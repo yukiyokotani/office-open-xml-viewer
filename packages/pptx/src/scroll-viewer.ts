@@ -1377,8 +1377,11 @@ export class PptxScrollViewer implements ZoomableViewer {
    * clears the highlights. A new presentation, or entering or leaving
    * `hiddenSlideMode: 'skip'`, drops the highlights; call this again
    * afterwards. If the preparation of a progressively loaded deck fails, a
-   * waiting request resolves with no matches; the failure is reported once
-   * through the viewer's error channel (`onError`), not through this Promise.
+   * waiting request resolves with no matches. The failure is not reported
+   * through this Promise but through the viewer's layout error channel: a
+   * call that awaits the preparation ({@link findText},
+   * `waitUntilLayoutComplete()`), the `onLayoutComplete` callback when
+   * configured, and otherwise `onError`.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],

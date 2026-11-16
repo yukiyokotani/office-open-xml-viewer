@@ -121,8 +121,9 @@ describe('buildPptxHighlightLayer', () => {
     const boxes = layer.children.flatMap((frame) => frame.children);
     expect(boxes.map((box) => box.style.background))
       .toEqual(['rgba(255, 0, 0, 0.4)', 'rgba(255, 0, 0, 0.4)', DEFAULT_FIND_ACTIVE_HIGHLIGHT]);
-    expect(boxes.map((box) => box.style.outline))
-      .toEqual([undefined, '2px solid #111', undefined]);
+    // The ring is drawn inside the box: the shape frame clips what is outside.
+    expect(boxes.map((box) => box.style['box-shadow']))
+      .toEqual([undefined, 'inset 0 0 0 2px #111,inset 0 0 0 3px #fff', undefined]);
   });
 
   it('keeps the paint order across overlapping shapes: each layer and the find get their own frames', () => {
@@ -145,7 +146,7 @@ describe('buildPptxHighlightLayer', () => {
       ['red'], ['red'], ['red'], ['blue'], [DEFAULT_FIND_HIGHLIGHT], [DEFAULT_FIND_ACTIVE_HIGHLIGHT],
     ]);
     // The active box of the later group is in a frame after the earlier group's.
-    expect(layer.children.map((frame) => frame.children[0].style.outline === '2px solid #111'))
+    expect(layer.children.map((frame) => frame.children[0].style['box-shadow'] !== undefined))
       .toEqual([false, false, true, false, false, false]);
     // A find alone still uses one frame per shape.
     const find = makeEl('div');

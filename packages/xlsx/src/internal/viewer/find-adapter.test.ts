@@ -102,9 +102,9 @@ describe('FindAdapter text highlights', () => {
     expect(await adapter.highlightPrev()).toMatchObject({ group: 'user', location: { sheet: 1, ref: 'C2' } });
     expect(state.sheet).toBe(1);
     expect(state.scrolled.at(-1)).toBe('2,3');
-    expect(boxes.map((box) => box.cssText.includes('outline:2px solid'))).toEqual([true]);
+    expect(boxes.map((box) => box.cssText.includes('box-shadow:inset 0 0 0 2px #111'))).toEqual([true]);
     expect(await adapter.highlightNext()).toMatchObject({ group: 'system', location: { sheet: 0, ref: 'A1' } });
-    expect(boxes.map((box) => box.cssText.includes('outline:2px solid'))).toEqual([true, false]);
+    expect(boxes.map((box) => box.cssText.includes('box-shadow:inset 0 0 0 2px #111'))).toEqual([true, false]);
     expect(boxes[1].cssText).toContain('background:rgba(4, 5, 6, 0.7)');
   });
 

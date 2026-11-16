@@ -48,8 +48,10 @@ export interface TextHighlightMatch<Loc = unknown> extends FindMatch<Loc> {
 /** Inline declarations that mark the active text highlight (the one
  *  `highlightNext` / `highlightPrev` last landed on). A ring instead of a
  *  colour change: the group background keeps its meaning, and the marker does
- *  not depend on hue. Dark ring with a light halo, visible on any page colour. */
-export const ACTIVE_TEXT_HIGHLIGHT_RING = 'outline:2px solid #111;box-shadow:0 0 0 4px #fff;';
+ *  not depend on hue. A dark ring with a light one inside it, visible on any
+ *  page colour, drawn inside the box so that a clipping container (a PPTX
+ *  shape frame) cannot cut it off. */
+export const ACTIVE_TEXT_HIGHLIGHT_RING = 'box-shadow:inset 0 0 0 2px #111,inset 0 0 0 3px #fff;';
 
 /**
  * Validate a set and return a copy that later changes to the caller's objects

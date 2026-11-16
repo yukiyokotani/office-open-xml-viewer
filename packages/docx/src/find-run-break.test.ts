@@ -144,6 +144,25 @@ describe('DOCX layout breaks for whole-word matching', () => {
     expect(await find.find('catalog', { wholeWord: true })).toHaveLength(1);
   });
 
+  it.each(['tab', 'space', 'nothing'] as const)(
+    'keeps a numbering marker apart from the paragraph text (suffix: %s)', async (suff) => {
+      const numbered = para(textRun('cat catalog'));
+      (numbered as unknown as { numbering: unknown; indentLeft: number; indentFirst: number }).numbering =
+        { numId: 1, level: 0, format: 'upperLetter', text: 'A', indentLeft: 36, tab: 36, suff, jc: 'left' };
+      const runs = pageRuns([numbered], 400);
+      const text = runs.map((run) => `${run.text}[${run.textRange?.start},${run.textRange?.end})`).join('|');
+      const [marker, first] = runs;
+      expect(marker.text, text).toBe('A');
+      expect(marker.textRange!.start, text).toBeLessThan(0);
+      expect(first.textRange!.start, text).toBe(0);
+      // The marker is generated: it is not the first letter of "Acat".
+      expect(docxRunsBreak(marker, first), text).toBe(true);
+      const find = new DocxFindController(() => 1, async () => runs);
+      expect((await find.find('cat', { wholeWord: true })).map((match) => match.text), text).toEqual(['cat']);
+      expect(await find.find('a', { wholeWord: true }), text).toHaveLength(1);
+    },
+  );
+
   it('lets the text range alone decide when the layout reports it', () => {
     const run = (text: string, x: number, y: number, start: number) => ({
       text, x, y, w: text.length * 5, h: 12, fontSize: 10, font: '10px serif',
@@ -157,6 +176,9 @@ describe('DOCX layout breaks for whole-word matching', () => {
     expect(docxRunsBreak(run('alog', 15, 0, 3), run('cat', 0, 0, 0))).toBe(false);
     // Something lies between them in the text, however close they are drawn.
     expect(docxRunsBreak(run('cat', 0, 0, 0), run('alog', 15, 0, 4))).toBe(true);
+    // The spans of a numbering marker join each other, and not the text.
+    expect(docxRunsBreak(run('1', 0, 0, -2), run('.', 5, 0, -1))).toBe(false);
+    expect(docxRunsBreak(run('.', 5, 0, -1), run('cat', 10, 0, 0))).toBe(true);
   });
 
   it('falls back to positions for runs without a text range', () => {

@@ -27,7 +27,8 @@ function runAxes(transform: string | undefined): readonly [number, number, numbe
  * decides: runs adjacent in the text join, wherever they are placed, so a long
  * word that wraps onto a second line stays one word; between runs that are not
  * adjacent lies a tab, a manual line break or an inline object, and they are
- * separate.
+ * separate. A numbering marker (negative offsets) is generated, not part of
+ * the paragraph text, and is separate from it whatever follows the marker.
  *
  * Runs without `textRange` are compared by position: another orientation,
  * another line, or a gap of more than a quarter of the font size on one line
@@ -43,8 +44,11 @@ export function docxRunsBreak(previous: DocxTextRunInfo, next: DocxTextRunInfo):
   )) return true;
   const from = previous.textRange;
   const to = next.textRange;
-  // Adjacent in either order: a right-to-left line lists its runs against the text.
-  if (from && to) return from.end !== to.start && to.end !== from.start;
+  if (from && to) {
+    if ((from.start < 0) !== (to.start < 0)) return true;
+    // Adjacent in either order: a right-to-left line lists its runs against the text.
+    return from.end !== to.start && to.end !== from.start;
+  }
   if ((previous.transform ?? '') !== (next.transform ?? '')) return true;
   const [inlineX, inlineY, blockX, blockY] = runAxes(previous.transform);
   const inline = (run: DocxTextRunInfo): number => run.x * inlineX + run.y * inlineY;

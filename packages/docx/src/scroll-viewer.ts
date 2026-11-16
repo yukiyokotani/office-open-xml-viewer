@@ -1246,8 +1246,10 @@ export class DocxScrollViewer implements ZoomableViewer {
    * ({@link setShowTrackedChanges}), drops the highlights and cancels a
    * request that is still waiting for the layout; call this again afterwards.
    * If the layout of a progressively loaded document fails, a waiting request
-   * resolves with no matches; the failure is reported once through the
-   * viewer's error channel (`onError`), not through this Promise.
+   * resolves with no matches. The failure is not reported through this
+   * Promise but through the viewer's layout error channel: a call that awaits
+   * the layout ({@link findText}, `waitUntilLayoutComplete()`), the
+   * `onLayoutComplete` callback when configured, and otherwise `onError`.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],

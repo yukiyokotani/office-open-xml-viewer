@@ -23,7 +23,8 @@ const GROUPS = [
   { id: 'system', terms: ['alpha'], color: 'rgba(0, 0, 255, 0.3)' },
   { id: 'user', terms: ['beta', 'alpha beta'], color: 'rgba(255, 0, 0, 0.3)' },
 ];
-const RING = '2px solid #111';
+/** The active highlight's ring, drawn inside its box. */
+const ringed = (box: FakeEl): boolean => box.style.cssText.includes('inset 0 0 0 2px #111');
 
 function installMeasuringDom(): void {
   installDom();
@@ -85,10 +86,10 @@ describe.each(['main', 'worker'] as const)('DocxViewer text highlights (%s mode)
 
     expect(await viewer.highlightPrev()).toMatchObject({ matchIndex: 3, group: 'user', location: { page: 1 } });
     expect(viewer.currentPage).toBe(1);
-    expect(layer().children.map((box) => box.style.outline === RING)).toEqual([false, true, false]);
+    expect(layer().children.map((box) => ringed(box))).toEqual([false, true, false]);
     expect(await viewer.highlightNext()).toMatchObject({ matchIndex: 0, group: 'system', location: { page: 0 } });
     expect(viewer.currentPage).toBe(0);
-    expect(layer().children.map((box) => box.style.outline === RING)).toEqual([true, false, false]);
+    expect(layer().children.map((box) => ringed(box))).toEqual([true, false, false]);
     // The find's active match is still the first one.
     expect(layer().children[2].style.background).toBe('rgba(4, 5, 6, 0.7)');
 
@@ -278,7 +279,7 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
 
     expect(await viewer.highlightPrev()).toMatchObject({ matchIndex: 7, location: { page: 3 } });
     expect(scrollHost.scrollTop).toBeGreaterThan(0);
-    expect(boxes().some((box) => box.style.outline === RING)).toBe(true);
+    expect(boxes().some((box) => ringed(box))).toBe(true);
 
     viewer.clearFind();
     expect(boxes().some((box) => box.style.background === 'rgba(1, 2, 3, 0.4)')).toBe(false);

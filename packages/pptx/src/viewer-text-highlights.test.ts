@@ -26,7 +26,8 @@ const GROUPS = [
   { id: 'user', terms: ['beta', 'alpha beta'], color: 'rgba(255, 0, 0, 0.3)' },
 ];
 const FIND_COLORS = { match: 'rgba(1, 2, 3, 0.4)', active: 'rgba(4, 5, 6, 0.7)' };
-const RING = '2px solid #111';
+/** The active highlight's ring, drawn inside its box. */
+const ringed = (box: FakeEl): boolean => box.style.cssText.includes('inset 0 0 0 2px #111');
 
 function mountCanvas(): HTMLCanvasElement {
   installDom();
@@ -79,10 +80,10 @@ describe.each(['main', 'worker'] as const)('PptxViewer text highlights (%s mode)
 
     expect(await viewer.highlightPrev()).toMatchObject({ matchIndex: 3, group: 'user', location: { slide: 1 } });
     expect(viewer.slideIndex).toBe(1);
-    expect(boxes().map((box) => box.style.outline === RING)).toEqual([false, true, false]);
+    expect(boxes().map((box) => ringed(box))).toEqual([false, true, false]);
     expect(await viewer.highlightNext()).toMatchObject({ matchIndex: 0, group: 'system', location: { slide: 0 } });
     expect(viewer.slideIndex).toBe(0);
-    expect(boxes().map((box) => box.style.outline === RING)).toEqual([true, false, false]);
+    expect(boxes().map((box) => ringed(box))).toEqual([true, false, false]);
     expect(boxes()[2].style.background).toBe(FIND_COLORS.active);
 
     viewer.clearFind();
@@ -232,7 +233,7 @@ describe.each(['main', 'worker'] as const)('PptxScrollViewer text highlights (%s
 
     expect(await viewer.highlightPrev()).toMatchObject({ matchIndex: 7, location: { slide: 3 } });
     expect(scrollHost.scrollTop).toBeGreaterThan(0);
-    expect(boxes().some((box) => box.style.outline === RING)).toBe(true);
+    expect(boxes().some((box) => ringed(box))).toBe(true);
 
     viewer.clearFind();
     expect(boxes().some((box) => box.style.background === FIND_COLORS.match)).toBe(false);

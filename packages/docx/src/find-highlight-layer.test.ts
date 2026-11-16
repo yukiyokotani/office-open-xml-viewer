@@ -74,9 +74,9 @@ describe('buildDocxHighlightLayer', () => {
     );
     expect(layer.children.map((box) => box.style.background))
       .toEqual(['rgba(255, 0, 0, 0.4)', 'rgba(255, 0, 0, 0.4)', 'orange']);
-    expect(layer.children.map((box) => box.style.outline))
-      .toEqual([undefined, '2px solid #111', undefined]);
-    expect(layer.children[1].style['box-shadow']).toBe('0 0 0 4px #fff');
+    // The ring is drawn inside the box, so a clipping container cannot hide it.
+    expect(layer.children.map((box) => box.style['box-shadow']))
+      .toEqual([undefined, 'inset 0 0 0 2px #111,inset 0 0 0 3px #fff', undefined]);
   });
 
   it('draws one box per slice, positioned from run x/y + measured extent', () => {

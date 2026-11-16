@@ -113,7 +113,9 @@
           const wr = wrapperRect(host);
           return {
             background: b.style.background,
-            ringed: b.style.outlineStyle === 'solid',
+            // The ring is an inset shadow: inside the box, so a clipping shape
+            // frame cannot hide it.
+            ringed: getComputedStyle(b).boxShadow.includes('inset'),
             left: Math.round(r.left - wr.left),
             top: Math.round(r.top - wr.top),
             width: Math.round(r.width),

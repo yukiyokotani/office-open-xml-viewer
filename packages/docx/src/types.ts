@@ -1862,7 +1862,9 @@ export interface DocxTextRunInfo {
    *  (UTF-16, end exclusive). Two segments of one paragraph are adjacent in
    *  the text when one ends where the other starts, however they are placed:
    *  an automatic line wrap leaves them adjacent, while a tab, a manual line
-   *  break or an inline object lies between them. */
+   *  break or an inline object lies between them. The paragraph text starts
+   *  at 0; a numbering marker, which is generated and not part of that text,
+   *  has negative offsets. */
   textRange?: Readonly<{ start: number; end: number }>;
   /** Left edge in canvas CSS px. */
   x: number;
