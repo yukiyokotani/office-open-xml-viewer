@@ -682,9 +682,15 @@ fn marker_outline(d: &str) -> Result<Option<Outline>, String> {
         Some(if negative { -value } else { value })
     };
     // A flag of an arc (`0` or `1`), which may abut what follows it.
-    let flag = |at: &mut usize| -> Option<()> {
+    let flag = |at: &mut usize| -> Option<bool> {
         skip(at);
-        matches!(bytes.get(*at), Some(b'0' | b'1')).then(|| *at += 1)
+        let value = match bytes.get(*at) {
+            Some(b'0') => false,
+            Some(b'1') => true,
+            _ => return None,
+        };
+        *at += 1;
+        Some(value)
     };
     let (mut curved, mut closed) = (false, false);
     let mut commands = 0usize;
@@ -738,24 +744,38 @@ fn marker_outline(d: &str) -> Result<Option<Outline>, String> {
             b'A' => {
                 // SVG 1.1 F.6.2: an arc with a zero radius is a straight
                 // line to its end; one ending where it starts is omitted.
+                // Any other arc is flattened (F.6.5) to its corners, so an
+                // outline with arcs is classified by its shape.
                 let arc = (|| {
-                    let (rx, ry, _) = (number(&mut at)?, number(&mut at)?, number(&mut at)?);
-                    flag(&mut at)?;
-                    flag(&mut at)?;
-                    Some((rx, ry, number(&mut at)?, number(&mut at)?))
+                    let (rx, ry, phi) = (number(&mut at)?, number(&mut at)?, number(&mut at)?);
+                    let (large, sweep) = (flag(&mut at)?, flag(&mut at)?);
+                    Some((
+                        rx,
+                        ry,
+                        phi,
+                        large,
+                        sweep,
+                        number(&mut at)?,
+                        number(&mut at)?,
+                    ))
                 })();
-                let Some((rx, ry, ex, ey)) = arc else {
+                let Some((rx, ry, phi, large, sweep, ex, ey)) = arc else {
                     return Ok(None);
                 };
                 let (nx, ny) = (bx + ex, by + ey);
                 if (nx, ny) == (x, y) {
                     continue;
                 }
-                (x, y) = (nx, ny);
                 if rx != 0.0 && ry != 0.0 {
-                    curved = true;
-                    continue;
+                    let points = arc_points((x, y), (nx, ny), (rx, ry), phi, large, sweep);
+                    crate::budget::tick(points.len())?;
+                    for point in points {
+                        if corners.first() != Some(&point) && corners.last() != Some(&point) {
+                            corners.push(point);
+                        }
+                    }
                 }
+                (x, y) = (nx, ny);
             }
             other => {
                 // Curves and arcs: the outline is curved.
@@ -786,6 +806,65 @@ fn marker_outline(d: &str) -> Result<Option<Outline>, String> {
         }
     }
     Ok((!corners.is_empty() || curved).then_some((curved, closed, corners)))
+}
+
+/// The points of an SVG elliptical arc (SVG 1.1 F.6.5, radii scaled up
+/// when too small, F.6.6) from `from` to `to`, one per sixteenth of a turn
+/// of its sweep and its end, without its start.
+fn arc_points(
+    from: (f64, f64),
+    to: (f64, f64),
+    (rx, ry): (f64, f64),
+    phi_deg: f64,
+    large: bool,
+    sweep: bool,
+) -> Vec<(f64, f64)> {
+    let (mut rx, mut ry) = (rx.abs(), ry.abs());
+    let (sin, cos) = phi_deg.to_radians().sin_cos();
+    let (dx, dy) = ((from.0 - to.0) / 2.0, (from.1 - to.1) / 2.0);
+    let (x1, y1) = (cos * dx + sin * dy, -sin * dx + cos * dy);
+    let lambda = (x1 / rx).powi(2) + (y1 / ry).powi(2);
+    if lambda > 1.0 {
+        rx *= lambda.sqrt();
+        ry *= lambda.sqrt();
+    }
+    let numerator = (rx * ry).powi(2) - (rx * y1).powi(2) - (ry * x1).powi(2);
+    let denominator = (rx * y1).powi(2) + (ry * x1).powi(2);
+    let mut root = if denominator > 0.0 {
+        (numerator / denominator).max(0.0).sqrt()
+    } else {
+        0.0
+    };
+    if large == sweep {
+        root = -root;
+    }
+    let (cx1, cy1) = (root * rx * y1 / ry, -root * ry * x1 / rx);
+    let (cx, cy) = (
+        cos * cx1 - sin * cy1 + (from.0 + to.0) / 2.0,
+        sin * cx1 + cos * cy1 + (from.1 + to.1) / 2.0,
+    );
+    let angle = |ux: f64, uy: f64| uy.atan2(ux);
+    let start = angle((x1 - cx1) / rx, (y1 - cy1) / ry);
+    let mut delta = angle((-x1 - cx1) / rx, (-y1 - cy1) / ry) - start;
+    let turn = std::f64::consts::TAU;
+    if sweep && delta < 0.0 {
+        delta += turn;
+    } else if !sweep && delta > 0.0 {
+        delta -= turn;
+    }
+    if !(cx.is_finite() && cy.is_finite() && delta.is_finite()) {
+        return vec![to];
+    }
+    let steps = ((delta.abs() / (turn / 16.0)).ceil() as usize).clamp(1, 16);
+    let mut out: Vec<(f64, f64)> = (1..steps)
+        .map(|i| {
+            let t = start + delta * i as f64 / steps as f64;
+            let (ex, ey) = (rx * t.cos(), ry * t.sin());
+            (cos * ex - sin * ey + cx, sin * ex + cos * ey + cy)
+        })
+        .collect();
+    out.push(to);
+    out
 }
 
 /// The most commands a marker outline is read for (the bound of the
@@ -1110,6 +1189,13 @@ mod tests {
             // omitted.
             ("M0 0L10 0A0 5 0 0 0 10 10L0 10z", "diamond"),
             ("M0 0L10 0a5 5 0 0 0 0 0L5 10z", "triangle"),
+            // An arc is classified by its shape: a shallow arc on an open
+            // arrow's edge keeps it an arrow; two half circles are an oval.
+            (
+                "M175 0a10000 10000 0 0 1 175 275l-75 75-50-75v75h-100v-75l-50 75-75-75z",
+                "arrow",
+            ),
+            ("M0 5a5 5 0 0 1 10 0a5 5 0 0 1-10 0z", "oval"),
             ("M0 0l10 20 20-20", "arrow"),
             ("", "triangle"),
             ("M0", "triangle"),
