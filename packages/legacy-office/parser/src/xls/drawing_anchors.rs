@@ -225,6 +225,8 @@ pub(super) fn chart_sheet_charts(
         return Err(unsupported("invalid BIFF sheet drawing root"));
     }
     let mut output = Vec::new();
+    let mut ids = HashSet::new();
+    let mut objects = HashSet::new();
     // Containers still to read: (start, end, nesting depth).
     let mut stack = vec![(8usize, end, 0usize)];
     while let Some((mut at, end, depth)) = stack.pop() {
@@ -272,7 +274,22 @@ pub(super) fn chart_sheet_charts(
                                 if identity || child.version != 2 || child.payload.len() != 8 {
                                     return Err(unsupported("invalid BIFF shape identity"));
                                 }
+                                if ids.len() >= MAX_OBJECTS {
+                                    return Err(crate::rejection::resource(
+                                        "BIFF shape count budget exceeded",
+                                    ));
+                                }
+                                if !ids.insert(u32_at(child.payload, 0)?) {
+                                    return Err(unsupported("duplicate or excessive BIFF shapes"));
+                                }
                                 identity = true;
+                            }
+                            // OfficeArtFSPGR: a group's coordinate rectangle.
+                            0xf009 => {
+                                if child.version != 1 || child.instance != 0 {
+                                    return Err(unsupported("invalid BIFF group rectangle"));
+                                }
+                                rectangle(child.payload)?;
                             }
                             0xf010 => {
                                 if rect.is_some()
@@ -306,6 +323,16 @@ pub(super) fn chart_sheet_charts(
                                                 && object_complete(client.data)
                                                 && object_framed(client.data)
                                         });
+                                    if owner.is_some_and(|client| {
+                                        !objects.insert(u16::from_le_bytes([
+                                            client.data[6],
+                                            client.data[7],
+                                        ]))
+                                    }) {
+                                        return Err(unsupported(
+                                            "duplicate BIFF drawing object id",
+                                        ));
+                                    }
                                     if owner.is_none() {
                                         return Err(unsupported(
                                             "invalid BIFF drawing object owner",
