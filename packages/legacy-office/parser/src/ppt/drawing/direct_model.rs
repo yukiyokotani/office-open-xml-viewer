@@ -606,6 +606,13 @@ impl Context<'_> {
                         None => None,
                     }
                 };
+                // The presentation renderer paints a picture's own fill
+                // behind it unless that fill is a picture: a pattern, texture
+                // or picture fill is drawn by a rectangle under the picture.
+                let (fill, backing) = match fill {
+                    Some(image @ Fill::Image { .. }) => (None, Some(image)),
+                    fill => (fill, None),
+                };
                 if undecoded {
                     // ITU-T T.81 arithmetic-coded, lossless, hierarchical and
                     // 12-bit frames have no decoder in the viewers this model
@@ -614,6 +621,9 @@ impl Context<'_> {
                     crate::rejection::approximated("unsupported OfficeArt JPEG frame encoding", ());
                     self.placeholder_frame(&shape, &transform, stroke, inherited)?;
                 } else {
+                    if let Some(backing) = backing {
+                        self.rectangle(None, &transform, backing, None, inherited)?;
+                    }
                     self.push(
                         SlideElement::Picture(PictureElement {
                             id: Some(shape.id.to_string()),
@@ -974,7 +984,6 @@ impl Context<'_> {
         stroke: Option<pptx_model::Stroke>,
         inherited: bool,
     ) -> Result<(), String> {
-        self.charge_shape_strings()?;
         let stroke = stroke.unwrap_or_else(|| pptx_model::Stroke {
             color: "808080".to_owned(),
             width: 9525,
@@ -989,6 +998,25 @@ impl Context<'_> {
             tail_end: None,
             cmpd: None,
         });
+        self.rectangle(
+            Some(shape.id.to_string()),
+            transform,
+            Fill::None,
+            Some(stroke),
+            inherited,
+        )
+    }
+
+    /// A rectangle over the box of `transform`, without text.
+    fn rectangle(
+        &mut self,
+        id: Option<String>,
+        transform: &pptx_model::Transform,
+        fill: Fill,
+        stroke: Option<pptx_model::Stroke>,
+        inherited: bool,
+    ) -> Result<(), String> {
+        self.charge_shape_strings()?;
         self.push(
             SlideElement::Shape(ShapeElement {
                 math_fallback: None,
@@ -1000,8 +1028,8 @@ impl Context<'_> {
                 flip_h: transform.flip_h,
                 flip_v: transform.flip_v,
                 geometry: "rect".to_owned(),
-                fill: Some(Fill::None),
-                stroke: Some(stroke),
+                fill: Some(fill),
+                stroke,
                 text_body: None,
                 default_text_color: None,
                 cust_geom: None,
@@ -1019,7 +1047,7 @@ impl Context<'_> {
                 glow: None,
                 soft_edge: None,
                 reflection: None,
-                id: Some(shape.id.to_string()),
+                id,
                 name: None,
                 hyperlink: None,
                 hyperlink_action: None,
@@ -1332,7 +1360,8 @@ impl Context<'_> {
     /// (`Paint::picture_backing`); its PDFs of frames with a shade or a
     /// pattern behind an opaque picture show the picture only, so the fill
     /// kinds are projected as for a shape, without Office evidence of their
-    /// placement behind a picture.
+    /// placement behind a picture. The caller draws a picture-type fill with
+    /// a rectangle under the picture.
     fn picture_frame_fill(
         &mut self,
         paint: &paint::Paint,
@@ -1406,7 +1435,7 @@ impl Context<'_> {
         let mut ruler_seen = false;
         let mut pending_action = None;
         let mut text_links = Vec::new();
-        let mut range_end = 0usize;
+        let mut range_end = None;
         for atom in parse_record_spans(self.backing, textbox.payload_span(), self.work_budget)? {
             let view = atom.view(self.backing)?;
             match view.kind {
@@ -1459,9 +1488,15 @@ impl Context<'_> {
                     };
                     let begin = u32_at(view.payload, 0)? as usize;
                     let end = u32_at(view.payload, 4)? as usize;
-                    // Checked against the text once it is known, for every
-                    // action: [MS-PPT] 2.9.59 requires a range valid for it.
-                    range_end = range_end.max(end);
+                    // [MS-PPT] 2.9.59 requires a range valid for the text,
+                    // for every action: its length is end - begin, and its
+                    // end is checked against the text once that is known.
+                    if begin > end {
+                        return Err(crate::rejection::corrupt(
+                            "PowerPoint text link range ends before it begins",
+                        ));
+                    }
+                    range_end = Some(range_end.map_or(end, |seen: usize| seen.max(end)));
                     if let Some(target) = link {
                         if begin >= end {
                             return Err(unsupported("invalid PowerPoint text link range"));
@@ -1534,16 +1569,19 @@ impl Context<'_> {
                 _ => {}
             }
         }
+        if let Some(end) = range_end {
+            let units = blocks.first().map(|text| text.encode_utf16().count());
+            if units.is_none_or(|units| end > units) {
+                return Err(crate::rejection::corrupt(
+                    "PowerPoint text link range exceeds its text",
+                ));
+            }
+        }
         if blocks.is_empty() {
             return Ok(None);
         }
         if blocks.len() != 1 {
             return Err(unsupported("ambiguous PowerPoint styled text body"));
-        }
-        if range_end > 0 && range_end > blocks[0].encode_utf16().count() {
-            return Err(crate::rejection::corrupt(
-                "PowerPoint text link range exceeds its text",
-            ));
         }
         let master_link = shape.master();
         let linked = master_link
@@ -2069,7 +2107,7 @@ mod tests {
         action: u8,
         jump: u8,
         range_instance: u16,
-        end: u8,
+        range: (u8, u8),
     ) -> Result<Slide, String> {
         use std::io::Write;
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -2098,7 +2136,11 @@ mod tests {
                 record(0, 3999, &4u32.to_le_bytes()),
                 record(0, TEXT_CHARS_ATOM, &[b'a', 0, b'b', 0, b'c', 0]),
                 record((instance << 4) | 15, 0x0ff2, &record(0, 0x0ff3, &info)),
-                record(range_instance << 4, 0x0fdf, &[0, 0, 0, 0, end, 0, 0, 0]),
+                record(
+                    range_instance << 4,
+                    0x0fdf,
+                    &[range.0, 0, 0, 0, range.1, 0, 0, 0],
+                ),
                 // An origin ruler: left margin and indent 0 at level 0.
                 record(
                     0,
@@ -2189,15 +2231,15 @@ mod tests {
         // [MS-PPT] 2.6.9: action 4 is a hyperlink, 3 a jump; instance 1 of
         // the container and of its range is the mouse-over interaction.
         assert_eq!(
-            links(interactive_text(0, 4, 0, 0, 2).unwrap()),
+            links(interactive_text(0, 4, 0, 0, (0, 2)).unwrap()),
             [[url.clone(), None, None], [None, None, None]]
         );
         assert_eq!(
-            links(interactive_text(1, 4, 0, 1, 2).unwrap()),
+            links(interactive_text(1, 4, 0, 1, (0, 2)).unwrap()),
             [[None, None, url], [None, None, None]]
         );
         assert_eq!(
-            links(interactive_text(0, 3, 1, 0, 2).unwrap()),
+            links(interactive_text(0, 3, 1, 0, (0, 2)).unwrap()),
             [
                 [
                     None,
@@ -2210,20 +2252,28 @@ mod tests {
         // Actions without a DrawingML run property state nothing.
         for (instance, action, jump) in [(1, 3, 1), (0, 3, 0), (0, 2, 0)] {
             assert_eq!(
-                links(interactive_text(instance, action, jump, instance, 2).unwrap()),
+                links(interactive_text(instance, action, jump, instance, (0, 2)).unwrap()),
                 [[None, None, None]]
             );
+        }
+        // [MS-PPT] 2.9.59: a range that ends before it begins is not a
+        // range, whatever the action does.
+        for action in [4, 2] {
+            let error = interactive_text(0, action, 0, 0, (2, 1))
+                .map(|_| ())
+                .unwrap_err();
+            assert!(error.contains("ends before it begins"), "{error}");
         }
         // [MS-PPT] 2.9.59: a range past the three characters is not valid
         // for the text, whatever the action does.
         for action in [4, 2] {
-            let error = interactive_text(0, action, 0, 0, 4).unwrap_err();
+            let error = interactive_text(0, action, 0, 0, (0, 4)).unwrap_err();
             assert!(error.contains("exceeds its text"), "{error}");
         }
-        assert!(interactive_text(0, 4, 0, 0, 3).is_ok());
+        assert!(interactive_text(0, 4, 0, 0, (0, 3)).is_ok());
         // A range of the other interaction, or an unknown one, is malformed.
         for (instance, range) in [(0, 1), (1, 0), (2, 2)] {
-            assert!(interactive_text(instance, 4, 0, range, 2).is_err());
+            assert!(interactive_text(instance, 4, 0, range, (0, 2)).is_err());
         }
     }
 
@@ -3052,6 +3102,33 @@ mod tests {
                 "PowerPoint picture frame non-solid fill"
             )]
         );
+        // A pattern or texture behind a picture is a rectangle under it:
+        // the renderer paints no picture fill behind a picture.
+        for kind in [1, 2] {
+            let model = backing(&[(0x180, kind), (0x4186, 1), (0x1bf, 0x0010_0010)]).unwrap();
+            let [SlideElement::Shape(under), SlideElement::Picture(picture)] = &model.elements[..]
+            else {
+                panic!("backing rectangle and picture: {:?}", model.elements)
+            };
+            assert!(picture.fill.is_none());
+            assert!(matches!(
+                under.fill,
+                Some(Fill::Image { tile: Some(_), .. })
+            ));
+            assert_eq!(
+                (
+                    under.geometry.as_str(),
+                    under.id.as_deref(),
+                    under.stroke.is_none()
+                ),
+                ("rect", None, true)
+            );
+            assert_eq!(
+                (under.x, under.y, under.width, under.height),
+                (picture.x, picture.y, picture.width, picture.height)
+            );
+            take_best_effort();
+        }
         // msofillTexture tiles the BLIP at its own size from the top left.
         let texture = [(0x180, 2), (0x4186, 1), (0x1bf, 0x0060_0060)];
         let model = project(1, 0x200, vec![properties(&texture)], png_blip(), None).unwrap();

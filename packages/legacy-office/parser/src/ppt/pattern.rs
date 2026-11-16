@@ -20,7 +20,7 @@ pub(super) fn cells(extension: &str, bytes: &[u8]) -> Result<Option<Cells>, Stri
         return Ok(None);
     }
     match extension {
-        "gif" => super::metro::binary_pattern_cells(bytes),
+        "gif" => Ok(super::metro::gif_pattern_cells(bytes)?.map(|(_, cells)| cells)),
         "png" => Ok(png_cells(bytes)),
         _ => Ok(None),
     }
@@ -312,6 +312,33 @@ mod tests {
         );
         assert_eq!(cells("png", &image[..image.len() - 13]).unwrap(), None);
         assert_eq!(cells("jpg", &image).unwrap(), None);
+        // An 8x8 GIF (LZW with a clear code before every pixel pair, so
+        // every code is three bits; GIF89a Appendix F).
+        let mut codes = Vec::new();
+        for row in DIAGONAL {
+            for pair in 0..4 {
+                codes.push(4u8);
+                for column in [pair * 2, pair * 2 + 1] {
+                    codes.push(u8::from(row & (0x80 >> column) != 0));
+                }
+            }
+        }
+        codes.push(5);
+        let mut packed = vec![0u8; (codes.len() * 3).div_ceil(8)];
+        for (index, code) in codes.iter().enumerate() {
+            for bit in 0..3 {
+                if code & (1 << bit) != 0 {
+                    packed[(index * 3 + bit) / 8] |= 1 << ((index * 3 + bit) % 8);
+                }
+            }
+        }
+        // Global palette: 0 black, 1 white.
+        let mut gif = b"GIF89a\x08\x00\x08\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff".to_vec();
+        gif.extend(b"\x2c\x00\x00\x00\x00\x08\x00\x08\x00\x00\x02");
+        gif.push(packed.len() as u8);
+        gif.extend(&packed);
+        gif.extend([0, 0x3b]);
+        assert_eq!(cells("gif", &gif).unwrap(), Some(DIAGONAL));
         // A 10x10 grayscale bitmap contributes its top-left 8x8 pixels.
         let mut gray = Vec::new();
         for row in 0..10 {

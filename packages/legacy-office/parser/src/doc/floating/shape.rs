@@ -455,18 +455,19 @@ impl<'a> Table<'a> {
             None
         };
         let gradient = if !line_shape && path_paint.0 {
+            // The shared projection also reads concentric shades; this
+            // floating-shape model holds linear ones only, and rejects the
+            // fill type whether or not the fill is displayed, as before.
+            if matches!(paint.fill_type, Some(5 | 6 | 8)) {
+                return Err(unsupported(
+                    "OfficeArt path or title gradient fills are not supported yet",
+                ));
+            }
             paint
                 // Shade scratch and stops are bounded per shape; the
                 // retained stops are charged with the model payload.
                 .shade(&shade, true, budget, &mut (1usize << 20))?
                 .map(|shade| -> Result<Gradient, String> {
-                    // The shared projection also reads concentric shades;
-                    // this floating-shape model holds linear ones only.
-                    if shade.path.is_some() {
-                        return Err(unsupported(
-                            "OfficeArt path or title gradient fills are not supported yet",
-                        ));
-                    }
                     let stops = shade
                         .projection
                         .stops

@@ -396,7 +396,9 @@ the presentation renderer reflects a picture fill with its shape. A bitmap it
 cannot read (neither black-and-white GIF nor PNG) is tiled reflected. A
 bitmap of another size has no evidence and tiles like an 8x8 one. Texture fills tile
 the stored picture at its own size from the top-left corner. A picture frame
-with a shade, pattern or texture fill gets that fill behind its picture.
+with a shade, pattern or texture fill gets that fill behind its picture; a
+pattern or texture is drawn by a rectangle under the picture, because the
+presentation renderer paints no picture fill behind a picture.
 Pattern placements with a fill rectangle, an origin or a unit remain
 rejected.
 

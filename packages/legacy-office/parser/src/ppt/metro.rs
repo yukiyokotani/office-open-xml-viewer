@@ -820,10 +820,10 @@ fn blob_bullet_images(
     ))
 }
 
-/// OfficeArt msofillPattern stores a 10x10 GIF but tiles only its upper-left
-/// 8x8 cells. PowerPoint 16 controls of pct30 and ltUpDiag show that white
-/// pixels map to the XML foreground and black to the background. Decode only
-/// a single bounded GIF image; other encodings remain unverifiable.
+/// OfficeArt msofillPattern stores an 8x8 GIF, or a 10x10 one of which only
+/// the upper-left 8x8 cells tile. PowerPoint 16 controls of pct30 and
+/// ltUpDiag show that white pixels map to the XML foreground and black to
+/// the background. Decode only a single bounded GIF image of either size.
 #[cfg(any(test, feature = "direct-ppt"))]
 fn pattern_image(bytes: &[u8]) -> Option<PatternImage> {
     if bytes.len() < 26 || !matches!(&bytes[..6], b"GIF87a" | b"GIF89a") {
@@ -832,7 +832,8 @@ fn pattern_image(bytes: &[u8]) -> Option<PatternImage> {
     let word = |at: usize| -> Option<u16> {
         Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
     };
-    if word(6)? != 10 || word(8)? != 10 {
+    let size = word(6)?;
+    if !matches!(size, 8 | 10) || word(8)? != size {
         return None;
     }
     let mut at = 13usize;
@@ -874,8 +875,8 @@ fn pattern_image(bytes: &[u8]) -> Option<PatternImage> {
             0x2c if pixels.is_none() => {
                 if word(at)? != 0
                     || word(at + 2)? != 0
-                    || word(at + 4)? != 10
-                    || word(at + 6)? != 10
+                    || word(at + 4)? != size
+                    || word(at + 6)? != size
                 {
                     return None;
                 }
@@ -912,6 +913,7 @@ fn pattern_image(bytes: &[u8]) -> Option<PatternImage> {
     }
     let (data, min_code) = pixels?;
     Some(PatternImage {
+        size: usize::from(size),
         data,
         min_code,
         palette,
@@ -921,6 +923,8 @@ fn pattern_image(bytes: &[u8]) -> Option<PatternImage> {
 
 #[cfg(any(test, feature = "direct-ppt"))]
 struct PatternImage {
+    /// Width and height in pixels: 8 or 10.
+    size: usize,
     data: Vec<u8>,
     min_code: u8,
     palette: Vec<u8>,
@@ -928,7 +932,17 @@ struct PatternImage {
 }
 
 #[cfg(any(test, feature = "direct-ppt"))]
-pub(in crate::ppt) fn binary_pattern_cells(bytes: &[u8]) -> Result<Option<[u8; 8]>, String> {
+fn binary_pattern_cells(bytes: &[u8]) -> Result<Option<[u8; 8]>, String> {
+    // The comparison with a DrawingML preset was measured on 10x10 bitmaps.
+    Ok(gif_pattern_cells(bytes)?
+        .filter(|(size, _)| *size == 10)
+        .map(|(_, cells)| cells))
+}
+
+/// The size (8 or 10) and the upper-left 8x8 cells of a black-and-white GIF
+/// pattern bitmap: one byte per row, a set bit for a white pixel.
+#[cfg(any(test, feature = "direct-ppt"))]
+pub(in crate::ppt) fn gif_pattern_cells(bytes: &[u8]) -> Result<Option<(usize, [u8; 8])>, String> {
     // Decoder admission policy, independent of the 10x10 pattern subset.
     if bytes.len() > 4096 {
         return Err(crate::rejection::resource(
@@ -936,6 +950,7 @@ pub(in crate::ppt) fn binary_pattern_cells(bytes: &[u8]) -> Result<Option<[u8; 8
         ));
     }
     let Some(PatternImage {
+        size,
         data,
         min_code,
         palette,
@@ -944,14 +959,14 @@ pub(in crate::ppt) fn binary_pattern_cells(bytes: &[u8]) -> Result<Option<[u8; 8
     else {
         return Ok(None);
     };
-    let Some(pixels) = decode_pattern_lzw(&data, min_code)? else {
+    let Some(pixels) = decode_pattern_lzw(&data, min_code, size * size)? else {
         return Ok(None);
     };
     Ok((|| {
         let mut rows = [0u8; 8];
         for y in 0..8 {
             for x in 0..8 {
-                let index = pixels[y * 10 + x];
+                let index = pixels[y * size + x];
                 if transparent == Some(index) {
                     return None;
                 }
@@ -963,14 +978,15 @@ pub(in crate::ppt) fn binary_pattern_cells(bytes: &[u8]) -> Result<Option<[u8; 8
                 }
             }
         }
-        Some(rows)
+        Some((size, rows))
     })())
 }
 
-/// GIF LZW streams are little-endian bit packed. The 10x10 admission bound
-/// caps both output and dictionary work, independent of compressed input.
+/// GIF LZW streams are little-endian bit packed. The admission bound of
+/// `pixels` (at most 10x10) caps both output and dictionary work,
+/// independent of compressed input.
 #[cfg(any(test, feature = "direct-ppt"))]
-fn decode_pattern_lzw(data: &[u8], min_code: u8) -> Result<Option<Vec<u8>>, String> {
+fn decode_pattern_lzw(data: &[u8], min_code: u8, pixels: usize) -> Result<Option<Vec<u8>>, String> {
     (|| -> Option<Result<Vec<u8>, String>> {
         let clear = 1usize << min_code;
         let end = clear + 1;
@@ -983,7 +999,7 @@ fn decode_pattern_lzw(data: &[u8], min_code: u8) -> Result<Option<Vec<u8>>, Stri
         let mut width = usize::from(min_code) + 1;
         let mut bit = 0usize;
         let mut previous: Option<Vec<u8>> = None;
-        let mut output = Vec::with_capacity(100);
+        let mut output = Vec::with_capacity(pixels);
         for _ in 0..512 {
             if bit + width > data.len() * 8 {
                 return None;
@@ -1001,7 +1017,7 @@ fn decode_pattern_lzw(data: &[u8], min_code: u8) -> Result<Option<Vec<u8>>, Stri
                 continue;
             }
             if code == end {
-                return (output.len() == 100).then_some(Ok(output));
+                return (output.len() == pixels).then_some(Ok(output));
             }
             let entry = if code < table.len() && !table[code].is_empty() {
                 table[code].clone()
@@ -1012,7 +1028,7 @@ fn decode_pattern_lzw(data: &[u8], min_code: u8) -> Result<Option<Vec<u8>>, Stri
             } else {
                 return None;
             };
-            if output.len().checked_add(entry.len())? > 100 {
+            if output.len().checked_add(entry.len())? > pixels {
                 return None;
             }
             output.extend_from_slice(&entry);
@@ -3594,7 +3610,7 @@ mod tests {
             let bit = code * 3 + 2;
             data[bit / 8] |= 1 << (bit % 8);
         }
-        assert!(decode_pattern_lzw(&data, 2)
+        assert!(decode_pattern_lzw(&data, 2, 100)
             .unwrap_err()
             .starts_with("LEGACY_RESOURCE_LIMIT:"));
     }

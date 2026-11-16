@@ -410,6 +410,7 @@ pub(crate) struct Shade {
     pub scaled: bool,
     pub rotate_with_shape: bool,
     /// The concentric (`a:path`) form; `None` for a linear shade.
+    #[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
     pub path: Option<PathShade>,
     /// fillColor and the first fillShadeColors entry, when the array starts
     /// at position 0 and so replaces fillColor in the drawn shade. Hosts that
@@ -423,6 +424,7 @@ pub(crate) struct Shade {
 /// msofillShadeShape and msofillShadeTitle).
 #[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
 pub(crate) struct PathShade {
     /// msofillShadeShape: the shade follows the outline of the shape instead
     /// of its bounding rectangle.
