@@ -254,7 +254,25 @@ pub(super) fn chart_sheet_charts(
                             0xf010 if child.payload.len() == 18 => {
                                 rect = Some(rectangle(&child.payload[2..])?);
                             }
-                            0xf011 => chart = drawing.charts.remove(&child_end),
+                            0xf011 => {
+                                // The chart substream belongs to a chart
+                                // object: an Obj whose FtCmo (ft 0x15,
+                                // cb 0x12) states ot 5.
+                                if let Some(range) = drawing.charts.remove(&child_end) {
+                                    let owner =
+                                        drawing.clients.remove(&child_end).filter(|client| {
+                                            client.kind == 0x005d
+                                                && client.data.len() >= 22
+                                                && client.data[..6] == [0x15, 0, 0x12, 0, 5, 0]
+                                        });
+                                    if owner.is_none() {
+                                        return Err(unsupported(
+                                            "invalid BIFF drawing object owner",
+                                        ));
+                                    }
+                                    chart = Some(range);
+                                }
+                            }
                             _ => {}
                         }
                         position = child_end;
