@@ -2373,11 +2373,19 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotatio
         ) => {
             let (bs, as_) = (sorted(bs), sorted(as_));
             let turn = (ba - aa).rem_euclid(360.0);
+            // The centre rectangle is a 16.16 fraction in the binary
+            // (MS-ODRAW 2.3.7.16-19) and 1/100000 in DrawingML (ECMA-376
+            // 20.1.10.48), so each edge may round by one step of either unit.
+            let same_focus = match (rect(bf), rect(af)) {
+                (None, None) => true,
+                (Some(b), Some(a)) => b.iter().zip(&a).all(|(b, a)| (b - a).abs() <= POSITION),
+                _ => false,
+            };
             if !(turn.min(360.0 - turn) < 0.01
                 && bt == at
                 && bsc == asc
                 && bp == ap
-                && rect(bf) == rect(af)
+                && same_focus
                 && bfl.as_deref().unwrap_or("none") == afl.as_deref().unwrap_or("none"))
             {
                 return Verdict::Unverifiable("fill");
@@ -2401,14 +2409,14 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotatio
                 (Some(true), _) => Verdict::Overridden(RESTATED_FILL),
                 (None, _) => Verdict::Unverifiable("fill"),
             };
+            // A concentric shade keeps its binary stops, whatever its
+            // rotation flags say: the PowerPoint 16 PDF of a control whose
+            // XML alone gives an interior stop 50% opacity (the binary shade
+            // colours have none) prints that stop opaque.
+            if bp.is_some() && !comparable_stops(&bs, &as_) {
+                return Verdict::Overridden(RESTATED_FILL);
+            }
             match rotation {
-                // A concentric shade keeps its binary stops: the PowerPoint
-                // 16 PDF of a control whose XML alone gives an interior stop
-                // 50% opacity (the binary shade colours have none) prints
-                // that stop opaque.
-                Verdict::Same if bp.is_some() && !comparable_stops(&bs, &as_) => {
-                    Verdict::Overridden(RESTATED_FILL)
-                }
                 Verdict::Same if !comparable_stops(&bs, &as_) => Verdict::Restated(RESTATED_FILL),
                 rotation => rotation,
             }
@@ -3260,6 +3268,48 @@ mod tests {
             }
             fill
         };
+        // The centre rectangle compares within the rounding of 16.16 and
+        // 1/100000 fractions: 0x4ccd / 65536 is DrawingML 30000.
+        let focused = |edge: f64| {
+            let mut fill = concentric("0000FF", None);
+            if let Some(Fill::Gradient { fill_to_rect, .. }) = fill.as_mut() {
+                *fill_to_rect = Some(ooxml_common::fill::FillRect {
+                    l: edge,
+                    t: edge,
+                    r: 1.0 - edge,
+                    b: 1.0 - edge,
+                });
+            }
+            fill
+        };
+        let binary_focus = RecordedFill::Stated(focused(f64::from(0x4ccd) / 65536.0).map(Box::new));
+        alternative.fill = focused(0.3);
+        assert_eq!(same_fill(&binary_focus, &alternative, 0.0), Verdict::Same);
+        alternative.fill = focused(0.3001);
+        assert_eq!(
+            same_fill(&binary_focus, &alternative, 0.0),
+            Verdict::Unverifiable("fill")
+        );
+        // On a rotated shape the binary stops win before the XML's
+        // rotation flag is weighed.
+        let unrotating = |color: &str, rotate: Option<bool>| {
+            let mut fill = concentric(color, None);
+            if let Some(Fill::Gradient { rot_with_shape, .. }) = fill.as_mut() {
+                *rot_with_shape = rotate;
+            }
+            fill
+        };
+        let fixed = RecordedFill::Stated(unrotating("0000FF", Some(false)).map(Box::new));
+        alternative.fill = unrotating("0000FF80", Some(true));
+        assert_eq!(
+            same_fill(&fixed, &alternative, 90.0),
+            Verdict::Overridden(RESTATED_FILL)
+        );
+        alternative.fill = unrotating("0000FF", Some(true));
+        assert_eq!(
+            same_fill(&fixed, &alternative, 90.0),
+            Verdict::Restated(RESTATED_FILL)
+        );
         let corner = RecordedFill::Stated(concentric("0000FF", None).map(Box::new));
         for (fill, expected) in [
             (concentric("0000FF", None), Verdict::Same),

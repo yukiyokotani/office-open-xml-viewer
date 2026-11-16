@@ -1261,13 +1261,9 @@ impl Context<'_> {
         let (flip_h, flip_v) = frame.map_or((false, false), |frame| (frame.flip_h, frame.flip_v));
         let mut reflected = None;
         if flip_h || flip_v {
-            *self.work_budget = self.work_budget.checked_sub(64).ok_or_else(|| {
-                crate::rejection::resource("PowerPoint pattern work budget exceeded")
-            })?;
             reflected = self.media.reflected_pattern(
                 id,
-                flip_h,
-                flip_v,
+                (flip_h, flip_v),
                 |extension, bytes| {
                     Ok(crate::ppt::pattern::cells(extension, bytes)?.map(|cells| {
                         crate::ppt::pattern::png(crate::ppt::pattern::mirrored(
@@ -1277,6 +1273,7 @@ impl Context<'_> {
                 },
                 self.backing,
                 self.pictures,
+                self.work_budget,
             )?;
             if reflected.is_none() {
                 // Not a bitmap this reader can rewrite: it tiles reflected.

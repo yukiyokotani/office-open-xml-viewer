@@ -12,6 +12,10 @@ const MAX_COMPARED_IMAGE_BYTES: usize = 1024 * 1024;
 /// Session allowance for image bytes copied for comparison with alternative
 /// shape XML. Once it is spent, later shapes keep their binary projection.
 const MAX_COMPARISON_COPY_BYTES: usize = 256 * 1024 * 1024;
+/// Work charged for reading one stored pattern bitmap of at most 4 KiB and
+/// writing its reflection (`ppt::pattern`): the GIF reader walks at most 512
+/// codes, the PNG reader at most 110 bytes.
+const PATTERN_REWRITE_WORK: usize = 512;
 
 pub(super) fn catalog_spans(
     document: &[u8],
@@ -324,7 +328,7 @@ pub(super) struct SpanStore {
     comparison_remaining: usize,
     /// Pattern bitmaps written for flipped shapes, by their stored bitmap
     /// and the two reflections (`ppt::pattern`).
-    reflected_patterns: BTreeMap<(u32, bool, bool), u32>,
+    reflected_patterns: BTreeMap<(u32, bool, bool), Option<u32>>,
 }
 
 impl SpanStore {
@@ -381,30 +385,35 @@ impl SpanStore {
     }
 
     /// The retained bitmap of the stored pattern `index` seen through the
-    /// given reflections, written once per session by `write` and then
-    /// reused. `None`: `write` could not read the stored bitmap.
+    /// given horizontal and vertical reflections. `write` reads the stored bitmap and writes the
+    /// reflected one; it runs once per bitmap and reflection in a session,
+    /// charged to `budget`, and its answer is reused, also when it is `None`
+    /// (a bitmap it cannot read).
     pub fn reflected_pattern(
         &mut self,
         index: u32,
-        flip_h: bool,
-        flip_v: bool,
+        flips: (bool, bool),
         write: impl FnOnce(&'static str, &[u8]) -> Result<Option<Vec<u8>>, String>,
         primary: &[u8],
         pictures: Option<&[u8]>,
+        budget: &mut usize,
     ) -> Result<Option<u32>, String> {
-        let key = (index, flip_h, flip_v);
+        let key = (index, flips.0, flips.1);
         if let Some(reflected) = self.reflected_patterns.get(&key) {
-            return Ok(Some(*reflected));
+            return Ok(*reflected);
         }
-        let Some((extension, bytes)) = self.image(index, primary, pictures)? else {
-            return Ok(None);
+        *budget = budget
+            .checked_sub(PATTERN_REWRITE_WORK)
+            .ok_or_else(|| crate::rejection::resource("PowerPoint pattern work budget exceeded"))?;
+        let written = match self.image(index, primary, pictures)? {
+            Some((extension, bytes)) => write(extension, bytes)?,
+            None => None,
         };
-        let Some(written) = write(extension, bytes)? else {
-            return Ok(None);
-        };
-        let reflected = self.admit_blob_image("png", written)?;
+        let reflected = written
+            .map(|bytes| self.admit_blob_image("png", bytes))
+            .transpose()?;
         self.reflected_patterns.insert(key, reflected);
-        Ok(Some(reflected))
+        Ok(reflected)
     }
 
     /// A copy of an admitted image for comparison with the image part of an
@@ -770,28 +779,40 @@ mod tests {
         let mut store = SpanStore::new(vec![spanned(&entry, 0)]);
         assert!(store.reference(1, &entry, None, &mut 100).unwrap());
         let mut writes = 0;
+        let mut budget = 3 * PATTERN_REWRITE_WORK;
         let mut reflected = |store: &mut SpanStore, flip_h, flip_v, readable: bool| {
-            store
-                .reflected_pattern(
-                    1,
-                    flip_h,
-                    flip_v,
-                    |extension, _| {
-                        writes += 1;
-                        assert_eq!(extension, "png");
-                        Ok(readable.then(|| vec![u8::from(flip_h), u8::from(flip_v)]))
-                    },
-                    &entry,
-                    None,
-                )
-                .unwrap()
+            store.reflected_pattern(
+                1,
+                (flip_h, flip_v),
+                |extension, _| {
+                    writes += 1;
+                    assert_eq!(extension, "png");
+                    Ok(readable.then(|| vec![u8::from(flip_h), u8::from(flip_v)]))
+                },
+                &entry,
+                None,
+                &mut budget,
+            )
         };
-        assert_eq!(reflected(&mut store, true, false, false), None);
-        let first = reflected(&mut store, true, false, true).unwrap();
-        assert_eq!(reflected(&mut store, true, false, true), Some(first));
-        let second = reflected(&mut store, true, true, true).unwrap();
+        let first = reflected(&mut store, true, false, true).unwrap().unwrap();
+        assert_eq!(reflected(&mut store, true, false, true), Ok(Some(first)));
+        let second = reflected(&mut store, true, true, true).unwrap().unwrap();
         assert_ne!(first, second);
-        assert_eq!(writes, 3);
+        // A bitmap that cannot be read is not read again either.
+        assert_eq!(reflected(&mut store, false, true, false), Ok(None));
+        assert_eq!(reflected(&mut store, false, true, true), Ok(None));
+        // The work of the three reads is spent; reuse costs nothing, and a
+        // further bitmap exceeds the budget before it is read.
+        let exhausted = store.reflected_pattern(
+            2,
+            (true, false),
+            |_, _| panic!("read past the budget"),
+            &entry,
+            None,
+            &mut budget,
+        );
+        assert!(exhausted.unwrap_err().contains("LEGACY_RESOURCE_LIMIT"));
+        assert_eq!((writes, budget), (3, 0));
         assert_eq!(
             store.image(first, &entry, None).unwrap(),
             Some(("png", [1u8, 0].as_slice()))
