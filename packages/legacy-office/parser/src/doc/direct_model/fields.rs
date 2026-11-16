@@ -631,7 +631,11 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Display, String> {
         keyword.as_str(),
         "PAGE" | "NUMPAGES" | "DATE" | "TIME" | "EQ" | "SYMBOL"
     );
-    if evaluated_keyword && (field.instruction_overflow || field.result_overflow) {
+    // A locked field and a SYMBOL with a stored result display that result
+    // as ordinary runs, whatever its length.
+    let stored_result = flags & F_LOCKED != 0 || (keyword == "SYMBOL" && field.separator.is_some());
+    if evaluated_keyword && !stored_result && (field.instruction_overflow || field.result_overflow)
+    {
         return Err(crate::rejection::resource(
             "Word evaluated field text budget exceeded",
         ));
@@ -1368,6 +1372,16 @@ mod tests {
             let error = tokens(&text, &table).unwrap_err();
             assert!(error.starts_with("LEGACY_RESOURCE_LIMIT:"), "{error}");
         }
+        // A SYMBOL with a stored result displays that result unchanged.
+        let text = format!(
+            "\u{13}SYMBOL 167\u{14}{}\u{15}\r",
+            "s".repeat(MAX_FIELD_TEXT + 8)
+        );
+        let table = with_types(&text, &[0x39], &[0x80]);
+        assert_eq!(
+            tokens(&text, &table).unwrap(),
+            vec![(Token::Text("s".repeat(MAX_FIELD_TEXT + 8)), 12)]
+        );
         // A cached field needs only its keyword.
         let text = format!(
             "\u{13}REF {}\u{14}r\u{15}\r",

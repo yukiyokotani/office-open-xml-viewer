@@ -100,7 +100,7 @@ pub(super) fn validate(
                     .is_some_and(notes::Reference::hidden)
             })
             .collect();
-        let numbering = note_numbers::assign(story, &hidden, effective_nfib, &dop, sections);
+        let numbering = note_numbers::assign(story, &hidden, effective_nfib, &dop, sections)?;
         if let Some(marks) = &numbering.marks {
             budget.charge(marks.iter().flatten().map(String::capacity).sum())?;
             references.set_marks(story.kind, marks);

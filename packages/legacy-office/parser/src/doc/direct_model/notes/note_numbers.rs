@@ -22,6 +22,10 @@ const DOP_NOTE_PROPERTIES_MAX_NFIB: u16 = 0x00d9;
 const RESTART_EACH_SECTION: u8 = 1;
 const RESTART_EACH_PAGE: u8 = 2;
 
+/// Resource policy for the reader-computed marks of one note kind, not a
+/// Word limit.
+const MAX_MARK_BYTES: usize = 1 << 20;
+
 /// MS-OSHARED 2.2.1.3 MSONFC values without a displayed number.
 const NFC_CHICAGO: u16 = 9;
 
@@ -53,7 +57,7 @@ pub(super) fn assign(
     effective_nfib: u16,
     dop: &settings::NoteProperties,
     sections: &[sections::Section],
-) -> Numbering {
+) -> Result<Numbering, String> {
     let footnote = story.kind == notes::Kind::Footnote;
     // MS-DOC 2.6.4: without the section property a footnote number is
     // Arabic and an endnote number lower-case Roman, counted from 1.
@@ -164,16 +168,39 @@ pub(super) fn assign(
         .zip(hidden)
         .any(|(entry, hidden)| entry.automatic && *hidden);
     let marks = (!uniform || name.is_none() || any_hidden).then(|| {
+        // A repeated-symbol or letter mark grows with its number: the marks
+        // of the document stay within a fixed text budget.
+        let mut remaining = MAX_MARK_BYTES;
         numbers
             .iter()
-            .map(|number| number.map(|(format, number)| mark(format, number)))
-            .collect()
+            .map(|number| match number {
+                None => Some(None),
+                Some((format, number)) => {
+                    let repeats = match *format {
+                        NFC_CHICAGO => (number.max(&1) - 1) as usize / 4 + 1,
+                        3 | 4 => (number.max(&1) - 1) as usize / 26 + 1,
+                        _ => 1,
+                    };
+                    remaining = remaining.checked_sub(repeats.saturating_mul(3))?;
+                    Some(Some(mark(*format, *number)))
+                }
+            })
+            .collect::<Option<Vec<_>>>()
     });
-    Numbering {
+    let marks = match marks {
+        Some(None) => {
+            return Err(crate::rejection::resource(
+                "Word note mark text budget exceeded",
+            ))
+        }
+        Some(Some(marks)) => Some(marks),
+        None => None,
+    };
+    Ok(Numbering {
         format: name.unwrap_or("decimal"),
         start,
         marks,
-    }
+    })
 }
 
 /// ECMA-376 17.11.20: the first number is at least 1. MS-DOC 2.7.2 allows
@@ -219,7 +246,7 @@ fn mark(format: u16, number: i64) -> String {
             // tripled and so on.
             const SYMBOLS: [char; 4] = ['*', '\u{2020}', '\u{2021}', '\u{a7}'];
             let index = (number - 1) as usize;
-            std::iter::repeat_n(SYMBOLS[index % 4], (index / 4 + 1).min(64)).collect()
+            std::iter::repeat_n(SYMBOLS[index % 4], index / 4 + 1).collect()
         }
         _ => {
             // The reader formats only the numberings above itself.
@@ -258,11 +285,7 @@ fn roman(mut number: u64) -> String {
 /// ECMA-376 17.18.59 upperLetter/lowerLetter: a..z, aa..zz, aaa..
 fn letters(number: u64, first: u8) -> String {
     let index = (number - 1) as usize;
-    std::iter::repeat_n(
-        char::from(first + (index % 26) as u8),
-        (index / 26 + 1).min(64),
-    )
-    .collect()
+    std::iter::repeat_n(char::from(first + (index % 26) as u8), index / 26 + 1).collect()
 }
 
 #[cfg(test)]
@@ -276,6 +299,10 @@ mod tests {
         assert_eq!(mark(2, 4), "iv");
         assert_eq!(mark(3, 27), "AA");
         assert_eq!(mark(4, 3), "c");
+        // A repeated mark keeps growing with its number.
+        assert_eq!(mark(NFC_CHICAGO, 253).chars().count(), 64);
+        assert_eq!(mark(NFC_CHICAGO, 257).chars().count(), 65);
+        assert_eq!(mark(4, 26 * 64 + 1).len(), 65);
         let chicago: Vec<String> = (1..=6).map(|number| mark(NFC_CHICAGO, number)).collect();
         assert_eq!(
             chicago,
@@ -338,7 +365,7 @@ mod tests {
             sections::Section::for_test(4, 2),
             sections::Section::for_test(20, 2),
         ];
-        let numbering = assign(&notes, &[false; 3], 0x00c1, &dop(0, 3, 2), &sections);
+        let numbering = assign(&notes, &[false; 3], 0x00c1, &dop(0, 3, 2), &sections).unwrap();
         assert_eq!(
             numbering,
             Numbering {
@@ -357,7 +384,7 @@ mod tests {
             sections::Section::for_test(20, 2),
         ];
         // Restart each section from 2, upper-case letters.
-        let numbering = assign(&notes, &[false; 4], 0x00c1, &dop(1, 2, 3), &sections);
+        let numbering = assign(&notes, &[false; 4], 0x00c1, &dop(1, 2, 3), &sections).unwrap();
         assert_eq!(numbering.format, "upperLetter");
         assert_eq!(
             numbering.marks,
@@ -375,7 +402,8 @@ mod tests {
             0x00c1,
             &dop(0, 1, 0),
             &sections,
-        );
+        )
+        .unwrap();
         assert_eq!(
             numbering.marks,
             Some(vec![
@@ -398,7 +426,7 @@ mod tests {
         let sections = [sections::Section::for_test(4, 2), second];
         crate::rejection::take_best_effort();
         // nFib above 0x00D9: the DOP numbering (chicago here) does not apply.
-        let numbering = assign(&notes, &[false; 2], 0x0101, &dop(0, 7, 9), &sections);
+        let numbering = assign(&notes, &[false; 2], 0x0101, &dop(0, 7, 9), &sections).unwrap();
         assert_eq!(numbering.format, "decimal");
         assert_eq!(
             numbering.marks,
@@ -406,7 +434,7 @@ mod tests {
         );
         assert!(crate::rejection::take_best_effort().is_empty());
         // The same sections in a DOP-scoped document: the DOP governs.
-        let numbering = assign(&notes, &[false; 2], 0x00c1, &dop(0, 7, 0), &sections);
+        let numbering = assign(&notes, &[false; 2], 0x00c1, &dop(0, 7, 0), &sections).unwrap();
         assert_eq!((numbering.start, numbering.marks), (7, None));
         assert_eq!(
             crate::rejection::take_best_effort(),
@@ -428,7 +456,7 @@ mod tests {
             ..Default::default()
         });
         let sections = [sections::Section::for_test(4, 2), second];
-        let numbering = assign(&notes, &[false; 2], 0x0101, &dop(0, 1, 0), &sections);
+        let numbering = assign(&notes, &[false; 2], 0x0101, &dop(0, 1, 0), &sections).unwrap();
         assert_eq!(
             numbering.marks,
             Some(vec![Some("1".into()), Some("7".into())])
