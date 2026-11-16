@@ -86,10 +86,15 @@ describe.each(['main', 'worker'] as const)('DocxViewer text highlights (%s mode)
 
     expect(await viewer.highlightPrev()).toMatchObject({ matchIndex: 3, group: 'user', location: { page: 1 } });
     expect(viewer.currentPage).toBe(1);
+    // The active highlight (of the second group) is painted last among the
+    // highlights, with its group colour and a ring; then the find.
     expect(layer().children.map((box) => ringed(box))).toEqual([false, true, false]);
+    expect(layer().children[1].style.background).toBe('rgba(255, 0, 0, 0.3)');
     expect(await viewer.highlightNext()).toMatchObject({ matchIndex: 0, group: 'system', location: { page: 0 } });
     expect(viewer.currentPage).toBe(0);
-    expect(layer().children.map((box) => ringed(box))).toEqual([true, false, false]);
+    // Now the first group's match is active: it is painted above the second group's.
+    expect(layer().children.map((box) => ringed(box))).toEqual([false, true, false]);
+    expect(layer().children.map((box) => box.style.background).slice(0, 2)).toEqual(['rgba(255, 0, 0, 0.3)', 'rgba(0, 0, 255, 0.3)']);
     // The find's active match is still the first one.
     expect(layer().children[2].style.background).toBe('rgba(4, 5, 6, 0.7)');
 

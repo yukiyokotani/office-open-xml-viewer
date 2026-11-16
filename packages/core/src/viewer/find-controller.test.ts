@@ -55,7 +55,7 @@ describe('UnitFindController', () => {
     resolve([{ text: 'a' }]);
     await expect(pending).resolves.toEqual([]);
     expect(find.unitRuns(0)).toBeUndefined();
-    expect(find.matches()).toEqual([]);
+    expect(find.next()).toBeNull();
   });
 
   it('commits a scan atomically and keeps newer visible render geometry', async () => {
@@ -81,7 +81,7 @@ describe('UnitFindController', () => {
     const find = controller([['a']]);
     await find.find('a');
     await expect(find.find('')).resolves.toEqual([]);
-    expect(find.matches()).toEqual([]);
+    expect(find.next()).toBeNull();
     expect(find.unitRuns(0)).toBeUndefined();
     expect(find.next()).toBeNull();
   });
@@ -123,14 +123,18 @@ describe('UnitFindController — text highlights', () => {
     expect(find.next()?.matchIndex).toBe(0);
     expect(find.highlightStep(true)).toMatchObject({ matchIndex: 1, group: 'user' });
     expect(find.highlightStep()).toMatchObject({ matchIndex: 0, group: 'user' });
-    expect(find.unitHighlights(0).map((box) => box.active)).toEqual([true, false, true, false]);
+    // The group boxes with the active highlight last, then the find boxes.
+    expect(find.unitHighlights(0).map((box) => [box.slices[0].start, box.color, box.active])).toEqual([
+      [8, 'rgba(0,0,255,0.3)', false], [0, 'rgba(0,0,255,0.3)', true],
+      [0, undefined, true], [8, undefined, false],
+    ]);
 
     // A new find query resets only the find cursor.
     await find.find('rev');
-    expect(find.unitHighlights(0).map((box) => box.active)).toEqual([true, false, false, false]);
+    expect(find.unitHighlights(0).map((box) => box.active)).toEqual([false, true, false, false]);
 
     find.clearFind();
-    expect(find.matches()).toEqual([]);
+    expect(find.next()).toBeNull();
     expect(find.unitHighlights(0)).toHaveLength(2);
     expect(find.unitRuns(0)).toBeDefined();
 
@@ -138,7 +142,7 @@ describe('UnitFindController — text highlights', () => {
     find.clearHighlights();
     expect(find.highlightStep()).toBeNull();
     expect(find.highlighting).toBe(false);
-    expect(find.matches()).toHaveLength(2);
+    expect(find.unitHighlights(0)).toHaveLength(2);
     expect(find.unitRuns(0)).toBeDefined();
 
     // The cached runs go with the last armed search.
@@ -181,8 +185,16 @@ describe('UnitFindController — text highlights', () => {
     // Navigation follows the document; painting follows the set.
     expect(matches.map((match) => match.group)).toEqual(['second', 'first']);
     expect(find.unitHighlights(0).map((box) => box.color)).toEqual(['red', 'blue']);
+    // The active highlight is painted last among the highlights, whichever
+    // group it belongs to, so no other group's background can cover its ring.
     expect(find.highlightStep()).toMatchObject({ group: 'second' });
-    expect(find.unitHighlights(0).map((box) => box.active)).toEqual([false, true]);
+    expect(find.unitHighlights(0).map((box) => [box.color, box.active, box.layer])).toEqual([
+      ['red', false, 0], ['blue', true, Infinity],
+    ]);
+    expect(find.highlightStep()).toMatchObject({ group: 'first' });
+    expect(find.unitHighlights(0).map((box) => [box.color, box.active, box.layer])).toEqual([
+      ['blue', false, 1], ['red', true, Infinity],
+    ]);
   });
 
   it('is not affected by later changes to the caller\'s group objects', async () => {
@@ -235,7 +247,7 @@ describe('UnitFindController — text highlights', () => {
     gates.forEach((open) => open([{ text: 'alpha' }]));
     await expect(found).resolves.toEqual([]);
     expect(await highlighted).toHaveLength(1);
-    expect(find.matches()).toEqual([]);
+    expect(find.next()).toBeNull();
   });
 
   it('cancels a highlight scan that a newer set or a clear supersedes', async () => {
@@ -296,7 +308,7 @@ describe('UnitFindController — whole-word find', () => {
     const cancelled = find.find('cat', { wholeWord: true });
     find.clearFind();
     await expect(cancelled).resolves.toEqual([]);
-    expect(find.matches()).toEqual([]);
+    expect(find.next()).toBeNull();
   });
 });
 
@@ -308,7 +320,8 @@ describe('UnitFindController — request results', () => {
     const [alpha, beta] = await Promise.all([find.find('alpha'), find.find('beta')]);
     expect(alpha.map((match) => match.text)).toEqual(['alpha']);
     expect(beta.map((match) => match.text)).toEqual(['beta']);
-    expect(find.matches().map((match) => match.text)).toEqual(['beta']);
+    // The later request is the one that stays installed.
+    expect(find.next()?.text).toBe('beta');
   });
 
   it('reports a failed preparation of the current request, and not of a superseded one', async () => {

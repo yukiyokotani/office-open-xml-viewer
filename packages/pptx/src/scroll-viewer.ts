@@ -188,7 +188,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     slotIndex: (slot) => slot.renderedSlide,
     token: (slot) => slot.renderGeneration,
     nextToken: (slot) => ++slot.renderGeneration,
-    wantRuns: (slot) => !!(this._opts.enableTextSelection && slot.textLayer) || this._overlayActive(),
+    wantRuns: (slot) => !!(this._opts.enableTextSelection && slot.textLayer) || this._findActive || this._find.highlighting,
     reportError: (error) => this._reportRenderError(error),
   } satisfies Pick<BitmapSlotHooks<SlideSlot, PptxTextRunInfo>,
     'slots' | 'epoch' | 'scale' | 'slotIndex' | 'token' | 'nextToken' | 'wantRuns' | 'reportError'>;
@@ -239,7 +239,8 @@ export class PptxScrollViewer implements ZoomableViewer {
     imageResources: () => this._opts.imageResources,
     errorPlaceholder: () => this._opts.errorPlaceholder,
     textSelection: () => this._opts.enableTextSelection === true,
-    findActive: () => this._overlayActive(),
+    // Run geometry is needed for the find and for the text highlights.
+    findActive: () => this._findActive || this._find.highlighting,
     mediaEnabled: () => this._opts.enableMediaPlayback === true,
     mediaRange: () => this._mediaRange(),
     rangeContains: (range, slide) => this._rangeContains(range, slide),
@@ -489,7 +490,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   private _findActive = false;
   private readonly _highlights = new HighlightLayerController<SlideSlot, PptxTextRunInfo, PptxMatchLocation>({
     slots: () => this._slots,
-    active: () => this._overlayActive(),
+    active: () => this._findActive || this._find.highlighting,
     runs: (unit) => this._find.slideRuns(unit),
     setRuns: (unit, runs) => this._find.setSlideRuns(unit, runs),
     paint: (unit, slot, runs, measure) => buildPptxHighlightLayer(
@@ -1336,7 +1337,7 @@ export class PptxScrollViewer implements ZoomableViewer {
         ? presentation.waitUntilLayoutComplete().catch(() => undefined)
         : this._errorRouter.ownBackgroundLifecycle(() => presentation.waitUntilLayoutComplete()));
     }
-    if (superseded() || (kind && !presentation.layoutComplete)) return [];
+    if (superseded() || !presentation.layoutComplete) return [];
     // The complete deck's hidden flags decide which slides a search may match.
     this._refreshShownSlides();
     const matches = await this._errorRouter.ownAwaitable(scan);
@@ -1408,12 +1409,6 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._searches[1]++;
     this._find.clearHighlights();
     this._highlights.redrawAll();
-  }
-
-  /** Whether mounted slides need run geometry for the find or the text
-   * highlights. */
-  private _overlayActive(): boolean {
-    return this._findActive || this._find.highlighting;
   }
 
   /** Drop the find and the text highlights (new presentation, hidden-slide

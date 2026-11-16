@@ -80,10 +80,15 @@ describe.each(['main', 'worker'] as const)('PptxViewer text highlights (%s mode)
 
     expect(await viewer.highlightPrev()).toMatchObject({ matchIndex: 3, group: 'user', location: { slide: 1 } });
     expect(viewer.slideIndex).toBe(1);
+    // The active highlight (of the second group) is painted last among the
+    // highlights, with its group colour and a ring; then the find.
     expect(boxes().map((box) => ringed(box))).toEqual([false, true, false]);
+    expect(boxes()[1].style.background).toBe('rgba(255, 0, 0, 0.3)');
     expect(await viewer.highlightNext()).toMatchObject({ matchIndex: 0, group: 'system', location: { slide: 0 } });
     expect(viewer.slideIndex).toBe(0);
-    expect(boxes().map((box) => ringed(box))).toEqual([true, false, false]);
+    // Now the first group's match is active: it is painted above the second group's.
+    expect(boxes().map((box) => ringed(box))).toEqual([false, true, false]);
+    expect(boxes().map((box) => box.style.background).slice(0, 2)).toEqual(['rgba(255, 0, 0, 0.3)', 'rgba(0, 0, 255, 0.3)']);
     expect(boxes()[2].style.background).toBe(FIND_COLORS.active);
 
     viewer.clearFind();

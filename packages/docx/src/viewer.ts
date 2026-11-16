@@ -612,7 +612,7 @@ export class DocxViewer implements ZoomableViewer {
       await (kind
         ? doc.waitUntilLayoutComplete().catch(() => undefined)
         : this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete()));
-      if (superseded() || (kind && !doc.layoutComplete)) return [];
+      if (superseded() || !doc.layoutComplete) return [];
     }
     const matches = await this._errorRouter.ownAwaitable(scan);
     // Redraw the current page's highlights (matches on it become visible without

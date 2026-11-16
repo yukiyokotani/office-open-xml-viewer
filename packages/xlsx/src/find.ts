@@ -152,8 +152,8 @@ export class XlsxFindController {
   clearHighlights(): void { this._marks.reset(); }
 
   /** The overlay boxes of a sheet in paint order: one per text-highlight group
-   *  per cell (active when any of its occurrences is the active highlight),
-   *  group by group in the order of the set, then one per find match, so the
+   *  per cell, group by group in the order of the set, then the ring of the
+   *  cell that holds the active highlight, then one per find match, so the
    *  find is painted on top. */
   sheetHighlights(sheet: number): XlsxCellHighlight[] {
     const out: XlsxCellHighlight[] = [];
@@ -162,10 +162,9 @@ export class XlsxFindController {
     // In the order of the set, so a later group is drawn inside (above) an
     // earlier one on a shared cell. Array.prototype.sort is stable: one group
     // keeps document order.
-    const marks = this._marks.matches.map((m, i) => ({ m, i }))
-      .filter(({ m }) => m.sheet === sheet)
-      .sort((a, b) => a.m.layer! - b.m.layer!);
-    for (const { m, i } of marks) {
+    const marks = this._marks.matches.filter((m) => m.sheet === sheet)
+      .sort((a, b) => a.layer! - b.layer!);
+    for (const m of marks) {
       const cell = `${m.row},${m.col}`;
       const key = `${cell},${m.source!.group}`;
       let box = boxes.get(key);
@@ -176,7 +175,12 @@ export class XlsxFindController {
         boxes.set(key, box);
         out.push(box);
       }
-      if (i === this._marks.active) box.active = true;
+    }
+    // The active highlight is marked by a box of its own above every group: a
+    // ring on its group's box could be covered by a later group's box.
+    const active = this._marks.matches[this._marks.active];
+    if (active?.sheet === sheet) {
+      out.push({ row: active.row, col: active.col, active: true, color: 'transparent', depth: 0 });
     }
     this._find.matches.forEach((m, i) => {
       if (m.sheet === sheet) out.push({ row: m.row, col: m.col, active: i === this._find.active });

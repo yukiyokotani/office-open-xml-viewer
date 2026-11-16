@@ -106,7 +106,10 @@ export interface FindMatchesOptions {
    * words (Han, Hiragana, Katakana, Thai, Lao, Khmer, Myanmar) the boundaries
    * come from `Intl.Segmenter` word segmentation and therefore depend on the
    * browser's dictionaries; where `Intl.Segmenter` is unavailable, text in
-   * those scripts is matched as if `wholeWord` were `false`.
+   * those scripts is matched as if `wholeWord` were `false`. Pages, slides and
+   * cells are searched one by one: a match never spans two of them, and their
+   * ends count as word boundaries, also for a word that is divided between two
+   * pages.
    */
   wholeWord?: boolean;
 }

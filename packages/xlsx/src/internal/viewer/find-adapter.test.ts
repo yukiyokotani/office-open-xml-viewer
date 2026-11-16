@@ -102,10 +102,13 @@ describe('FindAdapter text highlights', () => {
     expect(await adapter.highlightPrev()).toMatchObject({ group: 'user', location: { sheet: 1, ref: 'C2' } });
     expect(state.sheet).toBe(1);
     expect(state.scrolled.at(-1)).toBe('2,3');
-    expect(boxes.map((box) => box.cssText.includes('box-shadow:inset 0 0 0 2px #111'))).toEqual([true]);
+    // The group box, then the ring as a box of its own above it.
+    expect(boxes.map((box) => box.cssText.includes('box-shadow:inset 0 0 0 2px #111'))).toEqual([false, true]);
+    expect(paint(boxes[1])).toEqual(['transparent', '2px solid transparent']);
+    expect(geometry(boxes[1])).toBe(geometry(boxes[0]));
     expect(await adapter.highlightNext()).toMatchObject({ group: 'system', location: { sheet: 0, ref: 'A1' } });
-    expect(boxes.map((box) => box.cssText.includes('box-shadow:inset 0 0 0 2px #111'))).toEqual([true, false]);
-    expect(boxes[1].cssText).toContain('background:rgba(4, 5, 6, 0.7)');
+    expect(boxes.map((box) => box.cssText.includes('box-shadow:inset 0 0 0 2px #111'))).toEqual([false, true, false]);
+    expect(boxes[2].cssText).toContain('background:rgba(4, 5, 6, 0.7)');
   });
 
   it('clears each kind on its own', async () => {

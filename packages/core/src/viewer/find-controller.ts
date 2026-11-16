@@ -70,12 +70,15 @@ class MatchList<Location> {
     return this.at(this.active);
   }
 
-  /** Append this list's overlay boxes of a unit to `out`, in document order. */
+  /** Append this list's overlay boxes of a unit to `out`, in document order.
+   *  The active text highlight (a match with a colour) gets the topmost paint
+   *  layer; a find match has no layer. */
   boxes(unit: number, out: UnitHighlight[]): void {
     this.matches.forEach((match, index) => {
       if (match.unit === unit) {
+        const active = index === this.active;
         out.push({
-          slices: match.slices, active: index === this.active, color: match.color, layer: match.layer,
+          slices: match.slices, active, color: match.color, layer: active && match.color ? Infinity : match.layer,
         });
       }
     });
@@ -142,7 +145,8 @@ export class UnitFindController<Run extends SearchRun, Location> {
   }
 
   /** The overlay boxes of a unit in paint order: text highlights first (group
-   *  by group in the order of the set, each in document order), then the find
+   *  by group in the order of the set, each in document order, and the active
+   *  highlight last, so that no other group covers its ring), then the find
    *  matches, so the find is painted on top. */
   unitHighlights(unit: number): UnitHighlight[] {
     const out: UnitHighlight[] = [];
@@ -153,8 +157,6 @@ export class UnitFindController<Run extends SearchRun, Location> {
     this._find.boxes(unit, out);
     return out;
   }
-
-  matches(): FindMatch<Location>[] { return this._find.all(); }
 
   async find(query: string, opts: FindMatchesOptions = {}): Promise<FindMatch<Location>[]> {
     // Empty search is a full clear, including cached geometry, in both formats.

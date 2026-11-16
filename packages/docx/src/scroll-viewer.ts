@@ -1206,7 +1206,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       await (kind
         ? doc.waitUntilLayoutComplete().catch(() => undefined)
         : this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete()));
-      if (superseded() || (kind && doc.layoutComplete === false)) return [];
+      if (superseded() || doc.layoutComplete === false) return [];
     }
     const matches = await this._errorRouter.ownAwaitable(scan);
     this._highlights.redrawAll();

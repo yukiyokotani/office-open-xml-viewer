@@ -1023,7 +1023,7 @@ export class PptxViewer implements ZoomableViewer {
         ? engine.waitUntilLayoutComplete().catch(() => undefined)
         : this.errorRouter.ownBackgroundLifecycle(() => engine.waitUntilLayoutComplete()));
     }
-    if (superseded() || (kind && !engine.layoutComplete)) return [];
+    if (superseded() || !engine.layoutComplete) return [];
     this._findSkipsHidden = this._hiddenMode === 'skip' && this.visibleSlideCount > 0;
     const matches = await this.errorRouter.ownAwaitable(scan);
     if (superseded()) return [];

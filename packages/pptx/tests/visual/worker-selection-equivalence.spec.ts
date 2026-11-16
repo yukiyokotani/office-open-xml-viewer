@@ -114,10 +114,27 @@ test('worker selection + findText + zoom match main mode › demo/sample-1', asy
   expect(highlights.active?.matchIndex).toBe(0);
   const colors = new Set(highlights.boxes.map((box) => box.background));
   expect(colors.has('rgba(0, 0, 255, 0.3)') || colors.has('rgba(255, 0, 0, 0.3)')).toBe(true);
-  // The active highlight keeps its group colour and gains a ring.
-  const ringed = highlights.boxes.filter((box) => box.ringed);
-  expect(ringed.length).toBeGreaterThan(0);
-  for (const box of ringed) expect(box.background).toMatch(/^rgba\((0, 0, 255|255, 0, 0), 0\.3\)$/);
+  // The active highlight (match 0) keeps its group colour and has a ring drawn
+  // inside its bounds. It is the last highlight box in the document, after
+  // any other group's box over the same text, so that box cannot cover the
+  // ring; the find boxes follow.
+  const colorOf: Record<string, string> = { word: 'rgba(0, 0, 255, 0.3)', any: 'rgba(255, 0, 0, 0.3)' };
+  const isGroup = (box: { background: string }) => Object.values(colorOf).includes(box.background);
+  const activeGroup = highlights.active!.group;
+  expect(highlights.matches[0].group).toBe(activeGroup);
+  const ringIndexes = highlights.boxes.flatMap((box, index) => (box.ringed ? [index] : []));
+  expect(ringIndexes.length).toBeGreaterThan(0);
+  const firstRing = ringIndexes[0];
+  const lastRing = ringIndexes[ringIndexes.length - 1];
+  for (const index of ringIndexes) expect(highlights.boxes[index].background).toBe(colorOf[activeGroup]);
+  const ring = highlights.boxes[firstRing];
+  const beneath = highlights.boxes.slice(0, firstRing)
+    .filter((box) => box.left === ring.left && box.top === ring.top && box.width === ring.width);
+  // Wherever the whole-word group matches, the plain group matches too.
+  if (activeGroup === 'word') expect(beneath.map((box) => box.background)).toEqual([colorOf.any]);
+  for (const box of beneath) expect(box.background).not.toBe(colorOf[activeGroup]);
+  expect(highlights.boxes.slice(0, lastRing + 1).every(isGroup)).toBe(true);
+  expect(highlights.boxes.slice(lastRing + 1).some(isGroup)).toBe(false);
   for (const box of highlights.boxes) expect(box.width).toBeGreaterThan(0);
   expect(highlights.findNextIndex).toBe(main.matches.length > 1 ? 1 : 0);
 });

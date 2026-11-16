@@ -5,7 +5,8 @@
  * An offset in the searched text is a word boundary when a whole-word match may
  * start or end there. The rule, in order:
  *
- * 1. The start and the end of the text are boundaries, and so is every offset
+ * 1. The start and the end of the text are boundaries (the text is one page,
+ *    slide or cell: units are searched one by one), and so is every offset
  *    the format adapter marked as a layout break (a paragraph end, a manual
  *    line break, a tab, a different text container): the joined text has no
  *    separator character there, but the reader sees one. An automatic line

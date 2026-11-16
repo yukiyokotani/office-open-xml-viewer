@@ -290,7 +290,13 @@ describe('XlsxFindController text highlights', () => {
     c.highlightStep();
     c.highlightStep();
     expect(c.highlightStep()).toMatchObject({ matchIndex: 3, location: { ref: 'B2' } });
-    expect(c.sheetHighlights(0).map((box) => box.active)).toEqual([false, true, false, true, false, false]);
+    // Three group boxes, the ring on the cell of the active occurrence, then the find boxes.
+    expect(c.sheetHighlights(0).map((box) => [box.row, box.col, box.color, box.active])).toEqual([
+      [1, 1, 'rgba(0,0,255,0.3)', false], [2, 2, 'rgba(0,0,255,0.3)', false],
+      [1, 1, 'rgba(0, 184, 148, 0.35)', false],
+      [2, 2, 'transparent', true],
+      [1, 1, undefined, true], [2, 2, undefined, false], [2, 2, undefined, false],
+    ]);
     // The find cursor did not move.
     expect(c.next()?.matchIndex).toBe(1);
   });
