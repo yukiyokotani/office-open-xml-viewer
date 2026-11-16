@@ -766,16 +766,15 @@ fn marker_outline(d: &str) -> Result<Option<Outline>, String> {
                 if (nx, ny) == (x, y) {
                     continue;
                 }
-                if rx != 0.0 && ry != 0.0 {
-                    let points = arc_points((x, y), (nx, ny), (rx, ry), phi, large, sweep);
-                    crate::budget::tick(points.len())?;
-                    for point in points {
-                        if corners.first() != Some(&point) && corners.last() != Some(&point) {
-                            corners.push(point);
-                        }
+                let points = svg_arc(x, y, rx, ry, phi, large, sweep, nx, ny);
+                crate::budget::tick(points.len())?;
+                for point in points {
+                    if corners.first() != Some(&point) && corners.last() != Some(&point) {
+                        corners.push(point);
                     }
                 }
                 (x, y) = (nx, ny);
+                continue;
             }
             other => {
                 // Curves and arcs: the outline is curved.
@@ -808,63 +807,98 @@ fn marker_outline(d: &str) -> Result<Option<Outline>, String> {
     Ok((!corners.is_empty() || curved).then_some((curved, closed, corners)))
 }
 
-/// The points of an SVG elliptical arc (SVG 1.1 F.6.5, radii scaled up
-/// when too small, F.6.6) from `from` to `to`, one per sixteenth of a turn
-/// of its sweep and its end, without its start.
-fn arc_points(
-    from: (f64, f64),
-    to: (f64, f64),
-    (rx, ry): (f64, f64),
-    phi_deg: f64,
+/// The largest angle (degrees) one flattened step of an arc spans.
+pub const SVG_ARC_STEP_DEGREES: f64 = 5.0;
+
+/// The points after the start of an SVG elliptical arc (SVG 1.1 §F.6.5
+/// endpoint-to-centre conversion, §F.6.6 radius correction), flattened in
+/// steps of at most [`SVG_ARC_STEP_DEGREES`].
+#[allow(clippy::too_many_arguments)]
+pub fn svg_arc(
+    x1: f64,
+    y1: f64,
+    rx: f64,
+    ry: f64,
+    rotation: f64,
     large: bool,
     sweep: bool,
+    x2: f64,
+    y2: f64,
 ) -> Vec<(f64, f64)> {
     let (mut rx, mut ry) = (rx.abs(), ry.abs());
-    let (sin, cos) = phi_deg.to_radians().sin_cos();
-    let (dx, dy) = ((from.0 - to.0) / 2.0, (from.1 - to.1) / 2.0);
-    let (x1, y1) = (cos * dx + sin * dy, -sin * dx + cos * dy);
-    let lambda = (x1 / rx).powi(2) + (y1 / ry).powi(2);
-    if lambda > 1.0 {
-        rx *= lambda.sqrt();
-        ry *= lambda.sqrt();
+    if (x1 == x2 && y1 == y2) || rx == 0.0 || ry == 0.0 {
+        // §F.6.2: a zero radius is a straight line; equal ends draw nothing.
+        return if x1 == x2 && y1 == y2 {
+            Vec::new()
+        } else {
+            vec![(x2, y2)]
+        };
     }
-    let numerator = (rx * ry).powi(2) - (rx * y1).powi(2) - (ry * x1).powi(2);
-    let denominator = (rx * y1).powi(2) + (ry * x1).powi(2);
-    let mut root = if denominator > 0.0 {
-        (numerator / denominator).max(0.0).sqrt()
-    } else {
-        0.0
-    };
+    let phi = rotation.to_radians();
+    let (sin_phi, cos_phi) = phi.sin_cos();
+    // Halves first, so neither the difference nor the midpoint overflows.
+    let dx = x1 / 2.0 - x2 / 2.0;
+    let dy = y1 / 2.0 - y2 / 2.0;
+    let (mx, my) = (x1 / 2.0 + x2 / 2.0, y1 / 2.0 + y2 / 2.0);
+    let x1p = cos_phi * dx + sin_phi * dy;
+    let y1p = -sin_phi * dx + cos_phi * dy;
+    // §F.6.5 in the unit-circle frame of the ellipse (`u`, `v` = x1', y1'
+    // over the radii), with lengths taken by `hypot`: no square or product
+    // of coordinates over- or underflows.
+    let (mut u, mut v) = (x1p / rx, y1p / ry);
+    let mut reach = u.hypot(v);
+    if reach > 1.0 {
+        // §F.6.6: radii too small for the ends grow until they fit.
+        rx *= reach;
+        ry *= reach;
+        u /= reach;
+        v /= reach;
+        reach = 1.0;
+    }
+    // The centre in the frame is ±√(1−r²)·(v, −u)/r, r = |(u, v)|.
+    let mut lift = ((1.0 - reach) * (1.0 + reach)).max(0.0).sqrt();
     if large == sweep {
-        root = -root;
+        lift = -lift;
     }
-    let (cx1, cy1) = (root * rx * y1 / ry, -root * ry * x1 / rx);
-    let (cx, cy) = (
-        cos * cx1 - sin * cy1 + (from.0 + to.0) / 2.0,
-        sin * cx1 + cos * cy1 + (from.1 + to.1) / 2.0,
-    );
-    let angle = |ux: f64, uy: f64| uy.atan2(ux);
-    let start = angle((x1 - cx1) / rx, (y1 - cy1) / ry);
-    let mut delta = angle((-x1 - cx1) / rx, (-y1 - cy1) / ry) - start;
-    let turn = std::f64::consts::TAU;
-    if sweep && delta < 0.0 {
-        delta += turn;
-    } else if !sweep && delta > 0.0 {
-        delta -= turn;
+    let (cu, cv) = (lift * (v / reach), -lift * (u / reach));
+    let (cxp, cyp) = (cu * rx, cv * ry);
+    let cx = cos_phi * cxp - sin_phi * cyp + mx;
+    let cy = sin_phi * cxp + cos_phi * cyp + my;
+    let angle = |ux: f64, uy: f64, vx: f64, vy: f64| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
+    let theta1 = angle(1.0, 0.0, u - cu, v - cv);
+    let mut delta = angle(u - cu, v - cv, -u - cu, -v - cv);
+    if !sweep && delta > 0.0 {
+        delta -= std::f64::consts::TAU;
+    } else if sweep && delta < 0.0 {
+        delta += std::f64::consts::TAU;
     }
-    if !(cx.is_finite() && cy.is_finite() && delta.is_finite()) {
-        return vec![to];
+    if ![cx, cy, rx, ry, theta1, delta]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        // Beyond the range of the arithmetic: the chord.
+        return vec![(x2, y2)];
     }
-    let steps = ((delta.abs() / (turn / 16.0)).ceil() as usize).clamp(1, 16);
-    let mut out: Vec<(f64, f64)> = (1..steps)
+    let steps = ((delta.abs().to_degrees() / SVG_ARC_STEP_DEGREES).ceil() as usize).max(1);
+    let points: Vec<(f64, f64)> = (1..=steps)
         .map(|i| {
-            let t = start + delta * i as f64 / steps as f64;
-            let (ex, ey) = (rx * t.cos(), ry * t.sin());
-            (cos * ex - sin * ey + cx, sin * ex + cos * ey + cy)
+            if i == steps {
+                return (x2, y2);
+            }
+            let t = theta1 + delta * i as f64 / steps as f64;
+            let (sin_t, cos_t) = t.sin_cos();
+            (
+                cx + rx * cos_phi * cos_t - ry * sin_phi * sin_t,
+                cy + rx * sin_phi * cos_t + ry * cos_phi * sin_t,
+            )
         })
         .collect();
-    out.push(to);
-    out
+    if points.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
+        points
+    } else {
+        // A point beyond the range of the arithmetic: the chord.
+        vec![(x2, y2)]
+    }
 }
 
 /// The most commands a marker outline is read for (the bound of the
@@ -1196,6 +1230,7 @@ mod tests {
                 "arrow",
             ),
             ("M0 5a5 5 0 0 1 10 0a5 5 0 0 1-10 0z", "oval"),
+            ("M0 0A10 10 0 0 1 10 0A10 10 0 0 1 0 0Z", "oval"),
             ("M0 0l10 20 20-20", "arrow"),
             ("", "triangle"),
             ("M0", "triangle"),
