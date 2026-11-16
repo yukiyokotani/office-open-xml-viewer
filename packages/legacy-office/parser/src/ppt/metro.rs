@@ -32,8 +32,9 @@
 //! - no alternative part (a package with only the `downRev` checksums), or
 //!   an ordinary alternative that verifiably disagrees with the binary on a
 //!   compared attribute, or whose binary overrides it (`Verdict::Overridden`:
-//!   a binary gradient rotation flag the XML does not state as `1`): the
-//!   binary projection;
+//!   a binary gradient rotation flag the XML does not state as `1`, a stroked
+//!   custom path whose outline matches only by folding a line that turns
+//!   back on itself): the binary projection;
 //! - an alternative that agrees on every applicable compared attribute: the
 //!   alternative, with the binary's transform, identifier and characters;
 //!   a binary freeform keeps its outline, and a placeholder inherits locally
@@ -397,7 +398,9 @@ enum Verdict {
     /// Both forms state the attribute in encodings that do not correspond
     /// one to one, in a pairing whose PowerPoint 16 PDF controls draw the
     /// binary (a binary gradient rotation flag that the XML does not state
-    /// as `1`; `same_paint`). The shape keeps its binary projection, as for
+    /// as `1`; `same_paint`), or draw both forms alike (a stroked custom path
+    /// whose outline matches only by folding a line that turns back on
+    /// itself; `same_outline`). The shape keeps its binary projection, as for
     /// [`Verdict::Differs`]; the value names the rejection this outcome
     /// replaces.
     Overridden(&'static str),
@@ -406,6 +409,9 @@ enum Verdict {
 #[cfg(any(test, feature = "direct-ppt"))]
 const RESTATED_FILL: &str =
     "PowerPoint alternative shape XML fill cannot be compared with the binary shape";
+#[cfg(any(test, feature = "direct-ppt"))]
+const RESTATED_GEOMETRY: &str =
+    "PowerPoint alternative shape XML custom geometry cannot be compared with the binary shape";
 
 /// How a shape resolves before its alternative is projected.
 #[cfg(any(test, feature = "direct-ppt"))]
@@ -1672,7 +1678,11 @@ fn same_geometry(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdic
 /// unpaired structures stay unverifiable: no control establishes which side
 /// PowerPoint draws for them. So does a stroked path with dashes or
 /// arrowheads, which follow the traversal that the outline comparison
-/// normalizes away.
+/// normalizes away. A solid stroke draws collinear splits and another start
+/// point alike, but draws joins where a line turns back on itself (that
+/// control's binary path does, at its moved start); such a stroked path keeps
+/// the binary, which draws its own turns as authored and which the control
+/// without an alternative shows PowerPoint printing alike.
 #[cfg(any(test, feature = "direct-ppt"))]
 fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
     use pptx_model::PathCmd;
@@ -1711,8 +1721,9 @@ fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
         {
             // Dashes and arrowheads follow the traversal (start point and
             // direction of each segment), which the outline comparison
-            // normalizes away; only solid, unterminated strokes are known
-            // to draw alike.
+            // normalizes away. Solid, unterminated strokes draw alike up to
+            // the joins of lines that turn back on themselves, which
+            // `same_outline` reports.
             let traversal = |stroke: &Option<pptx_model::Stroke>| {
                 stroke.as_ref().is_some_and(|stroke| {
                     !stroke.custom_dash.is_empty()
@@ -1728,9 +1739,13 @@ fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
             {
                 return Verdict::Unverifiable("custom geometry");
             }
-            match same_outline(raw_b, raw_a) {
+            match same_outline(raw_b, raw_a, b_paint[index].1 || a_paint.1) {
                 Verdict::Same => {}
                 Verdict::Differs(what) => verdict = Verdict::Differs(what),
+                Verdict::Overridden(site) if verdict == Verdict::Same => {
+                    verdict = Verdict::Overridden(site)
+                }
+                Verdict::Overridden(_) => {}
                 other => return other,
             }
             continue;
@@ -1891,7 +1906,11 @@ fn contours(path: &[pptx_model::PathCmd]) -> Option<Vec<Contour>> {
 /// points are a different vertex (`Differs`, as for paired commands). A
 /// contour that does not normalize to the same kinds stays unverifiable.
 #[cfg(any(test, feature = "direct-ppt"))]
-fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathCmd]) -> Verdict {
+fn same_outline(
+    binary: &[pptx_model::PathCmd],
+    alternative: &[pptx_model::PathCmd],
+    stroked: bool,
+) -> Verdict {
     let near = |p: [f64; 2], q: [f64; 2]| {
         (p[0] - q[0]).abs() <= PATH_TOLERANCE && (p[1] - q[1]).abs() <= PATH_TOLERANCE
     };
@@ -1902,6 +1921,7 @@ fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathC
     };
     // Merge a cyclic (closed) or linear run of segments; `None` when the
     // contour degenerates to collinear lines only.
+    let reversed = std::cell::Cell::new(false);
     let normalize = |closed: bool, segments: Vec<Segment>| -> Option<Vec<Segment>> {
         let mut segments: Vec<Segment> = segments
             .into_iter()
@@ -1936,16 +1956,28 @@ fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathC
             }
             let last = segments[end - 1].end();
             let length = (last[0] - first[0]).hypot(last[1] - first[1]);
+            let along = |p: [f64; 2]| {
+                ((p[0] - first[0]) * (last[0] - first[0])
+                    + (p[1] - first[1]) * (last[1] - first[1]))
+                    / length
+            };
             let traced = length > PATH_TOLERANCE
                 && segments[index..end].iter().all(|s| {
                     let p = s.end();
-                    let along = ((p[0] - first[0]) * (last[0] - first[0])
-                        + (p[1] - first[1]) * (last[1] - first[1]))
-                        / length;
                     off_line(first, last, p) <= PATH_TOLERANCE
-                        && (-PATH_TOLERANCE..=length + PATH_TOLERANCE).contains(&along)
+                        && (-PATH_TOLERANCE..=length + PATH_TOLERANCE).contains(&along(p))
                 });
             if end - index > 1 && traced {
+                // A run that turns back on itself traces the same points,
+                // but a stroke draws joins at its turns.
+                let mut previous = 0.0;
+                for s in &segments[index..end] {
+                    let at = along(s.end());
+                    if at < previous - PATH_TOLERANCE {
+                        reversed.set(true);
+                    }
+                    previous = at;
+                }
                 merged.push(Segment::Line(first, last));
             } else {
                 merged.extend_from_slice(&segments[index..end]);
@@ -2026,7 +2058,11 @@ fn same_outline(binary: &[pptx_model::PathCmd], alternative: &[pptx_model::PathC
         }
         differs = true;
     }
-    if differs {
+    if stroked && reversed.get() {
+        // The stroke of the alternative may draw other joins: keep the
+        // binary, which draws its own turns as authored.
+        Verdict::Overridden(RESTATED_GEOMETRY)
+    } else if differs {
         Verdict::Differs("custom geometry vertices")
     } else {
         Verdict::Same
@@ -2888,8 +2924,35 @@ mod tests {
             same_geometry(&binary(&element, &leaf), &curved),
             Verdict::Unverifiable("custom geometry")
         );
-        // A binary start vertex moved along the first edge adds a line that
-        // the alternative does not state; the traced outline is the same.
+        // A binary that starts inside the first edge and closes through the
+        // corner traces the same outline in the same order: the same shape.
+        let forward = |corner: f64| {
+            let mut element = shape("custGeom");
+            element.cust_geom = Some(vec![vec![
+                PathCmd::MoveTo { x: 0.1, y: 0.0 },
+                PathCmd::LineTo { x: corner, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 0.1, y: 0.0 },
+                PathCmd::Close,
+            ]]);
+            element
+        };
+        assert_eq!(
+            same_geometry(&binary(&forward(1.0), &leaf), &square(false, 1.0)),
+            Verdict::Same
+        );
+        // Once normalized, the outlines pair like paired commands: another
+        // corner is a different vertex.
+        assert_eq!(
+            same_geometry(&binary(&forward(0.9), &leaf), &square(false, 1.0)),
+            Verdict::Differs("custom geometry vertices")
+        );
+        // A binary start vertex moved along the first edge with the line
+        // back to the corner turns back on itself there: the same filled
+        // outline, but a stroke draws joins at the turns. A stroked path
+        // keeps the binary, which draws them as authored; an unstroked one
+        // is the same shape.
         let mut moved = square(true, 1.0);
         if let Some(paths) = moved.cust_geom.as_mut() {
             paths[0][0] = PathCmd::MoveTo { x: 0.1, y: 0.0 };
@@ -2897,13 +2960,15 @@ mod tests {
         }
         assert_eq!(
             same_geometry(&binary(&moved, &leaf), &square(false, 1.0)),
-            Verdict::Same
+            Verdict::Overridden(RESTATED_GEOMETRY)
         );
-        // Once normalized, the outlines pair like paired commands: another
-        // corner is a different vertex.
         assert_eq!(
-            same_geometry(&binary(&moved, &leaf), &square(false, 0.9)),
-            Verdict::Differs("custom geometry vertices")
+            same_outline(
+                moved.cust_geom.as_ref().unwrap()[0].as_slice(),
+                square(false, 1.0).cust_geom.as_ref().unwrap()[0].as_slice(),
+                false
+            ),
+            Verdict::Same
         );
         // Unpaired commands that trace another outline stay unknown: a
         // vertex off the edge, a spike past the edge's end (a stroke would
@@ -2977,7 +3042,7 @@ mod tests {
             }
             element
         };
-        let binary_two = two(&moved, 1.0);
+        let binary_two = two(&forward(1.0), 1.0);
         assert_eq!(
             same_geometry(&binary(&binary_two, &leaf), &two(&square(false, 1.0), 1.0)),
             Verdict::Same
@@ -4474,7 +4539,7 @@ mod tests {
 
         #[test]
         fn unpaired_custom_path_commands_compare_their_outline() {
-            use crate::rejection::take_best_effort;
+            use crate::rejection::{take_best_effort, BestEffort};
             use pptx_model::PathCmd;
             let xml = SHAPE_XML.replace(
                 r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
@@ -4488,15 +4553,14 @@ mod tests {
             ];
             let mut element = element("00FF00");
             element.geometry = "custGeom".into();
-            // The start vertex moved along the first edge: the binary adds
-            // the line back to the corner, and its closing line returns to
-            // the corner before the close reaches the moved start.
+            // The binary starts inside the first edge and closes through the
+            // corner: the same outline, traced in the same order.
             element.cust_geom = Some(vec![vec![
                 PathCmd::MoveTo { x: 0.1, y: 0.0 },
-                PathCmd::LineTo { x: 0.0, y: 0.0 },
                 PathCmd::LineTo { x: 1.0, y: 0.0 },
                 PathCmd::LineTo { x: 1.0, y: 1.0 },
                 PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 0.1, y: 0.0 },
                 PathCmd::Close,
             ]]);
             element.fill = Some(Fill::Solid {
@@ -4541,6 +4605,27 @@ mod tests {
                 }
                 assert!(take_best_effort().is_empty());
             }
+            // The start moved along the first edge with a line back to the
+            // corner (the PowerPoint 16 control): the path turns back on
+            // itself, and its stroke may draw joins the alternative does not.
+            // The binary is kept, as the control without an alternative
+            // prints like the control.
+            element.cust_geom = Some(vec![vec![
+                PathCmd::MoveTo { x: 0.1, y: 0.0 },
+                PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::Close,
+            ]]);
+            assert!(matches!(
+                run_verification(&element, &blob(&xml), &theme(), AMPLE).0,
+                Ok(None)
+            ));
+            assert_eq!(
+                take_best_effort(),
+                [(BestEffort::Approximated, RESTATED_GEOMETRY)]
+            );
             // A closing line to the moved start instead cuts another
             // triangle: no control says which side PowerPoint draws.
             if let Some(paths) = element.cust_geom.as_mut() {

@@ -599,9 +599,11 @@ alternative. A rotation flag that only the binary sets keeps the binary
 projection. Custom path commands that do not pair one to one are compared as
 traced outlines (another start point, or collinear lines split differently,
 is the same outline). Outlines that then pair segment by segment but at other
-points are a verified difference and keep the binary projection; outlines
-that do not pair, and stroked paths with dashes or arrowheads (which follow
-the traversal), still reject the load.
+points are a verified difference and keep the binary projection. A stroked
+path whose outline matches only where a line turns back on itself also keeps
+the binary projection, because the stroke draws joins at those turns.
+Outlines that do not pair, and stroked paths with dashes or arrowheads (which
+follow the traversal), still reject the load.
 Exhausting an optional alternative's verification budgets keeps that
 shape's binary projection and does not poison the document. Input work uses
 the standard OOXML package allowance (256 MiB of actual consumed input per
