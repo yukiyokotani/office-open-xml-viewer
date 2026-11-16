@@ -4372,10 +4372,12 @@ fn logical_table_sequence_contexts(
 /// page and `column` as restarting it in the next column, or on the next page
 /// after the last column; §17.6.18 sectPr and the Cover Pages building block
 /// (§17.5.2) likewise begin new pages or sections. Only the main document
-/// story flows through pages and columns. Header/footer stories (§17.10) are
-/// laid out in a page's fixed header/footer region and footnote/endnote
-/// stories (§17.11) in its note area, so none of these transitions can be
-/// honoured there; a layout story root admits only paragraphs and tables.
+/// story's content decides where its pages and columns change. A header or
+/// footer story (§17.10) is laid out in a page's header/footer region, and a
+/// footnote or endnote story (§17.11) in a note area placed by its reference,
+/// which may continue the note on a later page but is never started by it;
+/// none of these transitions can be honoured there, and a layout story root
+/// admits only paragraphs and tables.
 /// The standard does not say what such a break means in those stories; its
 /// one rule for a break that cannot start a page is that page breaks "shall be
 /// ignored when present in frames" (§17.18.4). Library policy, inferred from

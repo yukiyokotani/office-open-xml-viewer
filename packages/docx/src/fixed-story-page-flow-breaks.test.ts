@@ -141,6 +141,8 @@ function observed(result: DocumentLayout) {
 
 const p = (runs: string, props = '') => `<w:p><w:pPr>${exact24}${props}</w:pPr><w:r>${runs}</w:r></w:p>`;
 const HINT = '<w:lastRenderedPageBreak/>';
+const field = (result: string) => '<w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> QUOTE "Q" </w:instrText>'
+  + `<w:fldChar w:fldCharType="separate"/>${result}<w:fldChar w:fldCharType="end"/>`;
 const cover = (content: string) => '<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/>'
   + `</w:docPartObj></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
 
@@ -155,6 +157,10 @@ const CONSTRUCTS: ReadonlyArray<readonly [string, string, string]> = [
   }),
   ['page break opening a paragraph', p('<w:br w:type="page"/><w:t>X2</w:t>'), p(`${HINT}<w:t>X2</w:t>`)],
   ['page break ending a paragraph', p('<w:t>X1</w:t><w:br w:type="page"/>'), p(`<w:t>X1</w:t>${HINT}`)],
+  // A complex field (§17.16.18) around both a hint and a break: removing them
+  // must keep the field boundaries on the retained runs.
+  ['page break inside a field result', p(`${field(`<w:t>X1</w:t>${HINT}<w:br w:type="page"/><w:t>X2</w:t>`)}`),
+    p(field(`<w:t>X1</w:t>${HINT}<w:t>X2</w:t>`))],
   ['paragraph sectPr', p('<w:t>X1</w:t>', '<w:sectPr><w:type w:val="continuous"/></w:sectPr>'), p('<w:t>X1</w:t>')],
   ['Cover Pages block', cover(p('<w:t>X1</w:t>')), p('<w:t>X1</w:t>')],
 ];
