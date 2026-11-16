@@ -5067,8 +5067,9 @@ function renderShapeGroups(
       const sw = shape.w * w;
       const sh = shape.h * h;
       if (!(sw >= 0 && sh >= 0 && (sw > 0 || sh > 0))) continue;
-      // Only a stroked preset line is drawn without area.
-      if ((sw === 0 || sh === 0) && !(shape.geom?.type === 'preset' && shape.strokeColor && shape.strokeWidth > 0)) continue;
+      // Only a stroked line (preset or custom geometry) is drawn without area.
+      if ((sw === 0 || sh === 0)
+        && !((shape.geom?.type === 'preset' || shape.geom?.type === 'custom') && shape.strokeColor && shape.strokeWidth > 0)) continue;
       drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages, cjkFallback, anchor);
     }
   }
@@ -5158,14 +5159,25 @@ function appendSpreadsheetShapeOutline(
 
 type PathSink = Parameters<typeof traceTrimmedPath>[0];
 
+/** Split a command list into subpaths, each starting at its `moveTo`. */
+function splitSubpaths(commands: CorePathCmd[]): CorePathCmd[][] {
+  const out: CorePathCmd[][] = [];
+  for (const cmd of commands) {
+    if (cmd.cmd === 'moveTo' || out.length === 0) out.push([]);
+    out[out.length - 1].push(cmd);
+  }
+  return out;
+}
+
 const decoratedEnd = (end: Stroke['headEnd']): boolean => !!end && end.type !== 'none';
 
 /** Head / tail anchors of custom-geometry paths drawn into (0,0)-(w,h): the
- *  shared core endpoint rule, fed with each path normalized to its own
- *  coordinate box (arc angles in degrees). */
+ *  shared core endpoint rule, fed with the subpaths of every path (split at
+ *  each `moveTo`, so a closed subpath does not hide an open one's end),
+ *  normalized to their path's own coordinate box (arc angles in degrees). */
 function customLineEndAnchors(paths: readonly PathInfo[], w: number, h: number): LineEndAnchors | null {
   if (paths.length === 0) return null;
-  const normalized = paths.map(path => path.commands.map((cmd): CorePathCmd => {
+  const normalized = paths.flatMap(path => splitSubpaths(path.commands.map((cmd): CorePathCmd => {
     const nx = (v: number) => v / path.w, ny = (v: number) => v / path.h;
     switch (cmd.op) {
       case 'moveTo': case 'lineTo': return { cmd: cmd.op, x: nx(cmd.x), y: ny(cmd.y) };
@@ -5174,7 +5186,7 @@ function customLineEndAnchors(paths: readonly PathInfo[], w: number, h: number):
       case 'arcTo': return { cmd: 'arcTo', wr: nx(cmd.wr), hr: ny(cmd.hr), stAng: cmd.stAng / 60000, swAng: cmd.swAng / 60000 };
       case 'close': return { cmd: 'close' };
     }
-  }));
+  })));
   const { start, end } = getCustGeomEndpoints(normalized);
   const anchor = (p: typeof start) => p && { x: p.x * w, y: p.y * h, angle: Math.atan2(p.dy * h, p.dx * w) };
   return start || end ? { start: anchor(start), end: anchor(end) } : null;

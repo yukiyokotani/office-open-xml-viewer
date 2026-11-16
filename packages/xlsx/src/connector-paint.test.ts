@@ -28,15 +28,18 @@ const STROKE_EMU = 19050;
 
 /** Paint one shape over a 3-column × 3-row anchor; record its device-space paint. */
 function record(shape: Partial<ShapeInfo>) {
-  /** Stroked paths in the connector's paint, in device space. */
+  /** Stroked subpaths in the connector's paint, in device space. */
   const strokes: { points: Point[]; closed: boolean; style: unknown }[] = [];
   /** Arrow heads: the device origin of the decoration frame (its tip) when filled. */
   const tips: Point[] = [];
   /** The transform each connector-paint fill / stroke was painted under. */
   const fillFrames: Matrix[] = [];
   const strokeFrames: Matrix[] = [];
-  let points: Point[] = [];
-  let closed = false;
+  let subpaths: { points: Point[]; closed: boolean }[] = [];
+  const pen = (p: Point) => {
+    if (subpaths.length === 0) subpaths.push({ points: [], closed: false });
+    subpaths[subpaths.length - 1].points.push(p);
+  };
   const stack: Matrix[] = [];
   let current = matrix(1, 0, 0, 1, 0, 0);
   const at = (x: number, y: number): Point => ({ x: current.a * x + current.c * y + current.e, y: current.b * x + current.d * y + current.f });
@@ -63,14 +66,15 @@ function record(shape: Partial<ShapeInfo>) {
         case 'createLinearGradient': case 'createRadialGradient':
           return () => ({ gradient: true, addColorStop() {} });
         case 'createPattern': return () => ({ setTransform() {} });
-        case 'beginPath': return () => { points = []; closed = false; };
-        case 'moveTo': case 'lineTo': return (x: number, y: number) => { points.push(at(x, y)); };
-        case 'bezierCurveTo': return (...args: number[]) => { points.push(at(args[4], args[5])); };
-        case 'quadraticCurveTo': return (...args: number[]) => { points.push(at(args[2], args[3])); };
-        case 'closePath': return () => { closed = true; };
+        case 'beginPath': return () => { subpaths = []; };
+        case 'moveTo': return (x: number, y: number) => { subpaths.push({ points: [at(x, y)], closed: false }); };
+        case 'lineTo': return (x: number, y: number) => { pen(at(x, y)); };
+        case 'bezierCurveTo': return (...args: number[]) => { pen(at(args[4], args[5])); };
+        case 'quadraticCurveTo': return (...args: number[]) => { pen(at(args[2], args[3])); };
+        case 'closePath': return () => { if (subpaths.length) subpaths[subpaths.length - 1].closed = true; };
         case 'stroke': return () => {
           if (isShapePaint(target.strokeStyle)) {
-            strokes.push({ points: [...points], closed, style: target.strokeStyle });
+            for (const subpath of subpaths) strokes.push({ ...subpath, points: [...subpath.points], style: target.strokeStyle });
             strokeFrames.push(current);
           }
         };
@@ -103,7 +107,7 @@ function record(shape: Partial<ShapeInfo>) {
   } as unknown as Worksheet;
   renderViewport(ctx, ws, { fonts: [], fills: [], borders: [], cellXfs: [] } as unknown as Styles,
     { row: 1, col: 1, rows: 10, cols: 10 });
-  // A callout's text box is a closed path; the leader is the open one.
+  // A callout's text box is a closed subpath; the leader is the open one.
   return { leaders: strokes.filter((s) => !s.closed && s.points.length >= 2), tips, fillFrames, strokeFrames };
 }
 
@@ -126,6 +130,15 @@ describe('XLSX connector line ends', () => {
       ['custom-geometry connector', { geom: { type: 'custom', paths: [{ w: 100, h: 100, commands: [
         { op: 'moveTo', x: 0, y: 0 }, { op: 'lineTo', x: 50, y: 0 },
         { op: 'cubicBezTo', x1: 80, y1: 0, x2: 100, y2: 20, x3: 100, y3: 100 },
+      ] }] } } as Partial<ShapeInfo>],
+      // A closed subpath ahead of the open line does not hide the line's end.
+      ['custom path with a closed subpath first', { geom: { type: 'custom', paths: [{ w: 100, h: 100, commands: [
+        { op: 'moveTo', x: 0, y: 0 }, { op: 'lineTo', x: 10, y: 0 }, { op: 'lineTo', x: 10, y: 10 }, { op: 'close' },
+        { op: 'moveTo', x: 0, y: 50 }, { op: 'lineTo', x: 100, y: 50 },
+      ] }] } } as Partial<ShapeInfo>],
+      // A flat custom-geometry connector (zero height) is still a stroked line.
+      ['zero-height custom connector', { h: 0, geom: { type: 'custom', paths: [{ w: 100, h: 100, commands: [
+        { op: 'moveTo', x: 0, y: 0 }, { op: 'lineTo', x: 100, y: 0 },
       ] }] } } as Partial<ShapeInfo>],
       // A painted (hatch) body fill must not cancel the leader trim.
       ['hatch-filled line', { ...preset('line'), fill: { fillType: 'hatch', color: '#00FF00', angle: 0, distancePt: 3, lines: 1 } } as Partial<ShapeInfo>],
