@@ -674,14 +674,20 @@ impl<'a> Table<'a> {
                     if placed {
                         crate::rejection::approximated(SITE, ());
                     }
+                    // fillBackOpacity (2.3.7.5) is a FixedPoint in [0, 1];
+                    // the shared paint validates only fillOpacity.
+                    let back_alpha = match paint.fill_back_alpha.unwrap_or(65536) {
+                        alpha @ 0..=65536 => alpha,
+                        _ => crate::rejection::spec_default(
+                            "invalid Word pattern fill background opacity",
+                            65536,
+                        ),
+                    };
                     fill_tile = Some(Tile {
                         blip,
                         pattern: Some([
                             rgb(color, alpha)?,
-                            rgb(
-                                paint.fill_back.unwrap_or(0xffffff),
-                                paint.fill_back_alpha.unwrap_or(65536),
-                            )?,
+                            rgb(paint.fill_back.unwrap_or(0xffffff), back_alpha)?,
                         ]),
                         alpha: 65536,
                         rotates: paint.rotate_fill_with_shape.unwrap_or(false),
@@ -1594,6 +1600,33 @@ mod tests {
             Some(["78AAE6".to_string(), "FFFFFF".to_string()])
         );
         assert!(facts.fill.is_none() && facts.fill_picture.is_none());
+        // Both colours carry their opacity; a background opacity above 1.0
+        // takes the opaque default.
+        let translucent = |back_alpha: u32| {
+            let bytes = container(
+                &[
+                    (0x180, 1),
+                    (0x182, 0x8000),
+                    (0x183, 0x0000_00ff),
+                    (0x184, back_alpha),
+                    (0x4186, 1),
+                ],
+                &[],
+                &[],
+            );
+            let facts = read(1, 0xa00, &bytes, [9, 9]).unwrap();
+            facts.fill_tile.unwrap().pattern.unwrap()
+        };
+        assert_eq!(translucent(0x4000), ["FFFFFF80", "FF000040"]);
+        assert!(crate::rejection::take_best_effort().is_empty());
+        assert_eq!(translucent(0x0002_0000), ["FFFFFF80", "FF0000"]);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "invalid Word pattern fill background opacity"
+            )]
+        );
         // msofillTexture tiles the picture with the fill opacity.
         let texture = container(&[(0x180, 2), (0x182, 0x8000), (0x4186, 1)], &[], &[]);
         let tile = read(1, 0xa00, &texture, [9, 9]).unwrap().fill_tile.unwrap();
