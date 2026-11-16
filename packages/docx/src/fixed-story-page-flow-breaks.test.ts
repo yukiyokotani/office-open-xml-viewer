@@ -113,14 +113,17 @@ function measureContext(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function layout(stories: Stories): DocumentLayout {
+function parse(stories: Stories): DocxDocumentModel {
   const archive = new DocxArchive(docx(stories));
-  let model: DocxDocumentModel;
   try {
-    model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+    return JSON.parse(new TextDecoder().decode(archive.parse())) as DocxDocumentModel;
   } finally {
     archive.free();
   }
+}
+
+function layout(stories: Stories): DocumentLayout {
+  const model = normalizeInternalDocumentModel(parse(stories)).document;
   return layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), {
     currentDateMs: 0,
   });
@@ -178,4 +181,25 @@ describe.each(STORIES)('a %s story', (_story, build) => {
     expect(result.pageCount).toBe(1);
     expect(result).toEqual(observed(layout(build(control))));
   });
+});
+
+// The geometry above cannot see field boundaries; the parsed model must keep
+// the field's end after the retained break run once the hint is removed.
+const FIELD_BLOCK = p(field(`<w:t>X1</w:t>${HINT}<w:br w:type="page"/><w:t>X2</w:t>`));
+it.each([
+  ['header', (model: DocxDocumentModel) => model.headers.default?.body],
+  ['footnote', (model: DocxDocumentModel) => model.footnotes?.find((note) => note.id === '1')?.content],
+] as const)('keeps a %s field around a page break on its retained runs', (story, blocks) => {
+  const model = parse(story === 'header'
+    ? { body: para('A'), header: FIELD_BLOCK }
+    : { body: noteReference('footnote') + para('A'), footnote: FIELD_BLOCK });
+  const paragraphs = (blocks(model) ?? []).filter((block) => block.type === 'paragraph');
+  expect(paragraphs).toHaveLength(1);
+  const paragraph = paragraphs[0] as unknown as {
+    runs: ReadonlyArray<{ type: string; text?: string; breakType?: string }>;
+    __complexFieldBoundaries?: ReadonlyArray<{ boundary: string; runIndex: number }>;
+  };
+  expect(paragraph.runs.map((run) => run.text ?? run.breakType)).toEqual(['X1', 'page', 'X2']);
+  expect(paragraph.__complexFieldBoundaries?.map(({ boundary, runIndex }) => [boundary, runIndex]))
+    .toEqual([['start', 0], ['end', 3]]);
 });
