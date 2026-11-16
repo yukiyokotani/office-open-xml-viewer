@@ -356,14 +356,15 @@ pub(super) fn chart_sheet(
             let model = drawable(&own, palette, references, budget)?;
             let mut embedded = Vec::with_capacity(objects.len());
             for &([left, top, right, bottom], (first, last), hidden) in &objects {
-                // MS-ODRAW 2.3.4.44 fHidden: the object is not displayed.
-                if hidden {
-                    continue;
-                }
                 let chart = records
                     .get(first..=last)
                     .ok_or_else(|| unsupported("BIFF chart substream out of range"))?;
                 let model = drawable(chart, palette, references, budget)?;
+                // MS-ODRAW 2.3.4.44 fHidden: the object is read like any
+                // other and not displayed.
+                if hidden {
+                    continue;
+                }
                 if right <= left || bottom <= top {
                     return Err(crate::rejection::corrupt("empty BIFF chart object anchor"));
                 }
