@@ -1460,6 +1460,7 @@ export type DocxHighlightColors = FindHighlightColors;
 export interface DocxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
+    color?: string;
 }
 export interface DocxMatchLocation {
     page: number;
@@ -1507,6 +1508,10 @@ export class DocxScrollViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<DocxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<DocxMatchLocation> | null>;
     clearFind(): void;
+    highlightText(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<DocxMatchLocation>[]>;
+    highlightNext(): Promise<TextHighlightMatch<DocxMatchLocation> | null>;
+    highlightPrev(): Promise<TextHighlightMatch<DocxMatchLocation> | null>;
+    clearHighlights(): void;
     get topVisiblePage(): number;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null;
@@ -1667,6 +1672,10 @@ export class DocxViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<DocxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<DocxMatchLocation> | null>;
     clearFind(): void;
+    highlightText(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<DocxMatchLocation>[]>;
+    highlightNext(): Promise<TextHighlightMatch<DocxMatchLocation> | null>;
+    highlightPrev(): Promise<TextHighlightMatch<DocxMatchLocation> | null>;
+    clearHighlights(): void;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getSelectionContext(options?: DocxSelectionContextOptions): DocxSelectionContext | null;
     destroy(): void;
@@ -1747,6 +1756,7 @@ export interface FindMatch<Loc = unknown> {
 }
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
+    wholeWord?: boolean;
 }
 export function fontCss(options: FontCssOptions): FontSource;
 export function fontCssApi(options: FontCssApiOptions): FontSource;
@@ -2806,6 +2816,17 @@ export interface TblpPr {
     tblpY: number;
     tblpXSpec?: 'left' | 'center' | 'right' | 'inside' | 'outside' | string;
     tblpYSpec?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
+}
+export interface TextHighlightGroup {
+    id: string;
+    terms: readonly string[];
+    color?: string;
+    caseSensitive?: boolean;
+    wholeWord?: boolean;
+}
+export interface TextHighlightMatch<Loc = unknown> extends FindMatch<Loc> {
+    group: string;
+    term: string;
 }
 export interface TextPath {
     string: string;

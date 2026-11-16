@@ -1184,6 +1184,7 @@ export interface FindMatch<Loc = unknown> {
 }
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
+    wholeWord?: boolean;
 }
 export function fontCss(options: FontCssOptions): FontSource;
 export function fontCssApi(options: FontCssApiOptions): FontSource;
@@ -1847,6 +1848,7 @@ export type PptxHighlightColors = FindHighlightColors;
 export interface PptxHighlightMatch {
     slices: MatchRunSlice[];
     active: boolean;
+    color?: string;
 }
 export interface PptxMatchLocation {
     slide: number;
@@ -1915,6 +1917,10 @@ export class PptxScrollViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<PptxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;
+    highlightText(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<PptxMatchLocation>[]>;
+    highlightNext(): Promise<TextHighlightMatch<PptxMatchLocation> | null>;
+    highlightPrev(): Promise<TextHighlightMatch<PptxMatchLocation> | null>;
+    clearHighlights(): void;
     get topVisibleSlide(): number;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getSelectionContext(options?: PptxSelectionContextOptions): PptxSelectionContext | null;
@@ -2035,6 +2041,10 @@ export class PptxViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<PptxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<PptxMatchLocation> | null>;
     clearFind(): void;
+    highlightText(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<PptxMatchLocation>[]>;
+    highlightNext(): Promise<TextHighlightMatch<PptxMatchLocation> | null>;
+    highlightPrev(): Promise<TextHighlightMatch<PptxMatchLocation> | null>;
+    clearHighlights(): void;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     getSelectionContext(options?: PptxSelectionContextOptions): PptxSelectionContext | null;
     destroy(): void;
@@ -2403,6 +2413,17 @@ interface TextBody__emitterCollision1 {
     shrinkOnOverflow?: boolean;
     numCol?: number;
     spcCol?: number;
+}
+export interface TextHighlightGroup {
+    id: string;
+    terms: readonly string[];
+    color?: string;
+    caseSensitive?: boolean;
+    wholeWord?: boolean;
+}
+export interface TextHighlightMatch<Loc = unknown> extends FindMatch<Loc> {
+    group: string;
+    term: string;
 }
 export interface TextOutline {
     width: number;

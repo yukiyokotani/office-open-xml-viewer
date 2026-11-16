@@ -469,6 +469,34 @@ and `clearFind()` search the complete document, including virtualized pages or
 slides outside the mounted window. Set `findHighlightColors: { match, active }`
 on any viewer to override the two overlay backgrounds with CSS colors; use an
 alpha color when the canvas text should remain visible through the highlight.
+`findText(query, { wholeWord: true })` keeps only whole-word matches.
+
+**Text highlights.** `highlightText(groups)` keeps several terms highlighted at
+once, separately from the find. Each group has an `id`, a list of `terms` (a
+phrase is one term that contains spaces), an optional `color`, and its own
+`caseSensitive` / `wholeWord` settings, so an application can show terms from
+different sources in different colors:
+
+```ts
+const matches = await viewer.highlightText([
+  { id: 'user', terms: ['revenue', 'quarterly earnings'], color: 'rgba(255, 193, 7, 0.4)' },
+  { id: 'validated', terms: ['guaranteed returns'], color: 'rgba(220, 53, 69, 0.35)', wholeWord: true },
+]);
+// Each match: { matchIndex, text, location, group, term }
+await viewer.highlightNext(); // or highlightPrev(); clearHighlights() removes the set
+```
+
+Every call replaces the previous set. Groups are searched independently, so
+matches of different groups may overlap; within a group the longer match wins.
+`highlightNext()` / `highlightPrev()` step through all matches in document
+order and mark the active one with a ring, leaving `findNext()` / `findPrev()`
+and the find highlights untouched. Colors alone do not reach every reader: the
+returned `group` lets the application label or list the matches, and `color`
+accepts any CSS background, including a pattern. Loading another document, or
+a call that changes the layout, drops the highlights; call `highlightText`
+again. Whole-word matching in scripts written without spaces uses
+`Intl.Segmenter`; where it is unavailable, such text is matched as a plain
+substring.
 
 **Selection context for AI/MCP.** Every Viewer exposes one read-only query,
 `getSelectionContext()`, for handing the user's current focus to an external
@@ -943,6 +971,7 @@ file without uploading it.
 | **Interaction** | Text selection, including table-cell text (transparent overlay, native copy) | ✅ |
 | | Bounded read-only text/element context (`getSelectionContext()`, page/source locators, element selection, AI/MCP callback) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — full-text search, all hits highlighted, each match tagged with its page) | ✅ |
+| | Text highlights (`highlightText` / `highlightNext` / `highlightPrev` / `clearHighlights` — several term groups at once, a color per group, independent of find) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (overlay hit-test, `onHyperlinkClick`; internal bookmark / anchor navigation) | ✅ |
 | | Continuous scroll viewer (`DocxScrollViewer` — virtualized page list, desk background / shadow, Ctrl/⌘+wheel zoom, borrowed-engine factory) | ✅ |
@@ -1007,6 +1036,7 @@ file without uploading it.
 | | Ctrl/⌘ + mouse-wheel and trackpad-pinch zoom (in addition to the slider) | ✅ |
 | | Runtime fit / zoom API (`fitWidth` / `fitPage` / `getScale` / `setScale`, in addition to the slider) | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with sheet + cell) | ✅ |
+| | Text highlights (`highlightText` / `highlightNext` / `highlightPrev` / `clearHighlights` — several term groups at once, a color per group, cell-level boxes) | ✅ |
 | | Clickable hyperlinks (`onHyperlinkClick`; internal defined-name / sheet-and-cell navigation, ranges use the first cell) | ✅ |
 | | Drag-to-resize columns / rows by dragging header borders (`resizable` option, default on) — **view-only: changes the on-screen view only and never modifies the loaded file** | ✅ |
 | | Customizable cell-selection color (`selectionColor` option, `setSelectionColor()`) | ✅ |
@@ -1111,6 +1141,7 @@ file without uploading it.
 | | Bounded text/element selection context (`getSelectionContext()`, element selection, master/layout/slide provenance, main + worker) | ✅ |
 | | Comments — opt-in slide-side cards (`comments: true`), authored target markers and highlights, replies and resolved state; also available per slide through the presentation model | ✅ |
 | | In-document find (`findText` / `findNext` / `findPrev` / `clearFind` — matches tagged with slide) | ✅ |
+| | Text highlights (`highlightText` / `highlightNext` / `highlightPrev` / `clearHighlights` — several term groups at once, a color per group, independent of find) | ✅ |
 | | Runtime zoom (`getScale` / `setScale` / `fitWidth` / `fitPage`) | ✅ |
 | | Clickable hyperlinks (`onHyperlinkClick`; internal slide-jump navigation) | ✅ |
 | | Continuous scroll viewer (`PptxScrollViewer` — virtualized slide list, desk background / shadow, Ctrl/⌘+wheel zoom, borrowed-engine factory) | ✅ |
