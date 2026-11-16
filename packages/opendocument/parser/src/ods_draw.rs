@@ -356,7 +356,10 @@ fn place(
             let _ = (sheet, sheet_names);
             parse_cell(reference)
         })
-        .filter(|_| rotation == 0.0 && bounds.is_none());
+        // A connector's geometry is its two ends (and its path), which
+        // LibreOffice keeps whatever end cell is written: it exports every
+        // connector with the end `A1` + 0.1 cm and draws it at its ends.
+        .filter(|_| rotation == 0.0 && bounds.is_none() && node.tag_name().name() != "connector");
     let (to_col, to_col_off, to_row, to_row_off) = match end {
         Some((row, col)) => (
             col - 1,
@@ -1270,10 +1273,29 @@ pub(crate) fn marker_kind(d: &str) -> Result<&'static str, String> {
     let notched = corners
         .iter()
         .any(|&(x, y)| x > left && x < right && y > top && y < bottom);
-    // Arcs are flattened to many corners.
-    Ok(if curved || corners.len() > 8 {
+    // A convex outline: every turn has the same sense.
+    let convex = {
+        let n = corners.len();
+        let mut sense = 0.0f64;
+        (0..n).all(|i| {
+            let (a, b, c) = (corners[i], corners[(i + 1) % n], corners[(i + 2) % n]);
+            let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+            if cross == 0.0 || sense == 0.0 || cross.signum() == sense {
+                if cross != 0.0 {
+                    sense = cross.signum();
+                }
+                true
+            } else {
+                false
+            }
+        })
+    };
+    // Arcs are flattened to many corners. A many-cornered outline that
+    // is not convex is an open arrow drawn as its outline (LibreOffice's
+    // `msArrowOpenEnd`: a chevron with a stub of the line).
+    Ok(if curved || (corners.len() > 8 && convex) {
         "oval"
-    } else if !closed {
+    } else if !closed || corners.len() > 8 {
         "arrow"
     } else {
         match corners.len() {
@@ -1876,6 +1898,32 @@ mod tests {
 
     /// The grid's lookups agree with walking it column by column and row by
     /// row (zero-width runs, trailing default columns, height overrides).
+    #[test]
+    fn markers_map_to_the_nearest_line_end() {
+        // The outlines LibreOffice writes for the SpreadsheetML line ends.
+        for (d, kind) in [
+            ("M150 0l150 300h-300z", "triangle"),
+            ("M150 0l150 300-150-120-150 120z", "stealth"),
+            ("M150 0l150 150-150 150-150-150z", "diamond"),
+            (
+                "M150 0l75 21 54 54 21 75-21 75-54 54-75 21-75-21-54-54-21-75 21-75 54-54z",
+                "oval",
+            ),
+            (
+                "M175 0l175 275-75 75-50-75v75h-100v-75l-50 75-75-75z",
+                "arrow",
+            ),
+            (
+                "M275 0l275 493-57 57-181-342v342h-75v-342l-181 342-56-57z",
+                "arrow",
+            ),
+            ("M0 0c10 0 20 10 20 20s-10 20-20 20z", "oval"),
+            ("M0 0l10 20 20-20", "arrow"),
+        ] {
+            assert_eq!(marker_kind(d).unwrap(), kind, "{d}");
+        }
+    }
+
     #[test]
     fn grid_lookups_match_a_linear_walk() {
         let columns = [(1, 3, 40), (4, 4, 0), (5, 9, 17), (10, 10, 0), (11, 12, 90)];
