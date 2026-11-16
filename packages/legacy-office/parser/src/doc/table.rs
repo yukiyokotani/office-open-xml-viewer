@@ -4,7 +4,6 @@ use super::{border::Border, u16_at, u32_at, unsupported};
 mod margin;
 pub(in crate::doc) use margin::Patch as MarginPatch;
 mod shading;
-pub(in crate::doc) use shading::Color;
 pub(in crate::doc) use shading::Shading;
 mod position;
 pub(in crate::doc) use position::Position;
@@ -666,7 +665,6 @@ impl Row {
                         cell.prepared_shading = Some(PreparedCellShading::StyleDeferred);
                     }
                 }
-                let mut supported = true;
                 if cb > 0 {
                     for (cell, bytes) in self.cells[start..start + cb / 10]
                         .iter_mut()
@@ -690,10 +688,10 @@ impl Row {
                             Some(value) if value.is_clear_auto_background() => {
                                 Some(PreparedCellShading::CompatibilityAuto)
                             }
-                            Some(_) | None => {
-                                supported = false;
-                                Some(PreparedCellShading::Unsupported)
-                            }
+                            // Any other entry is a fallback without a
+                            // verified use: it gates the document only when
+                            // a Raw ShdNil cell falls back to it.
+                            Some(_) | None => Some(PreparedCellShading::Unsupported),
                         };
                         if cell.raw_nil_authored {
                             cell.prepared_shading = Some(
@@ -704,17 +702,12 @@ impl Row {
                         }
                     }
                 }
-                Ok(if supported {
-                    StyleAwareShadingApply::Handled
-                } else {
-                    StyleAwareShadingApply::HandledUnsupported
-                })
+                Ok(StyleAwareShadingApply::Handled)
             }
             0xd62d | 0xd62e => Ok(StyleAwareShadingApply::HandledUnsupported),
             // TIstd followed by D660 is not admitted. The native control trio
             // produced no verified fill oracle, so do not project a guessed
             // result for any D660 pattern or table-style state.
-            0xd660 if self.table_style.is_some() => Ok(StyleAwareShadingApply::HandledUnsupported),
             0xd670..=0xd672 => {
                 let start = match code {
                     0xd671 => 22,
@@ -910,8 +903,12 @@ impl Row {
                 if b.len() != 11 || b[0] != 10 {
                     return Err(unsupported("invalid Word table shading length"));
                 }
+                // The shading of the table itself: Word paints it only
+                // between spaced cells, never in a cell (the native controls
+                // of a table style followed by this property produced no
+                // fill). The model has no table-level shading.
                 self.shading = Shading::read(&b[1..], false)?;
-                return Ok(self.shading.is_some());
+                return Ok(true);
             }
             0xd608 => {
                 let n = *b
@@ -1133,6 +1130,20 @@ impl Row {
             0x3404 => self.header = boolean(b[0])?,
             0x3403 | 0x3466 => self.cant_split = boolean(b[0])?,
             0x3615 => self.autofit = boolean(b[0])?,
+            0xf636 => {
+                // MS-DOC 2.6.3 sprmTFitText: CellRangeFitText (itcFirst,
+                // itcLim, fFitText) sets TCGRF.fFitText of its cells.
+                if b.len() != 3 {
+                    return Err(crate::rejection::corrupt(
+                        "invalid Word cell fit-text operand length",
+                    ));
+                }
+                let cells = range(b, self.cells.len())?;
+                let fit = boolean(b[2])?;
+                for cell in &mut self.cells[cells] {
+                    cell.flags = (cell.flags & !(1 << 12)) | (u16::from(fit) << 12);
+                }
+            }
             0x560b | 0x5664 => {
                 let value = u16_at(b, 0)?;
                 if value > 1 {
@@ -2103,7 +2114,7 @@ mod tests {
     }
 
     #[test]
-    fn native_tistd_resets_preceding_whole_table_shading_and_gates_the_reverse_order() {
+    fn native_tistd_resets_preceding_whole_table_shading_and_keeps_a_later_one() {
         let whole = shade(0);
 
         let mut before = Row::default();
@@ -2120,13 +2131,16 @@ mod tests {
 
         let mut after = Row::default();
         after.apply(0x563a, &1u16.to_le_bytes()).unwrap();
+        // After a table style the property is read like any other: Word
+        // paints table-level shading only between spaced cells.
         assert_eq!(
             after
                 .apply_style_aware_shading(0xd660, &whole, style_aware_policy())
                 .unwrap(),
-            StyleAwareShadingApply::HandledUnsupported
+            StyleAwareShadingApply::Unhandled
         );
-        assert!(after.shading.is_none());
+        assert!(after.apply(0xd660, &whole).unwrap());
+        assert!(after.shading.is_some());
 
         let mut no_style = Row::default();
         assert_eq!(

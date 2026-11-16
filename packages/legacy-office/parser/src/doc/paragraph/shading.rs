@@ -15,9 +15,9 @@ pub(in crate::doc) enum ShadingFill {
 }
 
 /// Decode an SHDOperand (`modern`, MS-DOC 2.9.249: cb = 10 then Shd) or a
-/// Shd80 (MS-DOC 2.9.248) and project it. `Ok(None)` means the value is valid
-/// but not representable by a single fill color, so the caller must keep the
-/// property unsupported rather than approximate a pattern with a tint.
+/// Shd80 (MS-DOC 2.9.248) and project it (`Shading::direct_fill`). `Ok(None)`
+/// means the value is valid but not one fill color (a hatch pattern), so the
+/// caller keeps the property unsupported.
 pub(in crate::doc) fn fill(operand: &[u8], modern: bool) -> Result<Option<ShadingFill>, String> {
     let shading = if modern {
         if operand.first() != Some(&10) || operand.len() != 11 {
@@ -31,58 +31,12 @@ pub(in crate::doc) fn fill(operand: &[u8], modern: bool) -> Result<Option<Shadin
     let Some(shading) = shading else {
         return Ok(None);
     };
-    let facts = shading.direct_facts();
-    Ok(match facts.pattern {
-        // ShdNil outside a table style specifies no shading (MS-DOC 2.9.247).
-        "nil" => Some(ShadingFill::None),
-        // ipatAuto/clear shows only the background color; an automatic
-        // background is ShdAuto, which applies no shading.
-        "clear" => Some(match shading.direct_background() {
-            Some(fill) => ShadingFill::Rgb(fill),
-            None => ShadingFill::None,
-        }),
-        // ipatSolid (ST_Shd solid) is a 100% foreground pattern. An automatic
-        // foreground has no documented concrete color, so it stays gated.
-        "solid" => match facts.foreground {
-            super::super::table::Color::Rgb([r, g, b]) => {
-                Some(ShadingFill::Rgb(format!("{r:02x}{g:02x}{b:02x}")))
-            }
-            super::super::table::Color::Auto => None,
-        },
-        // ST_Shd pctN is an N% foreground pattern over the background. Word
-        // renders it as one solid color: a Word-exported PDF of a pct15 run
-        // over white with an automatic (black) foreground paints exactly
-        // #D9D9D9 = 15% black over white. An automatic background has no
-        // such evidence and stays unrepresentable; hatch patterns cannot be a
-        // single fill.
-        pattern => percentage(pattern).and_then(|percent| {
-            let super::super::table::Color::Rgb(back) = facts.background else {
-                return None;
-            };
-            let fore = match facts.foreground {
-                super::super::table::Color::Rgb(value) => value,
-                super::super::table::Color::Auto => [0, 0, 0],
-            };
-            let mix = |index: usize| {
-                let value = f64::from(fore[index]) * percent / 100.0
-                    + f64::from(back[index]) * (100.0 - percent) / 100.0;
-                value.round() as u8
-            };
-            Some(ShadingFill::Rgb(format!(
-                "{:02x}{:02x}{:02x}",
-                mix(0),
-                mix(1),
-                mix(2)
-            )))
-        }),
-    })
-}
-
-fn percentage(pattern: &str) -> Option<f64> {
-    pattern
-        .strip_prefix("pct")
-        .and_then(|value| value.parse::<u8>().ok())
-        .map(f64::from)
+    Ok(shading.direct_fill().map(|fill| match fill {
+        Some(fill) => ShadingFill::Rgb(fill),
+        // ShdAuto / ShdNil / a clear pattern over an automatic background:
+        // no shading is applied (MS-DOC 2.9.247).
+        None => ShadingFill::None,
+    }))
 }
 
 #[cfg(test)]
@@ -130,7 +84,11 @@ mod tests {
             .unwrap(),
             Some(ShadingFill::Rgb("123456".into()))
         );
-        assert_eq!(fill(&modern(auto, [1, 2, 3, 0], 1), true).unwrap(), None);
+        // An automatic solid foreground is black.
+        assert_eq!(
+            fill(&modern(auto, [1, 2, 3, 0], 1), true).unwrap(),
+            Some(ShadingFill::Rgb("000000".into()))
+        );
         // pct5 (2), pct15 (0x26) and pct95 (0x3c) blend over the background;
         // an automatic foreground is black.
         for (ipat, expected) in [(2u16, "f2f2f2"), (0x26, "d9d9d9"), (0x3c, "0d0d0d")] {
@@ -143,8 +101,12 @@ mod tests {
             fill(&modern([0xff, 0, 0, 0], [0, 0, 0xff, 0], 7), true).unwrap(),
             Some(ShadingFill::Rgb("660099".into()))
         );
-        // Automatic background and hatch patterns stay unrepresentable.
-        assert_eq!(fill(&modern(auto, auto, 0x26), true).unwrap(), None);
+        // An automatic background is white.
+        assert_eq!(
+            fill(&modern(auto, auto, 0x26), true).unwrap(),
+            Some(ShadingFill::Rgb("d9d9d9".into()))
+        );
+        // Hatch patterns are not one color.
         for ipat in [14u16, 25, 0x3d] {
             assert_eq!(
                 fill(&modern(auto, [0xff, 0xff, 0xff, 0], ipat), true).unwrap(),

@@ -182,7 +182,20 @@ impl<'a> Formatting<'a> {
         if !self.paragraphs.is_empty() && self.paragraphs.at(end_fc).is_none() {
             return Err(unsupported("Word paragraph mark outside formatting ranges"));
         }
-        fkp::paragraph_style(&self.paragraphs, end_fc)
+        let (istd, applied) = fkp::paragraph_styles(&self.paragraphs, end_fc)?;
+        // A sprmPIstd naming no paragraph style leaves the PAPX style.
+        Ok(match applied {
+            Some(applied) if self.is_paragraph_style(applied) => applied,
+            Some(_) => {
+                crate::rejection::spec_default("Word sprmPIstd without a paragraph style", istd)
+            }
+            None => istd,
+        })
+    }
+
+    /// MS-DOC 2.9.260 StdfBase stk 1: a paragraph style.
+    fn is_paragraph_style(&self, istd: usize) -> bool {
+        matches!(self.styles.get(istd), Some(Some(style)) if style.kind == 1)
     }
 
     pub(in crate::doc) fn configure_table_styles(
@@ -564,6 +577,23 @@ impl<'a> Formatting<'a> {
         'a: 'b,
     {
         let mut direct_properties = DirectParagraphProperties::default();
+        // MS-DOC 2.6.2 sprmPIstd resets the paragraph properties to the
+        // style it names; `props` enters as the properties of that style
+        // (`Self::paragraph_style` resolves the last sprmPIstd). The state
+        // is restored when the last top-level sprmPIstd of the PAPX is met,
+        // so only the properties after it apply.
+        let mut pending_style_resets = if direct.windows(2).any(|pair| pair == [0x00, 0x46]) {
+            let mut count = 0usize;
+            let mut sprms = sprm::Sprms::new(direct);
+            let mut budget = sprm::Budget::default();
+            while let Some((code, _)) = sprms.next(&mut budget)? {
+                count += usize::from(code == 0x4600);
+            }
+            count
+        } else {
+            0
+        };
+        let mut style_base = (pending_style_resets != 0).then(|| props.clone());
         let (appended_bytes, filter) = appended
             .map_or((None, sprm::TopLevelFilter::All), |(bytes, filter)| {
                 (Some(bytes), filter)
@@ -575,6 +605,14 @@ impl<'a> Formatting<'a> {
             &mut self.budget,
             filter,
             |code, operand, _, is_piece| {
+                if code == 0x4600 && !is_piece {
+                    pending_style_resets = pending_style_resets.saturating_sub(1);
+                    if pending_style_resets == 0 {
+                        // The paragraph properties that precede the last
+                        // sprmPIstd are replaced by the style it names.
+                        *props = style_base.take().unwrap_or_else(|| props.clone());
+                    }
+                }
                 if (code >> 10) & 7 == 1
                     && !matches!(code, 0x2416 | 0x2417 | 0x6649 | 0x664a | 0x244b | 0x244c)
                     && !props.apply(code, operand)?

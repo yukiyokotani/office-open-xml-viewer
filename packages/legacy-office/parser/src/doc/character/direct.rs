@@ -1436,14 +1436,20 @@ mod tests {
     }
 
     #[test]
-    fn percentage_character_shading_blends_and_other_patterns_stay_unsupported() {
+    fn percentage_character_shading_blends_and_hatches_stay_unsupported() {
         let base = Properties::default();
-        for operand in [
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14),
-            cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26),
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1),
+        // A hatch pattern is not one color.
+        let hatch = cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14);
+        assert!(!base.clone().apply(0xca71, &hatch, &base).unwrap());
+        // An automatic foreground is black and an automatic background
+        // white (Word controls of table cells with these shadings).
+        for (operand, fill) in [
+            (cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26), "d9d9d9"),
+            (cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1), "000000"),
         ] {
-            assert!(!base.clone().apply(0xca71, &operand, &base).unwrap());
+            let mut properties = base.clone();
+            assert!(properties.apply(0xca71, &operand, &base).unwrap());
+            assert_eq!(public_run(&properties)["background"], fill);
         }
         // Word paints pct15 with an automatic foreground over white as #D9D9D9.
         let pct = applied(&[(0x4866, 0x9900u16.to_le_bytes().to_vec())]);
