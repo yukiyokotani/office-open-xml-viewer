@@ -360,7 +360,8 @@ pub(in super::super) fn without_text(error: &str) -> bool {
 /// [`without_text`] first establishes this, so a truncated token or a
 /// malformed expression behind the token the decompiler stopped at still
 /// rejects. A token of unknown size, or a fixed-arity function outside the
-/// function table (its operand count is unknown), is not established.
+/// function table (its operand count is unknown), or a token whose data
+/// lies in the RgbExtra, is not established.
 pub(in super::super) fn framed(rgce: &[u8]) -> bool {
     let mut at = 0usize;
     let mut depth = 0usize;
@@ -402,7 +403,9 @@ pub(in super::super) fn framed(rgce: &[u8]) -> bool {
             0x1e => (3, 0, 1),
             0x1f => (9, 0, 1),
             0x20..=0x7f => match token & 0x1f {
-                0x00 => (8, 0, 1),
+                // PtgArray and PtgMemArea take their data from the RgbExtra,
+                // which only a complete decompilation reads.
+                0x00 | 0x06 => return false,
                 0x01 => {
                     let (Some(&low), Some(&high)) = (rgce.get(at + 1), rgce.get(at + 2)) else {
                         return false;
@@ -418,9 +421,9 @@ pub(in super::super) fn framed(rgce: &[u8]) -> bool {
                 },
                 0x03 | 0x04 | 0x0a | 0x0c => (5, 0, 1),
                 0x05 | 0x0b | 0x0d => (9, 0, 1),
-                // PtgMemArea, PtgMemErr, PtgMemNoMem and PtgMemFunc precede
+                // PtgMemErr, PtgMemNoMem and PtgMemFunc precede
                 // the expression they describe.
-                0x06..=0x08 => (7, 0, 0),
+                0x07 | 0x08 => (7, 0, 0),
                 0x09 => (3, 0, 0),
                 0x19 | 0x1a | 0x1c => (7, 0, 1),
                 0x1b | 0x1d => (11, 0, 1),

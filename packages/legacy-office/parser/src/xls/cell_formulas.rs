@@ -198,6 +198,18 @@ mod tests {
             true
         )
         .is_err());
+        // An array constant needs its RgbExtra.
+        let array = formula(
+            1,
+            0,
+            &[0x42, 0x00, 0xff, 0x7f, 0x40, 0, 0, 0, 0, 0, 0, 0, 0x03],
+        );
+        assert!(project(
+            [(0x0006u16, array.as_slice())].into_iter(),
+            &Externs::default(),
+            true
+        )
+        .is_err());
         let mut extra = formula(1, 0, &[0x1e, 1, 0]);
         extra.push(0);
         assert!(project(
