@@ -1339,9 +1339,13 @@ pub(crate) fn collect_shapes(
                 child_depth,
             );
         } else if tag == "sp" || tag == "cxnSp" {
-            // `<xdr:cxnSp>` (§20.5.2) shares `<xdr:sp>`'s spPr / style
-            // children, so a connector is a shape whose preset is a line or a
-            // bent/curved connector and whose `<a:ln>` may carry head/tail ends.
+            // `<xdr:cxnSp>` (ECMA-376 Part 1 §20.5.2.13) carries the same
+            // `<xdr:spPr>` (§20.5.2.30) / `<xdr:style>` children as `<xdr:sp>`
+            // (§20.5.2.29); only its non-visual block differs
+            // (`<xdr:nvCxnSpPr>` §20.5.2.19 with `<xdr:cNvCxnSpPr>` §20.5.2.4,
+            // whose connection sites are not needed to paint). So a connector
+            // is a shape whose preset is a line or a bent/curved connector and
+            // whose `<a:ln>` may carry head/tail ends (§20.1.8.38 / §20.1.8.57).
             let sp_pr = child
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "spPr");
@@ -1871,23 +1875,29 @@ fn parse_shape_doc_anchors(
             let Some(xfrm) = parse_xfrm(&xfrm_n) else {
                 continue;
             };
-            // A straight horizontal / vertical connector legitimately has a zero
-            // `<a:ext>` on one axis (§20.1.7.6); any other shape without area
-            // is dropped as before.
-            let is_connector = sp.tag_name().name() == "cxnSp";
-            if (xfrm.ext_x == 0.0 || xfrm.ext_y == 0.0)
-                && !(is_connector && (xfrm.ext_x > 0.0 || xfrm.ext_y > 0.0))
-            {
+            // A straight horizontal / vertical line legitimately has a zero
+            // `<a:ext>` on one axis (§20.1.7.3 `ext`: cx / cy are
+            // ST_PositiveCoordinate, so 0 is valid). This holds for an
+            // `xdr:sp` with a line preset as much as for an `xdr:cxnSp`, so
+            // admit one zero axis when the other has extent, for both; the
+            // renderer's zero-area guard then paints only stroked presets. A
+            // shape without any extent is still dropped. A negative (invalid)
+            // extent keeps the pre-existing behaviour below.
+            let (zero_x, zero_y) = (xfrm.ext_x == 0.0, xfrm.ext_y == 0.0);
+            if (zero_x || zero_y) && !(xfrm.ext_x > 0.0 || xfrm.ext_y > 0.0) {
                 continue;
             }
             native_ext_cx = xfrm.ext_x as i64;
             native_ext_cy = xfrm.ext_y as i64;
+            // Normalize against the shape's own extent; a zero axis has no
+            // extent to divide by, so use a unit one there (only there: a
+            // negative extent still normalizes to the full anchor as before).
             collect_shapes(
                 &content,
                 xfrm.off_x,
                 xfrm.off_y,
-                xfrm.ext_x.max(1.0),
-                xfrm.ext_y.max(1.0),
+                if zero_x { 1.0 } else { xfrm.ext_x },
+                if zero_y { 1.0 } else { xfrm.ext_y },
                 DrawingGroupTransform::IDENTITY,
                 theme_colors,
                 theme_format_scheme,
@@ -1895,18 +1905,16 @@ fn parse_shape_doc_anchors(
                 &mut shapes,
                 DepthGuard::root(),
             );
-            // The anchor rect carries the connector's real size, so a zero-extent
+            // The anchor rect carries the shape's real size, so a zero-extent
             // axis spans the whole anchor on that axis (the line itself).
-            if is_connector {
-                for shape in shapes.iter_mut() {
-                    if xfrm.ext_x == 0.0 {
-                        shape.x = 0.0;
-                        shape.w = 1.0;
-                    }
-                    if xfrm.ext_y == 0.0 {
-                        shape.y = 0.0;
-                        shape.h = 1.0;
-                    }
+            for shape in shapes.iter_mut() {
+                if zero_x {
+                    shape.x = 0.0;
+                    shape.w = 1.0;
+                }
+                if zero_y {
+                    shape.y = 0.0;
+                    shape.h = 1.0;
                 }
             }
         } else {
@@ -5329,9 +5337,10 @@ mod group_transform_contract_tests {
     }
 }
 
-/// ECMA-376 §20.5.2 `<xdr:cxnSp>`: a connector is drawn like a shape, with
-/// its geometry from `<xdr:spPr>` and optional `<a:headEnd>` / `<a:tailEnd>`
-/// line ends (§20.1.8.38 / §20.1.8.57) on its `<a:ln>`.
+/// ECMA-376 Part 1 §20.5.2.13 `<xdr:cxnSp>`: a connector is drawn like a
+/// shape, with its geometry from `<xdr:spPr>` (§20.5.2.30) and optional
+/// `<a:headEnd>` / `<a:tailEnd>` line ends (§20.1.8.38 / §20.1.8.57) on its
+/// `<a:ln>`. A stand-alone line keeps a zero `<a:ext>` axis (§20.1.7.3).
 #[cfg(test)]
 mod connector_tests {
     use super::*;
@@ -5359,6 +5368,69 @@ mod connector_tests {
 
     fn parse(xml: &str) -> Vec<ShapeAnchor> {
         parse_shape_anchors(xml, &[], &ThemeFormatScheme::default(), &HashMap::new())
+    }
+
+    /// A stand-alone `<xdr:sp>` with preset `prst` and extent `ext`.
+    fn shape(prst: &str, ext: &str) -> String {
+        format!(
+            r#"<xdr:wsDr {NS}><xdr:twoCellAnchor>
+              <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+              <xdr:to><xdr:col>4</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+              <xdr:sp macro="" textlink="">
+                <xdr:nvSpPr><xdr:cNvPr id="2" name="S"/><xdr:cNvSpPr/></xdr:nvSpPr>
+                <xdr:spPr>
+                  <a:xfrm><a:off x="100" y="200"/><a:ext {ext}/></a:xfrm>
+                  <a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom>
+                  <a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+                </xdr:spPr>
+              </xdr:sp>
+              <xdr:clientData/>
+            </xdr:twoCellAnchor></xdr:wsDr>"#
+        )
+    }
+
+    fn frame(anchors: &[ShapeAnchor]) -> (f64, f64, f64, f64) {
+        let s = &anchors[0].shapes[0];
+        (s.x, s.y, s.w, s.h)
+    }
+
+    #[test]
+    fn standalone_sp_line_with_one_zero_axis_spans_its_anchor() {
+        // §20.1.7.3: cx / cy are ST_PositiveCoordinate, so a flat line is
+        // valid for an `xdr:sp` as much as for an `xdr:cxnSp`.
+        assert_eq!(
+            frame(&parse(&shape("line", r#"cx="914400" cy="0""#))),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+        assert_eq!(
+            frame(&parse(&shape("line", r#"cx="0" cy="914400""#))),
+            (0.0, 0.0, 1.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn shape_without_any_positive_extent_is_dropped() {
+        for ext in [
+            r#"cx="0" cy="0""#,
+            r#"cx="-914400" cy="0""#,
+            r#"cx="0" cy="-914400""#,
+        ] {
+            assert!(parse(&shape("line", ext)).is_empty(), "{ext}");
+        }
+    }
+
+    #[test]
+    fn negative_extent_still_fills_its_anchor() {
+        // Out-of-schema negative extents keep normalizing to the whole anchor
+        // (only a zero axis gets the unit replacement extent).
+        for ext in [
+            r#"cx="-914400" cy="190500""#,
+            r#"cx="914400" cy="-190500""#,
+            r#"cx="-914400" cy="-190500""#,
+        ] {
+            let (x, y, w, h) = frame(&parse(&shape("rect", ext)));
+            assert_eq!((x.abs(), y.abs(), w, h), (0.0, 0.0, 1.0, 1.0), "{ext}");
+        }
     }
 
     #[test]
