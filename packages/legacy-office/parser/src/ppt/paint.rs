@@ -33,13 +33,6 @@ impl Paint {
         ))
     }
 
-    /// Picture-frame backing fill. PowerPoint 16 writes the ~2,000 corpus
-    /// picture frames that do not set fFilled themselves as `noFill` (even
-    /// though the drawing-group defaults set fFilled), and the frames with an
-    /// explicit fFilled = 1 and fillColor as a solid spPr fill, which its PDF
-    /// export paints behind transparent pixels. Only that evidenced case is
-    /// projected: `Ok(None)` for an unfilled frame, `Err` for a filled frame
-    /// whose fill type or colour source has no evidence.
     /// msofillTexture on a shape or picture frame, under the same placement
     /// vetoes as a picture fill (`Paint::foreground_image`): a fill
     /// rectangle, a view-relative fill (MS-ODRAW 2.3.7.43), an origin or a
@@ -63,6 +56,14 @@ impl Paint {
         self.filled == Some(true) && self.fill_ok.unwrap_or(true)
     }
 
+    /// Solid picture-frame backing fill. PowerPoint 16 writes the ~2,000
+    /// corpus picture frames that do not set fFilled themselves as `noFill`
+    /// (even though the drawing-group defaults set fFilled), and the frames
+    /// with an explicit fFilled = 1 and fillColor as a solid spPr fill, which
+    /// its PDF export paints behind transparent pixels. `Ok(None)` for an
+    /// unfilled frame and for a frame whose fill is not solid (the direct
+    /// model's `picture_frame_fill` projects those), `Err` for a solid fill
+    /// without a colour.
     pub(super) fn picture_backing(&self) -> Result<Option<(u32, u32)>, String> {
         if !self.frame_filled() {
             return Ok(None);
