@@ -667,6 +667,9 @@ impl<'a> Table<'a> {
                 // `officeart::pattern`). Word's PDF export draws a 2x2 tile
                 // of pixels taken from the bitmap, in those colours.
                 (1, Some(blip)) => {
+                    if placed {
+                        crate::rejection::approximated(SITE, ());
+                    }
                     fill_tile = Some(Tile {
                         blip,
                         pattern: Some([
@@ -832,18 +835,32 @@ impl<'a> Table<'a> {
         // MS-ODRAW 2.3.22.10: fGtext requires gtextUNICODE. The text effect
         // types 136..=175 are defined with fGtextOK (their VML shapetypes
         // carry `textpathok`); another type needs the explicit bit.
-        let wide = |id: u16| {
-            self.complex.get(&id).map(|data| {
-                let units: Vec<u16> = data
-                    .chunks_exact(2)
-                    .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
-                    .take_while(|unit| *unit != 0)
-                    .collect();
-                String::from_utf16_lossy(&units)
-            })
+        // The complex strings are null-terminated UTF-16 (2.3.22.2, 2.3.22.7):
+        // an odd byte count is broken framing; a string without its
+        // terminator ends with its data.
+        let wide = |id: u16| -> Result<Option<String>, String> {
+            let Some(data) = self.complex.get(&id) else {
+                return Ok(None);
+            };
+            if data.len() % 2 != 0 {
+                return Err(crate::rejection::corrupt(
+                    "truncated Word geometry text string",
+                ));
+            }
+            let units: Vec<u16> = data
+                .chunks_exact(2)
+                .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+                .take_while(|unit| *unit != 0)
+                .collect();
+            Ok(Some(String::from_utf16_lossy(&units)))
         };
-        let geometry_text = match wide(0xc0) {
-            Some(string) if self.boolean(0xff, 14) == Some(true) => {
+        let geometry_text = match self.boolean(0xff, 14) {
+            Some(true) => {
+                // fGtext without the string it requires displays no text.
+                let string = wide(0xc0)?.unwrap_or_else(|| {
+                    crate::rejection::ignored_value("Word geometry text without its string");
+                    String::new()
+                });
                 let flag = |bit: u32| self.boolean(0xff, bit) == Some(true);
                 let value =
                     |id: u16, default: u32| self.values.get(&id).copied().unwrap_or(default);
@@ -877,7 +894,7 @@ impl<'a> Table<'a> {
                 };
                 Some(GeometryText {
                     string,
-                    font: wide(0xc5).filter(|font| !font.is_empty()),
+                    font: wide(0xc5)?.filter(|font| !font.is_empty()),
                     size_pt: f64::from(size) / 65_536.0,
                     bold: flag(5),
                     italic: flag(4),
@@ -1576,10 +1593,19 @@ mod tests {
         let tile = read(1, 0xa00, &texture, [9, 9]).unwrap().fill_tile.unwrap();
         assert_eq!((tile.blip, tile.pattern, tile.alpha), (0, None, 0x8000));
         assert!(crate::rejection::take_best_effort().is_empty());
-        // A scaled or offset texture is tiled at the default placement.
-        let scaled = container(&[(0x180, 2), (0x195, 1), (0x4186, 1)], &[], &[]);
-        assert!(read(1, 0xa00, &scaled, [9, 9]).unwrap().fill_tile.is_some());
-        assert_eq!(crate::rejection::take_best_effort().len(), 1);
+        // A scaled or offset texture or pattern keeps the default placement.
+        for kind in [1, 2] {
+            let scaled = container(&[(0x180, kind), (0x195, 1), (0x4186, 1)], &[], &[]);
+            let tile = read(1, 0xa00, &scaled, [9, 9]).unwrap().fill_tile.unwrap();
+            assert_eq!((tile.blip, tile.pattern.is_some()), (0, kind == 1));
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "Word non-solid drawing fills are not supported"
+                )]
+            );
+        }
     }
 
     /// A FOPT whose complex data follows its entries (MS-ODRAW 2.2.9).
@@ -1680,6 +1706,38 @@ mod tests {
             assert_eq!(facts.geometry_text.unwrap().string, "Word");
             assert_eq!(crate::rejection::take_best_effort(), [layout]);
         }
+        // fGtext without its string displays no text; a string of an odd
+        // byte count is broken framing.
+        let empty = with_strings(&[(0xff, 0x4000_4000)], &[]);
+        let facts = read(136, 0xa00, &empty, [9000, 3000]).unwrap();
+        assert_eq!(facts.geometry_text.unwrap().string, "");
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "Word geometry text without its string"
+            )]
+        );
+        let odd = record(
+            0xf004,
+            15,
+            &record(
+                0xf00b,
+                (2 << 4) | 3,
+                &[
+                    &0xffu16.to_le_bytes()[..],
+                    &0x4000_4000u32.to_le_bytes(),
+                    &0x80c0u16.to_le_bytes(),
+                    &3u32.to_le_bytes(),
+                    &[0x41, 0, 0x42],
+                ]
+                .concat(),
+            ),
+        );
+        assert_eq!(
+            read(136, 0xa00, &odd, [9000, 3000]).err().as_deref(),
+            Some("UNSUPPORTED:truncated Word geometry text string")
+        );
         // A bent text effect is drawn on the plain path.
         assert_eq!(wordart(144, &[]).subpaths.len(), 2);
         assert_eq!(

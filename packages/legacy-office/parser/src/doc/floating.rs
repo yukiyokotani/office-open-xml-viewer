@@ -426,6 +426,8 @@ impl<'a> Store<'a> {
             }
             let extent = turned;
             let offset = [frame[0].round() as i64, frame[1].round() as i64];
+            // A whole number of turns is +0.0, as before.
+            let rotation = rotation + 0.0;
             if !self.load_fill_picture(&facts)? {
                 self.omitted = true;
                 return Ok(None);
@@ -533,7 +535,8 @@ impl<'a> Store<'a> {
         let mut drawing = self.finish(anchor, &placement, order, extent, flags, align, content)?;
         drawing.x_emu += frame[0].round() as i64;
         drawing.y_emu += frame[1].round() as i64;
-        drawing.rotation = rotation;
+        // A whole number of turns is +0.0, as before.
+        drawing.rotation = rotation + 0.0;
         Ok(Some(drawing))
     }
 
@@ -2017,14 +2020,14 @@ mod tests {
     }
     #[test]
     fn turned_shapes_keep_their_unrotated_frame_anchored_and_inline() {
-        // A 400 x 300 twip rectangle at the SPA origin, turned 90 degrees.
-        let turned = |flags: u16, options: &[(u16, u32)]| {
+        // A 400 x 300 twip rectangle at the SPA origin, turned by `degrees`.
+        let turned = |flags: u16, degrees: i32, options: &[(u16, u32)]| {
             let (mut word, mut table) = input(flags);
             for (at, value) in [(12, 0i32), (16, 0), (20, 400), (24, 300)] {
                 table[at..at + 4].copy_from_slice(&value.to_le_bytes());
             }
             let mut props = Vec::new();
-            for (key, value) in [&[(4u16, 90u32 << 16)][..], options].concat() {
+            for (key, value) in [&[(4u16, (degrees << 16) as u32)][..], options].concat() {
                 props.extend(key.to_le_bytes());
                 props.extend(value.to_le_bytes());
             }
@@ -2063,7 +2066,7 @@ mod tests {
         };
         // Anchored to the page: the 15 x 20 pt unrotated frame about the
         // centre of the 20 x 15 pt anchor.
-        let (inline, shape) = turned((1 << 1) | (1 << 3) | (3 << 5), &[]);
+        let (inline, shape) = turned((1 << 1) | (1 << 3) | (3 << 5), 90, &[]);
         assert!(!inline && !shape.inline);
         assert_eq!(
             (shape.width_pt, shape.height_pt, shape.rotation),
@@ -2074,6 +2077,7 @@ mod tests {
         // and keeps its turn.
         let (inline, shape) = turned(
             (2 << 1) | (2 << 3) | (3 << 5),
+            90,
             &[(0x390, 3), (0x392, 3), (0x53f, 0x10001)],
         );
         assert!(inline && shape.inline);
@@ -2081,6 +2085,13 @@ mod tests {
             (shape.width_pt, shape.height_pt, shape.rotation),
             (15.0, 20.0, 90.0)
         );
+        // A whole number of turns stays +0.0 in the model.
+        let (_, shape) = turned((1 << 1) | (1 << 3) | (3 << 5), -360, &[]);
+        assert_eq!(
+            (shape.width_pt, shape.height_pt, shape.rotation),
+            (20.0, 15.0, 0.0)
+        );
+        assert!(shape.rotation.is_sign_positive());
         assert!(crate::rejection::take_best_effort().is_empty());
     }
 
@@ -2100,6 +2111,10 @@ mod tests {
         };
         let (size, origin, rotation) = turned(0xa00, 0);
         assert_eq!(rotation, 0.0);
+        // A whole number of turns stays +0.0 in the model.
+        let full = turned(0xa00, -360);
+        assert_eq!(full, (size, origin, 0.0));
+        assert!(full.2.is_sign_positive());
         // Below 45 degrees the anchor is the unrotated frame.
         assert_eq!(turned(0xa00, 30), (size, origin, 30.0));
         // From 45 degrees it is the rotated bounds: width and height are
