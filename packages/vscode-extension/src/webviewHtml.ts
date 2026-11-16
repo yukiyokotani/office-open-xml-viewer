@@ -11,7 +11,9 @@ const GOOGLE_FONTS_FILES_ORIGIN = 'https://fonts.gstatic.com';
  * Pure function (no VSCode API) so it can be unit-tested for both states.
  *
  * When `useGoogleFonts` is false the policy is fully offline: the only allowed
- * origin is the extension's own `cspSource`. When true we widen exactly two
+ * origin is the extension's own `cspSource`, and `connect-src` does not include
+ * even that. The host posts the document and parser WASM bytes (#2212), so the
+ * webview never fetches an extension resource itself. When true we widen exactly two
  * directives, no more:
  *   - `style-src` gains {@link GOOGLE_FONTS_CSS_ORIGIN} because the library
  *     loads each Google Fonts CSS via an injected `<link rel="stylesheet">`.
@@ -42,7 +44,7 @@ export function buildContentSecurityPolicy(
     `script-src 'nonce-${nonce}' 'wasm-unsafe-eval';`,
     `worker-src data: blob:;`,
     styleSrc,
-    `connect-src ${cspSource} data: blob:;`,
+    `connect-src data: blob:;`,
   ].join(' ');
 }
 
@@ -66,7 +68,9 @@ export function getWebviewHtml(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
   );
   // esbuild emits parser WASM assets as relative URLs. The webview document
-  // has its own origin, so resolve those URLs beside webview.js.
+  // has its own origin, so resolve those URLs beside webview.js. The webview
+  // does not fetch them (the host posts the bytes); the base only keeps any
+  // relative URL pointing at the extension's dist rather than the webview host.
   const assetBaseUri = new URL('.', scriptUri.toString()).toString();
 
   const nonce = getNonce();

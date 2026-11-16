@@ -4,6 +4,7 @@ import type { DocxDiagnostic } from './types.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
+import { realmBaseUrl } from '@silurus/ooxml-core/internal/bundled-asset-url';
 import {
   activeFontSet,
   preloadGoogleFonts,
@@ -478,10 +479,11 @@ export class DocxDocument {
         });
       },
     });
-    // Default: the parser WASM emitted next to this bundle, resolved relative to
-    // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
-    // relative override is still resolved against `location.href`.
-    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
+    // Default: the parser WASM emitted next to this bundle. `wasmUrl` overrides
+    // it (CDN / self-hosted copy). A relative URL (a re-bundled asset or an
+    // override) resolves against the page's base URL, `<base href>` included,
+    // before it is posted to the worker, whose own location is not that base.
+    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, realmBaseUrl()).href;
     this._bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
   }
 

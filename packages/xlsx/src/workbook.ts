@@ -8,6 +8,7 @@ import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import { xlsxCjkFallback } from './google-fonts.js';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
+import { realmBaseUrl } from '@silurus/ooxml-core/internal/bundled-asset-url';
 import {
   preloadGoogleFonts,
   unloadGoogleFonts,
@@ -255,11 +256,12 @@ export class XlsxWorkbook {
         );
       },
     });
-    // Default: the parser WASM emitted next to this bundle, resolved relative to
-    // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
-    // relative override is still resolved against `location.href`.
+    // Default: the parser WASM emitted next to this bundle. `wasmUrl` overrides
+    // it (CDN / self-hosted copy). A relative URL (a re-bundled asset or an
+    // override) resolves against the page's base URL, `<base href>` included,
+    // before it is posted to the worker, whose own location is not that base.
     if (initializeWasm) {
-      const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
+      const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, realmBaseUrl()).href;
       this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
     }
   }

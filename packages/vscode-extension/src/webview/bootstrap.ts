@@ -172,14 +172,24 @@ window.addEventListener('message', async (event: MessageEvent) => {
     showError('Error: the document bytes were not received');
     return;
   }
+  // The host also posts the parser WASM (#2212). A webview fetch of the
+  // bundled file goes through VS Code's resource service worker, which can
+  // time out over Remote SSH; a Blob URL keeps the load inside this document.
+  // It is never revoked: the parser re-instantiates from it after a trap.
+  const wasm = exactArrayBuffer(msg.wasm);
+  if (!wasm) {
+    showError('Error: the parser WebAssembly was not received');
+    return;
+  }
+  const wasmUrl = URL.createObjectURL(new Blob([wasm], { type: 'application/wasm' }));
 
   try {
     if (fileType === 'docx') {
-      await initDocx(buffer, useGoogleFonts);
+      await initDocx(buffer, wasmUrl, useGoogleFonts);
     } else if (fileType === 'xlsx') {
-      await initXlsx(buffer, useGoogleFonts);
+      await initXlsx(buffer, wasmUrl, useGoogleFonts);
     } else if (fileType === 'pptx') {
-      await initPptx(buffer, useGoogleFonts);
+      await initPptx(buffer, wasmUrl, useGoogleFonts);
     }
   } catch (err) {
     showError(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -188,8 +198,13 @@ window.addEventListener('message', async (event: MessageEvent) => {
 
 // ── XLSX ─────────────────────────────────────────────────────────────────────
 
-async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
+async function initXlsx(
+  buffer: ArrayBuffer,
+  wasmUrl: string,
+  useGoogleFonts: boolean,
+): Promise<void> {
   const viewer = new XlsxViewer(viewerContainer, {
+    wasmUrl,
     math,
     ...fullRenderers,
     useGoogleFonts,
@@ -227,8 +242,13 @@ async function initXlsx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
 
 // ── DOCX (virtualized continuous scroll) ─────────────────────────────────────
 
-async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
+async function initDocx(
+  buffer: ArrayBuffer,
+  wasmUrl: string,
+  useGoogleFonts: boolean,
+): Promise<void> {
   const viewer = new DocxScrollViewer(viewerContainer, {
+    wasmUrl,
     math,
     ...fullRenderers,
     useGoogleFonts,
@@ -256,8 +276,13 @@ async function initDocx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<v
 
 // ── PPTX (virtualized continuous scroll) ─────────────────────────────────────
 
-async function initPptx(buffer: ArrayBuffer, useGoogleFonts: boolean): Promise<void> {
+async function initPptx(
+  buffer: ArrayBuffer,
+  wasmUrl: string,
+  useGoogleFonts: boolean,
+): Promise<void> {
   const viewer = new PptxScrollViewer(viewerContainer, {
+    wasmUrl,
     math,
     ...fullRenderers,
     useGoogleFonts,
