@@ -57,6 +57,15 @@ contains the fixes of 0.89.10, 0.89.11 and 0.89.12.
   when `fonts` is configured and while the worker parses. Rendering is
   unchanged (#2210, #2217, #2220, #2224, #2226, #2231–#2234, #2236–#2238,
   #2250, #2253, #2260).
+  Measured against 0.89.11 with `fonts: [googleFonts()]` in Chromium (median
+  first paint of Japanese test documents and decks): with an empty cache the
+  first page appears 19–44% sooner, and in worker mode up to 51% sooner. With
+  a warm cache on the main thread it appears 13–42% later (for example
+  487 → 651 ms), because 0.90 downloads each face file itself to read its
+  metrics and registers it again on every load, where 0.89 left a warm load
+  to the browser's font cache. Latin documents differ by tens of
+  milliseconds at most. See the
+  [migration guide](docs/migration-0.90.md#first-display-time).
 - **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`) and
   the line ends of connectors, line shapes, callout leaders and
   custom-geometry lines are drawn, as in 0.89.12. The line-end code is now

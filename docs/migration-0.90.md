@@ -570,6 +570,27 @@ decoded size). Font files the library downloads itself (see
 faces, so a library-fetched face file over 30 MiB fails that face, with a
 warning.
 
+### First-display time
+
+With font sources the library downloads each face file itself (to read its
+metrics) and registers it for every document that loads. Measured against
+0.89.11 with `fonts: [googleFonts()]` in Chromium, median time to the first
+painted page:
+
+| Japanese documents and decks | Change from 0.89.11 |
+| --- | --- |
+| Empty cache, main thread | 19–44% sooner |
+| Empty cache, worker mode | up to 51% sooner |
+| Warm cache, main thread | 13–42% later (for example 487 → 651 ms) |
+| Warm cache, worker mode | about the same or sooner |
+
+The warm main-thread case is slower because 0.89 left a warm load to the
+browser's font cache, while 0.90 fetches the files again (normally from the
+HTTP cache) and registers the faces again on the page's thread. If repeated
+openings of CJK documents matter more than the first one, use
+`mode: 'worker'`. Latin documents differ by tens of milliseconds at most.
+Without a font source nothing is downloaded and these numbers do not apply.
+
 ### Implementation notes
 
 These details describe how the current implementation behaves. None of them
