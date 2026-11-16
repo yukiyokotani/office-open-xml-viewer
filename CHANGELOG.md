@@ -5,7 +5,7 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
-## 0.90.0 — Unreleased
+## 0.90.0 — 2026-11-16
 
 Minor release that lets applications choose where web fonts come from and
 adds experimental OpenDocument reading through a new optional package. Two
@@ -16,7 +16,8 @@ is ignored with the same warning, and never throws. If your page has a Content S
 the font file host (for example `fonts.gstatic.com`) in `connect-src` as well
 as `font-src`: font files are now fetched, and a blocked fetch falls back to
 the host fonts (see **Served font line heights** below). See the
-[0.89 to 0.90 migration guide](docs/migration-0.90.md).
+[0.89 to 0.90 migration guide](docs/migration-0.90.md). It also
+contains the fixes of 0.89.10, 0.89.11 and 0.89.12.
 
 - **Font sources:** the new `fonts` load option takes an ordered list of
   sources, built with `googleFonts({ baseUrl?, substitutions?, additionalFamilies? })`,
@@ -33,7 +34,9 @@ the host fonts (see **Served font line heights** below). See the
   `googleFontsSubstitutions`. DOCX, XLSX and PPTX behave the same in main and
   worker mode: in worker mode the page runs a resolver and also fetches the
   URLs it returns, so cookies and authentication behave as in main mode.
-  Nothing is requested without a source (#1460, #1497).
+  Faces from a source belong to the document that loaded them: two documents
+  open at once never paint with each other's faces. Nothing is requested
+  without a source (#1460, #1497).
 - **Custom Google Fonts origin:** `googleFonts({ baseUrl })` sends the
   stylesheet requests to a regional mirror or an internal proxy instead of
   `fonts.googleapis.com`. In 0.90 `baseUrl` must be an origin (no path). Redirects are followed and the font file URLs in the
@@ -42,6 +45,34 @@ the host fonts (see **Served font line heights** below). See the
   (#1497).
 - **Fewer font downloads:** DOCX and XLSX now load only the `unicode-range`
   subsets that the document's text paints, as PPTX already did.
+- **Font loading cost:** with font sources, first display does less work.
+  The subsets a document needs are now worked out precisely for accented,
+  Vietnamese and Indic text, right-to-left text, ruby, vertical text,
+  pictures, charts, numbered lists, equations and WMF/EMF text (read from
+  the picture just before it plays), where the whole family used to be
+  downloaded. Each face is built as its download lands, `googleFonts()` faces
+  are registered from their URL so the browser decodes them off the main
+  thread, Google Fonts files download 32 at a time, a served face's line
+  metrics are measured once per family, and the font-source code loads only
+  when `fonts` is configured and while the worker parses. Rendering is
+  unchanged (#2210, #2217, #2220, #2224, #2226, #2231–#2234, #2236–#2238,
+  #2250, #2253, #2260).
+  Measured against 0.89.11 with `fonts: [googleFonts()]` in Chromium (median
+  first paint of Japanese test documents and decks): with an empty cache the
+  first page appears 19–44% sooner, and in worker mode up to 51% sooner. With
+  a warm cache on the main thread it appears 13–42% later (for example
+  487 → 651 ms), because 0.90 downloads each face file itself to read its
+  metrics and registers it again on every load, where 0.89 left a warm load
+  to the browser's font cache. Latin documents differ by tens of
+  milliseconds at most. See the
+  [migration guide](docs/migration-0.90.md#first-display-time).
+- **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`) and
+  the line ends of connectors, line shapes, callout leaders and
+  custom-geometry lines are drawn, as in 0.89.12. The line-end code is now
+  shared with PowerPoint, whose drawing is unchanged (#2240, #2243).
+- **XLSX repaint:** scrolling and repainting a sheet no longer rebuild its
+  render index (cell map, merges, conditional formats, table styles) on every
+  frame, which took most of each frame on large sheets (#2230).
 - **Served font line heights:** DOCX lays out a face from the `fonts` option
   with Word's line rule from the face's own OpenType tables (including the
   line gap and, for variable fonts, the MVAR usWin deltas), as for an
@@ -80,7 +111,7 @@ the host fonts (see **Served font line heights** below). See the
   mismatched pair fails with `companion-runtime-mismatch`. Without the package
   nothing changes. See [docs/opendocument.md](docs/opendocument.md) and the
   [OpenDocument guide](https://ooxml.silurus.dev/opendocument/) (#2168, #2169,
-  #2170, #2189, #2205, #2208).
+  #2170, #2189, #2205, #2208, #2245, #2246, #2247, #2255, #2257).
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for
@@ -95,7 +126,7 @@ the host fonts (see **Served font line heights** below). See the
   including in worker mode. Without the option the placeholder is unchanged.
   This is additive, so no migration is needed (#1974). The code that lays out
   and paints a placeholder is fetched with the first failed part, so a file
-  without one does not load it (#2248).
+  without one does not load it (#2248, #2259).
 - **Node picture bytes:** `DocxDocumentSession` and `XlsxWorkbookSession`
   (from `openDocxDocument` and `openXlsxWorkbook` in `@silurus/ooxml/node`)
   now have `getImage(path, mimeType?)`, as `PptxPresentationSession` already
@@ -171,9 +202,10 @@ the host fonts (see **Served font line heights** below). See the
   `phonetic_pr` instead of `phoneticRuns` / `phoneticPr`, so the renderer
   never received it. Shared-string cells were not affected.
 
-## 0.89.12 — Unreleased
+## 0.89.12 — 2026-11-16
 
-Compatible patch release. No migration is required. 0.90.0 includes this fix.
+Compatible patch release. No migration is required. One Excel drawing fix:
+connector shapes and arrow heads are now drawn. It is described below.
 
 - **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`:
   straight, elbow and curved connectors) are now drawn, alone or inside a
@@ -184,18 +216,23 @@ Compatible patch release. No migration is required. 0.90.0 includes this fix.
   with a zero extent on one axis is no longer dropped. Thanks to @tienhieuD
   for the contribution (#2240, #2243).
 
-## 0.89.11 — Unreleased
+## 0.89.11 — 2026-11-14
 
-Compatible patch release. No migration is required.
+Compatible patch release. No migration is required. One Word layout fix: a
+custom footnote or endnote mark formatted as all caps or small caps no longer
+stops the whole document from rendering. It is described below.
 
 - **Word: all-caps custom footnote and endnote marks:** a footnote or endnote
   reference with a custom mark (`w:customMarkFollows`) whose run is formatted
   as all caps or small caps no longer fails layout of the whole document with
   "Text shape request does not match its full run context" (#2209).
 
-## 0.89.10 — Unreleased
+## 0.89.10 — 2026-11-13
 
-Compatible patch release. No migration is required.
+Compatible patch release. No migration is required. Two Word layout fixes: a
+soft hyphen after a word joined with a non-breaking hyphen no longer fails
+layout, and a hidden paragraph with "page break before" ahead of a text frame
+or table now starts a new page as Word does. Both are described below.
 
 - **Word: soft hyphen after a non-breaking-hyphen word:** a paragraph where a
   `<w:softHyphen/>` follows a word joined with `<w:noBreakHyphen/>` (for

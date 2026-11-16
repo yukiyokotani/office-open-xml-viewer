@@ -1,6 +1,6 @@
 {
   "name": "@silurus/ooxml-opendocument",
-  "version": "0.89.4",
+  "version": "0.90.0",
   "description": "Optional OpenDocument (ODT, ODP, ODS) model sources for @silurus/ooxml",
   "license": "MIT",
   "author": "Yuki Yokotani <silurus.dev@gmail.com>",
@@ -71,6 +71,6 @@
     "wasm"
   ],
   "peerDependencies": {
-    "@silurus/ooxml": "0.89.4"
+    "@silurus/ooxml": "0.90.0"
   }
 }

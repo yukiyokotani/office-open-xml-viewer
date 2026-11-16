@@ -513,11 +513,11 @@ values; read `error.violation` for the limit that applied.
   fails like a face that cannot load: it is left out with a `console.warn`,
   and the family is not passed to another source or substitute. For XLSX in
   worker mode, the viewer and the worker share each fetch and its outcome.
-  Documents open in the same realm share each face file's outcome too, since
-  they paint from one set of registered faces: while a document that could
-  not fetch a face is open, another document does not retry it (and a
-  document whose own request failed uses the file another one holds). A
-  document opened after those have closed retries.
+  Documents open in the same realm join a download of the same file (same URL
+  and `credentials`) that is in flight or already held, which only saves
+  requests: each document judges its own outcome against its own deadline
+  and registers the face under names of its own. A failure is not kept, so a
+  later request for the file retries.
 - A resolver is called only for families that no earlier call answered and no
   live cache entry covers. Within a document that means once per family. For
   XLSX in worker mode, the
@@ -569,6 +569,27 @@ decoded size). Font files the library downloads itself (see
 [Network, CORS and cookies](#network-cors-and-cookies)) count like `data`
 faces, so a library-fetched face file over 30 MiB fails that face, with a
 warning.
+
+### First-display time
+
+With font sources the library downloads each face file itself (to read its
+metrics) and registers it for every document that loads. Measured against
+0.89.11 with `fonts: [googleFonts()]` in Chromium, median time to the first
+painted page:
+
+| Japanese documents and decks | Change from 0.89.11 |
+| --- | --- |
+| Empty cache, main thread | 19–44% sooner |
+| Empty cache, worker mode | up to 51% sooner |
+| Warm cache, main thread | 13–42% later (for example 487 → 651 ms) |
+| Warm cache, worker mode | about the same or sooner |
+
+The warm main-thread case is slower because 0.89 left a warm load to the
+browser's font cache, while 0.90 fetches the files again (normally from the
+HTTP cache) and registers the faces again on the page's thread. If repeated
+openings of CJK documents matter more than the first one, use
+`mode: 'worker'`. Latin documents differ by tens of milliseconds at most.
+Without a font source nothing is downloaded and these numbers do not apply.
 
 ### Implementation notes
 
