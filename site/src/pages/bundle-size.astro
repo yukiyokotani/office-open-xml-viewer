@@ -28,19 +28,38 @@ import SiteFooter from '../components/SiteFooter.astro';
           <tbody>
             <tr>
               <th>DOCX static JavaScript</th>
-              <td>3,346 KiB</td>
+              <td>3,343 KiB</td>
               <td>787 KiB</td>
             </tr>
             <tr>
               <th>XLSX static JavaScript</th>
-              <td>2,221 KiB</td>
+              <td>2,222 KiB</td>
               <td>498 KiB</td>
             </tr>
             <tr>
               <th>PPTX static JavaScript</th>
-              <td>2,249 KiB</td>
-              <td>507 KiB</td>
+              <td>2,217 KiB</td>
+              <td>497 KiB</td>
             </tr>
+          </tbody>
+        </table>
+      </div>
+      <h2>Re-bundled by an application</h2>
+      <p>
+        The same viewer import after an application bundler re-bundles the package: an entry that
+        imports only <code>DocxViewer</code>, <code>XlsxViewer</code> or <code>PptxViewer</code>, bundled
+        and minified with Rolldown, measured over the static import graph of that entry (gzip level 9
+        per chunk). Lazily loaded code is excluded, as above.
+      </p>
+      <div class="size-table-wrap">
+        <table>
+          <thead>
+            <tr><th>Configuration</th><th>Raw</th><th>gzip</th></tr>
+          </thead>
+          <tbody>
+            <tr><th>DOCX viewer, re-bundled</th><td>2,399 KiB</td><td>651 KiB</td></tr>
+            <tr><th>XLSX viewer, re-bundled</th><td>1,571 KiB</td><td>407 KiB</td></tr>
+            <tr><th>PPTX viewer, re-bundled</th><td>1,538 KiB</td><td>400 KiB</td></tr>
           </tbody>
         </table>
       </div>
@@ -103,9 +122,9 @@ import SiteFooter from '../components/SiteFooter.astro';
             <tr><th>ODT reader module</th><td>9.9 KiB</td><td>3.8 KiB</td></tr>
             <tr><th>ODP reader module</th><td>10.0 KiB</td><td>3.8 KiB</td></tr>
             <tr><th>ODS reader module</th><td>10.1 KiB</td><td>3.8 KiB</td></tr>
-            <tr><th>ODT reader WASM</th><td>1,201.6 KiB</td><td>510.2 KiB</td></tr>
+            <tr><th>ODT reader WASM</th><td>1,209.0 KiB</td><td>513.7 KiB</td></tr>
             <tr><th>ODP reader WASM</th><td>1,401.0 KiB</td><td>550.0 KiB</td></tr>
-            <tr><th>ODS reader WASM</th><td>1,415.0 KiB</td><td>548.6 KiB</td></tr>
+            <tr><th>ODS reader WASM</th><td>1,422.5 KiB</td><td>550.7 KiB</td></tr>
           </tbody>
         </table>
       </div>
@@ -117,7 +136,7 @@ import SiteFooter from '../components/SiteFooter.astro';
           </thead>
           <tbody>
             <tr><th>DOCX parser WASM</th><td>2,244 KiB</td><td>942 KiB</td></tr>
-            <tr><th>XLSX parser WASM</th><td>1,901 KiB</td><td>788 KiB</td></tr>
+            <tr><th>XLSX parser WASM</th><td>1,902 KiB</td><td>788 KiB</td></tr>
             <tr><th>PPTX parser WASM</th><td>1,977 KiB</td><td>794 KiB</td></tr>
             <tr><th>MathJax runtime</th><td>3,846 KiB</td><td>1,269 KiB</td></tr>
           </tbody>
