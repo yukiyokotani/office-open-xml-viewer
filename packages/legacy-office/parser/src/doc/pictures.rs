@@ -400,6 +400,9 @@ pub(super) struct Options {
     flip: [bool; 2],
     pub rotation: i64,
     pseudo_inline: bool,
+    /// MS-ODRAW 2.3.4.7 pWrapPolygonVertices (0x0383) is present: the
+    /// authored tight/through contour, which the direct model does not read.
+    pub authored_wrap_contour: bool,
 }
 impl Options {
     fn apply(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
@@ -446,6 +449,9 @@ impl Options {
             if !inline && key == 0x4104 {
                 self.pib = (value as usize).checked_sub(1);
                 continue;
+            }
+            if id == 0x383 {
+                self.authored_wrap_contour = true;
             }
             if key & 0x8000 != 0 {
                 complex_end = complex_end

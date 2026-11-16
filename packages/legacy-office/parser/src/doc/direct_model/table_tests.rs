@@ -583,6 +583,30 @@ fn cell_border_assignment(sides: u8, border: [u8; 8]) -> Vec<u8> {
     sprm(0xd62f, &operand, false)
 }
 
+/// The single border Word prints for a direct cell FF assignment: the same
+/// bytes with brcType 1.
+fn ff_as_single(sides: u8, mut border: [u8; 8]) -> Vec<u8> {
+    assert_eq!(border[5], 0xff);
+    border[5] = 1;
+    cell_border_assignment(sides, border)
+}
+
+/// Assert that `actual` and `control` project the same document and that the
+/// FF approximation was taken.
+fn assert_ff_projects_as(actual: Vec<u8>, control: Vec<u8>, styled: bool) {
+    crate::rejection::take_best_effort();
+    let actual = cell_border_document(actual, styled).unwrap();
+    assert!(crate::rejection::take_best_effort().contains(&(
+        crate::rejection::BestEffort::Approximated,
+        "unsupported Word border type 0xFF ignore semantics"
+    )));
+    let control = cell_border_document(control, styled).unwrap();
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(control).unwrap()
+    );
+}
+
 fn cell_border_tc80_row(border: [u8; 4]) -> Vec<u8> {
     let mut definition = vec![26, 0, 1, 0, 0, 0xe8, 3, 0, 0, 0, 0];
     for _ in 0..4 {
@@ -796,17 +820,31 @@ fn cell_border_superseded_complete_assignment_matches_drawn_and_nil_controls() {
 }
 
 #[test]
-fn cell_border_superseded_leaves_winning_and_partially_replaced_owners_gated() {
-    let unresolved = cell_border_assignment(0x03, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+fn cell_border_ff_winning_and_partially_replaced_owners_print_single_rules() {
+    let ff = [0, 0, 0, 0, 8, 0xff, 0, 0];
+    let unresolved = cell_border_assignment(0x03, ff);
+    let single = ff_as_single(0x03, ff);
     let complete = cell_border_assignment(0x03, [0xff, 0, 0, 0, 8, 1, 0, 0]);
     let top_only = cell_border_assignment(0x01, [0xff, 0, 0, 0, 8, 1, 0, 0]);
-    for properties in [
-        [row(1000), unresolved.clone()].concat(),
-        [row(1000), complete, unresolved.clone()].concat(),
-        [row(1000), unresolved.clone(), unresolved.clone()].concat(),
-        [row(1000), unresolved, top_only].concat(),
+    for (actual, control) in [
+        (
+            [row(1000), unresolved.clone()].concat(),
+            [row(1000), single.clone()].concat(),
+        ),
+        (
+            [row(1000), complete.clone(), unresolved.clone()].concat(),
+            [row(1000), complete, single.clone()].concat(),
+        ),
+        (
+            [row(1000), unresolved.clone(), unresolved.clone()].concat(),
+            [row(1000), single.clone()].concat(),
+        ),
+        (
+            [row(1000), unresolved, top_only.clone()].concat(),
+            [row(1000), single, top_only].concat(),
+        ),
     ] {
-        assert!(cell_border_document(properties, false).is_err());
+        assert_ff_projects_as(actual, control, false);
     }
 
     // Replacing one cell must not discharge the neighbouring cell's owner.
@@ -840,8 +878,16 @@ fn cell_border_superseded_leaves_winning_and_partially_replaced_owners_gated() {
         sprm(0xd62f, &operand, false)
     };
     let both_ff = assignment(2, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+    let both_single = assignment(2, [0, 0, 0, 0, 8, 1, 0, 0]);
     let one_red = assignment(1, [0xff, 0, 0, 0, 8, 1, 0, 0]);
-    assert!(project([two_cells.clone(), both_ff.clone(), one_red].concat()).is_err());
+    assert_eq!(
+        serde_json::to_value(
+            project([two_cells.clone(), both_ff.clone(), one_red.clone()].concat()).unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(project([two_cells.clone(), both_single, one_red].concat()).unwrap())
+            .unwrap()
+    );
     let both_red = assignment(2, [0xff, 0, 0, 0, 8, 1, 0, 0]);
     let control = project([two_cells.clone(), both_red.clone()].concat()).unwrap();
     let BodyElement::Table(table) = &control.body[0] else {
@@ -936,8 +982,6 @@ fn cell_border_superseded_does_not_excuse_invalid_earlier_operands() {
     color[7] = 1;
     let mut kind = valid.clone();
     kind[9] = 2;
-    let mut width = valid.clone();
-    width[8] = 32;
     let later = cell_border_assignment(1, [0xff, 0, 0, 0, 8, 1, 0, 0]);
     cell_border_document([row(1000), later.clone()].concat(), false).unwrap();
     for (operand, reason) in [
@@ -947,7 +991,6 @@ fn cell_border_superseded_does_not_excuse_invalid_earlier_operands() {
         (cb.clone(), "truncated Word integer"),
         (color, "invalid Word COLORREF"),
         (kind, "undefined Word border type 0x02"),
-        (width, "invalid Word ignored border width"),
     ] {
         let error = cell_border_document(
             [row(1000), sprm(0xd62f, &operand, false), later.clone()].concat(),
@@ -974,7 +1017,7 @@ fn cell_border_superseded_does_not_excuse_invalid_earlier_operands() {
 }
 
 #[test]
-fn cell_border_superseded_keeps_row_old_tc80_and_style_carriers_gated() {
+fn cell_border_ff_keeps_row_old_tc80_and_style_carriers_gated() {
     let ff = [0, 0, 0, 0, 8, 0xff, 0, 0];
     let mut array = vec![48];
     for _ in 0..6 {
@@ -1007,21 +1050,27 @@ fn cell_border_superseded_keeps_row_old_tc80_and_style_carriers_gated() {
             "{error}"
         );
     }
-    // A later row border belongs to a different layer from direct cell FF.
+    // A later row border belongs to a different layer from direct cell FF,
+    // which prints its single rule.
     let mut red_array = vec![48];
     for _ in 0..6 {
         red_array.extend([0xff, 0, 0, 0, 8, 1, 0, 0]);
     }
-    assert!(cell_border_document(
+    assert_ff_projects_as(
         [
             row(1000),
             cell_border_assignment(1, ff),
             sprm(0xd613, &red_array, false),
         ]
         .concat(),
-        false
-    )
-    .is_err());
+        [
+            row(1000),
+            ff_as_single(1, ff),
+            sprm(0xd613, &red_array, false),
+        ]
+        .concat(),
+        false,
+    );
     let source = cell_border_source(
         [row(1000), sprm(0x563a, &1u16.to_le_bytes(), false), later].concat(),
         false,
@@ -1038,7 +1087,7 @@ fn cell_border_superseded_keeps_row_old_tc80_and_style_carriers_gated() {
 }
 
 #[test]
-fn cell_border_superseded_textbox_overwrite_matches_control_but_winner_refuses() {
+fn cell_border_superseded_textbox_overwrite_matches_control_and_winner_prints_single() {
     let source = super::tests::drawing_shape_source(Some("x\u{7}\u{7}\r"), false);
     let unresolved = cell_border_assignment(0x0f, [0, 0, 0, 0, 8, 0xff, 0, 0]);
     let red = cell_border_assignment(0x0f, [0xff, 0, 0, 0, 8, 1, 0, 0]);
@@ -1094,8 +1143,22 @@ fn cell_border_superseded_textbox_overwrite_matches_control_but_winner_refuses()
         serde_json::to_value(actual).unwrap(),
         serde_json::to_value(control).unwrap()
     );
-    assert!(project([row(1000), unresolved.clone()].concat()).is_err());
-    assert!(project([row(1000), red, unresolved].concat()).is_err());
+    let single = ff_as_single(0x0f, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+    for (actual, control) in [
+        (
+            [row(1000), unresolved.clone()].concat(),
+            [row(1000), single.clone()].concat(),
+        ),
+        (
+            [row(1000), red.clone(), unresolved].concat(),
+            [row(1000), red, single].concat(),
+        ),
+    ] {
+        assert_eq!(
+            serde_json::to_value(project(actual).unwrap()).unwrap(),
+            serde_json::to_value(project(control).unwrap()).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -2493,17 +2556,20 @@ fn cell_border_superseded_nested_owner_resolves_before_table_projection() {
         serde_json::to_value(actual).unwrap(),
         serde_json::to_value(control).unwrap()
     );
-    for borders in [unresolved.clone(), [blue, unresolved].concat()] {
-        let error = project(borders).expect_err("winning nested FF must refuse");
-        assert!(
-            error.contains("unsupported Word border type 0xFF ignore semantics"),
-            "{error}"
+    let single = ff_as_single(0x0f, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+    for (borders, control) in [
+        (unresolved.clone(), single.clone()),
+        ([blue.clone(), unresolved].concat(), [blue, single].concat()),
+    ] {
+        assert_eq!(
+            serde_json::to_value(project(borders).unwrap()).unwrap(),
+            serde_json::to_value(project(control).unwrap()).unwrap()
         );
     }
 }
 
 #[test]
-fn cell_border_superseded_definition_cannot_discharge_unresolved_owner() {
+fn cell_border_ff_owner_survives_a_table_definition_as_a_single_rule() {
     let ff = cell_border_assignment(1, [0, 0, 0, 0, 8, 0xff, 0, 0]);
     let drawn = cell_border_assignment(1, [0, 0, 0xff, 0, 24, 1, 0, 0]);
     let definition = sprm(0xd608, &[6, 0, 1, 0, 0, 0xe8, 3], false);
@@ -2512,11 +2578,15 @@ fn cell_border_superseded_definition_cannot_discharge_unresolved_owner() {
         false,
     )
     .unwrap();
-    let error = cell_border_document([row(1000), ff.clone(), definition.clone()].concat(), false)
-        .expect_err("a new table definition is not established to reset unresolved FF");
-    assert!(
-        error.contains("unresolved Word cell border before topology change"),
-        "{error}"
+    assert_ff_projects_as(
+        [row(1000), ff.clone(), definition.clone()].concat(),
+        [
+            row(1000),
+            ff_as_single(1, [0, 0, 0, 0, 8, 0xff, 0, 0]),
+            definition.clone(),
+        ]
+        .concat(),
+        false,
     );
     let replaced = cell_border_document(
         [row(1000), ff.clone(), drawn, definition.clone()].concat(),
@@ -2541,7 +2611,7 @@ fn cell_border_superseded_definition_cannot_discharge_unresolved_owner() {
 }
 
 #[test]
-fn cell_border_superseded_deletion_cannot_discharge_unresolved_owner() {
+fn cell_border_ff_owner_moves_and_deletes_with_its_cell() {
     let ff = cell_border_assignment(1, [0, 0, 0, 0, 8, 0xff, 0, 0]);
     let drawn = cell_border_assignment(1, [0, 0, 0xff, 0, 24, 1, 0, 0]);
     let insert = sprm(0x7621, &[1, 1, 0xe8, 3], false);
@@ -2551,14 +2621,11 @@ fn cell_border_superseded_deletion_cannot_discharge_unresolved_owner() {
         false,
     )
     .unwrap();
-    let error = cell_border_document(
+    let single = ff_as_single(1, [0, 0, 0, 0, 8, 0xff, 0, 0]);
+    assert_ff_projects_as(
         [row(1000), ff.clone(), insert.clone(), delete.clone()].concat(),
+        [row(1000), single.clone(), insert.clone(), delete.clone()].concat(),
         false,
-    )
-    .expect_err("deleting an owner does not establish the meaning of its unresolved FF");
-    assert!(
-        error.contains("unresolved Word cell border before topology change"),
-        "{error}"
     );
     let replaced = cell_border_document(
         [row(1000), ff.clone(), drawn.clone(), insert, delete.clone()].concat(),
@@ -2571,16 +2638,12 @@ fn cell_border_superseded_deletion_cannot_discharge_unresolved_owner() {
     );
 
     // Inserting a fresh cell moves the old owner intact. Deleting only the
-    // fresh cell must not discard the FF debt of the retained original cell.
+    // fresh cell keeps the single rule of the retained original cell.
     let insert_before = sprm(0x7621, &[0, 1, 0xe8, 3], false);
-    let error = cell_border_document(
+    assert_ff_projects_as(
         [row(1000), ff.clone(), insert_before.clone(), delete.clone()].concat(),
+        [row(1000), single, insert_before.clone(), delete.clone()].concat(),
         false,
-    )
-    .expect_err("unrelated deletion leaves the retained FF owner unresolved");
-    assert!(
-        error.contains("unsupported Word border type 0xFF ignore semantics"),
-        "{error}"
     );
     let mut shifted = vec![11, 1, 2, 1];
     shifted.extend([0, 0, 0xff, 0, 24, 1, 0, 0]);

@@ -245,11 +245,6 @@ impl Store<'_> {
             .ok_or_else(|| unsupported("Word drawing group lacks its coordinate system"))?;
         let map = Map::new(system, [0.0, 0.0, extent[0] as f64, extent[1] as f64])?;
         let align = direct_alignment(anchor, &head.placement)?;
-        if matches!(anchor.wrapping, 0 | 4 | 5) {
-            return Err(unsupported(
-                "Word drawing group uses an unsupported wrap contour",
-            ));
-        }
         let mut context = GroupRead {
             part,
             nested_solver: head.nested_solver,

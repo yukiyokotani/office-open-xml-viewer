@@ -461,11 +461,6 @@ impl<'a> Store<'a> {
                 return Ok(Some(drawing));
             }
             let align = direct_alignment(anchor, &placement)?;
-            if matches!(anchor.wrapping, 0 | 4 | 5) {
-                return Err(unsupported(
-                    "Word drawing shape uses an unsupported wrap contour",
-                ));
-            }
             return self
                 .finish(
                     anchor,
@@ -501,7 +496,9 @@ impl<'a> Store<'a> {
             // SPA provides an explicit, host-defined coordinate origin; aligned
             // positions are accepted only through `direct_alignment`.
             || (align.is_none() && (placement.horizontal != 0 || placement.vertical != 0))
-            || matches!(anchor.wrapping, 0 | 4 | 5)
+            // An authored tight/through contour is not read; the implicit
+            // full-envelope contour stands only for an absent one.
+            || (matches!(anchor.wrapping, 4 | 5) && picture.authored_wrap_contour)
         {
             self.omitted = true;
             return Ok(None);
@@ -961,10 +958,13 @@ fn anchors_in(
             2 => "paragraph",
             _ => return Err(unsupported("invalid Word floating vertical origin")),
         };
-        let wrapping = ((flags >> 5) & 15) as u8;
-        if wrapping > 5 {
-            return Err(unsupported("invalid Word floating wrap mode"));
-        }
+        let wrapping = match ((flags >> 5) & 15) as u8 {
+            // MS-DOC 2.9.82 wr 0 wraps text around the object without naming
+            // a contour; its nearest DrawingML wrap is square (wr 2).
+            0 => crate::rejection::approximated("Word drawing uses an unsupported wrap contour", 2),
+            wrapping @ 1..=5 => wrapping,
+            _ => return Err(unsupported("invalid Word floating wrap mode")),
+        };
         let side = if matches!(wrapping, 1 | 3) {
             "bothSides"
         } else {
@@ -1679,7 +1679,8 @@ mod tests {
 
         for horizontal in 0u16..=2 {
             for vertical in 0u16..=2 {
-                for wrapping in 1u16..=3 {
+                for wrapping in 0u16..=5 {
+                    crate::rejection::take_best_effort();
                     let (word, mut table) = drawing_input(0xa00, 0);
                     let flags = (horizontal << 1) | (vertical << 3) | (wrapping << 5);
                     table[28..30].copy_from_slice(&flags.to_le_bytes());
@@ -1700,12 +1701,83 @@ mod tests {
                     );
                     assert_eq!(image.anchor_x_from_margin, horizontal != 1);
                     assert_eq!(image.anchor_y_from_para, vertical == 2);
+                    // wr 0 (around) is projected as square; tight and
+                    // through carry the full-envelope contour.
                     assert_eq!(
                         image.wrap_mode.as_deref(),
-                        Some(["", "topAndBottom", "square", "none"][wrapping as usize])
+                        Some(
+                            [
+                                "square",
+                                "topAndBottom",
+                                "square",
+                                "none",
+                                "tight",
+                                "through"
+                            ][wrapping as usize]
+                        )
                     );
+                    assert_eq!(
+                        crate::rejection::take_best_effort(),
+                        if wrapping == 0 {
+                            vec![(
+                                crate::rejection::BestEffort::Approximated,
+                                "Word drawing uses an unsupported wrap contour",
+                            )]
+                        } else {
+                            Vec::new()
+                        }
+                    );
+                    let wrap = &image.anchor_acquisition.as_ref().unwrap().wrap;
+                    assert_eq!(
+                        wrap.kind,
+                        [
+                            docx_model::AnchorWrapKindWire::Square,
+                            docx_model::AnchorWrapKindWire::TopAndBottom,
+                            docx_model::AnchorWrapKindWire::Square,
+                            docx_model::AnchorWrapKindWire::None,
+                            docx_model::AnchorWrapKindWire::Tight,
+                            docx_model::AnchorWrapKindWire::Through,
+                        ][wrapping as usize]
+                    );
+                    assert_eq!(image.wrap_side.is_some(), matches!(wrapping, 0 | 2 | 4 | 5));
+                    if wrapping >= 4 {
+                        let polygon = wrap.polygon.as_ref().unwrap();
+                        assert_eq!(
+                            (
+                                polygon.coordinate_space.width,
+                                polygon.coordinate_space.height
+                            ),
+                            (21600, 21600)
+                        );
+                        assert_eq!(
+                            polygon
+                                .points
+                                .iter()
+                                .map(|point| (point.x.unwrap(), point.y.unwrap()))
+                                .collect::<Vec<_>>(),
+                            [(0, 0), (0, 21600), (21600, 21600), (21600, 0), (0, 0)]
+                        );
+                    } else {
+                        assert!(wrap.polygon.is_none());
+                    }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn authored_wrap_contour_keeps_tight_and_through_pictures_gated() {
+        // MS-ODRAW 2.3.4.7 pWrapPolygonVertices is not read: only an absent
+        // contour takes the implicit full envelope.
+        for wrapping in [2u16, 4, 5] {
+            let (word, mut table) = drawing_with_options(0xa00, 0, &[(0xc383, 0)]);
+            let flags = (1 << 1) | (1 << 3) | (wrapping << 5);
+            table[28..30].copy_from_slice(&flags.to_le_bytes());
+            let mut store = Store::read(&word, &table, 20).unwrap();
+            let mut budget = usize::MAX;
+            let picture = store.direct_picture(12, &mut budget).unwrap();
+            assert_eq!(picture.is_some(), wrapping == 2, "{wrapping}");
+            assert_eq!(store.omitted, wrapping != 2, "{wrapping}");
         }
     }
 

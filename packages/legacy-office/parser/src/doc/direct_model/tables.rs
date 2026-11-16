@@ -551,7 +551,8 @@ fn homogeneous_cell_frame(raw: &RawTable<Blocks>) -> Option<Box<docx_model::Fram
 /// geometry and absent or agreeing absolute width preferences. AutoFit retains its
 /// existing shared solver: cancellation of uniform O holds for its final width
 /// as well. Mixed translations, row parts, competing preferences and discarded
-/// horizontal continuations need a separate ownership proof and stay refused.
+/// horizontal continuations have no such proof; their rows keep their acquired
+/// origin as the nearest placement (`check_row_preferences`).
 fn centered_acquired_geometry(plan: &LogicalTable<Blocks>) -> bool {
     let first = &plan.rows[0].source;
     let Some(position) = first.position.direct().0 else {
@@ -614,14 +615,15 @@ fn check_row_preferences(
     {
         // MS-DOC 2.6.3/2.9.321 specify acquired logical row geometry;
         // 2.9.102 defines a separate preference. Retaining O rather than P is
-        // the bounded direct-projection policy documented on PreferredIndent,
-        // not a normative P/O precedence claim. Only ordinary leading main-
-        // story, depth-one RTL tables and the bounded whole-frame centered
-        // profile above use that policy through bidiVisual. Other placement
-        // classes retain the exact-equality fallback.
-        return Err(unsupported(
+        // the direct-projection policy documented on PreferredIndent, not a
+        // normative P/O precedence claim. Ordinary leading main-story,
+        // depth-one RTL tables and the whole-frame centered profile above
+        // follow it through bidiVisual; every other placement class keeps the
+        // acquired O as the nearest placement.
+        crate::rejection::approximated(
             "direct DOC model cannot place a right-to-left table with a preferred indent",
-        ));
+            (),
+        );
     }
     // [MS-DOC] 2.6.3 sprmTWidthBefore/sprmTWidthAfter are the preferred widths
     // of the same leading/trailing row parts whose physical widths the grid
@@ -784,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn differing_rtl_preference_requires_main_story_top_level_owner() {
+    fn differing_rtl_preference_outside_the_leading_owner_keeps_the_acquired_origin() {
         let project = |main_story: bool, nested: bool, preferred: i16| -> Result<Blocks, String> {
             let mut sequence = 0;
             let mut writer = Writer::with_positioned_tables(&mut sequence, main_story);
@@ -832,10 +834,24 @@ mod tests {
             writer.finish(&mut budget)
         };
         assert!(project(true, false, 109).is_ok());
+        // Another story or a nested table keeps the acquired origin: a
+        // differing preference projects as the agreeing one does.
         for (main_story, nested) in [(false, false), (true, true)] {
-            assert!(project(main_story, nested, 0).is_ok());
-            let error = project(main_story, nested, 109).err().unwrap();
-            assert!(error.contains("right-to-left"), "{error}");
+            let table = |blocks: Blocks| match blocks.0.into_iter().next() {
+                Some(Block::Table(table)) => serde_json::to_value(table).unwrap(),
+                _ => panic!("table"),
+            };
+            let agreeing = table(project(main_story, nested, 0).unwrap());
+            crate::rejection::take_best_effort();
+            let differing = table(project(main_story, nested, 109).unwrap());
+            assert_eq!(differing, agreeing);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "direct DOC model cannot place a right-to-left table with a preferred indent"
+                )]
+            );
         }
     }
 
@@ -932,12 +948,24 @@ mod tests {
                 );
             }
         }
-        // Different owners, translations, alignment or competing width
-        // preferences have no centered homogeneous admission proof.
         assert!(project(200, 120, true, 7).is_ok());
-        for variant in 1..=6 {
+        // Outside the main story the position itself is refused.
+        assert!(project(200, 120, true, 1)
+            .err()
+            .unwrap()
+            .contains("outside the main story"));
+        // Differing owners, translations, alignment or competing width
+        // preferences have no centered homogeneous proof: each row keeps its
+        // acquired origin as the nearest placement.
+        for variant in 2..=6 {
+            crate::rejection::take_best_effort();
+            let blocks = project(200, 120, true, variant).unwrap();
+            assert!(matches!(&blocks.0[0], Block::Table(table) if table.bidi_visual == Some(true)));
             assert!(
-                project(200, 120, true, variant).is_err(),
+                crate::rejection::take_best_effort().contains(&(
+                    crate::rejection::BestEffort::Approximated,
+                    "direct DOC model cannot place a right-to-left table with a preferred indent"
+                )),
                 "variant {variant}"
             );
         }

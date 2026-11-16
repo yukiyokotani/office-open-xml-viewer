@@ -2441,6 +2441,22 @@ mod tests {
                 .unwrap_err()
                 .contains("unsupported Word FIB version"));
         }
+        // A Word 97 base and back-version naming a Word 97 selector in the
+        // extension project as the Word 97 document itself.
+        crate::rejection::take_best_effort();
+        for extension in [0x00c0u16, 0x00c1, 0x00c2] {
+            let mut word = original_word.clone();
+            word[0x382..0x384].copy_from_slice(&2u16.to_le_bytes());
+            word[0x384..0x386].copy_from_slice(&extension.to_le_bytes());
+            assert_eq!(project(word).unwrap(), expected);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "unsupported Word FIB version"
+                )]
+            );
+        }
         let mut word = original_word.clone();
         word[2..4].copy_from_slice(&0x00c0u16.to_le_bytes());
         word[0x382..0x384].copy_from_slice(&u16::MAX.to_le_bytes());
@@ -2461,7 +2477,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_hyphen_preserves_its_own_style_and_validates_its_hresi() {
+    fn optional_hyphen_preserves_its_own_style_and_reads_its_hresi() {
         // The astral character places the isolated marker at UTF-16 CP 3,
         // rather than scalar index 2. Its formatting is absent from A/emoji/B
         // and the paragraph mark, so only marker-owner acquisition can refuse
@@ -2482,18 +2498,20 @@ mod tests {
             assert_eq!(runs[1]["fontSize"], 14.0);
             assert_eq!(runs[2]["text"], "B");
         }
+        // Out-of-range and custom methods break as hresNormal does.
+        let expected = serde_json::to_value(project(&[]).unwrap().document).unwrap();
         for chpx in [
             &[0x4e, 0x48, 0, 0][..],
             &[0x4e, 0x48, 0, 2, 0x4e, 0x48, 1, 0][..],
-            &[0x3c, 0x08, 1, 0x4e, 0x48, 0, 2][..],
+            &[0x4e, 0x48, 2, b'q'][..],
         ] {
-            assert!(project(chpx)
-                .unwrap_err()
-                .contains("invalid Word word-breaking method"));
+            assert_eq!(
+                serde_json::to_value(project(chpx).unwrap().document).unwrap(),
+                expected
+            );
         }
-        assert!(project(&[0x4e, 0x48, 2, b'q'])
-            .unwrap_err()
-            .contains("unsupported formatting"));
+        // A misframed operand is corrupt.
+        assert!(project(&[0x4e, 0x48, 1]).is_err());
         // A vanished marker contributes neither a conditional glyph nor a
         // break opportunity, after its properties have been validated.
         let hidden = project(&[0x3c, 0x08, 1, 0x4e, 0x48, 1, 0]).unwrap();
@@ -2502,7 +2520,7 @@ mod tests {
     }
 
     #[test]
-    fn hresi_final_direct_owner_admits_complete_document_and_retains_invalid_refusal() {
+    fn every_hresi_owner_projects_standard_breaking() {
         let project = |chpx: &[u8]| {
             let bytes = source_with_direct_chpx("quartz\r", chpx);
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
@@ -2513,31 +2531,21 @@ mod tests {
         for chpx in [
             &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 2, b'q', 0x33, 0x2a, 0][..],
-            // Word's measured alias of hresNormal, alone and as final owner.
             &[0x4e, 0x48, 0, 1][..],
             &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 0, 1][..],
-        ] {
-            assert_eq!(project(chpx).unwrap(), expected);
-        }
-        for chpx in [
             &[0x4e, 0x48, 2, b'q'][..],
             &[0x4e, 0x48, 1, 0, 0x4e, 0x48, 2, b'q'][..],
             &[0x86, 0x2a, 2, 0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
-        ] {
-            assert!(project(chpx)
-                .unwrap_err()
-                .contains("unsupported formatting"));
-        }
-        for chpx in [
             &[0x4e, 0x48, 0, 0][..],
             &[0x4e, 0x48, 0, 2][..],
             &[0x4e, 0x48, 0, b'Z', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 7, b'Z', 0x4e, 0x48, 1, 0][..],
-            &[0x4e, 0x48, 2][..],
         ] {
-            assert!(project(chpx).is_err());
+            assert_eq!(project(chpx).unwrap(), expected, "{chpx:?}");
         }
+        // Misframed operands stay corrupt.
         for chpx in [
+            &[0x4e, 0x48, 2][..],
             &[0x33, 0x2a, 1, 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 1, 0, 0x33, 0x2a, 1][..],
         ] {
@@ -2551,39 +2559,28 @@ mod tests {
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                 .map(|result| serde_json::to_value(result.document).unwrap())
         };
-        assert_eq!(
-            project_piece(&[0x4e, 0x48, 2, b'q'], &[0x4e, 0x48, 1, 0]).unwrap(),
-            expected
-        );
-        assert_eq!(
-            project_piece(&[], &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0]).unwrap(),
-            expected
-        );
-        assert!(project_piece(&[0x4e, 0x48, 1, 0], &[0x4e, 0x48, 2, b'q'])
-            .unwrap_err()
-            .contains("unsupported formatting"));
-        assert!(project_piece(&[0x4e, 0x48, 0, b'Z'], &[0x4e, 0x48, 1, 0]).is_err());
-    }
+        for (direct, piece) in [
+            (&[0x4e, 0x48, 2, b'q'][..], &[0x4e, 0x48, 1, 0][..]),
+            (&[][..], &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..]),
+            (&[0x4e, 0x48, 1, 0][..], &[0x4e, 0x48, 2, b'q'][..]),
+            (&[0x4e, 0x48, 0, b'Z'][..], &[0x4e, 0x48, 1, 0][..]),
+        ] {
+            assert_eq!(project_piece(direct, piece).unwrap(), expected);
+        }
 
-    #[test]
-    fn hresi_final_level_marker_owner_controls_complete_document_admission() {
-        let project = |chpx: &[u8]| {
+        // The final list-level marker owner keeps its numbering.
+        let project_level = |chpx: &[u8]| {
             let bytes = with_numbering_level_chpx(&source("quartz\r"), chpx);
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                 .map(|result| serde_json::to_value(result.document).unwrap())
         };
-        let expected = project(&[0x4e, 0x48, 1, 0]).unwrap();
-        assert_eq!(
-            project(&[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0]).unwrap(),
-            expected
-        );
+        let expected = project_level(&[0x4e, 0x48, 1, 0]).unwrap();
         for chpx in [
+            &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 2, b'q'][..],
             &[0x4e, 0x48, 1, 0, 0x4e, 0x48, 2, b'q'][..],
         ] {
-            assert!(project(chpx)
-                .unwrap_err()
-                .contains("unsupported formatting"));
+            assert_eq!(project_level(chpx).unwrap(), expected);
         }
     }
 
@@ -2602,14 +2599,38 @@ mod tests {
                 baseline
             );
         }
-        for value in [2, 4] {
-            assert!(project(&[0x86, 0x2a, value])
-                .unwrap_err()
-                .contains("unsupported formatting"));
+        // The language and UI-font methods, and an out-of-range value, use
+        // the same default font route.
+        let plain = project(&[]).unwrap();
+        crate::rejection::take_best_effort();
+        for (value, note) in [
+            (
+                2,
+                (
+                    crate::rejection::BestEffort::Approximated,
+                    "Word font fixup method requires a consumer",
+                ),
+            ),
+            (
+                4,
+                (
+                    crate::rejection::BestEffort::Approximated,
+                    "Word font fixup method requires a consumer",
+                ),
+            ),
+            (
+                0x80,
+                (
+                    crate::rejection::BestEffort::IgnoredValue,
+                    "invalid Word font fixup method",
+                ),
+            ),
+        ] {
+            assert_eq!(project(&[0x86, 0x2a, value]).unwrap(), plain);
+            assert!(crate::rejection::take_best_effort().contains(&note));
         }
-        assert!(project(&[0x86, 0x2a, 0x80])
-            .unwrap_err()
-            .contains("font fixup method"));
+        // A misframed operand is corrupt.
+        assert!(project(&[0x86, 0x2a]).is_err());
     }
 
     #[test]

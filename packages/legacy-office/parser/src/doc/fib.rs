@@ -113,16 +113,29 @@ pub(super) fn known_schema(word: &[u8]) -> Result<KnownFibSchema, String> {
     // selector and all extra bytes in the original stream; never interpret
     // this family's extension/FC-LCB tails as modern fields. Only the canonical
     // Word97 prefix with a compatible base/back-version is supported here.
-    let legacy_forward = (0x00c3..0x00d9).contains(&version)
-        && u16_at(word, 2)? == 0x00c1
-        && u16_at(word, 12)? <= 0x00c1;
+    let word97_prefix = count != 0 && u16_at(word, 2)? == 0x00c1 && u16_at(word, 12)? <= 0x00c1;
+    let legacy_forward = word97_prefix && (0x00c3..0x00d9).contains(&version);
+    // An nFibNew that names one of the Word 97 selectors of MS-DOC 2.5.2
+    // product behavior note 11 is outside the nFibNew values of 2.5.14, but
+    // the base, back-version and counted prefix are Word 97's and Word opens
+    // such a file. Read it with the Word 97 profile; its extension carries no
+    // later field this profile would interpret.
+    if word97_prefix && matches!(version, 0x00c0..=0x00c2) {
+        validate_fixed_prefix(word)?;
+        return Ok(KnownFibSchema {
+            version: crate::rejection::approximated("unsupported Word FIB version", 0x00c1),
+            extension_words: count,
+        });
+    }
     if legacy_forward {
         validate_fixed_prefix(word)?;
     }
     if (!matches!(version, 0x00c1 | 0x00d9 | 0x0101 | 0x010c | 0x0112) && !legacy_forward)
         || (count != 0 && version == 0x00c1)
     {
-        return Err(unsupported("unsupported Word FIB version"));
+        return Err(crate::rejection::out_of_scope_version(
+            "unsupported Word FIB version",
+        ));
     }
     Ok(KnownFibSchema {
         version,
@@ -247,7 +260,11 @@ mod tests {
             assert!(effective_version(&fib(version, None, [14, 22, 0x5d])).is_err());
             assert!(effective_version(&fib(0xc1, Some(version), [14, 22, 0x5d])).is_err());
         }
-        assert!(effective_version(&fib(0xc1, Some(0xc1), [14, 22, 0x5d])).is_err());
+        // A Word 97 selector in the extension keeps the Word 97 profile.
+        assert_eq!(
+            effective_version(&fib(0xc1, Some(0xc1), [14, 22, 0x5d])).unwrap(),
+            0xc1
+        );
     }
 
     #[test]
@@ -269,9 +286,42 @@ mod tests {
             word[2..4].copy_from_slice(&0x00c3u16.to_le_bytes());
             assert!(known_schema(&word).is_err());
         }
-        for selector in [0x00c2, 0x00da, 0x0100] {
+        for selector in [0x00da, 0x0100] {
             assert!(known_schema(&fib(0x00c1, Some(selector), [14, 22, 0x006c])).is_err());
         }
+    }
+
+    #[test]
+    fn word97_selector_in_the_extension_reads_with_the_word97_profile() {
+        crate::rejection::take_best_effort();
+        for selector in [0x00c0, 0x00c1, 0x00c2] {
+            let mut word = fib(0x00c1, Some(selector), [14, 22, 0x006c]);
+            let offset = word.len() - 6;
+            word[offset..offset + 2].copy_from_slice(&4u16.to_le_bytes());
+            word.extend_from_slice(&[0xe5, 0x00, 0xff, 0xff]);
+            word[12..14].copy_from_slice(&0x00bfu16.to_le_bytes());
+            let schema = known_schema(&word).unwrap();
+            assert_eq!(schema.effective_version(), 0x00c1);
+            assert!(!schema.has_dop2000_fields());
+            assert!(!schema.requires_legacy_dop97_prefix());
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "unsupported Word FIB version"
+                )]
+            );
+            for end in 0..word.len() {
+                assert!(known_schema(&word[..end]).is_err());
+            }
+            // A later back-version or a non-Word 97 base is not that profile.
+            word[12..14].copy_from_slice(&0x00d9u16.to_le_bytes());
+            assert!(known_schema(&word).is_err());
+            word[12..14].fill(0);
+            word[2..4].copy_from_slice(&0x00d9u16.to_le_bytes());
+            assert!(known_schema(&word).is_err());
+        }
+        crate::rejection::take_best_effort();
     }
 
     #[test]

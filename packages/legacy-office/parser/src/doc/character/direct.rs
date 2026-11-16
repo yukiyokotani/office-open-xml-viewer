@@ -1061,7 +1061,9 @@ mod tests {
     fn default_font_fixup_preserves_text_and_the_existing_font_route() {
         // FFM is an enum, not ToggleOperand. Default substitution uses the
         // renderer's existing Unicode fallback, preserving authored routing.
-        for value in [0, 1] {
+        // The language and UI-font methods and out-of-range values use the
+        // same route.
+        for value in [0, 1, 2, 3, 4, 0x80, 0xff] {
             let properties = applied(&[
                 (0x4a43, 24u16.to_le_bytes().to_vec()),
                 (0x085a, vec![1]),
@@ -1078,10 +1080,24 @@ mod tests {
             assert_eq!(run.font_hint, None);
         }
         let base = Properties::default();
+        crate::rejection::take_best_effort();
         for value in [2, 4] {
-            assert!(!base.clone().apply(0x2a86, &[value], &base).unwrap());
+            assert!(base.clone().apply(0x2a86, &[value], &base).unwrap());
         }
-        for invalid in [vec![], vec![1, 0], vec![3], vec![0x80], vec![0xff]] {
+        for value in [3, 0x80] {
+            assert!(base.clone().apply(0x2a86, &[value], &base).unwrap());
+        }
+        let notes = crate::rejection::take_best_effort();
+        assert_eq!(
+            notes.iter().map(|note| note.1).collect::<Vec<_>>(),
+            [
+                "Word font fixup method requires a consumer",
+                "Word font fixup method requires a consumer",
+                "invalid Word font fixup method",
+                "invalid Word font fixup method"
+            ]
+        );
+        for invalid in [vec![], vec![1, 0]] {
             assert!(
                 base.clone().apply(0x2a86, &invalid, &base).is_err(),
                 "{invalid:?}"

@@ -58,9 +58,6 @@ pub(in crate::doc) enum StyleAwareShadingApply {
 pub(in crate::doc) enum PreparedBorder {
     Old([u8; 4]),
     Modern([u8; 8]),
-    /// Validated modern native cell assignment with unresolved FF semantics.
-    /// It remains authored and present; it is neither NoChange nor Nil.
-    DeferredCellIgnore([u8; 8]),
 }
 
 impl PreparedBorder {
@@ -79,55 +76,39 @@ impl PreparedBorder {
         })
     }
 
-    // MS-DOC 2.4.6 applies property modifications in order; 2.9.305 assigns
-    // the complete Brc to each selected cell edge. A later complete assignment
-    // replaces this prepared owner, and the established TIstd reset removes
-    // this direct layer. Deferring FF permits those cases without deciding
-    // whether its winning operation ignores the type or the whole Brc. Any
-    // surviving final row-mark-owned value fails decode or an existing table
-    // gate before atomic admission. Story projection resolves every active row
-    // before emitting model data; non-TTP paragraph row copies are not effective
-    // owners (MS-DOC 2.4.3). Insertion moves existing cells with their owners.
-    // Rebuilding or deleting cells cannot discharge unresolved FF: geometry
-    // persistence/reset evidence does not establish a border reset contract.
-    // Generic readers, TC80, row arrays and old assignments stay conservative.
     // [MS-DOC] 2.9.20 distinguishes exact Nil from ordinary Brc before
-    // interpreting fields. Only modern native direct cell assignments defer
-    // the unresolved FF operation. 2.9.16 still requires its COLORREF and
-    // width domain to be valid (COLORREF: 2.9.43); reserved bits are ignored.
+    // interpreting fields; 2.9.22 lists brcType 0xFF without a drawing.
+    // Observed Windows Word (16.0) print of a direct modern sprmTSetBrc cell
+    // assignment of type 0xFF, measured by pixel-identical PDFs in a table
+    // without borders and under a table style with single borders:
+    // - cv 0xFFFFFFFF prints exactly as the exact NilBrc for every tested
+    //   width and trailing field, so it is that NilBrc.
+    // - Any other cv prints a solid rule of the authored colour whose
+    //   thickness follows dptLineWidth in eighth-points, as a single border
+    //   does: explicit black, red, green and white at widths 1 and 8 match
+    //   the same edge of type single, and width 255 prints a 32-point band.
+    //   The nearest model border is therefore a single border with the
+    //   authored colour, width and flags. dptLineWidth is read in the unit of
+    //   that single border, so the 1-point art-border range of 2.9.16 does
+    //   not apply to it.
+    // Generic readers, TC80, row arrays and old assignments are unchanged.
     fn read_cell_assignment(bytes: &[u8], old: bool) -> Result<Self, String> {
         if old {
             return Self::read(bytes, true);
         }
-        let bytes: [u8; 8] = bytes
+        let mut bytes: [u8; 8] = bytes
             .get(..8)
             .ok_or_else(|| unsupported("short Word prepared border"))?
             .try_into()
             .expect("eight-byte slice");
         if bytes[4..] != [0xff; 4] && bytes[5] == 0xff {
-            // Observed Windows Word (16.0) behavior for a direct sprmTSetBrc
-            // cell assignment of type 0xFF, measured by pixel-identical PDFs
-            // (zero two-export noise) in a table without borders and under a
-            // table style with single borders on every edge:
-            // - cv 0xFFFFFFFF prints exactly as the exact NilBrc. It removes
-            //   the style's edges as NilBrc does, unlike an ignored assignment
-            //   or type 0 (none), which both keep them. This holds for every
-            //   tested dptLineWidth (0, 1, 8, 31, 32, 128, 255) and every
-            //   tested last two bytes (dptSpace 0 or 31, fShadow, fFrame, the
-            //   reserved bits: 00 00, 1F 00, 20 00, 40 00, 7F 00, 00 FF,
-            //   E0 FF), so none of those fields matters.
-            // - The other tested values, cvAuto 0xFF000000 at width 255 and
-            //   explicit red at widths 8 and 255, paint undefined artwork;
-            //   Word could not export auto with RGB 123456. Every cv other
-            //   than 0xFFFFFFFF therefore keeps the deferred refusal below.
             if bytes[..4] == [0xff; 4] {
                 return Ok(Self::Modern([0xff; 8]));
             }
-            let _ = super::colorref::read(&bytes[..4])?;
-            if bytes[4] >= 32 {
-                return Err(unsupported("invalid Word ignored border width"));
-            }
-            return Ok(Self::DeferredCellIgnore(bytes));
+            bytes[5] = crate::rejection::approximated(
+                "unsupported Word border type 0xFF ignore semantics",
+                1,
+            );
         }
         Self::read(&bytes, false)
     }
@@ -136,12 +117,6 @@ impl PreparedBorder {
         match self {
             Self::Old(bytes) => Border::read(&bytes, true),
             Self::Modern(bytes) => Border::read(&bytes, false),
-            Self::DeferredCellIgnore(bytes) => {
-                debug_assert_eq!(bytes[5], 0xff);
-                Err(unsupported(
-                    "unsupported Word border type 0xFF ignore semantics",
-                ))
-            }
         }
     }
 
@@ -153,7 +128,6 @@ impl PreparedBorder {
         match self {
             Self::Old(bytes) => bytes == [0xff; 4],
             Self::Modern(bytes) => bytes[4..] == [0xff; 4],
-            Self::DeferredCellIgnore(_) => false,
         }
     }
 }
@@ -182,14 +156,6 @@ pub struct Cell {
     pub(in crate::doc) no_wrap: bool,
     /// [MS-DOC] 2.9.26 bArg from sprmTCellFHideMark (native acquisition).
     pub(in crate::doc) hide_mark: bool,
-}
-
-impl Cell {
-    fn has_unresolved_border(&self) -> bool {
-        self.prepared_borders
-            .iter()
-            .any(|value| matches!(value, Some(PreparedBorder::DeferredCellIgnore(_))))
-    }
 }
 
 pub struct Properties<R = Row> {
@@ -991,14 +957,6 @@ impl Row {
                     }
                     cells.push(cell);
                 }
-                // A TDefTable rebuild has no established border-specific FF
-                // reset contract. Validate its complete replacement first,
-                // then refuse to silently discard an unresolved old operation.
-                if self.cells.iter().any(Cell::has_unresolved_border) {
-                    return Err(unsupported(
-                        "unresolved Word cell border before topology change",
-                    ));
-                }
                 self.cells = cells;
             }
             0xf614 => self.preferred_width = PreferredWidth::table(b)?,
@@ -1036,16 +994,6 @@ impl Row {
                 let r = range(b, self.cells.len())?;
                 if r.len() == self.cells.len() {
                     return Err(unsupported("Word row cannot delete every cell"));
-                }
-                // Deleting an owner likewise does not establish FF semantics.
-                // Unrelated deletion must leave retained cell owners intact.
-                if self.cells[r.clone()]
-                    .iter()
-                    .any(Cell::has_unresolved_border)
-                {
-                    return Err(unsupported(
-                        "unresolved Word cell border before topology change",
-                    ));
                 }
                 self.cells.drain(r);
             }
@@ -1246,7 +1194,8 @@ mod tests {
     fn public_cell_border_none_nil_and_ignored_type_stay_distinct() {
         // Public [MS-DOC] 2.9.16/20/22/157 cases, invented independently:
         // none width is in eighth-points; exact Nil bypasses Brc fields;
-        // ordinary FF is an unresolved authored operation, not a clear.
+        // FF prints as a single rule of its authored colour and width.
+        crate::rejection::take_best_effort();
         let none =
             PreparedBorder::read_cell_assignment(&[0x21, 0x43, 0x65, 0, 255, 0, 0, 0], false)
                 .unwrap();
@@ -1257,13 +1206,9 @@ mod tests {
                 .unwrap();
         assert!(nil.is_nil());
         assert_eq!(nil.decode().unwrap().direct_spec().style, "nil");
-        let ignored =
-            PreparedBorder::read_cell_assignment(&[0x21, 0x43, 0x65, 0, 31, 255, 0, 0], false)
-                .unwrap();
-        assert!(!ignored.is_nil());
-        assert!(ignored.decode().is_err());
+        assert!(crate::rejection::take_best_effort().is_empty());
         // cv 0xFFFFFFFF with FF is Word's exact NilBrc whatever the width and
-        // the trailing fields; cvAuto 0xFF000000 is not (Word paints artwork).
+        // the trailing fields.
         for width in [0, 32, 255] {
             for tail in [[0xe0, 0xff], [0x7f, 0x00]] {
                 let nil = PreparedBorder::read_cell_assignment(
@@ -1275,24 +1220,30 @@ mod tests {
                 assert_eq!(nil.decode().unwrap().direct_spec().style, "nil");
             }
         }
-        let auto =
-            PreparedBorder::read_cell_assignment(&[0, 0, 0, 0xff, 8, 255, 0, 0], false).unwrap();
-        assert!(!auto.is_nil());
-        assert!(auto.decode().is_err());
-    }
-
-    #[test]
-    fn public_cell_border_ignored_width_boundary_remains_validated() {
-        // Current conservative scalar validation: Brc type>=40 width MUST<32.
-        // This does not settle whether FF MUST-ignore discards the full Brc.
-        assert!(
-            PreparedBorder::read_cell_assignment(&[0x21, 0x43, 0x65, 0, 31, 255, 0, 0], false,)
-                .is_ok()
-        );
-        assert!(
-            PreparedBorder::read_cell_assignment(&[0x21, 0x43, 0x65, 0, 32, 255, 0, 0], false,)
-                .is_err()
-        );
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // Any other colour, cvAuto included, is a single border of that
+        // colour, width and flags, whatever dptLineWidth.
+        for (bytes, color, width) in [
+            ([0x21, 0x43, 0x65, 0, 31, 255, 0, 0], Some("214365"), 31),
+            ([0xff, 0, 0, 0, 8, 255, 0, 0], Some("ff0000"), 8),
+            ([0xff, 0, 0, 0, 255, 255, 0, 0], Some("ff0000"), 255),
+            ([0, 0, 0, 0xff, 8, 255, 0, 0], None, 8),
+            ([0, 0, 0, 0xff, 32, 255, 0x7f, 0], None, 32),
+        ] {
+            let ignored = PreparedBorder::read_cell_assignment(&bytes, false).unwrap();
+            assert!(!ignored.is_nil());
+            let spec = ignored.decode().unwrap().direct_spec();
+            assert_eq!(spec.style, "single");
+            assert_eq!(spec.color.as_deref(), color);
+            assert_eq!(spec.width, f64::from(width) / 8.0);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "unsupported Word border type 0xFF ignore semantics"
+                )]
+            );
+        }
     }
 
     /// The projected table position and overlap of a row.

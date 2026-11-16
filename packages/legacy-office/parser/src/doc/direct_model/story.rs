@@ -193,13 +193,8 @@ pub(super) fn project(
             // displayed in the box `picture_bullet_display_box` establishes.
             // A box it cannot establish keeps the model atomically
             // unsupported; it never falls back to the text bullet.
-            let mut numbering_info = formatting.direct_numbering(
-                numbering,
-                reference,
-                &marker,
-                &paragraph,
-                direct.numbering_revision_label.as_deref(),
-            )?;
+            let mut numbering_info =
+                formatting.direct_numbering(numbering, reference, &marker, &paragraph)?;
             if let Some(bullet) = marker.picture_bullet().enabled()? {
                 let marker_size = Some(marker.picture_bullet_marker_size_pt()?);
                 match pictures.picture_bullet_display_box(formatting, bullet, marker_size)? {
@@ -4165,7 +4160,8 @@ mod tests {
         assert_eq!(projected.table_grids, [vec![18.0, 32.0, 18.0]]);
         assert_eq!(projected.row_grid_before, [0, 1]);
         assert_eq!(projected.col_spans, [2, 2]);
-        // This recovery does not define nonleading or floating placement.
+        // Nonleading and floating RTL tables keep the acquired origin as the
+        // nearest placement.
         for extra in [
             sprm(0x548a, &1u16.to_le_bytes()),
             sprm(0x548a, &2u16.to_le_bytes()),
@@ -4177,11 +4173,17 @@ mod tests {
                 extra,
             ]
             .concat();
-            let error = try_default_styled_table(&[], &after).err().unwrap();
-            assert!(error.contains("right-to-left"), "{error}");
+            crate::rejection::take_best_effort();
+            let projected = try_default_styled_table(&[], &after).unwrap();
+            assert_eq!(projected.table_directions, [Some(true)]);
+            assert_eq!(projected.markers, ["a"]);
+            assert!(crate::rejection::take_best_effort().contains(&(
+                crate::rejection::BestEffort::Approximated,
+                "direct DOC model cannot place a right-to-left table with a preferred indent"
+            )));
         }
         // The table takes its alignment from its first row. A later leading
-        // row cannot widen admission for a centered table's differing P.
+        // row does not turn a centered table into a leading one.
         let first = [
             sprm(0x560b, &1u16.to_le_bytes()),
             sprm(0x548a, &1u16.to_le_bytes()),
@@ -4192,7 +4194,8 @@ mod tests {
             sprm(0xf661, &[3, 0x6d, 0]),
         ]
         .concat();
-        let error = try_project_table(
+        crate::rejection::take_best_effort();
+        let projected = try_project_table(
             "a\u{7}\u{7}b\u{7}\u{7}\r",
             &[
                 (0, 2, cell()),
@@ -4207,9 +4210,12 @@ mod tests {
                 ..StyleFixture::default()
             },
         )
-        .err()
         .unwrap();
-        assert!(error.contains("right-to-left"), "{error}");
+        assert_eq!(projected.markers, ["a", "b"]);
+        assert!(crate::rejection::take_best_effort().contains(&(
+            crate::rejection::BestEffort::Approximated,
+            "direct DOC model cannot place a right-to-left table with a preferred indent"
+        )));
         let malformed = [sprm(0x560b, &1u16.to_le_bytes()), sprm(0xf661, &[2, 0, 0])].concat();
         let error = try_default_styled_table(&[], &malformed).err().unwrap();
         assert!(error.contains("preferred indent unit"), "{error}");

@@ -56,9 +56,6 @@ pub struct Store {
     ancestors: HashMap<(usize, u8), AncestorValue>,
     // (LSID, level) pairs with at least one real paragraph in this story.
     encountered: HashSet<(i32, u8)>,
-    /// Whether the last activated label used only exactly expanded number
-    /// formats (`number_format::expands_exactly`).
-    last_label_exact: bool,
 }
 
 impl Store {
@@ -75,11 +72,6 @@ impl Store {
         self.ancestors.clear();
         self.encountered.clear();
         Ok(())
-    }
-
-    /// Whether the label of the last `activate` is exactly comparable.
-    pub fn last_label_exact(&self) -> bool {
-        self.last_label_exact
     }
 
     pub fn activate(
@@ -254,10 +246,6 @@ impl Store {
                     .ok_or_else(|| unsupported("incompatible Word list ancestor format"))?;
             }
         }
-        self.last_label_exact = current.placeholders.iter().flatten().all(|&(_, target)| {
-            effective(target).is_some_and(|level| matches!(level.format, 0x17 | 0xff))
-                || number_format::expands_exactly(formats[usize::from(target)])
-        });
         let text = template
             .expand(
                 |index| {
