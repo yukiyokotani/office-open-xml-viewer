@@ -1,17 +1,6 @@
 //! MS-OSHARED 2.2.1.3 MSONFC to ECMA-376 17.18.59 ST_NumberFormat.
 //! Callers validate their context-specific exclusions (list levels/pages).
 
-/// Whether the shared counter formatter expands `name` exactly, rather than
-/// through its decimal fallback. A label built from any other format is still
-/// projected as before, but cannot be compared with another label: two
-/// different Word labels could collapse to one string.
-pub(super) fn expands_exactly(name: &str) -> bool {
-    matches!(
-        name,
-        "decimal" | "upperRoman" | "lowerRoman" | "upperLetter" | "lowerLetter" | "decimalZero"
-    )
-}
-
 pub(super) fn name(value: u8) -> Result<&'static str, String> {
     const FORMATS: [&str; 60] = [
         "decimal",

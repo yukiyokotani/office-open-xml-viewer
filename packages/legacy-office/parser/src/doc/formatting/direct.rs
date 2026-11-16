@@ -13,9 +13,6 @@ pub(in crate::doc) struct DirectResolvedParagraph {
     /// table paragraph may instead repeat its table's position.
     pub(in crate::doc) frame_gap: Option<crate::doc::paragraph::FrameGap>,
     pub(in crate::doc) native_frame: Option<crate::doc::paragraph::NativeFrameFacts>,
-    /// MS-DOC 2.9.159 NumRM prior label (fNumRM set). The numbering consumer
-    /// admits only a label equal to the current one.
-    pub(in crate::doc) numbering_revision_label: Option<String>,
 }
 
 pub(in crate::doc) struct DirectInlinePictureFacts {
@@ -54,18 +51,8 @@ impl Formatting<'_> {
         reference: numbering::Reference,
         marker: &Properties,
         paragraph: &DocParagraph,
-        revision_label: Option<&str>,
     ) -> Result<NumberingInfo, String> {
-        let numbering =
-            store.activate(&self.numbering, reference, marker, paragraph, &self.fonts)?;
-        if revision_label.is_some_and(|prior| prior != numbering.text || !store.last_label_exact())
-        {
-            // MS-DOC 2.9.159: the label changed since revision tracking
-            // began; Word shows that change as revision markup. A current
-            // label in a format without an exact expansion cannot be compared.
-            self.unsupported_paragraph_properties = true;
-        }
-        Ok(numbering)
+        store.activate(&self.numbering, reference, marker, paragraph, &self.fonts)
     }
 
     pub(in crate::doc) fn direct_anchor_host_metrics(
@@ -104,10 +91,6 @@ impl Formatting<'_> {
         // MS-DOC 2.6.4 sprmSDxtCharSpace is relative to the Normal style,
         // not the paragraph mark or any visible body run's direct formatting.
         let normal = self.paragraph_base(0)?;
-        // This ancillary Normal-style query has no later run cascade. Keep
-        // its conservative unsupported gate when the style's final Hresi
-        // would require a word-breaking consumer.
-        self.unsupported_character_properties |= normal.word_breaking_requires_consumer();
         normal.direct_font_size_pt()
     }
 
@@ -151,21 +134,11 @@ impl Formatting<'_> {
         paragraph.default_font_family_east_asia = mark_facts.font_family_east_asia.clone();
         paragraph.paragraph_mark_font_facts = Some(mark_facts);
         paragraph.paragraph_mark_color = mark.direct_color();
-        let numbering_revision_label = resolved
-            .properties
-            .numbering_revision_label()
-            .map(str::to_string);
-        if numbering_revision_label.is_some() && resolved.numbering.is_none() {
-            // A previously numbered paragraph that is no longer numbered is a
-            // numbering change Word marks up (MS-DOC 2.9.159 fNumRM).
-            self.unsupported_paragraph_properties = true;
-        }
         Ok(DirectResolvedParagraph {
             paragraph,
             numbering: resolved.numbering,
             frame_gap,
             native_frame,
-            numbering_revision_label,
         })
     }
 
