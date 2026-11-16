@@ -16,7 +16,7 @@ const fontFiles = (...args: Parameters<typeof publicFontFiles>) => descriptor(pu
 const fontResolver = (...args: Parameters<typeof publicFontResolver>) => descriptor(publicFontResolver(...args));
 import { docxFontFamilyPlan } from './font-demand-plan.js';
 import { formatOrdinalNumber } from '@silurus/ooxml-core';
-import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, loadDocxFontSources } from './font-source-load.js';
+import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, docxRegistersEveryDeclaration, loadDocxFontSources } from './font-source-load.js';
 import { LAYOUT_SYNTHESIZED_SCALARS } from './line-layout.js';
 import type { DocxDocumentModel } from './types.js';
 
@@ -65,9 +65,22 @@ describe('docxFontDemandScalars (design §6)', () => {
       sup: [{ kind: 'run', text: '2' }] }], display: false, fontSize: 10 }]));
     expect(equation).not.toBe('all');
     for (const ch of 'πr^2') expect(equation, ch).toContain(ch.codePointAt(0)!);
+    // Measured as spelled: a private-use code is demanded as itself.
+    const literal = scalarsOf(docWith([{ type: 'math', nodes: [{ kind: 'run', text: 'x\uF061' }], display: false, fontSize: 10 }]));
+    expect(literal).not.toBe('all');
+    expect(literal).toContain(0xf061);
     // A metafile's text records demand their own scalars when it plays (core
     // bindMetafileFontDemand).
     expect(scalarsOf(docWith([{ type: 'image', imagePath: 'word/media/image1.emf', mimeType: 'image/emf' }]))).not.toBe('all');
+  });
+
+  it('registers every declaration as its own face exactly where demand was \'all\' before', () => {
+    // Metafile text paints at any LOGFONT weight: a document naming a
+    // metafile picture or holding an equation keeps per-declaration faces.
+    expect(docxRegistersEveryDeclaration(docWith([{ type: 'image', imagePath: 'word/media/image1.emf', mimeType: 'image/emf' }]))).toBe(true);
+    expect(docxRegistersEveryDeclaration(docWith([{ type: 'image', imagePath: 'word/media/image1.wmf', mimeType: 'application/octet-stream' }]))).toBe(true);
+    expect(docxRegistersEveryDeclaration(docWith([{ type: 'math', nodes: [], display: false, fontSize: 10 }]))).toBe(true);
+    expect(docxRegistersEveryDeclaration(docWith([text('a'), { type: 'image', imagePath: 'word/media/image1.png', mimeType: 'image/png' }]))).toBe(false);
   });
 
   it.each([

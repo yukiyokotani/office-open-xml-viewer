@@ -74,6 +74,9 @@ export function collectSlideFontDemand(
     plain.add(text);
     return scalars.add(text);
   };
+  /** Text painted as spelled in a generic face: no symbol conversion applies,
+   * so a private-use code is demanded as itself. */
+  const addLiteral = (text: string): boolean => scalars.addSymbolText(text, [], true);
   /** `addSymbolText(text, [painted(family), sym && painted(sym)])`: without a
    * symbol-encoded face in either slot that is `add(text)`. */
   const add = (text: string, family: string | null | undefined, sym?: string | null): boolean => {
@@ -109,16 +112,17 @@ export function collectSlideFontDemand(
         if (!add(AUTONUM_ALPHABET, face)) return false;
       } else if (bullet?.type !== 'none' && bullet?.type !== 'inherit' && bullet?.type !== 'blip') return false;
       // An MCE preview of a failed equation (`mathFallbacks`, §M.1 Fallback)
-      // paints its text in the generic sans-serif face.
-      for (const preview of (para as Paragraph).mathFallbacks ?? []) if (!addPlain(preview.text)) return false;
+      // paints its text as spelled in the generic sans-serif face.
+      for (const preview of (para as Paragraph).mathFallbacks ?? []) if (!addLiteral(preview.text)) return false;
       for (const run of para.runs) {
         if (run.type === 'break') continue;
         if (run.type === 'math') {
           // A converted equation paints a raster whose glyphs reach no
           // document font. A failed one without a preview measures and paints
-          // its stored fallback text, else the unavailable placeholder, in
-          // the generic sans-serif face (renderer paintEquation).
-          if (!addPlain(run.fallbackText ?? '') || !addPlain(EQUATION_UNAVAILABLE)) return false;
+          // its stored fallback text as spelled, else the unavailable
+          // placeholder, in the generic sans-serif face (renderer
+          // paintEquation).
+          if (!addLiteral(run.fallbackText ?? '') || !addLiteral(EQUATION_UNAVAILABLE)) return false;
           continue;
         }
         if (run.type !== 'text') return false;

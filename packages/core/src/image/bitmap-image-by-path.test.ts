@@ -625,6 +625,32 @@ describe('getCachedBitmapByPath', () => {
     dropBitmapCacheByPath(fetchImage);
   });
 
+  it('reads metafile bytes for their font demand within the decode concurrency limit', async () => {
+    stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    let active = 0;
+    let peak = 0;
+    class SlowBlob extends Blob {
+      override async arrayBuffer(): Promise<ArrayBuffer> {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        return super.arrayBuffer();
+      }
+    }
+    const fetchImage = vi.fn(async () => new SlowBlob([wmf as BlobPart], { type: 'image/wmf' }));
+    const demand = vi.fn(async () => ({ families: new Map(), faces: [] }));
+    bindMetafileFontDemand(fetchImage, demand);
+    const paths = Array.from({ length: MAX_CONCURRENT_IMAGE_DECODES * 3 }, (_, index) => `word/media/slow${index}.wmf`);
+    await Promise.all(paths.map((path) => getCachedBitmapByPath(path, 'image/wmf', fetchImage, { widthPt: 50, heightPt: 25 })));
+    expect(demand).toHaveBeenCalledTimes(paths.length);
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThanOrEqual(MAX_CONCURRENT_IMAGE_DECODES);
+    bindMetafileFontDemand(fetchImage, undefined);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
   it('a failed metafile font demand keeps the faces already bound', async () => {
     stubMetafileSurfaceCreation();
     const wmf = buildMinimalWmf();

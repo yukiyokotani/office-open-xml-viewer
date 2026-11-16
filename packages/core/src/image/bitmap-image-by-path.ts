@@ -1138,10 +1138,13 @@ export function getCachedBitmapByPath(
       // already loaded (font loading never fails a picture).
       let run = bound.runs.get(imagePath);
       if (!run) {
-        const blob = profile.initialBlob;
-        run = (blob ? Promise.resolve(blob) : fetchImage(imagePath, mimeType))
-          .then((source) => source.arrayBuffer())
-          .then((buffer) => bound.demand(new Uint8Array(buffer)))
+        // Reading the bytes and walking their records take a decode slot;
+        // the font loading the walk starts does not hold one.
+        run = withDecodedImageSlot(owner, async () => {
+          const source = profile.initialBlob ?? await fetchImage(imagePath, mimeType);
+          return { loading: bound.demand(new Uint8Array(await source.arrayBuffer())) };
+        })
+          .then(({ loading }) => loading)
           .then((loaded) => {
             if (cacheGeneration(owner) === generation && metafileDemandByOwner.get(owner) === bound) {
               bindMetafileFontFamilies(owner, loaded);

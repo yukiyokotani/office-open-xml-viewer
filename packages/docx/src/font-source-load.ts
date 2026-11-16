@@ -93,8 +93,10 @@ const DOCX_RUN_WEIGHTS: readonly number[] = Object.freeze([400, 700]);
  * core collector demands what the shaper may substitute (mirrored partners,
  * Arabic presentation forms).
  */
-function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
+function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | { texts: string[]; literal: string[] } {
   const texts: string[] = [];
+  // Texts measured as they are spelled, in no symbol-encoded face.
+  const literal: string[] = [];
   let verticalForms = false;
   let kashida = false;
   const settings = (doc as { __noteLayoutSettings?: { footnoteNumberFormat?: string; endnoteNumberFormat?: string } })
@@ -128,7 +130,9 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
       }
       if (record.type === 'chart') return 'all';
       if (record.type === 'math') {
-        texts.push(typeof record.fallbackText === 'string'
+        // Measured as spelled, in the paragraph's generic stack (layout
+        // break-opportunities.ts): no symbol conversion applies.
+        literal.push(typeof record.fallbackText === 'string'
           ? record.fallbackText : mathFallbackText(record.nodes as Parameters<typeof mathFallbackText>[0]));
         continue;
       }
@@ -168,7 +172,7 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
       if (child !== null && typeof child === 'object') pending.push(child);
     }
   }
-  return texts;
+  return { texts, literal };
 }
 
 /**
@@ -206,13 +210,14 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
   // Layout-generated text (a field result such as a PAGE number) is painted
   // in its field's fonts too.
   if (!collector.addSymbolText(String.fromCodePoint(...LAYOUT_SYNTHESIZED_SCALARS), symbolFamilies)) return 'all';
-  for (const text of synthesized) if (!collector.addSymbolText(text, symbolFamilies)) return 'all';
+  for (const text of synthesized.texts) if (!collector.addSymbolText(text, symbolFamilies)) return 'all';
+  for (const text of synthesized.literal) if (!collector.addSymbolText(text, [], true)) return 'all';
   return collector.result();
 }
 
 /** Whether the document names a WMF/EMF picture part (by type or part
- * name), anywhere in the parsed model. */
-function docxReferencesMetafile(doc: DocxDocumentModel): boolean {
+ * name) or holds an OMML equation, anywhere in the parsed model. */
+export function docxRegistersEveryDeclaration(doc: DocxDocumentModel): boolean {
   const pending: unknown[] = [doc];
   const seen = new Set<object>();
   while (pending.length > 0) {
@@ -220,7 +225,8 @@ function docxReferencesMetafile(doc: DocxDocumentModel): boolean {
     if (value === null || typeof value !== 'object' || seen.has(value) || ArrayBuffer.isView(value)) continue;
     seen.add(value);
     const record = value as Record<string, unknown>;
-    if ((typeof record.mimeType === 'string' && isMetafileMime(record.mimeType))
+    if (record.type === 'math'
+      || (typeof record.mimeType === 'string' && isMetafileMime(record.mimeType))
       || (typeof record.imagePath === 'string' && METAFILE_PATH.test(record.imagePath))) return true;
     for (const child of Object.values(record)) if (child !== null && typeof child === 'object') pending.push(child);
   }
@@ -263,9 +269,13 @@ export async function loadDocxFontSources(
     // The session uses them only for a finite demand (an `'all'` demand
     // registers every declaration as its own face). Metafile text paints at
     // its LOGFONT weight (MS-WMF 2.2.1.2, any of 1–1000), which only the
-    // picture's records tell, so a document with metafile pictures registers
-    // every declaration as its own face too.
-    ...(docxReferencesMetafile(doc) ? {} : { requestedWeights: DOCX_RUN_WEIGHTS }),
+    // picture's records tell, and the players sniff content, so a picture's
+    // part name does not prove it paints no text. Ranging is therefore kept
+    // exactly where it applied before metafile and equation text had a
+    // finite demand: a document that names a metafile picture or holds an
+    // equation registers every declaration as its own face, as its former
+    // `'all'` demand did, and the weight metafile text paints at is unchanged.
+    ...(docxRegistersEveryDeclaration(doc) ? {} : { requestedWeights: DOCX_RUN_WEIGHTS }),
   });
   try {
     // The scalars are collected while the families' stylesheets download.

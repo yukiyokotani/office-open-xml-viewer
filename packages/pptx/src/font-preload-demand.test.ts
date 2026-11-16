@@ -69,11 +69,12 @@ describe('complete conservative PPTX paint demand', () => {
   it('demands what a failed equation paints: its MCE preview, stored fallback text or placeholder', () => {
     const body = (value: Slide) => (value.elements[0] as unknown as { textBody: Record<string, unknown> & { paragraphs: Array<Record<string, unknown>> } }).textBody;
     const equation = slide('A');
-    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false, fallbackText: 'πr²' }];
-    body(equation).paragraphs[0].mathFallbacks = [{ start: 0, end: 1, text: '∑α' }];
+    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false, fallbackText: 'πr²\uF061' }];
+    body(equation).paragraphs[0].mathFallbacks = [{ start: 0, end: 1, text: '∑α\uF062' }];
     const demand = collectSlideFontDemand(equation, new Set(), 10000);
     expect(demand).not.toBe('all');
-    expect(demand).toEqual(expect.arrayContaining([...'πr²∑α'].map((ch) => ch.codePointAt(0)!)));
+    // Painted as spelled: private-use codes are demanded as themselves.
+    expect(demand).toEqual(expect.arrayContaining([...'πr²∑α\uF061\uF062'].map((ch) => ch.codePointAt(0)!)));
   });
 
   it('demands nothing for text-free images and media posters', () => {
