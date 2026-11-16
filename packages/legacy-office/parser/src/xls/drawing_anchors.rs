@@ -264,6 +264,10 @@ pub(super) fn chart_sheet_charts(
                                             client.kind == 0x005d
                                                 && client.data.len() >= 22
                                                 && client.data[..6] == [0x15, 0, 0x12, 0, 5, 0]
+                                                // ... and whose subrecords
+                                                // end with FtEnd at the
+                                                // record end.
+                                                && object_complete(client.data)
                                         });
                                     if owner.is_none() {
                                         return Err(unsupported(

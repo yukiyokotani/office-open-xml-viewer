@@ -947,6 +947,11 @@ fn chart_objects_of_a_chart_sheet_are_drawn_over_its_chart() {
     assert!(projected_chart_sheet(&owned)
         .expect_err("rejected")
         .contains("invalid BIFF drawing object owner"));
+    let mut owned = chart_sheet_records(1);
+    owned[object].1.truncate(22);
+    assert!(projected_chart_sheet(&owned)
+        .expect_err("rejected")
+        .contains("invalid BIFF drawing object owner"));
     // A substream no chart object owns is not a chart sheet's structure.
     let mut owned = chart_sheet_records(0);
     owned.splice(1..1, bar_chart(true, None));
