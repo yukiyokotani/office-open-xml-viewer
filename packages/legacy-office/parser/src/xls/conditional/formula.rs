@@ -404,8 +404,9 @@ pub(in super::super) fn framed(rgce: &[u8]) -> bool {
             0x1f => (9, 0, 1),
             0x20..=0x7f => match token & 0x1f {
                 // PtgArray and PtgMemArea take their data from the RgbExtra,
-                // which only a complete decompilation reads.
-                0x00 | 0x06 => return false,
+                // which only a complete decompilation reads, and the PtgMem
+                // tokens state the size of the expression behind them.
+                0x00 | 0x06..=0x09 => return false,
                 0x01 => {
                     let (Some(&low), Some(&high)) = (rgce.get(at + 1), rgce.get(at + 2)) else {
                         return false;
@@ -421,10 +422,6 @@ pub(in super::super) fn framed(rgce: &[u8]) -> bool {
                 },
                 0x03 | 0x04 | 0x0a | 0x0c => (5, 0, 1),
                 0x05 | 0x0b | 0x0d => (9, 0, 1),
-                // PtgMemErr, PtgMemNoMem and PtgMemFunc precede
-                // the expression they describe.
-                0x07 | 0x08 => (7, 0, 0),
-                0x09 => (3, 0, 0),
                 0x19 | 0x1a | 0x1c => (7, 0, 1),
                 0x1b | 0x1d => (11, 0, 1),
                 _ => return false,

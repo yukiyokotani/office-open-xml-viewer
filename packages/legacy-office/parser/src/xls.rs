@@ -666,6 +666,22 @@ fn validate_direct_drawings(
             continue;
         }
         admit_direct_object(&anchor)?;
+        // A form control is not drawn, but the TxO of its caption is part
+        // of the sheet's records and must be one.
+        let controls = std::iter::once((anchor.object_type, anchor.shape.as_ref())).chain(
+            anchor
+                .members
+                .iter()
+                .map(|member| (member.object_type, member.shape.as_ref())),
+        );
+        for (kind, shape) in controls {
+            if let Some(text) = shape
+                .filter(|_| shapes::form_control(kind))
+                .and_then(|shape| shape.text)
+            {
+                shapes::txo_text(records, text)?;
+            }
+        }
         if anchor.object_type == 25 {
             if let Some(text) = anchor.shape.as_ref().and_then(|shape| shape.text) {
                 comment_texts.insert((anchor.sheet, anchor.object_id), text);
