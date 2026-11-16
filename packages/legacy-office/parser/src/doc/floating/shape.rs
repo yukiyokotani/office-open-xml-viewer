@@ -332,10 +332,15 @@ impl<'a> Table<'a> {
                 // Word's own DOCX of a corpus document writes both such
                 // boxes as `mso-next-textbox` referencing itself, with their
                 // own text; a second document has four more self-references.
-                // A real chain (another shape) stays unsupported.
                 0x8a if value == 0 || Some(value) == spid => {}
                 // hspNext names the next shape of a linked textbox chain.
-                0x8a => return Err(unsupported("linked Word textbox chains are not supported")),
+                // The DOCX model has no linked text boxes: the story stays
+                // in the first box of its chain (see the lTxid low word
+                // below) and the later boxes are drawn without text.
+                0x8a => crate::rejection::approximated(
+                    "linked Word textbox chain keeps its story in the first box",
+                    (),
+                ),
                 0xbf => {}
                 // Picture-only Boolean properties have no effect on shapes.
                 0x13f => {}
@@ -544,15 +549,28 @@ impl<'a> Table<'a> {
 
         let text = match (text_id.filter(|id| *id != 0), client_text) {
             (None, None) => None,
+            // MS-DOC 2.9.106 / MS-ODRAW lTxid: the high word is the
+            // one-based FTXBXS index and the low word the zero-based
+            // position of the shape in its chain of linked textboxes. A
+            // later box of a chain holds the text that overflows the boxes
+            // before it; the story is projected in the first box only.
+            (Some(id), client)
+                if client.is_none_or(|client| client == id)
+                    && id & 0xffff != 0
+                    && id >> 16 != 0 =>
+            {
+                crate::rejection::approximated(
+                    "linked Word textbox chain keeps its story in the first box",
+                    (),
+                );
+                None
+            }
             (Some(id), client) if client.is_none_or(|client| client == id) => {
                 if line_shape {
                     return Err(unsupported("Word line shapes cannot carry text"));
                 }
-                // MS-DOC 2.9.106: the high word is the one-based FTXBXS index
-                // and the low word is zero. A nonzero low word is a later box
-                // of a linked chain.
-                if id & 0xffff != 0 || id >> 16 == 0 {
-                    return Err(unsupported("linked Word textbox chains are not supported"));
+                if id >> 16 == 0 {
+                    return Err(unsupported("Word shape text references no textbox"));
                 }
                 Some(Text {
                     index: (id >> 16) as usize,
@@ -1095,8 +1113,26 @@ mod tests {
         );
         let own = container(&[(0x80, 0x10000), (0x8a, 0x806)], &[], &fsp);
         assert!(read(202, 0xa00, &own, [9, 9]).unwrap().text.is_some());
-        let other = container(&[(0x80, 0x10000), (0x8a, 0x807)], &[], &fsp);
-        assert!(read(202, 0xa00, &other, [9, 9]).is_err());
+        // A real chain: the first box keeps the story and a later box (a
+        // nonzero low word of lTxid) is drawn without text.
+        let note = (
+            crate::rejection::BestEffort::Approximated,
+            "linked Word textbox chain keeps its story in the first box",
+        );
+        crate::rejection::take_best_effort();
+        let first = container(&[(0x80, 0x10000), (0x8a, 0x807)], &[], &fsp);
+        assert_eq!(
+            read(202, 0xa00, &first, [9, 9])
+                .unwrap()
+                .text
+                .unwrap()
+                .index,
+            1
+        );
+        assert_eq!(crate::rejection::take_best_effort(), [note]);
+        let later = container(&[(0x80, 0x10001)], &[], &fsp);
+        assert!(read(202, 0xa00, &later, [9, 9]).unwrap().text.is_none());
+        assert_eq!(crate::rejection::take_best_effort(), [note]);
     }
 
     #[test]
@@ -1207,8 +1243,6 @@ mod tests {
             (1, &[(0xbf, 0x80008)], &[]),
             (1, &[(0x85, 2)], &[]),
             (1, &[(0x88, 1)], &[]),
-            (1, &[(0x80, 0x10001)], &[]),
-            (1, &[(0x80, 0x10000), (0x8a, 0x806)], &[]),
             // Relative sizing, pseudo-inline, horizontal rule, unknown ids.
             (1, &[], &[(0x7c3, 0xc8)]),
             (1, &[], &[(0x7c1, 10_001)]),

@@ -192,10 +192,18 @@ pub(super) fn project(
             // Bullet Pictures document's picture (bookmark, PICF and BLIP),
             // displayed in the box `picture_bullet_display_box` establishes.
             // A box it cannot establish keeps the model atomically
-            // unsupported; it never falls back to the text bullet.
+            // unsupported. A document without a Bullet Pictures document
+            // has no picture to display: Word then draws the level's text
+            // bullet (Word control).
             let mut numbering_info =
                 formatting.direct_numbering(numbering, reference, &marker, &paragraph)?;
-            if let Some(bullet) = marker.picture_bullet().enabled()? {
+            let bullet = marker.picture_bullet().enabled()?;
+            if bullet.is_some() && !pictures.has_bullet_document() {
+                crate::rejection::approximated(
+                    "Word picture bullet without its picture shown as the text bullet",
+                    (),
+                );
+            } else if let Some(bullet) = bullet {
                 let marker_size = Some(marker.picture_bullet_marker_size_pt()?);
                 match pictures.picture_bullet_display_box(formatting, bullet, marker_size)? {
                     Some(display_box) => pictures
@@ -1343,12 +1351,12 @@ fn textbox_content(
         false,
         table_sequence,
     )?;
-    // List counters shared between textboxes and the main story, and breaks
-    // inside a textbox, have no Office control yet: keep them fail-closed.
-    // A bullet level has no counter, so its marker does not depend on that
-    // sharing; bullets are projected (each textbox uses its own numbering
-    // store, which only matters for counted levels).
-    let numbered = || unsupported("direct DOC model does not yet number textbox paragraphs");
+    // Each textbox uses its own numbering store: a numbered list in a
+    // textbox counts from its first paragraph there (Word control). Whether
+    // Word continues a count between a textbox and the main story has no
+    // control, so a counted level is recorded. A bullet level has no
+    // counter. Breaks inside a textbox have no Office control yet and stay
+    // fail-closed.
     let counted = |paragraph: &docx_model::DocParagraph| {
         paragraph
             .numbering
@@ -1356,10 +1364,17 @@ fn textbox_content(
             .is_some_and(|numbering| numbering.format != "bullet")
     };
     let mut tables = Vec::new();
+    let mut numbered = false;
     for block in &body {
         match block {
-            BodyElement::Paragraph(paragraph) if counted(paragraph) => return Err(numbered()),
-            BodyElement::Paragraph(_) => {}
+            BodyElement::Paragraph(paragraph) => {
+                if counted(paragraph) && !std::mem::replace(&mut numbered, true) {
+                    crate::rejection::approximated(
+                        "Word textbox list numbers counted within the textbox",
+                        (),
+                    );
+                }
+            }
             BodyElement::Table(table) => tables.push(table.as_ref()),
             _ => {
                 return Err(unsupported(
@@ -1376,10 +1391,14 @@ fn textbox_content(
             .flat_map(|cell| &cell.content)
         {
             match element {
-                docx_model::CellElement::Paragraph(paragraph) if counted(paragraph) => {
-                    return Err(numbered())
+                docx_model::CellElement::Paragraph(paragraph) => {
+                    if counted(paragraph) && !std::mem::replace(&mut numbered, true) {
+                        crate::rejection::approximated(
+                            "Word textbox list numbers counted within the textbox",
+                            (),
+                        );
+                    }
                 }
-                docx_model::CellElement::Paragraph(_) => {}
                 docx_model::CellElement::Table(table) => tables.push(table.as_ref()),
             }
         }

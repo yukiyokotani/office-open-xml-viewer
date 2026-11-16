@@ -1554,6 +1554,53 @@ mod tests {
     }
 
     #[test]
+    fn numbered_textbox_paragraphs_count_within_the_textbox() {
+        let bytes = with_numbering(&drawing_shape_source(Some("one\rtwo\r"), false));
+        crate::rejection::take_best_effort();
+        let result =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let shape = result
+            .document
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => {
+                    paragraph.runs.iter().find_map(|run| match run {
+                        DocRun::Shape(shape) => Some(shape),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("textbox shape");
+        let numbers: Vec<_> = shape
+            .text_box_content
+            .iter()
+            .map(|block| {
+                let docx_model::TextBoxBlockWire::Body(BodyElement::Paragraph(paragraph)) = block
+                else {
+                    panic!("textbox paragraph")
+                };
+                paragraph
+                    .numbering
+                    .as_ref()
+                    .map(|numbering| (numbering.format.clone(), numbering.text.clone()))
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            [
+                Some(("decimal".to_string(), "1.".to_string())),
+                Some(("decimal".to_string(), "2.".to_string())),
+            ]
+        );
+        assert!(crate::rejection::take_best_effort().contains(&(
+            crate::rejection::BestEffort::Approximated,
+            "Word textbox list numbers counted within the textbox"
+        )));
+    }
+
+    #[test]
     fn textbox_shape_projects_paint_margins_and_its_story() {
         let bytes = drawing_shape_source(Some("Inside\rbox\r"), false);
         let result =
@@ -3441,9 +3488,25 @@ mod tests {
             ],
             [Some(72.0), Some(36.0)]
         );
+        // Without the `_PictureBullets` bookmark there is no picture: Word
+        // draws the level's text bullet (Word control).
+        for bookmarks in [&[][..], &[("_PictureBullet", 0, 1)][..]] {
+            let bytes = picture_bullet_source(&picture_bullet_level(0, 1), bookmarks, 75);
+            crate::rejection::take_best_effort();
+            let result = picture_bullet_result(&bytes).unwrap();
+            let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+                panic!("paragraph")
+            };
+            let numbering = paragraph.numbering.as_ref().unwrap();
+            assert_eq!(numbering.pic_bullet_width_pt, None);
+            assert!(numbering.pic_bullet_transform.is_none());
+            assert!(result.resources.is_empty());
+            assert!(crate::rejection::take_best_effort().contains(&(
+                crate::rejection::BestEffort::Approximated,
+                "Word picture bullet without its picture shown as the text bullet"
+            )));
+        }
         for (bookmarks, relative_cp, expected) in [
-            (&[][..], 0, "lacks its bookmark"),
-            (&[("_PictureBullet", 0, 1)][..], 0, "lacks its bookmark"),
             (&[("_PictureBullets", 0, 1)][..], 1, "outside its bookmark"),
             (
                 &[("_PictureBullets", 1, 2)][..],
