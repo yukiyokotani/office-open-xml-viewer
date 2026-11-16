@@ -1,5 +1,6 @@
 import { prepareDocxHostFontMetrics, type HostFontLineMeasurement } from './host-font-line-metrics.js';
 import {
+  bindMetafileFontDemand,
   bindMetafileFontFamilies,
   activeFontSet,
   loadNativeRouteSentinels,
@@ -48,7 +49,7 @@ import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.js';
 import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
 import { completeDocxFontPresence, docxFontFamilyPlan } from './font-demand-plan.js';
-import { loadDocxFontSources, type DocxLoadedFontSources } from './font-source-load.js';
+import { loadDocxFontSources, metafileFontDemand, type DocxLoadedFontSources } from './font-source-load.js';
 import {
   prepareServedFaceLines,
   servedFaceLineRequests,
@@ -64,6 +65,7 @@ import type {
 } from './worker-protocol';
 import { layoutSourceModelAdapterFromOwnedModel } from './layout-source-model-adapter.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
+import { errorPageLayoutReady } from './layout/document-layout-variants.js';
 import {
   retainRenderWorkerDocumentLayout,
   type RetainedRenderWorkerDocumentLayout,
@@ -151,6 +153,7 @@ function releaseRetainedFonts(): void {
   fontSourceSession = null;
   chartFontSubstitutionsOfDoc = undefined;
   bindMetafileFontFamilies(getImage, undefined);
+  bindMetafileFontDemand(getImage, undefined);
   embeddedFontFaces = [];
   try { unloadOfficeFontFallbacks(office); } catch {}
   try { sources?.release(); } catch {}
@@ -482,6 +485,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         if (nativeRouteLines.some(Boolean)) {
           nativeRouteMetrics = admitDocxNativeRouteLines(nativeRouteLines, activeFontSet());
         }
+        // A fatally unparseable document loads its error page here (#2248).
+        const errorPage = errorPageLayoutReady(source);
+        if (errorPage) await errorPage;
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         const layoutServices = createLayoutServices(source, { ...serviceOptions, servedFaceLines, nativeRouteMetrics });
         const requestedDoc = retainRenderWorkerDocumentLayout(
@@ -493,8 +499,10 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         officeFontFaces = officeFaces;
         fontSourceSession = loadedSources?.session ?? null;
         chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded);
-        // Metafile pictures paint their text with the served faces too.
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
         bindMetafileFontFamilies(getImage, loadedSources?.loaded);
+        bindMetafileFontDemand(getImage, loadedSources ? metafileFontDemand(loadedSources.session) : undefined);
         embeddedFontFaces = embeddedFonts.faces;
         fontDiagnostics = embeddedFonts.diagnostics ?? [];
         fontsTransferred = true;

@@ -1,7 +1,9 @@
 // Windows metafile pictures in OpenDocument text and spreadsheets reach the
 // shared renderer under the media types it keys metafile handling on
-// (core `isMetafileMime`): a clipped metafile is cropped against its frame,
-// and its text records make the font demand cover every scalar.
+// (core `isMetafileMime`): a clipped metafile is cropped against its frame.
+// Its text records need no load-time font demand: they demand their own
+// scalars when the picture plays (core `bindMetafileFontDemand`, bound by
+// the DOCX, XLSX and PPTX documents ODF sources load into).
 import { describe, expect, it } from 'vitest';
 import { metafileRasterSize } from '@silurus/ooxml-core';
 import { buildOdtFixture } from '../odt-fixture.js';
@@ -48,7 +50,7 @@ function pictures(value: unknown, found: Picture[] = []): Picture[] {
 }
 
 describe('OpenDocument metafile pictures', () => {
-  it('ODT: crops against the metafile frame and demands every scalar', async () => {
+  it('ODT: crops against the metafile frame and keeps the load-time demand finite', async () => {
     const model = await materializeDocxDocument(buildOdtFixture({
       automaticStyles: `<style:style style:name="fr1" style:family="graphic"><style:graphic-properties fo:clip="${CLIP}"/></style:style>`,
       body: `<text:p><draw:frame ${DRAW} draw:style-name="fr1" text:anchor-type="as-char" svg:width="3in" svg:height="1in"><draw:image xlink:href="${PICTURE}"/></draw:frame>x</text:p>`,
@@ -60,10 +62,10 @@ describe('OpenDocument metafile pictures', () => {
     // The shared painter rasterizes the whole frame and crops it.
     const size = metafileRasterSize(picture!.mimeType!, picture!.srcRect as never, 216, 72)!;
     expect(size.widthPt).toBeCloseTo(288, 6);
-    expect(docxFontDemandScalars(model as unknown as DocxDocumentModel)).toBe('all');
+    expect(docxFontDemandScalars(model as unknown as DocxDocumentModel)).not.toBe('all');
   });
 
-  it('ODS: crops against the metafile frame and demands every scalar', async () => {
+  it('ODS: crops against the metafile frame and keeps the load-time demand finite', async () => {
     const workbook = await materializeXlsxWorkbook(buildOdsFixture({
       automaticStyles: `<style:style style:name="gr1" style:family="graphic"><style:graphic-properties fo:clip="${CLIP}"/></style:style>`,
       body: '<table:table table:name="S"><table:table-row><table:table-cell>'
@@ -78,6 +80,6 @@ describe('OpenDocument metafile pictures', () => {
     const demand = new XlsxFontDemand(workbook.workbookIndex as unknown as ParsedWorkbook, 'jp', []);
     demand.take();
     demand.worksheetParts(sheet);
-    expect(demand.take()?.scalars).toBe('all');
+    expect(demand.take()?.scalars ?? []).not.toBe('all');
   });
 });

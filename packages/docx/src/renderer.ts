@@ -160,7 +160,10 @@ function normalizeRenderOptions(
   };
 }
 
-/** Internal production entry: paint from the same sealed source used by layout. */
+/** Internal production entry: paint from the same sealed source used by layout.
+ * A source that failed to parse comes with its error page's code loaded
+ * (`errorPageLayoutReady`, #2248): whatever produced it asynchronously awaited
+ * that, so this adapter stays free of waits ahead of the paint's render token. */
 export async function renderLayoutSourceToCanvas(
   source: LayoutSourceStore,
   canvas: HTMLCanvasElement | OffscreenCanvas,

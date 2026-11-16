@@ -46,9 +46,10 @@ describe('chart paint texts for font demand', () => {
       .toEqual(expect.arrayContaining(['令和']));
   });
 
-  it('declines region maps, metafile or unknown image fills and incomplete locale short dates', () => {
+  it('declines region maps, unknown image fills and incomplete locale short dates', () => {
     expect(chartPaintTexts({ chartType: 'regionMap', series: [] })).toBe('all');
-    expect(chartPaintTexts({ chartType: 'bar', series: [{ fill: { fillType: 'image', imagePath: 'ppt/media/i.emf', mimeType: 'image/emf' } }] })).toBe('all');
+    // A metafile fill demands its text records' scalars when it plays.
+    expect(chartPaintTexts({ chartType: 'bar', series: [{ fill: { fillType: 'image', imagePath: 'ppt/media/i.emf', mimeType: 'image/emf' } }] })).not.toBe('all');
     expect(chartPaintTexts({ chartType: 'bar', series: [{ fill: { fillType: 'image', imagePath: 'ppt/media/i.bin', mimeType: 'application/octet-stream' } }] })).toBe('all');
     expect(chartPaintTexts({ chartType: 'bar', series: [{ fill: { fillType: 'image', imagePath: 'ppt/media/i.png', mimeType: 'image/png' } }] })).not.toBe('all');
     const builtin14 = { chartType: 'bar', dataTable: {}, series: [{ catFormatBuiltinId: 14 }] };

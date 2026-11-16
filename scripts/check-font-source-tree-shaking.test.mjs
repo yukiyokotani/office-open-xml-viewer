@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { staticLazyFontSourceModules } from './check-font-source-tree-shaking.mjs';
+import { staticLazyFontSourceModules, staticLazyPartFailureModules } from './check-font-source-tree-shaking.mjs';
 
 const chunk = (imports, ...modules) => ({ imports, modules: Object.fromEntries(modules.map((id) => [id, ''])) });
 
@@ -43,5 +43,26 @@ test('a statically retained resolver bridge host is reported; its gate is not', 
   assert.deepEqual(staticLazyFontSourceModules(stats, ['pptx.mjs']), [
     ['pptx.mjs', 'packages/core/src/fonts/resolver-bridge-host.ts', 'presentation.js'],
     ['pptx.mjs', 'packages/core/src/fonts/source-cache.ts', 'presentation.js'],
+  ]);
+});
+
+test('part-failure placeholder code retained by a static chunk is reported per entry (#2248)', () => {
+  const text = 'packages/core/src/internal/error-placeholder-text.ts';
+  const card = 'packages/pptx/src/parse-error-placeholder.ts';
+  const stats = {
+    chunks: {
+      'docx.mjs': chunk(['document.js'], 'src/docx.ts'),
+      'document.js': chunk([], 'packages/docx/src/document.ts'),
+      // Reached only through import().
+      'error-page.js': chunk(['text.js'], 'packages/docx/src/layout/error-page.ts'),
+      'text.js': chunk([], text),
+      'xlsx.mjs': chunk(['text.js'], 'src/xlsx.ts'),
+      'pptx.mjs': chunk(['presentation.js'], 'src/pptx.ts'),
+      'presentation.js': chunk([], 'packages/pptx/src/presentation.ts', card),
+    },
+  };
+  assert.deepEqual(staticLazyPartFailureModules(stats), [
+    ['xlsx.mjs', text, 'text.js'],
+    ['pptx.mjs', card, 'presentation.js'],
   ]);
 });

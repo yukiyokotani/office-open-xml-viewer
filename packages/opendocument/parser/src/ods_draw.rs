@@ -356,7 +356,10 @@ fn place(
             let _ = (sheet, sheet_names);
             parse_cell(reference)
         })
-        .filter(|_| rotation == 0.0 && bounds.is_none());
+        // A connector's geometry is its two ends (and its path), which
+        // LibreOffice keeps whatever end cell is written: it exports every
+        // connector with the end `A1` + 0.1 cm and draws it at its ends.
+        .filter(|_| rotation == 0.0 && bounds.is_none() && node.tag_name().name() != "connector");
     let (to_col, to_col_off, to_row, to_row_off) = match end {
         Some((row, col)) => (
             col - 1,
@@ -1211,8 +1214,8 @@ fn shape_info(
         stroke_miter_limit: None,
         stroke_alignment: None,
         stroke_cmpd: None,
-        stroke_head_end: marker(ctx, chain, "start"),
-        stroke_tail_end: marker(ctx, chain, "end"),
+        stroke_head_end: marker(ctx, chain, "start", stroke_width),
+        stroke_tail_end: marker(ctx, chain, "end", stroke_width),
         geom: xlsx_model::ShapeGeom::Preset {
             name: preset.to_string(),
             adj: Vec::new(),
@@ -1222,65 +1225,33 @@ fn shape_info(
 }
 
 /// A line end (§20.158 / §20.160 `draw:marker-start` / `-end`): the
-/// DrawingML line end of its marker ([`marker_kind`]). A marker that names
-/// no definition with a path is a triangle, LibreOffice's plain arrow.
-fn marker(ctx: &Context, chain: &[&Style], end: &str) -> Option<xlsx_model::ShapeLineEnd> {
+/// DrawingML line end of its marker
+/// ([`marker_kind`](crate::odf_props::marker_kind)), sized by its width
+/// (§20.159 / §20.161) and view box against the line width `line_emu`
+/// ([`line_end_size`](crate::odf_props::line_end_size)). A marker that
+/// names no definition with a path is a triangle, LibreOffice's plain
+/// arrow.
+fn marker(
+    ctx: &Context,
+    chain: &[&Style],
+    end: &str,
+    line_emu: i64,
+) -> Option<xlsx_model::ShapeLineEnd> {
     let name = get(chain, &format!("graphic:draw:marker-{end}")).filter(|n| !n.is_empty())?;
-    let kind = ctx.marker_kinds.get(name).copied().unwrap_or("triangle");
+    let (kind, view_box) = ctx
+        .marker_kinds
+        .get(name)
+        .copied()
+        .unwrap_or(("triangle", None));
+    let width = get(chain, &format!("graphic:draw:marker-{end}-width"))
+        .and_then(length_pt)
+        .unwrap_or(crate::odf_props::DEFAULT_MARKER_WIDTH_PT);
+    let (w, len) =
+        crate::odf_props::line_end_size(kind, width, view_box, line_emu as f64 / EMU_PER_PT);
     Some(xlsx_model::ShapeLineEnd {
         r#type: kind.into(),
-        w: "med".into(),
-        len: "med".into(),
-    })
-}
-
-/// The DrawingML line end a marker's geometry (§16.42.8 `svg:d`) is
-/// nearest to, whatever the marker is named: a curved outline is an oval;
-/// a closed outline of three corners a triangle; of four corners a stealth
-/// arrow when one corner lies inside the outline's box (the notch), else a
-/// diamond; an open path an open arrow.
-pub(crate) fn marker_kind(d: &str) -> Result<&'static str, String> {
-    use xlsx_model::PathCmd;
-    let Some(path) = super::shape_path::svg_path(d, (0.0, 0.0, 1.0, 1.0))? else {
-        return Ok("triangle");
-    };
-    let curved = path
-        .commands
-        .iter()
-        .any(|c| matches!(c, PathCmd::CubicBezTo { .. } | PathCmd::QuadBezTo { .. }));
-    let closed = path.commands.iter().any(|c| matches!(c, PathCmd::Close));
-    let mut corners: Vec<(f64, f64)> = Vec::new();
-    for command in &path.commands {
-        if let PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } = *command {
-            // A path that returns to its start names it twice.
-            if corners.first() != Some(&(x, y)) && corners.last() != Some(&(x, y)) {
-                corners.push((x, y));
-            }
-        }
-    }
-    let bounds = |pick: fn(&(f64, f64)) -> f64| {
-        corners
-            .iter()
-            .map(pick)
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
-                (lo.min(v), hi.max(v))
-            })
-    };
-    let ((left, right), (top, bottom)) = (bounds(|p| p.0), bounds(|p| p.1));
-    let notched = corners
-        .iter()
-        .any(|&(x, y)| x > left && x < right && y > top && y < bottom);
-    // Arcs are flattened to many corners.
-    Ok(if curved || corners.len() > 8 {
-        "oval"
-    } else if !closed {
-        "arrow"
-    } else {
-        match corners.len() {
-            4 if notched => "stealth",
-            4 => "diamond",
-            _ => "triangle",
-        }
+        w: w.into(),
+        len: len.into(),
     })
 }
 

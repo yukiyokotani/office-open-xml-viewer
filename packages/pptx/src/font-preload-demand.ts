@@ -6,7 +6,7 @@ import {
 } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { symbolFontKey, type FontPreloadDemand, type TextBody } from '@silurus/ooxml-core';
 import { preparedPowerPointText } from './font-display-text.js';
-import type { Slide, SlideElement } from './types';
+import type { Paragraph, Slide, SlideElement } from './types';
 
 /** Optional loading policy, not OOXML rendering behavior. Collects every
  * scalar the renderer paints for the slide's enumerated paint paths; any
@@ -29,13 +29,17 @@ import type { Slide, SlideElement } from './types';
  * - fields: their stored text, a slide number its actual number;
  * - char markers in their a:buFont, auto-number markers every label their
  *   scheme can format, in the marker face;
- * - images (pictures, media posters, picture fills, picture bullets): no text,
- *   unless a metafile (its text records paint with served faces) or of an
- *   unknown type (core `paintsTextFreeImage`);
- * - charts: every scalar their labels can contain (core `chartPaintTexts`).
+ * - images (pictures, media posters, picture fills, picture bullets): no
+ *   load-time text, unless of an unknown type (core `paintsTextFreeImage`); a
+ *   metafile's text records demand their own scalars when it plays (core
+ *   `bindMetafileFontDemand`);
+ * - charts: every scalar their labels can contain (core `chartPaintTexts`);
+ * - equations: a converted one paints a raster; a failed one its MCE preview,
+ *   its stored fallback text or the unavailable placeholder, and the MCE
+ *   fallback elements are collected as elements.
  * Right-to-left paragraphs paint their texts reordered (UAX #9), mirrored
  * characters demanded by the core collector. Not modelled (`'all'`):
- * equations, region-map charts and unknown elements. */
+ * region-map charts and unknown elements. */
 export function collectSlideFontDemand(
   slide: Slide,
   committed: ReadonlySet<number>,
@@ -70,6 +74,9 @@ export function collectSlideFontDemand(
     plain.add(text);
     return scalars.add(text);
   };
+  /** Text painted as spelled in a generic face: no symbol conversion applies,
+   * so a private-use code is demanded as itself. */
+  const addLiteral = (text: string): boolean => scalars.addSymbolText(text, [], true);
   /** `addSymbolText(text, [painted(family), sym && painted(sym)])`: without a
    * symbol-encoded face in either slot that is `add(text)`. */
   const add = (text: string, family: string | null | undefined, sym?: string | null): boolean => {
@@ -104,8 +111,20 @@ export function collectSlideFontDemand(
         const face = bullet.fontFamily ?? (firstRun?.type === 'text' ? firstRun.fontFamily : null) ?? para.defFontFamily;
         if (!add(AUTONUM_ALPHABET, face)) return false;
       } else if (bullet?.type !== 'none' && bullet?.type !== 'inherit' && bullet?.type !== 'blip') return false;
+      // An MCE preview of a failed equation (`mathFallbacks`, §M.1 Fallback)
+      // paints its text as spelled in the generic sans-serif face.
+      for (const preview of (para as Paragraph).mathFallbacks ?? []) if (!addLiteral(preview.text)) return false;
       for (const run of para.runs) {
         if (run.type === 'break') continue;
+        if (run.type === 'math') {
+          // A converted equation paints a raster whose glyphs reach no
+          // document font. A failed one without a preview measures and paints
+          // its stored fallback text as spelled, else the unavailable
+          // placeholder, in the generic sans-serif face (renderer
+          // paintEquation).
+          if (!addLiteral(run.fallbackText ?? '') || !addLiteral(EQUATION_UNAVAILABLE)) return false;
+          continue;
+        }
         if (run.type !== 'text') return false;
         // A symbol-encoded Latin face (Symbol, Wingdings 1-3, Webdings) or the
         // a:sym face (§21.1.2.3.10) may draw its codes as other characters
@@ -144,6 +163,10 @@ export function collectSlideFontDemand(
   if (!slide.elements.every(element)) return 'all';
   return scalars.result();
 }
+
+/** The unavailable-equation text the renderer measures and the placeholder
+ * paints (core optional-image-fallback.ts). */
+const EQUATION_UNAVAILABLE = 'Equation unavailable';
 
 /** §20.1.10.83 ST_TextVerticalType. `vert` / `vert270` lay the body out
  * horizontally under a rotation and `mongolianVert` paints horizontally

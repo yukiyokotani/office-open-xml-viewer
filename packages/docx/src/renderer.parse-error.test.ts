@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { beforeAll, describe, it, expect, vi } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { renderDocumentToCanvas, renderLayoutSourceToCanvas } from './renderer.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
-import { selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
+import { errorPageLayoutReady, selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
 import { ensureDocumentLayoutVariants } from './layout/document.js';
 import type { DocxDocumentModel, SectionProps } from './types';
 import type { WireErrorPlaceholder } from '@silurus/ooxml-core/internal/part-failures';
@@ -98,6 +98,13 @@ function degradedDoc(parseError: string): DocxDocumentModel {
   };
 }
 
+// Whatever hands out a document that failed to parse loads the error page's
+// code first (#2248); these tests build such documents by hand. The cold
+// paths have their own suite at the end.
+beforeAll(async () => {
+  await errorPageLayoutReady(layoutSourceStore(degradedDoc('word/document.xml: bad')));
+});
+
 describe('RB7 renderDocumentToCanvas placeholder', () => {
   it('paints a placeholder carrying the parseError message for a degraded document', async () => {
     const { ctx, calls } = recordingCtx(true);
@@ -187,6 +194,7 @@ describe('#1974 errorPlaceholder text on the DOCX error page', () => {
   it('acquires the custom page as layout, retaining one custom page per document', async () => {
     const source = layoutSourceStore(degradedDoc(MESSAGE));
     const services = createLayoutServices(source);
+    await errorPageLayoutReady(source);
     ensureDocumentLayoutVariants(services, 0, () => source);
     const builtin = selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0);
     const first = withErrorPlaceholderPage(services, selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0), { state: 'resolved', title: 'A', detail: null }, 0);
@@ -222,6 +230,7 @@ describe('#1974 errorPlaceholder text on the DOCX error page', () => {
   it('keeps omitted and hidden detail as different pages in both orders', async () => {
     const source = layoutSourceStore(degradedDoc(MESSAGE));
     const services = createLayoutServices(source);
+    await errorPageLayoutReady(source);
     ensureDocumentLayoutVariants(services, 0, () => source);
     const texts = async (detail: string | null | undefined) => {
       const { ctx, calls } = recordingCtx(true);
@@ -237,3 +246,54 @@ describe('#1974 errorPlaceholder text on the DOCX error page', () => {
   });
 });
 
+/** #2248 — the error page is code only a fatally unparseable document needs. */
+describe('on-demand DOCX error page', () => {
+  const MESSAGE = 'word/document.xml: unexpected end of stream';
+  const healthy: DocxDocumentModel = {
+    section: LETTER_SECTION,
+    body: [],
+    headers: emptyHeadersFooters(),
+    footers: emptyHeadersFooters(),
+  };
+  async function coldModules() {
+    vi.resetModules();
+    const variants = await import('./layout/document-layout-variants.js');
+    const { ensureDocumentLayoutVariants: ensure } = await import('./layout/document.js');
+    const { layoutSourceStore: storeOf } = await import('./layout-source-model-adapter.js');
+    const { createLayoutServices: servicesOf } = await import('./layout-runtime.js');
+    const renderer = await import('./renderer.js');
+    return { variants, ensure, storeOf, servicesOf, renderer };
+  }
+
+  it('waits for nothing, and loads nothing, for a healthy document', async () => {
+    const { variants, ensure, storeOf, servicesOf, renderer } = await coldModules();
+    const source = storeOf(healthy);
+    expect(variants.errorPageLayoutReady(source)).toBeUndefined();
+    const { ctx } = recordingCtx();
+    await renderer.renderLayoutSourceToCanvas(source, stubCanvas(ctx), 0, { width: 816, dpr: 1 });
+    // Still not loaded: laying out a failed document now is refused.
+    const failed = storeOf(degradedDoc(MESSAGE));
+    expect(() => ensure(servicesOf(failed), 0, () => failed)).toThrow(/error page layout is not loaded/);
+  });
+
+  it('loads with the first failed document and is then synchronous', async () => {
+    const { variants, ensure, storeOf, servicesOf } = await coldModules();
+    const source = storeOf(degradedDoc(MESSAGE));
+    const ready = variants.errorPageLayoutReady(source);
+    expect(ready).toBeInstanceOf(Promise);
+    await ready;
+    expect(variants.errorPageLayoutReady(source)).toBeUndefined();
+    const services = servicesOf(source);
+    ensure(services, 0, () => source);
+    expect(variants.selectDocumentLayoutPage(services, { defaultCurrentDateMs: 0 }, 0).layout.pages).toHaveLength(1);
+  });
+
+  it('refuses to render a failed source whose page was never loaded', async () => {
+    const { storeOf, renderer } = await coldModules();
+    const { ctx, calls } = recordingCtx(true);
+    await expect(renderer.renderLayoutSourceToCanvas(
+      storeOf(degradedDoc(MESSAGE)), stubCanvas(ctx), 0, { width: 816, dpr: 1 },
+    )).rejects.toThrow(/error page layout is not loaded/);
+    expect(calls.filter((c) => c.op === 'fillText')).toEqual([]);
+  });
+});

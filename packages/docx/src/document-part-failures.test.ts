@@ -78,6 +78,28 @@ describe('DocxDocument part failures (#1974)', () => {
     expect(document.partFailures).toEqual([]);
   });
 
+  // #2248: the wait for a failed document's error page ends with destroy(),
+  // also when destroy() ran before that wait asked for the signal.
+  it('aborts the lifetime signal on destroy, before or after it was first read', () => {
+    const lifetimeOf = (document: DocxDocument) =>
+      (document as unknown as { _lifetimeSignal(): AbortSignal })._lifetimeSignal();
+    const teardown = (document: DocxDocument) => {
+      Object.assign(document as unknown as Record<string, unknown>, {
+        _bridge: { terminate() {} }, _rawParts: new Map(),
+        _embeddedFontFaces: [], _officeFontFaces: [], _nativeRouteFaces: [],
+      });
+      try { document.destroy(); } catch { /* off-prototype teardown of unrelated resources */ }
+    };
+    const read = workerDocument(meta).document;
+    const signal = lifetimeOf(read);
+    expect(signal.aborted).toBe(false);
+    teardown(read);
+    expect(signal.aborted).toBe(true);
+    const unread = workerDocument(meta).document;
+    teardown(unread);
+    expect(lifetimeOf(unread).aborted).toBe(true);
+  });
+
   it('never posts the option through collectPageRuns', async () => {
     const { document, request } = workerDocument(meta);
     request.mockImplementation(async () => ({ type: 'runsCollected', id: 1, runs: [] }) as never);

@@ -1,10 +1,12 @@
+import { createAbortError } from '@silurus/ooxml-core/internal/abort';
 import {
-  resolvedFromWire,
+  ERROR_PLACEHOLDER_TEXT_HOST,
+  onDemandModule,
   type ResolvedErrorPlaceholder,
   type WireErrorPlaceholder,
 } from '@silurus/ooxml-core/internal/part-failures';
-import { layoutParseErrorPage } from './error-page.js';
 import { deepFreezeDocumentLayout } from './invariants.js';
+import { createPageLayers } from './page-graph.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
 import {
   layoutOptionsForRender,
@@ -18,6 +20,54 @@ import {
 import type { FatalParseFact } from './layout-source-store.js';
 import type { DeepReadonly, DocumentLayout, LayoutPage, LayoutServices } from './types.js';
 import { LayoutVariantStore, type DocumentLayoutBuilder } from './variant-store.js';
+
+/**
+ * The synthetic page of a fatally unparseable document is code no healthy
+ * document needs, so it is loaded with the first such document (#2248). A
+ * self-contained worker bundle inlines it.
+ */
+const errorPage = /* @__PURE__ */ onDemandModule(async () => {
+  const { parseErrorPageLayout, resolvedFromWire } = await import('./error-page.js');
+  return {
+    layoutParseErrorPage: parseErrorPageLayout({ ...ERROR_PLACEHOLDER_TEXT_HOST, createPageLayers }),
+    resolvedFromWire,
+  };
+});
+
+/**
+ * Layout is synchronous: the error page's code has to be here before a
+ * fatally unparseable source gets its layout variants. Whatever hands out such
+ * a source asynchronously awaits this first: the pull materializers
+ * (`document-pull-client.ts`), the render worker and the model-source loaders.
+ * The renderer does not: a wait there would precede the paint's render token.
+ * `undefined` when there is nothing to wait for, which is always the case for
+ * a source that parsed. With a
+ * `signal` the wait rejects with an `AbortError` as soon as it aborts: once
+ * the document has been pulled, ending its worker no longer settles anything.
+ */
+export function errorPageLayoutReady(
+  source: Pick<LayoutSourceStore, 'fatalParse'>,
+  signal?: AbortSignal,
+): Promise<unknown> | undefined {
+  if (source.fatalParse === null || errorPage.loaded) return undefined;
+  const loading = errorPage.load();
+  if (!signal) return loading;
+  // The load is shared by every document of the realm, so it keeps running;
+  // only this caller stops waiting when its own load or document ends.
+  return new Promise((resolve, reject) => {
+    const abort = (): void => reject(createAbortError('DOCX error page load was aborted'));
+    const settled = (): void => signal.removeEventListener('abort', abort);
+    loading.then(resolve, reject).then(settled, settled);
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
+function loadedErrorPage() {
+  const loaded = errorPage.loaded;
+  if (!loaded) throw new Error('DOCX error page layout is not loaded: await errorPageLayoutReady(source) before laying out a source that failed to parse');
+  return loaded;
+}
 
 /**
  * The caller-text error page of a fatally unparseable document (#1974). It is
@@ -41,7 +91,7 @@ class CustomErrorPageSlot {
       placeholder.detail === undefined ? 'builtin' : placeholder.detail === null ? 'hidden' : ['text', placeholder.detail],
     ]);
     if (this.#key !== key || this.#layout === null) {
-      this.#layout = deepFreezeDocumentLayout(layoutParseErrorPage(
+      this.#layout = deepFreezeDocumentLayout(loadedErrorPage().layoutParseErrorPage(
         this.fatalParse.message,
         this.fatalParse.pageSize,
         this.services.text,
@@ -75,7 +125,7 @@ export function attachDocumentLayoutVariants(
   const fatalParse = input.source.fatalParse;
   const parseError = fatalParse === null
     ? null
-    : layoutParseErrorPage(
+    : loadedErrorPage().layoutParseErrorPage(
         fatalParse.message,
         fatalParse.pageSize,
         services.text,
@@ -125,7 +175,7 @@ export function withErrorPlaceholderPage<
 ): Selection {
   const custom = errorPlaceholderText ? customErrorPages.get(services) : undefined;
   if (!custom) return selection;
-  const placeholder = resolvedFromWire(errorPlaceholderText);
+  const placeholder = loadedErrorPage().resolvedFromWire(errorPlaceholderText);
   if (placeholder === null) return selection;
   const layout = custom.layoutFor(placeholder);
   const page = layout.pages[pageIndex];

@@ -1,6 +1,5 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
 import { fontDemandCollectorUrl } from './font-demand-collector-url.js';
-import { officeFaceWeight } from './powerpoint-line-metrics.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import type { DimOptions, PptxComment, Slide } from './types';
 import {
@@ -17,7 +16,9 @@ import {
 } from './slide-nav';
 import { acquireOfficeRoutes, distinctOfficeRouteLoads, type AcquiredOfficeRoutes } from './office-route-acquisition.js';
 import {
+  bindMetafileFontDemand,
   bindMetafileFontFamilies,
+  type MetafileFontDemand,
   type FontPreloadDemand,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
@@ -313,6 +314,9 @@ export class PptxPresentation {
    *  the SPA (refcounted in core, so a face shared with another open deck
    *  survives until both go). */
   private _fontSources: FontSourceSession | null = null;
+  /** The metafile text demand of {@link _fontSources} (core
+   * `bindMetafileFontDemand`), bound with its served faces at each render. */
+  private _metafileFontDemand: MetafileFontDemand | undefined;
   /** Symbol-code verdicts across this deck's main-mode renders, kept while
    * the realm's faces are unchanged (core createSymbolFaceOracleCache). */
   private _symbolFaces = createSymbolFaceOracleCache();
@@ -539,7 +543,7 @@ export class PptxPresentation {
     scalars: FontPreloadDemand | undefined,
   ): Promise<void> {
     if (this._destroyed || !this._fonts?.length) return;
-    const { FontSourceSession, PptxInstalledFamilies, pptxFontDemand } = await import('./font-source-load.js');
+    const { FontSourceSession, PptxInstalledFamilies, metafileFontDemand, pptxFontDemand } = await import('./font-source-load.js');
     if (this._destroyed || !this._fonts) return;
     // Installed authored faces are probed before any source face of this
     // delta registers, and never demanded (PptxInstalledFamilies).
@@ -548,6 +552,7 @@ export class PptxPresentation {
       pptxFontDemand(names, facts, scalars, this._embeddedFontAliases));
     if (this._destroyed || !this._fonts) return;
     this._fontSources ??= new FontSourceSession({ sources: this._fonts });
+    this._metafileFontDemand = metafileFontDemand(this._fontSources);
     await this._fontSources.ensure(demand);
   }
 
@@ -748,7 +753,7 @@ export class PptxPresentation {
         return slide;
       },
     });
-    const builder = new PresentationPreflightBuilder(bootstrap, { cjkFallback: this._cjkFallback, collectFontDemand: collectFontDemand ? await loadFontDemandCollector(true) : undefined, officeFaceWeight });
+    const builder = new PresentationPreflightBuilder(bootstrap, { cjkFallback: this._cjkFallback, collectFontDemand: collectFontDemand ? await loadFontDemandCollector(true) : undefined });
     const ensureFonts = async (): Promise<void> => {
       await embeddedFontLoad;
       if (!fonts) return;
@@ -1277,6 +1282,7 @@ export class PptxPresentation {
         this._assertResourceHealthy();
         // Metafile pictures paint their text with the served faces too.
         bindMetafileFontFamilies(this._fetchImage, this._fontSources?.loaded);
+        bindMetafileFontDemand(this._fetchImage, this._fontSources ? this._metafileFontDemand : undefined);
         return renderSlideWithEmbeddedFonts(
           canvas,
           slide,
@@ -1697,6 +1703,8 @@ export class PptxPresentation {
     // in-flight ensure (it resolves with an empty snapshot).
     const fontSources = this._fontSources;
     this._fontSources = null;
+    this._metafileFontDemand = undefined;
+    bindMetafileFontDemand(this._fetchImage, undefined);
     fontSources?.release();
     this._fontResolverBridge?.dispose();
     this._fontResolverBridge = null;

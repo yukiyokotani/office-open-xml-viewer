@@ -137,13 +137,8 @@ describe('XLSX font-source demand', () => {
   it("declines to 'all' for paint the model text does not spell", () => {
     const cases: Array<[string, (demand: XlsxFontDemand) => void, ParsedWorkbook?]> = [
       ['region-map chart', (d) => d.worksheetParts(sheet([], { charts: [{ chart: { chartType: 'regionMap', themeMinorFontLatin: 'Aptos' } }] } as never))],
-      ['metafile chart fill', (d) => d.worksheetParts(sheet([], { charts: [{ chart: { chartType: 'bar',
-        series: [{ fill: { fillType: 'image', imagePath: 'xl/media/image1.emf', mimeType: 'image/x-emf' } }] } }] } as never))],
       ['unknown shape text direction', (d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'preset', name: 'rect' },
         text: { vert: 'diagonal', paragraphs: [] } }] }] } as never))],
-      ['equation', (d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'preset', name: 'rect' },
-        text: { paragraphs: [{ runs: [{ type: 'math', nodes: [], display: false }] }] } }] }] } as never))],
-      ['metafile picture', (d) => d.worksheetParts(sheet([], { images: [{ imagePath: 'xl/media/image1.emf', mimeType: 'image/x-emf' }] } as never))],
     ];
     for (const [label, add, wb] of cases) {
       const demand = new XlsxFontDemand(wb ?? workbook(), 'jp', []);
@@ -151,6 +146,25 @@ describe('XLSX font-source demand', () => {
       add(demand);
       const scalars = wb ? first?.scalars : demand.take()?.scalars;
       expect(scalars, label).toBe('all');
+    }
+  });
+
+  it('needs no load-time demand for metafile pictures and fills or equations', () => {
+    // A metafile demands its text records' scalars when it plays (core
+    // bindMetafileFontDemand); an equation paints a converted raster or nothing.
+    const cases: Array<[string, (demand: XlsxFontDemand) => void]> = [
+      ['metafile chart fill', (d) => d.worksheetParts(sheet([], { charts: [{ chart: { chartType: 'bar',
+        series: [{ fill: { fillType: 'image', imagePath: 'xl/media/image1.emf', mimeType: 'image/x-emf' } }] } }] } as never))],
+      ['equation', (d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'preset', name: 'rect' },
+        text: { paragraphs: [{ runs: [{ type: 'math', nodes: [], display: false }] }] } }] }] } as never))],
+      ['metafile picture', (d) => d.worksheetParts(sheet([], { images: [{ imagePath: 'xl/media/image1.emf', mimeType: 'image/x-emf' }] } as never))],
+      ['metafile shape fill', (d) => d.worksheetParts(sheet([], { shapeGroups: [{ shapes: [{ geom: { type: 'image', imagePath: 'xl/media/image2.wmf', mimeType: 'image/x-wmf' } }] }] } as never))],
+    ];
+    for (const [label, add] of cases) {
+      const demand = new XlsxFontDemand(workbook(), 'jp', []);
+      demand.take();
+      add(demand);
+      expect(demand.take()?.scalars ?? [], label).not.toBe('all');
     }
   });
 

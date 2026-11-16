@@ -21,6 +21,7 @@ import { xlsxCjkFallback } from './font-requests.js';
  */
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
+  bindMetafileFontDemand,
   bindMetafileFontFamilies,
   activeFontSet,
   createSymbolFaceOracleCache,
@@ -56,6 +57,7 @@ import {
   InstalledFamilyExclusion,
   XlsxFontDemand,
   declaredFontSubstitutions,
+  metafileFontDemand,
 } from './font-source-load.js';
 import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { officeRequestKey } from './shape-office-line.js';
@@ -519,8 +521,10 @@ self.onmessage = async (e: MessageEvent<
         post({ type: 'errorPlaceholderRequired', id, sheetIndex: req.sheetIndex });
         return;
       }
-      // Metafile pictures paint their text with the served faces too.
+      // Metafile pictures paint their text with the served faces too, and
+      // load the scalars it paints before they play.
       bindMetafileFontFamilies(getImage, fontSources?.loaded);
+      bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
       await renderWorksheetViewport(
         { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,

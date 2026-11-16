@@ -20,7 +20,7 @@ use crate::xml::NS_DRAWOOO;
 const MAX_EQUATIONS: usize = 4096;
 const MAX_DEPTH: usize = 256;
 const MAX_COMMANDS: usize = 200_000;
-const ARC_STEP_DEGREES: f64 = 5.0;
+const ARC_STEP_DEGREES: f64 = crate::odf_props::SVG_ARC_STEP_DEGREES;
 
 /// The rejection of a shape over the geometry bounds.
 fn over_limit() -> String {
@@ -936,7 +936,9 @@ pub fn svg_path(d: &str, view: (f64, f64, f64, f64)) -> Result<Option<PathInfo>,
             b'A' => match reader.arc() {
                 Some((rx, ry, rotation, large, sweep, x, y)) => {
                     let (x, y) = (bx + x, by + y);
-                    for (px, py) in svg_arc(cx, cy, rx, ry, rotation, large, sweep, x, y) {
+                    for (px, py) in
+                        crate::odf_props::svg_arc(cx, cy, rx, ry, rotation, large, sweep, x, y)
+                    {
                         let (px, py) = p(px, py);
                         push(&mut commands, PathCmd::LineTo { x: px, y: py })?;
                     }
@@ -1061,97 +1063,6 @@ impl SvgReader<'_> {
     }
 }
 
-/// The points after the start of an SVG elliptical arc (SVG 1.1 §F.6.5
-/// endpoint-to-centre conversion, §F.6.6 radius correction), flattened in
-/// steps of at most [`ARC_STEP_DEGREES`].
-#[allow(clippy::too_many_arguments)]
-fn svg_arc(
-    x1: f64,
-    y1: f64,
-    rx: f64,
-    ry: f64,
-    rotation: f64,
-    large: bool,
-    sweep: bool,
-    x2: f64,
-    y2: f64,
-) -> Vec<(f64, f64)> {
-    let (mut rx, mut ry) = (rx.abs(), ry.abs());
-    if (x1 == x2 && y1 == y2) || rx == 0.0 || ry == 0.0 {
-        // §F.6.2: a zero radius is a straight line; equal ends draw nothing.
-        return if x1 == x2 && y1 == y2 {
-            Vec::new()
-        } else {
-            vec![(x2, y2)]
-        };
-    }
-    let phi = rotation.to_radians();
-    let (sin_phi, cos_phi) = phi.sin_cos();
-    // Halves first, so neither the difference nor the midpoint overflows.
-    let dx = x1 / 2.0 - x2 / 2.0;
-    let dy = y1 / 2.0 - y2 / 2.0;
-    let (mx, my) = (x1 / 2.0 + x2 / 2.0, y1 / 2.0 + y2 / 2.0);
-    let x1p = cos_phi * dx + sin_phi * dy;
-    let y1p = -sin_phi * dx + cos_phi * dy;
-    // §F.6.5 in the unit-circle frame of the ellipse (`u`, `v` = x1', y1'
-    // over the radii), with lengths taken by `hypot`: no square or product
-    // of coordinates over- or underflows.
-    let (mut u, mut v) = (x1p / rx, y1p / ry);
-    let mut reach = u.hypot(v);
-    if reach > 1.0 {
-        // §F.6.6: radii too small for the ends grow until they fit.
-        rx *= reach;
-        ry *= reach;
-        u /= reach;
-        v /= reach;
-        reach = 1.0;
-    }
-    // The centre in the frame is ±√(1−r²)·(v, −u)/r, r = |(u, v)|.
-    let mut lift = ((1.0 - reach) * (1.0 + reach)).max(0.0).sqrt();
-    if large == sweep {
-        lift = -lift;
-    }
-    let (cu, cv) = (lift * (v / reach), -lift * (u / reach));
-    let (cxp, cyp) = (cu * rx, cv * ry);
-    let cx = cos_phi * cxp - sin_phi * cyp + mx;
-    let cy = sin_phi * cxp + cos_phi * cyp + my;
-    let angle = |ux: f64, uy: f64, vx: f64, vy: f64| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
-    let theta1 = angle(1.0, 0.0, u - cu, v - cv);
-    let mut delta = angle(u - cu, v - cv, -u - cu, -v - cv);
-    if !sweep && delta > 0.0 {
-        delta -= std::f64::consts::TAU;
-    } else if sweep && delta < 0.0 {
-        delta += std::f64::consts::TAU;
-    }
-    if ![cx, cy, rx, ry, theta1, delta]
-        .iter()
-        .all(|v| v.is_finite())
-    {
-        // Beyond the range of the arithmetic: the chord.
-        return vec![(x2, y2)];
-    }
-    let steps = ((delta.abs().to_degrees() / ARC_STEP_DEGREES).ceil() as usize).max(1);
-    let points: Vec<(f64, f64)> = (1..=steps)
-        .map(|i| {
-            if i == steps {
-                return (x2, y2);
-            }
-            let t = theta1 + delta * i as f64 / steps as f64;
-            let (sin_t, cos_t) = t.sin_cos();
-            (
-                cx + rx * cos_phi * cos_t - ry * sin_phi * sin_t,
-                cy + rx * sin_phi * cos_t + ry * cos_phi * sin_t,
-            )
-        })
-        .collect();
-    if points.iter().all(|(x, y)| x.is_finite() && y.is_finite()) {
-        points
-    } else {
-        // A point beyond the range of the arithmetic: the chord.
-        vec![(x2, y2)]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1243,14 +1154,16 @@ mod tests {
     #[test]
     fn svg_arcs_stay_finite_or_fall_back_to_the_chord() {
         // Tiny radii grow to the half circle (§F.6.6) without overflowing.
-        let points = svg_arc(0.0, 0.0, 1e-200, 1e-200, 0.0, false, true, 100.0, 0.0);
+        let points =
+            crate::odf_props::svg_arc(0.0, 0.0, 1e-200, 1e-200, 0.0, false, true, 100.0, 0.0);
         let top = points[points.len() / 2 - 1];
         assert!(
             (top.0 - 50.0).abs() < 1e-9 && (top.1 + 50.0).abs() < 1e-9,
             "{top:?}"
         );
         // Points beyond the finite range: the chord.
-        let far = svg_arc(1e308, 1e308, 1e308, 1e308, 0.0, false, false, 1e308, -1e308);
+        let far =
+            crate::odf_props::svg_arc(1e308, 1e308, 1e308, 1e308, 0.0, false, false, 1e308, -1e308);
         assert_eq!(far, vec![(1e308, -1e308)]);
     }
 

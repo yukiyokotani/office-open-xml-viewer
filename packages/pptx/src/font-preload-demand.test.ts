@@ -6,7 +6,6 @@ import { formatAutoNum } from './autonum-label.js';
 import { PresentationPreflightBuilder, normalizePresentationPreflight } from './presentation-preflight.js';
 import type { Slide } from './types';
 import type { PresentationBootstrap } from './worker-protocol.js';
-import { officeFaceWeight } from './powerpoint-line-metrics.js';
 
 function slide(text: string, run: Partial<TextRunData> = {}): Slide {
   return { index: 0, slideNumber: 27, background: null, elements: [{ type: 'shape', textBody: {
@@ -55,11 +54,8 @@ describe('complete conservative PPTX paint demand', () => {
       { parseError: 'broken' },
       { elements: [{ type: 'unknown' }] },
       { elements: [{ type: 'chart', chart: { chartType: 'regionMap', series: [] } }] },
-      { elements: [picture('ppt/media/image1.emf', 'image/emf')] },
-      { elements: [picture('ppt/media/image1.wmf', 'application/octet-stream')] },
       { elements: [picture('ppt/media/image1.pict', 'image/x-pict')] },
-      { elements: [picture('ppt/media/image1.png', 'image/png')], background: { fillType: 'image', imagePath: 'ppt/media/bg.emf', mimeType: 'image/emf' } },
-      { elements: [{ type: 'media', posterPath: 'ppt/media/poster.wmf', posterMimeType: 'image/wmf', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
+      { elements: [picture('ppt/media/image1.bin', 'application/octet-stream')] },
     ]) {
       expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toBe('all');
     }
@@ -67,16 +63,17 @@ describe('complete conservative PPTX paint demand', () => {
     const unknownVert = slide('A');
     body(unknownVert).vert = 'diagonal';
     expect(collectSlideFontDemand(unknownVert, new Set(), 10000)).toBe('all');
+  });
+
+  it('demands what a failed equation paints: its MCE preview, stored fallback text or placeholder', () => {
+    const body = (value: Slide) => (value.elements[0] as unknown as { textBody: Record<string, unknown> & { paragraphs: Array<Record<string, unknown>> } }).textBody;
     const equation = slide('A');
-    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false }];
-    expect(collectSlideFontDemand(equation, new Set(), 10000)).toBe('all');
-    // A picture fill or picture marker that is a metafile plays its own text records.
-    const filled = slide('A');
-    (filled.elements[0] as unknown as Record<string, unknown>).fill = { fillType: 'image', imagePath: 'ppt/media/image2.emf', mimeType: 'image/emf' };
-    expect(collectSlideFontDemand(filled, new Set(), 10000)).toBe('all');
-    const marker = slide('A');
-    body(marker).paragraphs[0].bullet = { type: 'blip', imagePath: 'ppt/media/image3.wmf', mimeType: 'image/wmf' };
-    expect(collectSlideFontDemand(marker, new Set(), 10000)).toBe('all');
+    body(equation).paragraphs[0].runs = [{ type: 'math', nodes: [], display: false, fallbackText: 'πr²\uF061' }];
+    body(equation).paragraphs[0].mathFallbacks = [{ start: 0, end: 1, text: '∑α\uF062' }];
+    const demand = collectSlideFontDemand(equation, new Set(), 10000);
+    expect(demand).not.toBe('all');
+    // Painted as spelled: private-use codes are demanded as themselves.
+    expect(demand).toEqual(expect.arrayContaining([...'πr²∑α\uF061\uF062'].map((ch) => ch.codePointAt(0)!)));
   });
 
   it('demands nothing for text-free images and media posters', () => {
@@ -86,6 +83,10 @@ describe('complete conservative PPTX paint demand', () => {
       { elements: [...slide('A').elements, { type: 'media', posterPath: 'ppt/media/poster.png', posterMimeType: 'image/png', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
       { elements: [...slide('A').elements, { type: 'media', posterPath: '', posterMimeType: '', mediaPath: 'ppt/media/m.mp3', mimeType: 'audio/mpeg' }] },
       { background: { fillType: 'image', imagePath: 'ppt/media/bg.gif', mimeType: 'image/gif' } },
+      // Metafiles demand their text records' scalars when they play.
+      { elements: [...slide('A').elements, picture('ppt/media/image1.emf', 'image/emf'), picture('ppt/media/image1.wmf', 'application/octet-stream')] },
+      { background: { fillType: 'image', imagePath: 'ppt/media/bg.emf', mimeType: 'image/emf' } },
+      { elements: [...slide('A').elements, { type: 'media', posterPath: 'ppt/media/poster.wmf', posterMimeType: 'image/wmf', mediaPath: 'ppt/media/m.mp4', mimeType: 'video/mp4' }] },
     ]) {
       expect(collectSlideFontDemand({ ...slide('A'), ...patch } as Slide, new Set(), 10000), JSON.stringify(patch)).toEqual(plain);
     }
@@ -100,9 +101,9 @@ describe('complete conservative PPTX paint demand', () => {
     const nested = (image: unknown): Slide => ({ ...slide('A'), elements: [...slide('A').elements,
       { type: 'shape', textBody: null, fill: { layers: [null, 3, 'text', [{ stops: [{ tile: image }] }]] } }] } as unknown as Slide);
     expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.png', mimeType: 'image/png' }), new Set(), 10000)).toEqual(plain);
-    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.emf', mimeType: 'image/emf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ imagePath: 'ppt/media/a.bin', mimeType: 'application/octet-stream' }), new Set(), 10000)).toBe('all');
     expect(collectSlideFontDemand(nested({ imagePath: '', mimeType: null }), new Set(), 10000)).toBe('all');
-    expect(collectSlideFontDemand(nested({ posterPath: 'ppt/media/p.wmf', posterMimeType: 'image/wmf' }), new Set(), 10000)).toBe('all');
+    expect(collectSlideFontDemand(nested({ posterPath: 'ppt/media/p.bin', posterMimeType: 'application/octet-stream' }), new Set(), 10000)).toBe('all');
     expect(collectSlideFontDemand(nested({ posterPath: '', posterMimeType: '' }), new Set(), 10000)).toEqual(plain);
     // Not a path: only a string under the key names an image part.
     expect(collectSlideFontDemand(nested({ imagePath: { mimeType: 'image/emf' } }), new Set(), 10000)).toEqual(plain);
@@ -263,7 +264,7 @@ describe('complete conservative PPTX paint demand', () => {
   });
 
   it('commits only new scalar deltas and rolls back both scalars and all transitions', () => {
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
     builder.addSlide(slide('A'));
     expect(builder.currentFontPreloadDemandDelta).toEqual(expect.arrayContaining([65]));
     builder.prepareSlide({ ...slide('B'), index: 1 }).rollback();
@@ -279,14 +280,14 @@ describe('complete conservative PPTX paint demand', () => {
 
   it('collapses optional demand growth before exceeding the retained projection allowance', () => {
     expect(collectSlideFontDemand(slide('ABCDEFG'), new Set(), 3)).toBe('all');
-    const baseline = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
+    const baseline = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
     const first = baseline.prepareSlide(slide('漢'));
     const firstPeak = first.projectedBytes;
     first.commit();
     const second = baseline.prepareSlide({ ...slide('字'), index: 1 });
     const limit = Math.max(firstPeak, second.projectedBytes) + 10;
     second.commit();
-    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
+    const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
     builder.addSlide(slide(Array.from({ length: 300 }, (_, i) => String.fromCodePoint(0x4e00 + i)).join('')));
     builder.addSlide({ ...slide('字'), index: 1 });
     expect(builder.projectedBytes).toBeLessThanOrEqual(limit);
@@ -300,12 +301,12 @@ it('evicts optional precision under metadata pressure without rejecting or retai
   const secondSlide = { ...slide('B'), index: 1, notes: 'n'.repeat(200) };
   // Mandatory font-source facts are charged whenever demand is collected; a
   // collector that always declines to 'all' retains no optional precision.
-  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
+  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
   ordinary.addSlide(firstSlide);
   const required = ordinary.prepareSlide(secondSlide);
   const limit = required.projectedBytes;
   required.rollback();
-  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
+  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
   builder.addSlide(firstSlide);
   expect(builder.currentFontPreloadDemandDelta).toEqual(expect.arrayContaining([65]));
   const prepared = builder.prepareSlide(secondSlide);
@@ -320,13 +321,13 @@ it('evicts optional precision under metadata pressure without rejecting or retai
 
 
 it('does not repair a saturated mandatory projection by subtracting optional cache bytes', () => {
-  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all', officeFaceWeight });
+  const ordinary = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: () => 'all' });
   ordinary.addSlide(slide('A'));
   const second = { ...slide('B'), index: 1, notes: 'n'.repeat(100) };
   const probe = ordinary.prepareSlide(second);
   const limit = probe.projectedBytes;
   probe.rollback();
-  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
+  const builder = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
   builder.addSlide(slide('A'));
   const prior = builder.currentFontPreloadDemandDelta;
   expect(() => builder.prepareSlide({ ...second, notes: 'n'.repeat(1000) })).toThrow('hard limit');
@@ -337,7 +338,7 @@ it('does not repair a saturated mandatory projection by subtracting optional cac
 it.each([0, 1])('falls back to all when an empty delta array cannot fit its two-byte JSON representation (%i bytes free)', (remaining) => {
   const first = slide('A');
   const second = { ...slide('A'), index: 1, notes: 'n'.repeat(200) };
-  const probe = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight });
+  const probe = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand });
   probe.addSlide(first);
   const prepared = probe.prepareSlide(second);
   const limit = prepared.projectedBytes - 2 + remaining;
@@ -345,7 +346,7 @@ it.each([0, 1])('falls back to all when an empty delta array cannot fit its two-
   const ordinary = new PresentationPreflightBuilder(bootstrap, { maxProjectionBytes: limit });
   ordinary.addSlide(first);
   ordinary.addSlide(second);
-  const filtered = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, officeFaceWeight, maxProjectionBytes: limit });
+  const filtered = new PresentationPreflightBuilder(bootstrap, { collectFontDemand: collectSlideFontDemand, maxProjectionBytes: limit });
   filtered.addSlide(first);
   expect(() => filtered.addSlide(second)).not.toThrow();
   expect(filtered.finish().fontPreloadDemand).toBeUndefined();

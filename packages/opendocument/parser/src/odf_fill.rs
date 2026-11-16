@@ -196,7 +196,8 @@ pub struct FillDefs {
     images: HashMap<String, String>,
     opacities: HashMap<String, OpacityDef>,
     dashes: HashMap<String, &'static str>,
-    markers: HashMap<String, String>,
+    /// `draw:marker` outlines (`svg:d`) and their `svg:viewBox`.
+    markers: HashMap<String, (String, Option<crate::odf_props::ViewBox>)>,
 }
 
 /// `draw:angle` (§19.218): an angle with a unit, or a bare number in tenths
@@ -290,7 +291,11 @@ impl FillDefs {
                 self.dashes.insert(name.to_string(), dash_preset(node));
             } else if xml::is(node, NS_DRAW, "marker") {
                 if let Some(d) = node.attribute((NS_SVG, "d")) {
-                    self.markers.insert(name.to_string(), d.to_string());
+                    let view_box = node
+                        .attribute((NS_SVG, "viewBox"))
+                        .and_then(crate::odf_props::view_box);
+                    self.markers
+                        .insert(name.to_string(), (d.to_string(), view_box));
                 }
             } else if xml::is(node, NS_DRAW, "opacity") {
                 // LibreOffice 7.6 multi-step opacity: `loext:opacity-stop`
@@ -375,10 +380,10 @@ impl FillDefs {
 
     /// The line ends (§16.42.8 `draw:marker`): each name with its path
     /// data. A reader reads each path once, not once per line that uses it.
-    pub fn markers(&self) -> impl Iterator<Item = (&str, &str)> {
+    pub fn markers(&self) -> impl Iterator<Item = (&str, &str, Option<crate::odf_props::ViewBox>)> {
         self.markers
             .iter()
-            .map(|(name, d)| (name.as_str(), d.as_str()))
+            .map(|(name, (d, view_box))| (name.as_str(), d.as_str(), *view_box))
     }
 
     /// The fill of a graphic style chain (`graphic:` properties), with its

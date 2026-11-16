@@ -1,19 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   clampPartFailureMessage,
-  errorPlaceholderCanvasLines,
-  errorPlaceholderDetail,
-  errorPlaceholderTitle,
+  ERROR_PLACEHOLDER_TEXT_HOST,
   normalizeErrorPlaceholderText,
+  onDemandModule,
   PART_FAILURE_MESSAGES_MAX_UTF8,
   PartFailureDelivery,
   PartFailureLog,
   prepareErrorPlaceholder,
   resolveErrorPlaceholderFor,
-  resolvedFromWire,
   wireErrorPlaceholder,
-  wrapErrorPlaceholderText,
 } from './part-failures';
+import { errorPlaceholderText, resolvedFromWire } from './error-placeholder-text';
+
+const {
+  errorPlaceholderCanvasLines,
+  errorPlaceholderDetail,
+  errorPlaceholderTitle,
+  wrapErrorPlaceholderText,
+} = errorPlaceholderText(ERROR_PLACEHOLDER_TEXT_HOST);
 
 interface Failure { readonly kind: 'slide'; readonly slideIndex: number; readonly message: string }
 const failure = (slideIndex: number, message = `ppt/slides/slide${slideIndex + 1}.xml: bad`): Failure =>
@@ -256,5 +261,35 @@ describe('placeholder text bounds', () => {
     ctx.font = '20px sans-serif';
     errorPlaceholderCanvasLines(ctx, 'a b c d e f', 30, 4);
     expect(measureText.mock.calls.length).toBeGreaterThan(calls);
+  });
+});
+
+/** #2248 — placeholder code is loaded with the first failed part. */
+describe('onDemandModule', () => {
+  it('loads once, on the first request, and keeps the module', async () => {
+    const importModule = vi.fn(async () => ({ value: 1 }));
+    const lazy = onDemandModule(importModule);
+    expect(lazy.loaded).toBeUndefined();
+    expect(importModule).not.toHaveBeenCalled();
+    const first = lazy.load();
+    expect(lazy.load()).toBe(first);
+    expect(lazy.loaded).toBeUndefined();
+    expect(await first).toEqual({ value: 1 });
+    expect(lazy.loaded).toEqual({ value: 1 });
+    await lazy.load();
+    expect(importModule).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a failed load: the next failed part tries again', async () => {
+    let attempts = 0;
+    const lazy = onDemandModule(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('chunk unavailable');
+      return 'loaded';
+    });
+    await expect(lazy.load()).rejects.toThrow('chunk unavailable');
+    expect(lazy.loaded).toBeUndefined();
+    await expect(lazy.load()).resolves.toBe('loaded');
+    expect(lazy.loaded).toBe('loaded');
   });
 });

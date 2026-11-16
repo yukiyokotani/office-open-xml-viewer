@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<body data-status="loading">
+  <script type="module">
+    import { DocxDocument } from '/dist/docx.mjs';
+    import { XlsxWorkbook } from '/dist/xlsx.mjs';
+    import { PptxPresentation } from '/dist/pptx.mjs';
+
+    // #2248 — the published build paints a failed part's placeholder with code
+    // it fetches only then. The spec supplies one synthetic package per format
+    // (a malformed main part, slide or sheet) and compares main and worker mode.
+    const FORMATS = {
+      docx: {
+        load: (bytes, mode) => DocxDocument.load(bytes, { mode }),
+        render: (engine, opts) => engine.renderPageToBitmap(0, { width: 612, dpr: 1, ...opts }),
+      },
+      xlsx: {
+        load: (bytes, mode) => XlsxWorkbook.load(bytes, { mode }),
+        render: (engine, opts) => engine.renderViewportToBitmap(
+          1, { row: 1, col: 1, rows: 10, cols: 6 }, { width: 640, height: 360, dpr: 1, ...opts },
+        ),
+      },
+      pptx: {
+        load: (bytes, mode) => PptxPresentation.load(bytes, { mode }),
+        render: (engine, opts) => engine.renderSlideToBitmap(1, { width: 640, dpr: 1, ...opts }),
+      },
+    };
+
+    async function hashBitmap(bitmap) {
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', pixels));
+      return `${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}:${canvas.width}x${canvas.height}`;
+    }
+
+    window.runPartFailure = async (format, mode, packageBytes) => {
+      const { load, render } = FORMATS[format];
+      const engine = await load(new Uint8Array(packageBytes).buffer, mode);
+      try {
+        const calls = [];
+        const builtin = await hashBitmap(await render(engine, {}));
+        const custom = await hashBitmap(await render(engine, {
+          errorPlaceholder: (failure) => {
+            calls.push(failure);
+            return { title: `Custom ${failure.kind} title`, detail: 'Custom detail line' };
+          },
+        }));
+        return { builtin, custom, failures: engine.partFailures, calls };
+      } finally {
+        engine.destroy();
+      }
+    };
+    document.body.dataset.status = 'imported';
+  </script>
+</body>
+</html>

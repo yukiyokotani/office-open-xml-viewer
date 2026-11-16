@@ -17,7 +17,7 @@ the font file host (for example `fonts.gstatic.com`) in `connect-src` as well
 as `font-src`: font files are now fetched, and a blocked fetch falls back to
 the host fonts (see **Served font line heights** below). See the
 [0.89 to 0.90 migration guide](docs/migration-0.90.md). It also
-contains the fixes of 0.89.10 and 0.89.11.
+contains the fixes of 0.89.10, 0.89.11 and 0.89.12.
 
 - **Font sources:** the new `fonts` load option takes an ordered list of
   sources, built with `googleFonts({ baseUrl?, substitutions?, additionalFamilies? })`,
@@ -48,13 +48,19 @@ contains the fixes of 0.89.10 and 0.89.11.
 - **Font loading cost:** with font sources, first display does less work.
   The subsets a document needs are now worked out precisely for accented,
   Vietnamese and Indic text, right-to-left text, ruby, vertical text,
-  pictures, charts and numbered lists, where the whole family used to be
+  pictures, charts, numbered lists, equations and WMF/EMF text (read from
+  the picture just before it plays), where the whole family used to be
   downloaded. Each face is built as its download lands, `googleFonts()` faces
   are registered from their URL so the browser decodes them off the main
   thread, Google Fonts files download 32 at a time, a served face's line
   metrics are measured once per family, and the font-source code loads only
   when `fonts` is configured and while the worker parses. Rendering is
-  unchanged (#2210, #2217, #2220, #2224, #2226, #2231–#2234, #2236–#2238).
+  unchanged (#2210, #2217, #2220, #2224, #2226, #2231–#2234, #2236–#2238,
+  #2250, #2253, #2260).
+- **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`) and
+  the line ends of connectors, line shapes, callout leaders and
+  custom-geometry lines are drawn, as in 0.89.12. The line-end code is now
+  shared with PowerPoint, whose drawing is unchanged (#2240, #2243).
 - **XLSX repaint:** scrolling and repainting a sheet no longer rebuild its
   render index (cell map, merges, conditional formats, table styles) on every
   frame, which took most of each frame on large sheets (#2230).
@@ -96,7 +102,7 @@ contains the fixes of 0.89.10 and 0.89.11.
   mismatched pair fails with `companion-runtime-mismatch`. Without the package
   nothing changes. See [docs/opendocument.md](docs/opendocument.md) and the
   [OpenDocument guide](https://ooxml.silurus.dev/opendocument/) (#2168, #2169,
-  #2170, #2189, #2205, #2208, #2245, #2246, #2247).
+  #2170, #2189, #2205, #2208, #2245, #2246, #2247, #2255, #2257).
 - **Failed package parts:** a new `partFailures` getter on `DocxDocument`,
   `PptxPresentation`, `XlsxWorkbook` and every viewer lists the parts that
   failed to parse, and the new `onPartFailure` viewer option is called once for
@@ -109,7 +115,9 @@ contains the fixes of 0.89.10 and 0.89.11.
   text. It is a `{ title?, detail? }` object (`detail: null` hides the detail
   line) or a function of the failure. The function runs on the main thread,
   including in worker mode. Without the option the placeholder is unchanged.
-  This is additive, so no migration is needed (#1974).
+  This is additive, so no migration is needed (#1974). The code that lays out
+  and paints a placeholder is fetched with the first failed part, so a file
+  without one does not load it (#2248, #2259).
 - **Node picture bytes:** `DocxDocumentSession` and `XlsxWorkbookSession`
   (from `openDocxDocument` and `openXlsxWorkbook` in `@silurus/ooxml/node`)
   now have `getImage(path, mimeType?)`, as `PptxPresentationSession` already
@@ -184,6 +192,20 @@ contains the fixes of 0.89.10 and 0.89.11.
   phonetic display is on. The parser JSON named the reading `phonetic_runs` /
   `phonetic_pr` instead of `phoneticRuns` / `phoneticPr`, so the renderer
   never received it. Shared-string cells were not affected.
+
+## 0.89.12 — 2026-11-16
+
+Compatible patch release. No migration is required. One Excel drawing fix:
+connector shapes and arrow heads are now drawn. It is described below.
+
+- **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`:
+  straight, elbow and curved connectors) are now drawn, alone or inside a
+  group, including horizontal and vertical ones whose extent is zero on one
+  axis. Line ends (`a:headEnd` / `a:tailEnd`) are drawn on connectors, line
+  shapes, callout leaders and custom-geometry lines, and the line stops at
+  the arrow head instead of running through it. A stand-alone line shape
+  with a zero extent on one axis is no longer dropped. Thanks to @tienhieuD
+  for the contribution (#2240, #2243).
 
 ## 0.89.11 — 2026-11-14
 
