@@ -183,12 +183,15 @@ impl<'a> Formatting<'a> {
             return Err(unsupported("Word paragraph mark outside formatting ranges"));
         }
         let (istd, applied) = fkp::paragraph_styles(&self.paragraphs, end_fc)?;
-        // A sprmPIstd naming no paragraph style leaves the PAPX style.
         Ok(match applied {
             Some(applied) if self.is_paragraph_style(applied) => applied,
-            Some(_) => {
-                crate::rejection::spec_default("Word sprmPIstd without a paragraph style", istd)
-            }
+            // MS-DOC 2.6.2 gives such a paragraph the document defaults,
+            // which this reader does not resolve as a style: the PAPX style
+            // stands in for them.
+            Some(_) => crate::rejection::approximated(
+                "Word sprmPIstd without a paragraph style keeps the PAPX style",
+                istd,
+            ),
             None => istd,
         })
     }
@@ -609,8 +612,10 @@ impl<'a> Formatting<'a> {
                     pending_style_resets = pending_style_resets.saturating_sub(1);
                     if pending_style_resets == 0 {
                         // The paragraph properties that precede the last
-                        // sprmPIstd are replaced by the style it names.
+                        // sprmPIstd are replaced by the style it names,
+                        // the direct overrides captured from them included.
                         *props = style_base.take().unwrap_or_else(|| props.clone());
+                        direct_properties = DirectParagraphProperties::default();
                     }
                 }
                 if (code >> 10) & 7 == 1

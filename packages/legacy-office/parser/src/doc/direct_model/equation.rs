@@ -253,14 +253,10 @@ impl Reader<'_> {
             return None;
         }
         let (guide, guide_cp) = self.plain(|c| c == ')')?;
-        if !self.literal(")") {
+        // Word writes the guide and its base without a blank between them.
+        if !self.literal("),") {
             return None;
         }
-        self.skip_space();
-        if !self.peek().is_some_and(is_separator) {
-            return None;
-        }
-        self.at += 1;
         let (base, base_cp) = self.plain(|c| c == ')')?;
         self.at += 1;
         self.skip_space();
@@ -297,7 +293,7 @@ impl Reader<'_> {
             if end(character) {
                 break;
             }
-            if matches!(character, '(' | ')' | '\\') || is_separator(character) {
+            if matches!(character, '(' | ')' | ',' | '\\') {
                 return None;
             }
             self.at += 1;
@@ -766,6 +762,13 @@ mod tests {
             panic!()
         };
         assert_eq!((form.align, form.guide_half_points), ("left", None));
+        // A semicolon is text of a guide.
+        let Equation::Ruby(form) = parse(&chars(
+            "EQ \\* jc2 \\* \"Font:X\" \\* hps16 \\o\\ad(\\s\\up 14(a;b),c)",
+        )) else {
+            panic!()
+        };
+        assert_eq!((form.guide.as_str(), form.base.as_str()), ("a;b", "c"));
         // Anything else is an equation.
         assert!(matches!(
             parse(&chars("EQ \\o(\\s\\up 5(a),b)c")),

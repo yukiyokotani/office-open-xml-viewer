@@ -276,14 +276,31 @@ impl StoryFields {
                         Display::Result => {}
                         Display::Evaluated(entry) => {
                             // The token replaces everything the field holds,
-                            // fields nested in its result included.
-                            evaluated.retain(|(begin, ..)| *begin < field.begin);
+                            // fields nested in its result included. Those
+                            // closed after this field began: they are the
+                            // tail of the list.
+                            while evaluated
+                                .last()
+                                .is_some_and(|(begin, ..)| *begin > field.begin)
+                            {
+                                evaluated.pop();
+                            }
                             evaluated.push((field.begin, cp, entry));
                         }
                         Display::Private => {
                             if let Some(separator) = field.separator {
-                                evaluated.retain(|(begin, ..)| *begin < field.begin);
-                                private.retain(|(first, _)| *first < field.begin);
+                                while evaluated
+                                    .last()
+                                    .is_some_and(|(begin, ..)| *begin > field.begin)
+                                {
+                                    evaluated.pop();
+                                }
+                                while private
+                                    .last()
+                                    .is_some_and(|(first, _)| *first > field.begin)
+                                {
+                                    private.pop();
+                                }
                                 private.push((separator + 1, cp));
                             }
                         }
@@ -606,6 +623,18 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Display, String> {
     }
     if field.hidden {
         return Ok(Display::Result);
+    }
+    // A field Word evaluates or draws is read from its whole instruction and
+    // replaced as a whole: scratch that did not hold all of it is a limit of
+    // this reader, not content to drop.
+    let evaluated_keyword = matches!(
+        keyword.as_str(),
+        "PAGE" | "NUMPAGES" | "DATE" | "TIME" | "EQ" | "SYMBOL"
+    );
+    if evaluated_keyword && (field.instruction_overflow || field.result_overflow) {
+        return Err(crate::rejection::resource(
+            "Word evaluated field text budget exceeded",
+        ));
     }
     // fDiffer (0x01) only inverts the field-code view on screen; fZombieEmbed
     // (0x02), fResultsDirty (0x04) and fResultsEdited (0x08) do not change
@@ -1323,6 +1352,46 @@ mod tests {
             best_effort(),
             ["Word date-time field without a picture shows its stored result"]
         );
+    }
+
+    #[test]
+    fn an_evaluated_field_longer_than_the_scratch_is_a_resource_limit() {
+        // The token replaces the whole field: an instruction or result the
+        // scratch did not hold is not dropped.
+        for text in [
+            format!("\u{13}EQ {}\u{15}\r", "x".repeat(MAX_FIELD_TEXT + 8)),
+            format!("\u{13}PAGE\u{14}{}\u{15}\r", "9".repeat(MAX_FIELD_TEXT + 8)),
+        ] {
+            let kind = if text.contains("EQ") { 0x31 } else { 0x21 };
+            let flags = if text.contains('\u{14}') { 0x80 } else { 0x00 };
+            let table = with_types(&text, &[kind], &[flags]);
+            let error = tokens(&text, &table).unwrap_err();
+            assert!(error.starts_with("LEGACY_RESOURCE_LIMIT:"), "{error}");
+        }
+        // A cached field needs only its keyword.
+        let text = format!(
+            "\u{13}REF {}\u{14}r\u{15}\r",
+            "x".repeat(MAX_FIELD_TEXT + 8)
+        );
+        let table = with_types(&text, &[0x03], &[0x80]);
+        assert_eq!(tokens(&text, &table).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_field_replaces_only_the_fields_nested_in_it() {
+        // Fields before an evaluated field stay; a private result drops the
+        // evaluated field nested in it.
+        let text = "\u{13}PAGE\u{14}1\u{15}\u{13}NUMPAGES\u{14}2\u{15}\u{13}REF x\u{14}\u{13}PAGE\u{14}3\u{15}\u{15}\r";
+        let table = with_types(text, &[0x21, 0x1a, 0x03, 0x21], &[0x80, 0x80, 0xc0, 0xa0]);
+        let kinds: Vec<_> = tokens(text, &table)
+            .unwrap()
+            .into_iter()
+            .map(|(token, _)| match token {
+                Token::EvaluatedField(field) => field.field_type,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["page", "numPages"]);
     }
 
     #[test]

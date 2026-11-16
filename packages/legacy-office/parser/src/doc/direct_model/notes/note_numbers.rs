@@ -109,6 +109,12 @@ pub(super) fn assign(
     let section_of = |cp: usize| sections.partition_point(|section| section.end <= cp);
 
     // (format, number) of every automatic note, in reference order.
+    //
+    // MS-DOC 2.6.4 sprmSNFtn/sprmSNEdn: the value of a section is the
+    // number of its first note when the count restarts there; while the
+    // count continues it offsets the running count (a section whose value
+    // is 6 shows its notes five higher). A DOP-scoped document has one
+    // value for all sections (2.7.2 nFtn/nEdn), the first number.
     let mut numbers: Vec<Option<(u16, i64)>> = Vec::with_capacity(story.entries.len());
     let mut previous: Option<(usize, i64)> = None;
     let mut per_page = false;
@@ -121,16 +127,18 @@ pub(super) fn assign(
         let section = section_of(entry.reference_cp);
         let scope = scope_of(section);
         per_page |= scope.restart == RESTART_EACH_PAGE;
-        let number = match previous {
+        let first = first_number(scope.start);
+        // The running count of the scope, from 1.
+        let count = match previous {
             Some((last_section, last))
                 if !(scope.restart == RESTART_EACH_SECTION && last_section != section) =>
             {
                 last + 1
             }
-            _ => first_number(scope.start),
+            _ => 1,
         };
-        previous = Some((section, number));
-        numbers.push(Some((scope.format, number)));
+        previous = Some((section, count));
+        numbers.push(Some((scope.format, count + first - 1)));
     }
     if per_page {
         // Pages exist only after layout, and the DOCX model has no per-page
@@ -406,6 +414,24 @@ mod tests {
                 crate::rejection::BestEffort::IgnoredValue,
                 "Word section note properties in a DOP-scoped document"
             )]
+        );
+    }
+
+    #[test]
+    fn a_section_value_offsets_a_continuing_count() {
+        // Continuous numbering, section values 1 and 6: the second note is
+        // the second of the count, shown five higher.
+        let notes = story(&[(1, true), (9, true)]);
+        let mut second = sections::Section::for_test(20, 2);
+        second.set_note_properties_for_test(sections::NoteProperties {
+            footnote_offset: Some(6),
+            ..Default::default()
+        });
+        let sections = [sections::Section::for_test(4, 2), second];
+        let numbering = assign(&notes, &[false; 2], 0x0101, &dop(0, 1, 0), &sections);
+        assert_eq!(
+            numbering.marks,
+            Some(vec![Some("1".into()), Some("7".into())])
         );
     }
 
