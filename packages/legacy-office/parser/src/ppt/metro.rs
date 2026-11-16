@@ -2058,12 +2058,12 @@ fn same_outline(
         }
         differs = true;
     }
-    if stroked && reversed.get() {
+    if differs {
+        Verdict::Differs("custom geometry vertices")
+    } else if stroked && reversed.get() {
         // The stroke of the alternative may draw other joins: keep the
         // binary, which draws its own turns as authored.
         Verdict::Overridden(RESTATED_GEOMETRY)
-    } else if differs {
-        Verdict::Differs("custom geometry vertices")
     } else {
         Verdict::Same
     }
@@ -2961,6 +2961,11 @@ mod tests {
         assert_eq!(
             same_geometry(&binary(&moved, &leaf), &square(false, 1.0)),
             Verdict::Overridden(RESTATED_GEOMETRY)
+        );
+        // A different vertex beside the fold is a verified difference.
+        assert_eq!(
+            same_geometry(&binary(&moved, &leaf), &square(false, 0.9)),
+            Verdict::Differs("custom geometry vertices")
         );
         assert_eq!(
             same_outline(
@@ -4626,6 +4631,19 @@ mod tests {
                 take_best_effort(),
                 [(BestEffort::Approximated, RESTATED_GEOMETRY)]
             );
+            // With another corner as well, the verified difference keeps
+            // the binary and replaces no rejection.
+            if let Some(paths) = element.cust_geom.as_mut() {
+                paths[0][3] = PathCmd::LineTo { x: 1.0, y: 0.9 };
+            }
+            assert!(matches!(
+                run_verification(&element, &blob(&xml), &theme(), AMPLE).0,
+                Ok(None)
+            ));
+            assert!(take_best_effort().is_empty());
+            if let Some(paths) = element.cust_geom.as_mut() {
+                paths[0][3] = PathCmd::LineTo { x: 1.0, y: 1.0 };
+            }
             // A closing line to the moved start instead cuts another
             // triangle: no control says which side PowerPoint draws.
             if let Some(paths) = element.cust_geom.as_mut() {
