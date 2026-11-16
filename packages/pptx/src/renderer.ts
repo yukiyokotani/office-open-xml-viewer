@@ -344,13 +344,16 @@ export interface PptxTextRunInfo {
    */
   cellHorzOverflow?: 'clip' | 'overflow';
   /**
-   * Zero-based index, within the run's text body, of the authored line the run
-   * belongs to: a paragraph, or the part of a paragraph between manual line
-   * breaks (`<a:br>`). Runs of one authored line share it however the line is
-   * wrapped, or stacked into columns (`vert="wordArtVert"`), so a consumer can
-   * tell an automatic wrap inside a word from the end of a line of text.
+   * Zero-based index, within the run's text body, of the uninterrupted span of
+   * authored text the run belongs to. A span ends at a paragraph end, a manual
+   * line break (`<a:br>`), a tab or an inline equation. It does not end at an
+   * automatic line wrap, at a formatting change, or between the glyph cells of
+   * stacked vertical text (`vert="wordArtVert"`), so runs of one body with the
+   * same index are pieces of continuous text, and a consumer can tell a wrap
+   * inside a word from an authored separation. The indices increase in run
+   * order and need not be consecutive.
    */
-  logicalLine?: number;
+  textSpan?: number;
   /**
    * Additional rotation from a vertical text body (`vert="vert"` → 90,
    * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
@@ -5055,7 +5058,7 @@ function renderStackedTextBody(
     onTextRun({
       text: run.text, inShapeX: run.x - bx, inShapeY: run.y - by, w: run.w, h: run.h,
       fontSize: run.fontSize, font: run.font, shapeX: bx, shapeY: by, shapeW: bw, shapeH: bh,
-      rotation: shapeRotation, logicalLine: run.logicalLine,
+      rotation: shapeRotation, textSpan: run.textSpan,
       ...(run.hyperlink ? { hyperlink: run.hyperlink } : {}),
     });
   }
@@ -5793,9 +5796,10 @@ export function renderTextBody(
   let colIdx = 0;
   let entriesInCol = 0;
 
-  // The authored line each drawn line belongs to, reported on its runs: it
-  // advances at a paragraph end or a manual break, not at an automatic wrap.
-  let logicalLine = 0;
+  // The span of authored text each run belongs to (PptxTextRunInfo.textSpan):
+  // it advances at a paragraph end, a manual break, a tab and an equation,
+  // not at an automatic wrap.
+  let textSpan = 0;
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
     // Balanced column advance: when the current column has reached its share
@@ -6093,6 +6097,7 @@ export function renderTextBody(
       }
       if (seg.isTab) {
         penX += seg.tabWidthPx ?? 0;
+        textSpan++;
         continue;
       }
       // Justification advance after this piece (0 when not justifying). Added to
@@ -6112,6 +6117,7 @@ export function renderTextBody(
         paintEquation(ctx, seg, penX, baseline - seg.math.ascent);
         penX += w;
         penX += jext;
+        textSpan++;
         continue;
       }
       ctx.font = seg.font;
@@ -6376,7 +6382,7 @@ export function renderTextBody(
           shapeW: bw,
           shapeH: bh,
           rotation: shapeRotation,
-          logicalLine,
+          textSpan,
           hyperlink: seg.hyperlink,
         });
       }
@@ -6388,7 +6394,7 @@ export function renderTextBody(
     if (paraNeedsBidi) ctx.direction = 'ltr';
 
     cursorY += linePx;
-    if (endsLogicalLine) logicalLine++;
+    if (endsLogicalLine) textSpan++;
   }
 
   ctx.restore();

@@ -189,6 +189,23 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
         (p) => Promise.resolve(recordedPages[p] ?? []),
       );
 
+      // The real layout reports each run's range in its paragraph's text: the
+      // last run of a wrapped line and the first of the next are adjacent in
+      // it, so an automatic wrap is not a word boundary.
+      type Placed = Run & { textRange?: { start: number; end: number }; source?: { path: readonly number[] } };
+      let wraps = 0;
+      for (const runs of recordedPages as Placed[][]) {
+        for (let i = 1; i < runs.length; i++) {
+          const [previous, next] = [runs[i - 1], runs[i]];
+          expect(next.textRange).toBeDefined();
+          if (previous.source?.path.join('.') !== next.source?.path.join('.') || previous.y === next.y) continue;
+          if (previous.text === '' || next.text === '') continue;
+          wraps++;
+          expect(next.textRange!.start).toBe(previous.textRange!.end);
+        }
+      }
+      expect(wraps).toBeGreaterThan(10);
+
       // "Living" ends the headline's first paragraph and "Cathedral" is the next
       // one, with no character between them in the page's run list.
       const joined = recordedPages.map((runs) => runs.map((run) => run.text).join('')).join('\n');

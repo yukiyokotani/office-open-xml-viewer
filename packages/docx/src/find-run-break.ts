@@ -23,15 +23,16 @@ function runAxes(transform: string | undefined): readonly [number, number, numbe
  * joined search text has no character between them.
  *
  * Runs of different paragraphs are separate. Within a paragraph the layout
- * reports each run's range in the paragraph text (`textRange`): runs that are
- * not adjacent in that text are separate (a tab, a manual line break or an
- * inline object lies between them), and adjacent ones join, also across an
- * automatic wrap, so a long word broken over two lines stays one word. On one
- * line, runs apart by more than a quarter of the font size are separate (a tab
- * stop or a column gap). Runs without `textRange` are compared by position
- * alone: another orientation or another line separates. Positions are compared
- * in the runs' own writing frame, so the rule is the same for horizontal,
- * vertical and rotated text.
+ * reports each run's range in the paragraph text (`textRange`), and that alone
+ * decides: runs adjacent in the text join, wherever they are placed, so a long
+ * word that wraps onto a second line stays one word; between runs that are not
+ * adjacent lies a tab, a manual line break or an inline object, and they are
+ * separate.
+ *
+ * Runs without `textRange` are compared by position: another orientation,
+ * another line, or a gap of more than a quarter of the font size on one line
+ * separates. Positions are taken in the runs' own writing frame, so this is
+ * the same for horizontal, vertical and rotated text.
  */
 export function docxRunsBreak(previous: DocxTextRunInfo, next: DocxTextRunInfo): boolean {
   const a = previous.source;
@@ -42,15 +43,13 @@ export function docxRunsBreak(previous: DocxTextRunInfo, next: DocxTextRunInfo):
   )) return true;
   const from = previous.textRange;
   const to = next.textRange;
-  // Adjacent in the paragraph text, in either order (a right-to-left line
-  // lists its runs against the text).
-  const adjacent = from && to ? from.end === to.start || to.end === from.start : undefined;
-  if (adjacent === false) return true;
-  const sameFrame = (previous.transform ?? '') === (next.transform ?? '');
+  // Adjacent in either order: a right-to-left line lists its runs against the text.
+  if (from && to) return from.end !== to.start && to.end !== from.start;
+  if ((previous.transform ?? '') !== (next.transform ?? '')) return true;
   const [inlineX, inlineY, blockX, blockY] = runAxes(previous.transform);
   const inline = (run: DocxTextRunInfo): number => run.x * inlineX + run.y * inlineY;
   const block = (run: DocxTextRunInfo): number => run.x * blockX + run.y * blockY;
-  if (!sameFrame || Math.abs(block(previous) - block(next)) > 0.5) return adjacent !== true;
+  if (Math.abs(block(previous) - block(next)) > 0.5) return true;
   const gap = Math.max(
     inline(next) - (inline(previous) + previous.w), inline(previous) - (inline(next) + next.w));
   return gap > 0.25 * Math.min(previous.fontSize, next.fontSize);

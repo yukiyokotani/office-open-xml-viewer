@@ -103,34 +103,36 @@ it('keeps a term inside one table cell when a longer term of its group would cro
 });
 
 it('joins the runs of one authored line across wraps and stacked cells, and separates authored lines', () => {
-  const line = (text: string, logicalLine: number, overrides: Partial<PptxTextRunInfo> = {}) =>
-    run(text, { shapeId: '7', logicalLine, ...overrides });
+  const line = (text: string, textSpan: number, overrides: Partial<PptxTextRunInfo> = {}) =>
+    run(text, { shapeId: '7', textSpan, ...overrides });
   // An automatic wrap inside a word: the next drawn line continues the line.
   expect(pptxRunsBreak(line('cat', 0), line('alog', 0, { inShapeY: 12 }))).toBe(false);
   // A paragraph end or a manual break starts another authored line.
   expect(pptxRunsBreak(line('cat', 0), line('alog', 1, { inShapeY: 12 }))).toBe(true);
   expect(pptxRunsBreak(line('cat', 0), line('alog', 1, { inShapeX: 3 }))).toBe(true);
-  // On one drawn line a tab-sized gap still separates.
+  // The span alone decides: justification may move a piece of a word away,
+  // and a tab may be drawn with no gap at all.
   expect(pptxRunsBreak(line('cat', 0), line('alog', 0, { inShapeX: 3 }))).toBe(false);
-  expect(pptxRunsBreak(line('cat', 0), line('alog', 0, { inShapeX: 40 }))).toBe(true);
+  expect(pptxRunsBreak(line('cat', 0), line('alog', 0, { inShapeX: 40 }))).toBe(false);
+  expect(pptxRunsBreak(line('cat', 0), line('dog', 1, { inShapeX: 3 }))).toBe(true);
   // Stacked vertical text: one run per glyph, down a column and into the next.
   expect(pptxRunsBreak(line('c', 0), line('a', 0, { inShapeY: 28 }))).toBe(false);
   expect(pptxRunsBreak(line('t', 0, { inShapeY: 56 }), line('a', 0, { inShapeX: 30 }))).toBe(false);
   expect(pptxRunsBreak(line('t', 0, { inShapeY: 56 }), line('d', 1, { inShapeX: 30 }))).toBe(true);
   // Another shape separates whatever the line index.
-  expect(pptxRunsBreak(line('t', 0), run('d', { shapeId: '8', logicalLine: 0, inShapeX: 1 }))).toBe(true);
+  expect(pptxRunsBreak(line('t', 0), run('d', { shapeId: '8', textSpan: 0, inShapeX: 1 }))).toBe(true);
 });
 
 it('does not take a wrapped or stacked word for separate words', async () => {
   // "catalog" wrapped after "cat", then a second paragraph "cat".
   const wrapped = [
-    run('cat', { shapeId: '7', logicalLine: 0 }),
-    run('alog', { shapeId: '7', logicalLine: 0, inShapeY: 12 }),
-    run('cat', { shapeId: '7', logicalLine: 1, inShapeY: 24 }),
+    run('cat', { shapeId: '7', textSpan: 0 }),
+    run('alog', { shapeId: '7', textSpan: 0, inShapeY: 12 }),
+    run('cat', { shapeId: '7', textSpan: 1, inShapeY: 24 }),
   ];
   // The same text stacked: one glyph per run.
-  const stacked = [...'catalog'].map((text, index) => run(text, { shapeId: '7', logicalLine: 0, inShapeY: index * 28 }))
-    .concat([...'cat'].map((text, index) => run(text, { shapeId: '7', logicalLine: 1, inShapeY: index * 28, inShapeX: 30 })));
+  const stacked = [...'catalog'].map((text, index) => run(text, { shapeId: '7', textSpan: 0, inShapeY: index * 28 }))
+    .concat([...'cat'].map((text, index) => run(text, { shapeId: '7', textSpan: 1, inShapeY: index * 28, inShapeX: 30 })));
   for (const [runs, expected] of [[wrapped, [2]], [stacked, [7, 8, 9]]] as const) {
     const find = new PptxFindController(() => 1, async () => [...runs]);
     expect(await find.find('cat', { wholeWord: true })).toHaveLength(1);

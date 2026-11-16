@@ -147,7 +147,7 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
     const runs: PptxTextRunInfo[] = [];
     renderTextBody(ctx, stacked, 0, 0, 200, 470, SCALE,
       null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
-    expect(runs.map((run) => [run.text, run.logicalLine])).toEqual([
+    expect(runs.map((run) => [run.text, run.textSpan])).toEqual([
       ['c', 0], ['a', 0], ['t', 0], ['d', 1], ['o', 1],
     ]);
     // The cells of a column advance down; the next paragraph starts another column.
@@ -164,7 +164,7 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
       null, 0, false, false, '#000000', undefined, undefined, (run) => wrapped.push(run));
     expect(wrapped.map((run) => run.text).join('')).toBe('catalog');
     expect(new Set(wrapped.map((run) => run.inShapeX)).size).toBeGreaterThan(1);
-    expect(wrapped.every((run) => run.logicalLine === 0)).toBe(true);
+    expect(wrapped.every((run) => run.textSpan === 0)).toBe(true);
     for (let i = 1; i < wrapped.length; i++) expect(pptxRunsBreak(wrapped[i - 1], wrapped[i])).toBe(false);
   });
 
@@ -179,7 +179,7 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
     const wrapped = collect(body('catalogue', 'horz'), 80);
     expect(wrapped.map((run) => run.text).join('')).toBe('catalogue');
     expect(new Set(wrapped.map((run) => run.inShapeY)).size).toBeGreaterThan(1);
-    expect(wrapped.every((run) => run.logicalLine === 0)).toBe(true);
+    expect(wrapped.every((run) => run.textSpan === 0)).toBe(true);
     for (let i = 1; i < wrapped.length; i++) expect(pptxRunsBreak(wrapped[i - 1], wrapped[i])).toBe(false);
 
     // Two paragraphs, the second with a manual break: three authored lines.
@@ -194,9 +194,30 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
       ],
     });
     const lines = collect(text, 400);
-    expect(lines.map((run) => [run.text, run.logicalLine])).toEqual([['cat', 0], ['alog', 1], ['cat', 2]]);
+    expect(lines.map((run) => [run.text, run.textSpan])).toEqual([['cat', 0], ['alog', 1], ['cat', 2]]);
     expect(pptxRunsBreak(lines[0], lines[1])).toBe(true);
     expect(pptxRunsBreak(lines[1], lines[2])).toBe(true);
+  });
+
+  it('ends a span of authored text at a tab, however narrow the tab is drawn', () => {
+    const collect = (text: TextBody): PptxTextRunInfo[] => {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, text, 0, 0, 600, 470, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      return runs;
+    };
+    // "cat" is 3 × 0.6 × 24 = 43.2 px wide in the mock; the stop right after it
+    // leaves almost no gap, and a far stop leaves a wide one.
+    for (const stopPx of [44, 300]) {
+      const text = body('cat\tdog', 'horz');
+      (text.paragraphs[0] as unknown as { tabStops: { pos: number; algn: string }[] }).tabStops =
+        [{ pos: Math.round(stopPx / SCALE), algn: 'l' }];
+      const [cat, dog] = collect(text);
+      expect([cat.text, dog.text]).toEqual(['cat', 'dog']);
+      expect(dog.inShapeY).toBeCloseTo(cat.inShapeY, 6);
+      expect(dog.textSpan).toBeGreaterThan(cat.textSpan!);
+      expect(pptxRunsBreak(cat, dog)).toBe(true);
+    }
   });
 
   // #1827 PowerPoint controls: vrt2-only ∥ (Yu Gothic) stands unturned in a

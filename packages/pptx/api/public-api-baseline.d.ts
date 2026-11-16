@@ -1998,7 +1998,7 @@ export interface PptxTextRunInfo {
         column: number;
     }>;
     cellHorzOverflow?: 'clip' | 'overflow';
-    logicalLine?: number;
+    textSpan?: number;
     textBodyRotation?: number;
     hyperlink?: HyperlinkTarget;
 }

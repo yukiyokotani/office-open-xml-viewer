@@ -122,6 +122,43 @@ describe('DOCX layout breaks for whole-word matching', () => {
       .toEqual(['alog', 'alog']);
   });
 
+  it('keeps a word in one piece when distributed alignment spreads its runs apart', async () => {
+    const bold = { ...(textRun('cat') as object), bold: true } as DocRun;
+    const distributed = para(bold, textRun('alog'));
+    (distributed as unknown as { alignment: string }).alignment = 'distribute';
+    // A second paragraph keeps the distributed one from being a last line only.
+    const runs = pageRuns([distributed, para(textRun('cat'))], 400);
+    const text = runs.map((run) => `${run.text}@${Math.round(run.x)}`).join('|');
+    const [cat, alog] = runs;
+    expect([cat.text, alog.text], text).toEqual(['cat', 'alog']);
+    // The runs are adjacent in the text although the line is spread out.
+    expect(alog.textRange?.start, text).toBe(cat.textRange?.end);
+    expect(alog.x - (cat.x + cat.w), text).toBeGreaterThan(0.25 * cat.fontSize);
+    expect(docxRunsBreak(cat, alog), text).toBe(false);
+
+    const find = new DocxFindController(() => 1, async () => runs);
+    // Only the second paragraph's "cat" is a word.
+    const matches = await find.find('cat', { wholeWord: true });
+    expect(matches, text).toHaveLength(1);
+    expect(find.pageHighlights(0)[0].slices[0].runIndex).toBe(runs.length - 1);
+    expect(await find.find('catalog', { wholeWord: true })).toHaveLength(1);
+  });
+
+  it('lets the text range alone decide when the layout reports it', () => {
+    const run = (text: string, x: number, y: number, start: number) => ({
+      text, x, y, w: text.length * 5, h: 12, fontSize: 10, font: '10px serif',
+      textRange: { start, end: start + text.length },
+    });
+    // Adjacent in the text: one word, also when justification or a wrap moved
+    // the second run away, and in right-to-left order.
+    expect(docxRunsBreak(run('cat', 0, 0, 0), run('alog', 15, 0, 3))).toBe(false);
+    expect(docxRunsBreak(run('cat', 0, 0, 0), run('alog', 60, 0, 3))).toBe(false);
+    expect(docxRunsBreak(run('cat', 0, 0, 0), run('alog', 0, 12, 3))).toBe(false);
+    expect(docxRunsBreak(run('alog', 15, 0, 3), run('cat', 0, 0, 0))).toBe(false);
+    // Something lies between them in the text, however close they are drawn.
+    expect(docxRunsBreak(run('cat', 0, 0, 0), run('alog', 15, 0, 4))).toBe(true);
+  });
+
   it('falls back to positions for runs without a text range', () => {
     const run = (text: string, x: number, y: number) =>
       ({ text, x, y, w: text.length * 5, h: 12, fontSize: 10, font: '10px serif' });

@@ -201,6 +201,25 @@ describe('DocxViewer text highlights: the set is taken when the call is made', (
   });
 });
 
+describe('DocxViewer text highlights and a layout view change', () => {
+  it('cancels a request that was waiting for the progressive layout', async () => {
+    installMeasuringDom();
+    const engine = new FakeDocxEngine(2, [{ widthPt: 612, heightPt: 792 }]);
+    engine.feedTextRuns = [RUN];
+    engine.setLayoutComplete(false);
+    const { viewer, layer } = makeViewer(engine, 'main');
+    const waiting = viewer.highlightText(GROUPS);
+    await viewer.setShowTrackedChanges(true);
+    engine.setLayoutComplete(true);
+    await expect(waiting).resolves.toEqual([]);
+    expect(await viewer.highlightNext()).toBeNull();
+    expect(layer().children).toEqual([]);
+    // A request made after the change is served.
+    expect(await viewer.highlightText(GROUPS)).toHaveLength(4);
+    viewer.destroy();
+  });
+});
+
 describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s mode)', (mode) => {
   function mount(pages: number) {
     installDom();
@@ -265,6 +284,19 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
       .rejects.toThrow('duplicate group id');
     engine.setLayoutComplete(true);
     expect((await waiting).map((match) => match.text)).toEqual(['Alpha', 'Alpha']);
+    viewer.destroy();
+  });
+
+  it('cancels a request waiting for the progressive layout when the layout view changes', async () => {
+    const { viewer, engine, boxes } = mount(2);
+    engine.setLayoutComplete(false);
+    const waiting = viewer.highlightText(GROUPS);
+    await viewer.setShowTrackedChanges(true);
+    engine.setLayoutComplete(true);
+    await expect(waiting).resolves.toEqual([]);
+    expect(await viewer.highlightNext()).toBeNull();
+    expect(boxes()).toEqual([]);
+    expect(await viewer.highlightText(GROUPS)).toHaveLength(4);
     viewer.destroy();
   });
 

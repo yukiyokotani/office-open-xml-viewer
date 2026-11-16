@@ -167,6 +167,9 @@ export class DocxScrollViewer implements ZoomableViewer {
       this._layoutViewGeneration++;
       this._showTrackedChanges = publication.view.showTrackedChanges;
       this._currentDate = publication.view.currentDate;
+      // Another layout variant: drop the highlights, and a highlight request
+      // still waiting for the progressive layout with them.
+      this._searches[1]++;
       this._find.invalidate();
       this._layout.apply({
         pageCount: this._doc!.pageCount, exact: true, complete: this._doc!.layoutComplete,
@@ -1131,6 +1134,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     if (this._destroyed || generation !== this._layoutViewGeneration || doc !== this._doc) return;
     this._showTrackedChanges = value;
     if (docxModelSourcesConfigured(this._opts)) this._requestedShowTrackedChanges = value;
+    this._searches[1]++;
     this._find.invalidate();
     // Re-render every mounted slot at the new variant, and relayout: heights,
     // spacer and mount window all follow the new page count, and a shrinking
@@ -1229,8 +1233,8 @@ export class DocxScrollViewer implements ZoomableViewer {
    * matched `term`. Groups are searched independently, so matches of different
    * groups may overlap; within a group the longer match wins. An empty set
    * clears the highlights. A new document, or a call that changes the layout
-   * ({@link setShowTrackedChanges}), drops the highlights; call this again
-   * afterwards.
+   * ({@link setShowTrackedChanges}), drops the highlights and cancels a
+   * request that is still waiting for the layout; call this again afterwards.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],

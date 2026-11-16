@@ -652,7 +652,8 @@ export class DocxViewer implements ZoomableViewer {
    * Scans all pages like {@link findText} (and reuses its page text when both
    * are used), in `mode: 'main'` and `mode: 'worker'`. A new document, or a
    * call that changes the layout ({@link setShowTrackedChanges}), drops the
-   * highlights; call this again afterwards.
+   * highlights and cancels a request that is still waiting for the layout;
+   * call this again afterwards.
    */
   async highlightText(
     groups: readonly TextHighlightGroup[],
@@ -1058,6 +1059,9 @@ export class DocxViewer implements ZoomableViewer {
       currentDate: publication.view.currentDate,
       showTrackedChanges: publication.view.showTrackedChanges,
     };
+    // Another layout variant: drop the highlights, and a highlight request
+    // still waiting for the progressive layout with them.
+    this._searches[1]++;
     this._find.invalidate();
     this._currentPage = Math.max(0, Math.min(this._currentPage, doc.pageCount - 1));
     void this._render().catch((error) => this._reportRenderError(error));
@@ -1152,6 +1156,7 @@ export class DocxViewer implements ZoomableViewer {
     if (this._destroyed || generation !== this._layoutViewGeneration || doc !== this._doc) return;
     this._showTrackedChangesExplicit = true;
     this._opts = nextOptions;
+    this._searches[1]++;
     this._find.invalidate();
     this._currentPage = Math.max(0, Math.min(this._currentPage, this.pageCount - 1));
     await this._render();
