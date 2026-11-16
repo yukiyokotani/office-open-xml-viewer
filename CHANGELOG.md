@@ -5,9 +5,10 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
-## 0.89.12 — Unreleased
+## 0.89.12 — 2026-11-16
 
-Compatible patch release. No migration is required.
+Compatible patch release. No migration is required. One Excel drawing fix:
+connector shapes and arrow heads are now drawn. It is described below.
 
 - **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`:
   straight, elbow and curved connectors) are now drawn, alone or inside a
