@@ -20,7 +20,7 @@ describe('text highlight set', () => {
   });
 
   it('rejects a repeated group id, also when the set is otherwise empty', () => {
-    const repeated = new TypeError('highlightText: duplicate group id');
+    const repeated = new TypeError('duplicate group id');
     expect(() => adoptTextHighlightGroups([{ id: 'a', terms: ['x'] }, { id: 'a', terms: ['y'] }])).toThrow(repeated);
     expect(() => adoptTextHighlightGroups([{ id: 'a', terms: [] }, { id: 'a', terms: [] }])).toThrow(repeated);
   });

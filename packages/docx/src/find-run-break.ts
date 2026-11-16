@@ -54,3 +54,6 @@ export function docxRunsBreak(previous: DocxTextRunInfo, next: DocxTextRunInfo):
     inline(next) - (inline(previous) + previous.w), inline(previous) - (inline(next) + next.w));
   return gap > 0.25 * Math.min(previous.fontSize, next.fontSize);
 }
+
+/** The module's default export is what the find controller loads on demand. */
+export default docxRunsBreak;

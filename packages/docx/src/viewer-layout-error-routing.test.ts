@@ -43,6 +43,43 @@ describe.each(['viewer', 'scroll'] as const)('DOCX %s progressive failure routin
     surface.destroy();
   });
 
+  it('routes a failure a current highlight request waits for only through its Promise', async () => {
+    const onError = vi.fn();
+    const { engine, surface } = await loadedSurface(kind, { onError });
+    const error = new Error('layout failed');
+    const highlighting = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+    engine.setLayoutFailure(error);
+    publishDocxLayout(engine.asDoc(), {
+      pageCount: 1, exact: false, complete: false, error,
+    });
+
+    await expect(highlighting).rejects.toBe(error);
+    expect(onError).not.toHaveBeenCalled();
+    surface.destroy();
+  });
+
+  it.each(['before', 'after'] as const)(
+    'routes a failure once through onError when the only awaiter is a cleared highlight request (published %s the rejection)',
+    async (order) => {
+      const onError = vi.fn();
+      const { engine, surface } = await loadedSurface(kind, { onError });
+      const error = new Error('layout failed');
+      const cleared = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+      surface.clearHighlights();
+      const publish = () => publishDocxLayout(engine.asDoc(), {
+        pageCount: 1, exact: false, complete: false, error,
+      });
+      if (order === 'before') publish();
+      engine.setLayoutFailure(error);
+      await expect(cleared).resolves.toEqual([]);
+      if (order === 'after') publish();
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(error);
+      surface.destroy();
+    },
+  );
+
   it('routes an unawaited failure once through onError', async () => {
     const onError = vi.fn();
     const { engine, surface } = await loadedSurface(kind, { onError });

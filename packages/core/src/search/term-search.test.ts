@@ -6,10 +6,10 @@ import {
 import {
   findTermRanges,
   findTextHighlightRanges,
-  textHighlightCellMatcher,
-  textHighlightMatcher,
-  wholeWordCellMatcher,
-  wholeWordMatcher,
+  matchCellGroups,
+  matchGroups,
+  matchCellWords,
+  matchWords,
   wordBoundaries,
 } from './term-search.js';
 import type { TextHighlightGroup } from './text-highlight.js';
@@ -213,34 +213,34 @@ describe('findTextHighlightRanges', () => {
 describe('unit matchers', () => {
   const paragraphs = [{ text: 'Introduction', p: 0 }, { text: 'The cat', p: 1 }];
   type Paragraph = (typeof paragraphs)[number];
-  const loadBreak = async () => (previous: Paragraph, next: Paragraph) => previous.p !== next.p;
+  const loadBreak = async () => ({ default: (previous: Paragraph, next: Paragraph) => previous.p !== next.p });
   const accept = (): boolean => true;
   /** The format rule of PPTX table cells: a match stays within one container. */
   const withinParagraph = (unitRuns: Paragraph[], slices: MatchRunSlice[]): boolean =>
     slices.every((slice) => unitRuns[slice.runIndex].p === unitRuns[slices[0].runIndex].p);
 
-  it('wholeWordMatcher finds whole words using the format\'s layout breaks', async () => {
+  it('matchWords finds whole words using the format\'s layout breaks', async () => {
     const searched = buildTextIndex(paragraphs);
-    const withBreaks = await wholeWordMatcher<Paragraph, MatchRunSlice>(
+    const withBreaks = await matchWords<Paragraph, MatchRunSlice>(
       'the', { wholeWord: true }, fold, sliceRange, loadBreak, accept);
     expect(withBreaks(searched, paragraphs)).toEqual([{ slices: [{ runIndex: 1, start: 0, end: 3 }] }]);
-    const without = await wholeWordMatcher<Paragraph, MatchRunSlice>(
+    const without = await matchWords<Paragraph, MatchRunSlice>(
       'the', { wholeWord: true }, fold, sliceRange, undefined, accept);
     expect(without(searched, paragraphs)).toEqual([]);
   });
 
-  it('textHighlightMatcher resolves slices, colour and source, loading breaks only for whole words', async () => {
+  it('matchGroups resolves slices, colour and source, loading breaks only for whole words', async () => {
     const searched = buildTextIndex(paragraphs);
     let loads = 0;
     const counted = () => { loads++; return loadBreak(); };
-    const plain = await textHighlightMatcher<Paragraph, MatchRunSlice>(
+    const plain = await matchGroups<Paragraph, MatchRunSlice>(
       [{ id: 'user', terms: ['cat'], color: 'red' }, { id: 'system', terms: ['the'] }], fold, sliceRange, counted, accept);
     expect(loads).toBe(0);
     expect(plain(searched, paragraphs)).toEqual([
       { slices: [{ runIndex: 1, start: 0, end: 3 }], color: 'rgba(0, 184, 148, 0.35)', layer: 1, source: { group: 'system', term: 'the' } },
       { slices: [{ runIndex: 1, start: 4, end: 7 }], color: 'red', layer: 0, source: { group: 'user', term: 'cat' } },
     ]);
-    const words = await textHighlightMatcher<Paragraph, MatchRunSlice>(
+    const words = await matchGroups<Paragraph, MatchRunSlice>(
       [{ id: 'system', terms: ['introduction'], wholeWord: true }], fold, sliceRange, counted, accept);
     expect(loads).toBe(1);
     expect(words(searched, paragraphs)).toHaveLength(1);
@@ -249,7 +249,7 @@ describe('unit matchers', () => {
   it('applies the format rule before the overlap rule, so a rejected long match keeps a shorter valid one', async () => {
     const cells = [{ text: 'cat', p: 0 }, { text: 'dog cat', p: 1 }];
     const searched = buildTextIndex(cells);
-    const highlights = await textHighlightMatcher<Paragraph, MatchRunSlice>(
+    const highlights = await matchGroups<Paragraph, MatchRunSlice>(
       [{ id: 'a', terms: ['catdog', 'cat'] }], fold, sliceRange, undefined, withinParagraph);
     expect(highlights(searched, cells).map((hit) => hit.slices)).toEqual([
       [{ runIndex: 0, start: 0, end: 3 }],
@@ -257,22 +257,22 @@ describe('unit matchers', () => {
     ]);
     // A rejected occurrence does not hide one that starts inside it either.
     const seam = [{ text: 'xa', p: 0 }, { text: 'aa', p: 1 }];
-    const words = await wholeWordMatcher<Paragraph, MatchRunSlice>(
+    const words = await matchWords<Paragraph, MatchRunSlice>(
       'aa', { wholeWord: true }, fold, sliceRange, loadBreak, withinParagraph);
     expect(words(buildTextIndex(seam), seam)).toEqual([{ slices: [{ runIndex: 1, start: 0, end: 2 }] }]);
   });
 });
 
 describe('cell matchers', () => {
-  it('wholeWordCellMatcher takes the first display text that has a whole-word match', () => {
-    const match = wholeWordCellMatcher('cat', { wholeWord: true }, fold);
+  it('matchCellWords takes the first display text that has a whole-word match', () => {
+    const match = matchCellWords('cat', { wholeWord: true }, fold);
     expect(match(['category Cat'])).toEqual([{ text: 'Cat' }]);
     expect(match(['cats', 'a cat'])).toEqual([{ text: 'cat' }]);
     expect(match(['cats'])).toEqual([]);
   });
 
-  it('textHighlightCellMatcher searches each group in the first display text that matches it', () => {
-    const match = textHighlightCellMatcher([
+  it('matchCellGroups searches each group in the first display text that matches it', () => {
+    const match = matchCellGroups([
       { id: 'full', terms: ['456'], color: 'red' },
       { id: 'short', terms: ['235'] },
     ], fold);

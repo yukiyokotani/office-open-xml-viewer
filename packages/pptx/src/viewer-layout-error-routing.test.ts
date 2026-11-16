@@ -42,6 +42,32 @@ describe.each(['viewer', 'scroll'] as const)('PPTX %s progressive failure routin
     surface.destroy();
   });
 
+  it('routes a failure a current highlight request waits for only through its Promise', async () => {
+    const onError = vi.fn();
+    const { engine, surface } = await loadedSurface(kind, { onError });
+    const error = new Error('layout failed');
+    const highlighting = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+    engine.setLayoutProgress(1, false, error);
+
+    await expect(highlighting).rejects.toBe(error);
+    expect(onError).not.toHaveBeenCalled();
+    surface.destroy();
+  });
+
+  it('routes a failure once through onError when the only awaiter is a cleared highlight request', async () => {
+    const onError = vi.fn();
+    const { engine, surface } = await loadedSurface(kind, { onError });
+    const error = new Error('layout failed');
+    const cleared = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+    surface.clearHighlights();
+    engine.setLayoutProgress(1, false, error);
+
+    await expect(cleared).resolves.toEqual([]);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(error);
+    surface.destroy();
+  });
+
   it('routes a progressive search failure only through the find Promise', async () => {
     const onError = vi.fn();
     const { engine, surface } = await loadedSurface(kind, { onError });

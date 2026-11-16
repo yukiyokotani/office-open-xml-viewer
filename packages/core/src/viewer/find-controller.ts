@@ -104,9 +104,10 @@ export class UnitFindController<Run extends SearchRun, Location> {
     /** Units excluded from the search (e.g. hidden slides the viewer never
      *  draws) are neither collected nor matched. Evaluated per `find`. */
     private readonly _includeUnit: (unit: number) => boolean = () => true,
-    /** Loads the format's test for a layout break between two adjacent runs.
-     *  Only whole-word matching needs it, so it is fetched on demand. */
-    private readonly _runBreak?: () => Promise<(previous: Run, next: Run) => boolean>,
+    /** Loads the module whose default export is the format's test for a layout
+     *  break between two adjacent runs. Only whole-word matching needs it, so
+     *  it is fetched on demand. */
+    private readonly _runBreak?: () => Promise<{ default: (previous: Run, next: Run) => boolean }>,
   ) {
     this._find = new MatchList(location);
     this._marks = new MatchList(location);
@@ -164,7 +165,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
     // Whole-word matching is part of the on-demand term search; a plain find
     // starts without loading anything.
     return await this._scan(this._find, opts.wholeWord
-      ? async () => (await loadTermSearch()).wholeWordMatcher(
+      ? async () => (await loadTermSearch()).matchWords(
         query, opts, foldPreservingLength, sliceRange, this._runBreak, this._acceptMatch)
       : () => (index) => findMatches(index, query, opts)) ?? [];
   }
@@ -184,7 +185,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
       return [];
     }
     const matches = await this._scan(this._marks, async () =>
-      (await loadTermSearch()).textHighlightMatcher(
+      (await loadTermSearch()).matchGroups(
         set, foldPreservingLength, sliceRange, this._runBreak, this._acceptMatch));
     return (matches ?? []) as TextHighlightMatch<Location>[];
   }

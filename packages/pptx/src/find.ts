@@ -38,7 +38,7 @@ export class PptxFindController extends UnitFindController<PptxTextRunInfo, Pptx
     super(
       count, collectRuns, (slide) => ({ slide }), matchStaysWithinSearchContainer, includeSlide,
       // Whole-word matching only; kept out of the static bundle.
-      () => import('./find-run-break.js').then((loaded) => loaded.pptxRunsBreak),
+      () => import('./find-run-break.js'),
     );
   }
 

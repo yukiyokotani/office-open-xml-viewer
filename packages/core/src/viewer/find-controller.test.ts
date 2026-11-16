@@ -277,7 +277,7 @@ describe('UnitFindController — text highlights', () => {
       (unit: number) => ({ unit }),
       (unitRuns, slices) => slices.every((slice) => unitRuns[slice.runIndex].p === unitRuns[slices[0].runIndex].p),
       undefined,
-      async () => (previous, next) => previous.p !== next.p,
+      async () => ({ default: (previous, next) => previous.p !== next.p }),
     );
     const matches = await find.highlight([
       { id: 'word', terms: ['introduction', 'the'], wholeWord: true },

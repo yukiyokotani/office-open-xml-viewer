@@ -203,7 +203,7 @@ export class XlsxFindController {
     // Whole-word matching is part of the on-demand term search; a plain find
     // starts without loading anything.
     return await this._scan(this._find, opts.wholeWord
-      ? async () => (await loadTermSearch()).wholeWordCellMatcher(query, opts, foldPreservingLength)
+      ? async () => (await loadTermSearch()).matchCellWords(query, opts, foldPreservingLength)
       : () => (candidates) => {
         for (const candidate of candidates) {
           const index = buildTextIndex([{ text: candidate }]);
@@ -233,7 +233,7 @@ export class XlsxFindController {
       return [];
     }
     const matches = await this._scan(this._marks, async () =>
-      (await loadTermSearch()).textHighlightCellMatcher(set, foldPreservingLength));
+      (await loadTermSearch()).matchCellGroups(set, foldPreservingLength));
     return (matches ?? []) as TextHighlightMatch<XlsxMatchLocation>[];
   }
 

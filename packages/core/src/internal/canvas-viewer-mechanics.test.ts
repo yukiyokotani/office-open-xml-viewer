@@ -285,6 +285,58 @@ describe('CanvasViewerErrorRouter', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  describe('a superseded lifecycle awaiter', () => {
+    const setup = () => {
+      const onError = vi.fn();
+      const router = new CanvasViewerErrorRouter('TestViewer', onError);
+      const failure = new Error('layout failed');
+      let reject!: (error: Error) => void;
+      const pending = new Promise<void>((_resolve, rejectPromise) => { reject = rejectPromise; });
+      let superseded = false;
+      const cleared = router.ownBackgroundLifecycle(() => pending, () => superseded);
+      return { onError, router, failure, pending, cleared, reject, supersede: () => { superseded = true; } };
+    };
+
+    it('reports nothing itself and leaves the failure to onError when it was the only awaiter', async () => {
+      // The failure is published before the awaiter sees the rejection…
+      const first = setup();
+      first.supersede();
+      first.router.reportBackground(first.failure);
+      first.reject(first.failure);
+      await expect(first.cleared).resolves.toBeUndefined();
+      expect(first.onError).toHaveBeenCalledTimes(1);
+      expect(first.onError).toHaveBeenCalledWith(first.failure);
+
+      // …or after it: the superseded awaiter must not have claimed it.
+      const second = setup();
+      second.supersede();
+      second.reject(second.failure);
+      await expect(second.cleared).resolves.toBeUndefined();
+      second.router.reportBackground(second.failure);
+      expect(second.onError).toHaveBeenCalledTimes(1);
+      expect(second.onError).toHaveBeenCalledWith(second.failure);
+    });
+
+    it('leaves the failure to another awaiter that is still current', async () => {
+      const { onError, router, failure, pending, cleared, reject, supersede } = setup();
+      const current = router.ownBackgroundLifecycle(() => pending, () => false);
+      supersede();
+      router.reportBackground(failure);
+      reject(failure);
+      await expect(cleared).resolves.toBeUndefined();
+      await expect(current).rejects.toBe(failure);
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it('receives the failure while it is still current', async () => {
+      const { onError, router, failure, cleared, reject } = setup();
+      router.reportBackground(failure);
+      reject(failure);
+      await expect(cleared).rejects.toBe(failure);
+      expect(onError).not.toHaveBeenCalled();
+    });
+  });
+
   it('does not hide an unrelated background failure while a Promise is pending', async () => {
     const onError = vi.fn();
     const router = new CanvasViewerErrorRouter('TestViewer', onError);

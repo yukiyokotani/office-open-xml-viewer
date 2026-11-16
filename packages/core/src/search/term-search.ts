@@ -219,7 +219,8 @@ const highlightSource = ({ group, groupIndex, term }: TextHighlightRange): Highl
 /** Resolves one unit's index and runs to its matches. */
 type UnitMatcher<Run, Hit> = (index: TextIndex, runs: Run[]) => Hit[];
 type SliceRange<Slice> = (index: TextIndex, start: number, end: number) => Slice[];
-type RunBreakLoader<Run> = (() => Promise<RunBreakTest<Run>>) | undefined;
+/** Loads the module whose default export is the format's layout-break test. */
+type RunBreakLoader<Run> = (() => Promise<{ default: RunBreakTest<Run> }>) | undefined;
 /** The format's rule for a match, given the unit's runs and the match's slices. */
 type AcceptMatch<Run, Slice> = (runs: Run[], slices: Slice[]) => boolean;
 
@@ -228,7 +229,7 @@ type AcceptMatch<Run, Slice> = (runs: Run[], slices: Slice[]) => boolean;
  * `slice` are the static index primitives; `loadRunBreak` fetches the format's
  * layout-break test; `acceptMatch` is the format's match rule.
  */
-export async function wholeWordMatcher<Run extends SearchRun, Slice>(
+export async function matchWords<Run extends SearchRun, Slice>(
   query: string,
   opts: FindMatchesOptions,
   fold: Fold,
@@ -236,7 +237,7 @@ export async function wholeWordMatcher<Run extends SearchRun, Slice>(
   loadRunBreak: RunBreakLoader<Run>,
   acceptMatch: AcceptMatch<Run, Slice>,
 ): Promise<UnitMatcher<Run, { slices: Slice[] }>> {
-  const runBreak = await loadRunBreak?.();
+  const runBreak = (await loadRunBreak?.())?.default;
   return (index, runs) => findTermRanges(
     index, [query], opts, fold,
     () => wordBoundaries(index, runs, runBreak),
@@ -249,14 +250,14 @@ export async function wholeWordMatcher<Run extends SearchRun, Slice>(
  * fetched only when a group asks for whole words. `acceptMatch` is applied
  * before the overlap rule of a group.
  */
-export async function textHighlightMatcher<Run extends SearchRun, Slice>(
+export async function matchGroups<Run extends SearchRun, Slice>(
   groups: readonly TextHighlightGroup[],
   fold: Fold,
   slice: SliceRange<Slice>,
   loadRunBreak: RunBreakLoader<Run>,
   acceptMatch: AcceptMatch<Run, Slice>,
 ): Promise<UnitMatcher<Run, HighlightSource & { slices: Slice[] }>> {
-  const runBreak = groups.some((group) => group.wholeWord) ? await loadRunBreak?.() : undefined;
+  const runBreak = groups.some((group) => group.wholeWord) ? (await loadRunBreak?.())?.default : undefined;
   return (index, runs) => findTextHighlightRanges(
     index, groups, fold,
     () => wordBoundaries(index, runs, runBreak),
@@ -270,7 +271,7 @@ type CellMatcher<Hit> = (candidates: readonly string[]) => Hit[];
 
 /** The per-cell matcher of `findText(query, { wholeWord: true })` on a sheet:
  *  the matches come from the first display text that has any. */
-export function wholeWordCellMatcher(
+export function matchCellWords(
   query: string,
   opts: FindMatchesOptions,
   fold: Fold,
@@ -287,7 +288,7 @@ export function wholeWordCellMatcher(
 /** The per-cell matcher of a text-highlight set. Each group is searched on its
  *  own; like the find, a group's matches in a cell come from the first of the
  *  cell's display texts that has any. */
-export function textHighlightCellMatcher(
+export function matchCellGroups(
   groups: readonly TextHighlightGroup[],
   fold: Fold,
 ): CellMatcher<HighlightSource & { text: string }> {

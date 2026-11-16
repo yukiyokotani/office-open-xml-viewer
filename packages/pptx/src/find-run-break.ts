@@ -30,3 +30,6 @@ export function pptxRunsBreak(previous: PptxTextRunInfo, next: PptxTextRunInfo):
     next.inShapeX - (previous.inShapeX + previous.w), previous.inShapeX - (next.inShapeX + next.w));
   return gap > 0.25 * Math.min(previous.fontSize, next.fontSize);
 }
+
+/** The module's default export is what the find controller loads on demand. */
+export default pptxRunsBreak;

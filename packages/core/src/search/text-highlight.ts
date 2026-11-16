@@ -60,7 +60,7 @@ export const ACTIVE_TEXT_HIGHLIGHT_RING = 'outline:2px solid #111;box-shadow:0 0
  */
 export function adoptTextHighlightGroups(groups: readonly TextHighlightGroup[]): TextHighlightGroup[] {
   if (new Set(groups.map((group) => group.id)).size !== groups.length) {
-    throw new TypeError('highlightText: duplicate group id');
+    throw new TypeError('duplicate group id');
   }
   return groups
     .map((group) => ({ ...group, terms: group.terms.filter((term) => term !== '') }))

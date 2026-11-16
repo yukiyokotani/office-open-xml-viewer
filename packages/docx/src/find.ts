@@ -9,7 +9,7 @@ export class DocxFindController extends UnitFindController<DocxTextRunInfo, Docx
     super(
       count, collectRuns, (page) => ({ page }), undefined, undefined,
       // Whole-word matching only; kept out of the static bundle.
-      () => import('./find-run-break.js').then((loaded) => loaded.docxRunsBreak),
+      () => import('./find-run-break.js'),
     );
   }
 
