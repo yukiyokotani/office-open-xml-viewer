@@ -181,6 +181,9 @@ const formats = [
         <p>A document is rejected only when it is corrupt, encrypted or unsafe, or when it exceeds a
           resource limit. The readers never execute scripts, macros or forms, and never fetch external
           resources: linked files outside the package are not drawn.</p>
+        <p>This differs from the experimental <a href="/legacy-office#errors">legacy DOC/XLS/PPT readers</a>,
+          which currently reject the whole document with <code>unsupported-content</code> when they meet a
+          structure they cannot map (<a href="https://github.com/yukiyokotani/office-open-xml-viewer/issues/2263">issue #2263</a>).</p>
         <p>A source claims a package only by its <code>mimetype</code> file, so admission inspects the bytes,
           not the filename. Other inputs, including other OpenDocument families, continue on the OOXML
           path unchanged. The ZIP is read with the same structural checks and inflation limits as OOXML
