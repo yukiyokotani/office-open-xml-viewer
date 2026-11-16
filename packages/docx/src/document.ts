@@ -1057,6 +1057,12 @@ export class DocxDocument {
   private _servedFaceProbe: AbortController | null = null;
   /** Aborted by destroy(): ends worker-mode probe measurements. */
   private _probeLifetime: AbortController | null = null;
+  /** The signal destroy() aborts (already aborted after it), for a wait that
+   * ending the worker cannot settle: the error page's code of a document that
+   * failed to parse (#2248). Only such a document reads it. */
+  private _lifetimeSignal(): AbortSignal {
+    return (this._probeLifetime ??= new AbortController()).signal;
+  }
 
   /**
    * Main mode: resolve, register and load this document's font sources into
@@ -1165,7 +1171,7 @@ export class DocxDocument {
         const adapted = await materializeDocumentPullAdapterSession(
           this._bridge.transport(isDocumentPullResponse),
           res,
-          { timeoutMs, onUsage },
+          { timeoutMs, onUsage, lifetime: () => this._lifetimeSignal() },
         );
         this._source = adapted.source;
         this._document = adapted.document;
@@ -1180,7 +1186,7 @@ export class DocxDocument {
       const adapted = await materializeDocumentPullAdapterSession(
         this._bridge.transport(isDocumentPullResponse),
         identity,
-        { timeoutMs, onUsage },
+        { timeoutMs, onUsage, lifetime: () => this._lifetimeSignal() },
       );
       this._source = adapted.source;
       this._document = adapted.document;
@@ -1521,7 +1527,7 @@ export class DocxDocument {
           const adapted = await materializeDocumentPullAdapterSession(
             this._bridge.transport(isDocumentPullResponse),
             res,
-            { timeoutMs, onUsage },
+            { timeoutMs, onUsage, lifetime: () => this._lifetimeSignal() },
           );
           this._source = adapted.source;
           this._document = adapted.document;
@@ -1609,7 +1615,9 @@ export class DocxDocument {
     this._fontSourceLoad = null;
     this._servedFaceProbe?.abort();
     this._servedFaceProbe = null;
-    this._probeLifetime?.abort();
+    // Created here if nothing asked for it yet, so a wait that begins after
+    // destroy() still finds it aborted.
+    (this._probeLifetime ??= new AbortController()).abort();
     this._fontResolverBridge?.dispose();
     this._fontResolverBridge = null;
     const fontSourceSession = this._fontSourceSession;

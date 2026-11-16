@@ -12,6 +12,7 @@ export {
 } from '../document-pull-client.js';
 export { DocumentPullWorker, type DocxDocumentCursorArchive } from '../document-pull-worker.js';
 export { createLayoutServices } from '../layout-runtime.js';
+export { errorPageLayoutReady } from '../layout/document-layout-variants.js';
 export { retainRenderWorkerDocumentLayout } from '../render-worker-layout.js';
 export { renderLayoutSourceToCanvas } from '../renderer.js';
 export { normalizeLayoutOptions } from '../layout/options.js';

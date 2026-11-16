@@ -24,6 +24,7 @@ import {
   documentLayoutRuntimeOf,
 } from '../layout/runtime-state.js';
 import type { DeepReadonly, DocumentLayout } from '../layout/types.js';
+import { errorPageLayoutReady } from '../layout/document-layout-variants.js';
 import { retainRenderWorkerDocumentLayout } from '../render-worker-layout.js';
 import { layoutDocumentInputAsync } from '../layout/document.js';
 import { layoutDocumentProgressively } from '../layout/progressive.js';
@@ -293,6 +294,9 @@ export async function loadDocxModelSource(
           nativeRouteMetrics: nativeRoutes.nativeRouteMetrics,
         });
         const services = runtime.services;
+        // A fatally unparseable document loads its error page here (#2248).
+        const errorPage = errorPageLayoutReady(doc._source, signal);
+        if (errorPage) await errorPage;
         const retained = retainRenderWorkerDocumentLayout(
           doc._source,
           services,

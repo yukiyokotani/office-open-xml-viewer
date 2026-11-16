@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { layoutParseErrorPage } from './error-page.js';
+import { ERROR_PLACEHOLDER_TEXT_HOST } from '@silurus/ooxml-core/internal/part-failures';
+import { parseErrorPageLayout } from './error-page.js';
+import { createPageLayers } from './page-graph.js';
 import { createFontResolver } from './font-service.js';
 import { createTextLayoutService } from './text.js';
 import { paintLayoutPage } from '../paint/canvas-page.js';
 import { canvasFontString } from '@silurus/ooxml-core';
+
+const layoutParseErrorPage = parseErrorPageLayout({ ...ERROR_PLACEHOLDER_TEXT_HOST, createPageLayers });
 
 describe('parse-error page layout', () => {
   it('wraps detail text during layout and never measures text during paint', async () => {

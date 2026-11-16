@@ -93,7 +93,9 @@ the host fonts (see **Served font line heights** below). See the
   text. It is a `{ title?, detail? }` object (`detail: null` hides the detail
   line) or a function of the failure. The function runs on the main thread,
   including in worker mode. Without the option the placeholder is unchanged.
-  This is additive, so no migration is needed (#1974).
+  This is additive, so no migration is needed (#1974). The code that lays out
+  and paints a placeholder is fetched with the first failed part, so a file
+  without one does not load it (#2248).
 - **Node picture bytes:** `DocxDocumentSession` and `XlsxWorkbookSession`
   (from `openDocxDocument` and `openXlsxWorkbook` in `@silurus/ooxml/node`)
   now have `getImage(path, mimeType?)`, as `PptxPresentationSession` already

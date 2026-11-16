@@ -12,6 +12,7 @@ import {
 import type { NodeCanvasFactory } from './render.ts';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { nonOoxmlInputs } from '@silurus/ooxml-core/testing';
+import { brokenDocx } from '../../core/src/testing/part-failure-packages.ts';
 
 const factory: NodeCanvasFactory = {
   createCanvas: (width, height) =>
@@ -94,6 +95,24 @@ describe('Node bounded DOCX document session', () => {
     // multi-page lifetime test below; the assertions check pagination and
     // ownership, rather than a machine-dependent five-second performance SLO.
   }, 15_000);
+
+  // #2248: the error page's layout is loaded with the first failed document.
+  it('opens a document whose main part is malformed on its placeholder page', async () => {
+    const session = await openDocxDocument(brokenDocx(), { factory, currentDate: 0 });
+    try {
+      expect(session.pageCount).toBe(1);
+      const canvas = await session.renderPage(0, { width: 612 });
+      const pixels = (canvas as unknown as Canvas).getContext('2d')
+        .getImageData(0, 0, canvas.width, canvas.height).data;
+      let ink = 0;
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        if (pixels[offset]! < 250 || pixels[offset + 1]! < 250 || pixels[offset + 2]! < 250) ink += 1;
+      }
+      expect(ink).toBeGreaterThan(100);
+    } finally {
+      await session.close();
+    }
+  });
 
   it('does not route the bounded session through the materializing parse export', async () => {
     const parse = vi.spyOn(docxWasm, 'parse_docx');

@@ -1,13 +1,6 @@
 import { decodeSvgBlobOnMainThread } from '@silurus/ooxml-core/worker';
 import type { CjkLang } from '@silurus/ooxml-core';
-import {
-  errorPlaceholderDetail,
-  errorPlaceholderTitle,
-  errorPlaceholderCanvasLines,
-  ERROR_PLACEHOLDER_DETAIL_LINES,
-  resolvedFromWire,
-  type ResolvedErrorPlaceholder,
-} from '@silurus/ooxml-core/internal/part-failures';
+import { ERROR_PLACEHOLDER_TEXT_HOST, onDemandModule } from '@silurus/ooxml-core/internal/part-failures';
 import { XlsxErrorPlaceholderRequired } from './part-failures.js';
 import { chartFontSubstitutions, withChartFontSubstitutions } from '@silurus/ooxml-core/internal/chart-font-sources';
 import {
@@ -974,6 +967,11 @@ export async function renderWorksheetViewport(
     : paint();
 }
 
+/** The broken-sheet overlay, loaded with the first sheet that needs it
+ *  (#2248). A self-contained worker bundle inlines it. */
+const sheetErrorOverlay = /* @__PURE__ */ onDemandModule(async () =>
+  (await import('./sheet-error-overlay.js')).sheetErrorOverlay(ERROR_PLACEHOLDER_TEXT_HOST));
+
 /** {@link renderWorksheetViewport}'s body, verbatim; runs under the caller's
  *  render-pass lease. */
 async function renderWorksheetViewportLeased(
@@ -1049,6 +1047,12 @@ async function renderWorksheetViewportLeased(
     await prepareWorksheetMath(ws, deps.math);
   }
 
+  // The broken-sheet overlay's code is one more asynchronous input, loaded
+  // with the first sheet that needs it (#2248); later frames find it loaded.
+  const drawSheetParseErrorOverlay = ws.parseError
+    ? sheetErrorOverlay.loaded ?? await sheetErrorOverlay.load()
+    : undefined;
+
   // Resource preparation above may yield. A viewer can be destroyed or a newer
   // frame can supersede this one while it waits; never mutate the caller-owned
   // canvas after that lifecycle generation is stale.
@@ -1098,13 +1102,13 @@ async function renderWorksheetViewportLeased(
   // error overlay in place of the grid so the workbook's OTHER sheets stay usable
   // and this tab clearly reads as "broken". Healthy sheets never take this path.
   if (ws.parseError) {
-    drawSheetParseErrorOverlay(
+    drawSheetParseErrorOverlay!(
       ctx,
       width,
       height,
       ws.name,
       ws.parseError,
-      resolvedFromWire(opts.errorPlaceholderText),
+      opts.errorPlaceholderText,
     );
     return;
   }
@@ -1142,61 +1146,5 @@ function drawDialogSheetNotice(
   ctx.textBaseline = 'middle';
   ctx.font = `${Math.max(13, base * 0.035)}px sans-serif`;
   ctx.fillText('Legacy dialog sheets are not displayed', widthPx / 2, heightPx / 2);
-  ctx.restore();
-}
-
-/**
- * RB7: paint a placeholder overlay for a worksheet whose part failed to parse.
- * A neutral fill, a warning glyph, a heading naming the sheet, and the
- * part-tagged error wrapped to a few lines. Coordinates are in CSS px (the ctx
- * is already dpr-scaled by the caller). Only ever called for a sheet carrying
- * `parseError`.
- */
-function drawSheetParseErrorOverlay(
-  ctx: CanvasRenderingContext2D,
-  widthPx: number,
-  heightPx: number,
-  sheetName: string,
-  message: string,
-  placeholder: ResolvedErrorPlaceholder | null,
-): void {
-  ctx.save();
-  ctx.fillStyle = '#f7f7f8';
-  ctx.fillRect(0, 0, widthPx, heightPx);
-  const cx = widthPx / 2;
-  const base = Math.min(widthPx, heightPx);
-
-  const glyph = Math.max(20, base * 0.1);
-  ctx.fillStyle = '#b23b3b';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.32);
-
-  const headSize = Math.max(13, base * 0.035);
-  ctx.fillStyle = '#333333';
-  ctx.font = `600 ${headSize}px sans-serif`;
-  // The card is the whole viewport: the title only has to stay inside it,
-  // while the detail keeps a narrower reading measure.
-  const title = errorPlaceholderTitle(placeholder, `Sheet "${sheetName}" could not be displayed`);
-  for (const line of errorPlaceholderCanvasLines(ctx, title, widthPx * 0.9, 1)) {
-    ctx.fillText(line, cx, heightPx * 0.46);
-  }
-  const detail = errorPlaceholderDetail(placeholder, message);
-  if (detail === null) {
-    ctx.restore();
-    return;
-  }
-
-  const detailSize = Math.max(10, base * 0.022);
-  ctx.fillStyle = '#666666';
-  ctx.font = `${detailSize}px sans-serif`;
-  const lines = errorPlaceholderCanvasLines(ctx, detail, Math.min(widthPx * 0.8, 640), ERROR_PLACEHOLDER_DETAIL_LINES);
-  const lineHeight = detailSize * 1.4;
-  let y = heightPx * 0.52 + lineHeight;
-  for (const l of lines) {
-    ctx.fillText(l, cx, y);
-    y += lineHeight;
-  }
   ctx.restore();
 }
