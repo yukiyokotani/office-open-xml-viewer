@@ -252,6 +252,7 @@ pub(super) fn chart_sheet_charts(
                     let mut chart = None;
                     let mut identity = false;
                     let mut hidden = false;
+                    let mut owned = false;
                     let mut position = at + 8;
                     while position < next {
                         let (child, child_end) = record_with_end(
@@ -300,6 +301,13 @@ pub(super) fn chart_sheet_charts(
                                 {
                                     return Err(unsupported("invalid BIFF drawing client marker"));
                                 }
+                                if drawing
+                                    .clients
+                                    .remove(&child_end)
+                                    .is_none_or(|client| client.kind != 0x01b6)
+                                {
+                                    return Err(unsupported("invalid BIFF drawing textbox owner"));
+                                }
                             }
                             // OfficeArtFSP: the shape's identity and flags.
                             0xf00a => {
@@ -340,32 +348,30 @@ pub(super) fn chart_sheet_charts(
                                 {
                                     return Err(unsupported("invalid BIFF drawing client marker"));
                                 }
-                                // The chart substream belongs to a chart
-                                // object: an Obj whose FtCmo (ft 0x15,
-                                // cb 0x12) states ot 5.
+                                // Every client marker ends its fragment
+                                // and is followed by its Obj, with whole
+                                // subrecords and an identifier of its own.
+                                let client = drawing
+                                    .clients
+                                    .remove(&child_end)
+                                    .filter(|client| {
+                                        client.kind == 0x005d
+                                            && client.data.len() >= 22
+                                            && client.data[..4] == [0x15, 0, 0x12, 0]
+                                            && object_framed(client.data)
+                                    })
+                                    .ok_or_else(|| {
+                                        unsupported("invalid BIFF drawing object owner")
+                                    })?;
+                                if owned || !objects.insert(u16_at(client.data, 6)?) {
+                                    return Err(unsupported("duplicate BIFF drawing object id"));
+                                }
+                                owned = true;
+                                // A chart substream belongs to a chart
+                                // object (ot 5) whose record is complete.
                                 if let Some(range) = drawing.charts.remove(&child_end) {
-                                    let owner =
-                                        drawing.clients.remove(&child_end).filter(|client| {
-                                            client.kind == 0x005d
-                                                && client.data.len() >= 22
-                                                && client.data[..6] == [0x15, 0, 0x12, 0, 5, 0]
-                                                // ... and whose subrecords
-                                                // end with FtEnd at the
-                                                // record end.
-                                                && object_complete(client.data)
-                                                && object_framed(client.data)
-                                        });
-                                    if owner.is_some_and(|client| {
-                                        !objects.insert(u16::from_le_bytes([
-                                            client.data[6],
-                                            client.data[7],
-                                        ]))
-                                    }) {
-                                        return Err(unsupported(
-                                            "duplicate BIFF drawing object id",
-                                        ));
-                                    }
-                                    if owner.is_none() {
+                                    if u16_at(client.data, 4)? != 5 || !object_complete(client.data)
+                                    {
                                         return Err(unsupported(
                                             "invalid BIFF drawing object owner",
                                         ));
@@ -396,6 +402,11 @@ pub(super) fn chart_sheet_charts(
             }
             at = next;
         }
+    }
+    // Every Obj and TxO of the drawing belongs to a shape, and every chart
+    // substream to a chart object.
+    if !drawing.clients.is_empty() || !drawing.charts.is_empty() {
+        return Err(unsupported("unowned BIFF drawing clients"));
     }
     output.sort_by_key(|(_, chart, _)| chart.0);
     Ok(output)
