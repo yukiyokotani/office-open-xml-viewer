@@ -5187,7 +5187,11 @@ function customLineEndAnchors(paths: readonly PathInfo[], w: number, h: number):
       case 'close': return { cmd: 'close' };
     }
   })));
-  const { start, end } = getCustGeomEndpoints(normalized);
+  const ends = getCustGeomEndpoints(normalized);
+  // A decoration belongs to its line: a path with `stroke="0"` (§20.1.9.15)
+  // draws no line, so its end takes no decoration either.
+  const start = paths[0].stroke === false ? null : ends.start;
+  const end = paths[paths.length - 1].stroke === false ? null : ends.end;
   const anchor = (p: typeof start) => p && { x: p.x * w, y: p.y * h, angle: Math.atan2(p.dy * h, p.dx * w) };
   return start || end ? { start: anchor(start), end: anchor(end) } : null;
 }

@@ -153,6 +153,13 @@ describe('XLSX connector line ends', () => {
       expect(gap, name).toBeLessThanOrEqual(retract + 1e-9);
     }
 
+    // A custom path with stroke="0" draws no line, so its end is not decorated.
+    const unstroked = record({ strokeTailEnd: TRIANGLE, geom: { type: 'custom', paths: [{ w: 100, h: 100, fill: 'none', stroke: false, commands: [
+      { op: 'moveTo', x: 0, y: 0 }, { op: 'lineTo', x: 100, y: 100 },
+    ] }] } } as Partial<ShapeInfo>);
+    expect(unstroked.leaders).toHaveLength(0);
+    expect(unstroked.tips).toHaveLength(0);
+
     // flipH mirrors the leader and its decoration: the tail moves to the left.
     const plain = record({ strokeTailEnd: TRIANGLE });
     const flipped = record({ strokeTailEnd: TRIANGLE, flipH: true });
