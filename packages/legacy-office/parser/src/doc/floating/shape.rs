@@ -654,8 +654,10 @@ impl<'a> Table<'a> {
             let color = paint.fill.unwrap_or(0xffffff);
             // fillRectLeft.., fillDztype, fillWidth/Height and fillOriginX..
             // (2.3.7.8-2.3.7.13, 2.3.7.36-2.3.7.39) place and scale the
-            // BLIP. Only the default placement is projected.
+            // BLIP, and fillShape 0 aligns it with the view instead of the
+            // shape (2.3.7.43). Only the default placement is projected.
             let placed = paint.fill_rect.unwrap_or(false)
+                || !paint.fill_shape.unwrap_or(true)
                 || paint.fill_dztype.unwrap_or(0) != 0
                 || paint
                     .fill_origins
@@ -1593,9 +1595,16 @@ mod tests {
         let tile = read(1, 0xa00, &texture, [9, 9]).unwrap().fill_tile.unwrap();
         assert_eq!((tile.blip, tile.pattern, tile.alpha), (0, None, 0x8000));
         assert!(crate::rejection::take_best_effort().is_empty());
-        // A scaled or offset texture or pattern keeps the default placement.
-        for kind in [1, 2] {
-            let scaled = container(&[(0x180, kind), (0x195, 1), (0x4186, 1)], &[], &[]);
+        // A scaled, offset or view-aligned (fillShape 0) texture or pattern
+        // keeps the default placement.
+        for (kind, placement) in [
+            (1, (0x195, 1)),
+            (2, (0x195, 1)),
+            (1, (0x1bf, 0x0004_0000)),
+            (2, (0x1bf, 0x0004_0000)),
+            (2, (0x198, 1)),
+        ] {
+            let scaled = container(&[(0x180, kind), placement, (0x4186, 1)], &[], &[]);
             let tile = read(1, 0xa00, &scaled, [9, 9]).unwrap().fill_tile.unwrap();
             assert_eq!((tile.blip, tile.pattern.is_some()), (0, kind == 1));
             assert_eq!(
