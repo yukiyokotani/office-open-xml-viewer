@@ -31,7 +31,9 @@ mod dxf;
 pub(super) mod formula;
 mod ftab;
 
-pub(super) use formula::{decompile, decompile_cell, decompile_name, without_text, Externs};
+pub(super) use formula::{
+    decompile, decompile_cell, decompile_name, framed, without_text, Externs,
+};
 
 use super::{f64_at, styles, theme, u16_at, u32_at, unsupported};
 use std::collections::BTreeMap;
@@ -424,7 +426,7 @@ fn condition(
             // of the rule: one that cannot be read rejects. One the
             // decompiler merely has no text for does not matter here.
             if let Err(error) = formula(rgce1) {
-                if !formula::without_text(&error) {
+                if !formula::without_text(&error) || !formula::framed(rgce1) {
                     return Err(error);
                 }
             }
@@ -1286,6 +1288,8 @@ mod tests {
         assert!(classic_rule(2, 0, &[0x1e], 0x19, 0).is_err());
         // A formula the decompiler merely has no text for does not matter.
         assert!(classic_rule(2, 0, &[0x10], 0x19, 0).is_ok());
+        // ... unless a token behind the one it stopped at is truncated.
+        assert!(classic_rule(2, 0, &[0x10, 0x1e], 0x19, 0).is_err());
         take_best_effort();
     }
 

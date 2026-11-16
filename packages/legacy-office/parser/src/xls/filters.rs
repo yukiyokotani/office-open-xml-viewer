@@ -105,6 +105,27 @@ pub(super) fn check(
     Ok(())
 }
 
+/// Whether an AutoFilter record (2.4.6) holds what it declares: iEntry,
+/// flags, two 10-byte DOPERs (2.5.69) and, for each DOPER of a string
+/// (vt 6, its cch in the seventh byte), an XLUnicodeStringNoCch.
+pub(super) fn criteria_framed(data: &[u8]) -> bool {
+    if data.len() < 24 {
+        return false;
+    }
+    let mut at = 24;
+    for doper in [4usize, 14] {
+        if data[doper] != 6 {
+            continue;
+        }
+        let count = usize::from(data[doper + 6]);
+        let Some(&high) = data.get(at) else {
+            return false;
+        };
+        at += 1 + count * if high & 1 != 0 { 2 } else { 1 };
+    }
+    at == data.len()
+}
+
 /// Whether a drop-down object anchored at this zero-based cell is one of the
 /// filter's column buttons: on the header row, inside the filter columns.
 pub(super) fn owns_button(range: &xlsx_model::CellRange, column: u16, row: u16) -> bool {
@@ -228,6 +249,16 @@ mod tests {
         assert!(check(&range, 7, false)
             .unwrap_err()
             .contains("column count"));
+        // AutoFilter records: two numeric DOPERs; a string DOPER with and
+        // without its string.
+        let mut record = vec![0u8; 24];
+        assert!(criteria_framed(&record));
+        assert!(!criteria_framed(&record[..23]));
+        record[4] = 6;
+        record[10] = 2;
+        assert!(!criteria_framed(&record));
+        record.extend([0, b'a', b'b']);
+        assert!(criteria_framed(&record));
         // Criteria leave the range as it is.
         crate::rejection::take_best_effort();
         assert!(check(&range, 8, false).is_ok());

@@ -165,7 +165,9 @@ mod tests {
         txo[10] = 5;
         txo[12] = 16;
         let text = [&[0u8][..], b"hello"].concat();
-        let runs = [0u8; 16];
+        // One run from character 0, then the last run at cchText.
+        let mut runs = [0u8; 16];
+        runs[8] = 5;
         let records = [
             Record {
                 kind: 0x01b6,
@@ -216,6 +218,18 @@ mod tests {
         )
         .unwrap_err()
         .contains("formatting runs"));
+        // ... and they must end at cchText.
+        let unterminated = [0u8; 16];
+        let mut broken = records;
+        broken[2].data = &unterminated;
+        assert!(project(
+            &notes,
+            &broken,
+            |object| (object == 7).then_some(40),
+            &mut budget
+        )
+        .unwrap_err()
+        .contains("invalid BIFF TxO formatting runs"));
         take_best_effort();
         // Retained bytes are bounded.
         let mut small = 8;

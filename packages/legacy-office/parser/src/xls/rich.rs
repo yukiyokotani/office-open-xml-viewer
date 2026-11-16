@@ -26,17 +26,25 @@ struct Phonetic {
 }
 
 impl Phonetic {
-    /// `None` when the ExtRst holds no readable phonetic run. `units` is
-    /// the base string.
-    fn parse(ext: &[u8], units: &[u16]) -> Option<Self> {
-        let word = |at: usize| -> Option<u16> {
-            Some(u16::from_le_bytes([*ext.get(at)?, *ext.get(at + 1)?]))
+    /// `Ok(None)` when the ExtRst is complete but states no usable
+    /// phonetic run; an ExtRst that does not hold the fields and arrays it
+    /// declares is malformed. `units` is the base string.
+    fn parse(ext: &[u8], units: &[u16]) -> Result<Option<Self>, String> {
+        let truncated = || crate::rejection::corrupt("truncated BIFF phonetic string");
+        let word = |at: usize| -> Result<u16, String> {
+            match (ext.get(at), ext.get(at + 1)) {
+                (Some(&low), Some(&high)) => Ok(u16::from_le_bytes([low, high])),
+                _ => Err(truncated()),
+            }
         };
         // reserved (ignored), cb, then phs, rphssub and rgphruns.
         let size = usize::from(word(2)?);
-        let data = ext.get(4..4 + size)?;
-        let word = |at: usize| -> Option<u16> {
-            Some(u16::from_le_bytes([*data.get(at)?, *data.get(at + 1)?]))
+        let data = ext.get(4..4 + size).ok_or_else(truncated)?;
+        let word = |at: usize| -> Result<u16, String> {
+            match (data.get(at), data.get(at + 1)) {
+                (Some(&low), Some(&high)) => Ok(u16::from_le_bytes([low, high])),
+                _ => Err(truncated()),
+            }
         };
         let font = word(0)?;
         let flags = word(2)?;
@@ -44,13 +52,18 @@ impl Phonetic {
         // UTF-16 characters).
         let count = usize::from(word(4)?);
         let chars = usize::from(word(6)?);
-        if usize::from(word(8)?) != chars || count > 0x7fff || chars > 0x7fff {
-            return None;
-        }
-        let text: Vec<u16> = (0..chars)
+        let stored = usize::from(word(8)?);
+        let text: Vec<u16> = (0..stored)
             .map(|index| word(10 + index * 2))
-            .collect::<Option<_>>()?;
-        let runs_at = 10 + chars * 2;
+            .collect::<Result<_, _>>()?;
+        let runs_at = 10 + stored * 2;
+        // Every declared PhRuns entry must be present.
+        if count > 0 {
+            word(runs_at + count * 6 - 2)?;
+        }
+        if stored != chars || count > 0x7fff || chars > 0x7fff {
+            return Ok(None);
+        }
         // PhRuns (2.5.200): ichFirst, ichMom, cchMom. "If crun is zero,
         // there is one phonetic text run": the whole string over the whole
         // base text.
@@ -85,10 +98,10 @@ impl Phonetic {
         let mut runs = Vec::with_capacity(raw.len());
         for (index, &(first, base, length)) in raw.iter().enumerate() {
             let next = raw.get(index + 1).map_or(chars, |run| run.0);
-            let end = base.checked_add(length)?;
+            let end = base + length;
             // Each run starts after the one before it, in both strings.
             if first > next || next > chars || end > units.len() {
-                return None;
+                return Ok(None);
             }
             let (start, end) = (scalars[base], scalars[end]);
             if start >= end || first == next {
@@ -96,12 +109,12 @@ impl Phonetic {
             }
             runs.push((start, end, String::from_utf16_lossy(&text[first..next])));
         }
-        (!runs.is_empty()).then_some(Self {
+        Ok((!runs.is_empty()).then_some(Self {
             font,
             kind: (flags & 3) as u8,
             alignment: ((flags >> 2) & 3) as u8,
             runs,
-        })
+        }))
     }
 }
 
@@ -151,12 +164,12 @@ impl Text {
     /// base string `new` was built from). An ExtRst is framed by the
     /// string's cbExtRst, so one whose content cannot be read leaves the
     /// string without phonetic text.
-    pub(super) fn with_phonetic(mut self, units: &[u16], ext: &[u8]) -> Self {
-        match Phonetic::parse(ext, units) {
+    pub(super) fn with_phonetic(mut self, units: &[u16], ext: &[u8]) -> Result<Self, String> {
+        match Phonetic::parse(ext, units)? {
             Some(phonetic) => self.phonetic = Some(Box::new(phonetic)),
             None => crate::rejection::ignored_value("XLS phonetic guides are not projected"),
         }
-        self
+        Ok(self)
     }
 
     /// Bytes retained by this neutral SST entry, excluding the owning Vec's
@@ -517,6 +530,15 @@ mod tests {
                 "XLS phonetic guides are not projected"
             )]
         );
+        // An ExtRst that does not hold what it declares is malformed.
+        let mut short = ext_rst(6, 0x0005, "カンジ", &[(0, 0, 2)]);
+        short.truncate(short.len() - 3);
+        let input = phonetic_workbook("漢字", &short, &[[0, 0, 0, 0]]);
+        let cfb = CompoundFile::open(&input).unwrap();
+        assert!(DirectSession::new(&cfb)
+            .err()
+            .expect("rejected")
+            .contains("truncated BIFF phonetic string"));
         // A range list the record does not hold is malformed.
         let mut input = phonetic_workbook("漢字", &ext, &[[0, 0, 0, 0]]);
         let at = input

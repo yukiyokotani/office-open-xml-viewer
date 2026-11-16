@@ -1202,19 +1202,45 @@ pub(super) fn txo_text(records: &[Record<'_>], offset: usize) -> Result<String, 
     let characters = usize::from(u16_at(txo, 10)?);
     let run_bytes = usize::from(u16_at(txo, 12)?);
     let (units, mut next) = txo_characters(records, index, characters)?;
-    // The formatting runs are not projected; their Continue records are
-    // still part of the TxO.
-    let mut read = 0usize;
-    while read < run_bytes {
+    // The formatting runs are not projected, but they are part of the TxO:
+    // FormatRun (2.5.132) entries from character 0 in ascending order, then
+    // TxOLastRun (2.5.271) at cchText; none for an empty text.
+    let invalid = || unsupported("invalid BIFF TxO formatting runs");
+    if characters == 0 {
+        return if run_bytes == 0 {
+            Ok(String::new())
+        } else {
+            Err(invalid())
+        };
+    }
+    if run_bytes < 16 || run_bytes % 8 != 0 {
+        return Err(invalid());
+    }
+    let mut runs = Vec::with_capacity(run_bytes);
+    while runs.len() < run_bytes {
         let record = records
             .get(next)
             .filter(|record| record.kind == 0x003c)
             .ok_or_else(|| unsupported("truncated BIFF TxO formatting runs"))?;
-        read += record.data.len();
+        runs.extend_from_slice(record.data);
         next += 1;
     }
-    if read != run_bytes {
-        return Err(unsupported("invalid BIFF TxO formatting runs"));
+    if runs.len() != run_bytes {
+        return Err(invalid());
+    }
+    let positions: Vec<usize> = runs
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|run| usize::from(u16::from_le_bytes([run[0], run[1]])))
+        .collect();
+    let (last, starts) = positions.split_last().expect("at least two runs");
+    if *last != characters
+        || starts.first() != Some(&0)
+        || starts.windows(2).any(|pair| pair[0] >= pair[1])
+        || starts.last().is_some_and(|start| *start >= characters)
+    {
+        return Err(invalid());
     }
     Ok(String::from_utf16_lossy(&units))
 }

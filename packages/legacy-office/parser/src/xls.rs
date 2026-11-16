@@ -1052,7 +1052,7 @@ fn parse_sst_elements(fragments: &[&[u8]], phonetic: bool) -> Result<Vec<rich::T
             if ext_size > total_bytes {
                 return Err(unsupported("truncated BIFF rich or extended string data"));
             }
-            value.with_phonetic(&units, &cursor.read_variable(ext_size)?)
+            value.with_phonetic(&units, &cursor.read_variable(ext_size)?)?
         } else {
             cursor.skip_variable(ext_size)?;
             value
@@ -1501,8 +1501,9 @@ fn parse_sheet(
             0x009b | 0x009e | 0x087e => {
                 let framed = match record.kind {
                     0x009b => record.data.is_empty(),
-                    0x009e => record.data.len() >= 24,
-                    _ => record.data.len() > 12 && u16_at(record.data, 0)? == 0x087e,
+                    0x009e => filters::criteria_framed(record.data),
+                    // FrtRefHeader, then the fixed fields through guidSview.
+                    _ => record.data.len() >= 60 && u16_at(record.data, 0)? == 0x087e,
                 };
                 if !framed {
                     return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));

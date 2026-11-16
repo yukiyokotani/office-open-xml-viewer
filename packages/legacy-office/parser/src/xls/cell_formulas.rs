@@ -35,6 +35,7 @@ pub(super) fn project<'a>(
     macro_sheet: bool,
 ) -> Result<BTreeMap<(u16, u16), String>, String> {
     let text = |cell: (u16, u16),
+                rgce: &[u8],
                 formula: Result<String, String>,
                 output: &mut BTreeMap<(u16, u16), String>|
      -> Result<(), String> {
@@ -42,7 +43,11 @@ pub(super) fn project<'a>(
             Ok(formula) => {
                 output.insert(cell, formula);
             }
-            Err(error) if macro_sheet && super::conditional::without_text(&error) => {
+            Err(error)
+                if macro_sheet
+                    && super::conditional::without_text(&error)
+                    && super::conditional::framed(rgce) =>
+            {
                 crate::rejection::approximated("XLS macro sheets are not projected", ());
             }
             Err(error) => return Err(error),
@@ -76,6 +81,7 @@ pub(super) fn project<'a>(
                 }
                 text(
                     (row, col),
+                    rgce,
                     decompile_cell(rgce, extra, (row, col), externs),
                     &mut output,
                 )?;
@@ -92,6 +98,7 @@ pub(super) fn project<'a>(
                 let extra = data.get(offset + 2 + cce..).ok_or_else(truncated)?;
                 text(
                     cell,
+                    rgce,
                     decompile_cell(rgce, extra, cell, externs),
                     &mut output,
                 )?;
@@ -168,6 +175,14 @@ mod tests {
             )]
         );
         assert!(project(mixed.into_iter(), &Externs::default(), false).is_err());
+        // A truncated token behind the unknown function still rejects.
+        let broken = formula(1, 0, &[0x42, 0x00, 0xff, 0x7f, 0x1e]);
+        assert!(project(
+            [(0x0006u16, broken.as_slice())].into_iter(),
+            &Externs::default(),
+            true
+        )
+        .is_err());
         // An anchor without its definition rejects.
         assert!(project(
             [(0x0006u16, anchor.as_slice())].into_iter(),

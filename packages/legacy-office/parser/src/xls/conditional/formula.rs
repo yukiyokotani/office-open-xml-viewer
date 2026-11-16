@@ -354,6 +354,54 @@ pub(in super::super) fn without_text(error: &str) -> bool {
         .any(|site| error == unsupported(*site).as_str())
 }
 
+/// Whether `rgce` is a sequence of complete BIFF8 tokens (MS-XLS 2.5.198.25
+/// Ptg sizes), whatever they compute. A caller that passes over a formula
+/// [`without_text`] first establishes this, so a truncated or unknown token
+/// behind the one the decompiler stopped at still rejects.
+pub(in super::super) fn framed(rgce: &[u8]) -> bool {
+    let mut at = 0usize;
+    while at < rgce.len() {
+        let token = rgce[at];
+        let size = match token {
+            0x01 | 0x02 => 5,
+            0x03..=0x16 => 1,
+            0x17 => {
+                let (Some(&count), Some(&high)) = (rgce.get(at + 1), rgce.get(at + 2)) else {
+                    return false;
+                };
+                3 + usize::from(count) * if high & 1 != 0 { 2 } else { 1 }
+            }
+            0x19 => match rgce.get(at + 1) {
+                // PtgAttrChoose: a jump table of cOffset + 1 entries.
+                Some(0x04) => {
+                    let (Some(&low), Some(&high)) = (rgce.get(at + 2), rgce.get(at + 3)) else {
+                        return false;
+                    };
+                    4 + 2 * (usize::from(u16::from_le_bytes([low, high])) + 1)
+                }
+                Some(_) => 4,
+                None => return false,
+            },
+            0x1c | 0x1d => 2,
+            0x1e => 3,
+            0x1f => 9,
+            0x20..=0x7f => match token & 0x1f {
+                0x00 => 8,
+                0x01 | 0x09 => 3,
+                0x02 => 4,
+                0x03 | 0x04 | 0x0a | 0x0c => 5,
+                0x05 | 0x0b | 0x0d => 9,
+                0x06..=0x08 | 0x19 | 0x1a | 0x1c => 7,
+                0x1b | 0x1d => 11,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        at += size;
+    }
+    at == rgce.len()
+}
+
 fn reject() -> String {
     unsupported(WITHOUT_TEXT[0])
 }
