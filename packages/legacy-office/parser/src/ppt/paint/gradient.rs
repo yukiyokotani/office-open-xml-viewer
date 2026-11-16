@@ -13,12 +13,15 @@ pub(in crate::ppt) struct ResolvedGradient {
     alphas: Vec<u32>,
     scaled: bool,
     rotate_with_shape: bool,
+    path: Option<crate::officeart::paint::PathShade>,
+    /// See [`ResolvedGradient::binary_edited`].
+    binary_edited: bool,
 }
 
 impl Paint {
-    /// PowerPoint's adapter over the shared linear-shade rules
-    /// (`officeart::paint::Paint::linear_shade`), resolving slide scheme
-    /// colours for every projected stop.
+    /// PowerPoint's adapter over the shared shade rules
+    /// (`officeart::paint::Paint::shade`), resolving slide scheme colours for
+    /// every projected stop.
     pub(in crate::ppt) fn project_gradient(
         &self,
         source: &office_gradient::Borrowed<'_>,
@@ -27,7 +30,7 @@ impl Paint {
         work_budget: &mut usize,
         byte_budget: &mut usize,
     ) -> Result<Option<ResolvedGradient>, String> {
-        let Some(shade) = self.linear_shade(source, allow_fill, work_budget, byte_budget)? else {
+        let Some(shade) = self.shade(source, allow_fill, work_budget, byte_budget)? else {
             return Ok(None);
         };
         let mut projection = shade.projection;
@@ -37,16 +40,40 @@ impl Paint {
             };
             stop.color = color;
         }
+        let binary_edited = shade.replaced_front.is_some_and(|(fill, first)| {
+            match (
+                scheme::drawing(fill, colors),
+                scheme::drawing(first, colors),
+            ) {
+                (Some(fill), Some(first)) => fill & 0x00ff_ffff != first & 0x00ff_ffff,
+                _ => false,
+            }
+        });
         Ok(Some(ResolvedGradient {
             projection,
             alphas: shade.alphas,
             scaled: shade.scaled,
             rotate_with_shape: shade.rotate_with_shape,
+            path: shade.path,
+            binary_edited,
         }))
     }
 }
 
 impl ResolvedGradient {
+    /// Whether the binary shade was changed after PowerPoint wrote it.
+    ///
+    /// PowerPoint writes fillColor equal to the first fillShadeColors entry
+    /// (every Office-saved shade array of the local corpus, 269 shapes). An
+    /// array that starts at position 0 replaces fillColor in the drawn shade,
+    /// so a later edit of fillColor alone is not visible in the binary shade
+    /// itself, but PowerPoint 16 then draws the binary shape instead of its
+    /// alternative XML: the PDFs of two controls with only that edit equal
+    /// the PDFs of the same decks without the alternative.
+    pub(in crate::ppt) fn binary_edited(&self) -> bool {
+        self.binary_edited
+    }
+
     pub(in crate::ppt) fn into_model(self, byte_budget: &mut usize) -> Result<Fill, String> {
         let count = self.projection.stops.len();
         let bytes = count
@@ -79,13 +106,36 @@ impl ResolvedGradient {
                 color,
             });
         }
+        let Some(path) = self.path else {
+            return Ok(Fill::Gradient {
+                stops,
+                angle: self.projection.angle.degrees(),
+                grad_type: "linear".to_owned(),
+                scaled: Some(self.scaled),
+                path: None,
+                fill_to_rect: None,
+                tile_rect: None,
+                flip: None,
+                rot_with_shape: Some(self.rotate_with_shape),
+            });
+        };
+        // The model of `<a:path path="rect|shape"><a:fillToRect/></a:path>`
+        // (`ooxml_common::fill`): a "radial" gradient without an angle.
+        let [l, t, r, b] = path.focus_insets.map(|value| f64::from(value) / 65_536.0);
         Ok(Fill::Gradient {
             stops,
-            angle: self.projection.angle.degrees(),
-            grad_type: "linear".to_owned(),
-            scaled: Some(self.scaled),
-            path: None,
-            fill_to_rect: None,
+            angle: 0.0,
+            grad_type: "radial".to_owned(),
+            scaled: None,
+            path: Some(
+                if path.follows_outline {
+                    "shape"
+                } else {
+                    "rect"
+                }
+                .to_owned(),
+            ),
+            fill_to_rect: Some(ooxml_common::fill::FillRect { l, t, r, b }),
             tile_rect: None,
             flip: None,
             rot_with_shape: Some(self.rotate_with_shape),
@@ -151,6 +201,114 @@ mod tests {
         paint.project_gradient(source, true, None, &mut work, &mut bytes)
     }
 
+    fn model(paint: &Paint, source: &office_gradient::Borrowed<'_>) -> Fill {
+        let mut bytes = usize::MAX;
+        resolved(paint, source)
+            .unwrap()
+            .into_model(&mut bytes)
+            .unwrap()
+    }
+
+    #[test]
+    fn concentric_shades_project_to_path_gradients() {
+        use crate::rejection::{take_best_effort, BestEffort};
+        const SITE: &str = "OfficeArt path or title gradient fills are not supported yet";
+        let none = office_gradient::Borrowed::default();
+        let rect = |fill: &Fill| match fill {
+            Fill::Gradient {
+                stops,
+                angle,
+                grad_type,
+                scaled: None,
+                path: Some(path),
+                fill_to_rect: Some(focus),
+                tile_rect: None,
+                rot_with_shape: Some(false),
+                ..
+            } if grad_type == "radial" && *angle == 0.0 => (
+                path.clone(),
+                [focus.l, focus.t, focus.r, focus.b],
+                stops
+                    .iter()
+                    .map(|stop| (stop.position, stop.color.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            other => panic!("path gradient: {other:?}"),
+        };
+        take_best_effort();
+        // msofillShadeCenter without a centre rectangle: PowerPoint's corner
+        // shade, fillColor at the top-left corner.
+        let mut corner = paint();
+        corner.fill_type = Some(5);
+        assert_eq!(
+            rect(&model(&corner, &none)),
+            (
+                "rect".to_owned(),
+                [0.0, 0.0, 1.0, 1.0],
+                vec![(0.0, "112233".to_owned()), (1.0, "445566".to_owned())]
+            )
+        );
+        // Its centre shade states each edge at one half; an authored shade
+        // array keeps its order from the centre outwards.
+        let mut centre = corner;
+        centre.fill_to = [Some(0x8000); 4];
+        let stops = source(&[
+            (0x0000_00ff, 0),
+            (0x0000_ff00, 0x8000),
+            (0x00ff_0000, 0x1_0000),
+        ]);
+        let (path, focus, colors) = rect(&model(&centre, &stops));
+        assert_eq!((path.as_str(), focus), ("rect", [0.5; 4]));
+        assert_eq!(
+            colors,
+            [
+                (0.0, "FF0000".to_owned()),
+                (0.5, "00FF00".to_owned()),
+                (1.0, "0000FF".to_owned())
+            ]
+        );
+        // msofillShadeShape follows the outline.
+        let mut outline = centre;
+        outline.fill_type = Some(6);
+        assert_eq!(rect(&model(&outline, &none)).0, "shape");
+        assert_eq!(take_best_effort(), []);
+        // The host-defined title shade is drawn as the rectangle shade its
+        // properties describe.
+        let mut title = centre;
+        title.fill_type = Some(8);
+        assert_eq!(rect(&model(&title, &none)).0, "rect");
+        assert_eq!(take_best_effort(), [(BestEffort::Approximated, SITE)]);
+        // An edge outside the shape takes the default 0; an inverted
+        // rectangle collapses onto its near edge.
+        let mut outside = corner;
+        outside.fill_to = [Some(0xc000), Some(0x2_0000), Some(0x4000), None];
+        assert_eq!(rect(&model(&outside, &none)).1, [0.75, 0.0, 0.25, 1.0]);
+        assert_eq!(take_best_effort(), [(BestEffort::IgnoredValue, SITE)]);
+    }
+
+    #[test]
+    fn a_fill_colour_that_differs_from_the_first_shade_colour_marks_an_edited_binary() {
+        let stops = source(&[(0x0033_2211, 0), (0x0066_5544, 0x1_0000)]);
+        assert!(!resolved(&paint(), &stops).unwrap().binary_edited());
+        let mut edited = paint();
+        edited.fill = Some(0x0000_00ff);
+        let gradient = resolved(&edited, &stops).unwrap();
+        assert!(gradient.binary_edited());
+        // The drawn shade does not use the edited colour.
+        let mut bytes = usize::MAX;
+        assert!(matches!(
+            gradient.into_model(&mut bytes).unwrap(),
+            Fill::Gradient { ref stops, .. } if stops[0].color == "112233"
+        ));
+        // Two-colour shades draw fillColor itself; an unstated fillColor
+        // contradicts nothing.
+        let none = office_gradient::Borrowed::default();
+        assert!(!resolved(&edited, &none).unwrap().binary_edited());
+        let mut unstated = paint();
+        unstated.fill = None;
+        assert!(!resolved(&unstated, &stops).unwrap().binary_edited());
+    }
+
     #[test]
     fn admits_linear_shades_and_rejects_unsupported_shade_options() {
         let source = source(&[(0x0033_2211, 0)]);
@@ -179,9 +337,6 @@ mod tests {
         }
         // Shades without evidence fail closed instead of degrading to solid.
         for reject in [
-            |p: &mut Paint| p.fill_type = Some(5),
-            |p: &mut Paint| p.fill_type = Some(6),
-            |p: &mut Paint| p.fill_type = Some(8),
             |p: &mut Paint| p.fill_shape = Some(false),
             |p: &mut Paint| p.fill_rect = Some(true),
             |p: &mut Paint| p.fill_alpha = Some(1),

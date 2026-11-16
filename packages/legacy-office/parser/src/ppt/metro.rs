@@ -398,9 +398,13 @@ enum Verdict {
     /// Both forms state the attribute in encodings that do not correspond
     /// one to one, in a pairing whose PowerPoint 16 PDF controls draw the
     /// binary (a binary gradient rotation flag that the XML does not state
-    /// as `1`; `same_paint`), or draw both forms alike (a stroked custom path
-    /// whose outline matches only by folding a line that turns back on
-    /// itself; `same_outline`). The shape keeps its binary projection, as for
+    /// as `1`, and a concentric shade whose XML adds a tile rectangle or
+    /// restates a stop; `same_paint`), or draw both forms alike (a stroked
+    /// custom path whose outline matches only by folding a line that turns
+    /// back on itself; `same_outline`), or in a pairing this reader cannot
+    /// compare while the binary form is complete by itself (a pattern
+    /// bitmap against a preset whose cells were not measured;
+    /// `same_binary_pattern`). The shape keeps its binary projection, as for
     /// [`Verdict::Differs`]; the value names the rejection this outcome
     /// replaces.
     Overridden(&'static str),
@@ -554,6 +558,10 @@ fn validate_blob_references(
         .flat_map(|node| node.attributes())
         .filter(|attribute| ooxml_common::ns::is_r_ns(attribute.namespace()))
         .map(|attribute| attribute.value())
+        // An empty identifier names no relationship: PowerPoint writes
+        // `r:id=""` on a hyperlink that only states an action verb
+        // (ECMA-376 21.1.2.3.5).
+        .filter(|id| !id.is_empty())
         .collect();
     if ids.is_empty() {
         // The selected theme style may own the reference instead. It is not
@@ -662,8 +670,9 @@ fn sole_blob_image(
     Ok(bytes)
 }
 
-/// A shape whose only OPC dependencies are external click URLs can be
-/// compared to [MS-PPT] InteractiveInfoAtom/ExHyperlinkContainer targets.
+/// A shape whose only OPC dependencies are external click or mouse-over
+/// URLs can be compared to [MS-PPT] InteractiveInfoAtom/ExHyperlinkContainer
+/// targets. A hyperlink with an empty identifier depends on no relationship.
 /// Other relationship classes still have no binary counterpart here.
 #[cfg(feature = "direct-ppt")]
 fn blob_hyperlinks_only(blob: &[u8], part: &str, work_budget: &mut usize) -> Result<bool, String> {
@@ -672,19 +681,25 @@ fn blob_hyperlinks_only(blob: &[u8], part: &str, work_budget: &mut usize) -> Res
     let xml = read_blob_reference_part(&mut archive, part, work_budget)?;
     let doc = parse_xml(&xml)?;
     let mut ids = BTreeSet::new();
+    let mut hyperlinks = false;
     for node in doc.descendants() {
         for attr in node
             .attributes()
             .filter(|a| ooxml_common::ns::is_r_ns(a.namespace()))
         {
-            if node.tag_name().name() != "hlinkClick" || attr.name() != "id" {
+            if !matches!(node.tag_name().name(), "hlinkClick" | "hlinkMouseOver")
+                || attr.name() != "id"
+            {
                 return Ok(false);
             }
-            ids.insert(attr.value().to_owned());
+            hyperlinks = true;
+            if !attr.value().is_empty() {
+                ids.insert(attr.value().to_owned());
+            }
         }
     }
     if ids.is_empty() {
-        return Ok(false);
+        return Ok(hyperlinks);
     }
     let rels_path = ooxml_common::rels::relationship_part_path(part);
     let rels = read_blob_reference_part(&mut archive, &rels_path, work_budget)?;
@@ -1035,10 +1050,12 @@ fn same_binary_pattern(
     else {
         return Ok(None);
     };
+    // A preset whose cells were not measured, or a bitmap this reader does
+    // not decode, cannot be compared: the binary pattern is drawn as stored.
     let expected = match preset.as_str() {
         "pct30" => [0xaa, 0x44, 0xaa, 0x11, 0xaa, 0x44, 0xaa, 0x11],
         "ltUpDiag" => [0x11, 0x22, 0x44, 0x88, 0x11, 0x22, 0x44, 0x88],
-        _ => return Ok(Some(Verdict::Unverifiable("fill"))),
+        _ => return Ok(Some(Verdict::Overridden(RESTATED_FILL))),
     };
     let cells = binary
         .image_bytes
@@ -1047,7 +1064,7 @@ fn same_binary_pattern(
         .transpose()?
         .flatten();
     let Some(cells) = cells else {
-        return Ok(Some(Verdict::Unverifiable("fill")));
+        return Ok(Some(Verdict::Overridden(RESTATED_FILL)));
     };
     // MS-ODRAW binary pattern BLIP: black is clr1/background; white is
     // clr2/foreground. The XML pattern preset names the same 8x8 cells.
@@ -2167,7 +2184,9 @@ fn same_transform(
 /// DrawingML kind), except comparable gradient and pattern projections.
 /// PowerPoint 16 controls show XML pattern edits and binary image edits both
 /// affect PDF output. `same_binary_pattern` compares the image/pattern pair
-/// using its decoded 8x8 bitmap and duotone endpoints. Two gradients, with
+/// using its decoded 8x8 bitmap and duotone endpoints; where the bitmap does
+/// not decode or the preset's cells were not measured, the binary pattern is
+/// drawn (its PDFs show the stored bitmap's cells at the binary scale). Two gradients, with
 /// their stops and rotation flag, are compared by `same_paint` below.
 #[cfg(any(test, feature = "direct-ppt"))]
 fn same_fill(binary: &RecordedFill, alternative: &ShapeElement, rotation: f64) -> Verdict {
@@ -2343,10 +2362,21 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotatio
                 && bsc == asc
                 && bp == ap
                 && rect(bf) == rect(af)
-                && tile_rect(btr) == tile_rect(atr)
                 && bfl.as_deref().unwrap_or("none") == afl.as_deref().unwrap_or("none"))
             {
                 return Verdict::Unverifiable("fill");
+            }
+            if tile_rect(btr) != tile_rect(atr) {
+                // The binary has no tile rectangle (MS-ODRAW 2.3.7), so the
+                // XML one restates nothing the binary could contradict.
+                // PowerPoint 16 writes `<a:tileRect l="-100000" t="-100000"/>`
+                // for its corner shade, whose PDF has the centre at the
+                // shape's own corner, as the binary centre rectangle says.
+                return if bp.is_some() {
+                    Verdict::Overridden(RESTATED_FILL)
+                } else {
+                    Verdict::Unverifiable("fill")
+                };
             }
             let rotation = match (br, ar) {
                 _ if rotation_irrelevant || br == ar => Verdict::Same,
@@ -2356,6 +2386,13 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotatio
                 (None, _) => Verdict::Unverifiable("fill"),
             };
             match rotation {
+                // A concentric shade keeps its binary stops: the PowerPoint
+                // 16 PDF of a control whose XML alone gives an interior stop
+                // 50% opacity (the binary shade colours have none) prints
+                // that stop opaque.
+                Verdict::Same if bp.is_some() && !comparable_stops(&bs, &as_) => {
+                    Verdict::Overridden(RESTATED_FILL)
+                }
                 Verdict::Same if !comparable_stops(&bs, &as_) => Verdict::Restated(RESTATED_FILL),
                 rotation => rotation,
             }
@@ -2428,7 +2465,7 @@ fn same_hyperlinks(binary: &ShapeElement, alternative: &ShapeElement) -> Verdict
     {
         return Verdict::Differs("shape hyperlink");
     }
-    type Link<'a> = (Option<&'a str>, Option<&'a str>);
+    type Link<'a> = [Option<&'a str>; 4];
     let (Some(b), Some(a)) = (&binary.text_body, &alternative.text_body) else {
         return if binary.text_body.is_none() && alternative.text_body.is_none() {
             Verdict::Same
@@ -2448,9 +2485,14 @@ fn same_hyperlinks(binary: &ShapeElement, alternative: &ShapeElement) -> Verdict
                 .map(|run| match run {
                     TextRun::Text(data) => (
                         data.text.encode_utf16().count(),
-                        (data.hyperlink.as_deref(), data.hyperlink_action.as_deref()),
+                        [
+                            data.hyperlink.as_deref(),
+                            data.hyperlink_action.as_deref(),
+                            data.hyperlink_mouse_over.as_deref(),
+                            data.hyperlink_mouse_over_action.as_deref(),
+                        ],
                     ),
-                    _ => (1, (None, None)),
+                    _ => (1, [None; 4]),
                 })
                 .filter(|(len, _)| *len > 0),
         )
@@ -3182,6 +3224,42 @@ mod tests {
                 rot_with_shape: rotate,
             })
         };
+        // A concentric shade keeps its binary form when the alternative
+        // adds a tile rectangle or restates a stop.
+        let concentric = |color: &str, tile: Option<[f64; 4]>| {
+            let mut fill = gradient(&[(0.0, "FF0000"), (1.0, color)], Some(true));
+            if let Some(Fill::Gradient {
+                grad_type,
+                path,
+                fill_to_rect,
+                tile_rect,
+                ..
+            }) = fill.as_mut()
+            {
+                *grad_type = "radial".to_owned();
+                *path = Some("rect".to_owned());
+                let rect = |[l, t, r, b]: [f64; 4]| ooxml_common::fill::FillRect { l, t, r, b };
+                *fill_to_rect = Some(rect([0.0, 0.0, 1.0, 1.0]));
+                *tile_rect = tile.map(rect);
+            }
+            fill
+        };
+        let corner = RecordedFill::Stated(concentric("0000FF", None).map(Box::new));
+        for (fill, expected) in [
+            (concentric("0000FF", None), Verdict::Same),
+            (concentric("0000FF", Some([0.0; 4])), Verdict::Same),
+            (
+                concentric("0000FF", Some([-1.0, -1.0, 0.0, 0.0])),
+                Verdict::Overridden(RESTATED_FILL),
+            ),
+            (
+                concentric("0000FF80", None),
+                Verdict::Overridden(RESTATED_FILL),
+            ),
+        ] {
+            alternative.fill = fill;
+            assert_eq!(same_fill(&corner, &alternative, 0.0), expected);
+        }
         let recorded = RecordedFill::Stated(
             gradient(&[(0.0, "000000"), (0.3099975, "FFFFFF")], Some(true)).map(Box::new),
         );
@@ -3563,6 +3641,43 @@ mod tests {
         let mut truncated = gif(pct30);
         truncated.truncate(32);
         assert!(binary_pattern_cells(&truncated).unwrap().is_none());
+
+        // The pattern pair compares where the preset's cells were measured
+        // and the bitmap decodes; otherwise the binary pattern is drawn.
+        let pattern = |image: Option<Vec<u8>>, preset: &str| {
+            let mut element = shape("rect");
+            element.fill = serde_json::from_value(serde_json::json!({
+                "fillType": "image", "imagePath": "legacy-ppt/image/1",
+                "mimeType": "image/gif", "stretch": false,
+                "duotone": {"clr1": "FFFFFF", "clr2": "000000"}
+            }))
+            .unwrap();
+            let mut alternative = shape("rect");
+            alternative.fill = Some(pptx_model::Fill::Pattern {
+                fg: "000000".into(),
+                bg: "FFFFFF".into(),
+                preset: preset.into(),
+            });
+            let leaf = pptx_model::Transform::default();
+            let mut binary = binary(&element, &leaf);
+            binary.image_bytes = image;
+            same_binary_pattern(&binary, &alternative).unwrap()
+        };
+        assert_eq!(pattern(Some(gif(pct30)), "pct30"), Some(Verdict::Same));
+        assert_eq!(
+            pattern(Some(gif(diagonal)), "pct30"),
+            Some(Verdict::Differs("pattern fill"))
+        );
+        for (image, preset) in [
+            (Some(gif(pct30)), "dkDnDiag"),
+            (Some(truncated), "pct30"),
+            (None, "pct30"),
+        ] {
+            assert_eq!(
+                pattern(image, preset),
+                Some(Verdict::Overridden(RESTATED_FILL))
+            );
+        }
     }
 
     #[test]
@@ -3740,6 +3855,70 @@ mod tests {
             .err()
             .unwrap()
             .contains("placeholder style reference"));
+        }
+
+        #[test]
+        fn hyperlinks_without_a_relationship_and_mouse_over_targets_compare() {
+            let run = |link: &str| {
+                SHAPE_XML.replace(
+                    "</p:spPr>",
+                    &format!(
+                        "</p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:rPr xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">{link}</a:rPr><a:t>x</a:t></a:r></a:p></p:txBody>"
+                    ),
+                )
+            };
+            let rels = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.invalid/\" TargetMode=\"External\"/></Relationships>";
+            let part = "drs/shapexml.xml";
+            // An action-only click states `r:id=""`: no relationship part.
+            let jump =
+                run("<a:hlinkClick r:id=\"\" action=\"ppaction://hlinkshowjump?jump=nextslide\"/>");
+            let jump = package(&[(part, jump.as_str())], &[]);
+            assert!(validate_blob_references(&jump, part, &mut usize::MAX.clone()).is_ok());
+            assert!(blob_hyperlinks_only(&jump, part, &mut usize::MAX.clone()).unwrap());
+            // A mouse-over target is an external hyperlink like a click one.
+            let over = run("<a:hlinkMouseOver r:id=\"rId1\"/>");
+            let over = package(
+                &[(part, over.as_str()), ("drs/_rels/shapexml.xml.rels", rels)],
+                &[],
+            );
+            assert!(validate_blob_references(&over, part, &mut usize::MAX.clone()).is_ok());
+            assert!(blob_hyperlinks_only(&over, part, &mut usize::MAX.clone()).unwrap());
+            // Another relationship-backed element is not a hyperlink-only blob.
+            let image = run("<a:hlinkClick r:id=\"rId1\"/><a:blip r:embed=\"rId1\"/>");
+            let image = package(
+                &[
+                    (part, image.as_str()),
+                    ("drs/_rels/shapexml.xml.rels", rels),
+                ],
+                &[],
+            );
+            assert!(!blob_hyperlinks_only(&image, part, &mut usize::MAX.clone()).unwrap());
+
+            // The mouse-over target and the action verb are compared like
+            // the click target.
+            let text = |over: Option<&str>, action: Option<&str>| {
+                let mut element = shape("rect");
+                element.text_body = body(&[&[serde_json::json!({
+                    "type": "text", "text": "x", "bold": null, "italic": null,
+                    "underline": false, "strikethrough": false, "strikeDouble": false,
+                    "fontSize": null, "color": null, "fontFamily": null, "fieldType": null,
+                    "hyperlinkUsesTextFill": false,
+                    "hyperlinkAction": action, "hyperlinkMouseOver": over
+                })]]);
+                element
+            };
+            let binary = text(Some("https://example.invalid/"), Some("ppaction://a"));
+            assert_eq!(same_hyperlinks(&binary, &binary.clone()), Verdict::Same);
+            for other in [
+                text(None, Some("ppaction://a")),
+                text(Some("https://example.invalid/other"), Some("ppaction://a")),
+                text(Some("https://example.invalid/"), None),
+            ] {
+                assert_eq!(
+                    same_hyperlinks(&binary, &other),
+                    Verdict::Differs("text hyperlink")
+                );
+            }
         }
 
         #[test]

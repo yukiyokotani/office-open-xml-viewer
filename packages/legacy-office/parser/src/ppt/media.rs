@@ -434,7 +434,11 @@ impl SpanStore {
         };
         // A picture-frame placeholder is not a tiled/stretch fill capability.
         // Keep this gate even when another picture already cached the resource.
-        if image.image.extension == "pict" && !pict_placeholder {
+        if matches!(
+            image.image.extension,
+            "pict" | crate::officeart::raster::UNDECODED_JPEG
+        ) && !pict_placeholder
+        {
             return Ok(false);
         }
         self.used.insert(index);
@@ -680,10 +684,33 @@ mod tests {
         let mut bad = jpeg;
         bad[13] = 2;
         assert!(jpeg_size(&bad, &mut 100).is_err());
-        let unsupported_frame = [vec![0xff, 0xd8, 0xff, 0xc3, 0, 2], jpeg[2..].to_vec()].concat();
-        assert!(jpeg_size(&unsupported_frame, &mut 100)
-            .unwrap_err()
-            .contains("encoding"));
+        // A well-formed frame this reader does not decode (SOF3 lossless,
+        // SOF9 arithmetic, 12-bit samples) is rejected by the size reader and
+        // kept as an undecoded picture by the PowerPoint store.
+        for (marker, precision, expected) in [
+            (0xc3, 8, "encoding"),
+            (0xc9, 8, "encoding"),
+            (0xc1, 12, "JPEG frame"),
+        ] {
+            let mut frame = jpeg;
+            frame[5] = marker;
+            frame[8] = precision;
+            assert!(jpeg_size(&frame, &mut 100).unwrap_err().contains(expected));
+            let entry = record(0xf01d, 0x46a0, &[vec![0; 17], frame.to_vec()].concat());
+            let mut store = SpanStore::new(vec![spanned(&entry, 0)]);
+            // Not a fill; a picture frame keeps it as an undecoded picture.
+            assert!(!store.reference(1, &entry, None, &mut 100).unwrap());
+            assert!(store.reference_picture(1, &entry, None, &mut 100).unwrap());
+            assert_eq!(
+                store.image(1, &entry, None).unwrap().unwrap().0,
+                crate::officeart::raster::UNDECODED_JPEG
+            );
+        }
+        // A frame header whose length disagrees with its component count is
+        // not a frame of any encoding.
+        let truncated = [vec![0xff, 0xd8, 0xff, 0xc3, 0, 2], jpeg[2..].to_vec()].concat();
+        let entry = record(0xf01d, 0x46a0, &[vec![0; 17], truncated].concat());
+        assert!(image(&entry, &[], &mut 100).is_err());
         let mut fill = vec![0xff, 0xd8];
         fill.extend(vec![0xff; 100]);
         assert!(jpeg_size(&fill, &mut 10).unwrap_err().contains("budget"));

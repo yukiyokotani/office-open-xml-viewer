@@ -40,8 +40,14 @@ impl Paint {
     /// export paints behind transparent pixels. Only that evidenced case is
     /// projected: `Ok(None)` for an unfilled frame, `Err` for a filled frame
     /// whose fill type or colour source has no evidence.
+    /// Whether a picture frame states its own fill (see
+    /// [`Self::picture_backing`]).
+    pub(super) fn frame_filled(&self) -> bool {
+        self.filled == Some(true) && self.fill_ok.unwrap_or(true)
+    }
+
     pub(super) fn picture_backing(&self) -> Result<Option<(u32, u32)>, String> {
-        if self.filled != Some(true) || !self.fill_ok.unwrap_or(true) {
+        if !self.frame_filled() {
             return Ok(None);
         }
         match (self.fill_type.unwrap_or(0), self.fill) {
@@ -49,9 +55,8 @@ impl Paint {
             (0, None) => Err(super::unsupported(
                 "PowerPoint picture frame fill without a color",
             )),
-            _ => Err(super::unsupported(
-                "PowerPoint picture frame non-solid fill",
-            )),
+            // The caller projects the other fill kinds.
+            _ => Ok(None),
         }
     }
 
@@ -89,9 +94,8 @@ impl Paint {
             return None;
         }
         if matches!(self.fill_type.unwrap_or(0), 2 | 3) {
-            return image_fill.filter(|_| {
-                self.background_image().is_some() || self.background_texture().is_some()
-            });
+            return image_fill
+                .filter(|_| self.background_image().is_some() || self.texture_image().is_some());
         }
         (self.fill_type.unwrap_or(0) == 0)
             .then(|| {

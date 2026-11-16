@@ -346,9 +346,18 @@ picture frame whose `pib` names the BLIP to display (MS-ODRAW 2.2.40 and
 2.3.23.5), resolved through the shape's `ExObjRefAtom` to the document's
 external object list (MS-PPT 2.7.7 and 2.10.1). The object storage is never
 read or activated. PowerPoint's own PDF exports show that stored picture
-unchanged for embedded objects drawn as content. Icon or thumbnail aspects,
-linked objects and ActiveX controls, pictures without a supported BLIP, and
-unsupported fill placements are rejected instead of being drawn without them.
+unchanged for embedded objects drawn as content and for a linked object.
+Objects shown as an icon or thumbnail and ActiveX controls are drawn from the
+stored picture too; no Office output was available for them. An OLE shape
+without a stored picture is drawn as an unfilled frame with its own line, or
+a thin gray one. Pictures without a supported BLIP and unsupported picture
+fill placements are rejected instead of being drawn without them.
+
+A JPEG picture whose frame is well formed but is not an 8-bit Huffman
+baseline, extended-sequential or progressive frame (arithmetic-coded,
+lossless and 12-bit frames) is drawn as the same kind of frame: PowerPoint
+draws the arithmetic-coded and lossless ones, and this reader carries no
+decoder for them.
 
 PowerPoint displays GIF data that a producer stored in a PNG picture slot,
 so the direct PPT reader identifies such a slot by its GIF87a/GIF89a
@@ -360,18 +369,33 @@ keep their ordered shade colours, signed focus and 16.16 angle. Explicit
 shade-array stops at either endpoint take precedence over scalar front or
 back colours; a missing final endpoint uses the scalar back colour. Linear,
 scaled, two-colour and translucent shades are projected, including on rotated
-shapes and inside rotated or flipped groups. Path and title shades, other
-shade types, custom fill rectangles and opacity combined with a shade-colour
-array fail closed. Twenty controlled Office comparisons covered focus, angle,
-endpoint conflicts and leaf flips; the projected positions were within one
-DrawingML position unit of Office's serialized integers.
+shapes and inside rotated or flipped groups. Other shade types, custom fill
+rectangles and opacity combined with a shade-colour array fail closed. Twenty
+controlled Office comparisons covered focus, angle, endpoint conflicts and
+leaf flips; the projected positions were within one DrawingML position unit
+of Office's serialized integers.
 
-Pattern fills on unrotated shapes become tiled picture fills that follow
-PowerPoint's own output: the 8x8 area of the stored 10x10 pattern bitmap,
-one pattern pixel per point, white pixels in the fill colour and black
-pixels in the background colour. Supported placements retain their shape transforms. Unsupported bitmap
-sizes, translucent pattern colours and unprojected texture placements
-remain rejected.
+Concentric shades (`msofillShadeCenter`, PowerPoint's "from corner" and "from
+centre" styles) become DrawingML `path="rect"` gradients on shapes and slide
+backgrounds, as PowerPoint writes them: the stops keep the linear order from
+the centre rectangle outwards, and `fillToRect` is `fillToLeft`, `fillToTop`,
+1 - `fillToRight` and 1 - `fillToBottom`. An edge outside the shape takes the
+default 0. `msofillShadeShape` becomes `path="shape"` and the host-defined
+`msofillShadeTitle` is drawn as the rectangle shade its properties describe;
+neither could be authored in PowerPoint, so both follow the specification
+only.
+
+Pattern fills on shapes and slide backgrounds become tiled picture fills
+that follow PowerPoint's own output: white pixels in the fill colour and
+black pixels in the background colour, each with its own opacity, tiled from
+the top-left corner. A stored 8x8 bitmap tiles whole at 0.75 pt per pixel; of
+a stored 10x10 bitmap the 8x8 area tiles at one pixel per point. The pattern
+stays upright and unmirrored on rotated and flipped shapes. A bitmap of
+another size has no evidence and tiles like an 8x8 one. Texture fills tile
+the stored picture at its own size from the top-left corner. A picture frame
+with a shade, pattern or texture fill gets that fill behind its picture.
+Pattern placements with a fill rectangle, an origin or a unit remain
+rejected.
 
 Picture colour settings follow how PowerPoint itself reads the binary
 properties when it saves a binary deck as PPTX: "Black and White" becomes
@@ -383,10 +407,19 @@ the brightness over 0x8000, and contrast is k - 1 or 1 - 1/k for the stored
 16.16 slope k. PowerPoint writes exactly these values when it saves the
 binary deck as PPTX. The renderer's `lum` formula reproduces PowerPoint's PDF
 of a gray ramp under a bright × contrast grid, from both PPTX and .ppt, to
-within 0.7 of 255. Brightness/contrast combined with a transparent colour or
-black-and-white (whose order has no evidence), grayscale or black-and-white
-alone, recolouring and adjustments on picture fills stay rejected until
-Office output confirms their rendering.
+within 0.7 of 255. Grayscale alone becomes `grayscl`; with
+brightness/contrast it follows `lum`, the order PowerPoint's PDF shows.
+Brightness/contrast combined with a transparent colour or black-and-white
+(whose order has no evidence), black-and-white without grayscale, recolouring
+and adjustments on picture fills stay rejected until Office output confirms
+their rendering.
+
+In a shape that carries alternative shape XML, a text range with a mouse-over
+hyperlink or a click jump to the next, previous, first, last or last viewed
+slide or to the end of the show states the DrawingML run property PowerPoint
+writes for it (`hlinkMouseOver`, or `hlinkClick` with only a
+`ppaction://hlinkshowjump` action). The presentation renderer styles only
+click hyperlinks with a target as links, for PPTX files as well.
 
 A modern Office-saved PPT can retain paragraph properties in the OfficeArt
 `metroBlob` alternative shape XML rather than in its classic text ruler. The
@@ -596,7 +629,11 @@ so a difference does not show which side was edited; for these the source
 follows the side that PowerPoint PDF exports draw. Different gradient stops,
 or a gradient rotation flag that only the alternative states, adopt the
 alternative. A rotation flag that only the binary sets keeps the binary
-projection. Custom path commands that do not pair one to one are compared as
+projection. So do a concentric shade whose alternative adds a tile rectangle
+or restates a stop, a pattern whose bitmap or preset cannot be compared, and
+a shade whose fill colour differs from its first shade colour (PowerPoint
+writes them equal, and draws the binary shape once that colour is edited).
+Custom path commands that do not pair one to one are compared as
 traced outlines (another start point, or collinear lines split differently,
 is the same outline). Outlines that then pair segment by segment but at other
 points are a verified difference and keep the binary projection. A stroked
