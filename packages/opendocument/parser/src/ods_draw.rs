@@ -1214,8 +1214,8 @@ fn shape_info(
         stroke_miter_limit: None,
         stroke_alignment: None,
         stroke_cmpd: None,
-        stroke_head_end: marker(ctx, chain, "start"),
-        stroke_tail_end: marker(ctx, chain, "end"),
+        stroke_head_end: marker(ctx, chain, "start", stroke_width),
+        stroke_tail_end: marker(ctx, chain, "end", stroke_width),
         geom: xlsx_model::ShapeGeom::Preset {
             name: preset.to_string(),
             adj: Vec::new(),
@@ -1225,84 +1225,33 @@ fn shape_info(
 }
 
 /// A line end (§20.158 / §20.160 `draw:marker-start` / `-end`): the
-/// DrawingML line end of its marker ([`marker_kind`]). A marker that names
-/// no definition with a path is a triangle, LibreOffice's plain arrow.
-fn marker(ctx: &Context, chain: &[&Style], end: &str) -> Option<xlsx_model::ShapeLineEnd> {
+/// DrawingML line end of its marker
+/// ([`marker_kind`](crate::odf_props::marker_kind)), sized by its width
+/// (§20.159 / §20.161) and view box against the line width `line_emu`
+/// ([`line_end_size`](crate::odf_props::line_end_size)). A marker that
+/// names no definition with a path is a triangle, LibreOffice's plain
+/// arrow.
+fn marker(
+    ctx: &Context,
+    chain: &[&Style],
+    end: &str,
+    line_emu: i64,
+) -> Option<xlsx_model::ShapeLineEnd> {
     let name = get(chain, &format!("graphic:draw:marker-{end}")).filter(|n| !n.is_empty())?;
-    let kind = ctx.marker_kinds.get(name).copied().unwrap_or("triangle");
+    let (kind, view_box) = ctx
+        .marker_kinds
+        .get(name)
+        .copied()
+        .unwrap_or(("triangle", None));
+    let width = get(chain, &format!("graphic:draw:marker-{end}-width"))
+        .and_then(length_pt)
+        .unwrap_or(crate::odf_props::DEFAULT_MARKER_WIDTH_PT);
+    let (w, len) =
+        crate::odf_props::line_end_size(kind, width, view_box, line_emu as f64 / EMU_PER_PT);
     Some(xlsx_model::ShapeLineEnd {
         r#type: kind.into(),
-        w: "med".into(),
-        len: "med".into(),
-    })
-}
-
-/// The DrawingML line end a marker's geometry (§16.42.8 `svg:d`) is
-/// nearest to, whatever the marker is named: a curved outline is an oval;
-/// a closed outline of three corners a triangle; of four corners a stealth
-/// arrow when one corner lies inside the outline's box (the notch), else a
-/// diamond; an open path an open arrow.
-pub(crate) fn marker_kind(d: &str) -> Result<&'static str, String> {
-    use xlsx_model::PathCmd;
-    let Some(path) = super::shape_path::svg_path(d, (0.0, 0.0, 1.0, 1.0))? else {
-        return Ok("triangle");
-    };
-    let curved = path
-        .commands
-        .iter()
-        .any(|c| matches!(c, PathCmd::CubicBezTo { .. } | PathCmd::QuadBezTo { .. }));
-    let closed = path.commands.iter().any(|c| matches!(c, PathCmd::Close));
-    let mut corners: Vec<(f64, f64)> = Vec::new();
-    for command in &path.commands {
-        if let PathCmd::MoveTo { x, y } | PathCmd::LineTo { x, y } = *command {
-            // A path that returns to its start names it twice.
-            if corners.first() != Some(&(x, y)) && corners.last() != Some(&(x, y)) {
-                corners.push((x, y));
-            }
-        }
-    }
-    let bounds = |pick: fn(&(f64, f64)) -> f64| {
-        corners
-            .iter()
-            .map(pick)
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
-                (lo.min(v), hi.max(v))
-            })
-    };
-    let ((left, right), (top, bottom)) = (bounds(|p| p.0), bounds(|p| p.1));
-    let notched = corners
-        .iter()
-        .any(|&(x, y)| x > left && x < right && y > top && y < bottom);
-    // A convex outline: every turn has the same sense.
-    let convex = {
-        let n = corners.len();
-        let mut sense = 0.0f64;
-        (0..n).all(|i| {
-            let (a, b, c) = (corners[i], corners[(i + 1) % n], corners[(i + 2) % n]);
-            let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
-            if cross == 0.0 || sense == 0.0 || cross.signum() == sense {
-                if cross != 0.0 {
-                    sense = cross.signum();
-                }
-                true
-            } else {
-                false
-            }
-        })
-    };
-    // Arcs are flattened to many corners. A many-cornered outline that
-    // is not convex is an open arrow drawn as its outline (LibreOffice's
-    // `msArrowOpenEnd`: a chevron with a stub of the line).
-    Ok(if curved || (corners.len() > 8 && convex) {
-        "oval"
-    } else if !closed || corners.len() > 8 {
-        "arrow"
-    } else {
-        match corners.len() {
-            4 if notched => "stealth",
-            4 => "diamond",
-            _ => "triangle",
-        }
+        w: w.into(),
+        len: len.into(),
     })
 }
 
@@ -1898,32 +1847,6 @@ mod tests {
 
     /// The grid's lookups agree with walking it column by column and row by
     /// row (zero-width runs, trailing default columns, height overrides).
-    #[test]
-    fn markers_map_to_the_nearest_line_end() {
-        // The outlines LibreOffice writes for the SpreadsheetML line ends.
-        for (d, kind) in [
-            ("M150 0l150 300h-300z", "triangle"),
-            ("M150 0l150 300-150-120-150 120z", "stealth"),
-            ("M150 0l150 150-150 150-150-150z", "diamond"),
-            (
-                "M150 0l75 21 54 54 21 75-21 75-54 54-75 21-75-21-54-54-21-75 21-75 54-54z",
-                "oval",
-            ),
-            (
-                "M175 0l175 275-75 75-50-75v75h-100v-75l-50 75-75-75z",
-                "arrow",
-            ),
-            (
-                "M275 0l275 493-57 57-181-342v342h-75v-342l-181 342-56-57z",
-                "arrow",
-            ),
-            ("M0 0c10 0 20 10 20 20s-10 20-20 20z", "oval"),
-            ("M0 0l10 20 20-20", "arrow"),
-        ] {
-            assert_eq!(marker_kind(d).unwrap(), kind, "{d}");
-        }
-    }
-
     #[test]
     fn grid_lookups_match_a_linear_walk() {
         let columns = [(1, 3, 40), (4, 4, 0), (5, 9, 17), (10, 10, 0), (11, 12, 90)];

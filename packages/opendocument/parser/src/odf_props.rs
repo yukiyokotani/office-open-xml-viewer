@@ -645,6 +645,230 @@ pub fn metafile_size_pt(bytes: &[u8]) -> Option<(f64, f64)> {
     (size.0 > 0.0 && size.1 > 0.0).then_some(size)
 }
 
+/// `svg:viewBox` numbers: x, y, width, height.
+pub type ViewBox = (f64, f64, f64, f64);
+
+/// Whether an outline is curved, whether it is closed, and its corners.
+type Outline = (bool, bool, Vec<(f64, f64)>);
+
+/// The corners of a marker outline (§16.42.8 `draw:marker` `svg:d`, SVG
+/// path data): whether it holds a curve or an arc, whether it is closed, and
+/// the end points of its moves and straight segments (a point repeating the
+/// first or the previous one is named once). `None` when the data cannot
+/// be read.
+fn marker_outline(d: &str) -> Option<Outline> {
+    let bytes = d.as_bytes();
+    let mut at = 0;
+    let skip = |at: &mut usize| {
+        while *at < bytes.len() && (bytes[*at].is_ascii_whitespace() || bytes[*at] == b',') {
+            *at += 1;
+        }
+    };
+    let number = |at: &mut usize| -> Option<f64> {
+        skip(at);
+        let negative = match bytes.get(*at) {
+            Some(b'-') => {
+                *at += 1;
+                true
+            }
+            Some(b'+') => {
+                *at += 1;
+                false
+            }
+            _ => false,
+        };
+        let value = scan_number(bytes, at)?;
+        Some(if negative { -value } else { value })
+    };
+    let (mut curved, mut closed) = (false, false);
+    let mut corners: Vec<(f64, f64)> = Vec::new();
+    let (mut x, mut y, mut start) = (0.0f64, 0.0f64, (0.0f64, 0.0f64));
+    let mut command = 0u8;
+    loop {
+        skip(&mut at);
+        let Some(&byte) = bytes.get(at) else {
+            break;
+        };
+        if byte.is_ascii_alphabetic() {
+            command = byte;
+            at += 1;
+            if matches!(command, b'Z' | b'z') {
+                closed = true;
+                (x, y) = start;
+                continue;
+            }
+        } else if command == 0 || matches!(command, b'Z' | b'z') {
+            return None;
+        }
+        let relative = command.is_ascii_lowercase();
+        let (bx, by) = if relative { (x, y) } else { (0.0, 0.0) };
+        match command.to_ascii_uppercase() {
+            b'M' | b'L' => {
+                let (nx, ny) = (bx + number(&mut at)?, by + number(&mut at)?);
+                (x, y) = (nx, ny);
+                if command.eq_ignore_ascii_case(&b'M') {
+                    start = (x, y);
+                    // Further pairs after a move are lines.
+                    command = if relative { b'l' } else { b'L' };
+                }
+            }
+            b'H' => x = bx + number(&mut at)?,
+            b'V' => y = by + number(&mut at)?,
+            other => {
+                // Curves and arcs: the outline is curved.
+                let count = match other {
+                    b'C' => 6,
+                    b'S' | b'Q' => 4,
+                    b'T' => 2,
+                    b'A' => 7,
+                    _ => return None,
+                };
+                curved = true;
+                let mut last = (0.0, 0.0);
+                for i in 0..count {
+                    let v = number(&mut at)?;
+                    if i == count - 2 {
+                        last.0 = v;
+                    } else if i == count - 1 {
+                        last.1 = v;
+                    }
+                }
+                (x, y) = (bx + last.0, by + last.1);
+                continue;
+            }
+        }
+        if corners.first() != Some(&(x, y)) && corners.last() != Some(&(x, y)) {
+            corners.push((x, y));
+        }
+    }
+    (!corners.is_empty() || curved).then_some((curved, closed, corners))
+}
+
+/// The DrawingML line end (ST_LineEndType) a marker's geometry (§16.42.8
+/// `svg:d`) is nearest to, whatever the marker is named: a curved outline
+/// is an oval; a closed outline of three corners a triangle; of four
+/// corners a stealth arrow when one corner lies inside the outline's box
+/// (the notch), else a diamond; a convex outline of many corners (a
+/// polygonal circle) an oval; an open path, or a many-cornered outline
+/// that is not convex (LibreOffice's `msArrowOpenEnd`, a chevron with a
+/// stub of the line), an open arrow. Data that cannot be read is a
+/// triangle, LibreOffice's plain arrow.
+pub fn marker_kind(d: &str) -> &'static str {
+    let Some((curved, closed, corners)) = marker_outline(d) else {
+        return "triangle";
+    };
+    if curved {
+        return "oval";
+    }
+    let bounds = |pick: fn(&(f64, f64)) -> f64| {
+        corners
+            .iter()
+            .map(pick)
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(v), hi.max(v))
+            })
+    };
+    let ((left, right), (top, bottom)) = (bounds(|p| p.0), bounds(|p| p.1));
+    let notched = corners
+        .iter()
+        .any(|&(x, y)| x > left && x < right && y > top && y < bottom);
+    // A convex outline: every turn has the same sense.
+    let convex = {
+        let n = corners.len();
+        let mut sense = 0.0f64;
+        (0..n).all(|i| {
+            let (a, b, c) = (corners[i], corners[(i + 1) % n], corners[(i + 2) % n]);
+            let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+            if cross == 0.0 || sense == 0.0 || cross.signum() == sense {
+                if cross != 0.0 {
+                    sense = cross.signum();
+                }
+                true
+            } else {
+                false
+            }
+        })
+    };
+    if corners.len() > 8 && convex {
+        "oval"
+    } else if !closed || corners.len() > 8 {
+        "arrow"
+    } else {
+        match corners.len() {
+            4 if notched => "stealth",
+            4 => "diamond",
+            _ => "triangle",
+        }
+    }
+}
+
+/// The width of a line end whose style names a marker but no
+/// `draw:marker-start-width` / `-end-width`: 0.3 cm, as the presentation
+/// reader paints it.
+pub const DEFAULT_MARKER_WIDTH_PT: f64 = 0.3 * 72.0 / 2.54;
+
+/// The DrawingML size steps (ST_LineEndWidth, ST_LineEndLength: `sm`,
+/// `med`, `lg`) nearest to a marker's size, for the renderer that draws a
+/// line end of kind `kind` as {2, 3, 5} × `e` across (`w`) and along
+/// (`len`) the line, with `e` the line width, at least 2 pt.
+///
+/// A marker is drawn `width` across (§20.161 `draw:marker-end-width`) and,
+/// keeping its view box's proportions, `width × height / width` of its
+/// view box along the line. LibreOffice converts a DrawingML line end to
+/// exactly that: across {2, 3, 5} × `e`, along by the view box (100 units
+/// per step), with `e` the line width, at least 0.07 cm (measured: a
+/// 0.75 pt line's `sm`/`med`/`lg` ends are 0.14/0.21/0.35 cm, a 4.5 pt
+/// line's 0.318/0.477/0.795 cm, and a `w=sm len=lg` triangle's view box is
+/// 200 × 500). Its open arrow is half a step larger each way (`sm` is
+/// 2.5 `e` across, view box 250 wide), which the renderer's open arrow
+/// includes. Each size is the nearest step on a log scale, so a converted
+/// line end maps back to its own steps; other markers get the nearest the
+/// steps can draw.
+pub fn line_end_size(
+    kind: &str,
+    marker_width_pt: f64,
+    view_box: Option<ViewBox>,
+    line_width_pt: f64,
+) -> (&'static str, &'static str) {
+    let e = if line_width_pt.is_finite() {
+        line_width_pt.max(2.0)
+    } else {
+        2.0
+    };
+    let aspect = view_box
+        .filter(|v| v.2 > 0.0 && v.3 > 0.0 && (v.3 / v.2).is_finite())
+        .map_or(1.0, |v| v.3 / v.2);
+    let open = if kind == "arrow" { 0.5 } else { 0.0 };
+    let step = |size: f64| {
+        let ratio = size / e - open;
+        if !ratio.is_finite() || ratio <= 0.0 {
+            "med"
+        } else if ratio < 6f64.sqrt() {
+            "sm"
+        } else if ratio < 15f64.sqrt() {
+            "med"
+        } else {
+            "lg"
+        }
+    };
+    (step(marker_width_pt), step(marker_width_pt * aspect))
+}
+
+/// `svg:viewBox` (§19.581): four numbers.
+pub fn view_box(value: &str) -> Option<ViewBox> {
+    let mut parts = value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f64>().ok().filter(|v| v.is_finite()));
+    let v = (
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+        parts.next()??,
+    );
+    parts.next().is_none().then_some(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,5 +1024,89 @@ mod tests {
         assert_eq!(border_width_keyword("thick"), Some(2.5));
         assert_eq!(border_width_keyword("solid"), None);
         assert!((skew_shear(0.5) + 0.5f64.tan()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn markers_map_to_the_nearest_line_end() {
+        // The outlines LibreOffice writes for the DrawingML line ends.
+        for (d, kind) in [
+            ("M150 0l150 300h-300z", "triangle"),
+            ("M150 0l150 300-150-120-150 120z", "stealth"),
+            ("M150 0l150 150-150 150-150-150z", "diamond"),
+            (
+                "M150 0l75 21 54 54 21 75-21 75-54 54-75 21-75-21-54-54-21-75 21-75 54-54z",
+                "oval",
+            ),
+            (
+                "M175 0l175 275-75 75-50-75v75h-100v-75l-50 75-75-75z",
+                "arrow",
+            ),
+            (
+                "M275 0l275 493-57 57-181-342v342h-75v-342l-181 342-56-57z",
+                "arrow",
+            ),
+            // LibreOffice's own markers (its `standard.soe` palette): Arrow,
+            // Circle, Square 45.
+            ("M10 0l-10 30h20z", "triangle"),
+            ("M462 1118l-102-29-102-51-93-72-72-93-51-102-29-102-13-105 13-102 29-106 51-102 72-89 93-72 102-50 102-34 106-9 101 9 106 34 98 50 93 72 72 89 51 102 29 106 13 102-13 105-29 102-51 102-72 93-93 72-98 51-106 29-101 13z", "oval"),
+            ("M0 564l564 567 567-567-567-564z", "diamond"),
+            ("M 0,20 10,0 20,20 Z", "triangle"),
+            ("M0 0c10 0 20 10 20 20s-10 20-20 20z", "oval"),
+            ("M0 0a5 5 0 1 1 10 0z", "oval"),
+            ("M0 0l10 20 20-20", "arrow"),
+            ("", "triangle"),
+            ("M0", "triangle"),
+            ("garbage", "triangle"),
+        ] {
+            assert_eq!(marker_kind(d), kind, "{d}");
+        }
+    }
+
+    #[test]
+    fn line_end_sizes_map_back_to_their_steps() {
+        let cm = 72.0 / 2.54;
+        // What LibreOffice writes for a 0.75 pt line (0.026 cm): every
+        // w × len, closed ends and open arrows.
+        for (w, width) in [("sm", 0.14), ("med", 0.21), ("lg", 0.35)] {
+            for (len, units) in [("sm", 200.0), ("med", 300.0), ("lg", 500.0)] {
+                let across = 100.0 * (width / 0.07);
+                let view = Some((0.0, 0.0, across, units));
+                assert_eq!(line_end_size("triangle", width * cm, view, 0.75), (w, len));
+                let open = Some((0.0, 0.0, across + 50.0, units + 50.0));
+                assert_eq!(
+                    line_end_size("arrow", (width + 0.035) * cm, open, 0.75),
+                    (w, len)
+                );
+            }
+        }
+        // A 4.5 pt line (0.159 cm): steps of the line width; LibreOffice
+        // writes the open `sm`-wide arrow's view box 10 % longer.
+        let lw = 0.159 * cm;
+        assert_eq!(
+            line_end_size("oval", 0.795 * cm, Some((0.0, 0.0, 500.0, 200.0)), lw),
+            ("lg", "sm")
+        );
+        assert_eq!(
+            line_end_size("arrow", 0.397 * cm, Some((0.0, 0.0, 250.0, 605.0)), lw),
+            ("sm", "lg")
+        );
+        assert_eq!(
+            line_end_size("arrow", 0.397 * cm, Some((0.0, 0.0, 250.0, 275.0)), lw),
+            ("sm", "sm")
+        );
+        // Another marker: the nearest step (0.4 cm on a 0.1 cm line is 4 e).
+        assert_eq!(
+            line_end_size("triangle", 0.4 * cm, Some((0.0, 0.0, 20.0, 30.0)), 0.1 * cm),
+            ("lg", "lg")
+        );
+        // Unusable sizes are the middle step.
+        assert_eq!(line_end_size("triangle", 0.0, None, 1.0), ("med", "med"));
+        assert_eq!(
+            line_end_size("triangle", f64::NAN, Some((0.0, 0.0, 0.0, 1.0)), f64::NAN),
+            ("med", "med")
+        );
+        assert_eq!(view_box("0 0 200 300"), Some((0.0, 0.0, 200.0, 300.0)));
+        assert_eq!(view_box("0 0 200"), None);
+        assert_eq!(view_box("0 0 200 300 4"), None);
     }
 }

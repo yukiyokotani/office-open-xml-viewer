@@ -1398,39 +1398,39 @@ impl<'a> Reader<'a> {
         shape.stroke_cap = graphic
             .get(NS_SVG, "stroke-linecap")
             .map(|cap| crate::odf_props::stroke_line_cap(cap).into());
-        let marker = |name: Option<&str>, width: Option<f64>| -> Option<LineEnd> {
-            let name = name?;
-            let kind = if name.contains("Circle") {
-                "oval"
-            } else if name.contains("Square") || name.contains("Diamond") {
-                "diamond"
-            } else if name.contains("Line") || name.contains("heads") {
-                "arrow"
-            } else {
-                "triangle"
+        // §20.158-§20.161: a line end is its marker's outline (the
+        // DrawingML end it is nearest to), sized by its width and view box
+        // against the line. A name without a definition is a triangle,
+        // LibreOffice's plain arrow.
+        let line_width = shape.stroke_width;
+        for which in ["start", "end"] {
+            let Some(name) = graphic.get(NS_DRAW, &format!("marker-{which}")) else {
+                continue;
             };
-            let ratio = width.unwrap_or(0.0) / shape.stroke_width.max(0.5);
-            let size = if ratio <= 2.5 {
-                "sm"
-            } else if ratio <= 4.5 {
-                "med"
-            } else {
-                "lg"
+            let (kind, view_box) = match self.definition("marker", name)? {
+                Some(node) => (
+                    node.attribute((NS_SVG, "d"))
+                        .map_or("triangle", crate::odf_props::marker_kind),
+                    node.attribute((NS_SVG, "viewBox"))
+                        .and_then(crate::odf_props::view_box),
+                ),
+                None => ("triangle", None),
             };
-            Some(LineEnd {
+            let width = graphic
+                .length(NS_DRAW, &format!("marker-{which}-width"))
+                .unwrap_or(crate::odf_props::DEFAULT_MARKER_WIDTH_PT);
+            let (w, len) = crate::odf_props::line_end_size(kind, width, view_box, line_width);
+            let end = Some(LineEnd {
                 r#type: kind.into(),
-                w: size.into(),
-                len: size.into(),
-            })
-        };
-        shape.head_end = marker(
-            graphic.get(NS_DRAW, "marker-start"),
-            graphic.length(NS_DRAW, "marker-start-width"),
-        );
-        shape.tail_end = marker(
-            graphic.get(NS_DRAW, "marker-end"),
-            graphic.length(NS_DRAW, "marker-end-width"),
-        );
+                w: w.into(),
+                len: len.into(),
+            });
+            if which == "start" {
+                shape.head_end = end;
+            } else {
+                shape.tail_end = end;
+            }
+        }
         Ok(())
     }
 

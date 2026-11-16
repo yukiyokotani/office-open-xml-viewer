@@ -77,8 +77,9 @@ pub(crate) struct Context {
     pub faces: HashMap<String, String>,
     /// Named gradients, hatches and fill images (`office:styles`).
     pub fills: crate::odf_fill::FillDefs,
-    /// The line end of each `draw:marker`, read from its path once.
-    pub marker_kinds: HashMap<String, &'static str>,
+    /// The line end of each `draw:marker`, read from its path once, with
+    /// the marker's view box (its proportions).
+    pub marker_kinds: HashMap<String, (&'static str, Option<crate::odf_props::ViewBox>)>,
     pub xfs: XfBuilder,
     pub date1904: bool,
     /// Package images referenced by drawings (paths).
@@ -304,9 +305,12 @@ fn read_documents(
         }
     }
     let mut marker_kinds = HashMap::new();
-    for (name, d) in fills.markers() {
+    for (name, d, view_box) in fills.markers() {
         budget::tick(1)?;
-        marker_kinds.insert(name.to_string(), draw::marker_kind(d)?);
+        marker_kinds.insert(
+            name.to_string(),
+            (crate::odf_props::marker_kind(d), view_box),
+        );
     }
     let mut context = Context {
         store,
