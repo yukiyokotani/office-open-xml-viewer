@@ -388,6 +388,15 @@ fn decode(
     }
     let (width, height) = match extension {
         "png" => png_size(bytes)?,
+        // A picture frame of this host keeps its place when the frame is
+        // well formed but not decodable.
+        "jpg" if raster == Raster::PptPictures => {
+            let (size, undecoded) = jpeg_frame(bytes, budget)?;
+            if undecoded.is_some() {
+                extension = UNDECODED_JPEG;
+            }
+            size
+        }
         "jpg" => jpeg_size(bytes, budget)?,
         "gif" => gif_size(bytes)?,
         _ => tiff_size(bytes, budget)?,
@@ -506,7 +515,22 @@ pub(crate) fn png_size(b: &[u8]) -> Result<(u32, u32), String> {
         u32::from_be_bytes(b[20..24].try_into().unwrap()),
     ))
 }
+/// Extension of a JPEG BLIP whose first frame is well formed but not an
+/// 8-bit Huffman baseline, extended-sequential or progressive DCT frame
+/// (ITU-T T.81 Table B.1: lossless, differential and arithmetic-coded
+/// frames, and 12-bit samples). Only hosts that draw a placeholder for it
+/// receive it ([`Raster::PptPictures`]); it is never a decodable image.
+pub(crate) const UNDECODED_JPEG: &str = "jpeg-undecoded";
+
 pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), String> {
+    match jpeg_frame(b, budget)? {
+        (size, None) => Ok(size),
+        (_, Some(reason)) => Err(unsupported(reason)),
+    }
+}
+
+/// The dimensions of the first frame, and why it is not decodable if so.
+fn jpeg_frame(b: &[u8], budget: &mut usize) -> Result<((u32, u32), Option<&'static str>), String> {
     if !b.starts_with(&[0xff, 0xd8]) {
         return Err(unsupported("invalid OfficeArt JPEG header"));
     }
@@ -539,9 +563,9 @@ pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
         if matches!(marker, 0 | 0xd0..=0xd8) {
             return Err(unsupported("unexpected OfficeArt JPEG marker before frame"));
         }
-        // Do not skip an unsupported first frame and accidentally validate the
-        // dimensions of a later frame that a decoder would not choose.
-        if matches!(marker, 0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf | 0xde) {
+        // A hierarchical DHP segment (0xde) precedes frames this reader does
+        // not walk: do not skip it and validate a later frame's dimensions.
+        if marker == 0xde {
             return Err(unsupported("unsupported OfficeArt JPEG frame encoding"));
         }
         let length = b
@@ -553,19 +577,31 @@ pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
             .and_then(|b| b.get(..length))
             .filter(|b| b.len() >= 2)
             .ok_or_else(|| unsupported("invalid OfficeArt JPEG segment length"))?;
-        if matches!(marker, 0xc0..=0xc2) {
-            // ITU-T T.81 B.2.2: Lf = 8 + 3 * Nf. Only 8-bit Huffman
-            // baseline/sequential/progressive frames are supported here.
+        // SOF0-SOF15 except DHT (0xc4), JPG (0xc8) and DAC (0xcc).
+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+            // ITU-T T.81 B.2.2: every frame header is Lf = 8 + 3 * Nf with a
+            // sample precision P, then Y and X.
             if segment.len() < 8
-                || segment[2] != 8
                 || segment[7] == 0
                 || segment.len() != 8 + 3 * usize::from(segment[7])
             {
                 return Err(unsupported("unsupported OfficeArt JPEG frame"));
             }
+            // Only 8-bit Huffman baseline/sequential/progressive frames are
+            // decodable here.
+            let undecoded = if !matches!(marker, 0xc0..=0xc2) {
+                Some("unsupported OfficeArt JPEG frame encoding")
+            } else if segment[2] != 8 {
+                Some("unsupported OfficeArt JPEG frame")
+            } else {
+                None
+            };
             return Ok((
-                u32::from(u16::from_be_bytes([segment[5], segment[6]])),
-                u32::from(u16::from_be_bytes([segment[3], segment[4]])),
+                (
+                    u32::from(u16::from_be_bytes([segment[5], segment[6]])),
+                    u32::from(u16::from_be_bytes([segment[3], segment[4]])),
+                ),
+                undecoded,
             ));
         }
         position += length;
