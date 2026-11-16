@@ -591,11 +591,24 @@ Modern Office can retain DrawingML in an OfficeArt `metroBlob`
 ([MS-ODRAW] §2.3.4.41). The source uses three outcomes: a package with no
 alternative or a verified disagreement uses the binary projection; a verified
 consistent alternative is adopted; an unreadable or unverifiable alternative
-rejects the load. Exhausting an optional alternative's verification budgets
-keeps that shape's binary projection and does not poison the document. Input
-work uses the standard OOXML package allowance (256 MiB of actual consumed
-input per alternative, including rereads); inflated output remains bounded to
-1 MiB per part and 4 MiB per alternative package. Round-trip theme verification
+rejects the load. Some attributes are encoded differently in the two forms,
+so a difference does not show which side was edited; for these the source
+follows the side that PowerPoint PDF exports draw. Different gradient stops,
+or a gradient rotation flag that only the alternative states, adopt the
+alternative. A rotation flag that only the binary sets keeps the binary
+projection. Custom path commands that do not pair one to one are compared as
+traced outlines (another start point, or collinear lines split differently,
+is the same outline). Outlines that then pair segment by segment but at other
+points are a verified difference and keep the binary projection. A stroked
+path whose outline matches only where a line turns back on itself also keeps
+the binary projection, because the stroke draws joins at those turns.
+Outlines that do not pair, and stroked paths with dashes or arrowheads (which
+follow the traversal), still reject the load.
+Exhausting an optional alternative's verification budgets keeps that
+shape's binary projection and does not poison the document. Input work uses
+the standard OOXML package allowance (256 MiB of actual consumed input per
+alternative, including rereads); inflated output remains bounded to 1 MiB per
+part and 4 MiB per alternative package. Round-trip theme verification
 also has its own input-work allowance. Failed attempts retain no model, text,
 or image charges. A checksum-only package does not require a theme.
 

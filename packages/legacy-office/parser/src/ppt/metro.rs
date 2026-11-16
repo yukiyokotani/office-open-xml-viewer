@@ -18,7 +18,12 @@
 //!   fill color) while the alternative XML was kept renders the binary, and
 //!   a deck whose alternative states 10.5 pt text over a binary 10 pt run
 //!   renders without the alternative's run properties: the alternative is
-//!   not used once it disagrees with the binary.
+//!   not used once it disagrees with the binary;
+//! - controls whose XML alone changes a gradient stop or states
+//!   `rotWithShape="1"` render the XML, while a control whose binary alone
+//!   turns the gradient's rotation flag on renders the binary; a control
+//!   whose binary freeform alone moves its start vertex along the first edge
+//!   (the traced outline is unchanged) prints like its source.
 //!
 //! The alternative therefore carries display information the binary lacks,
 //! and the binary projection alone does not reproduce a shape whose
@@ -26,11 +31,19 @@
 //! outcomes (`adopt`):
 //! - no alternative part (a package with only the `downRev` checksums), or
 //!   an ordinary alternative that verifiably disagrees with the binary on a
-//!   compared attribute: the binary projection;
+//!   compared attribute, or whose binary overrides it (`Verdict::Overridden`:
+//!   a binary gradient rotation flag the XML does not state as `1`, a stroked
+//!   custom path whose outline matches only by folding a line that turns
+//!   back on itself): the binary projection;
 //! - an alternative that agrees on every applicable compared attribute: the
 //!   alternative, with the binary's transform, identifier and characters;
 //!   a binary freeform keeps its outline, and a placeholder inherits locally
 //!   omitted shape properties from the binary projection;
+//! - an alternative whose only disagreements are restatements (`Verdict::
+//!   Restated`: gradient stops, an XML gradient rotation flag `1` over a
+//!   binary that states none): the alternative, as above. This precedence
+//!   is inferred from the measured XML-only edit controls; no control
+//!   measures a binary-only edit of these values that the comparison reads;
 //! - alternative resource exhaustion keeps the binary projection;
 //! - encryption failures keep their own classification;
 //! - representational failures reject as unsupported: an ambiguous or
@@ -376,24 +389,80 @@ enum Verdict {
     /// Both forms state the attribute, but not in a form this reader can
     /// compare: agreement is unknown.
     Unverifiable(&'static str),
+    /// Both forms state the attribute in encodings that do not correspond
+    /// one to one, in a pairing whose PowerPoint 16 PDF controls draw the
+    /// alternative (gradient stops, and an XML rotation flag `1` over a
+    /// binary that states none; `same_paint`). The value names the rejection
+    /// this outcome replaces.
+    Restated(&'static str),
+    /// Both forms state the attribute in encodings that do not correspond
+    /// one to one, in a pairing whose PowerPoint 16 PDF controls draw the
+    /// binary (a binary gradient rotation flag that the XML does not state
+    /// as `1`; `same_paint`), or draw both forms alike (a stroked custom path
+    /// whose outline matches only by folding a line that turns back on
+    /// itself; `same_outline`). The shape keeps its binary projection, as for
+    /// [`Verdict::Differs`]; the value names the rejection this outcome
+    /// replaces.
+    Overridden(&'static str),
 }
 
-/// Adopt only when every compared attribute is the same. Any verified
-/// difference keeps the binary projection: PowerPoint ignores an alternative
-/// that disagrees with the binary shape. Otherwise, when some attribute
-/// cannot be compared, the display is unknown and the shape fails closed.
 #[cfg(any(test, feature = "direct-ppt"))]
-fn decide(verdicts: &[Verdict]) -> Result<bool, String> {
+const RESTATED_FILL: &str =
+    "PowerPoint alternative shape XML fill cannot be compared with the binary shape";
+#[cfg(any(test, feature = "direct-ppt"))]
+const RESTATED_GEOMETRY: &str =
+    "PowerPoint alternative shape XML custom geometry cannot be compared with the binary shape";
+
+/// How a shape resolves before its alternative is projected.
+#[cfg(any(test, feature = "direct-ppt"))]
+#[derive(Debug, PartialEq)]
+enum Decision {
+    /// The binary projection.
+    Binary,
+    /// The alternative; once it is adopted, the restated attributes it draws
+    /// are recorded with these replaced rejections.
+    Alternative(Vec<&'static str>),
+}
+
+/// Any verified difference keeps the binary projection: PowerPoint ignores an
+/// alternative that disagrees with the binary shape. Without one, an
+/// overriding binary encoding keeps it too, and is recorded as the decision
+/// that replaced its rejection. Otherwise, when some attribute cannot be
+/// compared, the display is unknown and the shape fails closed. Otherwise the
+/// alternative is adopted, with its restated attributes.
+#[cfg(any(test, feature = "direct-ppt"))]
+fn decide(verdicts: &[Verdict]) -> Result<Decision, String> {
     if verdicts.iter().any(|v| matches!(v, Verdict::Differs(_))) {
-        return Ok(false);
+        return Ok(Decision::Binary);
     }
-    match verdicts.iter().find_map(|v| match v {
+    let overridden: Vec<_> = verdicts
+        .iter()
+        .filter_map(|v| match v {
+            Verdict::Overridden(site) => Some(*site),
+            _ => None,
+        })
+        .collect();
+    if !overridden.is_empty() {
+        for site in overridden {
+            crate::rejection::approximated(site, ());
+        }
+        return Ok(Decision::Binary);
+    }
+    if let Some(what) = verdicts.iter().find_map(|v| match v {
         Verdict::Unverifiable(what) => Some(what),
         _ => None,
     }) {
-        Some(what) => Err(unverifiable(what)),
-        None => Ok(true),
+        return Err(unverifiable(what));
     }
+    Ok(Decision::Alternative(
+        verdicts
+            .iter()
+            .filter_map(|v| match v {
+                Verdict::Restated(site) => Some(*site),
+                _ => None,
+            })
+            .collect(),
+    ))
 }
 
 #[cfg(any(test, feature = "direct-ppt"))]
@@ -1176,8 +1245,15 @@ fn verify(
     // edits on the same controls invalidate it and render from the binary.
     // The proprietary checksum cannot be recomputed here to identify which
     // side was edited. Reject that pair rather than guessing its provenance.
+    // The controls that draw a restated attribute from the alternative are
+    // ordinary shapes; a placeholder keeps the same gate for it.
     let local_override = |verdict, stated, attribute| {
-        if stated && matches!(verdict, Verdict::Differs(_)) {
+        if stated
+            && matches!(
+                verdict,
+                Verdict::Differs(_) | Verdict::Restated(_) | Verdict::Overridden(_)
+            )
+        {
             Verdict::Unverifiable(attribute)
         } else {
             verdict
@@ -1223,9 +1299,9 @@ fn verify(
             Err(verdict) => *verdict,
         },
     ];
-    if !decide(&verdicts)? {
+    let Decision::Alternative(restated) = decide(&verdicts)? else {
         return Ok(None);
-    }
+    };
     shape = substituted.unwrap_or_else(|_| unreachable!("text agreement was decided"));
     if let Some(assets) = bullet_assets {
         let mut retained = std::collections::BTreeMap::new();
@@ -1339,6 +1415,9 @@ fn verify(
     *model_budget = model_budget.checked_sub(retained).ok_or_else(|| {
         crate::rejection::resource("PowerPoint direct slide model budget exceeded")
     })?;
+    for site in restated {
+        crate::rejection::approximated(site, ());
+    }
     Ok(Some(shape))
 }
 
@@ -1588,6 +1667,22 @@ fn same_geometry(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdic
 /// comparing. Paths, their paint and their command kinds must then match
 /// one to one; a different vertex is a different shape, while a different
 /// command structure may be another encoding of the same outline.
+///
+/// Commands that do not pair (another count, or another kind at one
+/// position) are compared as outlines instead (`same_outline`): the same
+/// traced contours, with another start point or with collinear lines split
+/// differently, are the same shape. The PowerPoint 16 control whose binary
+/// start vertex was moved along the first edge (adding a binary line the
+/// alternative does not state) prints like its source and like the control
+/// without an alternative, so neither side's edit is visible there. Other
+/// unpaired structures stay unverifiable: no control establishes which side
+/// PowerPoint draws for them. So does a stroked path with dashes or
+/// arrowheads, which follow the traversal that the outline comparison
+/// normalizes away. A solid stroke draws collinear splits and another start
+/// point alike, but draws joins where a line turns back on itself (that
+/// control's binary path does, at its moved start); such a stroked path keeps
+/// the binary, which draws its own turns as authored and which the control
+/// without an alternative shows PowerPoint printing alike.
 #[cfg(any(test, feature = "direct-ppt"))]
 fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
     use pptx_model::PathCmd;
@@ -1603,6 +1698,7 @@ fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
     }
     let mut verdict = Verdict::Same;
     for (index, (bp, ap)) in b.iter().zip(a).enumerate() {
+        let (raw_b, raw_a) = (bp, ap);
         let a_paint = match alternative.cust_geom_paint.as_ref().map(|p| p.get(index)) {
             None => (true, true),
             Some(Some(p)) => match p.fill.as_deref() {
@@ -1617,8 +1713,42 @@ fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
             verdict = Verdict::Differs("custom geometry path paint");
         }
         let (bp, ap) = (without_closing_lines(bp), without_closing_lines(ap));
-        if bp.len() != ap.len() {
-            return Verdict::Unverifiable("custom geometry");
+        if bp.len() != ap.len()
+            || bp
+                .iter()
+                .zip(&ap)
+                .any(|(bc, ac)| std::mem::discriminant(*bc) != std::mem::discriminant(*ac))
+        {
+            // Dashes and arrowheads follow the traversal (start point and
+            // direction of each segment), which the outline comparison
+            // normalizes away. Solid, unterminated strokes draw alike up to
+            // the joins of lines that turn back on themselves, which
+            // `same_outline` reports.
+            let traversal = |stroke: &Option<pptx_model::Stroke>| {
+                stroke.as_ref().is_some_and(|stroke| {
+                    !stroke.custom_dash.is_empty()
+                        || stroke.dash_style.as_deref().is_some_and(|d| d != "solid")
+                        || [&stroke.head_end, &stroke.tail_end]
+                            .into_iter()
+                            .flatten()
+                            .any(|end| end.kind != "none")
+                })
+            };
+            if (b_paint[index].1 || a_paint.1)
+                && (traversal(&binary.element.stroke) || traversal(&alternative.stroke))
+            {
+                return Verdict::Unverifiable("custom geometry");
+            }
+            match same_outline(raw_b, raw_a, b_paint[index].1 || a_paint.1) {
+                Verdict::Same => {}
+                Verdict::Differs(what) => verdict = Verdict::Differs(what),
+                Verdict::Overridden(site) if verdict == Verdict::Same => {
+                    verdict = Verdict::Overridden(site)
+                }
+                Verdict::Overridden(_) => {}
+                other => return other,
+            }
+            continue;
         }
         for (bc, ac) in bp.iter().zip(&ap) {
             let pairs = match (bc, ac) {
@@ -1659,6 +1789,7 @@ fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
                     },
                 ) => vec![(wr, awr), (hr, ahr), (st_ang, ast_ang), (sw_ang, asw_ang)],
                 (PathCmd::Close, PathCmd::Close) => Vec::new(),
+                // Equal kinds this comparator has no operands for.
                 _ => return Verdict::Unverifiable("custom geometry"),
             };
             if pairs.iter().any(|(p, q)| (*p - *q).abs() > PATH_TOLERANCE) {
@@ -1667,6 +1798,311 @@ fn same_paths(binary: &BinaryShape<'_>, alternative: &ShapeElement) -> Verdict {
         }
     }
     verdict
+}
+
+/// One drawn segment of a contour, with its end point; `Line` also keeps its
+/// start for the collinear merge.
+#[cfg(any(test, feature = "direct-ppt"))]
+#[derive(Clone, Copy, Debug)]
+enum Segment {
+    Line([f64; 2], [f64; 2]),
+    Arc([f64; 4], [f64; 2]),
+    Cubic([f64; 4], [f64; 2]),
+}
+
+#[cfg(any(test, feature = "direct-ppt"))]
+impl Segment {
+    fn end(&self) -> [f64; 2] {
+        match *self {
+            Segment::Line(_, end) | Segment::Arc(_, end) | Segment::Cubic(_, end) => end,
+        }
+    }
+}
+
+/// A contour: its start point, whether it is closed, and its segments.
+#[cfg(any(test, feature = "direct-ppt"))]
+type Contour = ([f64; 2], bool, Vec<Segment>);
+
+/// The contours of one path. `None` when a
+/// command has no end point this reader can place exactly: an arc whose
+/// angles are not multiples of 90 degrees (where parametric and visual
+/// ECMA-376 angle readings differ), a quadratic Bézier, or drawing without
+/// a start point.
+#[cfg(any(test, feature = "direct-ppt"))]
+fn contours(path: &[pptx_model::PathCmd]) -> Option<Vec<Contour>> {
+    use pptx_model::PathCmd;
+    fn quarter(degrees: f64) -> Option<(f64, f64)> {
+        let turns = degrees / 90.0;
+        if (turns - turns.round()).abs() > PATH_TOLERANCE {
+            return None;
+        }
+        Some(match (turns.round() as i64).rem_euclid(4) {
+            0 => (1.0, 0.0),
+            1 => (0.0, 1.0),
+            2 => (-1.0, 0.0),
+            _ => (0.0, -1.0),
+        })
+    }
+    let mut result: Vec<Contour> = Vec::new();
+    let mut current: Option<[f64; 2]> = None;
+    for command in path {
+        let segment = match *command {
+            PathCmd::MoveTo { x, y } => {
+                result.push(([x, y], false, Vec::new()));
+                current = Some([x, y]);
+                continue;
+            }
+            PathCmd::Close => {
+                let (start, closed, segments) = result.last_mut()?;
+                if *closed {
+                    return None;
+                }
+                let at = current?;
+                segments.push(Segment::Line(at, *start));
+                *closed = true;
+                current = Some(*start);
+                continue;
+            }
+            PathCmd::LineTo { x, y } => Segment::Line(current?, [x, y]),
+            PathCmd::CubicBezTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => Segment::Cubic([x1, y1, x2, y2], [x, y]),
+            PathCmd::ArcTo {
+                wr,
+                hr,
+                st_ang,
+                sw_ang,
+            } => {
+                let at = current?;
+                let (sc, ss) = quarter(st_ang)?;
+                let (ec, es) = quarter(st_ang + sw_ang)?;
+                let end = [at[0] - wr * sc + wr * ec, at[1] - hr * ss + hr * es];
+                Segment::Arc([wr, hr, st_ang, sw_ang], end)
+            }
+            _ => return None,
+        };
+        let (_, closed, segments) = result.last_mut()?;
+        if *closed {
+            return None;
+        }
+        current = Some(segment.end());
+        segments.push(segment);
+    }
+    Some(result)
+}
+
+/// Two ECMA-376 20.1.9 paths compared as traced contours, for command lists
+/// that do not pair one to one. Zero-length lines draw nothing, and a run of
+/// collinear lines whose points all lie between the run's first start and
+/// last end traces exactly one line between them, so both are normalized
+/// away; a closed contour may start at any of its segment boundaries. The
+/// normalized contours must then pair segment by segment, kind by kind,
+/// like paired commands: equal points are the same outline, and other
+/// points are a different vertex (`Differs`, as for paired commands). A
+/// contour that does not normalize to the same kinds stays unverifiable.
+#[cfg(any(test, feature = "direct-ppt"))]
+fn same_outline(
+    binary: &[pptx_model::PathCmd],
+    alternative: &[pptx_model::PathCmd],
+    stroked: bool,
+) -> Verdict {
+    let near = |p: [f64; 2], q: [f64; 2]| {
+        (p[0] - q[0]).abs() <= PATH_TOLERANCE && (p[1] - q[1]).abs() <= PATH_TOLERANCE
+    };
+    // The distance of `p` from the line through `a` and `b` (`a` != `b`).
+    let off_line = |a: [f64; 2], b: [f64; 2], p: [f64; 2]| {
+        let d = [b[0] - a[0], b[1] - a[1]];
+        ((d[0] * (p[1] - a[1]) - d[1] * (p[0] - a[0])) / d[0].hypot(d[1])).abs()
+    };
+    // Merge a cyclic (closed) or linear run of segments; `None` when the
+    // contour degenerates to collinear lines only.
+    let reversed = std::cell::Cell::new(false);
+    let normalize = |closed: bool, segments: Vec<Segment>| -> Option<Vec<Segment>> {
+        let mut segments: Vec<Segment> = segments
+            .into_iter()
+            .filter(|s| !matches!(s, Segment::Line(a, b) if near(*a, *b)))
+            .collect();
+        let continues = |s: &Segment, t: &Segment| match (s, t) {
+            (Segment::Line(a, b), Segment::Line(_, c)) => off_line(*a, *b, *c) <= PATH_TOLERANCE,
+            _ => false,
+        };
+        if closed {
+            // Rotate so the list starts where a run of collinear lines
+            // cannot continue across the boundary.
+            let n = segments.len();
+            let boundary =
+                (0..n).find(|&i| !continues(&segments[(i + n - 1) % n], &segments[i]))?;
+            segments.rotate_left(boundary);
+        }
+        // A run of lines traces exactly the line from its first start to
+        // its last end when every point of the run lies on that line,
+        // between those two ends.
+        let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
+        let mut index = 0;
+        while index < segments.len() {
+            let Segment::Line(first, _) = segments[index] else {
+                merged.push(segments[index]);
+                index += 1;
+                continue;
+            };
+            let mut end = index + 1;
+            while end < segments.len() && continues(&segments[end - 1], &segments[end]) {
+                end += 1;
+            }
+            let last = segments[end - 1].end();
+            let length = (last[0] - first[0]).hypot(last[1] - first[1]);
+            let along = |p: [f64; 2]| {
+                ((p[0] - first[0]) * (last[0] - first[0])
+                    + (p[1] - first[1]) * (last[1] - first[1]))
+                    / length
+            };
+            let traced = length > PATH_TOLERANCE
+                && segments[index..end].iter().all(|s| {
+                    let p = s.end();
+                    off_line(first, last, p) <= PATH_TOLERANCE
+                        && (-PATH_TOLERANCE..=length + PATH_TOLERANCE).contains(&along(p))
+                });
+            if end - index > 1 && traced {
+                // A run that turns back on itself traces the same points,
+                // but a stroke draws joins at its turns.
+                let mut previous = 0.0;
+                for s in &segments[index..end] {
+                    let at = along(s.end());
+                    if at < previous - PATH_TOLERANCE {
+                        reversed.set(true);
+                    }
+                    previous = at;
+                }
+                merged.push(Segment::Line(first, last));
+            } else {
+                merged.extend_from_slice(&segments[index..end]);
+            }
+            index = end;
+        }
+        Some(merged)
+    };
+    let (Some(b), Some(a)) = (contours(binary), contours(alternative)) else {
+        return Verdict::Unverifiable("custom geometry");
+    };
+    if b.len() != a.len() {
+        return Verdict::Unverifiable("custom geometry");
+    }
+    let mut differs = false;
+    for ((bs, bc, bseg), (as_, ac, aseg)) in b.into_iter().zip(a) {
+        let (Some(bseg), Some(aseg)) = (normalize(bc, bseg), normalize(ac, aseg)) else {
+            return Verdict::Unverifiable("custom geometry");
+        };
+        if bc != ac || bseg.len() != aseg.len() || bseg.is_empty() {
+            return Verdict::Unverifiable("custom geometry");
+        }
+        // An open contour pairs from its start point; a closed one at any
+        // rotation. Rotations are found in linear time on exact keys: the
+        // segment kinds, and the points rounded to the comparison
+        // tolerance; a rounded match is then checked within it.
+        let kinds = |segments: &[Segment]| -> Vec<u8> {
+            segments
+                .iter()
+                .map(|s| match s {
+                    Segment::Line(..) => 0,
+                    Segment::Arc(..) => 1,
+                    Segment::Cubic(..) => 2,
+                })
+                .collect()
+        };
+        let values = |s: &Segment| -> Vec<f64> {
+            match s {
+                Segment::Line(_, e) => e.to_vec(),
+                Segment::Arc(p, e) | Segment::Cubic(p, e) => p.iter().chain(e).copied().collect(),
+            }
+        };
+        let rounded = |segments: &[Segment]| -> Vec<(u8, Vec<i64>)> {
+            kinds(segments)
+                .into_iter()
+                .zip(segments)
+                .map(|(kind, s)| {
+                    let key = values(s)
+                        .into_iter()
+                        .map(|v| (v / PATH_TOLERANCE).round() as i64)
+                        .collect();
+                    (kind, key)
+                })
+                .collect()
+        };
+        let same_at = |offset: usize| {
+            let n = bseg.len();
+            (bc || near(bs, as_))
+                && (0..n).all(|i| {
+                    values(&bseg[(i + offset) % n])
+                        .iter()
+                        .zip(values(&aseg[i]))
+                        .all(|(p, q)| (p - q).abs() <= PATH_TOLERANCE)
+                })
+        };
+        fn offset<T: PartialEq>(closed: bool, b: &[T], a: &[T]) -> Option<usize> {
+            if closed {
+                cyclic_offset(b, a)
+            } else {
+                (b == a).then_some(0)
+            }
+        }
+        if offset(bc, &rounded(&bseg), &rounded(&aseg)).is_some_and(same_at) {
+            continue;
+        }
+        if offset(bc, &kinds(&bseg), &kinds(&aseg)).is_none() {
+            return Verdict::Unverifiable("custom geometry");
+        }
+        differs = true;
+    }
+    if differs {
+        Verdict::Differs("custom geometry vertices")
+    } else if stroked && reversed.get() {
+        // The stroke of the alternative may draw other joins: keep the
+        // binary, which draws its own turns as authored.
+        Verdict::Overridden(RESTATED_GEOMETRY)
+    } else {
+        Verdict::Same
+    }
+}
+
+/// A rotation `offset` with `text[(i + offset) % n] == pattern[i]` for all
+/// `i`, found with the Knuth-Morris-Pratt failure function over the doubled
+/// text in O(n).
+#[cfg(any(test, feature = "direct-ppt"))]
+fn cyclic_offset<T: PartialEq>(text: &[T], pattern: &[T]) -> Option<usize> {
+    let n = pattern.len();
+    if n == 0 || text.len() != n {
+        return None;
+    }
+    let mut failure = vec![0usize; n];
+    let mut k = 0;
+    for i in 1..n {
+        while k > 0 && pattern[i] != pattern[k] {
+            k = failure[k - 1];
+        }
+        if pattern[i] == pattern[k] {
+            k += 1;
+        }
+        failure[i] = k;
+    }
+    let mut k = 0;
+    for i in 0..2 * n - 1 {
+        let c = &text[i % n];
+        while k > 0 && *c != pattern[k] {
+            k = failure[k - 1];
+        }
+        if *c == pattern[k] {
+            k += 1;
+        }
+        if k == n {
+            return Some(i + 1 - n);
+        }
+    }
+    None
 }
 
 /// The path without a line to its subpath's start point directly before a
@@ -1731,8 +2167,8 @@ fn same_transform(
 /// DrawingML kind), except comparable gradient and pattern projections.
 /// PowerPoint 16 controls show XML pattern edits and binary image edits both
 /// affect PDF output. `same_binary_pattern` compares the image/pattern pair
-/// using its decoded 8x8 bitmap and duotone endpoints. Rotated-gradient
-/// omission is handled by `same_paint` below.
+/// using its decoded 8x8 bitmap and duotone endpoints. Two gradients, with
+/// their stops and rotation flag, are compared by `same_paint` below.
 #[cfg(any(test, feature = "direct-ppt"))]
 fn same_fill(binary: &RecordedFill, alternative: &ShapeElement, rotation: f64) -> Verdict {
     use pptx_model::Fill;
@@ -1759,7 +2195,7 @@ fn same_fill(binary: &RecordedFill, alternative: &ShapeElement, rotation: f64) -
         (None, Some(Fill::Solid { .. })) | (Some(Fill::Solid { .. }), None) => {
             Verdict::Differs("fill")
         }
-        (Some(a), Some(b)) if same_paint(a, b, rotation) => Verdict::Same,
+        (Some(a), Some(b)) => same_paint(a, b, rotation),
         _ => Verdict::Unverifiable("fill"),
     }
 }
@@ -1800,16 +2236,39 @@ fn same_color(binary: &str, alternative: &str) -> Option<bool> {
 /// with three and five binary stops, two and four XML stops, and changed
 /// XML/binary colours establish this restatement; compare the authored
 /// interior positions and colours, and the terminal colour, without inventing
-/// a terminal position for the binary. Other unequal layouts stay unverifiable.
+/// a terminal position for the binary.
+///
+/// Other unequal stops are restated and drawn from the alternative. This is
+/// the precedence the measured controls show, not an encoding limit: the
+/// PowerPoint 16 PDFs of controls whose XML alone changes a stop colour (five and three binary
+/// stops) or moves an interior stop by 19% print the XML stops. Moving it by
+/// 1% prints no visible change and decides nothing. No control edits a binary
+/// stop that this comparison reads (the binary-only colour controls edit
+/// `fillColor`, which the binary projection of these gradients does not
+/// draw), so PowerPoint's choice for that pairing is not measured; it is
+/// drawn like the measured XML-only edits.
 /// ECMA-376 CT_GradientFillProperties gives `flip` the default `none`; a
 /// `tileRect` with all zero offsets covers the whole shape, like no tileRect.
-/// PowerPoint 16 PDF controls on 90- and 180-degree rotations show that an
-/// omitted XML `rotWithShape` renders like `1`, while the corresponding binary
-/// shapes carry no authored rotation flag and project the binary default `0`.
-/// This paired omission is a PowerPoint restatement, not visual equivalence of
-/// the two projections. An XML-only `rotWithShape="0"` edit changes both PDFs.
+/// A difference in the angle, type, scaling, path or rectangles has no
+/// control and stays unverifiable.
+///
+/// Rotation with the shape, on 90- and 180-degree rotated shapes
+/// (PowerPoint 16 PDF controls; without rotation the flag draws nothing):
+///
+/// | binary | XML | PDF | verdict |
+/// |---|---|---|---|
+/// | false, stated or not | omitted | XML, rotating like `1` | same |
+/// | false | `0` | XML | same |
+/// | false | `1` | XML | restated |
+/// | true | omitted | binary | overridden |
+/// | true | `1` | not measured; equal | same |
+/// | true | `0` | not measured; a stated disagreement like the row above | overridden |
+///
+/// PowerPoint writes no binary flag for either XML value, so a binary
+/// `false` does not contradict the XML, while a binary `true` is a later
+/// edit of the binary unless the XML states the same.
 #[cfg(any(test, feature = "direct-ppt"))]
-fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotation: f64) -> bool {
+fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotation: f64) -> Verdict {
     use pptx_model::Fill;
     const POSITION: f64 = 1.0 / 65536.0 + 1.0 / 100_000.0;
     fn sorted(stops: &[pptx_model::GradStop]) -> Vec<(f64, &str)> {
@@ -1879,15 +2338,27 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotatio
         ) => {
             let (bs, as_) = (sorted(bs), sorted(as_));
             let turn = (ba - aa).rem_euclid(360.0);
-            comparable_stops(&bs, &as_)
-                && turn.min(360.0 - turn) < 0.01
+            if !(turn.min(360.0 - turn) < 0.01
                 && bt == at
                 && bsc == asc
                 && bp == ap
                 && rect(bf) == rect(af)
                 && tile_rect(btr) == tile_rect(atr)
-                && bfl.as_deref().unwrap_or("none") == afl.as_deref().unwrap_or("none")
-                && (br == ar || ar.is_none() && *br == Some(false) || rotation_irrelevant)
+                && bfl.as_deref().unwrap_or("none") == afl.as_deref().unwrap_or("none"))
+            {
+                return Verdict::Unverifiable("fill");
+            }
+            let rotation = match (br, ar) {
+                _ if rotation_irrelevant || br == ar => Verdict::Same,
+                (Some(false), None) => Verdict::Same,
+                (Some(false), Some(_)) => Verdict::Restated(RESTATED_FILL),
+                (Some(true), _) => Verdict::Overridden(RESTATED_FILL),
+                (None, _) => Verdict::Unverifiable("fill"),
+            };
+            match rotation {
+                Verdict::Same if !comparable_stops(&bs, &as_) => Verdict::Restated(RESTATED_FILL),
+                rotation => rotation,
+            }
         }
         (
             Fill::Pattern {
@@ -1900,8 +2371,10 @@ fn same_paint(binary: &pptx_model::Fill, alternative: &pptx_model::Fill, rotatio
                 bg: ab,
                 preset: ap,
             },
-        ) => same_color(bf, af) == Some(true) && same_color(bb, ab) == Some(true) && bp == ap,
-        _ => false,
+        ) if same_color(bf, af) == Some(true) && same_color(bb, ab) == Some(true) && bp == ap => {
+            Verdict::Same
+        }
+        _ => Verdict::Unverifiable("fill"),
     }
 }
 
@@ -2299,17 +2772,51 @@ mod tests {
 
     #[test]
     fn a_verified_difference_keeps_the_binary_and_an_unknown_one_fails_closed() {
+        use crate::rejection::take_best_effort;
         use Verdict::*;
-        assert_eq!(decide(&[Same, Same]), Ok(true));
+        let alternative = |sites: &[&'static str]| Ok(Decision::Alternative(sites.to_vec()));
+        take_best_effort();
+        assert_eq!(decide(&[Same, Same]), alternative(&[]));
+        // A verified difference decides alone: an overriding encoding beside
+        // it replaces no rejection.
         assert_eq!(
-            decide(&[Same, Differs("fill"), Unverifiable("geometry")]),
-            Ok(false)
+            decide(&[
+                Same,
+                Differs("fill"),
+                Overridden(RESTATED_FILL),
+                Unverifiable("geometry"),
+                Restated(RESTATED_FILL)
+            ]),
+            Ok(Decision::Binary)
         );
-        let error = decide(&[Same, Unverifiable("fill")]).unwrap_err();
+        let error = decide(&[Same, Restated(RESTATED_FILL), Unverifiable("fill")]).unwrap_err();
         assert!(
             error.starts_with("UNSUPPORTED:") && error.contains("fill"),
             "{error}"
         );
+        // Restated attributes are returned to the caller, which records them
+        // only once the alternative is adopted.
+        assert_eq!(
+            decide(&[Restated(RESTATED_FILL), Same]),
+            alternative(&[RESTATED_FILL])
+        );
+        assert!(take_best_effort().is_empty());
+        // An overriding binary encoding keeps the binary and outranks
+        // restatements and unknowns; it is recorded as the decision.
+        assert_eq!(
+            decide(&[
+                Restated(RESTATED_FILL),
+                Overridden(RESTATED_FILL),
+                Unverifiable("fill")
+            ]),
+            Ok(Decision::Binary)
+        );
+        assert_eq!(
+            take_best_effort(),
+            [(crate::rejection::BestEffort::Approximated, RESTATED_FILL)]
+        );
+        // The site is the rejection these outcomes replace.
+        assert_eq!(unverifiable("fill"), format!("UNSUPPORTED:{RESTATED_FILL}"));
     }
 
     #[test]
@@ -2349,6 +2856,24 @@ mod tests {
             same_geometry(&shape, &self::shape("upArrow")),
             Verdict::Same
         );
+    }
+
+    #[test]
+    fn cyclic_offsets_are_found_in_linear_time() {
+        assert_eq!(cyclic_offset(&[3, 1, 2], &[1, 2, 3]), Some(1));
+        assert_eq!(cyclic_offset(&[1, 1, 2, 1], &[1, 2, 1, 1]), Some(1));
+        assert_eq!(cyclic_offset(&[1, 2, 3], &[1, 3, 2]), None);
+        assert_eq!(cyclic_offset::<u8>(&[], &[]), None);
+        assert_eq!(cyclic_offset(&[1, 2], &[1, 2, 1]), None);
+        // A long periodic contour that differs in one place: the search stays
+        // linear (the former all-rotations scan was quadratic).
+        let n = 200_000;
+        let text: Vec<u8> = (0..n).map(|i| u8::from(i == n - 1)).collect();
+        let mut pattern = vec![0u8; n];
+        pattern[n / 2] = 1;
+        assert_eq!(cyclic_offset(&text, &pattern), Some(n / 2 - 1));
+        pattern[n / 2] = 2;
+        assert_eq!(cyclic_offset(&text, &pattern), None);
     }
 
     #[test]
@@ -2393,8 +2918,152 @@ mod tests {
                 y: 0.0,
             };
         }
+        // Commands that do not pair are compared as outlines. A quadratic
+        // Bézier has no exact comparison here.
         assert_eq!(
             same_geometry(&binary(&element, &leaf), &curved),
+            Verdict::Unverifiable("custom geometry")
+        );
+        // A binary that starts inside the first edge and closes through the
+        // corner traces the same outline in the same order: the same shape.
+        let forward = |corner: f64| {
+            let mut element = shape("custGeom");
+            element.cust_geom = Some(vec![vec![
+                PathCmd::MoveTo { x: 0.1, y: 0.0 },
+                PathCmd::LineTo { x: corner, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 0.1, y: 0.0 },
+                PathCmd::Close,
+            ]]);
+            element
+        };
+        assert_eq!(
+            same_geometry(&binary(&forward(1.0), &leaf), &square(false, 1.0)),
+            Verdict::Same
+        );
+        // Once normalized, the outlines pair like paired commands: another
+        // corner is a different vertex.
+        assert_eq!(
+            same_geometry(&binary(&forward(0.9), &leaf), &square(false, 1.0)),
+            Verdict::Differs("custom geometry vertices")
+        );
+        // A binary start vertex moved along the first edge with the line
+        // back to the corner turns back on itself there: the same filled
+        // outline, but a stroke draws joins at the turns. A stroked path
+        // keeps the binary, which draws them as authored; an unstroked one
+        // is the same shape.
+        let mut moved = square(true, 1.0);
+        if let Some(paths) = moved.cust_geom.as_mut() {
+            paths[0][0] = PathCmd::MoveTo { x: 0.1, y: 0.0 };
+            paths[0].insert(1, PathCmd::LineTo { x: 0.0, y: 0.0 });
+        }
+        assert_eq!(
+            same_geometry(&binary(&moved, &leaf), &square(false, 1.0)),
+            Verdict::Overridden(RESTATED_GEOMETRY)
+        );
+        // A different vertex beside the fold is a verified difference.
+        assert_eq!(
+            same_geometry(&binary(&moved, &leaf), &square(false, 0.9)),
+            Verdict::Differs("custom geometry vertices")
+        );
+        assert_eq!(
+            same_outline(
+                moved.cust_geom.as_ref().unwrap()[0].as_slice(),
+                square(false, 1.0).cust_geom.as_ref().unwrap()[0].as_slice(),
+                false
+            ),
+            Verdict::Same
+        );
+        // Unpaired commands that trace another outline stay unknown: a
+        // vertex off the edge, a spike past the edge's end (a stroke would
+        // draw it), or a bend behind a tiny first segment, whose direction
+        // must not stand for the run's line.
+        for extra in [
+            vec![PathCmd::LineTo { x: 0.5, y: 0.1 }],
+            vec![PathCmd::LineTo { x: 1.2, y: 0.0 }],
+            vec![
+                PathCmd::LineTo { x: 1e-8, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.09 },
+            ],
+        ] {
+            let mut other = square(true, 1.0);
+            if let Some(paths) = other.cust_geom.as_mut() {
+                for (offset, command) in extra.into_iter().enumerate() {
+                    paths[0].insert(1 + offset, command);
+                }
+            }
+            assert_eq!(
+                same_geometry(&binary(&other, &leaf), &square(false, 1.0)),
+                Verdict::Unverifiable("custom geometry")
+            );
+        }
+        // A long closed contour that starts elsewhere compares in linear
+        // time.
+        let n = 10_000;
+        let vertex = |i: usize| {
+            let angle = std::f64::consts::TAU * (i % n) as f64 / n as f64;
+            (0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin())
+        };
+        // The binary also splits its first edge at the midpoint, so the
+        // command lists do not pair.
+        let polygon = |from: usize, closing: bool| {
+            let (x, y) = vertex(from);
+            let mut commands = vec![PathCmd::MoveTo { x, y }];
+            if closing {
+                let (nx, ny) = vertex(from + 1);
+                commands.push(PathCmd::LineTo {
+                    x: (x + nx) / 2.0,
+                    y: (y + ny) / 2.0,
+                });
+            }
+            for i in 1..n + usize::from(closing) {
+                let (x, y) = vertex(from + i);
+                commands.push(PathCmd::LineTo { x, y });
+            }
+            commands.push(PathCmd::Close);
+            let mut element = shape("custGeom");
+            element.cust_geom = Some(vec![commands]);
+            element
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            same_geometry(&binary(&polygon(n / 3, true), &leaf), &polygon(0, false)),
+            Verdict::Same
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        // A verified difference in the paint of the unpaired path is
+        // reported as such and keeps the binary.
+        let mut unfilled = binary(&moved, &leaf);
+        unfilled.path_paint = Some(vec![(false, true)]);
+        assert_eq!(
+            same_geometry(&unfilled, &square(false, 1.0)),
+            Verdict::Differs("custom geometry path paint")
+        );
+        let two = |first: &ShapeElement, corner: f64| {
+            let mut element = first.clone();
+            if let Some(paths) = element.cust_geom.as_mut() {
+                paths.extend(square(false, corner).cust_geom.unwrap());
+            }
+            element
+        };
+        let binary_two = two(&forward(1.0), 1.0);
+        assert_eq!(
+            same_geometry(&binary(&binary_two, &leaf), &two(&square(false, 1.0), 1.0)),
+            Verdict::Same
+        );
+        assert_eq!(
+            same_geometry(&binary(&binary_two, &leaf), &two(&square(false, 1.0), 0.9)),
+            Verdict::Differs("custom geometry vertices")
+        );
+        // Another number of paths is not a pairing of commands.
+        assert_eq!(
+            same_geometry(&binary(&binary_two, &leaf), &square(false, 1.0)),
+            Verdict::Unverifiable("custom geometry")
+        );
+        // Equal kinds without comparable operands stay unverifiable.
+        assert_eq!(
+            same_geometry(&binary(&curved, &leaf), &curved),
             Verdict::Unverifiable("custom geometry")
         );
     }
@@ -2564,7 +3233,7 @@ mod tests {
         );
         assert_eq!(
             same_fill(&nonredundant, &alternative, 90.0),
-            Verdict::Unverifiable("fill")
+            Verdict::Restated(RESTATED_FILL)
         );
         alternative.fill = gradient(
             &[
@@ -2575,12 +3244,14 @@ mod tests {
             ],
             None,
         );
+        // Stops that are not this restatement are drawn from the
+        // alternative: a moved interior stop, or another stop colour.
         if let Some(Fill::Gradient { stops, .. }) = alternative.fill.as_mut() {
             stops[1].position = 0.42;
         }
         assert_eq!(
             same_fill(&resampled, &alternative, 180.0),
-            Verdict::Unverifiable("fill")
+            Verdict::Restated(RESTATED_FILL)
         );
         if let Some(Fill::Gradient { stops, .. }) = alternative.fill.as_mut() {
             stops[1].position = 0.39;
@@ -2588,7 +3259,7 @@ mod tests {
         }
         assert_eq!(
             same_fill(&resampled, &alternative, 180.0),
-            Verdict::Unverifiable("fill")
+            Verdict::Restated(RESTATED_FILL)
         );
         alternative.fill = gradient(&[(0.31, "FFFFFF"), (0.0, "000000")], Some(true));
         // ECMA-376 CT_GradientFillProperties defaults flip to "none";
@@ -2607,10 +3278,52 @@ mod tests {
         alternative.fill = gradient(&[(0.31, "FFFFFF"), (0.0, "000000")], None);
         assert_eq!(same_fill(&no_rotation, &alternative, 0.0), Verdict::Same);
         assert_eq!(same_fill(&no_rotation, &alternative, 90.0), Verdict::Same);
-        // Another stop layout cannot be equated by this bounded rule.
-        alternative.fill = gradient(&[(0.0, "000000"), (0.31, "FFFFFF")], None);
+        // Rotation with a rotated shape. A binary `false` states nothing
+        // against the XML; a binary `true` is the binary's own statement.
+        let stops = [(0.31, "FFFFFF"), (0.0, "000000")];
+        for (binary, xml, verdict) in [
+            (false, Some(false), Verdict::Same),
+            (false, Some(true), Verdict::Restated(RESTATED_FILL)),
+            (true, None, Verdict::Overridden(RESTATED_FILL)),
+            (true, Some(false), Verdict::Overridden(RESTATED_FILL)),
+            (true, Some(true), Verdict::Same),
+        ] {
+            let recorded = if binary { &recorded } else { &no_rotation };
+            alternative.fill = gradient(&stops, xml);
+            assert_eq!(
+                same_fill(recorded, &alternative, 90.0),
+                verdict,
+                "{binary} {xml:?}"
+            );
+            // Without rotation the flag draws nothing.
+            assert_eq!(same_fill(recorded, &alternative, 360.0), Verdict::Same);
+        }
+        // A binary rotation flag outranks restated stops.
+        alternative.fill = gradient(&[(0.0, "000000"), (0.5, "FFFFFF")], None);
         assert_eq!(
             same_fill(&recorded, &alternative, 90.0),
+            Verdict::Overridden(RESTATED_FILL)
+        );
+        assert_eq!(
+            same_fill(&no_rotation, &alternative, 90.0),
+            Verdict::Restated(RESTATED_FILL)
+        );
+        // The remaining gradient properties have no control.
+        if let Some(Fill::Gradient { angle, .. }) = alternative.fill.as_mut() {
+            *angle = 45.0;
+        }
+        assert_eq!(
+            same_fill(&no_rotation, &alternative, 90.0),
+            Verdict::Unverifiable("fill")
+        );
+        // Neither do two fills of different kinds.
+        alternative.fill = Some(Fill::Pattern {
+            fg: "000000".into(),
+            bg: "FFFFFF".into(),
+            preset: "pct30".into(),
+        });
+        assert_eq!(
+            same_fill(&no_rotation, &alternative, 90.0),
             Verdict::Unverifiable("fill")
         );
         assert_eq!(
@@ -3660,6 +4373,317 @@ mod tests {
                 run_verification(&element("00FF00"), &blob(SHAPE_XML), &theme(), AMPLE).0,
                 Ok(None)
             ));
+        }
+
+        const GRADIENT_XML: &str = r#"<a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="000000"/></a:gs><a:gs pos="50000"><a:srgbClr val="00FF00"/></a:gs><a:gs pos="100000"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill>"#;
+
+        fn gradient(stops: &[(f64, &str)], rotate: bool) -> Option<Fill> {
+            Some(Fill::Gradient {
+                stops: stops
+                    .iter()
+                    .map(|&(position, color)| pptx_model::GradStop {
+                        position,
+                        color: color.to_owned(),
+                    })
+                    .collect(),
+                angle: 90.0,
+                grad_type: "linear".to_owned(),
+                scaled: Some(false),
+                path: None,
+                fill_to_rect: None,
+                tile_rect: None,
+                flip: None,
+                rot_with_shape: Some(rotate),
+            })
+        }
+
+        fn gradient_stops(shape: &ShapeElement) -> Vec<(f64, String)> {
+            match &shape.fill {
+                Some(Fill::Gradient { stops, .. }) => stops
+                    .iter()
+                    .map(|stop| (stop.position, stop.color.clone()))
+                    .collect(),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        #[test]
+        fn restated_gradient_stops_are_drawn_from_the_alternative() {
+            use crate::rejection::{take_best_effort, BestEffort};
+            let xml = SHAPE_XML.replace(
+                r#"<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>"#,
+                GRADIENT_XML,
+            );
+            let mut element = element("FF0000");
+            // The binary holds another middle stop: not the restatement of
+            // these XML stops that `same_paint` equates.
+            element.fill = gradient(&[(0.0, "000000"), (0.4, "FF0000"), (1.0, "FFFFFF")], false);
+            take_best_effort();
+            let adopted = run_verification(&element, &blob(&xml), &theme(), AMPLE)
+                .0
+                .unwrap()
+                .expect("alternative with its own stops");
+            assert_eq!(
+                gradient_stops(&adopted),
+                [
+                    (0.0, "000000".to_owned()),
+                    (0.5, "00FF00".to_owned()),
+                    (1.0, "FFFFFF".to_owned())
+                ]
+            );
+            assert!(matches!(
+                adopted.fill,
+                Some(Fill::Gradient {
+                    rot_with_shape: None,
+                    ..
+                })
+            ));
+            // The transform and identifier stay the binary's.
+            assert_eq!(adopted.id.as_deref(), Some("3"));
+            assert_eq!(
+                (adopted.width, adopted.height),
+                (element.width, element.height)
+            );
+            assert_eq!(
+                take_best_effort(),
+                [(BestEffort::Approximated, RESTATED_FILL)]
+            );
+            // A placeholder that states the fill locally keeps its gate.
+            let placeholder = xml.replace("<p:nvPr/>", r#"<p:nvPr><p:ph type="body"/></p:nvPr>"#);
+            let error = run_verification(&element, &blob(&placeholder), &theme(), AMPLE)
+                .0
+                .unwrap_err();
+            assert!(
+                error.starts_with("UNSUPPORTED:") && error.contains("placeholder fill precedence"),
+                "{error}"
+            );
+            // Another angle is not a restatement of the stops.
+            let turned = xml.replace("5400000", "2700000");
+            let error = run_verification(&element, &blob(&turned), &theme(), AMPLE)
+                .0
+                .unwrap_err();
+            assert_eq!(error, format!("UNSUPPORTED:{RESTATED_FILL}"));
+            assert!(take_best_effort().is_empty());
+            // An adoption that fails afterwards (here the model budget)
+            // records no restatement.
+            let error =
+                run_verification(&element, &blob(&xml), &theme(), (usize::MAX, usize::MAX, 1))
+                    .0
+                    .unwrap_err();
+            assert!(error.starts_with("LEGACY_RESOURCE_LIMIT:"), "{error}");
+            assert!(take_best_effort().is_empty());
+        }
+
+        #[test]
+        fn gradient_rotation_follows_the_xml_unless_the_binary_states_true() {
+            use crate::rejection::{take_best_effort, BestEffort};
+            let xml = SHAPE_XML
+                .replace(
+                    r#"<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>"#,
+                    GRADIENT_XML,
+                )
+                .replace("<a:xfrm>", r#"<a:xfrm rot="5400000">"#);
+            let stops = [(0.0, "000000"), (0.5, "00FF00"), (1.0, "FFFFFF")];
+            let rotated = |rotate| {
+                let mut element = element("FF0000");
+                element.rotation = 90.0;
+                element.fill = gradient(&stops, rotate);
+                element
+            };
+            let verify = |element: &ShapeElement, xml: &str| {
+                let leaf = pptx_model::Transform {
+                    cx: element.width,
+                    cy: element.height,
+                    rot: element.rotation,
+                    ..Default::default()
+                };
+                let (mut work, mut text, mut model) = AMPLE;
+                verify(
+                    &binary(element, &leaf),
+                    &blob(xml),
+                    &theme(),
+                    &mut super::media::SpanStore::new(Vec::new()),
+                    &mut work,
+                    &mut text,
+                    &mut model,
+                )
+            };
+            let flag = |shape: &ShapeElement| match shape.fill {
+                Some(Fill::Gradient { rot_with_shape, .. }) => rot_with_shape,
+                _ => panic!("gradient"),
+            };
+            take_best_effort();
+            // An omitted XML flag over a binary without the flag: the XML.
+            let adopted = verify(&rotated(false), &xml).unwrap().expect("XML");
+            assert_eq!(flag(&adopted), None);
+            assert!(take_best_effort().is_empty());
+            // An XML `1` over the same binary: the XML.
+            let stated = xml.replace("<a:gradFill>", r#"<a:gradFill rotWithShape="1">"#);
+            let adopted = verify(&rotated(false), &stated).unwrap().expect("XML");
+            assert_eq!(flag(&adopted), Some(true));
+            assert_eq!(adopted.rotation, 90.0);
+            assert_eq!(
+                take_best_effort(),
+                [(BestEffort::Approximated, RESTATED_FILL)]
+            );
+            // A binary `true` the XML does not restate: the binary.
+            for xml in [
+                xml.clone(),
+                xml.replace("<a:gradFill>", r#"<a:gradFill rotWithShape="0">"#),
+            ] {
+                assert!(matches!(verify(&rotated(true), &xml), Ok(None)));
+                assert_eq!(
+                    take_best_effort(),
+                    [(BestEffort::Approximated, RESTATED_FILL)]
+                );
+            }
+            let adopted = verify(&rotated(true), &stated).unwrap().expect("XML");
+            assert_eq!(flag(&adopted), Some(true));
+            assert!(take_best_effort().is_empty());
+        }
+
+        #[test]
+        fn unpaired_custom_path_commands_compare_their_outline() {
+            use crate::rejection::{take_best_effort, BestEffort};
+            use pptx_model::PathCmd;
+            let xml = SHAPE_XML.replace(
+                r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#,
+                r#"<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="r" b="b"/><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="100" y="0"/></a:lnTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom>"#,
+            );
+            let outline = vec![
+                PathCmd::MoveTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::Close,
+            ];
+            let mut element = element("00FF00");
+            element.geometry = "custGeom".into();
+            // The binary starts inside the first edge and closes through the
+            // corner: the same outline, traced in the same order.
+            element.cust_geom = Some(vec![vec![
+                PathCmd::MoveTo { x: 0.1, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 0.1, y: 0.0 },
+                PathCmd::Close,
+            ]]);
+            element.fill = Some(Fill::Solid {
+                color: "FF0000".into(),
+            });
+            take_best_effort();
+            let adopted = run_verification(&element, &blob(&xml), &theme(), AMPLE)
+                .0
+                .unwrap()
+                .expect("the same outline adopts the alternative");
+            assert_eq!(
+                serde_json::to_value(&adopted.cust_geom).unwrap(),
+                serde_json::to_value(vec![outline.clone()]).unwrap()
+            );
+            assert!(matches!(&adopted.fill, Some(Fill::Solid { color }) if color == "FF0000"));
+            assert_eq!(adopted.id.as_deref(), Some("3"));
+            assert!(take_best_effort().is_empty());
+            // Dashes and arrowheads follow the traversal that the outline
+            // comparison normalizes away: such a stroked path stays unknown,
+            // while a solid line adopts as above.
+            for line in [
+                r#"<a:prstDash val="dash"/>"#,
+                r#"<a:custDash><a:ds d="300000" sp="100000"/></a:custDash>"#,
+                r#"<a:tailEnd type="triangle"/>"#,
+                r#"<a:prstDash val="solid"/>"#,
+            ] {
+                let stroked = xml.replace(
+                    "</p:spPr>",
+                    &format!(
+                        r#"<a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>{line}</a:ln></p:spPr>"#
+                    ),
+                );
+                let result = run_verification(&element, &blob(&stroked), &theme(), AMPLE).0;
+                if line.contains("solid") {
+                    assert!(result.unwrap().is_some(), "{line}");
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(
+                        error.starts_with("UNSUPPORTED:") && error.contains("custom geometry"),
+                        "{line}: {error}"
+                    );
+                }
+                assert!(take_best_effort().is_empty());
+            }
+            // The start moved along the first edge with a line back to the
+            // corner (the PowerPoint 16 control): the path turns back on
+            // itself, and its stroke may draw joins the alternative does not.
+            // The binary is kept, as the control without an alternative
+            // prints like the control.
+            element.cust_geom = Some(vec![vec![
+                PathCmd::MoveTo { x: 0.1, y: 0.0 },
+                PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::LineTo { x: 0.0, y: 0.0 },
+                PathCmd::Close,
+            ]]);
+            assert!(matches!(
+                run_verification(&element, &blob(&xml), &theme(), AMPLE).0,
+                Ok(None)
+            ));
+            assert_eq!(
+                take_best_effort(),
+                [(BestEffort::Approximated, RESTATED_GEOMETRY)]
+            );
+            // With another corner as well, the verified difference keeps
+            // the binary and replaces no rejection.
+            if let Some(paths) = element.cust_geom.as_mut() {
+                paths[0][3] = PathCmd::LineTo { x: 1.0, y: 0.9 };
+            }
+            assert!(matches!(
+                run_verification(&element, &blob(&xml), &theme(), AMPLE).0,
+                Ok(None)
+            ));
+            assert!(take_best_effort().is_empty());
+            if let Some(paths) = element.cust_geom.as_mut() {
+                paths[0][3] = PathCmd::LineTo { x: 1.0, y: 1.0 };
+            }
+            // A closing line to the moved start instead cuts another
+            // triangle: no control says which side PowerPoint draws.
+            if let Some(paths) = element.cust_geom.as_mut() {
+                paths[0][4] = PathCmd::LineTo { x: 0.1, y: 0.0 };
+            }
+            let error = run_verification(&element, &blob(&xml), &theme(), AMPLE)
+                .0
+                .unwrap_err();
+            assert!(
+                error.starts_with("UNSUPPORTED:") && error.contains("custom geometry"),
+                "{error}"
+            );
+            assert!(take_best_effort().is_empty());
+            // A bend behind a tiny first segment is another outline too.
+            element.cust_geom = Some(vec![vec![
+                PathCmd::MoveTo { x: 0.0, y: 0.0 },
+                PathCmd::LineTo { x: 1e-8, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 0.09 },
+                PathCmd::LineTo { x: 1.0, y: 0.0 },
+                PathCmd::LineTo { x: 1.0, y: 1.0 },
+                PathCmd::Close,
+            ]]);
+            let error = run_verification(&element, &blob(&xml), &theme(), AMPLE)
+                .0
+                .unwrap_err();
+            assert!(
+                error.starts_with("UNSUPPORTED:") && error.contains("custom geometry"),
+                "{error}"
+            );
+            assert!(take_best_effort().is_empty());
+            // The same commands with another vertex are a verified
+            // difference: the binary.
+            let mut vertex = outline;
+            vertex[1] = PathCmd::LineTo { x: 0.9, y: 0.0 };
+            element.cust_geom = Some(vec![vertex]);
+            assert!(matches!(
+                run_verification(&element, &blob(&xml), &theme(), AMPLE).0,
+                Ok(None)
+            ));
+            assert!(take_best_effort().is_empty());
         }
 
         #[test]
