@@ -24,6 +24,11 @@ pub(crate) struct Paint {
     pub(crate) fill_back_alpha: Option<u32>,
     pub(crate) fill_angle: Option<u32>,
     pub(crate) fill_focus: Option<u32>,
+    /// MS-ODRAW 2.3.7.16-19 fillToLeft, fillToTop, fillToRight, fillToBottom:
+    /// the centre rectangle of a concentric shade, as signed 16.16 fractions
+    /// ([MS-OSHARED] 2.2.1.6 FixedPoint) of the shape's bounding rectangle
+    /// measured from its origin.
+    pub(crate) fill_to: [Option<i32>; 4],
     pub(crate) fill_shade_type: Option<u32>,
     pub(crate) fill_dztype: Option<u32>,
     /// MS-ODRAW 2.3.7.12-13: signed lengths in the units named by fillDztype.
@@ -139,6 +144,7 @@ impl Paint {
             fill_back_alpha: self.fill_back_alpha.or(parent.fill_back_alpha),
             fill_angle: self.fill_angle.or(parent.fill_angle),
             fill_focus: self.fill_focus.or(parent.fill_focus),
+            fill_to: std::array::from_fn(|i| self.fill_to[i].or(parent.fill_to[i])),
             fill_shade_type: self.fill_shade_type.or(parent.fill_shade_type),
             fill_dztype: self.fill_dztype.or(parent.fill_dztype),
             fill_width: self.fill_width.or(parent.fill_width),
@@ -179,6 +185,7 @@ impl Paint {
             0x184 => self.fill_back_alpha = Some(value),
             0x18b => self.fill_angle = Some(value),
             0x18c => self.fill_focus = Some(value),
+            0x18d..=0x190 => self.fill_to[usize::from(id - 0x18d)] = Some(value as i32),
             0x19c => self.fill_shade_type = Some(value),
             // Caller validates fBid on this one-based BStore reference.
             0x4186 => self.fill_blip = Some(value),
@@ -259,13 +266,12 @@ impl Paint {
             self.fill_alpha.unwrap_or(65536),
         ))
     }
-    /// MS-ODRAW 2.4.11 msofillTexture on a slide background. PowerPoint 16
-    /// saves the tested background as an intrinsic 100% tile at slide origin,
-    /// including controls with nonzero fillOriginX/Y and EMU fillWidth/Height.
-    /// This is the background-only observation; ordinary shape texture
-    /// placement remains outside this projection.
+    /// MS-ODRAW 2.4.11 msofillTexture: the fillBlip BLIP and its opacity.
+    /// PowerPoint 16 tiles it at its intrinsic size from the origin of the
+    /// shape or slide (see the PowerPoint adapter); fillOriginX/Y and
+    /// fillWidth/Height do not change that in its own saves.
     #[cfg(feature = "direct-ppt")]
-    pub fn background_texture(&self) -> Option<(u32, u32)> {
+    pub fn texture_image(&self) -> Option<(u32, u32)> {
         (self.fill_type == Some(2)
             && self.fill_blip.unwrap_or(0) != 0
             && self.filled.unwrap_or(true)
@@ -394,15 +400,38 @@ mod tile_dimension_tests {
     }
 }
 
-/// A linear OfficeArt shade projected to DrawingML stop order. Stop colours
-/// stay OfficeArtCOLORREF values for the host to resolve.
+/// An OfficeArt shade projected to DrawingML stop order. Stop colours stay
+/// OfficeArtCOLORREF values for the host to resolve.
 #[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
-pub(crate) struct LinearShade {
+pub(crate) struct Shade {
     pub projection: super::gradient::projection::Projection,
     /// Per-stop 16.16 opacity, parallel to `projection.stops`.
     pub alphas: Vec<u32>,
     pub scaled: bool,
     pub rotate_with_shape: bool,
+    /// The concentric (`a:path`) form; `None` for a linear shade.
+    #[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
+    pub path: Option<PathShade>,
+    /// fillColor and the first fillShadeColors entry, when the array starts
+    /// at position 0 and so replaces fillColor in the drawn shade. Hosts that
+    /// read an alternative representation compare the two (see the PowerPoint
+    /// adapter).
+    #[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
+    pub replaced_front: Option<(u32, u32)>,
+}
+
+/// A concentric OfficeArt shade (MS-ODRAW 2.4.11 msofillShadeCenter,
+/// msofillShadeShape and msofillShadeTitle).
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(not(feature = "direct-ppt"), allow(dead_code))]
+pub(crate) struct PathShade {
+    /// msofillShadeShape: the shade follows the outline of the shape instead
+    /// of its bounding rectangle.
+    pub follows_outline: bool,
+    /// The centre rectangle as DrawingML `a:fillToRect` insets from the left,
+    /// top, right and bottom edges, in signed 16.16 fractions.
+    pub focus_insets: [i64; 4],
 }
 
 // Two-colour shades are projected with these marker colours so each output
@@ -413,7 +442,7 @@ const FRONT_MARKER: u32 = 0;
 const BACK_MARKER: u32 = 1;
 
 impl Paint {
-    /// Linear OfficeArt shades -> DrawingML `a:lin` gradients.
+    /// OfficeArt shades -> DrawingML `a:lin` and `a:path` gradients.
     ///
     /// Evidence for the mapping beyond MS-ODRAW 2.4.13 (whose shade
     /// illustrations do not state DrawingML equivalents): every shape-level
@@ -429,26 +458,49 @@ impl Paint {
     /// - Without fillShadeColors, fillOpacity applies to every stop taken from
     ///   the fill colour and fillBackOpacity to every stop taken from the back
     ///   colour (e.g. 27525/65536 -> alpha 42000, back 0 -> alpha 0).
+    /// - msofillShadeCenter (5) is `a:path path="rect"`: PowerPoint 16 writes
+    ///   that DrawingML for its "from corner" and "from centre" shades and
+    ///   its PDF export draws them so. The stops keep the linear order
+    ///   (fillColor or the first shade colour at the centre rectangle,
+    ///   position 0), and `a:fillToRect` is fillToLeft, fillToTop,
+    ///   1 - fillToRight and 1 - fillToBottom, each a signed fraction (a
+    ///   corner shade states none and reads `r="100000" b="100000"`; a
+    ///   centre shade states 0.5 four times and reads 50000 four times).
+    ///
+    /// Without Office evidence, from the specification only:
+    /// - msofillShadeShape (6) differs from (5) by following the outline of
+    ///   the shape (2.4.11), which is DrawingML `path="shape"`;
+    /// - msofillShadeTitle (8) is "interpreted by the host application"
+    ///   (2.4.11); it is drawn as the concentric rectangle shade its
+    ///   properties describe.
     ///
     /// Opacity combined with an authored shade-colour array has no evidence
-    /// and is rejected, as are the path shades (5, 6) and the host-defined
-    /// title shade (8).
+    /// and is rejected.
     #[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
-    pub(crate) fn linear_shade(
+    pub(crate) fn shade(
         &self,
         source: &super::gradient::Borrowed<'_>,
         allow_fill: bool,
         work_budget: &mut usize,
         byte_budget: &mut usize,
-    ) -> Result<Option<LinearShade>, String> {
+    ) -> Result<Option<Shade>, String> {
         use super::gradient::projection;
-        let scaled = match self.fill_type {
-            Some(4) => false,
-            Some(7) => true,
-            Some(5 | 6 | 8) => {
-                return Err(unsupported(
-                    "OfficeArt path or title gradient fills are not supported yet",
-                ))
+        const PATH_SITE: &str = "OfficeArt path or title gradient fills are not supported yet";
+        let (scaled, path) = match self.fill_type {
+            Some(4) => (false, None),
+            Some(7) => (true, None),
+            Some(kind @ (5 | 6 | 8)) => {
+                // FixedPoint is signed and the properties state no range: an
+                // edge may lie outside the shape, as a DrawingML inset may.
+                let [left, top, right, bottom] =
+                    self.fill_to.map(|value| i64::from(value.unwrap_or(0)));
+                (
+                    false,
+                    Some(PathShade {
+                        follows_outline: kind == 6,
+                        focus_insets: [left, top, 65_536 - right, 65_536 - bottom],
+                    }),
+                )
             }
             _ => return Ok(None),
         };
@@ -480,6 +532,10 @@ impl Paint {
             ));
         }
         let two_colour = authored.is_empty();
+        let replaced_front = match (self.fill, authored.first()) {
+            (Some(fill), Some(first)) => Some((fill, first.color)),
+            _ => None,
+        };
         let focus = self.fill_focus.unwrap_or(0) as i32;
         let requirements = projection::requirements(&authored, focus)?;
         let mut projection_scratch = requirements.scratch_bytes;
@@ -524,11 +580,16 @@ impl Paint {
             stop.color = color;
             alphas.push(alpha);
         }
-        Ok(Some(LinearShade {
+        if self.fill_type == Some(8) {
+            crate::rejection::approximated(PATH_SITE, ());
+        }
+        Ok(Some(Shade {
             projection,
             alphas,
             scaled,
             rotate_with_shape: self.rotate_fill_with_shape.unwrap_or(false),
+            path,
+            replaced_front,
         }))
     }
 }

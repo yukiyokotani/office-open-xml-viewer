@@ -96,7 +96,24 @@ explicit caller option, then the source's view default, then the renderer
 default. Capabilities that a source lacks degrade the same way for every
 format: resource metrics are reported without a ZIP usage snapshot, and
 `toMarkdown()` rejects with an "... is unsupported for this source" error.
-All three legacy readers lack Markdown export and ZIP accounting.
+All three legacy readers lack ZIP accounting, and the legacy XLS and PPT
+readers lack Markdown export.
+
+The legacy DOC reader offers Markdown export: it builds the same document
+model as the DOCX parser, and `toMarkdown()` runs the shared DOCX Markdown
+projection on that model (headings from outline level, lists, tables, notes,
+character formatting; geometry discarded). Document text and hyperlink
+targets are escaped exactly as for a DOCX. The reader keeps the source bytes
+for the life of the document and projects from them on each call, so
+`toMarkdown()` does not depend on the state of the streaming load. The
+output shares the DOCX Markdown byte ceiling. The source is kept only while
+it is no longer than the reader's model byte budget (256 MiB by default); a longer
+source still loads and renders, and its `toMarkdown()` rejects with a
+resource-limit error. Legacy XLS and PPT keep the
+rejection: the XLSX projection walks OOXML worksheet JSON against the package
+shared-strings table, which the typed BIFF projection does not carry, and the
+PPTX projection consumes a whole presentation including notes and comments,
+which the streaming legacy PPT session does not assemble.
 
 To cancel a load, destroy the document or viewer, or start another load in
 its place. Node sessions keep their `signal` option.
@@ -346,9 +363,18 @@ picture frame whose `pib` names the BLIP to display (MS-ODRAW 2.2.40 and
 2.3.23.5), resolved through the shape's `ExObjRefAtom` to the document's
 external object list (MS-PPT 2.7.7 and 2.10.1). The object storage is never
 read or activated. PowerPoint's own PDF exports show that stored picture
-unchanged for embedded objects drawn as content. Icon or thumbnail aspects,
-linked objects and ActiveX controls, pictures without a supported BLIP, and
-unsupported fill placements are rejected instead of being drawn without them.
+unchanged for embedded objects drawn as content and for a linked object.
+Objects shown as an icon or thumbnail and ActiveX controls are drawn from the
+stored picture too; no Office output was available for them. An OLE shape
+without a stored picture is drawn as an unfilled frame with its own line, or
+a thin gray one. Pictures without a supported BLIP and unsupported picture
+fill placements are rejected instead of being drawn without them.
+
+A JPEG picture whose frame is well formed but is not an 8-bit Huffman
+baseline, extended-sequential or progressive frame (arithmetic-coded,
+lossless and 12-bit frames) is drawn as the same kind of frame: PowerPoint
+draws the arithmetic-coded and lossless ones, and this reader carries no
+decoder for them.
 
 PowerPoint displays GIF data that a producer stored in a PNG picture slot,
 so the direct PPT reader identifies such a slot by its GIF87a/GIF89a
@@ -360,18 +386,39 @@ keep their ordered shade colours, signed focus and 16.16 angle. Explicit
 shade-array stops at either endpoint take precedence over scalar front or
 back colours; a missing final endpoint uses the scalar back colour. Linear,
 scaled, two-colour and translucent shades are projected, including on rotated
-shapes and inside rotated or flipped groups. Path and title shades, other
-shade types, custom fill rectangles and opacity combined with a shade-colour
-array fail closed. Twenty controlled Office comparisons covered focus, angle,
-endpoint conflicts and leaf flips; the projected positions were within one
-DrawingML position unit of Office's serialized integers.
+shapes and inside rotated or flipped groups. Other shade types, custom fill
+rectangles and opacity combined with a shade-colour array fail closed. Twenty
+controlled Office comparisons covered focus, angle, endpoint conflicts and
+leaf flips; the projected positions were within one DrawingML position unit
+of Office's serialized integers.
 
-Pattern fills on unrotated shapes become tiled picture fills that follow
-PowerPoint's own output: the 8x8 area of the stored 10x10 pattern bitmap,
-one pattern pixel per point, white pixels in the fill colour and black
-pixels in the background colour. Supported placements retain their shape transforms. Unsupported bitmap
-sizes, translucent pattern colours and unprojected texture placements
-remain rejected.
+Concentric shades (`msofillShadeCenter`, PowerPoint's "from corner" and "from
+centre" styles) become DrawingML `path="rect"` gradients on shapes and slide
+backgrounds, as PowerPoint writes them: the stops keep the linear order from
+the centre rectangle outwards, and `fillToRect` is `fillToLeft`, `fillToTop`,
+1 - `fillToRight` and 1 - `fillToBottom`, each a signed fraction (the centre
+rectangle may reach outside the shape). `msofillShadeShape` becomes `path="shape"` and the host-defined
+`msofillShadeTitle` is drawn as the rectangle shade its properties describe;
+neither could be authored in PowerPoint, so both follow the specification
+only.
+
+Pattern fills on shapes and slide backgrounds become tiled picture fills
+that follow PowerPoint's own output: white pixels in the fill colour and
+black pixels in the background colour, each with its own opacity, tiled from
+the top-left corner. A stored 8x8 bitmap tiles whole at 0.75 pt per pixel; of
+a stored 10x10 bitmap the 8x8 area tiles at one pixel per point. The pattern
+stays upright and unmirrored on rotated and flipped shapes: for a flipped
+shape the reader writes the bitmap as seen through the reflection, because
+the presentation renderer reflects a picture fill with its shape. A bitmap it
+cannot read (neither black-and-white GIF nor PNG) is tiled reflected. A
+bitmap of another size has no evidence and tiles like an 8x8 one. Texture fills tile
+the stored picture at its own size from the top-left corner. A picture frame
+with a shade, pattern or texture fill gets that fill behind its picture; a
+pattern or texture is drawn by a rectangle under the picture, because the
+presentation renderer paints no picture fill behind a picture.
+Pattern and shape texture placements with a fill rectangle, a view-relative
+fill, an origin or a unit remain rejected, on shapes and picture frames
+alike.
 
 Picture colour settings follow how PowerPoint itself reads the binary
 properties when it saves a binary deck as PPTX: "Black and White" becomes
@@ -383,10 +430,20 @@ the brightness over 0x8000, and contrast is k - 1 or 1 - 1/k for the stored
 16.16 slope k. PowerPoint writes exactly these values when it saves the
 binary deck as PPTX. The renderer's `lum` formula reproduces PowerPoint's PDF
 of a gray ramp under a bright × contrast grid, from both PPTX and .ppt, to
-within 0.7 of 255. Brightness/contrast combined with a transparent colour or
-black-and-white (whose order has no evidence), grayscale or black-and-white
-alone, recolouring and adjustments on picture fills stay rejected until
-Office output confirms their rendering.
+within 0.7 of 255. Grayscale alone becomes `grayscl`; with
+brightness/contrast it follows `lum`, the order PowerPoint's PDF shows.
+Brightness/contrast combined with a transparent colour or black-and-white
+(whose order has no evidence), black-and-white without grayscale, recolouring
+and adjustments on picture fills stay rejected until Office output confirms
+their rendering.
+
+In a shape that carries alternative shape XML, a text range with a mouse-over
+hyperlink, or with a click or mouse-over jump to the next, previous, first,
+last or last viewed slide or to the end of the show, states the DrawingML run
+property PowerPoint writes for it (`hlinkMouseOver` with a target, or
+`hlinkClick` or `hlinkMouseOver` with only a `ppaction://hlinkshowjump`
+action). A range must lie within its text and end after it begins. The presentation renderer styles only
+click hyperlinks with a target as links, for PPTX files as well.
 
 A modern Office-saved PPT can retain paragraph properties in the OfficeArt
 `metroBlob` alternative shape XML rather than in its classic text ruler. The
@@ -591,11 +648,28 @@ Modern Office can retain DrawingML in an OfficeArt `metroBlob`
 ([MS-ODRAW] §2.3.4.41). The source uses three outcomes: a package with no
 alternative or a verified disagreement uses the binary projection; a verified
 consistent alternative is adopted; an unreadable or unverifiable alternative
-rejects the load. Exhausting an optional alternative's verification budgets
-keeps that shape's binary projection and does not poison the document. Input
-work uses the standard OOXML package allowance (256 MiB of actual consumed
-input per alternative, including rereads); inflated output remains bounded to
-1 MiB per part and 4 MiB per alternative package. Round-trip theme verification
+rejects the load. Some attributes are encoded differently in the two forms,
+so a difference does not show which side was edited; for these the source
+follows the side that PowerPoint PDF exports draw. Different gradient stops,
+or a gradient rotation flag that only the alternative states, adopt the
+alternative. A rotation flag that only the binary sets keeps the binary
+projection. So do a concentric shade whose alternative adds a tile rectangle
+or restates a stop, a pattern whose bitmap or preset cannot be compared, and
+a shade whose fill colour differs from its first shade colour (PowerPoint
+writes them equal, and draws the binary shape once that colour is edited).
+Custom path commands that do not pair one to one are compared as
+traced outlines (another start point, or collinear lines split differently,
+is the same outline). Outlines that then pair segment by segment but at other
+points are a verified difference and keep the binary projection. A stroked
+path whose outline matches only where a line turns back on itself also keeps
+the binary projection, because the stroke draws joins at those turns.
+Outlines that do not pair, and stroked paths with dashes or arrowheads (which
+follow the traversal), still reject the load.
+Exhausting an optional alternative's verification budgets keeps that
+shape's binary projection and does not poison the document. Input work uses
+the standard OOXML package allowance (256 MiB of actual consumed input per
+alternative, including rereads); inflated output remains bounded to 1 MiB per
+part and 4 MiB per alternative package. Round-trip theme verification
 also has its own input-work allowance. Failed attempts retain no model, text,
 or image charges. A checksum-only package does not require a theme.
 

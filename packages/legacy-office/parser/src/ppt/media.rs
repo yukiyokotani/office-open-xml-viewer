@@ -7,6 +7,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 // Resource policy: do not pass dimension bombs to the ordinary image decoder.
 const MAX_MEDIA_BYTES: usize = 128 * 1024 * 1024;
+/// The largest part of an alternative shape XML package (`ppt::metro`).
+const MAX_COMPARED_IMAGE_BYTES: usize = 1024 * 1024;
+/// Session allowance for image bytes copied for comparison with alternative
+/// shape XML. Once it is spent, later shapes keep their binary projection.
+const MAX_COMPARISON_COPY_BYTES: usize = 256 * 1024 * 1024;
+/// Work charged for reading one stored pattern bitmap of at most 4 KiB and
+/// writing its reflection (`ppt::pattern`): the GIF reader walks at most 512
+/// codes, the PNG reader at most 110 bytes.
+const PATTERN_REWRITE_WORK: usize = 512;
 
 pub(super) fn catalog_spans(
     document: &[u8],
@@ -316,6 +325,10 @@ pub(super) struct SpanStore {
     blob_images: BTreeMap<u32, (&'static str, Vec<u8>)>,
     used: BTreeSet<u32>,
     remaining: usize,
+    comparison_remaining: usize,
+    /// Pattern bitmaps written for flipped shapes, by their stored bitmap
+    /// and the two reflections (`ppt::pattern`).
+    reflected_patterns: BTreeMap<(u32, bool, bool), Option<u32>>,
 }
 
 impl SpanStore {
@@ -326,6 +339,8 @@ impl SpanStore {
             blob_images: BTreeMap::new(),
             used: BTreeSet::new(),
             remaining: MAX_MEDIA_BYTES,
+            comparison_remaining: MAX_COMPARISON_COPY_BYTES,
+            reflected_patterns: BTreeMap::new(),
         }
     }
 
@@ -367,6 +382,64 @@ impl SpanStore {
             .map_err(|_| unsupported("PowerPoint image index overflow"))?;
         self.blob_images.insert(index, (extension, bytes));
         Ok(index)
+    }
+
+    /// The retained bitmap of the stored pattern `index` seen through the
+    /// given horizontal and vertical reflections. `write` reads the stored bitmap and writes the
+    /// reflected one; it runs once per bitmap and reflection in a session,
+    /// charged to `budget`, and its answer is reused, also when it is `None`
+    /// (a bitmap it cannot read).
+    pub fn reflected_pattern(
+        &mut self,
+        index: u32,
+        flips: (bool, bool),
+        write: impl FnOnce(&'static str, &[u8]) -> Result<Option<Vec<u8>>, String>,
+        primary: &[u8],
+        pictures: Option<&[u8]>,
+        budget: &mut usize,
+    ) -> Result<Option<u32>, String> {
+        let key = (index, flips.0, flips.1);
+        if let Some(reflected) = self.reflected_patterns.get(&key) {
+            return Ok(*reflected);
+        }
+        *budget = budget
+            .checked_sub(PATTERN_REWRITE_WORK)
+            .ok_or_else(|| crate::rejection::resource("PowerPoint pattern work budget exceeded"))?;
+        let written = match self.image(index, primary, pictures)? {
+            Some((extension, bytes)) => write(extension, bytes)?,
+            None => None,
+        };
+        let reflected = written
+            .map(|bytes| self.admit_blob_image("png", bytes))
+            .transpose()?;
+        self.reflected_patterns.insert(key, reflected);
+        Ok(reflected)
+    }
+
+    /// A copy of an admitted image for comparison with the image part of an
+    /// alternative shape XML package, which is at most
+    /// [`MAX_COMPARED_IMAGE_BYTES`] long: a longer image cannot equal one and
+    /// is not copied. The copies of a session are charged to their own
+    /// allowance. `None`: not copied; the caller keeps the binary shape.
+    pub fn comparison_copy(
+        &mut self,
+        index: u32,
+        primary: &[u8],
+        pictures: Option<&[u8]>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some((_, bytes)) = self.image(index, primary, pictures)? else {
+            return Ok(None);
+        };
+        if bytes.len() > MAX_COMPARED_IMAGE_BYTES || bytes.len() > self.comparison_remaining {
+            return Ok(None);
+        }
+        let mut copy = Vec::new();
+        if copy.try_reserve_exact(bytes.len()).is_err() {
+            return Ok(None);
+        }
+        copy.extend_from_slice(bytes);
+        self.comparison_remaining -= copy.len();
+        Ok(Some(copy))
     }
 
     pub fn reference(
@@ -434,7 +507,11 @@ impl SpanStore {
         };
         // A picture-frame placeholder is not a tiled/stretch fill capability.
         // Keep this gate even when another picture already cached the resource.
-        if image.image.extension == "pict" && !pict_placeholder {
+        if matches!(
+            image.image.extension,
+            "pict" | crate::officeart::raster::UNDECODED_JPEG
+        ) && !pict_placeholder
+        {
             return Ok(false);
         }
         self.used.insert(index);
@@ -670,6 +747,83 @@ mod tests {
     }
 
     #[test]
+    fn comparison_copies_are_bounded_by_size_and_by_a_session_allowance() {
+        let entry = blip(&png(1, 1), false);
+        let mut store = SpanStore::new(vec![spanned(&entry, 0)]);
+        assert!(store.reference(1, &entry, None, &mut 100).unwrap());
+        let stored = store.image(1, &entry, None).unwrap().unwrap().1.to_vec();
+        assert_eq!(
+            store.comparison_copy(1, &entry, None).unwrap(),
+            Some(stored.clone())
+        );
+        assert_eq!(
+            store.comparison_remaining,
+            MAX_COMPARISON_COPY_BYTES - stored.len()
+        );
+        // Past the allowance the image is not copied and nothing is charged.
+        store.comparison_remaining = stored.len() - 1;
+        assert_eq!(store.comparison_copy(1, &entry, None).unwrap(), None);
+        assert_eq!(store.comparison_remaining, stored.len() - 1);
+        // An image longer than any alternative part is never copied.
+        store.comparison_remaining = MAX_COMPARISON_COPY_BYTES;
+        let long = store
+            .admit_blob_image("png", vec![0; MAX_COMPARED_IMAGE_BYTES + 1])
+            .unwrap();
+        assert_eq!(store.comparison_copy(long, &entry, None).unwrap(), None);
+        assert_eq!(store.comparison_remaining, MAX_COMPARISON_COPY_BYTES);
+    }
+
+    #[test]
+    fn reflected_patterns_are_written_once_per_bitmap_and_reflection() {
+        let entry = blip(&png(1, 1), false);
+        let mut store = SpanStore::new(vec![spanned(&entry, 0)]);
+        assert!(store.reference(1, &entry, None, &mut 100).unwrap());
+        let mut writes = 0;
+        let mut budget = 3 * PATTERN_REWRITE_WORK;
+        let mut reflected = |store: &mut SpanStore, flip_h, flip_v, readable: bool| {
+            store.reflected_pattern(
+                1,
+                (flip_h, flip_v),
+                |extension, _| {
+                    writes += 1;
+                    assert_eq!(extension, "png");
+                    Ok(readable.then(|| vec![u8::from(flip_h), u8::from(flip_v)]))
+                },
+                &entry,
+                None,
+                &mut budget,
+            )
+        };
+        let first = reflected(&mut store, true, false, true).unwrap().unwrap();
+        assert_eq!(reflected(&mut store, true, false, true), Ok(Some(first)));
+        let second = reflected(&mut store, true, true, true).unwrap().unwrap();
+        assert_ne!(first, second);
+        // A bitmap that cannot be read is not read again either.
+        assert_eq!(reflected(&mut store, false, true, false), Ok(None));
+        assert_eq!(reflected(&mut store, false, true, true), Ok(None));
+        // The work of the three reads is spent; reuse costs nothing, and a
+        // further bitmap exceeds the budget before it is read.
+        let exhausted = store.reflected_pattern(
+            2,
+            (true, false),
+            |_, _| panic!("read past the budget"),
+            &entry,
+            None,
+            &mut budget,
+        );
+        assert!(exhausted.unwrap_err().contains("LEGACY_RESOURCE_LIMIT"));
+        assert_eq!((writes, budget), (3, 0));
+        assert_eq!(
+            store.image(first, &entry, None).unwrap(),
+            Some(("png", [1u8, 0].as_slice()))
+        );
+        assert_eq!(
+            store.image(second, &entry, None).unwrap(),
+            Some(("png", [1u8, 1].as_slice()))
+        );
+    }
+
+    #[test]
     fn jpeg_frame_lengths_and_marker_work_are_bounded() {
         let jpeg = [
             0xff, 0xd8, 0xff, 0x01, 0xff, 0xc0, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0,
@@ -680,31 +834,33 @@ mod tests {
         let mut bad = jpeg;
         bad[13] = 2;
         assert!(jpeg_size(&bad, &mut 100).is_err());
-        // A frame no host decoder is known to read (lossless SOF3,
-        // arithmetic SOF9, a 12-bit SOF1) is a JPEG all the same: its size
-        // is read and its bytes go to the host's decoder.
-        crate::rejection::take_best_effort();
-        assert_eq!(jpeg_size(&jpeg, &mut 100).unwrap(), (3, 2));
-        assert!(crate::rejection::take_best_effort().is_empty());
-        for (marker, precision) in [(0xc3, 8), (0xc9, 8), (0xc1, 12)] {
+        // A well-formed frame this reader does not decode (SOF3 lossless,
+        // SOF9 arithmetic, 12-bit samples) is rejected by the size reader and
+        // kept as an undecoded picture by the PowerPoint store.
+        for (marker, precision, expected) in [
+            (0xc3, 8, "encoding"),
+            (0xc9, 8, "encoding"),
+            (0xc1, 12, "JPEG frame"),
+        ] {
             let mut frame = jpeg;
             frame[5] = marker;
             frame[8] = precision;
-            assert_eq!(jpeg_size(&frame, &mut 100).unwrap(), (3, 2));
+            assert!(jpeg_size(&frame, &mut 100).unwrap_err().contains(expected));
+            let entry = record(0xf01d, 0x46a0, &[vec![0; 17], frame.to_vec()].concat());
+            let mut store = SpanStore::new(vec![spanned(&entry, 0)]);
+            // Not a fill; a picture frame keeps it as an undecoded picture.
+            assert!(!store.reference(1, &entry, None, &mut 100).unwrap());
+            assert!(store.reference_picture(1, &entry, None, &mut 100).unwrap());
             assert_eq!(
-                crate::rejection::take_best_effort(),
-                [(
-                    crate::rejection::BestEffort::Approximated,
-                    "unsupported OfficeArt JPEG frame encoding"
-                )]
+                store.image(1, &entry, None).unwrap().unwrap().0,
+                crate::officeart::raster::UNDECODED_JPEG
             );
         }
-        // The first frame header is the image's: a short one is not skipped
-        // for a later frame.
-        let short_frame = [vec![0xff, 0xd8, 0xff, 0xc3, 0, 2], jpeg[2..].to_vec()].concat();
-        assert!(jpeg_size(&short_frame, &mut 100)
-            .unwrap_err()
-            .contains("invalid OfficeArt JPEG frame header"));
+        // A frame header whose length disagrees with its component count is
+        // not a frame of any encoding.
+        let truncated = [vec![0xff, 0xd8, 0xff, 0xc3, 0, 2], jpeg[2..].to_vec()].concat();
+        let entry = record(0xf01d, 0x46a0, &[vec![0; 17], truncated].concat());
+        assert!(image(&entry, &[], &mut 100).is_err());
         let mut fill = vec![0xff, 0xd8];
         fill.extend(vec![0xff; 100]);
         assert!(jpeg_size(&fill, &mut 10).unwrap_err().contains("budget"));

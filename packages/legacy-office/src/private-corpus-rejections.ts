@@ -77,26 +77,4 @@ export const LEGACY_CORPUS_REJECTIONS: readonly LegacyCorpusRejection[] = [
       'ce2cb68a7fd54e431aafa0c6e1f8c35d0ac0b4931f7da0e5cc50400e9a4aaf79',
     ],
   },
-  {
-    format: 'ppt',
-    class: 'pending',
-    reason: 'UNSUPPORTED:PowerPoint alternative shape XML custom geometry cannot be compared with the binary shape',
-    sha256: [
-      'da839619e16c35e281c6e66831c5fe0d12640608ddbfd7137bcad1d2afde4206',
-    ],
-  },
-  {
-    format: 'ppt',
-    class: 'pending',
-    reason: 'UNSUPPORTED:PowerPoint alternative shape XML fill cannot be compared with the binary shape',
-    sha256: [
-      '1180be153c16c3e444edc565b4a5a8ea810e9d805035eb91243eee0d5f1a4902',
-      '2bdd29055fbc977180c8631409d3489e6536af01002a28954b58f0f6f3044ae5',
-      '2dd5f2477c2018c42459f98593628b1465d0574c31a46c2ba675426a2ce96366',
-      '4029e8998391b1942bea93eaa77ab602f66681e2e76b2b55f8caa6b7da68150a',
-      '5c4cb512fc80825032ae22b0f999134b3ed378bb0ea6d3bed434e8a7307a66b2',
-      '735e88e51c18c8bc6c0fea612cbbe990cf65667b7dc1d9dac07fda0d0317c86f',
-      'a8175cc42a961767bb38d30bc610a8c75237c6eafe28fe803b6719fa68321b2c',
-    ],
-  },
 ];

@@ -45,7 +45,7 @@ pub(in crate::doc) struct Facts {
     /// the shape (fUseShapeAnchor, 2.3.7.43).
     pub fill_picture: Option<(usize, bool)>,
     /// A linear shade (msofillShade / msofillShadeScale) projected by the
-    /// shared OfficeArt rules; see `Paint::linear_shade`.
+    /// shared OfficeArt rules; see `Paint::shade`.
     pub gradient: Option<Gradient>,
     /// MS-ODRAW 2.3.18.5 rotation, clockwise about the centre, in degrees.
     /// Only group members may carry a nonzero rotation (see `group`).
@@ -455,10 +455,18 @@ impl<'a> Table<'a> {
             None
         };
         let gradient = if !line_shape && path_paint.0 {
+            // The shared projection also reads concentric shades; this
+            // floating-shape model holds linear ones only, and rejects the
+            // fill type whether or not the fill is displayed, as before.
+            if matches!(paint.fill_type, Some(5 | 6 | 8)) {
+                return Err(unsupported(
+                    "OfficeArt path or title gradient fills are not supported yet",
+                ));
+            }
             paint
                 // Shade scratch and stops are bounded per shape; the
                 // retained stops are charged with the model payload.
-                .linear_shade(&shade, true, budget, &mut (1usize << 20))?
+                .shade(&shade, true, budget, &mut (1usize << 20))?
                 .map(|shade| -> Result<Gradient, String> {
                     let stops = shade
                         .projection

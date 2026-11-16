@@ -7,7 +7,7 @@
 //! rectangle of each gradient type against the gradient Excel draws):
 //!
 //! - msofillShade and msofillShadeScale are linear gradients through the
-//!   shared OfficeArt rules (`officeart::paint::Paint::linear_shade`);
+//!   shared OfficeArt rules (`officeart::paint::Paint::shade`);
 //! - msofillShadeCenter is a rectangular path gradient (`a:path path="rect"`)
 //!   that starts at the fillTo rectangle (MS-ODRAW 2.3.7.16-19, fractions of
 //!   the shape) with the first color of the shade and ends at the shape's
@@ -32,10 +32,7 @@ pub(super) struct Blip {
 
 /// Stops of one shade as model gradient stops: `RRGGBB`, or `RRGGBBAA` when
 /// an opacity applies (the convention of the shared gradient parser).
-fn stops(
-    shade: &crate::officeart::paint::LinearShade,
-    styles: &styles::Styles<'_>,
-) -> Vec<GradStop> {
+fn stops(shade: &crate::officeart::paint::Shade, styles: &styles::Styles<'_>) -> Vec<GradStop> {
     shade
         .projection
         .stops
@@ -156,7 +153,7 @@ pub(super) fn project(
             let mut work = 100_000usize;
             let mut bytes = 1 << 20;
             let shade = linear
-                .linear_shade(&colors, true, &mut work, &mut bytes)?
+                .shade(&colors, true, &mut work, &mut bytes)?
                 .ok_or_else(non_solid)?;
             let stops = stops(&shade, styles);
             let fill = if kind == 5 {

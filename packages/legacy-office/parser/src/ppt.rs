@@ -15,6 +15,7 @@ mod drawing;
 mod media;
 mod metro;
 mod paint;
+mod pattern;
 mod persist;
 mod ruler;
 mod scheme;

@@ -47,6 +47,7 @@ docx-model = { workspace = true, optional = true, features = ["owned-source-curs
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
+ooxml-common = { workspace = true, features = ["gfm-check"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 xlsx-parser = { path = "../../xlsx/parser" }

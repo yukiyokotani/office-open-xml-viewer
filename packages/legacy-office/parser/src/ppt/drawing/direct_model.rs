@@ -56,12 +56,71 @@ fn unprojected_blip_fill(kind: u32) -> String {
     })
 }
 
+/// What a text range does when it is clicked or pointed at ([MS-PPT] 2.6.9
+/// InteractiveInfoAtom), as the DrawingML run property that states it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TextLink<'a> {
+    /// `a:hlinkClick` to an external target (action II_HyperlinkAction).
+    Click(&'a str),
+    /// `a:hlinkClick` with only an action verb (action II_JumpAction).
+    Jump(&'static str),
+    /// `a:hlinkMouseOver` to an external target.
+    Over(&'a str),
+    /// `a:hlinkMouseOver` with only an action verb.
+    OverJump(&'static str),
+}
+
+impl TextLink<'_> {
+    fn retained_bytes(self) -> usize {
+        match self {
+            Self::Click(target) | Self::Over(target) => target.len(),
+            Self::Jump(action) | Self::OverJump(action) => action.len(),
+        }
+    }
+
+    /// Whether this is a mouse-over property; the others are click ones.
+    fn over(self) -> bool {
+        matches!(self, Self::Over(_) | Self::OverJump(_))
+    }
+}
+
+/// [MS-PPT] 2.6.9 InteractiveInfoAtom.jump (action II_JumpAction) as the
+/// `ppaction://hlinkshowjump` verb PowerPoint writes for it (ECMA-376
+/// 21.1.2.3.5 `action`). PowerPoint 16 saves jump 2 as
+/// `jump=previousslide`; the other verbs follow its DrawingML naming.
+fn jump_action(jump: u8) -> Option<&'static str> {
+    Some(match jump {
+        1 => "ppaction://hlinkshowjump?jump=nextslide",
+        2 => "ppaction://hlinkshowjump?jump=previousslide",
+        3 => "ppaction://hlinkshowjump?jump=firstslide",
+        4 => "ppaction://hlinkshowjump?jump=lastslide",
+        5 => "ppaction://hlinkshowjump?jump=lastslideviewed",
+        6 => "ppaction://hlinkshowjump?jump=endshow",
+        _ => return None,
+    })
+}
+
+/// The session image a projected picture, pattern or texture fill draws.
+/// For a pattern on a flipped shape this is the bitmap written for it, not
+/// the stored one, so a comparison with an alternative's picture never
+/// equates the alternative with a picture the fill does not draw.
+fn drawn_image(fill: Option<&Fill>) -> Option<u32> {
+    match fill {
+        Some(Fill::Image { image_path, .. }) => image_path
+            .strip_prefix("legacy-ppt/image/")
+            .and_then(|id| id.parse().ok()),
+        _ => None,
+    }
+}
+
 /// [MS-PPT] 2.9.59 ranges are UTF-16 positions in the original text atom;
-/// the paragraph separator occupies one position. A click range can cut a
-/// style run, so split that run at UTF-16-safe character boundaries.
+/// the paragraph separator occupies one position. A range can cut a style
+/// run, so split that run at UTF-16-safe character boundaries. The ranges of
+/// one call must not overlap: click and mouse-over ranges are applied in
+/// separate calls.
 fn apply_text_links(
     paragraphs: &mut [pptx_model::Paragraph],
-    links: &[(usize, usize, &str)],
+    links: &[(usize, usize, TextLink<'_>)],
     direct_color_authored: &[bool],
     work_budget: &mut usize,
     model_budget: &mut usize,
@@ -195,7 +254,7 @@ fn apply_text_links(
                             .get(selected)
                             .copied()
                             .filter(|&index| links[index].0 <= begin && cutoff <= links[index].1);
-                        let target_bytes = link.map_or(0, |index| links[index].2.len());
+                        let target_bytes = link.map_or(0, |index| links[index].2.retained_bytes());
                         let owned_bytes = style_bytes
                             .checked_add(last - first)
                             .and_then(|bytes| bytes.checked_add(target_bytes))
@@ -207,15 +266,48 @@ fn apply_text_links(
                         let mut part = data.clone();
                         part.text = source_text[first..last].to_owned();
                         if let Some(index) = link {
-                            if part.hyperlink.is_some() {
-                                return Err(unsupported("overlapping PowerPoint text links"));
-                            }
-                            part.hyperlink = Some(links[index].2.to_owned());
-                            // [MS-PPT] 2.9.15 CFMasks.color marks direct color.
-                            // Authored colors survive; inherited fallback uses
-                            // the master's hlink slot (existing Office controls).
-                            if !direct_color_authored[begin] {
-                                part.color = None;
+                            match links[index].2 {
+                                TextLink::Click(target) => {
+                                    if part.hyperlink.is_some() || part.hyperlink_action.is_some() {
+                                        return Err(unsupported(
+                                            "overlapping PowerPoint text links",
+                                        ));
+                                    }
+                                    part.hyperlink = Some(target.to_owned());
+                                    // [MS-PPT] 2.9.15 CFMasks.color marks direct color.
+                                    // Authored colors survive; inherited fallback uses
+                                    // the master's hlink slot (existing Office controls).
+                                    if !direct_color_authored[begin] {
+                                        part.color = None;
+                                    }
+                                }
+                                TextLink::Jump(action) => {
+                                    if part.hyperlink.is_some() || part.hyperlink_action.is_some() {
+                                        return Err(unsupported(
+                                            "overlapping PowerPoint text links",
+                                        ));
+                                    }
+                                    part.hyperlink_action = Some(action.to_owned());
+                                }
+                                over @ (TextLink::Over(_) | TextLink::OverJump(_)) => {
+                                    if part.hyperlink_mouse_over.is_some()
+                                        || part.hyperlink_mouse_over_action.is_some()
+                                    {
+                                        return Err(unsupported(
+                                            "overlapping PowerPoint text links",
+                                        ));
+                                    }
+                                    match over {
+                                        TextLink::Over(target) => {
+                                            part.hyperlink_mouse_over = Some(target.to_owned());
+                                        }
+                                        TextLink::OverJump(action) => {
+                                            part.hyperlink_mouse_over_action =
+                                                Some(action.to_owned());
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                             seen[index] = true;
                         }
@@ -296,28 +388,10 @@ impl Context<'_> {
         let background = match &self.presentation.backgrounds[self.index] {
             Some(background) => {
                 self.charge_shape_strings()?;
-                let image = if let Some((id, alpha)) = background.paint.background_texture() {
-                    let mut image = self.image_fill(id, alpha, true)?;
-                    if let Some(Fill::Image {
-                        dpi, stretch, tile, ..
-                    }) = image.as_mut()
-                    {
-                        // PowerPoint 16 saved a slide-background msofillTexture
-                        // as a 100% intrinsic tile at (0,0), even when binary
-                        // origin and EMU tile dimensions were changed. These
-                        // controls do not establish ordinary shape textures.
-                        *dpi = Some(0);
-                        *stretch = false;
-                        *tile = Some(ooxml_common::fill::TileInfo {
-                            tx: Some(0),
-                            ty: Some(0),
-                            sx: Some(1.0),
-                            sy: Some(1.0),
-                            flip: Some("none".to_owned()),
-                            algn: Some("tl".to_owned()),
-                        });
-                    }
-                    image
+                let image = if let Some((id, alpha)) = background.paint.texture_image() {
+                    self.texture_fill(id, alpha, true)?
+                } else if let Some(pattern) = background.paint.pattern_image() {
+                    Some(self.pattern_fill(pattern, None)?)
                 } else {
                     background
                         .paint
@@ -342,7 +416,13 @@ impl Context<'_> {
                         return Err(unprojected_blip_fill(kind));
                     }
                 }
-                gradient.or_else(|| background.paint.background_model(scheme, image))
+                let pattern = image
+                    .as_ref()
+                    .filter(|_| background.paint.fill_type == Some(1))
+                    .cloned();
+                gradient
+                    .or(pattern)
+                    .or_else(|| background.paint.background_model(scheme, image))
             }
             None => None,
         };
@@ -504,8 +584,10 @@ impl Context<'_> {
                 .map(|g| direct_geometry::project(g, self.model_budget))
                 .transpose()?
         };
-        if shape.is_ole() {
-            self.admit_ole_picture(&shape)?;
+        if shape.is_ole() && !self.admit_ole_picture(&shape)? {
+            let scheme = self.presentation.schemes[self.index].as_ref();
+            let (_, stroke) = paint.model_with_custom_geometry(scheme, false, true, None);
+            return self.placeholder_frame(&shape, &transform, stroke, inherited);
         }
         if shape.kind == 75 && shape.props.picture_linked {
             return Err(unsupported("linked PowerPoint picture file"));
@@ -533,59 +615,85 @@ impl Context<'_> {
                     .ok_or_else(|| unsupported("PowerPoint picture was not retained"))?;
                 let scheme = self.presentation.schemes[self.index].as_ref();
                 let (_, stroke) = paint.model_with_custom_geometry(scheme, false, true, None);
-                let fill = match paint.picture_backing()? {
-                    Some((color, alpha)) => {
-                        Some(paint::model_solid(color, alpha, scheme).ok_or_else(|| {
-                            unsupported("unresolved PowerPoint picture frame fill color")
-                        })?)
+                let undecoded = extension == crate::officeart::raster::UNDECODED_JPEG;
+                let fill = if undecoded {
+                    None
+                } else if paint.frame_filled() && paint.fill_type.unwrap_or(0) != 0 {
+                    self.picture_frame_fill(&paint, &gradient, &transform)?
+                } else {
+                    match paint.picture_backing()? {
+                        Some((color, alpha)) => {
+                            Some(paint::model_solid(color, alpha, scheme).ok_or_else(|| {
+                                unsupported("unresolved PowerPoint picture frame fill color")
+                            })?)
+                        }
+                        None => None,
                     }
-                    None => None,
                 };
-                self.push(
-                    SlideElement::Picture(PictureElement {
-                        id: Some(shape.id.to_string()),
-                        x: transform.x,
-                        y: transform.y,
-                        width: transform.cx,
-                        height: transform.cy,
-                        rotation: transform.rot,
-                        flip_h: transform.flip_h,
-                        flip_v: transform.flip_v,
-                        image_path: format!("legacy-ppt/image/{}", shape.props.picture),
-                        // The marker is internal to legacy PPT picture frames;
-                        // do not broaden image-fill or other format admission.
-                        mime_type: if extension == "pict" {
-                            "image/x-pict".to_owned()
-                        } else {
-                            ooxml_common::blip::mime_from_ext(extension).to_owned()
-                        },
-                        svg_image_path: None,
-                        intrinsic_width_px: None,
-                        intrinsic_height_px: None,
-                        stroke,
-                        fill,
-                        prst_geom: None,
-                        prst_adjust: None,
-                        src_rect: (shape.props.crop != [0; 4]).then_some(SrcRect {
-                            l: left as f64 / 100000.0,
-                            t: top as f64 / 100000.0,
-                            r: right as f64 / 100000.0,
-                            b: bottom as f64 / 100000.0,
+                // The presentation renderer paints a picture's own fill
+                // behind it unless that fill is a picture: a pattern, texture
+                // or picture fill is drawn by a rectangle under the picture.
+                let (fill, backing) = match fill {
+                    Some(image @ Fill::Image { .. }) => (None, Some(image)),
+                    fill => (fill, None),
+                };
+                if undecoded {
+                    // ITU-T T.81 arithmetic-coded, lossless, hierarchical and
+                    // 12-bit frames have no decoder in the viewers this model
+                    // is drawn by. PowerPoint 16 prints the arithmetic and
+                    // lossless ones; the picture's frame keeps its place.
+                    crate::rejection::approximated("unsupported OfficeArt JPEG frame encoding", ());
+                    self.placeholder_frame(&shape, &transform, stroke, inherited)?;
+                } else {
+                    if let Some(backing) = backing {
+                        self.rectangle(None, &transform, backing, None, inherited)?;
+                    }
+                    self.push(
+                        SlideElement::Picture(PictureElement {
+                            id: Some(shape.id.to_string()),
+                            x: transform.x,
+                            y: transform.y,
+                            width: transform.cx,
+                            height: transform.cy,
+                            rotation: transform.rot,
+                            flip_h: transform.flip_h,
+                            flip_v: transform.flip_v,
+                            image_path: format!("legacy-ppt/image/{}", shape.props.picture),
+                            // The marker is internal to legacy PPT picture frames;
+                            // do not broaden image-fill or other format admission.
+                            mime_type: if extension == "pict" {
+                                "image/x-pict".to_owned()
+                            } else {
+                                ooxml_common::blip::mime_from_ext(extension).to_owned()
+                            },
+                            svg_image_path: None,
+                            intrinsic_width_px: None,
+                            intrinsic_height_px: None,
+                            stroke,
+                            fill,
+                            prst_geom: None,
+                            prst_adjust: None,
+                            src_rect: (shape.props.crop != [0; 4]).then_some(SrcRect {
+                                l: left as f64 / 100000.0,
+                                t: top as f64 / 100000.0,
+                                r: right as f64 / 100000.0,
+                                b: bottom as f64 / 100000.0,
+                            }),
+                            alpha: None,
+                            duotone: None,
+                            blip_effects,
+                            cust_geom: None,
+                            shadow: None,
+                            inner_shadow: None,
+                            glow: None,
+                            soft_edge: None,
+                            reflection: None,
+                            scene3d: None,
+                            sp3d: None,
                         }),
-                        alpha: None,
-                        duotone: None,
-                        blip_effects,
-                        cust_geom: None,
-                        shadow: None,
-                        inner_shadow: None,
-                        glow: None,
-                        soft_edge: None,
-                        reflection: None,
-                        scene3d: None,
-                        sp3d: None,
-                    }),
-                    inherited,
-                )?;
+                        inherited,
+                    )?;
+                }
             } else {
                 return Err(unsupported(
                     "PowerPoint picture BLIP is not a supported image",
@@ -685,20 +793,22 @@ impl Context<'_> {
         } else {
             None
         };
-        let pattern = match (allow_fill, paint.pattern_image()) {
-            (true, Some(pattern)) => {
-                // A pattern does not rotate with its shape (fRotateFillWithShape
-                // is clear for every projected pattern): PowerPoint's own PPTX
-                // save of a 180-degree rotated pattern freeform writes the same
-                // tile as for unrotated ones (algn tl, tx/ty 0,
-                // rotWithShape 0). Flipped pattern shapes have no evidence.
-                if transform.flip_h || transform.flip_v {
-                    return Err(unsupported(
-                        "PowerPoint pattern fill on a flipped shape is not projected",
-                    ));
-                }
-                Some(self.pattern_fill(pattern)?)
+        let image = match (allow_fill, image.is_none(), paint.shape_texture_image()) {
+            (true, true, Some((id, alpha))) => {
+                self.picture_display_effects(&shape, false)?;
+                self.texture_fill(id, alpha, paint.rotate_fill_with_shape.unwrap_or(false))?
             }
+            _ => image,
+        };
+        let pattern = match (allow_fill, paint.pattern_image()) {
+            // A pattern does not rotate with its shape (fRotateFillWithShape
+            // is clear for every projected pattern): PowerPoint's own PPTX
+            // save of a 180-degree rotated pattern freeform writes the same
+            // tile as for unrotated ones (algn tl, tx/ty 0, rotWithShape 0),
+            // and its PDFs of a 30-degree rotated and of a flipped pattern
+            // shape print the pattern cells upright and unmirrored
+            // (`pattern_fill` writes the bitmap a flipped shape needs).
+            (true, Some(pattern)) => Some(self.pattern_fill(pattern, Some(&transform))?),
             _ => None,
         };
         if allow_fill && image.is_none() && pattern.is_none() {
@@ -706,26 +816,34 @@ impl Context<'_> {
                 return Err(unprojected_blip_fill(kind));
             }
         }
+        let texture = image
+            .clone()
+            .filter(|_| paint.shape_texture_image().is_some());
         let (fill, stroke) = paint.model_with_custom_geometry(
             self.presentation.schemes[self.index].as_ref(),
             allow_fill,
             allow_line,
             image,
         );
-        let fill = pattern.or(fill);
+        let fill = pattern.or(texture).or(fill);
         // Rotation and flips (own or inherited from groups) do not change the
         // projected shade: in every rotated or flipped corpus shape whose
         // metroBlob shows PowerPoint's own DrawingML (90/180/270 degrees, with
         // and without flips), `ang` stays 90 - fillAngle and only
         // fRotateFillWithShape selects rotWithShape.
-        let gradient_fill = paint
-            .project_gradient(
-                &gradient,
-                allow_fill,
-                self.presentation.schemes[self.index].as_ref(),
-                self.work_budget,
-                self.model_budget,
-            )?
+        let gradient_fill = paint.project_gradient(
+            &gradient,
+            allow_fill,
+            self.presentation.schemes[self.index].as_ref(),
+            self.work_budget,
+            self.model_budget,
+        )?;
+        // A shade edited after PowerPoint wrote it is drawn from the binary
+        // (`ResolvedGradient::binary_edited`): its alternative is not read.
+        let binary_edited = gradient_fill
+            .as_ref()
+            .is_some_and(|gradient| gradient.binary_edited());
+        let gradient_fill = gradient_fill
             .map(|value| value.into_model(self.model_budget))
             .transpose()?;
         let fill = gradient_fill.or(fill);
@@ -768,8 +886,23 @@ impl Context<'_> {
             scene3d: None,
             sp3d: None,
         };
+        // The picture the projected fill draws (a stored picture, pattern or
+        // texture, or the pattern written for a flipped shape), for
+        // comparison with the alternative's. One that is too long to equal
+        // an alternative's, or past the session's comparison allowance, is
+        // not compared: the shape keeps its binary projection.
+        let drawn_image = drawn_image(element.fill.as_ref());
+        let image_filled = matches!(element.fill, Some(Fill::Image { .. }));
+        let comparison_image = match drawn_image {
+            Some(id) if metro_blob.is_some() && !binary_edited => {
+                self.media
+                    .comparison_copy(id, self.backing, self.pictures)?
+            }
+            _ => None,
+        };
+        let uncompared = image_filled && comparison_image.is_none();
         let adopted = match (&metro_blob, &metro_theme) {
-            (Some(span), theme) => {
+            (Some(span), theme) if !binary_edited && !uncompared => {
                 let missing_theme = crate::ppt::metro::Theme::Unreadable;
                 let theme = theme.as_deref().unwrap_or(&missing_theme);
                 let recorded_fill = if !fill_area {
@@ -803,18 +936,7 @@ impl Context<'_> {
                     fill: recorded_fill,
                     path_paint: authored_paths.take(),
                     adjust_bounds,
-                    image_bytes: if matches!(element.fill, Some(Fill::Image { .. })) {
-                        let id = paint
-                            .foreground_image()
-                            .map(|(id, ..)| id)
-                            .or_else(|| paint.pattern_image().map(|(id, ..)| id));
-                        id.map(|id| self.media.image(id, self.backing, self.pictures))
-                            .transpose()?
-                            .flatten()
-                            .map(|(_, bytes)| bytes.to_vec())
-                    } else {
-                        None
-                    },
+                    image_bytes: comparison_image,
                 };
                 crate::ppt::metro::adopt(
                     &binary,
@@ -842,31 +964,124 @@ impl Context<'_> {
     /// ExObjRefAtom (MS-PPT 2.7.7) to the document's ExObjListContainer
     /// (2.10.1). The OLE object itself is never read or activated.
     ///
-    /// Evidence and limits: PowerPoint's PDF exports of the local corpus show
-    /// the stored picture unchanged for embedded objects with drawAspect
-    /// DVASPECT_CONTENT and exColorFollow ExColor_FollowScheme (Excel.Chart
-    /// PNG pictures). Icon/thumbnail aspects, linked objects (whose picture may
-    /// be refreshed from the link source) and ActiveX controls (drawn live by
-    /// the control) are not covered by that evidence and stay rejected.
-    fn admit_ole_picture(&self, shape: &SpannedShape) -> Result<(), String> {
-        if shape.kind != 75 || shape.props.picture == 0 {
-            return Err(unsupported(
-                "PowerPoint OLE object has no presentation picture",
-            ));
-        }
+    /// Evidence: PowerPoint's PDF exports show the stored picture unchanged
+    /// for embedded objects with drawAspect DVASPECT_CONTENT (Excel.Chart
+    /// PNG pictures) and for a linked object (a linked worksheet range whose
+    /// source is not available). An object shown as an icon or thumbnail
+    /// stores the picture of that aspect in the same place; PowerPoint could
+    /// not export the control, and an ActiveX control could not be authored,
+    /// so both are drawn from their stored picture without Office evidence.
+    ///
+    /// Returns whether the shape has a stored picture to draw; without one
+    /// the caller draws a placeholder frame.
+    fn admit_ole_picture(&self, shape: &SpannedShape) -> Result<bool, String> {
         let id = shape
             .props
             .ole_ref
             .ok_or_else(|| unsupported("PowerPoint OLE shape lacks ExObjRefAtom"))?;
         match self.presentation.ole_objects.get(id)? {
             // [MS-OSHARED] 2.2.1.2 DVASPECT_CONTENT.
-            media::OleObject::Embedded { draw_aspect: 1 } => Ok(()),
-            media::OleObject::Embedded { .. } => Err(unsupported(
+            media::OleObject::Embedded { draw_aspect: 1 } | media::OleObject::Linked => {}
+            media::OleObject::Embedded { .. } => crate::rejection::approximated(
                 "PowerPoint OLE object drawn as icon or thumbnail",
-            )),
-            media::OleObject::Linked => Err(unsupported("linked PowerPoint OLE object")),
-            media::OleObject::Control => Err(unsupported("PowerPoint ActiveX control")),
+                (),
+            ),
+            media::OleObject::Control => {
+                crate::rejection::approximated("PowerPoint ActiveX control", ())
+            }
         }
+        let stored = shape.kind == 75 && shape.props.picture != 0;
+        if !stored {
+            crate::rejection::approximated("PowerPoint OLE object has no presentation picture", ());
+        }
+        Ok(stored)
+    }
+
+    /// The frame drawn in place of content this reader cannot show: the
+    /// shape's own box and line, or a thin gray outline when it has none,
+    /// without a fill. The geometry around it is unchanged.
+    fn placeholder_frame(
+        &mut self,
+        shape: &SpannedShape,
+        transform: &pptx_model::Transform,
+        stroke: Option<pptx_model::Stroke>,
+        inherited: bool,
+    ) -> Result<(), String> {
+        let stroke = stroke.unwrap_or_else(|| pptx_model::Stroke {
+            color: "808080".to_owned(),
+            width: 9525,
+            fill: None,
+            dash_style: None,
+            custom_dash: Vec::new(),
+            line_cap: None,
+            line_join: None,
+            miter_limit: None,
+            alignment: None,
+            head_end: None,
+            tail_end: None,
+            cmpd: None,
+        });
+        self.rectangle(
+            Some(shape.id.to_string()),
+            transform,
+            Fill::None,
+            Some(stroke),
+            inherited,
+        )
+    }
+
+    /// A rectangle over the box of `transform`, without text.
+    fn rectangle(
+        &mut self,
+        id: Option<String>,
+        transform: &pptx_model::Transform,
+        fill: Fill,
+        stroke: Option<pptx_model::Stroke>,
+        inherited: bool,
+    ) -> Result<(), String> {
+        self.charge_shape_strings()?;
+        self.push(
+            SlideElement::Shape(ShapeElement {
+                math_fallback: None,
+                x: transform.x,
+                y: transform.y,
+                width: transform.cx,
+                height: transform.cy,
+                rotation: transform.rot,
+                flip_h: transform.flip_h,
+                flip_v: transform.flip_v,
+                geometry: "rect".to_owned(),
+                fill: Some(fill),
+                stroke,
+                text_body: None,
+                default_text_color: None,
+                cust_geom: None,
+                cust_geom_paint: None,
+                adj: None,
+                adj2: None,
+                adj3: None,
+                adj4: None,
+                adj5: None,
+                adj6: None,
+                adj7: None,
+                adj8: None,
+                shadow: None,
+                inner_shadow: None,
+                glow: None,
+                soft_edge: None,
+                reflection: None,
+                id,
+                name: None,
+                hyperlink: None,
+                hyperlink_action: None,
+                placeholder_type: None,
+                placeholder_idx: None,
+                text_rect: None,
+                scene3d: None,
+                sp3d: None,
+            }),
+            inherited,
+        )
     }
 
     /// MS-ODRAW 2.3.23 picture display adjustments and MS-PPT 2.7.9 metafile
@@ -888,11 +1103,13 @@ impl Context<'_> {
     /// metroBlobs) renders the same levels as the `<a:lum>` formula of the
     /// presentation renderer. It uses brightness / 0x8000 as the bright
     /// fraction and the 16.16 contrast as the slope k. Contrast is therefore
-    /// k - 1 for k <= 1 and 1 - 1/k above. Brightness/contrast together with
-    /// the transparent colour or the black-and-white pair has no evidence for
-    /// the order PowerPoint applies them in, so that stays rejected. Gray
-    /// alone, bi-level alone, recolor and colour modifiers have no evidence
-    /// and stay rejected too. Picture fills reject every adjustment.
+    /// k - 1 for k <= 1 and 1 - 1/k above. fPictureGray alone prints as a
+    /// gray picture, and after brightness/contrast when both are set.
+    /// Brightness/contrast together with the transparent colour or the
+    /// black-and-white pair has no evidence for the order PowerPoint applies
+    /// them in, so that stays rejected. Bi-level alone, recolor and colour
+    /// modifiers have no evidence and stay rejected too. Picture fills reject
+    /// every adjustment.
     fn picture_display_effects(
         &self,
         shape: &SpannedShape,
@@ -920,8 +1137,9 @@ impl Context<'_> {
                 "PowerPoint picture fill color adjustment is not projected",
             ));
         }
+        let mut effects = Vec::new();
         if luminance {
-            if gray || bilevel || transparent.is_some() {
+            if bilevel || transparent.is_some() {
                 return Err(unsupported(
                     "PowerPoint picture brightness/contrast combined with other color adjustments is not projected",
                 ));
@@ -932,12 +1150,14 @@ impl Context<'_> {
             let k = f64::from(contrast.unwrap_or(0x10000)) / 65536.0;
             let contrast = if k <= 1.0 { k - 1.0 } else { 1.0 - 1.0 / k };
             let bright = f64::from(brightness.unwrap_or(0) as i32) / 32768.0;
-            return Ok(vec![BlipEffect::Luminance {
+            effects.push(BlipEffect::Luminance {
                 bright: bright.clamp(-1.0, 1.0),
                 contrast: contrast.clamp(-1.0, 1.0),
-            }]);
+            });
+            if !gray {
+                return Ok(effects);
+            }
         }
-        let mut effects = Vec::new();
         if let Some(color) = transparent {
             // OfficeArtCOLORREF (MS-ODRAW 2.2.2): red, green, blue bytes and a
             // flag byte; only a literal RGB colour is a pixel colour to match.
@@ -966,11 +1186,12 @@ impl Context<'_> {
                 effects.push(BlipEffect::Grayscale);
                 effects.push(BlipEffect::BiLevel { thresh: 0.5 });
             }
-            (true, false) => {
-                return Err(unsupported(
-                    "PowerPoint picture grayscale adjustment is not projected",
-                ))
-            }
+            // fPictureGray alone is `<a:grayscl/>`. With brightness the gray
+            // conversion comes last: PowerPoint's PDF of a (200, 30, 30)
+            // picture with brightness 0x3333 prints gray 158, the luminance
+            // of the brightened (255, 132, 132), where brightening its gray
+            // 66 would print 168.
+            (true, false) => effects.push(BlipEffect::Grayscale),
             (false, true) => {
                 return Err(unsupported(
                     "PowerPoint picture black-and-white adjustment is not projected",
@@ -982,23 +1203,32 @@ impl Context<'_> {
 
     /// msofillPattern as a tiled DrawingML picture fill (ECMA-376 §20.1.8.58).
     ///
-    /// Evidence (PowerPoint's PDF export of a deck with pattern fills, and its
+    /// Evidence (PowerPoint's PDF export of decks with pattern fills, and its
     /// own PPTX save of the same binary deck): PowerPoint draws the pattern
     /// BLIP's white pixels in fillColor and its black pixels in fillBackColor
-    /// (the PPTX save bakes exactly that mapping into its tiled image), tiles
-    /// only the top-left 8x8 pixels of the 10x10 pattern bitmap it stores
-    /// (the two transparent rows and columns never appear), draws one pattern
-    /// pixel per point, and registers the tiles at the shape's top-left
-    /// corner. The black/white mapping is a duotone of the two colours; the
-    /// 8x8 area is a source crop; one pixel per point is 72 DPI. Other bitmap
-    /// sizes, translucent colours and background patterns have no evidence.
-    fn pattern_fill(&mut self, pattern: (u32, u32, u32, u32, u32)) -> Result<Fill, String> {
+    /// (the PPTX save bakes exactly that mapping into its tiled image) and
+    /// registers the tiles at the shape's top-left corner. The black/white
+    /// mapping is a duotone of the two colours.
+    /// - A 10x10 bitmap (older saves): only its top-left 8x8 pixels tile (the
+    ///   two transparent rows and columns never appear), one pattern pixel
+    ///   per point. The 8x8 area is a source crop; one pixel per point is
+    ///   72 DPI.
+    /// - An 8x8 bitmap (PowerPoint 16 saves): the whole bitmap tiles, one
+    ///   pattern pixel per 0.75 pt, the size of a pixel at 96 DPI. At 720 DPI
+    ///   the PDFs of four controls repeat a four-cell pattern every 30
+    ///   pixels.
+    ///
+    /// fillOpacity and fillBackOpacity apply to their own colour (a control
+    /// with both at 50% prints both colours half transparent).
+    ///
+    /// A bitmap of another size has no evidence: all of it is tiled like an
+    /// 8x8 one.
+    fn pattern_fill(
+        &mut self,
+        pattern: (u32, u32, u32, u32, u32),
+        frame: Option<&pptx_model::Transform>,
+    ) -> Result<Fill, String> {
         let (id, fore, fore_alpha, back, back_alpha) = pattern;
-        if fore_alpha != 65536 || back_alpha != 65536 {
-            return Err(unsupported(
-                "translucent PowerPoint pattern fill is not projected",
-            ));
-        }
         if !self
             .media
             .reference(id, self.backing, self.pictures, self.work_budget)?
@@ -1020,33 +1250,84 @@ impl Context<'_> {
                 ))
             }
         };
-        if size != (10, 10) {
-            return Err(unsupported(
+        let (dpi, src_rect) = match size {
+            (8, 8) => (96, None),
+            (10, 10) => (
+                72,
+                Some(SrcRect {
+                    l: 0.0,
+                    t: 0.0,
+                    r: 0.2,
+                    b: 0.2,
+                }),
+            ),
+            _ => crate::rejection::approximated(
                 "PowerPoint pattern bitmap size is not projected",
-            ));
+                (96, None),
+            ),
+        };
+        // The presentation renderer reflects a picture fill with its shape.
+        // PowerPoint does not reflect a pattern (see the caller), so a
+        // flipped shape tiles the bitmap as seen through its own reflections,
+        // from the corner that is drawn at the top left: the tile grid is
+        // offset by the shape's extent modulo the 8-pixel tile.
+        let (flip_h, flip_v) = frame.map_or((false, false), |frame| (frame.flip_h, frame.flip_v));
+        let mut reflected = None;
+        if flip_h || flip_v {
+            reflected = self.media.reflected_pattern(
+                id,
+                (flip_h, flip_v),
+                |extension, bytes| {
+                    Ok(crate::ppt::pattern::cells(extension, bytes)?.map(|cells| {
+                        crate::ppt::pattern::png(crate::ppt::pattern::mirrored(
+                            cells, flip_h, flip_v,
+                        ))
+                    }))
+                },
+                self.backing,
+                self.pictures,
+                self.work_budget,
+            )?;
+            if reflected.is_none() {
+                // Not a bitmap this reader can rewrite: it tiles reflected.
+                crate::rejection::approximated(
+                    "PowerPoint pattern fill on a flipped shape is not projected",
+                    (),
+                );
+            }
         }
+        let (id, extension, src_rect) = match reflected {
+            Some(id) => (id, "png", None),
+            None => (id, extension, src_rect),
+        };
+        let tile_emu = 8 * 914_400 / i64::from(dpi);
+        let offset = |flipped: bool, extent: i64| {
+            if flipped && reflected.is_some() {
+                extent.rem_euclid(tile_emu)
+            } else {
+                0
+            }
+        };
+        let (tx, ty) = frame.map_or((0, 0), |frame| {
+            (offset(flip_h, frame.cx), offset(flip_v, frame.cy))
+        });
         let scheme = self.presentation.schemes[self.index].as_ref();
-        let color = |value| {
-            paint::model_color(value, 65536, scheme)
+        let color = |value, alpha| {
+            paint::model_color(value, alpha, scheme)
                 .ok_or_else(|| unsupported("unresolved PowerPoint pattern color"))
         };
         Ok(Fill::Image {
             image_path: format!("legacy-ppt/image/{id}"),
             mime_type: ooxml_common::blip::mime_from_ext(extension).to_owned(),
             svg_image_path: None,
-            dpi: Some(72),
+            dpi: Some(dpi),
             rot_with_shape: Some(false),
-            src_rect: Some(SrcRect {
-                l: 0.0,
-                t: 0.0,
-                r: 0.2,
-                b: 0.2,
-            }),
+            src_rect,
             fill_rect: None,
             stretch: false,
             tile: Some(ooxml_common::fill::TileInfo {
-                tx: Some(0),
-                ty: Some(0),
+                tx: Some(tx),
+                ty: Some(ty),
                 sx: Some(1.0),
                 sy: Some(1.0),
                 flip: Some("none".to_owned()),
@@ -1055,11 +1336,81 @@ impl Context<'_> {
             alpha: None,
             // Black -> clr1, white -> clr2 (luminance ramp, §20.1.8.23).
             duotone: Some(ooxml_common::blip::Duotone {
-                clr1: color(back)?,
-                clr2: color(fore)?,
+                clr1: color(back, back_alpha)?,
+                clr2: color(fore, fore_alpha)?,
             }),
             blip_effects: Vec::new(),
         })
+    }
+
+    /// msofillTexture (MS-ODRAW 2.4.11) as a tiled DrawingML picture fill.
+    ///
+    /// PowerPoint 16 saves a texture as a 100% intrinsic tile at (0,0)
+    /// (`<a:tile tx="0" ty="0" sx="100000" sy="100000" flip="none"
+    /// algn="tl"/>`), for slide backgrounds even when the binary origin and
+    /// EMU tile dimensions were changed, and for shapes with a preset or a
+    /// user texture; its PDF exports tile them so.
+    fn texture_fill(
+        &mut self,
+        id: u32,
+        opacity: u32,
+        rotate: bool,
+    ) -> Result<Option<Fill>, String> {
+        let mut image = self.image_fill(id, opacity, rotate)?;
+        if let Some(Fill::Image {
+            dpi, stretch, tile, ..
+        }) = image.as_mut()
+        {
+            *dpi = Some(0);
+            *stretch = false;
+            *tile = Some(ooxml_common::fill::TileInfo {
+                tx: Some(0),
+                ty: Some(0),
+                sx: Some(1.0),
+                sy: Some(1.0),
+                flip: Some("none".to_owned()),
+                algn: Some("tl".to_owned()),
+            });
+        }
+        Ok(image)
+    }
+
+    /// The fill of a picture frame that is not a solid colour. PowerPoint
+    /// paints a frame's fill behind the transparent pixels of its picture
+    /// (`Paint::picture_backing`); its PDFs of frames with a shade or a
+    /// pattern behind an opaque picture show the picture only, so the fill
+    /// kinds are projected as for a shape, without Office evidence of their
+    /// placement behind a picture. The caller draws a picture-type fill with
+    /// a rectangle under the picture.
+    fn picture_frame_fill(
+        &mut self,
+        paint: &paint::Paint,
+        gradient: &crate::officeart::gradient::Borrowed<'_>,
+        frame: &pptx_model::Transform,
+    ) -> Result<Option<Fill>, String> {
+        const SITE: &str = "PowerPoint picture frame non-solid fill";
+        let scheme = self.presentation.schemes[self.index].as_ref();
+        let fill = if let Some(shade) =
+            paint.project_gradient(gradient, true, scheme, self.work_budget, self.model_budget)?
+        {
+            Some(shade.into_model(self.model_budget)?)
+        } else if let Some(pattern) = paint.pattern_image() {
+            Some(self.pattern_fill(pattern, Some(frame))?)
+        } else if let Some((id, alpha)) = paint.shape_texture_image() {
+            self.texture_fill(id, alpha, paint.rotate_fill_with_shape.unwrap_or(false))?
+        } else if let Some((id, alpha, rotate)) = paint.foreground_image() {
+            self.image_fill(id, alpha, rotate)?
+        } else {
+            None
+        };
+        // As for a shape, a pattern, texture or picture fill whose placement
+        // is not projected is not left out.
+        if fill.is_none() {
+            if let Some(kind) = paint.blip_fill_type() {
+                return Err(unprojected_blip_fill(kind));
+            }
+        }
+        Ok(crate::rejection::approximated(SITE, fill))
     }
 
     fn image_fill(&mut self, id: u32, opacity: u32, rotate: bool) -> Result<Option<Fill>, String> {
@@ -1111,13 +1462,16 @@ impl Context<'_> {
         let mut ruler_seen = false;
         let mut pending_action = None;
         let mut text_links = Vec::new();
+        let mut range_end = None;
         for atom in parse_record_spans(self.backing, textbox.payload_span(), self.work_budget)? {
             let view = atom.view(self.backing)?;
             match view.kind {
                 0x0ff2 if shape.props.metro.is_some() => {
-                    // [MS-PPT] 2.6.8-10: a click action immediately precedes
-                    // its 2.9.57 text-range atom in a client textbox.
-                    if view.version != 15 || pending_action.is_some() {
+                    // [MS-PPT] 2.6.8-10: a click (instance 0, 2.9.56) or
+                    // mouse-over (instance 1, 2.9.58) action immediately
+                    // precedes its text-range atom of the same instance
+                    // (2.9.57, 2.9.59) in a client textbox.
+                    if view.version != 15 || view.instance > 1 || pending_action.is_some() {
                         return Err(unsupported("invalid PowerPoint text interaction"));
                     }
                     let children =
@@ -1129,25 +1483,52 @@ impl Context<'_> {
                     if action.kind != 0x0ff3 || action.version != 0 || action.payload.len() != 16 {
                         return Err(unsupported("invalid PowerPoint text interaction atom"));
                     }
-                    pending_action = Some((u32_at(action.payload, 4)?, action.payload[8]));
+                    pending_action = Some((
+                        view.instance,
+                        u32_at(action.payload, 4)?,
+                        action.payload[8],
+                        action.payload[10],
+                    ));
                 }
                 0x0fdf if shape.props.metro.is_some() => {
-                    if view.version != 0 || view.instance != 0 || view.payload.len() != 8 {
+                    if view.version != 0 || view.instance > 1 || view.payload.len() != 8 {
                         return Err(unsupported("invalid PowerPoint text link range"));
                     }
-                    let (id, action) = pending_action
+                    let (instance, id, action, jump) = pending_action
                         .take()
                         .ok_or_else(|| unsupported("orphan PowerPoint text link range"))?;
-                    if action == 4 {
-                        let begin = u32_at(view.payload, 0)? as usize;
-                        let end = u32_at(view.payload, 4)? as usize;
-                        if begin >= end {
-                            return Err(unsupported("invalid PowerPoint text link range"));
-                        }
-                        let target = self.presentation.hyperlinks.get(id)?;
+                    if instance != view.instance {
+                        return Err(unsupported("invalid PowerPoint text link range"));
+                    }
+                    let over = instance == 1;
+                    // InteractiveInfoAtom.action: 4 is II_HyperlinkAction and
+                    // 3 II_JumpAction. PowerPoint 16 PDF controls draw the
+                    // range of a mouse-over hyperlink and of a click jump
+                    // like a click hyperlink; a mouse-over jump (no control)
+                    // states the same verb on `a:hlinkMouseOver`. The other
+                    // actions state nothing.
+                    let link = match (action, over) {
+                        (4, false) => Some(TextLink::Click(self.presentation.hyperlinks.get(id)?)),
+                        (4, true) => Some(TextLink::Over(self.presentation.hyperlinks.get(id)?)),
+                        (3, false) => jump_action(jump).map(TextLink::Jump),
+                        (3, true) => jump_action(jump).map(TextLink::OverJump),
+                        _ => None,
+                    };
+                    let begin = u32_at(view.payload, 0)? as usize;
+                    let end = u32_at(view.payload, 4)? as usize;
+                    // [MS-PPT] 2.9.59 requires a range valid for the text,
+                    // for every action: end is greater than begin, and is
+                    // checked against the text once that is known.
+                    if begin >= end {
+                        return Err(crate::rejection::corrupt(
+                            "invalid PowerPoint text link range",
+                        ));
+                    }
+                    range_end = Some(range_end.map_or(end, |seen: usize| seen.max(end)));
+                    if let Some(target) = link {
                         *self.model_budget = self
                             .model_budget
-                            .checked_sub(2 * std::mem::size_of::<(usize, usize, &str)>())
+                            .checked_sub(2 * std::mem::size_of::<(usize, usize, TextLink<'_>)>())
                             .ok_or_else(|| {
                                 crate::rejection::resource(
                                     "PowerPoint text link model budget exceeded",
@@ -1211,6 +1592,14 @@ impl Context<'_> {
                     local_ruler = Some(ruler::read_full(view, self.work_budget)?);
                 }
                 _ => {}
+            }
+        }
+        if let Some(end) = range_end {
+            let units = blocks.first().map(|text| text.encode_utf16().count());
+            if units.is_none_or(|units| end > units) {
+                return Err(crate::rejection::corrupt(
+                    "PowerPoint text link range exceeds its text",
+                ));
             }
         }
         if blocks.is_empty() {
@@ -1298,13 +1687,24 @@ impl Context<'_> {
             let colors = direct_color_authored
                 .as_deref()
                 .ok_or_else(|| unsupported("PowerPoint direct text color mask missing"))?;
-            apply_text_links(
-                &mut paragraphs,
-                &text_links,
-                colors,
-                self.work_budget,
-                self.model_budget,
-            )?;
+            // Click and mouse-over ranges are independent run properties
+            // and may cover the same characters.
+            for over in [false, true] {
+                let links: Vec<_> = text_links
+                    .iter()
+                    .copied()
+                    .filter(|(_, _, link)| link.over() == over)
+                    .collect();
+                if !links.is_empty() {
+                    apply_text_links(
+                        &mut paragraphs,
+                        &links,
+                        colors,
+                        self.work_budget,
+                        self.model_budget,
+                    )?;
+                }
+            }
         }
         let p = &shape.props;
         Ok(Some(TextBody {
@@ -1431,13 +1831,78 @@ mod tests {
             .unwrap();
         let target = "x".repeat(4096);
         let links = vec![
-            (0, 1, target.as_str()),
-            (1, 2, target.as_str()),
-            (2, 4, target.as_str()),
+            (0, 1, TextLink::Click(target.as_str())),
+            (1, 2, TextLink::Click(target.as_str())),
+            (2, 4, TextLink::Click(target.as_str())),
         ];
         let error = apply_text_links(&mut paragraphs, &links, &[false; 4], &mut 10_000, &mut 4096)
             .unwrap_err();
         assert!(error.contains("model budget"), "{error}");
+    }
+
+    #[test]
+    fn mouse_over_and_jump_ranges_state_their_own_run_properties() {
+        let mut paragraphs: Vec<pptx_model::Paragraph> =
+            vec![serde_json::from_value(serde_json::json!({
+                "alignment": "l", "marL": 0, "marR": 0, "indent": 0,
+                "spaceBefore": null, "spaceAfter": null, "spaceLine": null,
+                "lvl": 0, "bullet": {"type": "none"}, "defFontSize": null,
+                "defColor": null, "defBold": null, "defItalic": null,
+                "defFontFamily": null, "tabStops": [], "rtl": false, "eaLnBrk": true,
+                "runs": [{"type": "text", "text": "abcd", "bold": null, "italic": null,
+                    "underline": false, "strikethrough": false, "strikeDouble": false,
+                    "fontSize": 18.0, "color": "000000", "fontFamily": null,
+                    "fieldType": null, "hyperlinkUsesTextFill": false}]
+            }))
+            .unwrap()];
+        let colors = [false; 5];
+        // A click jump on "ab", then a mouse-over target on "bc": the two
+        // properties overlap on "b" without conflict.
+        let jump = jump_action(2).unwrap();
+        assert_eq!(jump, "ppaction://hlinkshowjump?jump=previousslide");
+        assert_eq!(jump_action(0), None);
+        assert_eq!(jump_action(7), None);
+        for links in [
+            [(0, 2, TextLink::Jump(jump))],
+            [(1, 3, TextLink::Over("https://example.invalid/o"))],
+        ] {
+            apply_text_links(&mut paragraphs, &links, &colors, &mut 10_000, &mut 100_000).unwrap();
+        }
+        let runs: Vec<_> = paragraphs[0]
+            .runs
+            .iter()
+            .map(|run| match run {
+                TextRun::Text(text) => (
+                    text.text.as_str(),
+                    text.hyperlink.as_deref(),
+                    text.hyperlink_action.as_deref(),
+                    text.hyperlink_mouse_over.as_deref(),
+                    text.color.as_deref(),
+                ),
+                _ => panic!("unexpected break"),
+            })
+            .collect();
+        let over = Some("https://example.invalid/o");
+        // Neither is a click target: the run keeps its colour.
+        assert_eq!(
+            runs,
+            [
+                ("a", None, Some(jump), None, Some("000000")),
+                ("b", None, Some(jump), over, Some("000000")),
+                ("c", None, None, over, Some("000000")),
+                ("d", None, None, None, Some("000000")),
+            ]
+        );
+        // Two click-class ranges on the same characters stay a conflict.
+        let error = apply_text_links(
+            &mut paragraphs,
+            &[(0, 1, TextLink::Click("https://example.invalid/"))],
+            &colors,
+            &mut 10_000,
+            &mut 100_000,
+        )
+        .unwrap_err();
+        assert!(error.contains("overlapping"), "{error}");
     }
 
     #[test]
@@ -1464,7 +1929,7 @@ mod tests {
             .unwrap()];
         apply_text_links(
             &mut paragraphs,
-            &[(1, 3, "https://example.invalid")],
+            &[(1, 3, TextLink::Click("https://example.invalid"))],
             &[false, false, true, false, false],
             &mut 10_000,
             &mut 100_000,
@@ -1658,6 +2123,211 @@ mod tests {
         assert!(
             matches!(result.elements.as_slice(), [SlideElement::Shape(shape)] if shape.geometry == "rect")
         );
+    }
+
+    /// A text box with one interaction (MS-PPT 2.6.8-10) on its first two
+    /// characters, in a shape that carries a checksum-only metroBlob.
+    fn interactive_text(
+        instance: u16,
+        action: u8,
+        jump: u8,
+        range_instance: u16,
+        range: (u8, u8),
+    ) -> Result<Slide, String> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("_rels/.rels", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="downrev" Type="http://schemas.microsoft.com/office/2006/relationships/downRev" Target="downrev.xml"/></Relationships>"#).unwrap();
+        let blob = zip.finish().unwrap().into_inner();
+        let property = record(
+            0x13,
+            0xf122,
+            &[
+                0x83a9u16.to_le_bytes().as_slice(),
+                &(blob.len() as u32).to_le_bytes(),
+                &blob,
+            ]
+            .concat(),
+        );
+        let mut info = [0u8; 16];
+        info[4..8].copy_from_slice(&7u32.to_le_bytes());
+        info[8] = action;
+        info[10] = jump;
+        let textbox = record(
+            15,
+            0xf00d,
+            &[
+                record(0, 3999, &4u32.to_le_bytes()),
+                record(0, TEXT_CHARS_ATOM, &[b'a', 0, b'b', 0, b'c', 0]),
+                record((instance << 4) | 15, 0x0ff2, &record(0, 0x0ff3, &info)),
+                record(
+                    range_instance << 4,
+                    0x0fdf,
+                    &[range.0, 0, 0, 0, range.1, 0, 0, 0],
+                ),
+                // An origin ruler: left margin and indent 0 at level 0.
+                record(
+                    0,
+                    4006,
+                    &[(8u32 | 256).to_le_bytes().as_slice(), &[0; 4]].concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let local = record(
+            15,
+            SLIDE_CONTAINER,
+            &record(
+                15,
+                1036,
+                &record(
+                    15,
+                    0xf002,
+                    &shape(
+                        202,
+                        0x200,
+                        0xf010,
+                        [0, 0, 100, 100],
+                        vec![property, textbox],
+                    ),
+                ),
+            ),
+        );
+        let target: Vec<u8> = "https://example.invalid/"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let list = record(
+            15,
+            0x0409,
+            &record(
+                15,
+                0x0fd7,
+                &[
+                    record(0, 0x0fd3, &7u32.to_le_bytes()),
+                    record(0x10, 0x0fba, &target),
+                ]
+                .concat(),
+            ),
+        );
+        let list_offset = local.len();
+        let document = [local, list].concat();
+        let local_span = record_span_with_end(&document, 0, &mut 20, "slide")
+            .unwrap()
+            .0;
+        let list_span = record_span_with_end(&document, list_offset, &mut 20, "list")
+            .unwrap()
+            .0;
+        let mut p = presentation(local_span);
+        p.hyperlinks = media::hyperlink_catalog(&document, &[list_span], &mut 1000);
+        slide(
+            0,
+            &p,
+            &document,
+            None,
+            &mut media::SpanStore::new(Vec::new()),
+            &mut 10_000,
+            &mut 100_000,
+            &mut (16 * 1024 * 1024),
+        )
+    }
+
+    #[test]
+    fn text_interactions_project_click_mouse_over_and_jump_ranges() {
+        let links = |slide: Slide| -> Vec<[Option<String>; 3]> {
+            let SlideElement::Shape(shape) = &slide.elements[0] else {
+                panic!("shape")
+            };
+            shape.text_body.as_ref().unwrap().paragraphs[0]
+                .runs
+                .iter()
+                .map(|run| match run {
+                    TextRun::Text(run) => [
+                        run.hyperlink.clone(),
+                        run.hyperlink_action.clone(),
+                        run.hyperlink_mouse_over.clone(),
+                    ],
+                    _ => panic!("text run"),
+                })
+                .collect()
+        };
+        let url = Some("https://example.invalid/".to_owned());
+        // [MS-PPT] 2.6.9: action 4 is a hyperlink, 3 a jump; instance 1 of
+        // the container and of its range is the mouse-over interaction.
+        assert_eq!(
+            links(interactive_text(0, 4, 0, 0, (0, 2)).unwrap()),
+            [[url.clone(), None, None], [None, None, None]]
+        );
+        assert_eq!(
+            links(interactive_text(1, 4, 0, 1, (0, 2)).unwrap()),
+            [[None, None, url], [None, None, None]]
+        );
+        assert_eq!(
+            links(interactive_text(0, 3, 1, 0, (0, 2)).unwrap()),
+            [
+                [
+                    None,
+                    Some("ppaction://hlinkshowjump?jump=nextslide".to_owned()),
+                    None
+                ],
+                [None, None, None]
+            ]
+        );
+        // Actions without a DrawingML run property state nothing.
+        for (instance, action, jump) in [(1, 3, 0), (0, 3, 0), (0, 2, 0), (1, 2, 0)] {
+            assert_eq!(
+                links(interactive_text(instance, action, jump, instance, (0, 2)).unwrap()),
+                [[None, None, None]]
+            );
+        }
+        // A mouse-over jump states its verb on the mouse-over property.
+        let slide = interactive_text(1, 3, 6, 1, (0, 2)).unwrap();
+        let SlideElement::Shape(shape) = &slide.elements[0] else {
+            panic!("shape")
+        };
+        let runs: Vec<_> = shape.text_body.as_ref().unwrap().paragraphs[0]
+            .runs
+            .iter()
+            .map(|run| match run {
+                TextRun::Text(run) => (
+                    run.hyperlink_action.as_deref(),
+                    run.hyperlink_mouse_over_action.as_deref(),
+                ),
+                _ => panic!("text run"),
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (None, Some("ppaction://hlinkshowjump?jump=endshow")),
+                (None, None)
+            ]
+        );
+        // [MS-PPT] 2.9.59: the end of a range is greater than its begin,
+        // whatever the action does.
+        for action in [4, 2] {
+            for range in [(2, 1), (1, 1)] {
+                let error = interactive_text(0, action, 0, 0, range)
+                    .map(|_| ())
+                    .unwrap_err();
+                assert!(
+                    error.contains("invalid PowerPoint text link range"),
+                    "{error}"
+                );
+            }
+        }
+        // [MS-PPT] 2.9.59: a range past the three characters is not valid
+        // for the text, whatever the action does.
+        for action in [4, 2] {
+            let error = interactive_text(0, action, 0, 0, (0, 4)).unwrap_err();
+            assert!(error.contains("exceeds its text"), "{error}");
+        }
+        assert!(interactive_text(0, 4, 0, 0, (0, 3)).is_ok());
+        // A range of the other interaction, or an unknown one, is malformed.
+        for (instance, range) in [(0, 1), (1, 0), (2, 2)] {
+            assert!(interactive_text(instance, 4, 0, range, (0, 2)).is_err());
+        }
     }
 
     #[test]
@@ -2091,22 +2761,56 @@ mod tests {
     }
 
     #[test]
-    fn ole_objects_outside_the_evidenced_display_case_are_rejected() {
+    fn ole_objects_draw_their_stored_picture_or_a_placeholder_frame() {
+        use crate::rejection::{take_best_effort, BestEffort};
         let list = |objects: &[(u16, u32, u32, u32)]| Some(ex_obj_list(objects));
+        let picture = || vec![properties(&[(0x4104, 1)]), ole_ref(7)];
+        // A linked object shows its stored picture, as an embedded one does.
+        take_best_effort();
+        let model = project(75, OLE, picture(), png_blip(), list(&[(0x0fce, 1, 1, 7)])).unwrap();
+        assert!(matches!(
+            &model.elements[..],
+            [SlideElement::Picture(picture)] if picture.image_path == "legacy-ppt/image/1"
+        ));
+        assert_eq!(take_best_effort(), []);
+        // Aspects and controls without Office evidence draw it too.
+        for (objects, site) in [
+            (
+                list(&[(0x0fcc, 4, 0, 7)]),
+                "PowerPoint OLE object drawn as icon or thumbnail",
+            ),
+            (list(&[(0x0fee, 1, 2, 7)]), "PowerPoint ActiveX control"),
+        ] {
+            let model = project(75, OLE, picture(), png_blip(), objects).unwrap();
+            assert!(matches!(
+                &model.elements[..],
+                [SlideElement::Picture(picture)] if picture.image_path == "legacy-ppt/image/1"
+            ));
+            assert_eq!(take_best_effort(), [(BestEffort::Approximated, site)]);
+        }
+        // No picture frame BLIP to show: an unfilled frame keeps the place.
+        for (kind, children) in [
+            (75, vec![ole_ref(7)]),
+            (1, vec![properties(&[(0x4104, 1)]), ole_ref(7)]),
+        ] {
+            let model =
+                project(kind, OLE, children, png_blip(), list(&[(0x0fcc, 1, 0, 7)])).unwrap();
+            let [SlideElement::Shape(frame)] = &model.elements[..] else {
+                panic!("placeholder frame: {:?}", model.elements)
+            };
+            assert_eq!(frame.geometry, "rect");
+            assert_eq!((frame.width, frame.height), (158750, 158750));
+            assert!(matches!(frame.fill, Some(Fill::None)));
+            assert_eq!(frame.stroke.as_ref().unwrap().color, "808080");
+            assert_eq!(
+                take_best_effort(),
+                [(
+                    BestEffort::Approximated,
+                    "PowerPoint OLE object has no presentation picture"
+                )]
+            );
+        }
         for (kind, children, objects, expected) in [
-            // No picture frame BLIP to show.
-            (
-                75,
-                vec![ole_ref(7)],
-                list(&[(0x0fcc, 1, 0, 7)]),
-                "no presentation picture",
-            ),
-            (
-                1,
-                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
-                list(&[(0x0fcc, 1, 0, 7)]),
-                "no presentation picture",
-            ),
             // Reference resolution (MS-PPT 2.7.7, 2.10.1).
             (
                 75,
@@ -2137,25 +2841,6 @@ mod tests {
                 vec![properties(&[(0x4104, 1)]), ole_ref(7)],
                 list(&[(0x0fcc, 1, 1, 7)]),
                 "inconsistent",
-            ),
-            // Display cases without Office evidence.
-            (
-                75,
-                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
-                list(&[(0x0fcc, 4, 0, 7)]),
-                "icon or thumbnail",
-            ),
-            (
-                75,
-                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
-                list(&[(0x0fce, 1, 1, 7)]),
-                "linked",
-            ),
-            (
-                75,
-                vec![properties(&[(0x4104, 1)]), ole_ref(7)],
-                list(&[(0x0fee, 1, 2, 7)]),
-                "ActiveX",
             ),
         ] {
             let error = project(kind, OLE, children, png_blip(), objects).unwrap_err();
@@ -2214,7 +2899,31 @@ mod tests {
         assert!(picture.width > 0 && picture.height > 0);
         // Recovery is picture-frame policy, not implicit acceptance of fills.
         let fill = properties(&[(0x180, 3), (0x4186, 1), (0x1bf, 0x0010_0010)]);
-        assert!(project(1, 0x200, vec![fill], blip.clone(), None)
+        assert!(project(1, 0x200, vec![fill.clone()], blip.clone(), None)
+            .unwrap_err()
+            .contains("fill BLIP"));
+        // A JPEG frame without a decoder (ITU-T T.81 SOF9, arithmetic
+        // coding) keeps the picture's place as a frame with its own line.
+        use crate::rejection::{take_best_effort, BestEffort};
+        let jpeg = [0xff, 0xd8, 0xff, 0xc9, 0, 11, 8, 0, 2, 0, 3, 1, 1, 0x11, 0];
+        let jpeg = record(0x46a0, 0xf01d, &[vec![0; 17], jpeg.to_vec()].concat());
+        take_best_effort();
+        let lined = properties(&[(0x4104, 1), (0x1c0, 0x0000ff), (0x1ff, 0x0008_0008)]);
+        let model = project(75, 0x200, vec![lined], jpeg.clone(), None).unwrap();
+        let [SlideElement::Shape(frame)] = &model.elements[..] else {
+            panic!("placeholder frame: {:?}", model.elements)
+        };
+        assert_eq!((frame.geometry.as_str(), frame.width), ("rect", 158750));
+        assert!(matches!(frame.fill, Some(Fill::None)));
+        assert_eq!(frame.stroke.as_ref().unwrap().color, "FF0000");
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Approximated,
+                "unsupported OfficeArt JPEG frame encoding"
+            )]
+        );
+        assert!(project(1, 0x200, vec![fill], jpeg, None)
             .unwrap_err()
             .contains("fill BLIP"));
         let mut broken = blip;
@@ -2223,7 +2932,8 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_or_adjusted_picture_blips_are_rejected_instead_of_dropped() {
+    fn picture_adjustments_and_blip_fills_project_or_reject() {
+        use crate::rejection::{take_best_effort, BestEffort};
         // MS-ODRAW 2.2.23: a DIB BLIP is not carried by the presentation model.
         let dib = record(0x7a80, 0xf01f, &[0; 40]);
         assert!(project(
@@ -2241,13 +2951,13 @@ mod tests {
             .contains("fill BLIP"));
         for (values, expected) in [
             (vec![(0x109, 0x8000), (0x13f, 0x0006_0006)], "brightness"),
+            (vec![(0x109, 0x8000), (0x13f, 0x0002_0002)], "brightness"),
             (vec![(0x108, 0x4ccd), (0x107, 0x00ff_ffff)], "brightness"),
             (
                 vec![(0x107, 0x0800_0001)],
                 "indexed picture transparent color",
             ),
             (vec![(0x11a, 0x0000ff)], "recolor"),
-            (vec![(0x13f, 0x0004_0004)], "grayscale"),
             (vec![(0x13f, 0x0002_0002)], "black-and-white"),
         ] {
             let values = [vec![(0x4104, 1)], values].concat();
@@ -2300,6 +3010,28 @@ mod tests {
                 (b - bright).abs() < 1e-3 && (c - contrast).abs() < 1e-3,
                 "{b} {c}"
             );
+        }
+        // fPictureGray alone is a gray picture; with brightness the gray
+        // conversion comes after the luminance change.
+        for (values, expected) in [
+            (vec![(0x13f, 0x0004_0004)], vec![BlipEffect::Grayscale]),
+            (
+                vec![(0x109, 0x4000), (0x13f, 0x0004_0004)],
+                vec![
+                    BlipEffect::Luminance {
+                        bright: 0.5,
+                        contrast: 0.0,
+                    },
+                    BlipEffect::Grayscale,
+                ],
+            ),
+        ] {
+            let values = [vec![(0x4104, 1)], values].concat();
+            let model = project(75, 0x200, vec![properties(&values)], png_blip(), None).unwrap();
+            let SlideElement::Picture(picture) = &model.elements[0] else {
+                panic!("picture")
+            };
+            assert_eq!(picture.blip_effects, expected);
         }
         // Colour adjustments on a picture fill stay rejected.
         let fill = properties(&[
@@ -2358,14 +3090,12 @@ mod tests {
             );
             assert_eq!(result.is_err(), rejected);
         }
-        // Pattern, texture and non-plain picture fills are not left unfilled.
+        // Non-plain pattern and picture fills are not left unfilled.
         for (values, expected) in [
-            (vec![(0x180, 1), (0x4186, 1)], Some("pattern bitmap size")),
             (
                 vec![(0x180, 1), (0x4186, 1), (0x1bf, 0x0002_0002)],
                 Some("pattern fill is not projected"),
             ),
-            (vec![(0x180, 2), (0x4186, 1)], Some("texture fill")),
             (
                 vec![(0x180, 3), (0x4186, 1), (0x1bf, 0x0002_0002)],
                 Some("picture fill placement"),
@@ -2411,9 +3141,109 @@ mod tests {
         assert!(backing(&[(0x1bf, 0x0010_0010)])
             .unwrap_err()
             .contains("without a color"));
-        assert!(backing(&[(0x180, 4), (0x181, 0xff), (0x1bf, 0x0010_0010)])
-            .unwrap_err()
-            .contains("non-solid"));
+        // A frame with another fill kind projects it as a shape would.
+        take_best_effort();
+        assert!(matches!(
+            picture_fill(backing(&[(0x180, 4), (0x181, 0xff), (0x1bf, 0x0010_0010)]).unwrap()),
+            Some(Fill::Gradient { ref stops, .. })
+                if stops.iter().any(|stop| stop.color == "FF0000")
+        ));
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Approximated,
+                "PowerPoint picture frame non-solid fill"
+            )]
+        );
+        // A frame fill whose placement is not projected rejects like a
+        // shape's, and so does one that names no usable BLIP.
+        for (values, expected) in [
+            (
+                vec![(0x180, 2), (0x4186, 1), (0x1bf, 0x0002_0002)],
+                "texture fill",
+            ),
+            (
+                vec![(0x180, 2), (0x4186, 1), (0x1bf, 0x0004_0000)],
+                "texture fill",
+            ),
+            (vec![(0x180, 2), (0x4186, 1), (0x199, 1)], "texture fill"),
+            (
+                vec![(0x180, 1), (0x4186, 1), (0x198, 1)],
+                "pattern fill is not projected",
+            ),
+            (
+                vec![(0x180, 3), (0x4186, 1), (0x198, 1)],
+                "picture fill placement",
+            ),
+            (vec![(0x180, 2)], "texture fill"),
+            (vec![(0x180, 1), (0x4186, 9)], "index out of range"),
+        ] {
+            let values = [values, vec![(0x1bf, 0x0010_0010)]].concat();
+            let error = backing(&values).map(|_| ()).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
+        // A pattern or texture behind a picture is a rectangle under it:
+        // the renderer paints no picture fill behind a picture.
+        for kind in [1, 2] {
+            let model = backing(&[(0x180, kind), (0x4186, 1), (0x1bf, 0x0010_0010)]).unwrap();
+            let [SlideElement::Shape(under), SlideElement::Picture(picture)] = &model.elements[..]
+            else {
+                panic!("backing rectangle and picture: {:?}", model.elements)
+            };
+            assert!(picture.fill.is_none());
+            assert!(matches!(
+                under.fill,
+                Some(Fill::Image { tile: Some(_), .. })
+            ));
+            assert_eq!(
+                (
+                    under.geometry.as_str(),
+                    under.id.as_deref(),
+                    under.stroke.is_none()
+                ),
+                ("rect", None, true)
+            );
+            assert_eq!(
+                (under.x, under.y, under.width, under.height),
+                (picture.x, picture.y, picture.width, picture.height)
+            );
+            take_best_effort();
+        }
+        // A shape texture with a fill rectangle, a view-relative fill, an
+        // origin or a unit has no projection.
+        for veto in [
+            (0x1bf, 0x0002_0002),
+            (0x1bf, 0x0004_0000),
+            (0x198, 1),
+            (0x195, 1),
+        ] {
+            let values = [(0x180, 2), (0x4186, 1), veto];
+            let error = project(1, 0x200, vec![properties(&values)], png_blip(), None)
+                .map(|_| ())
+                .unwrap_err();
+            assert!(error.contains("texture fill is not projected"), "{error}");
+        }
+        // msofillTexture tiles the BLIP at its own size from the top left.
+        let texture = [(0x180, 2), (0x4186, 1), (0x1bf, 0x0060_0060)];
+        let model = project(1, 0x200, vec![properties(&texture)], png_blip(), None).unwrap();
+        let SlideElement::Shape(shape) = &model.elements[0] else {
+            panic!("shape")
+        };
+        let Some(Fill::Image {
+            stretch: false,
+            dpi: Some(0),
+            tile: Some(tile),
+            rot_with_shape: Some(true),
+            duotone: None,
+            ..
+        }) = &shape.fill
+        else {
+            panic!("texture fill: {:?}", shape.fill)
+        };
+        assert_eq!(
+            (tile.tx, tile.ty, tile.sx, tile.sy, tile.algn.as_deref()),
+            (Some(0), Some(0), Some(1.0), Some(1.0), Some("tl"))
+        );
         // msofillPattern: a 10x10 pattern bitmap tiles its 8x8 area at one
         // pixel per point, white in fillColor and black in fillBackColor.
         let gif_blip = |w: u16, h: u16| {
@@ -2457,20 +3287,121 @@ mod tests {
             (duotone.clr1.as_str(), duotone.clr2.as_str()),
             ("0B0B0D", "217EA8")
         );
-        for (values, blip, flags, expected) in [
-            (pattern.to_vec(), gif_blip(8, 8), 0x200, "bitmap size"),
+        // An 8x8 bitmap tiles whole at 96 DPI; each opacity applies to its
+        // own colour. Another size has no evidence and tiles like it.
+        let translucent = [pattern.to_vec(), vec![(0x182, 0x8000), (0x184, 0x4000)]].concat();
+        for (values, blip, flags, colors, note) in [
             (
-                [pattern.to_vec(), vec![(0x182, 0x8000)]].concat(),
-                gif_blip(10, 10),
+                pattern.to_vec(),
+                gif_blip(8, 8),
                 0x200,
-                "translucent",
+                ("0B0B0D", "217EA8"),
+                false,
             ),
-            (pattern.to_vec(), gif_blip(10, 10), 0x240, "flipped shape"),
-            (pattern.to_vec(), png_blip(), 0x200, "bitmap size"),
+            (
+                translucent,
+                gif_blip(8, 8),
+                0x200,
+                ("0B0B0D40", "217EA880"),
+                false,
+            ),
+            (
+                pattern.to_vec(),
+                png_blip(),
+                0x200,
+                ("0B0B0D", "217EA8"),
+                true,
+            ),
         ] {
-            let error = project(1, flags, vec![properties(&values)], blip, None).unwrap_err();
-            assert!(error.contains(expected), "{expected}: {error}");
+            take_best_effort();
+            let model = project(1, flags, vec![properties(&values)], blip, None).unwrap();
+            let SlideElement::Shape(shape) = &model.elements[0] else {
+                panic!("shape")
+            };
+            let Some(Fill::Image {
+                dpi: Some(96),
+                src_rect: None,
+                rot_with_shape: Some(false),
+                tile: Some(_),
+                duotone: Some(duotone),
+                ..
+            }) = &shape.fill
+            else {
+                panic!("pattern fill: {:?}", shape.fill)
+            };
+            assert_eq!((duotone.clr1.as_str(), duotone.clr2.as_str()), colors);
+            assert_eq!(
+                take_best_effort(),
+                if note {
+                    vec![(
+                        BestEffort::Approximated,
+                        "PowerPoint pattern bitmap size is not projected",
+                    )]
+                } else {
+                    Vec::new()
+                }
+            );
         }
+        // A flipped shape tiles the bitmap as seen through its reflection,
+        // offset so that a tile starts at the edge drawn on the left: the
+        // renderer reflects the fill with the shape, PowerPoint does not.
+        let cells = [0xcc, 0x66, 0x33, 0x99, 0xcc, 0x66, 0x33, 0x99];
+        let stored = record(
+            0x6e00,
+            0xf01e,
+            &[vec![0; 17], crate::ppt::pattern::png(cells)].concat(),
+        );
+        for (flags, offset) in [
+            (0x240, (6350, 0)),
+            (0x280, (0, 6350)),
+            (0x2c0, (6350, 6350)),
+        ] {
+            take_best_effort();
+            let model =
+                project(1, flags, vec![properties(&pattern)], stored.clone(), None).unwrap();
+            let SlideElement::Shape(shape) = &model.elements[0] else {
+                panic!("shape")
+            };
+            let Some(Fill::Image {
+                image_path,
+                mime_type,
+                dpi: Some(96),
+                src_rect: None,
+                tile: Some(tile),
+                duotone: Some(_),
+                ..
+            }) = &shape.fill
+            else {
+                panic!("pattern fill: {:?}", shape.fill)
+            };
+            // The written bitmap is the session's first image after the
+            // stored one. The shape is 158750 EMU wide and high; a tile is
+            // 8 pixels at 96 DPI, 76200 EMU.
+            assert_eq!(
+                (image_path.as_str(), mime_type.as_str()),
+                ("legacy-ppt/image/2", "image/png")
+            );
+            assert_eq!((tile.tx, tile.ty), (Some(offset.0), Some(offset.1)));
+            assert_eq!(take_best_effort(), []);
+            // An alternative's picture is compared with the written bitmap.
+            assert_eq!(drawn_image(shape.fill.as_ref()), Some(2));
+        }
+        // A bitmap this reader cannot rewrite tiles reflected.
+        let model = project(1, 0x240, vec![properties(&pattern)], gif_blip(8, 8), None).unwrap();
+        assert!(matches!(
+            &model.elements[0],
+            SlideElement::Shape(shape) if matches!(
+                &shape.fill,
+                Some(Fill::Image { image_path, .. }) if image_path == "legacy-ppt/image/1"
+            )
+        ));
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Approximated,
+                "PowerPoint pattern fill on a flipped shape is not projected"
+            )]
+        );
         // A rotated pattern shape keeps the unrotated tile (rotWithShape 0).
         let rotated = [pattern.to_vec(), vec![(0x0004, 180 << 16)]].concat();
         let model = project(1, 0x200, vec![properties(&rotated)], gif_blip(10, 10), None).unwrap();

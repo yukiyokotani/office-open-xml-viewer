@@ -13,6 +13,7 @@ const MAX_DIRECT_DOC_MODEL_BYTES: usize = 256 * 1024 * 1024;
 #[wasm_bindgen]
 pub struct LegacyDocDocument {
     cursor: DirectCursor,
+    markdown: MarkdownSource,
 }
 
 #[wasm_bindgen]
@@ -37,6 +38,7 @@ impl LegacyDocDocument {
         let result = doc::direct_model(&cfb, maximum).map_err(|e| error(&e))?;
         Ok(Self {
             cursor: DirectCursor::new(result).map_err(|e| error(&e))?,
+            markdown: MarkdownSource::retain(data, maximum),
         })
     }
     pub fn open_document_cursor(
@@ -109,6 +111,43 @@ impl LegacyDocDocument {
             .map(str::to_owned)
             .map_err(string_error)
     }
+    /// GitHub-flavoured Markdown of the document, independent of the pull
+    /// cursor's streaming state: the `to_markdown` model source capability
+    /// the DOCX worker checks for.
+    pub fn to_markdown(&self) -> Result<String, JsValue> {
+        self.markdown.project().map_err(string_error)
+    }
+}
+
+/// The source bytes `to_markdown` projects from. The pull cursor consumes the
+/// projected model while streaming, so the Markdown projection reads the
+/// source again, as `DocxArchive::to_markdown` re-reads its retained package.
+///
+/// The CFB and model budgets do not count the input's own length (a small
+/// document can sit in a large compound file), so retention has its own
+/// bound: the copy is kept only while it fits the model byte budget the
+/// document was opened with. A longer source still loads and renders; only
+/// its Markdown projection is a resource-limit rejection. A projection holds
+/// a second model, under that same budget, for the duration of the call.
+struct MarkdownSource {
+    bytes: Option<Vec<u8>>,
+    max_model_bytes: usize,
+}
+
+impl MarkdownSource {
+    fn retain(data: Vec<u8>, max_model_bytes: usize) -> Self {
+        Self {
+            bytes: (data.len() <= max_model_bytes).then_some(data),
+            max_model_bytes,
+        }
+    }
+
+    fn project(&self) -> Result<String, String> {
+        let bytes = self.bytes.as_deref().ok_or_else(|| {
+            crate::rejection::resource("DOC source exceeds the Markdown retention budget")
+        })?;
+        doc::direct_markdown(bytes, self.max_model_bytes)
+    }
 }
 
 fn string_error(error: String) -> JsValue {
@@ -116,4 +155,23 @@ fn string_error(error: String) -> JsValue {
 }
 fn error(error: &str) -> JsValue {
     JsValue::from_str(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MarkdownSource;
+
+    #[test]
+    fn markdown_source_is_retained_only_within_the_model_byte_budget() {
+        // Within the budget the bytes are read (and here refused as no DOC).
+        let kept = MarkdownSource::retain(vec![0; 16], 16);
+        assert!(kept.project().unwrap_err().starts_with("UNSUPPORTED:"));
+        // Beyond it nothing is kept, and the projection says why.
+        let dropped = MarkdownSource::retain(vec![0; 16], 15);
+        assert!(dropped.bytes.is_none());
+        assert_eq!(
+            dropped.project().unwrap_err(),
+            "LEGACY_RESOURCE_LIMIT:DOC source exceeds the Markdown retention budget"
+        );
+    }
 }
