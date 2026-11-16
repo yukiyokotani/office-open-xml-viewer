@@ -309,7 +309,7 @@ fn read_documents(
         budget::tick(1)?;
         marker_kinds.insert(
             name.to_string(),
-            (crate::odf_props::marker_kind(d), view_box),
+            (crate::odf_props::marker_kind(d)?, view_box),
         );
     }
     let mut context = Context {

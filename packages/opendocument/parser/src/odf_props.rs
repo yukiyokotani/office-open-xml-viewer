@@ -654,9 +654,10 @@ type Outline = (bool, bool, Vec<(f64, f64)>);
 /// The corners of a marker outline (§16.42.8 `draw:marker` `svg:d`, SVG
 /// path data): whether it holds a curve or an arc, whether it is closed, and
 /// the end points of its moves and straight segments (a point repeating the
-/// first or the previous one is named once). `None` when the data cannot
-/// be read.
-fn marker_outline(d: &str) -> Option<Outline> {
+/// first or the previous one is named once). `Ok(None)` when the data
+/// cannot be read; an error past [`MAX_MARKER_COMMANDS`] commands or the
+/// read's work budget.
+fn marker_outline(d: &str) -> Result<Option<Outline>, String> {
     let bytes = d.as_bytes();
     let mut at = 0;
     let skip = |at: &mut usize| {
@@ -680,7 +681,13 @@ fn marker_outline(d: &str) -> Option<Outline> {
         let value = scan_number(bytes, at)?;
         Some(if negative { -value } else { value })
     };
+    // A flag of an arc (`0` or `1`), which may abut what follows it.
+    let flag = |at: &mut usize| -> Option<()> {
+        skip(at);
+        matches!(bytes.get(*at), Some(b'0' | b'1')).then(|| *at += 1)
+    };
     let (mut curved, mut closed) = (false, false);
+    let mut commands = 0usize;
     let mut corners: Vec<(f64, f64)> = Vec::new();
     let (mut x, mut y, mut start) = (0.0f64, 0.0f64, (0.0f64, 0.0f64));
     let mut command = 0u8;
@@ -689,6 +696,11 @@ fn marker_outline(d: &str) -> Option<Outline> {
         let Some(&byte) = bytes.get(at) else {
             break;
         };
+        commands += 1;
+        if commands > MAX_MARKER_COMMANDS {
+            return Err(crate::error::resource("marker geometry"));
+        }
+        crate::budget::tick(1)?;
         if byte.is_ascii_alphabetic() {
             command = byte;
             at += 1;
@@ -698,13 +710,16 @@ fn marker_outline(d: &str) -> Option<Outline> {
                 continue;
             }
         } else if command == 0 || matches!(command, b'Z' | b'z') {
-            return None;
+            return Ok(None);
         }
         let relative = command.is_ascii_lowercase();
         let (bx, by) = if relative { (x, y) } else { (0.0, 0.0) };
         match command.to_ascii_uppercase() {
             b'M' | b'L' => {
-                let (nx, ny) = (bx + number(&mut at)?, by + number(&mut at)?);
+                let (Some(dx), Some(dy)) = (number(&mut at), number(&mut at)) else {
+                    return Ok(None);
+                };
+                let (nx, ny) = (bx + dx, by + dy);
                 (x, y) = (nx, ny);
                 if command.eq_ignore_ascii_case(&b'M') {
                     start = (x, y);
@@ -712,21 +727,50 @@ fn marker_outline(d: &str) -> Option<Outline> {
                     command = if relative { b'l' } else { b'L' };
                 }
             }
-            b'H' => x = bx + number(&mut at)?,
-            b'V' => y = by + number(&mut at)?,
+            b'H' => match number(&mut at) {
+                Some(v) => x = bx + v,
+                None => return Ok(None),
+            },
+            b'V' => match number(&mut at) {
+                Some(v) => y = by + v,
+                None => return Ok(None),
+            },
+            b'A' => {
+                // SVG 1.1 F.6.2: an arc with a zero radius is a straight
+                // line to its end; one ending where it starts is omitted.
+                let arc = (|| {
+                    let (rx, ry, _) = (number(&mut at)?, number(&mut at)?, number(&mut at)?);
+                    flag(&mut at)?;
+                    flag(&mut at)?;
+                    Some((rx, ry, number(&mut at)?, number(&mut at)?))
+                })();
+                let Some((rx, ry, ex, ey)) = arc else {
+                    return Ok(None);
+                };
+                let (nx, ny) = (bx + ex, by + ey);
+                if (nx, ny) == (x, y) {
+                    continue;
+                }
+                (x, y) = (nx, ny);
+                if rx != 0.0 && ry != 0.0 {
+                    curved = true;
+                    continue;
+                }
+            }
             other => {
                 // Curves and arcs: the outline is curved.
                 let count = match other {
                     b'C' => 6,
                     b'S' | b'Q' => 4,
                     b'T' => 2,
-                    b'A' => 7,
-                    _ => return None,
+                    _ => return Ok(None),
                 };
                 curved = true;
                 let mut last = (0.0, 0.0);
                 for i in 0..count {
-                    let v = number(&mut at)?;
+                    let Some(v) = number(&mut at) else {
+                        return Ok(None);
+                    };
                     if i == count - 2 {
                         last.0 = v;
                     } else if i == count - 1 {
@@ -741,8 +785,12 @@ fn marker_outline(d: &str) -> Option<Outline> {
             corners.push((x, y));
         }
     }
-    (!corners.is_empty() || curved).then_some((curved, closed, corners))
+    Ok((!corners.is_empty() || curved).then_some((curved, closed, corners)))
 }
+
+/// The most commands a marker outline is read for (the bound of the
+/// spreadsheet reader's shape paths).
+const MAX_MARKER_COMMANDS: usize = 200_000;
 
 /// The DrawingML line end (ST_LineEndType) a marker's geometry (§16.42.8
 /// `svg:d`) is nearest to, whatever the marker is named: a curved outline
@@ -753,12 +801,12 @@ fn marker_outline(d: &str) -> Option<Outline> {
 /// that is not convex (LibreOffice's `msArrowOpenEnd`, a chevron with a
 /// stub of the line), an open arrow. Data that cannot be read is a
 /// triangle, LibreOffice's plain arrow.
-pub fn marker_kind(d: &str) -> &'static str {
-    let Some((curved, closed, corners)) = marker_outline(d) else {
-        return "triangle";
+pub fn marker_kind(d: &str) -> Result<&'static str, String> {
+    let Some((curved, closed, corners)) = marker_outline(d)? else {
+        return Ok("triangle");
     };
     if curved {
-        return "oval";
+        return Ok("oval");
     }
     let bounds = |pick: fn(&(f64, f64)) -> f64| {
         corners
@@ -789,7 +837,7 @@ pub fn marker_kind(d: &str) -> &'static str {
             }
         })
     };
-    if corners.len() > 8 && convex {
+    Ok(if corners.len() > 8 && convex {
         "oval"
     } else if !closed || corners.len() > 8 {
         "arrow"
@@ -799,7 +847,7 @@ pub fn marker_kind(d: &str) -> &'static str {
             4 => "diamond",
             _ => "triangle",
         }
-    }
+    })
 }
 
 /// The width of a line end whose style names a marker but no
@@ -840,10 +888,12 @@ pub fn line_end_size(
         .map_or(1.0, |v| v.3 / v.2);
     let open = if kind == "arrow" { 0.5 } else { 0.0 };
     let step = |size: f64| {
+        if !(size.is_finite() && size > 0.0) {
+            return "med";
+        }
+        // A marker smaller than the smallest step is that step.
         let ratio = size / e - open;
-        if !ratio.is_finite() || ratio <= 0.0 {
-            "med"
-        } else if ratio < 6f64.sqrt() {
+        if ratio < 6f64.sqrt() {
             "sm"
         } else if ratio < 15f64.sqrt() {
             "med"
@@ -1053,13 +1103,26 @@ mod tests {
             ("M 0,20 10,0 20,20 Z", "triangle"),
             ("M0 0c10 0 20 10 20 20s-10 20-20 20z", "oval"),
             ("M0 0a5 5 0 1 1 10 0z", "oval"),
+            // Arc flags may abut each other and the end point.
+            ("M0 0a5 5 0 1110 0z", "oval"),
+            ("M0 0a5 5 0 11 10 0z", "oval"),
+            // A zero radius is a straight line; an arc to its start is
+            // omitted.
+            ("M0 0L10 0A0 5 0 0 0 10 10L0 10z", "diamond"),
+            ("M0 0L10 0a5 5 0 0 0 0 0L5 10z", "triangle"),
             ("M0 0l10 20 20-20", "arrow"),
             ("", "triangle"),
             ("M0", "triangle"),
             ("garbage", "triangle"),
         ] {
-            assert_eq!(marker_kind(d), kind, "{d}");
+            assert_eq!(marker_kind(d).unwrap(), kind, "{d}");
         }
+    }
+
+    #[test]
+    fn marker_outlines_are_bounded() {
+        let long = format!("M0 0{}z", "l1 1".repeat(MAX_MARKER_COMMANDS));
+        assert!(marker_kind(&long).is_err());
     }
 
     #[test]
@@ -1099,6 +1162,9 @@ mod tests {
             line_end_size("triangle", 0.4 * cm, Some((0.0, 0.0, 20.0, 30.0)), 0.1 * cm),
             ("lg", "lg")
         );
+        // A marker below the smallest step is that step.
+        assert_eq!(line_end_size("arrow", 0.1, None, 0.5), ("sm", "sm"));
+        assert_eq!(line_end_size("triangle", 0.1, None, 0.5), ("sm", "sm"));
         // Unusable sizes are the middle step.
         assert_eq!(line_end_size("triangle", 0.0, None, 1.0), ("med", "med"));
         assert_eq!(

@@ -1409,8 +1409,10 @@ impl<'a> Reader<'a> {
             };
             let (kind, view_box) = match self.definition("marker", name)? {
                 Some(node) => (
-                    node.attribute((NS_SVG, "d"))
-                        .map_or("triangle", crate::odf_props::marker_kind),
+                    match node.attribute((NS_SVG, "d")) {
+                        Some(d) => crate::odf_props::marker_kind(d)?,
+                        None => "triangle",
+                    },
                     node.attribute((NS_SVG, "viewBox"))
                         .and_then(crate::odf_props::view_box),
                 ),
