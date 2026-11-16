@@ -74,7 +74,13 @@ fn extract(bytes: &[u8], work: &mut usize, mut remaining: usize) -> Result<Vec<M
     for (index, entry) in entries.into_iter().enumerate() {
         // XLS global BStore data is inline. A delayed reference must never be
         // reinterpreted as a workbook offset, pathname or external request.
-        if let Some(image) = raster::read_store_entry(entry, None, work, remaining)? {
+        if let Some(image) = raster::read_store_entry_as(
+            entry,
+            None,
+            work,
+            remaining,
+            raster::Raster::ExcelAdvertised,
+        )? {
             remaining = remaining
                 .checked_sub(image.bytes.len())
                 .ok_or_else(|| crate::rejection::resource("BIFF retained image budget exceeded"))?;
@@ -176,6 +182,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inspection_reads_jpeg_frames_of_every_encoding_as_excel_does() {
+        let lossless = [0xff, 0xd8, 0xff, 0xc3, 0, 11, 8, 0, 3, 0, 2, 1, 1, 0x11, 0];
+        let group = |jpeg: &[u8]| {
+            let blip = art(0xf01d, 0x46a0, &[&[0; 17][..], jpeg].concat());
+            art(0xf000, 15, &art(0xf001, 0x1f, &blip))
+        };
+        let bytes = group(&lossless);
+        crate::rejection::take_best_effort();
+        assert_eq!(
+            extract(&bytes, &mut 1_000, usize::MAX).unwrap(),
+            vec![(1, "jpg", lossless.to_vec())]
+        );
+        let records = [
+            record(BOF, &[0, 6, 5, 0]),
+            record(0xeb, &bytes),
+            record(EOF, &[]),
+        ];
+        assert_eq!(
+            selected(
+                &records,
+                &std::collections::BTreeSet::from([1]),
+                raster::Raster::ExcelAdvertised
+            )
+            .unwrap(),
+            vec![(1, "jpg", lossless.to_vec())]
+        );
+        let note = (
+            crate::rejection::BestEffort::Approximated,
+            "unsupported OfficeArt JPEG frame encoding",
+        );
+        assert_eq!(crate::rejection::take_best_effort(), [note, note]);
+        // A malformed first frame header is not skipped for a later frame.
+        let short = [&[0xff, 0xd8, 0xff, 0xc3, 0, 2][..], &lossless[2..]].concat();
+        assert!(extract(&group(&short), &mut 1_000, usize::MAX)
+            .unwrap_err()
+            .contains("invalid OfficeArt JPEG frame header"));
+    }
+
+    #[test]
     fn selected_references_are_deduplicated_and_unused_invalid_blips_are_not_decoded() {
         let good = art(0xf01e, 0x6e00, &[vec![0; 17], png()].concat());
         let invalid = art(0xf01a, 0x3d40, &[]);
@@ -187,34 +232,34 @@ mod tests {
         ];
         let selected_once = std::collections::BTreeSet::from([1, 1]);
         assert_eq!(
-            selected(&records, &selected_once, raster::Raster::Advertised).unwrap(),
+            selected(&records, &selected_once, raster::Raster::ExcelAdvertised).unwrap(),
             vec![(1, "png", png())]
         );
         assert!(selected(
             &records,
             &std::collections::BTreeSet::from([2]),
-            raster::Raster::Advertised
+            raster::Raster::ExcelAdvertised
         )
         .is_err());
         for index in [0, 3, u32::MAX] {
             assert!(selected(
                 &records,
                 &std::collections::BTreeSet::from([index]),
-                raster::Raster::Advertised
+                raster::Raster::ExcelAdvertised
             )
             .is_err());
         }
         assert!(selected(
             &records,
             &std::collections::BTreeSet::new(),
-            raster::Raster::Advertised
+            raster::Raster::ExcelAdvertised
         )
         .unwrap()
         .is_empty());
         assert!(selected(
             &[record(BOF, &[0, 6, 5, 0]), record(EOF, &[])],
             &selected_once,
-            raster::Raster::Advertised
+            raster::Raster::ExcelAdvertised
         )
         .is_err());
     }

@@ -107,7 +107,7 @@ pub(crate) fn inspect_pictures(
     let images = drawing_media::selected(
         &records,
         &indices,
-        crate::officeart::raster::Raster::Advertised,
+        crate::officeart::raster::Raster::ExcelAdvertised,
     )?;
     let supported: HashSet<u32> = images.iter().map(|i| i.0).collect();
     anchors.retain(|a| {

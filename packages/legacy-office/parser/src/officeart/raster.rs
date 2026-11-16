@@ -9,7 +9,7 @@ use std::ops::Range;
 
 /// Resolve only in-stream BLIPs. `delayed` is the format-defined binary stream,
 /// never a file path; DOC inline shapes do not supply a delayed store.
-#[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+#[cfg(test)]
 pub(crate) fn read_store_entry<'a>(
     entry: Record<'a>,
     delayed: Option<&'a [u8]>,
@@ -27,7 +27,7 @@ pub(crate) fn read_store_entry<'a>(
 /// evidence for TIFF in PowerPoint.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Raster {
-    #[cfg(any(test, feature = "direct-doc", feature = "inspection"))]
+    #[cfg(any(test, feature = "direct-doc"))]
     Advertised,
     // Chosen only by the direct DOC reader.
     #[cfg_attr(not(any(test, feature = "direct-doc")), allow(dead_code))]
@@ -41,6 +41,23 @@ pub(crate) enum Raster {
     /// and JPEG data of every frame encoding (see `decode`). Chosen only by
     /// the XLS reader.
     ExcelMetafiles,
+    /// Advertised raster encodings with Excel's JPEG reading but without the
+    /// GDI+ metafile layout: the native XLS image inspection.
+    #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+    ExcelAdvertised,
+}
+
+impl Raster {
+    /// Whether JPEG data of every frame encoding is read as Excel reads it
+    /// (see `decode`).
+    fn excel_jpeg(self) -> bool {
+        match self {
+            Raster::ExcelMetafiles => true,
+            #[cfg(any(test, all(feature = "inspection", not(target_arch = "wasm32"))))]
+            Raster::ExcelAdvertised => true,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
@@ -403,7 +420,7 @@ fn decode(
         // it does for the same picture in an OOXML package: an undecodable
         // one keeps its bytes for the host to draw or to replace with its
         // own placeholder.
-        "jpg" if raster == Raster::ExcelMetafiles => {
+        "jpg" if raster.excel_jpeg() => {
             let (size, undecoded) = jpeg_frame(bytes, budget, JpegFrames::AnyEncoding)?;
             if undecoded.is_some() {
                 crate::rejection::approximated("unsupported OfficeArt JPEG frame encoding", ());
@@ -1071,18 +1088,20 @@ mod tests {
         for (marker, precision) in [(0xc3, 8), (0xc9, 8), (0xc1, 12), (0xde, 8)] {
             let bytes = blip(&frame(marker, precision));
             let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
-            let image = read_as(record, &mut 100, usize::MAX, Raster::ExcelMetafiles)
-                .unwrap()
-                .unwrap();
-            assert_eq!(image.extension, "jpg");
-            assert_eq!(image.bytes.as_ref(), &bytes[8 + 17..]);
-            assert_eq!(
-                crate::rejection::take_best_effort(),
-                [(
-                    crate::rejection::BestEffort::Approximated,
-                    "unsupported OfficeArt JPEG frame encoding"
-                )]
-            );
+            for raster in [Raster::ExcelMetafiles, Raster::ExcelAdvertised] {
+                let image = read_as(record, &mut 100, usize::MAX, raster)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(image.extension, "jpg");
+                assert_eq!(image.bytes.as_ref(), &bytes[8 + 17..]);
+                assert_eq!(
+                    crate::rejection::take_best_effort(),
+                    [(
+                        crate::rejection::BestEffort::Approximated,
+                        "unsupported OfficeArt JPEG frame encoding"
+                    )]
+                );
+            }
             assert!(read_as(record, &mut 100, usize::MAX, Raster::Advertised).is_err());
             assert!(crate::rejection::take_best_effort().is_empty());
         }
@@ -1091,10 +1110,10 @@ mod tests {
         for marker in [0xc3, 0xde] {
             let bytes = blip(&[&[0xff, marker, 0, 2][..], &frame(0xc0, 8)].concat());
             let (record, _) = crate::officeart::record_with_end(&bytes, 0, &mut 10, "t").unwrap();
-            let error = read_as(record, &mut 100, usize::MAX, Raster::ExcelMetafiles)
-                .err()
-                .unwrap();
-            assert!(error.contains("invalid OfficeArt JPEG frame header"));
+            for raster in [Raster::ExcelMetafiles, Raster::ExcelAdvertised] {
+                let error = read_as(record, &mut 100, usize::MAX, raster).err().unwrap();
+                assert!(error.contains("invalid OfficeArt JPEG frame header"));
+            }
             assert!(read_as(record, &mut 100, usize::MAX, Raster::Advertised).is_err());
         }
     }
