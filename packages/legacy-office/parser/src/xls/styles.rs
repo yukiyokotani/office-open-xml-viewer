@@ -362,6 +362,17 @@ impl ResolvedStyleSheet {
             .ok_or_else(|| unsupported("BIFF rich-text font index out of range"))
     }
 
+    /// The model font of a phonetic string's FontIndex (MS-XLS 2.5.201 Phs
+    /// ifnt). ECMA-376 18.4.3: a fontId out of bounds is font zero.
+    pub(super) fn phonetic_font(&self, index: u16) -> u32 {
+        let offset = usize::from(index - u16::from(index > 4));
+        if index != 4 && offset < self.original_font_count {
+            offset as u32
+        } else {
+            0
+        }
+    }
+
     pub(super) fn validate_run_font(&self, index: u16) -> Result<(), String> {
         self.run_font(index).map(|_| ())
     }

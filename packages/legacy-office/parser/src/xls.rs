@@ -65,6 +65,9 @@ const MACRO_SHEET: u16 = 0x0040;
 const MAX_RECORDS: usize = 2_000_000;
 const MAX_SHEETS: usize = 65_536;
 const MAX_CELLS: usize = 10_000_000;
+/// Resource policy for the PhoneticInfo ranges of one sheet. One record
+/// holds at most 1027.
+const MAX_PHONETIC_RANGES: usize = 16_384;
 
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
 pub(crate) fn inspect_images(cfb: &CompoundFile<'_>) -> Result<Vec<drawing_media::Media>, String> {
@@ -185,9 +188,10 @@ struct SheetData {
     data_validations: Vec<xlsx_model::DataValidation>,
     /// Defined names visible on this sheet.
     defined_names: Vec<xlsx_model::DefinedName>,
-    /// A cell, row or column shows phonetic guides (MS-XLS 2.4.192
-    /// PhoneticInfo sqref, ROW/COLINFO fPhonetic).
-    shows_phonetic: bool,
+    /// The cell ranges whose phonetic strings are visible (MS-XLS 2.4.192
+    /// PhoneticInfo sqref): zero-based first row, last row, first column,
+    /// last column.
+    phonetic_ranges: Vec<[u16; 4]>,
     /// FORMULA, SHRFMLA, ARRAY and TABLE records, in order.
     formula_records: tables::Records,
     /// Formula text by cell.
@@ -247,6 +251,11 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     }
 
     let styles = styles::Styles::parse(&records)?;
+    // Phonetic strings are read only for a workbook that shows one: most
+    // East Asian workbooks store them without displaying any.
+    let phonetic = records.iter().any(|record| {
+        record.kind == 0x00ef && u16_at(record.data, 4).is_ok_and(|count| count != 0)
+    });
     let mut date1904 = false;
     let mut window_count = 0;
     let mut sheets = Vec::new();
@@ -278,7 +287,7 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                     fragments.push(next.data);
                     continued += 1;
                 }
-                shared_strings = parse_sst_elements(&fragments)?;
+                shared_strings = parse_sst_elements(&fragments, phonetic)?;
                 saw_sst = true;
             }
             _ => {}
@@ -364,11 +373,6 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
             } else {
                 hyperlinks::tooltip(record)?;
             }
-        }
-        // Phonetic guides (ExtRst runs in the shared strings) are not
-        // projected; a sheet that displays them fails closed.
-        if data.shows_phonetic {
-            return Err(unsupported("XLS phonetic guides are not projected"));
         }
         if !data.formula_records.is_empty() {
             if conditional_theme.is_none() {
@@ -511,8 +515,8 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     // cached results, as the XLSX model does. Print areas and titles are
     // defined names; page setup, headers and footers (including 2.4.136
     // HeaderFooter) only affect printing, which neither the XLSX model nor
-    // its viewer has. Phonetic strings (ExtRst) display only in cells marked
-    // by PhoneticInfo, ROW or COLINFO, which are rejected above.
+    // its viewer has. Phonetic strings (ExtRst) display in the cells of the
+    // PhoneticInfo ranges (see `direct`).
     let mut warnings: Vec<String> = Vec::new();
     // XFExt colors, indentation and gradient fills are projected; StyleExt
     // (2.4.270) only extends the cell-style gallery entries, which cells
@@ -874,13 +878,15 @@ fn parse_bound_sheet(data: &[u8]) -> Result<BoundSheet, String> {
 
 #[cfg(test)]
 fn parse_sst(fragments: &[&[u8]]) -> Result<Vec<String>, String> {
-    Ok(parse_sst_elements(fragments)?
+    Ok(parse_sst_elements(fragments, false)?
         .into_iter()
         .map(|s| s.text)
         .collect())
 }
 
-fn parse_sst_elements(fragments: &[&[u8]]) -> Result<Vec<rich::Text>, String> {
+/// `phonetic` reads each string's ExtRst (its phonetic string); otherwise
+/// that data is passed over.
+fn parse_sst_elements(fragments: &[&[u8]], phonetic: bool) -> Result<Vec<rich::Text>, String> {
     let total_bytes = fragments.iter().try_fold(0usize, |total, fragment| {
         total
             .checked_add(fragment.len())
@@ -958,8 +964,18 @@ fn parse_sst_elements(fragments: &[&[u8]]) -> Result<Vec<rich::Text>, String> {
             let bytes = cursor.read_variable_four()?;
             runs.push((u16_at(&bytes, 0)?, u16_at(&bytes, 2)?));
         }
-        cursor.skip_variable(ext_size)?;
         let value = rich::Text::new(&units, &runs)?;
+        let value = if phonetic && ext_size != 0 {
+            // The extension is part of the SST the fragments hold, which
+            // bounds this buffer.
+            if ext_size > total_bytes {
+                return Err(unsupported("truncated BIFF rich or extended string data"));
+            }
+            value.with_phonetic(&units, &cursor.read_variable(ext_size)?)
+        } else {
+            cursor.skip_variable(ext_size)?;
+            value
+        };
         retention_budget = retention_budget
             .checked_sub(value.retained_bytes()?)
             .ok_or_else(|| {
@@ -1068,6 +1084,24 @@ impl<'a, 'b> SstCursor<'a, 'b> {
             *byte = self.read_fixed(1, "truncated BIFF format run")?[0];
         }
         Ok(result)
+    }
+
+    /// The next `remaining` bytes of a variable field, which may cross
+    /// CONTINUE records without a compression flag.
+    fn read_variable(&mut self, mut remaining: usize) -> Result<Vec<u8>, String> {
+        let mut output = Vec::with_capacity(remaining);
+        while remaining > 0 {
+            self.advance_empty_fragments();
+            let fragment = self
+                .fragments
+                .get(self.fragment)
+                .ok_or_else(|| unsupported("truncated BIFF rich or extended string data"))?;
+            let take = remaining.min(fragment.len() - self.offset);
+            output.extend_from_slice(&fragment[self.offset..self.offset + take]);
+            self.offset += take;
+            remaining -= take;
+        }
+        Ok(output)
     }
 
     fn skip_variable(&mut self, mut remaining: usize) -> Result<(), String> {
@@ -1381,9 +1415,32 @@ fn parse_sheet(
             0x009d => output.autofilter_info = Some(u16_at(record.data, 0)?),
             0x009b | 0x009e | 0x087e => output.autofilter_criteria = true,
             0x04bc | 0x0221 | 0x0236 => output.formula_records.push(record.kind, record.data)?,
-            0x00ef => output.shows_phonetic |= u16_at(record.data, 4)? != 0,
-            0x0208 => output.shows_phonetic |= u16_at(record.data, 14)? & 0x4000 != 0,
-            0x007d => output.shows_phonetic |= u16_at(record.data, 8)? & 0x0008 != 0,
+            // PhoneticInfo: phs (the default format of new phonetic
+            // strings), then the SqRef of the cells that show theirs. ROW and
+            // COLINFO fPhonetic only say that some cell of the row shows one
+            // and what a new cell of the column does.
+            0x00ef => {
+                let count = usize::from(u16_at(record.data, 4)?);
+                if record.data.len() != 6 + count * 8 {
+                    return Err(crate::rejection::corrupt("invalid BIFF phonetic ranges"));
+                }
+                for index in 0..count {
+                    let at = 6 + index * 8;
+                    let range = [
+                        u16_at(record.data, at)?,
+                        u16_at(record.data, at + 2)?,
+                        u16_at(record.data, at + 4)?,
+                        u16_at(record.data, at + 6)?,
+                    ];
+                    if range[0] > range[1] || range[2] > range[3] || range[3] > 255 {
+                        return Err(crate::rejection::corrupt("invalid BIFF phonetic ranges"));
+                    }
+                    if output.phonetic_ranges.len() >= MAX_PHONETIC_RANGES {
+                        return Err(crate::rejection::resource("too many BIFF phonetic ranges"));
+                    }
+                    output.phonetic_ranges.push(range);
+                }
+            }
             0x01b2 | 0x01be => output.validation_records.push(record.kind, record.data)?,
             0x0081 => output.dialog = u16_at(record.data, 0)? & 0x0010 != 0,
             0x0862 => {

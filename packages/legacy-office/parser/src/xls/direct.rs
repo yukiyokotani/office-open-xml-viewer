@@ -547,7 +547,9 @@ fn project_sheet(
         return Ok(worksheet);
     }
     reserve_model(&mut worksheet.rows, sheet.rows.len(), budget)?;
+    let mut phonetic = PhoneticRanges::new(&sheet.phonetic_ranges);
     for (&row_index, cells) in &sheet.rows {
+        phonetic.advance(row_index);
         let mut row = xlsx_model::Row {
             index: u32::from(row_index) + 1,
             height: None,
@@ -574,7 +576,9 @@ fn project_sheet(
                     }
                     None => None,
                 },
-                show_phonetic: false,
+                // ECMA-376 18.3.1.4 `c@ph`: the cell shows the phonetic
+                // string of its text.
+                show_phonetic: phonetic.shows(column),
             });
         }
         worksheet.rows.push(row);
@@ -666,6 +670,61 @@ fn project_sheet(
     sheet.geometry.project(&mut worksheet, mdw, budget)?;
     sheet.views.project(&mut worksheet);
     Ok(worksheet)
+}
+
+/// Which columns of the current row lie in a PhoneticInfo range. Rows are
+/// visited in ascending order, so each range enters and leaves once.
+struct PhoneticRanges {
+    /// Ranges by first row, and the (last row, first column, last column)
+    /// of those entered, by last row.
+    pending: Vec<[u16; 4]>,
+    next: usize,
+    active: std::collections::BinaryHeap<std::cmp::Reverse<(u16, u16, u16)>>,
+    /// Entered ranges covering each column.
+    columns: [u32; 256],
+}
+
+impl PhoneticRanges {
+    fn new(ranges: &[[u16; 4]]) -> Self {
+        let mut pending = ranges.to_vec();
+        pending.sort_unstable();
+        Self {
+            pending,
+            next: 0,
+            active: std::collections::BinaryHeap::new(),
+            columns: [0; 256],
+        }
+    }
+
+    fn advance(&mut self, row: u16) {
+        while let Some(&[first, last, left, right]) = self.pending.get(self.next) {
+            if first > row {
+                break;
+            }
+            self.next += 1;
+            if last >= row {
+                for column in left..=right.min(255) {
+                    self.columns[usize::from(column)] += 1;
+                }
+                self.active.push(std::cmp::Reverse((last, left, right)));
+            }
+        }
+        while let Some(&std::cmp::Reverse((last, left, right))) = self.active.peek() {
+            if last >= row {
+                break;
+            }
+            self.active.pop();
+            for column in left..=right.min(255) {
+                self.columns[usize::from(column)] -= 1;
+            }
+        }
+    }
+
+    fn shows(&self, column: u16) -> bool {
+        self.columns
+            .get(usize::from(column))
+            .is_some_and(|count| *count != 0)
+    }
 }
 
 fn cell_value(value: &CellValue, budget: &mut usize) -> Result<xlsx_model::CellValue, String> {
