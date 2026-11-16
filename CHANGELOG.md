@@ -5,6 +5,19 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.12 — Unreleased
+
+Compatible patch release. No migration is required.
+
+- **Excel: connectors and arrow heads:** connector shapes (`xdr:cxnSp`:
+  straight, elbow and curved connectors) are now drawn, alone or inside a
+  group, including horizontal and vertical ones whose extent is zero on one
+  axis. Line ends (`a:headEnd` / `a:tailEnd`) are drawn on connectors, line
+  shapes, callout leaders and custom-geometry lines, and the line stops at
+  the arrow head instead of running through it. A stand-alone line shape
+  with a zero extent on one axis is no longer dropped. Thanks to @tienhieuD
+  for the contribution (#2240, #2243).
+
 ## 0.89.11 — 2026-11-14
 
 Compatible patch release. No migration is required. One Word layout fix: a

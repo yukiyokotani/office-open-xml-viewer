@@ -34,7 +34,7 @@ import type {
 import { blipEffectsMayExtendCoverage, blipPixelEffectsKey, imageEffectFrame, stretchedSourceFrame, type BlipEffect, type BlipPixelEffects } from '@silurus/ooxml-core';
 import { usesPathShade, trackPaintPath, currentStrokeBounds, chartImageFillStoreLookup, paintOptionalImagePlaceholder, pathFillModeOverlay, withDrawingMLShapeTransform, buildPresetGeometryFillPath } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, cachedTintedMathRaster, classifyCjkFont, classifyFontGeneric, googleCjkFontAlias, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, isCjkBreakChar, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, cachedTintedMathRaster, classifyCjkFont, classifyFontGeneric, googleCjkFontAlias, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, isCjkBreakChar, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, getConnectorAnchors, getCustGeomEndpoints, lineEndRetract, traceTrimmedPath, planPresetLeader, tracePlannedPresetLeader, drawPresetLineEndArrows, EMU_PER_PT, type LineEndAnchors, type PathCmd as CorePathCmd, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import {
   canvasShapeFontBoxProbe, excelShapeSpacing, officeRequestKey, shapeOfficeRouteKey, shapeRunLineRatios,
   type ShapeRunLineRatios,
@@ -4601,7 +4601,10 @@ function renderShapeGroups(
     const { x: x1, y: y1, width: w, height: h } = resolveWorksheetAnchorRect(
       ws, anchor, colAxis, rowAxis, cs,
     );
-    if (w <= 0 || h <= 0) continue;
+    // A box without area along one edge is a horizontal or vertical line
+    // (its stroke is all there is to draw); one without any extent, or with
+    // a negative one, is nothing.
+    if (!(w >= 0 && h >= 0 && (w > 0 || h > 0))) continue;
 
     const logicalCanvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
     const canvasX = sheetAnchoredRectX(logicalCanvasX, w, canvasW, rtl);
@@ -4619,7 +4622,10 @@ function renderShapeGroups(
       const sy = canvasY + shape.y * h;
       const sw = shape.w * w;
       const sh = shape.h * h;
-      if (sw <= 0 || sh <= 0) continue;
+      if (!(sw >= 0 && sh >= 0 && (sw > 0 || sh > 0))) continue;
+      // Only a stroked line (preset or custom geometry) is drawn without area.
+      if ((sw === 0 || sh === 0)
+        && !((shape.geom?.type === 'preset' || shape.geom?.type === 'custom') && shape.strokeColor && shape.strokeWidth > 0)) continue;
       drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages, cjkFallback, anchor);
     }
   }
@@ -4630,7 +4636,7 @@ function renderShapeGroups(
 // XLSX custom coordinates remain path-local until this format boundary.
 // Both ordinary painting and gradient outlines use the same arc/Bezier rules.
 function appendSpreadsheetCustomPath(
-  ctx: CanvasRenderingContext2D, path: PathInfo,
+  ctx: PathSink, path: PathInfo,
   x: number, y: number, w: number, h: number,
 ): void {
   if (path.w <= 0 || path.h <= 0) return;
@@ -4707,6 +4713,45 @@ function appendSpreadsheetShapeOutline(
   }
 }
 
+type PathSink = Parameters<typeof traceTrimmedPath>[0];
+
+/** Split a command list into subpaths, each starting at its `moveTo`. */
+function splitSubpaths(commands: CorePathCmd[]): CorePathCmd[][] {
+  const out: CorePathCmd[][] = [];
+  for (const cmd of commands) {
+    if (cmd.cmd === 'moveTo' || out.length === 0) out.push([]);
+    out[out.length - 1].push(cmd);
+  }
+  return out;
+}
+
+const decoratedEnd = (end: Stroke['headEnd']): boolean => !!end && end.type !== 'none';
+
+/** Head / tail anchors of custom-geometry paths drawn into (0,0)-(w,h): the
+ *  shared core endpoint rule, fed with the subpaths of every path (split at
+ *  each `moveTo`, so a closed subpath does not hide an open one's end),
+ *  normalized to their path's own coordinate box (arc angles in degrees). */
+function customLineEndAnchors(paths: readonly PathInfo[], w: number, h: number): LineEndAnchors | null {
+  if (paths.length === 0) return null;
+  const normalized = paths.flatMap(path => splitSubpaths(path.commands.map((cmd): CorePathCmd => {
+    const nx = (v: number) => v / path.w, ny = (v: number) => v / path.h;
+    switch (cmd.op) {
+      case 'moveTo': case 'lineTo': return { cmd: cmd.op, x: nx(cmd.x), y: ny(cmd.y) };
+      case 'cubicBezTo': return { cmd: 'cubicBezTo', x1: nx(cmd.x1), y1: ny(cmd.y1), x2: nx(cmd.x2), y2: ny(cmd.y2), x: nx(cmd.x3), y: ny(cmd.y3) };
+      case 'quadBezTo': return { cmd: 'quadBezTo', x1: nx(cmd.x1), y1: ny(cmd.y1), x: nx(cmd.x2), y: ny(cmd.y2) };
+      case 'arcTo': return { cmd: 'arcTo', wr: nx(cmd.wr), hr: ny(cmd.hr), stAng: cmd.stAng / 60000, swAng: cmd.swAng / 60000 };
+      case 'close': return { cmd: 'close' };
+    }
+  })));
+  const ends = getCustGeomEndpoints(normalized);
+  // A decoration belongs to its line: a path with `stroke="0"` (§20.1.9.15)
+  // draws no line, so its end takes no decoration either.
+  const start = paths[0].stroke === false ? null : ends.start;
+  const end = paths[paths.length - 1].stroke === false ? null : ends.end;
+  const anchor = (p: typeof start) => p && { x: p.x * w, y: p.y * h, angle: Math.atan2(p.dy * h, p.dx * w) };
+  return start || end ? { start: anchor(start), end: anchor(end) } : null;
+}
+
 function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapeInfo,
@@ -4729,8 +4774,17 @@ function drawShape(
 
   if (shape.geom.type === 'custom') {
     const fill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs);
-    for (const path of shape.geom.paths) {
-      if (path.w <= 0 || path.h <= 0) continue;
+    const paths = shape.geom.paths.filter(path => path.w > 0 && path.h > 0);
+    // ECMA-376 §20.1.8.38 / §20.1.8.57: a custom-geometry line (an
+    // `xdr:cxnSp` / `xdr:sp` with `a:custGeom`) takes its head on the first
+    // path's open start and its tail on the last path's open end; those paths
+    // stop where the decoration starts, as for the preset leaders.
+    const stroke = shapeStroke(shape);
+    const lineEnds = stroke && (decoratedEnd(stroke.headEnd) || decoratedEnd(stroke.tailEnd))
+      ? customLineEndAnchors(paths, sw, sh) : null;
+    const headTrim = lineEnds?.start && stroke?.headEnd ? lineEndRetract(stroke.headEnd, stroke, 1 / EMU_PER_PX, EMU_PER_PT) : 0;
+    const tailTrim = lineEnds?.end && stroke?.tailEnd ? lineEndRetract(stroke.tailEnd, stroke, 1 / EMU_PER_PX, EMU_PER_PT) : 0;
+    paths.forEach((path, index) => {
       ctx.beginPath();
       appendSpreadsheetCustomPath(ctx, path, 0, 0, sw, sh);
       // ECMA-376 §20.1.9.15: each custom path carries its own fill mode and
@@ -4744,7 +4798,19 @@ function drawShape(
           ctx.fill();
         }
       }
-      if (path.stroke !== false) strokeShapePath(ctx, shape, sw, sh, cs);
+      if (path.stroke === false) return;
+      const head = index === 0 ? headTrim : 0;
+      const tail = index === paths.length - 1 ? tailTrim : 0;
+      if (head > 0 || tail > 0) {
+        ctx.beginPath();
+        traceTrimmedPath(ctx, sink => appendSpreadsheetCustomPath(sink, path, 0, 0, sw, sh), head, tail);
+      }
+      strokeShapePath(ctx, shape, sw, sh, cs);
+    });
+    if (lineEnds && stroke) {
+      drawPresetLineEndArrows(ctx, lineEnds, stroke, 1 / EMU_PER_PX, EMU_PER_PT,
+        { x: 0, y: 0, w: sw, h: sh }, shape.rot, PT_TO_PX * cs,
+        { hostFrame: true, patternCoordinateTransform: axisAlignedPatternTransform(shape, sw, sh) });
     }
   } else if (shape.geom.type === 'preset') {
     // Drive the shape off the ECMA-376 §20.1.9 spec-driven preset engine
@@ -4757,6 +4823,17 @@ function drawShape(
     const applyAndStroke = shape.strokeColor && shape.strokeWidth > 0
       ? () => strokeShapePath(ctx, shape, sw, sh, cs)
       : null;
+    // ECMA-376 §20.1.8.38 / §20.1.8.57 `a:headEnd` / `a:tailEnd` on a
+    // connector or callout leader (an `xdr:cxnSp` or a line `xdr:sp`): the
+    // shared core policy decides whether the leader is re-stroked trimmed at
+    // the decorated ends, in which case the preset engine must not stroke the
+    // full-length leader underneath.
+    const stroke = shapeStroke(shape);
+    const geomName = shape.geom.name.toLowerCase();
+    const leader = planPresetLeader(geomName, stroke, 1 / EMU_PER_PX, EMU_PER_PT);
+    const lineEnds = leader?.decorated ? leader : null;
+    const skipTrailingStroke = lineEnds?.restroke != null;
+    const adj = shape.geom.adj ?? [];
     const drawn = renderPresetShape(
       ctx,
       shape.geom.name,
@@ -4764,13 +4841,30 @@ function drawShape(
       0,
       sw,
       sh,
-      shape.geom.adj ?? [],
+      adj,
       baseFill,
       applyAndStroke,
       // xlsx shapes carry no drop shadow on the body, so there's nothing to
       // clear between the engine's fill and stroke passes.
       () => {},
+      skipTrailingStroke ? { skipTrailingStroke: true } : undefined,
     );
+    if (drawn && lineEnds && stroke) {
+      const anchors = getConnectorAnchors(geomName, 0, 0, sw, sh, adj);
+      if (anchors) {
+        // The trimmed leader goes through the body's stroke host, so a
+        // gradient / pattern `a:ln` resolves against the leader's own coverage.
+        ctx.beginPath();
+        if (tracePlannedPresetLeader(ctx, lineEnds, geomName, anchors, 0, 0, sw, sh, adj)) {
+          strokeShapePath(ctx, shape, sw, sh, cs);
+        }
+        // Gradient / pattern decorations continue the leader's brush: the
+        // same shade frame, pattern transform and host CTM as strokeShapePath.
+        drawPresetLineEndArrows(ctx, anchors, stroke, 1 / EMU_PER_PX, EMU_PER_PT,
+          { x: 0, y: 0, w: sw, h: sh }, shape.rot, PT_TO_PX * cs,
+          { hostFrame: true, patternCoordinateTransform: axisAlignedPatternTransform(shape, sw, sh) });
+      }
+    }
     if (!drawn) {
       ctx.beginPath();
       ctx.rect(0, 0, sw, sh);
