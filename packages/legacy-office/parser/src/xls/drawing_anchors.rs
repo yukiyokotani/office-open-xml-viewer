@@ -237,6 +237,11 @@ pub(super) fn chart_sheet_charts(
             spend(&mut work)?;
             let (record, next) =
                 record_with_end(&drawing.bytes[..end], at, &mut work, "XLS drawing")?;
+            if matches!(record.kind, 0xf003 | 0xf004)
+                && (record.version != 15 || record.instance != 0)
+            {
+                return Err(unsupported("invalid BIFF shape container"));
+            }
             match record.kind {
                 0xf003 => stack.push((at + 8, next, depth + 1)),
                 0xf004 => {
