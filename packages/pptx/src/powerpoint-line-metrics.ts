@@ -74,9 +74,7 @@ export function powerPointAscentShare(
  * Light" is weight 300; a bold run synthesizes bold on that face). Acquisition,
  * presence keys and metric lookup share this tuple so an installed named cut is
  * probed and recognized under the same weight. Uncatalogued names keep the
- * requested weight (they have no catalog geometry either way). Graphs without
- * the catalogue use the equivalent generated-index form,
- * `indexedOfficeFaceWeight` (office-face-weight.ts).
+ * requested weight (they have no catalog geometry either way).
  */
 export const officeFaceWeight: OfficeFaceWeight = (family, bold, italic) => {
   const requested = bold ? 700 : 400;

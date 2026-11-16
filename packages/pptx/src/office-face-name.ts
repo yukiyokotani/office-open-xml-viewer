@@ -17,7 +17,6 @@ export function officeLayoutFaceName(family: string): string {
   return ownValue(OBSERVED_SUBSTITUTES, trimmed.toLocaleLowerCase('en-US')) ?? trimmed;
 }
 
-/** The catalogued face weight a run selects: `officeFaceWeight`
- * (powerpoint-line-metrics.ts) or its generated-index form
- * `indexedOfficeFaceWeight` (office-face-weight.ts). */
+/** The catalogued face weight a run selects (`officeFaceWeight`,
+ * powerpoint-line-metrics.ts). */
 export type OfficeFaceWeight = (family: string, bold: boolean, italic: boolean) => number;

@@ -182,7 +182,6 @@ jobs:
         run: |
           pnpm test:resource-policy
           pnpm check:resource-policy
-          pnpm check:pptx-face-weight-index
           pnpm lint
 
       # Rust model (serde wire, via the dev-only `schema` feature) vs the
