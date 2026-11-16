@@ -301,13 +301,16 @@ pub(super) fn chart_sheet_charts(
                                 {
                                     return Err(unsupported("invalid BIFF drawing client marker"));
                                 }
-                                if drawing
+                                let text = drawing
                                     .clients
                                     .remove(&child_end)
-                                    .is_none_or(|client| client.kind != 0x01b6)
-                                {
-                                    return Err(unsupported("invalid BIFF drawing textbox owner"));
-                                }
+                                    .filter(|client| client.kind == 0x01b6)
+                                    .ok_or_else(|| {
+                                        unsupported("invalid BIFF drawing textbox owner")
+                                    })?;
+                                // The text is not drawn; its TxO and
+                                // Continue records must still be whole.
+                                super::shapes::txo_text(records, text.offset)?;
                             }
                             // OfficeArtFSP: the shape's identity and flags.
                             0xf00a => {
