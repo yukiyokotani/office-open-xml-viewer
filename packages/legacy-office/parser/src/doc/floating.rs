@@ -709,8 +709,8 @@ fn oriented(frame: [f64; 4], stored: f64, flip: [bool; 2]) -> ([f64; 4], f64) {
 }
 
 /// Content the DOCX shape model turns with its shape although no Word
-/// control shows that Word does: shape text, and a picture fill that
-/// fUseShapeAnchor 0 keeps upright (MS-ODRAW 2.3.7.43).
+/// control shows that Word does: shape text, and a picture, pattern or
+/// texture fill that fUseShapeAnchor 0 keeps upright (MS-ODRAW 2.3.7.43).
 fn turned_content(content: &Content, rotation: f64) {
     let Content::Shape(shape) = content else {
         return;
@@ -721,7 +721,9 @@ fn turned_content(content: &Content, rotation: f64) {
     if shape.text.is_some() {
         crate::rejection::approximated("rotated Word drawing text is not supported", ());
     }
-    if shape.fill_picture.is_some_and(|(_, rotates)| !rotates) {
+    if shape.fill_picture.is_some_and(|(_, rotates)| !rotates)
+        || shape.fill_tile.as_ref().is_some_and(|tile| !tile.rotates)
+    {
         crate::rejection::approximated(
             "upright picture fills in rotated Word shapes are not supported",
             (),

@@ -105,6 +105,8 @@ pub(in crate::doc) struct Tile {
     pub pattern: Option<[String; 2]>,
     /// fillOpacity of a texture, FixedPoint 16.16.
     pub alpha: u32,
+    /// Whether the fill rotates with the shape (fUseShapeAnchor, 2.3.7.43).
+    pub rotates: bool,
 }
 
 /// MS-ODRAW 2.3.22 geometry text in the terms of the VML `v:textpath` that
@@ -682,6 +684,7 @@ impl<'a> Table<'a> {
                             )?,
                         ]),
                         alpha: 65536,
+                        rotates: paint.rotate_fill_with_shape.unwrap_or(false),
                     });
                 }
                 // msofillTexture: the picture repeats at its own size from
@@ -696,6 +699,7 @@ impl<'a> Table<'a> {
                         blip,
                         pattern: None,
                         alpha,
+                        rotates: paint.rotate_fill_with_shape.unwrap_or(false),
                     });
                 }
                 // An msofillPicture the stretched projection above declined:
@@ -1594,6 +1598,14 @@ mod tests {
         let texture = container(&[(0x180, 2), (0x182, 0x8000), (0x4186, 1)], &[], &[]);
         let tile = read(1, 0xa00, &texture, [9, 9]).unwrap().fill_tile.unwrap();
         assert_eq!((tile.blip, tile.pattern, tile.alpha), (0, None, 0x8000));
+        // fUseShapeAnchor (use bit 21, value bit 5) rotates the fill.
+        assert!(!tile.rotates);
+        let rotating = container(&[(0x180, 2), (0x1bf, 0x0060_0060), (0x4186, 1)], &[], &[]);
+        let tile = read(1, 0xa00, &rotating, [9, 9])
+            .unwrap()
+            .fill_tile
+            .unwrap();
+        assert!(tile.rotates);
         assert!(crate::rejection::take_best_effort().is_empty());
         // A scaled, offset or view-aligned (fillShape 0) texture or pattern
         // keeps the default placement.
@@ -1613,6 +1625,39 @@ mod tests {
                     crate::rejection::BestEffort::Approximated,
                     "Word non-solid drawing fills are not supported"
                 )]
+            );
+        }
+    }
+
+    #[test]
+    fn upright_fills_of_turned_shapes_are_recorded() {
+        use super::super::{turned_content, Content};
+        let site = (
+            crate::rejection::BestEffort::Approximated,
+            "upright picture fills in rotated Word shapes are not supported",
+        );
+        // Pattern, texture and picture fills, upright (fUseShapeAnchor 0, the
+        // default) or rotating with the shape.
+        for (kind, rotates) in [(1u32, false), (2, false), (3, false), (2, true), (3, true)] {
+            let mut properties = vec![(0x180u16, kind), (0x4186, 1)];
+            if rotates {
+                properties.push((0x1bf, 0x0060_0060));
+            }
+            let facts = read(1, 0xa00, &container(&properties, &[], &[]), [9, 9]).unwrap();
+            assert_eq!(
+                facts.fill_tile.as_ref().map(|tile| tile.rotates),
+                (kind != 3).then_some(rotates)
+            );
+            assert_eq!(facts.fill_picture, (kind == 3).then_some((0, rotates)));
+            let content = Content::Shape(Box::new(facts));
+            turned_content(&content, 0.0);
+            assert!(crate::rejection::take_best_effort().is_empty());
+            // The DOCX fill turns with the shape either way.
+            turned_content(&content, 90.0);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                if rotates { vec![] } else { vec![site] },
+                "{kind} {rotates}"
             );
         }
     }
