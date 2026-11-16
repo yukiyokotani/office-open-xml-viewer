@@ -206,6 +206,17 @@ mod tests {
             take_best_effort(),
             [(BestEffort::Skipped, "BIFF cell comments are not projected")]
         );
+        // The TxO's formatting runs are part of it: without their Continue
+        // record the comment cannot be read.
+        assert!(project(
+            &notes,
+            &records[..2],
+            |object| (object == 7).then_some(40),
+            &mut budget
+        )
+        .unwrap_err()
+        .contains("formatting runs"));
+        take_best_effort();
         // Retained bytes are bounded.
         let mut small = 8;
         assert!(project(&notes, &records, |_| None, &mut small)

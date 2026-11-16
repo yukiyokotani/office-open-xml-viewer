@@ -1200,7 +1200,22 @@ pub(super) fn txo_text(records: &[Record<'_>], offset: usize) -> Result<String, 
         return Err(unsupported("truncated BIFF TxO record"));
     }
     let characters = usize::from(u16_at(txo, 10)?);
-    let (units, _) = txo_characters(records, index, characters)?;
+    let run_bytes = usize::from(u16_at(txo, 12)?);
+    let (units, mut next) = txo_characters(records, index, characters)?;
+    // The formatting runs are not projected; their Continue records are
+    // still part of the TxO.
+    let mut read = 0usize;
+    while read < run_bytes {
+        let record = records
+            .get(next)
+            .filter(|record| record.kind == 0x003c)
+            .ok_or_else(|| unsupported("truncated BIFF TxO formatting runs"))?;
+        read += record.data.len();
+        next += 1;
+    }
+    if read != run_bytes {
+        return Err(unsupported("invalid BIFF TxO formatting runs"));
+    }
     Ok(String::from_utf16_lossy(&units))
 }
 

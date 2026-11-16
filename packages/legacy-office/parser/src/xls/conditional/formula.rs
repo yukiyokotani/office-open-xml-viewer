@@ -609,7 +609,9 @@ fn decompile_inner(
     let pop = |stack: &mut Vec<Item>| -> Result<String, String> {
         match stack.pop() {
             Some(Item::Text(text) | Item::Name(text)) => Ok(text),
-            _ => Err(reject()),
+            Some(Item::Function(_)) => Err(reject()),
+            // An operator without its operand is not a formula.
+            None => Err(malformed()),
         }
     };
     while at < rgce.len() {
@@ -765,7 +767,7 @@ fn decompile_inner(
                     }
                     let text = if tab == 0x00ff {
                         let arguments =
-                            arguments(&mut stack, count.checked_sub(1).ok_or_else(reject)?)?;
+                            arguments(&mut stack, count.checked_sub(1).ok_or_else(malformed)?)?;
                         // The callee is normally a function name; Excel also
                         // stores a call whose callee is a cell reference (a
                         // function unknown to BIFF8) and writes it as, for
@@ -901,8 +903,13 @@ fn decompile_inner(
     }
     match (stack.pop(), stack.is_empty()) {
         (Some(Item::Text(text) | Item::Name(text)), true) => Ok(text),
-        _ => Err(unsupported("malformed XLS conditional formatting formula")),
+        _ => Err(malformed()),
     }
+}
+
+/// A token program whose operands and operators do not form one expression.
+fn malformed() -> String {
+    unsupported("malformed XLS conditional formatting formula")
 }
 
 /// A single A1 cell reference as the decompiler writes it.
@@ -914,7 +921,7 @@ fn is_reference(text: &str) -> bool {
 }
 
 fn arguments(stack: &mut Vec<Item>, count: usize) -> Result<Vec<String>, String> {
-    let start = stack.len().checked_sub(count).ok_or_else(reject)?;
+    let start = stack.len().checked_sub(count).ok_or_else(malformed)?;
     stack
         .drain(start..)
         .map(|item| match item {

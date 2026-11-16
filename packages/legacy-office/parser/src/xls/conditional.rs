@@ -420,6 +420,14 @@ fn condition(
             if cp != 0 || rgce1.is_empty() || !rgce2.is_empty() {
                 return Err(unsupported("invalid XLS formula condition"));
             }
+            // The compatibility formula is not projected, but it is part
+            // of the rule: one that cannot be read rejects. One the
+            // decompiler merely has no text for does not matter here.
+            if let Err(error) = formula(rgce1) {
+                if !formula::without_text(&error) {
+                    return Err(error);
+                }
+            }
             // iParam: the number of standard deviations. 2.5.23 lists 0, 1
             // and 2; Excel's rule editor also writes 3 (ECMA-376 stdDev).
             let std_dev = match u16_at(parameters, 0)? {
@@ -1272,8 +1280,13 @@ mod tests {
             }
         ));
         assert_eq!(take_best_effort(), [(BestEffort::IgnoredValue, TEMPLATE)]);
-        // The rule still needs its formula slot to be well formed.
+        // The rule still needs its formula slot to be well formed, and the
+        // compatibility formula to be readable (a PtgInt without its value).
         assert!(classic_rule(2, 0, &[], 0x19, 0).is_err());
+        assert!(classic_rule(2, 0, &[0x1e], 0x19, 0).is_err());
+        // A formula the decompiler merely has no text for does not matter.
+        assert!(classic_rule(2, 0, &[0x10], 0x19, 0).is_ok());
+        take_best_effort();
     }
 
     #[test]
@@ -1543,6 +1556,9 @@ mod tests {
         );
         let none = gradient_extension(0.0, &[(9, 0, 0.0)]);
         assert!(rule_dxf(&dxfn12(&[(6, none)])).unwrap().fill.is_none());
+        // cGradStops may be zero.
+        let empty = gradient_extension(0.0, &[]);
+        assert!(rule_dxf(&dxfn12(&[(6, empty)])).unwrap().fill.is_none());
         take_best_effort();
         // A stop list the extension does not hold is malformed.
         let mut truncated = gradient;

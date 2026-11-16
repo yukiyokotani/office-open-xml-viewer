@@ -1101,6 +1101,14 @@ pub(super) mod tests {
                 "XLS macro sheets are not projected"
             )]
         );
+        // An operator without operands is no formula: it rejects.
+        let bytes = two_tab_workbook(1, macro_substream(0x00b7, &[0x03]));
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(DirectSession::new(&cfb)
+            .err()
+            .expect("rejected")
+            .contains("malformed"));
+        crate::rejection::take_best_effort();
         // A truncated formula on a macro sheet rejects: it cannot be read.
         let mut truncated = macro_substream(0x00b7, &rgce);
         let at = truncated
@@ -1134,17 +1142,65 @@ pub(super) mod tests {
 
     #[test]
     fn a_dialog_sheet_is_the_models_dialog_sheet_without_cells_or_drawings() {
-        // WsBool fDialog (0x0010) on a worksheet substream with a cell.
-        let mut stream = record(BOF, &[0, 6, 0x10, 0]);
-        stream.extend(record(0x0081, &[0xd1, 0x04]));
-        let mut number = vec![0, 0, 0, 0, 0, 0];
-        number.extend(7f64.to_le_bytes());
-        stream.extend(record(NUMBER, &number));
-        stream.extend(window2(0x00b6));
-        stream.extend(record(EOF, &[]));
-        let bytes = two_tab_workbook(0, stream);
+        fn art(kind: u16, options: u16, data: &[u8]) -> Vec<u8> {
+            [
+                options.to_le_bytes().to_vec(),
+                kind.to_le_bytes().to_vec(),
+                (data.len() as u32).to_le_bytes().to_vec(),
+                data.to_vec(),
+            ]
+            .concat()
+        }
+        // WsBool fDialog (0x0010) on a worksheet substream with a cell and,
+        // with `frame`, a dialog frame object (Obj ot 15).
+        let sheet = |frame: bool| {
+            let mut stream = record(BOF, &[0, 6, 0x10, 0]);
+            stream.extend(record(0x0081, &[0xd1, 0x04]));
+            let mut number = vec![0, 0, 0, 0, 0, 0];
+            number.extend(7f64.to_le_bytes());
+            stream.extend(record(NUMBER, &number));
+            if frame {
+                let mut patriarch = art(0xf009, 0x0001, &[0; 16]);
+                patriarch.extend(art(
+                    0xf00a,
+                    0x0002,
+                    &[1024u32.to_le_bytes(), 5u32.to_le_bytes()].concat(),
+                ));
+                let mut shape = art(
+                    0xf00a,
+                    0x0c92,
+                    &[1025u32.to_le_bytes(), 0x0a00u32.to_le_bytes()].concat(),
+                );
+                let mut anchor = vec![0u8; 18];
+                anchor[10] = 2;
+                anchor[14] = 2;
+                shape.extend(art(0xf010, 0, &anchor));
+                shape.extend(art(0xf011, 0, &[]));
+                let mut group = art(0xf004, 0x000f, &patriarch);
+                group.extend(art(0xf004, 0x000f, &shape));
+                let mut root = art(0xf008, 0x0010, &[0; 8]);
+                root.extend(art(0xf003, 0x000f, &group));
+                stream.extend(record(0x00ec, &art(0xf002, 0x000f, &root)));
+                let mut object = Vec::new();
+                for value in [0x15u16, 0x12, 15, 1, 0x6011] {
+                    object.extend(value.to_le_bytes());
+                }
+                object.extend([0u8; 16]);
+                stream.extend(record(0x005d, &object));
+            }
+            stream.extend(window2(0x00b6));
+            stream.extend(record(EOF, &[]));
+            two_tab_workbook(0, stream)
+        };
+        crate::rejection::take_best_effort();
+        let bytes = sheet(true);
         let cfb = CompoundFile::open(&bytes).unwrap();
         let mut session = DirectSession::new(&cfb).unwrap();
+        // The frame is a form control: it is not drawn.
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [] as [(crate::rejection::BestEffort, &str); 0]
+        );
         session.bootstrap().unwrap();
         let projected = session.projected_sheet(1, "C").unwrap();
         assert!(projected.worksheet.is_dialog_sheet);
@@ -1152,6 +1208,14 @@ pub(super) mod tests {
         assert!(projected.worksheet.shape_groups.is_empty());
         let plain = session.projected_sheet(0, "S").unwrap();
         assert!(!plain.worksheet.is_dialog_sheet);
+        // The flag alone leaves the worksheet the grid it stores.
+        let bytes = sheet(false);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut session = DirectSession::new(&cfb).unwrap();
+        session.bootstrap().unwrap();
+        let projected = session.projected_sheet(1, "C").unwrap();
+        assert!(!projected.worksheet.is_dialog_sheet);
+        assert_eq!(projected.rows.len(), 1);
     }
 
     #[test]

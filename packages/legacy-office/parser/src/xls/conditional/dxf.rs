@@ -480,7 +480,8 @@ fn gradient(
     let kind = u32_at(value, 0).map_err(|_| invalid())?;
     let count =
         usize::try_from(u32_at(value, 44).map_err(|_| invalid())?).map_err(|_| invalid())?;
-    if kind > 1 || count == 0 || count > 256 || value.len() != 48 + count * 22 {
+    // cGradStops may be zero: such a gradient has no stop (`None` below).
+    if kind > 1 || count > 256 || value.len() != 48 + count * 22 {
         return Err(invalid());
     }
     let mut stops = Vec::with_capacity(count);

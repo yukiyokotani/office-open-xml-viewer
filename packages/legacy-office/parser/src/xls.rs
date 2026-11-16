@@ -160,7 +160,8 @@ struct SheetData {
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
     /// A chart sheet's chart; such a sheet has no cells.
     chart_sheet: Option<chart::ChartSheet>,
-    /// MS-XLS 2.4.351 WsBool fDialog: the sheet is a dialog sheet.
+    /// The sheet is a dialog sheet: MS-XLS 2.4.351 WsBool fDialog, and (once
+    /// the drawings are read) a dialog frame object on it.
     dialog: bool,
     /// MS-XLS 2.4.179 Note records (cell comments), in order.
     notes: comments::Notes,
@@ -387,17 +388,8 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                 ));
             }
             let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
-            match cell_formulas::project(data.formula_records.iter(), externs) {
-                Ok(formulas) => data.formulas = formulas,
-                // Macro-sheet formulas use command and macro-control
-                // functions the decompiler has no text for. The cells keep
-                // their cached values. A formula that cannot be read still
-                // rejects.
-                Err(error) if macro_sheet && conditional::without_text(&error) => {
-                    crate::rejection::approximated("XLS macro sheets are not projected", ());
-                }
-                Err(error) => return Err(error),
-            }
+            data.formulas =
+                cell_formulas::project(data.formula_records.iter(), externs, macro_sheet)?;
         }
         if macro_sheet {
             show_macro_formulas(&mut data);
@@ -540,6 +532,18 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     }
     if skipped_non_worksheets {
         warnings.push("legacy-xls:non-worksheet-tabs-omitted".into());
+    }
+    // A worksheet that only carries the flag, without a dialog frame (Obj
+    // ot 15), is projected as the grid it stores.
+    if converted.iter().any(|(_, sheet)| sheet.dialog) {
+        let frames: std::collections::BTreeSet<usize> = drawing_anchors::strict(&records)?
+            .into_iter()
+            .filter(|anchor| anchor.object_type == 15)
+            .map(|anchor| anchor.sheet)
+            .collect();
+        for (tab, (_, sheet)) in tabs.iter().zip(&mut converted) {
+            sheet.dialog &= frames.contains(tab);
+        }
     }
     let filters: BTreeMap<usize, &xlsx_model::CellRange> = tabs
         .iter()
@@ -1490,7 +1494,21 @@ fn parse_sheet(
             }
             0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
             0x009d => output.autofilter_info = Some(u16_at(record.data, 0)?),
-            0x009b | 0x009e | 0x087e => output.autofilter_criteria = true,
+            // FilterMode (2.4.117, empty), AutoFilter (2.4.6: iEntry, flags
+            // and two 10-byte DOPERs) and AutoFilter12 (2.4.7, after its
+            // FrtRefHeader): their criteria are not drawn, their framing is
+            // still checked.
+            0x009b | 0x009e | 0x087e => {
+                let framed = match record.kind {
+                    0x009b => record.data.is_empty(),
+                    0x009e => record.data.len() >= 24,
+                    _ => record.data.len() > 12 && u16_at(record.data, 0)? == 0x087e,
+                };
+                if !framed {
+                    return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));
+                }
+                output.autofilter_criteria = true;
+            }
             0x04bc | 0x0221 | 0x0236 => output.formula_records.push(record.kind, record.data)?,
             // PhoneticInfo: phs (the default format of new phonetic
             // strings), then the SqRef of the cells that show theirs. ROW and

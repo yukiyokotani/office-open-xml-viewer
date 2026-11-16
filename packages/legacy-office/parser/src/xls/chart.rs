@@ -363,11 +363,18 @@ pub(super) fn chart_sheet(
                 if right <= left || bottom <= top {
                     return Err(crate::rejection::corrupt("empty BIFF chart object anchor"));
                 }
-                let scale = |value: i32, extent: i64| i64::from(value) * extent / 4000;
+                // Widened before any arithmetic: the anchor is four i32.
+                let scale = |value: i64, extent: i64| value.saturating_mul(extent) / 4000;
+                let (left, top, right, bottom) = (
+                    i64::from(left),
+                    i64::from(top),
+                    i64::from(right),
+                    i64::from(bottom),
+                );
                 embedded.push(EmbeddedChart {
                     model,
-                    x_emu: x_emu + scale(left, width_emu),
-                    y_emu: y_emu + scale(top, height_emu),
+                    x_emu: x_emu.saturating_add(scale(left, width_emu)),
+                    y_emu: y_emu.saturating_add(scale(top, height_emu)),
                     width_emu: scale(right - left, width_emu),
                     height_emu: scale(bottom - top, height_emu),
                 });
