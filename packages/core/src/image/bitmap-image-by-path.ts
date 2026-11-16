@@ -572,10 +572,13 @@ export function bindMetafileFontFamilies(
  * `metafile-font-demand.ts` `metafileFontDemand`). */
 export type MetafileFontDemand = (bytes: Uint8Array) => Promise<MetafileFontSources>;
 
-/** Per cache owner: its bound demand and, per image path, the demand run. */
+/** Per cache owner: its bound demand and, per image path, the demand run
+ * of the owner's current cache generation (a dropped cache may answer a path
+ * with other bytes). */
 const metafileDemandByOwner = new WeakMap<DecodedBitmapCacheOwner, {
   readonly demand: MetafileFontDemand;
   readonly runs: Map<string, Promise<void>>;
+  generation: number;
 }>();
 
 /** Bind the font demand a document's metafile pictures run, once per
@@ -585,7 +588,9 @@ const metafileDemandByOwner = new WeakMap<DecodedBitmapCacheOwner, {
  * then never needs to cover metafile text. `undefined` unbinds. */
 export function bindMetafileFontDemand(owner: DecodedBitmapCacheOwner, demand: MetafileFontDemand | undefined): void {
   if (!demand) metafileDemandByOwner.delete(owner);
-  else if (metafileDemandByOwner.get(owner)?.demand !== demand) metafileDemandByOwner.set(owner, { demand, runs: new Map() });
+  else if (metafileDemandByOwner.get(owner)?.demand !== demand) {
+    metafileDemandByOwner.set(owner, { demand, runs: new Map(), generation: cacheGeneration(owner) });
+  }
 }
 
 function withOwnerFontFamilies(opts: CachedBitmapOptions, owner: DecodedBitmapCacheOwner): CachedBitmapOptions {
@@ -1136,6 +1141,10 @@ export function getCachedBitmapByPath(
       // Its text's scalars load before the picture plays, with the faces of
       // the snapshot that answers them. A failed demand keeps the faces
       // already loaded (font loading never fails a picture).
+      if (bound.generation !== generation) {
+        bound.runs.clear();
+        bound.generation = generation;
+      }
       let run = bound.runs.get(imagePath);
       if (!run) {
         // Reading the bytes and walking their records take a decode slot;

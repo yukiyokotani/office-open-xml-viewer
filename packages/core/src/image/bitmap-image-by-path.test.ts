@@ -651,6 +651,35 @@ describe('getCachedBitmapByPath', () => {
     dropBitmapCacheByPath(fetchImage);
   });
 
+  it('runs the metafile font demand again after the owner\'s cache is dropped while it was pending', async () => {
+    stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    const fetchImage = vi.fn(async () => new Blob([wmf as BlobPart], { type: 'image/wmf' }));
+    const families = new Map([['brand', 'ooxml-font-source-1-0']]);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const demand = vi.fn(async () => {
+      if (demand.mock.calls.length === 1) await pending;
+      return { families, faces: [{}] };
+    });
+    bindMetafileFontDemand(fetchImage, demand);
+    const path = 'word/media/dropped-while-pending.wmf';
+    const draw = () => getCachedBitmapByPath(path, 'image/wmf', fetchImage, { widthPt: 50, heightPt: 25 });
+    const stale = draw();
+    await vi.waitFor(() => expect(demand).toHaveBeenCalledTimes(1));
+    dropBitmapCacheByPath(fetchImage);
+    // The new generation runs its own demand and binds what it answers.
+    const fresh = await draw();
+    expect(demand).toHaveBeenCalledTimes(2);
+    release();
+    await expect(stale).rejects.toThrow();
+    await expect(draw()).resolves.toBe(fresh);
+    bindMetafileFontFamilies(fetchImage, undefined);
+    await expect(draw()).resolves.not.toBe(fresh);
+    bindMetafileFontDemand(fetchImage, undefined);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
   it('a failed metafile font demand keeps the faces already bound', async () => {
     stubMetafileSurfaceCreation();
     const wmf = buildMinimalWmf();
