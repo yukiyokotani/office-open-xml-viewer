@@ -16,6 +16,9 @@ import {
   type FindHighlightColors,
   type FindMatch,
   type FindMatchesOptions,
+  type TextHighlightGroup,
+  type TextHighlightMatch,
+  textHighlightGroupsAreEmpty,
   type OoxmlResourceMetrics,
   type ViewerContextMenuEvent,
   type ZoomableViewer,
@@ -210,7 +213,7 @@ export class PptxViewer implements ZoomableViewer {
   private elementLayer: HTMLDivElement | null = null;
   /** IX2 — find state (per-slide runs, matches, active cursor). */
   private _find: PptxFindController;
-  private _findGeneration = 0;
+  private readonly _searchRequests: [find: number, highlights: number] = [0, 0];
   /** Private 2d context for measuring highlight text (own 1×1 canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
   private readonly presentationOwner: TerminalResourceOwner<PptxPresentation>;
@@ -549,8 +552,8 @@ export class PptxViewer implements ZoomableViewer {
    * Switch the hidden-slide mode at runtime and re-render. Entering `'skip'`
    * while on a hidden slide advances to the nearest visible slide. Entering or
    * leaving `'skip'` changes which slides find may match, so it clears the
-   * current search (matches, active match and highlights); call
-   * {@link findText} again.
+   * current search (matches, active match and highlights) and the text
+   * highlights; call {@link findText} and {@link highlightText} again.
    */
   async setHiddenSlideMode(mode: HiddenSlideMode): Promise<void> {
     const generation = this._beginNavigation();
@@ -989,11 +992,25 @@ export class PptxViewer implements ZoomableViewer {
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<PptxMatchLocation>[]> {
+    return this._search(
+      0, query.length === 0, () => this._find.clearFind(), () => this._find.find(query, opts));
+  }
+
+  /** The request handling shared by {@link findText} (`kind` 0) and
+   *  {@link highlightText} (`kind` 1); each kind is cancelled on its own. */
+  private async _search<Match>(
+    kind: 0 | 1,
+    empty: boolean,
+    clear: () => void,
+    scan: () => Promise<Match[]>,
+  ): Promise<Match[]> {
     const engine = this.engine;
     if (!engine) return [];
-    const generation = ++this._findGeneration;
-    if (query.length === 0) {
-      this._find.invalidate();
+    const generation = ++this._searchRequests[kind];
+    const superseded = (): boolean =>
+      this.destroyed || generation !== this._searchRequests[kind] || engine !== this.engine;
+    if (empty) {
+      clear();
       this._redrawHighlights();
       return [];
     }
@@ -1002,10 +1019,10 @@ export class PptxViewer implements ZoomableViewer {
         () => engine.waitUntilLayoutComplete(),
       );
     }
-    if (this.destroyed || generation !== this._findGeneration || engine !== this.engine) return [];
+    if (superseded()) return [];
     this._findSkipsHidden = this._hiddenMode === 'skip' && this.visibleSlideCount > 0;
-    const matches = await this.errorRouter.ownAwaitable(() => this._find.find(query, opts));
-    if (this.destroyed || generation !== this._findGeneration || engine !== this.engine) return [];
+    const matches = await this.errorRouter.ownAwaitable(scan);
+    if (superseded()) return [];
     this._redrawHighlights();
     return matches;
   }
@@ -1024,20 +1041,72 @@ export class PptxViewer implements ZoomableViewer {
     return this._activateMatch(this._find.prev());
   }
 
-  /** IX2 — clear all highlights and reset the find state. */
+  /** IX2 — clear the find highlights and reset the find state. Text highlights
+   *  set with {@link highlightText} stay. */
   clearFind(): void {
-    this._invalidateFind();
+    this._searchRequests[0]++;
+    this._find.clearFind();
     this._redrawHighlights();
   }
 
+  /**
+   * Replace the presentation's text highlights: every occurrence of every term
+   * of every group is highlighted in its group's `color`, until the next call
+   * or {@link clearHighlights}. This is separate from {@link findText}: both
+   * can be shown at once, and neither changes the other's matches or active
+   * match.
+   *
+   * Returns every match in document order, each tagged with its `{ slide }`
+   * (0-based), its `group` id and the `term` that matched. Groups are searched
+   * independently, so matches of different groups may overlap; within a group
+   * the longer match wins. An empty set clears the highlights.
+   *
+   * Scans the same slides as {@link findText} (and reuses its slide text when
+   * both are used), in `mode: 'main'` and `mode: 'worker'`. A new
+   * presentation, or entering or leaving `hiddenSlideMode: 'skip'`, drops the
+   * highlights; call this again afterwards.
+   */
+  async highlightText(
+    groups: readonly TextHighlightGroup[],
+  ): Promise<TextHighlightMatch<PptxMatchLocation>[]> {
+    return this._search(
+      1, textHighlightGroupsAreEmpty(groups),
+      () => this._find.clearHighlights(), () => this._find.highlight(groups));
+  }
+
+  /**
+   * Move to the next text highlight (wrap-around), navigating to its slide if
+   * needed, and mark it with a ring. Returns the now-active match, or `null`
+   * when there are none. Independent of {@link findNext}.
+   */
+  async highlightNext(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
+    return this._activateMatch(this._find.highlightNext());
+  }
+
+  /** Move to the previous text highlight (wrap-around). */
+  async highlightPrev(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
+    return this._activateMatch(this._find.highlightPrev());
+  }
+
+  /** Remove every text highlight set with {@link highlightText}. The find
+   *  state stays. */
+  clearHighlights(): void {
+    this._searchRequests[1]++;
+    this._find.clearHighlights();
+    this._redrawHighlights();
+  }
+
+  /** Drop the find and the text highlights (new presentation, hidden-slide
+   *  mode change, teardown). */
   private _invalidateFind(): void {
-    this._findGeneration++;
+    this._searchRequests[0]++;
+    this._searchRequests[1]++;
     this._find.invalidate();
   }
 
-  private async _activateMatch(
-    match: FindMatch<PptxMatchLocation> | null,
-  ): Promise<FindMatch<PptxMatchLocation> | null> {
+  private async _activateMatch<Match extends FindMatch<PptxMatchLocation>>(
+    match: Match | null,
+  ): Promise<Match | null> {
     if (!match) {
       this._redrawHighlights();
       return null;

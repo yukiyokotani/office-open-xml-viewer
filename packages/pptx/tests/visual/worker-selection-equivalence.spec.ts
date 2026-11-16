@@ -26,6 +26,12 @@ interface ModeData {
   matches: { text: string; slide: number }[];
   before: Snap;
   after: Snap;
+  textHighlights: {
+    matches: { text: string; slide: number; group: string; term: string }[];
+    active: { matchIndex: number; group: string } | null;
+    boxes: { background: string; ringed: boolean; left: number; top: number; width: number }[];
+    findNextIndex: number | undefined;
+  };
 }
 
 test('worker selection + findText + zoom match main mode › demo/sample-1', async ({ page }) => {
@@ -92,4 +98,26 @@ test('worker selection + findText + zoom match main mode › demo/sample-1', asy
     expect(follow(worker.before.highlights[i].left, worker.after.highlights[i].left)).toBe(true);
     expect(follow(worker.before.highlights[i].top, worker.after.highlights[i].top)).toBe(true);
   }
+
+  // --- text highlights (highlightText): the same set, cursor and boxes in both
+  // modes, next to the find and without disturbing it.
+  const highlights = main.textHighlights;
+  expect(worker.textHighlights).toEqual(highlights);
+  const any = highlights.matches.filter((match) => match.group === 'any');
+  const word = highlights.matches.filter((match) => match.group === 'word');
+  // A group without options matches what the find matched.
+  expect(any.map(({ text, slide }) => ({ text, slide }))).toEqual(main.matches);
+  // The whole-word group keeps some of those occurrences and drops the ones
+  // inside longer words.
+  expect(word.length).toBeGreaterThan(0);
+  expect(word.length).toBeLessThan(any.length);
+  expect(highlights.active?.matchIndex).toBe(0);
+  const colors = new Set(highlights.boxes.map((box) => box.background));
+  expect(colors.has('rgba(0, 0, 255, 0.3)') || colors.has('rgba(255, 0, 0, 0.3)')).toBe(true);
+  // The active highlight keeps its group colour and gains a ring.
+  const ringed = highlights.boxes.filter((box) => box.ringed);
+  expect(ringed.length).toBeGreaterThan(0);
+  for (const box of ringed) expect(box.background).toMatch(/^rgba\((0, 0, 255|255, 0, 0), 0\.3\)$/);
+  for (const box of highlights.boxes) expect(box.width).toBeGreaterThan(0);
+  expect(highlights.findNextIndex).toBe(main.matches.length > 1 ? 1 : 0);
 });

@@ -136,7 +136,13 @@ export {
   type PptxHighlightColors,
 } from './find-highlight-layer';
 export type { PptxMatchLocation } from './find';
-export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+export type {
+  FindHighlightColors,
+  FindMatch,
+  FindMatchesOptions,
+  TextHighlightGroup,
+  TextHighlightMatch,
+} from '@silurus/ooxml-core';
 export type { PresentationHandle } from './presentation-handle';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // IX1 — the shared hyperlink target shape surfaced by `PptxViewerOptions.

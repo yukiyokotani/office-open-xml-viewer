@@ -33,7 +33,7 @@ export class HighlightLayerController<Slot extends HighlightSlot, Run, Location>
     if (this.hooks.active()) this.hooks.setRuns(unit, runs);
   }
 
-  async activate(match: FindMatch<Location> | null): Promise<FindMatch<Location> | null> {
+  async activate<Match extends FindMatch<Location>>(match: Match | null): Promise<Match | null> {
     if (match) this.hooks.reveal(this.hooks.unitOf(match.location));
     this.redrawAll();
     return match;

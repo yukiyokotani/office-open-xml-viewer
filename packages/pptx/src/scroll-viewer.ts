@@ -1,4 +1,4 @@
-import { EMU_PER_PX, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type ZoomableViewer, openExternalHyperlink } from '@silurus/ooxml-core';
+import { EMU_PER_PX, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type TextHighlightGroup, type TextHighlightMatch, type ZoomableViewer, openExternalHyperlink, textHighlightGroupsAreEmpty } from '@silurus/ooxml-core';
 import { isBackwardSlideJump } from './slide-nav';
 import {
   computeUniformVisibleWindow,
@@ -188,7 +188,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     slotIndex: (slot) => slot.renderedSlide,
     token: (slot) => slot.renderGeneration,
     nextToken: (slot) => ++slot.renderGeneration,
-    wantRuns: (slot) => !!(this._opts.enableTextSelection && slot.textLayer) || this._findActive,
+    wantRuns: (slot) => !!(this._opts.enableTextSelection && slot.textLayer) || this._overlayActive(),
     reportError: (error) => this._reportRenderError(error),
   } satisfies Pick<BitmapSlotHooks<SlideSlot, PptxTextRunInfo>,
     'slots' | 'epoch' | 'scale' | 'slotIndex' | 'token' | 'nextToken' | 'wantRuns' | 'reportError'>;
@@ -239,7 +239,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     imageResources: () => this._opts.imageResources,
     errorPlaceholder: () => this._opts.errorPlaceholder,
     textSelection: () => this._opts.enableTextSelection === true,
-    findActive: () => this._findActive,
+    findActive: () => this._overlayActive(),
     mediaEnabled: () => this._opts.enableMediaPlayback === true,
     mediaRange: () => this._mediaRange(),
     rangeContains: (range, slide) => this._rangeContains(range, slide),
@@ -485,11 +485,11 @@ export class PptxScrollViewer implements ZoomableViewer {
    *  positions equal deck indices (`'show'`, `'dim'`, no hidden slide, or every
    *  slide hidden). */
   private _skipActive = false;
-  private _findGeneration = 0;
+  private readonly _searchRequests: [find: number, highlights: number] = [0, 0];
   private _findActive = false;
   private readonly _highlights = new HighlightLayerController<SlideSlot, PptxTextRunInfo, PptxMatchLocation>({
     slots: () => this._slots,
-    active: () => this._findActive,
+    active: () => this._overlayActive(),
     runs: (unit) => this._find.slideRuns(unit),
     setRuns: (unit, runs) => this._find.setSlideRuns(unit, runs),
     paint: (unit, slot, runs, measure) => buildPptxHighlightLayer(
@@ -1235,7 +1235,8 @@ export class PptxScrollViewer implements ZoomableViewer {
    * slide has painted. A pending `goToComment` is cancelled (resolves `false`).
    * Entering or leaving `'skip'` changes which slides
    * find may match, so it clears the current search (matches, active match and
-   * highlights); call {@link findText} again.
+   * highlights) and the text highlights; call {@link findText} and
+   * {@link highlightText} again.
    */
   async setHiddenSlideMode(mode: HiddenSlideMode): Promise<void> {
     if (this._destroyed) throw new Error('PptxScrollViewer is destroyed');
@@ -1245,7 +1246,10 @@ export class PptxScrollViewer implements ZoomableViewer {
     this._hiddenMode = mode;
     // A comment navigation in flight may target a slide this mode leaves out.
     this._commentNavigation.begin();
-    if ((previous === 'skip') !== (mode === 'skip')) this.clearFind();
+    if ((previous === 'skip') !== (mode === 'skip')) {
+      this.clearFind();
+      this.clearHighlights();
+    }
     const pres = this._pres;
     if (!pres) return;
     const layoutChanged = this._updateShownSlides();
@@ -1298,14 +1302,28 @@ export class PptxScrollViewer implements ZoomableViewer {
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<PptxMatchLocation>[]> {
+    if (this._pres) this._findActive = query.length > 0;
+    return this._search(
+      0, query.length === 0, () => this._find.clearFind(), () => this._find.find(query, opts));
+  }
+
+  /** The request handling shared by {@link findText} (`kind` 0) and
+   * {@link highlightText} (`kind` 1); each kind is cancelled on its own. */
+  private async _search<Match>(
+    kind: 0 | 1,
+    empty: boolean,
+    clear: () => void,
+    scan: () => Promise<Match[]>,
+  ): Promise<Match[]> {
     const presentation = this._pres;
     if (!presentation) return [];
-    const generation = ++this._findGeneration;
-    this._findActive = query.length > 0;
-    if (query.length === 0) {
+    const generation = ++this._searchRequests[kind];
+    const superseded = (): boolean =>
+      this._destroyed || generation !== this._searchRequests[kind] || presentation !== this._pres;
+    if (empty) {
       // A progressive deck must clear existing highlights without waiting for
       // slides that have not finished preparing. DOCX retains its layout wait.
-      this._find.invalidate();
+      clear();
       this._highlights.redrawAll();
       return [];
     }
@@ -1314,11 +1332,11 @@ export class PptxScrollViewer implements ZoomableViewer {
         () => presentation.waitUntilLayoutComplete(),
       );
     }
-    if (this._destroyed || generation !== this._findGeneration || presentation !== this._pres) return [];
-    // The complete deck's hidden flags decide which slides find may match.
+    if (superseded()) return [];
+    // The complete deck's hidden flags decide which slides a search may match.
     this._refreshShownSlides();
-    const matches = await this._errorRouter.ownAwaitable(() => this._find.find(query, opts));
-    if (this._destroyed || generation !== this._findGeneration || presentation !== this._pres) return [];
+    const matches = await this._errorRouter.ownAwaitable(scan);
+    if (superseded()) return [];
     this._highlights.redrawAll();
     return matches;
   }
@@ -1333,15 +1351,67 @@ export class PptxScrollViewer implements ZoomableViewer {
     return this._highlights.activate(this._find.prev());
   }
 
-  /** Clear the current query and every mounted highlight. */
+  /** Clear the current query and its highlights. Text highlights set with
+   * {@link highlightText} stay. */
   clearFind(): void {
     this._findActive = false;
-    this._invalidateFind();
+    this._searchRequests[0]++;
+    this._find.clearFind();
     this._highlights.redrawAll();
   }
 
+  /**
+   * Replace the presentation's text highlights: every occurrence of every term
+   * of every group is highlighted in its group's `color`, on every laid-out
+   * slide including those outside the mounted window, until the next call or
+   * {@link clearHighlights}. Separate from {@link findText}: both can be shown
+   * at once, and neither changes the other's matches or active match.
+   *
+   * Returns every match in document order with its `{ slide }`, `group` id and
+   * matched `term`. Groups are searched independently, so matches of different
+   * groups may overlap; within a group the longer match wins. An empty set
+   * clears the highlights. A new presentation, or entering or leaving
+   * `hiddenSlideMode: 'skip'`, drops the highlights; call this again
+   * afterwards.
+   */
+  async highlightText(
+    groups: readonly TextHighlightGroup[],
+  ): Promise<TextHighlightMatch<PptxMatchLocation>[]> {
+    return this._search(
+      1, textHighlightGroupsAreEmpty(groups),
+      () => this._find.clearHighlights(), () => this._find.highlight(groups));
+  }
+
+  /** Activate and reveal the next text highlight, wrapping at the end. The
+   * active highlight is marked with a ring. Independent of {@link findNext}. */
+  async highlightNext(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
+    return this._highlights.activate(this._find.highlightNext());
+  }
+
+  /** Activate and reveal the previous text highlight, wrapping at the beginning. */
+  async highlightPrev(): Promise<TextHighlightMatch<PptxMatchLocation> | null> {
+    return this._highlights.activate(this._find.highlightPrev());
+  }
+
+  /** Remove every text highlight set with {@link highlightText}. The find
+   * state stays. */
+  clearHighlights(): void {
+    this._searchRequests[1]++;
+    this._find.clearHighlights();
+    this._highlights.redrawAll();
+  }
+
+  /** Whether mounted slides need run geometry for the find or the text
+   * highlights. */
+  private _overlayActive(): boolean {
+    return this._findActive || this._find.highlightsArmed;
+  }
+
+  /** Drop the find and the text highlights (new presentation, hidden-slide
+   * mode change, teardown). */
   private _invalidateFind(): void {
-    this._findGeneration++;
+    this._searchRequests[0]++;
+    this._searchRequests[1]++;
     this._find.invalidate();
   }
 

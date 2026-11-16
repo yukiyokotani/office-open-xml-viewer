@@ -1,4 +1,7 @@
-import type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+import { ACTIVE_TEXT_HIGHLIGHT_RING } from '@silurus/ooxml-core';
+import type {
+  FindHighlightColors, FindMatch, FindMatchesOptions, TextHighlightGroup, TextHighlightMatch,
+} from '@silurus/ooxml-core';
 import type { Worksheet } from '../../types.js';
 import type { XlsxWorkbook } from '../../workbook.js';
 import { acquireXlsxWorksheet, xlsxCellDisplayTexts } from '../../workbook.js';
@@ -19,6 +22,10 @@ export function findHighlightOverlayStyle(
   const background = custom ?? (active ? DEFAULT_FIND_ACTIVE_HIGHLIGHT : DEFAULT_FIND_HIGHLIGHT);
   return { border: `2px solid ${custom ?? accent}`, background };
 }
+
+/** Each further text-highlight group on one cell is drawn this many CSS px
+ *  inside the previous one, so nested boxes show every group. */
+const TEXT_HIGHLIGHT_NESTING_PX = 3;
 
 type CellRect = { x: number; y: number; w: number; h: number };
 
@@ -85,14 +92,16 @@ export class FindAdapter {
     }
   }
 
-  /** Drop matches and cursor (new workbook, clearFind, teardown). */
+  /** Drop the find and the text highlights (new workbook, teardown). */
   invalidate(): void {
     this.controller.invalidate();
   }
 
   /**
    * Redraw the find-highlight overlay: one translucent box per matched cell on
-   * the current sheet, the active match in a stronger colour. Uses the SAME
+   * the current sheet, the active match in a stronger colour. Text highlights
+   * are drawn first (one box per group per cell, nested when several groups
+   * match one cell; the active one with a ring), the find on top. Uses the SAME
    * cell rect + screenX + header/frozen clamp the selection overlay uses, so a
    * box lands exactly on the drawn cell at any scroll offset / zoom / RTL.
    * Rebuilt on every render and scroll (cheap DOM geometry, no canvas paint).
@@ -132,12 +141,21 @@ export class FindAdapter {
       if (hl.row > freezeRows && y < frozenBoundY) { h -= frozenBoundY - y; y = frozenBoundY; }
       if (w <= 0 || h <= 0) continue;
       const screenLeft = this.host.screenX(x, w);
-      const { border, background } = hl.active ? active : other;
       const box = this.host.ownerDocument.createElement('div');
+      // A text highlight keeps its group value (a value that is not a colour
+      // leaves no border) and is ringed when active; each further group on a
+      // cell is inset, keeping at least a visible core.
+      const marked = hl.color !== undefined;
+      const { border, background } = marked
+        ? { border: `2px solid ${hl.color}`, background: hl.color }
+        : hl.active ? active : other;
+      const inset = Math.max(0, Math.min(
+        (hl.depth ?? 0) * TEXT_HIGHLIGHT_NESTING_PX, Math.floor((Math.min(w, h) - 4) / 2)));
       box.style.cssText =
         `position:absolute;` +
-        `left:${screenLeft}px;top:${y}px;width:${w}px;height:${h}px;` +
-        `box-sizing:border-box;border:${border};background:${background};pointer-events:none;`;
+        `left:${screenLeft + inset}px;top:${y + inset}px;width:${w - 2 * inset}px;height:${h - 2 * inset}px;` +
+        `box-sizing:border-box;border:${border};background:${background};pointer-events:none;` +
+        (marked && hl.active ? ACTIVE_TEXT_HIGHLIGHT_RING : '');
       overlayHost.appendFind(box);
     }
   }
@@ -163,15 +181,41 @@ export class FindAdapter {
     return this.activateMatch(this.controller.prev());
   }
 
-  /** Clear all highlights and reset the find state. */
+  /** Clear the find highlights and reset the find state. */
   clear(): void {
-    this.controller.invalidate();
+    this.controller.clearFind();
     this.updateOverlay();
   }
 
-  private async activateMatch(
-    match: FindMatch<XlsxMatchLocation> | null,
-  ): Promise<FindMatch<XlsxMatchLocation> | null> {
+  /** Replace the text highlights (see XlsxViewer.highlightText). */
+  async highlight(
+    groups: readonly TextHighlightGroup[],
+  ): Promise<TextHighlightMatch<XlsxMatchLocation>[]> {
+    if (!this.host.workbook()) return [];
+    const matches = await this.controller.highlight(groups);
+    this.updateOverlay();
+    return matches;
+  }
+
+  /** Move to the next text highlight (wrap-around). */
+  async highlightNext(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
+    return this.activateMatch(this.controller.highlightNext());
+  }
+
+  /** Move to the previous text highlight (wrap-around). */
+  async highlightPrev(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
+    return this.activateMatch(this.controller.highlightPrev());
+  }
+
+  /** Remove the text highlights; the find state stays. */
+  clearHighlights(): void {
+    this.controller.clearHighlights();
+    this.updateOverlay();
+  }
+
+  private async activateMatch<Match extends FindMatch<XlsxMatchLocation>>(
+    match: Match | null,
+  ): Promise<Match | null> {
     if (!match) {
       this.updateOverlay();
       return null;

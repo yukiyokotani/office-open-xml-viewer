@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { XlsxFindController, type FindCell } from './find.js';
 import { cellDisplayTexts, formatCellValueWithColor, formatGeneralNumber } from './number-format.js';
 import type { Styles, Worksheet } from './types.js';
@@ -232,5 +232,132 @@ describe('XlsxFindController cursor + highlights', () => {
     expect(c.matches()).toHaveLength(0);
     expect(c.activeLocation()).toBeNull();
     expect(c.next()).toBeNull();
+  });
+});
+
+describe('XlsxFindController text highlights', () => {
+  const sheets = [
+    { name: 'Summary', cells: [cell(1, 1, 'Revenue and guaranteed returns'), cell(2, 2, 'revenue, revenue')] },
+    { name: 'Notes', cells: [cell(3, 1, 'Guaranteed returns')] },
+  ];
+  const groups = [
+    { id: 'user', terms: ['revenue'], color: 'rgba(0,0,255,0.3)' },
+    { id: 'validated', terms: ['guaranteed returns', 'returns'] },
+  ];
+
+  it('returns every group match in sheet and cell order with group and term', async () => {
+    const c = controllerFor(sheets);
+    const matches = await c.highlight(groups);
+    expect(matches.map((m) => [m.matchIndex, m.group, m.term, m.text, m.location.sheetName, m.location.ref])).toEqual([
+      [0, 'user', 'revenue', 'Revenue', 'Summary', 'A1'],
+      [1, 'validated', 'guaranteed returns', 'guaranteed returns', 'Summary', 'A1'],
+      [2, 'user', 'revenue', 'revenue', 'Summary', 'B2'],
+      [3, 'user', 'revenue', 'revenue', 'Summary', 'B2'],
+      [4, 'validated', 'guaranteed returns', 'Guaranteed returns', 'Notes', 'A3'],
+    ]);
+  });
+
+  it('draws one box per group per cell, nested by depth, before the find boxes', async () => {
+    const c = controllerFor(sheets);
+    await c.find('and');
+    await c.highlight(groups);
+    expect(c.sheetHighlights(0)).toEqual([
+      { row: 1, col: 1, active: false, color: 'rgba(0,0,255,0.3)', depth: 0 },
+      { row: 1, col: 1, active: false, color: 'rgba(0, 184, 148, 0.35)', depth: 1 },
+      { row: 2, col: 2, active: false, color: 'rgba(0,0,255,0.3)', depth: 0 },
+      { row: 1, col: 1, active: false },
+    ]);
+  });
+
+  it('navigates independently of the find and marks the cell of the active occurrence', async () => {
+    const c = controllerFor(sheets);
+    await c.find('revenue');
+    await c.highlight(groups);
+    expect(c.next()?.location.ref).toBe('A1');
+    expect(c.highlightPrev()).toMatchObject({ matchIndex: 4, group: 'validated', location: { sheet: 1, ref: 'A3' } });
+    expect(c.highlightNext()).toMatchObject({ matchIndex: 0, group: 'user' });
+    c.highlightNext();
+    c.highlightNext();
+    expect(c.highlightNext()).toMatchObject({ matchIndex: 3, location: { ref: 'B2' } });
+    expect(c.sheetHighlights(0).map((box) => box.active)).toEqual([false, false, true, true, false, false]);
+    // The find cursor did not move.
+    expect(c.next()?.matchIndex).toBe(1);
+  });
+
+  it('keeps each kind when the other is cleared, and drops both on invalidate', async () => {
+    const c = controllerFor(sheets);
+    await c.find('revenue');
+    await c.highlight(groups);
+    c.clearFind();
+    expect(c.matches()).toEqual([]);
+    expect(c.sheetHighlights(0)).toHaveLength(3);
+    await c.find('revenue');
+    c.clearHighlights();
+    expect(c.highlightNext()).toBeNull();
+    expect(c.matches()).toHaveLength(3);
+    await c.highlight(groups);
+    c.invalidate();
+    expect(c.sheetHighlights(0)).toEqual([]);
+  });
+
+  it('replaces the set, clears on an empty set, and rejects a repeated id', async () => {
+    const c = controllerFor(sheets);
+    await c.highlight(groups);
+    expect((await c.highlight([{ id: 'only', terms: ['notes', 'summary', 'returns'] }])).map((m) => m.location.ref))
+      .toEqual(['A1', 'A3']);
+    await expect(c.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }])).rejects.toThrow('group ids must be unique');
+    expect(c.sheetHighlights(0)).toHaveLength(1);
+    expect(await c.highlight([{ id: 'only', terms: [] }])).toEqual([]);
+    expect(c.sheetHighlights(0)).toEqual([]);
+  });
+
+  it('matches whole words per group and searches a cell\'s alternate texts per group', async () => {
+    const c = new XlsxFindController(
+      () => 1,
+      () => 'S',
+      async () => [
+        { row: 1, col: 1, text: 'category cat' },
+        { row: 2, col: 1, text: '0.123456789', alternates: ['0.1235'] },
+      ],
+    );
+    const matches = await c.highlight([
+      { id: 'word', terms: ['cat'], wholeWord: true },
+      { id: 'full', terms: ['456'] },
+      { id: 'short', terms: ['235'] },
+    ]);
+    expect(matches.map((m) => [m.group, m.text, m.location.ref])).toEqual([
+      ['word', 'cat', 'A1'], ['short', '235', 'A2'], ['full', '456', 'A2'],
+    ]);
+  });
+
+  it('commits only the latest highlight request and never a cleared one', async () => {
+    const pending: Array<(cells: FindCell[]) => void> = [];
+    const c = new XlsxFindController(
+      () => 1,
+      () => 'S',
+      () => new Promise<FindCell[]>((resolve) => pending.push(resolve)),
+    );
+    const stale = c.highlight([{ id: 'a', terms: ['old'] }]);
+    const current = c.highlight([{ id: 'a', terms: ['new'] }]);
+    // The term search loads on demand; the superseded request never collects.
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0]([cell(1, 1, 'old new')]);
+    expect((await current).map((m) => m.text)).toEqual(['new']);
+    await expect(stale).resolves.toEqual([]);
+    const cleared = c.highlight([{ id: 'a', terms: ['old'] }]);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    c.clearHighlights();
+    pending[1]([cell(1, 1, 'old new')]);
+    await expect(cleared).resolves.toEqual([]);
+    expect(c.sheetHighlights(0)).toEqual([]);
+  });
+});
+
+describe('XlsxFindController.find wholeWord', () => {
+  it('matches whole words within each cell', async () => {
+    const c = controllerFor([{ name: 'S', cells: [cell(1, 1, 'category cat'), cell(2, 1, 'Cat'), cell(3, 1, 'cats')] }]);
+    expect((await c.find('cat', { wholeWord: true })).map((m) => [m.location.ref, m.text]))
+      .toEqual([['A1', 'cat'], ['A2', 'Cat']]);
+    expect(await c.find('cat')).toHaveLength(4);
   });
 });

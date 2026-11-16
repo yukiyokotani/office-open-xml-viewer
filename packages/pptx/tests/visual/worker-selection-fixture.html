@@ -115,10 +115,36 @@
       // runs round-trip) must rebuild the overlay + highlights at the new scale.
       await viewer.setScale(ZOOM);
       const after = capture(host, viewer, canvas);
+      // Text highlights: a second, independent set next to the find. Captured
+      // after the find snapshots so those stay as they were.
+      const highlightMatches = await viewer.highlightText([
+        { id: 'word', terms: [query], color: 'rgba(0, 0, 255, 0.3)', wholeWord: true },
+        { id: 'any', terms: [query], color: 'rgba(255, 0, 0, 0.3)' },
+      ]);
+      const activeHighlight = await viewer.highlightNext();
+      const layer = host.querySelector('[data-overlay="highlight"]');
+      const textHighlights = {
+        matches: highlightMatches.map((m) => ({ text: m.text, slide: m.location.slide, group: m.group, term: m.term })),
+        active: activeHighlight && { matchIndex: activeHighlight.matchIndex, group: activeHighlight.group },
+        boxes: [...layer.querySelectorAll('div')].filter((b) => b.style.background).map((b) => {
+          const r = b.getBoundingClientRect();
+          const wr = wrapperRect(host);
+          return {
+            background: b.style.background,
+            ringed: b.style.outlineStyle === 'solid',
+            left: Math.round(r.left - wr.left),
+            top: Math.round(r.top - wr.top),
+            width: Math.round(r.width),
+          };
+        }),
+      };
+      // The find kept its own cursor: its next step is its second match.
+      textHighlights.findNextIndex = (await viewer.findNext())?.matchIndex;
       return {
         matches: matches.map((m) => ({ text: m.text, slide: m.location.slide })),
         before,
         after,
+        textHighlights,
         viewer,
       };
     };
@@ -127,7 +153,7 @@
       const main = await buildViewer('main-host', 'main');
       const worker = await buildViewer('worker-host', 'worker');
 
-      const pack = ({ matches, before, after }) => ({ matches, before, after });
+      const pack = ({ matches, before, after, textHighlights }) => ({ matches, before, after, textHighlights });
       document.body.dataset.main = JSON.stringify(pack(main));
       document.body.dataset.worker = JSON.stringify(pack(worker));
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { UnitFindController } from './find-controller';
 
 const runs = (texts: string[]) => texts.map((text) => ({ text }));
@@ -84,5 +84,198 @@ describe('UnitFindController', () => {
     expect(find.matches()).toEqual([]);
     expect(find.unitRuns(0)).toBeUndefined();
     expect(find.next()).toBeNull();
+  });
+});
+
+describe('UnitFindController — text highlights', () => {
+  const groups = [
+    { id: 'user', terms: ['revenue'], color: 'rgba(0,0,255,0.3)' },
+    { id: 'validated', terms: ['guaranteed returns'] },
+  ];
+
+  it('returns every group match in document order with its group and term', async () => {
+    const find = controller([['Revenue and guaranteed ', 'returns'], ['revenue']]);
+    expect(await find.highlight(groups)).toEqual([
+      { matchIndex: 0, text: 'Revenue', location: { unit: 0 }, group: 'user', term: 'revenue' },
+      { matchIndex: 1, text: 'guaranteed returns', location: { unit: 0 }, group: 'validated', term: 'guaranteed returns' },
+      { matchIndex: 2, text: 'revenue', location: { unit: 1 }, group: 'user', term: 'revenue' },
+    ]);
+    expect(find.highlightsArmed).toBe(true);
+  });
+
+  it('paints the group colours first and the find matches after them', async () => {
+    const find = controller([['revenue']]);
+    await find.find('ven');
+    await find.highlight(groups);
+    expect(find.unitHighlights(0)).toEqual([
+      { slices: [{ runIndex: 0, start: 0, end: 7 }], active: false, color: 'rgba(0,0,255,0.3)' },
+      { slices: [{ runIndex: 0, start: 2, end: 5 }], active: false },
+    ]);
+    const validated = controller([['guaranteed returns']]);
+    await validated.highlight(groups);
+    expect(validated.unitHighlights(0)[0].color).toBe('rgba(0, 184, 148, 0.35)');
+  });
+
+  it('keeps the find and the highlights independent: matches, cursors and clears', async () => {
+    const find = controller([['revenue revenue']]);
+    await find.find('revenue');
+    await find.highlight(groups);
+    expect(find.next()?.matchIndex).toBe(0);
+    expect(find.highlightPrev()).toMatchObject({ matchIndex: 1, group: 'user' });
+    expect(find.highlightNext()).toMatchObject({ matchIndex: 0, group: 'user' });
+    expect(find.unitHighlights(0).map((box) => box.active)).toEqual([true, false, true, false]);
+
+    // A new find query resets only the find cursor.
+    await find.find('rev');
+    expect(find.unitHighlights(0).map((box) => box.active)).toEqual([true, false, false, false]);
+
+    find.clearFind();
+    expect(find.matches()).toEqual([]);
+    expect(find.unitHighlights(0)).toHaveLength(2);
+    expect(find.unitRuns(0)).toBeDefined();
+
+    await find.find('revenue');
+    find.clearHighlights();
+    expect(find.highlightNext()).toBeNull();
+    expect(find.highlightsArmed).toBe(false);
+    expect(find.matches()).toHaveLength(2);
+    expect(find.unitRuns(0)).toBeDefined();
+
+    // The cached runs go with the last armed search.
+    find.clearFind();
+    expect(find.unitRuns(0)).toBeUndefined();
+  });
+
+  it('replaces the previous set, and an empty set clears it', async () => {
+    const find = controller([['alpha beta']]);
+    await find.highlight([{ id: 'a', terms: ['alpha'] }]);
+    expect((await find.highlight([{ id: 'b', terms: ['beta'] }])).map((match) => match.group)).toEqual(['b']);
+    expect(find.unitHighlights(0)).toHaveLength(1);
+    expect(await find.highlight([{ id: 'b', terms: [''] }])).toEqual([]);
+    expect(find.unitHighlights(0)).toEqual([]);
+    expect(find.highlightsArmed).toBe(false);
+    expect(find.unitRuns(0)).toBeUndefined();
+  });
+
+  it('rejects a repeated group id without touching the current set', async () => {
+    const find = controller([['alpha']]);
+    await find.highlight([{ id: 'a', terms: ['alpha'] }]);
+    await expect(find.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }]))
+      .rejects.toThrow('group ids must be unique');
+    expect(find.unitHighlights(0)).toHaveLength(1);
+  });
+
+  it('is not affected by later changes to the caller\'s group objects', async () => {
+    let resolve!: (runs: { text: string }[]) => void;
+    const find = new UnitFindController(
+      () => 1,
+      () => new Promise<{ text: string }[]>((done) => { resolve = done; }),
+      (unit) => ({ unit }),
+    );
+    const terms = ['alpha'];
+    const group = { id: 'a', terms, color: 'red' };
+    const pending = find.highlight([group]);
+    terms[0] = 'beta';
+    group.color = 'blue';
+    // The term search loads on demand, so collection starts a little later.
+    await vi.waitFor(() => expect(resolve).toBeTypeOf('function'));
+    resolve([{ text: 'alpha beta' }]);
+    expect((await pending).map((match) => match.text)).toEqual(['alpha']);
+    expect(find.unitHighlights(0)[0].color).toBe('red');
+  });
+
+  it('collects each unit once when a find and a highlight start together', async () => {
+    const collected: number[] = [];
+    const find = new UnitFindController(
+      () => 2,
+      async (unit) => { collected.push(unit); return [{ text: 'alpha' }]; },
+      (unit) => ({ unit }),
+    );
+    const [found, highlighted] = await Promise.all([
+      find.find('alpha'),
+      find.highlight([{ id: 'a', terms: ['alpha'] }]),
+    ]);
+    expect(found).toHaveLength(2);
+    expect(highlighted).toHaveLength(2);
+    expect(collected).toEqual([0, 1]);
+  });
+
+  it('still completes when the scan it waited for is cancelled', async () => {
+    const gates: ((runs: { text: string }[]) => void)[] = [];
+    const find = new UnitFindController(
+      () => 1,
+      () => new Promise<{ text: string }[]>((done) => { gates.push(done); }),
+      (unit) => ({ unit }),
+    );
+    const found = find.find('alpha');
+    const highlighted = find.highlight([{ id: 'a', terms: ['alpha'] }]);
+    find.clearFind();
+    gates[0]([{ text: 'alpha' }]);
+    await expect(found).resolves.toEqual([]);
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    gates[1]([{ text: 'alpha' }]);
+    expect(await highlighted).toHaveLength(1);
+    expect(find.matches()).toEqual([]);
+  });
+
+  it('cancels a highlight scan that a newer set or a clear supersedes', async () => {
+    const gates: ((runs: { text: string }[]) => void)[] = [];
+    const find = new UnitFindController(
+      () => 1,
+      () => new Promise<{ text: string }[]>((done) => { gates.push(done); }),
+      (unit) => ({ unit }),
+    );
+    const first = find.highlight([{ id: 'a', terms: ['alpha'] }]);
+    const second = find.highlight([{ id: 'b', terms: ['beta'] }]);
+    // The superseded request never starts collecting.
+    await vi.waitFor(() => expect(gates).toHaveLength(1));
+    gates[0]([{ text: 'alpha beta' }]);
+    await expect(first).resolves.toEqual([]);
+    expect((await second).map((match) => match.group)).toEqual(['b']);
+
+    const third = find.highlight([{ id: 'c', terms: ['alpha'] }]);
+    find.clearHighlights();
+    await expect(third).resolves.toEqual([]);
+    expect(find.unitHighlights(0)).toEqual([]);
+  });
+
+  it('drops both searches on invalidate', async () => {
+    const find = controller([['alpha']]);
+    await find.find('alpha');
+    await find.highlight([{ id: 'a', terms: ['alpha'] }]);
+    find.invalidate();
+    expect(find.unitHighlights(0)).toEqual([]);
+    expect(find.highlightsArmed).toBe(false);
+    expect(find.unitRuns(0)).toBeUndefined();
+  });
+
+  it('applies the adapter\'s match filter and layout breaks to highlights', async () => {
+    const units = [[{ text: 'Introduction', p: 0 }, { text: 'The end', p: 1 }]];
+    const find = new UnitFindController(
+      () => units.length,
+      async (unit: number) => units[unit],
+      (unit: number) => ({ unit }),
+      (unitRuns, slices) => slices.every((slice) => unitRuns[slice.runIndex].p === unitRuns[slices[0].runIndex].p),
+      undefined,
+      async () => (previous, next) => previous.p !== next.p,
+    );
+    const matches = await find.highlight([
+      { id: 'word', terms: ['introduction', 'the'], wholeWord: true },
+      { id: 'across', terms: ['introductionthe'] },
+    ]);
+    expect(matches.map((match) => [match.group, match.text])).toEqual([['word', 'Introduction'], ['word', 'The']]);
+    expect(await find.find('the', { wholeWord: true })).toHaveLength(1);
+  });
+});
+
+describe('UnitFindController — whole-word find', () => {
+  it('matches whole words and stays cancellable while the term search loads', async () => {
+    const find = controller([['concatenate the cat'], ['Cat']]);
+    expect((await find.find('cat', { wholeWord: true })).map((match) => [match.location.unit, match.text]))
+      .toEqual([[0, 'cat'], [1, 'Cat']]);
+    const cancelled = find.find('cat', { wholeWord: true });
+    find.clearFind();
+    await expect(cancelled).resolves.toEqual([]);
+    expect(find.matches()).toEqual([]);
   });
 });
