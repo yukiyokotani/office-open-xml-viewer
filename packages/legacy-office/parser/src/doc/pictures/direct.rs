@@ -202,7 +202,8 @@ impl Store<'_> {
             // placeholder of a pseudo-inline shape; the shape itself is
             // projected at its anchor character.
             if !self.placeholders.contains(&offset) {
-                self.omitted = true;
+                self.omitted
+                    .defer("Word inline picture frame without a picture");
             }
             return Ok(None);
         };

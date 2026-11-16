@@ -22,7 +22,8 @@ pub(super) struct Store<'a> {
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
-    pub omitted: bool,
+    /// Inline picture frames that produced no picture.
+    pub omitted: crate::rejection::Deferred,
     /// The hidden `_PictureBullets` document, when the source has one.
     bullet_document: Option<super::picture_bullets::Document<'a>>,
     /// Acquired picture-bullet frames by PICF offset. Retained as source
@@ -41,7 +42,7 @@ impl<'a> Store<'a> {
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
-            omitted: false,
+            omitted: Default::default(),
             bullet_document: None,
             bullets: BTreeMap::new(),
         }
@@ -725,7 +726,7 @@ mod tests {
             .direct_inline(0, &mut usize::MAX.clone())
             .unwrap()
             .is_none());
-        assert!(!store.omitted);
+        assert!(!store.omitted.is_pending());
         // An explicit false, or a BLIP-referencing frame, is not a placeholder.
         for properties in [
             &[(0x53fu16, 0x0001_0000u32)][..],
@@ -734,7 +735,10 @@ mod tests {
             let data = fixture(properties, &[]);
             let mut store = Store::new(&data);
             let result = store.direct_inline(0, &mut usize::MAX.clone());
-            assert!(result.is_err() || store.omitted, "{properties:x?}");
+            assert!(
+                result.is_err() || store.omitted.is_pending(),
+                "{properties:x?}"
+            );
             assert!(store.placeholders.is_empty());
         }
     }
@@ -873,7 +877,10 @@ mod tests {
             .direct_inline(0, &mut usize::MAX.clone())
             .unwrap()
             .is_none());
-        assert!(store.omitted);
+        assert_eq!(
+            store.omitted.reason(),
+            Some("Word inline picture frame without a picture")
+        );
         assert!(store
             .finish_direct_resources(&mut usize::MAX.clone())
             .unwrap()
