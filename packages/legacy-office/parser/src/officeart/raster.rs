@@ -539,11 +539,6 @@ pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
         if matches!(marker, 0 | 0xd0..=0xd8) {
             return Err(unsupported("unexpected OfficeArt JPEG marker before frame"));
         }
-        // Do not skip an unsupported first frame and accidentally validate the
-        // dimensions of a later frame that a decoder would not choose.
-        if matches!(marker, 0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf | 0xde) {
-            return Err(unsupported("unsupported OfficeArt JPEG frame encoding"));
-        }
         let length = b
             .get(position..position + 2)
             .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
@@ -553,15 +548,27 @@ pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), Stri
             .and_then(|b| b.get(..length))
             .filter(|b| b.len() >= 2)
             .ok_or_else(|| unsupported("invalid OfficeArt JPEG segment length"))?;
-        if matches!(marker, 0xc0..=0xc2) {
-            // ITU-T T.81 B.2.2: Lf = 8 + 3 * Nf. Only 8-bit Huffman
-            // baseline/sequential/progressive frames are supported here.
+        // The first frame header (SOFn, or the DHP of a hierarchical image)
+        // is the one a decoder chooses: a later frame is never read instead.
+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf | 0xde) {
+            // ITU-T T.81 B.2.2: Lf = 8 + 3 * Nf, for every frame type.
             if segment.len() < 8
-                || segment[2] != 8
                 || segment[7] == 0
                 || segment.len() != 8 + 3 * usize::from(segment[7])
             {
-                return Err(unsupported("unsupported OfficeArt JPEG frame"));
+                return Err(crate::rejection::corrupt(
+                    "invalid OfficeArt JPEG frame header",
+                ));
+            }
+            // An 8-bit Huffman baseline, extended or progressive frame
+            // (SOF0-SOF2) is what every host image decoder reads. An
+            // arithmetic-coded, lossless or hierarchical frame, or one of
+            // another sample precision, is a JPEG all the same: its bytes
+            // are passed on unchanged for the host's decoder to draw or to
+            // replace with its own placeholder, as it does for the same
+            // picture in an OOXML package.
+            if !matches!(marker, 0xc0..=0xc2) || segment[2] != 8 {
+                crate::rejection::approximated("unsupported OfficeArt JPEG frame encoding", ());
             }
             return Ok((
                 u32::from(u16::from_be_bytes([segment[5], segment[6]])),

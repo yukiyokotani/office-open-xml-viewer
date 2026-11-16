@@ -1,20 +1,30 @@
-//! BIFF8 rectangles, text boxes and sheet-anchored groups -> XLSX-model shape
-//! anchors, without generating SpreadsheetML. MS-XLS 2.4.181 (Obj ot 0, 2 and
-//! 6), 2.4.329 (TxO), 2.5.129 (FontIndex); MS-ODRAW 2.2.12 (drawing defaults),
-//! 2.2.40 (FSP) and 2.3 (properties).
+//! BIFF8 drawing shapes and sheet-anchored groups -> XLSX-model shape
+//! anchors, without generating SpreadsheetML. MS-XLS 2.4.181 (Obj ot 0-4, 6,
+//! 9 and 30), 2.4.329 (TxO), 2.5.129 (FontIndex); MS-ODRAW 2.2.12 (drawing
+//! defaults), 2.2.40 (FSP), 2.3 (properties) and 2.4.24 (shape types).
 //!
 //! Excel's own XLSX of the corpus workbooks these XLS files were saved from is
 //! the mapping evidence: rectangles (msosptRectangle) and text boxes
 //! (msosptTextBox) are `prstGeom rect` shapes with the same solid fill and
 //! line, text box runs carry the BIFF Font's face, size, weight and palette
 //! color, TxO alignment is the paragraph `algn` and body `anchor`, and a group
-//! keeps its members' child-anchor placement. Every other drawn fact is
-//! rejected, never approximated.
+//! keeps its members' child-anchor placement. Other shape types are the
+//! DrawingML presets Office converts them to (`officeart::preset`), a shape
+//! with its own path is that path, and fills are the model's fills (`fill`).
+//!
+//! What the shape model cannot state is drawn as its nearest equivalent and
+//! recorded with the best-effort helpers (`crate::rejection`): a shadow and a
+//! property without a counterpart are not drawn, underline, strikethrough
+//! and the other font effects of a text run are left out, a shape type
+//! without a preset is a rectangle. Form controls are not drawn.
 use super::drawing_anchors::{self, CellCorner, GroupFrame, ShapeSource};
 use super::{styles, u16_at, unsupported, Record, SheetData};
 use crate::officeart::{paint::Paint, record_with_end};
 use ooxml_common::drawing::{DrawingGroupSpec, DrawingGroupTransform, DrawingRect};
 use std::collections::BTreeMap;
+
+mod fill;
+mod pattern;
 
 /// MS-ODRAW 2.3.21.2-5 default text margins (0.1 in, 0.05 in). Excel writes
 /// fAutoTextMargin (2.3.21.15, <57>) for text whose XLSX counterpart has a
@@ -34,7 +44,39 @@ struct Prepared {
     from: CellCorner,
     to: CellCorner,
     behavior: u16,
-    leaves: Vec<(xlsx_model::ShapeInfo, Placement)>,
+    leaves: Vec<PreparedLeaf>,
+}
+
+struct PreparedLeaf {
+    info: xlsx_model::ShapeInfo,
+    placement: Placement,
+    /// A preset shape's type and legacy adjust values, converted once the
+    /// shape's extent is known (`officeart::preset::adjustments`).
+    preset: Option<(u16, [Option<i32>; 10])>,
+    /// The picture its fill waits for.
+    blip: Option<fill::Blip>,
+}
+
+/// One projected shape: placement is resolved with its anchor.
+struct Projected {
+    info: xlsx_model::ShapeInfo,
+    rotation: i32,
+    preset: Option<(u16, [Option<i32>; 10])>,
+    blip: Option<fill::Blip>,
+}
+
+/// The object types drawn as shapes (MS-XLS 2.5.FtCmo ot): line, rectangle,
+/// oval, arc, text box, polygon and OfficeArt shape. Each is drawn from its
+/// OfficeArt shape type and properties.
+pub(super) fn shape_object(kind: u16) -> bool {
+    matches!(kind, 1 | 2 | 3 | 4 | 6 | 9 | 30)
+}
+
+/// Form controls (button, check box, option button, edit box, label, dialog
+/// frame, spinner, scroll bar, list box, group box, drop-down). The model
+/// has no control, so none is drawn.
+pub(super) fn form_control(kind: u16) -> bool {
+    matches!(kind, 7 | 11..=20)
 }
 
 /// Where a leaf sits: the enclosing groups (outermost first, the first one
@@ -145,7 +187,7 @@ impl Shapes {
             let Some(&sheet) = sheet_ids.get(&anchor.sheet) else {
                 continue;
             };
-            if !matches!(anchor.object_type, 0 | 2 | 6 | 9) {
+            if anchor.object_type != 0 && !shape_object(anchor.object_type) {
                 continue;
             }
             let defaults = match &defaults {
@@ -164,19 +206,26 @@ impl Shapes {
                 for member in &anchor.members {
                     if let (8, Some(picture)) = (member.object_type, member.picture) {
                         prepared.images.insert(picture.store_index);
-                        leaves.push((
-                            picture_leaf(member.order, &picture),
-                            Placement {
+                        leaves.push(PreparedLeaf {
+                            info: picture_leaf(member.order, &picture),
+                            placement: Placement {
                                 groups: member.groups.clone(),
                                 anchor: Some(member.anchor),
                                 rotation: picture.rotation,
                                 flip_h: member.shape_flags & 0x40 != 0,
                                 flip_v: member.shape_flags & 0x80 != 0,
                             },
-                        ));
+                            preset: None,
+                            blip: None,
+                        });
                         continue;
                     }
-                    if !matches!(member.object_type, 2 | 6 | 9) {
+                    // A grouped form control is not drawn (see
+                    // `admit_direct_object`, which records it).
+                    if form_control(member.object_type) {
+                        continue;
+                    }
+                    if !shape_object(member.object_type) {
                         return Err(unsupported(format!(
                             "grouped BIFF drawing object type {} is not projected",
                             member.object_type
@@ -191,19 +240,24 @@ impl Shapes {
                         child: true,
                         order: member.order,
                     };
-                    if let Some((info, rotation)) =
+                    if let Some(projected) =
                         leaf.project(records, styles, defaults, source, &mut budget)?
                     {
-                        leaves.push((
-                            info,
-                            Placement {
+                        prepared
+                            .images
+                            .extend(projected.blip.as_ref().map(|blip| blip.store));
+                        leaves.push(PreparedLeaf {
+                            info: projected.info,
+                            placement: Placement {
                                 groups: member.groups.clone(),
                                 anchor: Some(member.anchor),
-                                rotation,
+                                rotation: projected.rotation,
                                 flip_h: member.shape_flags & 0x40 != 0,
                                 flip_v: member.shape_flags & 0x80 != 0,
                             },
-                        ));
+                            preset: projected.preset,
+                            blip: projected.blip,
+                        });
                     }
                 }
             } else {
@@ -212,19 +266,24 @@ impl Shapes {
                     child: false,
                     order: anchor.order,
                 };
-                if let Some((info, rotation)) =
+                if let Some(projected) =
                     leaf.project(records, styles, defaults, source, &mut budget)?
                 {
-                    leaves.push((
-                        info,
-                        Placement {
+                    prepared
+                        .images
+                        .extend(projected.blip.as_ref().map(|blip| blip.store));
+                    leaves.push(PreparedLeaf {
+                        info: projected.info,
+                        placement: Placement {
                             groups: Vec::new(),
                             anchor: None,
-                            rotation,
+                            rotation: projected.rotation,
                             flip_h: anchor.shape_flags & 0x40 != 0,
                             flip_v: anchor.shape_flags & 0x80 != 0,
                         },
-                    ));
+                        preset: projected.preset,
+                        blip: projected.blip,
+                    });
                 }
             }
             if !leaves.is_empty() {
@@ -247,18 +306,19 @@ impl Shapes {
         self.images.clone()
     }
 
-    /// Give each grouped picture the MIME type of its decoded media.
+    /// Give each grouped picture and each picture fill the MIME type of its
+    /// decoded media, and each pattern fill the preset its bitmap draws.
     pub(super) fn attach_images(
         &mut self,
         pictures: &super::pictures::Pictures,
     ) -> Result<(), String> {
         for prepared in self.sheets.values_mut().flatten() {
-            for (info, _) in &mut prepared.leaves {
+            for leaf in &mut prepared.leaves {
                 if let xlsx_model::ShapeGeom::Image {
                     image_path,
                     mime_type,
                     ..
-                } = &mut info.geom
+                } = &mut leaf.info.geom
                 {
                     let id = image_path
                         .rsplit('/')
@@ -269,6 +329,21 @@ impl Shapes {
                         unsupported("grouped BIFF picture BLIP is not a supported image")
                     })?;
                     *mime_type = ooxml_common::blip::mime_from_ext(extension).into();
+                }
+                let Some(blip) = leaf.blip.take() else {
+                    continue;
+                };
+                let (extension, bytes) = pictures.media(blip.store).ok_or_else(|| {
+                    unsupported("grouped BIFF picture BLIP is not a supported image")
+                })?;
+                match &mut leaf.info.fill {
+                    Some(xlsx_model::ShapeFill::Pattern { preset, .. }) => {
+                        *preset = fill::pattern_preset(bytes, extension);
+                    }
+                    Some(xlsx_model::ShapeFill::Image { mime_type, .. }) => {
+                        *mime_type = ooxml_common::blip::mime_from_ext(extension).into();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -337,8 +412,19 @@ impl Shapes {
                 let shapes = shape
                     .leaves
                     .into_iter()
-                    .map(|(mut info, placement)| {
+                    .map(|leaf| {
+                        let PreparedLeaf {
+                            mut info,
+                            placement,
+                            preset,
+                            ..
+                        } = leaf;
                         let rect = placement.resolve(width, height);
+                        if let (Some((kind, legacy)), xlsx_model::ShapeGeom::Preset { adj, .. }) =
+                            (preset, &mut info.geom)
+                        {
+                            *adj = preset_adjustments(kind, &legacy, rect.width, rect.height);
+                        }
                         info.x = rect.x / width;
                         info.y = rect.y / height;
                         info.w = rect.width / width;
@@ -396,21 +482,31 @@ impl Table {
             // never change its binary rendering.
             return match id {
                 0x380 | 0x381 | 0x382 | 0x38d | 0x3a9 => Ok(()),
-                // Geometry arrays: the value is the array size and the data
-                // travels in `ShapeSource::complex`.
-                0x145 | 0x146 | 0x151 | 0x152 | 0x155..=0x157 => {
+                // Geometry arrays and fillShadeColors: the value is the
+                // array size and the data travels in `ShapeSource::complex`.
+                0x145 | 0x146 | 0x151 | 0x152 | 0x155..=0x157 | 0x197 => {
                     self.values.insert(id, value);
                     Ok(())
                 }
-                _ => Err(unsupported(format!(
-                    "XLS drawing shape complex property {id:#06x} is not projected"
-                ))),
+                // A property is framed by its own size, so one without a
+                // counterpart in the shape model is passed over.
+                _ => {
+                    crate::rejection::skipped(
+                        "XLS drawing shape complex property is not projected",
+                    );
+                    Ok(())
+                }
             };
         }
         if opid & 0x4000 != 0 {
-            return Err(unsupported(format!(
-                "XLS drawing shape BLIP property {id:#06x} is not projected"
-            )));
+            // fBid: the value is a one-based BLIP store index. fillBlip is
+            // the picture of a pattern, texture or picture fill.
+            if id == 0x186 {
+                self.values.insert(id, value);
+            } else {
+                crate::rejection::skipped("XLS drawing shape BLIP property is not projected");
+            }
+            return Ok(());
         }
         match self.values.get_mut(&id) {
             None => {
@@ -527,21 +623,18 @@ impl Leaf {
         defaults: &Table,
         source: &ShapeSource,
         budget: &mut usize,
-    ) -> Result<Option<(xlsx_model::ShapeInfo, i32)>, String> {
-        // MS-ODRAW 2.2.40: groups, patriarchs, deleted, OLE, master-linked,
-        // connector and background shapes need facts this projection lacks.
+    ) -> Result<Option<Projected>, String> {
+        // MS-ODRAW 2.2.40: groups, patriarchs, deleted, OLE, master-linked
+        // and background shapes need facts this projection lacks. A
+        // connector (fConnector) is drawn as its shape type.
         let membership = if self.child { 0x2 } else { 0 };
-        if self.flags & 0x53f != membership || self.flags & 0xa00 != 0xa00 {
+        if self.flags & 0x43f != membership || self.flags & 0xa00 != 0xa00 {
             return Err(unsupported("XLS drawing shape has unsupported shape flags"));
         }
-        // msosptNotPrimitive (0) is a freeform drawn from its own path.
-        if !matches!(source.kind, 0 | 1 | 202) {
-            return Err(unsupported(format!(
-                "XLS drawing shape type {} is not projected",
-                source.kind
-            )));
-        }
+        // A shape with its own path (pVertices) is drawn from it whatever
+        // its type; msosptNotPrimitive (0) is always its own path.
         let freeform = source.kind == 0;
+        let custom = freeform || source.complex.iter().any(|(id, _)| *id == 0x145);
         let mut geometry = crate::officeart::geometry::Geometry::default();
         let mut table = Table::default();
         for &(opid, value) in &source.properties {
@@ -552,9 +645,11 @@ impl Leaf {
         let mut margins = DEFAULT_MARGINS;
         let mut wrap = "square";
         let mut anchor_text = None;
-        let mut context_direction = false;
+        let mut direction = Direction::LeftToRight;
         let mut rotation = 0i32;
         let mut inscribed = false;
+        let mut adjust = [None; 10];
+        let mut compound = None;
         for (&id, &value) in &table.values {
             match id {
                 // Transform (2.3.18.5): resolved with the placement.
@@ -587,53 +682,100 @@ impl Leaf {
                 // unrecognized opid.opid field, a vendor can ignore the
                 // property").
                 0x0086 | 0x008c | 0x008d | 0x008e => {}
-                // Freeform geometry (2.3.6): the explicit path. A path that
-                // references a guide or an escape is rejected below.
-                0x0140..=0x0146 if freeform => {
-                    match source.complex.iter().find(|(c, _)| *c == id) {
-                        Some((_, data)) => geometry.complex(id, data.as_slice()),
-                        None => geometry.scalar(id, value)?,
-                    }
-                }
-                // Connection sites, their directions, adjust handles and the
-                // connection-site type (2.3.6.18-30) only serve editing.
-                0x0151 | 0x0152 | 0x0155 | 0x0158 if freeform => {}
-                // Guides feed formulas; a path using them is not decoded.
-                0x0156 if freeform => {}
+                // Geometry (2.3.6): the explicit path. A path that
+                // references a guide or an escape is not decoded (below).
+                0x0140..=0x0146 if custom => match source.complex.iter().find(|(c, _)| *c == id) {
+                    Some((_, data)) => geometry.complex(id, data.as_slice()),
+                    None => geometry.scalar(id, value)?,
+                },
+                // The coordinate space of a preset shape, which its preset
+                // geometry does not use.
+                0x0140..=0x0144 => {}
+                // adjustValue..adjust10Value (2.3.6.10-19) of a preset
+                // shape, converted with its extent.
+                0x0147..=0x0150 => adjust[usize::from(id - 0x147)] = Some(value as i32),
+                // Connection sites, their directions, adjust handles, guides
+                // (which feed formulas) and the connection-site type
+                // (2.3.6.18-30) only serve editing.
+                0x0151 | 0x0152 | 0x0155 | 0x0156 | 0x0158 => {}
                 // pInscribe (2.3.6.28): the text rectangle of the path.
-                0x0157 if freeform => inscribed = value != 0,
+                0x0157 => inscribed = value != 0,
                 // Geometry Boolean Properties (2.3.6.31): fill/line vetoes.
                 0x017f => paint.property(id, value)?,
                 0x0088 | 0x0089 if value == 0 => {}
-                // txdir (2.3.21.13): left-to-right or from the context.
-                0x008b if value == 0 => {}
-                0x008b if value == 2 => context_direction = true,
+                // txdir (2.3.21.13): left-to-right, right-to-left or from
+                // the context (the first strong character).
+                0x008b => {
+                    direction = match value {
+                        0 => Direction::LeftToRight,
+                        1 => Direction::RightToLeft,
+                        2 => Direction::Context,
+                        _ => crate::rejection::spec_default(
+                            "XLS drawing shape property is not projected",
+                            Direction::LeftToRight,
+                        ),
+                    }
+                }
                 0x00bf => {}
-                0x0180..=0x0183
+                // Fill (2.3.7): type, colors, opacities, the gradient angle,
+                // focus and shade type, and the texture tile.
+                0x0180..=0x0184
+                | 0x0189..=0x018c
+                | 0x0195
+                | 0x0198..=0x019c
                 | 0x01bf
                 | 0x01c0
                 | 0x01c1
                 | 0x01c4
                 | 0x01cb
+                | 0x01cc
                 | 0x01ce
                 | 0x01d0..=0x01d7
                 | 0x01ff => paint.property(id, value)?,
-                0x01cd if value == 0 => {}
+                // fillBlip (stored by `Table::add` without its fBid flag).
+                0x0186 => paint.fill_blip = Some(value),
+                // fillToLeft..fillToBottom and fillShadeColors: read with
+                // the gradient (`fill`). fillCrMod, the blip name and flags,
+                // the shade preset (whose colors are stored) and the
+                // extended colors (2.3.7.34-41, the scheme colors behind the
+                // stored RGB values) change nothing that is drawn.
+                0x0185 | 0x0187 | 0x0188 | 0x018d..=0x0190 | 0x0196 | 0x0197 | 0x019d..=0x01a8 => {}
+                // lineStyle (2.3.8.16, MSOLINESTYLE): the compound line.
+                0x01cd => {
+                    compound = match value {
+                        0 => None,
+                        1 => Some("dbl"),
+                        2 => Some("thickThin"),
+                        3 => Some("thinThick"),
+                        4 => Some("tri"),
+                        _ => crate::rejection::spec_default(
+                            "XLS drawing shape property is not projected",
+                            None,
+                        ),
+                    }
+                }
+                // lineCrMod and the extended line colors (2.3.8.29-33).
+                0x01c3 | 0x01d9..=0x01de => {}
+                // Shadow (2.3.13): its color, offsets and softness matter
+                // only when fShadow is set (below).
+                0x0200..=0x023e => {}
+                // cxstyle (2.3.2.8): how a connector is rerouted.
+                0x0303 => {}
                 // Shadow, Shape and Group Shape Boolean Properties
                 // (MS-ODRAW 2.3.13.23, 2.3.2.12 and 2.3.4.44): checked below.
                 0x023f | 0x033f | 0x03bf => {}
-                _ => {
-                    return Err(unsupported(format!(
-                        "XLS drawing shape property {id:#06x}={value:#x} is not projected"
-                    )))
-                }
+                // No counterpart in the shape model.
+                _ => crate::rejection::skipped("XLS drawing shape property is not projected"),
             }
         }
         if table.boolean(0x3bf, 1) == Some(true) {
             return Ok(None);
         }
+        // fShadow: the model's shapes have no shadow.
+        if table.boolean(0x23f, 1) == Some(true) {
+            crate::rejection::skipped("XLS drawing shadows are not projected");
+        }
         for (id, bit, reason) in [
-            (0x23f, 1, "XLS drawing shadows are not projected"),
             (0x1ff, 9, "XLS opaque line background is not projected"),
             (0x1ff, 6, "XLS inset line pens are not projected"),
             (0x1ff, 0, "XLS no-line dash rendering is not projected"),
@@ -654,28 +796,20 @@ impl Leaf {
             margins = DEFAULT_MARGINS;
         }
 
-        let fill = if paint.filled.unwrap_or(true) && paint.fill_ok.unwrap_or(true) {
-            if paint.fill_type.unwrap_or(0) != 0 || paint.fill_rect == Some(true) {
-                return Err(unsupported("non-solid XLS shape fills are not projected"));
-            }
-            Some(rgb(
-                paint.fill.unwrap_or(0x00ff_ffff),
-                paint.fill_alpha.unwrap_or(65_536),
-            )?)
+        let (fill, blip) = if paint.filled.unwrap_or(true) && paint.fill_ok.unwrap_or(true) {
+            let (fill, blip) = fill::project(&paint, &table, source, styles)?;
+            (Some(fill), blip)
         } else {
-            None
+            (None, None)
         };
         let line = if paint.lined.unwrap_or(true) && paint.line_ok.unwrap_or(true) {
             if paint.line_type.unwrap_or(0) != 0 {
                 return Err(unsupported("non-solid XLS shape lines are not projected"));
             }
-            if paint.details.line_end(0).is_some() || paint.details.line_end(1).is_some() {
-                return Err(unsupported("XLS shape line ends are not projected"));
-            }
             Some(rgb(
-                paint.line.unwrap_or(0),
+                color(paint.line.unwrap_or(0), [0, 0, 0], styles),
                 paint.line_alpha.unwrap_or(65_536),
-            )?)
+            ))
         } else {
             None
         };
@@ -688,52 +822,77 @@ impl Leaf {
                     anchor_text,
                     margins,
                     wrap,
+                    direction,
                     table: &table,
                 },
                 budget,
             )?,
             None => None,
         };
-        if freeform && inscribed && text.is_some() {
-            return Err(unsupported(
-                "XLS freeform text rectangles are not projected",
-            ));
+        // pInscribe: the text rectangle inside the path. The model lays
+        // text out in the shape's bounds.
+        if custom && inscribed && text.is_some() {
+            crate::rejection::approximated("XLS freeform text rectangles are not projected", ());
         }
-        let geom = if freeform {
-            let decoded = geometry
-                .decode(&mut 1_000_000usize)?
-                .ok_or_else(|| unsupported("XLS freeform uses guide formulas or path escapes"))?;
-            // Each path carries its authored noFill/noLine escape
-            // (ECMA-376 path@fill/@stroke, see `custom_geometry`). Whether
-            // Excel fills an open subpath of a filled shape is not
-            // established (PowerPoint does not), so such a path is rejected.
-            if fill.is_some()
-                && decoded
-                    .paths()
-                    .any(|path| path.authored_fill() && !path.fill())
-            {
+        let decoded = if custom {
+            let decoded = geometry.decode(&mut 1_000_000usize)?;
+            if decoded.is_none() && freeform {
                 return Err(unsupported(
-                    "XLS filled freeforms with open paths are not projected",
+                    "XLS freeform uses guide formulas or path escapes",
                 ));
             }
-            custom_geometry(&decoded)
+            decoded
         } else {
-            xlsx_model::ShapeGeom::Preset {
-                name: "rect".into(),
-                adj: Vec::new(),
+            None
+        };
+        let (geom, preset) = match decoded {
+            Some(decoded) => {
+                // Each path carries its authored noFill/noLine escape
+                // (ECMA-376 path@fill/@stroke, see `custom_geometry`). Whether
+                // Excel fills an open subpath of a filled shape is not
+                // established (PowerPoint does not), so such a path is rejected.
+                if fill.is_some()
+                    && decoded
+                        .paths()
+                        .any(|path| path.authored_fill() && !path.fill())
+                {
+                    return Err(unsupported(
+                        "XLS filled freeforms with open paths are not projected",
+                    ));
+                }
+                (custom_geometry(&decoded), None)
+            }
+            None => {
+                // MS-ODRAW 2.4.24 shape type as the preset Office converts
+                // it to. A type without one (or a typed shape whose own
+                // path is not decoded) is drawn as its bounding rectangle.
+                let name = match crate::officeart::preset::name(source.kind).filter(|_| !custom) {
+                    Some(name) => name,
+                    None => crate::rejection::approximated(
+                        "XLS drawing shape type is not projected",
+                        "rect",
+                    ),
+                };
+                (
+                    xlsx_model::ShapeGeom::Preset {
+                        name: name.into(),
+                        adj: Vec::new(),
+                    },
+                    (!custom && adjust.iter().any(Option::is_some))
+                        .then_some((source.kind, adjust)),
+                )
             }
         };
-        if context_direction
-            && text.as_ref().is_some_and(|text| {
-                text.paragraphs.iter().flat_map(|p| &p.runs).any(|run| {
-                    matches!(run, xlsx_model::ShapeTextRun::Text { text, .. }
-                        if text.chars().any(right_to_left))
-                })
-            })
-        {
-            return Err(unsupported("right-to-left XLS shape text is not projected"));
-        }
         let (join, miter) = paint.details.join();
+        let end = |index: usize| {
+            line.as_ref()
+                .and(paint.details.line_end(index))
+                .map(|end| xlsx_model::ShapeLineEnd {
+                    r#type: end.kind.to_owned(),
+                    w: end.width.to_owned(),
+                    len: end.length.to_owned(),
+                })
+        };
         let info = xlsx_model::ShapeInfo {
             z_order: self.order,
             // Placement is resolved with the anchor size.
@@ -744,8 +903,8 @@ impl Leaf {
             rot: 0.0,
             flip_h: false,
             flip_v: false,
-            fill_color: fill.clone(),
-            fill: fill.map(|color| xlsx_model::ShapeFill::Solid { color }),
+            fill_color: fill.as_ref().and_then(fill::fallback_color),
+            fill,
             stroke_width: line
                 .as_ref()
                 .map_or(0, |_| i64::from(paint.width.unwrap_or(9525))),
@@ -759,13 +918,15 @@ impl Leaf {
             stroke_line_cap: line.as_ref().map(|_| paint.details.canvas_cap().to_owned()),
             stroke_line_join: line.as_ref().map(|_| join.to_owned()),
             stroke_miter_limit: line.as_ref().and(miter),
-            stroke_color: line,
             stroke_fill: None,
             stroke_custom_dash: Vec::new(),
             stroke_alignment: None,
-            stroke_cmpd: None,
-            stroke_head_end: None,
-            stroke_tail_end: None,
+            stroke_cmpd: line.as_ref().and(compound).map(str::to_owned),
+            // lineStartArrowhead is the DrawingML headEnd, lineEndArrowhead
+            // its tailEnd (ECMA-376 20.1.8.38 and 20.1.8.57).
+            stroke_head_end: end(0),
+            stroke_tail_end: end(1),
+            stroke_color: line,
             geom,
             text,
         };
@@ -775,7 +936,50 @@ impl Leaf {
             std::mem::size_of::<xlsx_model::ShapeInfo>()
                 .saturating_add(usize::try_from(info.heap_bytes()).unwrap_or(usize::MAX)),
         )?;
-        Ok(Some((info, rotation)))
+        Ok(Some(Projected {
+            info,
+            rotation,
+            preset,
+            blip,
+        }))
+    }
+}
+
+/// MS-ODRAW 2.3.21.13 txdir.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    LeftToRight,
+    RightToLeft,
+    Context,
+}
+
+/// The `a:avLst` values of a preset shape from its legacy adjust values and
+/// its extent in EMU. A shape type whose adjust values have no established
+/// DrawingML counterpart keeps the preset's default proportions.
+fn preset_adjustments(
+    kind: u16,
+    legacy: &[Option<i32>; 10],
+    width: f64,
+    height: f64,
+) -> Vec<Option<f64>> {
+    let converted = crate::officeart::preset::adjustments(
+        kind,
+        legacy,
+        width.round() as i64,
+        height.round() as i64,
+    );
+    match converted {
+        Ok(Some(values)) => {
+            let used = values
+                .iter()
+                .rposition(Option::is_some)
+                .map_or(0, |i| i + 1);
+            values[..used].to_vec()
+        }
+        Ok(None) => Vec::new(),
+        Err(_) => {
+            crate::rejection::approximated("XLS drawing shape type is not projected", Vec::new())
+        }
     }
 }
 
@@ -883,24 +1087,37 @@ fn right_to_left(c: char) -> bool {
     matches!(u32::from(c), 0x0590..=0x08ff | 0xfb1d..=0xfdff | 0xfe70..=0xfeff)
 }
 
-/// OfficeArtCOLORREF (MS-ODRAW 2.2.2) with a 16.16 opacity (fillOpacity
-/// 2.3.7.5, lineOpacity 2.3.8.2) as the model's `#RRGGBB`, or `#RRGGBBAA`
-/// when translucent, with the alpha byte and opaque threshold of the shared
-/// DrawingML color parser. Excel's XLSX of a 50% line (`a:alpha 50000`)
-/// saves lineOpacity 0x8080, i.e. the same alpha byte 0x80. Palette, scheme
-/// and system indexes need Excel's color tables and are rejected.
-fn rgb(color: u32, alpha: u32) -> Result<String, String> {
-    if !matches!(color & 0xff00_0000, 0 | 0x0400_0000) {
-        return Err(unsupported(
+/// OfficeArtCOLORREF (MS-ODRAW 2.2.2) as red, green and blue. A plain,
+/// palette-matched (fPaletteRGB) or system-matched (fSystemRGB) color is its
+/// own RGB value. With fSchemeIndex the red byte is an index into the
+/// workbook's color table (MS-XLS 2.5.161 Icv: the Palette record and the
+/// display colors, see `styles::Styles::drawing_color`); Excel writes the
+/// default fill and line of every shape that way. A reference this reader
+/// cannot resolve (a palette or system index, an Icv outside the table)
+/// states no color, and the property takes `default`, the color MS-ODRAW
+/// gives it.
+fn color(value: u32, default: [u8; 3], styles: &styles::Styles<'_>) -> [u8; 3] {
+    let [red, green, blue, flags] = value.to_le_bytes();
+    let resolved = match flags {
+        0x00 | 0x02 | 0x04 => Some([red, green, blue]),
+        0x08 if green == 0 && blue == 0 => styles.drawing_color(u16::from(red)),
+        _ => None,
+    };
+    resolved.unwrap_or_else(|| {
+        crate::rejection::spec_default(
             "XLS drawing palette or scheme colors are not projected",
-        ));
-    }
-    let mut hex = format!(
-        "#{:02X}{:02X}{:02X}",
-        color & 0xff,
-        (color >> 8) & 0xff,
-        (color >> 16) & 0xff
-    );
+            default,
+        )
+    })
+}
+
+/// A color with a 16.16 opacity (fillOpacity 2.3.7.5, lineOpacity 2.3.8.2)
+/// as the model's `#RRGGBB`, or `#RRGGBBAA` when translucent, with the alpha
+/// byte and opaque threshold of the shared DrawingML color parser. Excel's
+/// XLSX of a 50% line (`a:alpha 50000`) saves lineOpacity 0x8080, i.e. the
+/// same alpha byte 0x80.
+fn rgb([red, green, blue]: [u8; 3], alpha: u32) -> String {
+    let mut hex = format!("#{red:02X}{green:02X}{blue:02X}");
     let alpha = f64::from(alpha) / 65_536.0;
     if (alpha - 1.0).abs() >= 0.004 {
         hex.push_str(&format!(
@@ -908,7 +1125,7 @@ fn rgb(color: u32, alpha: u32) -> Result<String, String> {
             (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
         ));
     }
-    Ok(hex)
+    hex
 }
 
 /// Resource policy admits amplified text work and complete retained shapes
@@ -983,6 +1200,7 @@ struct TextLayout<'a> {
     anchor_text: Option<u32>,
     margins: [u32; 4],
     wrap: &'a str,
+    direction: Direction,
     table: &'a Table,
 }
 
@@ -999,6 +1217,7 @@ fn text(
         anchor_text,
         margins,
         wrap,
+        direction,
         table,
     } = layout;
     let index = records
@@ -1133,9 +1352,28 @@ fn text(
             paragraph_runs.push(make_run(text, &fonts[&runs[run].1]));
             at = run_end;
         }
+        // ECMA-376 21.1.2.2.7 `a:pPr@rtl`. With txdir from the context the
+        // first strong character of the paragraph decides, as the Unicode
+        // bidirectional algorithm's paragraph level does.
+        let rtl = match direction {
+            Direction::LeftToRight => false,
+            Direction::RightToLeft => true,
+            Direction::Context => char::decode_utf16(units[start..end].iter().copied())
+                .filter_map(Result::ok)
+                .find_map(|c| {
+                    if right_to_left(c) {
+                        Some(true)
+                    } else if c.is_alphabetic() {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false),
+        };
         paragraphs.push(xlsx_model::ShapeParagraph {
             align: align.into(),
-            rtl: false,
+            rtl,
             mar_l: None,
             mar_r: None,
             indent: None,
@@ -1184,33 +1422,41 @@ struct RunFont {
 
 fn run_font(styles: &styles::Styles<'_>, index: u16) -> Result<RunFont, String> {
     let font = styles.shape_font(index)?;
+    // The model's text runs carry weight, slant, size, color and face.
     if font.underline || font.strike || font.other_effects {
-        return Err(unsupported(
+        crate::rejection::approximated(
             "XLS shape text underline, strikethrough or font effects are not projected",
-        ));
+            (),
+        );
     }
-    if !matches!(font.weight, 400 | 700) || font.size_twips == 0 || font.name.is_empty() {
+    if font.size_twips == 0 || font.name.is_empty() {
         return Err(unsupported("XLS shape text font weight is not projected"));
     }
-    let color = match (font.color, font.automatic_color) {
-        (Some(color), _) => color,
-        (None, true) => {
-            return Err(unsupported(
-                "automatic XLS shape text color is not projected",
-            ))
-        }
-        (None, false) => {
-            return Err(unsupported(
-                "XLS shape text system colors are not projected",
-            ))
-        }
+    // FONT bls (MS-XLS 2.4.122): 400 is normal and 700 bold. The model has
+    // one bold flag, so another weight is the nearer of the two.
+    let bold = match font.weight {
+        400 => false,
+        700 => true,
+        weight => crate::rejection::approximated(
+            "XLS shape text font weight is not projected",
+            weight >= 550,
+        ),
+    };
+    // An Icv of the Palette, or a display color: the automatic font color
+    // (0x7FFF) is the window text color.
+    let [red, green, blue] = match styles.drawing_color(font.color_index) {
+        Some(color) => color,
+        None => crate::rejection::spec_default(
+            "XLS shape text system colors are not projected",
+            [0, 0, 0],
+        ),
     };
     Ok(RunFont {
         name: font.name,
         size: f64::from(font.size_twips) / 20.0,
-        bold: font.weight == 700,
+        bold,
         italic: font.italic,
-        color,
+        color: format!("#{red:02X}{green:02X}{blue:02X}"),
     })
 }
 

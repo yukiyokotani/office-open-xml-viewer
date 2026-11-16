@@ -436,9 +436,8 @@ pub(super) struct ShapeFont {
     pub strike: bool,
     /// Superscript/subscript, outline, shadow, condense or extend.
     pub other_effects: bool,
-    /// Resolved palette color; `None` for the automatic color (0x7FFF).
-    pub color: Option<String>,
-    pub automatic_color: bool,
+    /// The font's Icv (see `Styles::drawing_color`).
+    pub color_index: u16,
 }
 
 /// Chart text font resolved from a BIFF Font record.
@@ -570,10 +569,8 @@ impl<'a> Styles<'a> {
             .filter(|_| index != 4)
             .ok_or_else(|| unsupported("BIFF shape text font index out of range"))?;
         let font = ResolvedFont::decode(data)?;
-        let automatic_color = matches!(self.color(font.color_index), ColorIdentity::Auto);
         Ok(ShapeFont {
-            color: self.chart_color(font.color_index),
-            automatic_color,
+            color_index: font.color_index,
             size_twips: font.size_twips,
             weight: font.weight,
             italic: font.italic,
@@ -586,6 +583,26 @@ impl<'a> Styles<'a> {
                 || font.extend,
             name: font.name,
         })
+    }
+
+    /// A drawing color by Icv (MS-XLS 2.5.161): the workbook Palette record
+    /// or the built-in indexed palette for 0..=0x3F, and the colors Excel
+    /// takes from the display settings: the window text color (0x40 default
+    /// foreground, 0x4D chart foreground, 0x51 ToolTip text, 0x7FFF font
+    /// automatic) and the window background color (0x41, 0x4E), which are
+    /// black and white unless the user changed the system colors (Office's
+    /// own output is produced with them). 0x4F is black by definition.
+    pub(super) fn drawing_color(&self, index: u16) -> Option<[u8; 3]> {
+        match index {
+            0x40 | 0x4d | 0x4f | 0x51 | 0x7fff => Some([0, 0, 0]),
+            0x41 | 0x4e => Some([0xff, 0xff, 0xff]),
+            _ => {
+                let hex = self.chart_color(index)?;
+                let hex = hex.trim_start_matches('#');
+                let channel = |at: usize| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok();
+                Some([channel(0)?, channel(2)?, channel(4)?])
+            }
+        }
     }
 
     /// FontX.iFont (2.4.123) one-based index into the global Font records.

@@ -631,11 +631,11 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
 
 /// Every sheet-anchored drawing object on a projected worksheet is an
 /// embedded chart (MS-XLS 2.4.181 ot 5 with its chart substream), a picture
-/// (ot 8 with a BLIP reference), a rectangle, text box or freeform polygon
-/// (ot 2, 6 or 9), a group (ot 0) of those and pictures, or a cell comment
-/// (ot 25, see `comments`); any other object (lines, ovals, controls),
-/// grouped charts, or a chart/picture without its data is rejected with the
-/// reason. `shapes` validates each shape's properties.
+/// (ot 8 with a BLIP reference), a shape (line, rectangle, oval, arc, text
+/// box, polygon or OfficeArt shape: `shapes`), a group (ot 0) of shapes and
+/// pictures, a cell comment (ot 25, see `comments`) or a form control, which
+/// is not drawn. A grouped chart, or a chart/picture without its data, is
+/// rejected with the reason. `shapes` reads each shape's properties.
 ///
 /// Returns the stream offset of each comment object's TxO, by BoundSheet tab
 /// and object identifier.
@@ -677,20 +677,27 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
             5 => return Err(unsupported("BIFF chart object without its chart substream")),
             8 if anchor.picture.is_some() => {}
             8 => return Err(unsupported("BIFF picture object without a BLIP reference")),
-            2 | 6 | 9 => {}
+            kind if shapes::shape_object(kind) => {}
             0 => {
-                if let Some(member) = anchor.members.iter().find(|member| {
-                    !matches!(member.object_type, 2 | 6 | 9)
+                for member in &anchor.members {
+                    if shapes::form_control(member.object_type) {
+                        crate::rejection::skipped("BIFF drawing object type is not projected");
+                    } else if !shapes::shape_object(member.object_type)
                         && !(member.object_type == 8 && member.picture.is_some())
-                }) {
-                    return Err(unsupported(format!(
-                        "grouped BIFF drawing object type {} is not projected",
-                        member.object_type
-                    )));
+                    {
+                        return Err(unsupported(format!(
+                            "grouped BIFF drawing object type {} is not projected",
+                            member.object_type
+                        )));
+                    }
                 }
             }
             // A cell comment: its Note is the model's comment.
             25 => {}
+            // A form control has no counterpart in the model.
+            kind if shapes::form_control(kind) => {
+                crate::rejection::skipped("BIFF drawing object type is not projected");
+            }
             kind => {
                 return Err(unsupported(format!(
                     "BIFF drawing object type {kind} is not projected"
@@ -739,20 +746,62 @@ mod direct_drawing_tests {
                 auto_picture: false,
             })
         };
+        use crate::rejection::{take_best_effort, BestEffort};
+        take_best_effort();
         assert!(super::admit_direct_object(&anchor(5, Some((1, 2)), None)).is_ok());
         assert!(super::admit_direct_object(&anchor(8, None, picture())).is_ok());
-        // A comment object is its cell's note, not a drawing.
-        assert!(super::admit_direct_object(&anchor(25, None, None)).is_ok());
+        // A comment object is its cell's note, not a drawing; lines, ovals,
+        // arcs and OfficeArt shapes are shapes.
+        for kind in [25, 1, 2, 3, 4, 6, 9, 30] {
+            assert!(super::admit_direct_object(&anchor(kind, None, None)).is_ok());
+        }
+        assert!(take_best_effort().is_empty());
+        // A form control is not drawn.
+        for kind in [7, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] {
+            assert!(super::admit_direct_object(&anchor(kind, None, None)).is_ok());
+            assert_eq!(
+                take_best_effort(),
+                [(
+                    BestEffort::Skipped,
+                    "BIFF drawing object type is not projected"
+                )]
+            );
+        }
         for (kind, chart, expected) in [
             (5, None, "without its chart substream"),
             (8, None, "without a BLIP reference"),
-            (1, None, "type 1 is not projected"),
-            (3, None, "type 3 is not projected"),
-            (4, None, "type 4 is not projected"),
+            (10, None, "type 10 is not projected"),
         ] {
             let error = super::admit_direct_object(&anchor(kind, chart, None)).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");
         }
+        // Group members: shapes and pictures are drawn, a form control is
+        // not, a chart cannot be grouped.
+        let member = |object_type, picture| super::drawing_anchors::GroupMember {
+            order: 2,
+            shape_id: 2,
+            shape_flags: 0xa02,
+            object_id: 2,
+            object_type,
+            anchor: [0, 0, 1, 1],
+            groups: Vec::new(),
+            shape: None,
+            picture,
+        };
+        let mut group = anchor(0, None, None);
+        group.members = vec![member(3, None), member(8, picture()), member(11, None)];
+        assert!(super::admit_direct_object(&group).is_ok());
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Skipped,
+                "BIFF drawing object type is not projected"
+            )]
+        );
+        group.members = vec![member(5, None)];
+        assert!(super::admit_direct_object(&group)
+            .unwrap_err()
+            .contains("grouped BIFF drawing object type 5"));
     }
 }
 

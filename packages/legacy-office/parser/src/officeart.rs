@@ -2,7 +2,7 @@
 use std::ops::Range;
 
 pub(crate) mod geometry;
-#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
 pub(crate) mod gradient;
 mod inflate;
 mod metafile;

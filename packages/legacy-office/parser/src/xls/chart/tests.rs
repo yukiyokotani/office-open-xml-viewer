@@ -944,7 +944,6 @@ fn chart_objects_of_a_chart_sheet_are_drawn_over_its_chart() {
     let mut owned = chart_sheet_records(0);
     owned.splice(1..1, bar_chart(true, None));
     assert!(projected_chart_sheet(&owned)
-        .err()
-        .expect("rejected")
+        .expect_err("rejected")
         .contains("nested BIFF substream inside a chart"));
 }

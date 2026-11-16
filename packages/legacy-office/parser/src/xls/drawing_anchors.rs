@@ -64,7 +64,8 @@ pub struct ShapeSource {
     pub properties: Vec<(u16, u32)>,
     /// Complex data of the geometry arrays (MS-ODRAW 2.3.6: pVertices,
     /// pSegmentInfo, pConnectionSites and their directions, pAdjustHandles,
-    /// pGuides and pInscribe), by property id.
+    /// pGuides and pInscribe) and of fillShadeColors (2.3.7.27), by
+    /// property id.
     pub complex: Vec<(u16, Vec<u8>)>,
     pub text: Option<usize>,
 }
@@ -198,6 +199,11 @@ fn workbook_with_policy(
     Ok(output)
 }
 
+/// A chart object of a chart sheet: its OfficeArtClientAnchorChart
+/// rectangle (left, top, right, bottom in SPRC) and the absolute record
+/// range of its chart substream.
+pub(super) type ChartSheetObject = ([i32; 4], (usize, usize));
+
 /// The embedded charts of a chart sheet substream (`records` runs from its
 /// BOF to its EOF, the BOF being record `base` of the stream): for each
 /// chart object (Obj ot 5 followed by its chart substream), the
@@ -207,7 +213,7 @@ fn workbook_with_policy(
 pub(super) fn chart_sheet_charts(
     records: &[Record<'_>],
     base: usize,
-) -> Result<Vec<([i32; 4], (usize, usize))>, String> {
+) -> Result<Vec<ChartSheetObject>, String> {
     let mut work = 2_000_000;
     let mut remaining = MAX_BYTES;
     let Some(mut drawing) = assemble(records, base, 0x0020, &mut work, &mut remaining)? else {
@@ -546,8 +552,9 @@ impl Facts<'_> {
     }
 }
 
-/// Geometry arrays retained for hosts that draw OfficeArt freeforms.
-const GEOMETRY_ARRAYS: [u16; 7] = [0x145, 0x146, 0x151, 0x152, 0x155, 0x156, 0x157];
+/// Arrays retained for hosts that draw OfficeArt shapes: the geometry of
+/// a freeform and the colors of a shaded fill (fillShadeColors).
+const GEOMETRY_ARRAYS: [u16; 8] = [0x145, 0x146, 0x151, 0x152, 0x155, 0x156, 0x157, 0x197];
 const MAX_SHAPE_COMPLEX_BYTES: usize = 4 * 1024 * 1024;
 
 fn rectangle(payload: &[u8]) -> Result<[i32; 4], String> {

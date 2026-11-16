@@ -680,10 +680,31 @@ mod tests {
         let mut bad = jpeg;
         bad[13] = 2;
         assert!(jpeg_size(&bad, &mut 100).is_err());
-        let unsupported_frame = [vec![0xff, 0xd8, 0xff, 0xc3, 0, 2], jpeg[2..].to_vec()].concat();
-        assert!(jpeg_size(&unsupported_frame, &mut 100)
+        // A frame no host decoder is known to read (lossless SOF3,
+        // arithmetic SOF9, a 12-bit SOF1) is a JPEG all the same: its size
+        // is read and its bytes go to the host's decoder.
+        crate::rejection::take_best_effort();
+        assert_eq!(jpeg_size(&jpeg, &mut 100).unwrap(), (3, 2));
+        assert!(crate::rejection::take_best_effort().is_empty());
+        for (marker, precision) in [(0xc3, 8), (0xc9, 8), (0xc1, 12)] {
+            let mut frame = jpeg;
+            frame[5] = marker;
+            frame[8] = precision;
+            assert_eq!(jpeg_size(&frame, &mut 100).unwrap(), (3, 2));
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "unsupported OfficeArt JPEG frame encoding"
+                )]
+            );
+        }
+        // The first frame header is the image's: a short one is not skipped
+        // for a later frame.
+        let short_frame = [vec![0xff, 0xd8, 0xff, 0xc3, 0, 2], jpeg[2..].to_vec()].concat();
+        assert!(jpeg_size(&short_frame, &mut 100)
             .unwrap_err()
-            .contains("encoding"));
+            .contains("invalid OfficeArt JPEG frame header"));
         let mut fill = vec![0xff, 0xd8];
         fill.extend(vec![0xff; 100]);
         assert!(jpeg_size(&fill, &mut 10).unwrap_err().contains("budget"));
