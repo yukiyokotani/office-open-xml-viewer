@@ -77,7 +77,7 @@ const formats = [
   <header class="guide-hero">
     <div class="wrap">
       <p class="eyebrow">Optional add-on · experimental</p>
-      <h1>OpenDocument files.</h1>
+      <h1>OpenDocument files</h1>
       <p>Show .odp presentations, .odt documents and .ods spreadsheets with the same viewers you use for PPTX, DOCX and XLSX.</p>
     </div>
   </header>
@@ -90,7 +90,7 @@ const formats = [
         <a href="#node">Node sessions</a>
         <a href="#loading">Assets and CSP</a>
         <a href="#policy">Rendering policy</a>
-        <a href="#odp">What ODP reads</a>
+        <a href="#odp">ODP features</a>
         <a href="#odt-ods">ODT and ODS</a>
         <a href="#errors">Failures</a>
       </nav>
@@ -98,7 +98,7 @@ const formats = [
     <div class="guide-content">
       <section id="install">
         <p class="section-label">Install</p>
-        <h2>An experimental opt-in.</h2>
+        <h2>Package and versions</h2>
         <p>The separate <code>@silurus/ooxml-opendocument</code> package adds experimental reading of
           OpenDocument presentations, text documents and spreadsheets. Each reader maps the package
           directly into the existing PPTX slide, DOCX document or XLSX workbook model; the ordinary
@@ -114,7 +114,7 @@ const formats = [
 
       <section id="browser">
         <p class="section-label">Browser viewers</p>
-        <h2>Enable each format explicitly.</h2>
+        <h2>Reader options by format</h2>
         <p>Import a reader and pass it as its own option: <code>&#123; odp &#125;</code> to the PPTX viewers
           and loaders, <code>&#123; odt &#125;</code> to the DOCX ones and <code>&#123; ods &#125;</code> to the
           XLSX ones. Each reader enables its own family only. OOXML input passed to the same viewer
@@ -136,7 +136,7 @@ const formats = [
 
       <section id="node">
         <p class="section-label">Node sessions</p>
-        <h2>Use the same reader in a bounded session.</h2>
+        <h2>Readers in Node sessions</h2>
         <div class="code-card"><Code code={nodeExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
         <p><code>openDocxDocument</code> with <code>&#123; odt &#125;</code>, <code>openXlsxWorkbook</code>
           with <code>&#123; ods &#125;</code> and the materialization APIs accept the readers the same way.
@@ -145,7 +145,7 @@ const formats = [
 
       <section id="loading">
         <p class="section-label">Assets and CSP</p>
-        <h2>Pay for the reader only when used.</h2>
+        <h2>Asset loading</h2>
         <p>Importing an entry or calling its factory fetches nothing. When a matching file is opened,
           the parser Worker (or Node) imports the reader's self-contained ES source module and its WASM:</p>
         <div class="table-wrap">
@@ -168,7 +168,7 @@ const formats = [
 
       <section id="policy">
         <p class="section-label">Rendering policy</p>
-        <h2>Best effort, LibreOffice as the reference.</h2>
+        <h2>Rendering and rejection rules</h2>
         <p>The readers aim to render every OpenDocument feature they read. Each one is read as ODF 1.3
           specifies and mapped onto the target model; where the specification leaves a choice to the
           consumer, or LibreOffice reads it differently, LibreOffice is the reference. Where the target
@@ -189,7 +189,7 @@ const formats = [
 
       <section id="odp">
         <p class="section-label">Presentations</p>
-        <h2>What ODP reads.</h2>
+        <h2>ODP features</h2>
         <p>The ODP reader maps a presentation into the PPTX slide model; LibreOffice Impress is the
           reference where ODF leaves a choice. It reads:</p>
         <ul>
@@ -220,13 +220,13 @@ const formats = [
             into the shared chart model; a structurally invalid chart is drawn from its replacement picture.</li>
         </ul>
         <p>Animations and transitions are not played. Text follows the fonts available to the browser, so
-          text set in fonts LibreOffice substitutes can wrap differently. Pair the reader with
-          <a href="/fonts">font sources</a> to serve the faces your decks use.</p>
+          text set in fonts LibreOffice substitutes can wrap differently. To serve the fonts a presentation uses, configure
+          <a href="/fonts">font sources</a>.</p>
       </section>
 
       <section id="odt-ods">
         <p class="section-label">Text and spreadsheets</p>
-        <h2>ODT and ODS.</h2>
+        <h2>ODT and ODS features</h2>
         <p><strong>ODT</strong> maps into the DOCX document model: paragraphs, headings and fields, character
           and paragraph properties, every list and outline numbering style, page styles with headers,
           footers and columns, sections, footnotes and endnotes, tables, drawings, pictures and formula
@@ -245,7 +245,7 @@ const formats = [
 
       <section id="errors">
         <p class="section-label">Failures</p>
-        <h2>Failures and limits.</h2>
+        <h2>Failures and limits</h2>
         <p>Once a reader claims a file, its failure rejects the load. There is no retry through another
           source or the OOXML parser.</p>
         <ul>

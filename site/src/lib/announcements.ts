@@ -48,15 +48,15 @@ export const announcements: readonly Announcement[] = [
     date: '2026-11-16',
     label: 'Release note',
     version: 'v0.90.0',
-    title: 'OpenDocument reading and application-chosen font sources in v0.90.0',
-    summary: 'v0.90.0 lets applications choose where web fonts come from with the new fonts option, adds optional, experimental reading of ODP presentations, ODT documents and ODS spreadsheets, renders Symbol and Wingdings text on every host, and cuts work from the font loading path when web fonts are enabled. The useGoogleFonts option is deprecated in favour of fonts: [googleFonts()].',
+    title: 'Font sources and OpenDocument reading in v0.90.0',
+    summary: 'v0.90.0 adds the fonts option, which sets where web fonts are loaded from, and optional, experimental reading of ODP presentations, ODT documents and ODS spreadsheets. It renders Symbol and Wingdings text on every host and reduces the work in the font loading path when web fonts are enabled. The useGoogleFonts option is deprecated in favour of fonts: [googleFonts()].',
     audience: 'All Viewer and Node integrations. Applications that pass useGoogleFonts, load web fonts under a Content Security Policy or compile against the low-level model types should read Upgrading.',
     sections: [
       {
         title: 'In short',
         kind: 'summary',
         paragraphs: [
-          'This release hands font provision to the application and opens a second family of document formats through an optional add-on. Without configuration nothing changes: no font is requested from any network host, and ordinary OOXML viewing loads no OpenDocument code.',
+          'This release adds application-configured font sources and an optional add-on that reads OpenDocument files. Without configuration nothing changes: no font is requested from any network host, and ordinary OOXML viewing loads no OpenDocument code.',
         ],
         bullets: [
           'Load web fonts from Google Fonts, a mirror or proxy, a hosted font service, your own files or your own resolver, with one `fonts` option for DOCX, XLSX and PPTX in main and worker mode.',
@@ -67,9 +67,9 @@ export const announcements: readonly Announcement[] = [
         ],
       },
       {
-        title: 'OpenDocument reading, as an optional add-on',
+        title: 'OpenDocument add-on',
         modules: ['@silurus/ooxml-opendocument/odp', '@silurus/ooxml-opendocument/odt', '@silurus/ooxml-opendocument/ods'],
-        rationale: 'Many documents arrive as OpenDocument files. Reading them into the existing models lets applications show them with the viewers they already use, without a conversion service.',
+        rationale: 'Reading OpenDocument files into the existing models lets applications show them with the same viewers, without a conversion service.',
         paragraphs: [
           'The experimental `@silurus/ooxml-opendocument` add-on reads OpenDocument presentations, text documents and spreadsheets directly into the PPTX slide, DOCX document and XLSX workbook models; the ordinary renderers draw them, and no intermediate OOXML package is generated. Pass `odp` to the PPTX viewers and loaders, `odt` to the DOCX ones and `ods` to the XLSX ones, in the browser and in Node sessions.',
           'The readers aim to render every feature they read, as ODF 1.3 specifies, with LibreOffice as the reference where the specification leaves a choice. Where the target model has no exact counterpart, a feature is drawn with its nearest equivalent; a few, listed as known differences, are not drawn. Only corrupt, encrypted or unsafe packages, or packages over a resource limit, are rejected. The readers never run scripts, macros or forms and never fetch external resources.',
@@ -91,7 +91,7 @@ await viewer.load(await file.arrayBuffer()); // .odp, .otp or .pptx`,
       {
         title: 'Font sources',
         modules: ['DOCX', 'XLSX', 'PPTX'],
-        rationale: 'Applications differ in where they may fetch fonts from: a public CDN, a regional mirror, an internal proxy, a licensed font service or their own servers. The library now asks the application instead of assuming Google Fonts.',
+        rationale: 'Applications differ in where they may fetch fonts from: a public CDN, a regional mirror, an internal proxy, a licensed font service or their own servers. The fonts option lets the application name its sources.',
         paragraphs: [
           'The new `fonts` load option takes an ordered list of sources built with `googleFonts()`, `fontCssApi()`, `fontCss()`, `fontFiles()` and `fontResolver()`. `googleFonts({ baseUrl })` sends the stylesheet requests to a Google-compatible mirror or proxy, and `googleFonts({ additionalFamilies })` adds Google families outside the preset catalog. `fontCssApi()` covers other per-family CSS APIs, `fontCss()` a static kit stylesheet, `fontFiles()` your own files or bytes, and `fontResolver()` authenticated or private services through a function that runs in the page.',
           'Sources are consulted per family, in order; the first source that has a face claims the family, and a failure keeps the host font with a `console.warn` instead of rejecting the load. Every source takes `substitutions`, such as the exported `officeFontSubstitutions` (Calibri to Carlito, Cambria to Caladea and others). A `FontSource` is opaque, so create every entry with a factory. Font sources have fixed limits; a factory input beyond one throws the new `OoxmlError` code `font-source-limit`.',
@@ -119,7 +119,7 @@ const viewer = new DocxViewer(canvas, {
         links: [{ label: 'Font sources guide', href: '/fonts' }],
       },
       {
-        title: 'Symbol fonts on every host',
+        title: 'Symbol font rendering',
         modules: ['DOCX', 'XLSX', 'PPTX'],
         paragraphs: [
           'Text, `w:sym` and `a:sym` symbols and list markers in Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings now render on every host. Greek letters and maths operators of Symbol, and the pictographs of the Wingdings and Webdings fonts, used to draw as tofu or as Latin letters wherever the font was missing or, like Apple\'s Symbol, not symbol-encoded.',
@@ -127,7 +127,7 @@ const viewer = new DocxViewer(canvas, {
         ],
       },
       {
-        title: 'Less font work before first display',
+        title: 'Font loading performance',
         modules: ['DOCX', 'XLSX', 'PPTX'],
         paragraphs: [
           'With font sources enabled, more content now has a precise font demand: accented and other composed text, right-to-left text, ruby, vertical Word sections and table cells, most charts, raster and SVG pictures, and numbered or vertical PowerPoint text no longer make a document fetch every `unicode-range` subset of its families. Some content still does, for example metafile pictures, equations, region-map charts and Word vertical text boxes.',
@@ -136,7 +136,7 @@ const viewer = new DocxViewer(canvas, {
         ],
       },
       {
-        title: 'More fixes and additions',
+        title: 'Other fixes and additions',
         modules: ['DOCX', 'XLSX', 'PPTX', 'Node'],
         paragraphs: [
           'PowerPoint table cells now draw their diagonal borders, and end-of-paragraph run properties apply to stacked vertical text. XLSX inline-string cells now show their furigana when phonetic display is on. A DOCX whose main document part cannot be parsed now opens with the "could not be displayed" page instead of rejecting.',
@@ -146,7 +146,7 @@ const viewer = new DocxViewer(canvas, {
       {
         title: 'Upgrading',
         paragraphs: [
-          'If you pass `useGoogleFonts`, migrate it. `useGoogleFonts: true` becomes `fonts: [googleFonts()]`, which sends the same stylesheet requests; `useGoogleFonts: false` is simply omitted. The alias still works in v0.90.0 with a warning printed once per JavaScript realm, and when `fonts` is also given, `fonts` wins: `useGoogleFonts` adds nothing, a warning is printed and nothing is thrown. From v0.91.0 it is ignored with the same warning and loads no web fonts, but never throws.',
+          'If you pass `useGoogleFonts`, migrate it. `useGoogleFonts: true` becomes `fonts: [googleFonts()]`, which sends the same stylesheet requests; `useGoogleFonts: false` is omitted. The alias still works in v0.90.0 with a warning printed once per JavaScript realm, and when `fonts` is also given, `fonts` wins: `useGoogleFonts` adds nothing, a warning is printed and nothing is thrown. From v0.91.0 it is ignored with the same warning and loads no web fonts, but never throws.',
           'If your page has a Content Security Policy and loads web fonts, allow the font file host (for example `fonts.gstatic.com`) in `connect-src` as well as `font-src`: font files are now fetched by the library, and a blocked fetch falls back to the host fonts.',
           'If your application inspects `OoxmlError.code`, one new code can appear: `font-source-limit`, thrown by a font source factory for a value beyond a fixed limit. It reports an application configuration problem, not a document problem.',
           'TypeScript users of the low-level model types may see compile errors where the types now match the parser output: some fields became optional or nullable, and `ChartThreeD.view3DPresent` and PPTX `TableCell.diagonalTL`/`diagonalTR` are renamed to `view3dPresent` and `diagonalTl`/`diagonalTr`. The data sent by the parser is unchanged.',
