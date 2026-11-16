@@ -563,7 +563,24 @@ fn object_framed(data: &[u8]) -> bool {
                 }
                 at += 4 + size;
             }
-            _ => at += 4 + size,
+            _ => {
+                // Subrecords of a fixed size (MS-XLS 2.5.139-2.5.150).
+                let fixed = match kind {
+                    0x0006..=0x0008 => Some(2),
+                    0x000a => Some(12),
+                    0x000b | 0x000f => Some(6),
+                    0x000c => Some(20),
+                    0x000d => Some(22),
+                    0x0010 | 0x0012 => Some(8),
+                    0x0011 => Some(4),
+                    0x0015 => Some(18),
+                    _ => None,
+                };
+                if fixed.is_some_and(|fixed| fixed != size) || data.len() < at + 4 + size {
+                    return false;
+                }
+                at += 4 + size;
+            }
         }
     }
     false

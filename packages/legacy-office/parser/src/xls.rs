@@ -259,9 +259,21 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     let styles = styles::Styles::parse(&records)?;
     // Phonetic strings are read only for a workbook that shows one: most
     // East Asian workbooks store them without displaying any.
-    let phonetic = records.iter().any(|record| {
-        record.kind == 0x00ef && u16_at(record.data, 4).is_ok_and(|count| count != 0)
-    });
+    let phonetic = {
+        // As the worksheet reader, which passes over the records of a saved
+        // custom view (UserSViewBegin to UserSViewEnd).
+        let mut custom_view = false;
+        records.iter().any(|record| {
+            match record.kind {
+                0x01aa => custom_view = true,
+                0x01ab => custom_view = false,
+                _ => {}
+            }
+            !custom_view
+                && record.kind == 0x00ef
+                && u16_at(record.data, 4).is_ok_and(|count| count != 0)
+        })
+    };
     let mut date1904 = false;
     let mut window_count = 0;
     let mut sheets = Vec::new();
