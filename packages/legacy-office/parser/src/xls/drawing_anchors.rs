@@ -498,6 +498,23 @@ fn object_complete(data: &[u8]) -> bool {
     false
 }
 
+/// Whether an Obj record's subrecords are whole: they end with FtEnd at
+/// the record end, or reach FtLbsData (ft 0x0013), which does not state its
+/// own length and runs to the end of the record.
+fn object_framed(data: &[u8]) -> bool {
+    let mut at = 0usize;
+    while at + 4 <= data.len() {
+        let kind = u16::from_le_bytes([data[at], data[at + 1]]);
+        let size = usize::from(u16::from_le_bytes([data[at + 2], data[at + 3]]));
+        match kind {
+            0x0000 => return size == 0 && at + 4 == data.len(),
+            0x0013 => return true,
+            _ => at += 4 + size,
+        }
+    }
+    false
+}
+
 fn corner(bytes: &[u8], offset: usize) -> Result<CellCorner, String> {
     let column = u16_at(bytes, offset)?;
     if column > 256 {
@@ -709,6 +726,12 @@ fn read_shape<'a>(
                     let kind = u16_at(client.data, 4)?;
                     if !matches!(kind, 0..=9 | 11..=20 | 25 | 30) {
                         return Err(unsupported("invalid BIFF object type"));
+                    }
+                    // The object types read since the readers render every
+                    // feature (lines, ovals, arcs, controls, comments and
+                    // OfficeArt shapes) must hold complete subrecords.
+                    if !matches!(kind, 0 | 2 | 5 | 6 | 8 | 9) && !object_framed(client.data) {
+                        return Err(crate::rejection::corrupt("truncated BIFF drawing object"));
                     }
                     let id = u16_at(client.data, 6)?;
                     if !objects.insert(id) {

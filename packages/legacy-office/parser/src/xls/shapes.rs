@@ -1201,6 +1201,10 @@ pub(super) fn txo_text(records: &[Record<'_>], offset: usize) -> Result<String, 
     }
     let characters = usize::from(u16_at(txo, 10)?);
     let run_bytes = usize::from(u16_at(txo, 12)?);
+    // cbFmla: the ObjFmla (2.5.187) that follows the fixed fields.
+    if txo.len() != 18 + usize::from(u16_at(txo, 16)?) {
+        return Err(unsupported("truncated BIFF TxO record"));
+    }
     let (units, mut next) = txo_characters(records, index, characters)?;
     // The formatting runs are not projected, but they are part of the TxO:
     // FormatRun (2.5.132) entries from character 0 in ascending order, then
