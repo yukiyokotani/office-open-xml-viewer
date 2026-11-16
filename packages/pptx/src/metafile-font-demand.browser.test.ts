@@ -90,8 +90,9 @@ describe('PPTX metafile text demand in the browser', () => {
     return [...new Set(requests.filter((name) => name.endsWith('.ttf')))].sort();
   }
 
-  it.each(['main', 'worker'] as const)('loads the subset a WMF picture paints when it plays (%s mode)', async (mode) => {
-    if (!browser) return;
+  it.for(['main', 'worker'] as const)('loads the subset a WMF picture paints when it plays (%s mode)', async (mode, { skip }) => {
+    // Reported as skipped, never as passing, where no browser can launch.
+    if (!browser) skip();
     // Without the picture only the body text's subset loads (finite demand).
     expect(await faceRequests(slide(false), mode)).toEqual(['latin.ttf']);
     expect(await faceRequests(slide(true), mode)).toEqual(['greek.ttf', 'latin.ttf']);
