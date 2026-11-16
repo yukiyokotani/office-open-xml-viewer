@@ -1241,6 +1241,36 @@ test('final renderer rejects transitional exports, hidden algorithms, and non-la
   }
 });
 
+test('final renderer admits only the exact error-page readiness gate before its body (#2248)', () => {
+  const body = 'const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);';
+  const gated = (gate) => canonicalRenderer
+    .replace("import { layoutSourceStore }", "import { errorPageLayoutReady } from './layout/document-layout-variants.js';\nimport { layoutSourceStore }")
+    .replace('export function renderLayoutSourceToCanvas(', 'export async function renderLayoutSourceToCanvas(')
+    .replace(body, `${gate}\n  ${body}`);
+  const fixture = (name, source) => {
+    const root = initializeCanonicalFixture(`docx-layout-boundary-error-page-gate-${name}-`);
+    const variants = 'packages/docx/src/layout/document-layout-variants.ts';
+    write(root, variants, `${readFileSync(join(root, variants), 'utf8')}\n`
+      + 'export function errorPageLayoutReady() { return undefined; }\n');
+    write(root, 'packages/docx/src/renderer.ts', source);
+    return root;
+  };
+  const accepted = runChecker(fixture('exact', gated(
+    'const errorPage = errorPageLayoutReady(source);\n  if (errorPage) await errorPage;',
+  )), '--final');
+  assert.equal(accepted.status, 0, accepted.output);
+  for (const [name, gate] of [
+    ['unconditional await', 'const errorPage = errorPageLayoutReady(source);\n  await errorPage;'],
+    ['foreign source', 'const errorPage = errorPageLayoutReady(foreignSource);\n  if (errorPage) await errorPage;'],
+    ['other callee', 'const errorPage = somethingElse(source);\n  if (errorPage) await errorPage;'],
+    ['else branch', 'const errorPage = errorPageLayoutReady(source);\n  if (errorPage) await errorPage; else layoutDocument(source);'],
+    ['other wait', 'const errorPage = errorPageLayoutReady(source);\n  if (errorPage) await layoutDocument(source);'],
+    ['gate only', 'const errorPage = errorPageLayoutReady(source);'],
+  ]) {
+    expectDiagnostic(fixture(name.replaceAll(' ', '-'), gated(gate)), 'FINAL_ADAPTER_BODY', name, '--final');
+  }
+});
+
 test('text-run projection has an exact root-adapter declaration surface', () => {
   const root = initializeCanonicalFixture('docx-layout-boundary-text-run-adapter-');
   write(root, 'packages/docx/src/layout/text-index.ts',

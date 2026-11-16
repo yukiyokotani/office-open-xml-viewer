@@ -67,7 +67,7 @@ export async function openDocxSource(
     });
     const defaultCurrentDateMs = normalizeCurrentDate(options.currentDate);
     // A fatally unparseable document loads its error page here (#2248).
-    const errorPage = errorPageLayoutReady(acquired.result);
+    const errorPage = errorPageLayoutReady(acquired.result, options.signal);
     if (errorPage) await errorPage;
     const retained = retainRenderWorkerDocumentLayout(acquired.result, services, defaultCurrentDateMs);
     const showTrackedChanges = viewDefaults.showTrackedChanges === true;

@@ -1057,6 +1057,10 @@ export class DocxDocument {
   private _servedFaceProbe: AbortController | null = null;
   /** Aborted by destroy(): ends worker-mode probe measurements. */
   private _probeLifetime: AbortController | null = null;
+  /** The signal destroy() aborts, for a wait that ending the worker cannot
+   * settle: the error page's code of a document that failed to parse (#2248).
+   * Only such a document reads it. */
+  private readonly _lifetime = (): AbortSignal => (this._probeLifetime ??= new AbortController()).signal;
 
   /**
    * Main mode: resolve, register and load this document's font sources into
@@ -1165,7 +1169,7 @@ export class DocxDocument {
         const adapted = await materializeDocumentPullAdapterSession(
           this._bridge.transport(isDocumentPullResponse),
           res,
-          { timeoutMs, onUsage },
+          { timeoutMs, onUsage, lifetime: this._lifetime },
         );
         this._source = adapted.source;
         this._document = adapted.document;
@@ -1180,7 +1184,7 @@ export class DocxDocument {
       const adapted = await materializeDocumentPullAdapterSession(
         this._bridge.transport(isDocumentPullResponse),
         identity,
-        { timeoutMs, onUsage },
+        { timeoutMs, onUsage, lifetime: this._lifetime },
       );
       this._source = adapted.source;
       this._document = adapted.document;
@@ -1521,7 +1525,7 @@ export class DocxDocument {
           const adapted = await materializeDocumentPullAdapterSession(
             this._bridge.transport(isDocumentPullResponse),
             res,
-            { timeoutMs, onUsage },
+            { timeoutMs, onUsage, lifetime: this._lifetime },
           );
           this._source = adapted.source;
           this._document = adapted.document;

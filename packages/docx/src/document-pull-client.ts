@@ -30,6 +30,13 @@ type DocumentUnit =
 export interface MaterializeDocumentPullOptions {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /**
+   * The owner's lifetime, for the wait that follows the pull of a document
+   * that failed to parse (its error page's code, #2248): ending the transport
+   * settles a pull, but not that wait. Read only for such a document.
+   * Defaults to `signal`.
+   */
+  readonly lifetime?: () => AbortSignal | undefined;
   readonly onUsage?: (usage: OoxmlResourceUsageSnapshot) => void;
 }
 
@@ -76,7 +83,7 @@ export async function materializeDocumentPullLayoutSession(
       return layoutSourceStoreFromOwnedModel(document);
     },
     // A fatally unparseable document loads its error page here (#2248).
-    ready: (source: LayoutSourceStore) => errorPageLayoutReady(source),
+    ready: (source: LayoutSourceStore) => errorPageLayoutReady(source, options.lifetime?.() ?? options.signal),
   });
 }
 
@@ -92,7 +99,7 @@ export async function materializeDocumentPullAdapterSession(
   const models = await materializeDocumentPullOwnedModelsSession(transport, identity, options);
   const adapter = layoutSourceModelAdapterFromOwnedModel(models.document, models.ownedLayoutDocument);
   // A fatally unparseable document loads its error page here (#2248).
-  const errorPage = errorPageLayoutReady(adapter.source);
+  const errorPage = errorPageLayoutReady(adapter.source, options.lifetime?.() ?? options.signal);
   if (errorPage) await errorPage;
   return adapter;
 }

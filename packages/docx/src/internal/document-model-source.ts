@@ -295,7 +295,7 @@ export async function loadDocxModelSource(
         });
         const services = runtime.services;
         // A fatally unparseable document loads its error page here (#2248).
-        const errorPage = errorPageLayoutReady(doc._source);
+        const errorPage = errorPageLayoutReady(doc._source, signal);
         if (errorPage) await errorPage;
         const retained = retainRenderWorkerDocumentLayout(
           doc._source,

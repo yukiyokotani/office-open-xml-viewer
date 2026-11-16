@@ -1,3 +1,4 @@
+import { createAbortError } from '@silurus/ooxml-core/internal/abort';
 import {
   ERROR_PLACEHOLDER_TEXT_HOST,
   onDemandModule,
@@ -39,10 +40,26 @@ const errorPage = /* @__PURE__ */ onDemandModule(async () => {
  * a source asynchronously awaits this first: the pull materializers
  * (`document-pull-client.ts`), the render worker, the model-source loaders and
  * a direct `renderLayoutSourceToCanvas()`. `undefined` when there is nothing
- * to wait for, which is always the case for a source that parsed.
+ * to wait for, which is always the case for a source that parsed. With a
+ * `signal` the wait rejects with an `AbortError` as soon as it aborts: once
+ * the document has been pulled, ending its worker no longer settles anything.
  */
-export function errorPageLayoutReady(source: Pick<LayoutSourceStore, 'fatalParse'>): Promise<unknown> | undefined {
-  return source.fatalParse === null || errorPage.loaded ? undefined : errorPage.load();
+export function errorPageLayoutReady(
+  source: Pick<LayoutSourceStore, 'fatalParse'>,
+  signal?: AbortSignal,
+): Promise<unknown> | undefined {
+  if (source.fatalParse === null || errorPage.loaded) return undefined;
+  const loading = errorPage.load();
+  if (!signal) return loading;
+  // The load is shared by every document of the realm, so it keeps running;
+  // only this caller stops waiting when its own load or document ends.
+  return new Promise((resolve, reject) => {
+    const abort = (): void => reject(createAbortError('DOCX error page load was aborted'));
+    const settled = (): void => signal.removeEventListener('abort', abort);
+    loading.then(resolve, reject).then(settled, settled);
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+  });
 }
 
 function loadedErrorPage() {
