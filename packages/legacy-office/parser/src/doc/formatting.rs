@@ -5616,6 +5616,35 @@ mod tests {
     }
 
     #[test]
+    fn undefined_style_property_is_skipped() {
+        let style = |chpx: &'static [u8]| Style {
+            kind: 1,
+            base: 0xfff,
+            chpx,
+            papx: &[],
+            table: None,
+            language_compatibility: StyleLanguageCompatibility::default(),
+        };
+        let run = |chpx: &'static [u8]| {
+            let mut f = empty();
+            f.styles = vec![Some(style(chpx))];
+            let run = f
+                .direct_text_run(0, None, 0, 1, &[&[]], "quartz".into())
+                .unwrap();
+            assert!(!f.unsupported_character_properties);
+            serde_json::to_value(run).unwrap()
+        };
+        let plain = run(&[]);
+        crate::rejection::take_best_effort();
+        // 0x0066 is not an MS-DOC 2.6 opcode (only a property identifier).
+        assert_eq!(run(&[0x66, 0x00, 0x00]), plain);
+        assert!(crate::rejection::take_best_effort().contains(&(
+            crate::rejection::BestEffort::Skipped,
+            "unknown Word property"
+        )));
+    }
+
+    #[test]
     fn custom_hresi_in_any_owner_projects_as_standard_breaking() {
         let normal = &[0x4e, 0x48, 1, 0][..];
         let custom = &[0x4e, 0x48, 2, b'q'][..];
