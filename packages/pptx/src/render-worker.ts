@@ -3,7 +3,7 @@ import type { CjkLang } from '@silurus/ooxml-core';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import type { PptxTextRunInfo } from './renderer';
 import { pptxSlideOfficeFontRequests } from './font-requests';
-import { FontSourceSession, PptxInstalledFamilies, pptxFontDemand } from './font-source-load.js';
+import { FontSourceSession, PptxInstalledFamilies, metafileFontDemand, pptxFontDemand } from './font-source-load.js';
 import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { acquireOfficeRoutes, distinctOfficeRouteLoads, type AcquiredOfficeRoutes } from './office-route-acquisition.js';
 import {
@@ -15,6 +15,7 @@ import { PptxSlideRepository } from './slide-repository';
 import { loadPptxSlideFromCursor } from './slide-cursor-operation';
 import { SlidePullWorker } from './slide-pull-worker';
 import {
+  bindMetafileFontDemand,
   bindMetafileFontFamilies,
   activeFontSet,
   createSymbolFaceOracleCache,
@@ -421,8 +422,10 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         // language; a request without one keeps a local surface.
         const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
-        // Metafile pictures paint their text with the served faces too.
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
         bindMetafileFontFamilies(getImage, fontSources?.loaded);
+        bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           dpr: request.dpr,
@@ -469,8 +472,10 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
         const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
-        // Metafile pictures paint their text with the served faces too.
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
         bindMetafileFontFamilies(getImage, fontSources?.loaded);
+        bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           defaultTextColor: compact.defaultTextColor,

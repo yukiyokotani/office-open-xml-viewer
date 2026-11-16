@@ -567,6 +567,32 @@ export function bindMetafileFontFamilies(
   });
 }
 
+/** Loads the scalars a metafile's text paints from the document's
+ * font-source session and answers its snapshot (core
+ * `metafile-font-demand.ts` `metafileFontDemand`). */
+export type MetafileFontDemand = (bytes: Uint8Array) => Promise<MetafileFontSources>;
+
+/** Per cache owner: its bound demand and, per image path, the demand run
+ * of the owner's current cache generation (a dropped cache may answer a path
+ * with other bytes). */
+const metafileDemandByOwner = new WeakMap<DecodedBitmapCacheOwner, {
+  readonly demand: MetafileFontDemand;
+  readonly runs: Map<string, Promise<void>>;
+  generation: number;
+}>();
+
+/** Bind the font demand a document's metafile pictures run, once per
+ * picture, before they play: their text records paint with the served faces
+ * ({@link bindMetafileFontFamilies}), so the scalars they paint load first and
+ * the snapshot they answer is bound in their place. The document's own demand
+ * then never needs to cover metafile text. `undefined` unbinds. */
+export function bindMetafileFontDemand(owner: DecodedBitmapCacheOwner, demand: MetafileFontDemand | undefined): void {
+  if (!demand) metafileDemandByOwner.delete(owner);
+  else if (metafileDemandByOwner.get(owner)?.demand !== demand) {
+    metafileDemandByOwner.set(owner, { demand, runs: new Map(), generation: cacheGeneration(owner) });
+  }
+}
+
 function withOwnerFontFamilies(opts: CachedBitmapOptions, owner: DecodedBitmapCacheOwner): CachedBitmapOptions {
   if (opts.metafileFonts) return opts;
   const fonts = metafileFontsByOwner.get(owner);
@@ -1072,6 +1098,7 @@ export function getCachedBitmapByPath(
     cacheKey: string,
     initial?: RasterSourceProfile,
     resizeToTarget = true,
+    options = normalized,
   ) => {
     const initialBlob = initial?.initialBlob;
     if (initial) initial.initialBlob = undefined;
@@ -1089,24 +1116,55 @@ export function getCachedBitmapByPath(
           targetHeightPx: resizeToTarget ? targetHeightPx : undefined,
           maxRetainedPixels,
           incompleteMetafile,
-          ...(normalized.metafileFonts ? { metafileFontFamilies: normalized.metafileFonts.families } : {}),
+          ...(options.metafileFonts ? { metafileFontFamilies: options.metafileFonts.families } : {}),
         };
         const bitmap = initial
           ? await decodeRasterOrMetafileWithInspection(blob, decodeOpts, initial.inspection)
           : await decodeRasterOrMetafile(blob, decodeOpts);
         return { bitmap, owned: true };
       },
-    ).then((bitmap) => enforceCachedRetainedBudget(bitmap, normalized));
+    ).then((bitmap) => enforceCachedRetainedBudget(bitmap, options));
   };
   const generation = cacheGeneration(owner);
   return rasterProfileFor(owner, imagePath, mimeType, fetchImage).then((profile) => {
     assertCurrentCacheGeneration(owner, generation);
     if (profileIsMetafile(profile)) {
-      return decode(
-        reusableMetafileVariantKey(owner, imagePath, normalized)
-          ?? metafileVariantKey(imagePath, normalized),
+      const play = (options: CachedBitmapOptions) => decode(
+        reusableMetafileVariantKey(owner, imagePath, options)
+          ?? metafileVariantKey(imagePath, options),
         profile,
+        true,
+        options,
       );
+      const bound = opts.metafileFonts ? undefined : metafileDemandByOwner.get(owner);
+      if (!bound) return play(normalized);
+      // Its text's scalars load before the picture plays, with the faces of
+      // the snapshot that answers them. A failed demand keeps the faces
+      // already loaded (font loading never fails a picture).
+      if (bound.generation !== generation) {
+        bound.runs.clear();
+        bound.generation = generation;
+      }
+      let run = bound.runs.get(imagePath);
+      if (!run) {
+        // Reading the bytes and walking their records take a decode slot;
+        // the font loading the walk starts does not hold one.
+        run = withDecodedImageSlot(owner, async () => {
+          const source = profile.initialBlob ?? await fetchImage(imagePath, mimeType);
+          return { loading: bound.demand(new Uint8Array(await source.arrayBuffer())) };
+        })
+          .then(({ loading }) => loading)
+          .then((loaded) => {
+            if (cacheGeneration(owner) === generation && metafileDemandByOwner.get(owner) === bound) {
+              bindMetafileFontFamilies(owner, loaded);
+            }
+          }, () => undefined);
+        bound.runs.set(imagePath, run);
+      }
+      return run.then(() => {
+        assertCurrentCacheGeneration(owner, generation);
+        return play(withOwnerFontFamilies(normalizedBitmapOptions(opts), owner));
+      });
     }
     if (!targetWidthPx && !targetHeightPx) {
       return decode(cachedBitmapVariantKey(imagePath), profile, false);

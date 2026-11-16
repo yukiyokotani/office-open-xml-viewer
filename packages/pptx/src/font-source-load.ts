@@ -65,3 +65,7 @@ export function pptxFontDemand(
 /** Installed authored families are probed before any source face of a delta
  * registers, and never demanded (core `installed-families.ts`). */
 export { InstalledFamilyExclusion as PptxInstalledFamilies } from '@silurus/ooxml-core/internal/font-sources';
+
+/** Metafile pictures demand their text's scalars when they play (core
+ * `bindMetafileFontDemand`). */
+export { metafileFontDemand } from '@silurus/ooxml-core/internal/metafile-font-demand';

@@ -19,6 +19,7 @@ import {
   type InstalledFamilyExclusion,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
+  bindMetafileFontDemand,
   bindMetafileFontFamilies,
   createSymbolFaceOracleCache,
   loadNativeRouteSentinels,
@@ -255,6 +256,7 @@ export class XlsxWorkbook {
   private installedFamilies: InstalledFamilyExclusion | null = null;
   private fontSessionType: typeof FontSourceSession | null = null;
   private fontAcquirerFor: typeof import('./font-source-load.js').inRealmResolverFaceAcquirer | null = null;
+  private fontMetafileDemand: typeof import('./font-source-load.js').metafileFontDemand | null = null;
   /** Every demand delta so far, replayed into each newly retained set. */
   private fontDeltas: Promise<FontSessionDemand>[] = [];
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
@@ -733,6 +735,7 @@ export class XlsxWorkbook {
     const fontSourceLoad = await import('./font-source-load.js');
     this.fontSessionType = fontSourceLoad.FontSourceSession;
     this.fontAcquirerFor = fontSourceLoad.inRealmResolverFaceAcquirer;
+    this.fontMetafileDemand = fontSourceLoad.metafileFontDemand;
     this.fontDemand = new fontSourceLoad.XlsxFontDemand(workbook, this.cjkFallback, fontSourceLoad.declaredFontSubstitutions(fonts));
     // Installed authored faces are probed before any source face of a delta
     // registers, and never demanded (core installed-families.ts).
@@ -1567,8 +1570,12 @@ export class XlsxWorkbook {
       : (typeof document !== 'undefined' ? document.fonts : null);
     // Metafile pictures are rasterized in this realm (its own FontFaceSet)
     // and paint their text with the served faces of this realm's session.
-    bindMetafileFontFamilies(this._fetchImage, typeof document !== 'undefined'
-      ? this.retainedFontSets.get(document.fonts)?.session?.loaded : undefined);
+    // Their text's scalars load before they play.
+    const metafileSession = typeof document !== 'undefined'
+      ? this.retainedFontSets.get(document.fonts)?.session : undefined;
+    bindMetafileFontFamilies(this._fetchImage, metafileSession?.loaded);
+    bindMetafileFontDemand(this._fetchImage, metafileSession && this.fontMetafileDemand
+      ? this.fontMetafileDemand(metafileSession) : undefined);
     const preview = this.sheetPreviews?.get(sheetIndex);
     if (preview?.worksheet && extracted.worksheet) {
       await preview.waitFor(Math.max(
@@ -1861,11 +1868,13 @@ export class XlsxWorkbook {
     this.installedFamilies = null;
     this.fontSessionType = null;
     this.fontAcquirerFor = null;
+    this.fontMetafileDemand = null;
     this.fontDeltas = [];
     this.officeFontRequests = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core
     // caches to release decoded surfaces and SVG references.
     dropDecodedBitmapCache(this._fetchImage);
+    bindMetafileFontDemand(this._fetchImage, undefined);
     dropSvgImageCache(this._fetchImage);
     this.rawParts.clear();
     this.queuedImageLoads?.clear();

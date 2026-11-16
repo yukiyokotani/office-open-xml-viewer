@@ -1,8 +1,6 @@
 /// <reference types="node" />
 import { readFileSync, readdirSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
-// @ts-ignore — shared synthetic ZIP fixture is a plain JavaScript module.
-import { storedZip } from '../../../tests/fixtures/chart-ex-packages.mjs';
 import { initSync, XlsxArchive } from './wasm/xlsx_parser.js';
 import { XlsxFontDemand } from './font-source-load.js';
 import { OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
@@ -10,6 +8,9 @@ import { renderViewport } from './renderer.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import type { ParsedWorkbook, Row, Worksheet } from './types.js';
 import { SYMBOL_ENCODED, symbolRealm } from './test-support/symbol-realm.js';
+import { metafileDemandScalars } from '@silurus/ooxml-core/internal/metafile-font-demand';
+import { storedZip } from '@silurus/ooxml-core/testing';
+import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing/metafile-paint';
 
 // Design §6 invariant: finite XLSX scalar demand is a superset of every scalar
 // the renderer measures or paints. A scalar outside the demand belongs to a
@@ -17,13 +18,15 @@ import { SYMBOL_ENCODED, symbolRealm } from './test-support/symbol-realm.js';
 // to a host font. Exercised over targeted synthetic workbooks (number formats,
 // dates, rich and inline text, phonetic runs, errors, booleans, shapes) and
 // the public demo workbook; every paint path the collector cannot prove
-// declines to 'all' (region-map charts, equations, metafiles, unknown
-// scalars).
+// declines to 'all' (region-map charts, unknown scalars). Equations paint
+// a raster or nothing; metafile pictures are played on a recording context
+// against the demand their image owner runs before they play.
 
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
-function workbookBytes(styles: string, sheet: string, sharedStrings?: string, drawing?: string, cols = ''): Uint8Array {
+function workbookBytes(styles: string, sheet: string, sharedStrings?: string, drawing?: string, cols = '',
+  media: ReadonlyMap<string, Uint8Array> = new Map()): Uint8Array {
   return storedZip([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
@@ -33,6 +36,7 @@ function workbookBytes(styles: string, sheet: string, sharedStrings?: string, dr
       + '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
       + (sharedStrings ? '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>' : '')
       + (drawing ? '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>' : '')
+      + '<Default Extension="wmf" ContentType="image/x-wmf"/><Default Extension="emf" ContentType="image/x-emf"/><Default Extension="png" ContentType="image/png"/>'
       + '</Types>'],
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
     ['xl/workbook.xml', `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`],
@@ -46,10 +50,14 @@ function workbookBytes(styles: string, sheet: string, sharedStrings?: string, dr
     ['xl/worksheets/sheet1.xml', `<worksheet xmlns="${MAIN}" xmlns:r="${REL}">${cols}<sheetData>${sheet}</sheetData>${drawing ? '<drawing r:id="rIdD"/>' : ''}</worksheet>`],
     ...(drawing ? [
       ['xl/worksheets/_rels/sheet1.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdD" Type="${REL}/drawing" Target="../drawings/drawing1.xml"/></Relationships>`],
-      ['xl/drawings/drawing1.xml', '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-        + drawing + '</xdr:wsDr>'],
+      ['xl/drawings/drawing1.xml', '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+        + ` xmlns:r="${REL}">` + drawing + '</xdr:wsDr>'],
+      ['xl/drawings/_rels/drawing1.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + [...media.keys()].map((name, index) => `<Relationship Id="rIdM${index}" Type="${REL}/image" Target="../media/${name}"/>`).join('')
+        + '</Relationships>'],
     ] : []),
-  ]) as Uint8Array;
+    ...[...media].map(([name, bytes]) => [`xl/media/${name}`, bytes] as [string, Uint8Array]),
+  ] as [string, string | Uint8Array][]) as Uint8Array;
 }
 
 const fonts = '<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font>'
@@ -101,6 +109,35 @@ const shapes = workbookBytes(
     + '<xdr:txBody><a:bodyPr wrap="square"/><a:p><a:r><a:rPr lang="en-US" sz="1400" b="1"><a:latin typeface="Nunito"/></a:rPr><a:t>Shape text: wrapping across lines – 100%</a:t></a:r></a:p>'
     + '<a:p><a:r><a:rPr lang="ru-RU" sz="1100"/><a:t>Привет\tмир</a:t></a:r><a:br><a:rPr/></a:br><a:r><a:rPr sz="1100"/><a:t>after break</a:t></a:r></a:p></xdr:txBody>'
     + '</xdr:sp><xdr:clientData/></xdr:twoCellAnchor>',
+);
+
+const anchor = (from: number, body: string) => `<xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${from}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>`
+  + `<xdr:to><xdr:col>6</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${from + 4}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>${body}<xdr:clientData/></xdr:twoCellAnchor>`;
+const pictureAnchor = (from: number, index: number) => anchor(from, `<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="${10 + index}" name="P"/><xdr:cNvPicPr/></xdr:nvPicPr>`
+  + `<xdr:blipFill><a:blip r:embed="rIdM${index}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>`
+  + '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic>');
+
+// WMF/EMF pictures (their text records demand their own scalars when they
+// play, also under a raster part name) and an OMML equation in shape text
+// (§22.1: a converted raster or nothing).
+const metafilesAndMath = workbookBytes(
+  fonts + base + '<cellXfs count="1"><xf numFmtId="0" fontId="0"/></cellXfs>',
+  '<row r="1"><c r="A1" t="inlineStr"><is><t>cell</t></is></c></row>',
+  undefined,
+  pictureAnchor(1, 0) + pictureAnchor(6, 1) + pictureAnchor(11, 2)
+    + anchor(16, '<xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="Text 1"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr>'
+      + '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="1200000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+      + '<xdr:txBody><a:bodyPr wrap="square"/><a:p><a:r><a:rPr lang="en-US" sz="1400"/><a:t>Area </a:t></a:r>'
+      + '<a14:m xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+      + '<m:sSup><m:e><m:r><m:t>πr</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath></a14:m></a:p></xdr:txBody></xdr:sp>'),
+  '',
+  new Map([
+    ['image1.wmf', wmfFixture([wmfRecords.setWindowExt(1000, 1000), wmfRecords.createFont('Times New Roman'),
+      wmfRecords.selectObject(0), wmfRecords.textOut(new Uint8Array([0x80, 0x41, 0xe9]))])],
+    ['image2.emf', emfTextFixture('Arial', ['Größe →'])],
+    ['image3.png', wmfFixture([wmfRecords.setWindowExt(1000, 1000), wmfRecords.createFont('MS Mincho', { charset: 128 }),
+      wmfRecords.selectObject(0), wmfRecords.textOut(new Uint8Array([0x93, 0xfa, 0x96, 0x7b]))])],
+  ]),
 );
 
 // §18.8.1 stacked (textRotation 255) and right-to-left (readingOrder 2) cells.
@@ -168,7 +205,27 @@ function recordingContext() {
 const decode = <T>(data: Uint8Array) => JSON.parse(new TextDecoder().decode(data)) as T;
 
 /** The parsed workbook and every worksheet, pulled as the workbook does. */
-function parse(bytes: Uint8Array): { workbook: ParsedWorkbook; sheets: Worksheet[] } {
+/** The bytes of every picture part a worksheet names (pictures, shape and
+ * chart fills): the players sniff content, as the image loader does, and
+ * other parts paint no text. */
+function pictureParts(worksheet: Worksheet, read: (path: string) => Uint8Array): Uint8Array[] {
+  const paths = new Set<string>();
+  const walk = (value: unknown) => {
+    if (value === null || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'imagePath' && typeof child === 'string') paths.add(child);
+      else walk(child);
+    }
+  };
+  walk({ images: worksheet.images, charts: worksheet.charts, shapeGroups: worksheet.shapeGroups, background: (worksheet as { background?: unknown }).background });
+  const parts: Uint8Array[] = [];
+  for (const path of paths) {
+    try { parts.push(read(path)); } catch { /* an absent part paints nothing */ }
+  }
+  return parts;
+}
+
+function parse(bytes: Uint8Array): { workbook: ParsedWorkbook; sheets: Worksheet[]; metafiles: Uint8Array[][] } {
   const archive = new XlsxArchive(bytes, undefined, undefined, undefined);
   try {
     const workbook = decode<ParsedWorkbook>(archive.parse());
@@ -189,7 +246,7 @@ function parse(bytes: Uint8Array): { workbook: ParsedWorkbook; sheets: Worksheet
         }
       }
     });
-    return { workbook, sheets };
+    return { workbook, sheets, metafiles: sheets.map((sheet) => pictureParts(sheet, (path) => archive.extract_image(path))) };
   } finally {
     archive.free();
   }
@@ -208,15 +265,19 @@ function paintedScalars(workbook: ParsedWorkbook, ws: Worksheet): Set<number> {
   return scalars;
 }
 
+const paintedOf = (texts: readonly string[]) => new Set(texts.flatMap((text) => [...text].map((ch) => ch.codePointAt(0)!)));
+const missingScalars = (painted: ReadonlySet<number>, demanded: ReadonlySet<number>) => [...painted].filter((cp) => !demanded.has(cp))
+  .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
+
 beforeAll(() => {
   initSync({ module: new Uint8Array(readFileSync(new URL('./wasm/xlsx_parser_bg.wasm', import.meta.url))) });
 });
 
 describe('XLSX font demand covers every measured or painted scalar', () => {
   const check = (label: string, bytes: Uint8Array): Array<'all' | 'finite'> => {
-    const { workbook, sheets } = parse(bytes);
+    const { workbook, sheets, metafiles } = parse(bytes);
     const outcomes: Array<'all' | 'finite'> = [];
-    for (const ws of sheets) {
+    for (const [index, ws] of sheets.entries()) {
       // One realm's demand as the workbook builds it: the workbook delta,
       // then the sheet's drawings and rows.
       const demand = new XlsxFontDemand(workbook, 'jp', []);
@@ -232,16 +293,29 @@ describe('XLSX font demand covers every measured or painted scalar', () => {
       demand.newRowsOf(ws);
       take();
       if (all) { outcomes.push('all'); continue; }
-      const missing = [...paintedScalars(workbook, ws)].filter((cp) => !demanded.has(cp))
-        .map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`);
-      expect(missing, `${label} sheet ${ws.name}`).toEqual([]);
-      outcomes.push('finite');
+      expect(missingScalars(paintedScalars(workbook, ws), demanded), `${label} sheet ${ws.name}`).toEqual([]);
+      // Each metafile picture: what its player paints, against the sheet's
+      // demand and the demand its image owner runs before it plays.
+      for (const [picture, metafile] of (metafiles[index] ?? []).entries()) {
+        const own = metafileDemandScalars(metafile);
+        if (own === 'all') { all = true; break; }
+        expect(missingScalars(paintedOf(metafilePaintedTexts(metafile)), new Set([...demanded, ...own])),
+          `${label} sheet ${ws.name} picture ${picture}`).toEqual([]);
+      }
+      outcomes.push(all ? 'all' : 'finite');
     }
     return outcomes;
   };
 
+  it('plays the targeted metafile pictures, including one under a raster part name', () => {
+    const parsed = parse(metafilesAndMath);
+    const painted = parsed.metafiles.flat().flatMap(metafilePaintedTexts).join('');
+    for (const text of ['日本', 'Größe →', '€Aé']) expect(painted).toContain(text);
+    expect(JSON.stringify(parsed.sheets)).toContain('"type":"math"');
+  });
+
   it('targeted synthetic workbooks', () => {
-    for (const [label, bytes] of Object.entries({ numberFormats, richText, shapes, alignedCells, verticalShapes })) {
+    for (const [label, bytes] of Object.entries({ numberFormats, richText, shapes, alignedCells, verticalShapes, metafilesAndMath })) {
       expect(check(label, bytes), label).toEqual(['finite']);
     }
   });
