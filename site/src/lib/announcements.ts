@@ -56,14 +56,14 @@ export const announcements: readonly Announcement[] = [
         title: 'In short',
         kind: 'summary',
         paragraphs: [
-          'This release adds application-configured font sources and an optional add-on that reads OpenDocument files. Without configuration nothing changes: no font is requested from any network host, and ordinary OOXML viewing loads no OpenDocument code.',
+          'This release adds application-configured font sources and an optional add-on that reads OpenDocument files. By default, no font is requested from any network host, and ordinary OOXML viewing loads no OpenDocument code.',
         ],
         bullets: [
-          'Load web fonts from Google Fonts, a mirror or proxy, a hosted font service, your own files or your own resolver, with one `fonts` option for DOCX, XLSX and PPTX in main and worker mode.',
-          'Open .odp, .odt and .ods files in the PPTX, DOCX and XLSX viewers through the experimental `@silurus/ooxml-opendocument` add-on.',
-          'Draw Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings text on every host instead of tofu or Latin letters.',
-          'Do less font work before first display with web fonts enabled, and repaint large XLSX sheets without rebuilding their render index on every frame.',
-          'Replace the deprecated `useGoogleFonts: true` with `fonts: [googleFonts()]`; allow the font file host in `connect-src` as well as `font-src`.',
+          'The `fonts` option loads web fonts from Google Fonts, a mirror or proxy, a hosted font service, your own files or your own resolver, for DOCX, XLSX and PPTX in main and worker mode.',
+          'The experimental `@silurus/ooxml-opendocument` add-on opens .odp, .odt and .ods files in the PPTX, DOCX and XLSX viewers.',
+          'Symbol, Wingdings, Wingdings 2, Wingdings 3 and Webdings text renders on every host instead of tofu or Latin letters.',
+          'With web fonts enabled, font loading does less work before first display; large XLSX sheets repaint without rebuilding their render index on every frame.',
+          '`useGoogleFonts` is deprecated: `useGoogleFonts: true` becomes `fonts: [googleFonts()]`. Under a Content Security Policy, the font file host must be allowed in `connect-src` as well as `font-src`.',
         ],
       },
       {
@@ -77,7 +77,7 @@ export const announcements: readonly Announcement[] = [
         ],
         examples: [
           {
-            title: 'Open ODP presentations in the PPTX viewer',
+            title: 'ODP presentations in the PPTX viewer',
             code: `import { PptxViewer } from '@silurus/ooxml/pptx';
 import { odp } from '@silurus/ooxml-opendocument/odp';
 
@@ -127,7 +127,7 @@ const viewer = new DocxViewer(canvas, {
         ],
       },
       {
-        title: 'Font loading performance',
+        title: 'Font loading and XLSX repaint performance',
         modules: ['DOCX', 'XLSX', 'PPTX'],
         paragraphs: [
           'With font sources enabled, more content now has a precise font demand: accented and other composed text, right-to-left text, ruby, vertical Word sections and table cells, most charts, raster and SVG pictures, and numbered or vertical PowerPoint text no longer make a document fetch every `unicode-range` subset of its families. Some content still does, for example metafile pictures, equations, region-map charts and Word vertical text boxes.',

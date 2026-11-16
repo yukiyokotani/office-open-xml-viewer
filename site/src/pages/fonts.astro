@@ -124,7 +124,7 @@ const limits = [
     <div class="wrap">
       <p class="eyebrow">Guide · LoadOptions.fonts</p>
       <h1>Font sources</h1>
-      <p>The <code>fonts</code> load option sets where web fonts are loaded from. Without it, no web fonts are loaded.</p>
+      <p>The <code>fonts</code> load option configures web font sources. By default, the library requests no web fonts.</p>
     </div>
   </header>
   <main class="wrap guide-layout">
@@ -424,7 +424,7 @@ const limits = [
             or the painted text has more than 65,536 distinct characters, the document requests every subset
             of the families concerned.</li>
         </ul>
-        <p>To avoid this, self-host the fonts: <code>fontFiles()</code> or <code>fontCss()</code> on your own
+        <p>To keep these requests on infrastructure you control, self-host the fonts: <code>fontFiles()</code> or <code>fontCss()</code> on your own
           origin, or a proxy that you control.</p>
       </section>
 
