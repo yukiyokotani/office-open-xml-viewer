@@ -135,6 +135,17 @@ and unknown structures and does not certify file validity. It applies to open
 and lazy worksheet, slide and image operations, in browser main/worker rendering
 modes and Node. Background failures use the same error through `onError`.
 
+### Difference from the OpenDocument readers
+
+The two optional reader packages currently follow different policies. The
+legacy readers reject the whole document with `unsupported-content` when they
+meet a structure they cannot map. The OpenDocument readers
+(`@silurus/ooxml-opendocument`, see [opendocument.md](./opendocument.md))
+render every feature they read and reject only corrupt, encrypted or unsafe
+input, or input over a resource limit. Keep a conversion fallback for legacy
+input. The legacy behaviour may change in a later release: aligning it with
+the OpenDocument policy is tracked in [issue #2263](https://github.com/yukiyokotani/office-open-xml-viewer/issues/2263).
+
 Encryption uses `unsupported-encryption`. `OoxmlResourceLimitError`,
 `parser-crashed`, `companion-runtime-mismatch`, network and worker failures keep
 their own meaning. Native budgets without measured resource records remain

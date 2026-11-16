@@ -116,7 +116,7 @@ const viewer = new DocxScrollViewer(container, {
   },
 });`;
 
-const classStyleExample = `/* Control the complete appearance with stable classes. */
+const classStyleExample = `/* Style comment cards with stable CSS classes. */
 #viewer .ooxml-comment-card {
   box-shadow: 0 12px 32px rgb(15 23 42 / 0.14);
   backdrop-filter: blur(14px);
@@ -258,7 +258,7 @@ const primitiveTabs = [
   <main class="wrap review-main">
     <section class="review-section" aria-labelledby="built-in-ui">
       <div class="section-heading">
-        <h2 id="built-in-ui">Start with the built-in UI</h2>
+        <h2 id="built-in-ui">Built-in UI</h2>
         <p>Use the same <code>comments</code> option across formats. The presentation follows the document type: a page margin for DOCX, a slide margin and markers for PPTX, and a cell-anchored popup for XLSX.</p>
       </div>
       <div class="format-setup-grid">
@@ -303,13 +303,13 @@ const primitiveTabs = [
         <div class="styling-paths">
           <section class="styling-path" aria-labelledby="css-variables-title">
             <p class="styling-path__label">CSS variables</p>
-            <h4 id="css-variables-title">Switch common theme tokens.</h4>
+            <h4 id="css-variables-title">Common theme tokens</h4>
             <p>Use variables for colors, card borders, and corner radius. This convenience layer intentionally does not mirror every CSS property.</p>
             <Code code={themeTokenExample} lang="css" themes={codeThemes} defaultColor={false} />
           </section>
           <section class="styling-path" aria-labelledby="stable-classes-title">
             <p class="styling-path__label">Stable classes</p>
-            <h4 id="stable-classes-title">Control the complete appearance.</h4>
+            <h4 id="stable-classes-title">Styling with CSS classes</h4>
             <p>Use classes for typography, spacing, shadows, filters, and state selectors. Cards expose <code>data-active</code> and <code>data-focused</code>. Viewer defaults use low-specificity selectors, so application CSS can override them without <code>!important</code>.</p>
             <Code code={classStyleExample} lang="css" themes={codeThemes} defaultColor={false} />
           </section>

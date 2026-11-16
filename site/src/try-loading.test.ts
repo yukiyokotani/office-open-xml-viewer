@@ -6,7 +6,7 @@ const renderer = readFileSync(new URL('./lib/try.ts', import.meta.url), 'utf8');
 
 describe('Try Yours parsing progress', () => {
   it('uses concise, functional copy for the file workflow', () => {
-    expect(source).toContain('Drop in a file.<br />See how it renders.');
+    expect(source).toContain('Try your own file.');
     expect(source).toContain('Choose another file');
     expect(source).not.toContain('Inspect freely');
     expect(source).not.toContain('Verify in source');

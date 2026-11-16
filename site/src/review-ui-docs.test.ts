@@ -51,7 +51,7 @@ describe('Office comment UI integration guide', () => {
     expect(page).toContain('Style the built-in UI');
     expect(page).toContain('Two complementary styling surfaces are available');
     expect(page).toContain('Stable classes');
-    expect(page).toContain('Control the complete appearance');
+    expect(page).toContain('Styling with CSS classes');
     expect(page).toContain('CSS variables');
     expect(page).toContain('Switch common theme tokens');
     expect(page).toContain('does not mirror every CSS property');

@@ -26,7 +26,7 @@ await viewer.waitUntilLayoutComplete();`;
 <section class="progressive-guide" id="progressive-layout" aria-labelledby="progressive-layout-title">
   <header class="progressive-head">
     <p class="eyebrow">Large presentations</p>
-    <h2 id="progressive-layout-title">Show the opening slides while the deck prepares</h2>
+    <h2 id="progressive-layout-title">Progressive layout: opening slides while the deck prepares</h2>
   </header>
   <div class="progressive-body">
     <div class="progressive-copy">
@@ -38,7 +38,7 @@ await viewer.waitUntilLayoutComplete();`;
       </p>
       <div class="progressive-rules">
         <article>
-          <h3>The total is stable</h3>
+          <h3>Slide count</h3>
           <p>
             PPTX declares its slide list and uniform dimensions up front. <code>slideCount</code>
             is final as soon as <code>load()</code> resolves, so a ScrollViewer reserves the full
@@ -46,7 +46,7 @@ await viewer.waitUntilLayoutComplete();`;
           </p>
         </article>
         <article>
-          <h3>Availability grows</h3>
+          <h3>Available slides</h3>
           <p>
             <code>availableSlideCount</code> is the paintable opening prefix. Navigating or
             scrolling ahead shows a loading state until that slide is ready; already painted
@@ -54,7 +54,7 @@ await viewer.waitUntilLayoutComplete();`;
           </p>
         </article>
         <article>
-          <h3>Subscribe or await</h3>
+          <h3>Callbacks and completion</h3>
           <p>
             Viewer callbacks receive <code>layoutComplete</code>. Await
             <code>waitUntilLayoutComplete()</code> before export, full-deck search, or any work

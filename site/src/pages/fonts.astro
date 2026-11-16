@@ -123,8 +123,8 @@ const limits = [
   <header class="guide-hero">
     <div class="wrap">
       <p class="eyebrow">Guide · LoadOptions.fonts</p>
-      <h1>Font sources.</h1>
-      <p>Decide where web fonts come from, or keep using only the fonts installed on the viewer's machine.</p>
+      <h1>Font sources</h1>
+      <p>The <code>fonts</code> load option configures web font sources. By default, the library requests no web fonts.</p>
     </div>
   </header>
   <main class="wrap guide-layout">
@@ -147,7 +147,7 @@ const limits = [
     <div class="guide-content">
       <section id="overview">
         <p class="section-label">Overview</p>
-        <h2>Fonts are opt-in.</h2>
+        <h2>Default behaviour and the <code>fonts</code> option</h2>
         <p>The <code>fonts</code> load option is an ordered list of font sources. With no sources,
           the library requests no fonts from any network host and the canvas uses the fonts installed
           on the viewer's machine. Fonts embedded in a document and installed fonts with the authored
@@ -175,7 +175,7 @@ const limits = [
 
       <section id="google-fonts">
         <p class="section-label">Use case 1</p>
-        <h2>Google Fonts.</h2>
+        <h2>Google Fonts</h2>
         <p><code>googleFonts()</code> requests stylesheets from <code>https://fonts.googleapis.com</code>
           with the CSS2 API (<code>/css2?family=…&amp;display=swap</code>). It asks only for the families
           in its catalog (the Office stand-ins such as Carlito and Caladea, the Noto script families and
@@ -207,7 +207,7 @@ const limits = [
 
       <section id="proxy">
         <p class="section-label">Use case 2</p>
-        <h2>Your own proxy or mirror.</h2>
+        <h2>Proxy or mirror</h2>
         <h3>A Google-compatible origin: <code>googleFonts(&#123; baseUrl &#125;)</code></h3>
         <p>In 0.90, <code>baseUrl</code> must be an origin: a scheme, host and optional port
           (<code>http:</code> or <code>https:</code>); one trailing slash is accepted. A path, query or user
@@ -246,7 +246,7 @@ const limits = [
 
       <section id="providers">
         <p class="section-label">Use case 3</p>
-        <h2>Third-party font providers.</h2>
+        <h2>Third-party font providers</h2>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Provider shape</th><th>Factory</th><th>Notes</th></tr></thead>
@@ -283,7 +283,7 @@ const limits = [
           does not see the text either. Serve static faces for those families with
           <code>unicode-range</code> subsets, from a stylesheet, <code>fontFiles()</code> or a resolver; the
           library then fetches only the subsets the document paints.</p>
-        <h3>Licences and tracking are yours</h3>
+        <h3>Licences and tracking</h3>
         <p>The library ships no font binaries and only reads <code>@font-face</code> <code>url()</code>
           rules. It does not run a provider's embed code (<code>&lt;script&gt;</code> or JavaScript kits),
           and it sends no usage or page-view tracking. Loading the embed code, any usage reporting the
@@ -293,7 +293,7 @@ const limits = [
 
       <section id="resolver">
         <p class="section-label">fontResolver()</p>
-        <h2>The resolver contract.</h2>
+        <h2>Resolver contract</h2>
         <p>This contract is settled for 0.90. Later versions may add fields to <code>demand</code> and
           <code>context</code>; they will not remove or change these.</p>
         <div class="code-card"><Code code={resolverTypes} lang="ts" themes={codeThemes} defaultColor={false} /></div>
@@ -337,7 +337,7 @@ const limits = [
 
       <section id="chaining">
         <p class="section-label">Chaining</p>
-        <h2>First source to claim a family wins.</h2>
+        <h2>Source order</h2>
         <p>Sources are consulted per family, in option order:</p>
         <ol>
           <li>Each source tries the family itself, then the <code>use</code> family of each of its matching <code>substitutions</code>.</li>
@@ -364,7 +364,7 @@ const limits = [
 
       <section id="substitutions">
         <p class="section-label">Substitutions</p>
-        <h2>Openly licensed stand-ins.</h2>
+        <h2>Office font substitutions</h2>
         <p><code>officeFontSubstitutions</code> is the library's list of openly licensed stand-ins for
           Office faces: Calibri → Carlito, Cambria → Caladea, Franklin Gothic Book and Franklin Gothic
           Medium → Libre Franklin, and several Arabic faces → Noto Naskh Arabic or Noto Sans Arabic, for
@@ -381,7 +381,7 @@ const limits = [
 
       <section id="network">
         <p class="section-label">Network</p>
-        <h2>CORS, credentials and CSP.</h2>
+        <h2>CORS, credentials and CSP</h2>
         <ul>
           <li>Fonts from another origin need CORS headers (<code>Access-Control-Allow-Origin</code>) on
             stylesheets and font files.</li>
@@ -411,7 +411,7 @@ const limits = [
 
       <section id="privacy">
         <p class="section-label">Privacy</p>
-        <h2>What a font host can learn.</h2>
+        <h2>Information sent to a font host</h2>
         <ul>
           <li>A hosted source receives the end user's IP address and User-Agent with each request.</li>
           <li>Normally only the <code>unicode-range</code> subsets that intersect the painted text are fetched
@@ -424,13 +424,13 @@ const limits = [
             or the painted text has more than 65,536 distinct characters, the document requests every subset
             of the families concerned.</li>
         </ul>
-        <p>If this matters, self-host the fonts: <code>fontFiles()</code> or <code>fontCss()</code> on your own
+        <p>To keep these requests on infrastructure you control, self-host the fonts: <code>fontFiles()</code> or <code>fontCss()</code> on your own
           origin, or a proxy that you control.</p>
       </section>
 
       <section id="limits">
         <p class="section-label">Timing and limits</p>
-        <h2>Bounded, and never fatal.</h2>
+        <h2>Deadlines and fixed limits</h2>
         <p>The numbers in this section (deadlines, parallel downloads, size and count limits) are the
           values the current implementation uses. They are documented so that you can size a deployment,
           not as API: a minor release may change them. Do not build logic on the exact values; read
@@ -473,7 +473,7 @@ const limits = [
 
       <section id="migration">
         <p class="section-label">Migration</p>
-        <h2>From <code>useGoogleFonts</code>.</h2>
+        <h2>Migration from <code>useGoogleFonts</code></h2>
         <p>Version 0.90 replaces the boolean <code>useGoogleFonts</code> option with <code>fonts</code>.
           Migration is required only if you pass <code>useGoogleFonts</code>.</p>
         <div class="table-wrap">
