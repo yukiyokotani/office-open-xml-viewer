@@ -200,12 +200,18 @@ describe('unit matchers', () => {
   const paragraphs = [{ text: 'Introduction', p: 0 }, { text: 'The cat', p: 1 }];
   type Paragraph = (typeof paragraphs)[number];
   const loadBreak = async () => (previous: Paragraph, next: Paragraph) => previous.p !== next.p;
+  const accept = (): boolean => true;
+  /** The format rule of PPTX table cells: a match stays within one container. */
+  const withinParagraph = (unitRuns: Paragraph[], slices: MatchRunSlice[]): boolean =>
+    slices.every((slice) => unitRuns[slice.runIndex].p === unitRuns[slices[0].runIndex].p);
 
   it('wholeWordMatcher finds whole words using the format\'s layout breaks', async () => {
     const searched = buildTextIndex(paragraphs);
-    const withBreaks = await wholeWordMatcher<Paragraph, MatchRunSlice>('the', { wholeWord: true }, fold, sliceRange, loadBreak);
+    const withBreaks = await wholeWordMatcher<Paragraph, MatchRunSlice>(
+      'the', { wholeWord: true }, fold, sliceRange, loadBreak, accept);
     expect(withBreaks(searched, paragraphs)).toEqual([{ slices: [{ runIndex: 1, start: 0, end: 3 }] }]);
-    const without = await wholeWordMatcher('the', { wholeWord: true }, fold, sliceRange, undefined);
+    const without = await wholeWordMatcher<Paragraph, MatchRunSlice>(
+      'the', { wholeWord: true }, fold, sliceRange, undefined, accept);
     expect(without(searched, paragraphs)).toEqual([]);
   });
 
@@ -214,23 +220,32 @@ describe('unit matchers', () => {
     let loads = 0;
     const counted = () => { loads++; return loadBreak(); };
     const plain = await textHighlightMatcher<Paragraph, MatchRunSlice>(
-      [{ id: 'user', terms: ['cat'], color: 'red' }, { id: 'system', terms: ['the'] }], fold, sliceRange, counted);
+      [{ id: 'user', terms: ['cat'], color: 'red' }, { id: 'system', terms: ['the'] }], fold, sliceRange, counted, accept);
     expect(loads).toBe(0);
     expect(plain(searched, paragraphs)).toEqual([
-      { slices: [{ runIndex: 1, start: 0, end: 3 }], color: 'rgba(0, 184, 148, 0.35)', source: { group: 'system', term: 'the' } },
-      { slices: [{ runIndex: 1, start: 4, end: 7 }], color: 'red', source: { group: 'user', term: 'cat' } },
+      { slices: [{ runIndex: 1, start: 0, end: 3 }], color: 'rgba(0, 184, 148, 0.35)', layer: 1, source: { group: 'system', term: 'the' } },
+      { slices: [{ runIndex: 1, start: 4, end: 7 }], color: 'red', layer: 0, source: { group: 'user', term: 'cat' } },
     ]);
     const words = await textHighlightMatcher<Paragraph, MatchRunSlice>(
-      [{ id: 'system', terms: ['introduction'], wholeWord: true }], fold, sliceRange, counted);
+      [{ id: 'system', terms: ['introduction'], wholeWord: true }], fold, sliceRange, counted, accept);
     expect(loads).toBe(1);
     expect(words(searched, paragraphs)).toHaveLength(1);
   });
 
-  it('rejects a set with a repeated group id', async () => {
-    const repeated = [{ id: 'a', terms: ['x'] }, { id: 'a', terms: ['y'] }];
-    await expect(textHighlightMatcher(repeated, fold, sliceRange, undefined))
-      .rejects.toThrow(new TypeError('highlightText: group ids must be unique'));
-    expect(() => textHighlightCellMatcher(repeated, fold)).toThrow('group ids must be unique');
+  it('applies the format rule before the overlap rule, so a rejected long match keeps a shorter valid one', async () => {
+    const cells = [{ text: 'cat', p: 0 }, { text: 'dog cat', p: 1 }];
+    const searched = buildTextIndex(cells);
+    const highlights = await textHighlightMatcher<Paragraph, MatchRunSlice>(
+      [{ id: 'a', terms: ['catdog', 'cat'] }], fold, sliceRange, undefined, withinParagraph);
+    expect(highlights(searched, cells).map((hit) => hit.slices)).toEqual([
+      [{ runIndex: 0, start: 0, end: 3 }],
+      [{ runIndex: 1, start: 4, end: 7 }],
+    ]);
+    // A rejected occurrence does not hide one that starts inside it either.
+    const seam = [{ text: 'xa', p: 0 }, { text: 'aa', p: 1 }];
+    const words = await wholeWordMatcher<Paragraph, MatchRunSlice>(
+      'aa', { wholeWord: true }, fold, sliceRange, loadBreak, withinParagraph);
+    expect(words(buildTextIndex(seam), seam)).toEqual([{ slices: [{ runIndex: 1, start: 0, end: 2 }] }]);
   });
 });
 
@@ -248,8 +263,8 @@ describe('cell matchers', () => {
       { id: 'short', terms: ['235'] },
     ], fold);
     expect(match(['0.123456789', '0.1235'])).toEqual([
-      { text: '235', color: 'rgba(0, 184, 148, 0.35)', source: { group: 'short', term: '235' } },
-      { text: '456', color: 'red', source: { group: 'full', term: '456' } },
+      { text: '235', color: 'rgba(0, 184, 148, 0.35)', layer: 1, source: { group: 'short', term: '235' } },
+      { text: '456', color: 'red', layer: 0, source: { group: 'full', term: '456' } },
     ]);
   });
 });

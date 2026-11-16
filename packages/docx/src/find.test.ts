@@ -37,10 +37,40 @@ it('separates runs of different paragraphs, lines, or apart on a line, and joins
   expect(docxRunsBreak(head, at('duction', 27, 0, { source: paragraph(0) }))).toBe(false);
   // Right-to-left order: the next run ends where the previous one starts.
   expect(docxRunsBreak(at('ab', 50, 0), at('cd', 40, 0))).toBe(false);
-  // A vertical page: a line is a column, so its runs share x.
-  const rotate = 'rotate(90deg)';
-  expect(docxRunsBreak(at('縦', 100, 0, { transform: rotate }), at('書', 100, 10, { transform: rotate }))).toBe(false);
-  expect(docxRunsBreak(at('縦', 100, 0, { transform: rotate }), at('書', 80, 0, { transform: rotate }))).toBe(true);
+});
+
+it('compares run positions in the writing frame of vertical and rotated text', () => {
+  // A vertical page: a line is a column, so its runs share x and advance down.
+  const down = { transform: 'rotate(90deg)' };
+  expect(docxRunsBreak(at('縦', 100, 0, down), at('書', 100, 5, down))).toBe(false);
+  expect(docxRunsBreak(at('縦', 100, 0, down), at('書', 80, 0, down))).toBe(true);
+  expect(docxRunsBreak(at('縦', 100, 0, down), at('書', 100, 40, down))).toBe(true);
+  // The other quarter turn advances up the page.
+  const up = { transform: 'rotate(-90deg)' };
+  expect(docxRunsBreak(at('ab', 100, 50, up), at('cd', 100, 40, up))).toBe(false);
+  expect(docxRunsBreak(at('ab', 100, 50, up), at('cd', 120, 50, up))).toBe(true);
+  // A horizontal text box turned by 180 degrees: one line keeps its y while
+  // the runs advance to the left, so "cat" + "alog" is still one word.
+  const turned = { transform: 'matrix(-1, 0, 0, -1, 0, 0)' };
+  expect(docxRunsBreak(at('cat', 100, 0, turned), at('alog', 85, 0, turned))).toBe(false);
+  expect(docxRunsBreak(at('cat', 100, 0, turned), at('next', 100, -12, turned))).toBe(true);
+  // An arbitrary rotation: the next run starts where the previous one ends
+  // along the rotated line.
+  const angle = Math.PI / 6;
+  const [cos, sin] = [Math.cos(angle), Math.sin(angle)];
+  const tilted = { transform: `matrix(${cos}, ${sin}, ${-sin}, ${cos}, 0, 0)` };
+  expect(docxRunsBreak(at('cat', 10, 20, tilted), at('alog', 10 + 15 * cos, 20 + 15 * sin, tilted))).toBe(false);
+  expect(docxRunsBreak(at('cat', 10, 20, tilted), at('next', 10 - 12 * sin, 20 + 12 * cos, tilted))).toBe(true);
+  // Runs oriented differently never continue each other.
+  expect(docxRunsBreak(at('ab', 0, 0, down), at('cd', 0, 10))).toBe(true);
+});
+
+it('does not take a word in a rotated text box for two words', async () => {
+  const turned = { transform: 'matrix(-1, 0, 0, -1, 0, 0)' };
+  const pages = [[at('cat', 100, 0, turned), at('alog cat', 85, 0, turned)]];
+  const find = new DocxFindController(() => pages.length, async (page) => pages[page]);
+  expect((await find.find('cat', { wholeWord: true })).map((match) => match.text)).toEqual(['cat']);
+  expect(find.pageHighlights(0)[0].slices).toEqual([{ runIndex: 1, start: 5, end: 8 }]);
 });
 
 it('highlights whole words that end at a paragraph, and reports group and term', async () => {
@@ -60,8 +90,9 @@ it('highlights whole words that end at a paragraph, and reports group and term',
     ['system', 'the', 'The', 0],
     ['user', 'duction', 'duction', 0],
   ]);
+  // Painted group by group in the order of the set.
   expect(find.pageHighlights(0).map((box) => box.color)).toEqual([
-    'rgba(0,0,255,0.3)', 'rgba(0, 184, 148, 0.35)', 'rgba(0,0,255,0.3)', 'rgba(0, 184, 148, 0.35)',
+    'rgba(0,0,255,0.3)', 'rgba(0,0,255,0.3)', 'rgba(0, 184, 148, 0.35)', 'rgba(0, 184, 148, 0.35)',
   ]);
   expect((await find.highlightNext())?.matchIndex).toBe(0);
 });

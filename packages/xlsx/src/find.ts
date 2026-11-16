@@ -26,7 +26,7 @@ import {
   loadTermSearch,
   nextActive,
   prevActive,
-  textHighlightGroupsAreEmpty,
+  validateTextHighlightGroups,
   type FindMatch,
   type FindMatchesOptions,
   type TextHighlightGroup,
@@ -66,14 +66,15 @@ interface XlsxResolvedMatch {
   row: number;
   col: number;
   text: string;
-  /** Text highlights only: the group's background, and the public
-   *  `{ group, term }` of the match. */
+  /** Text highlights only: the group's background, its paint layer (the
+   *  group's position in the set), and the public `{ group, term }`. */
   color?: string;
+  layer?: number;
   source?: { group: string; term: string };
 }
 
 /** What a scan reports per occurrence in one cell. */
-type CellHit = Pick<XlsxResolvedMatch, 'text' | 'color' | 'source'>;
+type CellHit = Pick<XlsxResolvedMatch, 'text' | 'color' | 'layer' | 'source'>;
 /** Resolves one cell's display texts (the full one first) to its occurrences. */
 type CellMatcher = (candidates: readonly string[]) => CellHit[];
 
@@ -81,12 +82,23 @@ type CellMatcher = (candidates: readonly string[]) => CellHit[];
  *  interactive find, or the text highlights). */
 class MatchList {
   matches: XlsxResolvedMatch[] = [];
+  /** Match indexes in paint order: by layer, then document order, so a later
+   *  group is drawn inside (above) an earlier one on a shared cell. */
+  paintOrder: number[] = [];
   active = -1;
   generation = 0;
 
   reset(): void {
     this.generation++;
-    this.matches = [];
+    this.commit([]);
+  }
+
+  /** Install a scan's result and reset the cursor. */
+  commit(matches: XlsxResolvedMatch[]): void {
+    this.matches = matches;
+    // Array.prototype.sort is stable: equal layers keep document order.
+    this.paintOrder = matches.map((_, index) => index)
+      .sort((a, b) => (matches[a].layer ?? 0) - (matches[b].layer ?? 0));
     this.active = -1;
   }
 
@@ -150,15 +162,17 @@ export class XlsxFindController {
   /** Drop the text highlights; the interactive find stays. */
   clearHighlights(): void { this._marks.reset(); }
 
-  /** The overlay boxes of a sheet: one per text-highlight group per cell
-   *  (active when any of its occurrences is the active highlight), then one per
-   *  find match, so the find is painted on top. */
+  /** The overlay boxes of a sheet in paint order: one per text-highlight group
+   *  per cell (active when any of its occurrences is the active highlight),
+   *  group by group in the order of the set, then one per find match, so the
+   *  find is painted on top. */
   sheetHighlights(sheet: number): XlsxCellHighlight[] {
     const out: XlsxCellHighlight[] = [];
     const boxes = new Map<string, XlsxCellHighlight>();
     const depth = new Map<string, number>();
-    this._marks.matches.forEach((m, i) => {
-      if (m.sheet !== sheet) return;
+    for (const i of this._marks.paintOrder) {
+      const m = this._marks.matches[i];
+      if (m.sheet !== sheet) continue;
       const cell = `${m.row},${m.col}`;
       const key = `${cell},${m.source!.group}`;
       let box = boxes.get(key);
@@ -170,7 +184,7 @@ export class XlsxFindController {
         out.push(box);
       }
       if (i === this._marks.active) box.active = true;
-    });
+    }
     this._find.matches.forEach((m, i) => {
       if (m.sheet === sheet) out.push({ row: m.row, col: m.col, active: i === this._find.active });
     });
@@ -195,7 +209,7 @@ export class XlsxFindController {
     }
     // Whole-word matching is part of the on-demand term search; a plain find
     // starts without loading anything.
-    const committed = await this._scan(this._find, opts.wholeWord
+    return await this._scan(this._find, opts.wholeWord
       ? async () => (await loadTermSearch()).wholeWordCellMatcher(query, opts, foldPreservingLength)
       : () => (candidates) => {
         for (const candidate of candidates) {
@@ -208,8 +222,7 @@ export class XlsxFindController {
           }
         }
         return [];
-      });
-    return committed ? this._find.all() : [];
+      }) ?? [];
   }
 
   next(): FindMatch<XlsxMatchLocation> | null { return this._find.step(nextActive); }
@@ -217,18 +230,18 @@ export class XlsxFindController {
   prev(): FindMatch<XlsxMatchLocation> | null { return this._find.step(prevActive); }
 
   /** Replace the text-highlight set and search every sheet for it. A set with
-   *  a repeated group id rejects and leaves the committed highlights as they
-   *  are. */
+   *  a repeated group id rejects and leaves the highlights and any request in
+   *  flight as they are. */
   async highlight(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<XlsxMatchLocation>[]> {
-    if (textHighlightGroupsAreEmpty(groups)) {
+    if (validateTextHighlightGroups(groups)) {
       this._marks.reset();
       return [];
     }
     // Detach from the caller's objects: the scan reads the set after awaits.
     const set = groups.map((group) => ({ ...group, terms: [...group.terms] }));
-    const committed = await this._scan(this._marks, async () =>
+    const matches = await this._scan(this._marks, async () =>
       (await loadTermSearch()).textHighlightCellMatcher(set, foldPreservingLength));
-    return committed ? this._marks.all() as TextHighlightMatch<XlsxMatchLocation>[] : [];
+    return (matches ?? []) as TextHighlightMatch<XlsxMatchLocation>[];
   }
 
   highlightNext(): TextHighlightMatch<XlsxMatchLocation> | null {
@@ -239,18 +252,26 @@ export class XlsxFindController {
     return this._marks.step(prevActive) as TextHighlightMatch<XlsxMatchLocation> | null;
   }
 
-  /** Read every sheet's cells and resolve the matcher `prepare` yields against
-   *  each cell's display texts. Returns `false` when a newer request of the
-   *  same kind (or a clear) superseded this one; `list` is then left untouched. */
+  /** Read every sheet's cells, resolve the matcher `prepare` yields against
+   *  each cell's display texts, and commit the result to `list`. Returns the
+   *  committed public matches, taken at commit time so that a later request
+   *  cannot change what this one reports. Returns `null` when a newer request
+   *  of the same kind (or a clear) superseded this one; `list` is then left
+   *  untouched, and a failure of the superseded request is not reported. */
   private async _scan(
     list: MatchList,
     prepare: () => CellMatcher | Promise<CellMatcher>,
-  ): Promise<boolean> {
+  ): Promise<FindMatch<XlsxMatchLocation>[] | null> {
     const generation = ++list.generation;
     let matcher = prepare();
     if (matcher instanceof Promise) {
-      matcher = await matcher;
-      if (generation !== list.generation) return false;
+      try {
+        matcher = await matcher;
+      } catch (error) {
+        if (generation !== list.generation) return null;
+        throw error;
+      }
+      if (generation !== list.generation) return null;
     }
     const sheets = this._sheetCount();
     const matches: XlsxResolvedMatch[] = [];
@@ -259,10 +280,10 @@ export class XlsxFindController {
       try {
         cells = await this._collectSheetCells(sheet);
       } catch (error) {
-        if (generation !== list.generation) return false;
+        if (generation !== list.generation) return null;
         throw error;
       }
-      if (generation !== list.generation) return false;
+      if (generation !== list.generation) return null;
       const sheetName = this._sheetName(sheet);
       for (const cell of cells) {
         for (const hit of matcher([cell.text, ...(cell.alternates ?? [])])) {
@@ -270,9 +291,8 @@ export class XlsxFindController {
         }
       }
     }
-    if (generation !== list.generation) return false;
-    list.matches = matches;
-    list.active = -1;
-    return true;
+    if (generation !== list.generation) return null;
+    list.commit(matches);
+    return list.all();
   }
 }

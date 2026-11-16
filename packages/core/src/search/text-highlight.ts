@@ -26,7 +26,8 @@ export interface TextHighlightGroup {
    *  Any CSS `background` value is accepted, so a pattern (for example a
    *  `repeating-linear-gradient`) can mark a group without relying on hue.
    *  XLSX also draws the cell border in this value when it is a plain colour.
-   *  Omitted: a translucent green. */
+   *  The value becomes part of an inline style, so pass only values the
+   *  application controls. Omitted: a translucent green. */
   color?: string;
   /** Match case exactly. Default `false`. */
   caseSensitive?: boolean;
@@ -50,8 +51,16 @@ export interface TextHighlightMatch<Loc = unknown> extends FindMatch<Loc> {
  *  not depend on hue. Dark ring with a light halo, visible on any page colour. */
 export const ACTIVE_TEXT_HIGHLIGHT_RING = 'outline:2px solid #111;box-shadow:0 0 0 4px #fff;';
 
-/** Whether the set would highlight nothing (no group has a non-empty term). */
-export function textHighlightGroupsAreEmpty(groups: readonly TextHighlightGroup[]): boolean {
+/**
+ * Validate a set, and return whether it is empty (no group has a non-empty
+ * term, so it highlights nothing). Group ids must be distinct, or the matches
+ * could not be attributed: a repeated id throws, also in an otherwise empty
+ * set, before anything is cleared or searched.
+ */
+export function validateTextHighlightGroups(groups: readonly TextHighlightGroup[]): boolean {
+  if (new Set(groups.map((group) => group.id)).size !== groups.length) {
+    throw new TypeError('highlightText: group ids must be unique');
+  }
   return groups.every((group) => group.terms.every((term) => term.length === 0));
 }
 

@@ -368,8 +368,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     },
     beforeReplace: (previous) => {
       this._selection.invalidateElementContext(false);
-      this._searchRequests[0]++;
-      this._searchRequests[1]++;
+      this._searches[0]++;
+      this._searches[1]++;
       this._find.invalidate();
       this._findActive = false;
       this._activeCommentId = null;
@@ -518,7 +518,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   /** Covers the pre-search progressive wait before DocxFindController can
    * establish its own cancellation generation, for findText() and for
    * highlightText(), which are cancelled independently. */
-  private readonly _searchRequests: [find: number, highlights: number] = [0, 0];
+  private readonly _searches: [find: number, highlights: number] = [0, 0];
   /** ECMA-376 §17.13.5 — current tracked-change view. A LAYOUT axis (deletions
    *  change line breaking and pagination), so it selects which retained layout
    *  variant the viewer reads geometry from; toggle it with
@@ -1177,7 +1177,7 @@ export class DocxScrollViewer implements ZoomableViewer {
    * {@link highlightText} (`kind` 1); each kind is cancelled on its own. */
   private async _search<Match>(kind: 0 | 1, scan: () => Promise<Match[]>): Promise<Match[]> {
     if (!this._doc) return [];
-    const generation = ++this._searchRequests[kind];
+    const generation = ++this._searches[kind];
     // Search spans every page, so a progressively-loaded document has to finish
     // laying out first — otherwise the search silently covers only the pages
     // that happen to exist yet. Guarded on the document actually being
@@ -1189,7 +1189,7 @@ export class DocxScrollViewer implements ZoomableViewer {
       await this._errorRouter.ownBackgroundLifecycle(
         () => doc.waitUntilLayoutComplete(),
       );
-      if (this._destroyed || this._doc !== doc || generation !== this._searchRequests[kind]) {
+      if (this._destroyed || this._doc !== doc || generation !== this._searches[kind]) {
         return [];
       }
     }
@@ -1211,7 +1211,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   /** Clear the current query and its highlights. Text highlights set with
    * {@link highlightText} stay. */
   clearFind(): void {
-    this._searchRequests[0]++;
+    this._searches[0]++;
     this._findActive = false;
     this._find.clearFind();
     this._highlights.redrawAll();
@@ -1251,7 +1251,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   /** Remove every text highlight set with {@link highlightText}. The find
    * state stays. */
   clearHighlights(): void {
-    this._searchRequests[1]++;
+    this._searches[1]++;
     this._find.clearHighlights();
     this._highlights.redrawAll();
   }
@@ -1374,8 +1374,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     this._pendingLoadAbort?.abort();
     this._pendingLoadAbort = null;
     this._pendingViewChanged = null;
-    this._searchRequests[0]++;
-    this._searchRequests[1]++;
+    this._searches[0]++;
+    this._searches[1]++;
     this._errorRouter.close();
     this._partFailureDelivery.close();
     this._layout.unbind();

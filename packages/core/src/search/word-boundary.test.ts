@@ -62,6 +62,30 @@ describe('wordBoundaryTest — scripts written without spaces', () => {
     expect(segmenter.calls).toEqual(['東京都', '大阪府', '京都']);
   });
 
+  it('walks a long run once, however many offsets are tested and in any order', () => {
+    // 60,000 characters without a space. Looking up every offset is linear
+    // overall; walking back to the run start per offset would take minutes.
+    const text = '東京都大阪'.repeat(12_000);
+    const segmenter = fixedSegmenter();
+    const test = wordBoundaryTest(text, undefined, segmenter);
+    const started = performance.now();
+    let found = 0;
+    for (let offset = text.length; offset >= 0; offset--) if (test(offset)) found++;
+    for (let offset = 0; offset <= text.length; offset++) if (test(offset)) found++;
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(found).toBe(4);
+    expect(segmenter.calls).toHaveLength(1);
+  });
+
+  it('keeps runs apart when they are consulted out of order', () => {
+    const text = '東京、大阪、京都';
+    const segmenter = fixedSegmenter(1);
+    const test = wordBoundaryTest(text, undefined, segmenter);
+    expect([7, 1, 4].map((offset) => test(offset))).toEqual([true, true, true]);
+    expect(boundaries(text, test)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(segmenter.calls).toEqual(['京都', '東京', '大阪']);
+  });
+
   it('asks the segmenter where a spaced script meets an unspaced one', () => {
     const text = 'Tokyo東京';
     const segmenter = fixedSegmenter(5);

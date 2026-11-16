@@ -111,6 +111,9 @@ describe.each(['main', 'worker'] as const)('DocxViewer text highlights (%s mode)
     await viewer.highlightText(GROUPS);
     expect((await viewer.highlightText([{ id: 'only', terms: ['beta'] }])).map((match) => match.group)).toEqual(['only']);
     expect(layer().children.map((box) => box.style.background)).toEqual(['rgba(0, 184, 148, 0.35)']);
+    // A repeated group id rejects, even with no terms, and clears nothing.
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    expect(layer().children).toHaveLength(1);
     expect(await viewer.highlightText([])).toEqual([]);
     expect(layer().children).toEqual([]);
     viewer.destroy();
@@ -255,8 +258,12 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
   });
 
   it('drops the highlights on destroy', async () => {
-    const { viewer } = mount(2);
+    const { viewer, boxes } = mount(2);
     await viewer.highlightText(GROUPS);
+    const shown = boxes().length;
+    expect(shown).toBeGreaterThan(0);
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    expect(boxes()).toHaveLength(shown);
     viewer.destroy();
     expect(await viewer.highlightNext()).toBeNull();
   });

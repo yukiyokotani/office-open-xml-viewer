@@ -98,6 +98,9 @@ describe.each(['main', 'worker'] as const)('PptxViewer text highlights (%s mode)
     await viewer.highlightText(GROUPS);
     await viewer.findText('');
     expect(boxes()).toHaveLength(2);
+    // A repeated group id rejects, even with no terms, and clears nothing.
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    expect(boxes()).toHaveLength(2);
     expect(await viewer.highlightText([])).toEqual([]);
     expect(boxes()).toEqual([]);
     viewer.destroy();
@@ -195,6 +198,8 @@ describe.each(['main', 'worker'] as const)('PptxScrollViewer text highlights (%s
     // An empty find query leaves a later highlight set in place.
     await viewer.highlightText(GROUPS);
     await viewer.findText('');
+    expect(boxes().some((box) => box.style.background === 'rgba(0, 0, 255, 0.3)')).toBe(true);
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
     expect(boxes().some((box) => box.style.background === 'rgba(0, 0, 255, 0.3)')).toBe(true);
     viewer.destroy();
     expect(await viewer.highlightNext()).toBeNull();

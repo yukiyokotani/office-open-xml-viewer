@@ -261,11 +261,22 @@ describe('XlsxFindController text highlights', () => {
     const c = controllerFor(sheets);
     await c.find('and');
     await c.highlight(groups);
+    // Group by group in the order of the set, then the find.
     expect(c.sheetHighlights(0)).toEqual([
       { row: 1, col: 1, active: false, color: 'rgba(0,0,255,0.3)', depth: 0 },
-      { row: 1, col: 1, active: false, color: 'rgba(0, 184, 148, 0.35)', depth: 1 },
       { row: 2, col: 2, active: false, color: 'rgba(0,0,255,0.3)', depth: 0 },
+      { row: 1, col: 1, active: false, color: 'rgba(0, 184, 148, 0.35)', depth: 1 },
       { row: 1, col: 1, active: false },
+    ]);
+  });
+
+  it('nests the boxes of a cell in the order of the set, wherever the matches start', async () => {
+    const c = controllerFor([{ name: 'S', cells: [cell(1, 1, 'returns before revenue')] }]);
+    // The second group matches first in the text; it is still the inner box.
+    const matches = await c.highlight(groups);
+    expect(matches.map((m) => m.group)).toEqual(['validated', 'user']);
+    expect(c.sheetHighlights(0).map((box) => [box.color, box.depth])).toEqual([
+      ['rgba(0,0,255,0.3)', 0], ['rgba(0, 184, 148, 0.35)', 1],
     ]);
   });
 
@@ -279,7 +290,7 @@ describe('XlsxFindController text highlights', () => {
     c.highlightNext();
     c.highlightNext();
     expect(c.highlightNext()).toMatchObject({ matchIndex: 3, location: { ref: 'B2' } });
-    expect(c.sheetHighlights(0).map((box) => box.active)).toEqual([false, false, true, true, false, false]);
+    expect(c.sheetHighlights(0).map((box) => box.active)).toEqual([false, true, false, true, false, false]);
     // The find cursor did not move.
     expect(c.next()?.matchIndex).toBe(1);
   });
@@ -306,6 +317,8 @@ describe('XlsxFindController text highlights', () => {
     expect((await c.highlight([{ id: 'only', terms: ['notes', 'summary', 'returns'] }])).map((m) => m.location.ref))
       .toEqual(['A1', 'A3']);
     await expect(c.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }])).rejects.toThrow('group ids must be unique');
+    // Also when the set is otherwise empty: nothing is cleared.
+    await expect(c.highlight([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
     expect(c.sheetHighlights(0)).toHaveLength(1);
     expect(await c.highlight([{ id: 'only', terms: [] }])).toEqual([]);
     expect(c.sheetHighlights(0)).toEqual([]);
@@ -359,5 +372,30 @@ describe('XlsxFindController.find wholeWord', () => {
     expect((await c.find('cat', { wholeWord: true })).map((m) => [m.location.ref, m.text]))
       .toEqual([['A1', 'cat'], ['A2', 'Cat']]);
     expect(await c.find('cat')).toHaveLength(4);
+  });
+});
+
+describe('XlsxFindController request results', () => {
+  it('reports each request its own result, and no error of a superseded request', async () => {
+    const pending: Array<{ resolve: (cells: FindCell[]) => void; reject: (error: Error) => void }> = [];
+    const c = new XlsxFindController(
+      () => 1,
+      () => 'S',
+      () => new Promise<FindCell[]>((resolve, reject) => pending.push({ resolve, reject })),
+    );
+    const first = c.find('alpha');
+    pending[0].resolve([cell(1, 1, 'alpha beta')]);
+    const second = c.find('beta');
+    expect((await first).map((m) => m.text)).toEqual([]);
+    pending[1].resolve([cell(1, 1, 'alpha beta')]);
+    expect((await second).map((m) => m.text)).toEqual(['beta']);
+
+    const failing = c.find('alpha');
+    c.clearFind();
+    pending[2].reject(new Error('sheet closed'));
+    await expect(failing).resolves.toEqual([]);
+    const current = c.find('alpha');
+    pending[3].reject(new Error('sheet failed'));
+    await expect(current).rejects.toThrow('sheet failed');
   });
 });

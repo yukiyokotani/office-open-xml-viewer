@@ -873,7 +873,7 @@ export type { FindHighlightColors } from './search/find-highlight';
 export {
   ACTIVE_TEXT_HIGHLIGHT_RING,
   loadTermSearch,
-  textHighlightGroupsAreEmpty,
+  validateTextHighlightGroups,
   type TextHighlightGroup,
   type TextHighlightMatch,
 } from './search/text-highlight';

@@ -82,8 +82,22 @@ it('highlights whole words that end at a line of a title, and reports group and 
     ['user', 'up', 'up', 0],
     ['system', 'revenue', 'revenue', 0],
   ]);
+  // Painted group by group in the order of the set.
   expect(find.slideHighlights(0).map((box) => box.color)).toEqual([
-    'rgba(0,0,255,0.3)', 'rgba(0,0,255,0.3)', 'rgba(0, 184, 148, 0.35)', 'rgba(0,0,255,0.3)',
+    'rgba(0,0,255,0.3)', 'rgba(0,0,255,0.3)', 'rgba(0,0,255,0.3)', 'rgba(0, 184, 148, 0.35)',
   ]);
   expect((await find.highlightPrev())?.matchIndex).toBe(3);
+});
+
+it('keeps a term inside one table cell when a longer term of its group would cross cells', async () => {
+  const cells = [
+    run('cat', { elementIndex: 0, tableCell: { row: 0, column: 0 } }),
+    run('dog', { elementIndex: 0, tableCell: { row: 0, column: 1 } }),
+  ];
+  const find = new PptxFindController(() => 1, async () => cells);
+  // "catdog" exists only across the cell boundary, where nothing may match.
+  const matches = await find.highlight([{ id: 'a', terms: ['catdog', 'cat', 'dog'] }]);
+  expect(matches.map((match) => [match.term, match.text])).toEqual([['cat', 'cat'], ['dog', 'dog']]);
+  expect((await find.find('cat', { wholeWord: true })).map((match) => match.text)).toEqual(['cat']);
+  await expect(find.find('catdog', { wholeWord: true })).resolves.toEqual([]);
 });

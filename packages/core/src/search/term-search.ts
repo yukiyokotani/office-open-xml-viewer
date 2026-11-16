@@ -63,12 +63,16 @@ export interface TermRange {
   termIndex: number;
 }
 
+/** Whether an occurrence `[start, end)` may be a match (a format rule, such as
+ *  PPTX not matching across table cells). */
+export type AcceptRange = (start: number, end: number) => boolean;
+
 /**
  * Visit every occurrence of `term` as a `[start, end)` range, in order and
  * without overlap, exactly as the plain find does: scanning resumes just past
- * each match. With a whole-word test, an occurrence that does not start and end
- * at a boundary is skipped, and scanning resumes one position later so it
- * cannot hide an occurrence that starts inside it.
+ * each match. An occurrence that the whole-word test or `accept` rejects is
+ * skipped, and scanning resumes one position later so it cannot hide an
+ * occurrence that starts inside it.
  */
 function forEachOccurrence(
   searched: SearchText,
@@ -76,6 +80,7 @@ function forEachOccurrence(
   opts: FindMatchesOptions,
   fold: Fold,
   boundary: WordBoundaryTest | null,
+  accept: AcceptRange | undefined,
   visit: (start: number, end: number) => void,
 ): void {
   if (term.length === 0) return;
@@ -86,7 +91,7 @@ function forEachOccurrence(
     const at = haystack.indexOf(needle, from);
     if (at === -1) break;
     const end = at + needle.length;
-    if (boundary && !(boundary(at) && boundary(end))) {
+    if ((boundary && !(boundary(at) && boundary(end))) || (accept && !accept(at, end))) {
       from = at + 1;
       continue;
     }
@@ -128,7 +133,8 @@ function dropOverlaps(ranges: TermRange[], textLength: number): TermRange[] {
  * terms are ignored (no trimming, as for a single query).
  *
  * `wordBoundary` builds the whole-word test of `searched`; it is called only
- * for `opts.wholeWord`.
+ * for `opts.wholeWord`. `accept` removes occurrences before the overlap rule,
+ * so a rejected long match does not suppress a shorter valid one.
  */
 export function findTermRanges(
   searched: SearchText,
@@ -136,6 +142,7 @@ export function findTermRanges(
   opts: FindMatchesOptions,
   fold: Fold,
   wordBoundary: () => WordBoundaryTest = () => wordBoundaryTest(searched.text),
+  accept?: AcceptRange,
 ): TermRange[] {
   const boundary = opts.wholeWord ? wordBoundary() : null;
   const ranges: TermRange[] = [];
@@ -143,7 +150,7 @@ export function findTermRanges(
   terms.forEach((term, termIndex) => {
     if (searchedTerms.has(term)) return;
     searchedTerms.add(term);
-    forEachOccurrence(searched, term, opts, fold, boundary, (start, end) => {
+    forEachOccurrence(searched, term, opts, fold, boundary, accept, (start, end) => {
       ranges.push({ start, end, termIndex });
     });
   });
@@ -152,12 +159,13 @@ export function findTermRanges(
   return searchedTerms.size <= 1 ? ranges : dropOverlaps(ranges, searched.text.length);
 }
 
-/** One text-highlight occurrence in one searched text: its range, its group,
- *  and the term that matched. */
+/** One text-highlight occurrence in one searched text: its range, its group
+ *  (and the group's position in the set), and the term that matched. */
 export interface TextHighlightRange {
   start: number;
   end: number;
   group: TextHighlightGroup;
+  groupIndex: number;
   term: string;
 }
 
@@ -169,48 +177,48 @@ export function findTextHighlightRanges(
   groups: readonly TextHighlightGroup[],
   fold: Fold,
   wordBoundary: () => WordBoundaryTest = () => wordBoundaryTest(searched.text),
+  accept?: AcceptRange,
 ): TextHighlightRange[] {
   const found: TextHighlightRange[] = [];
   let boundary: WordBoundaryTest | undefined;
   const sharedBoundary = (): WordBoundaryTest => boundary ??= wordBoundary();
-  for (const group of groups) {
-    for (const { start, end, termIndex } of findTermRanges(searched, group.terms, group, fold, sharedBoundary)) {
-      found.push({ start, end, group, term: group.terms[termIndex] });
+  groups.forEach((group, groupIndex) => {
+    const ranges = findTermRanges(searched, group.terms, group, fold, sharedBoundary, accept);
+    for (const { start, end, termIndex } of ranges) {
+      found.push({ start, end, group, groupIndex, term: group.terms[termIndex] });
     }
-  }
+  });
   // Array.prototype.sort is stable, so equal starts keep the group order.
   return groups.length > 1 ? found.sort((a, b) => a.start - b.start) : found;
 }
 
 /** What a text-highlight match carries besides its position: the group's
- *  background, and the `{ group, term }` reported on the public match. */
+ *  background, its paint layer (the group's position in the set; a later
+ *  group is painted above an earlier one), and the `{ group, term }` reported
+ *  on the public match. */
 interface HighlightSource {
   color: string;
+  layer: number;
   source: { group: string; term: string };
 }
 
-const highlightSource = ({ group, term }: TextHighlightRange): HighlightSource => ({
+const highlightSource = ({ group, groupIndex, term }: TextHighlightRange): HighlightSource => ({
   color: group.color ?? DEFAULT_TEXT_HIGHLIGHT,
+  layer: groupIndex,
   source: { group: group.id, term },
 });
 
-/** Reject a set the matches of which could not be attributed: group ids must
- *  be distinct. */
-function assertUniqueGroupIds(groups: readonly TextHighlightGroup[]): void {
-  if (new Set(groups.map((group) => group.id)).size !== groups.length) {
-    throw new TypeError('highlightText: group ids must be unique');
-  }
-}
-
 /** Resolves one unit's index and runs to its matches. */
-type UnitMatcher<Run, Hit> = (index: TextIndex, runs: readonly Run[]) => Hit[];
+type UnitMatcher<Run, Hit> = (index: TextIndex, runs: Run[]) => Hit[];
 type SliceRange<Slice> = (index: TextIndex, start: number, end: number) => Slice[];
 type RunBreakLoader<Run> = (() => Promise<RunBreakTest<Run>>) | undefined;
+/** The format's rule for a match, given the unit's runs and the match's slices. */
+type AcceptMatch<Run, Slice> = (runs: Run[], slices: Slice[]) => boolean;
 
 /**
  * The per-unit matcher of `findText(query, { wholeWord: true })`. `fold` and
  * `slice` are the static index primitives; `loadRunBreak` fetches the format's
- * layout-break test.
+ * layout-break test; `acceptMatch` is the format's match rule.
  */
 export async function wholeWordMatcher<Run extends SearchRun, Slice>(
   query: string,
@@ -218,29 +226,34 @@ export async function wholeWordMatcher<Run extends SearchRun, Slice>(
   fold: Fold,
   slice: SliceRange<Slice>,
   loadRunBreak: RunBreakLoader<Run>,
+  acceptMatch: AcceptMatch<Run, Slice>,
 ): Promise<UnitMatcher<Run, { slices: Slice[] }>> {
   const runBreak = await loadRunBreak?.();
-  return (index, runs) =>
-    findTermRanges(index, [query], opts, fold, () => wordBoundaries(index, runs, runBreak))
-      .map(({ start, end }) => ({ slices: slice(index, start, end) }));
+  return (index, runs) => findTermRanges(
+    index, [query], opts, fold,
+    () => wordBoundaries(index, runs, runBreak),
+    (start, end) => acceptMatch(runs, slice(index, start, end)),
+  ).map(({ start, end }) => ({ slices: slice(index, start, end) }));
 }
 
 /**
- * The per-unit matcher of a text-highlight set (rejects one with a repeated
- * group id). The layout-break test is fetched only when a group asks for whole
- * words.
+ * The per-unit matcher of a text-highlight set. The layout-break test is
+ * fetched only when a group asks for whole words. `acceptMatch` is applied
+ * before the overlap rule of a group.
  */
 export async function textHighlightMatcher<Run extends SearchRun, Slice>(
   groups: readonly TextHighlightGroup[],
   fold: Fold,
   slice: SliceRange<Slice>,
   loadRunBreak: RunBreakLoader<Run>,
+  acceptMatch: AcceptMatch<Run, Slice>,
 ): Promise<UnitMatcher<Run, HighlightSource & { slices: Slice[] }>> {
-  assertUniqueGroupIds(groups);
   const runBreak = groups.some((group) => group.wholeWord) ? await loadRunBreak?.() : undefined;
-  return (index, runs) =>
-    findTextHighlightRanges(index, groups, fold, () => wordBoundaries(index, runs, runBreak))
-      .map((hit) => ({ slices: slice(index, hit.start, hit.end), ...highlightSource(hit) }));
+  return (index, runs) => findTextHighlightRanges(
+    index, groups, fold,
+    () => wordBoundaries(index, runs, runBreak),
+    (start, end) => acceptMatch(runs, slice(index, start, end)),
+  ).map((hit) => ({ slices: slice(index, hit.start, hit.end), ...highlightSource(hit) }));
 }
 
 /** Resolves one cell's display texts (the full one first) to its matches. A
@@ -263,27 +276,29 @@ export function wholeWordCellMatcher(
   };
 }
 
-/** The per-cell matcher of a text-highlight set (throws for one with a repeated
- *  group id). Each group is searched on its own; like the find, a group's
- *  matches in a cell come from the first of the cell's display texts that has
- *  any. */
+/** The per-cell matcher of a text-highlight set. Each group is searched on its
+ *  own; like the find, a group's matches in a cell come from the first of the
+ *  cell's display texts that has any. */
 export function textHighlightCellMatcher(
   groups: readonly TextHighlightGroup[],
   fold: Fold,
 ): CellMatcher<HighlightSource & { text: string }> {
-  assertUniqueGroupIds(groups);
   return (candidates) => {
     const searched = candidates.map((text) => ({ text, folded: fold(text) }));
     const found: (HighlightSource & { text: string; start: number })[] = [];
-    for (const group of groups) {
+    groups.forEach((group, groupIndex) => {
       for (const candidate of searched) {
         const hits = findTextHighlightRanges(candidate, [group], fold);
         for (const hit of hits) {
-          found.push({ text: candidate.text.slice(hit.start, hit.end), start: hit.start, ...highlightSource(hit) });
+          found.push({
+            text: candidate.text.slice(hit.start, hit.end),
+            start: hit.start,
+            ...highlightSource({ ...hit, groupIndex }),
+          });
         }
         if (hits.length > 0) break;
       }
-    }
+    });
     // Stable: occurrences that start at the same offset keep the group order.
     return found.sort((a, b) => a.start - b.start).map(({ start: _start, ...hit }) => hit);
   };

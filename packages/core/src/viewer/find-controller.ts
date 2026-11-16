@@ -4,7 +4,7 @@ import type { FindMatchesOptions, SearchRun, TextIndex, TextMatch } from '../sea
 import type { FindMatch } from '../search/find-match';
 import {
   loadTermSearch,
-  textHighlightGroupsAreEmpty,
+  validateTextHighlightGroups,
   type TextHighlightGroup,
   type TextHighlightMatch,
 } from '../search/text-highlight';
@@ -13,15 +13,16 @@ interface ResolvedMatch {
   unit: number;
   text: string;
   slices: TextMatch['slices'];
-  /** Text highlights only: the group's background, and the public
-   *  `{ group, term }` of the match. */
+  /** Text highlights only: the group's background, its paint layer (the
+   *  group's position in the set), and the public `{ group, term }`. */
   color?: string;
+  layer?: number;
   source?: { group: string; term: string };
 }
 
 /** What a scan's matcher reports per occurrence. */
-type ScanHit = Pick<ResolvedMatch, 'slices' | 'color' | 'source'>;
-type Matcher<Run> = (index: TextIndex, runs: readonly Run[]) => ScanHit[];
+type ScanHit = Pick<ResolvedMatch, 'slices' | 'color' | 'layer' | 'source'>;
+type Matcher<Run> = (index: TextIndex, runs: Run[]) => ScanHit[];
 
 /** One overlay box list entry: the run-slices of a match, whether it is the
  *  active one of its kind, and for a text highlight the group background
@@ -36,6 +37,9 @@ export interface UnitHighlight {
  *  interactive find, or the text highlights). */
 class MatchList<Location> {
   matches: ResolvedMatch[] = [];
+  /** Match indexes in paint order: by layer, then document order, so a later
+   *  group is painted above an earlier one wherever its matches start. */
+  private _paint: number[] = [];
   active = -1;
   generation = 0;
   /** A non-empty search was requested and not cleared since. */
@@ -47,9 +51,17 @@ class MatchList<Location> {
 
   reset(): void {
     this.generation++;
-    this.matches = [];
-    this.active = -1;
+    this.commit([]);
     this.armed = false;
+  }
+
+  /** Install a scan's result and reset the cursor. */
+  commit(matches: ResolvedMatch[]): void {
+    this.matches = matches;
+    // Array.prototype.sort is stable: equal layers keep document order.
+    this._paint = matches.map((_, index) => index)
+      .sort((a, b) => (matches[a].layer ?? 0) - (matches[b].layer ?? 0));
+    this.active = -1;
   }
 
   /** The public form of match `index`, or `null` when out of range. */
@@ -70,13 +82,15 @@ class MatchList<Location> {
     return this.at(this.active);
   }
 
+  /** Append this list's overlay boxes of a unit to `out`, in paint order. */
   boxes(unit: number, out: UnitHighlight[]): void {
-    this.matches.forEach((match, index) => {
-      if (match.unit !== unit) return;
+    for (const index of this._paint) {
+      const match = this.matches[index];
+      if (match.unit !== unit) continue;
       const box: UnitHighlight = { slices: match.slices, active: index === this.active };
       if (match.color !== undefined) box.color = match.color;
       out.push(box);
-    });
+    }
   }
 }
 
@@ -102,7 +116,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
     private readonly _includeUnit: (unit: number) => boolean = () => true,
     /** Loads the format's test for a layout break between two adjacent runs.
      *  Only whole-word matching needs it, so it is fetched on demand. */
-    private readonly _loadRunBreak?: () => Promise<(previous: Run, next: Run) => boolean>,
+    private readonly _runBreak?: () => Promise<(previous: Run, next: Run) => boolean>,
   ) {
     this._find = new MatchList(location);
     this._marks = new MatchList(location);
@@ -137,8 +151,9 @@ export class UnitFindController<Run extends SearchRun, Location> {
     this._runs.set(unit, runs);
   }
 
-  /** The overlay boxes of a unit: text highlights first (in match order), then
-   *  the find matches, so the find is painted on top. */
+  /** The overlay boxes of a unit in paint order: text highlights first (group
+   *  by group in the order of the set, each in document order), then the find
+   *  matches, so the find is painted on top. */
   unitHighlights(unit: number): UnitHighlight[] {
     const out: UnitHighlight[] = [];
     this._marks.boxes(unit, out);
@@ -158,11 +173,10 @@ export class UnitFindController<Run extends SearchRun, Location> {
     }
     // Whole-word matching is part of the on-demand term search; a plain find
     // starts without loading anything.
-    const committed = await this._scan(this._find, this._marks, opts.wholeWord
+    return await this._scan(this._find, this._marks, opts.wholeWord
       ? async () => (await loadTermSearch()).wholeWordMatcher(
-        query, opts, foldPreservingLength, sliceRange, this._loadRunBreak)
-      : () => (index) => findMatches(index, query, opts));
-    return committed ? this._find.all() : [];
+        query, opts, foldPreservingLength, sliceRange, this._runBreak, this._acceptMatch)
+      : () => (index) => findMatches(index, query, opts)) ?? [];
   }
 
   next(): FindMatch<Location> | null { return this._find.step(nextActive); }
@@ -170,18 +184,19 @@ export class UnitFindController<Run extends SearchRun, Location> {
   prev(): FindMatch<Location> | null { return this._find.step(prevActive); }
 
   /** Replace the text-highlight set and search every unit for it. A set with
-   *  a repeated group id rejects and leaves the committed highlights as they
-   *  are. */
+   *  a repeated group id rejects and leaves the highlights and any request in
+   *  flight as they are. */
   async highlight(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<Location>[]> {
-    if (textHighlightGroupsAreEmpty(groups)) {
+    if (validateTextHighlightGroups(groups)) {
       this.clearHighlights();
       return [];
     }
     // Detach from the caller's objects: the scan reads the set after awaits.
     const set = groups.map((group) => ({ ...group, terms: [...group.terms] }));
-    const committed = await this._scan(this._marks, this._find, async () =>
-      (await loadTermSearch()).textHighlightMatcher(set, foldPreservingLength, sliceRange, this._loadRunBreak));
-    return committed ? this._marks.all() as TextHighlightMatch<Location>[] : [];
+    const matches = await this._scan(this._marks, this._find, async () =>
+      (await loadTermSearch()).textHighlightMatcher(
+        set, foldPreservingLength, sliceRange, this._runBreak, this._acceptMatch));
+    return (matches ?? []) as TextHighlightMatch<Location>[];
   }
 
   highlightNext(): TextHighlightMatch<Location> | null {
@@ -200,14 +215,17 @@ export class UnitFindController<Run extends SearchRun, Location> {
     this._runs.clear();
   }
 
-  /** Collect every included unit's runs and resolve the matcher `prepare`
-   *  yields against them. Returns `false` when a newer request of the same
-   *  kind (or a clear) superseded this one; `list` is then left untouched. */
+  /** Collect every included unit's runs, resolve the matcher `prepare` yields
+   *  against them, and commit the result to `list`. Returns the committed
+   *  public matches, taken at commit time so that a later request cannot
+   *  change what this one reports. Returns `null` when a newer request of the
+   *  same kind (or a clear) superseded this one; `list` is then left
+   *  untouched, and a failure of the superseded request is not reported. */
   private async _scan(
     list: MatchList<Location>,
     other: MatchList<Location>,
     prepare: () => Matcher<Run> | Promise<Matcher<Run>>,
-  ): Promise<boolean> {
+  ): Promise<FindMatch<Location>[] | null> {
     const generation = ++list.generation;
     let settle!: () => void;
     const scanning = new Promise<void>((resolve) => { settle = resolve; });
@@ -218,12 +236,17 @@ export class UnitFindController<Run extends SearchRun, Location> {
       // rendering every unit a second time.
       if (other.scanning) {
         await other.scanning;
-        if (generation !== list.generation) return false;
+        if (generation !== list.generation) return null;
       }
       let matcher = prepare();
       if (matcher instanceof Promise) {
-        matcher = await matcher;
-        if (generation !== list.generation) return false;
+        try {
+          matcher = await matcher;
+        } catch (error) {
+          if (generation !== list.generation) return null;
+          throw error;
+        }
+        if (generation !== list.generation) return null;
       }
       // From here on mounted units keep their run geometry current.
       list.armed = true;
@@ -240,14 +263,14 @@ export class UnitFindController<Run extends SearchRun, Location> {
           try {
             runs = await this._collectRuns(unit);
           } catch (error) {
-            if (generation !== list.generation) return false;
+            if (generation !== list.generation) return null;
             throw error;
           }
-          if (generation !== list.generation) return false;
+          if (generation !== list.generation) return null;
           unitRuns.set(unit, runs);
         }
       }
-      if (generation !== list.generation) return false;
+      if (generation !== list.generation) return null;
 
       // Visible renders can publish fresher geometry while an offscreen scan is
       // awaiting a unit. Resolve slices against the committed run lists.
@@ -267,9 +290,8 @@ export class UnitFindController<Run extends SearchRun, Location> {
       }
       this._runsRevision++;
       this._runs = committedRuns;
-      list.matches = matches;
-      list.active = -1;
-      return true;
+      list.commit(matches);
+      return list.all();
     } finally {
       if (list.scanning === scanning) list.scanning = null;
       settle();

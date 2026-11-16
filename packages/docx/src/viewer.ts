@@ -13,7 +13,7 @@ import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale, defaultDpr } from '@silurus/ooxml-core';
-import { textHighlightGroupsAreEmpty } from '@silurus/ooxml-core';
+import { validateTextHighlightGroups } from '@silurus/ooxml-core';
 import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, TextHighlightGroup, TextHighlightMatch, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
@@ -157,7 +157,7 @@ export class DocxViewer implements ZoomableViewer {
   private _find: DocxFindController;
   /** Covers the pre-search progressive wait that the controller's own
    * generation cannot see until find() starts. */
-  private readonly _searchRequests: [find: number, highlights: number] = [0, 0];
+  private readonly _searches: [find: number, highlights: number] = [0, 0];
   /** A 2d context used only to measure text for highlight geometry (its own
    *  1×1 offscreen canvas, so measuring never touches the visible canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
@@ -375,8 +375,8 @@ export class DocxViewer implements ZoomableViewer {
         this._invalidateElementContext(false);
         elementInvalidated = true;
         this._renderDispatcher.begin();
-        this._searchRequests[0]++;
-        this._searchRequests[1]++;
+        this._searches[0]++;
+        this._searches[1]++;
         this._find.invalidate();
         this._unbindLayoutDocument();
       });
@@ -598,13 +598,13 @@ export class DocxViewer implements ZoomableViewer {
   ): Promise<Match[]> {
     const doc = this._doc;
     if (!doc) return [];
-    const generation = ++this._searchRequests[kind];
+    const generation = ++this._searches[kind];
     // Preserve the established synchronous empty-query cancellation contract.
     // A real full-document search must wait for authoritative pagination or its
     // result would silently describe only the opening prefix.
     if (!empty && !doc.layoutComplete) {
       await this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete());
-      if (this._destroyed || this._doc !== doc || generation !== this._searchRequests[kind]) {
+      if (this._destroyed || this._doc !== doc || generation !== this._searches[kind]) {
         return [];
       }
     }
@@ -633,7 +633,7 @@ export class DocxViewer implements ZoomableViewer {
   /** IX2 — clear the find highlights and reset the find state. Text highlights
    *  set with {@link highlightText} stay. */
   clearFind(): void {
-    this._searchRequests[0]++;
+    this._searches[0]++;
     this._find.clearFind();
     this._redrawHighlights();
   }
@@ -657,7 +657,7 @@ export class DocxViewer implements ZoomableViewer {
   async highlightText(
     groups: readonly TextHighlightGroup[],
   ): Promise<TextHighlightMatch<DocxMatchLocation>[]> {
-    return this._search(1, textHighlightGroupsAreEmpty(groups), () => this._find.highlight(groups));
+    return this._search(1, validateTextHighlightGroups(groups), () => this._find.highlight(groups));
   }
 
   /**
@@ -678,7 +678,7 @@ export class DocxViewer implements ZoomableViewer {
   /** Remove every text highlight set with {@link highlightText}. The find
    *  state stays. */
   clearHighlights(): void {
-    this._searchRequests[1]++;
+    this._searches[1]++;
     this._find.clearHighlights();
     this._redrawHighlights();
   }
@@ -845,8 +845,8 @@ export class DocxViewer implements ZoomableViewer {
     this._pendingLoadAbort?.abort();
     this._pendingLoadAbort = null;
     this._pendingViewChanged = null;
-    this._searchRequests[0]++;
-    this._searchRequests[1]++;
+    this._searches[0]++;
+    this._searches[1]++;
     this._layoutViewGeneration++;
     this._partFailureDelivery.close();
     this._unbindLayoutDocument();

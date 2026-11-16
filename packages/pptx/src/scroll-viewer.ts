@@ -1,4 +1,4 @@
-import { EMU_PER_PX, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type TextHighlightGroup, type TextHighlightMatch, type ZoomableViewer, openExternalHyperlink, textHighlightGroupsAreEmpty } from '@silurus/ooxml-core';
+import { EMU_PER_PX, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type TextHighlightGroup, type TextHighlightMatch, type ZoomableViewer, openExternalHyperlink, validateTextHighlightGroups } from '@silurus/ooxml-core';
 import { isBackwardSlideJump } from './slide-nav';
 import {
   computeUniformVisibleWindow,
@@ -485,7 +485,7 @@ export class PptxScrollViewer implements ZoomableViewer {
    *  positions equal deck indices (`'show'`, `'dim'`, no hidden slide, or every
    *  slide hidden). */
   private _skipActive = false;
-  private readonly _searchRequests: [find: number, highlights: number] = [0, 0];
+  private readonly _searches: [find: number, highlights: number] = [0, 0];
   private _findActive = false;
   private readonly _highlights = new HighlightLayerController<SlideSlot, PptxTextRunInfo, PptxMatchLocation>({
     slots: () => this._slots,
@@ -1303,8 +1303,7 @@ export class PptxScrollViewer implements ZoomableViewer {
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<PptxMatchLocation>[]> {
     if (this._pres) this._findActive = query.length > 0;
-    return this._search(
-      0, query.length === 0, () => this._find.clearFind(), () => this._find.find(query, opts));
+    return this._search(0, query.length === 0, () => this._find.find(query, opts));
   }
 
   /** The request handling shared by {@link findText} (`kind` 0) and
@@ -1312,20 +1311,21 @@ export class PptxScrollViewer implements ZoomableViewer {
   private async _search<Match>(
     kind: 0 | 1,
     empty: boolean,
-    clear: () => void,
     scan: () => Promise<Match[]>,
   ): Promise<Match[]> {
     const presentation = this._pres;
     if (!presentation) return [];
-    const generation = ++this._searchRequests[kind];
+    const generation = ++this._searches[kind];
     const superseded = (): boolean =>
-      this._destroyed || generation !== this._searchRequests[kind] || presentation !== this._pres;
+      this._destroyed || generation !== this._searches[kind] || presentation !== this._pres;
     if (empty) {
       // A progressive deck must clear existing highlights without waiting for
       // slides that have not finished preparing. DOCX retains its layout wait.
-      clear();
+      // An empty request is a clear: the controller drops the state before its
+      // first await, so the redraw below already shows it.
+      const cleared = scan();
       this._highlights.redrawAll();
-      return [];
+      return cleared;
     }
     if (!presentation.layoutComplete) {
       await this._errorRouter.ownBackgroundLifecycle(
@@ -1355,7 +1355,7 @@ export class PptxScrollViewer implements ZoomableViewer {
    * {@link highlightText} stay. */
   clearFind(): void {
     this._findActive = false;
-    this._searchRequests[0]++;
+    this._searches[0]++;
     this._find.clearFind();
     this._highlights.redrawAll();
   }
@@ -1377,9 +1377,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   async highlightText(
     groups: readonly TextHighlightGroup[],
   ): Promise<TextHighlightMatch<PptxMatchLocation>[]> {
-    return this._search(
-      1, textHighlightGroupsAreEmpty(groups),
-      () => this._find.clearHighlights(), () => this._find.highlight(groups));
+    return this._search(1, validateTextHighlightGroups(groups), () => this._find.highlight(groups));
   }
 
   /** Activate and reveal the next text highlight, wrapping at the end. The
@@ -1396,7 +1394,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   /** Remove every text highlight set with {@link highlightText}. The find
    * state stays. */
   clearHighlights(): void {
-    this._searchRequests[1]++;
+    this._searches[1]++;
     this._find.clearHighlights();
     this._highlights.redrawAll();
   }
@@ -1410,8 +1408,8 @@ export class PptxScrollViewer implements ZoomableViewer {
   /** Drop the find and the text highlights (new presentation, hidden-slide
    * mode change, teardown). */
   private _invalidateFind(): void {
-    this._searchRequests[0]++;
-    this._searchRequests[1]++;
+    this._searches[0]++;
+    this._searches[1]++;
     this._find.invalidate();
   }
 

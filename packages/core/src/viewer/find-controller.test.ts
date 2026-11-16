@@ -157,12 +157,32 @@ describe('UnitFindController — text highlights', () => {
     expect(find.unitRuns(0)).toBeUndefined();
   });
 
-  it('rejects a repeated group id without touching the current set', async () => {
+  it('rejects a repeated group id without touching the current set or a request in flight', async () => {
     const find = controller([['alpha']]);
     await find.highlight([{ id: 'a', terms: ['alpha'] }]);
     await expect(find.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }]))
       .rejects.toThrow('group ids must be unique');
+    // Also when the set is otherwise empty: nothing is cleared.
+    await expect(find.highlight([{ id: 'x', terms: [] }, { id: 'x', terms: [''] }]))
+      .rejects.toThrow('group ids must be unique');
     expect(find.unitHighlights(0)).toHaveLength(1);
+
+    const inFlight = find.highlight([{ id: 'b', terms: ['alp'] }]);
+    await expect(find.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }])).rejects.toThrow(TypeError);
+    expect((await inFlight).map((match) => match.text)).toEqual(['alp']);
+  });
+
+  it('paints groups in the order of the set, wherever their matches start', async () => {
+    const find = controller([['abcdef']]);
+    const matches = await find.highlight([
+      { id: 'first', terms: ['cde'], color: 'red' },
+      { id: 'second', terms: ['abcd'], color: 'blue' },
+    ]);
+    // Navigation follows the document; painting follows the set.
+    expect(matches.map((match) => match.group)).toEqual(['second', 'first']);
+    expect(find.unitHighlights(0).map((box) => box.color)).toEqual(['red', 'blue']);
+    expect(find.highlightNext()).toMatchObject({ group: 'second' });
+    expect(find.unitHighlights(0).map((box) => box.active)).toEqual([false, true]);
   });
 
   it('is not affected by later changes to the caller\'s group objects', async () => {
@@ -277,5 +297,37 @@ describe('UnitFindController — whole-word find', () => {
     find.clearFind();
     await expect(cancelled).resolves.toEqual([]);
     expect(find.matches()).toEqual([]);
+  });
+});
+
+describe('UnitFindController — request results', () => {
+  it('reports each find its own matches when the runs are already cached', async () => {
+    const find = controller([['alpha beta']]);
+    await find.find('alpha');
+    // Both scans commit synchronously from the cache, one after the other.
+    const [alpha, beta] = await Promise.all([find.find('alpha'), find.find('beta')]);
+    expect(alpha.map((match) => match.text)).toEqual(['alpha']);
+    expect(beta.map((match) => match.text)).toEqual(['beta']);
+    expect(find.matches().map((match) => match.text)).toEqual(['beta']);
+  });
+
+  it('reports a failed preparation of the current request, and not of a superseded one', async () => {
+    let reject!: (error: Error) => void;
+    const failing = () => new Promise<never>((_resolve, rejectLoad) => { reject = rejectLoad; });
+    const find = new UnitFindController(
+      () => 1, async () => [{ text: 'alpha' }], (unit) => ({ unit }), undefined, undefined, failing,
+    );
+    const current = find.find('alpha', { wholeWord: true });
+    await vi.waitFor(() => expect(reject).toBeTypeOf('function'));
+    reject(new Error('chunk failed'));
+    await expect(current).rejects.toThrow('chunk failed');
+
+    const cleared = find.highlight([{ id: 'a', terms: ['alpha'], wholeWord: true }]);
+    const pendingReject = reject;
+    await vi.waitFor(() => expect(reject).not.toBe(pendingReject));
+    find.clearHighlights();
+    reject(new Error('chunk failed late'));
+    await expect(cleared).resolves.toEqual([]);
+    expect(find.highlightsArmed).toBe(false);
   });
 });

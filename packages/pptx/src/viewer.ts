@@ -18,7 +18,7 @@ import {
   type FindMatchesOptions,
   type TextHighlightGroup,
   type TextHighlightMatch,
-  textHighlightGroupsAreEmpty,
+  validateTextHighlightGroups,
   type OoxmlResourceMetrics,
   type ViewerContextMenuEvent,
   type ZoomableViewer,
@@ -213,7 +213,7 @@ export class PptxViewer implements ZoomableViewer {
   private elementLayer: HTMLDivElement | null = null;
   /** IX2 — find state (per-slide runs, matches, active cursor). */
   private _find: PptxFindController;
-  private readonly _searchRequests: [find: number, highlights: number] = [0, 0];
+  private readonly _searches: [find: number, highlights: number] = [0, 0];
   /** Private 2d context for measuring highlight text (own 1×1 canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
   private readonly presentationOwner: TerminalResourceOwner<PptxPresentation>;
@@ -992,8 +992,7 @@ export class PptxViewer implements ZoomableViewer {
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<PptxMatchLocation>[]> {
-    return this._search(
-      0, query.length === 0, () => this._find.clearFind(), () => this._find.find(query, opts));
+    return this._search(0, query.length === 0, () => this._find.find(query, opts));
   }
 
   /** The request handling shared by {@link findText} (`kind` 0) and
@@ -1001,18 +1000,19 @@ export class PptxViewer implements ZoomableViewer {
   private async _search<Match>(
     kind: 0 | 1,
     empty: boolean,
-    clear: () => void,
     scan: () => Promise<Match[]>,
   ): Promise<Match[]> {
     const engine = this.engine;
     if (!engine) return [];
-    const generation = ++this._searchRequests[kind];
+    const generation = ++this._searches[kind];
     const superseded = (): boolean =>
-      this.destroyed || generation !== this._searchRequests[kind] || engine !== this.engine;
+      this.destroyed || generation !== this._searches[kind] || engine !== this.engine;
     if (empty) {
-      clear();
+      // An empty request is a clear: the controller drops the state before
+      // its first await, so the redraw below already shows it.
+      const cleared = scan();
       this._redrawHighlights();
-      return [];
+      return cleared;
     }
     if (!engine.layoutComplete) {
       await this.errorRouter.ownBackgroundLifecycle(
@@ -1044,7 +1044,7 @@ export class PptxViewer implements ZoomableViewer {
   /** IX2 — clear the find highlights and reset the find state. Text highlights
    *  set with {@link highlightText} stay. */
   clearFind(): void {
-    this._searchRequests[0]++;
+    this._searches[0]++;
     this._find.clearFind();
     this._redrawHighlights();
   }
@@ -1069,9 +1069,7 @@ export class PptxViewer implements ZoomableViewer {
   async highlightText(
     groups: readonly TextHighlightGroup[],
   ): Promise<TextHighlightMatch<PptxMatchLocation>[]> {
-    return this._search(
-      1, textHighlightGroupsAreEmpty(groups),
-      () => this._find.clearHighlights(), () => this._find.highlight(groups));
+    return this._search(1, validateTextHighlightGroups(groups), () => this._find.highlight(groups));
   }
 
   /**
@@ -1091,7 +1089,7 @@ export class PptxViewer implements ZoomableViewer {
   /** Remove every text highlight set with {@link highlightText}. The find
    *  state stays. */
   clearHighlights(): void {
-    this._searchRequests[1]++;
+    this._searches[1]++;
     this._find.clearHighlights();
     this._redrawHighlights();
   }
@@ -1099,8 +1097,8 @@ export class PptxViewer implements ZoomableViewer {
   /** Drop the find and the text highlights (new presentation, hidden-slide
    *  mode change, teardown). */
   private _invalidateFind(): void {
-    this._searchRequests[0]++;
-    this._searchRequests[1]++;
+    this._searches[0]++;
+    this._searches[1]++;
     this._find.invalidate();
   }
 

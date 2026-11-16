@@ -78,33 +78,42 @@ export function wordBoundaryTest(
   breaks?: ReadonlySet<number>,
   segmenter: WordSegmenter | null = defaultSegmenter(),
 ): (offset: number) => boolean {
-  // Segment boundaries of each word-character run consulted so far, keyed by
-  // the run's start offset.
-  const segmented = new Map<number, Set<number>>();
+  // The word-character runs consulted so far, sorted by start and disjoint,
+  // each with its segment boundaries. An offset is looked up by binary search,
+  // so a run is walked and segmented once however many offsets fall into it.
+  const segmented: { start: number; end: number; boundaries: Set<number> }[] = [];
   const isBreak = (offset: number): boolean => breaks?.has(offset) === true;
 
   const segmentBoundary = (offset: number, dictionary: WordSegmenter): boolean => {
-    let start = offset;
-    while (start > 0 && !isBreak(start)) {
-      const previous = characterBefore(text, start);
-      if (!WORD_CHARACTER.test(previous)) break;
-      start -= previous.length;
+    let low = 0;
+    let high = segmented.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (segmented[middle].end < offset) low = middle + 1;
+      else high = middle;
     }
-    let boundaries = segmented.get(start);
-    if (!boundaries) {
+    let run = segmented[low];
+    if (!run || run.start > offset) {
+      let start = offset;
+      while (start > 0 && !isBreak(start)) {
+        const previous = characterBefore(text, start);
+        if (!WORD_CHARACTER.test(previous)) break;
+        start -= previous.length;
+      }
       let end = offset;
       while (end < text.length && !isBreak(end)) {
         const next = characterAt(text, end);
         if (!WORD_CHARACTER.test(next)) break;
         end += next.length;
       }
-      boundaries = new Set<number>();
+      const boundaries = new Set<number>();
       for (const segment of dictionary.segment(text.slice(start, end))) {
         boundaries.add(start + segment.index);
       }
-      segmented.set(start, boundaries);
+      run = { start, end, boundaries };
+      segmented.splice(low, 0, run);
     }
-    return boundaries.has(offset);
+    return run.boundaries.has(offset);
   };
 
   return (offset) => {
