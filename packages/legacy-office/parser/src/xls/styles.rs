@@ -918,6 +918,17 @@ fn dxf_bytes(dxf: &xlsx_model::Dxf) -> usize {
                 + f.pattern_type.len()
                 + color(&f.fg_color)
                 + color(&f.bg_color)
+                + f.gradient.as_ref().map_or(0, |gradient| {
+                    gradient.gradient_type.len()
+                        + gradient
+                            .stops
+                            .iter()
+                            .map(|stop| {
+                                std::mem::size_of::<xlsx_model::GradientStopSpec>()
+                                    + stop.color.len()
+                            })
+                            .sum::<usize>()
+                })
         })
         + dxf.border.as_ref().map_or(0, |b| {
             std::mem::size_of::<xlsx_model::Border>()

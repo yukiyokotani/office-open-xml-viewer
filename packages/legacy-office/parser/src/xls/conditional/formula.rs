@@ -135,7 +135,9 @@ const ECMA_FUTURE: [&str; 12] = [
 #[derive(Default)]
 pub(in super::super) struct Externs {
     xti_names: Vec<Option<std::rc::Rc<Vec<String>>>>,
-    /// Lbl (2.4.150) names in record order; built-in names are `None`.
+    /// Lbl (2.4.150) names in record order, with fProc. A built-in name has
+    /// the `_xlnm.` spelling of the model's defined names (see `names`); an
+    /// unknown built-in code or an empty name is `None`.
     names: Vec<Option<(String, bool)>>,
     /// Formula sheet prefix (quoted when needed) per XTI of this workbook's
     /// own SupBook that names exactly one sheet.
@@ -252,7 +254,12 @@ impl Externs {
                     // fProc (bit 3): the name calls a procedure, e.g. the
                     // hidden `_xlfn.` future-function names (2.2.2.3).
                     let procedure = u16_at(data, 0)? & 0x0008 != 0;
-                    defined.push((!builtin && !name.is_empty()).then_some((name, procedure)));
+                    let name = if builtin {
+                        super::super::names::builtin(&name, count)
+                    } else {
+                        (!name.is_empty()).then_some(name)
+                    };
+                    defined.push(name.map(|name| (name, procedure)));
                 }
                 _ => {}
             }
@@ -287,7 +294,7 @@ impl Externs {
         self.xti_sheets.get(usize::from(xti))?.as_deref()
     }
 
-    /// A one-based Lbl index as the user-defined name it names.
+    /// A one-based Lbl index as the name the model defines it under.
     fn name(&self, index: u32) -> Option<(&str, bool)> {
         let index = usize::try_from(index).ok()?.checked_sub(1)?;
         let (name, procedure) = self.names.get(index)?.as_ref()?;
@@ -337,6 +344,8 @@ fn reject() -> String {
 /// so text is built without inserting parentheses.
 enum Item {
     Text(String),
+    /// A PtgName defined name: an operand, or the target of a call.
+    Name(String),
     /// A PtgNameX add-in function name, valid only as a UDF call target.
     Function(String),
 }
@@ -581,7 +590,7 @@ fn decompile_inner(
     let mut at = 0;
     let pop = |stack: &mut Vec<Item>| -> Result<String, String> {
         match stack.pop() {
-            Some(Item::Text(text)) => Ok(text),
+            Some(Item::Text(text) | Item::Name(text)) => Ok(text),
             _ => Err(reject()),
         }
     };
@@ -742,9 +751,13 @@ fn decompile_inner(
                         // The callee is normally a function name; Excel also
                         // stores a call whose callee is a cell reference (a
                         // function unknown to BIFF8) and writes it as, for
-                        // example, `B11(...)` in its .xlsx counterpart.
+                        // example, `B11(...)` in its .xlsx counterpart. A
+                        // defined name is the callee of a user-defined
+                        // function (a VBA or XLL function, or one that no
+                        // longer exists: Excel then shows `#NAME?` and a
+                        // conditional format with it never applies).
                         let name = match stack.pop() {
-                            Some(Item::Function(name)) => name,
+                            Some(Item::Function(name) | Item::Name(name)) => name,
                             Some(Item::Text(reference)) if is_reference(&reference) => reference,
                             _ => return Err(reject()),
                         };
@@ -805,9 +818,11 @@ fn decompile_inner(
                     stack.push(Item::Text(format!("{pending}{sheet}!{text}")));
                     at += if token & 0x1f == 0x1a { 7 } else { 11 };
                 }
-                // PtgName (2.5.198.76): a user-defined name, written by name
-                // as in SpreadsheetML (observed with a data-validation list
-                // naming a defined range). Built-in names are not projected.
+                // PtgName (2.5.198.76): a defined name, written by name as
+                // in SpreadsheetML (observed with a data-validation list
+                // naming a defined range). A built-in name is written as the
+                // model defines it (`_xlnm.Print_Area`), so the renderer
+                // resolves it.
                 0x03 => {
                     let (name, procedure) = externs
                         .name(u32_at(rgce, at + 1)?)
@@ -826,7 +841,7 @@ fn decompile_inner(
                         }
                         stack.push(Item::Function(function.to_string()));
                     } else {
-                        stack.push(Item::Text(format!("{pending}{name}")));
+                        stack.push(Item::Name(format!("{pending}{name}")));
                     }
                     at += 5;
                 }
@@ -869,7 +884,7 @@ fn decompile_inner(
         return Err(reject());
     }
     match (stack.pop(), stack.is_empty()) {
-        (Some(Item::Text(text)), true) => Ok(text),
+        (Some(Item::Text(text) | Item::Name(text)), true) => Ok(text),
         _ => Err(unsupported("malformed XLS conditional formatting formula")),
     }
 }
@@ -887,7 +902,7 @@ fn arguments(stack: &mut Vec<Item>, count: usize) -> Result<Vec<String>, String>
     stack
         .drain(start..)
         .map(|item| match item {
-            Item::Text(text) => Ok(text),
+            Item::Text(text) | Item::Name(text) => Ok(text),
             Item::Function(_) => Err(reject()),
         })
         .collect()
@@ -930,7 +945,11 @@ mod tests {
                 "EOMONTH".into(),
                 "MYUDF".into(),
             ]))],
-            names: vec![Some(("List".into(), false)), None],
+            names: vec![
+                Some(("List".into(), false)),
+                None,
+                Some(("_xlnm.Print_Area".into(), false)),
+            ],
             xti_sheets: vec![Some("Data".into())],
         };
         // 'Data'!$B$4:$I$49 through a name's PtgArea3d.
@@ -944,6 +963,26 @@ mod tests {
             "List"
         );
         assert!(decompile(&[0x23, 2, 0, 0, 0], (0, 0), &externs).is_err());
+        // ROWS(_xlnm.Print_Area)>=1: a built-in name as the model names it.
+        assert_eq!(
+            decompile(
+                &[0x23, 3, 0, 0, 0, 0x41, 0x4c, 0x00, 0x1e, 1, 0, 0x0c],
+                (0, 0),
+                &externs
+            )
+            .unwrap(),
+            "ROWS(_xlnm.Print_Area)>=1"
+        );
+        // List(C3)>1: a call whose callee is a defined name (a user-defined
+        // function): PtgName, PtgRefN, PtgFuncVar(2, 0xFF), PtgInt, PtgGt.
+        let call = [
+            0x23, 1, 0, 0, 0, 0x4c, 0, 0, 0, 0xc0, 0x42, 0x02, 0xff, 0x00, 0x1e, 1, 0, 0x0d,
+        ];
+        assert_eq!(decompile(&call, (2, 2), &externs).unwrap(), "List(C3)>1");
+        // An expression is not a callee.
+        let mut expression = vec![0x1e, 1, 0, 0x1e, 2, 0, 0x03];
+        expression.extend([0x4c, 0, 0, 0, 0xc0, 0x42, 0x02, 0xff, 0x00]);
+        assert!(decompile(&expression, (2, 2), &externs).is_err());
         // EOMONTH($I$7,0): NameX, ref, int, FuncVar(3, 0xFF).
         let rgce = [
             0x39, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x24, 0x06, 0x00, 0x08, 0x00, 0x1e, 0x00,

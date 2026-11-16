@@ -32,6 +32,17 @@ const BUILTIN: [&str; 14] = [
     "_FilterDatabase",
 ];
 
+/// The SpreadsheetML name of a built-in Lbl name, whose stored name is its
+/// one-character code (2.4.150 Name).
+pub(super) fn builtin(text: &str, count: usize) -> Option<String> {
+    let code = text.chars().next().map(u32::from)?;
+    let builtin = usize::try_from(code)
+        .ok()
+        .and_then(|code| BUILTIN.get(code))
+        .filter(|_| count == 1)?;
+    Some(format!("_xlnm.{builtin}"))
+}
+
 /// Workbook defined names with their scope (`None` = workbook).
 #[derive(Default)]
 pub(super) struct Names(Vec<(Option<usize>, String, String)>);
@@ -68,13 +79,7 @@ impl Names {
                 String::from_utf16(&units).map_err(|_| truncated())?
             };
             let name = if flags & 0x0020 != 0 {
-                let code = text.chars().next().map(u32::from).unwrap_or(u32::MAX);
-                let builtin = usize::try_from(code)
-                    .ok()
-                    .and_then(|code| BUILTIN.get(code))
-                    .filter(|_| count == 1)
-                    .ok_or_else(|| unsupported("unknown XLS built-in name"))?;
-                format!("_xlnm.{builtin}")
+                builtin(&text, count).ok_or_else(|| unsupported("unknown XLS built-in name"))?
             } else {
                 text
             };
