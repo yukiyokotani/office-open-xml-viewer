@@ -25,7 +25,11 @@
 //!
 //! A turned or flipped group turns and flips its members about the centre of
 //! its own frame, outer groups after inner ones, as nested DrawingML group
-//! transforms do (ECMA-376 Annex L.4.7.4-L.4.7.6). Word evidence covers the
+//! transforms do (ECMA-376 Annex L.4.7.4-L.4.7.6). A nested group is a shape
+//! of its parent's coordinate system: its rotated bounds are exchanged and
+//! its members turn in the parent's units, before the ancestors scale the
+//! result (the exchange after mapping above is Word's observed behaviour for
+//! a member that is not a group). Word evidence covers the
 //! cases above only: other group angles, flipped groups, turned nested
 //! groups, turned and flipped members, turned pictures and turned text follow
 //! the same rule without a Word control. Members that are straight
@@ -161,15 +165,25 @@ impl Map {
     }
 
     fn rect(&self, rect: [i32; 4]) -> Result<[f64; 4], String> {
+        self.frame(Self::local(rect)?)
+    }
+
+    /// A child anchor as x, y, width, height in the units it is stored in.
+    fn local(rect: [i32; 4]) -> Result<[f64; 4], String> {
         let [left, top, right, bottom] = rect.map(f64::from);
         if right < left || bottom < top {
             return Err(unsupported("inverted Word drawing child anchor"));
         }
+        Ok([left, top, right - left, bottom - top])
+    }
+
+    /// Map x, y, width, height of this coordinate system.
+    fn frame(&self, [x, y, width, height]: [f64; 4]) -> Result<[f64; 4], String> {
         let frame = [
-            self.offset[0] + (left - self.origin[0]) * self.scale[0],
-            self.offset[1] + (top - self.origin[1]) * self.scale[1],
-            (right - left) * self.scale[0],
-            (bottom - top) * self.scale[1],
+            self.offset[0] + (x - self.origin[0]) * self.scale[0],
+            self.offset[1] + (y - self.origin[1]) * self.scale[1],
+            width * self.scale[0],
+            height * self.scale[1],
         ];
         if frame.iter().any(|value| !value.is_finite()) {
             return Err(unsupported("Word drawing child anchor exceeds its range"));
@@ -430,13 +444,17 @@ impl Store<'_> {
                     context.group_ids.push(head.spid);
                     let stored = group_properties(head.record, &mut self.budget)?;
                     let flip = [head.flags & 0x40 != 0, head.flags & 0x80 != 0];
-                    let (frame, rotation) = oriented(
-                        map.rect(head.child_anchor.ok_or_else(|| {
+                    // The group is a shape of its parent's coordinate system:
+                    // its rotated bounds are exchanged there, before the
+                    // ancestors scale the unrotated frame.
+                    let (local, rotation) = oriented(
+                        Map::local(head.child_anchor.ok_or_else(|| {
                             unsupported("nested Word drawing group lacks its child anchor")
                         })?)?,
                         stored,
                         flip,
                     );
+                    let frame = map.frame(local)?;
                     let mut inner = turns.to_vec();
                     inner.extend(Turn::new(frame, rotation, flip, map.scale));
                     let system = head.group_system.ok_or_else(|| {
@@ -625,6 +643,76 @@ mod tests {
         turn.apply(&mut turned);
         assert_eq!(turned.frame, [90.0, 20.0, 20.0, 10.0]);
         assert_eq!((turned.rotation, turned.flip), (80.0, [true, false]));
+    }
+
+    #[test]
+    fn a_quarter_turned_nested_group_is_unrotated_in_its_parents_units() {
+        fn record(kind: u16, options: u16, body: &[u8]) -> Vec<u8> {
+            [
+                options.to_le_bytes().as_slice(),
+                &kind.to_le_bytes(),
+                &(body.len() as u32).to_le_bytes(),
+                body,
+            ]
+            .concat()
+        }
+        let rect = |values: [i32; 4]| values.map(i32::to_le_bytes).concat();
+        let shape = |kind: u16, spid: u32, flags: u32, rest: &[Vec<u8>]| {
+            let fsp = [spid.to_le_bytes(), flags.to_le_bytes()].concat();
+            record(
+                0xf004,
+                15,
+                &[record(0xf00a, (kind << 4) | 2, &fsp), rest.concat()].concat(),
+            )
+        };
+        // A nested group over [0, 0, 100, 100] of its parent, turned 90
+        // degrees, with a 10 x 10 member centred at (75, 50) of its own
+        // 100 x 100 system.
+        let rotation = [
+            0x4u16.to_le_bytes().as_slice(),
+            &(90u32 << 16).to_le_bytes(),
+        ]
+        .concat();
+        let nested = record(
+            0xf003,
+            15,
+            &[
+                shape(
+                    0,
+                    2,
+                    0x203,
+                    &[
+                        record(0xf009, 1, &rect([0, 0, 100, 100])),
+                        record(0xf00b, (1 << 4) | 3, &rotation),
+                        record(0xf00f, 0, &rect([0, 0, 100, 100])),
+                    ],
+                ),
+                shape(1, 3, 0xa02, &[record(0xf00f, 0, &rect([70, 45, 80, 55]))]),
+            ]
+            .concat(),
+        );
+        let (nested, _) = crate::officeart::record_with_end(&nested, 0, &mut 100, "test").unwrap();
+        let word = vec![0; 0x232];
+        let mut store = Store::read(&word, &[], 0).unwrap();
+        let mut context = GroupRead {
+            part: Part::Main,
+            nested_solver: false,
+            line_connector: false,
+            group_ids: vec![],
+        };
+        // The parent maps its 100 x 100 units to 200 x 100: the member is
+        // 20 x 10 there, and its centre turns from (75, 50) to (50, 75) of
+        // the parent's units before that scale, which is (100, 75).
+        let parent = Map::new([0, 0, 100, 100], [0.0, 0.0, 200.0, 100.0]).unwrap();
+        let mut members = Vec::new();
+        store
+            .group_members(&[nested], parent, &[], 0, &mut members, &mut context)
+            .unwrap();
+        let [member] = members.as_slice() else {
+            panic!("one member")
+        };
+        assert_eq!(member.frame, [90.0, 70.0, 20.0, 10.0]);
+        assert_eq!((member.rotation, member.flip), (90.0, [false; 2]));
     }
 
     #[test]
