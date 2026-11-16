@@ -276,6 +276,7 @@ pub(super) fn chart_sheet_charts(
                                                 // end with FtEnd at the
                                                 // record end.
                                                 && object_complete(client.data)
+                                                && object_framed(client.data)
                                         });
                                     if owner.is_none() {
                                         return Err(unsupported(
