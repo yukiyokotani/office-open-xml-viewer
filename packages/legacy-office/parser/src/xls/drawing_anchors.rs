@@ -242,6 +242,7 @@ pub(super) fn chart_sheet_charts(
                 0xf004 => {
                     let mut rect = None;
                     let mut chart = None;
+                    let mut identity = false;
                     let mut position = at + 8;
                     while position < next {
                         let (child, child_end) = record_with_end(
@@ -251,6 +252,13 @@ pub(super) fn chart_sheet_charts(
                             "XLS shape",
                         )?;
                         match child.kind {
+                            // OfficeArtFSP: the shape's identity and flags.
+                            0xf00a => {
+                                if identity || child.version != 2 || child.payload.len() != 8 {
+                                    return Err(unsupported("invalid BIFF shape identity"));
+                                }
+                                identity = true;
+                            }
                             0xf010 if child.payload.len() == 18 => {
                                 rect = Some(rectangle(&child.payload[2..])?);
                             }
@@ -282,6 +290,9 @@ pub(super) fn chart_sheet_charts(
                         position = child_end;
                     }
                     if let Some(chart) = chart {
+                        if !identity {
+                            return Err(unsupported("missing BIFF shape identity"));
+                        }
                         let rect = rect.ok_or_else(|| {
                             unsupported("BIFF chart object without its chart anchor")
                         })?;
@@ -532,7 +543,8 @@ fn object_framed(data: &[u8]) -> bool {
 
 /// Whether the bytes of an ObjFmla (MS-XLS 2.5.187) hold its
 /// ObjectParsedFormula (2.5.198.22): cce, four unused bytes and a complete
-/// token program of cce bytes. An empty ObjFmla holds none.
+/// token program of cce bytes (never an empty one). An empty ObjFmla holds
+/// none.
 pub(super) fn object_formula_framed(formula: &[u8]) -> bool {
     if formula.is_empty() {
         return true;
@@ -543,7 +555,7 @@ pub(super) fn object_formula_framed(formula: &[u8]) -> bool {
     let size = usize::from(u16::from_le_bytes([formula[0], formula[1]]) & 0x7fff);
     formula
         .get(6..6 + size)
-        .is_some_and(|rgce| size == 0 || super::conditional::framed(rgce))
+        .is_some_and(super::conditional::framed)
 }
 
 fn corner(bytes: &[u8], offset: usize) -> Result<CellCorner, String> {
