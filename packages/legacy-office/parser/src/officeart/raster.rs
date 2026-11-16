@@ -386,12 +386,17 @@ fn decode(
             _ => return Ok(None),
         };
     }
+    let mut placeholder = false;
     let (width, height) = match extension {
         "png" => png_size(bytes)?,
         // Word stores and displays JPEG data of every coding process
         // (its PDFs of arithmetic-coded and lossless controls show the
         // picture). The frame header states the size in all of them.
-        "jpg" => jpeg_frame_size(bytes, budget, raster == Raster::TiffAndGifAware)?,
+        "jpg" => {
+            let (size, common) = jpeg_frame(bytes, budget, raster == Raster::TiffAndGifAware)?;
+            placeholder = !common;
+            size
+        }
         "gif" => gif_size(bytes)?,
         _ => tiff_size(bytes, budget)?,
     };
@@ -408,11 +413,34 @@ fn decode(
             "OfficeArt retained media budget exceeded",
         ));
     }
+    if placeholder {
+        // No common image decoder reads this coding process, and a picture
+        // that cannot be decoded fails the page it is on. The picture keeps
+        // its frame, drawn as a plain gray placeholder.
+        crate::rejection::approximated(
+            "JPEG coding process without a common decoder drawn as a placeholder frame",
+            (),
+        );
+        return Ok(Some(DecodedImage {
+            bytes: DecodedBytes::Owned(PLACEHOLDER_PNG.to_vec()),
+            extension: "png",
+        }));
+    }
     Ok(Some(DecodedImage {
         bytes: DecodedBytes::Source(range),
         extension,
     }))
 }
+
+/// A 1 by 1 pixel PNG of the gray D9D9D9.
+const PLACEHOLDER_PNG: [u8; 69] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xb8, 0x79, 0xf3, 0x26,
+    0x00, 0x05, 0x1a, 0x02, 0x8c, 0x8b, 0x4d, 0x4b, 0x05, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+    0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 /// GIF87a/89a logical screen descriptor (GIF89a specification section 18):
 /// the signature and version, then the 16-bit little-endian logical screen
 /// width and height. A header check only; the ordinary image decoder remains
@@ -511,15 +539,19 @@ pub(crate) fn png_size(b: &[u8]) -> Result<(u32, u32), String> {
 }
 #[cfg(all(test, feature = "direct-ppt"))]
 pub(crate) fn jpeg_size(b: &[u8], budget: &mut usize) -> Result<(u32, u32), String> {
-    jpeg_frame_size(b, budget, false)
+    Ok(jpeg_frame(b, budget, false)?.0)
 }
 
-/// The image size of the first frame. `any_process` also admits the frames
-/// a common decoder may not read: arithmetic coding, lossless and
-/// hierarchical processes and sample precisions other than 8 bits (ITU-T
-/// T.81 table B.1; all share the frame header of B.2.2). The data is then
-/// passed on as it is stored.
-fn jpeg_frame_size(b: &[u8], budget: &mut usize, any_process: bool) -> Result<(u32, u32), String> {
+/// The image size of the first frame, and whether it is an 8-bit Huffman
+/// baseline, extended sequential or progressive frame, which every common
+/// decoder reads. `any_process` also admits the other frames: arithmetic
+/// coding, lossless and hierarchical processes and sample precisions other
+/// than 8 bits (ITU-T T.81 table B.1; all share the frame header of B.2.2).
+fn jpeg_frame(
+    b: &[u8],
+    budget: &mut usize,
+    any_process: bool,
+) -> Result<((u32, u32), bool), String> {
     if !b.starts_with(&[0xff, 0xd8]) {
         return Err(unsupported("invalid OfficeArt JPEG header"));
     }
@@ -579,8 +611,11 @@ fn jpeg_frame_size(b: &[u8], budget: &mut usize, any_process: bool) -> Result<(u
                 return Err(unsupported("unsupported OfficeArt JPEG frame"));
             }
             return Ok((
-                u32::from(u16::from_be_bytes([segment[5], segment[6]])),
-                u32::from(u16::from_be_bytes([segment[3], segment[4]])),
+                (
+                    u32::from(u16::from_be_bytes([segment[5], segment[6]])),
+                    u32::from(u16::from_be_bytes([segment[3], segment[4]])),
+                ),
+                !other_process && segment[2] == 8,
             ));
         }
         position += length;
@@ -989,7 +1024,7 @@ mod tests {
 
 #[cfg(test)]
 mod jpeg_process_tests {
-    use super::jpeg_frame_size;
+    use super::jpeg_frame;
 
     fn jpeg(marker: u8, precision: u8) -> Vec<u8> {
         let mut bytes = vec![0xff, 0xd8, 0xff, marker, 0, 11, precision, 0, 2, 0, 3, 1];
@@ -998,20 +1033,20 @@ mod jpeg_process_tests {
     }
 
     #[test]
-    fn every_coding_process_states_its_size_for_a_host_that_passes_the_data_on() {
+    fn every_coding_process_states_its_size_and_whether_it_is_commonly_decoded() {
         // SOF3 lossless, SOF9 arithmetic sequential, SOF10 arithmetic
         // progressive; 12-bit extended sequential.
         for (marker, precision) in [(0xc3, 8), (0xc9, 8), (0xca, 8), (0xc1, 12), (0xc3, 16)] {
             let bytes = jpeg(marker, precision);
-            assert_eq!(jpeg_frame_size(&bytes, &mut 100, true).unwrap(), (3, 2));
-            assert!(jpeg_frame_size(&bytes, &mut 100, false).is_err());
+            assert_eq!(jpeg_frame(&bytes, &mut 100, true).unwrap(), ((3, 2), false));
+            assert!(jpeg_frame(&bytes, &mut 100, false).is_err());
         }
         assert_eq!(
-            jpeg_frame_size(&jpeg(0xc0, 8), &mut 100, false).unwrap(),
-            (3, 2)
+            jpeg_frame(&jpeg(0xc0, 8), &mut 100, false).unwrap(),
+            ((3, 2), true)
         );
         // A precision outside 2..=16 and the DHP marker stay rejected.
-        assert!(jpeg_frame_size(&jpeg(0xc3, 17), &mut 100, true).is_err());
-        assert!(jpeg_frame_size(&jpeg(0xde, 8), &mut 100, true).is_err());
+        assert!(jpeg_frame(&jpeg(0xc3, 17), &mut 100, true).is_err());
+        assert!(jpeg_frame(&jpeg(0xde, 8), &mut 100, true).is_err());
     }
 }

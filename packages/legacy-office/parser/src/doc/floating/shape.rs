@@ -498,9 +498,10 @@ impl<'a> Table<'a> {
         // MS-ODRAW 2.3.7.1 msofillShadeCenter (5) and msofillShadeShape (6)
         // shade from the focus rectangle fillToLeft..fillToBottom
         // (2.3.7.14-17) outward, along the bounding rectangle or the shape's
-        // own outline. They are the VML `gradientRadial` fill, which the
-        // DOCX parser reads as a DrawingML path gradient: the same stops as
-        // the linear shade, travelling from the focus rectangle outward.
+        // own outline, as a DrawingML path gradient does. The stops are those
+        // of the linear shade and start at the focus rectangle: Word's PDF
+        // of a two-colour shade from the centre (fillFocus 100) paints the
+        // fill colour at the centre and the back colour at the edges.
         let radial = match paint.fill_type {
             Some(5) => Some("rect"),
             Some(6) => Some("shape"),
@@ -516,7 +517,7 @@ impl<'a> Table<'a> {
                 // retained stops are charged with the model payload.
                 .linear_shade(&shade, true, budget, &mut (1usize << 20))?
                 .map(|shade| -> Result<Gradient, String> {
-                    let mut stops = shade
+                    let stops = shade
                         .projection
                         .stops
                         .iter()
@@ -524,10 +525,6 @@ impl<'a> Table<'a> {
                         .map(|(stop, alpha)| Ok((stop.position(), rgb(stop.color, *alpha)?)))
                         .collect::<Result<Vec<_>, String>>()?;
                     let radial = radial.map(|path| {
-                        for stop in &mut stops {
-                            stop.0 = 1.0 - stop.0;
-                        }
-                        stops.reverse();
                         let side = |id: u16| {
                             (f64::from(self.values.get(&id).copied().unwrap_or(0) as i32)
                                 / 65_536.0)
@@ -1433,7 +1430,8 @@ mod tests {
             .gradient
             .unwrap();
         assert_eq!(gradient.radial, Some(("rect", [0.5, 0.5, 0.5, 0.5])));
-        assert_eq!(gradient.stops.first().map(|stop| stop.0), Some(0.0));
+        // The fill colour is at the focus (the first stop).
+        assert_eq!(gradient.stops.first(), Some(&(0.0, "78AAE6".to_string())));
         assert_eq!(gradient.stops.last().map(|stop| stop.0), Some(1.0));
         assert!(best_effort().is_empty());
     }
