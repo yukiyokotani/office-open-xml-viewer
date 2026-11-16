@@ -680,9 +680,18 @@ fn cfvo(
         None
     };
     let (name, value) = match (kind, formula) {
-        // The minimum and maximum take no parameter.
-        (2, _) => ("min", None),
-        (3, _) => ("max", None),
+        // The minimum and maximum take no parameter. A formula stored with
+        // them is not used, but it must be one.
+        (2 | 3, formula) => {
+            if let Some(rgce) = formula {
+                if let Err(error) = formula::decompile(rgce, anchor, context.externs) {
+                    if !formula::without_text(&error) || !formula::framed(rgce) {
+                        return Err(error);
+                    }
+                }
+            }
+            (if kind == 2 { "min" } else { "max" }, None)
+        }
         (1 | 4 | 5, None) => {
             let value = f64_at(data, end)?;
             end += 8;
@@ -1287,9 +1296,11 @@ mod tests {
         assert!(classic_rule(2, 0, &[], 0x19, 0).is_err());
         assert!(classic_rule(2, 0, &[0x1e], 0x19, 0).is_err());
         // A formula the decompiler merely has no text for does not matter.
-        assert!(classic_rule(2, 0, &[0x10], 0x19, 0).is_ok());
-        // ... unless a token behind the one it stopped at is truncated.
-        assert!(classic_rule(2, 0, &[0x10, 0x1e], 0x19, 0).is_err());
+        // (the union of two numbers).
+        assert!(classic_rule(2, 0, &[0x1e, 1, 0, 0x1e, 2, 0, 0x10], 0x19, 0).is_ok());
+        // ... unless it lacks its operands or a later token is truncated.
+        assert!(classic_rule(2, 0, &[0x10], 0x19, 0).is_err());
+        assert!(classic_rule(2, 0, &[0x1e, 1, 0, 0x1e, 2, 0, 0x10, 0x1e], 0x19, 0).is_err());
         take_best_effort();
     }
 
@@ -1390,6 +1401,15 @@ mod tests {
         assert_eq!((max.kind.as_str(), max.value.as_deref()), ("max", None));
         // Reading a formula is not a best-effort decision.
         assert!(take_best_effort().is_empty());
+        // A formula stored with the minimum must still be a formula.
+        let mut bar = vec![0, 0, 0, 0, 0, 100];
+        bar.extend(rgb(0x20, 0xa4, 0x72));
+        bar.extend([2, 1, 0, 0x1e]);
+        bar.extend(cfvo(3, None));
+        assert!(
+            project_records(&[(0x0879, cond_fmt12(1)), (0x087a, cf12(4, 3, 0, &[], &bar))])
+                .is_err()
+        );
         // cfvoType 7 without a formula is malformed.
         let mut bar = vec![0, 0, 0, 0, 0, 100];
         bar.extend(rgb(0x20, 0xa4, 0x72));

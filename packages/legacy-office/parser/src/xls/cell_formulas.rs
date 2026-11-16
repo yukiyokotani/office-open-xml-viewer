@@ -36,6 +36,7 @@ pub(super) fn project<'a>(
 ) -> Result<BTreeMap<(u16, u16), String>, String> {
     let text = |cell: (u16, u16),
                 rgce: &[u8],
+                extra: &[u8],
                 formula: Result<String, String>,
                 output: &mut BTreeMap<(u16, u16), String>|
      -> Result<(), String> {
@@ -46,6 +47,9 @@ pub(super) fn project<'a>(
             Err(error)
                 if macro_sheet
                     && super::conditional::without_text(&error)
+                    // RgbExtra (array constants) is read only by a
+                    // complete decompilation.
+                    && extra.is_empty()
                     && super::conditional::framed(rgce) =>
             {
                 crate::rejection::approximated("XLS macro sheets are not projected", ());
@@ -82,6 +86,7 @@ pub(super) fn project<'a>(
                 text(
                     (row, col),
                     rgce,
+                    extra,
                     decompile_cell(rgce, extra, (row, col), externs),
                     &mut output,
                 )?;
@@ -99,6 +104,7 @@ pub(super) fn project<'a>(
                 text(
                     cell,
                     rgce,
+                    extra,
                     decompile_cell(rgce, extra, cell, externs),
                     &mut output,
                 )?;
@@ -179,6 +185,23 @@ mod tests {
         let broken = formula(1, 0, &[0x42, 0x00, 0xff, 0x7f, 0x1e]);
         assert!(project(
             [(0x0006u16, broken.as_slice())].into_iter(),
+            &Externs::default(),
+            true
+        )
+        .is_err());
+        // So does an operator without operands behind it, and RgbExtra the
+        // formula does not account for.
+        let dangling = formula(1, 0, &[0x42, 0x00, 0xff, 0x7f, 0x03]);
+        assert!(project(
+            [(0x0006u16, dangling.as_slice())].into_iter(),
+            &Externs::default(),
+            true
+        )
+        .is_err());
+        let mut extra = formula(1, 0, &[0x1e, 1, 0]);
+        extra.push(0);
+        assert!(project(
+            [(0x0006u16, extra.as_slice())].into_iter(),
             &Externs::default(),
             true
         )

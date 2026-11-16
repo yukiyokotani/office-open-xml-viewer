@@ -1318,8 +1318,17 @@ fn parse_sheet(
     let mut custom_view = false;
     let mut previous_kind = 0u16;
     let mut pivot_continues = false;
+    let mut filter_continues = 0u64;
     for record in &all_records[start_index + 1..] {
         let prior_kind = std::mem::replace(&mut previous_kind, record.kind);
+        // AutoFilter12 (2.4.7): one ContinueFrt12 follows per criterion and
+        // per date grouping.
+        if filter_continues != 0 {
+            if record.kind != 0x087f {
+                return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));
+            }
+            filter_continues -= 1;
+        }
         // PIVOTIVD, PIVOTPI and PIVOTLI (2.1.7.20.5) continue their record.
         let pivot_continue = record.kind == CONTINUE && pivot_continues;
         pivot_continues = pivots::continued(record.kind) || pivot_continue;
@@ -1507,6 +1516,12 @@ fn parse_sheet(
                 };
                 if !framed {
                     return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));
+                }
+                if record.kind == 0x087e && u32_at(record.data, 18)? == 0 {
+                    // cCriteria and cDateGroupings (ignored unless ft is
+                    // zero), after iEntry, fHideArrow, ft and cft.
+                    filter_continues =
+                        u64::from(u32_at(record.data, 26)?) + u64::from(u32_at(record.data, 30)?);
                 }
                 output.autofilter_criteria = true;
             }

@@ -354,22 +354,32 @@ pub(in super::super) fn without_text(error: &str) -> bool {
         .any(|site| error == unsupported(*site).as_str())
 }
 
-/// Whether `rgce` is a sequence of complete BIFF8 tokens (MS-XLS 2.5.198.25
-/// Ptg sizes), whatever they compute. A caller that passes over a formula
-/// [`without_text`] first establishes this, so a truncated or unknown token
-/// behind the one the decompiler stopped at still rejects.
+/// Whether `rgce` is a complete BIFF8 token program (MS-XLS 2.5.198.25 Ptg
+/// sizes) whose operators find their operands and which leaves one value,
+/// whatever it computes. A caller that passes over a formula
+/// [`without_text`] first establishes this, so a truncated token or a
+/// malformed expression behind the token the decompiler stopped at still
+/// rejects. A token of unknown size, or a fixed-arity function outside the
+/// function table (its operand count is unknown), is not established.
 pub(in super::super) fn framed(rgce: &[u8]) -> bool {
     let mut at = 0usize;
+    let mut depth = 0usize;
     while at < rgce.len() {
         let token = rgce[at];
-        let size = match token {
-            0x01 | 0x02 => 5,
-            0x03..=0x16 => 1,
+        // (size, operands taken, values left)
+        let (size, take, leave) = match token {
+            0x03..=0x11 => (1, 2, 1),
+            0x12..=0x15 => (1, 1, 1),
+            0x16 => (1, 0, 1),
             0x17 => {
                 let (Some(&count), Some(&high)) = (rgce.get(at + 1), rgce.get(at + 2)) else {
                     return false;
                 };
-                3 + usize::from(count) * if high & 1 != 0 { 2 } else { 1 }
+                (
+                    3 + usize::from(count) * if high & 1 != 0 { 2 } else { 1 },
+                    0,
+                    1,
+                )
             }
             0x19 => match rgce.get(at + 1) {
                 // PtgAttrChoose: a jump table of cOffset + 1 entries.
@@ -377,29 +387,54 @@ pub(in super::super) fn framed(rgce: &[u8]) -> bool {
                     let (Some(&low), Some(&high)) = (rgce.get(at + 2), rgce.get(at + 3)) else {
                         return false;
                     };
-                    4 + 2 * (usize::from(u16::from_le_bytes([low, high])) + 1)
+                    (
+                        4 + 2 * (usize::from(u16::from_le_bytes([low, high])) + 1),
+                        0,
+                        0,
+                    )
                 }
-                Some(_) => 4,
+                // PtgAttrSum.
+                Some(0x10) => (4, 1, 1),
+                Some(_) => (4, 0, 0),
                 None => return false,
             },
-            0x1c | 0x1d => 2,
-            0x1e => 3,
-            0x1f => 9,
+            0x1c | 0x1d => (2, 0, 1),
+            0x1e => (3, 0, 1),
+            0x1f => (9, 0, 1),
             0x20..=0x7f => match token & 0x1f {
-                0x00 => 8,
-                0x01 | 0x09 => 3,
-                0x02 => 4,
-                0x03 | 0x04 | 0x0a | 0x0c => 5,
-                0x05 | 0x0b | 0x0d => 9,
-                0x06..=0x08 | 0x19 | 0x1a | 0x1c => 7,
-                0x1b | 0x1d => 11,
+                0x00 => (8, 0, 1),
+                0x01 => {
+                    let (Some(&low), Some(&high)) = (rgce.get(at + 1), rgce.get(at + 2)) else {
+                        return false;
+                    };
+                    match ftab::function(u16::from_le_bytes([low, high])) {
+                        Some((_, Some(count))) => (3, usize::from(count), 1),
+                        _ => return false,
+                    }
+                }
+                0x02 => match rgce.get(at + 1) {
+                    Some(&count) => (4, usize::from(count & 0x7f), 1),
+                    None => return false,
+                },
+                0x03 | 0x04 | 0x0a | 0x0c => (5, 0, 1),
+                0x05 | 0x0b | 0x0d => (9, 0, 1),
+                // PtgMemArea, PtgMemErr, PtgMemNoMem and PtgMemFunc precede
+                // the expression they describe.
+                0x06..=0x08 => (7, 0, 0),
+                0x09 => (3, 0, 0),
+                0x19 | 0x1a | 0x1c => (7, 0, 1),
+                0x1b | 0x1d => (11, 0, 1),
                 _ => return false,
             },
             _ => return false,
         };
+        if depth < take {
+            return false;
+        }
+        depth = depth - take + leave;
         at += size;
     }
-    at == rgce.len()
+    at == rgce.len() && depth == 1
 }
 
 fn reject() -> String {
@@ -566,7 +601,8 @@ fn decompile_with(
     let mut used = 0;
     let text = decompile_inner(rgce, extra, &mut used, anchor, externs, name)?;
     if used != extra.len() {
-        return Err(reject());
+        // RgbExtra the formula does not use is not part of it.
+        return Err(malformed());
     }
     Ok(text)
 }
