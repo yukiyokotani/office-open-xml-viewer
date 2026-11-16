@@ -534,7 +534,23 @@ fn object_framed(data: &[u8]) -> bool {
                 let Some(formula) = data.get(at + 6..at + 6 + length) else {
                     return false;
                 };
-                return object_formula_framed(formula) && data.len() >= at + 6 + length + 8;
+                // cLines, iSel, flags and idEdit, then for a drop-down
+                // (FtCmo ot 0x14) LbsDropData (2.5.180): wStyle, cLine,
+                // dxMin and a counted string.
+                let fixed = at + 6 + length + 8;
+                if !object_formula_framed(formula) || data.len() < fixed {
+                    return false;
+                }
+                if data.get(4..6) != Some(&[0x14, 0][..]) {
+                    return true;
+                }
+                let (Some(count), Some(&high)) =
+                    (data.get(fixed + 6..fixed + 8), data.get(fixed + 8))
+                else {
+                    return false;
+                };
+                let count = usize::from(u16::from_le_bytes([count[0], count[1]]));
+                return data.len() >= fixed + 9 + count * if high & 1 != 0 { 2 } else { 1 };
             }
             // FtMacro, the ObjLinkFmla of a scroll bar or spinner and of a
             // check box or option button: the subrecord is an ObjFmla.
