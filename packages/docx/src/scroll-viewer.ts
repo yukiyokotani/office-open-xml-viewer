@@ -1172,7 +1172,8 @@ export class DocxScrollViewer implements ZoomableViewer {
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<DocxMatchLocation>[]> {
-    return this._search(0, () => {
+    // An empty query waits for the layout like any other (established contract).
+    return this._search(0, false, () => {
       this._findActive = query.length > 0;
       return this._find.find(query, opts);
     });
@@ -1180,23 +1181,30 @@ export class DocxScrollViewer implements ZoomableViewer {
 
   /** The request handling shared by {@link findText} (`kind` 0) and
    * {@link highlightText} (`kind` 1); each kind is cancelled on its own. */
-  private async _search<Match>(kind: 0 | 1, scan: () => Promise<Match[]>): Promise<Match[]> {
-    if (!this._doc) return [];
+  private async _search<Match>(
+    kind: 0 | 1,
+    empty: boolean,
+    scan: () => Promise<Match[]>,
+  ): Promise<Match[]> {
+    const doc = this._doc;
+    if (!doc) return [];
     const generation = ++this._searches[kind];
+    const superseded = (): boolean =>
+      this._destroyed || this._doc !== doc || generation !== this._searches[kind];
     // Search spans every page, so a progressively-loaded document has to finish
     // laying out first — otherwise the search silently covers only the pages
     // that happen to exist yet. Guarded on the document actually being
     // incomplete so that an ordinary document still starts its search
     // synchronously: `findText()` followed immediately by `clearFind()` must
-    // cancel the find, which it cannot do if the find has not begun.
-    if (this._doc.layoutComplete === false) {
-      const doc = this._doc;
+    // cancel the find, which it cannot do if the find has not begun. An empty
+    // highlight set is a clear and does not wait. A superseded highlight
+    // request reports nothing, also when the layout fails; a find reports that
+    // failure as before.
+    if (!empty && doc.layoutComplete === false) {
       await this._errorRouter.ownBackgroundLifecycle(
-        () => doc.waitUntilLayoutComplete(),
+        () => doc.waitUntilLayoutComplete(), kind ? superseded : undefined,
       );
-      if (this._destroyed || this._doc !== doc || generation !== this._searches[kind]) {
-        return [];
-      }
+      if (superseded()) return [];
     }
     const matches = await this._errorRouter.ownAwaitable(scan);
     this._highlights.redrawAll();
@@ -1241,7 +1249,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   ): Promise<TextHighlightMatch<DocxMatchLocation>[]> {
     // Validated and detached before the layout wait.
     const set = adoptTextHighlightGroups(groups);
-    return this._search(1, () => this._find.highlight(set));
+    return this._search(1, set.length === 0, () => this._find.highlight(set));
   }
 
   /** Activate and reveal the next text highlight, wrapping at the end. The

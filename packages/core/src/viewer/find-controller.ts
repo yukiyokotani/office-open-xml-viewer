@@ -114,9 +114,8 @@ export class UnitFindController<Run extends SearchRun, Location> {
 
   /** Drop both searches and the cached runs (new document, relayout). */
   invalidate(): void {
-    this._find.reset();
-    this._marks.reset();
-    this._trimRuns();
+    this.clearFind();
+    this.clearHighlights();
   }
 
   /** Drop the interactive find; text highlights stay. */

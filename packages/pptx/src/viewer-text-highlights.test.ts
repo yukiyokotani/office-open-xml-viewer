@@ -152,6 +152,49 @@ describe('PptxViewer text highlights on a progressively prepared deck', () => {
   });
 });
 
+describe('PPTX text highlights and a failed deck preparation', () => {
+  const settle = async (requests: Promise<unknown>[], fail: () => void) => {
+    const outcomes = Promise.allSettled(requests);
+    fail();
+    return (await outcomes).map((outcome) => outcome.status === 'fulfilled' ? outcome.value : String(outcome.reason));
+  };
+
+  it('PptxViewer reports the failure to the current request only', async () => {
+    const engine = new FakePptxEngine(2, WIDTH, HEIGHT);
+    engine.setLayoutProgress(1, false);
+    const { viewer } = makeViewer(engine);
+    const cleared = viewer.highlightText(GROUPS);
+    viewer.clearHighlights();
+    const current = viewer.highlightText(GROUPS);
+    // A find keeps reporting the failure after clearFind, as before.
+    const found = viewer.findText('alpha');
+    viewer.clearFind();
+    expect(await settle([cleared, current, found], () => engine.setLayoutProgress(1, false, new Error('deck failed'))))
+      .toEqual([[], 'Error: deck failed', 'Error: deck failed']);
+    viewer.destroy();
+  });
+
+  it('PptxScrollViewer reports the failure to the current request only', async () => {
+    installDom();
+    const container = makeContainer(200, 80);
+    const engine = new FakePptxEngine(2, WIDTH, HEIGHT);
+    engine.feedTextRuns = [RUN];
+    engine.setLayoutProgress(1, false);
+    const viewer = makeBorrowedPptxScrollViewer(container as unknown as HTMLElement, {
+      presentation: engine.asPres(),
+      gap: 0, overscan: 0, paddingTop: 0, paddingBottom: 0, paddingLeft: 0, paddingRight: 0,
+    });
+    const cleared = viewer.highlightText(GROUPS);
+    viewer.clearHighlights();
+    const current = viewer.highlightText(GROUPS);
+    const found = viewer.findText('alpha');
+    viewer.clearFind();
+    expect(await settle([cleared, current, found], () => engine.setLayoutProgress(1, false, new Error('deck failed'))))
+      .toEqual([[], 'Error: deck failed', 'Error: deck failed']);
+    viewer.destroy();
+  });
+});
+
 describe.each(['main', 'worker'] as const)('PptxScrollViewer text highlights (%s mode)', (mode) => {
   function mount(slides: number, hidden: number[] = [], hiddenSlideMode?: 'skip') {
     installDom();

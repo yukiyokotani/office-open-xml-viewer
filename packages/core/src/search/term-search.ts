@@ -69,11 +69,15 @@ export interface TermRange {
 export type AcceptRange = (start: number, end: number) => boolean;
 
 /**
- * Visit every occurrence of `term` as a `[start, end)` range, in order and
- * without overlap, exactly as the plain find does: scanning resumes just past
- * each match. An occurrence that the whole-word test or `accept` rejects is
- * skipped, and scanning resumes one position later so it cannot hide an
- * occurrence that starts inside it.
+ * Visit every occurrence of `term` as a `[start, end)` range, in order. An
+ * occurrence that the whole-word test or `accept` rejects is skipped, and
+ * scanning resumes one position later so it cannot hide an occurrence that
+ * starts inside it.
+ *
+ * Without `overlapping`, scanning resumes just past each match, exactly as the
+ * plain find does, so the visited occurrences do not overlap. With it, every
+ * occurrence is visited, also one that starts inside the previous one: the
+ * candidates of a term list, whose overlaps are resolved across all terms.
  */
 function forEachOccurrence(
   searched: SearchText,
@@ -82,6 +86,7 @@ function forEachOccurrence(
   fold: Fold,
   boundary: WordBoundaryTest | null,
   accept: AcceptRange | undefined,
+  overlapping: boolean,
   visit: (start: number, end: number) => void,
 ): void {
   if (term.length === 0) return;
@@ -97,7 +102,7 @@ function forEachOccurrence(
       continue;
     }
     visit(at, end);
-    from = end;
+    from = overlapping ? at + 1 : end;
   }
 }
 
@@ -147,17 +152,19 @@ export function findTermRanges(
 ): TermRange[] {
   const boundary = opts.wholeWord ? wordBoundary() : null;
   const ranges: TermRange[] = [];
-  const searchedTerms = new Set<string>();
-  terms.forEach((term, termIndex) => {
-    if (searchedTerms.has(term)) return;
-    searchedTerms.add(term);
-    forEachOccurrence(searched, term, opts, fold, boundary, accept, (start, end) => {
+  const distinct = [...new Set(terms)].filter((term) => term !== '');
+  // One term is scanned like the plain find: its matches are disjoint and in
+  // order. Several terms are resolved together, longest first, so each term
+  // contributes every occurrence as a candidate: an occurrence that loses to a
+  // longer match of another term must not have hidden a later one of its own.
+  const several = distinct.length > 1;
+  for (const term of distinct) {
+    const termIndex = terms.indexOf(term);
+    forEachOccurrence(searched, term, opts, fold, boundary, accept, several, (start, end) => {
       ranges.push({ start, end, termIndex });
     });
-  });
-  // One term's matches are already disjoint and in order; only a merge of
-  // several terms can collide.
-  return searchedTerms.size <= 1 ? ranges : dropOverlaps(ranges, searched.text.length);
+  }
+  return several ? dropOverlaps(ranges, searched.text.length) : ranges;
 }
 
 /** One text-highlight occurrence in one searched text: its range, its group

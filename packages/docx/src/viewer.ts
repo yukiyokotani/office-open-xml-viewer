@@ -599,14 +599,17 @@ export class DocxViewer implements ZoomableViewer {
     const doc = this._doc;
     if (!doc) return [];
     const generation = ++this._searches[kind];
+    const superseded = (): boolean =>
+      this._destroyed || this._doc !== doc || generation !== this._searches[kind];
     // Preserve the established synchronous empty-query cancellation contract.
     // A real full-document search must wait for authoritative pagination or its
-    // result would silently describe only the opening prefix.
+    // result would silently describe only the opening prefix. A superseded
+    // highlight request reports nothing, also when the layout fails; a find
+    // reports that failure as before.
     if (!empty && !doc.layoutComplete) {
-      await this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete());
-      if (this._destroyed || this._doc !== doc || generation !== this._searches[kind]) {
-        return [];
-      }
+      await this._errorRouter.ownBackgroundLifecycle(
+        () => doc.waitUntilLayoutComplete(), kind ? superseded : undefined);
+      if (superseded()) return [];
     }
     const matches = await this._errorRouter.ownAwaitable(scan);
     // Redraw the current page's highlights (matches on it become visible without

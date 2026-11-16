@@ -1015,8 +1015,10 @@ export class PptxViewer implements ZoomableViewer {
       return cleared;
     }
     if (!engine.layoutComplete) {
+      // A superseded highlight request reports nothing, also when the layout
+      // fails; a find reports that failure as before.
       await this.errorRouter.ownBackgroundLifecycle(
-        () => engine.waitUntilLayoutComplete(),
+        () => engine.waitUntilLayoutComplete(), kind ? superseded : undefined,
       );
     }
     if (superseded()) return [];

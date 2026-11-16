@@ -58,6 +58,20 @@ describe('findTermRanges — several terms', () => {
     ]);
   });
 
+  it('keeps an occurrence that only overlaps a losing candidate of its own term', () => {
+    // "returns returns" occurs at 11 and at 19. The one at 11 loses to the
+    // longer "guaranteed returns"; the one at 19 overlaps neither winner.
+    const searched = index('guaranteed returns returns returns');
+    expect(terms(searched, ['guaranteed returns', 'returns returns'], { wholeWord: true })).toEqual([
+      { start: 0, end: 18, termIndex: 0 },
+      { start: 19, end: 34, termIndex: 1 },
+    ]);
+    // Within one term, and between equal candidates, the earlier one still wins.
+    expect(starts(terms(index('aaaaa'), ['aa', 'aaa']))).toEqual([0, 3]);
+    expect(starts(terms(index('aaaa'), ['aa', 'b']))).toEqual([0, 2]);
+    expect(starts(terms(index('aaaa'), ['aa']))).toEqual([0, 2]);
+  });
+
   it('folds case for every term by default, and honours caseSensitive', () => {
     const searched = index('Alpha beta GAMMA');
     expect(starts(terms(searched, ['alpha', 'gamma']))).toEqual([0, 11]);

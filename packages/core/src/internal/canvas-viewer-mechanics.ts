@@ -599,11 +599,18 @@ export class CanvasViewerErrorRouter {
 
   /** Claim the background lifecycle while an explicit public Promise waits for
    * it. Publication and Promise rejection can cross any number of async jobs;
-   * synchronous ownership makes their single-channel contract deterministic. */
-  async ownBackgroundLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+   * synchronous ownership makes their single-channel contract deterministic.
+   *
+   * With `superseded`, a failure is not rethrown once the waiting request has
+   * been superseded: that request reports nothing, and its caller checks
+   * `superseded` after the wait as it does when the wait succeeds. */
+  async ownBackgroundLifecycle<T>(operation: () => Promise<T>, superseded?: () => boolean): Promise<T> {
     this.backgroundLifecycleOwners++;
     try {
       return await this.ownAwaitable(operation);
+    } catch (error) {
+      if (superseded?.()) return undefined as T;
+      throw error;
     } finally {
       this.backgroundLifecycleOwners--;
     }

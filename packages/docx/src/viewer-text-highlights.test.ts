@@ -201,6 +201,27 @@ describe('DocxViewer text highlights: the set is taken when the call is made', (
   });
 });
 
+describe('DocxViewer text highlights and a failed layout', () => {
+  it('reports the failure to the current request only; a cleared request reports nothing', async () => {
+    installMeasuringDom();
+    const engine = new FakeDocxEngine(2, [{ widthPt: 612, heightPt: 792 }]);
+    engine.feedTextRuns = [RUN];
+    engine.setLayoutComplete(false);
+    const { viewer } = makeViewer(engine, 'main');
+    const cleared = viewer.highlightText(GROUPS);
+    viewer.clearHighlights();
+    const current = viewer.highlightText(GROUPS);
+    // A find keeps reporting the failure after clearFind, as before.
+    const found = viewer.findText('alpha');
+    viewer.clearFind();
+    const outcomes = Promise.allSettled([cleared, current, found]);
+    engine.setLayoutFailure(new Error('layout failed'));
+    expect((await outcomes).map((outcome) => outcome.status === 'fulfilled' ? outcome.value : String(outcome.reason)))
+      .toEqual([[], 'Error: layout failed', 'Error: layout failed']);
+    viewer.destroy();
+  });
+});
+
 describe('DocxViewer text highlights and a layout view change', () => {
   it('cancels a request that was waiting for the progressive layout', async () => {
     installMeasuringDom();
@@ -284,6 +305,27 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
       .rejects.toThrow('duplicate group id');
     engine.setLayoutComplete(true);
     expect((await waiting).map((match) => match.text)).toEqual(['Alpha', 'Alpha']);
+    viewer.destroy();
+  });
+
+  it('reports a failed layout to the current request only, and clears an empty set without waiting', async () => {
+    const { viewer, engine, boxes } = mount(2);
+    await viewer.highlightText(GROUPS);
+    expect(boxes().length).toBeGreaterThan(0);
+    engine.setLayoutComplete(false);
+    // An empty set is a clear: it does not wait for the layout.
+    expect(await viewer.highlightText([])).toEqual([]);
+    expect(boxes()).toEqual([]);
+
+    const cleared = viewer.highlightText(GROUPS);
+    viewer.clearHighlights();
+    const current = viewer.highlightText(GROUPS);
+    const found = viewer.findText('alpha');
+    viewer.clearFind();
+    const outcomes = Promise.allSettled([cleared, current, found]);
+    engine.setLayoutFailure(new Error('layout failed'));
+    expect((await outcomes).map((outcome) => outcome.status === 'fulfilled' ? outcome.value : String(outcome.reason)))
+      .toEqual([[], 'Error: layout failed', 'Error: layout failed']);
     viewer.destroy();
   });
 
