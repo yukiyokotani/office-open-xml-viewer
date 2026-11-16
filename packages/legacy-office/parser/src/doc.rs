@@ -110,13 +110,12 @@ pub(crate) fn direct_model(
     with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
 }
 
-/// GitHub-flavoured markdown projection of a direct DOC source, through the
-/// shared `docx_model` markdown renderer so a legacy DOC reads exactly like
-/// the equivalent DOCX. Re-projects from the source bytes on every call: the
-/// streaming cursor consumes the model, mirroring how `DocxArchive`'s
-/// markdown re-reads its retained package. The projection shares the DOCX
-/// markdown hard ceiling; crossing it is a resource-limit rejection, not a
-/// truncated document.
+/// GitHub-flavoured Markdown projection of a direct DOC source, through the
+/// shared `docx_model` Markdown renderer so a legacy DOC reads exactly like
+/// the equivalent DOCX. Projects from the source bytes on every call (see
+/// `doc_wasm::MarkdownSource`). The projection shares the DOCX Markdown hard
+/// ceiling; crossing it is a resource-limit rejection, not a truncated
+/// document.
 pub(crate) fn direct_markdown(data: &[u8], max_model_bytes: usize) -> Result<String, String> {
     let cfb = CompoundFile::open(data).map_err(unsupported)?;
     let result = direct_model(&cfb, max_model_bytes)?;

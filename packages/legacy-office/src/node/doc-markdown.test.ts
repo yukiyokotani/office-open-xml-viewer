@@ -14,6 +14,10 @@ it('exposes to_markdown and projects paragraphs and bold like the DOCX path', as
   try {
     expect(typeof plain.archive.to_markdown).toBe('function');
     expect(plain.archive.to_markdown!()).toBe('Alpha\n\nBeta\n\n');
+    // The document cursor consumes the model; Markdown re-reads the bytes.
+    plain.archive.open_document_cursor(1, 1);
+    plain.archive.close_document_session();
+    expect(plain.archive.to_markdown!()).toBe('Alpha\n\nBeta\n\n');
   } finally { plain.close(); }
 
   // sprmCFBold on the paragraph's CHPX.

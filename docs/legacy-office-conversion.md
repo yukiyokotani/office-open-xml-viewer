@@ -99,16 +99,20 @@ format: resource metrics are reported without a ZIP usage snapshot, and
 All three legacy readers lack ZIP accounting, and the legacy XLS and PPT
 readers lack Markdown export.
 
-The legacy DOC reader does offer Markdown export: the direct reader projects
-into the same document model the DOCX parser produces, so `toMarkdown()`
-runs the shared DOCX markdown projection (headings from outline level,
-lists, tables, notes, character formatting; geometry discarded) on that
-model. The projection re-reads the retained source bytes, so it works
-independently of the streaming load cursor, and it shares the DOCX markdown
-byte ceiling. Legacy XLS and PPT keep the rejection: the XLSX markdown
-projection walks OOXML worksheet JSON against the package shared-strings
-table, which the typed BIFF projection does not carry, and the PPTX
-projection consumes a whole presentation including notes and comments,
+The legacy DOC reader offers Markdown export: it builds the same document
+model as the DOCX parser, and `toMarkdown()` runs the shared DOCX Markdown
+projection on that model (headings from outline level, lists, tables, notes,
+character formatting; geometry discarded). Document text and hyperlink
+targets are escaped exactly as for a DOCX. The reader keeps the source bytes
+for the life of the document and projects from them on each call, so
+`toMarkdown()` does not depend on the state of the streaming load. The
+output shares the DOCX Markdown byte ceiling. The source is kept only while
+it is no longer than the reader's model byte budget (256 MiB by default); a longer
+source still loads and renders, and its `toMarkdown()` rejects with a
+resource-limit error. Legacy XLS and PPT keep the
+rejection: the XLSX projection walks OOXML worksheet JSON against the package
+shared-strings table, which the typed BIFF projection does not carry, and the
+PPTX projection consumes a whole presentation including notes and comments,
 which the streaming legacy PPT session does not assemble.
 
 To cancel a load, destroy the document or viewer, or start another load in

@@ -141,8 +141,9 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
             </tbody>
           </table>
         </div>
-        <p>All three readers lack Markdown export and ZIP accounting. <code>toMarkdown()</code> rejects;
-          resource metrics have no ZIP usage snapshot. Password-protected legacy binaries,
+        <p>All three readers lack ZIP accounting: resource metrics have no ZIP usage snapshot.
+          DOC supports <code>toMarkdown()</code> through the DOCX Markdown projection; for XLS and PPT
+          <code>toMarkdown()</code> rejects. Password-protected legacy binaries,
           pre-CFB formats and unsupported binary structures are outside the supported subset.</p>
         <p><a href="https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/legacy-office-conversion.md">Read the full support list and compatibility boundaries on GitHub →</a></p>
       </section>

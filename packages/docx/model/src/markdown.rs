@@ -4,9 +4,11 @@
 // footnote bodies, and rich-text formatting; discards geometry, section
 // properties, font metrics, drawing shapes, page layout.
 //
-// Lives in the model crate so every producer of this model — the OOXML DOCX
-// parser and the legacy binary DOC direct reader alike — projects the same
-// markdown from the same document facts.
+// Lives in the model crate so a producer of this model other than the OOXML
+// DOCX parser can project the same markdown from the same document facts.
+// The projection reads lists from `DocParagraph::numbering` only: a producer
+// that emits list labels as leading runs (`TextRun::list_label`) gets plain
+// paragraphs, not Markdown lists.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write as _};
