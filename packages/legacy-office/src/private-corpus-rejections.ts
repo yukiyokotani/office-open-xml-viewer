@@ -26,6 +26,31 @@ export interface LegacyCorpusRejection {
 
 export const LEGACY_CORPUS_REJECTIONS: readonly LegacyCorpusRejection[] = [
   {
+    format: 'xls',
+    class: 'pending',
+    reason: 'UNSUPPORTED:BIFF picture object without a BLIP reference',
+    sha256: [
+      '0ddede6e6e90d4b821059aa887f9313f531edb65c82958fe9f4dae36ce2808b7',
+    ],
+  },
+  {
+    format: 'xls',
+    class: 'pending',
+    reason: 'UNSUPPORTED:XLS PivotTable style element is not representable',
+    sha256: [
+      '25987c6f20a747e15bd7c573c12278127c516150ceb5f646f552e477cc2f8228',
+      '2c4bd594c119b8e696474a9b9db9f3c802445e0f28455a702d15062347a92a14',
+    ],
+  },
+  {
+    format: 'xls',
+    class: 'pending',
+    reason: 'UNSUPPORTED:XLS shape text linked to a formula is not projected',
+    sha256: [
+      '54b57c1ded6f280dbb8fa44775ccd015afc6002bd335956d19acf436e6c7eb0b',
+    ],
+  },
+  {
     format: 'ppt',
     class: 'pending',
     reason: 'UNSUPPORTED:PowerPoint alternative shape XML custom geometry cannot be compared with the binary shape',

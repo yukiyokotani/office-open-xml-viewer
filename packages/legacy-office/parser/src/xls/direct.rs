@@ -1101,6 +1101,20 @@ pub(super) mod tests {
                 "XLS macro sheets are not projected"
             )]
         );
+        // A truncated formula on a macro sheet rejects: it cannot be read.
+        let mut truncated = macro_substream(0x00b7, &rgce);
+        let at = truncated
+            .windows(4)
+            .position(|window| window == rgce)
+            .unwrap();
+        truncated[at - 2] = 9;
+        let bytes = two_tab_workbook(1, truncated);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(DirectSession::new(&cfb)
+            .err()
+            .expect("rejected")
+            .contains("truncated"));
+        assert!(crate::rejection::take_best_effort().is_empty());
         // The same formula on a worksheet still rejects the workbook.
         let mut worksheet = macro_substream(0x00b7, &[0x42, 0x00, 0xff, 0x7f]);
         worksheet[6] = 0x10;

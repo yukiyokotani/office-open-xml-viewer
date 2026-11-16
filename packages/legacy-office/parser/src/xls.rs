@@ -391,8 +391,9 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                 Ok(formulas) => data.formulas = formulas,
                 // Macro-sheet formulas use command and macro-control
                 // functions the decompiler has no text for. The cells keep
-                // their cached values.
-                Err(error) if macro_sheet && error.starts_with("UNSUPPORTED:") => {
+                // their cached values. A formula that cannot be read still
+                // rejects.
+                Err(error) if macro_sheet && conditional::without_text(&error) => {
                     crate::rejection::approximated("XLS macro sheets are not projected", ());
                 }
                 Err(error) => return Err(error),

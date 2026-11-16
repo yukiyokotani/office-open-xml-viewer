@@ -31,7 +31,7 @@ mod dxf;
 pub(super) mod formula;
 mod ftab;
 
-pub(super) use formula::{decompile, decompile_cell, decompile_name, Externs};
+pub(super) use formula::{decompile, decompile_cell, decompile_name, without_text, Externs};
 
 use super::{f64_at, styles, theme, u16_at, u32_at, unsupported};
 use std::collections::BTreeMap;

@@ -336,8 +336,26 @@ fn sheet_prefix(name: &str) -> String {
     }
 }
 
+/// Diagnostics of a well-framed formula this decompiler has no text for: a
+/// token, name, reference or function outside its set. Every other failure
+/// is a formula that cannot be read (truncated or malformed).
+const WITHOUT_TEXT: [&str; 4] = [
+    "unsupported XLS conditional formatting formula token",
+    "unsupported XLS formula defined name",
+    "unsupported XLS 3-D reference",
+    "unsupported XLS conditional formatting add-in function",
+];
+
+/// Whether `error` is one of this module's "no text for this formula"
+/// rejections rather than a framing error.
+pub(in super::super) fn without_text(error: &str) -> bool {
+    WITHOUT_TEXT
+        .iter()
+        .any(|site| error == unsupported(*site).as_str())
+}
+
 fn reject() -> String {
-    unsupported("unsupported XLS conditional formatting formula token")
+    unsupported(WITHOUT_TEXT[0])
 }
 
 /// Operator precedence is carried by the token order and explicit PtgParen,
@@ -804,7 +822,7 @@ fn decompile_inner(
                 0x1a | 0x1b => {
                     let sheet = externs
                         .sheet(u16_at(rgce, at + 1)?)
-                        .ok_or_else(|| unsupported("unsupported XLS 3-D reference"))?;
+                        .ok_or_else(|| unsupported(WITHOUT_TEXT[2]))?;
                     let text = if token & 0x1f == 0x1a {
                         cell(u16_at(rgce, at + 3)?, u16_at(rgce, at + 5)?, anchor, name)
                     } else {
@@ -826,7 +844,7 @@ fn decompile_inner(
                 0x03 => {
                     let (name, procedure) = externs
                         .name(u32_at(rgce, at + 1)?)
-                        .ok_or_else(|| unsupported("unsupported XLS formula defined name"))?;
+                        .ok_or_else(|| unsupported(WITHOUT_TEXT[1]))?;
                     if procedure {
                         // A future function called through PtgFuncVar 0x00FF
                         // (MS-XLS 2.2.2.3): functions ECMA-376 predefines
@@ -867,7 +885,7 @@ fn decompile_inner(
                         .addin(u16_at(rgce, at + 1)?, u32_at(rgce, at + 3)?)
                         .filter(|name| TOOLPAK.contains(name))
                         .ok_or_else(|| {
-                            unsupported("unsupported XLS conditional formatting add-in function")
+                            unsupported(WITHOUT_TEXT[3])
                         })?;
                     if !pending.is_empty() {
                         return Err(reject());
