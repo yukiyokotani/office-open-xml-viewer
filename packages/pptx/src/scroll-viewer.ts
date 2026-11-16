@@ -1,4 +1,4 @@
-import { EMU_PER_PX, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type TextHighlightGroup, type TextHighlightMatch, type ZoomableViewer, openExternalHyperlink, validateTextHighlightGroups } from '@silurus/ooxml-core';
+import { EMU_PER_PX, type FindMatch, type FindMatchesOptions, type HyperlinkTarget, type OoxmlResourceMetrics, type TextHighlightGroup, type TextHighlightMatch, type ZoomableViewer, openExternalHyperlink, adoptTextHighlightGroups } from '@silurus/ooxml-core';
 import { isBackwardSlideJump } from './slide-nav';
 import {
   computeUniformVisibleWindow,
@@ -1377,7 +1377,9 @@ export class PptxScrollViewer implements ZoomableViewer {
   async highlightText(
     groups: readonly TextHighlightGroup[],
   ): Promise<TextHighlightMatch<PptxMatchLocation>[]> {
-    return this._search(1, validateTextHighlightGroups(groups), () => this._find.highlight(groups));
+    // Validated and detached before the layout wait.
+    const set = adoptTextHighlightGroups(groups);
+    return this._search(1, set.length === 0, () => this._find.highlight(set));
   }
 
   /** Activate and reveal the next text highlight, wrapping at the end. The
@@ -1402,7 +1404,7 @@ export class PptxScrollViewer implements ZoomableViewer {
   /** Whether mounted slides need run geometry for the find or the text
    * highlights. */
   private _overlayActive(): boolean {
-    return this._findActive || this._find.highlightsArmed;
+    return this._findActive || this._find.highlighting;
   }
 
   /** Drop the find and the text highlights (new presentation, hidden-slide

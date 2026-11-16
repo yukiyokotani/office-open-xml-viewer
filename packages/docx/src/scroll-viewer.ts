@@ -1,4 +1,5 @@
 import { openExternalHyperlink, PT_TO_PX } from '@silurus/ooxml-core';
+import { adoptTextHighlightGroups } from '@silurus/ooxml-core';
 import type { FindMatch, FindMatchesOptions, HyperlinkTarget, OoxmlResourceMetrics, TextHighlightGroup, TextHighlightMatch, ZoomableViewer } from '@silurus/ooxml-core';
 import {
   computeVisibleWindow,
@@ -186,7 +187,7 @@ export class DocxScrollViewer implements ZoomableViewer {
     token: () => 0,
     nextToken: () => 0,
     wantRuns: (slot) => !!(this._opts.enableTextSelection && slot.textLayer) ||
-      this._findActive || this._find.highlightsArmed || !!slot.commentTintLayer,
+      this._findActive || this._find.highlighting || !!slot.commentTintLayer,
     reportError: (error) => this._reportRenderError(error),
   } satisfies Pick<BitmapSlotHooks<PageSlot, DocxTextRunInfo>,
     'slots' | 'epoch' | 'scale' | 'slotIndex' | 'token' | 'nextToken' | 'wantRuns' | 'reportError'>;
@@ -504,7 +505,7 @@ export class DocxScrollViewer implements ZoomableViewer {
   private _findActive = false;
   private readonly _highlights = new HighlightLayerController<PageSlot, DocxTextRunInfo, DocxMatchLocation>({
     slots: () => this._slots,
-    active: () => this._findActive || this._find.highlightsArmed,
+    active: () => this._findActive || this._find.highlighting,
     runs: (unit) => this._find.pageRuns(unit),
     setRuns: (unit, runs) => this._find.setPageRuns(unit, runs),
     paint: (unit, slot, runs, measure) => buildDocxHighlightLayer(
@@ -1234,7 +1235,9 @@ export class DocxScrollViewer implements ZoomableViewer {
   async highlightText(
     groups: readonly TextHighlightGroup[],
   ): Promise<TextHighlightMatch<DocxMatchLocation>[]> {
-    return this._search(1, () => this._find.highlight(groups));
+    // Validated and detached before the layout wait.
+    const set = adoptTextHighlightGroups(groups);
+    return this._search(1, () => this._find.highlight(set));
   }
 
   /** Activate and reveal the next text highlight, wrapping at the end. The

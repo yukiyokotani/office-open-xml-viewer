@@ -74,7 +74,8 @@ export function buildPptxHighlightLayer(
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
 
   // One positioned + rotated div per shape frame (keyed like the text layer), so
-  // boxes inside it inherit the shape's rotation. Reused across matches/slices.
+  // boxes inside it inherit the shape's rotation. Reused across matches/slices
+  // of one background (see the loop below).
   // The frame is placed as a % of the slide box (so it tracks the scaled canvas)
   // with % width/height too, so the boxes inside (positioned as % of THIS frame)
   // scale with it under the shape's rotate().
@@ -93,7 +94,17 @@ export function buildPptxHighlightLayer(
     return entry;
   };
 
+  // The matches arrive in paint order: text highlights group by group, then the
+  // find. A frame is a stacking context, so a later entry in a frame created
+  // earlier would end up beneath another shape's frame where shapes overlap.
+  // Starting new frames whenever the background changes keeps the paint order
+  // across shapes; a plain find is one such stretch and keeps one frame per shape.
+  let background: string | undefined | null = null;
   for (const match of matches) {
+    if (match.color !== background) {
+      shapeMap.clear();
+      background = match.color;
+    }
     const fill = match.color ?? (match.active ? activeColor : matchColor);
     const ring = match.color !== undefined && match.active ? ACTIVE_TEXT_HIGHLIGHT_RING : '';
     for (const slice of match.slices) {

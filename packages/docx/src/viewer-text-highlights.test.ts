@@ -112,7 +112,7 @@ describe.each(['main', 'worker'] as const)('DocxViewer text highlights (%s mode)
     expect((await viewer.highlightText([{ id: 'only', terms: ['beta'] }])).map((match) => match.group)).toEqual(['only']);
     expect(layer().children.map((box) => box.style.background)).toEqual(['rgba(0, 184, 148, 0.35)']);
     // A repeated group id rejects, even with no terms, and clears nothing.
-    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('duplicate group id');
     expect(layer().children).toHaveLength(1);
     expect(await viewer.highlightText([])).toEqual([]);
     expect(layer().children).toEqual([]);
@@ -183,6 +183,24 @@ describe('DocxViewer text highlights on a progressively laid out document', () =
   });
 });
 
+describe('DocxViewer text highlights: the set is taken when the call is made', () => {
+  it('ignores later changes to the caller\'s objects, and an invalid set does not cancel a waiting request', async () => {
+    installMeasuringDom();
+    const engine = new FakeDocxEngine(2, [{ widthPt: 612, heightPt: 792 }]);
+    engine.feedTextRuns = [RUN];
+    engine.setLayoutComplete(false);
+    const { viewer } = makeViewer(engine, 'main');
+    const terms = ['alpha'];
+    const waiting = viewer.highlightText([{ id: 'a', terms }]);
+    terms[0] = 'beta';
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }]))
+      .rejects.toThrow('duplicate group id');
+    engine.setLayoutComplete(true);
+    expect((await waiting).map((match) => match.text)).toEqual(['Alpha', 'Alpha']);
+    viewer.destroy();
+  });
+});
+
 describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s mode)', (mode) => {
   function mount(pages: number) {
     installDom();
@@ -237,6 +255,19 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
     viewer.destroy();
   });
 
+  it('takes the set when the call is made, and an invalid set does not cancel a waiting request', async () => {
+    const { viewer, engine } = mount(2);
+    engine.setLayoutComplete(false);
+    const terms = ['alpha'];
+    const waiting = viewer.highlightText([{ id: 'a', terms }]);
+    terms[0] = 'beta';
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }]))
+      .rejects.toThrow('duplicate group id');
+    engine.setLayoutComplete(true);
+    expect((await waiting).map((match) => match.text)).toEqual(['Alpha', 'Alpha']);
+    viewer.destroy();
+  });
+
   it('keeps highlight geometry current after a zoom settle render without a find', async () => {
     vi.useFakeTimers();
     try {
@@ -262,7 +293,7 @@ describe.each(['main', 'worker'] as const)('DocxScrollViewer text highlights (%s
     await viewer.highlightText(GROUPS);
     const shown = boxes().length;
     expect(shown).toBeGreaterThan(0);
-    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('duplicate group id');
     expect(boxes()).toHaveLength(shown);
     viewer.destroy();
     expect(await viewer.highlightNext()).toBeNull();

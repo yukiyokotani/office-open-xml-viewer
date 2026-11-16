@@ -344,6 +344,14 @@ export interface PptxTextRunInfo {
    */
   cellHorzOverflow?: 'clip' | 'overflow';
   /**
+   * Zero-based column index when this run is one glyph cell of stacked vertical
+   * text (`vert="wordArtVert"` / `"wordArtVertRtl"`). The cells of one column
+   * follow each other downward and continue the same line of text; a change of
+   * column is the line change. Absent for every other run, whose line is its
+   * `inShapeY`.
+   */
+  stackedColumn?: number;
+  /**
    * Additional rotation from a vertical text body (`vert="vert"` → 90,
    * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
    */
@@ -5047,7 +5055,7 @@ function renderStackedTextBody(
     onTextRun({
       text: run.text, inShapeX: run.x - bx, inShapeY: run.y - by, w: run.w, h: run.h,
       fontSize: run.fontSize, font: run.font, shapeX: bx, shapeY: by, shapeW: bw, shapeH: bh,
-      rotation: shapeRotation,
+      rotation: shapeRotation, stackedColumn: run.column,
       ...(run.hyperlink ? { hyperlink: run.hyperlink } : {}),
     });
   }

@@ -99,7 +99,7 @@ describe.each(['main', 'worker'] as const)('PptxViewer text highlights (%s mode)
     await viewer.findText('');
     expect(boxes()).toHaveLength(2);
     // A repeated group id rejects, even with no terms, and clears nothing.
-    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('duplicate group id');
     expect(boxes()).toHaveLength(2);
     expect(await viewer.highlightText([])).toEqual([]);
     expect(boxes()).toEqual([]);
@@ -133,7 +133,13 @@ describe('PptxViewer text highlights on a progressively prepared deck', () => {
     const cleared = viewer.highlightText(GROUPS);
     viewer.clearHighlights();
     let settled = false;
-    const pending = viewer.highlightText(GROUPS).then((matches) => { settled = true; return matches; });
+    // The set is taken when the call is made: later changes to the caller's
+    // objects are ignored, and an invalid set does not cancel the request.
+    const groups = GROUPS.map((group) => ({ ...group, terms: [...group.terms] }));
+    const pending = viewer.highlightText(groups).then((matches) => { settled = true; return matches; });
+    groups[0].terms[0] = 'nothing';
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }]))
+      .rejects.toThrow('duplicate group id');
     const found = viewer.findText('alpha');
     await Promise.resolve();
     await Promise.resolve();
@@ -199,7 +205,7 @@ describe.each(['main', 'worker'] as const)('PptxScrollViewer text highlights (%s
     await viewer.highlightText(GROUPS);
     await viewer.findText('');
     expect(boxes().some((box) => box.style.background === 'rgba(0, 0, 255, 0.3)')).toBe(true);
-    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('duplicate group id');
     expect(boxes().some((box) => box.style.background === 'rgba(0, 0, 255, 0.3)')).toBe(true);
     viewer.destroy();
     expect(await viewer.highlightNext()).toBeNull();

@@ -116,6 +116,8 @@ export interface StackedGlyphRun {
   y: number;
   w: number;
   h: number;
+  /** Zero-based index of the stacked column the glyph stands in. */
+  column: number;
   hyperlink?: HyperlinkTarget;
 }
 
@@ -270,7 +272,9 @@ export function renderStackedText<T extends StackedSegmentStyle>(
   const runs: StackedGlyphRun[] = [];
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
-  const paintGlyph = (g: Measured<T>, axisX: number, cellTop: number, markerParagraph?: number) => {
+  const paintGlyph = (
+    g: Measured<T>, axisX: number, cellTop: number, markerParagraph?: number, column = 0,
+  ) => {
     const marker = markerParagraph !== undefined;
     const { style, box } = g;
     if (style.math) {
@@ -280,7 +284,7 @@ export function renderStackedText<T extends StackedSegmentStyle>(
     const size = style.sizePx;
     if (!marker) runs.push({
       text: g.text, font: style.font, fontSize: size,
-      x: axisX - g.thickness / 2, y: cellTop, w: g.thickness, h: g.advance,
+      x: axisX - g.thickness / 2, y: cellTop, w: g.thickness, h: g.advance, column,
       ...(style.hyperlink ? { hyperlink: style.hyperlink } : {}),
     });
     ctx.font = style.font;
@@ -343,7 +347,7 @@ export function renderStackedText<T extends StackedSegmentStyle>(
     let last: typeof layout.glyphs[number] | undefined;
     while (glyphIndex < layout.glyphs.length && layout.glyphs[glyphIndex].column === columnIndex) {
       const g = layout.glyphs[glyphIndex++];
-      paintGlyph(g, g.axisX, g.cellTop);
+      paintGlyph(g, g.axisX, g.cellTop, undefined, columnIndex);
       last = g;
     }
     // The same uniform/mixed-size Office controls strike the invisible final

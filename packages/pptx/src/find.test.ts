@@ -101,3 +101,22 @@ it('keeps a term inside one table cell when a longer term of its group would cro
   expect((await find.find('cat', { wholeWord: true })).map((match) => match.text)).toEqual(['cat']);
   await expect(find.find('catdog', { wholeWord: true })).resolves.toEqual([]);
 });
+
+it('joins the glyph cells of a stacked column and separates columns', () => {
+  const glyph = (text: string, stackedColumn: number, inShapeY: number) =>
+    run(text, { shapeId: '7', stackedColumn, inShapeY, inShapeX: stackedColumn * 30 });
+  expect(pptxRunsBreak(glyph('c', 0, 0), glyph('a', 0, 28))).toBe(false);
+  expect(pptxRunsBreak(glyph('t', 0, 56), glyph('d', 1, 0))).toBe(true);
+  // Another shape separates whatever the column.
+  expect(pptxRunsBreak(glyph('t', 0, 56), run('d', { shapeId: '8', stackedColumn: 0, inShapeY: 84 }))).toBe(true);
+});
+
+it('does not take the glyphs of a stacked word for separate words', async () => {
+  const stacked = [...'catalog'].map((text, index) => run(text, { shapeId: '7', stackedColumn: 0, inShapeY: index * 28 }))
+    .concat([...'cat'].map((text, index) => run(text, { shapeId: '7', stackedColumn: 1, inShapeY: index * 28, inShapeX: 30 })));
+  const find = new PptxFindController(() => 1, async () => stacked);
+  const matches = await find.find('cat', { wholeWord: true });
+  expect(matches).toHaveLength(1);
+  expect(find.slideHighlights(0)[0].slices.map((slice) => slice.runIndex)).toEqual([7, 8, 9]);
+  expect(await find.find('cat')).toHaveLength(2);
+});

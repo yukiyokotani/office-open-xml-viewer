@@ -13,7 +13,7 @@ import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale, defaultDpr } from '@silurus/ooxml-core';
-import { validateTextHighlightGroups } from '@silurus/ooxml-core';
+import { adoptTextHighlightGroups } from '@silurus/ooxml-core';
 import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, TextHighlightGroup, TextHighlightMatch, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
@@ -657,7 +657,9 @@ export class DocxViewer implements ZoomableViewer {
   async highlightText(
     groups: readonly TextHighlightGroup[],
   ): Promise<TextHighlightMatch<DocxMatchLocation>[]> {
-    return this._search(1, validateTextHighlightGroups(groups), () => this._find.highlight(groups));
+    // Validated and detached before the layout wait.
+    const set = adoptTextHighlightGroups(groups);
+    return this._search(1, set.length === 0, () => this._find.highlight(set));
   }
 
   /**

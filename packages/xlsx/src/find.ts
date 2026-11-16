@@ -26,7 +26,7 @@ import {
   loadTermSearch,
   nextActive,
   prevActive,
-  validateTextHighlightGroups,
+  adoptTextHighlightGroups,
   type FindMatch,
   type FindMatchesOptions,
   type TextHighlightGroup,
@@ -233,12 +233,12 @@ export class XlsxFindController {
    *  a repeated group id rejects and leaves the highlights and any request in
    *  flight as they are. */
   async highlight(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<XlsxMatchLocation>[]> {
-    if (validateTextHighlightGroups(groups)) {
+    // Detached from the caller's objects: the scan reads the set after awaits.
+    const set = adoptTextHighlightGroups(groups);
+    if (set.length === 0) {
       this._marks.reset();
       return [];
     }
-    // Detach from the caller's objects: the scan reads the set after awaits.
-    const set = groups.map((group) => ({ ...group, terms: [...group.terms] }));
     const matches = await this._scan(this._marks, async () =>
       (await loadTermSearch()).textHighlightCellMatcher(set, foldPreservingLength));
     return (matches ?? []) as TextHighlightMatch<XlsxMatchLocation>[];
@@ -263,36 +263,31 @@ export class XlsxFindController {
     prepare: () => CellMatcher | Promise<CellMatcher>,
   ): Promise<FindMatch<XlsxMatchLocation>[] | null> {
     const generation = ++list.generation;
-    let matcher = prepare();
-    if (matcher instanceof Promise) {
-      try {
+    try {
+      let matcher = prepare();
+      if (matcher instanceof Promise) {
         matcher = await matcher;
-      } catch (error) {
         if (generation !== list.generation) return null;
-        throw error;
       }
-      if (generation !== list.generation) return null;
-    }
-    const sheets = this._sheetCount();
-    const matches: XlsxResolvedMatch[] = [];
-    for (let sheet = 0; sheet < sheets; sheet++) {
-      let cells: FindCell[];
-      try {
-        cells = await this._collectSheetCells(sheet);
-      } catch (error) {
+      const sheets = this._sheetCount();
+      const matches: XlsxResolvedMatch[] = [];
+      for (let sheet = 0; sheet < sheets; sheet++) {
+        const cells = await this._collectSheetCells(sheet);
         if (generation !== list.generation) return null;
-        throw error;
-      }
-      if (generation !== list.generation) return null;
-      const sheetName = this._sheetName(sheet);
-      for (const cell of cells) {
-        for (const hit of matcher([cell.text, ...(cell.alternates ?? [])])) {
-          matches.push({ ...hit, sheet, sheetName, row: cell.row, col: cell.col });
+        const sheetName = this._sheetName(sheet);
+        for (const cell of cells) {
+          for (const hit of matcher([cell.text, ...(cell.alternates ?? [])])) {
+            matches.push({ ...hit, sheet, sheetName, row: cell.row, col: cell.col });
+          }
         }
       }
+      list.commit(matches);
+      return list.all();
+    } catch (error) {
+      // A superseded request reports nothing, not even its failure (a closed
+      // workbook's sheet, a chunk that did not load).
+      if (generation !== list.generation) return null;
+      throw error;
     }
-    if (generation !== list.generation) return null;
-    list.commit(matches);
-    return list.all();
   }
 }

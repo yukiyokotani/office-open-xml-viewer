@@ -4,7 +4,7 @@ import type { FindMatchesOptions, SearchRun, TextIndex, TextMatch } from '../sea
 import type { FindMatch } from '../search/find-match';
 import {
   loadTermSearch,
-  validateTextHighlightGroups,
+  adoptTextHighlightGroups,
   type TextHighlightGroup,
   type TextHighlightMatch,
 } from '../search/text-highlight';
@@ -87,9 +87,7 @@ class MatchList<Location> {
     for (const index of this._paint) {
       const match = this.matches[index];
       if (match.unit !== unit) continue;
-      const box: UnitHighlight = { slices: match.slices, active: index === this.active };
-      if (match.color !== undefined) box.color = match.color;
-      out.push(box);
+      out.push({ slices: match.slices, active: index === this.active, color: match.color });
     }
   }
 }
@@ -126,23 +124,23 @@ export class UnitFindController<Run extends SearchRun, Location> {
   invalidate(): void {
     this._find.reset();
     this._marks.reset();
-    this._dropRunsWhenIdle();
+    this._trimRuns();
   }
 
   /** Drop the interactive find; text highlights stay. */
   clearFind(): void {
     this._find.reset();
-    this._dropRunsWhenIdle();
+    this._trimRuns();
   }
 
   /** Drop the text highlights; the interactive find stays. */
   clearHighlights(): void {
     this._marks.reset();
-    this._dropRunsWhenIdle();
+    this._trimRuns();
   }
 
   /** Whether text highlights were requested and not cleared since. */
-  get highlightsArmed(): boolean { return this._marks.armed; }
+  get highlighting(): boolean { return this._marks.armed; }
 
   unitRuns(unit: number): Run[] | undefined { return this._runs.get(unit); }
 
@@ -187,12 +185,12 @@ export class UnitFindController<Run extends SearchRun, Location> {
    *  a repeated group id rejects and leaves the highlights and any request in
    *  flight as they are. */
   async highlight(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<Location>[]> {
-    if (validateTextHighlightGroups(groups)) {
+    // Detached from the caller's objects: the scan reads the set after awaits.
+    const set = adoptTextHighlightGroups(groups);
+    if (set.length === 0) {
       this.clearHighlights();
       return [];
     }
-    // Detach from the caller's objects: the scan reads the set after awaits.
-    const set = groups.map((group) => ({ ...group, terms: [...group.terms] }));
     const matches = await this._scan(this._marks, this._find, async () =>
       (await loadTermSearch()).textHighlightMatcher(
         set, foldPreservingLength, sliceRange, this._runBreak, this._acceptMatch));
@@ -209,7 +207,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
 
   /** Cached geometry is refreshed only while a search is armed, so it must not
    *  outlive the last one. */
-  private _dropRunsWhenIdle(): void {
+  private _trimRuns(): void {
     if (this._find.armed || this._marks.armed) return;
     this._runsRevision++;
     this._runs.clear();
@@ -240,12 +238,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
       }
       let matcher = prepare();
       if (matcher instanceof Promise) {
-        try {
-          matcher = await matcher;
-        } catch (error) {
-          if (generation !== list.generation) return null;
-          throw error;
-        }
+        matcher = await matcher;
         if (generation !== list.generation) return null;
       }
       // From here on mounted units keep their run geometry current.
@@ -260,12 +253,7 @@ export class UnitFindController<Run extends SearchRun, Location> {
         if (!included[unit]) continue;
         let runs = unitRuns.get(unit);
         if (!runs) {
-          try {
-            runs = await this._collectRuns(unit);
-          } catch (error) {
-            if (generation !== list.generation) return null;
-            throw error;
-          }
+          runs = await this._collectRuns(unit);
           if (generation !== list.generation) return null;
           unitRuns.set(unit, runs);
         }
@@ -292,6 +280,11 @@ export class UnitFindController<Run extends SearchRun, Location> {
       this._runs = committedRuns;
       list.commit(matches);
       return list.all();
+    } catch (error) {
+      // A superseded request reports nothing, not even its failure (a closed
+      // document's run collection, a chunk that did not load).
+      if (generation !== list.generation) return null;
+      throw error;
     } finally {
       if (list.scanning === scanning) list.scanning = null;
       settle();

@@ -18,7 +18,7 @@ import {
   type FindMatchesOptions,
   type TextHighlightGroup,
   type TextHighlightMatch,
-  validateTextHighlightGroups,
+  adoptTextHighlightGroups,
   type OoxmlResourceMetrics,
   type ViewerContextMenuEvent,
   type ZoomableViewer,
@@ -1069,7 +1069,9 @@ export class PptxViewer implements ZoomableViewer {
   async highlightText(
     groups: readonly TextHighlightGroup[],
   ): Promise<TextHighlightMatch<PptxMatchLocation>[]> {
-    return this._search(1, validateTextHighlightGroups(groups), () => this._find.highlight(groups));
+    // Validated and detached before the layout wait.
+    const set = adoptTextHighlightGroups(groups);
+    return this._search(1, set.length === 0, () => this._find.highlight(set));
   }
 
   /**

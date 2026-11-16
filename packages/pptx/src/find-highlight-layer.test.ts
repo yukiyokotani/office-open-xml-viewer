@@ -118,11 +118,38 @@ describe('buildPptxHighlightLayer', () => {
       { slices: [{ runIndex: 0, start: 8, end: 11 }], active: true },
     ];
     buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
-    const boxes = layer.children[0].children;
+    const boxes = layer.children.flatMap((frame) => frame.children);
     expect(boxes.map((box) => box.style.background))
       .toEqual(['rgba(255, 0, 0, 0.4)', 'rgba(255, 0, 0, 0.4)', DEFAULT_FIND_ACTIVE_HIGHLIGHT]);
     expect(boxes.map((box) => box.style.outline))
       .toEqual([undefined, '2px solid #111', undefined]);
+  });
+
+  it('keeps the paint order across overlapping shapes: later groups and the find get their own frames', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'abc', shapeX: 0 }), run({ text: 'abc', shapeX: 40 })];
+    const slice = (runIndex: number) => [{ runIndex, start: 0, end: 3 }];
+    const matches: PptxHighlightMatch[] = [
+      { slices: slice(0), active: false, color: 'red' },
+      { slices: slice(1), active: false, color: 'red' },
+      { slices: slice(0), active: false, color: 'blue' },
+      { slices: slice(0), active: false },
+      { slices: slice(1), active: true },
+    ];
+    buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
+    // Frames in DOM order: red on both shapes, then blue, then the find.
+    expect(layer.children.map((frame) => frame.children.map((box) => box.style.background))).toEqual([
+      ['red'], ['red'], ['blue'], [DEFAULT_FIND_HIGHLIGHT], [DEFAULT_FIND_ACTIVE_HIGHLIGHT],
+    ]);
+    // A find alone still uses one frame per shape.
+    const find = makeEl('div');
+    buildPptxHighlightLayer(
+      find as unknown as HTMLDivElement, runs,
+      [{ slices: slice(0), active: false }, { slices: slice(1), active: true }, { slices: slice(0), active: false }],
+      100, 100, measureForFont,
+    );
+    expect(find.children.map((frame) => frame.children.length)).toEqual([2, 1]);
   });
 
   it('composes frame flips with shape and text-body rotation', () => {

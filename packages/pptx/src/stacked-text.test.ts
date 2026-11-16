@@ -3,6 +3,7 @@ import { rasterizeMathSvg } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 import { layoutParagraph, prepareSlideMath, renderTextBody, shapeTextRotation, type PptxTextRunInfo } from './renderer.js';
 import { buildPptxTextLayer } from './text-layer.js';
+import { pptxRunsBreak } from './find-run-break.js';
 import type { Paragraph, TextBody, TextRunData } from './types.js';
 
 vi.mock('@silurus/ooxml-core', async (load) => ({
@@ -134,6 +135,25 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
     const bracket = calls.find((c) => c.text === '﹁');
     expect(bracket?.rot).toBe(0);
     expect(calls.some((c) => c.text === '「')).toBe(false);
+  });
+
+  // Whole-word matching reads the column of each glyph run: the cells of a
+  // column continue one line, and a paragraph starts another column.
+  it('reports the stacked column of every glyph run', () => {
+    const { ctx } = mockCtx();
+    const twoColumns = body('cat', 'wordArtVert');
+    twoColumns.paragraphs.push({ ...twoColumns.paragraphs[0], runs: [{ ...twoColumns.paragraphs[0].runs[0], text: 'do' } as TextRunData] });
+    const runs: PptxTextRunInfo[] = [];
+    renderTextBody(ctx, twoColumns, 0, 0, 200, 470, SCALE,
+      null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+    expect(runs.map((run) => [run.text, run.stackedColumn])).toEqual([
+      ['c', 0], ['a', 0], ['t', 0], ['d', 1], ['o', 1],
+    ]);
+    // The cells of a column advance down; the next column starts at its top.
+    expect(runs[1].inShapeY).toBeGreaterThan(runs[0].inShapeY);
+    expect(runs[3].inShapeY).toBeCloseTo(runs[0].inShapeY, 6);
+    expect(pptxRunsBreak(runs[0], runs[1])).toBe(false);
+    expect(pptxRunsBreak(runs[2], runs[3])).toBe(true);
   });
 
   // #1827 PowerPoint controls: vrt2-only ∥ (Yu Gothic) stands unturned in a

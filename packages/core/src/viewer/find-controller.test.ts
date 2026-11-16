@@ -100,7 +100,7 @@ describe('UnitFindController — text highlights', () => {
       { matchIndex: 1, text: 'guaranteed returns', location: { unit: 0 }, group: 'validated', term: 'guaranteed returns' },
       { matchIndex: 2, text: 'revenue', location: { unit: 1 }, group: 'user', term: 'revenue' },
     ]);
-    expect(find.highlightsArmed).toBe(true);
+    expect(find.highlighting).toBe(true);
   });
 
   it('paints the group colours first and the find matches after them', async () => {
@@ -137,7 +137,7 @@ describe('UnitFindController — text highlights', () => {
     await find.find('revenue');
     find.clearHighlights();
     expect(find.highlightNext()).toBeNull();
-    expect(find.highlightsArmed).toBe(false);
+    expect(find.highlighting).toBe(false);
     expect(find.matches()).toHaveLength(2);
     expect(find.unitRuns(0)).toBeDefined();
 
@@ -153,7 +153,7 @@ describe('UnitFindController — text highlights', () => {
     expect(find.unitHighlights(0)).toHaveLength(1);
     expect(await find.highlight([{ id: 'b', terms: [''] }])).toEqual([]);
     expect(find.unitHighlights(0)).toEqual([]);
-    expect(find.highlightsArmed).toBe(false);
+    expect(find.highlighting).toBe(false);
     expect(find.unitRuns(0)).toBeUndefined();
   });
 
@@ -161,10 +161,10 @@ describe('UnitFindController — text highlights', () => {
     const find = controller([['alpha']]);
     await find.highlight([{ id: 'a', terms: ['alpha'] }]);
     await expect(find.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }]))
-      .rejects.toThrow('group ids must be unique');
+      .rejects.toThrow('duplicate group id');
     // Also when the set is otherwise empty: nothing is cleared.
     await expect(find.highlight([{ id: 'x', terms: [] }, { id: 'x', terms: [''] }]))
-      .rejects.toThrow('group ids must be unique');
+      .rejects.toThrow('duplicate group id');
     expect(find.unitHighlights(0)).toHaveLength(1);
 
     const inFlight = find.highlight([{ id: 'b', terms: ['alp'] }]);
@@ -265,7 +265,7 @@ describe('UnitFindController — text highlights', () => {
     await find.highlight([{ id: 'a', terms: ['alpha'] }]);
     find.invalidate();
     expect(find.unitHighlights(0)).toEqual([]);
-    expect(find.highlightsArmed).toBe(false);
+    expect(find.highlighting).toBe(false);
     expect(find.unitRuns(0)).toBeUndefined();
   });
 
@@ -328,6 +328,6 @@ describe('UnitFindController — request results', () => {
     find.clearHighlights();
     reject(new Error('chunk failed late'));
     await expect(cleared).resolves.toEqual([]);
-    expect(find.highlightsArmed).toBe(false);
+    expect(find.highlighting).toBe(false);
   });
 });

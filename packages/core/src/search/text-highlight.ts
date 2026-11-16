@@ -52,16 +52,19 @@ export interface TextHighlightMatch<Loc = unknown> extends FindMatch<Loc> {
 export const ACTIVE_TEXT_HIGHLIGHT_RING = 'outline:2px solid #111;box-shadow:0 0 0 4px #fff;';
 
 /**
- * Validate a set, and return whether it is empty (no group has a non-empty
- * term, so it highlights nothing). Group ids must be distinct, or the matches
- * could not be attributed: a repeated id throws, also in an otherwise empty
- * set, before anything is cleared or searched.
+ * Validate a set and return a copy that later changes to the caller's objects
+ * cannot reach, without empty terms and without groups that have no term left.
+ * An empty result therefore means "highlight nothing". Group ids must be
+ * distinct, or the matches could not be attributed: a repeated id throws, also
+ * in an otherwise empty set, before anything is cleared or searched.
  */
-export function validateTextHighlightGroups(groups: readonly TextHighlightGroup[]): boolean {
+export function adoptTextHighlightGroups(groups: readonly TextHighlightGroup[]): TextHighlightGroup[] {
   if (new Set(groups.map((group) => group.id)).size !== groups.length) {
-    throw new TypeError('highlightText: group ids must be unique');
+    throw new TypeError('highlightText: duplicate group id');
   }
-  return groups.every((group) => group.terms.every((term) => term.length === 0));
+  return groups
+    .map((group) => ({ ...group, terms: group.terms.filter((term) => term !== '') }))
+    .filter((group) => group.terms.length);
 }
 
 /** Load the term-list matcher (several terms, whole words, group search). It

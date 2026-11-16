@@ -316,9 +316,9 @@ describe('XlsxFindController text highlights', () => {
     await c.highlight(groups);
     expect((await c.highlight([{ id: 'only', terms: ['notes', 'summary', 'returns'] }])).map((m) => m.location.ref))
       .toEqual(['A1', 'A3']);
-    await expect(c.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }])).rejects.toThrow('group ids must be unique');
+    await expect(c.highlight([{ id: 'x', terms: ['a'] }, { id: 'x', terms: ['b'] }])).rejects.toThrow('duplicate group id');
     // Also when the set is otherwise empty: nothing is cleared.
-    await expect(c.highlight([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+    await expect(c.highlight([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('duplicate group id');
     expect(c.sheetHighlights(0)).toHaveLength(1);
     expect(await c.highlight([{ id: 'only', terms: [] }])).toEqual([]);
     expect(c.sheetHighlights(0)).toEqual([]);

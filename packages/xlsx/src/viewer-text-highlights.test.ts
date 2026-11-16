@@ -62,7 +62,7 @@ async function exercise(viewer: XlsxViewer | XlsxSheetViewer): Promise<void> {
 
   expect(await viewer.highlightText(GROUPS)).toHaveLength(3);
   // A repeated group id rejects, even with no terms, and clears nothing.
-  await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('group ids must be unique');
+  await expect(viewer.highlightText([{ id: 'x', terms: [] }, { id: 'x', terms: [] }])).rejects.toThrow('duplicate group id');
   expect(await viewer.highlightNext()).toMatchObject({ matchIndex: 0 });
   expect(await viewer.highlightText([])).toEqual([]);
   expect(await viewer.highlightNext()).toBeNull();
