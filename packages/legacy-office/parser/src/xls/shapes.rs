@@ -1202,7 +1202,12 @@ pub(super) fn txo_text(records: &[Record<'_>], offset: usize) -> Result<String, 
     let characters = usize::from(u16_at(txo, 10)?);
     let run_bytes = usize::from(u16_at(txo, 12)?);
     // cbFmla: the ObjFmla (2.5.187) that follows the fixed fields.
-    if txo.len() != 18 + usize::from(u16_at(txo, 16)?) {
+    let formula = usize::from(u16_at(txo, 16)?);
+    if txo.len() != 18 + formula {
+        return Err(unsupported("truncated BIFF TxO record"));
+    }
+    // Its ObjectParsedFormula (2.5.198.22): cce, four unused bytes, rgce.
+    if formula != 0 && (formula < 6 || formula < 6 + usize::from(u16_at(txo, 18)? & 0x7fff)) {
         return Err(unsupported("truncated BIFF TxO record"));
     }
     let (units, mut next) = txo_characters(records, index, characters)?;

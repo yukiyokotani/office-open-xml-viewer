@@ -499,8 +499,10 @@ fn object_complete(data: &[u8]) -> bool {
 }
 
 /// Whether an Obj record's subrecords are whole: they end with FtEnd at
-/// the record end, or reach FtLbsData (ft 0x0013), which does not state its
-/// own length and runs to the end of the record.
+/// the record end, or reach FtLbsData (2.5.147, ft 0x0013), which does not
+/// state its own length and runs to the end of the record: its ObjFmla
+/// (cbFmla, then that many bytes) and the cLines, iSel, flags and idEdit
+/// fields must be present.
 fn object_framed(data: &[u8]) -> bool {
     let mut at = 0usize;
     while at + 4 <= data.len() {
@@ -508,7 +510,13 @@ fn object_framed(data: &[u8]) -> bool {
         let size = usize::from(u16::from_le_bytes([data[at + 2], data[at + 3]]));
         match kind {
             0x0000 => return size == 0 && at + 4 == data.len(),
-            0x0013 => return true,
+            0x0013 => {
+                let Some(formula) = data.get(at + 4..at + 6) else {
+                    return false;
+                };
+                let formula = usize::from(u16::from_le_bytes([formula[0], formula[1]]));
+                return data.len() >= at + 6 + formula + 8;
+            }
             _ => at += 4 + size,
         }
     }
