@@ -39,7 +39,9 @@ use crate::styles::{
 };
 use crate::types::*;
 use crate::xml_util::*;
-use docx_model::paragraph_breaks::{split_para_on_page_breaks, ParaPiece};
+use docx_model::paragraph_breaks::{
+    remove_rendered_page_hints, split_para_on_page_breaks, ParaPiece,
+};
 
 #[cfg(test)]
 #[path = "parser/fail_closed_tests.rs"]
@@ -1468,11 +1470,13 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         rel_map,
         theme,
         &section_hf,
-        environment
-            .document_settings
-            .as_ref()
-            .and_then(|settings| settings.split_pg_break_and_para_mark)
-            == Some(true),
+        StoryFlow::MainBody {
+            split_pg_break_and_para_mark: environment
+                .document_settings
+                .as_ref()
+                .and_then(|settings| settings.split_pg_break_and_para_mark)
+                == Some(true),
+        },
     );
     // Match the cursor's acquisition order: section stories precede body
     // facts; notes are acquired in finish_document after both.
@@ -1641,7 +1645,9 @@ impl DocxBodyCursor {
             body_footers,
             projector,
             semantic: BodyParseCursor {
-                split_pg_break_and_para_mark,
+                flow: StoryFlow::MainBody {
+                    split_pg_break_and_para_mark,
+                },
                 ref_leading_breaks: preflight.ref_leading_breaks,
                 ..BodyParseCursor::default()
             },
@@ -2403,7 +2409,7 @@ fn parse_notes(
             &HashMap::new(),
             TablePositioningContext::IgnoredStory,
             Some(&mut local_diagnostics),
-            false,
+            StoryFlow::Fixed,
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
         out.push(crate::types::DocxNote { id, content });
@@ -4162,7 +4168,7 @@ fn parse_body_elements(
         section_hf,
         TablePositioningContext::Normal,
         None,
-        false,
+        StoryFlow::default(),
     )
 }
 
@@ -4188,7 +4194,7 @@ fn parse_body_elements_with_diagnostics(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
 ) -> (Vec<BodyElement>, Vec<ParseDiagnostic>) {
     let mut diagnostics = Vec::new();
     let body = parse_body_elements_in_story(
@@ -4202,7 +4208,7 @@ fn parse_body_elements_with_diagnostics(
         section_hf,
         TablePositioningContext::Normal,
         Some(&mut diagnostics),
-        split_pg_break_and_para_mark,
+        flow,
     );
     (body, diagnostics)
 }
@@ -4374,13 +4380,48 @@ fn logical_table_sequence_contexts(
     .collect()
 }
 
+/// Whether a story takes part in the main document's page flow.
+///
+/// ECMA-376 §17.18.4 (ST_BrType) defines `page` as restarting text on the next
+/// page and `column` as restarting it in the next column, or on the next page
+/// after the last column; §17.6.18 sectPr and the Cover Pages building block
+/// (§17.5.2) likewise begin new pages or sections. Only the main document
+/// story flows through pages and columns. Header/footer stories (§17.10) are
+/// laid out in a page's fixed header/footer region and footnote/endnote
+/// stories (§17.11) in its note area, so none of these transitions can be
+/// honoured there; a layout story root admits only paragraphs and tables.
+/// The standard does not say what such a break means in those stories; its
+/// one rule for a break that cannot start a page is that page breaks "shall be
+/// ignored when present in frames" (§17.18.4). Library policy, inferred from
+/// that rule and not from observed Word output: a fixed story keeps the break
+/// as an inline run of its unsplit paragraph, which layout treats as it
+/// already treats a page or column break in a table cell or a text box (an
+/// ignored character, see the line breaker's segment builder). A stray sectPr
+/// or Cover Pages gallery in such a story starts nothing either. Whether Word
+/// ends the line at such a break is unmeasured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoryFlow {
+    /// The main document body. splitPgBreakAndParaMark (Part 4 §14.8.3.38)
+    /// is body-only normalization.
+    MainBody { split_pg_break_and_para_mark: bool },
+    /// A header, footer, footnote or endnote story.
+    Fixed,
+}
+
+impl Default for StoryFlow {
+    fn default() -> Self {
+        Self::MainBody {
+            split_pg_break_and_para_mark: false,
+        }
+    }
+}
+
 /// Cross-block semantic state for one WordprocessingML story. Complex fields
 /// can span paragraphs (§17.16.18), and section ordinals are assigned in story
 /// order, so neither belongs to a temporary per-block DOM arena.
 #[derive(Default)]
 struct BodyParseCursor {
-    // Body-only normalization; page stories keep their existing break policy.
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
     field: FieldState,
     section_ordinal: usize,
     ref_leading_breaks: HashMap<String, String>,
@@ -4421,6 +4462,23 @@ impl BodyParseCursor {
                     &mut child_diagnostics,
                 );
                 apply_matching_leading_break(&mut result, &self.ref_leading_breaks);
+                let split_pg_break_and_para_mark = match self.flow {
+                    StoryFlow::MainBody {
+                        split_pg_break_and_para_mark,
+                    } => split_pg_break_and_para_mark,
+                    // See StoryFlow: the paragraph stays whole, its page and
+                    // column breaks inline, and a paragraph sectPr is ignored.
+                    StoryFlow::Fixed => {
+                        remove_rendered_page_hints(&mut result);
+                        output.push(BodyElement::Paragraph(Box::new(result)));
+                        return Self::commit_block(
+                            output,
+                            child_diagnostics,
+                            source_body_index,
+                            diagnostics,
+                        );
+                    }
+                };
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
                         DocRun::Break {
@@ -4471,7 +4529,7 @@ impl BodyParseCursor {
                             });
                             // §14.8.3.38: retain the mark only when the page
                             // break is not subsumed by the section transition.
-                            if self.split_pg_break_and_para_mark {
+                            if split_pg_break_and_para_mark {
                                 result.runs.clear();
                                 output.push(BodyElement::Paragraph(Box::new(result)));
                             }
@@ -4483,8 +4541,7 @@ impl BodyParseCursor {
                         push_section_break(&mut output);
                     }
                     _ => {
-                        for piece in
-                            split_para_on_page_breaks(result, self.split_pg_break_and_para_mark)
+                        for piece in split_para_on_page_breaks(result, split_pg_break_and_para_mark)
                         {
                             match piece {
                                 ParaPiece::Para(paragraph) => {
@@ -4522,7 +4579,7 @@ impl BodyParseCursor {
                 );
                 output.push(BodyElement::Table(Box::new(table)));
             }
-            "sectPr" if !is_final_body_sect_pr => {
+            "sectPr" if !is_final_body_sect_pr && self.flow != StoryFlow::Fixed => {
                 output.push(section_break_element(
                     child,
                     section_hf,
@@ -4532,6 +4589,15 @@ impl BodyParseCursor {
             }
             _ => {}
         }
+        Self::commit_block(output, child_diagnostics, source_body_index, diagnostics)
+    }
+
+    fn commit_block(
+        output: Vec<BodyElement>,
+        child_diagnostics: Vec<PendingParseDiagnostic>,
+        source_body_index: usize,
+        diagnostics: Option<&mut Vec<ParseDiagnostic>>,
+    ) -> Vec<BodyElement> {
         if !output.is_empty() {
             if let Some(diagnostics) = diagnostics {
                 commit_pending_parse_diagnostics(
@@ -4557,7 +4623,7 @@ fn parse_body_elements_in_story(
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
     table_positioning_context: TablePositioningContext,
     diagnostics: Option<&mut Vec<ParseDiagnostic>>,
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
 ) -> Vec<BodyElement> {
     // A story nested in another (a text box, a table cell's content) shares
     // its host's shape types; an outermost story indexes its own.
@@ -4573,7 +4639,7 @@ fn parse_body_elements_in_story(
             section_hf,
             table_positioning_context,
             diagnostics,
-            split_pg_break_and_para_mark,
+            flow,
         )
     };
     if vml_shape_types_active() {
@@ -4595,11 +4661,11 @@ fn parse_story_body_elements(
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
     table_positioning_context: TablePositioningContext,
     mut diagnostics: Option<&mut Vec<ParseDiagnostic>>,
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
     let mut cursor = BodyParseCursor {
-        split_pg_break_and_para_mark,
+        flow,
         ..BodyParseCursor::default()
     };
     // The body-level sectPr (the last element) defines the final section and
@@ -4668,7 +4734,8 @@ fn parse_story_body_elements(
         // ECMA-376 §17.5.2: a "Cover Pages" building block occupies its own page
         // in Word — the following content (even a "continuous" section) starts on
         // the next page. Emit the page break after the cover's content.
-        if cover_break_after {
+        // Fixed stories start no page (see StoryFlow).
+        if cover_break_after && cursor.flow != StoryFlow::Fixed {
             cover_break_positions.push(body.len());
             body.push(BodyElement::PageBreak {
                 origin: Some(PageBreakOrigin::CoverPageSynthetic),
@@ -5775,7 +5842,7 @@ fn load_header_footer_set(
             &local_rel_map,
             theme,
             &HashMap::new(),
-            false,
+            StoryFlow::Fixed,
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
         let hf = HeaderFooter { body };
@@ -20885,7 +20952,9 @@ mod split_page_break_mark_tests {
                 &HashMap::new(),
                 TablePositioningContext::Normal,
                 None,
-                true,
+                StoryFlow::MainBody {
+                    split_pg_break_and_para_mark: true,
+                },
             );
             let paragraphs: Vec<_> = elements
                 .iter()
