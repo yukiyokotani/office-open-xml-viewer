@@ -201,8 +201,9 @@ fn workbook_with_policy(
 
 /// A chart object of a chart sheet: its OfficeArtClientAnchorChart
 /// rectangle (left, top, right, bottom in SPRC) and the absolute record
-/// range of its chart substream.
-pub(super) type ChartSheetObject = ([i32; 4], (usize, usize));
+/// range of its chart substream, and whether the object is hidden (read,
+/// not drawn).
+pub(super) type ChartSheetObject = ([i32; 4], (usize, usize), bool);
 
 /// The embedded charts of a chart sheet substream (`records` runs from its
 /// BOF to its EOF, the BOF being record `base` of the stream): for each
@@ -250,6 +251,7 @@ pub(super) fn chart_sheet_charts(
                     let mut rect = None;
                     let mut chart = None;
                     let mut identity = false;
+                    let mut hidden = false;
                     let mut position = at + 8;
                     while position < next {
                         let (child, child_end) = record_with_end(
@@ -261,14 +263,44 @@ pub(super) fn chart_sheet_charts(
                         match child.kind {
                             // The property tables are not projected, but
                             // they must hold the properties they declare.
-                            0xf00b => {
-                                crate::officeart::properties::visit(child, &mut work, |_| Ok(()))?
+                            0xf00b | 0xf122 => {
+                                // Group Shape Boolean Properties (MS-ODRAW
+                                // 2.3.4.44): fHidden with its use bit.
+                                let mut read = |p: crate::officeart::properties::Property<'_>| {
+                                    if p.opid & 0xc000 == 0
+                                        && p.opid & 0x3fff == 0x03bf
+                                        && p.value & 0x0002_0000 != 0
+                                    {
+                                        hidden = p.value & 0x0002 != 0;
+                                    }
+                                    Ok(())
+                                };
+                                if child.kind == 0xf00b {
+                                    crate::officeart::properties::visit(
+                                        child, &mut work, &mut read,
+                                    )?;
+                                } else {
+                                    crate::officeart::properties::visit_tertiary(
+                                        child, &mut work, &mut read,
+                                    )?;
+                                }
                             }
-                            0xf122 => crate::officeart::properties::visit_tertiary(
-                                child,
-                                &mut work,
-                                |_| Ok(()),
-                            )?,
+                            // OfficeArtChildAnchor and the text box marker,
+                            // which a chart object does not use.
+                            0xf00f => {
+                                if child.version != 0 || child.instance != 0 {
+                                    return Err(unsupported("invalid BIFF child anchor"));
+                                }
+                                rectangle(child.payload)?;
+                            }
+                            0xf00d => {
+                                if child.version != 0
+                                    || child.instance != 0
+                                    || !child.payload.is_empty()
+                                {
+                                    return Err(unsupported("invalid BIFF drawing client marker"));
+                                }
+                            }
                             // OfficeArtFSP: the shape's identity and flags.
                             0xf00a => {
                                 if identity || child.version != 2 || child.payload.len() != 8 {
@@ -357,7 +389,7 @@ pub(super) fn chart_sheet_charts(
                                 "BIFF retained anchor budget exceeded",
                             ));
                         }
-                        output.push((rect, chart));
+                        output.push((rect, chart, hidden));
                     }
                 }
                 _ => {}
@@ -365,7 +397,7 @@ pub(super) fn chart_sheet_charts(
             at = next;
         }
     }
-    output.sort_by_key(|(_, chart)| chart.0);
+    output.sort_by_key(|(_, chart, _)| chart.0);
     Ok(output)
 }
 
