@@ -252,6 +252,16 @@ pub(super) fn chart_sheet_charts(
                             "XLS shape",
                         )?;
                         match child.kind {
+                            // The property tables are not projected, but
+                            // they must hold the properties they declare.
+                            0xf00b => {
+                                crate::officeart::properties::visit(child, &mut work, |_| Ok(()))?
+                            }
+                            0xf122 => crate::officeart::properties::visit_tertiary(
+                                child,
+                                &mut work,
+                                |_| Ok(()),
+                            )?,
                             // OfficeArtFSP: the shape's identity and flags.
                             0xf00a => {
                                 if identity || child.version != 2 || child.payload.len() != 8 {
