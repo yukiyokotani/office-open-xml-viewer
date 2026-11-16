@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { R, deck, para, picture, run, textBox } from './test-support/synthetic-deck.js';
 import { metafileDemandScalars } from '@silurus/ooxml-core/internal/metafile-font-demand';
-import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing';
+import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing/metafile-paint';
 import { initSync, PptxArchive } from './wasm/pptx_parser.js';
 import { collectSlideFontDemand } from './font-preload-demand.js';
 import { renderSlideWithEmbeddedFonts } from './renderer.js';

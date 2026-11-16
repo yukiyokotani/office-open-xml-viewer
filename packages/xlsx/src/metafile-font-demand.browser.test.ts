@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
 import { existsSync, readFileSync } from 'node:fs';
-import { storedZip, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing';
+import { storedZip } from '@silurus/ooxml-core/testing';
+import { wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing/metafile-paint';
 
 // Metafile text demands its own scalars when the picture plays (core
 // bindMetafileFontDemand), through the production load and render paths in

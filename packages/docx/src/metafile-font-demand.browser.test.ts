@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
 import { existsSync, readFileSync } from 'node:fs';
-import { wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing';
+import { wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing/metafile-paint';
 import { storeZip } from './conformance/generate.js';
 
 // Metafile text demands its own scalars when the picture plays (core

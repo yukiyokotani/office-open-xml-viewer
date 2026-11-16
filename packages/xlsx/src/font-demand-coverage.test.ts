@@ -9,7 +9,8 @@ import { resolveSharedStringRows } from './shared-strings.js';
 import type { ParsedWorkbook, Row, Worksheet } from './types.js';
 import { SYMBOL_ENCODED, symbolRealm } from './test-support/symbol-realm.js';
 import { metafileDemandScalars } from '@silurus/ooxml-core/internal/metafile-font-demand';
-import { emfTextFixture, metafilePaintedTexts, storedZip, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing';
+import { storedZip } from '@silurus/ooxml-core/testing';
+import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing/metafile-paint';
 
 // Design §6 invariant: finite XLSX scalar demand is a superset of every scalar
 // the renderer measures or paints. A scalar outside the demand belongs to a

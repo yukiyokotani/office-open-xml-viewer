@@ -11,7 +11,7 @@ import { normalizeInternalDocumentModel } from './parser-model.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import { docxFontDemandScalars } from './font-source-load.js';
 import { metafileDemandScalars } from '@silurus/ooxml-core/internal/metafile-font-demand';
-import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing';
+import { emfTextFixture, metafilePaintedTexts, wmfFixture, wmfRecords } from '@silurus/ooxml-core/testing/metafile-paint';
 import type { DocxDocumentModel } from './types.js';
 
 // Design §6 invariant: finite DOCX scalar demand is a superset of every
