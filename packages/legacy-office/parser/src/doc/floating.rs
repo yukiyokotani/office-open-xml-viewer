@@ -698,9 +698,10 @@ fn oriented(frame: [f64; 4], stored: f64, flip: [bool; 2]) -> ([f64; 4], f64) {
     } else {
         frame
     };
-    let rotation = if flip[0] != flip[1] {
-        // Adding zero keeps an unrotated shape at +0.0.
-        (-stored).rem_euclid(360.0) + 0.0
+    // A whole number of turns keeps the value it had before flips were
+    // read here (the sign of its zero included).
+    let rotation = if flip[0] != flip[1] && turn != 0.0 {
+        (-stored).rem_euclid(360.0)
     } else {
         turn
     };
@@ -2093,6 +2094,25 @@ mod tests {
         );
         assert!(shape.rotation.is_sign_positive());
         assert!(crate::rejection::take_best_effort().is_empty());
+    }
+
+    #[test]
+    fn a_whole_number_of_turns_keeps_its_stored_zero_under_a_flip() {
+        // Group members were projected with `stored.rem_euclid(360)` before
+        // flips reversed the angle: a whole turn keeps that value, sign of
+        // zero included, with or without a single flip.
+        let frame = [0.0, 0.0, 2.0, 1.0];
+        for flip in [[false, false], [true, false], [false, true]] {
+            let (unrotated, rotation) = oriented(frame, -360.0, flip);
+            assert_eq!(unrotated, frame);
+            assert_eq!(
+                rotation.to_bits(),
+                (-360f64).rem_euclid(360.0).to_bits(),
+                "{flip:?}"
+            );
+        }
+        assert_eq!(oriented(frame, 30.0, [true, false]).1, 330.0);
+        assert_eq!(oriented(frame, 30.0, [true, true]).1, 30.0);
     }
 
     #[test]

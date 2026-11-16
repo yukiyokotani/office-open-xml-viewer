@@ -55,27 +55,36 @@ pub(in crate::doc) struct Member {
 }
 
 /// A turned or flipped group: its unrotated frame in the top-level frame, its
-/// clockwise rotation in degrees and its flips.
+/// clockwise rotation in degrees, its flips, and the scale from the
+/// coordinate system the group lies in (its parent's) to the top-level frame.
 #[derive(Clone, Copy)]
 struct Turn {
     frame: [f64; 4],
     rotation: f64,
     flip: [bool; 2],
+    scale: [f64; 2],
 }
 
 impl Turn {
     /// `None` for a group that neither turns nor flips its members.
-    fn new(frame: [f64; 4], rotation: f64, flip: [bool; 2]) -> Option<Self> {
+    fn new(frame: [f64; 4], rotation: f64, flip: [bool; 2], scale: [f64; 2]) -> Option<Self> {
         (rotation != 0.0 || flip != [false; 2]).then_some(Self {
             frame,
             rotation,
             flip,
+            scale,
         })
     }
 
     /// Flip, then turn, `member` about the centre of the group frame. A
     /// single flip reverses the direction of the member's own rotation
     /// (F x R(a) = R(-a) x F).
+    ///
+    /// A nested group turns in its parent's coordinate system, before the
+    /// ancestors scale it: with member frames already mapped to the
+    /// top-level frame, the offset from the group centre is taken back to
+    /// the parent's units, turned, and scaled again (S R F S^-1). Sizes
+    /// scale on the authored axes (Annex L.4.7.6).
     fn apply(&self, member: &mut Member) {
         let [x, y, width, height] = member.frame;
         let [left, top, group_width, group_height] = self.frame;
@@ -89,7 +98,14 @@ impl Turn {
             ];
         } else {
             let centre = [left + group_width / 2.0, top + group_height / 2.0];
-            let mut offset = [x + width / 2.0 - centre[0], y + height / 2.0 - centre[1]];
+            // A degenerate axis has no offset to scale.
+            let scale = self
+                .scale
+                .map(|scale| if scale > 0.0 { scale } else { 1.0 });
+            let mut offset = [
+                (x + width / 2.0 - centre[0]) / scale[0],
+                (y + height / 2.0 - centre[1]) / scale[1],
+            ];
             for (offset, flip) in offset.iter_mut().zip(self.flip) {
                 if flip {
                     *offset = -*offset;
@@ -104,8 +120,8 @@ impl Turn {
                 angle => angle.to_radians().sin_cos(),
             };
             member.frame = [
-                centre[0] + offset[0] * cos - offset[1] * sin - width / 2.0,
-                centre[1] + offset[0] * sin + offset[1] * cos - height / 2.0,
+                centre[0] + (offset[0] * cos - offset[1] * sin) * scale[0] - width / 2.0,
+                centre[1] + (offset[0] * sin + offset[1] * cos) * scale[1] - height / 2.0,
                 width,
                 height,
             ];
@@ -322,7 +338,9 @@ impl Store<'_> {
         let (frame, rotation) =
             oriented([0.0, 0.0, extent[0] as f64, extent[1] as f64], stored, flip);
         let map = Map::new(system, frame)?;
-        let turns: Vec<Turn> = Turn::new(frame, rotation, flip).into_iter().collect();
+        let turns: Vec<Turn> = Turn::new(frame, rotation, flip, [1.0; 2])
+            .into_iter()
+            .collect();
         let align = direct_alignment(anchor, &head.placement);
         let mut context = GroupRead {
             part,
@@ -420,7 +438,7 @@ impl Store<'_> {
                         flip,
                     );
                     let mut inner = turns.to_vec();
-                    inner.extend(Turn::new(frame, rotation, flip));
+                    inner.extend(Turn::new(frame, rotation, flip, map.scale));
                     let system = head.group_system.ok_or_else(|| {
                         unsupported("Word drawing group lacks its coordinate system")
                     })?;
@@ -568,6 +586,45 @@ mod tests {
             .group_members(&[], map, &[], MAX_DEPTH + 1, &mut vec![], &mut context)
             .unwrap_err()
             .starts_with("LEGACY_RESOURCE_LIMIT:"));
+    }
+
+    #[test]
+    fn a_nested_group_turns_before_its_ancestors_scale_it() {
+        let member = |frame: [f64; 4]| Member {
+            content: Content::Picture {
+                image_index: 0,
+                extension: "png",
+                crop: [0; 4],
+            },
+            frame,
+            rotation: 10.0,
+            flip: [false; 2],
+            spid: 1,
+        };
+        // An outer group maps 100 x 100 units to 200 x 100; a nested group
+        // of that whole area turns 30 degrees. A member centred at (75, 50)
+        // in the outer units turns to (71.65, 62.5) there, which is
+        // (143.3, 62.5) in the frame.
+        let turn = Turn::new([0.0, 0.0, 200.0, 100.0], 30.0, [false; 2], [2.0, 1.0]).unwrap();
+        let mut turned = member([140.0, 45.0, 20.0, 10.0]);
+        turn.apply(&mut turned);
+        let centre = [
+            turned.frame[0] + turned.frame[2] / 2.0,
+            turned.frame[1] + turned.frame[3] / 2.0,
+        ];
+        assert!((centre[0] - (100.0 + 50.0 * 30f64.to_radians().cos())).abs() < 1e-9);
+        assert!((centre[1] - 62.5).abs() < 1e-9);
+        assert_eq!(
+            (turned.frame[2], turned.frame[3], turned.rotation),
+            (20.0, 10.0, 40.0)
+        );
+        // A quarter turn with a horizontal flip: the offset (50, 0) flips to
+        // (-25, 0) in the parent's units and turns down to (0, -25).
+        let turn = Turn::new([0.0, 0.0, 200.0, 100.0], 90.0, [true, false], [2.0, 1.0]).unwrap();
+        let mut turned = member([140.0, 45.0, 20.0, 10.0]);
+        turn.apply(&mut turned);
+        assert_eq!(turned.frame, [90.0, 20.0, 20.0, 10.0]);
+        assert_eq!((turned.rotation, turned.flip), (80.0, [true, false]));
     }
 
     #[test]
