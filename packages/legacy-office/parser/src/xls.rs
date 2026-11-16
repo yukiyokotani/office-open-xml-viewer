@@ -1349,7 +1349,9 @@ fn parse_sheet(
         // AutoFilter12 (2.4.7): one ContinueFrt12 follows per criterion and
         // per date grouping.
         if filter_continues != 0 {
-            if record.kind != 0x087f {
+            // ContinueFrt12 (2.4.62): its FrtRefHeader, then the item.
+            if record.kind != 0x087f || record.data.len() <= 12 || u16_at(record.data, 0)? != 0x087f
+            {
                 return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));
             }
             filter_continues -= 1;
