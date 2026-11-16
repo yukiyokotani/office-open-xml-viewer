@@ -1383,6 +1383,13 @@ impl Context<'_> {
         } else {
             None
         };
+        // As for a shape, a pattern, texture or picture fill whose placement
+        // is not projected is not left out.
+        if fill.is_none() {
+            if let Some(kind) = paint.blip_fill_type() {
+                return Err(unprojected_blip_fill(kind));
+            }
+        }
         Ok(crate::rejection::approximated(SITE, fill))
     }
 
@@ -1489,18 +1496,15 @@ impl Context<'_> {
                     let begin = u32_at(view.payload, 0)? as usize;
                     let end = u32_at(view.payload, 4)? as usize;
                     // [MS-PPT] 2.9.59 requires a range valid for the text,
-                    // for every action: its length is end - begin, and its
-                    // end is checked against the text once that is known.
-                    if begin > end {
+                    // for every action: end is greater than begin, and is
+                    // checked against the text once that is known.
+                    if begin >= end {
                         return Err(crate::rejection::corrupt(
-                            "PowerPoint text link range ends before it begins",
+                            "invalid PowerPoint text link range",
                         ));
                     }
                     range_end = Some(range_end.map_or(end, |seen: usize| seen.max(end)));
                     if let Some(target) = link {
-                        if begin >= end {
-                            return Err(unsupported("invalid PowerPoint text link range"));
-                        }
                         *self.model_budget = self
                             .model_budget
                             .checked_sub(2 * std::mem::size_of::<(usize, usize, TextLink<'_>)>())
@@ -2256,13 +2260,18 @@ mod tests {
                 [[None, None, None]]
             );
         }
-        // [MS-PPT] 2.9.59: a range that ends before it begins is not a
-        // range, whatever the action does.
+        // [MS-PPT] 2.9.59: the end of a range is greater than its begin,
+        // whatever the action does.
         for action in [4, 2] {
-            let error = interactive_text(0, action, 0, 0, (2, 1))
-                .map(|_| ())
-                .unwrap_err();
-            assert!(error.contains("ends before it begins"), "{error}");
+            for range in [(2, 1), (1, 1)] {
+                let error = interactive_text(0, action, 0, 0, range)
+                    .map(|_| ())
+                    .unwrap_err();
+                assert!(
+                    error.contains("invalid PowerPoint text link range"),
+                    "{error}"
+                );
+            }
         }
         // [MS-PPT] 2.9.59: a range past the three characters is not valid
         // for the text, whatever the action does.
@@ -3102,6 +3111,24 @@ mod tests {
                 "PowerPoint picture frame non-solid fill"
             )]
         );
+        // A frame fill whose placement is not projected rejects like a
+        // shape's, and so does one that names no usable BLIP.
+        for (values, expected) in [
+            (
+                vec![(0x180, 1), (0x4186, 1), (0x198, 1)],
+                "pattern fill is not projected",
+            ),
+            (
+                vec![(0x180, 3), (0x4186, 1), (0x198, 1)],
+                "picture fill placement",
+            ),
+            (vec![(0x180, 2)], "texture fill"),
+            (vec![(0x180, 1), (0x4186, 9)], "index out of range"),
+        ] {
+            let values = [values, vec![(0x1bf, 0x0010_0010)]].concat();
+            let error = backing(&values).map(|_| ()).unwrap_err();
+            assert!(error.contains(expected), "{expected}: {error}");
+        }
         // A pattern or texture behind a picture is a rectangle under it:
         // the renderer paints no picture fill behind a picture.
         for kind in [1, 2] {
