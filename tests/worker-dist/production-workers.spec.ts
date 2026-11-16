@@ -42,6 +42,13 @@ async function expectWorkerBitmaps(page: import('@playwright/test').Page, url: s
   expect(ordinaryRenderWorkers, 'one render worker per format').toHaveLength(3);
   expect(sourceRequests, 'ordinary OOXML main/worker loads must not fetch source chunks').toEqual([]);
   expect(sourceBodies, 'ordinary OOXML main/worker loads must not fetch source module bodies').toEqual([]);
+  // #2248: nor the placeholder code that only a failed part needs.
+  expect(
+    [...ordinaryAssetUrls].filter((assetUrl) => (
+      /\/(error-page|error-placeholder-text|parse-error-placeholder|sheet-error-overlay)-[^/]+\.js$/.test(assetUrl)
+    )),
+    'healthy OOXML main/worker loads must not fetch part-failure placeholder code',
+  ).toEqual([]);
   await expect(page.locator('body')).toHaveAttribute('data-ordinary-ready', 'true');
   await expect(page.locator('body')).toHaveAttribute('data-ordinary-loads',
     'docx-worker,xlsx-worker,pptx-worker,docx-main,xlsx-main,pptx-main');

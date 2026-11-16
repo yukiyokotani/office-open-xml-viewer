@@ -87,7 +87,9 @@ the host fonts (see **Served font line heights** below). See the
   each. These are the parts whose "could not be displayed" placeholder is
   painted, plus an XLSX shared part such as `xl/sharedStrings.xml`. They never
   reach `onError`, and `load()` still resolves. XLSX sheets are reported when
-  their model is first loaded (#1974).
+  their model is first loaded (#1974). The code that calls `onPartFailure` and
+  the PPTX and XLSX placeholder cards are fetched with the first failed part,
+  so a file without one does not load them (#2248).
 - **Placeholder text:** the new `errorPlaceholder` option, on viewers and on
   the engines' render options, replaces the placeholder's title and detail
   text. It is a `{ title?, detail? }` object (`detail: null` hides the detail

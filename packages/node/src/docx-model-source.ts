@@ -1,6 +1,7 @@
 import {
   acquireDocxNodeDocument,
   createLayoutServices,
+  errorPageLayoutReady,
   materializeDocumentPullLayoutSession,
   materializeDocumentPullSession,
   normalizeDocxDocumentModel,
@@ -65,6 +66,9 @@ export async function openDocxSource(
       allowFootnoteContinuation: options.allowFootnoteContinuation !== false,
     });
     const defaultCurrentDateMs = normalizeCurrentDate(options.currentDate);
+    // A fatally unparseable document loads its error page here (#2248).
+    const errorPage = errorPageLayoutReady(acquired.result);
+    if (errorPage) await errorPage;
     const retained = retainRenderWorkerDocumentLayout(acquired.result, services, defaultCurrentDateMs);
     const showTrackedChanges = viewDefaults.showTrackedChanges === true;
     const layout = showTrackedChanges

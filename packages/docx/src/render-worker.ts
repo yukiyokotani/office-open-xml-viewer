@@ -64,6 +64,7 @@ import type {
 } from './worker-protocol';
 import { layoutSourceModelAdapterFromOwnedModel } from './layout-source-model-adapter.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
+import { errorPageLayoutReady } from './layout/document-layout-variants.js';
 import {
   retainRenderWorkerDocumentLayout,
   type RetainedRenderWorkerDocumentLayout,
@@ -482,6 +483,9 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         if (nativeRouteLines.some(Boolean)) {
           nativeRouteMetrics = admitDocxNativeRouteLines(nativeRouteLines, activeFontSet());
         }
+        // A fatally unparseable document loads its error page here (#2248).
+        const errorPage = errorPageLayoutReady(source);
+        if (errorPage) await errorPage;
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         const layoutServices = createLayoutServices(source, { ...serviceOptions, servedFaceLines, nativeRouteMetrics });
         const requestedDoc = retainRenderWorkerDocumentLayout(

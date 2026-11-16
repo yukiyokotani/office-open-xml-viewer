@@ -48,13 +48,33 @@ export const LAZY_FONT_SOURCE_MODULES = Object.freeze([
   'packages/docx/src/served-font-metrics.ts',
 ]);
 
+// The same holds for the code only a failed part needs (#2248): the
+// "could not be displayed" placeholder of each format (the DOCX error page,
+// the PPTX and XLSX canvas cards) and the text helpers they share load with
+// the first failed part.
+const PLACEHOLDER_TEXT_MODULE = 'packages/core/src/internal/error-placeholder-text.ts';
+export const LAZY_PART_FAILURE_MODULES = Object.freeze({
+  'docx.mjs': Object.freeze([PLACEHOLDER_TEXT_MODULE, 'packages/docx/src/layout/error-page.ts']),
+  'xlsx.mjs': Object.freeze([PLACEHOLDER_TEXT_MODULE, 'packages/xlsx/src/sheet-error-overlay.ts']),
+  'pptx.mjs': Object.freeze([PLACEHOLDER_TEXT_MODULE, 'packages/pptx/src/parse-error-placeholder.ts']),
+});
+
 /** `[entry, module, chunk]` for every lazy font-source module that a chunk
  * in the static graph of a format entry retains. */
 export function staticLazyFontSourceModules(stats, entries = ['docx.mjs', 'xlsx.mjs', 'pptx.mjs']) {
-  const lazy = new Set(LAZY_FONT_SOURCE_MODULES);
+  return staticLazyModules(stats, entries, () => LAZY_FONT_SOURCE_MODULES);
+}
+
+/** The same for the modules only a failed part needs. */
+export function staticLazyPartFailureModules(stats, entries = Object.keys(LAZY_PART_FAILURE_MODULES)) {
+  return staticLazyModules(stats, entries, (entry) => LAZY_PART_FAILURE_MODULES[entry] ?? []);
+}
+
+function staticLazyModules(stats, entries, lazyModulesOf) {
   const violations = [];
   for (const entry of entries) {
     if (!stats.chunks[entry]) throw new Error(`module stats lack the entry ${entry}`);
+    const lazy = new Set(lazyModulesOf(entry));
     const seen = new Set();
     const pending = [entry];
     while (pending.length > 0) {
@@ -122,6 +142,17 @@ function checkStaticGraphs() {
         violations.map(([entry, module, chunk]) => `  ${entry}: ${module} (chunk ${chunk})`).join('\n')}`);
     }
     console.log(`docx.mjs, xlsx.mjs, pptx.mjs: static graphs retain none of ${LAZY_FONT_SOURCE_MODULES.length} font-source modules`);
+    const partFailureModules = [...new Set(Object.values(LAZY_PART_FAILURE_MODULES).flat())];
+    const missingPartFailure = partFailureModules.filter((module) => !retained.has(module));
+    if (missingPartFailure.length > 0) {
+      throw new Error(`lazy part-failure modules missing from the build: ${missingPartFailure.join(', ')}`);
+    }
+    const partFailureViolations = staticLazyPartFailureModules(stats);
+    if (partFailureViolations.length > 0) {
+      throw new Error(`part-failure code in a format entry's static graph (load it only through import()):\n${
+        partFailureViolations.map(([entry, module, chunk]) => `  ${entry}: ${module} (chunk ${chunk})`).join('\n')}`);
+    }
+    console.log(`docx.mjs, xlsx.mjs, pptx.mjs: static graphs retain none of ${partFailureModules.length} part-failure modules`);
   } finally {
     // A unique directory created by this run; rmSync does not follow symlinks.
     rmSync(root, { recursive: true, force: true });

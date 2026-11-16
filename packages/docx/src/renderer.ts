@@ -5,7 +5,7 @@ import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer, Imag
 export type { DocxTextRunInfo } from './types';
 import { bodyMathOccurrences } from './layout/resources.js';
 import { paintResourceRegistryOf, privateResourceLookupOf } from './layout/runtime-state.js';
-import { selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
+import { errorPageLayoutReady, selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
 import type { WireErrorPlaceholder } from './layout/error-page.js';
 import { rasterPaintOccurrencesForPage } from './layout/text-index.js';
 import { textRunsForPage } from './text-run-projection.js';
@@ -167,6 +167,10 @@ export async function renderLayoutSourceToCanvas(
   pageIndex: number,
   opts: RenderDocumentOptions & { readonly callerOwnedCanvasTarget?: boolean } = {},
 ): Promise<void> {
+  // A direct caller's fatally unparseable source loads its error page here
+  // (#2248); a document or session has loaded it with the source.
+  const errorPage = errorPageLayoutReady(source);
+  if (errorPage) await errorPage;
   const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);
   return renderSelectedDocumentPage(
     normalized.selection.layout,
