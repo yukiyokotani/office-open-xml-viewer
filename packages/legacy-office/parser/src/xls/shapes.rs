@@ -1228,7 +1228,8 @@ pub(super) fn txo_text(records: &[Record<'_>], offset: usize) -> Result<String, 
     while runs.len() < run_bytes {
         let record = records
             .get(next)
-            .filter(|record| record.kind == 0x003c)
+            // An empty Continue carries no run and would not advance.
+            .filter(|record| record.kind == 0x003c && !record.data.is_empty())
             .ok_or_else(|| unsupported("truncated BIFF TxO formatting runs"))?;
         runs.extend_from_slice(record.data);
         next += 1;

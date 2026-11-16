@@ -108,6 +108,8 @@ pub(super) fn project(
     output
         .try_reserve_exact(notes.0.len())
         .map_err(|_| crate::rejection::resource("XLS comment allocation failed"))?;
+    // Each comment object's TxO is read once, however many Notes name it.
+    let mut texts: std::collections::BTreeMap<u16, String> = std::collections::BTreeMap::new();
     for note in &notes.0 {
         // A Note without its comment object is no comment: Excel shows
         // none, and such a record alone never changed the sheet.
@@ -118,7 +120,14 @@ pub(super) fn project(
             // The box Excel keeps on the sheet is not drawn.
             crate::rejection::skipped("BIFF cell comments are not projected");
         }
-        let text = super::shapes::txo_text(records, offset)?;
+        let text = match texts.get(&note.object) {
+            Some(text) => text.clone(),
+            None => {
+                let text = super::shapes::txo_text(records, offset)?;
+                texts.insert(note.object, text.clone());
+                text
+            }
+        };
         let cell_ref = reference(note.row, note.column);
         let bytes = std::mem::size_of::<xlsx_model::XlsxComment>()
             + text.len()

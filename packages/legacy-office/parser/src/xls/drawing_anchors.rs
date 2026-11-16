@@ -629,6 +629,11 @@ fn object_framed(data: &[u8]) -> bool {
                 if size == 0 {
                     return at + 4 == data.len();
                 }
+                // Otherwise it counts at least the empty ObjFmla and the
+                // four fixed fields.
+                if size < 10 {
+                    return false;
+                }
                 let Some(length) = data.get(at + 4..at + 6) else {
                     return false;
                 };
