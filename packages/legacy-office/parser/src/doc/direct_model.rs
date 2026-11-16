@@ -11,6 +11,7 @@ use docx_model::{
 
 #[cfg(test)]
 mod automatic_spacing_tests;
+mod equation;
 pub(in crate::doc) mod fields;
 mod headers;
 mod notes;
@@ -2827,7 +2828,7 @@ mod tests {
     }
 
     #[test]
-    fn unverified_private_field_results_are_rejected_not_hidden() {
+    fn private_field_results_are_not_displayed() {
         let sections = [(5, 2, 12_240, 15_840, 1, 720)];
         let slots = [
             None,
@@ -2837,16 +2838,29 @@ mod tests {
             None,
             None,
         ];
+        let header_text = |bytes: &[u8]| -> Vec<String> {
+            let result =
+                super::super::direct_model(&CompoundFile::open(bytes).unwrap(), 1024 * 1024)
+                    .unwrap();
+            let header = result.document.headers.default.expect("default header");
+            let [BodyElement::Paragraph(paragraph)] = header.body.as_slice() else {
+                panic!("one header paragraph");
+            };
+            paragraph
+                .runs
+                .iter()
+                .map(|run| match run {
+                    DocRun::Text(run) => run.text.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
         let bytes = source_with_typography("Body\r", &sections, None, None, None, Some(&slots));
-        assert!(
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).is_ok()
-        );
+        assert_eq!(header_text(&bytes), ["x"]);
+        // MS-DOC 2.9.110 fPrivateResult: the result "is not intended to be
+        // visible to the user".
         let bytes = mark_header_field_results_private(&bytes);
-        assert!(
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
-                .unwrap_err()
-                .contains("private field result")
-        );
+        assert!(header_text(&bytes).is_empty());
     }
 
     #[test]

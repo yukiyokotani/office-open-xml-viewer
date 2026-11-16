@@ -518,26 +518,56 @@ pub(super) fn project(
                 Token::Linked(_) => {
                     return Err(unsupported("nested Word link token"));
                 }
-                Token::EvaluatedField(field) if field.ruby.is_some() => {
-                    push_ruby(
-                        &mut paragraph,
-                        story,
-                        formatting,
-                        style,
-                        table_style,
-                        field.ruby.as_deref().expect("ruby form"),
-                        budget,
-                    )?;
-                }
-                Token::EvaluatedField(field) => {
-                    let run = evaluated_field_run(story, formatting, style, table_style, &field)?;
-                    budget.charge(
-                        std::mem::size_of::<docx_model::FieldRun>()
-                            .checked_add(super::payload::field_run(&run)?)
-                            .ok_or("OUTPUT_TOO_LARGE")?,
-                    )?;
-                    budget.push(&mut paragraph.runs, DocRun::Field(Box::new(run)))?;
-                }
+                Token::EvaluatedField(field) => match field.drawn.as_deref() {
+                    Some(super::fields::Drawn::Ruby(form)) => {
+                        push_ruby(
+                            &mut paragraph,
+                            story,
+                            formatting,
+                            style,
+                            table_style,
+                            form,
+                            budget,
+                        )?;
+                    }
+                    Some(super::fields::Drawn::Equation(nodes)) => {
+                        push_equation(
+                            &mut paragraph,
+                            story,
+                            formatting,
+                            style,
+                            table_style,
+                            field.format_cp,
+                            nodes,
+                            budget,
+                        )?;
+                    }
+                    Some(super::fields::Drawn::Symbol(form)) => {
+                        push_symbol(
+                            &mut paragraph,
+                            story,
+                            formatting,
+                            style,
+                            table_style,
+                            field.format_cp,
+                            form,
+                            budget,
+                        )?;
+                    }
+                    None => {
+                        // A field in hidden text displays nothing.
+                        if let Some(run) =
+                            evaluated_field_run(story, formatting, style, table_style, &field)?
+                        {
+                            budget.charge(
+                                std::mem::size_of::<docx_model::FieldRun>()
+                                    .checked_add(super::payload::field_run(&run)?)
+                                    .ok_or("OUTPUT_TOO_LARGE")?,
+                            )?;
+                            budget.push(&mut paragraph.runs, DocRun::Field(Box::new(run)))?;
+                        }
+                    }
+                },
             }
         }
 
@@ -869,9 +899,10 @@ fn push_ruby(
             formatting.direct_ruby_guide_run(style, table_style, fc, prm, &story.prcs)
         },
         |part, run| {
-            let (run, language) = run
-                .flatten()
-                .ok_or_else(|| unsupported("hidden Word phonetic guide text"))?;
+            // Hidden guide characters are not displayed.
+            let Some((run, language)) = run.flatten() else {
+                return Ok(());
+            };
             budget.charge(std::mem::size_of::<RubyGuideRunTypographyWire>() + part.len())?;
             guide_runs.push(RubyGuideRunTypographyWire {
                 text: part.to_string(),
@@ -901,17 +932,29 @@ fn push_ruby(
             Ok(())
         },
     )?;
-    let base_size = base_runs
-        .first()
-        .map(|(_, run)| run.font_size)
-        .ok_or_else(|| unsupported("hidden Word phonetic guide base text"))?;
+    // A hidden base hides the whole guide (Word control: a phonetic guide
+    // in hidden text prints nothing).
+    let Some(base_size) = base_runs.first().map(|(_, run)| run.font_size) else {
+        return Ok(());
+    };
+    if guide_runs.is_empty() {
+        // Only the base is visible: it is ordinary text.
+        for (part, mut run) in base_runs {
+            budget.text(&mut paragraph.runs, &mut run, &part)?;
+        }
+        return Ok(());
+    }
     let raise_pt = f64::from(form.raise_pt);
+    let guide_size_pt = form.guide_half_points.map_or_else(
+        || guide_runs[0].font_size_pt.unwrap_or(base_size / 2.0),
+        |half_points| f64::from(half_points) / 2.0,
+    );
     let annotation = docx_model::RubyAnnotation {
-        text: form.guide.clone(),
-        font_size_pt: f64::from(form.guide_half_points) / 2.0,
+        text: guide_runs.iter().map(|run| run.text.as_str()).collect(),
+        font_size_pt: guide_size_pt,
         hps_raise_pt: Some(raise_pt),
         typography: Some(docx_model::RubyTypographyWire {
-            align: valid("distributeSpace".to_string()),
+            align: valid(form.align.to_string()),
             base_font_size_pt: valid_pt(base_size),
             raise_pt: valid_pt(raise_pt),
             language: TypographyValueWire::default(),
@@ -977,7 +1020,7 @@ fn evaluated_field_run(
     style: usize,
     table_style: Option<formatting::TableFormattingKey>,
     field: &super::fields::Evaluated,
-) -> Result<docx_model::FieldRun, String> {
+) -> Result<Option<docx_model::FieldRun>, String> {
     let checkbox = field
         .form_data_cp
         .map(|data_cp| {
@@ -989,21 +1032,22 @@ fn evaluated_field_run(
             super::fields::checkbox_state(data)
         })
         .transpose()?;
-    let mut properties = |cp: usize| -> Result<docx_model::FieldRun, String> {
+    let mut properties = |cp: usize| -> Result<Option<docx_model::FieldRun>, String> {
         let (_, fc, piece) = story
             .position(cp)
             .ok_or_else(|| unsupported("Word field outside piece table"))?;
-        let run = formatting
-            .direct_text_run(
-                style,
-                table_style,
-                fc,
-                piece.prm,
-                &story.prcs,
-                String::new(),
-            )?
-            .ok_or_else(|| unsupported("hidden Word evaluated field is not supported"))?;
-        Ok(docx_model::FieldRun {
+        let Some(run) = formatting.direct_text_run(
+            style,
+            table_style,
+            fc,
+            piece.prm,
+            &story.prcs,
+            String::new(),
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(docx_model::FieldRun {
             field_type: field.field_type.to_string(),
             instruction: field.instruction.clone(),
             fallback_text: field.cached_result.clone(),
@@ -1034,9 +1078,15 @@ fn evaluated_field_run(
             highlight: run.highlight,
             emphasis_mark: run.emphasis_mark,
             typography_acquisition: run.typography_acquisition,
-        })
+        }))
     };
-    let mut run = properties(field.format_cp)?;
+    let stored = field.agreeing_result_cp.map(&mut properties).transpose()?;
+    // Hidden field characters display nothing (Word control: a PAGE field
+    // whose code and result are hidden prints nothing). A visible stored
+    // result under a hidden instruction formats the value.
+    let Some(mut run) = properties(field.format_cp)?.or_else(|| stored.clone().flatten()) else {
+        return Ok(None);
+    };
     if let Some((checked, size)) = checkbox {
         // ECMA-376 17.16.17 checkBox: the DOCX parser shows a ballot box and
         // applies an explicit size to both font-size slots.
@@ -1046,21 +1096,135 @@ fn evaluated_field_run(
             run.font_size_cs = Some(size);
         }
     }
-    if let Some(result_cp) = field.agreeing_result_cp {
+    if let Some(stored) = stored {
         // Without MERGEFORMAT/CHARFORMAT, ECMA-376 17.16.4.3.3 leaves the
         // formatting of a regenerated result to the application. The DOCX
-        // parser uses the first instruction run; accept that only when the
-        // stored result agrees, including every typography acquisition fact.
-        let stored = properties(result_cp)?;
-        let same = serde_json::to_value(&run).map_err(|error| error.to_string())?
-            == serde_json::to_value(&stored).map_err(|error| error.to_string())?;
+        // parser uses the first instruction run, and so does this
+        // projection; a stored result formatted differently is recorded.
+        let same = match &stored {
+            Some(stored) => {
+                let mut stored = stored.clone();
+                stored.fallback_text.clone_from(&run.fallback_text);
+                stored.font_size = run.font_size;
+                stored.font_size_cs = run.font_size_cs;
+                serde_json::to_value(&run).map_err(|error| error.to_string())?
+                    == serde_json::to_value(&stored).map_err(|error| error.to_string())?
+            }
+            None => false,
+        };
         if !same {
-            return Err(unsupported(
-                "Word evaluated field result formatting differs from its instruction",
-            ));
+            crate::rejection::approximated(
+                "Word evaluated field result formatted unlike its instruction",
+                (),
+            );
         }
     }
-    Ok(run)
+    Ok(Some(run))
+}
+
+/// The run properties at `cp`, or `None` for hidden text.
+fn field_text_run(
+    story: &Story<'_>,
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    cp: usize,
+) -> Result<Option<docx_model::TextRun>, String> {
+    let (_, fc, piece) = story
+        .position(cp)
+        .ok_or_else(|| unsupported("Word field outside piece table"))?;
+    formatting.direct_text_run(
+        style,
+        table_style,
+        fc,
+        piece.prm,
+        &story.prcs,
+        String::new(),
+    )
+}
+
+/// An EQ field as an inline equation (ECMA-376 22.1.2.77 `m:oMath`), sized
+/// like its first displayed character.
+#[allow(clippy::too_many_arguments)]
+fn push_equation(
+    paragraph: &mut docx_model::DocParagraph,
+    story: &Story<'_>,
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    format_cp: usize,
+    nodes: &[ooxml_common::math::MathNode],
+    budget: &mut ModelBudget,
+) -> Result<(), String> {
+    if nodes.is_empty() {
+        return Ok(());
+    }
+    // Hidden field characters display nothing.
+    let Some(run) = field_text_run(story, formatting, style, table_style, format_cp)? else {
+        return Ok(());
+    };
+    let nodes = nodes.to_vec();
+    budget.charge(super::equation::payload(&nodes))?;
+    budget.push(
+        &mut paragraph.runs,
+        DocRun::Math {
+            nodes,
+            display: false,
+            font_size: run.font_size,
+            jc: None,
+        },
+    )
+}
+
+/// A SYMBOL field as the one-glyph run the DOCX parser projects for `w:sym`
+/// (ECMA-376 17.3.3.30): the character in the named font on the ASCII,
+/// high-ANSI and East Asian axes.
+#[allow(clippy::too_many_arguments)]
+fn push_symbol(
+    paragraph: &mut docx_model::DocParagraph,
+    story: &Story<'_>,
+    formatting: &mut formatting::Formatting<'_>,
+    style: usize,
+    table_style: Option<formatting::TableFormattingKey>,
+    format_cp: usize,
+    form: &super::fields::SymbolForm,
+    budget: &mut ModelBudget,
+) -> Result<(), String> {
+    let Some(mut run) = field_text_run(story, formatting, style, table_style, format_cp)? else {
+        return Ok(());
+    };
+    let symbol_font = form
+        .font
+        .as_deref()
+        .is_some_and(|font| formatting.is_symbol_font(font));
+    let glyph = match form.code {
+        // A font with the symbol character set maps its codes into the
+        // private use area U+F000..U+F0FF (MS-DOC 2.9.86 FFN chs; Word's
+        // PDF of a SYMBOL 167 control in such a font carries U+F0A7).
+        code @ 0x20..=0xff if symbol_font && !form.unicode => char::from_u32(0xf000 + code),
+        code @ 0x80..=0x9f if !form.unicode => Some(super::super::decode_windows_1252(code as u8)),
+        code => char::from_u32(code),
+    }
+    .filter(|glyph| !glyph.is_control());
+    let Some(glyph) = glyph else {
+        crate::rejection::ignored_value("Word SYMBOL field character code outside Unicode");
+        return Ok(());
+    };
+    if let Some(font) = &form.font {
+        run.font_family = Some(font.clone());
+        run.font_family_high_ansi = Some(font.clone());
+        run.font_family_east_asia = Some(font.clone());
+        run.font_slots = None;
+    }
+    if let Some(size) = form.size_half_points.map(|size| f64::from(size) / 2.0) {
+        run.font_size = size;
+        run.font_size_cs = Some(size);
+    }
+    budget.text(
+        &mut paragraph.runs,
+        &mut run,
+        glyph.encode_utf8(&mut [0; 4]),
+    )
 }
 
 /// Project one textbox's text (MS-DOC 2.3.6, 2.9.106) through the ordinary

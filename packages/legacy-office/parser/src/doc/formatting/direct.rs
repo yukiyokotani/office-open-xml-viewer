@@ -142,6 +142,14 @@ impl Formatting<'_> {
         })
     }
 
+    /// Whether the font table gives `name` the symbol character set
+    /// (MS-DOC 2.9.86 FFN chs).
+    pub(in crate::doc) fn is_symbol_font(&self, name: &str) -> bool {
+        self.symbol_fonts
+            .iter()
+            .any(|font| font.eq_ignore_ascii_case(name))
+    }
+
     pub(in crate::doc) fn direct_text_run(
         &mut self,
         paragraph_style: usize,

@@ -101,6 +101,8 @@ pub struct Formatting<'a> {
     pub characters: Index<'a>,
     paragraphs: Index<'a>,
     fonts: Vec<String>,
+    /// Names of the fonts whose FFN states the symbol character set.
+    symbol_fonts: Vec<String>,
     defaults: Properties,
     styles: Vec<Option<Style<'a>>>,
     paragraph_cache: BTreeMap<(usize, Option<TableFormattingKey>), Properties>,
@@ -144,7 +146,7 @@ impl<'a> Formatting<'a> {
     }
 
     pub fn read(word: &'a [u8], table: &'a [u8], data: &'a [u8]) -> Result<Self, String> {
-        let fonts = read_fonts(fkp::table_part(word, table, 0x112)?)?;
+        let (fonts, symbol_fonts) = read_fonts(fkp::table_part(word, table, 0x112)?)?;
         let (defaults, styles) = read_styles(fkp::table_part(word, table, 0xa2)?)?;
         let characters = Index::read(word, table, Kind::Character)?;
         let paragraphs = Index::read(word, table, Kind::Paragraph)?;
@@ -154,6 +156,7 @@ impl<'a> Formatting<'a> {
             characters,
             paragraphs,
             fonts,
+            symbol_fonts,
             defaults,
             styles,
             paragraph_cache: BTreeMap::new(),
@@ -959,9 +962,12 @@ impl<'a> Formatting<'a> {
     }
 }
 
-fn read_fonts(bytes: &[u8]) -> Result<Vec<String>, String> {
+/// MS-DOC 2.9.86 FFN chs of the symbol character set (SYMBOL_CHARSET).
+const SYMBOL_CHARSET: u8 = 2;
+
+fn read_fonts(bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), String> {
     if bytes.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let count = u16_at(bytes, 0)? as usize;
     if count > 0x7ff0 || u16_at(bytes, 2)? != 0 {
@@ -969,6 +975,7 @@ fn read_fonts(bytes: &[u8]) -> Result<Vec<String>, String> {
     }
     let mut offset = 4;
     let mut fonts = Vec::with_capacity(count);
+    let mut symbol_fonts = Vec::new();
     for _ in 0..count {
         let size = *bytes
             .get(offset)
@@ -990,13 +997,15 @@ fn read_fonts(bytes: &[u8]) -> Result<Vec<String>, String> {
         if units.is_empty() || units.len() * 2 + 2 > name.len() {
             return Err(unsupported("unterminated or empty Word font name"));
         }
-        fonts.push(
-            String::from_utf16(&units)
-                .map_err(|_| unsupported("invalid Unicode Word font name"))?,
-        );
+        let name = String::from_utf16(&units)
+            .map_err(|_| unsupported("invalid Unicode Word font name"))?;
+        if font[3] == SYMBOL_CHARSET {
+            symbol_fonts.push(name.clone());
+        }
+        fonts.push(name);
         offset += size;
     }
-    Ok(fonts)
+    Ok((fonts, symbol_fonts))
 }
 
 fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), String> {
@@ -1117,7 +1126,7 @@ mod tests {
         }
         bytes.push(font.len() as u8);
         bytes.extend(font);
-        assert_eq!(read_fonts(&bytes).unwrap(), ["日本語 Font"]);
+        assert_eq!(read_fonts(&bytes).unwrap().0, ["日本語 Font"]);
         bytes.pop();
         assert!(read_fonts(&bytes).is_err());
     }
@@ -1127,6 +1136,7 @@ mod tests {
             characters: Index::default(),
             paragraphs: Index::default(),
             fonts: vec![],
+            symbol_fonts: vec![],
             defaults: Properties::default(),
             styles: vec![],
             paragraph_cache: BTreeMap::new(),

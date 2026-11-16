@@ -141,7 +141,6 @@ enum LanguageAxis {
 enum LanguageResolution {
     Absent,
     Assigned(&'static str),
-    Unsupported(u16),
 }
 
 #[derive(Clone, Copy)]
@@ -872,21 +871,10 @@ impl Properties {
 
     pub(super) fn resolved_languages(&self) -> Result<ResolvedLanguages, String> {
         Ok(ResolvedLanguages {
-            default: self.resolve_language_axis(
-                self.lang_default_lid,
-                LanguageAxis::Default,
-                "default",
-            )?,
-            east_asia: self.resolve_language_axis(
-                self.lang_east_asia_lid,
-                LanguageAxis::EastAsia,
-                "East Asian",
-            )?,
-            bidi: self.resolve_language_axis(
-                self.lang_bidi_lid,
-                LanguageAxis::ComplexScript,
-                "complex-script",
-            )?,
+            default: self.resolve_language_axis(self.lang_default_lid, LanguageAxis::Default)?,
+            east_asia: self
+                .resolve_language_axis(self.lang_east_asia_lid, LanguageAxis::EastAsia)?,
+            bidi: self.resolve_language_axis(self.lang_bidi_lid, LanguageAxis::ComplexScript)?,
         })
     }
 
@@ -894,14 +882,10 @@ impl Properties {
         &self,
         lid: Option<u16>,
         axis: LanguageAxis,
-        name: &str,
     ) -> Result<Option<&'static str>, String> {
         match self.language(lid, axis) {
             LanguageResolution::Absent => Ok(None),
             LanguageResolution::Assigned(language) => Ok(Some(language)),
-            LanguageResolution::Unsupported(lid) => Err(unsupported(format!(
-                "unsupported Word {name} language ID 0x{lid:04X}"
-            ))),
         }
     }
 
@@ -934,9 +918,31 @@ impl Properties {
             }
             _ => {}
         }
+        use crate::lcid::Resolution;
         match crate::lcid::resolve(u32::from(lid)) {
-            crate::lcid::Resolution::Assigned(language) => LanguageResolution::Assigned(language),
-            _ => LanguageResolution::Unsupported(lid),
+            // MS-LCID 2.2 names every one of these locales. Word stamps the
+            // reserved ones too (0x0850, mn-Mong-CN, in a Word-saved control)
+            // and carries the Microsoft-specific names (es-ES_tradnl) into
+            // w:lang verbatim.
+            Resolution::Assigned(language)
+            | Resolution::AssignedNonLanguageTag(language)
+            | Resolution::Reserved(Some(language)) => LanguageResolution::Assigned(language),
+            Resolution::DocumentedAliases(names) => {
+                names.first().map_or(LanguageResolution::Absent, |name| {
+                    LanguageResolution::Assigned(name)
+                })
+            }
+            // A LID MS-LCID names no locale for selects no language, as an
+            // absent property does.
+            Resolution::Reserved(None)
+            | Resolution::CustomUserDefault
+            | Resolution::CustomUnspecified
+            | Resolution::Transient
+            | Resolution::Unassigned
+            | Resolution::Unknown => {
+                crate::rejection::ignored_value("Word language ID without a locale name");
+                LanguageResolution::Absent
+            }
         }
     }
 }
@@ -1343,10 +1349,25 @@ mod tests {
 
         assert!(base.clone().apply(0x485f, &[1], &base).is_err());
         assert!(base.clone().apply(0x485f, &[1, 2, 3], &base).is_err());
-        for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
-            let mut unresolved = base.clone();
-            unresolved.apply(0x485f, &lid.to_le_bytes(), &base).unwrap();
-            assert!(unresolved.resolved_languages().is_err(), "LID {lid:04x}");
+        // A LID without a locale name selects no language; the named
+        // reserved, alias and Microsoft-specific locales keep their name.
+        for (lid, language) in [
+            (u16::MAX, None),
+            (0x0000, None),
+            (0x007f, None),
+            (0x0467, Some("ff-NG")),
+            (0x040a, Some("es-ES_tradnl")),
+            (0x0850, Some("mn-Mong-CN")),
+        ] {
+            let mut resolved = base.clone();
+            resolved.apply(0x485f, &lid.to_le_bytes(), &base).unwrap();
+            crate::rejection::take_best_effort();
+            assert_eq!(bidi(&resolved), language, "LID {lid:04x}");
+            assert_eq!(
+                crate::rejection::take_best_effort().is_empty(),
+                language.is_some(),
+                "LID {lid:04x}"
+            );
         }
         // Word writes 0x0400 for a style without its own complex-script
         // language: it inherits. 0x1000 (a tag without an LCID) projects no
