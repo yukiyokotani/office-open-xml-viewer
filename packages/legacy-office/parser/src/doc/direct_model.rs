@@ -1991,6 +1991,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn markdown_projection_reprojects_the_same_model_facts() {
+        assert_eq!(
+            super::super::direct_markdown(&source("Alpha\rBeta\r"), 1024 * 1024).unwrap(),
+            "Alpha\n\nBeta\n\n"
+        );
+        // sprmCFBold on the paragraph's CHPX.
+        let bold = source_with_direct_chpx("Bold\r", &[0x35, 0x08, 1]);
+        assert_eq!(
+            super::super::direct_markdown(&bold, 1024 * 1024).unwrap(),
+            "**Bold**\n\n"
+        );
+        assert_eq!(
+            super::super::direct_markdown(&numbered_source("A\rB\r"), 1024 * 1024).unwrap(),
+            "1. A\n1. B\n"
+        );
+        assert!(super::super::direct_markdown(&[0; 16], 1024 * 1024)
+            .unwrap_err()
+            .starts_with("UNSUPPORTED:"));
+    }
+
+    /// Markdown is rendered by downstream Markdown/HTML consumers: DOC text
+    /// and hyperlink field targets must stay literal text and form no script
+    /// link, raw HTML or Markdown structure of their own.
+    #[test]
+    fn markdown_projection_keeps_hostile_text_literal() {
+        const INLINE: &str = "<img src=x onerror=alert(1)> [x](javascript:alert(1)) https://evil.example/ www.evil.example a@evil.example ~~del~~ &copy; `c`";
+        let text = format!(
+            "{INLINE}\r# forged heading\r| a | b |\u{b}| :-- | --: |\u{b}forged | row\r```\u{b}> quoted\r- item\r1. item\r===\r\u{13}HYPERLINK \"javascript:alert(1)\"\u{14}script\u{15}\r\u{13}HYPERLINK \"https://e.example/x) [y](https://evil.example/\"\u{14}safe\u{15}\r"
+        );
+        let markdown = super::super::direct_markdown(&source(&text), 1024 * 1024).unwrap();
+        let gfm = ooxml_common::markdown::gfm_check::summarize(&markdown);
+
+        assert!(!markdown.contains("javascript:alert(1)\")"), "{markdown}");
+        assert!(!markdown.contains("](javascript:"), "{markdown}");
+        assert_eq!(
+            (gfm.headings.len(), gfm.tables, gfm.images, gfm.html),
+            (0, 0, 0, 0),
+            "{markdown}"
+        );
+        assert_eq!(
+            (gfm.strikethrough, gfm.code, gfm.block_quotes),
+            (0, 0, 0),
+            "{markdown}"
+        );
+        assert_eq!((gfm.list_items, gfm.thematic_breaks), (0, 0), "{markdown}");
+        // The one link is the well-formed HTTPS field; its target cannot
+        // close the destination and open a second link.
+        assert_eq!(gfm.links, 1, "{markdown}");
+        assert!(
+            markdown.contains("[safe](https://e.example/x%29%20[y]%28https://evil.example/)"),
+            "{markdown}"
+        );
+        for literal in [
+            INLINE,
+            "# forged heading",
+            "| a | b |",
+            "| :-- | --: |",
+            "forged | row",
+            "```",
+            "> quoted",
+            "- item",
+            "1. item",
+            "===",
+            "script",
+        ] {
+            assert!(gfm.text.contains(literal), "{literal:?} in {markdown}");
+        }
+    }
+
     /// The first numbered paragraph's marker, as the byte route's DOCX parser
     /// projected it before that route was removed.
     const NUMBERED_MARKER: &str = r#"{"fontFacts":{"fontFamily":"Test Font","fontFamilyEastAsia":"Test Font","fontFamilyHighAnsi":"Test Font","fontSize":10.0,"fontSizeCs":10.0,"fontSlots":{"direct":{"ascii":"Test Font","eastAsia":"Test Font","highAnsi":"Test Font"},"theme":{},"themePresent":{"ascii":false,"complexScript":false,"eastAsia":false,"highAnsi":false}}},"fontFamily":"Test Font","fontFamilyEastAsia":"Test Font","format":"decimal","indentLeft":0.0,"jc":"left","level":0,"numId":1,"suff":"tab","tab":0.0,"text":"1."}"#;

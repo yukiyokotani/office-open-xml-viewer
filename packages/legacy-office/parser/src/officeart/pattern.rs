@@ -14,12 +14,12 @@
 //!
 //! `CELLS` repeats the cell artwork the shared renderer paints for each
 //! preset (measured from PowerPoint's PDF export; a unit test compares the two
-//! tables). The three presets with half-covered edge cells have no two-colour
+//! tables). The XLS reader looks its pattern bitmaps up in the same table. The three presets with half-covered edge cells have no two-colour
 //! equivalent there: their bitmap takes the nearest preset like any other
 //! bitmap without an exact match.
 
 /// `#` foreground, `.` background, `+` half covered; rows separated by `/`.
-const CELLS: [(&str, &str); 54] = [
+pub(crate) const CELLS: [(&str, &str); 54] = [
     (
         "pct5",
         "#......./......../......../......../....#.../......../......../........",
@@ -238,23 +238,30 @@ const CELLS: [(&str, &str); 54] = [
     ),
 ];
 
+/// The foreground cells of one `CELLS` artwork, one byte per row with the
+/// leftmost cell in bit 7. Half-covered (`+`) cells count as background.
+pub(crate) fn artwork_cells(artwork: &str) -> [u8; 8] {
+    let mut cells = [0u8; 8];
+    for (row, line) in cells.iter_mut().zip(artwork.split('/')) {
+        for (column, cell) in line.bytes().enumerate() {
+            *row |= u8::from(cell == b'#') << (7 - column);
+        }
+    }
+    cells
+}
+
 /// The preset whose cells equal `rows` (bit 7 of each row is the left cell,
 /// a set bit the foreground). A half-covered preset cell is the anti-aliased
 /// edge of a one-cell diagonal and counts as background, which no stored
 /// bitmap has confirmed yet. A bitmap that equals no preset keeps its tone:
 /// it takes the percentage preset with the nearest share of foreground cells.
+#[cfg(any(test, feature = "direct-doc"))]
 pub(crate) fn preset(rows: [u8; 8]) -> &'static str {
     const SITE: &str = "pattern fill bitmap without an equal preset pattern";
-    let cells = |artwork: &str| {
-        let mut cells = [0u8; 8];
-        for (row, line) in cells.iter_mut().zip(artwork.split('/')) {
-            for (column, cell) in line.bytes().enumerate() {
-                *row |= u8::from(cell == b'#') << (7 - column);
-            }
-        }
-        cells
-    };
-    if let Some((name, artwork)) = CELLS.iter().find(|(_, artwork)| cells(artwork) == rows) {
+    if let Some((name, artwork)) = CELLS
+        .iter()
+        .find(|(_, artwork)| artwork_cells(artwork) == rows)
+    {
         if artwork.contains('+') {
             crate::rejection::approximated(SITE, ());
         }
@@ -267,7 +274,7 @@ pub(crate) fn preset(rows: [u8; 8]) -> &'static str {
         CELLS
             .iter()
             .filter(|(name, _)| name.starts_with("pct"))
-            .min_by_key(|(_, artwork)| coverage(cells(artwork)).abs_diff(wanted))
+            .min_by_key(|(_, artwork)| coverage(artwork_cells(artwork)).abs_diff(wanted))
             .map_or("pct50", |(name, _)| name),
     )
 }
@@ -277,6 +284,7 @@ pub(crate) fn preset(rows: [u8; 8]) -> &'static str {
 /// 10x10 bitmap it stores), one bit per pixel, set for white. `None` when
 /// the image is anything else or has a pixel that is not opaque black or
 /// white: such a BLIP is not a two-colour pattern.
+#[cfg(any(test, feature = "direct-doc"))]
 pub(crate) fn cells(png: &[u8]) -> Option<[u8; 8]> {
     // A two-colour 10x10 bitmap is far below this in every PNG encoding.
     if png.len() > 4096 || !png.starts_with(b"\x89PNG\r\n\x1a\n") {

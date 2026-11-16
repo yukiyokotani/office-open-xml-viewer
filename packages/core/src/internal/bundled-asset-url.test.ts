@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resolveBundledAssetUrl } from './bundled-asset-url.js';
+import { realmBaseUrl, resolveBundledAssetUrl } from './bundled-asset-url.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -42,5 +42,21 @@ describe('bundled model-source assets', () => {
     vi.stubGlobal('location', undefined);
     expect(resolveBundledAssetUrl('/opt/reader.wasm', owner)).toBe('file:///opt/reader.wasm');
     expect(resolveBundledAssetUrl('./reader.mjs', owner)).toBe('file:///build/package/reader.mjs');
+  });
+});
+
+describe('realm base URL (#2212)', () => {
+  it('uses the document base URL, which honours <base href>, over the window location', () => {
+    vi.stubGlobal('location', { href: 'vscode-webview://panel/index.html?id=1' });
+    vi.stubGlobal('document', { baseURI: 'https://ext.example.test/dist/' });
+    expect(realmBaseUrl()).toBe('https://ext.example.test/dist/');
+    expect(resolveBundledAssetUrl('/assets/source.mjs', owner))
+      .toBe('https://ext.example.test/assets/source.mjs');
+  });
+
+  it('uses the worker location in a realm without a document', () => {
+    vi.stubGlobal('document', undefined);
+    vi.stubGlobal('location', { href: 'https://app.example.test/assets/worker.js' });
+    expect(realmBaseUrl()).toBe('https://app.example.test/assets/worker.js');
   });
 });

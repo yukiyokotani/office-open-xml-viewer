@@ -34,6 +34,7 @@
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import { nullRecord } from '../internal/own-key.js';
+import { realmBaseUrl } from '../internal/bundled-asset-url.js';
 import {
   HARD_MAX_FONT_SOURCE_DECLARATIONS,
   HARD_MAX_FONT_SOURCE_FACE_BYTES,
@@ -408,14 +409,6 @@ export function dataUrlDecodedByteLength(url: string): number | undefined {
   if (!base64) return bytes;
   if (bytes % 4 === 0) bytes -= Math.min(trailingEquals, 2);
   return Math.floor(bytes * 3 / 4);
-}
-
-/** The calling realm's base for relative application URLs; undefined in a
- * realm without one (Node), where relative URLs are rejected. */
-function realmBaseUrl(): string | undefined {
-  const scope = globalThis as { document?: { baseURI?: unknown }; location?: { href?: unknown } };
-  const base = scope.document?.baseURI ?? scope.location?.href;
-  return typeof base === 'string' ? base : undefined;
 }
 
 /**

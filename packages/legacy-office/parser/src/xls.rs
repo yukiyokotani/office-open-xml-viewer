@@ -6,8 +6,9 @@
 //! conditional formatting, tables, hyperlinks, filters, validation, defined
 //! names, PivotTable layout, charts, pictures and shapes into the XLSX
 //! renderer model (see `direct`). Formula token programs, external links and
-//! macros are never evaluated or copied; drawn content the model cannot carry
-//! fails closed. Anchored drawings require host-measured Normal-font metrics.
+//! macros are never evaluated or copied. A macro sheet is projected as the
+//! grid Excel shows for it and a dialog sheet as the model's dialog sheet.
+//! Anchored drawings require host-measured Normal-font metrics.
 //! See [MS-XLS] 2.4 for record structures and 2.5.293 for BIFF8
 //! Unicode strings. FILEPASS and pre-BIFF8 workbooks fail closed.
 
@@ -17,6 +18,7 @@ use crate::cfb::CompoundFile;
 
 mod cell_formulas;
 mod chart;
+mod comments;
 mod conditional;
 pub(crate) mod direct;
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -59,9 +61,14 @@ const MERGEDCELLS: u16 = 0x00e5;
 const BIFF8: u16 = 0x0600;
 const WORKBOOK_GLOBALS: u16 = 0x0005;
 const WORKSHEET: u16 = 0x0010;
+/// MS-XLS 2.4.21 BOF dt of a macro sheet substream.
+const MACRO_SHEET: u16 = 0x0040;
 const MAX_RECORDS: usize = 2_000_000;
 const MAX_SHEETS: usize = 65_536;
 const MAX_CELLS: usize = 10_000_000;
+/// Resource policy for the PhoneticInfo ranges of one sheet. One record
+/// holds at most 1027.
+const MAX_PHONETIC_RANGES: usize = 16_384;
 
 #[cfg(all(feature = "inspection", not(target_arch = "wasm32")))]
 pub(crate) fn inspect_images(cfb: &CompoundFile<'_>) -> Result<Vec<drawing_media::Media>, String> {
@@ -100,7 +107,7 @@ pub(crate) fn inspect_pictures(
     let images = drawing_media::selected(
         &records,
         &indices,
-        crate::officeart::raster::Raster::Advertised,
+        crate::officeart::raster::Raster::ExcelAdvertised,
     )?;
     let supported: HashSet<u32> = images.iter().map(|i| i.0).collect();
     anchors.retain(|a| {
@@ -153,6 +160,13 @@ struct SheetData {
     conditional_formats: Vec<xlsx_model::ConditionalFormat>,
     /// A chart sheet's chart; such a sheet has no cells.
     chart_sheet: Option<chart::ChartSheet>,
+    /// The sheet is a dialog sheet: MS-XLS 2.4.351 WsBool fDialog, and (once
+    /// the drawings are read) a dialog frame object on it.
+    dialog: bool,
+    /// MS-XLS 2.4.179 Note records (cell comments), in order.
+    notes: comments::Notes,
+    /// Their XLSX-model projection.
+    comments: Vec<xlsx_model::XlsxComment>,
     /// MS-XLS 2.4.113 FeatHdr11, 2.4.114 Feature11, 2.4.115 Feature12 and
     /// 2.4.157 List12 records (tables), in stream order.
     table_records: tables::Records,
@@ -180,9 +194,10 @@ struct SheetData {
     data_validations: Vec<xlsx_model::DataValidation>,
     /// Defined names visible on this sheet.
     defined_names: Vec<xlsx_model::DefinedName>,
-    /// A cell, row or column shows phonetic guides (MS-XLS 2.4.192
-    /// PhoneticInfo sqref, ROW/COLINFO fPhonetic).
-    shows_phonetic: bool,
+    /// The cell ranges whose phonetic strings are visible (MS-XLS 2.4.192
+    /// PhoneticInfo sqref): zero-based first row, last row, first column,
+    /// last column.
+    phonetic_ranges: Vec<[u16; 4]>,
     /// FORMULA, SHRFMLA, ARRAY and TABLE records, in order.
     formula_records: tables::Records,
     /// Formula text by cell.
@@ -242,6 +257,23 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     }
 
     let styles = styles::Styles::parse(&records)?;
+    // Phonetic strings are read only for a workbook that shows one: most
+    // East Asian workbooks store them without displaying any.
+    let phonetic = {
+        // As the worksheet reader, which passes over the records of a saved
+        // custom view (UserSViewBegin to UserSViewEnd).
+        let mut custom_view = false;
+        records.iter().any(|record| {
+            match record.kind {
+                0x01aa => custom_view = true,
+                0x01ab => custom_view = false,
+                _ => {}
+            }
+            !custom_view
+                && record.kind == 0x00ef
+                && u16_at(record.data, 4).is_ok_and(|count| count != 0)
+        })
+    };
     let mut date1904 = false;
     let mut window_count = 0;
     let mut sheets = Vec::new();
@@ -273,7 +305,7 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                     fragments.push(next.data);
                     continued += 1;
                 }
-                shared_strings = parse_sst_elements(&fragments)?;
+                shared_strings = parse_sst_elements(&fragments, phonetic)?;
                 saw_sst = true;
             }
             _ => {}
@@ -319,8 +351,8 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
             // MS-XLS 2.4.28 BoundSheet8.dt: 1 macro sheet, 2 chart sheet, 6 VB
             // module. A VB module has no sheet content to display. Chart
             // sheets are projected (their charts are parsed once all
-            // worksheets they reference are read); macro sheets are rejected
-            // rather than dropping tabs whose cells Excel shows.
+            // worksheets they reference are read). A macro sheet is a grid of
+            // cells like a worksheet and keeps its tab (below).
             if sheet.sheet_type == 2 {
                 pending_chart_sheets.push((converted.len(), sheet.offset));
                 converted.push((
@@ -333,15 +365,15 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                 tabs.push(tab);
                 continue;
             }
-            if sheet.sheet_type != 6 {
-                return Err(unsupported(match sheet.sheet_type {
-                    1 => "XLS macro sheets are not projected",
-                    _ => "unknown XLS sheet type",
-                }));
+            if sheet.sheet_type == 6 {
+                skipped_non_worksheets = true;
+                continue;
             }
-            skipped_non_worksheets = true;
-            continue;
+            if sheet.sheet_type != 1 {
+                return Err(crate::rejection::corrupt("unknown XLS sheet type"));
+            }
         }
+        let macro_sheet = sheet.sheet_type == 1;
         let mut data = parse_sheet(&records, &sheet, &shared_strings)?;
         if let Some(ext) = data.sheet_ext.as_deref() {
             if conditional_theme.is_none() {
@@ -360,11 +392,6 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                 hyperlinks::tooltip(record)?;
             }
         }
-        // Phonetic guides (ExtRst runs in the shared strings) are not
-        // projected; a sheet that displays them fails closed.
-        if data.shows_phonetic {
-            return Err(unsupported("XLS phonetic guides are not projected"));
-        }
         if !data.formula_records.is_empty() {
             if conditional_theme.is_none() {
                 conditional_theme = Some((
@@ -373,7 +400,11 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
                 ));
             }
             let (_, externs) = conditional_theme.as_ref().expect("parsed theme");
-            data.formulas = cell_formulas::project(data.formula_records.iter(), externs)?;
+            data.formulas =
+                cell_formulas::project(data.formula_records.iter(), externs, macro_sheet)?;
+        }
+        if macro_sheet {
+            show_macro_formulas(&mut data);
         }
         if has_names {
             if conditional_theme.is_none() {
@@ -494,8 +525,8 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     // cached results, as the XLSX model does. Print areas and titles are
     // defined names; page setup, headers and footers (including 2.4.136
     // HeaderFooter) only affect printing, which neither the XLSX model nor
-    // its viewer has. Phonetic strings (ExtRst) display only in cells marked
-    // by PhoneticInfo, ROW or COLINFO, which are rejected above.
+    // its viewer has. Phonetic strings (ExtRst) display in the cells of the
+    // PhoneticInfo ranges (see `direct`).
     let mut warnings: Vec<String> = Vec::new();
     // XFExt colors, indentation and gradient fills are projected; StyleExt
     // (2.4.270) only extends the cell-style gallery entries, which cells
@@ -514,20 +545,51 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     if skipped_non_worksheets {
         warnings.push("legacy-xls:non-worksheet-tabs-omitted".into());
     }
+    // A worksheet that only carries the flag, without a dialog frame (Obj
+    // ot 15), is projected as the grid it stores.
+    if converted.iter().any(|(_, sheet)| sheet.dialog) {
+        let frames: std::collections::BTreeSet<usize> = drawing_anchors::strict(&records)?
+            .into_iter()
+            .filter(|anchor| anchor.object_type == 15)
+            .map(|anchor| anchor.sheet)
+            .collect();
+        for (tab, (_, sheet)) in tabs.iter().zip(&mut converted) {
+            sheet.dialog &= frames.contains(tab);
+        }
+    }
     let filters: BTreeMap<usize, &xlsx_model::CellRange> = tabs
         .iter()
         .zip(&converted)
         .filter_map(|(&tab, (_, sheet))| sheet.auto_filter.as_ref().map(|range| (tab, range)))
         .collect();
-    validate_direct_drawings(&records, &tabs, &filters)?;
+    // The objects of a dialog sheet are its dialog frame and controls. The
+    // model's dialog sheet (ECMA-376 18.3.1.34) has no drawing layer, so no
+    // drawing of such a tab is prepared: its entry names no BoundSheet.
+    let drawing_tabs: Vec<usize> = tabs
+        .iter()
+        .zip(&converted)
+        .map(|(&tab, (_, sheet))| if sheet.dialog { usize::MAX } else { tab })
+        .collect();
+    let comment_texts = validate_direct_drawings(&records, &tabs, &drawing_tabs, &filters)?;
+    let mut comment_budget = rich::MAX_MODEL_BYTES;
+    for (&tab, (_, sheet)) in drawing_tabs.iter().zip(&mut converted) {
+        if !sheet.notes.is_empty() {
+            sheet.comments = comments::project(
+                &sheet.notes,
+                &records,
+                |object| comment_texts.get(&(tab, object)).copied(),
+                &mut comment_budget,
+            )?;
+        }
+    }
     // Rectangles, text boxes, freeforms and their groups.
-    let mut shapes = shapes::Shapes::prepare(&records, &tabs, &styles)?;
+    let mut shapes = shapes::Shapes::prepare(&records, &drawing_tabs, &styles)?;
     let grouped_pictures = shapes.picture_indices();
     // Excel displays GDI+ metafiles with their short end-of-file record, so
     // their rasters are admitted as Excel draws them.
     let pictures = pictures::Pictures::prepare(
         &records,
-        &tabs,
+        &drawing_tabs,
         crate::officeart::raster::Raster::ExcelMetafiles,
         &grouped_pictures,
     )
@@ -584,20 +646,47 @@ fn prepare_workbook(workbook: &[u8]) -> Result<PreparedXls, String> {
     })
 }
 
-/// The direct reader must not drop drawn content: every sheet-anchored
-/// drawing object on a projected worksheet is an embedded chart (MS-XLS
-/// 2.4.181 ot 5 with its chart substream), a picture (ot 8 with a BLIP
-/// reference), a rectangle, text box or freeform polygon (ot 2, 6 or 9) or a
-/// group (ot 0) of those and pictures; any other object (lines, ovals,
-/// controls, cell comments), grouped charts, or a chart/picture without its data
-/// is rejected with the reason. `shapes` validates each shape's properties.
+/// Every sheet-anchored drawing object on a projected worksheet is an
+/// embedded chart (MS-XLS 2.4.181 ot 5 with its chart substream), a picture
+/// (ot 8 with a BLIP reference), a shape (line, rectangle, oval, arc, text
+/// box, polygon or OfficeArt shape: `shapes`), a group (ot 0) of shapes and
+/// pictures, a cell comment (ot 25, see `comments`) or a form control, which
+/// is not drawn. A grouped chart, or a chart/picture without its data, is
+/// rejected with the reason. `shapes` reads each shape's properties.
+///
+/// Returns the stream offset of each comment object's TxO, by BoundSheet tab
+/// and object identifier.
+///
+/// `sheets` are the tabs of every projected sheet and `tabs` those whose
+/// drawings are drawn (a dialog sheet's are not, but their records are
+/// still read).
 fn validate_direct_drawings(
     records: &[Record<'_>],
+    sheets: &[usize],
     tabs: &[usize],
     filters: &BTreeMap<usize, &xlsx_model::CellRange>,
-) -> Result<(), String> {
+) -> Result<BTreeMap<(usize, u16), usize>, String> {
     let projected: std::collections::BTreeSet<_> = tabs.iter().copied().collect();
+    let mut comment_texts = BTreeMap::new();
     for anchor in drawing_anchors::strict(records)? {
+        // A form control is not drawn, but the TxO of its caption is part
+        // of the sheet's records and must be one.
+        if sheets.contains(&anchor.sheet) {
+            let controls = std::iter::once((anchor.object_type, anchor.shape.as_ref())).chain(
+                anchor
+                    .members
+                    .iter()
+                    .map(|member| (member.object_type, member.shape.as_ref())),
+            );
+            for (kind, shape) in controls {
+                if let Some(text) = shape
+                    .filter(|_| shapes::form_control(kind))
+                    .and_then(|shape| shape.text)
+                {
+                    shapes::txo_text(records, text)?;
+                }
+            }
+        }
         if !projected.contains(&anchor.sheet) {
             continue;
         }
@@ -612,8 +701,15 @@ fn validate_direct_drawings(
             continue;
         }
         admit_direct_object(&anchor)?;
+        if anchor.object_type == 25 {
+            if let Some(text) = anchor.shape.as_ref().and_then(|shape| shape.text) {
+                // Read whether or not a Note names the object.
+                shapes::txo_text(records, text)?;
+                comment_texts.insert((anchor.sheet, anchor.object_id), text);
+            }
+        }
     }
-    Ok(())
+    Ok(comment_texts)
 }
 
 fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), String> {
@@ -623,19 +719,27 @@ fn admit_direct_object(anchor: &drawing_anchors::DrawingAnchor) -> Result<(), St
             5 => return Err(unsupported("BIFF chart object without its chart substream")),
             8 if anchor.picture.is_some() => {}
             8 => return Err(unsupported("BIFF picture object without a BLIP reference")),
-            2 | 6 | 9 => {}
+            kind if shapes::shape_object(kind) => {}
             0 => {
-                if let Some(member) = anchor.members.iter().find(|member| {
-                    !matches!(member.object_type, 2 | 6 | 9)
+                for member in &anchor.members {
+                    if shapes::form_control(member.object_type) {
+                        crate::rejection::skipped("BIFF drawing object type is not projected");
+                    } else if !shapes::shape_object(member.object_type)
                         && !(member.object_type == 8 && member.picture.is_some())
-                }) {
-                    return Err(unsupported(format!(
-                        "grouped BIFF drawing object type {} is not projected",
-                        member.object_type
-                    )));
+                    {
+                        return Err(unsupported(format!(
+                            "grouped BIFF drawing object type {} is not projected",
+                            member.object_type
+                        )));
+                    }
                 }
             }
-            25 => return Err(unsupported("BIFF cell comments are not projected")),
+            // A cell comment: its Note is the model's comment.
+            25 => {}
+            // A form control has no counterpart in the model.
+            kind if shapes::form_control(kind) => {
+                crate::rejection::skipped("BIFF drawing object type is not projected");
+            }
             kind => {
                 return Err(unsupported(format!(
                     "BIFF drawing object type {kind} is not projected"
@@ -684,19 +788,62 @@ mod direct_drawing_tests {
                 auto_picture: false,
             })
         };
+        use crate::rejection::{take_best_effort, BestEffort};
+        take_best_effort();
         assert!(super::admit_direct_object(&anchor(5, Some((1, 2)), None)).is_ok());
         assert!(super::admit_direct_object(&anchor(8, None, picture())).is_ok());
+        // A comment object is its cell's note, not a drawing; lines, ovals,
+        // arcs and OfficeArt shapes are shapes.
+        for kind in [25, 1, 2, 3, 4, 6, 9, 30] {
+            assert!(super::admit_direct_object(&anchor(kind, None, None)).is_ok());
+        }
+        assert!(take_best_effort().is_empty());
+        // A form control is not drawn.
+        for kind in [7, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] {
+            assert!(super::admit_direct_object(&anchor(kind, None, None)).is_ok());
+            assert_eq!(
+                take_best_effort(),
+                [(
+                    BestEffort::Skipped,
+                    "BIFF drawing object type is not projected"
+                )]
+            );
+        }
         for (kind, chart, expected) in [
             (5, None, "without its chart substream"),
             (8, None, "without a BLIP reference"),
-            (25, None, "cell comments"),
-            (1, None, "type 1 is not projected"),
-            (3, None, "type 3 is not projected"),
-            (4, None, "type 4 is not projected"),
+            (10, None, "type 10 is not projected"),
         ] {
             let error = super::admit_direct_object(&anchor(kind, chart, None)).unwrap_err();
             assert!(error.contains(expected), "{expected}: {error}");
         }
+        // Group members: shapes and pictures are drawn, a form control is
+        // not, a chart cannot be grouped.
+        let member = |object_type, picture| super::drawing_anchors::GroupMember {
+            order: 2,
+            shape_id: 2,
+            shape_flags: 0xa02,
+            object_id: 2,
+            object_type,
+            anchor: [0, 0, 1, 1],
+            groups: Vec::new(),
+            shape: None,
+            picture,
+        };
+        let mut group = anchor(0, None, None);
+        group.members = vec![member(3, None), member(8, picture()), member(11, None)];
+        assert!(super::admit_direct_object(&group).is_ok());
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Skipped,
+                "BIFF drawing object type is not projected"
+            )]
+        );
+        group.members = vec![member(5, None)];
+        assert!(super::admit_direct_object(&group)
+            .unwrap_err()
+            .contains("grouped BIFF drawing object type 5"));
     }
 }
 
@@ -849,13 +996,15 @@ fn parse_bound_sheet(data: &[u8]) -> Result<BoundSheet, String> {
 
 #[cfg(test)]
 fn parse_sst(fragments: &[&[u8]]) -> Result<Vec<String>, String> {
-    Ok(parse_sst_elements(fragments)?
+    Ok(parse_sst_elements(fragments, false)?
         .into_iter()
         .map(|s| s.text)
         .collect())
 }
 
-fn parse_sst_elements(fragments: &[&[u8]]) -> Result<Vec<rich::Text>, String> {
+/// `phonetic` reads each string's ExtRst (its phonetic string); otherwise
+/// that data is passed over.
+fn parse_sst_elements(fragments: &[&[u8]], phonetic: bool) -> Result<Vec<rich::Text>, String> {
     let total_bytes = fragments.iter().try_fold(0usize, |total, fragment| {
         total
             .checked_add(fragment.len())
@@ -933,8 +1082,18 @@ fn parse_sst_elements(fragments: &[&[u8]]) -> Result<Vec<rich::Text>, String> {
             let bytes = cursor.read_variable_four()?;
             runs.push((u16_at(&bytes, 0)?, u16_at(&bytes, 2)?));
         }
-        cursor.skip_variable(ext_size)?;
         let value = rich::Text::new(&units, &runs)?;
+        let value = if phonetic && ext_size != 0 {
+            // The extension is part of the SST the fragments hold, which
+            // bounds this buffer.
+            if ext_size > total_bytes {
+                return Err(unsupported("truncated BIFF rich or extended string data"));
+            }
+            value.with_phonetic(&units, &cursor.read_variable(ext_size)?)?
+        } else {
+            cursor.skip_variable(ext_size)?;
+            value
+        };
         retention_budget = retention_budget
             .checked_sub(value.retained_bytes()?)
             .ok_or_else(|| {
@@ -1045,6 +1204,24 @@ impl<'a, 'b> SstCursor<'a, 'b> {
         Ok(result)
     }
 
+    /// The next `remaining` bytes of a variable field, which may cross
+    /// CONTINUE records without a compression flag.
+    fn read_variable(&mut self, mut remaining: usize) -> Result<Vec<u8>, String> {
+        let mut output = Vec::with_capacity(remaining);
+        while remaining > 0 {
+            self.advance_empty_fragments();
+            let fragment = self
+                .fragments
+                .get(self.fragment)
+                .ok_or_else(|| unsupported("truncated BIFF rich or extended string data"))?;
+            let take = remaining.min(fragment.len() - self.offset);
+            output.extend_from_slice(&fragment[self.offset..self.offset + take]);
+            self.offset += take;
+            remaining -= take;
+        }
+        Ok(output)
+    }
+
     fn skip_variable(&mut self, mut remaining: usize) -> Result<(), String> {
         while remaining > 0 {
             self.advance_empty_fragments();
@@ -1131,6 +1308,23 @@ fn decode_biff_chars(
     Ok((value, byte_count))
 }
 
+/// A macro sheet (MS-XLS 2.1.7.20.3) is a grid whose window shows formulas
+/// (2.4.346 Window2 fDspFmlaRt), as Excel creates it. Excel draws and prints
+/// each formula cell of such a sheet as `=` and its formula text; the model
+/// has no formula view, so those cells carry that text as their value. A
+/// member of a shared or array formula other than its anchor has no formula
+/// text of its own (see `cell_formulas`) and keeps its cached value.
+fn show_macro_formulas(data: &mut SheetData) {
+    if !data.views.displays_formulas() {
+        return;
+    }
+    for (&(row, column), text) in &data.formulas {
+        if let Some(value) = data.rows.get_mut(&row).and_then(|row| row.get_mut(&column)) {
+            *value = CellValue::Text(format!("={text}"));
+        }
+    }
+}
+
 fn parse_sheet(
     all_records: &[Record<'_>],
     sheet: &BoundSheet,
@@ -1140,7 +1334,12 @@ fn parse_sheet(
         .binary_search_by_key(&sheet.offset, |record| record.offset)
         .map_err(|_| unsupported("BOUNDSHEET8 points outside the BIFF record stream"))?;
     let bof = all_records[start_index];
-    if bof.kind != BOF || u16_at(bof.data, 0)? != BIFF8 || u16_at(bof.data, 2)? != WORKSHEET {
+    let expected = if sheet.sheet_type == 1 {
+        MACRO_SHEET
+    } else {
+        WORKSHEET
+    };
+    if bof.kind != BOF || u16_at(bof.data, 0)? != BIFF8 || u16_at(bof.data, 2)? != expected {
         return Err(unsupported(
             "BOUNDSHEET8 does not point to a BIFF8 worksheet",
         ));
@@ -1156,8 +1355,19 @@ fn parse_sheet(
     let mut custom_view = false;
     let mut previous_kind = 0u16;
     let mut pivot_continues = false;
+    let mut filter_continues = 0u64;
     for record in &all_records[start_index + 1..] {
         let prior_kind = std::mem::replace(&mut previous_kind, record.kind);
+        // AutoFilter12 (2.4.7): one ContinueFrt12 follows per criterion and
+        // per date grouping.
+        if filter_continues != 0 {
+            // ContinueFrt12 (2.4.62): its FrtRefHeader, then the item.
+            if record.kind != 0x087f || record.data.len() <= 12 || u16_at(record.data, 0)? != 0x087f
+            {
+                return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));
+            }
+            filter_continues -= 1;
+        }
         // PIVOTIVD, PIVOTPI and PIVOTLI (2.1.7.20.5) continue their record.
         let pivot_continue = record.kind == CONTINUE && pivot_continues;
         pivot_continues = pivots::continued(record.kind) || pivot_continue;
@@ -1332,12 +1542,70 @@ fn parse_sheet(
             }
             0x01b8 | 0x0800 => output.hyperlink_records.push(record.kind, record.data)?,
             0x009d => output.autofilter_info = Some(u16_at(record.data, 0)?),
-            0x009b | 0x009e | 0x087e => output.autofilter_criteria = true,
+            // FilterMode (2.4.117, empty), AutoFilter (2.4.6: iEntry, flags
+            // and two 10-byte DOPERs) and AutoFilter12 (2.4.7, after its
+            // FrtRefHeader): their criteria are not drawn, their framing is
+            // still checked.
+            0x009b | 0x009e | 0x087e => {
+                let framed = match record.kind {
+                    0x009b => record.data.is_empty(),
+                    0x009e => filters::criteria_framed(record.data),
+                    // FrtRefHeader, then the fixed fields through guidSview
+                    // and rgb: nothing for criteria (ft 0), a DXFN12NoCB
+                    // for a cell or font color (1, 2), an AF12CellIcon (3).
+                    _ => {
+                        record.data.len() >= 60
+                            && u16_at(record.data, 0)? == 0x087e
+                            && match u32_at(record.data, 18)? {
+                                0 => true,
+                                // At least the DXFN header (flags).
+                                1 | 2 => record.data.len() >= 66,
+                                3 => record.data.len() >= 68,
+                                _ => false,
+                            }
+                    }
+                };
+                if !framed {
+                    return Err(crate::rejection::corrupt("invalid BIFF AutoFilter record"));
+                }
+                if record.kind == 0x087e && u32_at(record.data, 18)? == 0 {
+                    // cCriteria and cDateGroupings (ignored unless ft is
+                    // zero), after iEntry, fHideArrow, ft and cft.
+                    filter_continues =
+                        u64::from(u32_at(record.data, 26)?) + u64::from(u32_at(record.data, 30)?);
+                }
+                output.autofilter_criteria = true;
+            }
             0x04bc | 0x0221 | 0x0236 => output.formula_records.push(record.kind, record.data)?,
-            0x00ef => output.shows_phonetic |= u16_at(record.data, 4)? != 0,
-            0x0208 => output.shows_phonetic |= u16_at(record.data, 14)? & 0x4000 != 0,
-            0x007d => output.shows_phonetic |= u16_at(record.data, 8)? & 0x0008 != 0,
+            // PhoneticInfo: phs (the default format of new phonetic
+            // strings), then the SqRef of the cells that show theirs. ROW and
+            // COLINFO fPhonetic only say that some cell of the row shows one
+            // and what a new cell of the column does.
+            0x00ef => {
+                let count = usize::from(u16_at(record.data, 4)?);
+                if record.data.len() != 6 + count * 8 {
+                    return Err(crate::rejection::corrupt("invalid BIFF phonetic ranges"));
+                }
+                for index in 0..count {
+                    let at = 6 + index * 8;
+                    let range = [
+                        u16_at(record.data, at)?,
+                        u16_at(record.data, at + 2)?,
+                        u16_at(record.data, at + 4)?,
+                        u16_at(record.data, at + 6)?,
+                    ];
+                    if range[0] > range[1] || range[2] > range[3] || range[3] > 255 {
+                        return Err(crate::rejection::corrupt("invalid BIFF phonetic ranges"));
+                    }
+                    if output.phonetic_ranges.len() >= MAX_PHONETIC_RANGES {
+                        return Err(crate::rejection::resource("too many BIFF phonetic ranges"));
+                    }
+                    output.phonetic_ranges.push(range);
+                }
+            }
             0x01b2 | 0x01be => output.validation_records.push(record.kind, record.data)?,
+            0x0081 => output.dialog = u16_at(record.data, 0)? & 0x0010 != 0,
+            0x001c => output.notes.push(record.data)?,
             0x0862 => {
                 if output.sheet_ext.replace(record.data.to_vec()).is_some() {
                     return Err(unsupported("duplicate BIFF sheet extension"));

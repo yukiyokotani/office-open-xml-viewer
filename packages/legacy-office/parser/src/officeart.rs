@@ -2,12 +2,12 @@
 use std::ops::Range;
 
 pub(crate) mod geometry;
-#[cfg(any(feature = "direct-doc", feature = "direct-ppt"))]
+#[cfg(any(feature = "direct-doc", feature = "direct-ppt", feature = "direct-xls"))]
 pub(crate) mod gradient;
-mod inflate;
+pub(crate) mod inflate;
 mod metafile;
 pub(crate) mod paint;
-#[cfg(any(test, feature = "direct-doc"))]
+#[cfg(any(test, feature = "direct-doc", feature = "direct-xls"))]
 pub(crate) mod pattern;
 pub(crate) mod preset;
 pub(crate) mod preset_defaults;

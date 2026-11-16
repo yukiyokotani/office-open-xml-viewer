@@ -85,6 +85,11 @@ with `unsupported-content` when they meet a structure they cannot map
 ([legacy-office-conversion.md](./legacy-office-conversion.md),
 [issue #2263](https://github.com/yukiyokotani/office-open-xml-viewer/issues/2263)).
 
+## Markdown export
+
+The OpenDocument sources do not offer Markdown export: `toMarkdown()` rejects
+with an "... is unsupported for this source" error.
+
 ## What is rendered
 
 - Text: paragraphs, headings, spans, white space (`text:s`, tabs, line

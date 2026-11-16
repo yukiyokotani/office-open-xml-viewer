@@ -52,7 +52,7 @@ pub(in crate::doc) struct Facts {
     /// its outline; see [`GeometryText`].
     pub geometry_text: Option<GeometryText>,
     /// A linear shade (msofillShade / msofillShadeScale) projected by the
-    /// shared OfficeArt rules; see `Paint::linear_shade`.
+    /// shared OfficeArt rules; see `Paint::shade`.
     pub gradient: Option<Gradient>,
     /// MS-ODRAW 2.3.13 shadow style, in the shape of the VML `v:shadow`
     /// the DOCX parser reads (the two state the same properties).
@@ -589,7 +589,7 @@ impl<'a> Table<'a> {
                 shade_paint
                     // Shade scratch and stops are bounded per shape; the
                     // retained stops are charged with the model payload.
-                    .linear_shade(&shade, true, budget, &mut (1usize << 20))?
+                    .shade(&shade, true, budget, &mut (1usize << 20))?
                     .map(|shade| -> Result<Gradient, String> {
                         let stops = shade
                             .projection

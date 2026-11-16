@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!-- #2212: the page's base URL differs from its location, as in the VS Code
+       webview, which points <base> at the extension's dist directory. -->
+  <base href="/dist/" />
+</head>
+<body data-status="loading">
+  <script type="importmap">
+    { "imports": { "@silurus/ooxml/internal/companion": "/dist/internal-companion.mjs" } }
+  </script>
+  <script type="module">
+    import { DocxDocument } from '/dist/docx.mjs';
+    import { XlsxWorkbook } from '/dist/xlsx.mjs';
+    import { PptxPresentation } from '/dist/pptx.mjs';
+
+    const loaders = { docx: DocxDocument, xlsx: XlsxWorkbook, pptx: PptxPresentation };
+    /** Load with a relative `wasmUrl`, which must resolve against <base>. */
+    window.loadWithRelativeWasm = async (format, mode) => {
+      const response = await fetch(`/packages/${format}/public/demo/sample-1.${format}`);
+      if (!response.ok) throw new Error(`${format} sample: ${response.status}`);
+      const loaded = await loaders[format].load(await response.arrayBuffer(), {
+        mode,
+        wasmUrl: `${format}_parser_bg.wasm`,
+      });
+      const effectiveMode = loaded.mode;
+      loaded.destroy();
+      return effectiveMode;
+    };
+    document.body.dataset.status = 'imported';
+  </script>
+</body>
+</html>

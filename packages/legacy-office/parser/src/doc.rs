@@ -113,6 +113,25 @@ pub(crate) fn direct_model(
     with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
 }
 
+/// GitHub-flavoured Markdown projection of a direct DOC source, through the
+/// shared `docx_model` Markdown renderer so a legacy DOC reads exactly like
+/// the equivalent DOCX. Projects from the source bytes on every call (see
+/// `doc_wasm::MarkdownSource`). The projection shares the DOCX Markdown hard
+/// ceiling; crossing it is a resource-limit rejection, not a truncated
+/// document.
+pub(crate) fn direct_markdown(data: &[u8], max_model_bytes: usize) -> Result<String, String> {
+    let cfb = CompoundFile::open(data).map_err(unsupported)?;
+    let result = direct_model(&cfb, max_model_bytes)?;
+    let limit = ooxml_common::resource::HARD_MAX_DOCX_MARKDOWN_BYTES;
+    let output = docx_model::markdown::render_document_with_limit(&result.document, limit);
+    if output.exceeded() {
+        return Err(crate::rejection::resource(
+            "DOC markdown projection exceeds its hard ceiling",
+        ));
+    }
+    Ok(output.into_string())
+}
+
 fn with_acquired_doc<T>(
     cfb: &CompoundFile<'_>,
     visit: impl FnOnce(AcquiredDoc<'_>) -> Result<T, String>,
