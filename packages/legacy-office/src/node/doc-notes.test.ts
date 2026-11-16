@@ -52,21 +52,28 @@ it.each([
   { label: 'partial continuation rule', kind: 'footnotes', separators: ['\u0003\r\r', '\u0003\r', '', '', '', ''] },
   { label: 'authored notice text', kind: 'footnotes', separators: ['\u0003\r\r', '\u0003\r\r', 'Notice\r\r', '', '', ''] },
   { label: 'endnote short continuation', kind: 'endnotes', separators: ['', '', '', '\u0003\r\r', '\u0003\r\r', ''] },
-] as const)('keeps $label outside native short/short admission', async ({ kind, separators }) => {
-  await expect(load(buildDocFixture({ text: 'Body\u0002\r',
+] as const)('draws the default separator for $label', async ({ kind, separators }) => {
+  // A separator story outside the model's reserved-story shapes: the note
+  // kind keeps the separator the layout draws without one.
+  const model = await load(buildDocFixture({ text: 'Body\u0002\r',
     [kind]: [{ cp: 4, text: '\u0002Note\r' }], noteSeparators: separators,
     characterProperties: new Uint8Array([0x55, 0x08, 1]),
-  }))).rejects.toMatchObject({ code: 'unsupported-content', details: { format: 'doc', reason: 'source-subset' } });
+  }));
+  expect(reservedSeparators(model)[kind === 'footnotes' ? 'footnote' : 'endnote']).toBeUndefined();
+  expect((model as unknown as Model)[kind]).toHaveLength(1);
 });
+
+interface ReservedSeparators { footnote?: unknown; endnote?: unknown }
+const reservedSeparators = (model: unknown): ReservedSeparators =>
+  (model as { __noteLayoutSettings: { reservedSeparators: ReservedSeparators } }).__noteLayoutSettings.reservedSeparators;
 
 const separatorSymbol = concat(little16(0x6a09), little16(0), little16(0x41));
 it.each([
   { label: 'ordinary control glyph', offset: 0, properties: separatorSymbol },
   { label: 'continuation content-mark glyph', offset: 4, properties: separatorSymbol },
   { label: 'notice content-mark glyph', offset: 6, properties: separatorSymbol },
-  { label: 'notice tracked insertion', offset: 6, properties: concat(little16(0x0801), new Uint8Array([1])) },
   { label: 'notice frame', offset: 6, properties: concat(little16(0x8418), little16(1440)) },
-])('refuses unsupported metric payload: $label', async ({ offset, properties }) => {
+])('draws the default separator for a metric payload the model does not hold: $label', async ({ offset, properties }) => {
   const text = 'Body\u0002\r';
   const footnotes = [{ cp: 4, text: '\u0002Note\r' }];
   const headerStart = text.length + footnotes[0].text.length + 1;
@@ -74,13 +81,30 @@ it.each([
   // remain valid, so this exercises separator eligibility rather than masking
   // it behind malformed references or unrelated body formatting.
   const start = headerStart + offset;
-  await expect(load(buildDocFixture({ text, footnotes, noteSeparators: shortFootnoteSeparators,
+  const model = await load(buildDocFixture({ text, footnotes, noteSeparators: shortFootnoteSeparators,
     fonts: [{ name: 'Arial', charset: 0 }],
     characterProperties: new Uint8Array([0x55, 0x08, 1]),
     formattingRuns: [
       { end: start, properties: new Uint8Array() },
       { end: start + 1, properties },
       { end: headerStart + 9, properties: new Uint8Array() },
+    ],
+  }));
+  expect(reservedSeparators(model).footnote).toBeUndefined();
+  expect((model as unknown as Model).footnotes).toHaveLength(1);
+});
+
+it('rejects a tracked insertion in a reserved separator story', async () => {
+  const text = 'Body\u0002\r';
+  const footnotes = [{ cp: 4, text: '\u0002Note\r' }];
+  const start = text.length + footnotes[0].text.length + 1 + 6;
+  await expect(load(buildDocFixture({ text, footnotes, noteSeparators: shortFootnoteSeparators,
+    fonts: [{ name: 'Arial', charset: 0 }],
+    characterProperties: new Uint8Array([0x55, 0x08, 1]),
+    formattingRuns: [
+      { end: start, properties: new Uint8Array() },
+      { end: start + 1, properties: concat(little16(0x0801), new Uint8Array([1])) },
+      { end: start + 3, properties: new Uint8Array() },
     ],
   }))).rejects.toMatchObject({ code: 'unsupported-content', details: { format: 'doc', reason: 'source-subset' } });
 });
