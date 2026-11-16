@@ -511,16 +511,39 @@ fn object_framed(data: &[u8]) -> bool {
         match kind {
             0x0000 => return size == 0 && at + 4 == data.len(),
             0x0013 => {
-                let Some(formula) = data.get(at + 4..at + 6) else {
+                // cbFContinued 0: the fields after the header are absent.
+                if size == 0 {
+                    return at + 4 == data.len();
+                }
+                let Some(length) = data.get(at + 4..at + 6) else {
                     return false;
                 };
-                let formula = usize::from(u16::from_le_bytes([formula[0], formula[1]]));
-                return data.len() >= at + 6 + formula + 8;
+                let length = usize::from(u16::from_le_bytes([length[0], length[1]]));
+                let Some(formula) = data.get(at + 6..at + 6 + length) else {
+                    return false;
+                };
+                return object_formula_framed(formula) && data.len() >= at + 6 + length + 8;
             }
             _ => at += 4 + size,
         }
     }
     false
+}
+
+/// Whether the bytes of an ObjFmla (MS-XLS 2.5.187) hold its
+/// ObjectParsedFormula (2.5.198.22): cce, four unused bytes and a complete
+/// token program of cce bytes. An empty ObjFmla holds none.
+pub(super) fn object_formula_framed(formula: &[u8]) -> bool {
+    if formula.is_empty() {
+        return true;
+    }
+    if formula.len() < 6 {
+        return false;
+    }
+    let size = usize::from(u16::from_le_bytes([formula[0], formula[1]]) & 0x7fff);
+    formula
+        .get(6..6 + size)
+        .is_some_and(|rgce| size == 0 || super::conditional::framed(rgce))
 }
 
 fn corner(bytes: &[u8], offset: usize) -> Result<CellCorner, String> {

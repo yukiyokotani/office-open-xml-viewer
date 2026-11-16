@@ -1206,8 +1206,7 @@ pub(super) fn txo_text(records: &[Record<'_>], offset: usize) -> Result<String, 
     if txo.len() != 18 + formula {
         return Err(unsupported("truncated BIFF TxO record"));
     }
-    // Its ObjectParsedFormula (2.5.198.22): cce, four unused bytes, rgce.
-    if formula != 0 && (formula < 6 || formula < 6 + usize::from(u16_at(txo, 18)? & 0x7fff)) {
+    if !drawing_anchors::object_formula_framed(&txo[18..]) {
         return Err(unsupported("truncated BIFF TxO record"));
     }
     let (units, mut next) = txo_characters(records, index, characters)?;
