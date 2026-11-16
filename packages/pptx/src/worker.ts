@@ -1,5 +1,4 @@
 import { importFontDemandCollector } from './font-demand-collector.js';
-import { indexedOfficeFaceWeight } from './office-face-weight.js';
 import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
@@ -135,7 +134,7 @@ self.onmessage = async (
         // keeping a second builder here would duplicate the bounded projection.
         preflightBuilder = request.progressiveLayout
           ? null
-          : new PresentationPreflightBuilder(bootstrap, { cjkFallback: request.cjkFallback, collectFontDemand: await collectorLoad, officeFaceWeight: indexedOfficeFaceWeight });
+          : new PresentationPreflightBuilder(bootstrap, { cjkFallback: request.cjkFallback, collectFontDemand: await collectorLoad });
         post({ kind: 'presentationOpened', id, bootstrap });
         presentationState = 'ready';
         return;

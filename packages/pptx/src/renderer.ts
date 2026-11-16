@@ -88,8 +88,11 @@ import {
   lineEndPaintExtent,
   lineEndRetract,
   traceTrimmedPath,
-  tracePresetLeader,
   trimGeometryPathEnds,
+  hasPresetLineEnds,
+  planPresetLeader,
+  tracePlannedPresetLeader,
+  drawPresetLineEndArrows,
   computeScene3dQuad,
   isScene3dNonIdentity,
   drawProjected,
@@ -4269,40 +4272,16 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // applying native shadow state here makes each path cast a separate shadow.
   if (!el.shadow) applyGlow(ctx, el.glow ?? null, scale);
 
-  const CONNECTOR_GEOMS = new Set([
-    'line', 'straightconnector1',
-    'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
-    'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
-  ]);
-
-  // callout family — `<a:ln><a:headEnd|tailEnd>` decorate the LEADER line
-  // (the geometry's last `<path>` in presets.json), not the text rectangle
-  // (path 0) or the accent bar. callout1 = 2-point leader, callout2/3 =
-  // 3-/4-point polylines; getConnectorAnchors resolves the leader's two ends
-  // for every variant, so all twelve share the connector decoration path.
-  const CALLOUT_GEOMS = new Set([
-    'callout1', 'callout2', 'callout3',
-    'bordercallout1', 'bordercallout2', 'bordercallout3',
-    'accentcallout1', 'accentcallout2', 'accentcallout3',
-    'accentbordercallout1', 'accentbordercallout2', 'accentbordercallout3',
-  ]);
-
-  // A leader line we re-stroke from its vertices, trimmed at its decorated
-  // ends: every callout plus the straight / bent (polyline) connectors.
-  // Curved connectors are excluded here, because their leader is a Bézier and
-  // getConnectorAnchors.vertices only captures segment endpoints, so
-  // re-stroking from vertices would straighten the curve. When an end
-  // retracts, their preset leader is trimmed along the curve instead
-  // (`trimsCurvedLeader` below).
-  const isRetractableLeader = (g: string): boolean =>
-    CALLOUT_GEOMS.has(g) || g === 'line' || g === 'straightconnector1' || g.startsWith('bentconnector');
-  // How far each decorated end pulls its line back (observed Office rule in
-  // core arrow-geometry.ts). Paths that cannot be re-stroked from straight
+  // Connector / callout leaders and their head/tail decorations follow the
+  // shared core policy (preset-line-ends.ts): a retractable (straight / bent /
+  // callout) leader is always re-stroked from its vertices, trimmed at its
+  // decorated ends; a curved connector's leader is trimmed along the curve
+  // when an end retracts. Paths that cannot be re-stroked from straight
   // vertices — curved connectors, custom geometry, compound lines — are
   // trimmed along the path instead, so every line kind stops at the same place.
+  const leaderPlan = planPresetLeader(geom, el.stroke, scale, PT_TO_EMU, true);
   const headTrim = el.stroke?.headEnd ? lineEndRetract(el.stroke.headEnd, el.stroke, scale, PT_TO_EMU) : 0;
   const tailTrim = el.stroke?.tailEnd ? lineEndRetract(el.stroke.tailEnd, el.stroke, scale, PT_TO_EMU) : 0;
-  const trimsCurvedLeader = geom.startsWith('curvedconnector') && (headTrim > 0 || tailTrim > 0);
   const custEnds = el.custGeom && el.custGeom.length > 0 && (headTrim > 0 || tailTrim > 0)
     ? getCustGeomEndpoints(el.custGeom) : null;
   const custHeadTrim = custEnds?.start ? headTrim : 0;
@@ -4365,7 +4344,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       : undefined;
 
     if (usePresetEngine && !silhouette) {
-      const skipTrailingStroke = isRetractableLeader(geom) || trimsCurvedLeader;
+      const skipTrailingStroke = leaderPlan?.restroke != null;
       renderPresetShape(
         target, geom, bx, by, bw, bh,
         [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
@@ -4540,37 +4519,18 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const flatBevelEdgePadCss = (el.stroke ? (el.stroke.width * scale) / 2 : 0) + 2;
   const paintLineDecorations = (target: CanvasRenderingContext2D): void => {
     if (usesPathShade(el.stroke?.fill)) target = trackPaintPath(target);
-    if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
+    if (el.stroke && hasPresetLineEnds(geom)) {
       // The preset body deliberately suppresses retractable leader strokes. Paint
       // the shortened leader and its line ends into the same target as the body
       // so outer shadows, reflections and soft edges see one composed object.
-      const anchors = getConnectorAnchors(
-        geom,
-        x,
-        y,
-        w,
-        h,
-        [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
-      );
+      const adj = [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8];
+      const anchors = getConnectorAnchors(geom, x, y, w, h, adj);
       if (!anchors) return;
       const cmpd = el.stroke.cmpd;
       const isStraight = geom === 'line' || geom === 'straightconnector1';
-      if (isRetractableLeader(geom) && anchors.vertices.length >= 2 && !(cmpd && isStraight)) {
-        // Trim across the whole leader, so a short terminal leg cannot stop
-        // the retraction early; a leader consumed by both ends paints nothing.
-        const pts = anchors.vertices;
+      if (leaderPlan?.restroke && !(cmpd && isStraight)) {
         target.beginPath();
-        traceTrimmedPath(target, (sink) => {
-          sink.moveTo(pts[0].x, pts[0].y);
-          for (let i = 1; i < pts.length; i++) sink.lineTo(pts[i].x, pts[i].y);
-        }, headTrim, tailTrim);
-        applyStroke(target, el.stroke, scale, { x, y, w, h }, el.rotation);
-        target.stroke();
-      }
-      if (trimsCurvedLeader) {
-        target.beginPath();
-        if (tracePresetLeader(target, geom, x, y, w, h,
-          [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8], headTrim, tailTrim)) {
+        if (tracePlannedPresetLeader(target, leaderPlan, geom, anchors, x, y, w, h, adj)) {
           applyStroke(target, el.stroke, scale, { x, y, w, h }, el.rotation);
           target.stroke();
         }
@@ -4594,34 +4554,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           );
         }
       }
-      if (el.stroke.tailEnd) {
-        drawArrowHead(
-          target,
-          anchors.end.x,
-          anchors.end.y,
-          anchors.end.angle,
-          el.stroke.tailEnd,
-          el.stroke,
-          scale,
-          PT_TO_EMU,
-          resolveArrowPaint(target, el.stroke, scale, PT_TO_EMU, anchors.end.x, anchors.end.y, anchors.end.angle,
-            el.stroke.tailEnd, { x, y, w, h }, el.rotation, scale * PT_TO_EMU),
-        );
-      }
-      if (el.stroke.headEnd) {
-        drawArrowHead(
-          target,
-          anchors.start.x,
-          anchors.start.y,
-          anchors.start.angle,
-          el.stroke.headEnd,
-          el.stroke,
-          scale,
-          PT_TO_EMU,
-          resolveArrowPaint(target, el.stroke, scale, PT_TO_EMU, anchors.start.x, anchors.start.y, anchors.start.angle,
-            el.stroke.headEnd, { x, y, w, h }, el.rotation, scale * PT_TO_EMU),
-        );
-      }
+      drawPresetLineEndArrows(target, anchors, el.stroke, scale, PT_TO_EMU, { x, y, w, h }, el.rotation, scale * PT_TO_EMU);
       return;
     }
 

@@ -344,7 +344,7 @@ it.each(['default', 'source'] as const)('still loads when the collector sidecar 
   const { importFontDemandCollector } = await import('./font-demand-collector.js');
   for (const url of ['./missing-font-demand-sidecar.mjs', '', new URL('./missing-font-demand-sidecar.mjs', import.meta.url).href,
     // A served module without the export.
-    new URL('./office-face-weight.ts', import.meta.url).href]) {
+    new URL('./office-face-name.ts', import.meta.url).href]) {
     const collector = await importFontDemandCollector(url);
     expect(collector({ index: 0, elements: [] } as never, new Set(), 1000), url).toBe('all');
   }
