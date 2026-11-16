@@ -1,9 +1,10 @@
-import { defineConfig, type Plugin } from 'vite';
+import { build, defineConfig, type Plugin, type ResolvedConfig } from 'vite';
 import wasm from 'vite-plugin-wasm';
 import { dts } from 'rolldown-plugin-dts';
 import { resolve, dirname, basename, posix } from 'path';
 import { fileURLToPath } from 'url';
 import { readFile } from 'fs/promises';
+import { gzipSync } from 'zlib';
 import { rolldown } from 'rolldown';
 import { docxCompatibilityMetadata } from './scripts/docx-compatibility-build.mjs';
 import { optionalRendererMarkers } from './scripts/optional-renderer-markers.mjs';
@@ -191,6 +192,347 @@ async function bundleSelfContainedModule(entry: string, plugins: Plugin[]): Prom
   }
 }
 
+/**
+ * Merge the small shared static chunks of the published entries.
+ *
+ * Lazy boundaries (font sources, model sources, optional renderers) split the
+ * modules an entry loads at start-up into many small chunks, one per
+ * combination of static and lazy importers. An unbundled (CDN) consumer pays a
+ * request and lost compression for each; a re-bundling consumer is unaffected.
+ *
+ * Which modules an entry loads at start-up is known only after tree shaking,
+ * so the library build first runs a probe build (same configuration,
+ * automatic chunking, nothing written) and then assigns the probe's chunks to
+ * `codeSplitting` groups. Chunks are merged only when
+ *  - exactly the same entries, optional entries included, load them
+ *    statically, so no entry loads anything at start-up that it did not load
+ *    before, and lazy code stays lazy;
+ *  - exactly the same entries reach them only through lazy imports, so a
+ *    merged file is fetched lazily only by entries that already fetched part
+ *    of it lazily (two lazy imports of one entry may now share one file);
+ *  - no optional entry loads them only lazily, so those lazy loads stay as
+ *    they were;
+ *  - none is an entry or contains a dynamic `import()`, so a lazy chunk
+ *    importing a group back cannot make a consumer's Rolldown retain the
+ *    group through rolldown/rolldown#11213 (see `avoidRedundantChunkLoads`
+ *    below);
+ *  - none has top-level code that a consumer's bundler keeps whenever the
+ *    file is imported at all, so a consumer that re-bundles the package keeps
+ *    no more code than before (a `sideEffects: false` module is dropped only
+ *    when nothing from it is used);
+ *  - the merged file compresses no worse than the separate files.
+ *
+ * `preserveEntrySignatures: 'strict'` requires `includeDependenciesRecursively`,
+ * which captures every retained module a grouped module imports, also through
+ * modules tree shaking removed (re-export barrels). A chunk joins a group
+ * only when everything it pulls in that way is in its own group or in a group
+ * captured before it (the groups form an acyclic graph, captured
+ * dependencies first); any other chunk stays with automatic chunking.
+ *
+ * The published output is checked against the probe: every entry must load
+ * exactly the same modules at start-up, and every group must hold exactly its
+ * planned modules.
+ */
+// Marks the nested probe build; passed in its inline configuration so that
+// no other build in the process is affected.
+const CHUNK_PROBE = 'static-chunk-plan:probe';
+const MAX_GROUPS = 256;
+
+type ProbeChunk = {
+  fileName: string;
+  name: string;
+  code: string;
+  isEntry: boolean;
+  facadeModuleId: string | null;
+  imports: string[];
+  dynamicImports: string[];
+  moduleIds: string[];
+};
+type ModuleGraph = (id: string) => { importedIds: readonly string[]; dynamicallyImportedIds: readonly string[] } | null;
+type ChunkGroup = { name: string; moduleIds: string[]; members: Set<string> };
+
+export function staticChunkPlan(
+  defaultEntries: Record<string, string>,
+  optionalEntries: Record<string, string>,
+): { plugin: Plugin; groups: Array<{ name: (id: string) => string | null; priority: number }> } {
+  const allEntries = { ...defaultEntries, ...optionalEntries };
+  let resolved: ResolvedConfig | undefined;
+  let probing = false;
+  let probe: { chunks: Map<string, ProbeChunk>; loads: Map<string, string>; residues: Set<string> } | undefined;
+  let groups: ChunkGroup[] | undefined;
+  const plugin: Plugin = {
+    name: 'static-chunk-plan',
+    apply: 'build',
+    configResolved(config) {
+      resolved = config;
+      probing = config.plugins.some((candidate) => candidate.name === CHUNK_PROBE);
+    },
+    async buildStart(options) {
+      probe = undefined;
+      groups = undefined;
+      if (probing) return;
+      // Only the library build: Storybook's build reuses this configuration.
+      const input = Object.values(options.input ?? {});
+      if (!Object.values(allEntries).every((entry) => input.includes(entry))) return;
+      const result = await build({
+        configFile: resolved!.configFile,
+        mode: resolved!.mode,
+        logLevel: 'silent',
+        plugins: [{ name: CHUNK_PROBE }],
+        build: { write: false, emptyOutDir: false },
+      });
+      const output = (Array.isArray(result) ? result[0] : result) as { output: Array<ProbeChunk & { type: string }> };
+      const chunks = new Map(output.output
+        .filter((item) => item.type === 'chunk')
+        .map((chunk) => [chunk.fileName, chunk]));
+      probe = { chunks, loads: startupLoads(chunks), residues: await topLevelResidues(chunks) };
+    },
+    buildEnd() {
+      if (!probe) return;
+      groups = planGroups(probe.chunks, probe.residues, (id) => this.getModuleInfo(id));
+      if (groups.length > MAX_GROUPS) this.error(`static-chunk-plan: ${groups.length} groups exceed ${MAX_GROUPS} slots`);
+    },
+    generateBundle(_options, bundle) {
+      if (!probe || !groups) return;
+      const chunks = new Map(Object.values(bundle)
+        .filter((output) => output.type === 'chunk')
+        .map((chunk) => [chunk.fileName, chunk as unknown as ProbeChunk]));
+      const loads = startupLoads(chunks);
+      for (const entryName of Object.keys(allEntries)) {
+        if (loads.get(entryName) !== probe.loads.get(entryName)) {
+          this.error(`static-chunk-plan: grouping changed the modules ${entryName}.mjs loads at start-up`);
+        }
+      }
+      for (const { name, moduleIds } of groups) {
+        const chunk = [...chunks.values()].find((candidate) => candidate.name === name);
+        if (chunk?.moduleIds.slice().sort().join('\n') !== moduleIds.slice().sort().join('\n')) {
+          this.error(`static-chunk-plan: group ${name} does not hold exactly its planned modules`);
+        }
+      }
+    },
+  };
+  // The groups are known only once the module graph is complete, while the
+  // output options are fixed before the build: reserve ordered slots, and let
+  // slot i hold the i-th planned group. A higher-priority group captures its
+  // modules first.
+  const slots = Array.from({ length: MAX_GROUPS }, (_, index) => ({
+    name: (id: string): string | null => {
+      const group = groups?.[index];
+      return group?.members.has(id) ? group.name : null;
+    },
+    priority: MAX_GROUPS - index,
+  }));
+  return { plugin, groups: slots };
+
+  function entryChunk(chunks: Map<string, ProbeChunk>, id: string): string {
+    const chunk = [...chunks.values()].find((candidate) => candidate.isEntry && candidate.facadeModuleId === id);
+    if (!chunk) throw new Error(`static-chunk-plan: no entry chunk for ${id}`);
+    return chunk.fileName;
+  }
+
+  function reach(chunks: Map<string, ProbeChunk>, entry: string, dynamic: boolean): Set<string> {
+    const seen = new Set<string>();
+    const pending = [entryChunk(chunks, entry)];
+    while (pending.length > 0) {
+      const fileName = pending.pop()!;
+      const chunk = chunks.get(fileName);
+      if (seen.has(fileName) || !chunk) continue;
+      seen.add(fileName);
+      pending.push(...chunk.imports, ...(dynamic ? chunk.dynamicImports : []));
+    }
+    return seen;
+  }
+
+  /**
+   * The chunks with top-level code a consumer's bundler keeps whenever the
+   * chunk is imported at all (a `sideEffects: false` package drops a module
+   * only when nothing from it is used). Merged into a group, that code would
+   * be kept for every importer of anything in the group.
+   */
+  async function topLevelResidues(chunks: Map<string, ProbeChunk>): Promise<Set<string>> {
+    const loaded = new Set(Object.values(defaultEntries).flatMap((entry) => [...reach(chunks, entry, false)]));
+    const impure = await Promise.all([...loaded].filter((fileName) => !chunks.get(fileName)!.isEntry).map(async (fileName) => {
+      const bundle = await rolldown({
+        input: '\0residue-probe',
+        logLevel: 'silent',
+        external: (id) => !id.startsWith('\0') && !chunks.has(posix.normalize(id)),
+        treeshake: { moduleSideEffects: (id) => id === fileName },
+        plugins: [{
+          name: 'probe-chunks',
+          resolveId: (id, importer) => {
+            if (id === '\0residue-probe') return id;
+            const target = importer && !importer.startsWith('\0') ? posix.join(posix.dirname(importer), id) : posix.normalize(id);
+            return chunks.has(target) ? target : { id, external: true };
+          },
+          load: (id) => (id === '\0residue-probe' ? `import ${JSON.stringify(fileName)};` : chunks.get(id)?.code ?? null),
+        }],
+      });
+      try {
+        const { output } = await bundle.generate({ format: 'es', minify: true, codeSplitting: false });
+        return output[0].code.trim().length > 0 ? fileName : undefined;
+      } finally {
+        await bundle.close();
+      }
+    }));
+    return new Set(impure.filter((fileName): fileName is string => fileName !== undefined));
+  }
+
+  /** Each entry's start-up modules, as one comparable string. */
+  function startupLoads(chunks: Map<string, ProbeChunk>): Map<string, string> {
+    return new Map(Object.entries(allEntries).map(([entryName, entry]) => [entryName,
+      [...reach(chunks, entry, false)].flatMap((fileName) => chunks.get(fileName)!.moduleIds).sort().join('\n')]));
+  }
+
+  function planGroups(chunks: Map<string, ProbeChunk>, residues: Set<string>, graph: ModuleGraph): ChunkGroup[] {
+    // The entries that load each chunk statically, and those that load it
+    // only through a lazy import.
+    const signature = new Map<string, string>();
+    for (const [entryName, entry] of Object.entries(allEntries)) {
+      const loads = reach(chunks, entry, false);
+      for (const fileName of reach(chunks, entry, true)) {
+        const mark = loads.has(fileName) ? entryName : `lazy:${entryName}`;
+        signature.set(fileName, signature.has(fileName) ? `${signature.get(fileName)}+${mark}` : mark);
+      }
+    }
+    const loaded = new Set(Object.values(defaultEntries).flatMap((entry) => [...reach(chunks, entry, false)]));
+    const optionalLazy = new Set(Object.values(optionalEntries).flatMap((entry) => {
+      const own = reach(chunks, entry, false);
+      return [...reach(chunks, entry, true)].filter((fileName) => !own.has(fileName));
+    }));
+    const owner = new Map([...chunks.values()].flatMap((chunk) =>
+      chunk.moduleIds.map((id) => [id, chunk.fileName])));
+    // The chunks whose modules capturing `fileName` would pull in.
+    const pulls = new Map<string, Set<string>>();
+    for (const fileName of loaded) {
+      const found = new Set<string>();
+      const seen = new Set<string>();
+      const pending = chunks.get(fileName)!.moduleIds.flatMap((id) => graph(id)?.importedIds ?? []);
+      while (pending.length > 0) {
+        const dep = pending.pop()!;
+        if (seen.has(dep)) continue;
+        seen.add(dep);
+        if (owner.has(dep)) found.add(owner.get(dep)!);
+        else pending.push(...(graph(dep)?.importedIds ?? []));
+      }
+      found.delete(fileName);
+      pulls.set(fileName, found);
+    }
+    // Candidate groups: the chunks the same entries load, of those that may
+    // be merged at all.
+    let units = new Map<string, string[]>();
+    for (const fileName of loaded) {
+      const chunk = chunks.get(fileName)!;
+      if (chunk.isEntry || optionalLazy.has(fileName) || residues.has(fileName) || chunk.dynamicImports.length > 0
+        || chunk.moduleIds.some((id) => id.startsWith('\0') || (graph(id)?.dynamicallyImportedIds.length ?? 0) > 0)) continue;
+      const key = signature.get(fileName)!;
+      units.set(key, [...(units.get(key) ?? []), fileName]);
+    }
+    // Drop chunks until every chunk pulls only from its own group or from
+    // groups that can be captured before it (the group graph is acyclic).
+    for (let changed = true; changed;) {
+      changed = false;
+      const unitOf = new Map([...units].flatMap(([key, files]) => files.map((fileName) => [fileName, key])));
+      const keep = (key: string, test: (fileName: string) => boolean) => {
+        const files = units.get(key)!.filter(test);
+        if (files.length === units.get(key)!.length) return;
+        changed = true;
+        if (files.length > 0) units.set(key, files);
+        else units.delete(key);
+      };
+      for (const key of [...units.keys()]) keep(key, (fileName) => [...pulls.get(fileName)!].every((dep) => unitOf.has(dep)));
+      if (changed) continue;
+      // Merging must not make the files compress worse than apart (one
+      // request each); smallest chunks are merged first.
+      for (const key of [...units.keys()]) {
+        const accepted: string[] = [];
+        let packed = 0;
+        for (const fileName of units.get(key)!.slice().sort((a, b) => chunks.get(a)!.code.length - chunks.get(b)!.code.length)) {
+          const together = gzipSize(accepted.concat(fileName).map((member) => chunks.get(member)!.code).join('\n'));
+          if (accepted.length === 0 || together <= packed + gzipSize(chunks.get(fileName)!.code)) {
+            accepted.push(fileName);
+            packed = together;
+          }
+        }
+        keep(key, (fileName) => accepted.includes(fileName));
+      }
+      if (changed) continue;
+      const edges = new Map([...units].map(([key, files]) => [key, new Set(files.flatMap((fileName) =>
+        [...pulls.get(fileName)!].map((dep) => unitOf.get(dep)!)).filter((dep) => dep !== key))]));
+      for (const cycle of stronglyConnected(edges).filter((component) => component.size > 1)) {
+        for (const key of cycle) {
+          keep(key, (fileName) => ![...pulls.get(fileName)!].some((dep) => unitOf.get(dep) !== key && cycle.has(unitOf.get(dep)!)));
+        }
+      }
+    }
+    // Dependencies first; a group of one chunk only renames it.
+    const edges = new Map([...units].map(([key, files]) => [key, new Set(files.flatMap((fileName) =>
+      [...pulls.get(fileName)!].map((dep) => [...units].find(([, members]) => members.includes(dep))![0])).filter((dep) => dep !== key))]));
+    const order: string[] = [];
+    const visit = (key: string) => {
+      if (order.includes(key)) return;
+      for (const dep of edges.get(key)!) visit(dep);
+      order.push(key);
+    };
+    for (const key of units.keys()) visit(key);
+    // A group is identified by its name, which must not repeat an entry's.
+    const used = new Set<string>(Object.keys(allEntries));
+    return order.map((key) => {
+      const files = units.get(key)!;
+      const largest = files.reduce((a, b) => (chunks.get(b)!.code.length > chunks.get(a)!.code.length ? b : a));
+      let name = chunks.get(largest)!.name;
+      for (let index = 2; used.has(name); index++) name = `${chunks.get(largest)!.name}${index}`;
+      used.add(name);
+      const moduleIds = files.flatMap((fileName) => chunks.get(fileName)!.moduleIds);
+      return { name, moduleIds, members: new Set(moduleIds) };
+    });
+  }
+}
+
+function gzipSize(code: string): number {
+  return gzipSync(code, { level: 9 }).length;
+}
+
+/** Tarjan's strongly connected components. */
+function stronglyConnected(edges: Map<string, Set<string>>): Set<string>[] {
+  const index = new Map<string, number>();
+  const low = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const components: Set<string>[] = [];
+  const connect = (node: string) => {
+    index.set(node, index.size);
+    low.set(node, index.get(node)!);
+    stack.push(node);
+    onStack.add(node);
+    for (const next of edges.get(node) ?? []) {
+      if (!index.has(next)) {
+        connect(next);
+        low.set(node, Math.min(low.get(node)!, low.get(next)!));
+      } else if (onStack.has(next)) {
+        low.set(node, Math.min(low.get(node)!, index.get(next)!));
+      }
+    }
+    if (low.get(node) === index.get(node)) {
+      const component = new Set<string>();
+      for (let member = stack.pop()!; ; member = stack.pop()!) {
+        onStack.delete(member);
+        component.add(member);
+        if (member === node) break;
+      }
+      components.push(component);
+    }
+  };
+  for (const node of edges.keys()) if (!index.has(node)) connect(node);
+  return components;
+}
+
+const chunkPlan = staticChunkPlan(
+  Object.fromEntries(['index', 'docx', 'xlsx', 'pptx', 'node']
+    .map((name) => [name, resolve(__dirname, `src/${name}.ts`)])),
+  Object.fromEntries(['math', 'three-d', 'region-map', 'chart-ex', 'tiff', 'internal-companion']
+    .map((name) => [name, resolve(__dirname, `src/${name}.ts`)])),
+);
+
 export default defineConfig(({ command, mode }) => ({
   // The private comparison build removes selected-source dispatch and code
   // reachable only through it. Published and dev builds always use true.
@@ -220,6 +562,7 @@ export default defineConfig(({ command, mode }) => ({
     wasm(),
     legacyBundleBoundary(),
     moduleStatsPlugin(__dirname),
+    chunkPlan.plugin,
     // Storybook loads the root Vite config in serve mode. The declaration
     // plugins are build-only: their Rolldown buildStart hooks expect library
     // inputs and fail against Storybook's dev-server graph.
@@ -293,6 +636,7 @@ export default defineConfig(({ command, mode }) => ({
       },
       external: [/^node:/, 'skia-canvas'],
       output: {
+        codeSplitting: { groups: chunkPlan.groups },
         assetFileNames: '[name][extname]',
         chunkFileNames: (chunk) =>
           chunk.name.endsWith('.d')
