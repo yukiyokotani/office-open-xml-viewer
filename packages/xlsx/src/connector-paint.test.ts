@@ -32,6 +32,9 @@ function record(shape: Partial<ShapeInfo>) {
   const strokes: { points: Point[]; closed: boolean; style: unknown }[] = [];
   /** Arrow heads: the device origin of the decoration frame (its tip) when filled. */
   const tips: Point[] = [];
+  /** The transform each connector-paint fill / stroke was painted under. */
+  const fillFrames: Matrix[] = [];
+  const strokeFrames: Matrix[] = [];
   let points: Point[] = [];
   let closed = false;
   const stack: Matrix[] = [];
@@ -54,7 +57,9 @@ function record(shape: Partial<ShapeInfo>) {
         case 'rotate': return (r: number) => {
           current = current.multiply(matrix(Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0));
         };
-        case 'setTransform': return (a = 1, b = 0, c = 0, d = 1, e = 0, f = 0) => { current = matrix(a, b, c, d, e, f); };
+        case 'setTransform': return (a: number | Matrix = 1, b = 0, c = 0, d = 1, e = 0, f = 0) => {
+          current = typeof a === 'object' ? matrix(a.a, a.b, a.c, a.d, a.e, a.f) : matrix(a, b, c, d, e, f);
+        };
         case 'createLinearGradient': case 'createRadialGradient':
           return () => ({ gradient: true, addColorStop() {} });
         case 'createPattern': return () => ({ setTransform() {} });
@@ -64,10 +69,16 @@ function record(shape: Partial<ShapeInfo>) {
         case 'quadraticCurveTo': return (...args: number[]) => { points.push(at(args[2], args[3])); };
         case 'closePath': return () => { closed = true; };
         case 'stroke': return () => {
-          if (isShapePaint(target.strokeStyle)) strokes.push({ points: [...points], closed, style: target.strokeStyle });
+          if (isShapePaint(target.strokeStyle)) {
+            strokes.push({ points: [...points], closed, style: target.strokeStyle });
+            strokeFrames.push(current);
+          }
         };
         case 'fill': return () => {
-          if (isShapePaint(target.fillStyle)) tips.push({ x: current.e, y: current.f });
+          if (isShapePaint(target.fillStyle)) {
+            tips.push({ x: current.e, y: current.f });
+            fillFrames.push(current);
+          }
         };
         default: return typeof prop === 'string' ? () => undefined : undefined;
       }
@@ -93,7 +104,7 @@ function record(shape: Partial<ShapeInfo>) {
   renderViewport(ctx, ws, { fonts: [], fills: [], borders: [], cellXfs: [] } as unknown as Styles,
     { row: 1, col: 1, rows: 10, cols: 10 });
   // A callout's text box is a closed path; the leader is the open one.
-  return { leaders: strokes.filter((s) => !s.closed && s.points.length >= 2), tips };
+  return { leaders: strokes.filter((s) => !s.closed && s.points.length >= 2), tips, fillFrames, strokeFrames };
 }
 
 /** Device px a tail triangle retracts the line (core's observed Office rule). */
@@ -111,6 +122,11 @@ describe('XLSX connector line ends', () => {
       ['curved connector', preset('curvedConnector3')],
       // Callout leaders take line ends like connectors (shared core policy).
       ['callout leader', preset('borderCallout1')],
+      // A custom-geometry connector ends on its last path's open end.
+      ['custom-geometry connector', { geom: { type: 'custom', paths: [{ w: 100, h: 100, commands: [
+        { op: 'moveTo', x: 0, y: 0 }, { op: 'lineTo', x: 50, y: 0 },
+        { op: 'cubicBezTo', x1: 80, y1: 0, x2: 100, y2: 20, x3: 100, y3: 100 },
+      ] }] } } as Partial<ShapeInfo>],
       // A painted (hatch) body fill must not cancel the leader trim.
       ['hatch-filled line', { ...preset('line'), fill: { fillType: 'hatch', color: '#00FF00', angle: 0, distancePt: 3, lines: 1 } } as Partial<ShapeInfo>],
     ];
@@ -136,8 +152,8 @@ describe('XLSX connector line ends', () => {
     expect(flipped.tips[0].x + plain.tips[0].x).toBeCloseTo(start.x + fStart.x, 6);
   });
 
-  it('strokes a gradient line with ends in the gradient, not a solid colour', () => {
-    const { leaders, tips } = record({
+  it('paints a gradient line and its ends in the gradient of the line frame', () => {
+    const { leaders, fillFrames, strokeFrames } = record({
       strokeTailEnd: TRIANGLE,
       strokeFill: {
         fillType: 'gradient', angle: 0, gradType: 'linear',
@@ -146,6 +162,10 @@ describe('XLSX connector line ends', () => {
     });
     expect(leaders).toHaveLength(1);
     expect(leaders[0].style).toMatchObject({ gradient: true });
-    expect(tips).toHaveLength(1);
+    // The arrow head continues the line's brush: it is filled under the frame
+    // the line was stroked in, not the translated / rotated decoration frame.
+    expect(fillFrames).toHaveLength(1);
+    const coefficients = ({ a, b, c, d, e, f }: Matrix) => [a, b, c, d, e, f];
+    expect(coefficients(fillFrames[0])).toEqual(coefficients(strokeFrames[0]));
   });
 });

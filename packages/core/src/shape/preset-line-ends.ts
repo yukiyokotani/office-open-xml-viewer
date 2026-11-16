@@ -109,20 +109,33 @@ export function tracePlannedPresetLeader(
   return false;
 }
 
+/** The two ends of a decorated line: tip points and outward angles (radians);
+ *  null for an end that takes no decoration (a closed subpath). */
+export interface LineEndAnchors {
+  readonly start: { readonly x: number; readonly y: number; readonly angle: number } | null;
+  readonly end: { readonly x: number; readonly y: number; readonly angle: number } | null;
+}
+
 /**
- * Paint the tail decoration at the leader's end, then the head decoration at
+ * Paint the tail decoration at the line's end, then the head decoration at
  * its start, each in the stroke's resolved paint (`frame` / `rotation` /
- * `ptUnits` are the host's shade frame, as for its body stroke).
+ * `ptUnits` are the host's shade frame, as for its body stroke). `brush`
+ * optionally gives the host's pattern coordinate transform and paints
+ * gradient / pattern brushes in the host frame, so a decoration continues
+ * the brush of the line it ends.
  */
 export function drawPresetLineEndArrows(
-  ctx: CanvasRenderingContext2D, anchors: ConnectorAnchors, stroke: Stroke,
+  ctx: CanvasRenderingContext2D, anchors: LineEndAnchors, stroke: Stroke,
   scale: number, unitsPerPoint: number,
   frame: { x: number; y: number; w: number; h: number }, rotation: number, ptUnits: number,
+  brush?: { readonly hostFrame: true; readonly patternCoordinateTransform?: DOMMatrix2DInit },
 ): void {
   const paint = (end: ArrowEnd, tip: { x: number; y: number; angle: number }) => drawArrowHead(
     ctx, tip.x, tip.y, tip.angle, end, stroke, scale, unitsPerPoint,
-    resolveArrowPaint(ctx, stroke, scale, unitsPerPoint, tip.x, tip.y, tip.angle, end, frame, rotation, ptUnits),
+    resolveArrowPaint(ctx, stroke, scale, unitsPerPoint, tip.x, tip.y, tip.angle, end, frame, rotation, ptUnits,
+      brush?.patternCoordinateTransform),
+    brush?.hostFrame ?? false,
   );
-  if (stroke.tailEnd) paint(stroke.tailEnd, anchors.end);
-  if (stroke.headEnd) paint(stroke.headEnd, anchors.start);
+  if (stroke.tailEnd && anchors.end) paint(stroke.tailEnd, anchors.end);
+  if (stroke.headEnd && anchors.start) paint(stroke.headEnd, anchors.start);
 }
