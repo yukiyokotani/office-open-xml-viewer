@@ -505,8 +505,8 @@ fn project_sheet(
         // chart-area rectangle.
         worksheet.is_chart_sheet = true;
         worksheet.show_gridlines = false;
-        charge_copy(budget, &chart.model)?;
-        reserve_model(&mut worksheet.charts, 1, budget)?;
+        charge_copy(budget, chart.model.as_ref())?;
+        reserve_model(&mut worksheet.charts, 1 + chart.embedded.len(), budget)?;
         worksheet.charts.push(xlsx_model::ChartAnchor {
             z_order: 0,
             from_col: 0,
@@ -517,8 +517,25 @@ fn project_sheet(
             to_col_off: chart.x_emu + chart.width_emu,
             to_row: 0,
             to_row_off: chart.y_emu + chart.height_emu,
-            chart: chart.model.clone(),
+            chart: chart.model.as_ref().clone(),
         });
+        // Chart objects placed on the chart sheet, drawn over its chart in
+        // document order with the same absolute anchoring.
+        for (order, embedded) in chart.embedded.iter().enumerate() {
+            charge_copy(budget, embedded.model.as_ref())?;
+            worksheet.charts.push(xlsx_model::ChartAnchor {
+                z_order: order as u64 + 1,
+                from_col: 0,
+                from_col_off: embedded.x_emu,
+                from_row: 0,
+                from_row_off: embedded.y_emu,
+                to_col: 0,
+                to_col_off: embedded.x_emu + embedded.width_emu,
+                to_row: 0,
+                to_row_off: embedded.y_emu + embedded.height_emu,
+                chart: embedded.model.as_ref().clone(),
+            });
+        }
         sheet.views.project(&mut worksheet);
         return Ok(worksheet);
     }

@@ -198,6 +198,82 @@ fn workbook_with_policy(
     Ok(output)
 }
 
+/// The embedded charts of a chart sheet substream (`records` runs from its
+/// BOF to its EOF, the BOF being record `base` of the stream): for each
+/// chart object (Obj ot 5 followed by its chart substream), the
+/// OfficeArtClientAnchorChart rectangle (MS-XLS 2.5.191: lx1, ly1, lx2, ly2
+/// in SPRC, 1/4000 of the chart area) and the absolute record range of the
+/// chart substream, in document order.
+pub(super) fn chart_sheet_charts(
+    records: &[Record<'_>],
+    base: usize,
+) -> Result<Vec<([i32; 4], (usize, usize))>, String> {
+    let mut work = 2_000_000;
+    let mut remaining = MAX_BYTES;
+    let Some(mut drawing) = assemble(records, base, 0x0020, &mut work, &mut remaining)? else {
+        return Ok(Vec::new());
+    };
+    let (root, end) = record_with_end(&drawing.bytes, 0, &mut work, "XLS drawing")?;
+    if root.kind != 0xf002 || root.version != 15 || root.instance != 0 || end != drawing.bytes.len()
+    {
+        return Err(unsupported("invalid BIFF sheet drawing root"));
+    }
+    let mut output = Vec::new();
+    // Containers still to read: (start, end, nesting depth).
+    let mut stack = vec![(8usize, end, 0usize)];
+    while let Some((mut at, end, depth)) = stack.pop() {
+        if depth > MAX_DEPTH {
+            return Err(crate::rejection::resource(
+                "BIFF drawing group depth exceeded",
+            ));
+        }
+        while at < end {
+            spend(&mut work)?;
+            let (record, next) =
+                record_with_end(&drawing.bytes[..end], at, &mut work, "XLS drawing")?;
+            match record.kind {
+                0xf003 => stack.push((at + 8, next, depth + 1)),
+                0xf004 => {
+                    let mut rect = None;
+                    let mut chart = None;
+                    let mut position = at + 8;
+                    while position < next {
+                        let (child, child_end) = record_with_end(
+                            &drawing.bytes[..next],
+                            position,
+                            &mut work,
+                            "XLS shape",
+                        )?;
+                        match child.kind {
+                            0xf010 if child.payload.len() == 18 => {
+                                rect = Some(rectangle(&child.payload[2..])?);
+                            }
+                            0xf011 => chart = drawing.charts.remove(&child_end),
+                            _ => {}
+                        }
+                        position = child_end;
+                    }
+                    if let Some(chart) = chart {
+                        let rect = rect.ok_or_else(|| {
+                            unsupported("BIFF chart object without its chart anchor")
+                        })?;
+                        if output.len() >= MAX_OBJECTS {
+                            return Err(crate::rejection::resource(
+                                "BIFF retained anchor budget exceeded",
+                            ));
+                        }
+                        output.push((rect, chart));
+                    }
+                }
+                _ => {}
+            }
+            at = next;
+        }
+    }
+    output.sort_by_key(|(_, chart)| chart.0);
+    Ok(output)
+}
+
 struct Drawing<'a> {
     bytes: Vec<u8>,
     /// Assembled byte boundary -> the immediately following native client.
