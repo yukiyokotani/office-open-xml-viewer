@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import { getWebviewHtml } from '../webviewHtml';
 import { shouldUseGoogleFonts } from '../config';
-import { readParserWasm } from '../parserWasm';
 import {
   type SelectionContextHandle,
   SelectionContextRegistry,
@@ -122,18 +121,13 @@ export abstract class BaseEditorProvider
         const session = view.selectionSession;
         view.initializedSession = session;
         let data: Uint8Array | undefined;
-        let wasm: Uint8Array | undefined;
         let error: string | undefined;
         try {
           // `readFile` may return a Node Buffer (often a view into a shared
           // pool). The webview serializer JSON-encodes a Buffer as
           // `{type:"Buffer",data:[...]}` instead of transferring it, so copy
           // into a plain, exact-length Uint8Array that it transfers as bytes.
-          // The parser WASM is posted too, never fetched by the webview.
-          [data, wasm] = await Promise.all([
-            vscode.workspace.fs.readFile(document.uri).then((bytes) => new Uint8Array(bytes)),
-            readParserWasm(this.context.extensionUri, this.fileType),
-          ]);
+          data = new Uint8Array(await vscode.workspace.fs.readFile(document.uri));
         } catch (err) {
           error = err instanceof Error ? err.message : String(err);
         }
@@ -143,7 +137,6 @@ export abstract class BaseEditorProvider
           type: 'ooxml-init',
           fileType: this.fileType,
           data,
-          wasm,
           error,
           useGoogleFonts: shouldUseGoogleFonts(),
           selectionSession: session,
