@@ -2,6 +2,7 @@ import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import type { PptxTextRunInfo } from './renderer';
 import { pptxRunFrameKey, pptxRunFrameTransform } from './run-frame-transform.js';
 import { createPptxRunFrame } from './run-frame-dom.js';
+import { pptxTextSpanRuns } from './text-anchor.js';
 import { setSelectionData } from '@silurus/ooxml-core/internal/selection-data';
 
 /**
@@ -68,6 +69,7 @@ export function buildPptxTextLayer(
     }
 
     const span = ownerDocument.createElement('span');
+    pptxTextSpanRuns.set(span, run);
     setSelectionData(span, 'ooxmlSelectionRun', 'pptx');
     setSelectionData(span, 'runIndex', String(runIndex));
     if (run.shapeId !== undefined) setSelectionData(span, 'shapeId', run.shapeId);
