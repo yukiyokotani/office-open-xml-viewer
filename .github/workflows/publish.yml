@@ -155,6 +155,8 @@ jobs:
 
       # Exact-version retries: registry failures other than E404 fail closed.
       # The root must be available before its exact-peer companion publishes.
+      # On the v0.89 maintenance line the script publishes under the
+      # `release-0.89` dist-tag so that `latest` stays on 0.90.x.
       - name: Publish viewer, then legacy companion
         run: node scripts/publish-packages.mjs
         env:

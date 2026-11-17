@@ -8,10 +8,12 @@
 # Replaces the former deploy-storybook.yml + deploy-site.yml.
 name: Deploy site + Storybook to GitHub Pages
 
+# v0.89 is a maintenance line behind 0.90: the public site and Storybook are
+# deployed from the current release line only. A `v0.89.*` tag must not
+# redeploy the 0.89 tree over them, so this branch has no tag trigger, and the
+# build job is disabled for any manual run of this copy. (A workflow needs at
+# least one trigger.)
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -25,6 +27,7 @@ concurrency:
 
 jobs:
   build:
+    if: false  # never deploy the site from the v0.89 line (see the comment at `on:`)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

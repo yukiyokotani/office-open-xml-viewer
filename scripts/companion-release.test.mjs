@@ -57,15 +57,17 @@ else { console.log(JSON.stringify({error:{code:'E404'}})); process.exit(1); }
     executable('pnpm', `
 const fs = require('node:fs');
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-fs.appendFileSync(process.env.PUBLISH_LOG, pkg.name + '\\n');
+fs.appendFileSync(process.env.PUBLISH_LOG, [pkg.name, ...process.argv.slice(2)].join(' ') + '\\n');
 `);
     const log = join(root, 'published');
     const result = run('publish-packages.mjs', [], {
       PATH: `${join(root, 'bin')}:${process.env.PATH}`, SCENARIO: scenario, PUBLISH_LOG: log,
     });
     assert.equal(result.status, scenario === 'registry-failure' ? 1 : 0, result.stderr);
-    const expected = scenario === 'fresh' ? ['@silurus/ooxml', '@silurus/ooxml-legacy-office']
-      : scenario === 'root-published' ? ['@silurus/ooxml-legacy-office'] : [];
+    // The v0.89 maintenance line never publishes under npm's default `latest`.
+    const args = ' publish --no-git-checks --tag release-0.89';
+    const expected = scenario === 'fresh' ? ['@silurus/ooxml' + args, '@silurus/ooxml-legacy-office' + args]
+      : scenario === 'root-published' ? ['@silurus/ooxml-legacy-office' + args] : [];
     let published = [];
     try { published = readFileSync(log, 'utf8').trim().split('\n'); } catch {}
     assert.deepEqual(published, expected);

@@ -3,6 +3,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
+// v0.89 is a maintenance line behind 0.90. Without an explicit dist-tag npm
+// would move `latest` to 0.89.x, so every package on this branch publishes
+// under `release-0.89` (not a semver range, as npm requires).
+const DIST_TAG = 'release-0.89';
 execFileSync(process.execPath, ['scripts/sync-companion-version.mjs'], { cwd: root, stdio: 'inherit' });
 for (const directory of ['.', 'packages/legacy-office']) {
   const cwd = fileURLToPath(new URL(`${directory}/`, new URL('../', import.meta.url)));
@@ -18,5 +22,5 @@ for (const directory of ['.', 'packages/legacy-office']) {
   let error;
   try { error = JSON.parse(query.stdout || query.stderr).error; } catch {}
   if (error?.code !== 'E404') throw new Error(`Cannot verify ${name}@${version}: ${query.stderr}`);
-  execFileSync('pnpm', ['publish', '--no-git-checks'], { cwd, stdio: 'inherit' });
+  execFileSync('pnpm', ['publish', '--no-git-checks', '--tag', DIST_TAG], { cwd, stdio: 'inherit' });
 }

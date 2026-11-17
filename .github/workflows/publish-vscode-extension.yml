@@ -1,15 +1,10 @@
 name: Publish VS Code Extension
 
+# v0.89 is a maintenance line behind 0.90 and the Marketplace already has
+# 0.90.x, so the extension is not published from this branch: no tag trigger
+# and no publish step. A manual run only packages and uploads the VSIX.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Package only (no publish to Marketplace)'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -97,11 +92,3 @@ jobs:
           name: ooxml-viewer-vsix
           path: packages/vscode-extension/ooxml-viewer.vsix
           if-no-files-found: error
-
-      # ── Publish ────────────────────────────────────────────────────────────
-      - name: Publish to VS Code Marketplace
-        if: ${{ github.event_name == 'push' || !inputs.dry_run }}
-        working-directory: packages/vscode-extension
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: pnpm exec vsce publish --no-dependencies --packagePath ooxml-viewer.vsix
