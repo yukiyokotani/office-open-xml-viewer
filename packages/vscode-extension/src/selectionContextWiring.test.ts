@@ -40,7 +40,11 @@ describe('VS Code selection-context wiring', () => {
     expect(bootstrap).toContain('selectionSession');
     expect(bootstrap).toContain("type: 'webview-ready', selectionSession");
     expect(bootstrap).toContain('msg.selectionSession !== selectionSession');
-    expect(editorHost).toContain('view.initializedSession === view.selectionSession');
+    expect(editorHost).toContain('msg.selectionSession !== view.selectionSession');
+    // One init per webview document of that session (session + instance).
+    expect(editorHost).toContain(
+      'view.initialized?.session === session && view.initialized.instance === instance',
+    );
   });
 
   it('makes the explicit MCP enable command work for previews outside the workspace', () => {
