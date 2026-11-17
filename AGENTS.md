@@ -9,8 +9,8 @@ Instruction files:
   `AGENTS.md` convention load it directly.
 - `packages/<name>/AGENTS.md` — facts specific to one package. They add to this
   file and do not repeat it.
-- `.claude/CLAUDE.md` and `packages/<name>/CLAUDE.md` — one-line files that
-  import the `AGENTS.md` beside them for Claude Code. They hold no rules.
+- `.claude/CLAUDE.md` (imports `../AGENTS.md`) and `packages/<name>/CLAUDE.md`
+  (imports `AGENTS.md`) — one-line files for Claude Code. They hold no rules.
 
 Add or change rules only in an `AGENTS.md`. Do not add tool-specific rule
 files.
@@ -328,9 +328,9 @@ pnpm build:wasm
 or per package:
 
 ```bash
-cd packages/docx/parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/docx_parser.js
-cd packages/xlsx/parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/xlsx_parser.js
-cd packages/pptx/parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/pptx_parser.js
+pnpm --filter @silurus/ooxml-docx wasm
+pnpm --filter @silurus/ooxml-xlsx wasm
+pnpm --filter @silurus/ooxml-pptx wasm
 ```
 
 Storybook is unified at the repository root. Static prefixes are:
