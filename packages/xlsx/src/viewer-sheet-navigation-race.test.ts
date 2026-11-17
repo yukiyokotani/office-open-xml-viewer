@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { XlsxViewer } from './viewer.js';
-import { XlsxWorkbook } from './workbook.js';
+import { XlsxWorkbook, xlsxCellDisplayTexts } from './workbook.js';
 import { WorksheetPreview } from './internal/worksheet-preview.js';
 import type { Worksheet } from './types.js';
 import { installDom, makeContainer, type FakeEl } from './viewer-destroy-test-dom.js';
@@ -34,10 +34,10 @@ function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value
   return { promise, resolve };
 }
 
-function buildViewer(onSheetChange = vi.fn(), names = ['A', 'B']) {
+function buildViewer(onSheetChange = vi.fn(), names = ['A', 'B'], onError = vi.fn()) {
   installDom();
   const container = makeContainer();
-  const viewer = new XlsxViewer(container as unknown as HTMLElement, { onSheetChange });
+  const viewer = new XlsxViewer(container as unknown as HTMLElement, { onSheetChange, onError });
   const requests = names.map(() => deferred<Worksheet>());
   const workbook = {
     sheetNames: names,
@@ -67,8 +67,119 @@ function buildViewer(onSheetChange = vi.fn(), names = ['A', 'B']) {
     engine.firstPreviewRender = false;
     engine.committedFrameCount = Number(engine.committedFrameCount) + 1;
   });
-  return { viewer, engine, workbook, requests, onSheetChange, container };
+  return { viewer, engine, workbook, requests, onSheetChange, onError, container };
 }
+
+/** Search reads complete sheets; navigation may still await reacquisition after eviction. */
+async function buildFindViewer() {
+  const fixture = buildViewer(vi.fn(), ['A', 'B', 'C']);
+  const { viewer, engine, workbook, requests } = fixture;
+  const sheets = workbook.sheetNames.map((name, index) => ({
+    ...worksheet(name),
+    rows: [{ index: 100, cells: [{ row: 100, col: 20,
+      value: { type: 'text', text: index === 0 ? 'home' : 'hello' } }] }],
+  } as Worksheet));
+  Object.assign(workbook, {
+    isHidden: () => false,
+    tabColors: [],
+    [xlsxCellDisplayTexts]: () => (cell: { value: { text: string } }) => [cell.value.text],
+    acquireWorksheetLease: async (index: number) => ({ worksheet: sheets[index], release: vi.fn() }),
+    acquireWorksheetPreviewLease: async (index: number) => ({
+      worksheet: await requests[index].promise, release: vi.fn(), partial: false,
+      completion: Promise.resolve(sheets[index]),
+    }),
+  });
+  engine.scheduleRender = vi.fn();
+  delete engine.updateSpacerSize;
+  for (const element of [engine.canvasArea, engine.scrollHost] as FakeEl[]) {
+    element.clientWidth = 800;
+    element.clientHeight = 600;
+  }
+  requests[0].resolve(sheets[0]);
+  await viewer.goToSheet(0);
+  await viewer.findText('hello');
+  return { ...fixture, sheets };
+}
+
+describe('XlsxViewer pending search activation', () => {
+  it.each(['clear', 'replace', 'empty', 'destroy'] as const)(
+    'does not navigate or scroll after %s during worksheet acquisition', async (action) => {
+      const { viewer, requests, sheets, onSheetChange } = await buildFindViewer();
+      try {
+        const pending = viewer.findNext();
+        await Promise.resolve();
+        if (action === 'clear') viewer.clearFind();
+        else if (action === 'destroy') viewer.destroy();
+        else await viewer.findText(action === 'empty' ? '' : 'missing');
+        requests[1].resolve(sheets[1]);
+        expect(await pending).toBeNull();
+        expect(viewer.sheetIndex).toBe(0);
+        expect(viewer.getViewportOffset()).toEqual({ x: 0, y: 0 });
+        expect(onSheetChange).toHaveBeenCalledTimes(1);
+        expect(await viewer.findNext()).toBeNull();
+      } finally { viewer.destroy(); }
+    });
+
+  it('keeps newer activation pending when an older worksheet request settles', async () => {
+    const { viewer, requests, sheets, onSheetChange } = await buildFindViewer();
+    try {
+      const older = viewer.findNext();
+      await Promise.resolve();
+      const newer = viewer.findPrev();
+      requests[1].resolve(sheets[1]);
+      expect(await older).toBeNull();
+      expect(viewer.sheetIndex).toBe(0);
+      expect(viewer.getViewportOffset()).toEqual({ x: 0, y: 0 });
+      requests[2].resolve(sheets[2]);
+      expect(await newer).toMatchObject({ location: { sheet: 2, ref: 'T100' } });
+      expect(viewer.sheetIndex).toBe(2);
+      expect(viewer.getViewportOffset().y).toBeGreaterThan(0);
+      expect(onSheetChange).toHaveBeenCalledTimes(2);
+    } finally { viewer.destroy(); }
+  });
+
+  it('preserves matches and manual navigation when a retired search settles later', async () => {
+    const { viewer, requests, sheets, onSheetChange } = await buildFindViewer();
+    try {
+      const pending = viewer.findNext();
+      await Promise.resolve();
+      const manual = viewer.goToSheet(2);
+      requests[1].resolve(sheets[1]);
+      expect(await pending).toBeNull();
+      expect(viewer.getViewportOffset()).toEqual({ x: 0, y: 0 });
+      requests[2].resolve(sheets[2]);
+      await manual;
+      expect(viewer.sheetIndex).toBe(2);
+      expect(viewer.getViewportOffset()).toEqual({ x: 0, y: 0 });
+      expect(onSheetChange).toHaveBeenCalledTimes(2);
+      expect(await viewer.findNext()).toMatchObject({ location: { sheet: 2, ref: 'T100' } });
+      expect(viewer.getViewportOffset().y).toBeGreaterThan(0);
+    } finally { viewer.destroy(); }
+  });
+
+  it('keeps a committed preview live when a sheet-change callback clears search', async () => {
+    const { viewer, workbook, sheets, onSheetChange, onError } = await buildFindViewer();
+    let rejectCompletion!: (error: Error) => void;
+    const completion = new Promise<Worksheet>((_, reject) => { rejectCompletion = reject; });
+    Object.assign(workbook, {
+      acquireWorksheetPreviewLease: async () => ({
+        worksheet: sheets[1], release: vi.fn(), partial: true, completion,
+        waitForRows: async () => undefined,
+      }),
+    });
+    onSheetChange.mockImplementation(() => viewer.clearFind());
+    try {
+      expect(await viewer.findNext()).toBeNull();
+      expect(viewer.sheetIndex).toBe(1);
+      expect(viewer.getViewportOffset()).toEqual({ x: 0, y: 0 });
+      const error = new Error('row pull failed');
+      rejectCompletion(error);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(onError).toHaveBeenCalledWith(error);
+    } finally { viewer.destroy(); }
+  });
+});
 
 describe('XlsxViewer sheet acquisition generation', () => {
   it('covers the viewport after saved hidden rows are restored while the pull continues', async () => {

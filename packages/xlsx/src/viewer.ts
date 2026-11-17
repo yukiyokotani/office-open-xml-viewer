@@ -957,7 +957,7 @@ class XlsxViewerEngine implements ZoomableViewer {
       highlightColors: () => this.opts.findHighlightColors,
       cellRect: (row, col) => this._cellRect(row, col),
       screenX: (x, w) => this.screenX(x, w),
-      goToSheet: (index) => this.goToSheet(index),
+      goToSheet: (index, signal) => this.navigateToSheet(index, signal),
       scrollCellIntoView: (row, col) => this._scrollCellIntoView(row, col),
     });
 
@@ -1110,7 +1110,8 @@ class XlsxViewerEngine implements ZoomableViewer {
     else this.acquisition.destroy();
   }
 
-  private async showSheet(index: number): Promise<void> {
+  private async showSheet(index: number, signal?: AbortSignal): Promise<void> {
+    this.finder.retireActivation(signal);
     // End a live compact preview before reading/replaying the per-sheet ledger,
     // including same-sheet reloads. It must not become the new projection's
     // committed state merely because an asynchronous navigation interrupted it.
@@ -1695,10 +1696,30 @@ class XlsxViewerEngine implements ZoomableViewer {
    * matching {@link PptxViewer.goToSlide} / {@link DocxViewer.goToPage}.
    */
   async goToSheet(index: number): Promise<void> {
-    if (this.sheetCount === 0) return;
+    await this.navigateToSheet(index);
+  }
+
+  /** Search cancellation retires only its own navigation, never a newer request. */
+  private async navigateToSheet(index: number, signal?: AbortSignal): Promise<void> {
+    if (this.sheetCount === 0 || signal?.aborted) return;
     const workbook = this.workbook;
     if (!this.prepareWorkbook(workbook)) return;
-    await this.showSheet(Math.max(0, Math.min(index, this.sheetCount - 1)));
+    const sheetIndex = Math.max(0, Math.min(index, this.sheetCount - 1));
+    const operation = this.showSheet(sheetIndex, signal);
+    const generation = this.sheetRequestGeneration;
+    const cancel = (): void => {
+      // A committed preview must keep receiving rows and failures. Search only
+      // navigates across sheets; once its sheet is installed, retire scrolling.
+      if (this.sheetRequestGeneration === generation && this.currentSheet !== sheetIndex) {
+        this.sheetRequestGeneration++;
+      }
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      await operation;
+    } finally {
+      signal?.removeEventListener('abort', cancel);
+    }
   }
 
   async nextSheet(): Promise<void> {
