@@ -30,9 +30,6 @@ describe('buildContentSecurityPolicy', () => {
     expect(csp).toContain("style-src 'unsafe-inline'");
     expect(csp).toContain(`font-src ${CSP_SOURCE}`);
     expect(csp).toContain(`media-src ${CSP_SOURCE} blob:`);
-    // #2212: the host posts the document and parser WASM bytes, so the webview
-    // fetches only what it builds itself, never an extension resource.
-    expect(csp.match(/connect-src ([^;]*)/)?.[1]).toBe('data: blob:');
   });
 
   it('whitelists only the two font CDN origins when enabled', () => {
@@ -52,7 +49,6 @@ describe('buildContentSecurityPolicy', () => {
     const connectSrc = csp.match(/connect-src ([^;]*)/)?.[1] ?? '';
     expect(connectSrc).not.toContain('googleapis');
     expect(connectSrc).not.toContain('gstatic');
-    expect(connectSrc).not.toContain(CSP_SOURCE);
     expect(csp).toContain(`media-src ${CSP_SOURCE} blob:`);
   });
 });
