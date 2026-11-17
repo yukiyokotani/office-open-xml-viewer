@@ -28,6 +28,12 @@ import { captureUnhandledWheelZoom } from './wheelZoomFallback';
 import { FindPopupController, type FindableViewer } from './findPopup';
 import { fullRenderers } from './advancedChartRenderers';
 import { exactArrayBuffer } from './postedBytes';
+import { fetchParserWasmBlobUrl } from './parserWasmUrl';
+// The same files the viewers reference by default; esbuild emits each once
+// under dist/assets and these imports are their URLs relative to <base>.
+import docxWasmAsset from '@silurus/ooxml-docx/wasm-binary';
+import xlsxWasmAsset from '@silurus/ooxml-xlsx/wasm-binary';
+import pptxWasmAsset from '@silurus/ooxml-pptx/wasm-binary';
 // Side-effect import: bundles the self-contained MathJax + STIX Two Math engine
 // into the webview and sets globalThis.__ooxmlStix2. The library renders OMML
 // equations only when handed a `math` engine; its built-in engine loads lazily
@@ -49,6 +55,20 @@ const math = {
 const vscodeApi = acquireVsCodeApi();
 const fileType = __OOXML_FILE_TYPE__;
 const selectionSession = __OOXML_SELECTION_SESSION__;
+// Identifies this document among those VS Code loads from the same HTML: a
+// hidden editor's document is destroyed and a new one is loaded when the tab
+// is shown again. The host sends one `ooxml-init` per instance.
+const webviewInstance = crypto.randomUUID();
+
+// Start the parser WASM request with the document, in parallel with the host
+// reading the file. It must be made here, not by the parser worker: see
+// fetchParserWasmBlobUrl.
+const parserWasmUrl = fetchParserWasmBlobUrl(
+  { docx: docxWasmAsset, xlsx: xlsxWasmAsset, pptx: pptxWasmAsset }[fileType],
+  document.baseURI,
+);
+// Reported when `ooxml-init` awaits it; this only marks the rejection handled.
+parserWasmUrl.catch(() => undefined);
 
 function publishSelectionContext(context: unknown): void {
   vscodeApi.postMessage({
@@ -145,7 +165,7 @@ window.addEventListener(
 );
 
 // Notify extension host that the webview script is ready to receive messages.
-vscodeApi.postMessage({ type: 'webview-ready', selectionSession });
+vscodeApi.postMessage({ type: 'webview-ready', selectionSession, instance: webviewInstance });
 
 window.addEventListener('message', async (event: MessageEvent) => {
   const msg = event.data;
@@ -155,6 +175,8 @@ window.addEventListener('message', async (event: MessageEvent) => {
   }
   if (msg.type !== 'ooxml-init') return;
   if (msg.selectionSession !== selectionSession) return;
+  // An init read for an earlier document of this session can arrive here.
+  if (msg.instance !== webviewInstance) return;
 
   // Opt-in flag forwarded from the extension host (gated by the
   // `ooxmlViewer.useGoogleFonts` setting AND workspace trust). When false the
@@ -172,18 +194,9 @@ window.addEventListener('message', async (event: MessageEvent) => {
     showError('Error: the document bytes were not received');
     return;
   }
-  // The host also posts the parser WASM (#2212). A webview fetch of the
-  // bundled file goes through VS Code's resource service worker, which can
-  // time out over Remote SSH; a Blob URL keeps the load inside this document.
-  // It is never revoked: the parser re-instantiates from it after a trap.
-  const wasm = exactArrayBuffer(msg.wasm);
-  if (!wasm) {
-    showError('Error: the parser WebAssembly was not received');
-    return;
-  }
-  const wasmUrl = URL.createObjectURL(new Blob([wasm], { type: 'application/wasm' }));
 
   try {
+    const wasmUrl = await parserWasmUrl;
     if (fileType === 'docx') {
       await initDocx(buffer, wasmUrl, useGoogleFonts);
     } else if (fileType === 'xlsx') {

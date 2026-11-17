@@ -1,5 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 /**
  * Re-bundle Vite library-mode sidecars into the VS Code webview. Vite writes
@@ -35,40 +34,48 @@ export const bundledAssetSidecars = {
   },
 };
 
-/** Manifest file name inside the webview output directory (`dist`). */
-export const PARSER_WASM_MANIFEST = 'parser-wasm.json';
-
-const PARSER_WASM_OUTPUT = /(?:^|\/)(assets\/(docx|xlsx|pptx)_parser_bg-[A-Za-z0-9]+\.wasm)$/;
+const PARSER_FORMATS = ['docx', 'xlsx', 'pptx'];
 
 /**
- * Record which emitted file holds each format's parser WASM. The extension
- * host reads those bytes from its own install and posts them to the webview
- * (#2212): a webview fetch of an extension resource goes through VS Code's
- * resource service worker, which can time out over Remote SSH. Asset names
- * carry a content hash and `dist/assets` may keep files from earlier builds,
- * so the host must not guess the name from a directory listing.
+ * The webview bundle must emit exactly one parser WASM per format and no other
+ * WASM. The bootstrap imports each parser through the package's `wasm-binary`
+ * export while the viewer references the copy in the package's `dist`; esbuild
+ * writes one file for both only while their bytes are identical. A stale
+ * `dist` would otherwise ship two parsers for a format, and the webview would
+ * hand the viewer one it was not built with.
+ *
+ * @param {Iterable<string>} outputs emitted output paths
+ * @returns {string[]} one message per violation; empty when the outputs are valid
  */
-export const parserWasmManifest = {
-  name: 'parser-wasm-manifest',
+export function parserWasmOutputProblems(outputs) {
+  const wasm = [...outputs].map((output) => output.replaceAll('\\', '/')).filter((output) => output.endsWith('.wasm'));
+  const problems = [];
+  for (const format of PARSER_FORMATS) {
+    const emitted = wasm.filter((output) => new RegExp(`(?:^|/)${format}_parser_bg-[A-Za-z0-9]+\\.wasm$`).test(output));
+    if (emitted.length !== 1) {
+      problems.push(`expected one ${format} parser WASM, found ${emitted.length}${emitted.length ? `: ${emitted.join(', ')}` : ''}`);
+    }
+  }
+  const other = wasm.filter((output) => !/(?:^|\/)(?:docx|xlsx|pptx)_parser_bg-[A-Za-z0-9]+\.wasm$/.test(output));
+  if (other.length > 0) problems.push(`unexpected WASM output: ${other.join(', ')}`);
+  return problems;
+}
+
+/** Fail the build when {@link parserWasmOutputProblems} reports a violation. */
+export const singleParserWasmPerFormat = {
+  name: 'single-parser-wasm-per-format',
   setup(build) {
     build.initialOptions.metafile = true;
-    build.onEnd(async (result) => {
+    build.onEnd((result) => {
       if (result.errors.length > 0 || !result.metafile) return;
-      const manifest = {};
-      for (const output of Object.keys(result.metafile.outputs)) {
-        const match = PARSER_WASM_OUTPUT.exec(output.replaceAll('\\', '/'));
-        if (!match) continue;
-        if (manifest[match[2]]) {
-          throw new Error(`[parser-wasm-manifest] two ${match[2]} parser WASM outputs`);
-        }
-        manifest[match[2]] = match[1];
-      }
-      const missing = ['docx', 'xlsx', 'pptx'].filter((format) => !manifest[format]);
-      if (missing.length > 0) {
-        throw new Error(`[parser-wasm-manifest] no parser WASM output for ${missing.join(', ')}`);
-      }
-      const outdir = build.initialOptions.outdir ?? dirname(build.initialOptions.outfile);
-      await writeFile(join(outdir, PARSER_WASM_MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`);
+      const problems = parserWasmOutputProblems(Object.keys(result.metafile.outputs));
+      if (problems.length === 0) return;
+      return {
+        errors: problems.map((text) => ({
+          pluginName: 'single-parser-wasm-per-format',
+          text: `${text}. Rebuild the parser WASM and the library packages so that src/wasm and dist match.`,
+        })),
+      };
     });
   },
 };
