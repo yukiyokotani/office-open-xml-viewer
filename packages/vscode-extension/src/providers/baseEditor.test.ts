@@ -157,4 +157,54 @@ describe('BaseEditorProvider webview resource scope', () => {
     expect(posted[0]).toMatchObject({ type: 'ooxml-init', error: 'EACCES' });
     expect(posted[0].data).toBeUndefined();
   });
+
+  it('initializes a document re-created for the same HTML, once per document', async () => {
+    mocks.readFile.mockReset().mockResolvedValue(new Uint8Array([1, 2, 3]));
+    const provider = new TestProvider(
+      { extensionUri: { path: '/ext' } } as never,
+      new SelectionContextRegistry(),
+    );
+    const { panel, posted, send } = fakePanel();
+    await provider.resolveCustomEditor(
+      { uri: { scheme: 'file', path: '/docs/x.docx', fsPath: '/docs/x.docx' } } as never,
+      panel as never,
+    );
+
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'first' });
+    // A repeated ready from the same document must not start a second viewer.
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'first' });
+    expect(posted).toHaveLength(1);
+
+    // The tab was hidden and shown again: VS Code loaded the same HTML (same
+    // session) into a new document, which must get its own init.
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'second' });
+    expect(posted).toHaveLength(2);
+    expect(posted[1]).toMatchObject({ type: 'ooxml-init', selectionSession: 1, instance: 'second' });
+    expect(mocks.readFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a read that a re-created document superseded', async () => {
+    let finishFirst!: (bytes: Uint8Array) => void;
+    mocks.readFile
+      .mockReset()
+      .mockImplementationOnce(() => new Promise<Uint8Array>((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValue(new Uint8Array([7]));
+    const provider = new TestProvider(
+      { extensionUri: { path: '/ext' } } as never,
+      new SelectionContextRegistry(),
+    );
+    const { panel, posted, send } = fakePanel();
+    await provider.resolveCustomEditor(
+      { uri: { scheme: 'file', path: '/docs/x.docx', fsPath: '/docs/x.docx' } } as never,
+      panel as never,
+    );
+
+    const first = send({ type: 'webview-ready', selectionSession: 1, instance: 'first' });
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'second' });
+    finishFirst(new Uint8Array([1]));
+    await first;
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ instance: 'second' });
+  });
 });
