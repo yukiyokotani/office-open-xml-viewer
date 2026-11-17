@@ -41,6 +41,11 @@ describe('VS Code webview math engine bundle', () => {
         '@silurus/ooxml-docx': resolve(EXTENSION_ROOT, '../docx/src/index.ts'),
         '@silurus/ooxml-xlsx': resolve(EXTENSION_ROOT, '../xlsx/src/index.ts'),
         '@silurus/ooxml-pptx': resolve(EXTENSION_ROOT, '../pptx/src/index.ts'),
+        // bootstrap.ts imports the parser WASM assets by subpath; a package
+        // alias would otherwise rewrite those to paths under index.ts.
+        '@silurus/ooxml-docx/wasm-binary': resolve(EXTENSION_ROOT, '../docx/src/wasm/docx_parser_bg.wasm'),
+        '@silurus/ooxml-xlsx/wasm-binary': resolve(EXTENSION_ROOT, '../xlsx/src/wasm/xlsx_parser_bg.wasm'),
+        '@silurus/ooxml-pptx/wasm-binary': resolve(EXTENSION_ROOT, '../pptx/src/wasm/pptx_parser_bg.wasm'),
       },
       external: ['*.wasm'],
       loader: { '.wasm': 'file', '.ttf': 'file' },

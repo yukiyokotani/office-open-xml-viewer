@@ -50,25 +50,6 @@ function webviewRoundTrip(message: unknown): Record<string, unknown> {
   });
 }
 
-const WASM = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
-
-/** Route reads: the build manifest and parser WASM under /ext/dist, else the document. */
-function mockReads(document: () => Promise<Uint8Array>, manifest: Record<string, string> = {
-  docx: 'assets/docx_parser_bg-ABC123.wasm',
-}) {
-  mocks.readFile.mockReset().mockImplementation(async (uri: { path: string }) => {
-    if (uri.path === '/ext/dist/parser-wasm.json') {
-      return new TextEncoder().encode(JSON.stringify(manifest));
-    }
-    // A pooled Node Buffer view, as `workspace.fs.readFile` may return.
-    if (uri.path === '/ext/dist/assets/docx_parser_bg-ABC123.wasm') {
-      return Buffer.from([9, ...WASM, 9]).subarray(1, 1 + WASM.length);
-    }
-    if (uri.path.startsWith('/ext/')) throw new Error(`unexpected extension read ${uri.path}`);
-    return document();
-  });
-}
-
 class TestProvider extends BaseEditorProvider {
   protected readonly fileType = 'docx' as const;
 }
@@ -102,7 +83,7 @@ function fakePanel() {
 describe('BaseEditorProvider webview resource scope', () => {
   it('exposes only bundled assets and posts the document bytes itself', async () => {
     const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
-    mockReads(async () => bytes);
+    mocks.readFile.mockReset().mockResolvedValue(bytes);
     const provider = new TestProvider(
       { extensionUri: { path: '/ext' } } as never,
       new SelectionContextRegistry(),
@@ -130,8 +111,6 @@ describe('BaseEditorProvider webview resource scope', () => {
       selectionSession: 1,
     });
     expect(posted[0].data).toEqual(bytes);
-    // #2212: the parser WASM is posted, so the webview never fetches it.
-    expect([...(posted[0].wasm as Uint8Array)]).toEqual([...WASM]);
     expect(posted[0]).not.toHaveProperty('url');
   });
 
@@ -143,7 +122,7 @@ describe('BaseEditorProvider webview resource scope', () => {
     // The transport itself cannot carry a Buffer.
     expect(exactArrayBuffer(webviewRoundTrip({ data: pooled }).data)).toBeNull();
 
-    mockReads(async () => pooled);
+    mocks.readFile.mockReset().mockResolvedValue(pooled);
     const provider = new TestProvider(
       { extensionUri: { path: '/ext' } } as never,
       new SelectionContextRegistry(),
@@ -155,17 +134,13 @@ describe('BaseEditorProvider webview resource scope', () => {
     );
     await send({ type: 'webview-ready', selectionSession: 1 });
 
-    const message = webviewRoundTrip(posted[0]);
-    const received = exactArrayBuffer(message.data);
+    const received = exactArrayBuffer(webviewRoundTrip(posted[0]).data);
     expect(received).not.toBeNull();
     expect([...new Uint8Array(received as ArrayBuffer)]).toEqual([0x50, 0x4b, 0x03, 0x04]);
-    const wasm = exactArrayBuffer(message.wasm);
-    expect(wasm).not.toBeNull();
-    expect([...new Uint8Array(wasm as ArrayBuffer)]).toEqual([...WASM]);
   });
 
   it('reports a read failure to the webview instead of leaving it loading', async () => {
-    mockReads(async () => { throw new Error('EACCES'); });
+    mocks.readFile.mockReset().mockRejectedValue(new Error('EACCES'));
     const provider = new TestProvider(
       { extensionUri: { path: '/ext' } } as never,
       new SelectionContextRegistry(),
@@ -183,23 +158,53 @@ describe('BaseEditorProvider webview resource scope', () => {
     expect(posted[0].data).toBeUndefined();
   });
 
-  it('reports a parser WASM missing from the build instead of posting the document alone', async () => {
-    mockReads(async () => new Uint8Array([0x50, 0x4b]), { pptx: 'assets/pptx_parser_bg-ABC123.wasm' });
+  it('initializes a document re-created for the same HTML, once per document', async () => {
+    mocks.readFile.mockReset().mockResolvedValue(new Uint8Array([1, 2, 3]));
     const provider = new TestProvider(
       { extensionUri: { path: '/ext' } } as never,
       new SelectionContextRegistry(),
     );
     const { panel, posted, send } = fakePanel();
-
     await provider.resolveCustomEditor(
       { uri: { scheme: 'file', path: '/docs/x.docx', fsPath: '/docs/x.docx' } } as never,
       panel as never,
     );
-    await send({ type: 'webview-ready', selectionSession: 1 });
+
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'first' });
+    // A repeated ready from the same document must not start a second viewer.
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'first' });
+    expect(posted).toHaveLength(1);
+
+    // The tab was hidden and shown again: VS Code loaded the same HTML (same
+    // session) into a new document, which must get its own init.
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'second' });
+    expect(posted).toHaveLength(2);
+    expect(posted[1]).toMatchObject({ type: 'ooxml-init', selectionSession: 1, instance: 'second' });
+    expect(mocks.readFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops a read that a re-created document superseded', async () => {
+    let finishFirst!: (bytes: Uint8Array) => void;
+    mocks.readFile
+      .mockReset()
+      .mockImplementationOnce(() => new Promise<Uint8Array>((resolve) => { finishFirst = resolve; }))
+      .mockResolvedValue(new Uint8Array([7]));
+    const provider = new TestProvider(
+      { extensionUri: { path: '/ext' } } as never,
+      new SelectionContextRegistry(),
+    );
+    const { panel, posted, send } = fakePanel();
+    await provider.resolveCustomEditor(
+      { uri: { scheme: 'file', path: '/docs/x.docx', fsPath: '/docs/x.docx' } } as never,
+      panel as never,
+    );
+
+    const first = send({ type: 'webview-ready', selectionSession: 1, instance: 'first' });
+    await send({ type: 'webview-ready', selectionSession: 1, instance: 'second' });
+    finishFirst(new Uint8Array([1]));
+    await first;
 
     expect(posted).toHaveLength(1);
-    expect(posted[0].error).toMatch(/docx parser WebAssembly is missing/);
-    expect(posted[0].data).toBeUndefined();
-    expect(posted[0].wasm).toBeUndefined();
+    expect(posted[0]).toMatchObject({ instance: 'second' });
   });
 });
