@@ -770,4 +770,44 @@ describe('retained table pagination contracts', () => {
       8,
     );
   });
+
+  // CT_Tbl allows zero w:tr (EG_ContentRowContent is minOccurs="0"); template
+  // engines emit this when a repeated row is bound to an empty list. A
+  // zero-row table must place nothing rather than ask for a fresh region on
+  // every page.
+  describe('zero-row table (no w:tr)', () => {
+    const zeroRowTable = (floating = false) => {
+      const empty = table([], [60, 120]);
+      if (floating) {
+        Object.assign(empty, { tblpPr: {
+          leftFromText: 0, rightFromText: 0, topFromText: 0, bottomFromText: 0,
+          horzAnchor: 'margin', horzSpecified: true, vertAnchor: 'text', tblpX: 0, tblpY: 1,
+        } });
+      }
+      return empty as unknown as BodyElement;
+    };
+    const paragraphYs = (body: BodyElement[]) => {
+      const layout = layoutDocument(documentModel([
+        paragraph('before') as unknown as BodyElement,
+        ...body,
+        paragraph('after') as unknown as BodyElement,
+      ], 100));
+      expect(layout.pages).toHaveLength(1);
+      return layout.pages[0]!.layers.body
+        .filter((node) => node.kind === 'paragraph')
+        .map((node) => node.flowBounds.yPt);
+    };
+
+    it('lays out an in-flow table on one page without shifting the following paragraph', () => {
+      expect(paragraphYs([zeroRowTable()])).toEqual(paragraphYs([]));
+    });
+
+    it('lays out a floating table on one page without shifting the following paragraph', () => {
+      expect(paragraphYs([zeroRowTable(true)])).toEqual(paragraphYs([]));
+    });
+
+    it('lays out two adjacent tables on one page without shifting the following paragraph', () => {
+      expect(paragraphYs([zeroRowTable(), zeroRowTable()])).toEqual(paragraphYs([]));
+    });
+  });
 });

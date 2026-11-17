@@ -45,6 +45,39 @@ pub fn split_para_on_page_breaks(
     }
 }
 
+/// Remove rendered-page cache hints (§17.3.3.13 lastRenderedPageBreak) from a
+/// paragraph, remapping complex-field boundaries onto the retained runs.
+/// Authored page and column breaks stay in place as runs.
+pub fn remove_rendered_page_hints(para: &mut DocParagraph) {
+    if !para.complex_field_boundaries.is_empty() {
+        let mut retained_prefix = Vec::with_capacity(para.runs.len() + 1);
+        retained_prefix.push(0);
+        for run in &para.runs {
+            work(1);
+            let retained = !matches!(
+                run,
+                DocRun::Break {
+                    break_type: BreakType::RenderedPage
+                }
+            );
+            retained_prefix
+                .push(retained_prefix.last().copied().unwrap_or(0) + usize::from(retained));
+        }
+        for boundary in &mut para.complex_field_boundaries {
+            work(1);
+            boundary.run_index = retained_prefix[boundary.run_index.min(para.runs.len())];
+        }
+    }
+    para.runs.retain(|run| {
+        !matches!(
+            run,
+            DocRun::Break {
+                break_type: BreakType::RenderedPage
+            }
+        )
+    });
+}
+
 pub fn visit_para_on_page_breaks<E>(
     mut para: DocParagraph,
     split_pg_break_and_para_mark: bool,
@@ -59,33 +92,7 @@ pub fn visit_para_on_page_breaks<E>(
         )
     };
     if !para.runs.iter().any(is_hard_break) {
-        if !para.complex_field_boundaries.is_empty() {
-            let mut retained_prefix = Vec::with_capacity(para.runs.len() + 1);
-            retained_prefix.push(0);
-            for run in &para.runs {
-                work(1);
-                let retained = !matches!(
-                    run,
-                    DocRun::Break {
-                        break_type: BreakType::RenderedPage
-                    }
-                );
-                retained_prefix
-                    .push(retained_prefix.last().copied().unwrap_or(0) + usize::from(retained));
-            }
-            for boundary in &mut para.complex_field_boundaries {
-                work(1);
-                boundary.run_index = retained_prefix[boundary.run_index.min(para.runs.len())];
-            }
-        }
-        para.runs.retain(|run| {
-            !matches!(
-                run,
-                DocRun::Break {
-                    break_type: BreakType::RenderedPage
-                }
-            )
-        });
+        remove_rendered_page_hints(&mut para);
         emit(ParaPiece::Para(para))?;
         return Ok(());
     }

@@ -39,7 +39,9 @@ use crate::styles::{
 };
 use crate::types::*;
 use crate::xml_util::*;
-use docx_model::paragraph_breaks::{split_para_on_page_breaks, ParaPiece};
+use docx_model::paragraph_breaks::{
+    remove_rendered_page_hints, split_para_on_page_breaks, ParaPiece,
+};
 
 #[cfg(test)]
 #[path = "parser/fail_closed_tests.rs"]
@@ -1229,7 +1231,7 @@ fn preflight_document_body(
 
         sequence_facts.push(match block.local_name.as_str() {
             "p" => LogicalBodySequenceFact::Paragraph,
-            "tbl" => {
+            "tbl" if table_has_rows(root) => {
                 let tbl_pr = child_w(root, "tblPr");
                 LogicalBodySequenceFact::Table(LogicalTableSequenceFact {
                     source_offset: block.source_offset,
@@ -1461,11 +1463,13 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
         rel_map,
         theme,
         &section_hf,
-        environment
-            .document_settings
-            .as_ref()
-            .and_then(|settings| settings.split_pg_break_and_para_mark)
-            == Some(true),
+        StoryFlow::MainBody {
+            split_pg_break_and_para_mark: environment
+                .document_settings
+                .as_ref()
+                .and_then(|settings| settings.split_pg_break_and_para_mark)
+                == Some(true),
+        },
     );
     // Match the cursor's acquisition order: section stories precede body
     // facts; notes are acquired in finish_document after both.
@@ -1634,7 +1638,9 @@ impl DocxBodyCursor {
             body_footers,
             projector,
             semantic: BodyParseCursor {
-                split_pg_break_and_para_mark,
+                flow: StoryFlow::MainBody {
+                    split_pg_break_and_para_mark,
+                },
                 ref_leading_breaks: preflight.ref_leading_breaks,
                 ..BodyParseCursor::default()
             },
@@ -2394,7 +2400,7 @@ fn parse_notes(
             &HashMap::new(),
             TablePositioningContext::IgnoredStory,
             Some(&mut local_diagnostics),
-            false,
+            StoryFlow::Fixed,
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
         out.push(crate::types::DocxNote { id, content });
@@ -4089,8 +4095,17 @@ fn parse_embedded_fonts(
 fn body_children_with_cover_breaks<'a, 'input>(
     node: roxmltree::Node<'a, 'input>,
 ) -> Vec<(roxmltree::Node<'a, 'input>, bool)> {
+    // A row-less table is no block (see `table_has_rows`): skipping it here,
+    // as the streamed projector does, keeps it out of the Cover Pages tail,
+    // the §17.4.37 sequence and the REF passes, exactly as if absent.
+    let block = |n: &roxmltree::Node| {
+        n.is_element()
+            && !(is_w_ns(n.tag_name().namespace())
+                && n.tag_name().name() == "tbl"
+                && !table_has_rows(*n))
+    };
     let mut out: Vec<(roxmltree::Node, bool)> = Vec::new();
-    for child in node.children().filter(|n| n.is_element()) {
+    for child in node.children().filter(block) {
         let tn = child.tag_name();
         if is_w_ns(tn.namespace()) && tn.name() == "sdt" {
             let is_cover = child_w(child, "sdtPr")
@@ -4100,7 +4115,10 @@ fn body_children_with_cover_breaks<'a, 'input>(
                 .as_deref()
                 == Some("Cover Pages");
             if let Some(content) = child_w(child, "sdtContent") {
-                let inner = element_children_flat(content);
+                let inner: Vec<_> = element_children_flat(content)
+                    .into_iter()
+                    .filter(block)
+                    .collect();
                 let last = inner.len();
                 for (idx, c) in inner.into_iter().enumerate() {
                     out.push((c, is_cover && idx + 1 == last));
@@ -4136,7 +4154,7 @@ fn parse_body_elements(
         section_hf,
         TablePositioningContext::Normal,
         None,
-        false,
+        StoryFlow::default(),
     )
 }
 
@@ -4162,7 +4180,7 @@ fn parse_body_elements_with_diagnostics(
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
 ) -> (Vec<BodyElement>, Vec<ParseDiagnostic>) {
     let mut diagnostics = Vec::new();
     let body = parse_body_elements_in_story(
@@ -4176,7 +4194,7 @@ fn parse_body_elements_with_diagnostics(
         section_hf,
         TablePositioningContext::Normal,
         Some(&mut diagnostics),
-        split_pg_break_and_para_mark,
+        flow,
     );
     (body, diagnostics)
 }
@@ -4318,7 +4336,7 @@ fn logical_table_sequence_contexts(
         .iter()
         .map(|(node, _)| match node.tag_name().name() {
             "p" => LogicalBodySequenceFact::Paragraph,
-            "tbl" => {
+            "tbl" if table_has_rows(*node) => {
                 let tbl_pr = child_w(*node, "tblPr");
                 LogicalBodySequenceFact::Table(LogicalTableSequenceFact {
                     source_offset: node.range().start,
@@ -4348,13 +4366,50 @@ fn logical_table_sequence_contexts(
     .collect()
 }
 
+/// Whether a story takes part in the main document's page flow.
+///
+/// ECMA-376 §17.18.4 (ST_BrType) defines `page` as restarting text on the next
+/// page and `column` as restarting it in the next column, or on the next page
+/// after the last column; §17.6.18 sectPr and the Cover Pages building block
+/// (§17.5.2) likewise begin new pages or sections. Only the main document
+/// story's content decides where its pages and columns change. A header or
+/// footer story (§17.10) is laid out in a page's header/footer region, and a
+/// footnote or endnote story (§17.11) in a note area placed by its reference,
+/// which may continue the note on a later page but is never started by it;
+/// none of these transitions can be honoured there, and a layout story root
+/// admits only paragraphs and tables.
+/// The standard does not say what such a break means in those stories; its
+/// one rule for a break that cannot start a page is that page breaks "shall be
+/// ignored when present in frames" (§17.18.4). Library policy, inferred from
+/// that rule and not from observed Word output: a fixed story keeps the break
+/// as an inline run of its unsplit paragraph, which layout treats as it
+/// already treats a page or column break in a table cell or a text box (an
+/// ignored character, see the line breaker's segment builder). A stray sectPr
+/// or Cover Pages gallery in such a story starts nothing either. Whether Word
+/// ends the line at such a break is unmeasured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoryFlow {
+    /// The main document body. splitPgBreakAndParaMark (Part 4 §14.8.3.38)
+    /// is body-only normalization.
+    MainBody { split_pg_break_and_para_mark: bool },
+    /// A header, footer, footnote or endnote story.
+    Fixed,
+}
+
+impl Default for StoryFlow {
+    fn default() -> Self {
+        Self::MainBody {
+            split_pg_break_and_para_mark: false,
+        }
+    }
+}
+
 /// Cross-block semantic state for one WordprocessingML story. Complex fields
 /// can span paragraphs (§17.16.18), and section ordinals are assigned in story
 /// order, so neither belongs to a temporary per-block DOM arena.
 #[derive(Default)]
 struct BodyParseCursor {
-    // Body-only normalization; page stories keep their existing break policy.
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
     field: FieldState,
     section_ordinal: usize,
     ref_leading_breaks: HashMap<String, String>,
@@ -4395,6 +4450,23 @@ impl BodyParseCursor {
                     &mut child_diagnostics,
                 );
                 apply_matching_leading_break(&mut result, &self.ref_leading_breaks);
+                let split_pg_break_and_para_mark = match self.flow {
+                    StoryFlow::MainBody {
+                        split_pg_break_and_para_mark,
+                    } => split_pg_break_and_para_mark,
+                    // See StoryFlow: the paragraph stays whole, its page and
+                    // column breaks inline, and a paragraph sectPr is ignored.
+                    StoryFlow::Fixed => {
+                        remove_rendered_page_hints(&mut result);
+                        output.push(BodyElement::Paragraph(Box::new(result)));
+                        return Self::commit_block(
+                            output,
+                            child_diagnostics,
+                            source_body_index,
+                            diagnostics,
+                        );
+                    }
+                };
                 let lone_break = if result.runs.len() == 1 {
                     match &result.runs[0] {
                         DocRun::Break {
@@ -4445,7 +4517,7 @@ impl BodyParseCursor {
                             });
                             // §14.8.3.38: retain the mark only when the page
                             // break is not subsumed by the section transition.
-                            if self.split_pg_break_and_para_mark {
+                            if split_pg_break_and_para_mark {
                                 result.runs.clear();
                                 output.push(BodyElement::Paragraph(Box::new(result)));
                             }
@@ -4457,8 +4529,7 @@ impl BodyParseCursor {
                         push_section_break(&mut output);
                     }
                     _ => {
-                        for piece in
-                            split_para_on_page_breaks(result, self.split_pg_break_and_para_mark)
+                        for piece in split_para_on_page_breaks(result, split_pg_break_and_para_mark)
                         {
                             match piece {
                                 ParaPiece::Para(paragraph) => {
@@ -4479,7 +4550,7 @@ impl BodyParseCursor {
                     }
                 }
             }
-            "tbl" => {
+            "tbl" if table_has_rows(child) => {
                 let table = parse_table_with_diagnostics(
                     child,
                     style_map,
@@ -4496,7 +4567,7 @@ impl BodyParseCursor {
                 );
                 output.push(BodyElement::Table(Box::new(table)));
             }
-            "sectPr" if !is_final_body_sect_pr => {
+            "sectPr" if !is_final_body_sect_pr && self.flow != StoryFlow::Fixed => {
                 output.push(section_break_element(
                     child,
                     section_hf,
@@ -4506,6 +4577,15 @@ impl BodyParseCursor {
             }
             _ => {}
         }
+        Self::commit_block(output, child_diagnostics, source_body_index, diagnostics)
+    }
+
+    fn commit_block(
+        output: Vec<BodyElement>,
+        child_diagnostics: Vec<PendingParseDiagnostic>,
+        source_body_index: usize,
+        diagnostics: Option<&mut Vec<ParseDiagnostic>>,
+    ) -> Vec<BodyElement> {
         if !output.is_empty() {
             if let Some(diagnostics) = diagnostics {
                 commit_pending_parse_diagnostics(
@@ -4531,7 +4611,7 @@ fn parse_body_elements_in_story(
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
     table_positioning_context: TablePositioningContext,
     diagnostics: Option<&mut Vec<ParseDiagnostic>>,
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
 ) -> Vec<BodyElement> {
     // A story nested in another (a text box, a table cell's content) shares
     // its host's shape types; an outermost story indexes its own.
@@ -4547,7 +4627,7 @@ fn parse_body_elements_in_story(
             section_hf,
             table_positioning_context,
             diagnostics,
-            split_pg_break_and_para_mark,
+            flow,
         )
     };
     if vml_shape_types_active() {
@@ -4569,11 +4649,11 @@ fn parse_story_body_elements(
     section_hf: &HashMap<roxmltree::NodeId, ResolvedSectionHf>,
     table_positioning_context: TablePositioningContext,
     mut diagnostics: Option<&mut Vec<ParseDiagnostic>>,
-    split_pg_break_and_para_mark: bool,
+    flow: StoryFlow,
 ) -> Vec<BodyElement> {
     let mut body: Vec<BodyElement> = Vec::new();
     let mut cursor = BodyParseCursor {
-        split_pg_break_and_para_mark,
+        flow,
         ..BodyParseCursor::default()
     };
     // The body-level sectPr (the last element) defines the final section and
@@ -4642,7 +4722,8 @@ fn parse_story_body_elements(
         // ECMA-376 §17.5.2: a "Cover Pages" building block occupies its own page
         // in Word — the following content (even a "continuous" section) starts on
         // the next page. Emit the page break after the cover's content.
-        if cover_break_after {
+        // Fixed stories start no page (see StoryFlow).
+        if cover_break_after && cursor.flow != StoryFlow::Fixed {
             cover_break_positions.push(body.len());
             body.push(BodyElement::PageBreak {
                 origin: Some(PageBreakOrigin::CoverPageSynthetic),
@@ -5749,7 +5830,7 @@ fn load_header_footer_set(
             &local_rel_map,
             theme,
             &HashMap::new(),
-            false,
+            StoryFlow::Fixed,
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
         let hf = HeaderFooter { body };
@@ -11914,6 +11995,7 @@ fn parse_text_box_content(
                     paragraph,
                 ))));
             }
+            (namespace, "tbl") if is_w_ns(namespace) && !table_has_rows(node) => {}
             (namespace, "tbl") if is_w_ns(namespace) => {
                 if let Some(table_depth) = depth.descend() {
                     let table = parse_table(
@@ -15536,6 +15618,17 @@ fn table_row_count(node: roxmltree::Node) -> usize {
     children_w_flat(node, "tr").len()
 }
 
+/// Whether a `<w:tbl>` has any `<w:tr>`. CT_Tbl allows none
+/// (EG_ContentRowContent is minOccurs="0", and an empty row wrapper such as
+/// `<w:sdt>` flattens to none); template engines emit one when a repeated row
+/// is bound to an empty list. ECMA-376 §17.4.37 (tbl) defines a table as
+/// content arranged in rows, so a table with no row has nothing to lay out:
+/// it leaves no model block in any story and no logical-table sequence
+/// member, exactly as if absent.
+fn table_has_rows(node: roxmltree::Node) -> bool {
+    table_row_count(node) > 0
+}
+
 /// Effective ECMA-376 §17.7.4 table-style identity of a `<w:tbl>`.
 ///
 /// An explicit `<w:tblStyle w:val>` is honored only when it resolves to a real
@@ -16520,7 +16613,7 @@ fn parse_table_cell(
             // the one real recursion level. A crossing latches a typed hard
             // resource failure before stopping recursion; this provisional
             // table cannot be published by the package operation.
-            "tbl" => {
+            "tbl" if table_has_rows(child) => {
                 if let Some(child_depth) = depth.descend() {
                     content.push(CellElement::Table(Box::new(parse_table_with_diagnostics(
                         child,
@@ -17320,7 +17413,9 @@ mod tests {
     /// `<w:tbl>` (which `parse_tbl` supplies). The innermost cell holds one
     /// paragraph. Each `<w:tbl>` here plus the outer wrapper is one recursion.
     fn nested_table_body(levels: usize) -> String {
-        let mut inner = String::from("<w:p><w:r><w:t>x</w:t></w:r></w:p>");
+        // Every nested table keeps a row: a row-less table is no model block.
+        let mut inner =
+            String::from("<w:tr><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>");
         for _ in 0..levels {
             inner = format!("<w:tr><w:tc><w:tbl>{inner}</w:tbl></w:tc></w:tr>");
         }
@@ -20738,7 +20833,9 @@ mod split_page_break_mark_tests {
                 &HashMap::new(),
                 TablePositioningContext::Normal,
                 None,
-                true,
+                StoryFlow::MainBody {
+                    split_pg_break_and_para_mark: true,
+                },
             );
             let paragraphs: Vec<_> = elements
                 .iter()
@@ -31815,6 +31912,140 @@ mod numbering_marker_font_tests {
         assert_eq!(second["logicalRowOffset"], 1);
         assert_eq!(first["logicalTotalRows"], 2);
         assert_eq!(second["logicalTotalRows"], 2);
+    }
+
+    // CT_Tbl allows a table with no w:tr (EG_ContentRowContent is
+    // minOccurs="0"); an empty row wrapper flattens to none. Such a table has
+    // nothing to lay out, so it leaves no model block in any story and no
+    // §17.4.37 sequence member: its neighbours parse exactly as if adjacent.
+    const ZERO_ROW_TABLES: [&str; 3] = [
+        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid></w:tbl>"#,
+        r#"<w:tbl><w:tblPr><w:tblpPr w:vertAnchor="text" w:tblpY="20"/></w:tblPr></w:tbl>"#,
+        r#"<w:tbl><w:tblPr/><w:sdt><w:sdtContent/></w:sdt><w:bookmarkStart w:id="0" w:name="b"/><w:bookmarkEnd w:id="0"/></w:tbl>"#,
+    ];
+
+    #[test]
+    fn zero_row_tables_leave_no_body_block_or_sequence_barrier() {
+        let look = r#"<w:tblLook w:firstRow="1" w:lastRow="1" w:noHBand="1"/>"#;
+        for zero_row in ZERO_ROW_TABLES {
+            let xml = format!(
+                r#"<w:body xmlns:w="{ns}"><w:p/>{zero_row}{}{zero_row}{}{zero_row}<w:p/></w:body>"#,
+                one_row_table(look, "first"),
+                one_row_table(look, "last"),
+                ns = W_NS,
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut num_map = NumberingMap::default();
+            let elements = parse_body_elements(
+                doc.root_element(),
+                &logical_sequence_styles(),
+                &mut num_map,
+                &HashMap::new(),
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            );
+            let kinds: Vec<&str> = elements
+                .iter()
+                .map(|element| match element {
+                    BodyElement::Paragraph(_) => "p",
+                    BodyElement::Table(_) => "tbl",
+                    _ => "other",
+                })
+                .collect();
+            assert_eq!(kinds, ["p", "tbl", "tbl", "p"], "{zero_row}");
+            let tables: Vec<&DocTable> = elements
+                .iter()
+                .filter_map(|element| match element {
+                    BodyElement::Table(table) => Some(table.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(first_cell_color(tables[0]).as_deref(), Some("aa0000"));
+            assert_eq!(first_cell_color(tables[1]).as_deref(), Some("0000bb"));
+            let first = serde_json::to_value(&tables[0].table_layout).unwrap();
+            let second = serde_json::to_value(&tables[1].table_layout).unwrap();
+            assert_eq!(first["logicalSequenceId"], second["logicalSequenceId"]);
+            assert_eq!(second["logicalRowOffset"], 1);
+            assert_eq!(second["logicalTotalRows"], 2);
+        }
+    }
+
+    #[test]
+    fn zero_row_tables_never_end_a_cover_pages_block() {
+        let cover = |content: &str| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
+            )
+        };
+        for zero_row in ZERO_ROW_TABLES {
+            for (body, expected) in [
+                (format!("{}<w:p/>", cover(zero_row)), vec!["p"]),
+                (
+                    format!("{}<w:p/>", cover(&format!("<w:p/>{zero_row}"))),
+                    vec!["p", "pageBreak", "p"],
+                ),
+            ] {
+                let xml = format!(r#"<w:body xmlns:w="{ns}">{body}</w:body>"#, ns = W_NS);
+                let doc = roxmltree::Document::parse(&xml).unwrap();
+                let mut num_map = NumberingMap::default();
+                let kinds: Vec<&str> = parse_body_elements(
+                    doc.root_element(),
+                    &logical_sequence_styles(),
+                    &mut num_map,
+                    &HashMap::new(),
+                    &ChartMap::default(),
+                    &HashMap::new(),
+                    &ThemeColors::default(),
+                    &HashMap::new(),
+                )
+                .iter()
+                .map(|element| match element {
+                    BodyElement::Paragraph(_) => "p",
+                    BodyElement::PageBreak { .. } => "pageBreak",
+                    _ => "other",
+                })
+                .collect();
+                assert_eq!(kinds, expected, "{body}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_row_tables_leave_no_cell_or_text_box_block() {
+        for zero_row in ZERO_ROW_TABLES {
+            let outer = parse_tbl_styled(
+                &format!(r#"<w:tr><w:tc><w:p/>{zero_row}<w:p/></w:tc></w:tr>"#),
+                &logical_sequence_styles(),
+            );
+            let cell = &outer.rows[0].cells[0].content;
+            assert_eq!(cell.len(), 2, "{zero_row}");
+            assert!(cell
+                .iter()
+                .all(|element| matches!(element, CellElement::Paragraph(_))));
+
+            let xml = format!(
+                r#"<w:txbxContent xmlns:w="{ns}"><w:p/>{zero_row}<w:p/></w:txbxContent>"#,
+                ns = W_NS,
+            );
+            let doc = roxmltree::Document::parse(&xml).unwrap();
+            let mut num_map = NumberingMap::default();
+            let (wire, _) = parse_text_box_content(
+                doc.root_element(),
+                &logical_sequence_styles(),
+                &mut num_map,
+                &HashMap::new(),
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                DepthGuard::root(),
+            );
+            assert_eq!(wire.len(), 2, "{zero_row}");
+            assert!(wire
+                .iter()
+                .all(|block| matches!(block, TextBoxBlockWire::Body(BodyElement::Paragraph(_)))));
+        }
     }
 
     #[test]

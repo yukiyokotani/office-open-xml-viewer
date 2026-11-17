@@ -243,6 +243,14 @@ export function measureBodyTableEntry(
     throw new Error('Ordinary table acquisition received an adjacent-group cursor');
   }
   const cursor = request.cursor?.cursor ?? startTableFragmentCursor();
+  if (cursor.rowIndex >= retained.input.rows.length) {
+    // Nothing is left to place: a table with no rows (CT_Tbl allows zero w:tr,
+    // EG_ContentRowContent is minOccurs="0"). takeTableFragment reports this as
+    // "no fragment", which every acquisition path below would read as "does not
+    // fit here" and request a fresh region, and the same answer repeats on
+    // every page.
+    return Object.freeze({ layout: retained.layout, blockExtentPt: 0, nextCursor: null });
+  }
   const pageHeightPt = state.pageH;
   if (authoredPositioning) {
     return measurePositionedTable(context, request as OrdinaryBodyTableRequest, operations, {
