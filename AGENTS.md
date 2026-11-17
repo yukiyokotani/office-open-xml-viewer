@@ -1,8 +1,19 @@
 # Agent Instructions
 
-This file is the canonical workflow for AI coding agents working on this
-repository. Tool-specific files such as `CLAUDE.md` may add supplements, but they
-must not contradict this file.
+This file is the single source of agent instructions for this repository. It
+applies to every AI coding agent and to every tool.
+
+Instruction files:
+
+- `AGENTS.md` (this file) — all repository-wide rules. Tools that follow the
+  `AGENTS.md` convention load it directly.
+- `packages/<name>/AGENTS.md` — facts specific to one package. They add to this
+  file and do not repeat it.
+- `.claude/CLAUDE.md` and `packages/<name>/CLAUDE.md` — one-line files that
+  import the `AGENTS.md` beside them for Claude Code. They hold no rules.
+
+Add or change rules only in an `AGENTS.md`. Do not add tool-specific rule
+files.
 
 ## Project
 
@@ -28,11 +39,11 @@ Use this flow for ordinary bug fixes and feature work:
 2. If the checkout is dirty, preserve unrelated work before switching or pulling.
    Prefer `git stash push -u -m <clear-message>` for work that appears to belong
    to another session.
-3. Create a feature branch. Use `codex/<topic>` for Codex work when possible;
-   otherwise follow the repository's existing branch naming.
-4. When creating or entering a Codex/Claude worktree, make the root checkout's
+3. Create a feature branch named `<agent>/<topic>`, for example
+   `codex/<topic>` or `claude/<topic>`.
+4. When creating or entering a Git worktree, make the root checkout's
    ignored `spec/` directory available from that worktree as a local symlink.
-   For the standard `.claude/worktrees/<name>` layout, run:
+   For a worktree under `.claude/worktrees/<name>`, run:
 
    ```bash
    ln -s ../../../spec spec
@@ -54,30 +65,19 @@ Use this flow for ordinary bug fixes and feature work:
 
 ## Worktrees and Parallel Sessions
 
-After reading this file:
+Several agent sessions may work on this repository at the same time, each in
+its own Git worktree.
 
-1. Run `pwd` and identify the worktree role from the path.
-2. Ensure `spec` exists in the worktree as a symlink to the main checkout's
-   ignored OOXML specification directory (step 4 of the Standard Development
-   Flow).
-3. Read the package-level `AGENTS.md` for any package you will edit.
-4. Follow the ownership limits below unless the user explicitly asks for a
-   cross-package change.
-
-Some agent sessions run in package-scoped worktrees:
-
-- `.claude/worktrees/pptx` or `ooxml-pptx` → PPTX session; edit
-  `packages/pptx` only unless the task requires shared code.
-- DOCX-focused worktrees should primarily edit `packages/docx`.
-- XLSX-focused worktrees should primarily edit `packages/xlsx`.
-
-Reading other packages is fine. Editing other packages should happen only for a
-coherent cross-package fix described in Cross-Package Integration.
-
-Multiple agent sessions (for example Claude and Codex) may run at once. Treat
-unexpected dirty files as user or peer-agent work, and do not revert or
-overwrite unrelated changes; preserve them as in step 2 of the Standard
-Development Flow.
+- Before editing, make sure `spec` exists in the worktree (step 4 of the
+  Standard Development Flow) and read the `AGENTS.md` of each package you will
+  edit.
+- A task scoped to one format edits that format's package. Reading other
+  packages is fine. Edit `packages/core`, `packages/ooxml-common`, or another
+  format only for a coherent fix described in Cross-Package Integration, or
+  when the user asks for a cross-package change.
+- Treat unexpected dirty files as work that belongs to the user or to another
+  session. Do not revert or overwrite unrelated changes; preserve them as in
+  step 2 of the Standard Development Flow.
 
 ## Git and PR Rules
 
@@ -106,11 +106,10 @@ Development Flow.
   the actual model used for that task; do not hard-code a model name across
   tasks. Examples:
   - Codex: `Co-Authored-By: Codex <model-name> <noreply@openai.com>`
-  - Claude/Fable: `Co-Authored-By: Claude <model-name> <noreply@anthropic.com>`
-- If Claude starts, directs, or delegates work to Codex, include both trailers in the
-  resulting commit, including the model each agent actually used for that task.
-  This preserves the human-readable provenance of the orchestration layer and
-  the implementation agent.
+  - Claude: `Co-Authored-By: Claude <model-name> <noreply@anthropic.com>`
+- If one agent directs or delegates work to another, include a trailer for
+  each agent in the resulting commit, with the model each one used for that
+  task.
 
 ## Verification
 
@@ -314,7 +313,7 @@ must not be committed; rebuild it instead of copying it between worktrees. VRT
 screenshots and diffs also stay local unless the user explicitly asks to commit
 them.
 
-When using a Codex/Claude worktree, copy local private stories/samples from the
+When using a worktree, copy local private stories/samples from the
 main local checkout if needed. Avoid copying `.DS_Store`, temporary Office lock
 files, screenshots, VRT diffs, or private reference images unless the user
 explicitly asks.

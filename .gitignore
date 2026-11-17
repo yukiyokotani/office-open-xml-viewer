@@ -19,7 +19,9 @@ spec/
 node_modules/
 # Per-worktree pnpm store used by sandboxed/local agent sessions.
 /.pnpm-store/
-.claude/
+# Claude Code local state. Only the instruction wrapper is tracked.
+.claude/*
+!.claude/CLAUDE.md
 dist/
 # WASM build output (regenerate with: pnpm build:wasm)
 packages/pptx/src/wasm/

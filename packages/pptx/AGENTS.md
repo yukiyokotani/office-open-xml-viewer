@@ -1,9 +1,14 @@
 # @silurus/ooxml-pptx — for PPTX sessions
 
-Package supplement for PPTX sessions. Read the root `AGENTS.md` first; it is
-canonical for workflow, branching, VRT and reference-image rules, and the root
-tool-specific files (for example `CLAUDE.md` for autonomous-work hours) add
-agent-specific supplements. This file only records PPTX-specific facts.
+Read the root `AGENTS.md` (canonical) first. Follow it for workflow, branches,
+VRT, and reference-image rules. This file records only PPTX-specific facts.
+
+## Edit Scope
+
+- Mainly `packages/pptx/**` (including the Rust code in `parser/` and `model/`).
+- Change `packages/core` / `packages/ooxml-common` or other formats only as part
+  of a coherent fix that follows Cross-Package Integration in the root
+  `AGENTS.md`.
 
 ## Package Layout
 
