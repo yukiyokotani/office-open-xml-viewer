@@ -55,6 +55,10 @@ const math = {
 const vscodeApi = acquireVsCodeApi();
 const fileType = __OOXML_FILE_TYPE__;
 const selectionSession = __OOXML_SELECTION_SESSION__;
+// Identifies this document among those VS Code loads from the same HTML: a
+// hidden editor's document is destroyed and a new one is loaded when the tab
+// is shown again. The host sends one `ooxml-init` per instance.
+const webviewInstance = crypto.randomUUID();
 
 // Start the parser WASM request with the document, in parallel with the host
 // reading the file. It must be made here, not by the parser worker: see
@@ -161,7 +165,7 @@ window.addEventListener(
 );
 
 // Notify extension host that the webview script is ready to receive messages.
-vscodeApi.postMessage({ type: 'webview-ready', selectionSession });
+vscodeApi.postMessage({ type: 'webview-ready', selectionSession, instance: webviewInstance });
 
 window.addEventListener('message', async (event: MessageEvent) => {
   const msg = event.data;
@@ -171,6 +175,8 @@ window.addEventListener('message', async (event: MessageEvent) => {
   }
   if (msg.type !== 'ooxml-init') return;
   if (msg.selectionSession !== selectionSession) return;
+  // An init read for an earlier document of this session can arrive here.
+  if (msg.instance !== webviewInstance) return;
 
   // Opt-in flag forwarded from the extension host (gated by the
   // `ooxmlViewer.useGoogleFonts` setting AND workspace trust). When false the
