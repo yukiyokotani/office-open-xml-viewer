@@ -1048,12 +1048,18 @@ fn read_fonts(bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), String> {
             .map(|b| u16::from_le_bytes(*b))
             .take_while(|u| *u != 0)
             .collect();
-        if units.is_empty() || units.len() * 2 + 2 > name.len() {
-            return Err(unsupported("unterminated or empty Word font name"));
+        if units.len() * 2 + 2 > name.len() {
+            return Err(crate::rejection::corrupt("unterminated Word font name"));
+        }
+        // MS-DOC 2.9.86 FFN xszFfn: a terminated empty name names no font. The
+        // slot is kept so later indices still address their fonts; a run that
+        // selects it takes no font of its own, as Word does.
+        if units.is_empty() {
+            crate::rejection::ignored_value("empty Word font name");
         }
         let name = String::from_utf16(&units)
             .map_err(|_| unsupported("invalid Unicode Word font name"))?;
-        if font[3] == SYMBOL_CHARSET {
+        if font[3] == SYMBOL_CHARSET && !name.is_empty() {
             symbol_fonts.push(name.clone());
         }
         fonts.push(name);
@@ -1183,6 +1189,28 @@ mod tests {
         assert_eq!(read_fonts(&bytes).unwrap().0, ["日本語 Font"]);
         bytes.pop();
         assert!(read_fonts(&bytes).is_err());
+    }
+
+    #[test]
+    fn keeps_the_slot_of_an_empty_font_name_and_reads_the_fonts_after_it() {
+        let mut bytes = vec![2, 0, 0, 0];
+        for name in ["", "Calibri"] {
+            let mut font = vec![0; 39];
+            for unit in format!("{name}\0").encode_utf16() {
+                font.extend(unit.to_le_bytes());
+            }
+            bytes.push(font.len() as u8);
+            bytes.extend(font);
+        }
+        crate::rejection::take_best_effort();
+        assert_eq!(read_fonts(&bytes).unwrap().0, ["", "Calibri"]);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "empty Word font name"
+            )]
+        );
     }
 
     fn empty() -> Formatting<'static> {

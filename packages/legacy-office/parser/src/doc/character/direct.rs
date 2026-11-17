@@ -371,12 +371,11 @@ impl Properties {
         let mut axes: FontAxes = [None, None, None, None];
         for (axis, index) in axes.iter_mut().zip(self.fonts) {
             if let Some(index) = index {
-                *axis = Some(
-                    fonts
-                        .get(index)
-                        .ok_or_else(|| unsupported("Word font index outside font table"))?
-                        .clone(),
-                );
+                let name = fonts
+                    .get(index)
+                    .ok_or_else(|| unsupported("Word font index outside font table"))?;
+                // An empty FFN name (see `read_fonts`) leaves the axis unset.
+                *axis = (!name.is_empty()).then(|| name.clone());
             }
         }
         Ok(axes)
