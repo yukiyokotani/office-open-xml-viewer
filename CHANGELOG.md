@@ -5,6 +5,43 @@ semantic versioning. While the major version is zero, minor releases may contain
 explicitly documented breaking changes; patch releases remain compatible with
 the corresponding minor release.
 
+## 0.89.13 — 2026-11-17
+
+Compatible patch release. No migration is required. Two Word layout fixes, a
+fix for relative WASM URLs on pages with a `<base href>`, and two VS Code
+extension fixes: the parser WASM loads, and an editor tab that was
+hidden and shown again renders. They are described below.
+
+- **Word: tables without rows:** a table with no rows (`w:tbl` without
+  `w:tr`, as template engines produce when a repeated row is bound to an
+  empty list) no longer fails layout with "Document page budget exceeded".
+  It takes no space, in flow, floating or next to another such table. Thanks
+  to @mskalnik for the contribution (#2269).
+- **Word: page and column breaks in headers, footers and notes:** a header,
+  footer, footnote or endnote that contains a page or column break
+  (`<w:br w:type="page"/>` or `"column"`), a paragraph-level `w:sectPr` or a
+  Cover Pages building block no longer fails layout with "Unsupported …
+  story block". These stories cannot start a page or column, so the break is
+  ignored and the paragraph is kept whole, as in table cells and text boxes;
+  a section break or Cover Pages block there starts nothing. The main body
+  is unchanged (#2274).
+- **Relative `wasmUrl` with `<base href>`:** a relative `wasmUrl`, and the
+  relative URL of the bundled parser WASM, are now resolved against
+  `document.baseURI` instead of the page location, so a page with a
+  `<base href>` loads the parser from the directory it names. Absolute URLs
+  behave as before (#2212, #2270).
+- **VS Code extension: parser WASM failed to load:** opening a DOCX, XLSX or
+  PPTX file could fail with HTTP 403 or 408 for the parser WASM, in local
+  windows and over Remote SSH. VS Code's webview service worker does not
+  answer resource requests issued from a Worker, and the parser worker
+  fetched the WASM itself. The webview document now fetches the WASM and
+  passes it to the worker as a Blob URL (#2212, #2270, #2278).
+- **VS Code extension: editor tab shown again:** an editor tab that was
+  hidden, for example by switching to another tab, and then shown again
+  stayed on the loading spinner. VS Code re-creates the webview document of a
+  hidden custom editor; the re-created document is now initialized again
+  (#2278).
+
 ## 0.89.12 — 2026-11-16
 
 Compatible patch release. No migration is required. One Excel drawing fix:
