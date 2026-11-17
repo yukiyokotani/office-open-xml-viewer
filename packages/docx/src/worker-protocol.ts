@@ -158,6 +158,7 @@ export type RenderWorkerRequest =
   // find controller scans every page for its runs; a bitmap per page would be
   // wasted work + transfer for pages the user never looks at.
   | { type: 'collectRuns'; id: number; pageIndex: number; opts: WireRenderPageOptions }
+  | { type: 'collectElements'; id: number; pageIndex: number; opts: DocxElementContextOptions }
   | {
       type: 'hitTestElement';
       id: number;
@@ -210,6 +211,7 @@ export type RenderWorkerResponse =
   // retained layout variant it paints and ships it beside the bitmap.
   | { type: 'pageRendered'; id: number; bitmap: ImageBitmap; runs: DocxTextRunInfo[]; diagnostics?: readonly LayoutDiagnostic[] }
   | { type: 'runsCollected'; id: number; runs: DocxTextRunInfo[] }
+  | { type: 'elementsCollected'; id: number; contexts: DocxElementContext[] }
   // Progressive layout in worker mode: the worker publishes its provisional
   // prefixes as they are primed, then answers the original `parse` with the
   // authoritative `parsedMeta`. Keyed by `forId` rather than `id` ON PURPOSE —

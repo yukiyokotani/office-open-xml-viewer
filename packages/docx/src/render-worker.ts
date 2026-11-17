@@ -74,7 +74,7 @@ import { paginateRenderWorkerDocumentProgressively } from './render-worker-progr
 import { PaginationAbortError } from './layout/pagination-scheduler.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
-import { hitTestSelectedDocxElementContext } from './element-context.js';
+import { collectSelectedDocxElementContexts, hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import {
   renderWorkerLayoutMeta,
@@ -668,6 +668,16 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         { ...req.opts, defaultCurrentDateMs: doc.defaultCurrentDateMs },
       );
       post({ type: 'elementHit', id, context });
+      return;
+    }
+    if (req.type === 'collectElements') {
+      if (!doc) throw new Error('Document not loaded');
+      const contexts = collectSelectedDocxElementContexts(
+        doc.layoutServices,
+        req.pageIndex,
+        { ...req.opts, defaultCurrentDateMs: doc.defaultCurrentDateMs },
+      );
+      post({ type: 'elementsCollected', id, contexts });
       return;
     }
     if (req.type === 'extractImage') {

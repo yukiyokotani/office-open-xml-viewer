@@ -1410,6 +1410,7 @@ export class DocxDocument {
     renderPageToBitmap(pageIndex: number, opts?: RenderPageToBitmapOptions): Promise<ImageBitmap>;
     collectPageRuns(pageIndex: number, opts?: CollectPageRunsOptions): Promise<DocxTextRunInfo[]>;
     getCommentThreads(pageIndex: number, options?: DocxPageCommentThreadsOptions): Promise<readonly Readonly<ResolvedDocxCommentThread>[]>;
+    collectPageElements(pageIndex: number, opts?: DocxElementContextOptions): Promise<DocxElementContext[]>;
     getElementContextAt(pageIndex: number, point: DocxPagePoint, opts?: DocxElementContextOptions): Promise<DocxElementContext | null>;
     private __privatePresence;
     private constructor();

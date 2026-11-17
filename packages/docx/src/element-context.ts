@@ -13,6 +13,7 @@ import { paintResourceRegistryOf } from './layout/runtime-state.js';
 import type {
   DeepReadonly,
   DrawingLayout,
+  ImagePaintResourceDescriptor,
   LayoutRect,
   LayoutServices,
   PaintNode,
@@ -120,17 +121,31 @@ function geometryBounds(geometry: ElementGeometry): LayoutRect {
   return 'drawing' in geometry ? geometry.drawing.inkBounds : geometry.placement.bounds;
 }
 
-function mappedBounds(geometry: ElementGeometry): DocxElementContext['bounds'] {
+/** Apply the image painter's center rotation before the retained page transform.
+ * Drawing ink bounds already include their drawing transform. */
+function mappedBounds(
+  geometry: ElementGeometry,
+  registry: PaintResourceRegistry,
+): DocxElementContext['bounds'] {
   const bounds = geometryBounds(geometry);
+  const rotation = !('drawing' in geometry) && geometry.placement.resourceKind === 'image'
+    ? (registry.resolve(geometry.placement.resourceKey, 'image') as DeepReadonly<ImagePaintResourceDescriptor>).rotation ?? 0
+    : 0;
+  const radians = rotation * Math.PI / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  const centerX = bounds.xPt + bounds.widthPt / 2;
+  const centerY = bounds.yPt + bounds.heightPt / 2;
   const corners = [
-    mapAffinePoint(geometry.pointToPage, bounds),
-    mapAffinePoint(geometry.pointToPage, { xPt: bounds.xPt + bounds.widthPt, yPt: bounds.yPt }),
-    mapAffinePoint(geometry.pointToPage, { xPt: bounds.xPt, yPt: bounds.yPt + bounds.heightPt }),
-    mapAffinePoint(geometry.pointToPage, {
-      xPt: bounds.xPt + bounds.widthPt,
-      yPt: bounds.yPt + bounds.heightPt,
-    }),
-  ];
+    [0, 0], [1, 0], [0, 1], [1, 1],
+  ].map(([x, y]) => {
+    const dx = (x - 0.5) * bounds.widthPt;
+    const dy = (y - 0.5) * bounds.heightPt;
+    return mapAffinePoint(geometry.pointToPage, {
+      xPt: centerX + dx * cosine - dy * sine,
+      yPt: centerY + dx * sine + dy * cosine,
+    });
+  });
   const left = Math.min(...corners.map((corner) => corner.xPt));
   const top = Math.min(...corners.map((corner) => corner.yPt));
   const right = Math.max(...corners.map((corner) => corner.xPt));
@@ -226,11 +241,7 @@ function contextForElement(
     const resourceKey = 'drawing' in geometry
       ? resourceCommand(geometry.drawing, 'image')!.resourceKey
       : geometry.placement.resourceKey;
-    const descriptor = registry.descriptors.find((candidate) =>
-      candidate.resourceKey === resourceKey && candidate.kind === 'image' &&
-      'mimeType' in candidate);
-    if (!descriptor) throw new Error(`Unknown image paint resource: ${resourceKey}`);
-    mimeType = (descriptor as { readonly mimeType: string }).mimeType;
+    mimeType = (registry.resolve(resourceKey, 'image') as DeepReadonly<ImagePaintResourceDescriptor>).mimeType;
   } else {
     const bounded = boundedText(shapeTextParts(geometry as DrawingGeometry), maxTextCharacters);
     text = bounded.text;
@@ -243,7 +254,7 @@ function contextForElement(
     elementIndex,
     elementType,
     point: { ...point },
-    bounds: mappedBounds(geometry),
+    bounds: mappedBounds(geometry, registry),
     source: sourceLocator('drawing' in geometry ? geometry.drawing.source : geometry.source),
     ...(text === undefined ? {} : { text }),
     ...(mimeType === undefined ? {} : { mimeType }),
@@ -277,6 +288,41 @@ export function hitTestDocxElementContext(
     if (context) return context;
   }
   return null;
+}
+
+/** Collect detached image, chart, and shape occurrences in page paint order.
+ * Bounds are full element frames, not clip intersections or visibility tests;
+ * overlapping occurrences remain independently addressable. */
+export function collectDocxElementContexts(
+  layout: Parameters<typeof elementGeometryForPage>[0],
+  pageIndex: number,
+  registry: PaintResourceRegistry,
+  options: DocxElementContextOptions = {},
+): DocxElementContext[] {
+  const maxTextCharacters = normalizedMax(options.maxTextCharacters);
+  return elementGeometryForPage(layout, pageIndex).flatMap((geometry, index) => {
+    const bounds = mappedBounds(geometry, registry);
+    const point = {
+      xPt: bounds.xPt + bounds.widthPt / 2,
+      yPt: bounds.yPt + bounds.heightPt / 2,
+    };
+    const context = contextForElement(geometry, pageIndex, index, point, registry, maxTextCharacters);
+    return context ? [context] : [];
+  });
+}
+
+/** Select the exact layout variant used by paint, then enumerate its occurrences. */
+export function collectSelectedDocxElementContexts(
+  services: LayoutServices,
+  pageIndex: number,
+  options: SelectedDocxElementContextOptions,
+): DocxElementContext[] {
+  const selected = selectDocumentLayoutPage(services, {
+    currentDate: options.currentDate,
+    defaultCurrentDateMs: options.defaultCurrentDateMs,
+    showTrackedChanges: options.showTrackedChanges,
+  }, pageIndex);
+  return collectDocxElementContexts(selected.layout, pageIndex, paintResourceRegistryOf(services), options);
 }
 
 /** Select the exact layout variant used by paint, then hit-test its drawings. */

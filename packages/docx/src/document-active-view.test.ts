@@ -87,6 +87,16 @@ describe('activeDocxLayoutViewOf', () => {
 });
 
 describe('omitted per-call options select the active load-time variant', () => {
+  it('collectPageElements follows the active view and permits explicit overrides', async () => {
+    const { doc, builds } = documentWithActiveView({ currentDate: DATED, showTrackedChanges: true });
+    expect(await doc.collectPageElements(0)).toEqual([]);
+    expect(builds).toHaveLength(1);
+    expect(builds[0]).toMatchObject({ currentDateMs: DATED.getTime(), showTrackedChanges: true });
+    await doc.collectPageElements(0, { showTrackedChanges: false });
+    expect(builds).toHaveLength(2);
+    expect(builds[1].showTrackedChanges).toBeUndefined();
+  });
+
   it('an optionless collectPageRuns never builds the default variant', async () => {
     const { doc, builds } = documentWithActiveView({ currentDate: DATED });
     await doc.collectPageRuns(0);
