@@ -9,3 +9,18 @@ interface Stix2Engine {
 }
 // eslint-disable-next-line no-var
 declare var __ooxmlStix2: Stix2Engine | undefined;
+
+// Parser WASM binaries are bundled with esbuild's `file` loader: the default
+// export is the emitted asset's URL, relative to the webview's <base>.
+declare module '@silurus/ooxml-docx/wasm-binary' {
+  const url: string;
+  export default url;
+}
+declare module '@silurus/ooxml-xlsx/wasm-binary' {
+  const url: string;
+  export default url;
+}
+declare module '@silurus/ooxml-pptx/wasm-binary' {
+  const url: string;
+  export default url;
+}

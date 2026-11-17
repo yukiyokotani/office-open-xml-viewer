@@ -68,7 +68,9 @@ export function getWebviewHtml(
     vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'),
   );
   // esbuild emits parser WASM assets as relative URLs. The webview document
-  // has its own origin, so resolve those URLs beside webview.js.
+  // has its own origin, so resolve those URLs beside webview.js. The document
+  // fetches the parser WASM from there (`connect-src` cspSource) and hands the
+  // parser worker a Blob URL; see webview/parserWasmUrl.ts.
   const assetBaseUri = new URL('.', scriptUri.toString()).toString();
 
   const nonce = getNonce();
