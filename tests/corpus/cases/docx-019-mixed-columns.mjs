@@ -1,6 +1,6 @@
 import { DOCX } from '../lib/grid.mjs';
 import { docxPackage, header, run } from '../lib/docx.mjs';
-import { A_SERIES } from '../lib/iso216.mjs';
+import { A_SERIES, B_SERIES, C_SERIES } from '../lib/iso216.mjs';
 
 // A paper laid out the way journals and conference templates are: a
 // one-column abstract, a two-column body, a full-width table between two
@@ -9,14 +9,6 @@ import { A_SERIES } from '../lib/iso216.mjs';
 // change of layout is a continuous section break, so up to four sections share
 // a page.
 const COLS = { num: 2, space: DOCX.gutterAfter(2) };
-const B_SERIES = [
-  ['B0', 1000, 1414], ['B1', 707, 1000], ['B2', 500, 707], ['B3', 353, 500], ['B4', 250, 353], ['B5', 176, 250],
-  ['B6', 125, 176], ['B7', 88, 125], ['B8', 62, 88], ['B9', 44, 62], ['B10', 31, 44],
-];
-const C_SERIES = [
-  ['C0', 917, 1297], ['C1', 648, 917], ['C2', 458, 648], ['C3', 324, 458], ['C4', 229, 324], ['C5', 162, 229],
-  ['C6', 114, 162], ['C7', 81, 114], ['C8', 57, 81], ['C9', 40, 57], ['C10', 28, 40],
-];
 
 const ratio = (w, h) => (h / w).toFixed(3);
 const sizeText = (series, i) => {

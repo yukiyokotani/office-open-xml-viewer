@@ -142,6 +142,9 @@ export function sectPrXml(section = {}) {
  *    columnBreakBefore?, pageBreakBefore?, lineAuto? (single, not exact),
  *    markRPr? (paragraph-mark run properties) }
  *  { kind: 'table', at?, grid, rows: [{ lines, cells }] }
+ *  { kind: 'raw', xml, at?, height? (lines; unknown when absent) }   body-level
+ *    XML written as is (tables the composer cannot express: autofit, nested,
+ *    repeated header rows); offsets before it go to the previous paragraph.
  *  { kind: 'section', ...section }   ends the running section; the next
  *    section takes these properties (its sectPr is written by the composer).
  * `at` is the 1-based grid line the block starts on. Distances become space
@@ -182,7 +185,8 @@ export function composeBody(blocks, firstSection = {}) {
     if (block.at !== undefined && Number.isNaN(line)) throw new Error(`block ${index}: 'at' after a naturally wrapped paragraph`);
     const gap = Number.isNaN(line) ? 0 : at - line - own;
     if (gap < 0) throw new Error(`block ${index} at line ${at} overlaps the previous block (next free line ${line})`);
-    const height = block.kind === 'table'
+    const height = block.kind === 'raw' ? block.height ?? NaN
+      : block.kind === 'table'
       ? block.rows.reduce((sum, row) => sum + row.lines, 0)
       : block.text !== undefined ? NaN
         : block.runs ? block.height ?? NaN
@@ -192,17 +196,17 @@ export function composeBody(blocks, firstSection = {}) {
     let before = own;
     if (gap > 0) {
       const prev = out[out.length - 1];
-      if (block.kind === 'table' || boundary) {
+      if (block.kind === 'table' || block.kind === 'raw' || boundary) {
         if (!prev || prev.kind !== 'p') throw new Error(`block ${index}: no paragraph to carry the offset`);
         prev.after += gap;
       } else before += gap;
     }
-    out.push(block.kind === 'table' ? { kind: 'table', block } : { kind: 'p', block, before, after });
+    out.push(block.kind === 'table' || block.kind === 'raw' ? { kind: block.kind, block } : { kind: 'p', block, before, after });
     boundary = false;
     line = at + height + after;
     sectionBottom = Math.max(sectionBottom, line);
   });
-  const body = out.map((item) => (item.kind === 'table'
+  const body = out.map((item) => (item.kind === 'raw' ? item.block.xml : item.kind === 'table'
     ? tableXml(item.block)
     : paragraphXml(item.block, item.before * DOCX.LINE, item.after * DOCX.LINE, item.sectPr))).join('');
   return { body, lastSection: current };
