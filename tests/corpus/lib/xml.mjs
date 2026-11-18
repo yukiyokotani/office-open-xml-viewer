@@ -35,6 +35,8 @@ export const NS = {
   wps: 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape',
   mc: 'http://schemas.openxmlformats.org/markup-compatibility/2006',
   v: 'urn:schemas-microsoft-com:vml',
+  m: 'http://schemas.openxmlformats.org/officeDocument/2006/math',
+  wpg: 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup',
 };
 
 export const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
