@@ -116,7 +116,8 @@ and sufficient, no decoration.
   registries already resolve (`packages/core/src/fonts/google-fonts.ts`,
   `packages/core/src/fonts/scripts.ts`); see the note on VRT below.
 - **Colour.** Black on white; one accent, Claude orange `D97757`, only when a feature
-  needs a colour.
+  needs a colour. Fills are solid; gradients appear only in the gradient
+  specimen (pptx-009).
 - **Text.** Original, sober and self-describing: a specimen names its own
   values (a tab stop line names its stop positions). Data are timeless,
   verifiable facts: ISO 216 sizes, unit definitions, typographic point
