@@ -37,6 +37,7 @@ pnpm corpus:build                         # write every specimen
 node tests/corpus/build.mjs --check       # exit 1 if a committed file is stale
 node --test tests/corpus/corpus.test.mjs  # rebuild in memory and verify
 pnpm corpus:gap [--format docx] [--part 'word/document'] [--top N]
+pnpm corpus:coverage --format docx [--dir SUBDIR|.] [--top N]
 ```
 
 `corpus:gap` compares the public corpus with a local private corpus under
@@ -47,6 +48,23 @@ dropped), prints covered / total per format and the uncovered features
 grouped by part and element, ranked by how many private files use them. It
 prints no file names and writes nothing. Without a private corpus it says so
 and exits 0. Use it to choose the next specimens.
+
+`corpus:coverage` measures the renderer instead of the XML. It renders every
+public specimen and every private file (recursively; `--dir .` for the top
+level only) through the package's VRT fixture in Chromium with V8 block
+coverage, maps the served TypeScript back to `packages/*/src` lines, and lists
+the lines some private file executes but no specimen does, grouped into hunks
+and ranked by the number of private files reaching them. This finds behaviour
+that structural vocabulary misses: combinations (a table inside balanced
+columns), compatibility modes and value-dependent branches. Font-resolution
+modules are excluded by default (`--exclude REGEX` to change), because the
+public corpus loads its own two families while private files fall back to
+host fonts. Parsing runs in a worker and is not measured; use `corpus:gap` for
+it. Lines executed by the same code path in two different layout states (one
+balanced page against several) look the same, so pair it with reading the
+private files. Stdout shows source lines and counts only; the full report,
+which names private files, is written to the ignored
+`packages/<fmt>/public/private/coverage-gap.json`.
 
 The test fails when a committed file differs by one byte from its rebuild,
 when a package is malformed, when a feature a case declares in `covers` is
