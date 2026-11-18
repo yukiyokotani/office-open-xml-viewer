@@ -7,7 +7,7 @@ const { MARGIN_COL, MODULE, FIRST_ROW } = XLSX;
 const SAMPLES = [
   ['font scheme minor', { scheme: 'minor' }, `Theme minor font, ${FONT.latin}`],
   ['font color theme 1 (dk1)', { scheme: 'minor', themeColor: [1] }, 'Dark 1: black'],
-  ['font color theme 4 (accent1)', { scheme: 'minor', themeColor: [4] }, 'Accent 1: orange'],
+  ['font color theme 4 (accent1)', { scheme: 'minor', themeColor: [4] }, 'Accent 1: cyan'],
   ['fill theme 4', { fill: 'theme:4' }, null],
   ['fill theme 4, tint -0.5', { fill: 'theme:4:-0.5' }, null],
   ['fill theme 4, tint 0.8', { fill: 'theme:4:0.8' }, null],
@@ -30,7 +30,7 @@ export default {
     const s = sheet({
       id: 'xlsx-010',
       title: 'Theme fonts and colours',
-      verify: 'Verify: the font is the theme minor font; fills from top: accent orange, a darker orange (tint -0.5), a pale orange (tint 0.8).',
+      verify: 'Verify: the font is the theme minor font; fills from top: accent cyan, a darker cyan (tint -0.5), a pale cyan (tint 0.8).',
       cols: [['A', MARGIN_COL], ['B', 2 * MODULE], ['C', MODULE], ['D', MODULE], ['E', MODULE]],
     });
     s.theme(THEME);

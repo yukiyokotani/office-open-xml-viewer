@@ -51,7 +51,7 @@ export default {
       title: 'Theme fonts and colours',
       verify: [
         'Verify: every sample resolves through the theme part:',
-        `${FONT.latin} and ${FONT.eastAsia}, accent orange, its half shade, black.`,
+        `${FONT.latin} and ${FONT.eastAsia}, accent cyan, its half shade, black.`,
       ],
     }),
     { kind: 'p', at: at(2), style: 'caption', bold: true, tabs: TAB, lines: ['Run property\tSample'] },

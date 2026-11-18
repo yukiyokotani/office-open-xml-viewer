@@ -10,7 +10,7 @@
 export const FONT = { latin: 'Roboto', eastAsia: 'Noto Sans JP' };
 
 /** Black on white; the accent is used only when a feature needs a colour. */
-export const COLOR = { ink: '000000', paper: 'FFFFFF', accent: 'D97757' };
+export const COLOR = { ink: '000000', paper: 'FFFFFF', accent: '12BFD8' };
 
 /** Text inset (EMU) of a DrawingML shape whose outline is drawn: one 12 pt
  * gutter, so text never touches the rule. Text in unoutlined shapes, text

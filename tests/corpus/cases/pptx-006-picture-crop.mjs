@@ -49,7 +49,7 @@ export default {
       title: 'Picture crop',
       verify: [
         'Verify: the left picture shows six outlined fields over columns 1-3, rows 2-3;',
-        'the right picture is cropped to the orange field and fills column 5, row 2.',
+        'the right picture is cropped to the cyan field and fills column 5, row 2.',
       ],
     }),
     pic(3, 'Uncropped', box),

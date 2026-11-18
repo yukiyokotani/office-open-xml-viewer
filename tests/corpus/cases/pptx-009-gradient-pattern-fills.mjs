@@ -11,7 +11,7 @@ const FILLS = [
   {
     name: 'Linear gradient, 90°',
     xml: `<a:gradFill rotWithShape="1"><a:gsLst>${stop(0, COLOR.accent)}${stop(50000, COLOR.paper)}${stop(100000, COLOR.ink)}</a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill>`,
-    lines: ['gradFill, a:lin ang 5400000 (90°)', `stops 0 % ${COLOR.accent}, 50 % ${COLOR.paper},`, `100 % ${COLOR.ink}: orange at the top`],
+    lines: ['gradFill, a:lin ang 5400000 (90°)', `stops 0 % ${COLOR.accent}, 50 % ${COLOR.paper},`, `100 % ${COLOR.ink}: cyan at the top`],
   },
   {
     name: 'Radial gradient',

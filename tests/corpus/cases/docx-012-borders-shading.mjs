@@ -34,7 +34,7 @@ export default {
       title: 'Borders and shading',
       verify: [
         'Verify: each 1 pt rule sits one baseline from its text;',
-        'side rules fall in the gutters; the orange fill spans the box.',
+        'side rules fall in the gutters; the cyan fill spans the box.',
       ],
     }),
     caption(2, `Top border: w:sz ${SZ} (1 pt), w:space ${SPACE} pt, one baseline above the text`),

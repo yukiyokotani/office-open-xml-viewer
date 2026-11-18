@@ -4,9 +4,9 @@ import { sheet } from '../lib/xlsx.mjs';
 const { MARGIN_COL, MODULE, FIRST_ROW } = XLSX;
 const SAMPLES = [
   [`fill ${COLOR.ink}, font ${COLOR.paper}`, { fill: COLOR.ink, color: COLOR.paper }, 'White on black'],
-  [`fill ${COLOR.accent}, font ${COLOR.ink}`, { fill: COLOR.accent }, 'Black on orange'],
-  [`fill ${COLOR.accent}, font ${COLOR.paper}`, { fill: COLOR.accent, color: COLOR.paper }, 'White on orange'],
-  [`font ${COLOR.accent}, no fill`, { color: COLOR.accent }, 'Orange on white'],
+  [`fill ${COLOR.accent}, font ${COLOR.ink}`, { fill: COLOR.accent }, 'Black on cyan'],
+  [`fill ${COLOR.accent}, font ${COLOR.paper}`, { fill: COLOR.accent, color: COLOR.paper }, 'White on cyan'],
+  [`font ${COLOR.accent}, no fill`, { color: COLOR.accent }, 'Cyan on white'],
 ];
 
 export default {

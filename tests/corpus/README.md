@@ -115,7 +115,7 @@ and sufficient, no decoration.
   License 1.1. They are the open faces this repository's Google Fonts
   registries already resolve (`packages/core/src/fonts/google-fonts.ts`,
   `packages/core/src/fonts/scripts.ts`); see the note on VRT below.
-- **Colour.** Black on white; one accent, Claude orange `D97757`, only when a feature
+- **Colour.** Black on white; one accent, cyan `12BFD8`, only when a feature
   needs a colour. Fills are solid; gradients appear only in the gradient
   specimen (pptx-009).
 - **Text.** Original, sober and self-describing: a specimen names its own

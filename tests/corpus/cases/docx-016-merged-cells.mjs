@@ -29,7 +29,7 @@ export default {
       title: 'Merged cells',
       verify: [
         'Verify: the table starts on column 2; the heading spans two',
-        'columns; the label spans three rows, centred; orange cells filled.',
+        'columns; the label spans three rows, centred; cyan cells filled.',
       ],
     }),
     {

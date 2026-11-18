@@ -23,7 +23,7 @@ const layoutBody = '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:cNvSpPr><a:s
 const item = (lvlN, text) => `<a:p>${lvlN ? `<a:pPr lvl="${lvlN}"/>` : ''}<a:r><a:rPr lang="en-GB"/><a:t>${text}</a:t></a:r></a:p>`;
 const slideBody = '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/>'
   + '<p:txBody><a:bodyPr/><a:lstStyle/>'
-  + item(0, 'Level 1: orange dash, buClr accent')
+  + item(0, 'Level 1: cyan dash, buClr accent')
   + item(1, 'Level 2: dash in the text colour')
   + item(1, 'Line spacing spcPct 120 %')
   + item(0, 'Bullets from the master body style')
@@ -58,7 +58,7 @@ export default {
       id: 'pptx-012',
       title: 'Bullets',
       verify: [
-        'Verify: left, master bullets on columns 1 and 2 with text one column in, level 1 dash orange;',
+        'Verify: left, master bullets on columns 1 and 2 with text one column in, level 1 dash cyan;',
         'right, numbers 1-3 on column 7 with text on column 8. All lines on the 24 pt pitch.',
       ],
     }),

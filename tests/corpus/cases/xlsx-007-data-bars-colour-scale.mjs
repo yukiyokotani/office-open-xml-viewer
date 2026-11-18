@@ -26,7 +26,7 @@ export default {
     const s = sheet({
       id: 'xlsx-007',
       title: 'Data bars and colour scale',
-      verify: 'Verify: bar length grows with width (A0 longest); height fill runs from white (A10) to orange (A0).',
+      verify: 'Verify: bar length grows with width (A0 longest); height fill runs from white (A10) to cyan (A0).',
       cols: [['A', MARGIN_COL], ['B', MODULE], ['C', 2 * MODULE], ['D', MODULE]],
     });
     s.set(`B${FIRST_ROW}`, 'ISO 216', { font: 'captionBold' });

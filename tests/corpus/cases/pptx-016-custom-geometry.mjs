@@ -48,7 +48,7 @@ export default {
       id: 'pptx-016',
       title: 'Custom geometry',
       verify: [
-        'Verify: black steps, an orange quarter ellipse and a wave, each filling a field of three columns',
+        'Verify: black steps, a cyan quarter ellipse and a wave, each filling a field of three columns',
         'by two rows; corners and ends meet the field edges exactly.',
       ],
     }),

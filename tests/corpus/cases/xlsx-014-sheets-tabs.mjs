@@ -21,7 +21,7 @@ export default {
     const s = sheet({
       id: 'xlsx-014',
       title: 'Sheets and tabs',
-      verify: 'Verify: three sheets, the second with an orange tab, the third hidden; this sheet is active.',
+      verify: 'Verify: three sheets, the second with a cyan tab, the third hidden; this sheet is active.',
       cols: COLS,
     });
     s.bookView(' activeTab="0"');

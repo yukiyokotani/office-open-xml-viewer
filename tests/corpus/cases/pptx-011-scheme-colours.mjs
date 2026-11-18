@@ -36,7 +36,7 @@ export default {
       id: 'pptx-011',
       title: 'Scheme colours',
       verify: [
-        'Verify: from the left, accent orange, black, dark orange and pale orange, each filling three',
+        'Verify: from the left, accent cyan, black, dark cyan and pale cyan, each filling three',
         'columns by two rows; every colour is resolved through the theme.',
       ],
     }),

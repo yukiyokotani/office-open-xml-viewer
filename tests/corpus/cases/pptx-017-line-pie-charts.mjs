@@ -40,8 +40,8 @@ export default {
       id: 'pptx-017',
       title: 'Line and pie charts',
       verify: [
-        'Verify: a line through seven orange markers labelled 1189 to 148 over hairline gridlines, legend below;',
-        'a pie of 50, 25, 12.5 and two 6.25 % slices from 12 o’clock, alternating black and orange, legend right.',
+        'Verify: a line through seven cyan markers labelled 1189 to 148 over hairline gridlines, legend below;',
+        'a pie of 50, 25, 12.5 and two 6.25 % slices from 12 o’clock, alternating black and cyan, legend right.',
       ],
     }),
     frame(3, 'Line chart', field(1, 6, 2, 3), 'rId2'),

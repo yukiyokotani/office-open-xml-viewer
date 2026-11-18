@@ -31,7 +31,7 @@ export default {
     s.set(`B${FIRST_ROW + 1}`, 'shared string runs (x:r)');
     s.set(`C${FIRST_ROW + 1}`, {
       rich: [['One cell, four runs: '], ['bold', { b: true }], [', '], ['italic', { i: true }], [', '], ['underlined', { u: true }],
-        [' and '], ['orange', { color: COLOR.accent }], ['.']],
+        [' and '], ['cyan', { color: COLOR.accent }], ['.']],
     });
     s.set(`B${FIRST_ROW + 3}`, 'cell font i');
     s.set(`C${FIRST_ROW + 3}`, 'The whole cell is italic.', { italic: true });

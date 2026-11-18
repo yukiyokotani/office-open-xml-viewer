@@ -29,7 +29,7 @@ export default {
     const s = sheet({
       id: 'xlsx-006',
       title: 'Conditional formatting',
-      verify: 'Verify: widths over 300 white on orange; the three largest heights bold; the A4 label orange.',
+      verify: 'Verify: widths over 300 white on cyan; the three largest heights bold; the A4 label cyan.',
       cols: [['A', MARGIN_COL], ['B', MODULE], ['C', MODULE], ['D', MODULE], ['E', MARGIN_COL], ['F', 3 * MODULE]],
     });
     s.set(`B${FIRST_ROW}`, 'ISO 216', { font: 'captionBold' });

@@ -26,7 +26,7 @@ export default {
       title: 'Slide background',
       verify: [
         'Verify: black background, white text and a white field in columns 1-3 of rows 2-3,',
-        'an orange field in columns 4-6; no colour is written on the slide, only theme references.',
+        'a cyan field in columns 4-6; no colour is written on the slide, only theme references.',
       ],
     }),
     shape(3, 'bg2 field', field(1, 3, 2, 3), 'rect', '<a:solidFill><a:schemeClr val="tx1"/></a:solidFill>', '<a:ln><a:noFill/></a:ln>'),
@@ -35,7 +35,7 @@ export default {
       { style: 'caption', bold: true, text: 'p:bg / p:bgRef idx 1001, schemeClr bg1' },
       { style: 'caption', text: 'Background style 1 of the theme (bgFillStyleLst) painted in bg1.' },
       { style: 'caption', text: 'a:overrideClrMapping bg1 → dk1, tx1 → lt1: bg1 is black, tx1 white.' },
-      { style: 'caption', text: 'Left field: schemeClr tx1 (white). Right field: accent1 (orange).' },
+      { style: 'caption', text: 'Left field: schemeClr tx1 (white). Right field: accent1 (cyan).' },
     ]),
   ], { slideBg: BG, clrMapOvr: OVERRIDE }),
 };
