@@ -216,11 +216,19 @@ test.describe('docx visual fidelity', () => {
 // with the previous renderer's images, bound by manifest to
 // VRT_BASELINE_REVISION. `demo` runs under `pnpm vrt`; `private` under
 // `pnpm vrt:private` (VRT_PRIVATE_CORPUS=1).
-type SelfVrtCorpus = 'demo' | 'private';
+type SelfVrtCorpus = 'demo' | 'corpus' | 'private';
 
-function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: string[]): void {
+// `query` holds the fixture parameters after the page index: the demo and
+// private corpora render at 612 px; the public specimens are A4 (595 pt) and
+// load their Roboto / Noto Sans JP faces offline (?fonts=corpus).
+function describeSelfRegression(
+  title: string,
+  corpus: SelfVrtCorpus,
+  files: string[],
+  { query = '&width=612' }: { query?: string } = {},
+): void {
   test.describe(title, () => {
-    if (corpus === 'demo' && files.length > 0) {
+    if (corpus !== 'private' && files.length > 0) {
       test.beforeAll(() => {
         prepareSelfVrtCorpus({ corpus, format: 'docx', files, snapshot: SNAPSHOT });
       });
@@ -233,7 +241,7 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
         const openPage = async (pageIndex: number) => {
           await page.goto(
             `/tests/visual/fixture.html?file=${encodeURIComponent(selfVrtInputPath({ corpus, file }))}`
-            + `&page=${pageIndex}&width=612`,
+            + `&page=${pageIndex}${query}`,
           );
           await page.waitForFunction(
             () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
@@ -279,6 +287,9 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
 }
 
 const DOCX_DEMO_CORPUS = SELF_VRT ? selfVrtCorpusFiles({ corpus: 'demo', format: 'docx' }) : [];
+// Public specimen corpus (tests/corpus/, generated into public/corpus/): runs
+// under `pnpm vrt` with the demo corpus, or alone under `pnpm vrt:corpus`.
+const DOCX_PUBLIC_CORPUS = SELF_VRT ? selfVrtCorpusFiles({ corpus: 'corpus', format: 'docx' }) : [];
 const DOCX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
   ? selfVrtCorpusFiles({ corpus: 'private', format: 'docx' })
   : [];
@@ -288,4 +299,7 @@ if (process.env.VRT_PRIVATE_CORPUS === '1') {
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', DOCX_DEMO_CORPUS);
+describeSelfRegression('public corpus self regression', 'corpus', DOCX_PUBLIC_CORPUS, {
+  query: '&width=595&fonts=corpus',
+});
 describeSelfRegression('private corpus self regression', 'private', DOCX_PRIVATE_CORPUS);

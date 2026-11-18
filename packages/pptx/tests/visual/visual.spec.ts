@@ -10,6 +10,7 @@ import {
   selfVrtInputPath,
   verifySelfVrtItemManifest,
 } from '../../../../tests/visual/private-corpus.mjs';
+import { loadFastTierSelection, privateCorpusTier } from '../../../../tests/visual/corpus-features.mjs';
 
 test.afterEach(async ({ page }) => {
   await page.evaluate(() => {
@@ -223,16 +224,34 @@ test.describe('visual fidelity', () => {
 // with the previous renderer's images, bound by manifest to
 // VRT_BASELINE_REVISION. `demo` runs under `pnpm vrt`; `private` under
 // `pnpm vrt:private` (VRT_PRIVATE_CORPUS=1).
-type SelfVrtCorpus = 'demo' | 'private';
+type SelfVrtCorpus = 'demo' | 'corpus' | 'private' | 'private-fast';
 
-function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: string[]): void {
+// Fast-tier selection (tests/visual/corpus-features.mjs): per file, the
+// slides that add structural XML features, out of the file's slide count.
+type FastTierSelection = {
+  digest: string;
+  files: Map<string, { unitCount: number; units: number[] }>;
+};
+
+// `query` holds extra fixture parameters (the public specimens load their
+// Roboto / Noto Sans JP faces offline with ?fonts=corpus). `selection` limits
+// a `private-fast` run to the selected slides; a file without any is skipped.
+function describeSelfRegression(
+  title: string,
+  corpus: SelfVrtCorpus,
+  files: string[],
+  { query = '', selection }: { query?: string; selection?: FastTierSelection } = {},
+): void {
   test.describe(title, () => {
-    if (corpus === 'demo' && files.length > 0) {
+    if ((corpus === 'demo' || corpus === 'corpus') && files.length > 0) {
       test.beforeAll(() => {
         prepareSelfVrtCorpus({ corpus, format: 'pptx', files, snapshot: SNAPSHOT });
       });
     }
     for (const file of files) {
+      const selected = selection?.files.get(file);
+      if (selection && !selected) throw new Error(`${file} is missing from the fast-tier selection`);
+      if (selected && selected.units.length === 0) continue;
       test(file, async ({ page }) => {
         test.setTimeout(600_000);
         const stem = file.slice(0, -'.pptx'.length);
@@ -240,7 +259,7 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
         const openSlide = async (slideIndex: number) => {
           await page.goto(
             `/tests/visual/fixture.html?pptx=${encodeURIComponent(selfVrtInputPath({ corpus, file: stem }))}`
-            + `&slide=${slideIndex}`,
+            + `&slide=${slideIndex}${query}`,
           );
           await page.waitForFunction(
             () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
@@ -253,12 +272,20 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
           }
         };
 
-        await openSlide(0);
+        const firstSlide = selected?.units[0] ?? 0;
+        await openSlide(firstSlide);
         const slideCount = Number(await page.evaluate(() => document.body.dataset.slideCount));
         expect(slideCount, `${stem} must report its complete slide count`).toBeGreaterThan(0);
+        if (selected && selected.unitCount !== slideCount) {
+          throw new Error(
+            `${stem}: renderer reports ${slideCount} slides but the fast-tier selection `
+            + `expects ${selected.unitCount}; regenerate it with pnpm vrt:private:fast:select`,
+          );
+        }
+        const slideIndices = selected?.units ?? Array.from({ length: slideCount }, (_, index) => index);
         const differences: string[] = [];
-        for (let slideIndex = 0; slideIndex < slideCount; slideIndex++) {
-          if (slideIndex > 0) {
+        for (const slideIndex of slideIndices) {
+          if (slideIndex !== firstSlide) {
             await page.evaluate(async (index) => {
               const render = (globalThis as unknown as {
                 renderPptxVrtSlide(slideIndex: number): Promise<void>;
@@ -277,6 +304,7 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
         }
         verifySelfVrtItemManifest({
           corpus, format: 'pptx', stem, itemKind: 'slide', itemCount: slideCount, snapshot: SNAPSHOT,
+          ...(selected ? { itemIndices: selected.units } : {}),
         });
         expect(differences, differences.join('\n')).toEqual([]);
       });
@@ -285,15 +313,33 @@ function describeSelfRegression(title: string, corpus: SelfVrtCorpus, files: str
 }
 
 const PPTX_DEMO_CORPUS = SELF_VRT ? selfVrtCorpusFiles({ corpus: 'demo', format: 'pptx' }) : [];
+// Public specimen corpus (tests/corpus/, generated into public/corpus/): runs
+// under `pnpm vrt` with the demo corpus, or alone under `pnpm vrt:corpus`.
+const PPTX_PUBLIC_CORPUS = SELF_VRT ? selfVrtCorpusFiles({ corpus: 'corpus', format: 'pptx' }) : [];
 const PPTX_PRIVATE_CORPUS = process.env.VRT_PRIVATE_CORPUS === '1'
   ? selfVrtCorpusFiles({ corpus: 'private', format: 'pptx' })
   : [];
 
+// VRT_PRIVATE_TIER=fast renders only the slides chosen by
+// tests/visual/corpus-features.mjs (structural XML feature cover) into the
+// separate `private-fast` baseline tree; the default full tier renders every slide.
+const PPTX_PRIVATE_SELF_VRT: SelfVrtCorpus = privateCorpusTier() === 'fast' ? 'private-fast' : 'private';
+const PPTX_FAST_SELECTION: FastTierSelection | undefined =
+  process.env.VRT_PRIVATE_CORPUS === '1' && PPTX_PRIVATE_SELF_VRT === 'private-fast'
+    ? loadFastTierSelection({ format: 'pptx', files: PPTX_PRIVATE_CORPUS })
+    : undefined;
+
 if (process.env.VRT_PRIVATE_CORPUS === '1') {
-  prepareSelfVrtCorpus({ corpus: 'private', format: 'pptx', files: PPTX_PRIVATE_CORPUS, snapshot: SNAPSHOT });
+  prepareSelfVrtCorpus({
+    corpus: PPTX_PRIVATE_SELF_VRT, format: 'pptx', files: PPTX_PRIVATE_CORPUS, snapshot: SNAPSHOT,
+    selectionDigest: PPTX_FAST_SELECTION?.digest,
+  });
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', PPTX_DEMO_CORPUS);
+describeSelfRegression('public corpus self regression', 'corpus', PPTX_PUBLIC_CORPUS, {
+  query: '&fonts=corpus',
+});
 
 // The demo decks through PptxScrollViewer in its default options: every slot
 // canvas is compared with the previous renderer's, so the scroll path is
@@ -342,4 +388,6 @@ test.describe('demo corpus scroll viewer self regression', () => {
     });
   }
 });
-describeSelfRegression('private corpus self regression', 'private', PPTX_PRIVATE_CORPUS);
+describeSelfRegression('private corpus self regression', PPTX_PRIVATE_SELF_VRT, PPTX_PRIVATE_CORPUS, {
+  selection: PPTX_FAST_SELECTION,
+});

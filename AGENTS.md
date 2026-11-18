@@ -349,6 +349,16 @@ verification is acceptable when the user asks to view it.
 
 VRT is local-only because private samples are not redistributable.
 
+The public specimen corpus (`tests/corpus/`, files in
+`packages/<fmt>/public/corpus/`) is the exception: anyone can run its
+self-regression, with no private data. It is part of the default `vrt` and
+`vrt:snapshot` runs, under the same baseline-checkout binding as the demo
+corpus; `pnpm vrt:corpus:snapshot` (in the baseline worktree) and
+`pnpm vrt:corpus` (in the candidate) run only that set. The fixtures load its
+Roboto and Noto Sans JP faces from the packages' `@fontsource` dependencies, so
+the run is offline. The private fast and full tiers below remain
+maintainer-only.
+
 Regression detection must compare the changed renderer with images produced by
 the previous renderer. It must not use Word/Excel/PowerPoint or PDF reference
 images as the regression oracle. Keep Office-reference fidelity evaluation as a
@@ -411,7 +421,10 @@ For the one-time bootstrap of a harness change against a baseline revision that
 predates it, copy only the allowlisted VRT harness files listed in
 `tests/visual/private-corpus.mjs` into the baseline worktree and set
 `VRT_ALLOW_HARNESS_CHANGES=1` for both the snapshot and the comparison run;
-renderer/parser changes remain forbidden.
+renderer/parser changes remain forbidden. `pnpm-lock.yaml` is allowlisted only
+for adding or removing the fixtures' `@fontsource/*` packages; any other hunk
+fails. Inputs under `packages/<fmt>/public/corpus/` are ignored by Git before
+the corpus is tracked, so a bootstrap may copy them in too.
 
 ### Fidelity scores
 
@@ -436,6 +449,29 @@ UPDATE_SCORES=1 pnpm vrt:fidelity
 This rewrites only `scores.json`, never the reference images. Commit the
 re-recorded scores as their own change that names the source revision. Never
 loosen `RATCHET_DROP_PCT` or `FAIL_ABOVE_PCT` to make a run pass.
+
+For day-to-day PPTX/XLSX work, a fast private tier renders only the slides and
+sheets that a greedy cover of structural XML features (element nesting,
+attributes, enum-like values, relationship types and media types, including
+parts reached through relationships) needs. Generate the gitignored selection
+manifests, then use the same baseline binding as the full run:
+
+```bash
+pnpm vrt:private:fast:select
+# baseline worktree
+VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:private:fast:snapshot
+# candidate
+VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PORT=5191 pnpm vrt:private:fast
+```
+
+Both worktrees need the same selection manifest (it lives in the gitignored
+private corpus, so copy it); the run fails closed when it is missing, when any
+corpus file was added, removed or changed, or when the baseline was captured
+under a different selection. Fast-tier baselines live separately from
+full-tier ones. Structural features do not capture
+geometry-dependent behavior such as text wrapping, autofit, pagination or value
+formatting, so run the full `vrt:private` before a release or when the change
+affects layout geometry. DOCX has no fast tier yet.
 
 Only update references when the user explicitly asks:
 

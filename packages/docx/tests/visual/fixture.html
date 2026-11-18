@@ -24,9 +24,46 @@
   const page = parseInt(params.get('page') ?? '0', 10);
   const width = parseInt(params.get('width') ?? '612', 10);
 
+  // ?fonts=corpus loads the faces the public specimen corpus names (Roboto,
+  // Noto Sans JP) from this package's own @fontsource dependencies, so the
+  // corpus VRT runs offline. Fontsource partitions each weight/style into
+  // unicode-range faces and a font shorthand only fetches the subset matching
+  // its sample text, so every declared face is loaded before rendering.
+  const CORPUS_FONTS = {
+    roboto: ['400', '400-italic', '700', '700-italic'],
+    'noto-sans-jp': ['400', '700'],
+  };
+  const corpusFontStylesheets = Object.entries(CORPUS_FONTS)
+    .flatMap(([name, files]) => files.map((f) => `/node_modules/@fontsource/${name}/${f}.css`));
+  const fontFamilyKey = (family) => family.trim().replace(/^['"]|['"]$/g, '').toLowerCase();
+  async function loadFixtureFonts(hrefs, families) {
+    const sheets = await Promise.all(hrefs.map((href) => new Promise((resolve, reject) => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = href;
+      link.onload = () => link.sheet
+        ? resolve(link.sheet)
+        : reject(new Error(`fixture font stylesheet unavailable: ${href}`));
+      link.onerror = () => reject(new Error(`fixture font stylesheet failed: ${href}`));
+      document.head.append(link);
+    })));
+    for (const family of families) {
+      const declared = sheets.reduce((count, sheet) => count + [...sheet.cssRules].filter(
+        (rule) => rule instanceof CSSFontFaceRule && fontFamilyKey(rule.style.fontFamily) === family,
+      ).length, 0);
+      const faces = [...document.fonts].filter((face) => fontFamilyKey(face.family) === family);
+      if (declared === 0 || faces.length !== declared) {
+        throw new Error(`fixture ${family} faces: declared ${declared}, registered ${faces.length}`);
+      }
+      await Promise.all(faces.map((face) => face.load()));
+    }
+    await document.fonts.ready;
+  }
+
   const canvas = document.getElementById('canvas');
 
   try {
+    if (params.get('fonts') === 'corpus') await loadFixtureFonts(corpusFontStylesheets, ['roboto', 'noto sans jp']);
     const doc = await DocxDocument.load('/' + file, { math, threeD, regionMap, tiff, chartEx });
     // Report the renderer's REAL page count so the VRT spec can assert the
     // requested page index is in range. renderPage() silently clamps an
