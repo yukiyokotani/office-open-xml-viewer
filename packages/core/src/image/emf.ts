@@ -425,11 +425,13 @@ interface PlayState {
   pathRetained: number;
   maxPathCommands: number;
   arcDirection: number; // EMR_SETARCDIRECTION ArcDirection; default AD_COUNTERCLOCKWISE
-  // Clipping state. Each DC level owns exactly one outstanding canvas save
-  // (the playback base or the SAVEDC save), so a clip reset at the current
-  // level is a restore+save — exact only when no outer level is clipped.
-  clipped: boolean; // any clip active at the current level (incl. inherited)
-  outerClipped: boolean; // a clip inherited from an enclosing level
+  // Clipping state. The GDI clip region is kept as the list of regions it is
+  // the intersection of (empty = the default, unclipped). The canvas holds
+  // one outstanding save, the playback base; the canvas clip is that list
+  // applied on top of it. A change that is not an intersection (a reset, an
+  // offset, RESTOREDC) rebuilds the canvas clip from the list, so it is exact
+  // at every DC level.
+  clip: readonly ClipRegion[];
   unsupported: Set<string>; // records that drew nothing although they draw content
 }
 
@@ -623,8 +625,7 @@ interface SavedDc {
   curX: number;
   curY: number;
   arcDirection: number;
-  clipped: boolean;
-  outerClipped: boolean;
+  clip: readonly ClipRegion[];
   // The DC path (see PathBuffer): the shared buffer and its extent at
   // SAVEDC, and the bracket state that goes with it.
   pathBuf: PathBuffer;
@@ -1516,35 +1517,50 @@ function clipRect(s: PlayState, c: EmfCursor, exclude: boolean): void {
 function clipWith(
   s: PlayState,
   rule: CanvasFillRule,
-  build: (sink: Sink) => void,
+  build: (ctx: AnyCtx) => void,
 ): void {
-  s.ctx.beginPath();
-  build(s.ctx);
-  applyClip(s, rule);
+  const region: ClipRegion = { build, rule, dx: 0, dy: 0 };
+  s.clip = [...s.clip, region];
+  applyClip(s.ctx, region);
 }
 
-function applyClip(s: PlayState, rule: CanvasFillRule): void {
+/** One region of the clip intersection: a traced outline, its winding rule,
+ *  and the device offset accumulated by EMR_OFFSETCLIPRGN. */
+interface ClipRegion {
+  build: (ctx: AnyCtx) => void;
+  rule: CanvasFillRule;
+  dx: number;
+  dy: number;
+}
+
+function applyClip(ctx: AnyCtx, region: ClipRegion): void {
+  ctx.beginPath();
+  if (region.dx || region.dy) {
+    // Path points take the transform current when they are added, so the
+    // offset applies to the outline only.
+    ctx.translate(region.dx, region.dy);
+    region.build(ctx);
+    ctx.translate(-region.dx, -region.dy);
+  } else {
+    region.build(ctx);
+  }
   try {
-    s.ctx.clip(rule);
-    s.clipped = true;
+    ctx.clip(region.rule);
   } catch {
     /* a ctx without clip() (some mocks): leave unclipped */
   }
 }
 
-/** Reset the clip region to the default ([MS-EMF] RGN_COPY with no region).
- *  Canvas can only drop a clip by restoring a save, which is exact at this DC
- *  level only when no enclosing level is clipped. */
-function resetClip(s: PlayState, name: string): boolean {
-  if (!s.clipped) return true;
-  if (s.outerClipped) {
-    s.unsupported.add(`${name} (reset of an inherited clip)`);
-    return false;
-  }
+/** Replace the clip region and rebuild the canvas clip from the playback's
+ *  base save (no-op when the region is unchanged). */
+function setClip(s: PlayState, clip: readonly ClipRegion[]): void {
+  if (clip === s.clip) return;
+  const unchanged = clip.length === s.clip.length && clip.every((r, i) => r === s.clip[i]);
+  s.clip = clip;
+  if (unchanged) return;
   s.ctx.restore();
   s.ctx.save();
-  s.clipped = false;
-  return true;
+  for (const region of clip) applyClip(s.ctx, region);
 }
 
 /** EMR_EXTSELECTCLIPRGN(75): u32 RgnDataSize, u32 RegionMode, RegionData
@@ -1556,7 +1572,7 @@ function extSelectClipRgn(s: PlayState, c: EmfCursor): void {
   const mode = c.u32();
   const name = 'EMR_EXTSELECTCLIPRGN';
   if (mode === RGN_COPY && size === 0) {
-    resetClip(s, name);
+    setClip(s, []);
     return;
   }
   // RegionDataHeader: dwSize (32), iType (1), nCount,
@@ -1578,7 +1594,7 @@ function extSelectClipRgn(s: PlayState, c: EmfCursor): void {
     s.unsupported.add(`${name} (mode ${mode})`);
     return;
   }
-  if (mode === RGN_COPY && !resetClip(s, name)) return;
+  if (mode === RGN_COPY) setClip(s, []);
   const dev = (x: number, y: number): [number, number] => [
     ((x - s.left) * s.W) / s.boundsW,
     ((y - s.top) * s.H) / s.boundsH,
@@ -2031,8 +2047,7 @@ export function playEmf(
       ? Math.min(limits.maxPathCommands as number, MAX_EMF_PATH_COMMANDS)
       : MAX_EMF_PATH_COMMANDS,
     arcDirection: AD_COUNTERCLOCKWISE,
-    clipped: false,
-    outerClipped: false,
+    clip: [],
     unsupported: new Set(),
   });
 
@@ -2087,15 +2102,15 @@ function replayRecords(
   bytes: Uint8Array,
 ): void {
   const ctx = s.ctx;
-  // The playback's own base save: every DC level owns one outstanding canvas
-  // save, so a clip reset can restore to it, and playback leaves the caller's
-  // context state (including clips) as it found it.
+  // The playback's own base save: the clip is rebuilt on top of it, and
+  // playback leaves the caller's context state (including clips) as it found
+  // it.
   ctx.save();
   try {
     replayRecordStream(s, plus, stopOnPlusFailure, dv, bytes);
   } finally {
     // Unwind even on a resource failure; the caller may reuse the context.
-    for (let i = 0; i <= s.stack.length; i++) ctx.restore();
+    ctx.restore();
   }
 }
 
@@ -2270,9 +2285,8 @@ function replayRecordStream(
           break;
         }
         case EMR.SAVEDC: {
-          // Mirror the GDI state push on the canvas too, so a clip set via
-          // SELECTCLIPPATH (below) is scoped to the matching RESTOREDC.
-          s.ctx.save();
+          // The clip region is saved with the rest of the DC state; the
+          // canvas clip is rebuilt from it on RESTOREDC.
           s.stack.push({
             wt: { ...s.wt },
             mapMode: s.mapMode,
@@ -2294,8 +2308,7 @@ function replayRecordStream(
             curX: s.curX,
             curY: s.curY,
             arcDirection: s.arcDirection,
-            clipped: s.clipped,
-            outerClipped: s.outerClipped,
+            clip: s.clip,
             pathBuf: s.path.buf,
             pathLength: s.path.buf.ops.length,
             pathCommands: s.path.buf.commands,
@@ -2304,7 +2317,6 @@ function replayRecordStream(
             pathDiscarded: s.pathDiscarded,
           });
           s.path.buf.saved.push({ length: s.path.buf.ops.length, commands: s.path.buf.commands });
-          s.outerClipped = s.clipped;
           break;
         }
         case EMR.RESTOREDC: {
@@ -2317,7 +2329,6 @@ function replayRecordStream(
           const left = new Set<PathBuffer>();
           for (let i = 0; i < times; i++) {
             saved = s.stack.pop();
-            s.ctx.restore(); // unwind the matching canvas save (clip/state)
             if (saved) {
               saved.pathBuf.saved.pop();
               left.add(saved.pathBuf);
@@ -2344,8 +2355,7 @@ function replayRecordStream(
             s.curX = saved.curX;
             s.curY = saved.curY;
             s.arcDirection = saved.arcDirection;
-            s.clipped = saved.clipped;
-            s.outerClipped = saved.outerClipped;
+            setClip(s, saved.clip);
             // The saved path comes back with its open/held/discarded state
             // (see PathBuffer). Snapshots above this one were popped with it,
             // so cutting the shared buffer back cannot change a live snapshot.
@@ -2409,9 +2419,8 @@ function replayRecordStream(
           break;
         case EMR.SELECTCLIPPATH: {
           // data: u32 RegionMode. AND intersects; COPY replaces the clip.
-          // OR/XOR/DIFF, and a COPY that cannot drop an inherited clip, are
-          // reported and intersect instead (the playback that predates the
-          // RegionMode operand).
+          // OR/XOR/DIFF are reported and intersect instead (the playback that
+          // predates the RegionMode operand).
           const mode = c.remaining >= 4 ? c.u32() : RGN_AND;
           // Without a held path (none, or a bracket still open) GDI fails
           // and neither the clip nor the path changes.
@@ -2419,7 +2428,7 @@ function replayRecordStream(
           if (mode !== RGN_AND && mode !== RGN_COPY) {
             s.unsupported.add(`EMR_SELECTCLIPPATH (mode ${mode})`);
           } else if (mode === RGN_COPY) {
-            resetClip(s, 'EMR_SELECTCLIPPATH');
+            setClip(s, []);
           }
           // Use the path just defined as the clip region (intersecting the
           // current clip — the common RGN_AND case, and what a following blit
@@ -2427,8 +2436,8 @@ function replayRecordStream(
           // shapes so its background is masked out). Scoped by the enclosing
           // SAVEDC/RESTOREDC.
           if (!s.pathDiscarded) {
-            tracePath(s.ctx, s.path.buf.ops);
-            applyClip(s, s.fillRule);
+            const ops = s.path.buf.ops.slice();
+            clipWith(s, s.fillRule, (ctx) => tracePath(ctx, ops));
           }
           discardPath(s);
           break;
@@ -2442,10 +2451,19 @@ function replayRecordStream(
         case EMR.EXTSELECTCLIPRGN:
           extSelectClipRgn(s, c);
           break;
-        case EMR.OFFSETCLIPRGN:
-          // Moving a default (unclipped) region changes nothing.
-          if (s.clipped) s.unsupported.add('EMR_OFFSETCLIPRGN');
+        case EMR.OFFSETCLIPRGN: {
+          // data: PointL offset in logical units ([MS-EMF] 2.3.2.4). Moving
+          // the default (unclipped) region changes nothing.
+          const ox = c.i32();
+          const oy = c.i32();
+          if (s.clip.length === 0) break;
+          const [x0, y0] = toPx(s, 0, 0);
+          const [x1, y1] = toPx(s, ox, oy);
+          const dx = x1 - x0;
+          const dy = y1 - y0;
+          setClip(s, s.clip.map((r) => ({ ...r, dx: r.dx + dx, dy: r.dy + dy })));
           break;
+        }
         case EMR.SETARCDIRECTION: {
           const direction = c.u32();
           if (direction === AD_COUNTERCLOCKWISE || direction === AD_CLOCKWISE) {
