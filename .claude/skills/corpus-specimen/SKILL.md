@@ -52,7 +52,7 @@ Read `tests/corpus/README.md` for the layout, the commands and the VRT run.
 6. **Reference PDFs.** A new or changed DOCX/PPTX specimen (and an XLSX
    one with a chart) needs fresh `<stem>.win.pdf` and `<stem>.mac.pdf`
    exported by Office (Windows: Word/PowerPoint/Excel export to PDF; Mac:
-   the same, PowerPoint with "Best for electronic distribution"), with the
+   the same with "Best for printing", the Mac's own engine), with the
    corpus fonts installed. Then `node tests/corpus/references.mjs --record
    <id>`. Until then `references.mjs` lists it as missing; a changed
    specimen whose old PDFs remain fails the test as stale, so export again

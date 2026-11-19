@@ -1,0 +1,442 @@
+{
+  "docx-001-type-scale.mac.pdf": {
+    "source": "eec47f71a9d271d71cc1a906b7dcfd3310bfe787c09b1efc1343540e0f769743",
+    "pdf": "7059eaf6297f95b8a4476890430d0fef04d712aa76842392251ce754f455c786"
+  },
+  "docx-001-type-scale.win.pdf": {
+    "source": "eec47f71a9d271d71cc1a906b7dcfd3310bfe787c09b1efc1343540e0f769743",
+    "pdf": "37f9b80d6ad980645ae6ca4392a370ccc216bb74b7cce99b333319862cca29c1"
+  },
+  "docx-002-tab-stops-indents.mac.pdf": {
+    "source": "f8362a670f7989033458a3eb0476554f118bd4c72033762edb3cc259171d4cbf",
+    "pdf": "e37862a86ee30b2b02c74ff731f2bae336c1630086e0bec761cd5d3bb39df696"
+  },
+  "docx-002-tab-stops-indents.win.pdf": {
+    "source": "f8362a670f7989033458a3eb0476554f118bd4c72033762edb3cc259171d4cbf",
+    "pdf": "8ededf3989825a0b81704952c2e03ef7b95a856ab3fd077cc7cbea8c67a343d6"
+  },
+  "docx-003-table-iso-216.mac.pdf": {
+    "source": "dbe1370fd8cde77fd748f91b14c25e9bfbaee510c9ac6094ae6c1612da5aeecb",
+    "pdf": "d6a719dead4c3d45c225bcf23061a4868aab6a89ba8e335a67d81ae9eb29d427"
+  },
+  "docx-003-table-iso-216.win.pdf": {
+    "source": "dbe1370fd8cde77fd748f91b14c25e9bfbaee510c9ac6094ae6c1612da5aeecb",
+    "pdf": "3ed08244463a75af244a415df4ad89f1c5ef3bbccbced74282ef1e67d985bf85"
+  },
+  "docx-004-section-columns.mac.pdf": {
+    "source": "6d5eede0f8e95d11ffb19e1bd03bec55b63e7298774e44b6a6a69eeaac237ba5",
+    "pdf": "69a987d90d2daa68b2b1467be8c0dd437919d5998396009c61bbe022ca284ca4"
+  },
+  "docx-004-section-columns.win.pdf": {
+    "source": "6d5eede0f8e95d11ffb19e1bd03bec55b63e7298774e44b6a6a69eeaac237ba5",
+    "pdf": "2643e7a680a93ef877fdc2386ae55e1426d9cf2a873b56991d01023f69c4909a"
+  },
+  "docx-005-unequal-columns.mac.pdf": {
+    "source": "2158c8101fda38c86356bfdb6721638e79c01cc6523e5f8ad4cee254a30ea7ce",
+    "pdf": "f6050635a46e6068673141cdd44a489f9cbe97cb971b403e98998f40101445ce"
+  },
+  "docx-005-unequal-columns.win.pdf": {
+    "source": "2158c8101fda38c86356bfdb6721638e79c01cc6523e5f8ad4cee254a30ea7ce",
+    "pdf": "dbefe1ff4d30e3668e1883b3a39a1a705a896bb5bf029f2fd24ab8268d1fe1a7"
+  },
+  "docx-006-japanese-columns.mac.pdf": {
+    "source": "269ec62f2b44daa6749bcfa54d277996e8937c1f2f2cdd76e0b94ba47cc9d36e",
+    "pdf": "2e4c10a847f9bad235be6e2c0ae32bb095c5d9d82ca5d654a098eaea47bb241f"
+  },
+  "docx-006-japanese-columns.win.pdf": {
+    "source": "269ec62f2b44daa6749bcfa54d277996e8937c1f2f2cdd76e0b94ba47cc9d36e",
+    "pdf": "77d74653fa61cdc01d4379200f6ef2a08259cd1d742be351e8b4f1a894b84b21"
+  },
+  "docx-007-vertical-japanese.mac.pdf": {
+    "source": "a6738f8d30009863edd9d95c4d47e194a4e390cc64bae04ee8f82d4f06bca412",
+    "pdf": "576c3ea839d215ebe6a6b065725d9120bc96bc8255a90115c4727540557784ba"
+  },
+  "docx-007-vertical-japanese.win.pdf": {
+    "source": "a6738f8d30009863edd9d95c4d47e194a4e390cc64bae04ee8f82d4f06bca412",
+    "pdf": "9e49134ae49d50ce6b018d58b8a10f0b190005ed4130a9572b7799c578c311ee"
+  },
+  "docx-008-numbering.mac.pdf": {
+    "source": "a77575b0cd468dd665b0196b2757834362117bcb137c2ddabcefa239ce96f4f9",
+    "pdf": "f30a14e9327ea8993bdb59306e83d0fad1955df1f7092fc52dae03a247f805b6"
+  },
+  "docx-008-numbering.win.pdf": {
+    "source": "a77575b0cd468dd665b0196b2757834362117bcb137c2ddabcefa239ce96f4f9",
+    "pdf": "f8ba99201a2817f9a1feda84b6f70b15f7bb2a8e00eb437453c6d28f0ecfd077"
+  },
+  "docx-009-headers-footers.mac.pdf": {
+    "source": "ba423042929a117e1919873f4f315bff7a615f05b53a0686a147c4c7ed7c65ca",
+    "pdf": "39544484e8e062a424e086d24d00e9c298e3a16c9b338b37622b58ba37563197"
+  },
+  "docx-009-headers-footers.win.pdf": {
+    "source": "ba423042929a117e1919873f4f315bff7a615f05b53a0686a147c4c7ed7c65ca",
+    "pdf": "1e2e3139dafd1eca29c0adfbcdc2386bbb687c9fa2a213435d11ae3be8630f3e"
+  },
+  "docx-010-pictures.mac.pdf": {
+    "source": "b0daa8a7327b86828ac4e563a3ebe6063fa1b769bb295f14178258526112c2c0",
+    "pdf": "b4c10fe775400ae78548cb3c7b89d11c384f102b3e1d15a9a11ede186b211487"
+  },
+  "docx-010-pictures.win.pdf": {
+    "source": "b0daa8a7327b86828ac4e563a3ebe6063fa1b769bb295f14178258526112c2c0",
+    "pdf": "02c696cc19b5825de9b242a033b5c2b36b5769464ecb1cc9109e18a1e26c3d2f"
+  },
+  "docx-011-notes-links.mac.pdf": {
+    "source": "dbbc87e12b99d7aded0fa7f6a9e4e1b063cffa12c576aef36d8dc97b2faf340f",
+    "pdf": "ecaa1688e9e2b92e11116db7eefb1a10c7db498ed715b6d121f9c8f4145a6dee"
+  },
+  "docx-011-notes-links.win.pdf": {
+    "source": "dbbc87e12b99d7aded0fa7f6a9e4e1b063cffa12c576aef36d8dc97b2faf340f",
+    "pdf": "53b809fda73218a43697a443844a1f053606a2e3d7093403d097fc5e918caf7a"
+  },
+  "docx-012-borders-shading.mac.pdf": {
+    "source": "ec1b8f89b4a8d8eb3524aeccf650bb446cce993d1d53f35a2f9947858d9391ca",
+    "pdf": "b09316a951fbaf99ffad76128b964ea7c235904ff8c5fff2a7d0ade8b563ec31"
+  },
+  "docx-012-borders-shading.win.pdf": {
+    "source": "ec1b8f89b4a8d8eb3524aeccf650bb446cce993d1d53f35a2f9947858d9391ca",
+    "pdf": "aa43337d43959dfebcf3ec9d182ab15b1c3edf4c050017817d2e300fffd45041"
+  },
+  "docx-013-run-properties.mac.pdf": {
+    "source": "6f03de0ab2d987898f8e517d6f5fca9e5f76f2cbd08d2f1b8b97149c2caad5fa",
+    "pdf": "fd0faed595cda5940e86efa83f2b346c95febfc3188fc39e01d719b34a5ecec4"
+  },
+  "docx-013-run-properties.win.pdf": {
+    "source": "6f03de0ab2d987898f8e517d6f5fca9e5f76f2cbd08d2f1b8b97149c2caad5fa",
+    "pdf": "c87cbb0d99c34f53ebe174ac7ee9df710395cadef312c7fc3a89c909deed2692"
+  },
+  "docx-014-theme-fonts.mac.pdf": {
+    "source": "aa06d8e70bec7a0930c4291ed4e9c45ede98ec9e1dd7b5e8e33008592488078c",
+    "pdf": "f99102cc2da329bda88c79c2dd8141d78e5fbe0c76d67473dab22437da2c68c1"
+  },
+  "docx-014-theme-fonts.win.pdf": {
+    "source": "aa06d8e70bec7a0930c4291ed4e9c45ede98ec9e1dd7b5e8e33008592488078c",
+    "pdf": "084861b41e6e6da93d942c83f7ccb7051a1a5c95270cd6aca864710bf163b913"
+  },
+  "docx-015-table-style.mac.pdf": {
+    "source": "6d85652ec9dceff59aa90c1fe5b206bace18a6baf96ce885568ce42cacf77530",
+    "pdf": "7beddc745e187e2e62db11373603763bc6d54bb22ed0c4256e164b1c72d452e9"
+  },
+  "docx-015-table-style.win.pdf": {
+    "source": "6d85652ec9dceff59aa90c1fe5b206bace18a6baf96ce885568ce42cacf77530",
+    "pdf": "00d9c544c4b2a07bac181ec40435b98307c9d9919e7b6318c7b78517ed90772c"
+  },
+  "docx-016-merged-cells.mac.pdf": {
+    "source": "03724066ed31b6034ada55b5a2cf55207584cd0e1523f65958d80e8071741808",
+    "pdf": "8742e29a026c5813a76d6be37401abcc60b4193858a38c4c3bf180b33600e08d"
+  },
+  "docx-016-merged-cells.win.pdf": {
+    "source": "03724066ed31b6034ada55b5a2cf55207584cd0e1523f65958d80e8071741808",
+    "pdf": "12202f4d91143a806acb9cbbffecfcdd6ec02d215c0bfcf3d80aaa1d562d6ca2"
+  },
+  "docx-017-style-inheritance.mac.pdf": {
+    "source": "5704be2ae8720fa1e0da92a341dca2cb0295125d889e837011b9da8bde62d740",
+    "pdf": "6c00461d948be2010848725c009880a1fdcbe91c3a0c49b41f3ca47fce7d7515"
+  },
+  "docx-017-style-inheritance.win.pdf": {
+    "source": "5704be2ae8720fa1e0da92a341dca2cb0295125d889e837011b9da8bde62d740",
+    "pdf": "ad3804de168af5dad816d7096cbdb7ca31fe2972190f20ed689b961f99074a6c"
+  },
+  "docx-018-text-box.mac.pdf": {
+    "source": "b8cb5d890a6e1eb99d2bb2d3fa4f62e3b6f4ba411ffb53ef1c8c768111d2623c",
+    "pdf": "f91c16c5ed228c37ec64b51233caeebbb99e770d08900e7f49c58d7a5cc5ae98"
+  },
+  "docx-018-text-box.win.pdf": {
+    "source": "b8cb5d890a6e1eb99d2bb2d3fa4f62e3b6f4ba411ffb53ef1c8c768111d2623c",
+    "pdf": "8fdac24a81618aa484dd0153b7537e73a4223807ec7c059b40e0bc53c446a3ac"
+  },
+  "docx-019-mixed-columns.mac.pdf": {
+    "source": "1accff33ed28ebe9d3a8ccf52d9bea76d4dfbe771db23f2462c0ad586549fdd7",
+    "pdf": "0ae0351c0aeab7b4b9e909a8f5dc8e4067c2887602ecbe1af1b5c19a8238c6e1"
+  },
+  "docx-019-mixed-columns.win.pdf": {
+    "source": "1accff33ed28ebe9d3a8ccf52d9bea76d4dfbe771db23f2462c0ad586549fdd7",
+    "pdf": "93d14ebb8d725d9b8af9aadc8cc2859864f3f71ca465a5fbc95da00ce6380505"
+  },
+  "docx-020-charts.mac.pdf": {
+    "source": "9970f401a11852330c75b001bacee9fa82fcfcc25e795920101e9d7f33c01c8e",
+    "pdf": "d30802a7f36539b4a52012904e5eedf2984230f5f82a4ebce657ae12d501f180"
+  },
+  "docx-020-charts.win.pdf": {
+    "source": "9970f401a11852330c75b001bacee9fa82fcfcc25e795920101e9d7f33c01c8e",
+    "pdf": "ee63b7e6bceb521212b835186e9a631fd130b21fc15f7cb51575ed883f97eae1"
+  },
+  "docx-021-table-layout.mac.pdf": {
+    "source": "ecefedea96de9d6ba1cf0be71cc82a60aa8567359c6e36f684880ef38d4f2434",
+    "pdf": "02d35aa2e645499358d63f3742d7a9d5f19bd2d3ffaa52be325cb1c84f3014e7"
+  },
+  "docx-021-table-layout.win.pdf": {
+    "source": "ecefedea96de9d6ba1cf0be71cc82a60aa8567359c6e36f684880ef38d4f2434",
+    "pdf": "4c5426cae45a3eed32d969b31d32d81a6ba662d75657e0269376f8578a20ca94"
+  },
+  "docx-022-ruby.mac.pdf": {
+    "source": "45e4eb96f5173c574a349a77aa9f9534f62400b724aa7577f07f506431f61bbe",
+    "pdf": "9da8cb9ff759892471a074c33b9508b461f033c251d3523f444baed7331895ea"
+  },
+  "docx-022-ruby.win.pdf": {
+    "source": "45e4eb96f5173c574a349a77aa9f9534f62400b724aa7577f07f506431f61bbe",
+    "pdf": "003225995a3aff5abee5bad095409134d1da984ac50664b1f08ebdd2aca248d1"
+  },
+  "docx-023-breaks.mac.pdf": {
+    "source": "89ca87cc01098755aebd2bbcd67f93af2dda2343de1d9621b8a6c00d32e60b6e",
+    "pdf": "6e547208cea28fabd13d8c529739c00a523502ed1fb6b075f88e91bb53b84f2c"
+  },
+  "docx-023-breaks.win.pdf": {
+    "source": "89ca87cc01098755aebd2bbcd67f93af2dda2343de1d9621b8a6c00d32e60b6e",
+    "pdf": "39300011809c8365cd3e54a4cc96b88af4ee34987f2ac56a9719116d719f6e61"
+  },
+  "docx-024-equations.mac.pdf": {
+    "source": "9a35805d304b715346dbc4f90cf12f30ffd401753c6e99a0bd63408788807ba1",
+    "pdf": "a660ae2c07e324ae19eddeb7211a03d36e631989093f7207c043a2b53cfa1c4a"
+  },
+  "docx-024-equations.win.pdf": {
+    "source": "9a35805d304b715346dbc4f90cf12f30ffd401753c6e99a0bd63408788807ba1",
+    "pdf": "4fb87143ce554587e2b119379cc32ffc177297fb08d4b2bf43302a24d0254b85"
+  },
+  "docx-025-border-groups.mac.pdf": {
+    "source": "ecf65b2bd15099e6c0d32eaffe1b51facf608bf76dccf80297a9c01c6ce73b2f",
+    "pdf": "c51069863883e428a218b52c74fd5cbe69da5d9c5e55151dc2d9596f6d114174"
+  },
+  "docx-025-border-groups.win.pdf": {
+    "source": "ecf65b2bd15099e6c0d32eaffe1b51facf608bf76dccf80297a9c01c6ce73b2f",
+    "pdf": "05c5f7e472442a27c9662571e02e4b95c32bedb1a570f2f5eac9a8fefb1d7212"
+  },
+  "docx-026-floating-pictures.mac.pdf": {
+    "source": "7eb39db5985f7329333907583e15e7c0ca83f7b2a3f71b6b80e39689d55b382b",
+    "pdf": "abdca084d9363934ca7dee72b397baeee43b31a1174c3315179b691d9e178d0b"
+  },
+  "docx-026-floating-pictures.win.pdf": {
+    "source": "7eb39db5985f7329333907583e15e7c0ca83f7b2a3f71b6b80e39689d55b382b",
+    "pdf": "43a0b4de3d7d14bf7c5eb65b2a2204200132fe6eeea77ddc64aa623cf7f9a745"
+  },
+  "docx-027-shape-group.mac.pdf": {
+    "source": "2f298f09171ac4bd3de7c49befa9cd92303b70b61b9478dfdf11936fadd48671",
+    "pdf": "8d7cf9582cfca1ff502c7e1a763a8b5a69db7bcd47bd8e6cee7553bee56b1ac6"
+  },
+  "docx-027-shape-group.win.pdf": {
+    "source": "2f298f09171ac4bd3de7c49befa9cd92303b70b61b9478dfdf11936fadd48671",
+    "pdf": "d5a9091f3b041d875dd1f3e95247b523266b2235631374fa8031bd93243793f8"
+  },
+  "docx-028-paper-furniture.mac.pdf": {
+    "source": "df60edbd7e83638113f5166747dfc413114cd61b5b026584c060320e709ea553",
+    "pdf": "bb0a3d9f1262aae95a5e3eea7a5dc1006ca78fe488a49ebbd7a6d948d05b5b54"
+  },
+  "docx-028-paper-furniture.win.pdf": {
+    "source": "df60edbd7e83638113f5166747dfc413114cd61b5b026584c060320e709ea553",
+    "pdf": "a5638b58efeb177f0aa24d61c21e811dff48df5d7bbf7da468319cff411f5bad"
+  },
+  "docx-029-vertical-text-box.mac.pdf": {
+    "source": "8622d70c857e5e90a48fef1c7fa40fe675ff1a7595309ab741acbcbb3babe508",
+    "pdf": "2e508c18f93fada612b4a3d3d4a1efc89950d34c0840f0e39cdff35e0e59e1a7"
+  },
+  "docx-029-vertical-text-box.win.pdf": {
+    "source": "8622d70c857e5e90a48fef1c7fa40fe675ff1a7595309ab741acbcbb3babe508",
+    "pdf": "b8de764ac1c02a0692418f075fb00f7f56bb55c6dcb6736f81ea749d2741dbf5"
+  },
+  "docx-030-cover-page.mac.pdf": {
+    "source": "298a4e4be12952dccaead65deb910959dd402ee46ed8830cedd50cfe3ed9f5fb",
+    "pdf": "bd3f4e4d3db6f6ed6ca51de4963789c60fd6a1d433ff6af631c3f9c46634c0be"
+  },
+  "docx-030-cover-page.win.pdf": {
+    "source": "298a4e4be12952dccaead65deb910959dd402ee46ed8830cedd50cfe3ed9f5fb",
+    "pdf": "b27cbb1151e8f48f0c0ecafab6c9f1f37fdf004f531288e5d9593372a964fa1c"
+  },
+  "docx-031-japanese-grid.mac.pdf": {
+    "source": "b2d5f22076c70cc181e0f18814fb5c6e20b4f8aef391fc87ae1f6c2f9b5fc1af",
+    "pdf": "19b1f0595031c8166c882e12b96012d4a23edb4c6fd32dc8f133e72b6a690f17"
+  },
+  "docx-031-japanese-grid.win.pdf": {
+    "source": "b2d5f22076c70cc181e0f18814fb5c6e20b4f8aef391fc87ae1f6c2f9b5fc1af",
+    "pdf": "6662f9c63e2589d2bcf0e6637b5fe606eba9f798bb325c4b954d6be5440060b2"
+  },
+  "docx-032-metafile-clipping.mac.pdf": {
+    "source": "66e7b4ed14db562a5b9b0f7001cd3fdec806073325f811775ca7564d16138d23",
+    "pdf": "6370b66eaa6455c1809e7ef3f8fe09f07bc40324fa14cc33fb632fa686a88a04"
+  },
+  "docx-032-metafile-clipping.win.pdf": {
+    "source": "66e7b4ed14db562a5b9b0f7001cd3fdec806073325f811775ca7564d16138d23",
+    "pdf": "add0282c548d1848922e9e2d5601ffffb17687366e87af064f46272d3281cff2"
+  },
+  "docx-033-article-sections.mac.pdf": {
+    "source": "347fca9735e05805fedd032e4cae4ed81f9eae02e8ab4a5d8a9a6f98fc66d15a",
+    "pdf": "f32afdf2e05ab57f453cbcf7c9fd690a66c8b347e71f5dd642122638debb7747"
+  },
+  "docx-033-article-sections.win.pdf": {
+    "source": "347fca9735e05805fedd032e4cae4ed81f9eae02e8ab4a5d8a9a6f98fc66d15a",
+    "pdf": "8d250796a7dbd34f9328e692ec76719283d4eabd07f330e69b7bf2b21ce408e3"
+  },
+  "docx-034-office-fonts.mac.pdf": {
+    "source": "4507c6fef9b0703af1e27b0e0265307b2f4be3bf23ab6dc2be834c553f9df2cb",
+    "pdf": "32291d2a60260f19097302addf2753842bb6f608b1fac51b6e7399b00c9b5a73"
+  },
+  "docx-034-office-fonts.win.pdf": {
+    "source": "4507c6fef9b0703af1e27b0e0265307b2f4be3bf23ab6dc2be834c553f9df2cb",
+    "pdf": "921b60f7085cdc26c58e812edc3170bcf8af13a5b76e19147a05b72e01bc4344"
+  },
+  "pptx-001-paragraph-levels.mac.pdf": {
+    "source": "9a98a374282cfc4e5c9246e36287f9f8974ade19652f0e33a066c0786c77df7d",
+    "pdf": "683ae01f7021c4caf144b2bccbe1da518ee113d848aa307092ecc2eec3fe6126"
+  },
+  "pptx-001-paragraph-levels.win.pdf": {
+    "source": "9a98a374282cfc4e5c9246e36287f9f8974ade19652f0e33a066c0786c77df7d",
+    "pdf": "c1eed1339bc394f662cd58ac5f4dc2656709e6d8fe275fb858e2aaa361b4c80b"
+  },
+  "pptx-002-preset-shapes.mac.pdf": {
+    "source": "9a6fe345a74aedb175956bb63ebce2e6262cfff03472a127e373563ccec27358",
+    "pdf": "1626d9c9595cd9b73b4093b92044a4dbfedb5399320fb22545aec213c1357395"
+  },
+  "pptx-002-preset-shapes.win.pdf": {
+    "source": "9a6fe345a74aedb175956bb63ebce2e6262cfff03472a127e373563ccec27358",
+    "pdf": "a24774f01ed626d897b57ff903d26cf6a7da99e1a50e4dd78d28d632cd99e28e"
+  },
+  "pptx-003-table-units.mac.pdf": {
+    "source": "22a6b6a8012193301bfb61ac97f3fd26d54ec4d294247a18f1aa62c898ce215f",
+    "pdf": "46f585d9c878aa234b1d926fd3b8f9e5bdf18748d8a85e1998264b68237ff074"
+  },
+  "pptx-003-table-units.win.pdf": {
+    "source": "22a6b6a8012193301bfb61ac97f3fd26d54ec4d294247a18f1aa62c898ce215f",
+    "pdf": "bfcef2536821304223be7040beaa758f8bdfd3c8103d3436c4ffe750f82699a3"
+  },
+  "pptx-004-text-columns.mac.pdf": {
+    "source": "c9377c5685eb237412db50bcfab8b94e762492376e740b119e28e265d77a6ca8",
+    "pdf": "ef5e91077a4b0a15b0bdd7a106b29d2703a01f27f5d4b9b939dcca48e9a23716"
+  },
+  "pptx-004-text-columns.win.pdf": {
+    "source": "c9377c5685eb237412db50bcfab8b94e762492376e740b119e28e265d77a6ca8",
+    "pdf": "7ce4933aa954e057d3d28054b7d58a456c038c66c562971d36da23d23ba783d1"
+  },
+  "pptx-005-japanese-text.mac.pdf": {
+    "source": "b2babdbeceb8ecbf6620f3f348983d0927f083c66d5772fd6b5d60832c32d294",
+    "pdf": "c191b7332b93b72e542572041f888399fb54c93ac373d1cef996d8d5bd55cd9e"
+  },
+  "pptx-005-japanese-text.win.pdf": {
+    "source": "b2babdbeceb8ecbf6620f3f348983d0927f083c66d5772fd6b5d60832c32d294",
+    "pdf": "987a28d0c002ab30163fa327ff2fe0b8237587d4f8f66fed6e01622c6461c355"
+  },
+  "pptx-006-picture-crop.mac.pdf": {
+    "source": "e26f75b8352568860fba4a845460838a5ee2b798c7912b32d4cfdfa471d798db",
+    "pdf": "4d5cb091bdec5695438d3ecf0d23e8985990865ee57eb36155cf08ebe45754b9"
+  },
+  "pptx-006-picture-crop.win.pdf": {
+    "source": "e26f75b8352568860fba4a845460838a5ee2b798c7912b32d4cfdfa471d798db",
+    "pdf": "16236fd95cf734c13c5848fa3b3653121012ed3b0672ac1ed1a10476afa78b73"
+  },
+  "pptx-007-group-connectors.mac.pdf": {
+    "source": "1d8f128f79f0dc563645262a07d1a435d360e07b79c80a551cf3d24bcb2d3737",
+    "pdf": "dab58ff24ac331fbaf6f0162258ff4bf5791879fdbb425b57a7b5b2b0def39e7"
+  },
+  "pptx-007-group-connectors.win.pdf": {
+    "source": "1d8f128f79f0dc563645262a07d1a435d360e07b79c80a551cf3d24bcb2d3737",
+    "pdf": "7d969c7996794227db2556f145a70321072c4717507090ddee3593aca82a0df6"
+  },
+  "pptx-008-placeholders.mac.pdf": {
+    "source": "a4a2644f1eaa475c8eb2b60ed186fffb5298d7bb3f9c2404fe75ba27f305a5a9",
+    "pdf": "cba978e4878b65e4c45cf9888ce38ea4355ae350a9180d066135e4e63924f411"
+  },
+  "pptx-008-placeholders.win.pdf": {
+    "source": "a4a2644f1eaa475c8eb2b60ed186fffb5298d7bb3f9c2404fe75ba27f305a5a9",
+    "pdf": "9b67050b9506d1f53a1ac70a8950c94ecec1b3b0c7ea702c670d335077bf55a4"
+  },
+  "pptx-009-gradient-pattern-fills.mac.pdf": {
+    "source": "c3f22447d328208edd68688c5632cfcacde160b9fd75bf2c18ea3d7b5b33841a",
+    "pdf": "76578f2fd346a39bb833df4bd7a9d82608ad7466089232e9510cd50264ac7787"
+  },
+  "pptx-009-gradient-pattern-fills.win.pdf": {
+    "source": "c3f22447d328208edd68688c5632cfcacde160b9fd75bf2c18ea3d7b5b33841a",
+    "pdf": "02a2a98473f892087ff4fbcd61615340c4f34d71a345f340de85a4ece84c83c3"
+  },
+  "pptx-010-chart.mac.pdf": {
+    "source": "c4ef8445fae302765805ad4727e6638cd52b90c11fe4cdd95c218984307cb6d5",
+    "pdf": "50f6a96f323b0bbad40fdf4aff38bf8168d9e1d88432c78ab7eeb442ba856cb0"
+  },
+  "pptx-010-chart.win.pdf": {
+    "source": "c4ef8445fae302765805ad4727e6638cd52b90c11fe4cdd95c218984307cb6d5",
+    "pdf": "e353d9f04239105ae0fdce1ca162fbfba79d1131799a0c18827e6a0a7f7dd566"
+  },
+  "pptx-011-scheme-colours.mac.pdf": {
+    "source": "659a839f6506459471614614fdbab2a41ad85a607d7c6eb32ae47dea2f810093",
+    "pdf": "f04141dd8f038fd47cb575aef1bfff3934ca1c3fc76b337df728d95937c2a89d"
+  },
+  "pptx-011-scheme-colours.win.pdf": {
+    "source": "659a839f6506459471614614fdbab2a41ad85a607d7c6eb32ae47dea2f810093",
+    "pdf": "01f592636d80851678803e5b318bb107332ca9ce6aa94d9ac3b465257b7a501b"
+  },
+  "pptx-012-bullets.mac.pdf": {
+    "source": "9c98cf9c7a7447cfbde293caaab2d2e0fca51c7ccd0b5a0c0ca45f379e8b144b",
+    "pdf": "2ae32d587f2354d33ff810c6bacdd06301302ba5539e340cb0e845a7c4c80549"
+  },
+  "pptx-012-bullets.win.pdf": {
+    "source": "9c98cf9c7a7447cfbde293caaab2d2e0fca51c7ccd0b5a0c0ca45f379e8b144b",
+    "pdf": "13688e52c3245e9aeab9ffdab9209313ba34e24de1316217f7b8734d217a34d9"
+  },
+  "pptx-013-line-ends-dashes.mac.pdf": {
+    "source": "924f4a293ae4b836887fb79b2ef1bbb39536ce8ac07a3daf0d391137fe4fb7ad",
+    "pdf": "ff1e9b68d25ea4d9448c5f42656f7c25514a21780ad4317baeda9ed793254bfa"
+  },
+  "pptx-013-line-ends-dashes.win.pdf": {
+    "source": "924f4a293ae4b836887fb79b2ef1bbb39536ce8ac07a3daf0d391137fe4fb7ad",
+    "pdf": "1bb3c0dd63b21360e1fc2d7a38e6c0e0476df6390418fc5a8d9118975180a6b2"
+  },
+  "pptx-014-anchoring-autofit.mac.pdf": {
+    "source": "918fb5af3336dc322d9dbcc47408c84f56937ab72fe051ed9ffb340a658a5261",
+    "pdf": "e73dbb51c82b7aab8760b10e3dcdf2a904e04c3bc2d708c909167681bc23db4c"
+  },
+  "pptx-014-anchoring-autofit.win.pdf": {
+    "source": "918fb5af3336dc322d9dbcc47408c84f56937ab72fe051ed9ffb340a658a5261",
+    "pdf": "1b1906555349e8561cc3ad70aa3c0c4515d5a4dbafa238cffd51799d8089ce48"
+  },
+  "pptx-015-slide-background.mac.pdf": {
+    "source": "8e36d138ed64c8ffbfa2a8d7611644bd581ae64ef5cd33b8bbb27f9dc5c04d89",
+    "pdf": "1601bc8c5513fee6db382018a469833da978803a7ebf81b8ac7c3c4b6438d444"
+  },
+  "pptx-015-slide-background.win.pdf": {
+    "source": "8e36d138ed64c8ffbfa2a8d7611644bd581ae64ef5cd33b8bbb27f9dc5c04d89",
+    "pdf": "82b27a93f5c4637fd94ddfe33c90c96f9fd880a993c7036f9ae01423a486eaf6"
+  },
+  "pptx-016-custom-geometry.mac.pdf": {
+    "source": "227e17401dcc6c9ca8d17ddac5b40031cbb524b963c2c320adb9900cb6c55de3",
+    "pdf": "4720296802b6888e0cb6b31ef70af4fad44ce4007689fd6d04590db73969d586"
+  },
+  "pptx-016-custom-geometry.win.pdf": {
+    "source": "227e17401dcc6c9ca8d17ddac5b40031cbb524b963c2c320adb9900cb6c55de3",
+    "pdf": "4c642e921e338ad5d30b759250b63bc032392ad6af3b7ca6326d65bc15424384"
+  },
+  "pptx-017-line-pie-charts.mac.pdf": {
+    "source": "91b5fd51c347f19acf6a7e8dcd6adfa6830c090fac8dffc161e8366b9029bbfb",
+    "pdf": "16cea58a97b30005032b08ce35724e1f246ebef24a9bdee18613a4fcc4c41244"
+  },
+  "pptx-017-line-pie-charts.win.pdf": {
+    "source": "91b5fd51c347f19acf6a7e8dcd6adfa6830c090fac8dffc161e8366b9029bbfb",
+    "pdf": "f19c93f2df048dc107fba8031ebaeb0e9fd67c8e4abd8cf59572020e82b875f6"
+  },
+  "pptx-018-master-body-levels.mac.pdf": {
+    "source": "fe53c9deb71883f6a9be6274c120df49b5acdc60c97c7288110783a8af011c3f",
+    "pdf": "e660475dc92f3586101e92bd1d198675ce654040ebc2c96e1d0ed0f41a95f093"
+  },
+  "pptx-018-master-body-levels.win.pdf": {
+    "source": "fe53c9deb71883f6a9be6274c120df49b5acdc60c97c7288110783a8af011c3f",
+    "pdf": "d734138dfff9b6b9f6540ee6ada573879345143921087b53c6a4ed658ce3d8d0"
+  },
+  "pptx-019-theme-style-matrix.mac.pdf": {
+    "source": "71daaa72c6e26f549281fafc69055b01459751fd9444715934578005f6c7b077",
+    "pdf": "f31e4308437142e3e10e061f2adedd0cba8986e7bdd5c398df0fbb49db54e4d8"
+  },
+  "pptx-019-theme-style-matrix.win.pdf": {
+    "source": "71daaa72c6e26f549281fafc69055b01459751fd9444715934578005f6c7b077",
+    "pdf": "b2add518e0ef47217f962299800faecbc052fe036e2db784696c56b624fba0c6"
+  },
+  "xlsx-009-chart.mac.pdf": {
+    "source": "f549094c713f82e7a8dc1140f46c69e468291051e6f5239e800a9ecbb8af3aa3",
+    "pdf": "327a2e865ce85ccf2d0fa3b4e5ddf09f7b6505dcf74035fd4abdf13b3c2b599f"
+  },
+  "xlsx-009-chart.win.pdf": {
+    "source": "f549094c713f82e7a8dc1140f46c69e468291051e6f5239e800a9ecbb8af3aa3",
+    "pdf": "a52866cce8f0869c428d8b578a602e118e430e697d8a3e3873d1010acef16461"
+  },
+  "xlsx-016-line-chart.mac.pdf": {
+    "source": "542d474da14f7c6d9b1d5e47de0b4371823de4a64404885c456b9d936d7b96df",
+    "pdf": "5c97e6458dea51e06965d319fd5f4bcba62992013257964e1ba8583de971490b"
+  },
+  "xlsx-016-line-chart.win.pdf": {
+    "source": "542d474da14f7c6d9b1d5e47de0b4371823de4a64404885c456b9d936d7b96df",
+    "pdf": "aa0ab676431d8e0eae8ac3533e0681a785f3c9ec317bb5bd7afde14eb133e0b8"
+  }
+}

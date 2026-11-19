@@ -20,6 +20,9 @@
 !packages/xlsx/public/corpus/*.xlsx
 !packages/docx/public/corpus/
 !packages/docx/public/corpus/*.docx
+# Their Office reference PDFs (tests/corpus/references.json)
+!packages/*/public/corpus/*.win.pdf
+!packages/*/public/corpus/*.mac.pdf
 # Office Open XML spec documents
 /spec
 spec/
