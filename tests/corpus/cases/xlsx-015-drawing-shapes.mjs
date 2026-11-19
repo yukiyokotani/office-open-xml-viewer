@@ -1,4 +1,4 @@
-import { COLOR, OUTLINED_INSET, XLSX } from '../lib/grid.mjs';
+import { COLOR, FONT, OUTLINED_INSET, XLSX } from '../lib/grid.mjs';
 import { relationships } from '../lib/opc.mjs';
 import { gridPicture } from '../lib/png.mjs';
 import { R, sheet } from '../lib/xlsx.mjs';
@@ -16,7 +16,7 @@ const SHAPE = '<xdr:twoCellAnchor editAs="twoCell">' + cell('from', 1, top) + ce
   + '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
   + `<a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="${COLOR.ink}"/></a:solidFill></a:ln></xdr:spPr>`
   + `<xdr:txBody><a:bodyPr wrap="square" lIns="${OUTLINED_INSET}" tIns="${OUTLINED_INSET}" rIns="${OUTLINED_INSET}" bIns="${OUTLINED_INSET}" anchor="t"/><a:lstStyle/>`
-  + `<a:p><a:r><a:rPr lang="en-GB" sz="${XLSX.TYPE.text * 100}"><a:solidFill><a:srgbClr val="${COLOR.ink}"/></a:solidFill><a:latin typeface="Roboto"/></a:rPr>`
+  + `<a:p><a:r><a:rPr lang="en-GB" sz="${XLSX.TYPE.text * 100}"><a:solidFill><a:srgbClr val="${COLOR.ink}"/></a:solidFill><a:latin typeface="${FONT.latin}"/></a:rPr>`
   + `<a:t>${esc('xdr:sp anchored from B7 to the top left of D13: a rectangle with a text body, 1 pt outline, insets 12 pt (one gutter).')}</a:t></a:r></a:p></xdr:txBody></xdr:sp>`
   + '<xdr:clientData/></xdr:twoCellAnchor>';
 const PIC = '<xdr:twoCellAnchor editAs="oneCell">' + cell('from', 4, top) + cell('to', 6, top + 6)

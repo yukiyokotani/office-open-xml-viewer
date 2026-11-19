@@ -35,7 +35,7 @@ export default {
       kind: 'p',
       cols: [1, 2],
       lines: [
-        'This paragraph is set in 9 point Roboto on a',
+        'This paragraph is set in 9 point Noto Sans on a',
         '12 point line. The live area of the page is',
         '165 by 254 mm and holds sixty such lines;',
         'Word records the leading as line 240, exact.',

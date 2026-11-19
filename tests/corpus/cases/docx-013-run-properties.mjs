@@ -14,7 +14,7 @@ const PROPS = [
   ['w:spacing 20', '<w:spacing w:val="20"/>', 'Letter spacing: 1 pt added after each character.'],
   [`w:color ${COLOR.accent}`, `<w:color w:val="${COLOR.accent}"/>`, 'Colour: the accent cyan of the corpus.'],
   ['w:vanish', '<w:vanish/>', 'Hidden text'],
-  ['w:rFonts eastAsia', `<w:rFonts w:eastAsia="${FONT.eastAsia}"/>`, '和文はNoto Sans JP、欧文はRobotoで組む。'],
+  ['w:rFonts eastAsia', `<w:rFonts w:eastAsia="${FONT.eastAsia}"/>`, '和文はNoto Sans JP、欧文はNoto Sansで組む。'],
 ];
 
 export default {

@@ -260,6 +260,15 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@fontsource/noto-sans':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/noto-sans-arabic':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/noto-sans-hebrew':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@fontsource/noto-sans-jp':
         specifier: ^5.3.1
         version: 5.3.1
@@ -425,6 +434,15 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@fontsource/noto-sans':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/noto-sans-arabic':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/noto-sans-hebrew':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@fontsource/noto-sans-jp':
         specifier: ^5.3.1
         version: 5.3.1
@@ -502,6 +520,15 @@ importers:
         specifier: workspace:*
         version: link:../core
     devDependencies:
+      '@fontsource/noto-sans':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/noto-sans-arabic':
+        specifier: ^5.3.0
+        version: 5.3.0
+      '@fontsource/noto-sans-hebrew':
+        specifier: ^5.3.0
+        version: 5.3.0
       '@fontsource/noto-sans-jp':
         specifier: ^5.3.1
         version: 5.3.1
@@ -1076,8 +1103,17 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@fontsource/noto-sans-arabic@5.3.0':
+    resolution: {integrity: sha512-i3t6GR0LOReyJVEk+YfYCnxv53wuIelg7Y9NGNvOq4Diq/EP0YszaGXkQwfQNigLjfO4POrLaPGM0sNliGYk7A==}
+
+  '@fontsource/noto-sans-hebrew@5.3.0':
+    resolution: {integrity: sha512-7owtzuw9D+ipt0g8mcBGOm7MS/mv/REKsjSwEUe749UUsrnG54TSmusNn7oxv2GxbUORAzADLQ8ggdtt7oKkpg==}
+
   '@fontsource/noto-sans-jp@5.3.1':
     resolution: {integrity: sha512-9NNBB/M9PextLYVXGSfIaLZsPnrt5UDw8g2B6T0M775H2yb/oekApSjuS1XKOP7FPcMMEnTavR5rJGDM66qKtA==}
+
+  '@fontsource/noto-sans@5.3.0':
+    resolution: {integrity: sha512-fBCog2PY7DiVVTEEqtI/Qdinx/knobHYfoGpjFXdfBX5RoJaBp1Prw2G75p0OIsdlMZg3cLo0c+YbIUYOxnQJw==}
 
   '@fontsource/nunito-sans@5.2.7':
     resolution: {integrity: sha512-Vh+xhMsrH1eA9Q83Va82su3rDmNilYg+ur/TfHAOyr5kTpCOWMB8B1tDoJvSe+yJPpZ2jEWtnBHGqI2LUPVxUA==}
@@ -5460,7 +5496,13 @@ snapshots:
   '@esbuild/win32-x64@0.27.7':
     optional: true
 
+  '@fontsource/noto-sans-arabic@5.3.0': {}
+
+  '@fontsource/noto-sans-hebrew@5.3.0': {}
+
   '@fontsource/noto-sans-jp@5.3.1': {}
+
+  '@fontsource/noto-sans@5.3.0': {}
 
   '@fontsource/nunito-sans@5.2.7': {}
 

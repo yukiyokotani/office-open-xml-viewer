@@ -129,10 +129,10 @@ and sufficient, no decoration.
   italics, underline, colour or effects unless that is the feature under
   test. Line breaks in running text are written into the text, so wrapping
   never moves a block off the grid; a specimen about wrapping says so.
-- **Font.** Roboto (Latin) and Noto Sans JP (Japanese), both SIL Open Font
-  License 1.1. They are the open faces this repository's Google Fonts
-  registries already resolve (`packages/core/src/fonts/google-fonts.ts`,
-  `packages/core/src/fonts/scripts.ts`); see the note on VRT below.
+- **Font.** The Noto Sans family for every script: Noto Sans (Latin), Noto
+  Sans JP, Noto Sans Arabic and Noto Sans Hebrew, all SIL Open Font License
+  1.1. They are the faces this repository's script registry already resolves
+  (`packages/core/src/fonts/scripts.ts`); see the note on VRT below.
 - **Colour.** Black on white; one accent, cyan `12BFD8`, only when a feature
   needs a colour. Fills are solid; gradients appear only in the gradient
   specimen (pptx-009).
@@ -177,8 +177,8 @@ VRT_BASELINE_REVISION=$base VRT_BASELINE_CHECKOUT=/tmp/ooxml-vrt-baseline VRT_PO
 The comparison reads the baseline images from the baseline worktree itself,
 which must be a clean checkout at that revision (see `AGENTS.md`, "Visual
 regression"). Baselines live in the gitignored
-`tests/visual/baseline/public-corpus/`. The fixtures load Roboto and Noto Sans
-JP from the packages' `@fontsource` dependencies (`?fonts=corpus`), so the run
+`tests/visual/baseline/public-corpus/`. The fixtures load the Noto Sans faces
+from the packages' `@fontsource` dependencies (`?fonts=corpus`), so the run
 is offline, and they fail if any declared face does not load rather than
 comparing fallback glyphs. The private fast and full tiers stay
 maintainer-only.

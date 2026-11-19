@@ -34,14 +34,16 @@
     // scale-parameterised specs; the default matches the reference images.
     const width    = Math.max(1, parseInt(params.get('width') ?? '1280', 10));
 
-    // ?fonts=corpus loads the faces the public specimen corpus names (Roboto,
-    // Noto Sans JP) from this package's own @fontsource dependencies, so the
+    // ?fonts=corpus loads the faces the public specimen corpus names (Noto Sans,
+    // Noto Sans JP, Arabic, Hebrew) from this package's own @fontsource dependencies, so the
     // corpus VRT runs offline. Fontsource partitions each weight/style into
     // unicode-range faces and a font shorthand only fetches the subset matching
     // its sample text, so every declared face is loaded before rendering.
     const CORPUS_FONTS = {
-      roboto: ['400', '400-italic', '700', '700-italic'],
+      'noto-sans': ['400', '400-italic', '700', '700-italic'],
       'noto-sans-jp': ['400', '700'],
+      'noto-sans-arabic': ['400', '700'],
+      'noto-sans-hebrew': ['400', '700'],
     };
     const corpusFontStylesheets = Object.entries(CORPUS_FONTS)
       .flatMap(([name, files]) => files.map((f) => `/node_modules/@fontsource/${name}/${f}.css`));
@@ -116,7 +118,7 @@
 
     try {
       await loadFixtureFonts(fixtureFontStylesheets, ['nunito sans']);
-      if (params.get('fonts') === 'corpus') await loadFixtureFonts(corpusFontStylesheets, ['roboto', 'noto sans jp']);
+      if (params.get('fonts') === 'corpus') await loadFixtureFonts(corpusFontStylesheets, ['noto sans', 'noto sans jp', 'noto sans arabic', 'noto sans hebrew']);
       const resp = await fetch(`/${pptxName}.pptx`);
       if (!resp.ok) throw new Error(`fetch failed: ${resp.status}`);
       const buf = await resp.arrayBuffer();

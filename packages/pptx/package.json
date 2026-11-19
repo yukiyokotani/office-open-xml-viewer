@@ -50,6 +50,9 @@
     "vrt:worker": "playwright test --config playwright.config.ts worker-equivalence"
   },
   "devDependencies": {
+    "@fontsource/noto-sans": "^5.3.0",
+    "@fontsource/noto-sans-arabic": "^5.3.0",
+    "@fontsource/noto-sans-hebrew": "^5.3.0",
     "@fontsource/noto-sans-jp": "^5.3.1",
     "@fontsource/roboto": "^5.3.0",
     "@playwright/test": "^1.64.1",

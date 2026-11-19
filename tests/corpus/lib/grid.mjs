@@ -2,12 +2,11 @@
 // corpus is derived from the constants in this file; case modules never write
 // a free-standing length.
 
-/** One sans family in two weights (400, 700) and its Japanese companion.
- * Roboto is the open-licensed grotesque that the library's Google Fonts
- * substitute registry already resolves (packages/core/src/fonts/google-fonts.ts,
- * 400/700 + italics); Noto Sans JP is the Japanese face of the shared script
- * registry (packages/core/src/fonts/scripts.ts). Both are SIL OFL 1.1. */
-export const FONT = { latin: 'Roboto', eastAsia: 'Noto Sans JP' };
+/** One family for every script: Noto Sans (Latin, 400/700 + italics) with
+ * its Japanese, Arabic and Hebrew companions, so mixed-script text keeps one
+ * design. These are the faces the library's script registry already resolves
+ * (packages/core/src/fonts/scripts.ts). All SIL OFL 1.1. */
+export const FONT = { latin: 'Noto Sans', eastAsia: 'Noto Sans JP', arabic: 'Noto Sans Arabic', hebrew: 'Noto Sans Hebrew' };
 
 /** Black on white; the accent is used only when a feature needs a colour. */
 export const COLOR = { ink: '000000', paper: 'FFFFFF', accent: '12BFD8' };
