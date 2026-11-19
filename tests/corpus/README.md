@@ -24,6 +24,7 @@ tests/corpus/
   lib/chart.mjs, drawing.mjs, iso216.mjs   shared chart, picture and data helpers
   lib/features.mjs     `covers` vocabulary (extraction shared with tests/visual/corpus-features.mjs)
   lib/package-check.mjs  content types, relationships, XML well-formedness
+  render.mjs           render specimens to PNG and contact sheets for review
 packages/<fmt>/public/corpus/<fmt>-NNN-<slug>.<ext>   committed output
 ```
 
@@ -38,6 +39,7 @@ node tests/corpus/build.mjs --check       # exit 1 if a committed file is stale
 node --test tests/corpus/corpus.test.mjs  # rebuild in memory and verify
 pnpm corpus:gap [--format docx] [--part 'word/document'] [--top N]
 pnpm corpus:coverage --format docx [--dir SUBDIR|.] [--top N]
+node tests/corpus/render.mjs --format docx [--cases docx-024,docx-031] --out DIR
 ```
 
 `corpus:gap` compares the public corpus with a local private corpus under
@@ -79,83 +81,12 @@ timestamp 1980-01-01 00:00, no extra fields. The same sources therefore give
 the same bytes on any platform and Node version. Builders must not read the
 clock, the environment or the locale.
 
-## Adding a case
+## Authoring
 
-1. Pick the next number for the format and a short slug; create
-   `cases/<fmt>-NNN-<slug>.mjs` exporting
-   `{ id, slug, format, title, covers, parts }`, where `parts()` returns
-   part name → XML string (use the composer in `lib/<fmt>.mjs`).
-2. List in `covers` the XML features the case exists to exercise, as
-   `part|parent>child`, `part|element@attr` or `part|element@attr=value`
-   with the prefixes of `lib/xml.mjs` (`w`, `x`, `a`, `p`, `r`). Values are
-   checked only when they are enum-like (letters only); numeric attributes are
-   covered by presence.
-3. Run `pnpm corpus:build`, open the file in Word, Excel or PowerPoint (it
-   must open without repair), and commit the case and its output together.
-
-## Design rules
-
-The corpus follows a grid in the sense of Josef Müller-Brockmann: necessary
-and sufficient, no decoration.
-
-- **One feature family per file.** One page, sheet or slide unless pagination
-  is the subject.
-- **Furniture.** A header in the top-left field: id, title, one line saying
-  what to verify. Nothing else.
-- **Grid.** All lengths come from `lib/grid.mjs`; a case never writes a
-  free-standing number for a position, indent, tab stop or width.
-  - DOCX: A4 portrait; margins left 25, right 20, top 20, bottom 23 mm; live
-    area 165 × 254 mm; 12 pt baseline grid of 60 lines; 4 columns of 37.5 mm
-    with 5 mm gutters; 6 rows of 9 lines separated by one empty line. Line
-    spacing is exact, paragraph spacing a whole number of lines.
-  - PPTX: 16:9 (12 192 000 × 6 858 000 EMU); margin 457 200 EMU (0.5 in)
-    on all sides; 12 columns of 800 100 EMU with 152 400 EMU (12 pt)
-    gutters; 12 pt baseline; 4 rows of 9 lines separated by one line.
-    The indent module is one column plus one gutter, 952 500 EMU.
-  - XLSX: column A is a 2-character margin; the column module is 12
-    characters (half and whole multiples); rows are 12 pt, one baseline, and
-    taller rows are whole baselines (title row 36 pt). A 2-character gutter
-    column separates a flush-right column from a following flush-left one.
-  - Headers and footers (DOCX) sit two baselines outside the live area;
-    pictures, charts and shapes occupy whole grid fields. Text insets of
-    text boxes and table cells are zero so the first glyph sits on the edge;
-    a shape whose outline is drawn insets its text by one gutter (12 pt,
-    `OUTLINED_INSET`) so the text never touches the rule.
-- **Type.** One sans family in two weights; at most three sizes per file,
-  each on the baseline (DOCX 8/12, 9/12, 24/24; PPTX 10/12, 20/24, 40/48;
-  XLSX 8, 9 and 24 pt). On slides, 20/24 is for display lines and single-line
-  labels (paragraph levels, placeholders, table cells); running prose is set
-  in the text size, 10/12, like the Verify line. Flush left, ragged right. No centring, justification,
-  italics, underline, colour or effects unless that is the feature under
-  test. Line breaks in running text are written into the text, so wrapping
-  never moves a block off the grid; a specimen about wrapping says so.
-- **Font.** The Noto Sans family for every script: Noto Sans (Latin), Noto
-  Sans JP, Noto Sans Arabic and Noto Sans Hebrew, all SIL Open Font License
-  1.1. They are the faces this repository's script registry already resolves
-  (`packages/core/src/fonts/scripts.ts`); see the note on VRT below.
-- **Colour.** Black on white; one accent, cyan `12BFD8`, only when a feature
-  needs a colour. Fills are solid; gradients appear only in the gradient
-  specimen (pptx-009).
-- **Text.** Original, sober and self-describing: a specimen names its own
-  values (a tab stop line names its stop positions). Data are timeless,
-  verifiable facts: ISO 216 sizes, unit definitions, typographic point
-  systems, calendar and number facts. English first; Japanese plain prose
-  (である体) only where East Asian layout is the feature. No lorem ipsum, no
-  placeholder words, no quoted or copyrighted material.
-- **Minimal XML.** No rsids, no unused styles, no document properties; only
-  the parts a consumer needs to open the file without repair.
-
-## Where specimens leave the grid on purpose
-
-- PPTX group children use the group's child coordinate space, and connector
-  ends sit at the middle of shape edges (half a row); the grid test skips them.
-- DOCX inline pictures sit in a paragraph with single (auto) line spacing,
-  so that line is as tall as the picture plus the font's descent.
-- DOCX vertical writing (docx-007): the 165 mm live width is not a whole
-  number of 12 pt lines (38.98).
-- DOCX paragraph side borders stand in the gutters, outside the columns.
-- Where Word decides placement (column balancing, the footnote area), the
-  result is Word's, not the grid's.
+The rules every specimen follows (grid, type, font, colour, text, minimal
+XML), the procedure for adding one and the review loop live in the
+`corpus-specimen` skill, `.claude/skills/corpus-specimen/SKILL.md`. Read it
+before adding or changing a case.
 
 ## Visual regression
 
