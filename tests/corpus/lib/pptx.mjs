@@ -83,7 +83,7 @@ export function table(id, name, box, columns, rows) {
 
 /** Header furniture in the top-left field: columns 1-6, row 1. */
 export function header({ id, title, verify }) {
-  return textBox(2, 'Header', field(1, 6, 1, 1), [
+  return textBox(2, 'Header', field(1, 12, 1, 1), [
     { style: 'caption', bold: true, text: id },
     { style: 'title', bold: true, text: title },
     ...verify.map((text, i) => ({ style: 'caption', text, before: i === 0 ? 1 : 0 })),
