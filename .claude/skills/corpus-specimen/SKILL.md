@@ -137,6 +137,11 @@ and sufficient, no decoration.
   Sans JP, Noto Sans Arabic and Noto Sans Hebrew, all SIL Open Font License
   1.1. They are the faces this repository's script registry already resolves
   (`packages/core/src/fonts/scripts.ts`); see the note on VRT below.
+  Every DOCX specimen carries a `word/fontTable.xml` listing them with their
+  charsets (`docxPackage` writes it). Without it, Word for Windows replaces
+  the docDefaults East Asian font with the theme font, so the Japanese text
+  comes out in Yu Mincho. A case that writes its own font table must start
+  it with `FONT_TABLE_ENTRIES`.
 - **Colour.** Black on white; one accent, cyan `12BFD8`, only when a feature
   needs a colour. Fills are solid; gradients appear only in the gradient
   specimen (pptx-009).

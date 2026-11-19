@@ -1,5 +1,5 @@
 import { DOCX } from '../lib/grid.mjs';
-import { WML, W, docxPackage, header } from '../lib/docx.mjs';
+import { FONT_TABLE_ENTRIES, WML, W, docxPackage, header } from '../lib/docx.mjs';
 import { XML_DECL, esc } from '../lib/xml.mjs';
 
 // Office font regression set. The text names fonts that ship with Microsoft
@@ -19,7 +19,7 @@ const JAPANESE = [
   ['游明朝', 'Yu Mincho', 'roman'], ['游ゴシック', 'Yu Gothic', 'swiss'], ['ＭＳ 明朝', 'MS Mincho', 'roman'],
   ['ＭＳ ゴシック', 'MS Gothic', 'modern'], ['ＭＳ Ｐゴシック', 'MS PGothic', 'swiss'], ['メイリオ', 'Meiryo', 'swiss'],
 ];
-const FONT_TABLE = XML_DECL + `<w:fonts ${W}>`
+const FONT_TABLE = XML_DECL + `<w:fonts ${W}>${FONT_TABLE_ENTRIES}`
   + LATIN.map(([name, family]) => `<w:font w:name="${name}"><w:charset w:val="00"/><w:family w:val="${family}"/><w:pitch w:val="variable"/></w:font>`).join('')
   + JAPANESE.map(([name, alt, family]) => `<w:font w:name="${name}"><w:altName w:val="${alt}"/><w:charset w:val="80"/><w:family w:val="${family}"/>`
     + `<w:pitch w:val="${family === 'modern' ? 'fixed' : 'variable'}"/></w:font>`).join('')

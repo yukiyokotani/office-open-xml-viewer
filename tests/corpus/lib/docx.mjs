@@ -254,6 +254,18 @@ const settingsXml = (extra = '', after = '') => XML_DECL + `<w:settings ${W}>${e
   + '<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>'
   + `</w:compat>${after}</w:settings>`;
 
+// Word writes a font table into every document it saves, and Word for Windows
+// relies on it: a docDefaults w:eastAsia font that the table does not list
+// with an East Asian charset (and that Word does not already know, such as
+// MS Gothic) is replaced with the theme's minor East Asian font, so the
+// Japanese text would be set in Yu Mincho. Word for Mac keeps the named font.
+// Every specimen therefore carries a table listing the corpus fonts; a case
+// that writes its own word/fontTable.xml starts it with FONT_TABLE_ENTRIES.
+export const FONT_TABLE_ENTRIES = [
+  [FONT.latin, '00'], [FONT.eastAsia, '80'], [FONT.arabic, 'B2'], [FONT.hebrew, 'B1'],
+].map(([name, charset]) => `<w:font w:name="${name}"><w:charset w:val="${charset}"/><w:family w:val="swiss"/><w:pitch w:val="variable"/></w:font>`).join('');
+const FONT_TABLE = XML_DECL + `<w:fonts ${W}>${FONT_TABLE_ENTRIES}</w:fonts>`;
+
 /** Build a package. extra: { styles?: xml, settings?: xml (before w:compat),
  * settingsAfter?: xml (after w:compat: themeFontLang, clrSchemeMapping, ...),
  * firstSection?: section, parts?: { path: xml|bytes }, rels?: [[id, type,
@@ -262,11 +274,13 @@ const settingsXml = (extra = '', after = '') => XML_DECL + `<w:settings ${W}>${e
 export function docxPackage(blocks, extra = {}) {
   const { body, lastSection } = composeBody(blocks, extra.firstSection);
   const ns = [W, ...(extra.ns ?? [])].join(' ');
+  const ownFontTable = Boolean(extra.parts?.['word/fontTable.xml']);
   const document = XML_DECL + `<w:document ${ns}><w:body>${body}${sectPrXml(lastSection)}</w:body></w:document>`;
   const types = contentTypes({
     'word/document.xml': `${WML}.document.main+xml`,
     'word/styles.xml': `${WML}.styles+xml`,
     'word/settings.xml': `${WML}.settings+xml`,
+    ...(ownFontTable ? {} : { 'word/fontTable.xml': `${WML}.fontTable+xml` }),
     ...(extra.overrides ?? {}),
   });
   const defaults = Object.entries(extra.defaults ?? {})
@@ -277,12 +291,14 @@ export function docxPackage(blocks, extra = {}) {
     'word/_rels/document.xml.rels': relationships([
       ['rId1', 'styles', 'styles.xml'],
       ['rId2', 'settings', 'settings.xml'],
+      ...(ownFontTable ? [] : [['rIdFontTable', 'fontTable', 'fontTable.xml']]),
       ...(extra.rels ?? []),
       ...(extra.externalRels ?? []).map(([id, type, target]) => [id, type, target, 'External']),
     ]),
     'word/document.xml': document,
     'word/styles.xml': stylesXml(extra.styles),
     'word/settings.xml': settingsXml(extra.settings, extra.settingsAfter),
+    ...(ownFontTable ? {} : { 'word/fontTable.xml': FONT_TABLE }),
     ...(extra.parts ?? {}),
   };
 }
