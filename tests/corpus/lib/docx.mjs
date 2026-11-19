@@ -111,6 +111,7 @@ const leadingLines = (style) => DOCX.TYPE[style ?? 'text'].leading / DOCX.LINE;
  * space } for unequal ones (space = gutter after each column but the last). */
 export function colsXml(cols) {
   if (!cols) return '';
+  if (cols.raw) return cols.raw;
   if (cols.widths) {
     const n = cols.widths.length;
     return `<w:cols w:num="${n}" w:space="${cols.space}" w:equalWidth="0">${cols.widths

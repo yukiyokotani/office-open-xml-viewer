@@ -6,6 +6,7 @@
 //   partKind|{ns}parent>{ns}child
 //   partKind|{ns}element@{ns}attr
 //   partKind|{ns}element@{ns}attr=value   (enum-like values only)
+//   dirKind|*.ext                         non-XML part, e.g. 'word/media/|*.emf'
 // partKind is the lower-cased part path with digit runs replaced by N.
 //
 // Case modules write features with prefixes for readability
@@ -40,8 +41,10 @@ export function canonicalFeature(shorthand) {
     const attr = qualify(eq < 0 ? rest : rest.slice(0, eq), true);
     return `${kind}|${element}@${attr}${eq < 0 ? '' : `=${rest.slice(eq + 1)}`}`;
   }
+  // Non-XML part by extension: 'word/media/|*.emf'.
+  if (/^\*\.[a-z0-9]+$/.test(selector)) return `${kind}|${selector}`;
   const gt = selector.indexOf('>');
-  if (gt < 0) throw new Error(`feature selector needs '>' or '@': ${shorthand}`);
+  if (gt < 0) throw new Error(`feature selector needs '>', '@' or '*.ext': ${shorthand}`);
   const parent = selector.slice(0, gt);
   return `${kind}|${parent ? qualify(parent, false) : ''}>${qualify(selector.slice(gt + 1), false)}`;
 }
