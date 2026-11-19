@@ -25,6 +25,8 @@ tests/corpus/
   lib/features.mjs     `covers` vocabulary (extraction shared with tests/visual/corpus-features.mjs)
   lib/package-check.mjs  content types, relationships, XML well-formedness
   render.mjs           render specimens to PNG and contact sheets for review
+  references.mjs       status and recording of the Office reference PDFs
+  references.json      source and PDF hashes of every reference PDF
 packages/<fmt>/public/corpus/<fmt>-NNN-<slug>.<ext>   committed output
 ```
 
@@ -80,6 +82,25 @@ stored (no compression, so output does not depend on the zlib build), every
 timestamp 1980-01-01 00:00, no extra fields. The same sources therefore give
 the same bytes on any platform and Node version. Builders must not read the
 clock, the environment or the locale.
+
+## Office reference PDFs
+
+Each DOCX and PPTX specimen, and each XLSX specimen that holds a chart, is
+kept with the PDFs Office exports from it, next to it in
+`packages/<fmt>/public/corpus/`: `<stem>.win.pdf` from Office for Windows and
+`<stem>.mac.pdf` from Office for Mac. `tests/corpus/references.json` records
+for each PDF the SHA-256 of the specimen it was exported from and of the PDF.
+The test fails when a present PDF is unrecorded, differs from its record, or
+was exported from a specimen that has since changed.
+
+```bash
+node tests/corpus/references.mjs                 # list missing and stale PDFs
+node tests/corpus/references.mjs --record [ids]  # record freshly exported PDFs
+```
+
+The exporting machine must have the corpus fonts installed (Noto Sans, Noto
+Sans JP, Noto Sans Arabic, Noto Sans Hebrew), except for the Office font
+specimen, which tests substitution by design.
 
 ## Authoring
 

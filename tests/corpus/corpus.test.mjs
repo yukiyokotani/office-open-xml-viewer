@@ -11,6 +11,8 @@ import test from 'node:test';
 import { FORMATS, buildCase, fileName, loadCases, outputDir, outputPath } from './lib/cases.mjs';
 import { canonicalFeature, packageFeatures } from './lib/features.mjs';
 import { checkPackage, parseXmlStrict } from './lib/package-check.mjs';
+import { VARIANTS, isReferencePdf, needsReference, pdfName, readManifest, sha256 } from './lib/references.mjs';
+import { readZip } from '../visual/corpus-features.mjs';
 
 const cases = await loadCases();
 
@@ -23,7 +25,7 @@ test('case ids are unique and every format has cases', () => {
 test('the corpus directories hold exactly the built cases', () => {
   for (const format of FORMATS) {
     const dir = outputDir(format);
-    const committed = existsSync(dir) ? readdirSync(dir).filter((f) => !f.startsWith('.')).sort() : [];
+    const committed = existsSync(dir) ? readdirSync(dir).filter((f) => !f.startsWith('.') && !isReferencePdf(f)).sort() : [];
     const expected = cases.filter((c) => c.format === format).map(fileName).sort();
     assert.deepEqual(committed, expected, `packages/${format}/public/corpus`);
   }
@@ -51,6 +53,38 @@ for (const c of cases) {
     });
   });
 }
+
+// Office reference PDFs: each present PDF belongs to a specimen that needs
+// one and was exported from the specimen as committed (references.json).
+// Missing PDFs are listed by tests/corpus/references.mjs, not failed here.
+test('Office reference PDFs are recorded and current', () => {
+  const manifest = readManifest();
+  const expected = new Map();
+  for (const c of cases) {
+    const file = `${c.id}-${c.slug}.${c.format}`;
+    const source = readFileSync(outputPath(c));
+    if (!needsReference(c.format, source, readZip)) continue;
+    for (const variant of VARIANTS) expected.set(pdfName(file, variant), { format: c.format, source: sha256(source) });
+  }
+  const problems = [];
+  for (const format of FORMATS) {
+    const dir = outputDir(format);
+    if (!existsSync(dir)) continue;
+    for (const name of readdirSync(dir).filter(isReferencePdf)) {
+      const want = expected.get(name);
+      const entry = manifest[name];
+      if (!want || want.format !== format) problems.push(`${name}: no specimen needs this PDF`);
+      else if (!entry) problems.push(`${name}: not in references.json; run node tests/corpus/references.mjs --record`);
+      else if (entry.source !== want.source) problems.push(`${name}: stale, the specimen changed; export it again`);
+      else if (entry.pdf !== sha256(readFileSync(`${dir}/${name}`))) problems.push(`${name}: the PDF differs from references.json`);
+    }
+  }
+  for (const name of Object.keys(manifest)) {
+    const want = expected.get(name);
+    if (!want || !existsSync(`${outputDir(want.format)}/${name}`)) problems.push(`${name}: in references.json but no PDF`);
+  }
+  assert.deepEqual(problems, []);
+});
 
 // The checker itself must reject what it exists to catch.
 test('the package checker rejects malformed XML', () => {

@@ -49,7 +49,15 @@ Read `tests/corpus/README.md` for the layout, the commands and the VRT run.
 5. **Office check.** Each specimen must open in Word, Excel or PowerPoint
    without repair. Batch these checks (usually delegated); note any repair
    prompt as a bug in the case.
-6. **Commit** the case, any lib change and the regenerated
+6. **Reference PDFs.** A new or changed DOCX/PPTX specimen (and an XLSX
+   one with a chart) needs fresh `<stem>.win.pdf` and `<stem>.mac.pdf`
+   exported by Office (Windows: Word/PowerPoint/Excel export to PDF; Mac:
+   the same, PowerPoint with "Best for electronic distribution"), with the
+   corpus fonts installed. Then `node tests/corpus/references.mjs --record
+   <id>`. Until then `references.mjs` lists it as missing; a changed
+   specimen whose old PDFs remain fails the test as stale, so export again
+   or delete them.
+7. **Commit** the case, any lib change and the regenerated
    `packages/<fmt>/public/corpus/` file together, on a feature branch. No
    private file names, content or paths in messages or PR text.
 
