@@ -1,6 +1,6 @@
 ---
 name: corpus-specimen
-description: Author, change or review public OOXML specimens in tests/corpus (docx/pptx/xlsx test files built from hand-written XML). Use when adding a specimen, turning a private-sample finding or a coverage gap into a public test file, writing a binary helper (PNG, EMF) for the builder, or checking how specimens render.
+description: Author, change or review public OOXML specimens in tests/corpus (docx/pptx/xlsx test files built from hand-written XML). Use whenever issue, bug-fix or feature work exposes an unimplemented or broken OOXML feature (to hand a minimal pattern to the corpus), and when adding a specimen, turning a private-sample finding or a coverage gap into a public test file, writing a binary helper (PNG, EMF) for the builder, or checking how specimens render.
 ---
 
 # Public specimen authoring
@@ -60,6 +60,30 @@ Read `tests/corpus/README.md` for the layout, the commands and the VRT run.
 7. **Commit** the case, any lib change and the regenerated
    `packages/<fmt>/public/corpus/` file together, on a feature branch. No
    private file names, content or paths in messages or PR text.
+
+## Patterns from issue work
+
+The public corpus replaces accumulated private samples with the smallest set of
+files that still covers every behaviour, one that outside developers can use
+too. Every issue, bug fix or feature task feeds it.
+
+1. Write the pattern yourself. When the work exposes a feature that is
+   unimplemented or broken, keep only the elements, attributes, values and
+   geometry that trigger the behaviour. Never copy text, names, images or file
+   names from private, third-party or copyrighted samples.
+2. Check for overlap. Look at the existing specimens' `covers` lists and the
+   feature report. Extend a specimen rather than adding one that overlaps it.
+3. Hand it over in one of two ways:
+   - Add or extend the specimen yourself, following this skill. That includes
+     exporting the Windows and Mac Office PDFs.
+   - If another session owns the corpus, send it four things:
+     - the minimal XML;
+     - what Office does, as observed facts from an Office-exported PDF: page,
+       position and size, line and page breaks;
+     - what the viewer does now: an error, or the visible difference;
+     - the branch or PR with the fix, if there is one.
+4. In the PR or handoff, say which pattern went where. The fix still needs its
+   own focused regression test; a specimen does not replace it.
 
 ## Specimens from a private sample
 
