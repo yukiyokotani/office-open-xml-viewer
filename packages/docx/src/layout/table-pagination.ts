@@ -195,6 +195,19 @@ export interface TableFragmentContext {
 
 export interface TableFragmentResult {
   readonly fragment: TableFragmentLayout | null;
+  /**
+   * The fragment is the table's whole layout as this occurrence acquired it:
+   * every row of the table, each the occurrence's own row, none clipped, cut,
+   * continued, recovered or reselected, in this table or in any table nested
+   * below it. Derived from the selected rows themselves
+   * ({@link SelectedRow.wholeSource}); absent for every other selection.
+   *
+   * It is the one proof a selection may be exchanged for its source
+   * ({@link partialRow}). A fragment that does not state it is materialized
+   * as selected by every row enclosing it, at every depth: what admission
+   * accepted is what is laid out and painted.
+   */
+  readonly wholeSource?: true;
   readonly nextCursor: TableFragmentCursor | null;
   readonly requiresFreshPage: boolean;
   readonly floatingTablePlacements?: readonly ResolvedFloatingTablePlacementLayout[];
@@ -238,12 +251,18 @@ interface SelectedCell {
   readonly range: readonly BlockContinuationRange[];
   readonly next: TableCellFragmentCursor;
   readonly complete: boolean;
-  /** A selected nested-table fragment was clipped at its band end
-   * (clipAtPageEnd), so it is not the nested table's whole layout. */
-  readonly clippedNestedFragment?: true;
+  /** The selection is the source cell's content, whole: taken from the cell's
+   * start to its end, each nested table selected as its whole source
+   * ({@link TableFragmentResult.wholeSource}). */
+  readonly wholeSource: boolean;
 }
 
 interface SelectedRow {
+  /** The occurrence's own row, whole and unclipped: `input` is that row as
+   * acquired, nothing in it or in a table nested in it cut, continued,
+   * clipped, recovered or reselected. False for a repeated header occurrence,
+   * which is not the table's own row at that position. */
+  readonly wholeSource: boolean;
   readonly input: TableRowLayoutInput;
   readonly logicalRowIndex: number;
   readonly fragmentIndex: number;
@@ -311,11 +330,32 @@ function paginationRowHeight(source: RetainedTableAcquisition, rowIndex: number)
 // ownership releases the index with the shaped epoch, including on failure.
 const parentCells = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, TableCellLayout>>();
 
+/**
+ * The context a table nested in `parentCell` is fragmented in.
+ * `availableHeightPt` is what the cell has left for it here; `freshHeightPt`
+ * is the nested table's own fresh band, the most relocating can give it: the
+ * cell's whole content band on a fresh page, where the table is the cell
+ * fragment's first block. It is not the page's band. Every enclosing inset
+ * (cell margins, row rules, cell spacing, repeated header rows) makes the
+ * cell's band smaller than the page's, so a nested table measured against
+ * the page's band would always appear able to gain space by moving on, and
+ * a unit of it that no band can hold (an over-page cantSplit row, a blocked
+ * cell unit) would be deferred on every page instead of being handled where
+ * it starts its own fresh band.
+ *
+ * Library reading, not a measurement of nested tables: ECMA-376 §17.4.6
+ * speaks of a row that cannot fit on a single page without distinguishing a
+ * nested row, whose page is the band its cell can give it; see
+ * WORD_OVER_PAGE_CANT_SPLIT_CLIP and LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP.
+ * The remainder estimate of {@link remainingRowAtCursor} keeps the page's
+ * band on both sides.
+ */
 function nestedTableFragmentContext(
   source: RetainedTableAcquisition,
   parentCell: TableCellLayoutInput,
   context: TableFragmentContext,
   availableHeightPt: number,
+  freshHeightPt: number,
   nestedBlock?: TableCellBlockInput,
 ): TableFragmentContext {
   let cells = parentCells.get(source);
@@ -349,6 +389,7 @@ function nestedTableFragmentContext(
   return Object.freeze({
     ...inherited,
     availableHeightPt: bounds.heightPt,
+    freshPageHeightPt: Math.max(0, freshHeightPt),
     placement: Object.freeze({
       ...context.placement,
       container: Object.freeze({ ...context.placement.container, bounds }),
@@ -1204,6 +1245,7 @@ function remainingRowAtCursor(
                   cell,
                   context,
                   context.freshPageHeightPt,
+                  context.freshPageHeightPt,
                   block,
                 ),
               );
@@ -1559,6 +1601,7 @@ function selectedWholeRow(
   resolvedFloatingTables: readonly ResolvedFloatingTablePlacementLayout[] = [],
 ): SelectedRow {
   return {
+    wholeSource: ownership === 'source' && fragmentIndex === 0 && !clipAtPageEnd,
     input: row,
     logicalRowIndex: row.logicalRowIndex,
     fragmentIndex,
@@ -1653,6 +1696,20 @@ function selectParagraph(
   };
 }
 
+/**
+ * The nested fragments one row selection has taken, by nested block. A
+ * row's fresh-band re-selection takes its nested tables in the very contexts
+ * of its first selection (a nested table is not told of the re-selection), so
+ * a table it reaches with the same cursor and the same remaining band is the
+ * fragment already taken, not fragmented again: a chain of recovering rows
+ * costs one take per level, not two to the depth.
+ */
+type NestedTakes = Map<TableCellBlockInput, Readonly<{
+  cursor: TableFragmentCursor | null;
+  remainingPt: number;
+  result: TableFragmentResult;
+}>>;
+
 function selectCell(
   source: RetainedTableAcquisition,
   cell: TableCellLayoutInput,
@@ -1661,11 +1718,22 @@ function selectCell(
   freshAvailableContentHeightPt: number,
   canGainPageSpace: boolean,
   context: TableFragmentContext,
-  /** Admission-only limit; see measureTableCellBlockFlowHeightPt. */
-  containmentLimitPt = Number.POSITIVE_INFINITY,
+  nestedTakes: NestedTakes,
+  /** Set by the row's fresh-band re-selection
+   * (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP): the containment limit of
+   * measureTableCellBlockFlowHeightPt, and this cell's first unit is retained
+   * even when it is taller than the band. It governs this cell's own units
+   * only. A table nested in the cell is not told: it is fragmented in its own
+   * context and, starting its own fresh band here, recovers its own blocked
+   * units there, clipped and top-aligned like this row. */
+  recoveryContainmentLimitPt?: number,
 ): SelectedCell {
+  const containmentLimitPt = recoveryContainmentLimitPt ?? Number.POSITIVE_INFINITY;
+  const retainsFirstUnit = !canGainPageSpace && (
+    recoveryContainmentLimitPt !== undefined || context.oversizedCellPolicy === 'overflow-first-unit'
+  );
   if (cell.verticalMerge === 'continue') {
-    return { input: cell, range: [], next: cursor, complete: true };
+    return { input: cell, range: [], next: cursor, complete: true, wholeSource: true };
   }
   if (cell.verticalText) {
     // ECMA-376 §17.4.72: rotated lines run along the row, so the block axis
@@ -1684,6 +1752,7 @@ function selectCell(
         nestedFragmentIndex: 0,
       }),
       complete: true,
+      wholeSource: atStart,
     };
   }
   const blocks: TableCellBlockInput[] = [];
@@ -1692,7 +1761,9 @@ function selectCell(
   let paragraphLineStart = cursor.paragraphLineStart;
   let nestedCursor = cursor.nestedCursor;
   let nestedFragmentIndex = cursor.nestedFragmentIndex;
-  let clippedNestedFragment = false;
+  // Paragraph and whole blocks selected from the cell's start to its end are
+  // the source's; a nested table's fragment is only when its own pass says so.
+  let wholeSource = blockIndex === 0 && paragraphLineStart === 0 && nestedCursor === null;
 
   while (blockIndex < cell.blocks.length) {
     context.chargeSourceScan?.(1);
@@ -1712,8 +1783,7 @@ function selectCell(
       if (child.lines.length === 0) {
         if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock], containmentLimitPt)
           > availableContentHeightPt + EPSILON_PT
-          && !(context.oversizedCellPolicy === 'overflow-first-unit'
-            && !canGainPageSpace && blocks.length === 0)) break;
+          && !(retainsFirstUnit && blocks.length === 0)) break;
         blocks.push(sourceBlock);
         range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
         blockIndex += 1;
@@ -1729,7 +1799,7 @@ function selectCell(
         freshAvailableContentHeightPt,
         canGainPageSpace,
         context,
-        context.oversizedCellPolicy === 'overflow-first-unit' && !canGainPageSpace && blocks.length === 0,
+        retainsFirstUnit && blocks.length === 0,
         containmentLimitPt,
       );
       if (!selected.block || !selected.range) break;
@@ -1752,13 +1822,19 @@ function selectCell(
         0,
         availableContentHeightPt - measureTableCellBlockFlowHeightPt(blocks, containmentLimitPt),
       );
-      const nestedResult = takeTableFragment(
-        nested,
-        nestedCursor ?? startTableFragmentCursor(),
-        nestedTableFragmentContext(source, cell, context, remainingPt, sourceBlock),
-      );
+      const taken = nestedTakes.get(sourceBlock);
+      const nestedResult = taken && taken.cursor === nestedCursor && taken.remainingPt === remainingPt
+        ? taken.result
+        : takeTableFragment(
+          nested,
+          nestedCursor ?? startTableFragmentCursor(),
+          nestedTableFragmentContext(
+            source, cell, context, remainingPt, freshAvailableContentHeightPt, sourceBlock,
+          ),
+        );
+      nestedTakes.set(sourceBlock, { cursor: nestedCursor, remainingPt, result: nestedResult });
       if (!nestedResult.fragment) break;
-      if (nestedResult.fragment.clipBounds) clippedNestedFragment = true;
+      if (nestedResult.wholeSource !== true) wholeSource = false;
       blocks.push({ layout: nestedResult.fragment, sourceBlockIndex: sourceBlock.sourceBlockIndex });
       range.push({
         kind: 'nested-table',
@@ -1789,7 +1865,7 @@ function selectCell(
     range,
     next: Object.freeze({ blockIndex, paragraphLineStart, nestedCursor, nestedFragmentIndex }),
     complete,
-    ...(clippedNestedFragment ? { clippedNestedFragment: true as const } : {}),
+    wholeSource: wholeSource && complete,
   };
 }
 
@@ -1862,18 +1938,17 @@ function partialRow(
         - (freshPrefix.flowBounds.yPt + freshPrefix.heightPt - context.placement.cursor.yPt)
       : freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
-  const selectCells = (
-    selectionContext: TableFragmentContext,
-    containmentLimitPt?: number,
-  ) => row.cells.map((cell, index) => selectCell(
+  const nestedTakes: NestedTakes = new Map();
+  const selectCells = (recoveryContainmentLimitPt?: number) => row.cells.map((cell, index) => selectCell(
     source,
     cell,
     cellCursors[index]!,
     availableContentHeightPt,
     freshAvailableContentHeightPt,
     canGainPageSpace,
-    selectionContext,
-    containmentLimitPt,
+    context,
+    nestedTakes,
+    recoveryContainmentLimitPt,
   ));
   const cellMadeProgress = (cell: SelectedCell, index: number) => (
     cell.next.blockIndex !== cellCursors[index]?.blockIndex
@@ -1894,7 +1969,7 @@ function partialRow(
         && row.cells[index]?.blocks[cellCursors[index]?.blockIndex ?? 0]?.layout.kind === 'paragraph'
       )),
     });
-  let selectedCells = selectCells(context);
+  let selectedCells = selectCells();
   // `library-over-page-table-cell-unit-clip`: decided after the parallel-cell
   // rule, so a row whose other cells progress is recovered too. Relocating
   // cannot gain space, and the selection would otherwise be empty forever.
@@ -1906,12 +1981,7 @@ function partialRow(
   const recoversBlockedUnits = !canGainPageSpace
     && context.oversizedCellPolicy !== 'overflow-first-unit'
     && !admissible(selectedCells);
-  if (recoversBlockedUnits) {
-    selectedCells = selectCells(
-      { ...context, oversizedCellPolicy: 'overflow-first-unit' },
-      freshAvailableContentHeightPt,
-    );
-  }
+  if (recoversBlockedUnits) selectedCells = selectCells(freshAvailableContentHeightPt);
   if (!admissible(selectedCells)) return { selected: null, next: cursor, complete: false };
   // The recovered fragment is clipped at the band end, so it must place each
   // admitted unit where admission charged it, or a line admitted inside the
@@ -1931,20 +2001,28 @@ function partialRow(
 
   const complete = selectedCells.every((cell) => cell.complete);
   if (complete && cursor.rowFragmentIndex === 0) {
-    // A completed first fragment is the source row, unless what was selected
-    // differs from it: this recovery, or a nested table that was recovered
-    // (or otherwise clipped) inside its own band. Restoring the source cells
-    // would bring back the unclipped nested layout and the unrecovered
-    // offsets, placing admitted content beyond the band.
-    const keepsSelection = recoversBlockedUnits
-      || selectedCells.some((cell) => cell.clippedNestedFragment === true);
+    // The first fragment holds the whole row. The source row stands for it
+    // (keeping the row's identity and its acquired blocks) only when the
+    // selection is proven to be that row: nothing was recovered here, and
+    // every cell selected its source content whole, each nested table at
+    // every depth included (TableFragmentResult.wholeSource). Any other
+    // selection is the row: a nested table clipped, recovered or reselected
+    // anywhere below would otherwise come back at its source extent, with no
+    // clip and no continuation, and move the content beside and below it
+    // (a centered or bottom-aligned sibling, the following blocks) past the
+    // band admission placed it in. The row keeps its own id and authored
+    // height either way; it occurs once.
+    const wholeSource = !recoversBlockedUnits && selectedCells.every((cell) => cell.wholeSource);
     return {
-      selected: selectedWholeRow(
-        keepsSelection ? { ...row, cells: selectedCells.map((cell) => recovered(cell.input)) } : row,
-        'source',
-        0,
-        recoversBlockedUnits,
-      ),
+      selected: {
+        ...selectedWholeRow(
+          wholeSource ? row : { ...row, cells: selectedCells.map((cell) => recovered(cell.input)) },
+          'source',
+          0,
+          recoversBlockedUnits,
+        ),
+        wholeSource,
+      },
       next: Object.freeze({
         rowIndex: cursor.rowIndex + 1,
         rowFragmentIndex: 0,
@@ -1969,6 +2047,7 @@ function partialRow(
   };
   return {
     selected: {
+      wholeSource: false,
       input: fragmentInput,
       logicalRowIndex: row.logicalRowIndex,
       fragmentIndex: cursor.rowFragmentIndex,
@@ -1986,6 +2065,16 @@ function partialRow(
   };
 }
 
+/**
+ * The fragment of the selected rows, laid out from their inputs alone: the
+ * one materialization of a selection. What admission accepted
+ * ({@link SelectedRow.input}, and through the nested fragments it holds,
+ * every depth below it) is what is laid out, clipped (`clipAtPageEnd`) and
+ * painted. The source is read for what is not selected content: column
+ * widths, the host cell of a positioned child and that child, which is
+ * placed whole. A rotated cell, never sliced, may have its own lines
+ * acquired again at the fragment's length ({@link layoutTableFragment}).
+ */
 function materializeFragment(
   source: RetainedTableAcquisition,
   selected: readonly SelectedRow[],
@@ -2560,10 +2649,10 @@ function takeTableFragmentPass(
     } : undefined;
     // The row is cut (or continued) here: its nested page-placed content is
     // placed against the occurrence this fragment selects, not the uncut row,
-    // and so are its own positioned children's anchors. A completed first
-    // fragment selects the candidate itself, unless partialRow kept a
-    // different selection (a recovered or clipped-nested row), whose geometry
-    // the anchors must then follow as materialization does.
+    // and so are its own positioned children's anchors. The probe is whatever
+    // partialRow selects, exactly what materialization lays out: the
+    // candidate itself for a completed first fragment proven to be its source
+    // row, the kept selection for any other.
     const cutOf = (candidate: TableRowLayoutInput): TableRowLayoutInput | null => {
       const probe = partialRow(
         source, candidate, rowCursor, availablePt, freshSourceHeightPt, canGainPageSpace, context,
@@ -2763,6 +2852,11 @@ function takeTableFragmentPass(
   }
   return passOf({
     fragment,
+    // Every row of the table, each selected as its whole source: a
+    // continuation on either side, a repeated header or a deferred row leaves
+    // the selection short of that.
+    ...(selected.length === source.input.rows.length && selected.every((row) => row.wholeSource)
+      ? { wholeSource: true as const } : {}),
     nextCursor,
     requiresFreshPage: false,
     floatingTablePlacements: fragment.resolvedFloatingTables,
