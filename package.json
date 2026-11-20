@@ -126,7 +126,7 @@
     "screenshots:readme": "playwright test --config tests/smoke/playwright.config.ts readme-screenshots --project=chrome",
     "test:pattern-browser": "playwright test --config tests/patterns/playwright.config.ts",
     "test:site-runtime": "playwright test --config tests/site-dist/playwright.config.ts",
-    "test": "vitest run && node --test scripts/optional-renderer-markers.test.mjs scripts/check-optional-entries.test.mjs scripts/check-font-source-tree-shaking.test.mjs tests/visual/private-corpus.test.mjs tests/visual/corpus-features.test.mjs tests/corpus/corpus.test.mjs scripts/companion-release.test.mjs scripts/check-relative-wasm-urls.test.mjs packages/docx/tests/visual/stable-canvas-render.test.mjs 'packages/legacy-office/tools/*.test.mjs'",
+    "test": "vitest run && node --test scripts/check-agent-instructions.test.mjs scripts/optional-renderer-markers.test.mjs scripts/check-optional-entries.test.mjs scripts/check-font-source-tree-shaking.test.mjs tests/visual/private-corpus.test.mjs tests/visual/corpus-features.test.mjs tests/corpus/corpus.test.mjs scripts/companion-release.test.mjs scripts/check-relative-wasm-urls.test.mjs packages/docx/tests/visual/stable-canvas-render.test.mjs 'packages/legacy-office/tools/*.test.mjs'",
     "corpus:build": "node tests/corpus/build.mjs",
     "corpus:gap": "node tests/corpus/gap.mjs",
     "corpus:coverage": "node tests/corpus/coverage-gap.mjs",
