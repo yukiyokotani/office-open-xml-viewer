@@ -206,6 +206,7 @@ import {
   type LineVisualOrder,
 } from './bidi-line';
 import { justifyLine, type Justified } from './text-justify';
+import { pptxTextBodyText, sourcePptxTextRun, type PptxTextSourceCache } from './text-anchor.js';
 import { justifiedPiecePositions } from '@silurus/ooxml-core';
 import { resolveTableBorderConflict } from './table-border-conflict.js';
 import { isSmartArtFallbackShape, smartArtFallbackTextColor } from './smartart-fallback-contrast';
@@ -289,6 +290,13 @@ export interface RenderContext {
 
 /** Information about a rendered text segment for building a transparent selection overlay. */
 export interface PptxTextRunInfo {
+  /** Native body-local UTF-16 range before attaching slide occurrence identity. */
+  sourceStart?: number;
+  sourceEnd?: number;
+  /** Gaps explicitly omitted by native layout, shared across callbacks. */
+  sourceNonpainted?: readonly Readonly<{ start: number; end: number }>[];
+  /** Durable provenance; absent when exact source projection is unsupported. */
+  source?: import('./text-anchor.js').PptxTextSource;
   /** Paint-order index for distinguishing displayed text containers, including
    * recovery previews. This is not a source-model locator for hit testing. */
   renderElementIndex?: number;
@@ -995,6 +1003,9 @@ function paintEquation(ctx: CanvasRenderingContext2D, style: LayoutSegment, x: n
 }
 
 type LayoutSegment = {
+  /** Paragraph-local UTF-16 provenance retained by the native line breaker. */
+  sourceStart?: number;
+  sourceEnd?: number;
   text: string;
   font: string;
   /** Inline DrawingML TAB, classified UAX#9 S during visual ordering (#916). */
@@ -2188,6 +2199,7 @@ export function layoutParagraph(
   );
   const marRPx = emuToPx(para.marR, scale);
   const broken = breakDrawingMlText(input, {
+    hasSourceOffsets: true,
     maxWidth: maxWidthPx,
     firstLineIndent: firstLineIndentPx,
     measureText(text, style) {
@@ -2268,7 +2280,8 @@ export function layoutParagraph(
         const leadingLetterSpacingPx = previous?.type === 'text'
           && previous.style.sourceRunId === part.style.sourceRunId
           ? part.style.letterSpacingPx : undefined;
-        return { ...part.style, text: part.text, leadingLetterSpacingPx };
+        return { ...part.style, text: part.text, leadingLetterSpacingPx,
+          sourceStart: part.sourceStart, sourceEnd: part.sourceEnd };
       }
       if (part.type === 'tab') return { ...part.style, text: '', isTab: true, tabWidthPx: part.width };
       return { ...part.style, text: '' };
@@ -5785,6 +5798,32 @@ export function renderTextBody(
   let colIdx = 0;
   let entriesInCol = 0;
 
+  const paragraphStarts = new Map<Paragraph, number>();
+  const sourceNonpainted: { start: number; end: number }[] = [];
+  if (onTextRun) {
+    let offset = 0;
+    for (const paragraph of body.paragraphs) {
+      paragraphStarts.set(paragraph, offset);
+      offset += paragraph.runs.reduce((length, run) => length + (run.type === 'text' ? run.text.length : 1), 0) + 1;
+    }
+    const text = pptxTextBodyText(body);
+    if (text !== undefined) {
+      const painted = allLines.flatMap(({ line, para }) => line.segments.flatMap((segment) =>
+        segment.text && segment.sourceStart !== undefined && segment.sourceEnd !== undefined
+          ? [{ start: paragraphStarts.get(para)! + segment.sourceStart,
+            end: paragraphStarts.get(para)! + segment.sourceEnd }] : []));
+      let cursor = 0;
+      for (const range of painted.sort((left, right) => left.start - right.start)) {
+        if (range.start > cursor && /^[\n\t ]+$/u.test(text.slice(cursor, range.start))) {
+          sourceNonpainted.push({ start: cursor, end: range.start });
+        }
+        cursor = Math.max(cursor, range.end);
+      }
+      if (cursor < text.length && /^[\n\t ]+$/u.test(text.slice(cursor))) {
+        sourceNonpainted.push({ start: cursor, end: text.length });
+      }
+    }
+  }
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
     // Balanced column advance: when the current column has reached its share
@@ -6352,7 +6391,10 @@ export function renderTextBody(
       }
 
       if (onTextRun && seg.text) {
+        const paragraphStart = paragraphStarts.get(entry.para)!;
         onTextRun({
+          ...(!paraNeedsBidi && !ls && !internalStretch && !jext && seg.sourceStart !== undefined && seg.sourceEnd !== undefined
+            ? { sourceStart: paragraphStart + seg.sourceStart, sourceEnd: paragraphStart + seg.sourceEnd, sourceNonpainted } : {}),
           text: seg.text,
           inShapeX: penX - bx,
           inShapeY: cursorY - by,
@@ -9098,6 +9140,7 @@ async function renderSlideLeased(
   // renderSlide installed only this device scale on the root context. Keep it
   // as the slide frame while each element adds local rotations or reflections.
   const slidePatternFrame = { a: effectiveDpr, d: effectiveDpr };
+  const textSourceCache: PptxTextSourceCache = new Map();
   for (const [elementIndex, el] of slide.elements.entries()) {
     // A text-run callback may start a newer render of this canvas; stop so we
     // don't paint this (now stale) slide over the newer one.
@@ -9114,14 +9157,16 @@ async function renderSlideLeased(
               elementIndex: undefined,
               origin: undefined,
               shapeId: undefined,
+              source: undefined,
             });
           } else {
-            onTextRun({
+            const located = {
               ...run,
               renderElementIndex: elementIndex,
               elementIndex: sourceIndex,
               origin: sourceSlide.elementSources?.[sourceIndex]?.origin ?? 'slide',
-            });
+            };
+            onTextRun({ ...located, source: sourcePptxTextRun(sourceSlide, sourceSlide.elements[sourceIndex], located, textSourceCache) });
           }
         }
       : undefined;

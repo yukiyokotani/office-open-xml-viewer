@@ -11,7 +11,7 @@ export type DrawingMlInputRun<T> =
   | { type: 'object'; width: number; style: T; payload?: unknown; display?: boolean };
 
 export type DrawingMlLineSegment<T> =
-  | { type: 'text'; text: string; style: T; width: number }
+  | { type: 'text'; text: string; style: T; width: number; sourceStart?: number; sourceEnd?: number }
   | { type: 'tab'; style: T; width: number }
   | { type: 'object'; style: T; width: number; payload?: unknown };
 
@@ -36,6 +36,8 @@ export interface DrawingMlBrokenLine<T> {
 }
 
 export interface DrawingMlBreakOptions<T> {
+  /** Retain UTF-16 input offsets without changing paint or line-breaking decisions. */
+  hasSourceOffsets?: boolean;
   /** Inner text width after body insets and paragraph margins, in canvas px. */
   maxWidth: number;
   /** Signed first-line indent; continuation lines use the full `maxWidth`. */
@@ -75,7 +77,7 @@ export interface DrawingMlBreakOptions<T> {
 }
 
 type Atom<T> =
-  | { type: 'text'; text: string; style: T; run: number }
+  | { type: 'text'; text: string; style: T; run: number; sourceStart: number; sourceEnd: number }
   | { type: 'tab'; style: T; run: number }
   | { type: 'object'; style: T; run: number; width: number; payload?: unknown };
 
@@ -113,6 +115,7 @@ export function breakDrawingMlText<T>(
   const regionLineFeedRun: number[] = [-1];
   const regionEndBreakRun: number[] = [];
   let runIndex = 0;
+  let sourceOffset = 0;
   for (const run of runs) {
     runRegion.push(regions.length - 1);
     if (run.type === 'break') {
@@ -120,6 +123,7 @@ export function breakDrawingMlText<T>(
       regions.push([]);
       regionLineFeedRun.push(-1);
       runIndex++;
+      sourceOffset++;
       continue;
     }
     if (run.type === 'object') {
@@ -146,8 +150,10 @@ export function breakDrawingMlText<T>(
         regionLineFeedRun.push(runIndex);
       }
       else if (text === '\t') regions.at(-1)!.push({ type: 'tab', style: run.style, run: runIndex });
-      else if (text !== '\r') regions.at(-1)!.push({ type: 'text', text, style: run.style, run: runIndex });
+      else if (text !== '\r') regions.at(-1)!.push({ type: 'text', text, style: run.style, run: runIndex,
+        sourceStart: sourceOffset + offsets[i], sourceEnd: sourceOffset + offsets[i + 1] });
     }
+    sourceOffset += run.text.length;
     runIndex++;
   }
 
@@ -318,9 +324,11 @@ export function breakDrawingMlText<T>(
         const last = segments.at(-1);
         if (last?.type === 'text' && sameStyle(last.style, atom.style)) {
           last.text += atom.text;
+          if (options.hasSourceOffsets) last.sourceEnd = atom.sourceEnd;
           return;
         }
-        segments.push({ type: 'text', text: atom.text, style: atom.style, width: 0 });
+        segments.push({ type: 'text', text: atom.text, style: atom.style, width: 0,
+          ...(options.hasSourceOffsets ? { sourceStart: atom.sourceStart, sourceEnd: atom.sourceEnd } : {}) });
       } else if (atom.type === 'tab') {
         segments.push({ type: 'tab', style: atom.style, width: 0 });
       } else {
@@ -365,7 +373,11 @@ export function breakDrawingMlText<T>(
       if (plainText !== null && plainOffsets && plainStyle !== undefined) {
         const text = plainText.slice(plainOffsets[start], plainOffsets[stop]);
         const width = options.measureText(text, plainStyle);
-        return { segments: [{ type: 'text', text, style: plainStyle, width }], width };
+        const first = atoms[start];
+        const last = atoms[stop - 1];
+        return { segments: [{ type: 'text', text, style: plainStyle, width,
+          ...(options.hasSourceOffsets && first?.type === 'text' && last?.type === 'text'
+            ? { sourceStart: first.sourceStart, sourceEnd: last.sourceEnd } : {}) }], width };
       }
       const segments: DrawingMlLineSegment<T>[] = [];
       for (let i = start; i < stop; i++) appendAtom(segments, atoms[i]);

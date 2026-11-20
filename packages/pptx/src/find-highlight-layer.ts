@@ -80,7 +80,7 @@ export function buildPptxHighlightLayer(
     const key = pptxRunFrameKey(run, transform);
     let entry = shapeMap.get(key);
     if (!entry) {
-      const frame = createPptxRunFrame(ownerDocument, run, cssWidth, cssHeight, 'none', 'hidden');
+      const frame = createPptxRunFrame(ownerDocument, run, cssWidth, cssHeight, 'none', 'visible');
       entry = frame;
       shapeMap.set(key, entry);
       layer.appendChild(frame.div);

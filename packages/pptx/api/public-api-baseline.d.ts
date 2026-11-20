@@ -1134,6 +1134,10 @@ export interface ChartTrendline {
 export type ChartType = 'line' | 'stackedLine' | 'stackedLinePct' | 'clusteredBar' | 'clusteredBarH' | 'stackedBar' | 'stackedBarH' | 'stackedBarPct' | 'stackedBarHPct' | 'area' | 'stackedArea' | 'stackedAreaPct' | 'pie' | 'doughnut' | 'scatter' | 'bubble' | 'radar' | 'waterfall' | 'stock' | 'surface' | 'surface3D' | 'boxWhisker' | 'sunburst' | 'treemap' | string;
 export type CjkFallback = 'auto' | CjkLang;
 type CjkLang = 'kr' | 'sc' | 'tc' | 'hk' | 'jp';
+export function createPptxTextAnchor(runs: readonly PptxTextRunInfo[], slices: readonly MatchRunSlice[]): {
+    readonly isSuccess: true;
+    readonly anchor: PptxTextAnchor;
+} | PptxTextAnchorFailure;
 export type DecodedImageBudgetStrategy = 'adaptive' | 'strict';
 export interface DimOptions {
     color: string;
@@ -1967,7 +1971,38 @@ export interface PptxSlidePoint {
     readonly x: number;
     readonly y: number;
 }
+export interface PptxTextAnchor {
+    readonly type: 'pptx-text';
+    readonly version: 1;
+    readonly body: PptxTextBodyIdentity;
+    readonly start: number;
+    readonly end: number;
+    readonly exact: string;
+    readonly prefix: string;
+    readonly suffix: string;
+    readonly bodyLength: number;
+}
+export type PptxTextAnchorFailure = {
+    readonly isSuccess: false;
+    readonly reason: 'invalid-range' | 'unsupported' | 'cross-body' | 'source-not-found' | 'text-mismatch' | 'ambiguous' | 'incomplete';
+};
+export interface PptxTextBodyIdentity {
+    readonly slideIndex: number;
+    readonly slidePart: string;
+    readonly shapeId: string;
+    readonly cell?: Readonly<{
+        row: number;
+        column: number;
+    }>;
+}
 export interface PptxTextRunInfo {
+    sourceStart?: number;
+    sourceEnd?: number;
+    sourceNonpainted?: readonly Readonly<{
+        start: number;
+        end: number;
+    }>[];
+    source?: PptxTextSource;
     renderElementIndex?: number;
     elementIndex?: number;
     origin?: SlideElementOrigin;
@@ -2006,6 +2041,18 @@ export interface PptxTextSelectionContext {
     readonly textCharacters: number;
     readonly maxTextCharacters: number;
     readonly maxRunLocators: number;
+}
+export interface PptxTextSource {
+    readonly body: PptxTextBodyIdentity;
+    readonly context: Readonly<{
+        text: string;
+        nonpainted?: readonly Readonly<{
+            start: number;
+            end: number;
+        }>[];
+    }>;
+    readonly start: number;
+    readonly end: number;
 }
 export class PptxViewer implements ZoomableViewer {
     static fromPresentation(canvas: HTMLCanvasElement, presentation: PptxPresentation, opts?: Omit<PptxViewerOptions, keyof LoadOptions>): Omit<PptxViewer, 'load'>;
@@ -2086,6 +2133,10 @@ interface ProgressiveLayoutPartial {
 interface ProgressiveLayoutProgress {
     committedUnits: number;
 }
+export function readPptxTextAnchor(root: HTMLElement, selection: Selection | null, options?: TextSelectionContextOptions): {
+    readonly isSuccess: true;
+    readonly anchor: PptxTextAnchor;
+} | PptxTextAnchorFailure;
 export function readPptxTextSelectionContext(root: HTMLElement, selection: Selection | null, options?: TextSelectionContextOptions): PptxTextSelectionContext | null;
 export interface Reflection {
     blur: number;
@@ -2128,6 +2179,10 @@ export interface RenderSlideToBitmapOptions {
     onTextRun?: TextRunCallback;
     errorPlaceholder?: ErrorPlaceholderOption<PptxPartFailure>;
 }
+export function resolvePptxTextAnchor(anchor: PptxTextAnchor, runs: readonly PptxTextRunInfo[]): {
+    readonly isSuccess: true;
+    readonly slices: MatchRunSlice[];
+} | PptxTextAnchorFailure;
 export interface Rot3d {
     lat: number;
     lon: number;

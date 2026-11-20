@@ -24,6 +24,10 @@ export {
 } from './renderer';
 export { buildPptxTextLayer } from './text-layer';
 export {
+  createPptxTextAnchor, readPptxTextAnchor, resolvePptxTextAnchor,
+  type PptxTextAnchor, type PptxTextSource, type PptxTextBodyIdentity, type PptxTextAnchorFailure,
+} from './text-anchor.js';
+export {
   readPptxTextSelectionContext,
   type PptxSelectionRunLocator,
   type PptxTextSelectionContext,
