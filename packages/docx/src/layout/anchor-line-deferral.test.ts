@@ -281,6 +281,22 @@ describe('page-owned anchor whose own exclusion pushes its anchor line off the p
     expect(lines(result).get('P010')).toMatchObject({ page: 2, yPt: 72 });
   });
 
+  it('defers a later anchor whose test also pushes the lines accepted before it', () => {
+    // P003's picture fits on page 1. Registering P010's 600 pt picture as well
+    // leaves room for two lines only, so that test pushes P003's accepted line
+    // off the page too. Word's test is still P010's: page 1 keeps P003's wrap
+    // only and ends at P009; P010 starts page 2 below its picture.
+    const result = layout(docx(30, {
+      3: { anchors: [{}] },
+      10: { anchors: [{ heightPt: 600 }] },
+    }));
+    expect(pageRange(result, 1)).toEqual([0, 9]);
+    expect(lines(result).get('P000')).toMatchObject({ page: 1, yPt: 372 });
+    expect(pictures(result).get(3)).toEqual([{ page: 1, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(10)).toEqual([{ page: 2, xPt: 72, yPt: 72 }]);
+    expect(lines(result).get('P010')).toMatchObject({ page: 2, yPt: 672 });
+  });
+
   it('keeps a picture on its page when its line moves to the next column', () => {
     // Word control: two 222 pt columns. Column 1 stays wrapped below the
     // picture and the anchor paragraph starts column 2 of the same page.
