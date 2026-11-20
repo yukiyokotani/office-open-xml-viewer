@@ -55,8 +55,8 @@ because released packages and changelog entries link to them.
 
 ## Contributor workflow
 
-- [`docx-architecture-audit.md`](docx-architecture-audit.md) — the review
-  procedure for DOCX layout changes.
+- [`docx-architecture-audit`](../.agents/skills/docx-architecture-audit/SKILL.md)
+  skill — the review procedure for DOCX layout changes.
 - [`../scripts/README.md`](../scripts/README.md) — what each repository script
   does and how to rerun the generators.
 

@@ -47,8 +47,8 @@ whenever Rust parser source changes or `src/wasm/` may be stale.
 - Unit tests run from the repository root with `pnpm test` (vitest).
 - Visual tests: `pnpm --filter @silurus/ooxml-pptx vrt` (self-VRT against a
   baseline checkout), `vrt:private` (private self-VRT plus private worker
-  parity), `vrt:fidelity` (demo ratchet against `references/demo/`). See the
-  root `AGENTS.md` for the required baseline environment variables.
+  parity), `vrt:fidelity` (demo ratchet against `references/demo/`). The `vrt`
+  skill has the required baseline environment variables.
 - Storybook is unified at the repository root (`pnpm storybook`).
 
 ## OOXML Units

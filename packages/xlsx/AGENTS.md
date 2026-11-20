@@ -58,6 +58,6 @@ then applies `scripts/append-wasm-reinit.mjs`.
 
 - Unit tests: `pnpm test` (vitest) at the repository root.
 - VRT: `pnpm --filter @silurus/ooxml-xlsx vrt` / `vrt:private` / `vrt:fidelity`.
-  See the root `AGENTS.md` for the baseline environment variables.
+  The `vrt` skill has the baseline environment variables.
 - Storybook: `pnpm storybook` at the repository root.
 - Do not commit samples: never commit the private corpus or generated output.

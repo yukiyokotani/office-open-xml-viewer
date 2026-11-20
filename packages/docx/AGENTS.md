@@ -46,8 +46,20 @@ then applies `scripts/append-wasm-reinit.mjs`.
 
 - Unit tests: `pnpm test` (vitest) at the repository root.
 - VRT: `pnpm --filter @silurus/ooxml-docx vrt` / `vrt:private` / `vrt:fidelity` /
-  `conformance`. See the root `AGENTS.md` for the baseline environment variables.
+  `conformance`. The `vrt` skill has the baseline environment variables.
 - Storybook: `pnpm storybook` at the repository root.
+
+A good verification set for a narrow DOCX renderer fix:
+
+```bash
+./node_modules/.bin/vitest run \
+  packages/docx/src/cell-border-conflict.test.ts \
+  packages/docx/src/cell-border-conflict-render.test.ts \
+  packages/docx/src/column-widths.test.ts
+
+./node_modules/.bin/tsc --build --pretty false
+git diff --check
+```
 
 ## No Heuristics (consistent with the OOXML Implementation Policy in the root `AGENTS.md`)
 

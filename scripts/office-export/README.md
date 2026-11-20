@@ -1,7 +1,8 @@
 # Office PDF export
 
-Tools for exporting Office reference PDFs, such as the public corpus
-references (`tests/corpus/README.md`, "Office reference PDFs").
+Tools for exporting Office reference PDFs. The `office-reference-export`
+skill (`.agents/skills/office-reference-export/SKILL.md`) says which export
+is the reference and how to drive Office.
 
 - `windows-export.ps1`: Office for Windows driver that runs in the Windows
   guest. It runs one VBScript and one Office instance per file, with a
