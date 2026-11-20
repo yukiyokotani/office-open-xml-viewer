@@ -159,8 +159,8 @@ jobs:
       # The root must be available before its exact-peer companions publish
       # (@silurus/ooxml-legacy-office, then @silurus/ooxml-opendocument).
       # NPM_TOKEN must be allowed to create new @silurus packages for a
-      # companion's first release; see the release skill
-      # (.agents/skills/release/SKILL.md).
+      # companion's first release; see
+      # docs/workflow/release.md.
       - name: Publish viewer, then companions
         run: node scripts/publish-packages.mjs
         env:

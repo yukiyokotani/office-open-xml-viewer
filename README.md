@@ -1149,7 +1149,7 @@ pnpm typecheck
 
 # Visual regression tests (local only — not run in CI). `pnpm vrt` compares
 # against a baseline checkout captured with `pnpm vrt:snapshot`; see
-# .agents/skills/vrt/SKILL.md for the required VRT_BASELINE_REVISION /
+# docs/workflow/vrt.md for the required VRT_BASELINE_REVISION /
 # VRT_BASELINE_CHECKOUT variables.
 pnpm vrt
 # Fidelity ratchet against the committed demo references

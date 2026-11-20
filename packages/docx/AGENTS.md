@@ -1,14 +1,15 @@
 # @silurus/ooxml-docx — for DOCX sessions
 
-Read the root `AGENTS.md` (canonical) first. Follow it for workflow, branches,
-VRT, and reference-image rules. This file records only DOCX-specific facts.
+Start from the root [`AGENTS.md`](../../AGENTS.md) map; workflow, VRT and
+reference-image rules live in [`docs/`](../../docs/README.md).
+This file records only DOCX-specific facts.
 
 ## Edit Scope
 
 - Mainly `packages/docx/**` (including the Rust code in `parser/` and `model/`).
 - Change `packages/core` / `packages/ooxml-common` or other formats only as part
-  of a coherent fix that follows Cross-Package Integration in the root
-  `AGENTS.md`.
+  of a coherent fix that follows Cross-Package Integration in the
+  [core beliefs](../../docs/design-docs/core-beliefs.md).
 
 ## Directory Layout (main entries)
 
@@ -46,7 +47,8 @@ then applies `scripts/append-wasm-reinit.mjs`.
 
 - Unit tests: `pnpm test` (vitest) at the repository root.
 - VRT: `pnpm --filter @silurus/ooxml-docx vrt` / `vrt:private` / `vrt:fidelity` /
-  `conformance`. The `vrt` skill has the baseline environment variables.
+  `conformance`. [`docs/workflow/vrt.md`](../../docs/workflow/vrt.md) has the baseline
+  environment variables.
 - Storybook: `pnpm storybook` at the repository root.
 
 A good verification set for a narrow DOCX renderer fix:
@@ -61,7 +63,7 @@ A good verification set for a narrow DOCX renderer fix:
 git diff --check
 ```
 
-## No Heuristics (consistent with the OOXML Implementation Policy in the root `AGENTS.md`)
+## No Heuristics (consistent with the [core beliefs](../../docs/design-docs/core-beliefs.md))
 
 DOCX rendering, especially around anchors, wgp, docGrid, and ruby, often tempts
 you to add heuristics. Observe the following:

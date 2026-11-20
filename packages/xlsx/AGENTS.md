@@ -1,14 +1,15 @@
 # @silurus/ooxml-xlsx — for XLSX sessions
 
-Read the root `AGENTS.md` (canonical) first. Follow it for workflow, branches,
-VRT, and reference-image rules. This file records only XLSX-specific facts.
+Start from the root [`AGENTS.md`](../../AGENTS.md) map; workflow, VRT and
+reference-image rules live in [`docs/`](../../docs/README.md).
+This file records only XLSX-specific facts.
 
 ## Edit Scope
 
 - Mainly `packages/xlsx/**` (including the Rust code in `parser/` and `model/`).
 - Change `packages/core` / `packages/ooxml-common` or other formats only as part
-  of a coherent fix that follows Cross-Package Integration in the root
-  `AGENTS.md`.
+  of a coherent fix that follows Cross-Package Integration in the
+  [core beliefs](../../docs/design-docs/core-beliefs.md).
 
 ## Formula Handling (policy)
 
@@ -58,6 +59,7 @@ then applies `scripts/append-wasm-reinit.mjs`.
 
 - Unit tests: `pnpm test` (vitest) at the repository root.
 - VRT: `pnpm --filter @silurus/ooxml-xlsx vrt` / `vrt:private` / `vrt:fidelity`.
-  The `vrt` skill has the baseline environment variables.
+  [`docs/workflow/vrt.md`](../../docs/workflow/vrt.md) has the baseline
+  environment variables.
 - Storybook: `pnpm storybook` at the repository root.
 - Do not commit samples: never commit the private corpus or generated output.

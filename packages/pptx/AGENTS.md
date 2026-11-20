@@ -1,14 +1,15 @@
 # @silurus/ooxml-pptx — for PPTX sessions
 
-Read the root `AGENTS.md` (canonical) first. Follow it for workflow, branches,
-VRT, and reference-image rules. This file records only PPTX-specific facts.
+Start from the root [`AGENTS.md`](../../AGENTS.md) map; workflow, VRT and
+reference-image rules live in [`docs/`](../../docs/README.md).
+This file records only PPTX-specific facts.
 
 ## Edit Scope
 
 - Mainly `packages/pptx/**` (including the Rust code in `parser/` and `model/`).
 - Change `packages/core` / `packages/ooxml-common` or other formats only as part
-  of a coherent fix that follows Cross-Package Integration in the root
-  `AGENTS.md`.
+  of a coherent fix that follows Cross-Package Integration in the
+  [core beliefs](../../docs/design-docs/core-beliefs.md).
 
 ## Package Layout
 
@@ -47,8 +48,8 @@ whenever Rust parser source changes or `src/wasm/` may be stale.
 - Unit tests run from the repository root with `pnpm test` (vitest).
 - Visual tests: `pnpm --filter @silurus/ooxml-pptx vrt` (self-VRT against a
   baseline checkout), `vrt:private` (private self-VRT plus private worker
-  parity), `vrt:fidelity` (demo ratchet against `references/demo/`). The `vrt`
-  skill has the required baseline environment variables.
+  parity), `vrt:fidelity` (demo ratchet against `references/demo/`). [`docs/workflow/vrt.md`](../../docs/workflow/vrt.md)
+  has the required baseline environment variables.
 - Storybook is unified at the repository root (`pnpm storybook`).
 
 ## OOXML Units
