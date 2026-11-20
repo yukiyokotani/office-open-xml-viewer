@@ -495,7 +495,7 @@ function buildLayoutSourceModelAdapter(
       widthPt: numbering.picBulletWidthPt ?? marker.fontSizePt,
       heightPt: numbering.picBulletHeightPt ?? marker.fontSizePt,
     };
-  });
+  }, bodyLayoutInput.pageBackground);
   const footnotes = frozenNotes(privateDocument.footnotes);
   const endnotes = frozenNotes(privateDocument.endnotes);
   const hasPaginationFields = paginatedFlowHasPaginationDependentFields(

@@ -9,7 +9,7 @@ import type {
   PaintResourceKind,
 } from '../layout/types.js';
 import { rasterizeColumnSeparator } from './column-separator-raster.js';
-import { paintDrawingLayout } from './canvas-drawing.js';
+import { paintDrawingCommands, paintDrawingLayout } from './canvas-drawing.js';
 import {
   paintDrawingWithOwnedTextBoxes,
   paintParagraphLayout,
@@ -277,6 +277,10 @@ function paintPageContents(
       });
     }
   };
+  // ECMA-376 §17.2.1: the document background fills the physical page
+  // behind all other content, including a back page border and the
+  // background/behind-text layers.
+  if (page.pageBackground) paintDrawingCommands(page.pageBackground.commands, context);
   if (page.pageBorder?.zOrder === 'back') {
     paintPageBorderLayout(page.pageBorder, context);
   }

@@ -51,6 +51,13 @@ pub const PARSE_DIAGNOSTIC_SEVERITY_REF_BOOKMARK_RESOURCE_LIMIT: DiagnosticSever
 pub const PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_VML_CONTENT: &str = "UNSUPPORTED_VML_CONTENT";
 pub const PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_VML_CONTENT: DiagnosticSeverity =
     DiagnosticSeverity::Warning;
+/// A §17.2.1 `w:background/w:drawing` whose payload is not a page fill (a
+/// group, chart or other graphic frame, or a tiled DrawingML picture fill),
+/// so the displayed background omits it.
+pub const PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_BACKGROUND_DRAWING: &str =
+    "UNSUPPORTED_BACKGROUND_DRAWING";
+pub const PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_BACKGROUND_DRAWING: DiagnosticSeverity =
+    DiagnosticSeverity::Warning;
 
 /// Private parser-to-layout diagnostic severity. This wire is intentionally
 /// smaller than the public document model: diagnostics carry stable facts and
@@ -194,6 +201,29 @@ pub struct Document {
     /// document to the highest page. Empty, and omitted, for DOCX.
     #[serde(rename = "__pageObjects", skip_serializing_if = "Vec::is_empty")]
     pub page_objects: Vec<PageObjectStory>,
+    /// Private parser/layout wire: the ECMA-376 Part 1 §17.2.1 document
+    /// background painted beneath all content of every page. The DOCX parser
+    /// emits it only while §17.15.1.26 `w:displayBackgroundShape` is on, so its
+    /// presence is the decision to paint. Omitted when nothing is painted.
+    #[serde(rename = "__pageBackground", skip_serializing_if = "Option::is_none")]
+    pub page_background: Option<PageBackgroundWire>,
+}
+
+/// Paint-ready document background (see `Document::page_background`). Layers
+/// paint in order over the whole physical page: `color`, then each of `fills`.
+#[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PageBackgroundWire {
+    /// §17.2.1 `w:color` / `w:themeColor` (+ `w:themeTint` / `w:themeShade`)
+    /// resolved to `RRGGBB`. Absent for `auto` or when neither is authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Background shapes layered above `color`, in document order: the
+    /// Part 4 §19.1.2.2 `v:background` fill, then the fill of a §17.3.3.9
+    /// `w:drawing` child. Each covers the whole page.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub fills: Vec<ShapeFill>,
 }
 
 /// One physical page's anchored drawings (see `Document::page_objects`).

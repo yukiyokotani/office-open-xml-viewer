@@ -155,6 +155,10 @@ pub(crate) struct DocumentBodyProjector<R: BufRead> {
     body_closed: bool,
     sdts: Vec<SdtFrame>,
     capture: Option<Capture>,
+    /// ECMA-376 Part 1 §17.2.1 `w:background`, the CT_DocumentBase child
+    /// preceding `w:body`. Captured through the same MCE projection as body
+    /// blocks, but it is no body block: it takes no ordinal.
+    background: Option<Vec<u8>>,
     cover_break_after: Vec<bool>,
     discarded_provisional_choices: usize,
     finished: bool,
@@ -177,6 +181,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
             body_closed: false,
             sdts: Vec::new(),
             capture: None,
+            background: None,
             cover_break_after: Vec::new(),
             discarded_provisional_choices: 0,
             finished: false,
@@ -1064,6 +1069,15 @@ impl<R: BufRead> DocumentBodyProjector<R> {
             return Ok(false);
         }
 
+        if self.is_document_background(is_word, &local_name) {
+            self.capture = Some(Capture {
+                root_depth: next_depth,
+                source_offset,
+                local_name,
+                xml: Vec::new(),
+            });
+            return Ok(true);
+        }
         self.observe_sdt_metadata(is_word, &local_name, start, next_depth)?;
         if self.at_logical_level() && is_word && local_name == "sdt" {
             self.sdts.push(SdtFrame {
@@ -1093,7 +1107,9 @@ impl<R: BufRead> DocumentBodyProjector<R> {
         let local_name = local_name(empty)?;
         let is_word = is_w_ns(namespace);
         self.observe_sdt_metadata(is_word, &local_name, empty, self.depth)?;
-        if !(self.at_logical_level() && is_word && is_body_block(&local_name)) {
+        if !(self.is_document_background(is_word, &local_name)
+            || self.at_logical_level() && is_word && is_body_block(&local_name))
+        {
             return Ok(false);
         }
         self.capture = Some(Capture {
@@ -1186,6 +1202,22 @@ impl<R: BufRead> DocumentBodyProjector<R> {
         Ok(())
     }
 
+    /// The first `w:background` child of the document element (§17.2.1;
+    /// CT_DocumentBase permits one, before the body).
+    fn is_document_background(&self, is_word: bool, local_name: &str) -> bool {
+        is_word
+            && local_name == "background"
+            && self.background.is_none()
+            && !self.body_seen
+            && self.processed_parent_is_word("document")
+    }
+
+    /// The captured §17.2.1 background element, once the projection has
+    /// passed it.
+    pub(crate) fn background_xml(&self) -> Option<&[u8]> {
+        self.background.as_deref()
+    }
+
     fn at_logical_level(&self) -> bool {
         self.processed_parent_is_word("body") || self.processed_parent_is_word("sdtContent")
     }
@@ -1275,6 +1307,10 @@ impl<R: BufRead> DocumentBodyProjector<R> {
             .capture
             .take()
             .ok_or_else(|| "document body capture is not active".to_string())?;
+        if capture.local_name == "background" && self.body_content_depth.is_none() {
+            self.background = Some(capture.xml);
+            return Ok(None);
+        }
         if capture.local_name == "tbl" && !captured_table_has_rows(&capture.xml)? {
             return Ok(None);
         }
@@ -1497,6 +1533,37 @@ mod tests {
             );
             roxmltree::Document::parse(&text).unwrap();
         }
+    }
+
+    #[test]
+    fn captures_the_document_background_outside_the_block_sequence() {
+        // §17.2.1 w:background precedes w:body; its Transitional VML child is
+        // projected through Part 3 MCE selection like block content, but the
+        // background takes no block ordinal.
+        let xml = format!(
+            r#"<w:document xmlns:w="{W}" xmlns:mc="{MC}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:u="urn:unsupported"><w:background w:color="22551B"><mc:AlternateContent><mc:Choice Requires="u"><u:fill/></mc:Choice><mc:Fallback><v:background fillcolor="red"/></mc:Fallback></mc:AlternateContent></w:background><w:body><w:p/><w:sectPr/></w:body></w:document>"#,
+        );
+        let mut projector = DocumentBodyProjector::new(
+            BufReader::new(Cursor::new(xml.as_bytes().to_vec())),
+            None,
+            Rc::default(),
+        );
+        let mut blocks = Vec::new();
+        while let Some(block) = projector.next_block().unwrap() {
+            blocks.push(block.local_name);
+        }
+        assert_eq!(blocks, ["p", "sectPr"]);
+        assert_eq!(projector.plan().unwrap().cover_break_after, [false, false]);
+        let background = String::from_utf8(projector.background_xml().unwrap().to_vec()).unwrap();
+        let document = roxmltree::Document::parse(&background).unwrap();
+        let root = document.root_element();
+        assert_eq!(root.tag_name().name(), "background");
+        assert_eq!(
+            root.first_element_child()
+                .map(|child| child.tag_name().name()),
+            Some("background"),
+            "selected VML fallback is unwrapped: {background}"
+        );
     }
 
     #[test]

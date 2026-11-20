@@ -167,7 +167,13 @@ export async function renderSelectedDocumentPage<TTextRun>(
   const token = (renderTokens.get(canvas) ?? 0) + 1;
   renderTokens.set(canvas, token);
   const superseded = (): boolean => renderTokens.get(canvas) !== token;
-  const pageResourceKeys = page.layers.capabilities.resourceKeys;
+  // The §17.2.1 page background owns retained picture brushes outside the
+  // page story graph; prepare them with the page's own resources.
+  const backgroundResourceKeys = (page.pageBackground?.commands ?? []).flatMap((command) => (
+    command.kind === 'drawingml-image-fill' ? [command.resourceKey] : []
+  ));
+  const pageResourceKeys = page.layers.capabilities.resourceKeys
+    && [...backgroundResourceKeys, ...page.layers.capabilities.resourceKeys];
   const descriptorByKey = new Map(
     options.registry.descriptors.map((descriptor) => [descriptor.resourceKey, descriptor]),
   );

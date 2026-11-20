@@ -1232,6 +1232,16 @@ export interface PageBorderLayout {
   readonly segments: readonly BorderSegment[];
 }
 
+/** ECMA-376 §17.2.1 document background of one page: full-page commands in
+ * physical page points (`fill-rect` for the solid colour, then each
+ * background shape fill). Paint replays them before every other page layer. */
+export interface PageBackgroundLayout {
+  readonly commands: readonly Extract<
+    DrawingPaintCommand,
+    { kind: 'fill-rect' | 'drawingml-shape' | 'drawingml-image-fill' }
+  >[];
+}
+
 /** Physical page-space ink fixed during layout for ECMA-376 §17.6.4
  * `w:cols/@w:sep`. Paint may snap the retained endpoints to device pixels,
  * but it must not recover section-band geometry. */
@@ -1252,6 +1262,8 @@ export interface LayoutPage {
   readonly sectionRegions: readonly PageSectionRegion[];
   readonly columnSeparators: readonly ColumnSeparatorLayout[];
   readonly pageBorder: PageBorderLayout | null;
+  /** §17.2.1 document background; absent when none is displayed. */
+  readonly pageBackground?: PageBackgroundLayout;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
   /** ECMA-376 §17.13.5 markup view only: one margin bar per line containing

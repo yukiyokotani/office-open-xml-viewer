@@ -547,8 +547,12 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
   if (node.clip?.kind === 'polygon') {
     node.clip.points.forEach((point, index) => requirePoint(point, `${path}.clip.points[${index}]`));
   }
-  node.commands.forEach((command, index) => {
-    const commandPath = `${path}.commands[${index}]`;
+  requireDrawingCommands(node.commands, `${path}.commands`);
+}
+
+function requireDrawingCommands(commands: DrawingLayout['commands'], path: string): void {
+  commands.forEach((command, index) => {
+    const commandPath = `${path}[${index}]`;
     if (command.kind === 'noop') return;
     if (command.kind === 'drawingml-shape') {
       requireDrawingMLShapePlan(command, commandPath);
@@ -661,6 +665,18 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
       );
     }
     requirePageBorder(page, `pages[${pageIndex}].pageBorder`);
+    if (page.pageBackground !== undefined) {
+      if (!Array.isArray(page.pageBackground.commands) || page.pageBackground.commands.length === 0) {
+        throw new LayoutInvariantError(
+          'INVALID_GEOMETRY',
+          `pages[${pageIndex}].pageBackground has no commands`,
+        );
+      }
+      requireDrawingCommands(
+        page.pageBackground.commands,
+        `pages[${pageIndex}].pageBackground.commands`,
+      );
+    }
 
     const domains = new Map<string, FlowDomain>();
     page.flowDomains.forEach((domain, domainIndex) => {

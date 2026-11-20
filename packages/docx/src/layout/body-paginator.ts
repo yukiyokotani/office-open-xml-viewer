@@ -42,6 +42,7 @@ import {
   createFieldAcquisitionServicesView,
   createParagraphAcquisitionCacheServicesView,
 } from './runtime-state.js';
+import { sectionPhysicalPageExtent, withPageBackground } from './page-background.js';
 import {
   accumulatePagePaintNode,
   accumulatePageSectionRegion,
@@ -433,10 +434,7 @@ function physicalPage(
   interval: ReservedBodyInterval,
 ) {
   const writingMode = sectionWritingMode(section);
-  const extent = uprightPhysicalExtent({
-    widthPt: section.geometry.pageWidth,
-    heightPt: section.geometry.pageHeight,
-  }, writingMode);
+  const extent = sectionPhysicalPageExtent(section);
   if (writingMode !== 'horizontal-tb') {
     return Object.freeze({
       ...extent,
@@ -5793,7 +5791,12 @@ function composeBodyPaginationResult(
       });
   const finalized = Object.freeze({
     ...withParserDiagnostics,
-    pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
+    // §17.2.1: the document background is a fact of every physical page,
+    // fixed once the page geometry is final.
+    pages: Object.freeze(withParserDiagnostics.pages.map((page) => withPageBackground(
+      finalizePageBookmarkStarts(page),
+      input.pageBackground,
+    ))),
   });
   const withChangeBars = options.showTrackedChanges === true
     ? attachTrackChangeBars(finalized)

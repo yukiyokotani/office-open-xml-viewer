@@ -92,6 +92,7 @@ import type {
 } from './layout/body-layout-input.js';
 import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
 import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
+import { pageBackgroundAcquisitionInput } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
@@ -325,6 +326,9 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
   readonly __documentTypographySettings?: Readonly<{
     normalStyleFontSizePt?: number;
   }>;
+  /** ECMA-376 §17.2.1 background, present only while §17.15.1.26
+   * displayBackgroundShape is on; see layout/page-background.ts. */
+  readonly __pageBackground?: unknown;
 }
 
 export function documentTypographySettingsInput(
@@ -1535,6 +1539,9 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),
     noteLayoutSettings: documentNoteLayoutSettingsInput(doc),
     pageLayoutSettings: documentPageLayoutSettingsInput(doc),
+    pageBackground: pageBackgroundAcquisitionInput(
+      (doc as InternalDocxDocumentModel).__pageBackground,
+    ),
     parserDiagnostics: mapParseDiagnostics(
       (doc as InternalDocxDocumentModel).diagnostics,
       doc.body.length,

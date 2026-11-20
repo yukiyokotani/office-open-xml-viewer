@@ -78,6 +78,7 @@ mod decimal_number_tests {
     }
 }
 
+mod page_background;
 mod vml_fill;
 #[path = "parser/vml_geometry.rs"]
 mod vml_geometry;
@@ -953,6 +954,13 @@ struct DocumentParseEnvironment {
     note_layout_settings: Option<crate::types::NoteLayoutSettingsWire>,
     special_note_references: SpecialNoteReferences,
     even_and_odd_headers: bool,
+    /// ECMA-376 §17.15.1.26 `w:displayBackgroundShape` (CT_OnOff; absent is
+    /// off): whether the §17.2.1 document background is shown.
+    display_background_shape: bool,
+    /// §17.15.1.20 theme colour mapping for WordprocessingML colour references.
+    color_scheme_mapping: page_background::ColorSchemeMapping,
+    /// The acquired §17.2.1 background, set by the document-part pass.
+    page_background: Option<PageBackgroundWire>,
     word_ilvl_error: Option<String>,
 }
 
@@ -1126,6 +1134,8 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
     // §17.10.1 even/odd headers is a settings.xml flag (not a sectPr property), so
     // capture it here and stamp it onto the section below.
     let mut even_and_odd_headers = false;
+    let mut display_background_shape = false;
+    let mut color_scheme_mapping = page_background::ColorSchemeMapping::default();
     if let Ok(settings_xml) = read_part_string(zip, settings_path.as_deref()) {
         if let Some(langs) = parse_theme_font_langs(&settings_xml) {
             theme.apply_theme_font_langs(&langs);
@@ -1134,6 +1144,11 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
         page_layout_settings = parse_page_layout_settings(&settings_xml);
         (note_layout_settings, special_note_references) = parse_note_layout_settings(&settings_xml);
         even_and_odd_headers = parse_even_and_odd_headers(&settings_xml);
+        if let Ok(settings) = parse_guarded(&settings_xml) {
+            let root = settings.root_element();
+            display_background_shape = bool_prop(root, "displayBackgroundShape").unwrap_or(false);
+            color_scheme_mapping = page_background::ColorSchemeMapping::parse(root);
+        }
     }
 
     // ECMA-376 §17.7.2 — record the document default run fonts on the theme so
@@ -1171,6 +1186,9 @@ fn load_document_parse_environment(zip: &mut Zip) -> DocumentParseEnvironment {
         note_layout_settings,
         special_note_references,
         even_and_odd_headers,
+        display_background_shape,
+        color_scheme_mapping,
+        page_background: None,
         word_ilvl_error,
     }
 }
@@ -1189,6 +1207,8 @@ struct DocumentBodyPreflight {
     section: SectionProps,
     ref_leading_breaks: HashMap<String, String>,
     ref_budget_exceeded: bool,
+    /// Projected §17.2.1 `w:background` element, when authored.
+    background_xml: Option<Vec<u8>>,
 }
 
 /// First pass over `word/document.xml`. Only cross-block facts survive this
@@ -1269,6 +1289,7 @@ fn preflight_document_body(
     }
 
     let plan = projector.plan()?;
+    let background_xml = projector.background_xml().map(<[u8]>::to_vec);
     if sequence_facts.len() != plan.cover_break_after.len() {
         return Err("document body projection produced inconsistent block facts".to_string());
     }
@@ -1323,7 +1344,33 @@ fn preflight_document_body(
         section,
         ref_leading_breaks,
         ref_budget_exceeded,
+        background_xml,
     })
+}
+
+impl DocumentParseEnvironment {
+    /// Acquire the §17.2.1 document background from its element. Runs once,
+    /// after settings, theme and document relationships are loaded.
+    fn acquire_page_background(
+        &mut self,
+        node: roxmltree::Node,
+        diagnostics: &mut Vec<ParseDiagnostic>,
+    ) {
+        self.page_background = page_background::parse_page_background(
+            node,
+            self.display_background_shape,
+            page_background::PageBackgroundContext {
+                mapping: &self.color_scheme_mapping,
+                theme: &self.theme,
+                style_map: &self.style_map,
+                num_map: &mut self.num_map,
+                media_map: &self.media_map,
+                chart_map: &self.chart_map,
+                rel_map: &self.rel_map,
+            },
+            diagnostics,
+        );
+    }
 }
 
 pub fn parse(zip: &mut Zip) -> Result<Document, String> {
@@ -1478,8 +1525,16 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
                 == Some(true),
         },
     );
-    // Match the cursor's acquisition order: section stories precede body
-    // facts; notes are acquired in finish_document after both.
+    // Match the cursor's acquisition order: section stories precede the
+    // §17.2.1 background, which precedes body facts; notes are acquired in
+    // finish_document after both.
+    if let Some(background) = xml_doc
+        .root_element()
+        .children()
+        .find(|node| is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == "background")
+    {
+        environment.acquire_page_background(background, &mut story_diagnostics);
+    }
     story_diagnostics.extend(diagnostics);
     let diagnostics = story_diagnostics;
     let final_section_ordinal = body
@@ -1621,6 +1676,18 @@ impl DocxBodyCursor {
                     title_page: fact.title_page,
                 }));
             }
+        }
+
+        if let Some(xml) = preflight.background_xml.as_deref() {
+            let xml = std::str::from_utf8(xml).map_err(|error| DocumentCursorFailure {
+                error: format!("{DOCUMENT_PART}: projected background is not UTF-8: {error}"),
+                theme: Box::new(degraded_theme.clone()),
+            })?;
+            let document = parse_guarded(xml).map_err(|error| DocumentCursorFailure {
+                error: format!("{DOCUMENT_PART}: projected background: {error}"),
+                theme: Box::new(degraded_theme.clone()),
+            })?;
+            environment.acquire_page_background(document.root_element(), &mut story_diagnostics);
         }
 
         let projector =
@@ -2030,6 +2097,7 @@ fn finish_document(
         parse_error: None,
         // WordprocessingML has no physical-page anchor (a producer-only wire).
         page_objects: Vec::new(),
+        page_background: environment.page_background,
     })
 }
 
@@ -14514,7 +14582,18 @@ fn vml_word_anchor_acquisition(
 /// (`silver`, `black`, `red`, …) resolved through the shared
 /// `ooxml_common::theme::preset_color` table. `None` for an unrecognized value
 /// (e.g. `windowText`, a palette-relative token we don't model here).
+///
+/// Part 4 §20.1.2.3 ST_ColorType: "An optional index can be stored in square
+/// brackets following the color and a space" (Word writes e.g.
+/// `#4f81bd [3204]`). The index is application palette metadata; the colour
+/// before it is the value.
 fn vml_color_hex6(c: &str) -> Option<String> {
+    let c = match c.trim().split_once(' ') {
+        Some((color, index)) if index.trim().starts_with('[') && index.trim().ends_with(']') => {
+            color
+        }
+        _ => c,
+    };
     let s = c.trim().trim_start_matches('#');
     if s.len() == 6 && s.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Some(s.to_ascii_lowercase());

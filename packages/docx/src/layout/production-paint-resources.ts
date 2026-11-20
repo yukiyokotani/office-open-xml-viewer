@@ -13,6 +13,7 @@ import type { BodyAcquisitionInputProjections } from './acquisition-input-projec
 import { chartResourceKey, imageResourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
 import { documentPageObjects } from '../page-object-wire.js';
 import { pageObjectStorySource } from './body-layout-input.js';
+import type { PageBackgroundLayoutInput } from './page-background.js';
 import {
   createPaintResourceRegistry,
 } from './paint-resources.js';
@@ -62,6 +63,7 @@ function collectDescriptorCandidates(
   acquisitionInputs: BodyAcquisitionInputProjections | undefined,
   mathOccurrences: readonly MathOccurrence[],
   resolvePictureBulletSize?: PictureBulletSizeResolver,
+  pageBackground?: PageBackgroundLayoutInput,
 ): Readonly<{ imageMetadata: ImageMetadataRecord[]; descriptors: PaintResourceDescriptor[] }> {
   const imageCandidates: ImageDescriptorCandidate[] = [];
   const imageMetadata: ImageMetadataRecord[] = [];
@@ -253,6 +255,34 @@ function collectDescriptorCandidates(
   });
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
+  // ECMA-376 §17.2.1 background picture fills: one resource per physical page
+  // size, whose extent is the host box of the Part 4 §19.1.2.5 brush.
+  for (const fill of pageBackground?.fills ?? []) {
+    if (fill.kind !== 'image') continue;
+    const image = fill.fill;
+    for (const resource of fill.resources) {
+      imageCandidates.push(imageCandidate('image', resource.resourceKey, image.imagePath, {
+        ...(image.svgImagePath === undefined ? {} : { svgImagePath: image.svgImagePath }),
+        ...(image.srcRect === undefined ? {} : { srcRect: { ...image.srcRect } }),
+        ...(image.alpha === undefined ? {} : { alpha: image.alpha }),
+        ...(image.duotone === undefined ? {} : { duotone: { ...image.duotone } }),
+        ...(image.blipEffects?.length ? {
+          blipEffects: structuredClone(image.blipEffects) as ImageRun['blipEffects'],
+          effectHost: {
+            rotation: 0, flipH: false, flipV: false,
+            ...(image.fillRect === undefined ? {} : { fillRect: { ...image.fillRect } }),
+          },
+        } : {}),
+        ...(image.vml === undefined ? {} : { vmlFill: image.vml }),
+      }));
+      imageMetadata.push({
+        resourceKey: resource.resourceKey,
+        mimeType: image.mimeType,
+        widthPt: resource.widthPt,
+        heightPt: resource.heightPt,
+      });
+    }
+  }
 
   const metadataByKey = new Map(imageMetadata.map((record) => [record.resourceKey, record]));
   if (metadataByKey.size !== imageMetadata.length) throw new Error('Duplicate image resource key');
@@ -284,9 +314,10 @@ export function projectDocumentSnapshotResources(
   acquisitionInputs: BodyAcquisitionInputProjections | undefined,
   mathOccurrences: readonly MathOccurrence[],
   resolvePictureBulletSize?: PictureBulletSizeResolver,
+  pageBackground?: PageBackgroundLayoutInput,
 ): DocumentSnapshotResourceProjection {
   const projected = collectDescriptorCandidates(
-    doc, acquisitionInputs, mathOccurrences, resolvePictureBulletSize,
+    doc, acquisitionInputs, mathOccurrences, resolvePictureBulletSize, pageBackground,
   );
   return Object.freeze({
     imageMetadata: Object.freeze(projected.imageMetadata.map((record) => Object.freeze({ ...record }))),
