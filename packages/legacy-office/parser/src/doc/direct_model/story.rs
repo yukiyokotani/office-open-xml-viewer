@@ -1283,7 +1283,7 @@ fn push_symbol(
         .is_some_and(|font| formatting.is_symbol_font(font));
     let glyph = match form.code {
         // A font with the symbol character set maps its codes into the
-        // private use area U+F000..U+F0FF (MS-DOC 2.9.86 FFN chs; Word's
+        // private use area U+F000..U+F0FF (MS-DOC 2.9.82 FFN chs; Word's
         // PDF of a SYMBOL 167 control in such a font carries U+F0A7).
         code @ 0x20..=0xff if symbol_font && !form.unicode => char::from_u32(0xf000 + code),
         code @ 0x80..=0x9f if !form.unicode => Some(super::super::decode_windows_1252(code as u8)),

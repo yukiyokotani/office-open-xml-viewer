@@ -143,7 +143,7 @@ impl Formatting<'_> {
     }
 
     /// Whether the font table gives `name` the symbol character set
-    /// (MS-DOC 2.9.86 FFN chs).
+    /// (MS-DOC 2.9.82 FFN chs).
     pub(in crate::doc) fn is_symbol_font(&self, name: &str) -> bool {
         self.symbol_fonts
             .iter()
