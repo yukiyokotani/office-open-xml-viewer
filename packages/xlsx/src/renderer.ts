@@ -5206,6 +5206,9 @@ function drawShape(
   group?: { readonly nativeExtCx: number; readonly nativeExtCy: number },
 ): void {
   if (usesPathShade(shape.strokeFill)) ctx = trackPaintPath(ctx);
+  // Line width and line-end sizes use the same zoomed scale as the geometry
+  // (see shapeStrokeScale), so the body stroke and its decorations agree.
+  const strokeScale = shapeStrokeScale(cs);
   ctx.save();
   if (shape.rot !== 0 || shape.flipH || shape.flipV) {
     ctx.translate(sx + sw / 2, sy + sh / 2);
@@ -5227,8 +5230,8 @@ function drawShape(
     const stroke = shapeStroke(shape);
     const lineEnds = stroke && (decoratedEnd(stroke.headEnd) || decoratedEnd(stroke.tailEnd))
       ? customLineEndAnchors(paths, sw, sh) : null;
-    const headTrim = lineEnds?.start && stroke?.headEnd ? lineEndRetract(stroke.headEnd, stroke, 1 / EMU_PER_PX, EMU_PER_PT) : 0;
-    const tailTrim = lineEnds?.end && stroke?.tailEnd ? lineEndRetract(stroke.tailEnd, stroke, 1 / EMU_PER_PX, EMU_PER_PT) : 0;
+    const headTrim = lineEnds?.start && stroke?.headEnd ? lineEndRetract(stroke.headEnd, stroke, strokeScale, EMU_PER_PT) : 0;
+    const tailTrim = lineEnds?.end && stroke?.tailEnd ? lineEndRetract(stroke.tailEnd, stroke, strokeScale, EMU_PER_PT) : 0;
     paths.forEach((path, index) => {
       ctx.beginPath();
       appendSpreadsheetCustomPath(ctx, path, 0, 0, sw, sh);
@@ -5253,7 +5256,7 @@ function drawShape(
       strokeShapePath(ctx, shape, sw, sh, cs);
     });
     if (lineEnds && stroke) {
-      drawPresetLineEndArrows(ctx, lineEnds, stroke, 1 / EMU_PER_PX, EMU_PER_PT,
+      drawPresetLineEndArrows(ctx, lineEnds, stroke, strokeScale, EMU_PER_PT,
         { x: 0, y: 0, w: sw, h: sh }, shape.rot, PT_TO_PX * cs,
         { hostFrame: true, patternCoordinateTransform: axisAlignedPatternTransform(shape, sw, sh) });
     }
@@ -5275,7 +5278,7 @@ function drawShape(
     // preset engine must not stroke the full-length leader underneath.
     const stroke = shapeStroke(shape);
     const geomName = shape.geom.name.toLowerCase();
-    const leader = planPresetLeader(geomName, stroke, 1 / EMU_PER_PX, EMU_PER_PT);
+    const leader = planPresetLeader(geomName, stroke, strokeScale, EMU_PER_PT);
     const lineEnds = leader?.decorated ? leader : null;
     const skipTrailingStroke = lineEnds?.restroke != null;
     // Hatches, staggered picture tiles and translucent pictures are painted,
@@ -5314,7 +5317,7 @@ function drawShape(
         }
         // Gradient / pattern decorations continue the leader's brush: the
         // same shade frame, pattern transform and host CTM as strokeShapePath.
-        drawPresetLineEndArrows(ctx, anchors, stroke, 1 / EMU_PER_PX, EMU_PER_PT,
+        drawPresetLineEndArrows(ctx, anchors, stroke, strokeScale, EMU_PER_PT,
           { x: 0, y: 0, w: sw, h: sh }, shape.rot, PT_TO_PX * cs,
           { hostFrame: true, patternCoordinateTransform: axisAlignedPatternTransform(shape, sw, sh) });
       }
@@ -6375,6 +6378,25 @@ function shapeStroke(shape: ShapeInfo): Stroke | null {
   };
 }
 
+/**
+ * EMU → canvas-unit factor for a drawing's outline (`a:ln@w`, ECMA-376
+ * §20.1.2.2.24, an EMU length) and the line-end sizes derived from it
+ * (§20.1.8.38 / §20.1.8.57 `a:headEnd` / `a:tailEnd`, multiples of the line
+ * width). Shape geometry is laid out in zoomed CSS px (anchor EMU × `cs` /
+ * EMU_PER_PX), so the outline takes the same factor and scales with the sheet
+ * zoom like the shape it outlines; dash patterns are multiples of the
+ * resolved width and follow it. Device pixel ratio stays in the canvas
+ * transform and is not folded in here. Hairline policy (shared with PPTX, which
+ * passes its render scale the same way): core's stroke resolver floors the
+ * painted width at 0.5 canvas units, independent of zoom, so a thin line stays
+ * visible when zoomed out. Line-end sizes keep core's absolute 2 pt base,
+ * which scales with zoom through this factor. Cell borders and grid lines
+ * follow their own zoom-independent policy and do not use this.
+ */
+function shapeStrokeScale(cs: number): number {
+  return cs / EMU_PER_PX;
+}
+
 function strokeShapePath(
   ctx: CanvasRenderingContext2D,
   shape: ShapeInfo,
@@ -6384,7 +6406,7 @@ function strokeShapePath(
 ): void {
   const stroke = shapeStroke(shape);
   if (!stroke) return;
-  applyStroke(ctx, stroke, 1 / EMU_PER_PX);
+  applyStroke(ctx, stroke, shapeStrokeScale(cs));
   // Match DOCX/PPTX stroke hosts: use the authored box, not the fill-bearing
   // silhouette (which excludes decorative paths that may still be stroked).
   // Shade coordinates use that host box; raster coverage comes from the
