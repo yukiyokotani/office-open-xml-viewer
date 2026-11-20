@@ -1697,16 +1697,27 @@ function selectParagraph(
 }
 
 /**
- * The nested fragments one row selection has taken, by nested block. A
- * row's fresh-band re-selection takes its nested tables in the very contexts
- * of its first selection (a nested table is not told of the re-selection), so
- * a table it reaches with the same cursor and the same remaining band is the
- * fragment already taken, not fragmented again: a chain of recovering rows
- * costs one take per level, not two to the depth.
+ * The nested fragments taken while one row of one selection pass is
+ * selected, by nested block: across the row's selections (its cut probes,
+ * its selection, the re-selection after its positioned children are placed)
+ * and, inside each, across the fresh-band re-selection, which takes the
+ * nested tables in the very context of the first selection (a nested table
+ * is not told of it).
+ *
+ * A nested fragment depends on its table, its cursor, the band the cell has
+ * left for it, the table's own fresh band and the fragment context, which
+ * carries the nested block's page origin (keyed by the block itself). Within
+ * the row all selections share that context, so a nested block reached again
+ * with the same cursor and the same two bands is the fragment already taken,
+ * not fragmented again. A candidate row whose nested block was placed anew
+ * (another origin) holds another block and is taken anew. Without this each
+ * level repeats every level below it per selection, and a chain of nested
+ * tables costs work exponential in its depth; with it, one take per level.
  */
 type NestedTakes = Map<TableCellBlockInput, Readonly<{
   cursor: TableFragmentCursor | null;
   remainingPt: number;
+  freshPt: number;
   result: TableFragmentResult;
 }>>;
 
@@ -1823,7 +1834,8 @@ function selectCell(
         availableContentHeightPt - measureTableCellBlockFlowHeightPt(blocks, containmentLimitPt),
       );
       const taken = nestedTakes.get(sourceBlock);
-      const nestedResult = taken && taken.cursor === nestedCursor && taken.remainingPt === remainingPt
+      const nestedResult = taken && taken.cursor === nestedCursor
+        && taken.remainingPt === remainingPt && taken.freshPt === freshAvailableContentHeightPt
         ? taken.result
         : takeTableFragment(
           nested,
@@ -1832,7 +1844,9 @@ function selectCell(
             source, cell, context, remainingPt, freshAvailableContentHeightPt, sourceBlock,
           ),
         );
-      nestedTakes.set(sourceBlock, { cursor: nestedCursor, remainingPt, result: nestedResult });
+      nestedTakes.set(sourceBlock, {
+        cursor: nestedCursor, remainingPt, freshPt: freshAvailableContentHeightPt, result: nestedResult,
+      });
       if (!nestedResult.fragment) break;
       if (nestedResult.wholeSource !== true) wholeSource = false;
       blocks.push({ layout: nestedResult.fragment, sourceBlockIndex: sourceBlock.sourceBlockIndex });
@@ -1877,6 +1891,9 @@ function partialRow(
   freshAvailableHeightPt: number,
   canGainPageSpace: boolean,
   context: TableFragmentContext,
+  /** Shared by every selection of this row in this pass, all made in
+   * `context`. */
+  nestedTakes: NestedTakes,
   prefixGeometry?: Readonly<{
     current: (row: TableRowLayoutInput) => TableRowLayout | null;
     fresh: (row: TableRowLayoutInput) => TableRowLayout | null;
@@ -1938,7 +1955,6 @@ function partialRow(
         - (freshPrefix.flowBounds.yPt + freshPrefix.heightPt - context.placement.cursor.yPt)
       : freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
-  const nestedTakes: NestedTakes = new Map();
   const selectCells = (recoveryContainmentLimitPt?: number) => row.cells.map((cell, index) => selectCell(
     source,
     cell,
@@ -2653,13 +2669,14 @@ function takeTableFragmentPass(
     // partialRow selects, exactly what materialization lays out: the
     // candidate itself for a completed first fragment proven to be its source
     // row, the kept selection for any other.
-    const cutOf = (candidate: TableRowLayoutInput): TableRowLayoutInput | null => {
-      const probe = partialRow(
-        source, candidate, rowCursor, availablePt, freshSourceHeightPt, canGainPageSpace, context,
-        prefixGeometry,
-      );
-      return probe.selected?.input ?? null;
-    };
+    const nestedTakes: NestedTakes = new Map();
+    const selectionOf = (candidate: TableRowLayoutInput) => partialRow(
+      source, candidate, rowCursor, availablePt, freshSourceHeightPt, canGainPageSpace, context,
+      nestedTakes, prefixGeometry,
+    );
+    const cutOf = (candidate: TableRowLayoutInput): TableRowLayoutInput | null => (
+      selectionOf(candidate).selected?.input ?? null
+    );
     const continuing = rowCursor.rowFragmentIndex > 0;
     const cutRow = rowNeedsPageOrigins(source, occurrenceRow, context.chargeSourceScan)
       ? placeRowNestedContent(
@@ -2673,11 +2690,9 @@ function takeTableFragmentPass(
       context.availableHeightPt - availablePt,
       (candidate, remaining) => cutOf(candidate) ?? (continuing ? remaining : candidate),
     );
-    let partial = partialRow(
-      source, cutRow, rowCursor, availablePt,
-      freshSourceHeightPt, canGainPageSpace, context,
-      prefixGeometry,
-    );
+    let partial = selectionOf(cutRow);
+    // The row `partial` was selected from.
+    let partialOf = cutRow;
     let selectedPrepared: ReturnType<typeof finalFrameRow> | null = null;
     const visitedOwnershipStates = new Set<string>();
     while (partial.selected) {
@@ -2699,11 +2714,14 @@ function takeTableFragmentPass(
         (occurrence) => transactionInputs.has(occurrenceSelectionKey(occurrence)),
         hint?.resolved,
       );
-      const reselection = partialRow(
-        source, selectedPrepared.row, rowCursor, availablePt,
-        freshSourceHeightPt, canGainPageSpace, context,
-        prefixGeometry,
-      );
+      // Placing the row's positioned children re-acquires their anchor
+      // paragraphs, so the prepared row is selected again. A row with no
+      // such child to place comes back as it went in, and its selection
+      // stands: selecting it again would repeat every table nested in it.
+      const reselection = selectedPrepared.row === partialOf
+        ? partial
+        : selectionOf(selectedPrepared.row);
+      partialOf = selectedPrepared.row;
       if (!reselection.selected) {
         partial = reselection;
         break;

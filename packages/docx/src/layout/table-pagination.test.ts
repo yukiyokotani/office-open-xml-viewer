@@ -2306,6 +2306,41 @@ describe('table fragment selection conservation', () => {
     }
   };
 
+  it('fragments a chain of recovering nested tables in work linear in its depth', () => {
+    // Single-row tables nested in one another, each holding its child beside
+    // a paragraph no band holds, so every level re-selects (recovers) its
+    // row. A level that fragments its child once per selection of its row,
+    // and selects its row once, costs the same at every depth; one that
+    // repeats either doubles the work per level. Source scans are counted,
+    // not time.
+    const scansAt = (depth: number): number => {
+      const blocked = (id: string) => withContainedDrawing(
+        paragraph(id, lines(4)), { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+      );
+      let table = acquisition([cellsRow(0, [[blocked('leaf')]])], `chain-${depth}`, NESTED_ORIGIN);
+      for (let level = depth - 1; level >= 1; level -= 1) {
+        const nested = table;
+        table = Object.freeze({
+          ...acquisition([cellsRow(0, [
+            [nested.layout as unknown as ParagraphLayout], [blocked(`blocked-${level}`)],
+          ])], `chain-${level}`, level === 1 ? undefined : NESTED_ORIGIN),
+          nestedById: Object.freeze({ [nested.layout.id]: nested }),
+        });
+      }
+      let scans = 0;
+      const result = take(table, BAND_PT, startTableFragmentCursor(), {
+        chargeSourceScan: (units) => { scans += units; },
+      });
+      expect(result.nextCursor).toBeNull();
+      expect(result.fragment?.advancePt).toBe(40);
+      return scans;
+    };
+    const [at4, at8, at16] = [4, 8, 16].map(scansAt) as [number, number, number];
+    // Equal steps cost equal work: the per-level cost from 8 to 16 is that
+    // from 4 to 8, not its sixteenfold.
+    expect(at16 - at8).toBe(2 * (at8 - at4));
+  });
+
   const cases: Case[] = [];
   for (const depth of [1, 2, 3, 4]) for (const leaf of ['flow', 'recovery', 'recoveryCut', 'cantSplit'] as const) {
     for (const wrap of (depth === 1 ? ['bare'] : ['bare', 'mixed', 'blocked', 'rotated']) as Wrap[]) {
