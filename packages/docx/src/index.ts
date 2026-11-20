@@ -180,7 +180,13 @@ export {
 } from './revisions';
 export type { DocxStorySource } from './types';
 export type { DocxMatchLocation } from './find';
-export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+export type {
+  FindHighlightColors,
+  FindMatch,
+  FindMatchesOptions,
+  TextHighlightGroup,
+  TextHighlightMatch,
+} from '@silurus/ooxml-core';
 export { autoResize, type AutoResizeOptions } from '@silurus/ooxml-core';
 // IX1 — the shared hyperlink target shape surfaced by `DocxViewerOptions.
 // onHyperlinkClick`, `DocxTextRunInfo.hyperlink`, and the 5th arg of

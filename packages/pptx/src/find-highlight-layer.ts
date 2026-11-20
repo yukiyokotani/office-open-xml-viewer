@@ -15,6 +15,7 @@
  * them along the glyphs. The active match uses a distinct emphasis colour.
  */
 import {
+  ACTIVE_TEXT_HIGHLIGHT_RING,
   sliceHorizontalExtent,
   overlayPercent,
   type FindHighlightColors,
@@ -27,6 +28,15 @@ import { createPptxRunFrame } from './run-frame-dom.js';
 export interface PptxHighlightMatch {
   slices: MatchRunSlice[];
   active: boolean;
+  /** Set for a text highlight (`highlightText`): the group's CSS background,
+   *  used instead of the find colours. Its active match keeps this background
+   *  and gains a ring. Absent for a find match. */
+  color?: string;
+  /** Paint layer of a text highlight: the position of its group in the set.
+   *  Entries are passed in paint order (layer by layer, then the find, which
+   *  has none); each layer gets shape frames of its own, so it stays above the
+   *  layers before it where shapes overlap. */
+  layer?: number;
 }
 
 /** Browser find-bar palette (translucent so glyphs stay legible). */
@@ -69,15 +79,25 @@ export function buildPptxHighlightLayer(
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
 
   // One positioned + rotated div per shape frame (keyed like the text layer), so
-  // boxes inside it inherit the shape's rotation. Reused across matches/slices.
+  // boxes inside it inherit the shape's rotation. Reused across matches/slices
+  // of one paint layer.
   // The frame is placed as a % of the slide box (so it tracks the scaled canvas)
   // with % width/height too, so the boxes inside (positioned as % of THIS frame)
   // scale with it under the shape's rotate().
+  //
+  // The matches arrive in paint order: text highlights layer by layer, then the
+  // find. A frame is a stacking context, so a later entry in a frame created
+  // earlier would end up beneath another shape's frame where shapes overlap.
+  // Keying the frames by layer as well gives every layer frames of its own,
+  // appended after those of the layers before it; the find is one layer and
+  // keeps one frame per shape.
   const ownerDocument = layer.ownerDocument ?? document;
   const shapeMap = new Map<string, { div: HTMLDivElement; w: number; h: number }>();
-  const shapeDiv = (run: PptxTextRunInfo): { div: HTMLDivElement; w: number; h: number } => {
+  const shapeDiv = (
+    run: PptxTextRunInfo, paintLayer: number | undefined,
+  ): { div: HTMLDivElement; w: number; h: number } => {
     const transform = pptxRunFrameTransform(run);
-    const key = pptxRunFrameKey(run, transform);
+    const key = `${pptxRunFrameKey(run, transform)},${paintLayer}`;
     let entry = shapeMap.get(key);
     if (!entry) {
       const frame = createPptxRunFrame(ownerDocument, run, cssWidth, cssHeight, 'none', 'hidden');
@@ -89,14 +109,15 @@ export function buildPptxHighlightLayer(
   };
 
   for (const match of matches) {
-    const fill = match.active ? activeColor : matchColor;
+    const fill = match.color ?? (match.active ? activeColor : matchColor);
+    const ring = match.color !== undefined && match.active ? ACTIVE_TEXT_HIGHLIGHT_RING : '';
     for (const slice of match.slices) {
       const run = runs[slice.runIndex];
       if (!run) continue;
       const measure = measureForFont(run.font);
       const { x, width } = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
       if (width <= 0) continue;
-      const shape = shapeDiv(run);
+      const shape = shapeDiv(run, match.layer);
       const box = ownerDocument.createElement('div');
       // Placed as a % of the shape frame (shapeW/shapeH), so the box scales with
       // the frame when the whole overlay is scaled down by external CSS.
@@ -104,7 +125,7 @@ export function buildPptxHighlightLayer(
         `position:absolute;` +
         `left:${overlayPercent(run.inShapeX + x, shape.w)};top:${overlayPercent(run.inShapeY, shape.h)};` +
         `width:${overlayPercent(width, shape.w)};height:${overlayPercent(run.h, shape.h)};` +
-        `background:${fill};pointer-events:none;`;
+        `background:${fill};pointer-events:none;${ring}`;
       shape.div.appendChild(box);
     }
   }

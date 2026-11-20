@@ -155,6 +155,51 @@ describe.skipIf(!skia || !pptxMod || !rendererMod || !findMod || !highlightMod |
       expect(matches[0].location.slide).toBeGreaterThanOrEqual(0);
     });
 
+    it('matches whole words that end a line or a shape, in a whole-word find and in a text-highlight set', async () => {
+      const slides = await collectSlides();
+      type Match = { text: string; location: { slide: number }; group?: string; term?: string };
+      const { PptxFindController } = findMod as {
+        PptxFindController: new (
+          count: () => number,
+          collect: (s: number) => Promise<Run[]>,
+        ) => {
+          find: (q: string, o?: { wholeWord?: boolean }) => Promise<Match[]>;
+          highlight: (groups: unknown[]) => Promise<Match[]>;
+        };
+      };
+      // A real seam where one run ends in a letter, the next starts with one,
+      // and layout separates them (another line or another shape).
+      const separated = (previous: Run, next: Run): boolean =>
+        previous.shapeX !== next.shapeX || previous.shapeY !== next.shapeY ||
+        Math.abs(previous.inShapeY - next.inShapeY) > 0.5;
+      let seam: { slide: number; word: string } | undefined;
+      for (let slide = 0; slide < slides.length && !seam; slide++) {
+        const runs = slides[slide].filter((run) => run.text.length > 0);
+        for (let i = 1; i < runs.length; i++) {
+          const word = /\p{L}{4,}$/u.exec(runs[i - 1].text)?.[0];
+          const alone = word !== undefined && !/\p{L}/u.test(runs[i - 1].text.slice(-word.length - 1, -word.length));
+          if (word && alone && /^\p{L}/u.test(runs[i].text) && separated(runs[i - 1], runs[i])) {
+            seam = { slide, word };
+            break;
+          }
+        }
+      }
+      expect(seam).toBeDefined();
+      const ctrl = new PptxFindController(
+        () => slides.length,
+        (s) => Promise.resolve(slides[s] ?? []),
+      );
+      const plain = (await ctrl.find(seam!.word)).filter((match) => match.location.slide === seam!.slide);
+      const whole = (await ctrl.find(seam!.word, { wholeWord: true }))
+        .filter((match) => match.location.slide === seam!.slide);
+      expect(whole.length).toBeGreaterThanOrEqual(1);
+      expect(whole.length).toBeLessThanOrEqual(plain.length);
+
+      const highlighted = await ctrl.highlight([{ id: 'seam', terms: [seam!.word], wholeWord: true }]);
+      expect(highlighted.filter((match) => match.location.slide === seam!.slide)).toHaveLength(whole.length);
+      expect(highlighted.every((match) => match.group === 'seam' && match.term === seam!.word)).toBe(true);
+    });
+
     it('places the highlight box inside its shape group on the drawn run', async () => {
       const slides = await collectSlides();
       const { PptxFindController } = findMod as {

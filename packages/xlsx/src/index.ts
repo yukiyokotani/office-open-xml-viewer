@@ -41,7 +41,13 @@ export {
 // IX2 find-in-document: the xlsx match-location shape (sheet + A1 cell ref).
 // `FindMatch` / `FindMatchesOptions` come from core (shared across formats).
 export type { XlsxMatchLocation } from './find.js';
-export type { FindHighlightColors, FindMatch, FindMatchesOptions } from '@silurus/ooxml-core';
+export type {
+  FindHighlightColors,
+  FindMatch,
+  FindMatchesOptions,
+  TextHighlightGroup,
+  TextHighlightMatch,
+} from '@silurus/ooxml-core';
 export type {
   ChartAreaGroupDecorations,
   ChartBarGroupDecorations,

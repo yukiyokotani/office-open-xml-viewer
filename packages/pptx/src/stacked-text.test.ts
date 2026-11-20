@@ -3,6 +3,7 @@ import { rasterizeMathSvg } from '@silurus/ooxml-core';
 import type { HyperlinkTarget } from '@silurus/ooxml-core';
 import { layoutParagraph, prepareSlideMath, renderTextBody, shapeTextRotation, type PptxTextRunInfo } from './renderer.js';
 import { buildPptxTextLayer } from './text-layer.js';
+import { pptxRunsBreak } from './find-run-break.js';
 import type { Paragraph, TextBody, TextRunData } from './types.js';
 
 vi.mock('@silurus/ooxml-core', async (load) => ({
@@ -134,6 +135,140 @@ describe('pptx stacked vertical text (wordArtVert / wordArtVertRtl)', () => {
     const bracket = calls.find((c) => c.text === '﹁');
     expect(bracket?.rot).toBe(0);
     expect(calls.some((c) => c.text === '「')).toBe(false);
+  });
+
+  // Whole-word matching reads the authored line of each glyph run: the cells
+  // of a paragraph continue one line, also into a further column, and the
+  // next paragraph (or the text after a manual break) is another line.
+  it('reports the authored line of every glyph run', () => {
+    const { ctx } = mockCtx();
+    const stacked = body('cat', 'wordArtVert');
+    stacked.paragraphs.push({ ...stacked.paragraphs[0], runs: [{ ...stacked.paragraphs[0].runs[0], text: 'do' } as TextRunData] });
+    const runs: PptxTextRunInfo[] = [];
+    renderTextBody(ctx, stacked, 0, 0, 200, 470, SCALE,
+      null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+    expect(runs.map((run) => [run.text, run.textSpan])).toEqual([
+      ['c', 0], ['a', 0], ['t', 0], ['d', 1], ['o', 1],
+    ]);
+    // The cells of a column advance down; the next paragraph starts another column.
+    expect(runs[1].inShapeY).toBeGreaterThan(runs[0].inShapeY);
+    expect(runs[3].inShapeY).toBeCloseTo(runs[0].inShapeY, 6);
+    expect(pptxRunsBreak(runs[0], runs[1])).toBe(false);
+    expect(pptxRunsBreak(runs[2], runs[3])).toBe(true);
+
+    // A column too short for the word: it wraps into the next column and
+    // stays one authored line.
+    const short = mockCtx();
+    const wrapped: PptxTextRunInfo[] = [];
+    renderTextBody(short.ctx, body('catalog', 'wordArtVert'), 0, 0, 200, 110, SCALE,
+      null, 0, false, false, '#000000', undefined, undefined, (run) => wrapped.push(run));
+    expect(wrapped.map((run) => run.text).join('')).toBe('catalog');
+    expect(new Set(wrapped.map((run) => run.inShapeX)).size).toBeGreaterThan(1);
+    expect(wrapped.every((run) => run.textSpan === 0)).toBe(true);
+    for (let i = 1; i < wrapped.length; i++) expect(pptxRunsBreak(wrapped[i - 1], wrapped[i])).toBe(false);
+  });
+
+  it('reports the authored line of horizontal runs across wraps, paragraphs and manual breaks', () => {
+    const collect = (text: TextBody, width: number): PptxTextRunInfo[] => {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, text, 0, 0, width, 470, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      return runs;
+    };
+    // A box too narrow for the word: it wraps inside the word and stays one line.
+    const wrapped = collect(body('catalogue', 'horz'), 80);
+    expect(wrapped.map((run) => run.text).join('')).toBe('catalogue');
+    expect(new Set(wrapped.map((run) => run.inShapeY)).size).toBeGreaterThan(1);
+    expect(wrapped.every((run) => run.textSpan === 0)).toBe(true);
+    for (let i = 1; i < wrapped.length; i++) expect(pptxRunsBreak(wrapped[i - 1], wrapped[i])).toBe(false);
+
+    // Two paragraphs, the second with a manual break: three authored lines.
+    const text = body('cat', 'horz');
+    const first = text.paragraphs[0];
+    text.paragraphs.push({
+      ...first,
+      runs: [
+        { ...first.runs[0], text: 'alog' } as TextRunData,
+        { type: 'break' } as unknown as TextRunData,
+        { ...first.runs[0], text: 'cat' } as TextRunData,
+      ],
+    });
+    const lines = collect(text, 400);
+    expect(lines.map((run) => [run.text, run.textSpan])).toEqual([['cat', 0], ['alog', 1], ['cat', 2]]);
+    expect(pptxRunsBreak(lines[0], lines[1])).toBe(true);
+    expect(pptxRunsBreak(lines[1], lines[2])).toBe(true);
+  });
+
+  it('ends a span where an automatic wrap drops the space, and not where it breaks a word', () => {
+    const collect = (text: string, width: number): PptxTextRunInfo[] => {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, body(text, 'horz'), 0, 0, width, 470, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      return runs;
+    };
+    // Narrow the box step by step across the width where the space after
+    // "cat" stops fitting on the first line.
+    const seen = new Set<string>();
+    for (let width = 140; width >= 60; width--) {
+      const runs = collect('cat dog', width);
+      const joined = runs.map((run) => run.text).join('|');
+      if (runs.length !== 2 || runs[0].inShapeY === runs[1].inShapeY) continue;
+      seen.add(joined);
+      if (joined === 'cat|dog') {
+        // The space is on neither line: the two runs are separate words.
+        expect(runs[1].textSpan, `${width}`).toBeGreaterThan(runs[0].textSpan!);
+        expect(pptxRunsBreak(runs[0], runs[1]), `${width}`).toBe(true);
+      } else {
+        // The space stayed at the end of the first line and separates them.
+        expect(joined, `${width}`).toBe('cat |dog');
+        expect(runs[1].textSpan, `${width}`).toBe(runs[0].textSpan);
+      }
+    }
+    expect([...seen].sort()).toEqual(['cat |dog', 'cat|dog']);
+    // The same at a stacked column end: "cat" fills the column, the space is dropped.
+    for (const vert of ['wordArtVert', 'wordArtVertRtl']) {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, body('cat dog', vert), 0, 0, 200, 110, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      const text = runs.map((run) => run.text).join('');
+      const cat = runs.filter((run) => run.textSpan === runs[0].textSpan).map((run) => run.text).join('');
+      expect(['cat', 'cat '], `${vert}: ${text}`).toContain(cat);
+      if (text === 'catdog') expect(runs.at(-1)!.textSpan).toBeGreaterThan(runs[0].textSpan!);
+    }
+  });
+
+  it.each(['wordArtVert', 'wordArtVertRtl'])('ends a span at a tab in %s text', (vert) => {
+    const runs: PptxTextRunInfo[] = [];
+    renderTextBody(mockCtx().ctx, body('cat\tdog', vert), 0, 0, 200, 470, SCALE,
+      null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+    const letters = runs.filter((run) => /[a-z]/.test(run.text));
+    expect(letters.map((run) => run.text).join('')).toBe('catdog');
+    expect(new Set(letters.slice(0, 3).map((run) => run.textSpan)).size).toBe(1);
+    expect(new Set(letters.slice(3).map((run) => run.textSpan)).size).toBe(1);
+    expect(letters[3].textSpan).toBeGreaterThan(letters[2].textSpan!);
+    expect(pptxRunsBreak(letters[2], letters[3])).toBe(true);
+    expect(pptxRunsBreak(letters[0], letters[1])).toBe(false);
+  });
+
+  it('ends a span of authored text at a tab, however narrow the tab is drawn', () => {
+    const collect = (text: TextBody): PptxTextRunInfo[] => {
+      const runs: PptxTextRunInfo[] = [];
+      renderTextBody(mockCtx().ctx, text, 0, 0, 600, 470, SCALE,
+        null, 0, false, false, '#000000', undefined, undefined, (run) => runs.push(run));
+      return runs;
+    };
+    // "cat" is 3 × 0.6 × 24 = 43.2 px wide in the mock; the stop right after it
+    // leaves almost no gap, and a far stop leaves a wide one.
+    for (const stopPx of [44, 300]) {
+      const text = body('cat\tdog', 'horz');
+      (text.paragraphs[0] as unknown as { tabStops: { pos: number; algn: string }[] }).tabStops =
+        [{ pos: Math.round(stopPx / SCALE), algn: 'l' }];
+      const [cat, dog] = collect(text);
+      expect([cat.text, dog.text]).toEqual(['cat', 'dog']);
+      expect(dog.inShapeY).toBeCloseTo(cat.inShapeY, 6);
+      expect(dog.textSpan).toBeGreaterThan(cat.textSpan!);
+      expect(pptxRunsBreak(cat, dog)).toBe(true);
+    }
   });
 
   // #1827 PowerPoint controls: vrt2-only ∥ (Yu Gothic) stands unturned in a

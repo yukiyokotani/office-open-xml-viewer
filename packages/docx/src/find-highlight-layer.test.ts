@@ -59,6 +59,26 @@ const W = 7;
 const measureForFont = () => (s: string) => s.length * W;
 
 describe('buildDocxHighlightLayer', () => {
+  it("paints a text highlight in its group's background and rings the active one", () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'abc def ghi' })];
+    const matches: DocxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 4, end: 7 }], active: true, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 8, end: 11 }], active: true },
+    ];
+    buildDocxHighlightLayer(
+      layer as unknown as HTMLDivElement, runs, matches, 700, 900, measureForFont,
+      { match: 'yellow', active: 'orange' },
+    );
+    expect(layer.children.map((box) => box.style.background))
+      .toEqual(['rgba(255, 0, 0, 0.4)', 'rgba(255, 0, 0, 0.4)', 'orange']);
+    // The ring is drawn inside the box, so a clipping container cannot hide it.
+    expect(layer.children.map((box) => box.style['box-shadow']))
+      .toEqual([undefined, 'inset 0 0 0 2px #111,inset 0 0 0 3px #fff', undefined]);
+  });
+
   it('draws one box per slice, positioned from run x/y + measured extent', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');

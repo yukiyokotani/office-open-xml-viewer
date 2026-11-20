@@ -13,7 +13,8 @@ import { buildDocxTextLayer } from './text-layer';
 import { buildDocxHighlightLayer, type DocxHighlightMatch } from './find-highlight-layer';
 import { DocxFindController, type DocxMatchLocation } from './find';
 import { openExternalHyperlink, PT_TO_PX, nextZoomStep, prevZoomStep, clampScale, fitScale, defaultDpr } from '@silurus/ooxml-core';
-import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
+import { adoptTextHighlightGroups } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, TextHighlightGroup, TextHighlightMatch, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
   CanvasLoadingIndicator,
@@ -156,7 +157,7 @@ export class DocxViewer implements ZoomableViewer {
   private _find: DocxFindController;
   /** Covers the pre-search progressive wait that the controller's own
    * generation cannot see until find() starts. */
-  private _findRequestGeneration = 0;
+  private readonly _searches: [find: number, highlights: number] = [0, 0];
   /** A 2d context used only to measure text for highlight geometry (its own
    *  1×1 offscreen canvas, so measuring never touches the visible canvas). */
   private _measureCtx: CanvasRenderingContext2D | null = null;
@@ -374,7 +375,8 @@ export class DocxViewer implements ZoomableViewer {
         this._invalidateElementContext(false);
         elementInvalidated = true;
         this._renderDispatcher.begin();
-        this._findRequestGeneration++;
+        this._searches[0]++;
+        this._searches[1]++;
         this._find.invalidate();
         this._unbindLayoutDocument();
       });
@@ -584,21 +586,35 @@ export class DocxViewer implements ZoomableViewer {
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<DocxMatchLocation>[]> {
+    return this._search(0, query.length === 0, () => this._find.find(query, opts));
+  }
+
+  /** The request handling shared by {@link findText} (`kind` 0) and
+   *  {@link highlightText} (`kind` 1); each kind is cancelled on its own. */
+  private async _search<Match>(
+    kind: 0 | 1,
+    empty: boolean,
+    scan: () => Promise<Match[]>,
+  ): Promise<Match[]> {
     const doc = this._doc;
     if (!doc) return [];
-    const generation = ++this._findRequestGeneration;
+    const generation = ++this._searches[kind];
+    const superseded = (): boolean =>
+      this._destroyed || this._doc !== doc || generation !== this._searches[kind];
     // Preserve the established synchronous empty-query cancellation contract.
     // A real full-document search must wait for authoritative pagination or its
-    // result would silently describe only the opening prefix.
-    if (query.length > 0 && !doc.layoutComplete) {
-      await this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete());
-      if (this._destroyed || this._doc !== doc || generation !== this._findRequestGeneration) {
-        return [];
-      }
+    // result would silently describe only the opening prefix. A find owns a
+    // failure of that layout and reports it through its Promise, as before. A
+    // highlight request does not: the failure stays on the viewer's error
+    // channel (delivered once, whether or not the request is still current),
+    // and the request resolves with no matches.
+    if (!empty && !doc.layoutComplete) {
+      await (kind
+        ? doc.waitUntilLayoutComplete().catch(() => undefined)
+        : this._errorRouter.ownBackgroundLifecycle(() => doc.waitUntilLayoutComplete()));
+      if (superseded() || !doc.layoutComplete) return [];
     }
-    const matches = await this._errorRouter.ownAwaitable(
-      () => this._find.find(query, opts),
-    );
+    const matches = await this._errorRouter.ownAwaitable(scan);
     // Redraw the current page's highlights (matches on it become visible without
     // navigating). Cheap DOM geometry — no page re-render.
     this._redrawHighlights();
@@ -620,18 +636,72 @@ export class DocxViewer implements ZoomableViewer {
     return this._activateMatch(this._find.prev());
   }
 
-  /** IX2 — clear all highlights and reset the find state. */
+  /** IX2 — clear the find highlights and reset the find state. Text highlights
+   *  set with {@link highlightText} stay. */
   clearFind(): void {
-    this._findRequestGeneration++;
-    this._find.invalidate();
+    this._searches[0]++;
+    this._find.clearFind();
+    this._redrawHighlights();
+  }
+
+  /**
+   * Replace the document's text highlights: every occurrence of every term of
+   * every group is highlighted in its group's `color`, until the next call or
+   * {@link clearHighlights}. This is separate from {@link findText}: both can
+   * be shown at once, and neither changes the other's matches or active match.
+   *
+   * Returns every match in document order, each tagged with its `{ page }`
+   * (0-based), its `group` id and the `term` that matched. Groups are searched
+   * independently, so matches of different groups may overlap; within a group
+   * the longer match wins. An empty set clears the highlights.
+   *
+   * Scans all pages like {@link findText} (and reuses its page text when both
+   * are used), in `mode: 'main'` and `mode: 'worker'`. A new document, or a
+   * call that changes the layout ({@link setShowTrackedChanges}), drops the
+   * highlights and cancels a request that is still waiting for the layout;
+   * call this again afterwards. If the layout of a progressively loaded
+   * document fails, a waiting request resolves with no matches. The failure is
+   * not reported through this Promise but through the viewer's layout error
+   * channel: a call that awaits the layout ({@link findText},
+   * `waitUntilLayoutComplete()`), the `onLayoutComplete` callback when
+   * configured, and otherwise `onError`.
+   */
+  async highlightText(
+    groups: readonly TextHighlightGroup[],
+  ): Promise<TextHighlightMatch<DocxMatchLocation>[]> {
+    // Validated and detached before the layout wait.
+    const set = adoptTextHighlightGroups(groups);
+    return this._search(1, set.length === 0, () => this._find.highlight(set));
+  }
+
+  /**
+   * Move to the next text highlight (wrap-around from last to first),
+   * navigating to its page if needed, and mark it with a ring. Returns the
+   * now-active match, or `null` when there are none. Independent of
+   * {@link findNext}.
+   */
+  async highlightNext(): Promise<TextHighlightMatch<DocxMatchLocation> | null> {
+    return this._activateMatch(this._find.highlightStep());
+  }
+
+  /** Move to the previous text highlight (wrap-around from first to last). */
+  async highlightPrev(): Promise<TextHighlightMatch<DocxMatchLocation> | null> {
+    return this._activateMatch(this._find.highlightStep(true));
+  }
+
+  /** Remove every text highlight set with {@link highlightText}. The find
+   *  state stays. */
+  clearHighlights(): void {
+    this._searches[1]++;
+    this._find.clearHighlights();
     this._redrawHighlights();
   }
 
   /** Navigate to the active match's page (if not already there) and redraw the
    *  highlights so the active box shows in the emphasis colour. */
-  private async _activateMatch(
-    match: FindMatch<DocxMatchLocation> | null,
-  ): Promise<FindMatch<DocxMatchLocation> | null> {
+  private async _activateMatch<Match extends FindMatch<DocxMatchLocation>>(
+    match: Match | null,
+  ): Promise<Match | null> {
     if (!match) {
       this._redrawHighlights();
       return null;
@@ -789,7 +859,8 @@ export class DocxViewer implements ZoomableViewer {
     this._pendingLoadAbort?.abort();
     this._pendingLoadAbort = null;
     this._pendingViewChanged = null;
-    this._findRequestGeneration++;
+    this._searches[0]++;
+    this._searches[1]++;
     this._layoutViewGeneration++;
     this._partFailureDelivery.close();
     this._unbindLayoutDocument();
@@ -999,6 +1070,9 @@ export class DocxViewer implements ZoomableViewer {
       currentDate: publication.view.currentDate,
       showTrackedChanges: publication.view.showTrackedChanges,
     };
+    // Another layout variant: drop the highlights, and a highlight request
+    // still waiting for the progressive layout with them.
+    this._searches[1]++;
     this._find.invalidate();
     this._currentPage = Math.max(0, Math.min(this._currentPage, doc.pageCount - 1));
     void this._render().catch((error) => this._reportRenderError(error));
@@ -1093,6 +1167,7 @@ export class DocxViewer implements ZoomableViewer {
     if (this._destroyed || generation !== this._layoutViewGeneration || doc !== this._doc) return;
     this._showTrackedChangesExplicit = true;
     this._opts = nextOptions;
+    this._searches[1]++;
     this._find.invalidate();
     this._currentPage = Math.max(0, Math.min(this._currentPage, this.pageCount - 1));
     await this._render();

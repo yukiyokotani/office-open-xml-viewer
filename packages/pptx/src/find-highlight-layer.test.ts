@@ -108,6 +108,56 @@ describe('buildPptxHighlightLayer', () => {
     expect(shapeDiv.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
+  it("paints a text highlight in its group's background and rings the active one", () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'abc def ghi' })];
+    const matches: PptxHighlightMatch[] = [
+      { slices: [{ runIndex: 0, start: 0, end: 3 }], active: false, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 4, end: 7 }], active: true, color: 'rgba(255, 0, 0, 0.4)' },
+      { slices: [{ runIndex: 0, start: 8, end: 11 }], active: true },
+    ];
+    buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
+    const boxes = layer.children.flatMap((frame) => frame.children);
+    expect(boxes.map((box) => box.style.background))
+      .toEqual(['rgba(255, 0, 0, 0.4)', 'rgba(255, 0, 0, 0.4)', DEFAULT_FIND_ACTIVE_HIGHLIGHT]);
+    // The ring is drawn inside the box: the shape frame clips what is outside.
+    expect(boxes.map((box) => box.style['box-shadow']))
+      .toEqual([undefined, 'inset 0 0 0 2px #111,inset 0 0 0 3px #fff', undefined]);
+  });
+
+  it('keeps the paint order across overlapping shapes: each layer and the find get their own frames', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    const runs = [run({ text: 'abc', shapeX: 0 }), run({ text: 'abc', shapeX: 40 })];
+    const slice = (runIndex: number) => [{ runIndex, start: 0, end: 3 }];
+    // Two groups share one background; the later one holds the active match.
+    const matches: PptxHighlightMatch[] = [
+      { slices: slice(0), active: false, color: 'red', layer: 0 },
+      { slices: slice(1), active: false, color: 'red', layer: 0 },
+      { slices: slice(0), active: true, color: 'red', layer: 1 },
+      { slices: slice(0), active: false, color: 'blue', layer: 2 },
+      { slices: slice(0), active: false },
+      { slices: slice(1), active: true },
+    ];
+    buildPptxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
+    // Frames in DOM order: layer 0 on both shapes, layer 1, layer 2, the find.
+    expect(layer.children.map((frame) => frame.children.map((box) => box.style.background))).toEqual([
+      ['red'], ['red'], ['red'], ['blue'], [DEFAULT_FIND_HIGHLIGHT], [DEFAULT_FIND_ACTIVE_HIGHLIGHT],
+    ]);
+    // The active box of the later group is in a frame after the earlier group's.
+    expect(layer.children.map((frame) => frame.children[0].style['box-shadow'] !== undefined))
+      .toEqual([false, false, true, false, false, false]);
+    // A find alone still uses one frame per shape.
+    const find = makeEl('div');
+    buildPptxHighlightLayer(
+      find as unknown as HTMLDivElement, runs,
+      [{ slices: slice(0), active: false }, { slices: slice(1), active: true }, { slices: slice(0), active: false }],
+      100, 100, measureForFont,
+    );
+    expect(find.children.map((frame) => frame.children.length)).toEqual([2, 1]);
+  });
+
   it('composes frame flips with shape and text-body rotation', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');

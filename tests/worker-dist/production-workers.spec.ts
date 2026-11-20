@@ -236,7 +236,21 @@ test('published XLSX viewer isolates an out-of-range date and retains other shee
         await viewer.load(new Uint8Array(bytes).buffer);
         await viewer.goToSheet(1);
         const matches = await viewer.findText('Healthy sheet');
-        results.push({ mode, errors, matches: matches.length });
+        // Text highlights and whole-word matching load the published on-demand
+        // term-search chunk; the find above must stay as it is.
+        const highlighted = await viewer.highlightText([
+          { id: 'whole', terms: ['healthy', 'sheet'], wholeWord: true },
+          { id: 'partial', terms: ['ealth'] },
+          { id: 'none', terms: ['ealth'], wholeWord: true },
+        ]);
+        const wholeWord = await viewer.findText('Healthy', { wholeWord: true });
+        const active = await viewer.highlightNext();
+        results.push({
+          mode, errors, matches: matches.length,
+          highlighted: highlighted.map((match: { group: string; text: string }) => `${match.group}:${match.text}`),
+          wholeWord: wholeWord.length,
+          active: `${active?.group}:${active?.location.ref}`,
+        });
       } finally {
         viewer.destroy();
         host.remove();
@@ -252,7 +266,10 @@ test('published XLSX viewer isolates an out-of-range date and retains other shee
     }
   }, [...dateRangeXlsxBytes()]);
   expect(results).toEqual({
-    results: [{ mode: 'main', errors: [], matches: 1 }, { mode: 'worker', errors: [], matches: 1 }],
+    results: ['main', 'worker'].map((mode) => ({
+      mode, errors: [], matches: 1,
+      highlighted: ['whole:Healthy', 'partial:ealth', 'whole:sheet'], wholeWord: 1, active: 'whole:A1',
+    })),
     invalid: '#', healthy: 'Healthy sheet',
   });
 });

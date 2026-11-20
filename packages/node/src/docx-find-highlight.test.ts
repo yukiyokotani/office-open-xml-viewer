@@ -170,6 +170,70 @@ describe.skipIf(!skia || !docxMod || !rendererMod || !findMod || !highlightMod |
       expect(hp.some((h) => h.active)).toBe(true);
     });
 
+    it('matches whole words that end a paragraph, in a whole-word find and in a text-highlight set', async () => {
+      const recordedPages = pages();
+      type Match = { matchIndex: number; text: string; location: { page: number }; group?: string; term?: string };
+      const { DocxFindController } = findMod as {
+        DocxFindController: new (
+          count: () => number,
+          collect: (p: number) => Promise<Run[]>,
+        ) => {
+          find: (q: string, o?: { wholeWord?: boolean }) => Promise<Match[]>;
+          highlight: (groups: unknown[]) => Promise<Match[]>;
+          highlightStep: () => Match | null;
+          pageHighlights: (p: number) => { active: boolean; color?: string }[];
+        };
+      };
+      const controller = new DocxFindController(
+        () => recordedPages.length,
+        (p) => Promise.resolve(recordedPages[p] ?? []),
+      );
+
+      // The real layout reports each run's range in its paragraph's text: the
+      // last run of a wrapped line and the first of the next are adjacent in
+      // it, so an automatic wrap is not a word boundary.
+      type Placed = Run & { textRange?: { start: number; end: number }; source?: { path: readonly number[] } };
+      let wraps = 0;
+      for (const runs of recordedPages as Placed[][]) {
+        for (let i = 1; i < runs.length; i++) {
+          const [previous, next] = [runs[i - 1], runs[i]];
+          expect(next.textRange).toBeDefined();
+          if (previous.source?.path.join('.') !== next.source?.path.join('.') || previous.y === next.y) continue;
+          if (previous.text === '' || next.text === '') continue;
+          wraps++;
+          expect(next.textRange!.start).toBe(previous.textRange!.end);
+        }
+      }
+      expect(wraps).toBeGreaterThan(10);
+
+      // "Living" ends the headline's first paragraph and "Cathedral" is the next
+      // one, with no character between them in the page's run list.
+      const joined = recordedPages.map((runs) => runs.map((run) => run.text).join('')).join('\n');
+      expect(joined).toContain('LivingCathedral');
+      expect((await controller.find('living', { wholeWord: true })).map((match) => match.text)).toContain('Living');
+      expect((await controller.find('cathedral', { wholeWord: true })).length).toBeGreaterThanOrEqual(1);
+      // A word fragment is found by a plain find only.
+      expect((await controller.find('cathed')).length).toBeGreaterThanOrEqual(1);
+      expect(await controller.find('cathed', { wholeWord: true })).toEqual([]);
+
+      const matches = await controller.highlight([
+        { id: 'headline', terms: ['living', 'cathedral'], wholeWord: true, color: 'rgba(0, 0, 255, 0.3)' },
+        { id: 'fragment', terms: ['cathed'] },
+      ]);
+      const groupsOf = (text: string) =>
+        matches.filter((match) => match.text.toLowerCase() === text).map((match) => match.group);
+      expect(groupsOf('living')).toContain('headline');
+      expect(groupsOf('cathedral')).toContain('headline');
+      expect(groupsOf('cathed')).toContain('fragment');
+      expect(matches.map((match) => match.matchIndex)).toEqual(matches.map((_, index) => index));
+      // The find above stays as it was: no matches, and the highlights are drawn.
+      const active = controller.highlightStep();
+      expect(active?.matchIndex).toBe(0);
+      const boxes = controller.pageHighlights(active!.location.page);
+      expect(boxes.filter((box) => box.active)).toHaveLength(1);
+      expect(boxes.every((box) => box.color !== undefined)).toBe(true);
+    });
+
     it('places the highlight box on the drawn glyph run (real skia measure)', async () => {
       const recordedPages = pages();
       const { DocxFindController } = findMod as {

@@ -281,6 +281,20 @@ for (const format of formats) {
   forbidOption(api, format.canvasOptions, format.borrowedOption);
   forbidOption(api, format.containerOptions, format.borrowedOption);
 
+  // Find and text highlights have one shape on every viewer; only the match
+  // location is format-native.
+  const matchLocation = `${format.label[0]}${format.label.slice(1).toLowerCase()}MatchLocation`;
+  for (const viewer of [format.canvasViewer, format.containerViewer]) {
+    requireMethod(api, viewer, 'findText', `Promise<FindMatch<${matchLocation}>[]>`);
+    requireMethod(api, viewer, 'clearFind', 'void');
+    requireMethodParameters(api, viewer, 'highlightText', ['readonly TextHighlightGroup[]']);
+    requireMethod(api, viewer, 'highlightText', `Promise<TextHighlightMatch<${matchLocation}>[]>`);
+    for (const method of ['highlightNext', 'highlightPrev']) {
+      requireMethod(api, viewer, method, `Promise<TextHighlightMatch<${matchLocation}> | null>`);
+    }
+    requireMethod(api, viewer, 'clearHighlights', 'void');
+  }
+
   const commentsType = `${format.label[0]}${format.label.slice(1).toLowerCase()}CommentsOptions`;
   const commentsOptionType = `boolean | ${commentsType}`;
   if (format.label === 'XLSX') {

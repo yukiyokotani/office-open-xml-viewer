@@ -43,6 +43,52 @@ describe.each(['viewer', 'scroll'] as const)('DOCX %s progressive failure routin
     surface.destroy();
   });
 
+  // A highlight request never owns the layout failure: it resolves with no
+  // matches, and the failure is delivered once on the viewer's error channel,
+  // whether the request is current or was cleared, and in either order of the
+  // publication and the rejection of the wait.
+  it.each([
+    ['current', 'before'], ['current', 'after'], ['cleared', 'before'], ['cleared', 'after'],
+  ] as const)(
+    'routes a failure once through onError while a %s highlight request waits (published %s the rejection)',
+    async (state, order) => {
+      const onError = vi.fn();
+      const { engine, surface } = await loadedSurface(kind, { onError });
+      const error = new Error('layout failed');
+      const highlighting = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+      if (state === 'cleared') surface.clearHighlights();
+      const publish = () => publishDocxLayout(engine.asDoc(), {
+        pageCount: 1, exact: false, complete: false, error,
+      });
+      if (order === 'before') publish();
+      engine.setLayoutFailure(error);
+      await expect(highlighting).resolves.toEqual([]);
+      if (order === 'after') publish();
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).toHaveBeenCalledWith(error);
+      expect(await surface.highlightNext()).toBeNull();
+      surface.destroy();
+    },
+  );
+
+  it('keeps a failure a find waits for on the find Promise while a highlight request waits too', async () => {
+    const onError = vi.fn();
+    const { engine, surface } = await loadedSurface(kind, { onError });
+    const error = new Error('layout failed');
+    const highlighting = surface.highlightText([{ id: 'a', terms: ['needle'] }]);
+    const finding = surface.findText('needle');
+    engine.setLayoutFailure(error);
+    publishDocxLayout(engine.asDoc(), {
+      pageCount: 1, exact: false, complete: false, error,
+    });
+
+    await expect(finding).rejects.toBe(error);
+    await expect(highlighting).resolves.toEqual([]);
+    expect(onError).not.toHaveBeenCalled();
+    surface.destroy();
+  });
+
   it('routes an unawaited failure once through onError', async () => {
     const onError = vi.fn();
     const { engine, surface } = await loadedSurface(kind, { onError });

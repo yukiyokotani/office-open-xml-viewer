@@ -1321,6 +1321,7 @@ export interface FindMatch<Loc = unknown> {
 }
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
+    wholeWord?: boolean;
 }
 export function fontCss(options: FontCssOptions): FontSource;
 export function fontCssApi(options: FontCssApiOptions): FontSource;
@@ -2405,6 +2406,17 @@ export class TiffDecodeError extends Error {
     readonly code: 'ooxml-tiff-decode';
     constructor(message: string, options?: ErrorOptions);
 }
+export interface TextHighlightGroup {
+    id: string;
+    terms: readonly string[];
+    color?: string;
+    caseSensitive?: boolean;
+    wholeWord?: boolean;
+}
+export interface TextHighlightMatch<Loc = unknown> extends FindMatch<Loc> {
+    group: string;
+    term: string;
+}
 export interface TiffRenderer {
     render(bytes: Uint8Array, options?: Readonly<TiffRenderOptions>): Promise<ImageBitmap | null>;
 }
@@ -2730,6 +2742,10 @@ export class XlsxSheetViewer implements ZoomableViewer {
     findNext(): Promise<FindMatch<XlsxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<XlsxMatchLocation> | null>;
     clearFind(): void;
+    highlightText(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<XlsxMatchLocation>[]>;
+    highlightNext(): Promise<TextHighlightMatch<XlsxMatchLocation> | null>;
+    highlightPrev(): Promise<TextHighlightMatch<XlsxMatchLocation> | null>;
+    clearHighlights(): void;
     getResourceMetrics(): Promise<OoxmlResourceMetrics>;
     destroy(): void;
     private __privatePresence;
@@ -2808,6 +2824,10 @@ class XlsxViewerEngine implements ZoomableViewer {
     findNext(): Promise<FindMatch<XlsxMatchLocation> | null>;
     findPrev(): Promise<FindMatch<XlsxMatchLocation> | null>;
     clearFind(): void;
+    highlightText(groups: readonly TextHighlightGroup[]): Promise<TextHighlightMatch<XlsxMatchLocation>[]>;
+    highlightNext(): Promise<TextHighlightMatch<XlsxMatchLocation> | null>;
+    highlightPrev(): Promise<TextHighlightMatch<XlsxMatchLocation> | null>;
+    clearHighlights(): void;
     setScale(scale: number): void;
     getScale(): number;
     zoomIn(): void;

@@ -344,6 +344,18 @@ export interface PptxTextRunInfo {
    */
   cellHorzOverflow?: 'clip' | 'overflow';
   /**
+   * Zero-based index, within the run's text body, of the uninterrupted span of
+   * authored text the run belongs to. A span ends at a paragraph end, a manual
+   * line break (`<a:br>`), a tab, an inline equation, and an automatic wrap
+   * that dropped the spaces it broke at (they are in neither line's text). It
+   * does not end at a wrap inside a word, at a formatting change, or between
+   * the glyph cells of stacked vertical text (`vert="wordArtVert"`), so runs
+   * of one body with the same index are pieces of continuous text, and a
+   * consumer can tell a wrap inside a word from a separation. The indices
+   * increase in run order and need not be consecutive.
+   */
+  textSpan?: number;
+  /**
    * Additional rotation from a vertical text body (`vert="vert"` → 90,
    * `vert="vert270"` → -90). The CSS overlay must add this to `rotation`.
    */
@@ -1108,6 +1120,9 @@ interface LayoutLine {
    *  left-aligned, not stretched — like the paragraph's last line (§20.1.10.59).
    *  `dist`/`thaiDist` still fill every line, including these. */
   endsWithBreak?: boolean;
+  /** The automatic wrap after this line dropped authored spaces, so its text
+   *  and the next line's are not adjacent (see `PptxTextRunInfo.textSpan`). */
+  dropsSpace?: boolean;
   /** The a:br / endParaRPr marks that size this line with text (see
    * `followingMark`). They take part in the line metrics only: they draw
    * nothing and are not layout pieces. */
@@ -2288,6 +2303,7 @@ export function layoutParagraph(
       segments: [...content, ...(!hasText && breakStyle ? [{ ...breakStyle, text: '' }] : [])],
       ...(metricMarks.length > 0 ? { metricMarks } : {}),
       ...(line.endsWithBreak ? { endsWithBreak: true } : {}),
+      ...(line.dropsSpace ? { dropsSpace: true } : {}),
     };
   });
 }
@@ -5047,7 +5063,7 @@ function renderStackedTextBody(
     onTextRun({
       text: run.text, inShapeX: run.x - bx, inShapeY: run.y - by, w: run.w, h: run.h,
       fontSize: run.fontSize, font: run.font, shapeX: bx, shapeY: by, shapeW: bw, shapeH: bh,
-      rotation: shapeRotation,
+      rotation: shapeRotation, textSpan: run.textSpan,
       ...(run.hyperlink ? { hyperlink: run.hyperlink } : {}),
     });
   }
@@ -5785,6 +5801,10 @@ export function renderTextBody(
   let colIdx = 0;
   let entriesInCol = 0;
 
+  // The span of authored text each run belongs to (PptxTextRunInfo.textSpan):
+  // it advances at a paragraph end, a manual break, a tab and an equation,
+  // not at an automatic wrap.
+  let textSpan = 0;
   for (const entry of allLines) {
     const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
     // Balanced column advance: when the current column has reached its share
@@ -6082,6 +6102,7 @@ export function renderTextBody(
       }
       if (seg.isTab) {
         penX += seg.tabWidthPx ?? 0;
+        textSpan++;
         continue;
       }
       // Justification advance after this piece (0 when not justifying). Added to
@@ -6101,6 +6122,7 @@ export function renderTextBody(
         paintEquation(ctx, seg, penX, baseline - seg.math.ascent);
         penX += w;
         penX += jext;
+        textSpan++;
         continue;
       }
       ctx.font = seg.font;
@@ -6365,6 +6387,7 @@ export function renderTextBody(
           shapeW: bw,
           shapeH: bh,
           rotation: shapeRotation,
+          textSpan,
           hyperlink: seg.hyperlink,
         });
       }
@@ -6376,6 +6399,7 @@ export function renderTextBody(
     if (paraNeedsBidi) ctx.direction = 'ltr';
 
     cursorY += linePx;
+    if (endsLogicalLine || line.dropsSpace) textSpan++;
   }
 
   ctx.restore();

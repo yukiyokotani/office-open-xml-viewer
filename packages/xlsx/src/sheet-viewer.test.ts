@@ -1503,6 +1503,10 @@ describe('XlsxSheetViewer canvas mount', () => {
     expect(() => viewer.setSelection('A1')).toThrow(closed);
     expect(() => viewer.setSelectionColor('#000')).toThrow(closed);
     expect(() => viewer.clearFind()).toThrow(closed);
+    await expect(viewer.highlightText([{ id: 'a', terms: ['x'] }])).rejects.toThrow(closed);
+    await expect(viewer.highlightNext()).rejects.toThrow(closed);
+    await expect(viewer.highlightPrev()).rejects.toThrow(closed);
+    expect(() => viewer.clearHighlights()).toThrow(closed);
   });
 
   it('retains the successful load metrics snapshot after destroy without an explicit metrics query', async () => {

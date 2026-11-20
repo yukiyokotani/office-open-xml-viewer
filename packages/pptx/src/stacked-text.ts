@@ -116,6 +116,10 @@ export interface StackedGlyphRun {
   y: number;
   w: number;
   h: number;
+  /** Index of the uninterrupted span of authored text the glyph belongs to
+   *  (see `PptxTextRunInfo.textSpan`). Text that wraps into a further column
+   *  inside a word keeps its index. */
+  textSpan: number;
   hyperlink?: HyperlinkTarget;
 }
 
@@ -270,7 +274,9 @@ export function renderStackedText<T extends StackedSegmentStyle>(
   const runs: StackedGlyphRun[] = [];
   const prevAlign = ctx.textAlign;
   const prevBaseline = ctx.textBaseline;
-  const paintGlyph = (g: Measured<T>, axisX: number, cellTop: number, markerParagraph?: number) => {
+  const paintGlyph = (
+    g: Measured<T> & { span?: number }, axisX: number, cellTop: number, markerParagraph?: number,
+  ) => {
     const marker = markerParagraph !== undefined;
     const { style, box } = g;
     if (style.math) {
@@ -280,7 +286,7 @@ export function renderStackedText<T extends StackedSegmentStyle>(
     const size = style.sizePx;
     if (!marker) runs.push({
       text: g.text, font: style.font, fontSize: size,
-      x: axisX - g.thickness / 2, y: cellTop, w: g.thickness, h: g.advance,
+      x: axisX - g.thickness / 2, y: cellTop, w: g.thickness, h: g.advance, textSpan: g.span ?? 0,
       ...(style.hyperlink ? { hyperlink: style.hyperlink } : {}),
     });
     ctx.font = style.font;

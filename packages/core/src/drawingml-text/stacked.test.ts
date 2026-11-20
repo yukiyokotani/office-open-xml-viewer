@@ -54,6 +54,45 @@ describe('layoutStackedText (wordArtVert / wordArtVertRtl)', () => {
     expect(layoutStackedText([para(['ABCDEFGH'])], options({ wrap: false })).columns).toHaveLength(1);
   });
 
+  // Whole-word matching reads `span`: glyphs of one span are continuous text.
+  it.each(['wordArtVert', 'wordArtVertRtl'] as const)(
+    'gives the glyphs of %s their span of authored text', (direction) => {
+      const spans = (paragraphs: StackedParagraph<Style>[], extra: Partial<StackedLayoutOptions<Style>> = {}) => {
+        const glyphs = layoutStackedText(paragraphs, options({ direction, ...extra })).glyphs;
+        // Renumber from zero: the values need not be consecutive.
+        const seen: number[] = [];
+        return glyphs.map((g) => {
+          if (!seen.includes(g.span)) seen.push(g.span);
+          return `${g.text}${seen.indexOf(g.span)}`;
+        }).join(' ');
+      };
+      // A word that wraps into the next column inside the word is one span; a
+      // paragraph and a manual break start another.
+      expect(spans([para(['ABCDEFG'])])).toBe('A0 B0 C0 D0 E0 F0 G0');
+      expect(spans([para(['AB']), para(['CD'])])).toBe('A0 B0 C1 D1');
+      expect(spans([{ ...para([]), runs: [
+        { type: 'text', text: 'AB', style: S }, { type: 'break' }, { type: 'text', text: 'CD', style: S },
+      ] }])).toBe('A0 B0 C1 D1');
+      // A wrap at a space that stays in the column keeps the span (the space
+      // itself separates the words); a wrap that drops the space ends it.
+      expect(spans([para(['Hi all'])])).toBe('H0 i0  0 a0 l0 l0');
+      expect(spans([para(['ABCDE FG'])])).toBe('A0 B0 C0 D0 E0 F1 G1');
+      // A tab separates although it adds no glyph.
+      expect(spans([para(['AB\tCD'])])).toBe('A0 B0 C1 D1');
+      // An inline object separates the text around it, drawn or zero-size.
+      const withObject = [{ ...para([]), runs: [
+        { type: 'text' as const, text: 'AB', style: S },
+        { type: 'object' as const, width: 10, style: S },
+        { type: 'text' as const, text: 'CD', style: S },
+      ] }];
+      const object = (advance: number) => ({ objectGlyph: () => ({
+        text: '\uFFFC', style: S, kind: 'upright' as const, advance, thickness: advance, space: false,
+      }) });
+      expect(spans(withObject, object(10))).toBe('A0 B0 \uFFFC1 C2 D2');
+      expect(spans(withObject, object(0))).toBe('A0 B0 C1 D1');
+    },
+  );
+
   it('puts lnSpc extra on the page-right side and paragraph spacing per direction', () => {
     const spaced = (extra: Partial<StackedParagraph<Style>>) => [para(['ABCD'], extra), para(['EFGH'], extra)];
     const pct150 = { lineSpacing: { type: 'pct' as const, val: 150000 }, spaceBefore: { type: 'pts' as const, val: 12 } };

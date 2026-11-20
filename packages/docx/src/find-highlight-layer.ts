@@ -22,6 +22,7 @@ import { countSpacingCharacters } from './character-spacing.js';
  * matching a browser find bar's current-vs-other highlighting.
  */
 import {
+  ACTIVE_TEXT_HIGHLIGHT_RING,
   sliceHorizontalExtent,
   overlayPercent,
   type FindHighlightColors,
@@ -35,6 +36,10 @@ import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
 export interface DocxHighlightMatch {
   slices: MatchRunSlice[];
   active: boolean;
+  /** Set for a text highlight (`highlightText`): the group's CSS background,
+   *  used instead of the find colours. Its active match keeps this background
+   *  and gains a ring. Absent for a find match. */
+  color?: string;
 }
 
 /** Default highlight colours (browser find-bar palette): a soft yellow for
@@ -80,7 +85,8 @@ export function buildDocxHighlightLayer(
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
 
   for (const match of matches) {
-    const fill = match.active ? activeColor : matchColor;
+    const fill = match.color ?? (match.active ? activeColor : matchColor);
+    const ring = match.color !== undefined && match.active ? ACTIVE_TEXT_HIGHLIGHT_RING : '';
     for (const slice of match.slices) {
       const run = runs[slice.runIndex];
       if (!run) continue;
@@ -120,7 +126,7 @@ export function buildDocxHighlightLayer(
         `left:${overlayPercent(run.x + x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
         `width:${overlayPercent(width, cssWidth)};height:${overlayPercent(run.h, cssHeight)};` +
         transform +
-        `background:${fill};pointer-events:none;`;
+        `background:${fill};pointer-events:none;${ring}`;
       layer.appendChild(box);
     }
   }

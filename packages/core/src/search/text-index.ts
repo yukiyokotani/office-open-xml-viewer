@@ -96,6 +96,22 @@ export interface FindMatchesOptions {
    * find-in-page). IX2 default — an integrator can pass `true`.
    */
   caseSensitive?: boolean;
+  /**
+   * Match whole words only. Default `false`. A match is kept when it starts and
+   * ends at a word boundary: next to a character that is not a letter, combining
+   * mark, number or `_`, at the end of a paragraph or of a line ended by a
+   * manual break, at a tab, or at the ends of the text. So `cat` is not found
+   * inside `concatenate`, also where that word wraps onto a second line, while
+   * `C++` is found before a comma. In scripts written without spaces between
+   * words (Han, Hiragana, Katakana, Thai, Lao, Khmer, Myanmar) the boundaries
+   * come from `Intl.Segmenter` word segmentation and therefore depend on the
+   * browser's dictionaries; where `Intl.Segmenter` is unavailable, text in
+   * those scripts is matched as if `wholeWord` were `false`. Pages, slides and
+   * cells are searched one by one: a match never spans two of them, and their
+   * ends count as word boundaries, also for a word that is divided between two
+   * pages.
+   */
+  wholeWord?: boolean;
 }
 
 /**
@@ -119,7 +135,7 @@ export interface FindMatchesOptions {
  * (true for effectively all real documents), use it as-is; the per-code-point
  * walk only runs for strings containing a length-changing fold.
  */
-function foldPreservingLength(s: string): string {
+export function foldPreservingLength(s: string): string {
   const whole = s.toLowerCase();
   if (whole.length === s.length) return whole;
   let out = '';
@@ -181,7 +197,7 @@ function runAtOffset(index: TextIndex, pos: number): number {
  * skipped — they contribute no glyphs to highlight. The range is assumed
  * non-empty and within `[0, text.length]`.
  */
-function sliceRange(index: TextIndex, matchStart: number, matchEnd: number): MatchRunSlice[] {
+export function sliceRange(index: TextIndex, matchStart: number, matchEnd: number): MatchRunSlice[] {
   const { runStart, runCount, text } = index;
   const slices: MatchRunSlice[] = [];
   let run = runAtOffset(index, matchStart);
@@ -214,6 +230,10 @@ function sliceRange(index: TextIndex, matchStart: number, matchEnd: number): Mat
  * match (so `"aa"` in `"aaaa"` yields two matches at 0 and 2, matching a
  * browser's find-in-page). An empty (or whitespace-trimmed-to-empty is NOT
  * applied — only truly empty) query returns `[]`.
+ *
+ * `opts.wholeWord` is not applied here: whole-word matching is part of the
+ * on-demand term search (`term-search.ts`), which the find controllers use for
+ * such a query instead of this function.
  *
  * Pure: no DOM, no geometry. The viewer turns `slices` into pixel rectangles
  * using each run's font.

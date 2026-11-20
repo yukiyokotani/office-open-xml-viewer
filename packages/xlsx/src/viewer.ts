@@ -10,7 +10,7 @@ import {
 } from './workbook.js';
 import type { LoadOptions } from './workbook.js';
 import type { ViewportRange, Worksheet, XlsxChromeColors, XlsxComment } from './types.js';
-import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
+import type { FindHighlightColors, HyperlinkTarget, FindMatch, FindMatchesOptions, OoxmlResourceMetrics, TextHighlightGroup, TextHighlightMatch, ViewerContextMenuEvent, ZoomableViewer } from '@silurus/ooxml-core';
 import { nextVisibleIndex, resolveVisibleIndex, countVisible, anchoredZoomOffset, openExternalHyperlink, nextZoomStep, prevZoomStep, fitScale } from '@silurus/ooxml-core';
 import {
   CallerCanvasMount,
@@ -2174,9 +2174,52 @@ class XlsxViewerEngine implements ZoomableViewer {
     return this.finder.prev();
   }
 
-  /** IX2 — clear all highlights and reset the find state. */
+  /** IX2 — clear the find highlights and reset the find state. Text highlights
+   *  set with {@link highlightText} stay. */
   clearFind(): void {
     this.finder.clear();
+  }
+
+  /**
+   * Replace the workbook's text highlights: every cell whose rendered display
+   * text contains a term of a group is boxed in that group's `color`, until the
+   * next call or {@link clearHighlights}. This is separate from
+   * {@link findText}: both can be shown at once, and neither changes the
+   * other's matches or active match.
+   *
+   * Returns every match in document order (sheet ascending, then row-major),
+   * each tagged with its `{ sheet, sheetName, ref, row, col }`, its `group` id
+   * and the `term` that matched. Every occurrence within a cell is one match,
+   * while the highlight is the cell: a cell matched by several groups shows
+   * one nested box per group. Groups are searched independently; within a
+   * group the longer match wins an overlap. An empty set clears the
+   * highlights. Loading another workbook drops them.
+   */
+  async highlightText(
+    groups: readonly TextHighlightGroup[],
+  ): Promise<TextHighlightMatch<XlsxMatchLocation>[]> {
+    return this.finder.highlight(groups);
+  }
+
+  /**
+   * Move to the next text highlight (wrap-around), switching sheets and
+   * scrolling the matched cell into view as needed, and mark it with a ring.
+   * Returns the now-active match, or `null` when there are none. Independent
+   * of {@link findNext}.
+   */
+  async highlightNext(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
+    return this.finder.highlightNext();
+  }
+
+  /** Move to the previous text highlight (wrap-around). */
+  async highlightPrev(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
+    return this.finder.highlightPrev();
+  }
+
+  /** Remove every text highlight set with {@link highlightText}. The find
+   *  state stays. */
+  clearHighlights(): void {
+    this.finder.clearHighlights();
   }
 
   /**
@@ -2986,33 +3029,48 @@ export class XlsxSheetViewer implements ZoomableViewer {
     return this.destroyed ? this.snapshot.visibleSheetCount : this.engine.visibleSheetCount;
   }
 
+  /** Run an engine search call between two open checks; a navigation also
+   *  refreshes the snapshot read after destroy. */
+  private async search<Result>(run: () => Promise<Result>, navigates = false): Promise<Result> {
+    this.assertOpen();
+    const result = await run();
+    this.assertOpen();
+    if (navigates) this.captureSnapshot();
+    return result;
+  }
+
   async findText(
     query: string,
     options?: FindMatchesOptions,
   ): Promise<FindMatch<XlsxMatchLocation>[]> {
-    this.assertOpen();
-    const matches = await this.engine.findText(query, options);
-    this.assertOpen();
-    return matches;
+    return this.search(() => this.engine.findText(query, options));
   }
 
   async findNext(): Promise<FindMatch<XlsxMatchLocation> | null> {
-    this.assertOpen();
-    const match = await this.engine.findNext();
-    this.assertOpen();
-    this.captureSnapshot();
-    return match;
+    return this.search(() => this.engine.findNext(), true);
   }
 
   async findPrev(): Promise<FindMatch<XlsxMatchLocation> | null> {
-    this.assertOpen();
-    const match = await this.engine.findPrev();
-    this.assertOpen();
-    this.captureSnapshot();
-    return match;
+    return this.search(() => this.engine.findPrev(), true);
   }
 
   clearFind(): void { this.assertOpen(); this.engine.clearFind(); }
+
+  async highlightText(
+    groups: readonly TextHighlightGroup[],
+  ): Promise<TextHighlightMatch<XlsxMatchLocation>[]> {
+    return this.search(() => this.engine.highlightText(groups));
+  }
+
+  async highlightNext(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
+    return this.search(() => this.engine.highlightNext(), true);
+  }
+
+  async highlightPrev(): Promise<TextHighlightMatch<XlsxMatchLocation> | null> {
+    return this.search(() => this.engine.highlightPrev(), true);
+  }
+
+  clearHighlights(): void { this.assertOpen(); this.engine.clearHighlights(); }
 
   async getResourceMetrics(): Promise<OoxmlResourceMetrics> {
     if (this.destroyed) {
