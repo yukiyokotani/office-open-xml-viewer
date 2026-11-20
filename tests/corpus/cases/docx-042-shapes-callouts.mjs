@@ -1,5 +1,5 @@
 import { COLOR, DOCX, FONT } from '../lib/grid.mjs';
-import { A_NS } from '../lib/drawing.mjs';
+import { A_NS, wpsShape } from '../lib/drawing.mjs';
 import { docxPackage, header } from '../lib/docx.mjs';
 import { esc } from '../lib/xml.mjs';
 
@@ -21,28 +21,17 @@ const { LINE, colStart, span, emu } = DOCX;
 const JA = `<w:rFonts w:ascii="${FONT.eastAsia}" w:eastAsia="${FONT.eastAsia}" w:hAnsi="${FONT.eastAsia}"/>`;
 let nextId = 1;
 const line = (n) => n * LINE;
-const fill = (c) => (c ? `<a:solidFill><a:srgbClr val="${c}"/></a:solidFill>` : '<a:noFill/>');
 const ln = `<a:ln w="12700"><a:solidFill><a:srgbClr val="${COLOR.ink}"/></a:solidFill></a:ln>`;
-const txt = (runs) => (runs ? `<wps:txbx><w:txbxContent>${runs}</w:txbxContent></wps:txbx>` : '');
 const p = (runs) => `<w:p>${runs}</w:p>`;
 const r = (text, rPr = '') => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t xml:space="preserve">${esc(text)}</w:t></w:r>`;
 
 /** A shape anchored at (x, y) twips from the margin / paragraph, size cx × cy twips. */
-function shape({ x, y, cx, cy, prst, adj = '', fillColor = null, outline = true, text = '', relH = 1, connector = false, flipV = false }) {
-  const id = nextId++;
-  return '<w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:drawing>'
-    + `<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${relH}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">`
-    + `<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>${emu(x)}</wp:posOffset></wp:positionH>`
-    + `<wp:positionV relativeFrom="paragraph"><wp:posOffset>${emu(y)}</wp:posOffset></wp:positionV>`
-    + `<wp:extent cx="${emu(cx)}" cy="${emu(cy)}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>`
-    + `<wp:docPr id="${id}" name="Shape ${id}"/><wp:cNvGraphicFramePr/>`
-    + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
-    + (connector ? '<wps:cNvCnPr/>' : '<wps:cNvSpPr/>')
-    + `<wps:spPr><a:xfrm${flipV ? ' flipV="1"' : ''}><a:off x="0" y="0"/><a:ext cx="${emu(cx)}" cy="${emu(cy)}"/></a:xfrm>`
-    + `<a:prstGeom prst="${prst}"><a:avLst>${adj}</a:avLst></a:prstGeom>${connector ? '' : fill(fillColor)}${outline ? ln : '<a:ln><a:noFill/></a:ln>'}</wps:spPr>`
-    + txt(text)
-    + `<wps:bodyPr rot="0" vert="horz" wrap="square" lIns="${text && outline ? 152400 : 0}" tIns="0" rIns="${text && outline ? 152400 : 0}" bIns="0" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr>`
-    + '</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback/></mc:AlternateContent></w:r>';
+function shape({ x, y, cx, cy, prst, adj = '', fillColor = null, outline = true, text = '', relH = 1, connector = false }) {
+  const inset = text && outline ? 152400 : 0;
+  return wpsShape({
+    id: nextId++, x: emu(x), y: emu(y), cx: emu(cx), cy: emu(cy), prst, adj, fill: fillColor,
+    outline: outline ? ln : '', text, insets: [inset, 0, inset, 0], relH, connector,
+  });
 }
 const gd = (pairs) => pairs.map(([n, v]) => `<a:gd name="${n}" fmla="val ${v}"/>`).join('');
 const COL = colStart(2);
