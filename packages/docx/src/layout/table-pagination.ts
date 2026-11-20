@@ -1613,7 +1613,7 @@ function selectParagraph(
   // A fresh note band cannot gain space by relocating an over-tall unit.
   // Retain exactly its first complete line; later lines keep their cursor,
   // rather than being clipped below that indivisible unit on the same page.
-  if (lineEnd === start && overflowFirstUnit) lineEnd = start + 1;
+  if (lineEnd === start && overflowFirstUnit && start < paragraph.lines.length) lineEnd = start + 1;
   if (lineEnd === start) return { block: null, range: null, lineEnd: start, advancePt: 0 };
   const canRelocate = start === 0 && (selectedBlocks.length > 0 || canGainPageSpace);
   // §17.3.1.14 / §17.3.1.44 apply to cell paragraphs too. The selected
@@ -1852,20 +1852,32 @@ function partialRow(
         - (freshPrefix.flowBounds.yPt + freshPrefix.heightPt - context.placement.cursor.yPt)
       : freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
-  const selectedCells = row.cells.map((cell, index) => selectCell(
+  const selectCells = (selectionContext: TableFragmentContext) => row.cells.map((cell, index) => selectCell(
     source,
     cell,
     cellCursors[index]!,
     availableContentHeightPt,
     freshAvailableContentHeightPt,
     canGainPageSpace,
-    context,
+    selectionContext,
   ));
   const cellMadeProgress = (cell: SelectedCell, index: number) => (
     cell.next.blockIndex !== cellCursors[index]?.blockIndex
     || cell.next.paragraphLineStart !== cellCursors[index]?.paragraphLineStart
     || cell.next.nestedFragmentIndex !== cellCursors[index]?.nestedFragmentIndex
   );
+  let selectedCells = selectCells(context);
+  let forcedFirstUnit = false;
+  // ECMA-376 §17.4.6 lets a row continue across pages. When a fresh page
+  // cannot hold even the first unit of any cell (a cell-owned anchor can make
+  // a single line's charge exceed the page), moving on cannot gain space:
+  // retain each cell's first indivisible unit, as fresh note bands do,
+  // instead of failing to make progress.
+  if (!canGainPageSpace && context.oversizedCellPolicy !== 'overflow-first-unit'
+    && !selectedCells.some(cellMadeProgress)) {
+    selectedCells = selectCells({ ...context, oversizedCellPolicy: 'overflow-first-unit' });
+    forcedFirstUnit = true;
+  }
   // The compatibility authority owns the cross-cell cut selection that
   // ECMA-376 §17.4.6 leaves undefined. This call site deliberately checks only
   // paragraph children; nested tables retain their own fragmentation path.
@@ -1886,7 +1898,7 @@ function partialRow(
   const complete = selectedCells.every((cell) => cell.complete);
   if (complete && cursor.rowFragmentIndex === 0) {
     return {
-      selected: selectedWholeRow(row, 'source'),
+      selected: selectedWholeRow(row, 'source', 0, forcedFirstUnit),
       next: Object.freeze({
         rowIndex: cursor.rowIndex + 1,
         rowFragmentIndex: 0,
@@ -1916,6 +1928,8 @@ function partialRow(
       fragmentIndex: cursor.rowFragmentIndex,
       ownership: 'source',
       ranges: selectedCells.map((cell) => cell.range),
+      // The forced unit can still exceed the page; keep it inside the band.
+      ...(forcedFirstUnit ? { clipAtPageEnd: true } : {}),
     },
     next: Object.freeze({
       rowIndex: complete ? cursor.rowIndex + 1 : cursor.rowIndex,

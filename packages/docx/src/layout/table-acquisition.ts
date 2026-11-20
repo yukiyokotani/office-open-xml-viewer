@@ -493,8 +493,8 @@ function verticalCellMode(
 
 /**
  * Line extent of rotated cell content at an acquired line width: each line's
- * placement span (independent of its alignment on that
- * line) plus the paragraph's side indents and, on the first line, a positive
+ * placement span (independent of its alignment on that line; the unspread
+ * advances for a distributed line) plus the paragraph's side indents and, on the first line, a positive
  * first-line indent. The line box advance is also a minimum along the rotated
  * row axis, even when a glyph is narrower; see WORD_ROTATED_CELL_AUTO_ROW_WRAP.
  * The unconstrained extent is an upper bound on the row height needed to fit
@@ -525,7 +525,15 @@ function naturalLineExtentPt(
       }
       if (endPt < startPt) return;
       const firstLinePt = lineIndex === 0 ? Math.max(0, paragraph?.indentFirst ?? 0) : 0;
-      extentPt = Math.max(extentPt, endPt - startPt + sideIndentsPt + firstLinePt);
+      // ECMA-376 §17.18.44 `distribute` spreads every line, the last one too,
+      // across whatever line length it is given, so its placement span is the
+      // trial length itself. Its natural length is the unspread cluster advances.
+      const spanPt = paragraph?.alignment === 'distribute'
+        ? line.placements.reduce((sum, placement) => sum + (placement.kind === 'text'
+          ? placement.clusters.reduce((clusters, cluster) => clusters + cluster.advancePt, 0)
+          : 'bounds' in placement && placement.bounds ? placement.bounds.widthPt : 0), 0)
+        : endPt - startPt;
+      extentPt = Math.max(extentPt, spanPt + sideIndentsPt + firstLinePt);
     });
   });
   return Math.min(MAXIMUM_ROTATED_LINE_LENGTH_PT, Math.ceil(extentPt * 100) / 100);

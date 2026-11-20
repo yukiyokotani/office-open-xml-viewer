@@ -1037,7 +1037,9 @@ describe('retained table pagination', () => {
     expect(second.requiresFreshPage).toBe(false);
   });
 
-  it('fails fast when no block boundary can advance on a fresh page', () => {
+  it('retains an over-page indivisible unit, clipped, on a fresh page', () => {
+    // Moving on cannot gain space, so the first unit is kept and clipped to
+    // the band (ECMA-376 §17.4.6 lets the row continue) instead of failing.
     const retained = paragraph('unplaceable-zero-line', []);
     const unplaceable = {
       ...retained,
@@ -1047,9 +1049,12 @@ describe('retained table pagination', () => {
     };
     const source = acquisition([row(0, 120, { paragraph: unplaceable })]);
 
-    expect(() => take(source, 100, startTableFragmentCursor(), {
-      freshPageHeightPt: 100,
-    })).toThrow('Table pagination cannot advance from a fresh page');
+    const result = take(source, 100, startTableFragmentCursor(), { freshPageHeightPt: 100 });
+    expect(result.requiresFreshPage).toBe(false);
+    expect(result.nextCursor).toBeNull();
+    expect(result.fragment?.advancePt).toBe(100);
+    expect(result.fragment?.clipBounds?.heightPt).toBe(100);
+    expect(result.fragment?.unpaintedOverflowPt).toBe(20);
   });
 
   it('requests a fresh page for an unbreakable row that fits the fresh band', () => {

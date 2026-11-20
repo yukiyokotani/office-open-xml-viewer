@@ -625,6 +625,51 @@ describe('createLayoutPage', () => {
     });
   });
 
+  it('treats a section boundary reconstructed with floating-point dust as shared', () => {
+    // educational blind document: section 1 ends at 42.55 + 134.40000000000003
+    // and the continuous two-column section 2 starts at 176.95000000000002.
+    const first = section('lrTb', [{ xPt: 42.55, wPt: 510.2 }]);
+    const second = section('lrTb', [
+      { xPt: 42.55, wPt: 244.475 },
+      { xPt: 308.275, wPt: 244.475 },
+    ]);
+    const build = (secondStartPt: number) => createLayoutPage({
+      pageIndex: 0,
+      physicalPage: { widthPt: 612, heightPt: 792, contentTopPt: 42.55, contentBottomPt: 760 },
+      sectionOccurrenceId: 'section:first',
+      section: first,
+      sectionRegions: [
+        {
+          id: 'region:first',
+          sectionOccurrenceId: 'section:first',
+          section: first,
+          writingMode: 'horizontal-tb',
+          blockStartPt: 42.55,
+          blockEndPt: 176.95000000000005,
+          columns: [{ inlineStartPt: 42.55, inlineExtentPt: 510.2 }],
+        },
+        {
+          id: 'region:second',
+          sectionOccurrenceId: 'section:second',
+          section: second,
+          writingMode: 'horizontal-tb',
+          blockStartPt: secondStartPt,
+          blockEndPt: 760,
+          columns: [
+            { inlineStartPt: 42.55, inlineExtentPt: 244.475 },
+            { inlineStartPt: 308.275, inlineExtentPt: 244.475 },
+          ],
+        },
+      ],
+      paint: [],
+      readingOrder: [],
+      pageNumber: { displayNumber: 1, format: 'decimal', sectionOccurrenceId: 'section:first' },
+    });
+
+    expect(build(176.95000000000002).flowDomains).toHaveLength(3);
+    expect(() => build(176.9)).toThrow('Section flow domains on one page must be physically disjoint');
+  });
+
   it('retains overlapping block bands when section regions own disjoint authored columns', () => {
     const columns = [
       { xPt: 72, wPt: 142 },

@@ -222,6 +222,25 @@ describe('ECMA-376 §17.4.72 cell text direction', () => {
     expect(height('A'.repeat(30))).toBeGreaterThan(height('A'.repeat(8)));
   });
 
+  it('sizes a rotated distributed row by its natural line length, not the trial length', () => {
+    // §17.18.44 distribute stretches every line across the trial length, so
+    // a narrow cell whose stacked lines never fit its width must not grow the
+    // row to the maximum trial length (a Japanese form's 職・氏名/代表者 cell).
+    const height = (alignment: string) => firstRowHeight({
+      ...tableOf([row([
+        cell('ABCD', {
+          textDirection: 'tbRl',
+          widthPt: 15,
+          content: [paraOf('職・氏名', alignment), paraOf('代表者', alignment)],
+        }),
+        cell('N'),
+      ])]),
+      colWidths: [15, 140],
+    });
+    expect(height('left')).toBeLessThan(60);
+    expect(height('distribute')).toBeCloseTo(height('left'), 1);
+  });
+
   it('rotated auto and atLeast rows honor margins, authored floors, and a taller neighbor', () => {
     const height = (rotated: DocTableCell, neighbor: DocTableCell, floor: number | null = null, rule = 'auto') =>
       firstRowHeight({ ...tableOf([row([rotated, neighbor], floor, rule)]), colWidths: [220, 140] });
