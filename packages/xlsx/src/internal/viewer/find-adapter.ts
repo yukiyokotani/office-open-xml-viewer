@@ -34,7 +34,7 @@ export interface FindAdapterHost {
   highlightColors(): FindHighlightColors | undefined;
   cellRect(row: number, col: number): CellRect | null;
   screenX(logicalX: number, width: number): number;
-  goToSheet(index: number): Promise<void>;
+  goToSheet(index: number, signal?: AbortSignal): Promise<void>;
   /** Scroll so a cell is in view (Excel's find behaviour: in-view cells stay). */
   scrollCellIntoView(row: number, col: number): void;
 }
@@ -45,6 +45,13 @@ export interface FindAdapterHost {
  * source) and draws the find-highlight overlay for the displayed sheet.
  */
 export class FindAdapter {
+  private activationController?: AbortController;
+  /** Workbook the latest find() searched (null before any search). */
+  private searchedWorkbook: XlsxWorkbook | null = null;
+  /** Bumped by every find() and invalidate(); still equal after a find's await
+   *  means that find (not a newer one or a clear) installed the results. */
+  private findRequest = 0;
+
   /** Find state (matches + active cursor); survives sheet switches. */
   readonly controller: XlsxFindController;
 
@@ -87,7 +94,22 @@ export class FindAdapter {
 
   /** Drop matches and cursor (new workbook, clearFind, teardown). */
   invalidate(): void {
+    this.findRequest++;
+    this.searchedWorkbook = null;
+    this.retireActivation();
     this.controller.invalidate();
+  }
+
+  /** Drop find state unless it was produced by a search of `workbook`. */
+  invalidateUnlessFor(workbook: XlsxWorkbook): void {
+    if (this.searchedWorkbook !== workbook) this.invalidate();
+  }
+
+  /** Cancel pending activation without dropping matches on manual navigation. */
+  retireActivation(signal?: AbortSignal): void {
+    if (this.activationController?.signal === signal) return;
+    this.activationController?.abort();
+    this.activationController = undefined;
   }
 
   /**
@@ -147,8 +169,16 @@ export class FindAdapter {
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<XlsxMatchLocation>[]> {
-    if (!this.host.workbook()) return [];
+    const workbook = this.host.workbook();
+    if (!workbook) return [];
+    // The previous results and cursor stay usable until this search commits
+    // (and stay if it fails); only an activation started before it is retired.
+    const request = ++this.findRequest;
+    this.searchedWorkbook = workbook;
+    this.retireActivation();
     const matches = await this.controller.find(query, opts);
+    // The committed results replace those an activation started meanwhile used.
+    if (request === this.findRequest) this.retireActivation();
     this.updateOverlay();
     return matches;
   }
@@ -165,24 +195,28 @@ export class FindAdapter {
 
   /** Clear all highlights and reset the find state. */
   clear(): void {
-    this.controller.invalidate();
+    this.invalidate();
     this.updateOverlay();
   }
 
   private async activateMatch(
     match: FindMatch<XlsxMatchLocation> | null,
   ): Promise<FindMatch<XlsxMatchLocation> | null> {
+    this.retireActivation();
     if (!match) {
       this.updateOverlay();
       return null;
     }
+    const controller = new AbortController();
+    this.activationController = controller;
     const { sheet, row, col } = match.location;
     if (sheet !== this.host.currentSheet()) {
       // showSheet resets scroll/selection and re-renders; the find state (and so
       // the highlights) survive because they live on the controller, not the
       // sheet. updateOverlay runs after the sheet switch below.
-      await this.host.goToSheet(sheet);
+      await this.host.goToSheet(sheet, controller.signal);
     }
+    if (controller.signal.aborted) return null;
     this.host.scrollCellIntoView(row, col);
     // Scrolling schedules a coalesced render; draw the highlights now so the
     // active box is visible immediately without waiting a frame.
@@ -193,6 +227,6 @@ export class FindAdapter {
   /** Teardown: drop the find state so a stale findNext()/findPrev() after
    *  teardown returns null instead of a match pointing into a dead viewer. */
   destroy(): void {
-    this.controller.invalidate();
+    this.invalidate();
   }
 }
