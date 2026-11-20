@@ -46,6 +46,11 @@ export interface FindAdapterHost {
  */
 export class FindAdapter {
   private activationController?: AbortController;
+  /** Workbook the latest find() searched (null before any search). */
+  private searchedWorkbook: XlsxWorkbook | null = null;
+  /** Bumped by every find() and invalidate(); still equal after a find's await
+   *  means that find (not a newer one or a clear) installed the results. */
+  private findRequest = 0;
 
   /** Find state (matches + active cursor); survives sheet switches. */
   readonly controller: XlsxFindController;
@@ -89,8 +94,15 @@ export class FindAdapter {
 
   /** Drop matches and cursor (new workbook, clearFind, teardown). */
   invalidate(): void {
+    this.findRequest++;
+    this.searchedWorkbook = null;
     this.retireActivation();
     this.controller.invalidate();
+  }
+
+  /** Drop find state unless it was produced by a search of `workbook`. */
+  invalidateUnlessFor(workbook: XlsxWorkbook): void {
+    if (this.searchedWorkbook !== workbook) this.invalidate();
   }
 
   /** Cancel pending activation without dropping matches on manual navigation. */
@@ -157,9 +169,16 @@ export class FindAdapter {
     query: string,
     opts: FindMatchesOptions = {},
   ): Promise<FindMatch<XlsxMatchLocation>[]> {
-    if (!this.host.workbook()) return [];
-    this.invalidate();
+    const workbook = this.host.workbook();
+    if (!workbook) return [];
+    // The previous results and cursor stay usable until this search commits
+    // (and stay if it fails); only an activation started before it is retired.
+    const request = ++this.findRequest;
+    this.searchedWorkbook = workbook;
+    this.retireActivation();
     const matches = await this.controller.find(query, opts);
+    // The committed results replace those an activation started meanwhile used.
+    if (request === this.findRequest) this.retireActivation();
     this.updateOverlay();
     return matches;
   }
