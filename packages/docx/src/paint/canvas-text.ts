@@ -3,6 +3,7 @@ import {
   canvasFontString,
   withVertFeature,
 } from '@silurus/ooxml-core';
+import { fillRetainedText } from './canvas-text-fill.js';
 import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
@@ -103,22 +104,23 @@ function paintRetainedGlyph(
 ): void {
   const { ctx } = context;
   ctx.fillStyle = resolvedTextColor(operation.color, context);
-  ctx.font = canvasFontString(
+  const font = canvasFontString(
     operation.fontRoute,
     operation.fontSizePt,
     operation.fontWeight,
     operation.fontStyle,
   );
+  ctx.font = font;
   const previousKerning = ctx.fontKerning;
   if (operation.kerning) ctx.fontKerning = operation.kerning;
   if (upright) {
     ctx.save();
     ctx.translate(operation.origin.xPt, operation.origin.yPt);
     ctx.rotate(-Math.PI / 2);
-    ctx.fillText(operation.text, 0, 0);
+    fillRetainedText(context, font, operation.text, 0, 0);
     ctx.restore();
   } else {
-    ctx.fillText(operation.text, operation.origin.xPt, operation.origin.yPt);
+    fillRetainedText(context, font, operation.text, operation.origin.xPt, operation.origin.yPt);
   }
   if (operation.kerning) ctx.fontKerning = previousKerning;
 }
@@ -223,7 +225,7 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
       ctx.font = operation.font;
       ctx.textAlign = operation.textAlign;
       ctx.textBaseline = 'alphabetic';
-      ctx.fillText(operation.text, operation.origin.xPt, operation.origin.yPt);
+      fillRetainedText(context, operation.font, operation.text, operation.origin.xPt, operation.origin.yPt);
     }
   }
   if (node.shading) {
@@ -319,12 +321,13 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
         ctx.fillRect(placement.bounds.xPt, placement.bounds.yPt, placement.bounds.widthPt, placement.bounds.heightPt);
       }
       ctx.fillStyle = textColor(placement, context);
-      ctx.font = canvasFontString(
+      const font = canvasFontString(
         placement.fontRoute,
         placement.fontSizePt,
         placement.fontWeight,
         placement.fontStyle,
       );
+      ctx.font = font;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
       const previousLetterSpacing = ctx.letterSpacing;
@@ -357,7 +360,7 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.letterSpacing = `${op.letterSpacingPt}px`;
-          const draw = (): void => ctx.fillText(text, glyphOffsetXPt, glyphOffsetYPt);
+          const draw = (): void => fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
           if (op.verticalFeature) {
             withVertFeature(ctx as CanvasRenderingContext2D, draw);
           }
@@ -370,18 +373,18 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
-          ctx.fillText(text, glyphOffsetXPt, glyphOffsetYPt);
+          fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
           ctx.restore();
         } else if (op.scaleX !== 1) {
           ctx.save();
           ctx.translate(originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
           ctx.scale(op.scaleX, 1);
           ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
-          ctx.fillText(text, 0, 0);
+          fillRetainedText(context, font, text, 0, 0);
           ctx.restore();
         } else {
           ctx.letterSpacing = `${op.letterSpacingPt}px`;
-          ctx.fillText(text, originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
+          fillRetainedText(context, font, text, originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
         }
       }
       ctx.letterSpacing = previousLetterSpacing;

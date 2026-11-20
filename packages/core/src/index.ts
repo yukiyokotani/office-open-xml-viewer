@@ -191,6 +191,25 @@ export {
   type LoadedOfficeFontFallbacks,
 } from './fonts/office-fallback';
 export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
+// Size-proportional Canvas advances: a shorthand the host grid-fits at its own
+// size is measured and painted at a reference em under a linear scale.
+export {
+  TEXT_ADVANCE_REFERENCE_PX,
+  createReferenceAdvanceContext,
+  createTextAdvancePlanner,
+  fillTextAtReference,
+  referenceTextFont,
+  scaleTextMetrics,
+  withReferenceAdvances,
+  type ReferenceAdvanceContext,
+  type ReferenceAdvanceTarget,
+  type ReferenceTextFont,
+  type ReferenceTextPaintTarget,
+  type TextAdvanceLookup,
+  type TextAdvanceMeasurer,
+  type TextAdvancePlanner,
+  type TextAdvancePlannerOptions,
+} from './text/reference-advances';
 export {
   parseOpenTypeLineMetrics,
   parseOpenTypeResourceMetrics,

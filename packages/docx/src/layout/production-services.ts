@@ -74,6 +74,10 @@ export interface ProductionLayoutServiceOptions {
   /** FontFaceSet of the measuring canvas, including foreign DOM realms. */
   readonly fontSet?: FontFaceSet | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
+  /** The reference-advance planner of {@link measureContext} (core
+   * reference-advances.ts): glyph contour acquisition rasterizes with the
+   * same em as measurement. Absent: contours rasterize at the request size. */
+  readonly textAdvancePlanner?: import('@silurus/ooxml-core').TextAdvancePlanner;
   /** Exact registrations returned by the DOCX loader. */
   readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
   /** Exact local registrations, scoped to this FontFaceSet. */
@@ -426,7 +430,10 @@ export function createProductionTextLayoutService(
         return results;
       },
     } : {}),
-    ...(context ? { glyphContours: acquireCanvasGlyphContours, glyphContourFingerprint: 'canvas-half-coverage-contours-v2',
+    ...(context ? {
+      glyphContours: (request: Parameters<typeof acquireCanvasGlyphContours>[0]) =>
+        acquireCanvasGlyphContours(request, options.textAdvancePlanner),
+      glyphContourFingerprint: 'canvas-half-coverage-contours-v3',
       ...(supportsDirectedContext ? { glyphContoursSupportDirection: true as const } : {}) } : {}),
     fonts: createFontResolver(inventory, {
       installedFamilies: options.installedFamilies,
@@ -493,8 +500,10 @@ export function createProductionTextLayoutService(
       // v2 proves synthesized faces; v4 additionally owns temporary projectable
       // directed source bundles. Capability participates in the stable semantic
       // fingerprint, independently of source occurrence or cache history.
-      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v5'
-        : context ? 'canvas-text-metrics-v2' : 'deterministic-text-metrics-v1',
+      // v6/v3: a shorthand the context grid-fits at its own size is measured
+      // at the reference em (core reference-advances.ts).
+      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v6'
+        : context ? 'canvas-text-metrics-v3' : 'deterministic-text-metrics-v1',
       ...(context ? { sameGlyphRaster, ownsGlyphs } : {}),
       measure,
       ...(supportsDirectedContext ? { measureDirected: measure, supportsDirectedAuxiliaries: true as const } : {}),

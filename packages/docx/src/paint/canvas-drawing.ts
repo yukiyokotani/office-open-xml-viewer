@@ -11,6 +11,7 @@ import {
   withPatternCoordinateSpace,
 } from '@silurus/ooxml-core';
 import { paintRetainedResource } from './canvas-resource.js';
+import { fillRetainedText } from './canvas-text-fill.js';
 
 function paintPageAlignedDrawingMLShape(
   plan: Parameters<typeof paintDrawingMLShape>[1],
@@ -211,13 +212,14 @@ export function paintDrawingCommands(
             context.ctx.clip();
             let xPt = -slice.sourceX;
             for (const span of command.spans) {
-              context.ctx.font = canvasFontString(
+              const font = canvasFontString(
                 span.fontRoute,
                 command.fontSizePt,
                 span.fontWeight,
                 span.fontStyle,
               );
-              context.ctx.fillText(span.text, xPt, 0);
+              context.ctx.font = font;
+              fillRetainedText(context, font, span.text, xPt, 0);
               xPt += span.advancePt;
             }
             context.ctx.restore();
@@ -248,13 +250,14 @@ export function paintDrawingCommands(
         context.ctx.textBaseline = 'alphabetic';
         let xPt = 0;
         for (const span of command.spans) {
-          context.ctx.font = canvasFontString(
+          const font = canvasFontString(
             span.fontRoute,
             command.fontSizePt,
             span.fontWeight,
             span.fontStyle,
           );
-          context.ctx.fillText(span.text, xPt, 0);
+          context.ctx.font = font;
+          fillRetainedText(context, font, span.text, xPt, 0);
           xPt += span.advancePt;
         }
         context.ctx.restore();
@@ -287,12 +290,13 @@ export function paintDrawingCommands(
       continue;
     }
     context.ctx.fillStyle = command.fill;
-    context.ctx.font = canvasFontString(
+    const font = canvasFontString(
       command.fontRoute,
       command.fontSizePt,
       command.fontWeight,
       command.fontStyle,
     );
+    context.ctx.font = font;
     context.ctx.textAlign =
       command.align === 'start' ? 'left' : command.align === 'end' ? 'right' : 'center';
     context.ctx.textBaseline = command.baseline;
@@ -308,6 +312,6 @@ export function paintDrawingCommands(
         : command.baseline === 'bottom'
           ? command.rect.yPt + command.rect.heightPt
           : command.rect.yPt + command.rect.heightPt / 2;
-    context.ctx.fillText(command.text, xPt, yPt);
+    fillRetainedText(context, font, command.text, xPt, yPt);
   }
 }

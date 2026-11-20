@@ -1626,6 +1626,10 @@ export interface DocxTextRunInfo {
     }>;
     fontSize: number;
     font: string;
+    referenceFont?: Readonly<{
+        font: string;
+        scale: number;
+    }>;
     letterSpacingPx?: number;
     transform?: string;
     hyperlink?: HyperlinkTarget;

@@ -73,6 +73,8 @@ export interface CanvasDocumentPaintOptions<TTextRun> {
   readonly svgDecoder?: import('@silurus/ooxml-core').SvgBlobDecoder;
   readonly parseError: boolean;
   readonly registry: PaintResourceRegistry;
+  /** Layout measurement's reference-advance decisions for retained text. */
+  readonly textAdvances?: import('@silurus/ooxml-core').TextAdvanceLookup;
   /** Final retained raster/chart frames for this selected page. */
   readonly rasterPaintOccurrences: readonly DeepReadonly<RasterPaintOccurrence>[];
   readonly privateResources?: PrivatePaintResourceLookup;
@@ -670,6 +672,7 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
         resources,
         documentDefaultTextColor: options.defaultTextColor ?? '#000000',
         defaultTextColor: options.defaultTextColor ?? '#000000',
+        ...(options.textAdvances ? { textAdvances: options.textAdvances } : {}),
       });
     } finally {
       context.restore();

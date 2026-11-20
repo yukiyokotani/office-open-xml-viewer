@@ -1,4 +1,4 @@
-import { canvasFontString, PT_TO_PX } from '@silurus/ooxml-core';
+import { canvasFontString, PT_TO_PX, referenceTextFont } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer.js';
 import {
   composeAffine,
@@ -37,6 +37,16 @@ function projectTextRun(
   const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
   const transform = cssTransformFor(pointToCss);
   const letterSpacingPt = placement.letterSpacingPt;
+  const font = canvasFontString(
+    placement.fontRoute,
+    placement.fontSizePt * blockScale,
+    placement.fontWeight,
+    placement.fontStyle,
+  );
+  // Overlays lay the run out at the reference em: the drawn advances are
+  // proportional on every host, and the browser's own text layout at the
+  // display size may be grid-fitted (core reference-advances.ts).
+  const reference = referenceTextFont(font);
   return {
     source: {
       story: geometry.source.story,
@@ -71,12 +81,8 @@ function projectTextRun(
       }),
     } : {}),
     fontSize: placement.fontSizePt * blockScale,
-    font: canvasFontString(
-      placement.fontRoute,
-      placement.fontSizePt * blockScale,
-      placement.fontWeight,
-      placement.fontStyle,
-    ),
+    font,
+    ...(reference ? { referenceFont: reference } : {}),
     ...(letterSpacingPt !== 0
       ? { letterSpacingPx: letterSpacingPt * inlineScale }
       : {}),

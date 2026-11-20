@@ -5,6 +5,7 @@ import type {
   Matrix2DData,
 } from '../layout/types.js';
 import type { ResolvedPaintResource } from './resource-session.js';
+import type { TextAdvanceLookup } from '@silurus/ooxml-core';
 
 export interface PaintPageOptions {
   readonly scale: number;
@@ -87,4 +88,9 @@ export interface CanvasPaintContext {
   readonly textBoxVerticalMode?: 'vert' | 'vert270' | 'eaVert' | 'mongolianVert';
   /** The page paint plan owns anchored drawings for this retained root. */
   readonly omitAnchoredDrawings?: boolean;
+  /** Layout measurement's reference-advance decisions (core
+   * reference-advances.ts): a retained shorthand layout measured at the
+   * reference em is drawn there under a linear scale, so the shaped glyph
+   * advances are the retained ones. Read-only; paint never probes. */
+  readonly textAdvances?: TextAdvanceLookup;
 }

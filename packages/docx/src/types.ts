@@ -1878,6 +1878,14 @@ export interface DocxTextRunInfo {
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing. */
   font: string;
+  /** {@link font} at a size-independent reference em, with the factor that
+   * maps its measurements onto this run's CSS px. The run's glyph advances are
+   * proportional to the font size (Word's layout model), while some hosts
+   * grid-fit small sizes (Chromium on Windows rounds faces with embedded
+   * bitmaps to whole pixels), so measuring or laying out {@link font} directly
+   * can disagree with the drawn glyphs. Overlays measure and lay out the run's
+   * text with `font` and multiply by `scale`. */
+  referenceFont?: Readonly<{ font: string; scale: number }>;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;
   /** CSS transform used by the overlay for vertical-page text. */
