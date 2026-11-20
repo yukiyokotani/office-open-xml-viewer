@@ -355,9 +355,36 @@ self-regression, with no private data. It is part of the default `vrt` and
 `vrt:snapshot` runs, under the same baseline-checkout binding as the demo
 corpus; `pnpm vrt:corpus:snapshot` (in the baseline worktree) and
 `pnpm vrt:corpus` (in the candidate) run only that set. The fixtures load its
-Roboto and Noto Sans JP faces from the packages' `@fontsource` dependencies, so
+Noto Sans family faces from the packages' `@fontsource` dependencies, so
 the run is offline. The private fast and full tiers below remain
 maintainer-only.
+
+### Feeding the public corpus from issue work
+
+The public corpus is meant to replace the accumulated private samples with
+the smallest set of files that still covers every behaviour, and to be usable
+by outside developers. Every issue, bug fix or feature task contributes to it:
+
+- When the work shows a feature that is unimplemented or broken, write a
+  minimal OOXML pattern for it yourself: only the elements, attributes,
+  values and geometry that trigger the behaviour.
+- Never copy text, names, images or file names from private, third-party or
+  copyrighted samples into the pattern.
+- Before you add anything, check whether an existing specimen already covers
+  the pattern (its `covers` list and the feature report). Extend a specimen
+  rather than add an overlapping one.
+- Hand the pattern to the corpus. Either add or extend a specimen with the
+  `tests/corpus` builder, following the `corpus-specimen` skill (this includes
+  the Windows and Mac Office reference PDFs). Or, when another session owns
+  the corpus, send it these four items:
+  - the minimal XML;
+  - what Office does, as observed facts from an Office-exported PDF: page,
+    position and size, line and page breaks;
+  - what the viewer does now: an error, or the visible difference;
+  - the branch or PR that carries the fix, if any.
+- Say in the PR or handoff which pattern was handed over and where it went.
+  The fix still needs its own focused regression test; the specimen does not
+  replace it.
 
 Regression detection must compare the changed renderer with images produced by
 the previous renderer. It must not use Word/Excel/PowerPoint or PDF reference
