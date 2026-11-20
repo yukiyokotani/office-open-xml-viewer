@@ -482,6 +482,10 @@ export interface NaturalClusterAdvance {
   readonly advancePx: number;
   /** Vertical cells only: the planner floored this cell. */
   readonly floored?: boolean;
+  /** Shaped horizontal clusters only: the advance with just the preceding
+   * grapheme as context, the cheap estimate {@link condensedFloorAdvancesPx}
+   * screens with before it reads `advancePx`. */
+  readonly pairAdvancePx?: number;
 }
 
 
@@ -604,13 +608,67 @@ export function condensedUnitAdvancesPx(
 
 /** Whether {@link condensedUnitAdvancesPx} reaches the floor: a negative
  * horizontal unit, or a vertical cell the planner floored. */
-export function condensedUnitsFloor(
+function condensedUnitsFloor(
   units: CondensedAdvanceUnits,
   advances: readonly number[],
 ): boolean {
   return units.kind === 'vertical-cells'
     ? units.cells.some((cell) => cell.floored === true)
     : advances.some((advance) => advance < 0);
+}
+
+
+/** Whether the clusters' pair-context estimates clear the floor without the
+ * exact contextual advances (#1986): every estimated unit advance is at least
+ * the segment's per-character condensing `m` (> 0 whenever the floor applies).
+ * A unit's exact and estimated advances differ only by
+ * `charScale * (pairAdvancePx - advancePx)`, the change that context before
+ * the preceding grapheme makes to its shaped increment; while that change is
+ * at most `m`, an estimate of at least `m` proves an exact advance >= 0, so
+ * no unit floors and the caller's result is the signed arithmetic either way.
+ * The first two clusters of a slice share their exact windows (estimate ===
+ * exact). Anything else (a missing estimate, a non-positive scale, a margin
+ * the units cannot cover, a non-finite value) answers false: the exact path. */
+function pairEstimatesClearFloor(
+  seg: LayoutTextSeg,
+  grid: DocGridCtx | undefined,
+  scale: number,
+  units: CondensedAdvanceUnits,
+): boolean {
+  if (units.kind !== 'natural-clusters') return false;
+  const gridPx = segmentCharacterGridDeltaPx(seg, grid, scale);
+  const spacingPx = charSpacingDeltaPx(seg, scale);
+  const charScale = charScaleFactor(seg);
+  const marginPx = Math.max(-gridPx, -(gridPx + spacingPx));
+  if (!(charScale > 0) || !(marginPx > 0) || !Number.isFinite(marginPx * charScale)) return false;
+  const adjustmentPx = condensedCharacterAdjustments(seg, grid, scale);
+  let offset = 0;
+  for (const unit of units.clusters) {
+    const start = offset;
+    offset += unit.text.length;
+    if (unit.pairAdvancePx === undefined) return false;
+    const estimate = unit.pairAdvancePx * charScale
+      + countedSpacingAdvance(countSpacingCharacters(unit.text), gridPx, spacingPx, gridPx + spacingPx)
+      + adjustmentPx(start, offset);
+    if (!(estimate >= marginPx) || !Number.isFinite(estimate)) return false;
+  }
+  return offset === seg.text.length;
+}
+
+
+/** The units' signed advances ({@link condensedUnitAdvancesPx}) when some unit
+ * reaches the floor, otherwise `undefined`. The pair-context screen
+ * ({@link pairEstimatesClearFloor}) answers the common unfloored case
+ * without reading any exact contextual advance. */
+export function condensedFloorAdvancesPx(
+  seg: LayoutTextSeg,
+  grid: DocGridCtx | undefined,
+  scale: number,
+  units: CondensedAdvanceUnits,
+): readonly number[] | undefined {
+  if (pairEstimatesClearFloor(seg, grid, scale, units)) return undefined;
+  const advances = condensedUnitAdvancesPx(seg, grid, scale, units);
+  return condensedUnitsFloor(units, advances) ? advances : undefined;
 }
 
 
@@ -624,8 +682,8 @@ function condensedFlooredAdvancePx(
   scale: number,
   units: CondensedAdvanceUnits,
 ): number | undefined {
-  const advances = condensedUnitAdvancesPx(seg, grid, scale, units);
-  if (!condensedUnitsFloor(units, advances)) return undefined;
+  const advances = condensedFloorAdvancesPx(seg, grid, scale, units);
+  if (!advances) return undefined;
   let total = 0;
   for (const advance of advances) total += advance > 0 ? advance : 0;
   return total;
@@ -636,8 +694,13 @@ function condensedFlooredAdvancePx(
  * WORD_CONDENSED_SPACING_ADVANCE_FLOOR, used by line fitting and retained
  * geometry alike: each grapheme of `segment.text[start, end)` measured with up
  * to {@link CONDENSED_CONTEXT_GRAPHEMES} preceding graphemes of the same slice,
- * minus that context. Linear in the slice length; every measured UTF-16 unit
- * is charged to `reserveWork`. */
+ * minus that context. Linear in the slice length; every UTF-16 unit of the
+ * exact windows is charged to `reserveWork`, in order, whether or not read.
+ *
+ * Shaped clusters after the second also carry the cheap pair-context
+ * estimate `pairAdvancePx` (bigram windows, which the shaper's cache mostly
+ * answers) and measure their exact K-context windows only when `advancePx`
+ * is first read, so a floor screen that clears them never shapes those. */
 export function contextualGraphemeAdvances(
   segment: LayoutTextSeg,
   start: number,
@@ -651,30 +714,46 @@ export function contextualGraphemeAdvances(
     ...graphemeClusterOffsets(segment.text.slice(start, end)).map((offset) => start + offset),
     end,
   ])].sort((a, b) => a - b);
-  const width = (from: number, to: number): number => {
+  const { text, textLayoutService: service, textShapeRequest: request } = segment;
+  const shaped = service && request;
+  const width = (from: number, to: number, charge = true): number => {
     if (to <= from) return 0;
-    reserveWork(to - from);
-    if (segment.textLayoutService && segment.textShapeRequest) {
-      if (segment.textShapeRequest.text !== segment.text) {
+    if (charge) reserveWork(to - from);
+    if (service && request) {
+      if (request.text !== text) {
         throw new Error('Cluster measurement does not match its retained text range context');
       }
-      return segment.textLayoutService.shape({
-        ...sliceTextShapeRequest(segment.textShapeRequest, from, to),
+      return service.shape({
+        ...sliceTextShapeRequest(request, from, to),
         fontSizePt: fontSizePx,
         measure: true,
         clusterGeometry: false,
       }).advancePt;
     }
-    return measureFallback(segment.text.slice(from, to));
+    return measureFallback(text.slice(from, to));
   };
   const clusters: NaturalClusterAdvance[] = [];
   for (let index = 0; index < offsets.length - 1; index += 1) {
     const clusterStart = offsets[index]!;
     const clusterEnd = offsets[index + 1]!;
     const contextStart = offsets[Math.max(0, index - CONDENSED_CONTEXT_GRAPHEMES)]!;
+    const clusterText = text.slice(clusterStart, clusterEnd);
+    if (!shaped || index < 2) {
+      // Context is at most the preceding grapheme: the pair estimate is exact.
+      const advancePx = width(contextStart, clusterEnd) - width(contextStart, clusterStart);
+      clusters.push(shaped ? { text: clusterText, advancePx, pairAdvancePx: advancePx } : { text: clusterText, advancePx });
+      continue;
+    }
+    reserveWork(clusterEnd - contextStart);
+    reserveWork(clusterStart - contextStart);
+    const previous = offsets[index - 1]!;
+    let exact: number | undefined;
     clusters.push({
-      text: segment.text.slice(clusterStart, clusterEnd),
-      advancePx: width(contextStart, clusterEnd) - width(contextStart, clusterStart),
+      text: clusterText,
+      pairAdvancePx: width(previous, clusterEnd, false) - width(previous, clusterStart, false),
+      get advancePx() {
+        return exact ??= width(contextStart, clusterEnd, false) - width(contextStart, clusterStart, false);
+      },
     });
   }
   return clusters;
