@@ -5,7 +5,9 @@ import { storeZip } from './conformance/generate.js';
 import { layoutDocument } from './document-layout.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
-import { paintLayoutPageContent } from './paint/canvas-page.js';
+import { paintLayoutPage } from './paint/canvas-page.js';
+import { preloadPaintImages } from './paint/browser-images.js';
+import { rasterPaintOccurrencesForPage } from './layout/text-index.js';
 import type { DocumentLayout, LayoutRect, PaintResourceKind } from './layout/types.js';
 import type { CanvasPaintResourcePainter } from './paint/types.js';
 import { makeRecordingCanvas } from './test-support/recording-canvas.test-support.js';
@@ -99,12 +101,13 @@ function recordingContext(): { ctx: CanvasRenderingContext2D; events: string[] }
   return { ctx, events };
 }
 
-function paint(result: DocumentLayout, pageIndex = 0, resources?: CanvasPaintResourcePainter) {
+/** Paint one page through the page-surface owner (`paintLayoutPage`), which
+ * fills the surface with the background colour before the page content. */
+async function paint(result: DocumentLayout, pageIndex = 0, resources?: CanvasPaintResourcePainter) {
   const { ctx, events } = recordingContext();
-  paintLayoutPageContent(result.pages[pageIndex]!, {
-    ctx, scale: 1, dpr: 1,
-    resources: resources ?? { paint: () => { throw new Error('unexpected resource'); } },
-  });
+  const target = { width: 0, height: 0, getContext: () => ctx } as unknown as OffscreenCanvas;
+  await paintLayoutPage(result, pageIndex, target, { scale: 1, dpr: 1 },
+    resources ?? { paint: () => { throw new Error('unexpected resource'); } });
   return events;
 }
 
@@ -117,20 +120,18 @@ describe('§17.2.1 document background', () => {
     ['absent', '', null],
     ['val=false', '<w:displayBackgroundShape w:val="false"/>', null],
     ['val=0', '<w:displayBackgroundShape w:val="0"/>', null],
-  ])('displayBackgroundShape %s decides whether the theme colour is painted', (_label, settings, expected) => {
+  ])('displayBackgroundShape %s decides whether the theme colour is painted', async (_label, settings, expected) => {
     const result = layout(parse({ background: THEMED, settings }));
     const page = result.pages[0]!;
     if (expected === null) {
       expect(page.pageBackground).toBeUndefined();
-      expect(paint(result).some((event) => event.startsWith('rect:'))).toBe(false);
+      expect((await paint(result)).some((event) => event.startsWith('rect:'))).toBe(false);
       return;
     }
     // themeColor accent1 (4F81BD) with themeTint 0x99 overrides w:color.
-    expect(page.pageBackground?.commands).toEqual([{
-      kind: 'fill-rect',
-      rect: { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 },
-      fill: expected,
-    }]);
+    expect(page.pageBackground).toEqual({ color: expected, commands: [] });
+    // The colour is the page surface: one full-page fill, nothing stacked.
+    expect((await paint(result)).filter((event) => event.startsWith('rect:'))).toEqual([`rect:${expected.toLowerCase()}`]);
   });
 
   it('resolves background1 through the settings colour scheme mapping', () => {
@@ -138,39 +139,40 @@ describe('§17.2.1 document background', () => {
       background: '<w:background w:color="FFFFFF" w:themeColor="background1"/>',
       settings: '<w:displayBackgroundShape/><w:clrSchemeMapping w:bg1="dark2"/>',
     })).pages[0]!;
-    expect(page.pageBackground?.commands[0]).toMatchObject({ kind: 'fill-rect', fill: '#1F497D' });
+    expect(page.pageBackground?.color).toBe('#1F497D');
   });
 
-  it('paints the background before the header, behind-text drawings and body text', () => {
+  it('paints the background before the header, behind-text drawings and body text', async () => {
     const behindText = '<w:p><w:r><w:pict><v:rect style="position:absolute;margin-left:0;margin-top:0;width:50pt;height:50pt;z-index:-1" fillcolor="#ff0000" stroked="f"/></w:pict></w:r><w:r><w:t>Body</w:t></w:r></w:p>';
     const result = layout(parse({
       background: '<w:background w:color="22551B"/>', body: behindText, header: true,
     }));
-    const events = paint(result);
+    const events = await paint(result);
     // The full-page colour precedes every story and anchored drawing.
     expect(events).toEqual(['rect:#22551b', 'text:Header', 'fill:rgba(255,0,0,1)', 'text:Body']);
   });
 
-  it('layers a VML gradient above the solid colour on every page', () => {
+  it('layers a VML gradient above the solid colour on every page', async () => {
     const background = '<w:background w:color="FFF0E1"><v:background fillcolor="#fff0e1 [3201]"><v:fill type="gradient" color2="#4f81bd [3204]"/></v:background></w:background>';
     const twoPages = '<w:p><w:r><w:t>One</w:t></w:r></w:p><w:p><w:r><w:br w:type="page"/><w:t>Two</w:t></w:r></w:p>';
     const result = layout(parse({ background, body: twoPages }));
     expect(result.pages).toHaveLength(2);
     for (const pageIndex of [0, 1]) {
       const commands = result.pages[pageIndex]!.pageBackground!.commands;
-      expect(commands.map((command) => command.kind)).toEqual(['fill-rect', 'drawingml-shape']);
-      const shape = commands[1];
+      expect(result.pages[pageIndex]!.pageBackground!.color).toBe('#FFF0E1');
+      expect(commands.map((command) => command.kind)).toEqual(['drawingml-shape']);
+      const shape = commands[0];
       if (shape?.kind !== 'drawingml-shape') throw new Error('gradient command');
       expect(shape.plan.rect).toEqual({ x: 0, y: 0, w: 612, h: 792 });
       expect(shape.plan.fill).toMatchObject({ fillType: 'gradient', stops: [{ color: 'fff0e1' }, { color: '4f81bd' }] });
-      const events = paint(result, pageIndex);
+      const events = await paint(result, pageIndex);
       expect(events[0]).toBe('rect:#fff0e1');
       expect(events[1]).toMatch(/^fill:gradient:/u);
       expect(events.findIndex((event) => event.startsWith('text:'))).toBeGreaterThan(1);
     }
   });
 
-  it('retains one page-sized VML picture brush per physical page size', () => {
+  it('retains one page-sized VML picture brush per physical page size', async () => {
     const background = '<w:background><v:background><v:fill r:id="rTexture" type="tile"/></v:background></w:background>';
     // The first section is landscape: a second physical page size.
     const body = '<w:p><w:pPr><w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr></w:pPr><w:r><w:t>Wide</w:t></w:r></w:p><w:p><w:r><w:t>Tall</w:t></w:r></w:p>';
@@ -197,8 +199,24 @@ describe('§17.2.1 document background', () => {
         vmlFill: { repeat: true },
       });
     }
+    // The background brushes are canonical raster demand: page preparation
+    // fetches their part (decode itself needs a browser).
+    for (const [pageIndex, key] of keys.entries()) {
+      const occurrences = rasterPaintOccurrencesForPage(result, pageIndex);
+      expect(occurrences).toContainEqual({
+        resourceKey: key, resourceKind: 'image',
+        widthPt: result.pages[pageIndex]!.geometry.widthPt,
+        heightPt: result.pages[pageIndex]!.geometry.heightPt,
+      });
+      const fetched: string[] = [];
+      await preloadPaintImages(
+        descriptors.filter((candidate) => candidate.resourceKey === key), occurrences,
+        async (path) => { fetched.push(path); return new Blob([new Uint8Array([0x89, 0x50])], { type: 'image/png' }); },
+      ).catch(() => undefined);
+      expect(fetched).toContain('word/media/texture.png');
+    }
     const painted: Array<[string, PaintResourceKind, LayoutRect]> = [];
-    const events = paint(result, 1, {
+    const events = await paint(result, 1, {
       paint: (key: string, kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([key, kind, bounds]); },
     });
     expect(painted).toEqual([[keys[1], 'image', { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 }]]);
@@ -208,7 +226,7 @@ describe('§17.2.1 document background', () => {
   const inline = (graphic: string, cx = 914400, cy = 457200) => `<w:drawing><wp:inline><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="9" name="bg"/><a:graphic>${graphic}</a:graphic></wp:inline></w:drawing>`;
   const rect = (x: number, fill: string) => `<wps:wsp><wps:cNvPr id="${x + 10}" name="r"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="${x}" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>${fill}<a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>`;
 
-  it('paints a DrawingML group background over the page box beneath every story', () => {
+  it('paints a DrawingML group background over the page box beneath every story', async () => {
     const group = inline(`<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="457200"/></a:xfrm></wpg:grpSpPr>${
       rect(0, '<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>')}${
       rect(457200, '<a:solidFill><a:srgbClr val="0000FF"/></a:solidFill>')}</wpg:wgp></a:graphicData>`);
@@ -229,22 +247,22 @@ describe('§17.2.1 document background', () => {
       { x: 306, y: 0, w: 306, h: 792 },
     ]);
     expect(result.diagnostics).toEqual([]);
-    expect(paint(result)).toEqual([
+    expect(await paint(result)).toEqual([
       'rect:#22551b', 'fill:rgba(255,0,0,1)', 'fill:rgba(0,0,255,1)', 'text:Header', 'text:Body',
     ]);
   });
 
-  it('paints a chart background through the retained chart resource at page size', () => {
+  it('paints a chart background through the retained chart resource at page size', async () => {
     const chart = inline('<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData>');
     const model = parse({ background: `<w:background>${chart}</w:background>` });
     const result = layout(model);
     const painted: Array<[PaintResourceKind, LayoutRect]> = [];
-    paint(result, 0, { paint: (_key: string, kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([kind, bounds]); } });
+    await paint(result, 0, { paint: (_key: string, kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([kind, bounds]); } });
     expect(painted).toEqual([['chart', { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 }]]);
     expect(result.pages[0]!.pageBackground).toBeUndefined();
   });
 
-  it('tiles a DrawingML picture fill of a background shape', () => {
+  it('tiles a DrawingML picture fill of a background shape', async () => {
     const tiled = inline(`<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">${
       rect(0, '<a:blipFill><a:blip r:embed="rTexture"/><a:tile tx="0" ty="0" sx="50000" sy="50000" flip="x" algn="tl"/></a:blipFill>')
     }</a:graphicData>`, 457200, 457200);
@@ -259,7 +277,27 @@ describe('§17.2.1 document background', () => {
       .find((candidate) => candidate.resourceKey === command.resourceKey);
     expect(descriptor).toMatchObject({ kind: 'image', tile: { sx: 0.5, sy: 0.5, flip: 'x', algn: 'tl' } });
     const painted: Array<[string, LayoutRect]> = [];
-    paint(result, 0, { paint: (key: string, _kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([key, bounds]); } });
+    await paint(result, 0, { paint: (key: string, _kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([key, bounds]); } });
     expect(painted).toEqual([[command.resourceKey, { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 }]]);
+  });
+
+  it('keeps the background drawing story on a parity blank page and nothing else', async () => {
+    const picture = inline(`<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">${
+      rect(0, '<a:solidFill><a:srgbClr val="00FF00"/></a:solidFill>')}</a:graphicData>`, 457200, 457200);
+    // The second section starts on an odd page, so page 2 is a parity blank.
+    const body = '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr></w:pPr><w:r><w:t>One</w:t></w:r></w:p><w:p><w:r><w:t>Three</w:t></w:r></w:p>';
+    const model = parse({ background: `<w:background>${picture}</w:background>`, body, header: true });
+    const xml = JSON.stringify(model);
+    expect(xml).toContain('"type":"sectionBreak"');
+    const sectioned = JSON.parse(xml.replace('"sectionStart":null', '"sectionStart":"oddPage"')) as DocxDocumentModel;
+    sectioned.section.sectionStart = 'oddPage';
+    const result = layout(sectioned);
+    expect(result.pages.map((page) => page.parityBlank)).toEqual([false, true, false]);
+    const blank = result.pages[1]!;
+    expect(blank.layers.roots.map((root) => root.layer)).toEqual(['background']);
+    expect(blank.readingOrder).toEqual(blank.layers.roots.map((root) => root.node.id));
+    expect(blank.flowDomains.map((domain) => domain.id)).toEqual(['story:page-background:page:1']);
+    const events = await paint(result, 1);
+    expect(events).toEqual(['fill:rgba(0,255,0,1)']);
   });
 });

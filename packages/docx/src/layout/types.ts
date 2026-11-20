@@ -1236,13 +1236,17 @@ export interface PageBorderLayout {
   readonly segments: readonly BorderSegment[];
 }
 
-/** ECMA-376 §17.2.1 document background of one page: full-page commands in
- * physical page points (`fill-rect` for the solid colour, then each
- * background shape fill). Paint replays them before every other page layer. */
+/** ECMA-376 §17.2.1 document background of one page, in physical page
+ * points. `color` is the page surface colour: whoever owns the page surface
+ * paints it once in place of the default white page fill (same geometry, so
+ * a white background is pixel-identical to no background). `commands` are the
+ * full-page background shape fills replayed above it, before every other page
+ * layer. */
 export interface PageBackgroundLayout {
+  readonly color: string | null;
   readonly commands: readonly Extract<
     DrawingPaintCommand,
-    { kind: 'fill-rect' | 'drawingml-shape' | 'drawingml-image-fill' }
+    { kind: 'drawingml-shape' | 'drawingml-image-fill' }
   >[];
 }
 

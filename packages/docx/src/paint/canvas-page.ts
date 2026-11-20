@@ -277,9 +277,11 @@ function paintPageContents(
       });
     }
   };
-  // ECMA-376 §17.2.1: the document background (its colour and VML fills,
-  // then the `background` layer holding its drawing story) fills the
-  // physical page behind all other content, a back page border included.
+  // ECMA-376 §17.2.1: the document background (its VML fills, then the
+  // `background` layer holding its drawing story) fills the physical page
+  // behind all other content, a back page border included. Its colour is
+  // the page surface, painted by the surface owner (paintLayoutPage here,
+  // or the document renderer's page fill).
   const firstNonBackground = entries.findIndex((entry) => entry.sourceLayer !== 'background');
   const backgroundEnd = Math.min(
     firstNonBackground === -1 ? entries.length : firstNonBackground,
@@ -348,6 +350,10 @@ export async function paintLayoutPage(
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, target.width, target.height);
     ctx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+    if (page.pageBackground?.color) {
+      ctx.fillStyle = page.pageBackground.color;
+      ctx.fillRect(0, 0, page.geometry.widthPt, page.geometry.heightPt);
+    }
     paintLayoutPageContent(page, {
       ctx, scale: options.scale, dpr: options.dpr, resources,
     });

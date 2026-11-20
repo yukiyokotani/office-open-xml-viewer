@@ -666,10 +666,12 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
     }
     requirePageBorder(page, `pages[${pageIndex}].pageBorder`);
     if (page.pageBackground !== undefined) {
-      if (!Array.isArray(page.pageBackground.commands) || page.pageBackground.commands.length === 0) {
+      const { color, commands } = page.pageBackground;
+      if ((color !== null && !/^#[0-9A-F]{6}$/u.test(color))
+        || !Array.isArray(commands) || (color === null && commands.length === 0)) {
         throw new LayoutInvariantError(
           'INVALID_GEOMETRY',
-          `pages[${pageIndex}].pageBackground has no commands`,
+          `pages[${pageIndex}].pageBackground paints nothing or has an invalid colour`,
         );
       }
       requireDrawingCommands(
@@ -694,13 +696,19 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
       domains.set(domain.id, domain);
     });
 
+    // A parity blank page carries no stories, but ECMA-376 §17.2.1 makes the
+    // document background a fact of every page: its `background`-layer
+    // story (and that story's flow domain) is the only content admitted.
+    const backgroundRoots = page.layers.roots.filter((root) => root.layer === 'background');
+    const backgroundNodeIds = new Set(backgroundRoots.map((root) => root.node.id));
+    const backgroundDomainIds = new Set(backgroundRoots.map((root) => root.node.flowDomainId));
     if (page.parityBlank && (
-      page.flowDomains.length > 0
+      page.flowDomains.some((domain) => !backgroundDomainIds.has(domain.id))
       || (page.sectionRegions?.length ?? 0) > 0
       || (page.columnSeparators?.length ?? 0) > 0
-      || pageLayerNodes(page).length > 0
-      || page.layers.roots.length > 0
-      || page.readingOrder.length > 0
+      || pageLayerNodes(page).some((root) => root.layer !== 'background')
+      || page.layers.roots.some((root) => root.layer !== 'background')
+      || page.readingOrder.some((id) => !backgroundNodeIds.has(id))
       || (page.bookmarkStarts?.length ?? 0) > 0
     )) {
       throw new LayoutInvariantError(

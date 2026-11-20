@@ -11,7 +11,10 @@ import {
   captureDecodedBitmapCacheEpoch,
   decodedBitmapTargetResizeOptions,
   duotoneImageData,
+  MAX_RASTER_DIMENSION,
   MAX_RASTER_PIXELS,
+  createAuxCanvas,
+  imageNaturalSize,
   dropCachedDerivedBitmapNamespace,
   getCachedBitmapByPath,
   getCachedDerivedBitmap,
@@ -105,9 +108,112 @@ function requestKey(request: ImageDecodeRequest): string {
 }
 
 const DOCX_COLOR_EFFECT_CACHE_NAMESPACE = 'docx-color-effects';
+const DOCX_TILE_CELL_CACHE_NAMESPACE = 'docx-tile-cells';
 
 export function dropBrowserImageCache(fetchImage: DocxFetchImage): void {
   dropCachedDerivedBitmapNamespace(fetchImage, DOCX_COLOR_EFFECT_CACHE_NAMESPACE);
+  dropCachedDerivedBitmapNamespace(fetchImage, DOCX_TILE_CELL_CACHE_NAMESPACE);
+}
+
+/** Decoded-image map key of an image descriptor's (effect-applied) source. */
+export function paintImageDecodeKey(descriptor: DeepReadonly<ImagePaintResourceDescriptor>): string {
+  return descriptor.blipEffects?.length ? descriptor.resourceKey : imageKey(
+    descriptor.partPath,
+    descriptor.colorReplaceFrom,
+    descriptor.duotone as Duotone | undefined,
+    descriptor.vmlStrokePattern as Duotone | undefined,
+    descriptor.blipEffects,
+  );
+}
+
+/** Whether a §20.1.8.58 tile repeats a composed cell rather than the decoded
+ * source itself: a §20.1.8.55 crop or a `flip` mirror needs one. */
+export function drawingMLTileNeedsCell(descriptor: DeepReadonly<ImagePaintResourceDescriptor>): boolean {
+  const flip = descriptor.tile?.flip;
+  return descriptor.tile !== undefined
+    && (descriptor.srcRect != null || flip === 'x' || flip === 'y' || flip === 'xy');
+}
+
+/** Decoded-image map key of a descriptor's composed tile cell. */
+export function drawingMLTileCellKey(descriptor: DeepReadonly<ImagePaintResourceDescriptor>): string {
+  const crop = descriptor.srcRect ?? { l: 0, t: 0, r: 0, b: 0 };
+  return `${paintImageDecodeKey(descriptor)}|tile-cell:${descriptor.tile?.flip ?? 'none'}:${crop.l}:${crop.t}:${crop.r}:${crop.b}`;
+}
+
+/** Native source-pixel geometry of one tile cell: the §20.1.8.55 crop
+ * window of the decoded source (whose grid stays native for tiles), and the
+ * cell that mirrors it per `flip`. */
+export function drawingMLTileCellGeometry(
+  descriptor: DeepReadonly<ImagePaintResourceDescriptor>,
+  source: CanvasImageSource,
+): Readonly<{
+  sourceX: number; sourceY: number; sourceWidth: number; sourceHeight: number;
+  tileWidthPx: number; tileHeightPx: number; cellWidthPx: number; cellHeightPx: number;
+  flipX: boolean; flipY: boolean;
+}> {
+  const natural = imageNaturalSize(source);
+  const crop = descriptor.srcRect ?? { l: 0, t: 0, r: 0, b: 0 };
+  const sourceWidth = natural.w * (1 - crop.l - crop.r);
+  const sourceHeight = natural.h * (1 - crop.t - crop.b);
+  const flipX = descriptor.tile?.flip === 'x' || descriptor.tile?.flip === 'xy';
+  const flipY = descriptor.tile?.flip === 'y' || descriptor.tile?.flip === 'xy';
+  const tileWidthPx = Math.round(sourceWidth);
+  const tileHeightPx = Math.round(sourceHeight);
+  if (!(Number.isFinite(sourceWidth) && Number.isFinite(sourceHeight) && tileWidthPx >= 1 && tileHeightPx >= 1)) {
+    throw new OoxmlError('unsupported-image-effect', 'Unrepresentable picture tile size');
+  }
+  return {
+    sourceX: natural.w * crop.l, sourceY: natural.h * crop.t, sourceWidth, sourceHeight,
+    tileWidthPx, tileHeightPx,
+    cellWidthPx: tileWidthPx * (flipX ? 2 : 1), cellHeightPx: tileHeightPx * (flipY ? 2 : 1),
+    flipX, flipY,
+  };
+}
+
+/** Compose a tile cell as a document-owned derived bitmap. The cell is
+ * admitted against the shared per-surface axis and pixel ceilings before any
+ * allocation (a negative crop inset or a mirror can otherwise amplify a
+ * source), and is then retained under the same weighted LRU, decode slots,
+ * render-pass lease and aggregate decoded-byte ceiling as its source. The
+ * scratch surface is released once the bitmap is baked. */
+async function drawingMLTileCell(
+  descriptor: DeepReadonly<ImagePaintResourceDescriptor>,
+  source: DecodedImage,
+  fetchImage: DocxFetchImage,
+): Promise<ImageBitmap | null> {
+  const geometry = drawingMLTileCellGeometry(descriptor, source);
+  const pixels = geometry.cellWidthPx * geometry.cellHeightPx;
+  if (geometry.cellWidthPx > MAX_RASTER_DIMENSION || geometry.cellHeightPx > MAX_RASTER_DIMENSION
+    || pixels > MAX_RASTER_PIXELS) {
+    throw new OoxmlDecodedImageLimitError('image-pixels', MAX_RASTER_PIXELS, pixels);
+  }
+  const epoch = captureDecodedBitmapCacheEpoch(fetchImage, DOCX_TILE_CELL_CACHE_NAMESPACE);
+  return getCachedDerivedBitmap(
+    DOCX_TILE_CELL_CACHE_NAMESPACE,
+    drawingMLTileCellKey(descriptor),
+    fetchImage,
+    async () => {
+      const canvas = createAuxCanvas(geometry.cellWidthPx, geometry.cellHeightPx);
+      const context = canvas?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
+      if (!canvas || !context) throw new Error('2D canvas is unavailable for a picture tile cell');
+      try {
+        for (const [mirrorX, mirrorY] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+          if ((mirrorX && !geometry.flipX) || (mirrorY && !geometry.flipY)) continue;
+          context.save();
+          context.translate(geometry.tileWidthPx * (mirrorX ? 2 : 0), geometry.tileHeightPx * (mirrorY ? 2 : 0));
+          context.scale(mirrorX ? -1 : 1, mirrorY ? -1 : 1);
+          context.drawImage(source, geometry.sourceX, geometry.sourceY,
+            geometry.sourceWidth, geometry.sourceHeight, 0, 0, geometry.tileWidthPx, geometry.tileHeightPx);
+          context.restore();
+        }
+        return { bitmap: await createImageBitmap(canvas as unknown as ImageBitmapSource), owned: true };
+      } finally {
+        canvas.width = 1;
+        canvas.height = 1;
+      }
+    },
+    epoch,
+  );
 }
 
 function applyExactColorReplacement(data: ImageData, colorHex: string): void {
@@ -348,9 +454,10 @@ function imageDecodeRequests(
       request.targetHeightPx = target.height;
     }
     const key = requestKey(request);
-    // VML image brushes use native pixel dimensions for size/aspect. Preserve
-    // the source grid even when another occurrence shares this decoded image.
-    if (image.vmlFill) naturalSizeChartKeys.add(key);
+    // VML image brushes and §20.1.8.58 DrawingML tiles take their size from
+    // the native pixel dimensions. Preserve the source grid even when another
+    // occurrence shares this decoded image.
+    if (image.vmlFill || image.tile) naturalSizeChartKeys.add(key);
     const existing = requests.get(key);
     if (!existing) {
       requests.set(key, request);
@@ -618,6 +725,16 @@ export async function preloadPaintImages(
   const decoded = new Map<string, DecodedPaintImage>();
   for (const entry of entries) {
     if (entry) decoded.set(entry[0], entry[1]);
+  }
+  // §20.1.8.58 cells derive from the decoded sources above.
+  for (const descriptor of descriptors) {
+    if ((descriptor.kind !== 'image' && descriptor.kind !== 'picture-bullet')
+      || !drawingMLTileNeedsCell(descriptor)) continue;
+    const key = drawingMLTileCellKey(descriptor);
+    if (decoded.has(key)) continue;
+    const source = decoded.get(paintImageDecodeKey(descriptor));
+    if (!source || isOptionalImageCodecUnavailableError(source, 'tiff')) continue;
+    decoded.set(key, await drawingMLTileCell(descriptor, source as DecodedImage, fetchImage));
   }
   return decoded;
 }

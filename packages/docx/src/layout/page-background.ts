@@ -182,20 +182,14 @@ function pagePlan(
   return { ...plan, resolvedGeometry: resolveDrawingMLGeometry(plan, 1) };
 }
 
-/** Full-page commands of one physical page, painted before any page story,
- * page border or anchored drawing (§17.2.1 "behind all other content"). */
+/** The page surface colour and full-page fill commands of one physical page,
+ * painted before any page story, page border or anchored drawing (§17.2.1
+ * "behind all other content"). */
 export function materializePageBackground(
   input: PageBackgroundLayoutInput,
   extent: PhysicalPageExtent,
 ): PageBackgroundLayout {
   const commands: PageBackgroundLayout['commands'][number][] = [];
-  if (input.color !== null) {
-    commands.push({
-      kind: 'fill-rect',
-      rect: { xPt: 0, yPt: 0, widthPt: extent.widthPt, heightPt: extent.heightPt },
-      fill: `#${input.color}`,
-    });
-  }
   for (const fill of input.fills) {
     if (fill.kind === 'paint') {
       commands.push({ kind: 'drawingml-shape', plan: pagePlan(extent, fill.fill) });
@@ -221,7 +215,7 @@ export function materializePageBackground(
       }),
     });
   }
-  return { commands };
+  return { color: input.color === null ? null : `#${input.color}`, commands };
 }
 
 /** Attach the document background to a completed page (no-op without one). */

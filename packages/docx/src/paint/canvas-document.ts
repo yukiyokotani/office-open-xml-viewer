@@ -36,6 +36,8 @@ import {
   isTerminalImageAcquisitionError,
   preloadPaintImages,
   imageKey,
+  drawingMLTileCellKey,
+  drawingMLTileNeedsCell,
   type DocxFetchImage,
   type DecodedPaintImage,
 } from './browser-images.js';
@@ -580,7 +582,9 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
         paintCanvas.style.height = `${cssHeight}px`;
       }
       context.scale(effectiveDpr, effectiveDpr);
-      context.fillStyle = '#ffffff';
+      // ECMA-376 §17.2.1: a solid document background replaces the white
+      // page surface (one fill, same geometry).
+      context.fillStyle = page.pageBackground?.color ?? '#ffffff';
       context.fillRect(0, 0, cssWidth, cssHeight);
     };
 
@@ -627,7 +631,12 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
           );
         }
         if (image && descriptor.vmlFill) return acquireVmlImageBrush(descriptor, image);
-        if (image && descriptor.tile) return acquireDrawingMLTileBrush(descriptor, image);
+        if (image && descriptor.tile) {
+          const cell = drawingMLTileNeedsCell(descriptor) ? images.get(drawingMLTileCellKey(descriptor)) : undefined;
+          return cell === null
+            ? unavailablePaintResourceHandle('picture tile cell produced no drawable output')
+            : acquireDrawingMLTileBrush(descriptor, image, cell as CanvasImageSource | undefined);
+        }
         return image ?? unavailablePaintResourceHandle(
           options.fetchImage
             ? 'unsupported image format produced no drawable output'

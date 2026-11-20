@@ -94,6 +94,9 @@ utils:
       # DPR to choose a retained decode. These resource-policy primitives neither
       # measure nor feed geometry back into DocumentLayout.
       - regex: "^MAX_RASTER_PIXELS$"
+      # Per-axis ceiling admitting a composed §20.1.8.58 tile cell before its
+      # scratch surface is allocated; a resource-policy constant only.
+      - regex: "^MAX_RASTER_DIMENSION$"
       # Decoded-image policy is shared across all format painters. DOCX supplies
       # immutable paint demands and consumes the returned target plan; neither
       # operation may feed measurement or pagination.

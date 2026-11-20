@@ -659,6 +659,21 @@ function pageGeometryIndex(
     emittedRasterDrawings: new Set(),
     drawingSourceOrder: 0,
   };
+  // ECMA-376 §17.2.1: the page background's picture brushes are painted in
+  // physical page points before every page root, outside the story graph.
+  if (context.collectRasterPaintOccurrences) {
+    for (const command of page.pageBackground?.commands ?? []) {
+      if (command.kind !== 'drawingml-image-fill') continue;
+      const { x, y, w, h } = command.plan.rect;
+      const fillRect = command.fillRect ?? { l: 0, t: 0, r: 0, b: 0 };
+      appendRasterPaintOccurrence(context, command.resourceKey, 'image', {
+        xPt: x + fillRect.l * w,
+        yPt: y + fillRect.t * h,
+        widthPt: w * (1 - fillRect.l - fillRect.r),
+        heightPt: h * (1 - fillRect.t - fillRect.b),
+      }, IDENTITY_AFFINE);
+    }
+  }
   const rootOrder = context.collectRasterPaintOccurrences
     ? page.layers.roots.map(({ node }) => node.id)
     : page.readingOrder;
