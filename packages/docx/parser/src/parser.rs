@@ -15021,6 +15021,10 @@ fn parse_shape_fill(
                 };
                 return FillSpec::Explicit(Box::new(ShapeFill::Image {
                     vml: None,
+                    // §20.1.8.14 xsd:unsignedInt; an unparsable value is absent.
+                    dpi: child
+                        .attribute("dpi")
+                        .and_then(|value| value.trim().parse::<u32>().ok()),
                     image_path,
                     mime_type,
                     svg_image_path,
@@ -30540,7 +30544,7 @@ mod inline_wps_shape_tests {
             "word/media/overlay.png".to_string(),
         )]);
         let runs = inline_shape_runs(
-            r#"<a:blipFill>
+            r#"<a:blipFill dpi="192">
                  <a:blip r:embed="rIdOverlay"/>
                  <a:tile tx="12700" ty="-25400" sx="50000" sy="75000" flip="xy" algn="ctr"/>
                </a:blipFill>"#,
@@ -30558,6 +30562,8 @@ mod inline_wps_shape_tests {
         assert_eq!(json["tile"]["sy"], 0.75);
         assert_eq!(json["tile"]["flip"], "xy");
         assert_eq!(json["tile"]["algn"], "ctr");
+        // §20.1.8.14 dpi is retained on the private wire.
+        assert_eq!(json["__dpi"], 192);
     }
 
     #[test]

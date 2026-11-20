@@ -27,7 +27,7 @@ export function chartPaintResourceKey(source: import('./types.js').SourceRef): s
   return chartResourceKey(source);
 }
 
-type ImageDescriptorOptions = Partial<ImageRun> & Pick<ImagePaintResourceDescriptor, 'vmlFill' | 'vmlStrokePattern' | 'effectHost' | 'tile'>;
+type ImageDescriptorOptions = Partial<ImageRun> & Pick<ImagePaintResourceDescriptor, 'vmlFill' | 'vmlStrokePattern' | 'effectHost' | 'tile' | 'blipDpi'>;
 
 type ImageDescriptorCandidate = Omit<ImagePaintResourceDescriptor, 'intrinsicSize' | 'mimeType'>;
 
@@ -54,6 +54,7 @@ function imageCandidate(
     ...(run.vmlStrokePattern === undefined ? {} : { vmlStrokePattern: run.vmlStrokePattern }),
     ...(run.vmlFill === undefined ? {} : { vmlFill: run.vmlFill }),
     ...(run.tile === undefined ? {} : { tile: { ...run.tile } }),
+    ...(run.blipDpi === undefined ? {} : { blipDpi: run.blipDpi }),
     ...(run.blipEffects?.length ? { blipEffects: run.blipEffects.map(effect => ({ ...effect })) } : {}),
     ...(run.effectHost === undefined ? {} : { effectHost: { ...run.effectHost } }),
   };
@@ -99,6 +100,10 @@ function collectDescriptorCandidates(
     if (run.type !== 'shape') return;
     const shape = run as ShapeRun & import('./types.js').VmlShapeAcquisitionFacts & Readonly<{ textBoxContent?: BodyElement[] }>;
     if (shape.fill?.fillType === 'image') {
+      // §20.1.8.14 authored DPI (private wire); 0 or absence defers to the blip.
+      const authoredDpi = (shape.fill as { __dpi?: unknown }).__dpi;
+      const blipDpi = typeof authoredDpi === 'number' && Number.isFinite(authoredDpi) && authoredDpi > 0
+        ? authoredDpi : undefined;
       addImage(
         'image', source, shape.fill.imagePath, shape.fill.mimeType,
         shape.widthPt, shape.heightPt,
@@ -116,11 +121,14 @@ function collectDescriptorCandidates(
             effectHost: {
               rotation: shape.rotation, flipH: shape.flipH, flipV: shape.flipV,
               ...(shape.fill.fillRect === undefined ? {} : { fillRect: { ...shape.fill.fillRect } }),
-              ...(shape.fill.tile ? { tileDpi: 96 } : {}),
+              // Physical effects of a tile sample at its DPI; preparation
+              // replaces this with the blip's own DPI when none is authored.
+              ...(shape.fill.tile ? { tileDpi: blipDpi ?? 96 } : {}),
             },
           } : {}),
           ...(shape.fill.vml === undefined ? {} : { vmlFill: shape.fill.vml }),
           ...(shape.fill.tile === undefined ? {} : { tile: shape.fill.tile }),
+          ...(shape.fill.tile === undefined || blipDpi === undefined ? {} : { blipDpi }),
         },
       );
     }

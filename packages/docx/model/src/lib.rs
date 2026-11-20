@@ -2683,6 +2683,12 @@ pub enum ShapeFill {
         blip_effects: Vec<BlipEffect>,
         #[serde(skip_serializing_if = "Option::is_none")]
         vml: Option<VmlImageFill>,
+        /// ECMA-376 §20.1.8.14 `CT_BlipFillProperties@dpi`, as authored (0
+        /// and absence both mean the DPI stored in the blip). It converts
+        /// native image pixels to a physical size for a §20.1.8.58 tile and
+        /// for physical blip effects. Private wire; VML fills carry none.
+        #[serde(rename = "__dpi", skip_serializing_if = "Option::is_none")]
+        dpi: Option<u32>,
     },
 }
 

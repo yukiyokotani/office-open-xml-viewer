@@ -542,6 +542,9 @@ export type ImagePaintResourceDescriptor = Readonly<{
    * with the decoded image into a repeating brush registered against the
    * painted bounds (independent of `intrinsicSize`). */
   tile?: DeepReadonly<import('@silurus/ooxml-core').TileInfo>;
+  /** ECMA-376 §20.1.8.14 authored positive `blipFill@dpi`. Absent (and an
+   * authored 0) means the DPI declared by the blip itself. */
+  blipDpi?: number;
   blipEffects?: DeepReadonly<import('@silurus/ooxml-core').BlipEffect[]>;
   /** Host shape orientation for CT_Blip effects on a shape blip fill
    * (§20.1.8.45/.49 rotWithShape): the fill paints inside the rotated shape,

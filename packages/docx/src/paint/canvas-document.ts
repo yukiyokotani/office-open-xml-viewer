@@ -37,7 +37,6 @@ import {
   preloadPaintImages,
   imageKey,
   drawingMLTileCellKey,
-  drawingMLTileNeedsCell,
   type DocxFetchImage,
   type DecodedPaintImage,
 } from './browser-images.js';
@@ -632,10 +631,10 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
         }
         if (image && descriptor.vmlFill) return acquireVmlImageBrush(descriptor, image);
         if (image && descriptor.tile) {
-          const cell = drawingMLTileNeedsCell(descriptor) ? images.get(drawingMLTileCellKey(descriptor)) : undefined;
-          return cell === null
-            ? unavailablePaintResourceHandle('picture tile cell produced no drawable output')
-            : acquireDrawingMLTileBrush(descriptor, image, cell as CanvasImageSource | undefined);
+          const cell = images.get(drawingMLTileCellKey(descriptor));
+          // A §20.1.8.55 window with no positive extent selects nothing.
+          return acquireDrawingMLTileBrush(descriptor, image, cell as CanvasImageSource | null | undefined)
+            ?? unavailablePaintResourceHandle('picture tile window selects no content');
         }
         return image ?? unavailablePaintResourceHandle(
           options.fetchImage

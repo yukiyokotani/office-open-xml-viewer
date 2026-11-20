@@ -97,6 +97,12 @@ utils:
       # Per-axis ceiling admitting a composed §20.1.8.58 tile cell before its
       # scratch surface is allocated; a resource-policy constant only.
       - regex: "^MAX_RASTER_DIMENSION$"
+      # The authored frame of a grown effect surface and the neighbour periods
+      # its outset reaches: the §20.1.8.58 tile period and cell composition.
+      # Decoded-image geometry and a work ceiling only.
+      - regex: "^imageEffectFrame$"
+      - regex: "^imageEffectOutsetPeriods$"
+      - regex: "^MAX_IMAGE_EFFECT_PIXEL_WORK$"
       # Decoded-image policy is shared across all format painters. DOCX supplies
       # immutable paint demands and consumes the returned target plan; neither
       # operation may feed measurement or pagination.

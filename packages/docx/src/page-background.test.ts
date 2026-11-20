@@ -264,7 +264,7 @@ describe('§17.2.1 document background', () => {
 
   it('tiles a DrawingML picture fill of a background shape', async () => {
     const tiled = inline(`<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">${
-      rect(0, '<a:blipFill><a:blip r:embed="rTexture"/><a:tile tx="0" ty="0" sx="50000" sy="50000" flip="x" algn="tl"/></a:blipFill>')
+      rect(0, '<a:blipFill dpi="192"><a:blip r:embed="rTexture"/><a:tile tx="0" ty="0" sx="50000" sy="50000" flip="x" algn="tl"/></a:blipFill>')
     }</a:graphicData>`, 457200, 457200);
     const model = parse({ background: `<w:background>${tiled}</w:background>` });
     const result = layout(model);
@@ -275,7 +275,10 @@ describe('§17.2.1 document background', () => {
     expect(command.plan.rect).toEqual({ x: 0, y: 0, w: 612, h: 792 });
     const descriptor = layoutSourceStore(model).paintResources.descriptors
       .find((candidate) => candidate.resourceKey === command.resourceKey);
-    expect(descriptor).toMatchObject({ kind: 'image', tile: { sx: 0.5, sy: 0.5, flip: 'x', algn: 'tl' } });
+    // §20.1.8.14 blipFill@dpi travels parser → model → resource acquisition.
+    expect(descriptor).toMatchObject({
+      kind: 'image', tile: { sx: 0.5, sy: 0.5, flip: 'x', algn: 'tl' }, blipDpi: 192,
+    });
     const painted: Array<[string, LayoutRect]> = [];
     await paint(result, 0, { paint: (key: string, _kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([key, bounds]); } });
     expect(painted).toEqual([[command.resourceKey, { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 }]]);

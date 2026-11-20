@@ -1,5 +1,5 @@
 import { imageNaturalSize } from '@silurus/ooxml-core';
-import { drawingMLTileCellGeometry, drawingMLTileNeedsCell } from './browser-images.js';
+import { drawingMLTileDpi, drawingMLTileGeometry } from './browser-images.js';
 import type { DeepReadonly, ImagePaintResourceDescriptor } from '../layout/types.js';
 import type { DrawingMLTileBrush, VmlImageBrush } from './vml-image-brush.js';
 
@@ -38,37 +38,42 @@ export function acquireVmlImageBrush(
 }
 
 /** ECMA-376 §20.1.8.58 DrawingML tile, resolved once after lazy decode. The
- * tile repeats the §20.1.8.55 cropped source (Annex L.4.8.4.3) at its native
- * 96-DPI size scaled by `sx`/`sy`; `algn` registers the first tile against
- * the painted box after scaling, `tx`/`ty` then offset it, and `flip`
- * mirrors alternate tiles (the first is unmirrored). A crop or mirror
- * repeats `cell`, composed and admitted during image preparation
- * (browser-images); this acquisition allocates nothing.
+ * tile repeats the authored frame windowed by §20.1.8.55 (Annex L.4.8.4.3),
+ * whose physical size is its source pixels at the effective §20.1.8.14 DPI
+ * scaled by `sx`/`sy`; `algn` registers the first tile against the painted
+ * box after scaling, `tx`/`ty` then offset it, and `flip` mirrors alternate
+ * tiles (the first is unmirrored). A crop, mirror, effect outset or
+ * fractional window repeats `cell`, composed and admitted during image
+ * preparation (browser-images); this acquisition allocates nothing.
  *
  * CT_TileInfoProperties gives `tx`, `ty`, `sx`, `sy` and `algn` no schema
  * default (`flip` defaults to none). Library policy reads an absent value as
- * the identity: no offset, 100% scale, top-left registration. */
+ * the identity: no offset, 100% scale, top-left registration. A window with
+ * no positive extent selects nothing and yields `null`. */
 export function acquireDrawingMLTileBrush(
   descriptor: DeepReadonly<ImagePaintResourceDescriptor>,
   source: CanvasImageSource,
   cell?: CanvasImageSource | null,
-): Readonly<DrawingMLTileBrush> {
+): Readonly<DrawingMLTileBrush> | null {
   const tile = descriptor.tile;
   if (!tile) throw new Error('Missing DrawingML tile acquisition facts');
-  const geometry = drawingMLTileCellGeometry(descriptor, source);
-  const tileWidthPt = geometry.sourceWidth * 72 / 96 * (tile.sx ?? 1);
-  const tileHeightPt = geometry.sourceHeight * 72 / 96 * (tile.sy ?? 1);
+  const geometry = drawingMLTileGeometry(descriptor, source);
+  if (!geometry) return null;
+  const dpi = drawingMLTileDpi(descriptor, source as object);
+  const tileWidthPt = geometry.windowWidth * 72 / dpi.x * (tile.sx ?? 1);
+  const tileHeightPt = geometry.windowHeight * 72 / dpi.y * (tile.sy ?? 1);
   const offsetXPt = (tile.tx ?? 0) / 12700;
   const offsetYPt = (tile.ty ?? 0) / 12700;
   if (![tileWidthPt, tileHeightPt].every((value) => Number.isFinite(value) && value > 0)
     || ![offsetXPt, offsetYPt].every(Number.isFinite)) {
     throw new RangeError('DrawingML tile requires a positive tile size and a finite offset');
   }
-  const image = drawingMLTileNeedsCell(descriptor) ? cell : source;
+  const image = geometry.needsCell ? cell : source;
   if (!image) throw new Error('DrawingML tile cell was not prepared');
   return Object.freeze({
     kind: 'drawingml-tile-brush', image,
     tileWidthPt, tileHeightPt, alignment: tile.algn ?? 'tl', offsetXPt, offsetYPt,
-    pixelWidth: geometry.tileWidthPx, pixelHeight: geometry.tileHeightPx,
+    pixelWidth: geometry.needsCell ? geometry.tileWidthPx : geometry.naturalWidth,
+    pixelHeight: geometry.needsCell ? geometry.tileHeightPx : geometry.naturalHeight,
   });
 }

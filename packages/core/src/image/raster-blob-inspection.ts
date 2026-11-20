@@ -6,6 +6,7 @@ import {
   type RasterDimensions,
 } from './raster-dimensions.js';
 import { isTiff } from './tiff-contract.js';
+import { sniffRasterResolution, type RasterResolution } from './raster-resolution.js';
 import { isEmf, isWmf } from './wmf.js';
 
 export type RasterFormat = 'png' | 'jpeg' | 'gif' | 'bmp' | 'webp' | 'tiff' | 'wmf' | 'emf';
@@ -13,6 +14,8 @@ export type RasterFormat = 'png' | 'jpeg' | 'gif' | 'bmp' | 'webp' | 'tiff' | 'w
 export interface RasterBlobInspection {
   readonly format: RasterFormat | null;
   readonly dimensions: RasterDimensions | null;
+  /** Physical resolution declared in the header prefix, when present. */
+  readonly resolution?: RasterResolution | null;
 }
 
 /** MIME types whose browser decoder accepts a bounded two-axis resize request.
@@ -227,13 +230,14 @@ export async function inspectRasterBlob(
   const format = rasterFormat(head);
   if (!format) return { format: null, dimensions: null };
   const dimensions = sniffRasterDimensions(head);
+  const resolution = sniffRasterResolution(head);
   // A prefix SOF is insufficient: Chrome also honors EXIF APP1 metadata that
   // follows SOF. Scan every JPEG to the first scan boundary so retained-surface
   // planning uses the decoder-natural orientation.
   if (format === 'jpeg') {
-    return { format, dimensions: await streamJpegDimensions(blob) ?? dimensions };
+    return { format, dimensions: await streamJpegDimensions(blob) ?? dimensions, resolution };
   }
-  if (dimensions) return { format, dimensions };
-  if (format === 'tiff') return { format, dimensions: await deepTiffDimensions(blob, head) };
-  return { format, dimensions: null };
+  if (dimensions) return { format, dimensions, resolution };
+  if (format === 'tiff') return { format, dimensions: await deepTiffDimensions(blob, head), resolution };
+  return { format, dimensions: null, resolution };
 }
