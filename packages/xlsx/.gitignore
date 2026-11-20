@@ -7,7 +7,6 @@ src/wasm/*.wasm
 src/wasm/*.js
 src/wasm/*.ts
 !src/wasm/.gitkeep
-public/private/
 tests/visual/references/private/
 # Local-only Storybook stories that load sample XLSX files
 src/*.privateDemo.stories.ts
