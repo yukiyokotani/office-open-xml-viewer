@@ -47,12 +47,6 @@ export const PARSER_DIAGNOSTIC_CONTRACT = Object.freeze({
     layoutCode: 'UNSUPPORTED_FEATURE',
     message: 'WordprocessingML text effects are not rendered',
   }),
-  UNSUPPORTED_BACKGROUND_DRAWING: Object.freeze({
-    severity: 'warning',
-    part: WORDPROCESSINGML_DOCUMENT_PART,
-    layoutCode: 'UNSUPPORTED_FEATURE',
-    message: 'A document background drawing that is not a page fill was not rendered',
-  }),
   INVALID_TEXT_EFFECT_VALUE: Object.freeze({
     severity: 'warning',
     part: WORDPROCESSINGML_DOCUMENT_PART,

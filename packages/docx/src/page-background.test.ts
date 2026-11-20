@@ -37,11 +37,12 @@ interface Fixture {
 
 function parse({ background, settings = '<w:displayBackgroundShape/>', body, header = false }: Fixture): DocxDocumentModel {
   const paragraph = '<w:p><w:r><w:t>Body</w:t></w:r></w:p>';
-  const document = `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">${background}<w:body>${body ?? paragraph}<w:sectPr>${header ? '<w:headerReference w:type="default" r:id="rHeader"/>' : ''}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr></w:body></w:document>`;
+  const document = `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">${background}<w:body>${body ?? paragraph}<w:sectPr>${header ? '<w:headerReference w:type="default" r:id="rHeader"/>' : ''}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr></w:body></w:document>`;
   const relationships = [
     ['rSettings', 'settings', 'settings.xml'],
     ['rTheme', 'theme', 'theme/theme1.xml'],
     ['rTexture', 'image', 'media/texture.png'],
+    ['rChart', 'chart', 'charts/chart1.xml'],
     ...(header ? [['rHeader', 'header', 'header1.xml']] : []),
   ];
   const files = new Map<string, string | Uint8Array>([
@@ -54,6 +55,7 @@ function parse({ background, settings = '<w:displayBackgroundShape/>', body, hea
     ['word/settings.xml', `<w:settings xmlns:w="${W}">${settings}</w:settings>`],
     ['word/theme/theme1.xml', THEME],
     ['word/media/texture.png', new Uint8Array([0x89, 0x50, 0x4e, 0x47])],
+    ['word/charts/chart1.xml', '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>'],
     ['word/header1.xml', `<w:hdr xmlns:w="${W}"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>`],
   ]);
   const archive = new DocxArchive(storeZip(new Map([...files].map(([name, data]) => [
@@ -201,5 +203,63 @@ describe('§17.2.1 document background', () => {
     });
     expect(painted).toEqual([[keys[1], 'image', { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 }]]);
     expect(events.findIndex((event) => event.startsWith('text:'))).toBeGreaterThanOrEqual(0);
+  });
+
+  const inline = (graphic: string, cx = 914400, cy = 457200) => `<w:drawing><wp:inline><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="9" name="bg"/><a:graphic>${graphic}</a:graphic></wp:inline></w:drawing>`;
+  const rect = (x: number, fill: string) => `<wps:wsp><wps:cNvPr id="${x + 10}" name="r"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="${x}" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom>${fill}<a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>`;
+
+  it('paints a DrawingML group background over the page box beneath every story', () => {
+    const group = inline(`<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="457200"/></a:xfrm></wpg:grpSpPr>${
+      rect(0, '<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>')}${
+      rect(457200, '<a:solidFill><a:srgbClr val="0000FF"/></a:solidFill>')}</wpg:wgp></a:graphicData>`);
+    const result = layout(parse({
+      background: `<w:background w:color="22551B">${group}</w:background>`, header: true,
+    }));
+    const page = result.pages[0]!;
+    const drawings = page.layers.background.flatMap((node) => (
+      node.kind === 'paragraph' ? node.drawings : []));
+    // The group occupies the page box; each member scales from the authored
+    // 72x36pt group frame.
+    expect(drawings.map((drawing) => drawing.flowBounds)).toEqual([
+      { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 },
+    ]);
+    expect(drawings[0]!.commands.map((command) => (
+      command.kind === 'drawingml-shape' ? command.plan.rect : command.kind))).toEqual([
+      { x: 0, y: 0, w: 306, h: 792 },
+      { x: 306, y: 0, w: 306, h: 792 },
+    ]);
+    expect(result.diagnostics).toEqual([]);
+    expect(paint(result)).toEqual([
+      'rect:#22551b', 'fill:rgba(255,0,0,1)', 'fill:rgba(0,0,255,1)', 'text:Header', 'text:Body',
+    ]);
+  });
+
+  it('paints a chart background through the retained chart resource at page size', () => {
+    const chart = inline('<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rChart"/></a:graphicData>');
+    const model = parse({ background: `<w:background>${chart}</w:background>` });
+    const result = layout(model);
+    const painted: Array<[PaintResourceKind, LayoutRect]> = [];
+    paint(result, 0, { paint: (_key: string, kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([kind, bounds]); } });
+    expect(painted).toEqual([['chart', { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 }]]);
+    expect(result.pages[0]!.pageBackground).toBeUndefined();
+  });
+
+  it('tiles a DrawingML picture fill of a background shape', () => {
+    const tiled = inline(`<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">${
+      rect(0, '<a:blipFill><a:blip r:embed="rTexture"/><a:tile tx="0" ty="0" sx="50000" sy="50000" flip="x" algn="tl"/></a:blipFill>')
+    }</a:graphicData>`, 457200, 457200);
+    const model = parse({ background: `<w:background>${tiled}</w:background>` });
+    const result = layout(model);
+    const drawing = result.pages[0]!.layers.background.flatMap((node) => (
+      node.kind === 'paragraph' ? node.drawings : []))[0]!;
+    const command = drawing.commands.find((candidate) => candidate.kind === 'drawingml-image-fill');
+    if (command?.kind !== 'drawingml-image-fill') throw new Error('tiled picture fill command');
+    expect(command.plan.rect).toEqual({ x: 0, y: 0, w: 612, h: 792 });
+    const descriptor = layoutSourceStore(model).paintResources.descriptors
+      .find((candidate) => candidate.resourceKey === command.resourceKey);
+    expect(descriptor).toMatchObject({ kind: 'image', tile: { sx: 0.5, sy: 0.5, flip: 'x', algn: 'tl' } });
+    const painted: Array<[string, LayoutRect]> = [];
+    paint(result, 0, { paint: (key: string, _kind: PaintResourceKind, bounds: LayoutRect) => { painted.push([key, bounds]); } });
+    expect(painted).toEqual([[command.resourceKey, { xPt: 0, yPt: 0, widthPt: 612, heightPt: 792 }]]);
   });
 });

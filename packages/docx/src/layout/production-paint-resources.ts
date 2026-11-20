@@ -11,9 +11,9 @@ import type {
 import type { ImageMetadataRecord, MathOccurrence, PictureBulletSizeResolver } from './resources.js';
 import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import { chartResourceKey, imageResourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
-import { documentPageObjects } from '../page-object-wire.js';
+import { documentPageBackgroundStory, documentPageObjects } from '../page-object-wire.js';
 import { pageObjectStorySource } from './body-layout-input.js';
-import type { PageBackgroundLayoutInput } from './page-background.js';
+import { pageBackgroundStorySource, type PageBackgroundLayoutInput } from './page-background.js';
 import {
   createPaintResourceRegistry,
 } from './paint-resources.js';
@@ -27,7 +27,7 @@ export function chartPaintResourceKey(source: import('./types.js').SourceRef): s
   return chartResourceKey(source);
 }
 
-type ImageDescriptorOptions = Partial<ImageRun> & Pick<ImagePaintResourceDescriptor, 'vmlFill' | 'vmlStrokePattern' | 'effectHost'>;
+type ImageDescriptorOptions = Partial<ImageRun> & Pick<ImagePaintResourceDescriptor, 'vmlFill' | 'vmlStrokePattern' | 'effectHost' | 'tile'>;
 
 type ImageDescriptorCandidate = Omit<ImagePaintResourceDescriptor, 'intrinsicSize' | 'mimeType'>;
 
@@ -53,6 +53,7 @@ function imageCandidate(
     ...(run.duotone === undefined ? {} : { duotone: { ...run.duotone } }),
     ...(run.vmlStrokePattern === undefined ? {} : { vmlStrokePattern: run.vmlStrokePattern }),
     ...(run.vmlFill === undefined ? {} : { vmlFill: run.vmlFill }),
+    ...(run.tile === undefined ? {} : { tile: { ...run.tile } }),
     ...(run.blipEffects?.length ? { blipEffects: run.blipEffects.map(effect => ({ ...effect })) } : {}),
     ...(run.effectHost === undefined ? {} : { effectHost: { ...run.effectHost } }),
   };
@@ -119,6 +120,7 @@ function collectDescriptorCandidates(
             },
           } : {}),
           ...(shape.fill.vml === undefined ? {} : { vmlFill: shape.fill.vml }),
+          ...(shape.fill.tile === undefined ? {} : { tile: shape.fill.tile }),
         },
       );
     }
@@ -253,6 +255,7 @@ function collectDescriptorCandidates(
   documentPageObjects(doc).forEach((object, ordinal) => {
     visitBody(object.body, 'header', pageObjectStorySource(ordinal).storyInstance);
   });
+  visitBody(documentPageBackgroundStory(doc), 'header', pageBackgroundStorySource().storyInstance);
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
   // ECMA-376 §17.2.1 background picture fills: one resource per physical page

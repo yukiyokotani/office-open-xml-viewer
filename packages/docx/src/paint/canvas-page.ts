@@ -277,14 +277,20 @@ function paintPageContents(
       });
     }
   };
-  // ECMA-376 §17.2.1: the document background fills the physical page
-  // behind all other content, including a back page border and the
-  // background/behind-text layers.
+  // ECMA-376 §17.2.1: the document background (its colour and VML fills,
+  // then the `background` layer holding its drawing story) fills the
+  // physical page behind all other content, a back page border included.
+  const firstNonBackground = entries.findIndex((entry) => entry.sourceLayer !== 'background');
+  const backgroundEnd = Math.min(
+    firstNonBackground === -1 ? entries.length : firstNonBackground,
+    decorationIndex,
+  );
   if (page.pageBackground) paintDrawingCommands(page.pageBackground.commands, context);
+  paintEntries(entries.slice(0, backgroundEnd));
   if (page.pageBorder?.zOrder === 'back') {
     paintPageBorderLayout(page.pageBorder, context);
   }
-  paintEntries(entries.slice(0, decorationIndex));
+  paintEntries(entries.slice(backgroundEnd, decorationIndex));
   paintColumnSeparators(page, context);
   paintEntries(entries.slice(decorationIndex));
   // ECMA-376 §17.13.5 markup view (`word-track-change-bar`): margin bars are

@@ -14,6 +14,7 @@ import {
   numberingMarkerShapeInput,
   paragraphMarkShapeInput,
   inlineObjectShapeInput,
+  documentPageBackgroundStory,
   documentPageObjects,
   type InternalDocxDocumentModel,
   type InternalRunSlotMetadata,
@@ -342,6 +343,7 @@ export function* docxRenderedTextUsages(
   yield* headerFooterUsages(doc.headers, collection);
   yield* headerFooterUsages(doc.footers, collection);
   for (const object of documentPageObjects(doc)) yield* bodyUsages(object.body, collection);
+  yield* bodyUsages(documentPageBackgroundStory(doc), collection);
   for (const note of [...(doc.footnotes ?? []), ...(doc.endnotes ?? [])]) {
     yield* bodyUsages(note.content, collection);
   }

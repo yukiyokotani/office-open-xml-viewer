@@ -538,6 +538,10 @@ export type ImagePaintResourceDescriptor = Readonly<{
   /** Part 4 §19.1.2.21: clr1 replaces black, clr2 replaces coloured pixels. */
   vmlStrokePattern?: DeepReadonly<Duotone>;
   vmlFill?: DeepReadonly<Extract<import('../types.js').ShapeFill, { fillType: 'image' }>['vml']>;
+  /** ECMA-376 §20.1.8.58 DrawingML tile of a shape picture fill, resolved
+   * with the decoded image into a repeating brush registered against the
+   * painted bounds (independent of `intrinsicSize`). */
+  tile?: DeepReadonly<import('@silurus/ooxml-core').TileInfo>;
   blipEffects?: DeepReadonly<import('@silurus/ooxml-core').BlipEffect[]>;
   /** Host shape orientation for CT_Blip effects on a shape blip fill
    * (§20.1.8.45/.49 rotWithShape): the fill paints inside the rotated shape,

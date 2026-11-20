@@ -1,4 +1,4 @@
-import { isVmlImageBrush } from './vml-image-brush.js';
+import { drawingMLTileOrigin, isDrawingMLTileBrush, isVmlImageBrush } from './vml-image-brush.js';
 import { drawImageCropped, paintOptionalImagePlaceholder } from '@silurus/ooxml-core';
 import type { ImagePaintResourceDescriptor, LayoutRect } from '../layout/types.js';
 import { isUnavailablePaintResourceHandle, type ResolvedPaintResource } from './resource-session.js';
@@ -30,6 +30,24 @@ export function paintImageResource(
   coverageBounds: LayoutRect = bounds,
 ): void {
   const descriptor = resource.descriptor as ImagePaintResourceDescriptor;
+  if (isDrawingMLTileBrush(resource.handle)) {
+    const brush = resource.handle;
+    const origin = drawingMLTileOrigin(brush, bounds);
+    const sx = brush.tileWidthPt / brush.pixelWidth;
+    const sy = brush.tileHeightPt / brush.pixelHeight;
+    ctx.save();
+    try {
+      ctx.globalAlpha *= descriptor.alpha ?? 1;
+      const pattern = ctx.createPattern?.(brush.image, 'repeat');
+      if (!pattern) throw new Error('Canvas cannot create a retained DrawingML tile pattern');
+      ctx.translate(origin.xPt, origin.yPt);
+      ctx.scale(sx, sy);
+      ctx.fillStyle = pattern;
+      ctx.fillRect((coverageBounds.xPt - origin.xPt) / sx, (coverageBounds.yPt - origin.yPt) / sy,
+        coverageBounds.widthPt / sx, coverageBounds.heightPt / sy);
+    } finally { ctx.restore(); }
+    return;
+  }
   if (isVmlImageBrush(resource.handle)) {
     const brush = resource.handle;
     const width = brush.width * bounds.widthPt, height = brush.height * bounds.heightPt;

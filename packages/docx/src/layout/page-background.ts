@@ -12,6 +12,7 @@ import type {
   DeepReadonly,
   LayoutPage,
   PageBackgroundLayout,
+  SourceRef,
 } from './types.js';
 
 // ECMA-376 Part 1 §17.2.1 `w:background`: "the image or fill for the entire
@@ -23,10 +24,12 @@ import type {
 type ImageFill = DeepReadonly<Extract<ShapeFill, { fillType: 'image' }>>;
 type PaintFill = DeepReadonly<Exclude<ShapeFill, { fillType: 'image' }>>;
 
-/** Parser facts: `color` is `RRGGBB`; fills layer above it in order. */
+/** Parser facts: `color` is `RRGGBB`; fills layer above it in order, then
+ * the drawings of the background story (`hasStory`). */
 export interface PageBackgroundAcquisitionInput {
   readonly color: string | null;
   readonly fills: readonly DeepReadonly<ShapeFill>[];
+  readonly hasStory: boolean;
 }
 
 /** One retained image resource of a background picture for one physical
@@ -49,6 +52,15 @@ export type PageBackgroundFillInput =
 export interface PageBackgroundLayoutInput {
   readonly color: string | null;
   readonly fills: readonly PageBackgroundFillInput[];
+  /** The background drawing story, laid out on every page in its
+   * `background` layer above `color` and `fills`. */
+  readonly story: SourceRef | null;
+}
+
+/** The story source of the §17.2.1 background drawing story: a header-class
+ * page story laid out on every page in the page's `background` layer. */
+export function pageBackgroundStorySource(): SourceRef {
+  return Object.freeze({ story: 'header' as const, storyInstance: 'page-background', path: [] });
 }
 
 const HEX6 = /^[0-9A-Fa-f]{6}$/u;
@@ -65,7 +77,9 @@ export function pageBackgroundAcquisitionInput(
 ): PageBackgroundAcquisitionInput | null {
   if (wire === undefined) return null;
   if (!isRecord(wire)) throw new Error('Unsupported page background');
-  const { color, fills } = wire;
+  const { color, fills, body } = wire;
+  if (body !== undefined && !Array.isArray(body)) throw new Error('Unsupported page background story');
+  const hasStory = Array.isArray(body) && body.length > 0;
   if (color !== undefined && (typeof color !== 'string' || !HEX6.test(color))) {
     throw new Error('Unsupported page background color');
   }
@@ -74,15 +88,19 @@ export function pageBackgroundAcquisitionInput(
     && (fill.fillType !== 'image' || (
       typeof fill.imagePath === 'string' && fill.imagePath.length > 0
       && typeof fill.mimeType === 'string'
-      // A DrawingML tile is reported by the parser and never emitted.
+      // Part 4 VML brushes; DrawingML content arrives as the story.
       && fill.tile === undefined
     ))
   )))) {
     throw new Error('Unsupported page background fill');
   }
   const acquiredFills = (fills ?? []) as readonly DeepReadonly<ShapeFill>[];
-  if (color === undefined && acquiredFills.length === 0) return null;
-  return { color: color === undefined ? null : color.toUpperCase(), fills: acquiredFills };
+  if (color === undefined && acquiredFills.length === 0 && !hasStory) return null;
+  return {
+    color: color === undefined ? null : color.toUpperCase(),
+    fills: acquiredFills,
+    hasStory,
+  };
 }
 
 /** The physical page extent `section` produces (the page geometry layout
@@ -132,6 +150,7 @@ export function projectPageBackgroundLayoutInput(
   }
   return {
     color: acquired.color,
+    story: acquired.hasStory ? pageBackgroundStorySource() : null,
     fills: acquired.fills.map((fill, fillIndex): PageBackgroundFillInput => (
       fill.fillType === 'image'
         ? {
@@ -210,7 +229,7 @@ export function withPageBackground(
   page: LayoutPage,
   input: PageBackgroundLayoutInput | null | undefined,
 ): LayoutPage {
-  if (!input) return page;
+  if (!input || (input.color === null && input.fills.length === 0)) return page;
   return Object.freeze({
     ...page,
     pageBackground: materializePageBackground(input, {

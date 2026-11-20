@@ -223,41 +223,110 @@ fn vml_background_fill(
     }
 }
 
-/// A page fill from one §17.3.3.9 drawing payload: a picture stretches over
-/// the page (§20.1.8.56 stretch is the only picture fill mode), and a shape
-/// contributes its fill. Other payloads are not fills.
-fn drawing_background_fill(run: DocRun) -> Result<Option<ShapeFill>, ()> {
-    match run {
-        DocRun::Image(image) => {
-            // Picture crop, transparency and recolour effects keep their
-            // blip meaning; placement transforms do not apply to a page fill.
-            if image.color_replace_from.is_some() {
-                return Err(());
+const WP_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+const WP14_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing";
+
+fn xml_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('"', "&quot;")
+}
+
+/// Every namespace in scope at `node`, redeclared so a copied subtree keeps
+/// its prefixes when it is re-hosted in a new element.
+fn in_scope_namespaces(node: roxmltree::Node) -> String {
+    let mut declarations = String::new();
+    for namespace in node.namespaces() {
+        match namespace.name() {
+            Some("xml") => {}
+            Some(prefix) => declarations.push_str(&format!(
+                r#" xmlns:{prefix}="{}""#,
+                xml_attribute(namespace.uri())
+            )),
+            None => {
+                declarations.push_str(&format!(r#" xmlns="{}""#, xml_attribute(namespace.uri())))
             }
-            Ok(Some(ShapeFill::Image {
-                image_path: image.image_path,
-                mime_type: image.mime_type,
-                svg_image_path: image.svg_image_path,
-                src_rect: image.src_rect,
-                fill_rect: None,
-                tile: None,
-                alpha: image.alpha,
-                duotone: image.duotone,
-                blip_effects: image.blip_effects,
-                vml: None,
-            }))
         }
-        DocRun::Shape(shape) => match shape.fill {
-            // DrawingML tiled blip fills (§20.1.8.58) are not rendered by the
-            // shared shape image path either; report rather than stretch.
-            Some(ShapeFill::Image { tile: Some(_), .. }) => Err(()),
-            Some(ShapeFill::Solid { color }) => Ok(Some(ShapeFill::Solid {
-                color: vml_color_alpha(color, shape.fill_opacity),
-            })),
-            fill => Ok(fill),
-        },
-        _ => Err(()),
     }
+    declarations
+}
+
+/// §17.2.1: the background is "the image or fill for the entire page
+/// surface, behind all other document content", and its `w:drawing` child
+/// lets any DrawingML content form it. Each payload (`wp:inline` or
+/// `wp:anchor`) is re-hosted as a page-anchored drawing at the page origin
+/// whose [MS-ODRAWXML] `wp14:sizeRelH`/`wp14:sizeRelV` size is 100% of the
+/// page, behind the text (`behindDoc`) with `wp:wrapNone`. The ordinary
+/// anchor pipeline then acquires and paints pictures (crop and recolour
+/// effects included), shapes, groups, canvases and charts with the page box
+/// as their extent; a group keeps its authored `wp:extent` as the frame its
+/// children scale from. The payload's authored position, wrapping and
+/// relative size are replaced, since background content is fixed to the
+/// page and never displaces text (library policy for the §17.2.1 sentence).
+fn background_anchor_xml(container: roxmltree::Node, relative_height: usize) -> Option<String> {
+    let text = container.document().input_text();
+    let copy = |name: &str| {
+        container
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == name)
+            .map(|node| &text[node.range()])
+    };
+    let graphic = copy("graphic")?;
+    let extent = copy("extent").unwrap_or_default();
+    let doc_pr = copy("docPr").unwrap_or_default();
+    let frame_pr = copy("cNvGraphicFramePr").unwrap_or_default();
+    let namespaces = in_scope_namespaces(container);
+    Some(format!(
+        r#"<bgwp:anchor xmlns:bgwp="{WP_NS}" xmlns:bgwp14="{WP14_NS}"{namespaces} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="{relative_height}" behindDoc="1" locked="1" layoutInCell="0" allowOverlap="1"><bgwp:simplePos x="0" y="0"/><bgwp:positionH relativeFrom="page"><bgwp:posOffset>0</bgwp:posOffset></bgwp:positionH><bgwp:positionV relativeFrom="page"><bgwp:posOffset>0</bgwp:posOffset></bgwp:positionV>{extent}<bgwp:effectExtent l="0" t="0" r="0" b="0"/><bgwp:wrapNone/>{doc_pr}{frame_pr}{graphic}<bgwp14:sizeRelH relativeFrom="page"><bgwp14:pctWidth>100000</bgwp14:pctWidth></bgwp14:sizeRelH><bgwp14:sizeRelV relativeFrom="page"><bgwp14:pctHeight>100000</bgwp14:pctHeight></bgwp14:sizeRelV></bgwp:anchor>"#
+    ))
+}
+
+/// The background drawings as one fixed story: one paragraph per
+/// `w:drawing`, each payload a run in document order (later payloads stack
+/// above earlier ones). Laid out on every page beneath all page stories.
+fn background_drawing_story(
+    drawings: &[roxmltree::Node],
+    context: &mut PageBackgroundContext,
+    diagnostics: &mut Vec<ParseDiagnostic>,
+) -> Vec<BodyElement> {
+    let mut paragraphs = String::new();
+    let mut relative_height = 0usize;
+    for drawing in drawings {
+        let mut runs = String::new();
+        for container in drawing_own_containers(*drawing) {
+            if let Some(anchor) = background_anchor_xml(container, relative_height) {
+                relative_height += 1;
+                runs.push_str(&format!("<w:r><w:drawing>{anchor}</w:drawing></w:r>"));
+            }
+        }
+        if !runs.is_empty() {
+            paragraphs.push_str(&format!("<w:p>{runs}</w:p>"));
+        }
+    }
+    if paragraphs.is_empty() {
+        return Vec::new();
+    }
+    let xml = format!(
+        r#"<bgstory xmlns:w="{}">{paragraphs}</bgstory>"#,
+        wordprocessingml::TRANSITIONAL
+    );
+    let Ok(document) = parse_guarded(&xml) else {
+        return Vec::new();
+    };
+    let (body, local_diagnostics) = parse_body_elements_with_diagnostics(
+        document.root_element(),
+        context.style_map,
+        context.num_map,
+        context.media_map,
+        context.chart_map,
+        context.rel_map,
+        context.theme,
+        &HashMap::new(),
+        StoryFlow::Fixed,
+    );
+    commit_story_diagnostics(local_diagnostics, diagnostics);
+    body
 }
 
 /// Acquire the §17.2.1 background. `display` is the effective §17.15.1.26
@@ -265,7 +334,7 @@ fn drawing_background_fill(run: DocRun) -> Result<Option<ShapeFill>, ()> {
 pub(super) fn parse_page_background(
     node: roxmltree::Node,
     display: bool,
-    context: PageBackgroundContext,
+    mut context: PageBackgroundContext,
     diagnostics: &mut Vec<ParseDiagnostic>,
 ) -> Option<PageBackgroundWire> {
     if !display {
@@ -274,42 +343,21 @@ pub(super) fn parse_page_background(
     let mut background = PageBackgroundWire {
         color: background_color(node, context.mapping, context.theme),
         fills: Vec::new(),
+        body: Vec::new(),
     };
+    let mut drawings = Vec::new();
     for child in node.children().filter(roxmltree::Node::is_element) {
         if child.has_tag_name(("urn:schemas-microsoft-com:vml", "background")) {
             background
                 .fills
                 .extend(vml_background_fill(child, context.media_map, diagnostics));
         } else if is_w_ns(child.tag_name().namespace()) && child.tag_name().name() == "drawing" {
-            for container in drawing_own_containers(child) {
-                let mut runs = parse_drawing_container(
-                    context.style_map,
-                    context.num_map,
-                    container,
-                    context.media_map,
-                    context.chart_map,
-                    context.rel_map,
-                    context.theme,
-                    DepthGuard::root(),
-                );
-                let fill = match (runs.pop(), runs.is_empty()) {
-                    (None, _) => Ok(None),
-                    (Some(run), true) => drawing_background_fill(run),
-                    // A group or canvas is several drawables, not one fill.
-                    (Some(_), false) => Err(()),
-                };
-                match fill {
-                    Ok(fill) => background.fills.extend(fill),
-                    Err(()) => push_diagnostic(
-                        diagnostics,
-                        PARSE_DIAGNOSTIC_CODE_UNSUPPORTED_BACKGROUND_DRAWING,
-                        PARSE_DIAGNOSTIC_SEVERITY_UNSUPPORTED_BACKGROUND_DRAWING,
-                    ),
-                }
-            }
+            drawings.push(child);
         }
     }
-    (background.color.is_some() || !background.fills.is_empty()).then_some(background)
+    background.body = background_drawing_story(&drawings, &mut context, diagnostics);
+    (background.color.is_some() || !background.fills.is_empty() || !background.body.is_empty())
+        .then_some(background)
 }
 
 #[cfg(test)]
@@ -468,7 +516,7 @@ mod tests {
         let theme = r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:clrScheme name="t"><a:dk1><a:srgbClr val="000000"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4><a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme></a:themeElements></a:theme>"#;
         let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/><Relationship Id="rTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/><Relationship Id="rPic" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/bg.png"/></Relationships>"#;
         let document = format!(
-            r#"<w:document xmlns:w="{W}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">{background}<w:body><w:p><w:r><w:t>x</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#
+            r#"<w:document xmlns:w="{W}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">{background}<w:body><w:p><w:r><w:t>x</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:body></w:document>"#
         );
         let settings = format!(r#"<w:settings xmlns:w="{W}">{settings}</w:settings>"#);
         let mut bytes = Vec::new();
@@ -533,8 +581,9 @@ mod tests {
     }
 
     #[test]
-    fn package_background_resolves_vml_and_drawingml_children_in_order() {
-        let picture = r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="bg"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="bg"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rPic"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#;
+    fn package_background_rehosts_drawings_as_page_sized_anchors_above_vml_fills() {
+        // A recoloured picture (a:clrChange) keeps the body picture path's effect.
+        let picture = r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="bg"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="bg"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rPic"><a:clrChange><a:clrFrom><a:srgbClr val="FFFFFF"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange></a:blip><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#;
         let document = parse_package(
             &format!(
                 r##"<w:background w:color="22551B"><v:background id="_x0000_s1025" o:bwmode="white" fillcolor="#22551b [3204]" o:targetscreensize="1024,768"><v:fill r:id="rPic" o:title="tex" type="frame"/></v:background>{picture}</w:background>"##
@@ -543,25 +592,69 @@ mod tests {
         );
         let background = &document["__pageBackground"];
         assert_eq!(background["color"], "22551B");
-        assert_eq!(background["fills"][0]["fillType"], "image");
+        assert_eq!(background["fills"].as_array().unwrap().len(), 1);
         assert_eq!(background["fills"][0]["imagePath"], "word/media/bg.png");
         assert_eq!(background["fills"][0]["vml"]["repeat"], false);
-        assert_eq!(background["fills"][1]["fillType"], "image");
-        assert!(background["fills"][1].get("vml").is_none());
+        let runs = &background["body"][0]["runs"];
+        let image = runs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|run| run["type"] == "image")
+            .expect("background picture run");
+        assert_eq!(image["imagePath"], "word/media/bg.png");
+        // The ordered CT_Blip chain carries the §20.1.8.16 colour change, as
+        // for a body picture.
+        assert_eq!(image["blipEffects"][0]["type"], "colorChange");
+        assert_eq!(image["blipEffects"][0]["toAlpha"], 0.0);
+        assert_eq!(image["anchor"], true);
+        let anchor = &image["__anchorAcquisition"];
+        assert_eq!(anchor["horizontal"]["relativeFrom"], "page");
+        assert_eq!(anchor["vertical"]["relativeFrom"], "page");
+        assert_eq!(anchor["horizontal"]["choice"]["valuePt"], 0.0);
+        for axis in ["horizontal", "vertical"] {
+            assert_eq!(anchor["relativeSize"][axis]["relativeFrom"], "page");
+            assert_eq!(anchor["relativeSize"][axis]["fraction"], 1.0);
+        }
+        assert_eq!(anchor["behavior"]["behindDoc"], true);
+        assert_eq!(anchor["wrap"]["kind"], "none");
         assert!(document.get("diagnostics").is_none());
     }
 
     #[test]
-    fn package_background_reports_a_drawing_that_is_not_a_page_fill() {
-        let chart_like = r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="g"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="missing"/></a:graphicData></a:graphic></wp:inline></w:drawing>"#;
+    fn package_background_group_keeps_its_members_and_authored_frame() {
+        let shape = |id: u32, x: u32, color: &str| {
+            format!(
+                r#"<wps:wsp><wps:cNvPr id="{id}" name="s{id}"/><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="{x}" y="0"/><a:ext cx="457200" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp>"#
+            )
+        };
+        let group = format!(
+            r#"<w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="2" name="g"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="457200"/></a:xfrm></wpg:grpSpPr>{}{}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing>"#,
+            shape(3, 0, "FF0000"),
+            shape(4, 457200, "0000FF")
+        );
         let document = parse_package(
-            &format!(r#"<w:background w:color="22551B">{chart_like}</w:background>"#),
+            &format!(r#"<w:background>{group}</w:background>"#),
             "<w:displayBackgroundShape/>",
         );
-        assert_eq!(document["__pageBackground"]["color"], "22551B");
+        let shapes: Vec<_> = document["__pageBackground"]["body"][0]["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|run| run["type"] == "shape")
+            .cloned()
+            .collect();
+        assert_eq!(shapes.len(), 2);
+        for shape in &shapes {
+            let anchor = &shape["__anchorAcquisition"];
+            assert_eq!(anchor["relativeSize"]["horizontal"]["fraction"], 1.0);
+            assert_eq!(anchor["extent"]["widthPt"], 72.0);
+            assert!(anchor["group"].is_object());
+        }
         assert_eq!(
-            document["diagnostics"][0]["code"],
-            "UNSUPPORTED_BACKGROUND_DRAWING"
+            shapes[1]["__anchorAcquisition"]["group"]["resolvedChildFrame"]["offsetXPt"],
+            36.0
         );
+        assert!(document.get("diagnostics").is_none());
     }
 }

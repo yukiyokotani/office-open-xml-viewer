@@ -1,5 +1,5 @@
 import { withChartFontSubstitutions } from '@silurus/ooxml-core/internal/chart-font-sources';
-import { acquireVmlImageBrush } from './browser-vml-image-brush.js';
+import { acquireDrawingMLTileBrush, acquireVmlImageBrush } from './browser-vml-image-brush.js';
 import {
   withBitmapCacheLease,
   OoxmlError,
@@ -627,6 +627,7 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
           );
         }
         if (image && descriptor.vmlFill) return acquireVmlImageBrush(descriptor, image);
+        if (image && descriptor.tile) return acquireDrawingMLTileBrush(descriptor, image);
         return image ?? unavailablePaintResourceHandle(
           options.fetchImage
             ? 'unsupported image format produced no drawable output'
