@@ -1124,22 +1124,58 @@ describe('retained table pagination', () => {
     }],
     cellContainmentBounds: drawingBounds,
   });
-  /** Every cell line painted inside its fragment's clip, as `paragraph:line`. */
-  const visibleLines = (result: ReturnType<typeof take>): string[] => {
-    const fragment = result.fragment;
-    if (!fragment) return [];
-    const clip = fragment.clipBounds ?? fragment.flowBounds;
-    return fragment.rows.flatMap((item) => item.cells.flatMap((cell) => cell.blocks.flatMap((block) => {
+  type PaintedTable = Readonly<{
+    flowBounds: { yPt: number; heightPt: number };
+    clipBounds?: { yPt: number; heightPt: number };
+    rows: readonly Readonly<{ cells: readonly Readonly<{
+      contentBounds: { yPt: number };
+      blocks: readonly Readonly<{ offsetPt: number; layout: ParagraphLayout | PaintedTable & { kind: 'table' } }>[];
+    }>[] }>[];
+  }>;
+  /** Every cell line painted inside its table's clip, nested fragments
+   * included, as `paragraph:line`. A nested fragment counts only when its own
+   * clipped box lies inside the enclosing band. */
+  const paintedLines = (table: PaintedTable): string[] => {
+    const clip = table.clipBounds ?? table.flowBounds;
+    const bottomPt = clip.yPt + clip.heightPt + 1e-6;
+    return table.rows.flatMap((item) => item.cells.flatMap((cell) => cell.blocks.flatMap((block) => {
       const layout = block.layout;
-      if (layout.kind !== 'paragraph') return [];
+      const originPt = cell.contentBounds.yPt + block.offsetPt;
+      if (layout.kind === 'table') {
+        const nestedClip = layout.clipBounds ?? layout.flowBounds;
+        return originPt >= clip.yPt - 1e-6 && originPt + nestedClip.heightPt <= bottomPt
+          ? paintedLines(layout) : [];
+      }
       return layout.lines.flatMap((line) => {
-        const topPt = cell.contentBounds.yPt + block.offsetPt + line.bounds.yPt - layout.flowBounds.yPt;
-        return topPt >= clip.yPt - 1e-6 && topPt + line.advancePt <= clip.yPt + clip.heightPt + 1e-6
-          // Slices extend the source paragraph id.
+        const topPt = originPt + line.bounds.yPt - layout.flowBounds.yPt;
+        // Slices extend the source paragraph id.
+        return topPt >= clip.yPt - 1e-6 && topPt + line.advancePt <= bottomPt
           ? [`${layout.id.split(':')[0]}:${line.range.start}`] : [];
       });
     })));
   };
+  const visibleLines = (result: ReturnType<typeof take>): string[] =>
+    result.fragment ? paintedLines(result.fragment as unknown as PaintedTable) : [];
+  /** Take fragments on fresh 100pt pages until the table ends. */
+  const takeAll = (
+    source: RetainedTableAcquisition,
+    overrides: Partial<TableFragmentContext> = {},
+  ): ReturnType<typeof take>[] => {
+    const results: ReturnType<typeof take>[] = [];
+    let cursor: ReturnType<typeof take>['nextCursor'] = startTableFragmentCursor();
+    while (cursor && results.length < 4) {
+      const result = take(source, 100, cursor, overrides);
+      expect(result.requiresFreshPage).toBe(false);
+      results.push(result);
+      cursor = result.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    return results;
+  };
+  const bottomAlignedSecondCell = (input: TableRowLayoutInput): TableRowLayoutInput => ({
+    ...input,
+    cells: input.cells.map((cell, index) => index === 1 ? { ...cell, vAlign: 'bottom' as const } : cell),
+  });
 
   it('admits cell text past a layoutInCell containment no fresh band can hold', () => {
     // The drawing's containment ends 120pt below its paragraph top, past any
@@ -1177,24 +1213,80 @@ describe('retained table pagination', () => {
       paragraph('raised-anchor', Array.from({ length: 12 }, () => 10)),
       { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
     );
-    const base = cellsRow(0, [[anchored], [paragraph('bottom-aligned', [10])]]);
-    const source = acquisition([{
-      ...base,
-      cells: base.cells.map((cell, index) => index === 1 ? { ...cell, vAlign: 'bottom' as const } : cell),
-    }]);
-    const seen: string[] = [];
-    let cursor: ReturnType<typeof take>['nextCursor'] = startTableFragmentCursor();
-    for (let page = 0; cursor && page < 4; page += 1) {
-      const result = take(source, 100, cursor);
-      expect(result.requiresFreshPage).toBe(false);
-      seen.push(...visibleLines(result));
-      cursor = result.nextCursor;
-    }
-    expect(cursor).toBeNull();
+    const source = acquisition([bottomAlignedSecondCell(
+      cellsRow(0, [[anchored], [paragraph('bottom-aligned', [10])]]),
+    )]);
+    const seen = takeAll(source).flatMap(visibleLines);
     expect(seen.sort()).toEqual([
       ...Array.from({ length: 12 }, (_, line) => `raised-anchor:${line}`),
       'bottom-aligned:0',
     ].sort());
+  });
+
+  it('keeps a recovered nested fragment when the enclosing row completes', () => {
+    // The nested row recovers inside the outer cell's fresh band (40pt, top
+    // aligned). Completing the outer row must keep that fragment rather than
+    // restore the unrecovered 140pt nested layout.
+    const anchored = withContainedDrawing(
+      paragraph('nested-raised', [10, 10, 10, 10]),
+      { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+    );
+    const nested = acquisition([bottomAlignedSecondCell(
+      cellsRow(0, [[anchored], [paragraph('nested-bottom', [10])]]),
+    )], 'nested-table');
+    const outerRow = cellsRow(0, [[]]);
+    const outer = acquisition([{
+      ...outerRow,
+      cells: [{ ...outerRow.cells[0]!, blocks: [{ layout: nested.layout, sourceBlockIndex: 0 }] }],
+    }], 'outer-table');
+    const source: RetainedTableAcquisition = Object.freeze({
+      ...outer,
+      nestedById: Object.freeze({ [nested.layout.id]: nested }),
+    });
+
+    const results = takeAll(source);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.fragment?.advancePt).toBe(40);
+    expect(results.flatMap(visibleLines).sort()).toEqual([
+      'nested-bottom:0', 'nested-raised:0', 'nested-raised:1', 'nested-raised:2', 'nested-raised:3',
+    ]);
+  });
+
+  it('anchors a floating table to the recovered placement of its paragraph', () => {
+    // Materialization puts the recovered text at the cell top, not 20pt below
+    // the drawing that starts above it; a text-relative float follows it.
+    const anchored = withContainedDrawing(
+      paragraph('float-anchor', [10, 10, 10, 10]),
+      { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+    );
+    const floating = acquisition([row(0, 10)], 'floating-table');
+    const source = withNestedFloatingTable(acquisition([cellsRow(0, [[anchored]])]), floating);
+
+    const results = takeAll(source, {
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 120 },
+        margin: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 100 },
+        column: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 100 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-page-points', flowDomainId: 'logical-page:1',
+        entries: Object.freeze([]), nextParagraphId: 0,
+      },
+      reacquirePageDependentBlock: (request: { acquired: ParagraphLayout }) => request.acquired,
+    } as unknown as Partial<TableFragmentContext>);
+    expect(results).toHaveLength(1);
+    const fragment = results[0]!.fragment!;
+    const cell = fragment.rows[0]!.cells[0]!;
+    const paintedTopPt = cell.contentBounds.yPt + cell.blocks[0]!.offsetPt;
+    const [placement] = results[0]!.floatingTablePlacements ?? [];
+    expect(placement?.source.anchorBounds.yPt).toBe(paintedTopPt);
+    // The text-relative float (6pt below its anchor) stays inside the band.
+    expect(placement?.yPt).toBe(paintedTopPt + 6);
+    // take() places the fragment at y=20 in a 100pt band.
+    expect(placement!.bounds.yPt + placement!.bounds.heightPt).toBeLessThanOrEqual(120);
+    expect(results.flatMap(visibleLines).sort()).toEqual([
+      'float-anchor:0', 'float-anchor:1', 'float-anchor:2', 'float-anchor:3',
+    ]);
   });
 
   it.each([

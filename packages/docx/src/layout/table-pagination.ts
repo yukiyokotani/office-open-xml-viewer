@@ -238,6 +238,9 @@ interface SelectedCell {
   readonly range: readonly BlockContinuationRange[];
   readonly next: TableCellFragmentCursor;
   readonly complete: boolean;
+  /** A selected nested-table fragment was clipped at its band end
+   * (clipAtPageEnd), so it is not the nested table's whole layout. */
+  readonly clippedNestedFragment?: true;
 }
 
 interface SelectedRow {
@@ -1689,6 +1692,7 @@ function selectCell(
   let paragraphLineStart = cursor.paragraphLineStart;
   let nestedCursor = cursor.nestedCursor;
   let nestedFragmentIndex = cursor.nestedFragmentIndex;
+  let clippedNestedFragment = false;
 
   while (blockIndex < cell.blocks.length) {
     context.chargeSourceScan?.(1);
@@ -1754,6 +1758,7 @@ function selectCell(
         nestedTableFragmentContext(source, cell, context, remainingPt, sourceBlock),
       );
       if (!nestedResult.fragment) break;
+      if (nestedResult.fragment.clipBounds) clippedNestedFragment = true;
       blocks.push({ layout: nestedResult.fragment, sourceBlockIndex: sourceBlock.sourceBlockIndex });
       range.push({
         kind: 'nested-table',
@@ -1784,6 +1789,7 @@ function selectCell(
     range,
     next: Object.freeze({ blockIndex, paragraphLineStart, nestedCursor, nestedFragmentIndex }),
     complete,
+    ...(clippedNestedFragment ? { clippedNestedFragment: true as const } : {}),
   };
 }
 
@@ -1925,9 +1931,16 @@ function partialRow(
 
   const complete = selectedCells.every((cell) => cell.complete);
   if (complete && cursor.rowFragmentIndex === 0) {
+    // A completed first fragment is the source row, unless what was selected
+    // differs from it: this recovery, or a nested table that was recovered
+    // (or otherwise clipped) inside its own band. Restoring the source cells
+    // would bring back the unclipped nested layout and the unrecovered
+    // offsets, placing admitted content beyond the band.
+    const keepsSelection = recoversBlockedUnits
+      || selectedCells.some((cell) => cell.clippedNestedFragment === true);
     return {
       selected: selectedWholeRow(
-        recoversBlockedUnits ? { ...row, cells: row.cells.map(recovered) } : row,
+        keepsSelection ? { ...row, cells: selectedCells.map((cell) => recovered(cell.input)) } : row,
         'source',
         0,
         recoversBlockedUnits,
@@ -2547,15 +2560,16 @@ function takeTableFragmentPass(
     } : undefined;
     // The row is cut (or continued) here: its nested page-placed content is
     // placed against the occurrence this fragment selects, not the uncut row,
-    // and so are its own positioned children's anchors.
+    // and so are its own positioned children's anchors. A completed first
+    // fragment selects the candidate itself, unless partialRow kept a
+    // different selection (a recovered or clipped-nested row), whose geometry
+    // the anchors must then follow as materialization does.
     const cutOf = (candidate: TableRowLayoutInput): TableRowLayoutInput | null => {
       const probe = partialRow(
         source, candidate, rowCursor, availablePt, freshSourceHeightPt, canGainPageSpace, context,
         prefixGeometry,
       );
-      return probe.selected && !(probe.complete && rowCursor.rowFragmentIndex === 0)
-        ? probe.selected.input
-        : null;
+      return probe.selected?.input ?? null;
     };
     const continuing = rowCursor.rowFragmentIndex > 0;
     const cutRow = rowNeedsPageOrigins(source, occurrenceRow, context.chargeSourceScan)
