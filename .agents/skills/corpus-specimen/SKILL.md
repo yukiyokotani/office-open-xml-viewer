@@ -97,6 +97,12 @@ fresh on the grid with self-describing text, and name in the Verify line the
 state the reader should check. Keep interview notes in the ignored
 `packages/<fmt>/public/private/sample-notes.md`, never in the repository.
 
+The same holds for files our own agents generated earlier, such as RTL
+coverage files written for an issue. Their content may be reused, but a
+specimen still follows the corpus design rules below: grid, Noto fonts,
+black on white with the one accent, self-describing captions and a Verify
+line. Carry over what the file checks, never how it looks.
+
 ## Office font specimens
 
 The normal specimens use only the Noto Sans family, which the VRT fixtures
