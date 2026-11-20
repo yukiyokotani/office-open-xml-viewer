@@ -364,6 +364,17 @@ export const WORD_OVER_PAGE_CANT_SPLIT_CLIP = defineCompatibilityRule({
   description: 'Word starts an over-page cantSplit row on a fresh page and clips its overflow instead of synthesizing a row continuation.',
 });
 
+/** Consumed by table-pagination.ts partialRow and by the admission-only
+ * containment limit of table.ts measureTableCellBlockFlowHeightPt. */
+export const LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP = defineCompatibilityRule({
+  id: 'library-over-page-table-cell-unit-clip',
+  evidence: {
+    kind: 'library-policy',
+    reference: 'packages/docx/src/layout/table-pagination.test.ts#clips an over-page first cell line on a fresh page and continues the cell on the next page',
+  },
+  description: 'Library policy, no Office measurement, applied in every compatibility mode: ECMA-376 §17.4.6 lets a splittable row continue across pages but defines nothing for a cell unit that no page can hold. When a row fragment on a fresh band (nothing but repeated header rows above it, so relocating cannot gain space) would otherwise select nothing, whether because no cell progresses or because word-parallel-paragraph-row-cut rejects a cut that leaves a blocked paragraph cell behind, the row is re-selected once: a layoutInCell containment interval (§20.4.2.3) whose own extent exceeds the fresh content band stops charging admission, so the text around its drawing keeps flowing, and a first line or block still taller than the band is retained alone. The fragment is clipped at the band end and its remaining content continues on the next page. Content below the band end (part of that unit or of the drawing) is not painted. This is a recovery from an otherwise non-converging pagination, not a claim about Word or the specification; the warning channel is reserved for caller opt-outs, so it reports nothing.',
+});
+
 export const WORD_OVER_PAGE_CELL_BREAK_OCCUPANCY = defineCompatibilityRule({
   id: 'word-over-page-cell-break-occupancy',
   evidence: {

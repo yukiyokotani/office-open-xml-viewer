@@ -1594,6 +1594,7 @@ function selectParagraph(
   canGainPageSpace: boolean,
   context: TableFragmentContext,
   overflowFirstUnit = false,
+  containmentLimitPt = Number.POSITIVE_INFINITY,
 ): Readonly<{
   block: TableCellBlockInput | null;
   range: BlockContinuationRange | null;
@@ -1606,7 +1607,7 @@ function selectParagraph(
     const candidate = paragraphSlice(paragraph, start, candidateEnd, context);
     const candidateBlock = { ...sourceBlock, layout: candidate };
     noteOverflowPolicyOf(context.services)?.chargeWork(noteRecoveryOwnerOf(context.services) ?? paragraph.source, selectedBlocks.length);
-    if (measureTableCellBlockFlowHeightPt([...selectedBlocks, candidateBlock])
+    if (measureTableCellBlockFlowHeightPt([...selectedBlocks, candidateBlock], containmentLimitPt)
       > availableHeightPt + EPSILON_PT) break;
     lineEnd = candidateEnd;
   }
@@ -1622,7 +1623,7 @@ function selectParagraph(
   if (sourceBlock.keepLines === true
     && lineEnd < paragraph.lines.length
     && canRelocate
-    && measureTableCellBlockFlowHeightPt([{ ...sourceBlock, layout: paragraph }])
+    && measureTableCellBlockFlowHeightPt([{ ...sourceBlock, layout: paragraph }], containmentLimitPt)
       <= freshAvailableHeightPt + EPSILON_PT) {
     return { block: null, range: null, lineEnd: start, advancePt: 0 };
   }
@@ -1657,6 +1658,8 @@ function selectCell(
   freshAvailableContentHeightPt: number,
   canGainPageSpace: boolean,
   context: TableFragmentContext,
+  /** Admission-only limit; see measureTableCellBlockFlowHeightPt. */
+  containmentLimitPt = Number.POSITIVE_INFINITY,
 ): SelectedCell {
   if (cell.verticalMerge === 'continue') {
     return { input: cell, range: [], next: cursor, complete: true };
@@ -1703,7 +1706,7 @@ function selectCell(
       // still a source block and must advance the cell cursor; asking the line
       // slicer for a first line can never make progress from an empty array.
       if (child.lines.length === 0) {
-        if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock])
+        if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock], containmentLimitPt)
           > availableContentHeightPt + EPSILON_PT
           && !(context.oversizedCellPolicy === 'overflow-first-unit'
             && !canGainPageSpace && blocks.length === 0)) break;
@@ -1723,6 +1726,7 @@ function selectCell(
         canGainPageSpace,
         context,
         context.oversizedCellPolicy === 'overflow-first-unit' && !canGainPageSpace && blocks.length === 0,
+        containmentLimitPt,
       );
       if (!selected.block || !selected.range) break;
       blocks.push({ ...selected.block, ...(sourceBlock.structuralTrailing
@@ -1742,7 +1746,7 @@ function selectCell(
     if (nested) {
       const remainingPt = Math.max(
         0,
-        availableContentHeightPt - measureTableCellBlockFlowHeightPt(blocks),
+        availableContentHeightPt - measureTableCellBlockFlowHeightPt(blocks, containmentLimitPt),
       );
       const nestedResult = takeTableFragment(
         nested,
@@ -1767,7 +1771,7 @@ function selectCell(
       continue;
     }
 
-    if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock])
+    if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock], containmentLimitPt)
       > availableContentHeightPt + EPSILON_PT) break;
     blocks.push(sourceBlock);
     range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
@@ -1852,7 +1856,10 @@ function partialRow(
         - (freshPrefix.flowBounds.yPt + freshPrefix.heightPt - context.placement.cursor.yPt)
       : freshAvailableHeightPt - verticalInsetsPt - spacingInsetsPt - boundaryInsetsPt,
   );
-  const selectCells = (selectionContext: TableFragmentContext) => row.cells.map((cell, index) => selectCell(
+  const selectCells = (
+    selectionContext: TableFragmentContext,
+    containmentLimitPt?: number,
+  ) => row.cells.map((cell, index) => selectCell(
     source,
     cell,
     cellCursors[index]!,
@@ -1860,45 +1867,51 @@ function partialRow(
     freshAvailableContentHeightPt,
     canGainPageSpace,
     selectionContext,
+    containmentLimitPt,
   ));
   const cellMadeProgress = (cell: SelectedCell, index: number) => (
     cell.next.blockIndex !== cellCursors[index]?.blockIndex
     || cell.next.paragraphLineStart !== cellCursors[index]?.paragraphLineStart
     || cell.next.nestedFragmentIndex !== cellCursors[index]?.nestedFragmentIndex
   );
+  // A selection is admissible when some cell progresses and, under the
+  // compatibility authority that owns the cross-cell cut selection ECMA-376
+  // §17.4.6 leaves undefined, no unfinished paragraph cell is left without
+  // progress. This call site deliberately checks only paragraph children;
+  // nested tables retain their own fragmentation path.
+  const admissible = (cells: readonly SelectedCell[]) => cells.some(cellMadeProgress)
+    && !wordRelocatesParallelParagraphRowCut({
+      compatibility: context.compatibility,
+      hasUnfinishedParagraphWithoutProgress: cells.some((cell, index) => (
+        !cell.complete
+        && !cellMadeProgress(cell, index)
+        && row.cells[index]?.blocks[cellCursors[index]?.blockIndex ?? 0]?.layout.kind === 'paragraph'
+      )),
+    });
   let selectedCells = selectCells(context);
-  let forcedFirstUnit = false;
-  // ECMA-376 §17.4.6 lets a row continue across pages. When a fresh page
-  // cannot hold even the first unit of any cell (a cell-owned anchor can make
-  // a single line's charge exceed the page), moving on cannot gain space:
-  // retain each cell's first indivisible unit, as fresh note bands do,
-  // instead of failing to make progress.
-  if (!canGainPageSpace && context.oversizedCellPolicy !== 'overflow-first-unit'
-    && !selectedCells.some(cellMadeProgress)) {
-    selectedCells = selectCells({ ...context, oversizedCellPolicy: 'overflow-first-unit' });
-    forcedFirstUnit = true;
+  // `library-over-page-table-cell-unit-clip`: decided after the parallel-cell
+  // rule, so a row whose other cells progress is recovered too. Relocating
+  // cannot gain space, and the selection would otherwise be empty forever.
+  // The re-selection loses as little as possible: a layoutInCell containment
+  // interval that no fresh band can hold stops charging admission (its
+  // drawing stays cell-owned and is clipped with the row), so the following
+  // text keeps flowing; only a unit still taller than the band is retained
+  // alone and clipped, as fresh note bands retain theirs.
+  const recoversBlockedUnits = !canGainPageSpace
+    && context.oversizedCellPolicy !== 'overflow-first-unit'
+    && !admissible(selectedCells);
+  if (recoversBlockedUnits) {
+    selectedCells = selectCells(
+      { ...context, oversizedCellPolicy: 'overflow-first-unit' },
+      freshAvailableContentHeightPt,
+    );
   }
-  // The compatibility authority owns the cross-cell cut selection that
-  // ECMA-376 §17.4.6 leaves undefined. This call site deliberately checks only
-  // paragraph children; nested tables retain their own fragmentation path.
-  const hasUnfinishedParagraphWithoutProgress = selectedCells.some((cell, index) => (
-    !cell.complete
-    && !cellMadeProgress(cell, index)
-    && row.cells[index]?.blocks[cellCursors[index]?.blockIndex ?? 0]?.layout.kind === 'paragraph'
-  ));
-  if (wordRelocatesParallelParagraphRowCut({
-    compatibility: context.compatibility,
-    hasUnfinishedParagraphWithoutProgress,
-  })) {
-    return { selected: null, next: cursor, complete: false };
-  }
-  const madeProgress = selectedCells.some(cellMadeProgress);
-  if (!madeProgress) return { selected: null, next: cursor, complete: false };
+  if (!admissible(selectedCells)) return { selected: null, next: cursor, complete: false };
 
   const complete = selectedCells.every((cell) => cell.complete);
   if (complete && cursor.rowFragmentIndex === 0) {
     return {
-      selected: selectedWholeRow(row, 'source', 0, forcedFirstUnit),
+      selected: selectedWholeRow(row, 'source', 0, recoversBlockedUnits),
       next: Object.freeze({
         rowIndex: cursor.rowIndex + 1,
         rowFragmentIndex: 0,
@@ -1928,8 +1941,8 @@ function partialRow(
       fragmentIndex: cursor.rowFragmentIndex,
       ownership: 'source',
       ranges: selectedCells.map((cell) => cell.range),
-      // The forced unit can still exceed the page; keep it inside the band.
-      ...(forcedFirstUnit ? { clipAtPageEnd: true } : {}),
+      // A recovered unit can still exceed the band; keep it inside the band.
+      ...(recoversBlockedUnits ? { clipAtPageEnd: true } : {}),
     },
     next: Object.freeze({
       rowIndex: complete ? cursor.rowIndex + 1 : cursor.rowIndex,

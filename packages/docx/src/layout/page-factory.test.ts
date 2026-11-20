@@ -626,8 +626,8 @@ describe('createLayoutPage', () => {
   });
 
   it('treats a section boundary reconstructed with floating-point dust as shared', () => {
-    // educational blind document: section 1 ends at 42.55 + 134.40000000000003
-    // and the continuous two-column section 2 starts at 176.95000000000002.
+    // Section 1 ends at 42.55 + 134.40000000000003 and the continuous
+    // two-column section 2 starts at 176.95000000000002.
     const first = section('lrTb', [{ xPt: 42.55, wPt: 510.2 }]);
     const second = section('lrTb', [
       { xPt: 42.55, wPt: 244.475 },

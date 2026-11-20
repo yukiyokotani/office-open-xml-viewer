@@ -1057,6 +1057,146 @@ describe('retained table pagination', () => {
     expect(result.fragment?.unpaintedOverflowPt).toBe(20);
   });
 
+  // LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP: fresh-band recovery of cell units
+  // that no page can hold.
+  const cellsRow = (
+    logicalRowIndex: number,
+    cells: readonly (readonly ParagraphLayout[])[],
+    options: { repeatedHeader?: boolean } = {},
+  ): TableRowLayoutInput => {
+    const template = row(logicalRowIndex, 10, options);
+    return {
+      ...template,
+      cells: cells.map((paragraphs, columnStart) => ({
+        ...template.cells[0]!,
+        id: `cell-${logicalRowIndex}.${columnStart}`,
+        columnStart,
+        blocks: paragraphs.map((layout, sourceBlockIndex) => ({ layout, sourceBlockIndex })),
+      })),
+    };
+  };
+  const rangesOf = (result: ReturnType<typeof take>, rowIndex = 0) =>
+    result.fragment?.rows[rowIndex]?.cells.map((cell) => cell.contentRanges);
+
+  it('clips an over-page first cell line on a fresh page and continues the cell on the next page', () => {
+    const source = acquisition([cellsRow(0, [[
+      paragraph('over-page-line', [120]),
+      paragraph('following', [10, 10]),
+    ]])]);
+
+    const first = take(source, 100);
+    expect(first.requiresFreshPage).toBe(false);
+    expect(rangesOf(first)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }]]);
+    expect(first.fragment?.advancePt).toBe(100);
+    expect(first.fragment?.clipBounds?.heightPt).toBe(100);
+    expect(first.fragment?.unpaintedOverflowPt).toBe(20);
+    expect(first.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1, cells: [{ blockIndex: 1 }] });
+
+    const second = take(source, 100, first.nextCursor!);
+    expect(rangesOf(second)).toEqual([[{ kind: 'paragraph', blockIndex: 1, lineStart: 0, lineEnd: 2 }]]);
+    expect(second.fragment?.advancePt).toBe(20);
+    expect(second.fragment?.clipBounds).toBeUndefined();
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('admits cell text past a layoutInCell containment no fresh band can hold', () => {
+    // The drawing's containment ends 120pt below its paragraph top, past any
+    // 100pt band. It stops charging admission only on a fresh band; the text
+    // keeps flowing instead of one line per page.
+    const plain = paragraph('contained-anchor', [10, 10, 10]);
+    const drawingBounds = { xPt: 0, yPt: 90, widthPt: 20, heightPt: 30 };
+    const anchored = layoutParagraph({
+      ...plain,
+      lines: plain.lines.map((line, index) => index > 0 ? line : {
+        ...line,
+        placements: [{
+          kind: 'drawing' as const, range: line.range, drawingId: 'contained',
+          bounds: drawingBounds, advancePt: 0,
+        }],
+      }),
+      drawings: [{
+        kind: 'drawing', id: 'contained', source: plain.source,
+        flowDomainId: plain.flowDomainId, ordinaryFlow: false,
+        flowBounds: drawingBounds, inkBounds: drawingBounds,
+        advancePt: 0, commands: [],
+        anchorLayer: {
+          occurrenceId: 'contained', behindDoc: false, relativeHeight: 1, sourceOrder: 0,
+          horizontalOwnership: 'host', verticalOwnership: 'host',
+          layoutInCell: true, cellContainment: true,
+        },
+      }],
+      cellContainmentBounds: drawingBounds,
+    });
+    const source = acquisition([cellsRow(0, [[anchored, paragraph('after-anchor', [10])]])]);
+
+    // Relocating can still gain space: the containment keeps charging.
+    expect(take(source, 60).requiresFreshPage).toBe(true);
+
+    const fresh = take(source, 100);
+    expect(rangesOf(fresh)).toEqual([[
+      { kind: 'whole', blockIndex: 0 },
+      { kind: 'whole', blockIndex: 1 },
+    ]]);
+    expect(fresh.nextCursor).toBeNull();
+    expect(fresh.fragment?.advancePt).toBe(100);
+    expect(fresh.fragment?.unpaintedOverflowPt).toBe(20);
+  });
+
+  it.each([
+    // word-parallel-paragraph-row-cut rejects the short cell's progress alone;
+    // the recovery is decided after it, so both cells share one clipped page.
+    ['word', 1],
+    // No such rule: the short cell goes first, the tall one is recovered next.
+    ['standard', 2],
+  ] as const)(
+    'recovers a blocked cell beside a progressing cell on a fresh page (%s)',
+    (compatibility, expectedPages) => {
+      const source = acquisition([cellsRow(0, [
+        [paragraph('tall', [120])],
+        [paragraph('short', [10])],
+      ])]);
+      let cursor: ReturnType<typeof take>['nextCursor'] = startTableFragmentCursor();
+      const tallPages: number[] = [];
+      let pages = 0;
+      while (cursor && pages < 3) {
+        const result = take(source, 100, cursor, { compatibility });
+        expect(result.requiresFreshPage).toBe(false);
+        if (rangesOf(result)?.[0]?.length) tallPages.push(pages);
+        pages += 1;
+        cursor = result.nextCursor;
+        if (!cursor) {
+          expect(result.fragment?.clipBounds?.heightPt).toBe(100);
+          expect(result.fragment?.unpaintedOverflowPt).toBe(20);
+        }
+      }
+      expect(cursor).toBeNull();
+      expect(pages).toBe(expectedPages);
+      expect(tallPages).toEqual([expectedPages - 1]);
+    },
+  );
+
+  it('recovers a body row continued below a repeated header on a fresh page', () => {
+    const header = cellsRow(0, [[paragraph('header', [20])]], { repeatedHeader: true });
+    const body = cellsRow(1, [[paragraph('body', [10, 120, 10])]]);
+    const source = acquisition([header, body]);
+
+    const first = take(source, 100);
+    expect(rangesOf(first, 1)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }]]);
+    expect(first.fragment?.clipBounds).toBeUndefined();
+
+    const second = take(source, 100, first.nextCursor!);
+    expect(second.fragment?.rows.map((item) => item.ownership)).toEqual(['repeated-header', 'source']);
+    expect(rangesOf(second, 1)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 1, lineEnd: 2 }]]);
+    expect(second.fragment?.advancePt).toBe(100);
+    expect(second.fragment?.clipBounds?.heightPt).toBe(100);
+
+    const third = take(source, 100, second.nextCursor!);
+    expect(third.fragment?.rows.map((item) => item.ownership)).toEqual(['repeated-header', 'source']);
+    expect(rangesOf(third, 1)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 2, lineEnd: 3 }]]);
+    expect(third.fragment?.advancePt).toBe(30);
+    expect(third.nextCursor).toBeNull();
+  });
+
   it('requests a fresh page for an unbreakable row that fits the fresh band', () => {
     const source = acquisition([row(0, 70, { cantSplit: true })]);
     const cursor = startTableFragmentCursor();

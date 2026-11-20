@@ -225,13 +225,13 @@ describe('ECMA-376 §17.4.72 cell text direction', () => {
   it('sizes a rotated distributed row by its natural line length, not the trial length', () => {
     // §17.18.44 distribute stretches every line across the trial length, so
     // a narrow cell whose stacked lines never fit its width must not grow the
-    // row to the maximum trial length (a Japanese form's 職・氏名/代表者 cell).
+    // row to the maximum trial length.
     const height = (alignment: string) => firstRowHeight({
       ...tableOf([row([
         cell('ABCD', {
           textDirection: 'tbRl',
           widthPt: 15,
-          content: [paraOf('職・氏名', alignment), paraOf('代表者', alignment)],
+          content: [paraOf('甲乙・丙丁', alignment), paraOf('戊己庚', alignment)],
         }),
         cell('N'),
       ])]),
@@ -239,6 +239,40 @@ describe('ECMA-376 §17.4.72 cell text direction', () => {
     });
     expect(height('left')).toBeLessThan(60);
     expect(height('distribute')).toBeCloseTo(height('left'), 1);
+  });
+
+  it('keeps automatic East Asian spacing in a rotated distributed line length', () => {
+    // WORD_EAST_ASIAN_AUTO_SPACE inserts a quarter em at each ideograph/Latin
+    // seam. Only the §17.18.44 distribute expansion leaves the natural length,
+    // so the single stacked column of this 15pt-wide tbRl cell still fits.
+    const rotated = (alignment: string) => {
+      const retained = layoutDocument(modelOf({
+        ...tableOf([row([
+          cell('', { textDirection: 'tbRl', widthPt: 15, content: [paraOf('漢A漢A漢A漢A', alignment)] }),
+          cell('N'),
+        ])]),
+        colWidths: [15, 140],
+      })).pages[0]?.layers.body.find((node) => node.kind === 'table');
+      if (!retained || retained.kind !== 'table') throw new Error('Table was not laid out');
+      const rotatedCell = retained.rows[0]!.cells[0]!;
+      const lines = rotatedCell.blocks.flatMap((block) => block.layout.kind === 'paragraph'
+        ? block.layout.lines : []);
+      return {
+        heightPt: retained.rows[0]!.heightPt,
+        columns: lines.length,
+        // Stacked columns run across the physical cell width (no margins).
+        stackedPt: lines.reduce((sum, line) => sum + line.advancePt, 0),
+      };
+    };
+    const left = rotated('left');
+    const distributed = rotated('distribute');
+    // Eight 10pt clusters plus seven 2.5pt seams.
+    expect(left.heightPt).toBeGreaterThanOrEqual(97.5 - 0.01);
+    expect(distributed.heightPt).toBeCloseTo(left.heightPt, 1);
+    for (const { columns, stackedPt } of [left, distributed]) {
+      expect(columns).toBe(1);
+      expect(stackedPt).toBeLessThanOrEqual(15);
+    }
   });
 
   it('rotated auto and atLeast rows honor margins, authored floors, and a taller neighbor', () => {

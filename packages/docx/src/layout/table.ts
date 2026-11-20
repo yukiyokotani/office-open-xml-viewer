@@ -73,7 +73,10 @@ function paragraphBlockAdvance(layout: ParagraphLayout): number {
  * between adjacent paragraphs, so it cannot be recovered by summing each
  * child's advance independently after table placement.
  */
-function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeometry {
+function resolveCellFlow(
+  blocks: readonly TableCellBlockInput[],
+  containmentLimitPt = Number.POSITIVE_INFINITY,
+): CellFlowGeometry {
   const placements: TableCellBlockLayout[] = [];
   let cursorPt = 0;
   let previousParagraph: ParagraphLayout | null = null;
@@ -101,10 +104,13 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
         previousParagraph = layout;
         previousAfterPt = afterPt;
       }
-      if (layout.cellContainmentBounds) {
-        const containmentTopPt = offsetPt
-          + layout.cellContainmentBounds.yPt
-          - layout.flowBounds.yPt;
+      const ownContainmentTopPt = layout.cellContainmentBounds
+        ? layout.cellContainmentBounds.yPt - layout.flowBounds.yPt
+        : 0;
+      if (layout.cellContainmentBounds
+        && Math.max(0, ownContainmentTopPt + layout.cellContainmentBounds.heightPt)
+          - Math.min(0, ownContainmentTopPt) <= containmentLimitPt + 1e-6) {
+        const containmentTopPt = offsetPt + ownContainmentTopPt;
         const containmentBottomPt = containmentTopPt
           + layout.cellContainmentBounds.heightPt;
         firstInkTopPt = firstInkTopPt === undefined
@@ -157,11 +163,16 @@ function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
  * Return the authored block-flow height used by table row layout. Pagination
  * calls this same fold while choosing legal fragment boundaries so paragraph
  * spacing collapse cannot disagree with the geometry materialized afterwards.
+ *
+ * `containmentLimitPt` is for page-cut admission only: a paragraph's
+ * layoutInCell containment interval whose own extent exceeds it is left out
+ * (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP). Row layout never passes it.
  */
 export function measureTableCellBlockFlowHeightPt(
   blocks: readonly TableCellBlockInput[],
+  containmentLimitPt = Number.POSITIVE_INFINITY,
 ): number {
-  return cellContentRequiredHeightPt(resolveCellFlow(blocks));
+  return cellContentRequiredHeightPt(resolveCellFlow(blocks, containmentLimitPt));
 }
 
 interface RowSpacingInsets {
