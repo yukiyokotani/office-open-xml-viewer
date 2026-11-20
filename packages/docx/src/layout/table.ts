@@ -149,6 +149,16 @@ function resolveCellFlow(
   };
 }
 
+/** A cell's flow as row layout materializes it; a recovered fragment's cell
+ * applies its admission containment limit (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP)
+ * so its text sits where pagination admitted it. */
+function cellFlow(cell: TableCellLayoutInput): CellFlowGeometry {
+  return resolveCellFlow(
+    cell.verticalMerge === 'continue' ? [] : cell.blocks,
+    cell.recoveryContainmentLimitPt,
+  );
+}
+
 function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
   const containmentTopPt = flow.cellContainmentTopPt ?? 0;
   const containmentBottomPt = flow.cellContainmentBottomPt ?? 0;
@@ -164,9 +174,10 @@ function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
  * calls this same fold while choosing legal fragment boundaries so paragraph
  * spacing collapse cannot disagree with the geometry materialized afterwards.
  *
- * `containmentLimitPt` is for page-cut admission only: a paragraph's
- * layoutInCell containment interval whose own extent exceeds it is left out
- * (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP). Row layout never passes it.
+ * `containmentLimitPt` is for the fresh-band recovery only: a paragraph's
+ * layoutInCell containment interval whose own extent exceeds it is left out,
+ * top and bottom alike (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP). The recovered
+ * cells carry the same limit, so row layout materializes the admitted flow.
  */
 export function measureTableCellBlockFlowHeightPt(
   blocks: readonly TableCellBlockInput[],
@@ -1422,7 +1433,7 @@ export function layoutTable(
   }
   const flows = new Map<string, CellFlowGeometry>();
   input.rows.forEach((row) => row.cells.forEach((cell) => {
-    flows.set(cell.id, resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks));
+    flows.set(cell.id, cellFlow(cell));
   }));
   const boundaries = resolvedBoundaries(input);
   const ruleInsetsPt = rowRuleInsetsPt(input, boundaries);
@@ -1749,7 +1760,7 @@ export function laidOutTableTracks(
       }
       const flows = new Map(candidate.cells.map((cell) => [
         cell.id,
-        resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks),
+        cellFlow(cell),
       ] as const));
       return materializeTableRow(input, rowIndex, { ...frame, flows }, placement, candidate);
     },
@@ -1884,7 +1895,7 @@ export function tablePrefixTracks(input: TableLayoutInput, services?: LayoutServ
   const flowOf = (cell: TableCellLayoutInput): CellFlowGeometry => {
     let flow = flows.get(cell);
     if (!flow) {
-      flow = resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks);
+      flow = cellFlow(cell);
       flows.set(cell, flow);
     }
     return flow;

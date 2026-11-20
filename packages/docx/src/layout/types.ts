@@ -1554,6 +1554,12 @@ export interface TableCellLayoutInput {
     tr2bl: TableBorderInput | null;
   }>;
   readonly blocks: readonly TableCellBlockInput[];
+  /** LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP: set only on the cells of a
+   * recovered fragment. A layoutInCell containment interval whose own extent
+   * exceeds it shapes neither the fragment's admission nor this cell's flow
+   * (no row growth, no downward text offset); its drawing keeps its position
+   * and is clipped with the fragment. */
+  readonly recoveryContainmentLimitPt?: number;
   /** ECMA-376 §17.4.72 rotated cell text. Blocks were acquired with
    * `lineLengthPt` as their line width; the cell requires
    * `requiredLineLengthPt` of physical content height. */

@@ -1099,34 +1099,56 @@ describe('retained table pagination', () => {
     expect(second.nextCursor).toBeNull();
   });
 
+  const withContainedDrawing = (
+    plain: ParagraphLayout,
+    drawingBounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+  ): ParagraphLayout => layoutParagraph({
+    ...plain,
+    lines: plain.lines.map((line, index) => index > 0 ? line : {
+      ...line,
+      placements: [{
+        kind: 'drawing' as const, range: line.range, drawingId: `${plain.id}:drawing`,
+        bounds: drawingBounds, advancePt: 0,
+      }],
+    }),
+    drawings: [{
+      kind: 'drawing', id: `${plain.id}:drawing`, source: plain.source,
+      flowDomainId: plain.flowDomainId, ordinaryFlow: false,
+      flowBounds: drawingBounds, inkBounds: drawingBounds,
+      advancePt: 0, commands: [],
+      anchorLayer: {
+        occurrenceId: `${plain.id}:drawing`, behindDoc: false, relativeHeight: 1, sourceOrder: 0,
+        horizontalOwnership: 'host', verticalOwnership: 'host',
+        layoutInCell: true, cellContainment: true,
+      },
+    }],
+    cellContainmentBounds: drawingBounds,
+  });
+  /** Every cell line painted inside its fragment's clip, as `paragraph:line`. */
+  const visibleLines = (result: ReturnType<typeof take>): string[] => {
+    const fragment = result.fragment;
+    if (!fragment) return [];
+    const clip = fragment.clipBounds ?? fragment.flowBounds;
+    return fragment.rows.flatMap((item) => item.cells.flatMap((cell) => cell.blocks.flatMap((block) => {
+      const layout = block.layout;
+      if (layout.kind !== 'paragraph') return [];
+      return layout.lines.flatMap((line) => {
+        const topPt = cell.contentBounds.yPt + block.offsetPt + line.bounds.yPt - layout.flowBounds.yPt;
+        return topPt >= clip.yPt - 1e-6 && topPt + line.advancePt <= clip.yPt + clip.heightPt + 1e-6
+          // Slices extend the source paragraph id.
+          ? [`${layout.id.split(':')[0]}:${line.range.start}`] : [];
+      });
+    })));
+  };
+
   it('admits cell text past a layoutInCell containment no fresh band can hold', () => {
     // The drawing's containment ends 120pt below its paragraph top, past any
     // 100pt band. It stops charging admission only on a fresh band; the text
     // keeps flowing instead of one line per page.
-    const plain = paragraph('contained-anchor', [10, 10, 10]);
-    const drawingBounds = { xPt: 0, yPt: 90, widthPt: 20, heightPt: 30 };
-    const anchored = layoutParagraph({
-      ...plain,
-      lines: plain.lines.map((line, index) => index > 0 ? line : {
-        ...line,
-        placements: [{
-          kind: 'drawing' as const, range: line.range, drawingId: 'contained',
-          bounds: drawingBounds, advancePt: 0,
-        }],
-      }),
-      drawings: [{
-        kind: 'drawing', id: 'contained', source: plain.source,
-        flowDomainId: plain.flowDomainId, ordinaryFlow: false,
-        flowBounds: drawingBounds, inkBounds: drawingBounds,
-        advancePt: 0, commands: [],
-        anchorLayer: {
-          occurrenceId: 'contained', behindDoc: false, relativeHeight: 1, sourceOrder: 0,
-          horizontalOwnership: 'host', verticalOwnership: 'host',
-          layoutInCell: true, cellContainment: true,
-        },
-      }],
-      cellContainmentBounds: drawingBounds,
-    });
+    const anchored = withContainedDrawing(
+      paragraph('contained-anchor', [10, 10, 10]),
+      { xPt: 0, yPt: 90, widthPt: 20, heightPt: 30 },
+    );
     const source = acquisition([cellsRow(0, [[anchored, paragraph('after-anchor', [10])]])]);
 
     // Relocating can still gain space: the containment keeps charging.
@@ -1138,8 +1160,41 @@ describe('retained table pagination', () => {
       { kind: 'whole', blockIndex: 1 },
     ]]);
     expect(fresh.nextCursor).toBeNull();
-    expect(fresh.fragment?.advancePt).toBe(100);
-    expect(fresh.fragment?.unpaintedOverflowPt).toBe(20);
+    // The left-out interval no longer grows the row; its drawing is clipped
+    // with the fragment.
+    expect(fresh.fragment?.advancePt).toBe(40);
+    expect(fresh.fragment?.clipBounds?.heightPt).toBe(40);
+    expect(visibleLines(fresh)).toHaveLength(4);
+  });
+
+  it('paints every recovered line once beside a drawing that starts above its text', () => {
+    // Containment from -20pt to +120pt of its paragraph: no 100pt band holds
+    // it. Materialization must not move the admitted text down by the 20pt
+    // above it, and a bottom-aligned sibling must not align against the
+    // over-band row; otherwise admitted lines are clipped with the cursor
+    // already past them.
+    const anchored = withContainedDrawing(
+      paragraph('raised-anchor', Array.from({ length: 12 }, () => 10)),
+      { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+    );
+    const base = cellsRow(0, [[anchored], [paragraph('bottom-aligned', [10])]]);
+    const source = acquisition([{
+      ...base,
+      cells: base.cells.map((cell, index) => index === 1 ? { ...cell, vAlign: 'bottom' as const } : cell),
+    }]);
+    const seen: string[] = [];
+    let cursor: ReturnType<typeof take>['nextCursor'] = startTableFragmentCursor();
+    for (let page = 0; cursor && page < 4; page += 1) {
+      const result = take(source, 100, cursor);
+      expect(result.requiresFreshPage).toBe(false);
+      seen.push(...visibleLines(result));
+      cursor = result.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(seen.sort()).toEqual([
+      ...Array.from({ length: 12 }, (_, line) => `raised-anchor:${line}`),
+      'bottom-aligned:0',
+    ].sort());
   });
 
   it.each([

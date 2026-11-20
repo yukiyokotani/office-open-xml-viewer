@@ -1907,11 +1907,31 @@ function partialRow(
     );
   }
   if (!admissible(selectedCells)) return { selected: null, next: cursor, complete: false };
+  // The recovered fragment is clipped at the band end, so it must place each
+  // admitted unit where admission charged it, or a line admitted inside the
+  // band would be painted beyond the clip and lost with the cursor already
+  // past it. Its cells therefore materialize without the containment
+  // intervals admission left out (no row growth, no downward offset for a
+  // drawing above the text) and from their top: a centered or bottom vAlign
+  // (§17.4.84) aligns against the over-band row. Rotated cells keep their own
+  // single-fragment geometry.
+  const recovered = <Cell extends TableCellLayoutInput>(cell: Cell): Cell => (
+    !recoversBlockedUnits || cell.verticalText ? cell : {
+      ...cell,
+      vAlign: 'top',
+      recoveryContainmentLimitPt: freshAvailableContentHeightPt,
+    }
+  );
 
   const complete = selectedCells.every((cell) => cell.complete);
   if (complete && cursor.rowFragmentIndex === 0) {
     return {
-      selected: selectedWholeRow(row, 'source', 0, recoversBlockedUnits),
+      selected: selectedWholeRow(
+        recoversBlockedUnits ? { ...row, cells: row.cells.map(recovered) } : row,
+        'source',
+        0,
+        recoversBlockedUnits,
+      ),
       next: Object.freeze({
         rowIndex: cursor.rowIndex + 1,
         rowFragmentIndex: 0,
@@ -1929,7 +1949,7 @@ function partialRow(
     id: `${row.id}:fragment:${cursor.rowFragmentIndex}`,
     heightPt: null,
     heightRule: 'auto',
-    cells: selectedCells.map((cell, index) => ({
+    cells: selectedCells.map((cell, index) => recovered({
       ...cell.input,
       id: `${cell.input.id}:fragment:${cursor.rowFragmentIndex}:${index}`,
     })),
