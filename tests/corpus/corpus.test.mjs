@@ -97,6 +97,8 @@ test('the package checker rejects malformed XML', () => {
 // Grid discipline: every length that places text or an object comes from
 // lib/grid.mjs. Checked mechanically so a new case cannot slip in an ad-hoc
 // offset. Intentional exceptions are listed with their reason.
+const WORD_CHARS_SENTINEL = 31680;
+
 test('positions and lengths lie on the grid', async () => {
   const { DOCX, OUTLINED_INSET, PPTX, XLSX } = await import('./lib/grid.mjs');
   const { readZip } = await import('../visual/corpus-features.mjs');
@@ -130,6 +132,9 @@ test('positions and lengths lie on the grid', async () => {
           if (el.name === 'w:tab' && el.attrs.has('w:pos') && !edgesW.has(a('w:pos'))) bad(`tab stop ${a('w:pos')}`);
           if (el.name === 'w:ind') {
             for (const k of ['w:left', 'w:right', 'w:hanging', 'w:firstLine']) {
+              // 31680 twips (22 in) is the value Word writes beside *Chars
+              // indents; Word ignores it, and docx-039 tests exactly that.
+              if (a(k) === WORD_CHARS_SENTINEL && c.id === 'docx-039') continue;
               if (el.attrs.has(k) && !edgesW.has(a(k))) bad(`indent ${k} ${a(k)}`);
             }
           }
