@@ -82,6 +82,7 @@ import {
   type ReviewProjectionIndex,
 } from './layout/text-index.js';
 import {
+  collectSelectedDocxElementContexts,
   hitTestSelectedDocxElementContext,
   type DocxElementContextOptions,
 } from './element-context.js';
@@ -2219,6 +2220,37 @@ export class DocxDocument {
       runs,
       { includeResolved },
     );
+  }
+
+  /**
+   * Collect pictures, charts, and shapes in paint order from the active page
+   * layout, including inline resources and overlapping occurrences. Returns
+   * detached contexts with full axis-aligned bounds in physical page points
+   * and a representative point at each bounds center. No painting is needed;
+   * worker mode projects the same geometry in the worker-owned layout.
+   */
+  async collectPageElements(
+    pageIndex: number,
+    opts: DocxElementContextOptions = {},
+  ): Promise<DocxElementContext[]> {
+    const viewOpts = this._withActiveView({
+      ...(opts.maxTextCharacters === undefined ? {} : { maxTextCharacters: opts.maxTextCharacters }),
+      ...(opts.currentDate === undefined ? {} : { currentDate: opts.currentDate }),
+      ...(opts.showTrackedChanges === undefined ? {} : { showTrackedChanges: opts.showTrackedChanges }),
+    });
+    if (this._mode === 'worker') {
+      const res = await this._bridge.request(
+        (id) => ({ type: 'collectElements', id, pageIndex, opts: viewOpts }) satisfies RenderWorkerRequest,
+      );
+      return (res as Extract<RenderWorkerResponse, { type: 'elementsCollected' }>).contexts;
+    }
+    const runtime = documentLayoutRuntimeOf(this);
+    const services = runtime.services;
+    if (!services) throw new Error('Document layout services are not initialized');
+    return collectSelectedDocxElementContexts(services, pageIndex, {
+      ...viewOpts,
+      defaultCurrentDateMs: runtime.defaultCurrentDateMs,
+    });
   }
 
   /**

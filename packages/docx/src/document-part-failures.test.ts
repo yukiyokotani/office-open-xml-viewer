@@ -9,7 +9,7 @@ import { attachDocumentLayoutRuntime } from './layout/runtime-state.js';
  */
 function workerDocument(meta: Record<string, unknown> | null) {
   vi.stubGlobal('OffscreenCanvas', class { constructor(readonly width: number, readonly height: number) {} });
-  const request = vi.fn(async () => ({ type: 'pageRendered', id: 1, bitmap: { close() {} }, runs: [], diagnostics: [] }));
+  const request = vi.fn(async (_build: (id: number) => unknown) => ({ type: 'pageRendered', id: 1, bitmap: { close() {} }, runs: [], diagnostics: [] }));
   const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
   Object.assign(instance, { _mode: 'worker', _meta: meta, _bridge: { request } });
   const document = instance as unknown as DocxDocument;
@@ -117,6 +117,18 @@ describe('DocxDocument part failures (#1974)', () => {
     expect(sentOptions(request)).toEqual({ currentDate: 0 });
   });
 
+  it('collects worker elements without posting reused render callbacks', async () => {
+    const { document, request } = workerDocument(meta);
+    request.mockImplementation(async () => ({ type: 'elementsCollected', id: 1, contexts: [] }) as never);
+    expect(await document.collectPageElements(0, {
+      currentDate: 0, maxTextCharacters: 10, showTrackedChanges: false, errorPlaceholder: () => ({}),
+    } as never)).toEqual([]);
+    const build = request.mock.calls[0]![0] as (id: number) => unknown;
+    expect(build(1)).toEqual({ type: 'collectElements', id: 1, pageIndex: 0,
+      opts: { currentDate: 0, maxTextCharacters: 10, showTrackedChanges: false } });
+    expect(() => structuredClone(build(1))).not.toThrow();
+  });
+
   it('rejects instead of throwing for a throwing resolver in main mode', () => {
     const instance = Object.create(DocxDocument.prototype) as Record<string, unknown>;
     Object.assign(instance, { _mode: 'main', _meta: meta });
@@ -128,4 +140,3 @@ describe('DocxDocument part failures (#1974)', () => {
     return expect(result).rejects.toBe(failure);
   });
 });
-

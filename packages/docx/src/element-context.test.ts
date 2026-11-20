@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChartModel } from '@silurus/ooxml-core';
-import { hitTestDocxElementContext } from './element-context.js';
+import { collectDocxElementContexts, hitTestDocxElementContext } from './element-context.js';
 import { buildPageLayers } from './layout/page-layers.js';
 import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import type {
@@ -163,6 +163,54 @@ const chart = {
 } as unknown as ChartModel;
 
 describe('DOCX element context', () => {
+  it('collects overlapping occurrences in paint order with detached, bounded context', () => {
+    const layout = layoutFor([
+      drawing('image', 0, 'image', 'image:1', 1),
+      drawing('chart', 1, 'chart', 'chart:1', 2),
+    ]);
+    const registry = createPaintResourceRegistry([
+      { kind: 'image', resourceKey: 'image:1', partPath: 'word/media/image1.png',
+        mimeType: 'image/png', intrinsicSize: { widthPt: 100, heightPt: 60 } },
+      { kind: 'chart', resourceKey: 'chart:1', intrinsicSize: { widthPt: 100, heightPt: 60 }, model: chart },
+    ]);
+    const contexts = collectDocxElementContexts(layout, 0, registry, { maxTextCharacters: 5 });
+    expect(contexts.map(({ elementType, elementIndex }) => [elementType, elementIndex]))
+      .toEqual([['image', 0], ['chart', 1]]);
+    expect(contexts[0]).toMatchObject({ bounds, point: { xPt: 60, yPt: 50 } });
+    expect(contexts[1]).toMatchObject({ textCharacters: 5, truncated: true, maxTextCharacters: 5 });
+    expect(structuredClone(contexts)).toEqual(contexts);
+    Reflect.set(contexts[0].source.path, '0', 99);
+    expect(collectDocxElementContexts(layout, 0, registry)[0].source.path).toEqual([0, 0]);
+    expect(collectDocxElementContexts(layoutFor([]), 0, registry)).toEqual([]);
+    expect(() => collectDocxElementContexts(layout, 0, registry, { maxTextCharacters: -1 }))
+      .toThrow(RangeError);
+  });
+
+  it.each([
+    { rotation: 90, widthPt: 120, heightPt: 360 },
+    { rotation: 45, widthPt: 160 * Math.SQRT2, heightPt: 260 * Math.SQRT2 },
+  ])('projects $rotation-degree inline image rotation before the enclosing transform', ({ rotation, widthPt, heightPt }) => {
+    const inline = inlineImageParagraph('inline', source([0]), 'image:rotated', bounds, 3);
+    const box = textBox('box', inline, { a: 2, b: 1, c: 0, d: 3, e: 5, f: 7 });
+    const root = { ...paragraph([]), textBoxes: [box] };
+    const layout = layoutFor([]);
+    Object.assign(layout.pages[0], {
+      layers: buildPageLayers([{ layer: 'body', node: root }]),
+    });
+    const registry = createPaintResourceRegistry([{
+      kind: 'image', resourceKey: 'image:rotated', partPath: 'word/media/rotated.png',
+      mimeType: 'image/png', intrinsicSize: { widthPt: 100, heightPt: 60 }, rotation,
+    }]);
+    const [context] = collectDocxElementContexts(layout, 0, registry);
+    expect(context.bounds.xPt).toBeCloseTo(125 - widthPt / 2);
+    expect(context.bounds.yPt).toBeCloseTo(217 - heightPt / 2);
+    expect(context.bounds.widthPt).toBeCloseTo(widthPt);
+    expect(context.bounds.heightPt).toBeCloseTo(heightPt);
+    expect(context.point.xPt).toBeCloseTo(125);
+    expect(context.point.yPt).toBeCloseTo(217);
+    expect(hitTestDocxElementContext(layout, 0, context.point, registry)?.bounds).toEqual(context.bounds);
+  });
+
   it('uses retained page paint order and returns bounded chart context', () => {
     const image = drawing('image', 0, 'image', 'image:1', 1);
     const topChart = drawing('chart', 1, 'chart', 'chart:1', 2);
