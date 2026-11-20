@@ -152,12 +152,15 @@ impl Properties {
         if let Some((glyph, font)) = symbol {
             // ECMA-376 17.3.3.30 sym: a one-glyph run in the symbol's font,
             // exactly as the DOCX parser projects `w:sym` (font on the
-            // ascii, high-ANSI and East Asian axes, no slot provenance).
+            // ascii, high-ANSI and East Asian axes, no slot provenance). A
+            // symbol font slot without a name keeps the run's own fonts.
             run.text = glyph;
-            run.font_family = Some(font.clone());
-            run.font_family_high_ansi = Some(font.clone());
-            run.font_family_east_asia = Some(font);
-            run.font_slots = None;
+            if let Some(font) = font {
+                run.font_family = Some(font.clone());
+                run.font_family_high_ansi = Some(font.clone());
+                run.font_family_east_asia = Some(font);
+                run.font_slots = None;
+            }
         }
         run.typography_acquisition = Some(RunTypographyWire {
             underline: match (
@@ -309,7 +312,7 @@ impl Properties {
     /// document applies it to non-fSpec U+0028 characters and Word's own PDF
     /// shows the symbol glyph there. Picture/OLE/object characters are never
     /// symbols.
-    fn direct_symbol(&self, fonts: &[String]) -> Result<Option<(String, String)>, String> {
+    fn direct_symbol(&self, fonts: &[String]) -> Result<Option<(String, Option<String>)>, String> {
         let Some((font, code)) = self.symbol else {
             return Ok(None);
         };
@@ -318,10 +321,8 @@ impl Properties {
         }
         let glyph = char::from_u32(u32::from(code))
             .ok_or_else(|| unsupported("invalid Word symbol character code"))?;
-        let font = fonts
-            .get(usize::from(font))
-            .ok_or_else(|| unsupported("Word symbol font outside font table"))?;
-        Ok(Some((glyph.to_string(), font.clone())))
+        let font = table_font(fonts, font.into(), "Word symbol font outside font table")?;
+        Ok(Some((glyph.to_string(), font)))
     }
 
     /// Text for one visible span resolved by [`Self::direct_text_run`]. A
@@ -371,12 +372,7 @@ impl Properties {
         let mut axes: FontAxes = [None, None, None, None];
         for (axis, index) in axes.iter_mut().zip(self.fonts) {
             if let Some(index) = index {
-                *axis = Some(
-                    fonts
-                        .get(index)
-                        .ok_or_else(|| unsupported("Word font index outside font table"))?
-                        .clone(),
-                );
+                *axis = table_font(fonts, index, "Word font index outside font table")?;
             }
         }
         Ok(axes)
@@ -458,6 +454,17 @@ impl Properties {
     fn signed_twentieth_points(&self, key: &str) -> Result<Option<f64>, String> {
         Ok(self.signed_number(key)?.map(|value| value / 20.0))
     }
+}
+
+/// The font-table name at `index`. An empty slot (see `read_fonts`) names no
+/// font; an index past the table is rejected with `outside`.
+fn table_font(
+    fonts: &[String],
+    index: usize,
+    outside: &'static str,
+) -> Result<Option<String>, String> {
+    let name = fonts.get(index).ok_or_else(|| unsupported(outside))?;
+    Ok((!name.is_empty()).then(|| name.clone()))
 }
 
 fn font_slots(axes: &FontAxes) -> Option<RunFontSlots> {
@@ -1389,6 +1396,34 @@ mod tests {
         assert_eq!(public_run(&pct)["background"], "d9d9d9");
         let cleared = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff; 4], 0))]);
         assert!(public_run(&cleared)["background"].is_null());
+    }
+
+    #[test]
+    fn an_empty_font_table_slot_names_no_font_on_any_axis() {
+        let fonts = ["", "Arial"].map(String::from);
+        // sprmCRgFtc0 selects Arial, sprmCRgFtc1 the empty slot, and
+        // sprmCSymbol a glyph in the empty slot.
+        let properties = applied(&[
+            (0x4a4f, vec![1, 0]),
+            (0x4a50, vec![0, 0]),
+            (0x6a09, vec![0, 0, 0xb0, 0xf0]),
+        ]);
+        let run = properties
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.text, "\u{f0b0}");
+        assert_eq!(run.font_family.as_deref(), Some("Arial"));
+        assert_eq!(run.font_family_east_asia, None);
+        assert_eq!(run.font_family_high_ansi, None);
+        assert_eq!(run.font_family_cs, None);
+        let slots = run.font_slots.expect("the Arial axis keeps its slot");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Arial"));
+        assert_eq!(slots.direct.east_asia, None);
+        // Paragraph marks and numbering markers resolve the same axes.
+        let facts = properties.direct_font_facts(&fonts).unwrap();
+        assert_eq!(facts.font_family.as_deref(), Some("Arial"));
+        assert_eq!(facts.font_family_east_asia, None);
     }
 
     #[test]
