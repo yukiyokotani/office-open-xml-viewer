@@ -626,6 +626,7 @@ pub(super) fn project(
                             &mut blocks.0,
                             Block::PageBreak {
                                 same_paragraph_as_previous: None,
+                                page_break_before: false,
                             },
                         )?;
                         // ECMA-376 Part 4 §14.8.3.38, via Copts.b: the mark
@@ -639,9 +640,9 @@ pub(super) fn project(
                         }
                     }
                 }
-                [DocRun::Break {
-                    break_type: BreakType::Column,
-                }] => budget.push(&mut blocks.0, Block::ColumnBreak)?,
+                // A column break, alone or not, goes through the shared
+                // splitter, which keeps its paragraph mark
+                // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN) and pageBreakBefore.
                 _ => visit_para_on_page_breaks(paragraph, split_pg_break_and_para_mark, |piece| {
                     let element = match piece {
                         ParaPiece::Para(mut paragraph) => {
@@ -653,6 +654,11 @@ pub(super) fn project(
                             same_paragraph_as_previous,
                         } => Block::PageBreak {
                             same_paragraph_as_previous: same_paragraph_as_previous.then_some(true),
+                            page_break_before: false,
+                        },
+                        ParaPiece::PageBreakBefore => Block::PageBreak {
+                            same_paragraph_as_previous: None,
+                            page_break_before: true,
                         },
                         ParaPiece::ColumnBreak => Block::ColumnBreak,
                     };
@@ -674,12 +680,14 @@ pub(super) fn project(
             Block::Table(value) => BodyElement::Table(value),
             Block::PageBreak {
                 same_paragraph_as_previous,
+                page_break_before,
             } => BodyElement::PageBreak {
                 // A break character in the DOC text is an authored break,
                 // exactly as the converted DOCX reports it.
                 origin: Some(docx_model::PageBreakOrigin::Authored),
                 parity: None,
                 same_paragraph_as_previous,
+                page_break_before: page_break_before.then_some(true),
             },
             Block::ColumnBreak => BodyElement::ColumnBreak,
         };

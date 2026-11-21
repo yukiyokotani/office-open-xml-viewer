@@ -1797,6 +1797,7 @@ impl DocxBodyCursor {
                             origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
+                            page_break_before: None,
                         }],
                     });
                 }
@@ -1872,6 +1873,7 @@ impl DocxBodyCursor {
                             origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
+                            page_break_before: None,
                         },
                     );
                     for diagnostic in &mut self.diagnostics[diagnostics_start..] {
@@ -4554,9 +4556,6 @@ impl BodyParseCursor {
                         DocRun::Break {
                             break_type: BreakType::Page,
                         } => Some(BreakType::Page),
-                        DocRun::Break {
-                            break_type: BreakType::Column,
-                        } => Some(BreakType::Column),
                         _ => None,
                     }
                 } else {
@@ -4596,6 +4595,7 @@ impl BodyParseCursor {
                                 origin: Some(PageBreakOrigin::Authored),
                                 parity: None,
                                 same_paragraph_as_previous: None,
+                                page_break_before: None,
                             });
                             // §14.8.3.38: retain the mark only when the page
                             // break is not subsumed by the section transition.
@@ -4606,11 +4606,9 @@ impl BodyParseCursor {
                         }
                         push_section_break(&mut output);
                     }
-                    Some(BreakType::Column) => {
-                        output.push(BodyElement::ColumnBreak);
-                        push_section_break(&mut output);
-                    }
                     _ => {
+                        // Column breaks, alone or not, keep their paragraph mark
+                        // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN) in the shared splitter.
                         for piece in split_para_on_page_breaks(result, split_pg_break_and_para_mark)
                         {
                             match piece {
@@ -4624,6 +4622,13 @@ impl BodyParseCursor {
                                     parity: None,
                                     same_paragraph_as_previous: same_paragraph_as_previous
                                         .then_some(true),
+                                    page_break_before: None,
+                                }),
+                                ParaPiece::PageBreakBefore => output.push(BodyElement::PageBreak {
+                                    origin: Some(PageBreakOrigin::Authored),
+                                    parity: None,
+                                    same_paragraph_as_previous: None,
+                                    page_break_before: Some(true),
                                 }),
                                 ParaPiece::ColumnBreak => output.push(BodyElement::ColumnBreak),
                             }
@@ -4811,6 +4816,7 @@ fn parse_story_body_elements(
                 origin: Some(PageBreakOrigin::CoverPageSynthetic),
                 parity: None,
                 same_paragraph_as_previous: None,
+                page_break_before: None,
             });
         }
     }
@@ -7760,6 +7766,9 @@ fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontS
     })
 }
 
+/// Empty a break-only paragraph that keeps only its mark, pointing its
+/// run-indexed metadata (revisions, comment marks, field boundaries) at the
+/// paragraph start so no index outlives the removed break run.
 fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
     let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
     RunFontFacts {
@@ -17172,6 +17181,7 @@ mod tests {
             } => {
                 format!("page:{same_paragraph_as_previous}")
             }
+            ParaPiece::PageBreakBefore => "pageBreakBefore".into(),
             ParaPiece::ColumnBreak => "column".into(),
         }
     }
@@ -17237,6 +17247,19 @@ mod tests {
                 }
                 // The previous normalizer plus `endsAtHardBreak` on every
                 // paragraph piece that a page or column break follows.
+                // A terminal column break now also retains the paragraph mark
+                // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+                let terminal_column = matches!(
+                    para.runs.iter().rev().find(|run| !matches!(
+                        run,
+                        DocRun::Break {
+                            break_type: BreakType::RenderedPage
+                        }
+                    )),
+                    Some(DocRun::Break {
+                        break_type: BreakType::Column
+                    })
+                );
                 let old = old_split_para_on_page_breaks(para.clone());
                 let followed: Vec<bool> = (0..old.len())
                     .map(|index| {
@@ -17246,7 +17269,7 @@ mod tests {
                         )
                     })
                     .collect();
-                let expected: Vec<_> = old
+                let mut expected: Vec<_> = old
                     .into_iter()
                     .zip(followed)
                     .map(|(piece, followed)| match piece {
@@ -17257,6 +17280,25 @@ mod tests {
                         piece => old_piece_shape(piece),
                     })
                     .collect();
+                if terminal_column {
+                    // With no content piece the mark keeps every in-range
+                    // field boundary, collapsed onto its start.
+                    let mut mark = DocParagraph::default();
+                    if !expected.iter().any(|piece| piece.starts_with("p:")) {
+                        let mut kept: Vec<_> = para
+                            .complex_field_boundaries
+                            .iter()
+                            .filter(|boundary| boundary.run_index <= para.runs.len())
+                            .cloned()
+                            .collect();
+                        kept.sort_by_key(|boundary| boundary.run_index);
+                        for boundary in &mut kept {
+                            boundary.run_index = 0;
+                        }
+                        mark.complex_field_boundaries = kept;
+                    }
+                    expected.push(format!("p:{}", serde_json::to_string(&mark).unwrap()));
+                }
                 let actual: Vec<_> = split_para_on_page_breaks(para, false)
                     .into_iter()
                     .map(piece_shape)
@@ -27234,8 +27276,119 @@ mod column_tests {
     #[test]
     fn column_break_only_paragraph_becomes_body_column_break() {
         let body = body_from(r#"<w:p><w:r><w:br w:type="column"/></w:r></w:p>"#);
-        assert_eq!(body.len(), 1);
+        // The break, then the paragraph mark's empty line at the top of the
+        // next column (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+        assert_eq!(body.len(), 2);
         assert!(matches!(body[0], BodyElement::ColumnBreak));
+        assert!(matches!(&body[1], BodyElement::Paragraph(p) if p.runs.is_empty()));
+    }
+
+    #[test]
+    fn page_break_before_column_break_paragraph_turns_the_page_first() {
+        let body = body_from(
+            r#"<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:br w:type="column"/></w:r></w:p>"#,
+        );
+        // The paragraph's own idempotent transition, not a hard page break: at
+        // an empty page start it adds no page.
+        assert_eq!(body.len(), 3);
+        assert!(matches!(
+            body[0],
+            BodyElement::PageBreak {
+                page_break_before: Some(true),
+                ..
+            }
+        ));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(
+            matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty() && !p.page_break_before)
+        );
+    }
+
+    #[test]
+    fn break_only_mark_keeps_a_field_end_begun_in_an_earlier_paragraph() {
+        for hint in ["", r#"<w:r><w:lastRenderedPageBreak/></w:r>"#] {
+            let body = body_from(&format!(
+                r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF target </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>result</w:t></w:r></w:p><w:p>{hint}<w:r><w:br w:type="column"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+            ));
+            let BodyElement::Paragraph(first) = &body[0] else {
+                panic!("expected the field paragraph first, got {body:?}");
+            };
+            let BodyElement::Paragraph(mark) = body.last().expect("mark paragraph") else {
+                panic!("expected the mark paragraph last, got {body:?}");
+            };
+            let start = first
+                .complex_field_boundaries
+                .iter()
+                .find(|boundary| boundary.boundary == "start")
+                .expect("field start in the first paragraph");
+            let end = mark
+                .complex_field_boundaries
+                .iter()
+                .find(|boundary| boundary.boundary == "end")
+                .unwrap_or_else(|| panic!("field end kept on the mark ({hint:?}): {mark:?}"));
+            assert_eq!(end.occurrence_id, start.occurrence_id, "{hint}");
+            assert_eq!(end.run_index, 0, "{hint}");
+        }
+    }
+
+    #[test]
+    fn column_break_paragraph_mark_survives_rendered_page_hints_and_keeps_indices() {
+        for xml in [
+            r#"<w:p><w:r><w:lastRenderedPageBreak/><w:br w:type="column"/></w:r></w:p>"#,
+            r#"<w:p><w:r><w:br w:type="column"/></w:r><w:r><w:lastRenderedPageBreak/></w:r></w:p>"#,
+            r#"<w:p><w:commentRangeStart w:id="0"/><w:r><w:br w:type="column"/></w:r><w:commentRangeEnd w:id="0"/></w:p>"#,
+        ] {
+            let body = body_from(xml);
+            assert!(matches!(body[0], BodyElement::ColumnBreak), "{xml}");
+            let BodyElement::Paragraph(mark) = &body[1] else {
+                panic!("mark paragraph expected for {xml}");
+            };
+            assert!(mark.runs.is_empty(), "{xml}");
+            assert!(
+                mark.comment_marks
+                    .iter()
+                    .all(|entry| entry.run_index as usize <= mark.runs.len()),
+                "{xml}"
+            );
+            assert!(mark.run_revisions.len() <= mark.runs.len(), "{xml}");
+        }
+    }
+
+    /// A complex field whose cached result is only the column break leaves no
+    /// run-relative fact pointing past the empty mark.
+    #[test]
+    fn column_break_field_result_collapses_onto_the_mark() {
+        let body = body_from(
+            r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF target </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:br w:type="column"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:commentRangeEnd w:id="1"/></w:p>"#,
+        );
+        let BodyElement::Paragraph(mark) = body.last().expect("mark paragraph") else {
+            panic!("expected the mark paragraph last, got {body:?}");
+        };
+        assert!(mark.runs.is_empty());
+        assert!(mark.run_revisions.is_empty());
+        // Both result boundaries survive, collapsed onto the empty mark.
+        let kinds: Vec<_> = mark
+            .complex_field_boundaries
+            .iter()
+            .map(|boundary| (boundary.boundary.as_str(), boundary.run_index))
+            .collect();
+        assert_eq!(kinds, [("start", 0), ("end", 0)]);
+        assert!(mark
+            .comment_marks
+            .iter()
+            .all(|comment| comment.run_index as usize <= mark.runs.len()));
+        assert!(matches!(body[body.len() - 2], BodyElement::ColumnBreak));
+    }
+
+    #[test]
+    fn terminal_column_break_moves_the_mark_to_the_next_column() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br w:type="column"/></w:r></w:p>"#,
+        );
+        assert_eq!(body.len(), 3);
+        assert!(matches!(&body[0], BodyElement::Paragraph(p) if !p.runs.is_empty()));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty()));
     }
 
     #[test]
@@ -27521,12 +27674,14 @@ mod column_tests {
                </w:sdt>
                <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
         );
-        // Para(cover), ColumnBreak, PageBreak (synthetic, kept), Para(body).
-        assert_eq!(body.len(), 4);
+        // Para(cover), ColumnBreak, the column-break paragraph's mark line,
+        // PageBreak (synthetic, kept), Para(body).
+        assert_eq!(body.len(), 5);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::ColumnBreak));
-        assert!(matches!(body[2], BodyElement::PageBreak { .. }));
-        assert!(matches!(body[3], BodyElement::Paragraph(_)));
+        assert!(matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty()));
+        assert!(matches!(body[3], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[4], BodyElement::Paragraph(_)));
     }
 
     /// ECMA-376 §17.6.x — a `<w:sectPr>` carried in a paragraph's `pPr` defines
