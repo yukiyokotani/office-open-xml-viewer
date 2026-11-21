@@ -106,7 +106,7 @@ import {
   type FootnoteCursor,
 } from './footnote-fragmentation.js';
 import { noteSeparatorOccurrence } from './reserved-note-separators.js';
-import { paragraphGapAdjustment } from './paragraph-spacing.js';
+import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import {
   endnoteIdsInRetainedSlice,
   footnoteIdsInRetainedLines,
@@ -2814,7 +2814,8 @@ function* paginateBodyPassSteps(
       const spacing = resumed?.kind === 'paragraph'
         ? { suppressBefore: resumed.suppressBefore, overlap: 0 }
         : paragraphGapAdjustment(previousParagraph, block, previousAfterPt,
-          block.continuousSectionRole === 'suppress-before' ? 0 : block.spaceBeforePt);
+          block.continuousSectionRole === 'suppress-before' ? 0 : block.spaceBeforePt,
+          paragraphGapFoldOf(compat));
       const spacingOverlap = block.continuousSectionRole === 'drop-previous-after'
         ? previousAfterPt
         : spacing.overlap;
@@ -4106,7 +4107,7 @@ function composePageStories(
     const geometry = vertical
       // `word-vertical-section-physical-header-footer`
       ? Object.freeze({
-          ...physicalSectionGeometry(page.section.geometry, page.section.sectionFlow),
+          ...physicalSectionGeometry(page.section.geometry, sectionWritingMode(page.section)),
           ...effectiveHeaderFooterInlineMargins(owner.pageLayout, page.pageIndex),
         })
       : horizontalStorySection.geometry;

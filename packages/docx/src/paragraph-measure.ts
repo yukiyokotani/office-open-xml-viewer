@@ -195,8 +195,9 @@ export function measureParagraph(
   // boundary: a 16pt East Asian mark on an 18pt grid occupies two cells even
   // when the document contains no literal CJK code point.
   // Keep that compatibility projection inside the active line grid. Part 4
-  // §14.8.3.50 does not select an East Asian font for an otherwise Latin mark;
-  // §17.3.2.26's explicit mark hint remains authoritative without a grid.
+  // §14.8.3.50 does not select an East Asian font for an otherwise Latin mark,
+  // and WORD_EMPTY_MARK_ASCII_FACE measures the empty mark with its ascii face
+  // whatever its hint (paragraphMarkLineMetrics).
   // Windows Word controls with useFELayout and no grid retain the Latin
   // single-line box (Times New Roman 10pt footnote separators; Ubuntu 12pt
   // body marks and footnote/endnote separators),
@@ -255,7 +256,9 @@ export function measureParagraph(
     if (spacing?.rule === 'atLeast') return Math.min(advancePt, descentPt);
     return Math.max(0, advancePt - ascentPt);
   };
-  const measureMarkOnly = (): MeasuredParagraph => {
+  // `emptyMark`: the paragraph has no content at all. A mark line that only
+  // carries wrap-float anchors is not an empty paragraph mark.
+  const measureMarkOnly = (emptyMark: boolean): MeasuredParagraph => {
     let markTopPt = cursorPt;
     const markMetrics = paragraphMarkLineMetrics(
       paragraph,
@@ -271,6 +274,7 @@ export function measureParagraph(
       environment.paragraphMarkShapeInput,
       compat.useFeLayout,
       firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
+      emptyMark,
     );
     const markAdvancePt = markMetrics.advancePx;
     let markWrapBounds: MeasuredParagraph['markWrapBounds'];
@@ -367,7 +371,7 @@ export function measureParagraph(
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
-  if (segments.length === 0) return measureMarkOnly();
+  if (segments.length === 0) return measureMarkOnly(true);
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in
@@ -715,7 +719,7 @@ export function measureParagraph(
     },
     context.lineEdgeRules,
   );
-  if (lines.length === 0) return measureMarkOnly();
+  if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
   const measuredLines: MeasuredLine[] = [];

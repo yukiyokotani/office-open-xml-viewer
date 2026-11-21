@@ -12,11 +12,15 @@ import {
   type SectionLayoutContext,
   type SectionGridContext,
 } from '../layout-context.js';
-import type { DeepReadonly, SectionFlow } from './types.js';
+import type { DeepReadonly, SectionFlow, WritingMode } from './types.js';
+import type { AnchorFrameRect } from './anchor-frame.js';
 import {
+  logicalPageExtent,
   logicalToPhysicalMatrix,
   physicalToLogicalMatrix,
+  sectionWritingMode,
   transformRectEdges,
+  uprightPhysicalExtent,
 } from './coordinate-space.js';
 
 /**
@@ -81,88 +85,118 @@ export function sectionBodyInsetPt(marginPt: number): number {
   return Math.abs(marginPt);
 }
 
-/** Physical-to-logical quarter turn for vertical section body layout. The
- * established Transitional-token mapping is unchanged; a section flow derives
- * its edges from its own canonical matrix (bottomToTop: logical left/right/top/bottom
- * are the physical bottom/top/left/right margins). */
+/**
+ * Physical-to-logical mapping of a section's page box and §17.6.11 `w:pgMar`
+ * margins, through the section frame's own canonical matrix
+ * ({@link physicalToLogicalMatrix}). The writing mode is the only authority:
+ * the frame that lays the body out is the frame that paints it, so a physical
+ * margin owns the logical edge it is painted on.
+ *
+ * - vertical-rl (tbRl, tbRlV, and btLr under
+ *   `word-section-btlr-tbrl-page-frame`): lines advance right to left, so the
+ *   logical top/right/bottom/left margins are the physical right/bottom/left/top.
+ * - vertical-lr (tbLrV, Part 4 §14.11.7 ≡ Part 1 §17.18.93 lrV, lines flowing
+ *   from left to right): the logical top/right/bottom/left margins are the
+ *   physical left/bottom/right/top (`word-section-tblrv-left-page-frame`).
+ * - sideways-lr (a bottomToTop section flow): logical left/right/top/bottom
+ *   are the physical bottom/top/left/right margins.
+ * - horizontal-tb: the identity.
+ */
 export function logicalSectionGeometry(
   physical: SectionGeom,
-  sectionFlow?: SectionFlow | null,
+  writingMode: WritingMode,
 ): SectionGeom {
-  if (sectionFlow != null) {
-    const edges = transformRectEdges(
-      physicalToLogicalMatrix('sideways-lr', {
-        widthPt: physical.pageWidth,
-        heightPt: physical.pageHeight,
-      }),
-      {
-        top: physical.marginTop,
-        right: physical.marginRight,
-        bottom: physical.marginBottom,
-        left: physical.marginLeft,
-      },
-    );
-    return {
-      pageWidth: physical.pageHeight,
-      pageHeight: physical.pageWidth,
-      marginLeft: edges.left,
-      marginTop: edges.top,
-      marginRight: edges.right,
-      marginBottom: edges.bottom,
-      headerDistance: physical.headerDistance,
-      footerDistance: physical.footerDistance,
-    };
-  }
+  const page = { widthPt: physical.pageWidth, heightPt: physical.pageHeight };
+  const extent = logicalPageExtent(page, writingMode);
+  const edges = transformRectEdges(physicalToLogicalMatrix(writingMode, page), {
+    top: physical.marginTop,
+    right: physical.marginRight,
+    bottom: physical.marginBottom,
+    left: physical.marginLeft,
+  });
   return {
-    pageWidth: physical.pageHeight,
-    pageHeight: physical.pageWidth,
-    marginLeft: physical.marginTop,
-    marginTop: physical.marginRight,
-    marginRight: physical.marginBottom,
-    marginBottom: physical.marginLeft,
+    pageWidth: extent.widthPt,
+    pageHeight: extent.heightPt,
+    marginLeft: edges.left,
+    marginTop: edges.top,
+    marginRight: edges.right,
+    marginBottom: edges.bottom,
     headerDistance: physical.headerDistance,
     footerDistance: physical.footerDistance,
   };
 }
 
-/** Inverse logical-to-physical quarter turn for a vertical section page box. */
+/** Exact inverse of {@link logicalSectionGeometry} for the same writing mode. */
 export function physicalSectionGeometry(
   logical: SectionGeom,
-  sectionFlow?: SectionFlow | null,
+  writingMode: WritingMode,
 ): SectionGeom {
-  if (sectionFlow != null) {
-    const edges = transformRectEdges(
-      logicalToPhysicalMatrix('sideways-lr', {
-        widthPt: logical.pageHeight,
-        heightPt: logical.pageWidth,
-      }),
-      {
-        top: logical.marginTop,
-        right: logical.marginRight,
-        bottom: logical.marginBottom,
-        left: logical.marginLeft,
-      },
-    );
-    return {
-      pageWidth: logical.pageHeight,
-      pageHeight: logical.pageWidth,
-      marginTop: edges.top,
-      marginRight: edges.right,
-      marginBottom: edges.bottom,
-      marginLeft: edges.left,
-      headerDistance: logical.headerDistance,
-      footerDistance: logical.footerDistance,
-    };
-  }
+  const page = uprightPhysicalExtent(
+    { widthPt: logical.pageWidth, heightPt: logical.pageHeight },
+    writingMode,
+  );
+  const edges = transformRectEdges(logicalToPhysicalMatrix(writingMode, page), {
+    top: logical.marginTop,
+    right: logical.marginRight,
+    bottom: logical.marginBottom,
+    left: logical.marginLeft,
+  });
   return {
-    pageWidth: logical.pageHeight,
-    pageHeight: logical.pageWidth,
-    marginTop: logical.marginLeft,
-    marginRight: logical.marginTop,
-    marginBottom: logical.marginRight,
-    marginLeft: logical.marginBottom,
+    pageWidth: page.widthPt,
+    pageHeight: page.heightPt,
+    marginTop: edges.top,
+    marginRight: edges.right,
+    marginBottom: edges.bottom,
+    marginLeft: edges.left,
     headerDistance: logical.headerDistance,
     footerDistance: logical.footerDistance,
+  };
+}
+
+/**
+ * The upright physical `page` and `margin` anchor reference frames of a
+ * vertical section, rebuilt from its section-logical frames.
+ *
+ * ECMA-376 §20.4.3.4/§20.4.3.5 (ST_RelFromH/ST_RelFromV `page`, `margin`) name
+ * the page and its §17.6.11 `w:pgMar` text margins. Under
+ * `word-vertical-section-physical-drawing-layer` positionH/positionV of a
+ * vertical section resolve on the upright physical page, while retained body
+ * acquisition holds the page box and margins in the section's logical frame.
+ * The physical margins are recovered with {@link physicalSectionGeometry} for
+ * the section's writing mode, the exact inverse of the
+ * {@link logicalSectionGeometry} mapping that produced the logical frame, for
+ * every vertical direction (vertical-rl, vertical-lr and the sideways-lr of a
+ * bottomToTop section flow). The derived left/right/top/bottom and
+ * inside/outside margin edges follow from these two frames.
+ *
+ * Column, character, paragraph and line frames are built from the flow
+ * geometry by `verticalSectionReferenceFrames` (paragraph.ts).
+ */
+export function uprightPhysicalPageFrames<
+  T extends { readonly page: AnchorFrameRect | null; readonly margin: AnchorFrameRect | null },
+>(frames: T, writingMode: WritingMode): T {
+  const { page, margin } = frames;
+  if (!page) return frames;
+  const logical: SectionGeom = {
+    pageWidth: page.widthPt,
+    pageHeight: page.heightPt,
+    marginLeft: margin ? margin.xPt - page.xPt : 0,
+    marginTop: margin ? margin.yPt - page.yPt : 0,
+    marginRight: margin ? page.xPt + page.widthPt - margin.xPt - margin.widthPt : 0,
+    marginBottom: margin ? page.yPt + page.heightPt - margin.yPt - margin.heightPt : 0,
+    headerDistance: 0,
+    footerDistance: 0,
+  };
+  const physical = physicalSectionGeometry(logical, writingMode);
+  return {
+    ...frames,
+    page: { xPt: 0, yPt: 0, widthPt: physical.pageWidth, heightPt: physical.pageHeight },
+    margin: margin && {
+      xPt: physical.marginLeft,
+      yPt: physical.marginTop,
+      widthPt: Math.max(0, physical.pageWidth - physical.marginLeft - physical.marginRight),
+      heightPt: Math.max(0, physical.pageHeight - physical.marginTop - physical.marginBottom),
+    },
   };
 }
 
@@ -322,7 +356,10 @@ export function resolveSectionContextForPage(
 ): SectionLayoutContext {
   const physical = effectivePhysicalSectionGeometry(policy, pageIndex);
   const geometry = isVerticalSectionDirection(policy.textDirection)
-    ? logicalSectionGeometry(physical, base.sectionFlow)
+    ? logicalSectionGeometry(physical, sectionWritingMode({
+        textDirection: policy.textDirection,
+        sectionFlow: base.sectionFlow,
+      }))
     : physical;
   return Object.freeze({
     ...base,

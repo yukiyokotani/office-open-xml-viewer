@@ -145,7 +145,16 @@ export const WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER = defineCompatibilityR
     kind: 'regression-test',
     reference: 'packages/docx/src/anchor-vertical-physical.test.ts#lands an upright-section anchor at the recorded physical centroid',
   },
-  description: 'Resolve anchored drawings in an upright vertical section against the physical page frame independently of the rotated text-flow coordinate space. Evidence (observed Office behaviour): Word output adjudicated in issue #988 (batch 3, item 2) and PR #999; origin PR #770.',
+  description: 'Resolve anchored drawings in an upright vertical section against the physical page frame independently of the rotated text-flow coordinate space. Evidence (observed Office behaviour): Word output adjudicated in issue #988 (batch 3, item 2) and PR #999; origin PR #770. The page and margin references are the physical page box and its authored w:pgMar margins (context.ts uprightPhysicalPageFrames, the exact inverse of the logical section mapping for every vertical direction): in a Word 16 (Windows) PDF of an A4 tbRl section with 54 pt left/right and 72 pt top/bottom margins, margin-relative drawings (align left with a posOffset positionV; posOffset positionH and positionV) resolved from the physical margin origin x = 54, y = 72 (regression test packages/docx/src/anchor-vertical-margin-frame.test.ts). Column, character, paragraph and line references are covered by word-vertical-section-flow-anchor-frames.',
+});
+
+export const WORD_VERTICAL_SECTION_FLOW_ANCHOR_FRAMES = defineCompatibilityRule({
+  id: 'word-vertical-section-flow-anchor-frames',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/anchor-vertical-margin-frame.test.ts#places tbLrV flow anchors where Word does',
+  },
+  description: 'Physical reference frames of the flow-owned anchor references in a vertical section (paragraph.ts verticalSectionReferenceFrames), measured in Word 16 (Windows) PDFs of synthetic A4 controls with T90/R36/B60/L50 pt margins and an 18 pt line grid, in tbRl, btLr and tbLrV: positionH column starts at the physical image of the anchor paragraph block-start edge (the right edge of its first line strip in tbRl/btLr, independent of the anchor line or column band) with positive offsets moving right, and align left/center/right place the object within that edge and the physical right edge of the column box; positionH character holds the object against the physical left edge of the anchor line, its right edge there when lines progress leftward (tbRl/btLr, offsets 0/+30/-30, any anchor position along the line) and its left edge there when they progress rightward (tbLrV, offset 0); positionV paragraph starts at the column physical top (offsets 0/+20/-10, independent of the anchor position); positionV line starts at the start of the character before the anchor, or the line start when none precedes it (10.5 and 21 pt text, offsets 0/+20). btLr matches tbRl. Unmeasured: align against character, paragraph and line, tbLrV column alignment, tbRlV, bottomToTop section flows, indented or spaced paragraphs, and layoutInCell anchors of vertical cells, which use the physical image of the cell box.',
 });
 
 export const WORD_PAGE_LEVEL_FLOAT_PRESCAN = defineCompatibilityRule({

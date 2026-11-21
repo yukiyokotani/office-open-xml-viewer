@@ -29,10 +29,10 @@ describe('paragraphGapPt — §17.3.1.9 contextualSpacing per-side semantics', (
     curr: ParagraphSpacingParticipant,
     afterPt: number,
     beforePt: number,
-  ): number => paragraphGapPt(prev, curr, afterPt, beforePt);
+  ): number => paragraphGapPt(prev, curr, afterPt, beforePt, 'maximum');
 
   it('reserves only the first block own spaceBefore at i=0 (no previous block)', () => {
-    expect(paragraphGapPt(null, {}, 0, 6)).toBe(6);
+    expect(paragraphGapPt(null, {}, 0, 6, 'maximum')).toBe(6);
   });
 
   // ── sample-57 adjudication table (after=10 / before=12 unless noted) ──────

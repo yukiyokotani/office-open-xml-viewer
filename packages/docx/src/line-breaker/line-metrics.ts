@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight } from '../layout/line-compatibility.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, WORD_EMPTY_MARK_ASCII_FACE } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -335,20 +335,25 @@ export function paragraphMarkLineMetrics(
   // px — a picture bullet on an empty list item stands on the mark line's
   // baseline: its height is a minimum ascent of the mark line.
   minimumAscentPx = 0,
+  // true only where an actually empty paragraph mark is measured (the mark
+  // line of a paragraph with no content). Every other caller measures a
+  // stand-in for a non-empty line (a drop-cap anchor paragraph, an inline
+  // object's outer run) and keeps the established hint/document-script routing.
+  emptyMark = false,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
-  // Existing empty-mark policy retains hint/document-script font routing.
-  // This is not specified by §17.3.2.26: an empty mark has no character from
-  // which to select a slot. Ordinary Word probes select the ascii face, but
-  // applying that selection to grid page-edge admission also moves following
-  // content a whole grid line in a real document. That face/admission
-  // interaction remains unresolved; do not add a grid-only font exception.
-  // Font routing and content/document-based grid-cell classification remain
-  // independent until the complete empty-mark rule is established.
+  // WORD_EMPTY_MARK_ASCII_FACE (`emptyMark` only): §17.3.2.26 selects a font
+  // slot from a character, and an empty mark has none. The mark is measured with its ascii
+  // face whatever its hint, language, the document's scripts or a line grid;
+  // the grid sets the advance, and this face also owns the content box used
+  // for grid page-edge admission. Grid-cell classification (`eastAsian`) stays
+  // content/document based and independent of the face.
   // WORD_PICTURE_BULLET_LINE_PARTICIPATION: beside a picture bullet the empty
   // mark is measured with its own (non-East-Asian) face.
-  const markUsesEastAsianFace = (eastAsian && minimumAscentPx <= 0)
+  void WORD_EMPTY_MARK_ASCII_FACE;
+  const routedEastAsian = (eastAsian && minimumAscentPx <= 0)
     || effectiveMarkShapeInput?.fontHint === 'eastAsia';
+  const markUsesEastAsianFace = !emptyMark && routedEastAsian;
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
   const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
@@ -472,9 +477,15 @@ export function paragraphMarkLineMetrics(
   // the baseline, and that whole box then follows the paragraph's line rule.
   // Exact spacing ignores the picture (the caller passes no minimum).
   asc = Math.max(asc, minimumAscentPx);
+  // A mark that WORD_EMPTY_MARK_ASCII_FACE moved off its East Asian routing
+  // keeps the design height of a selected resource that records only its Far
+  // East line: that face has no other design line, and the line height is a
+  // property of the face, not of the slot that selected it.
   const resourceRatio = markUsesEastAsianFace
     ? resolvedLocalFont?.eastAsianLineHeightRatio ?? resolvedLocalFont?.lineHeightRatio
-    : resolvedLocalFont?.lineHeightRatio;
+    : routedEastAsian
+      ? resolvedLocalFont?.lineHeightRatio ?? resolvedLocalFont?.eastAsianLineHeightRatio
+      : resolvedLocalFont?.lineHeightRatio;
   const designIntendedSingle = referenceMarkMetric
     ? referenceMarkMetric.lineHeightRatio * fs * scale
     : resourceRatio != null
@@ -571,10 +582,11 @@ export function paragraphMarkLineHeight(
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
+  emptyMark = false,
 ): number {
   return paragraphMarkLineMetrics(
     para, scale, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout,
+    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout, 0, emptyMark,
   ).advancePx;
 }
 
@@ -616,11 +628,12 @@ export function paragraphMarkBelowBaselinePt(
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
+  emptyMark = false,
 ): number {
   // Measured at scale 1 so the returned px value is already in points.
   const m = paragraphMarkLineMetrics(
     para, 1, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout,
+    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout, 0, emptyMark,
   );
   return lineBelowBaselinePx(m.advancePx, m.ascentPx, m.descentPx);
 }

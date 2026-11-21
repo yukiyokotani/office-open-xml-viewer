@@ -58,6 +58,12 @@ export interface DocxCompatProfile {
    * @compatRule word-standalone-hard-page-break-top-spacing
    */
   readonly pageBreakBeforeSuppressesTopSpacing: boolean;
+  /**
+   * `w:compat/w:doNotUseHTMLParagraphAutoSpacing` was authored true: adjacent
+   * paragraph spacing adds instead of folding to the §17.3.1.33 maximum.
+   * @compatRule word-fixed-paragraph-spacing-additive-gap
+   */
+  readonly additiveParagraphGap: boolean;
 
   // Tables.
   /**
@@ -253,7 +259,7 @@ export type DocxCompatSettingsInput = Partial<Pick<DocSettings,
   | 'compatibilityMode' | 'footnoteLayoutLikeWW8' | 'adjustLineHeightInTable' | 'useFeLayout'
   | 'balanceSingleByteDoubleByteWidth' | 'lineWrapLikeWord6' | 'enableOpenTypeFeatures'
   | 'ulTrailSpace' | 'doNotExpandShiftReturn' | 'doNotSuppressIndentation' | 'ww11IndentRules'
-  | 'doNotUseIndentAsNumberingTabStop' | 'noTabHangInd'>>
+  | 'doNotUseIndentAsNumberingTabStop' | 'noTabHangInd' | 'doNotUseHtmlParagraphAutoSpacing'>>
   & { readonly __footnoteColumnBands?: boolean };
 
 /** Build the profile of one document. Pure, O(1) and allocation-light: it
@@ -286,6 +292,7 @@ export function buildDocxCompatProfile(
     continuousSectionKeepsFootnotePage: mode15,
     footnoteLayoutLikeWW8: flag(settings?.footnoteLayoutLikeWW8),
     pageBreakBeforeSuppressesTopSpacing: mode15,
+    additiveParagraphGap: flag(settings?.doNotUseHtmlParagraphAutoSpacing),
     tableOriginMeasuredMode: measuredMode,
     tableOriginPlacementMode: omitted || measuredMode,
     tableMode15Geometry: mode15,

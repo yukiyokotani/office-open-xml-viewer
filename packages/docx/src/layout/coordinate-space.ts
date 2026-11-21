@@ -51,7 +51,10 @@ export function writingModeFromTextDirection(textDirection: string): WritingMode
       return 'vertical-rl';
     case 'lr':
     case 'lrV':
+      return 'vertical-lr';
     case 'tbLrV':
+      // Part 4 §14.11.7 (≡ lrV); its page frame is the compatibility rule
+      // `word-section-tblrv-left-page-frame`.
       return 'vertical-lr';
     default:
       throw new RangeError(`Unsupported Transitional text direction ${JSON.stringify(textDirection)}`);

@@ -662,7 +662,7 @@ describe('canonical body producer', () => {
       context: verticalSection,
       pageLayout: {
         ...bodyOwner().pageLayout,
-        physicalGeometry: physicalSectionGeometry(verticalSection.geometry),
+        physicalGeometry: physicalSectionGeometry(verticalSection.geometry, 'vertical-rl'),
         textDirection: 'tbRl' as const,
       },
     };

@@ -5,6 +5,7 @@ import {
   logicalSectionGeometry,
   physicalSectionGeometry,
 } from './context.js';
+import { sectionWritingMode } from './coordinate-space.js';
 
 /** True when a section flows vertically. The Transitional ST_TextDirection
  * values `tbRl`, `tbRlV`, `tbLrV`, and `btLr` share the rotated page frame (a
@@ -29,6 +30,15 @@ export function isAllRotatedVerticalTextDirection(
   return textDirection === 'btLr';
 }
 
+/** Writing mode of a vertical section's own frame (its text direction, or
+ * the canonical frame its section flow selects). */
+function verticalSectionWritingMode(section: SectionProps, sectionFlow?: SectionFlow) {
+  if (!isVerticalSection(section)) {
+    throw new RangeError(`Section text direction ${JSON.stringify(section.textDirection)} is not vertical`);
+  }
+  return sectionWritingMode({ textDirection: section.textDirection as string, sectionFlow });
+}
+
 /** Map physical vertical-section geometry into the logical horizontal frame
  * used by retained acquisition. ECMA-376 §17.6.11 defines the page margins. */
 export function verticalLayoutSection(
@@ -37,7 +47,7 @@ export function verticalLayoutSection(
 ): SectionProps {
   return {
     ...physical,
-    ...logicalSectionGeometry(physical, sectionFlow),
+    ...logicalSectionGeometry(physical, verticalSectionWritingMode(physical, sectionFlow)),
   };
 }
 
@@ -56,6 +66,6 @@ export function physicalLayoutSection(
 ): SectionProps {
   return {
     ...logical,
-    ...physicalSectionGeometry(logical, sectionFlow),
+    ...physicalSectionGeometry(logical, verticalSectionWritingMode(logical, sectionFlow)),
   };
 }

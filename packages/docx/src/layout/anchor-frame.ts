@@ -392,6 +392,22 @@ function axisBase(
   };
 }
 
+/**
+ * The object size `resolveAnchorFrame` will use against these frames: the
+ * wp:extent, or the wp14:sizeRelH/sizeRelV size relative to its page or margin
+ * reference (ECMA-376 §20.4.2.7 and the wp14 size extensions). Null when either
+ * axis is unresolvable, in which case the frame resolution reports the issue.
+ */
+export function resolveAnchorObjectSize(
+  acquisition: Readonly<AnchorAcquisitionInput>,
+  frames: AnchorReferenceFramesInput,
+): Readonly<{ widthPt: number; heightPt: number }> | null {
+  const width = resolveSize('horizontal', acquisition, frames);
+  const height = resolveSize('vertical', acquisition, frames);
+  if (!width.resolved || !height.resolved) return null;
+  return { widthPt: width.resolved.valuePt, heightPt: height.resolved.valuePt };
+}
+
 function resolveSize(
   axis: Axis,
   acquisition: Readonly<AnchorAcquisitionInput>,
