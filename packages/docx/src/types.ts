@@ -1878,13 +1878,13 @@ export interface DocxTextRunInfo {
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing. */
   font: string;
-  /** {@link font} at a size-independent reference em, with the factor that
-   * maps its measurements onto this run's CSS px. The run's glyph advances are
-   * proportional to the font size (Word's layout model), while some hosts
-   * grid-fit small sizes (Chromium on Windows rounds faces with embedded
-   * bitmaps to whole pixels), so measuring or laying out {@link font} directly
-   * can disagree with the drawn glyphs. Overlays measure and lay out the run's
-   * text with `font` and multiply by `scale`. */
+  /** Present when the host grid-fits this run's face at its size (Chromium on
+   * Windows rounds faces with embedded bitmaps to whole pixels): the run was
+   * laid out and drawn from the size-proportional advances of {@link font} at
+   * a reference em, so measuring or laying out {@link font} directly would
+   * disagree with the drawn glyphs. `font` is that reference-em shorthand and
+   * `scale` maps its measurements onto this run's CSS px; overlays measure and
+   * lay out the run's text with it. */
   referenceFont?: Readonly<{ font: string; scale: number }>;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;

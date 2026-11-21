@@ -1108,6 +1108,7 @@ function assertTextRunProjectionAdapterBoundary(root) {
   const expected = new Map([
     ['@silurus/ooxml-core', [
       { typeOnly: false, names: ['PT_TO_PX', 'canvasFontString', 'referenceTextFont'] },
+      { typeOnly: true, names: ['TextAdvanceLookup'] },
     ]],
     [`${DOCX_SOURCE}/renderer.ts`, [
       { typeOnly: true, names: ['DocxTextRunInfo'] },

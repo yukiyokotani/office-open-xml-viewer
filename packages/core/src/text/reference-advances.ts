@@ -15,9 +15,18 @@
  * proportionally. Integer strike advances are a rasterizer artefact, not font
  * data: laying out from them makes text wider than Word's on that host.
  *
- * Library policy: a font shorthand whose host advances at its own size are not
- * proportional to its advances at {@link TEXT_ADVANCE_REFERENCE_PX} is measured
- * and painted at that reference em under a linear scale. The device raster
+ * Chrome on macOS shows the same artefact for an `sbix` colour bitmap face:
+ * Apple Color Emoji's digit, `#` and emoji glyphs measured 13px at 10px and
+ * 14px at 11px (proportional: 10 and 11).
+ *
+ * Library policy: a font shorthand whose host advances at its own size are
+ * grid-fitted, i.e. depart from the advances at {@link TEXT_ADVANCE_REFERENCE_PX}
+ * scaled to that size and land on whole pixels, is measured and painted at
+ * that reference em under a linear scale. Advances that depart by a fractional
+ * amount are font data, not grid fitting: an optical-size axis (`opsz`, e.g.
+ * macOS system-ui, whose 11px 'a' measures 6.13 against 5.52 scaled from
+ * 256px) or a size-dependent tracking table selects a different design at a
+ * different size, so such a face keeps its own size. The device raster
  * size is unchanged by the scale, so the host still selects its glyph images
  * (a bitmap strike included) for the displayed size; only their positions
  * follow the proportional advances, as in Word. Shorthands the host measures
@@ -110,6 +119,11 @@ function fontPlanKey(parsed: ParsedFontShorthand): string {
  * percent. */
 const POSITION_ALLOWANCE_PX = 2 ** -10;
 const SIZE_PRECISION_ALLOWANCE = 2 ** -9;
+/** Distance from a whole pixel within which a measured advance counts as
+ * grid-fitted: grid-fitting hosts report exact integers, while an advance
+ * from a design (any optical-size instance included) is a fixed-point value
+ * that lands this close to an integer only by coincidence. */
+const WHOLE_PIXEL_TOLERANCE_PX = 2 ** -10;
 /** Relative agreement required between the reference em and twice it before
  * a context is trusted to scale metrics with the font size at all. */
 const SIZE_PROPORTIONAL_TOLERANCE = 2 ** -12;
@@ -180,12 +194,22 @@ export function createTextAdvancePlanner(
         return false;
       }
       context.font = shorthandAt(parsed, parsed.sizePx);
-      return probeClusters.some((cluster, index) => {
+      // Grid fitting is proven only when clusters depart from their
+      // proportional advance and every departing cluster measures a whole
+      // number of pixels. One fractional departure means a size-dependent
+      // design (opsz, tracking) shapes part of this route, which the
+      // reference em would replace with its display design: keep the size.
+      let departed = false;
+      for (const [index, cluster] of probeClusters.entries()) {
         const width = context.measureText(cluster).width;
         const linear = referenceWidths[index]! * reference.scale;
-        return !(Math.abs(width - linear)
-          <= POSITION_ALLOWANCE_PX + Math.abs(linear) * SIZE_PRECISION_ALLOWANCE);
-      });
+        if (Math.abs(width - linear) <= POSITION_ALLOWANCE_PX + Math.abs(linear) * SIZE_PRECISION_ALLOWANCE) {
+          continue;
+        }
+        if (!(Math.abs(width - Math.round(width)) <= WHOLE_PIXEL_TOLERANCE_PX)) return false;
+        departed = true;
+      }
+      return departed;
     } finally {
       context.font = previousFont;
       if (typeof previousSpacing === 'string') context.letterSpacing = previousSpacing;

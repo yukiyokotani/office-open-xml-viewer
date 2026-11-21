@@ -146,7 +146,7 @@ function normalizeRenderOptions(
       rasterPaintOccurrences: rasterPaintOccurrencesForPage(selection.layout, pageIndex),
       privateResources: privateResourceLookupOf<CanvasImageSource>(services),
       textRuns: options.onTextRun
-        ? textRunsForPage(selection.layout, pageIndex, { scale })
+        ? textRunsForPage(selection.layout, pageIndex, { scale, textAdvances: textAdvanceLookupOf(services) })
         : [],
       onTextRun: options.onTextRun,
       callerOwnedCanvasTarget: options.callerOwnedCanvasTarget,

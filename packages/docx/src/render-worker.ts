@@ -64,7 +64,7 @@ import type {
   DocumentMeta,
 } from './worker-protocol';
 import { layoutSourceModelAdapterFromOwnedModel } from './layout-source-model-adapter.js';
-import { layoutSourceStoreOf } from './layout/runtime-state.js';
+import { layoutSourceStoreOf, textAdvanceLookupOf } from './layout/runtime-state.js';
 import { errorPageLayoutReady } from './layout/document-layout-variants.js';
 import {
   retainRenderWorkerDocumentLayout,
@@ -645,6 +645,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
+        textAdvances: textAdvanceLookupOf(doc.layoutServices),
       });
       const bitmap = canvas.transferToImageBitmap();
       postOwnedImageBitmap(post, { type: 'pageRendered', id, bitmap, runs, diagnostics });
@@ -655,6 +656,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
+        textAdvances: textAdvanceLookupOf(doc.layoutServices),
       });
       post({ type: 'runsCollected', id, runs });
       return;

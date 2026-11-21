@@ -61,9 +61,9 @@ describe('reference text advances', () => {
     const probes = measured.length;
     expect(planner.plan('bold 11px X')).toEqual(referenceTextFont('bold 11px X'));
     expect(planner.plan('normal 700 11px X')).toEqual(referenceTextFont('normal 700 11px X'));
-    // Reference-em clusters, the reference and doubled probe strings, and the
-    // requested-size clusters up to the first grid-fitted one ('a').
-    expect(measured.length - probes).toBe(PROBES.length + 3);
+    // Reference-em clusters, the reference and doubled probe strings, and
+    // every requested-size cluster (each departure must be a whole pixel).
+    expect(measured.length - probes).toBe(PROBES.length * 2 + 2);
     expect(planner.planned('700 11px X')).toEqual(referenceTextFont('700 11px X'));
     expect(planner.planned('normal 400 13px X')).toBeUndefined();
     // The probe restores the measuring state it borrowed.
@@ -79,6 +79,29 @@ describe('reference text advances', () => {
     expect(proportional.plan('normal 400 11px X')).toBeNull();
     const fixed = createTextAdvancePlanner(measuringContext(() => 6).target, { probeClusters: PROBES });
     expect(fixed.plan('normal 400 11px X')).toBeNull();
+  });
+
+  it('keeps optical-size designs at their own size', () => {
+    // An opsz axis that tops out below the reference em: wider, fractional
+    // advances at small sizes, exactly proportional from 96px up (the shape
+    // of macOS system-ui: 'a' is 6.13px at 11px against 5.52 from 256px).
+    const optical = (character: string, px: number) =>
+      linear(character, px) * (px >= 96 ? 1 : 1 + 0.11 * (96 - px) / 85);
+    expect(createTextAdvancePlanner(measuringContext(optical).target, { probeClusters: PROBES })
+      .plan('normal 400 11px system-ui')).toBeNull();
+    // A route mixing a whole-pixel departure with a fractional one has a
+    // size-dependent design in it as well: no proof of grid fitting.
+    const mixed = (character: string, px: number) => (character === '0'
+      ? (px < 64 ? Math.round(px * 1.3) : px)
+      : optical(character, px));
+    expect(createTextAdvancePlanner(measuringContext(mixed).target, { probeClusters: PROBES })
+      .plan('normal 400 11px X')).toBeNull();
+    // A colour bitmap face that only supplies the digit still proves it.
+    const strikeDigit = (character: string, px: number) => (character === '0'
+      ? (px < 64 ? Math.round(px * 1.3) : px)
+      : linear(character, px));
+    expect(createTextAdvancePlanner(measuringContext(strikeDigit).target, { probeClusters: PROBES })
+      .plan('normal 400 11px X')).toEqual(referenceTextFont('normal 400 11px X'));
   });
 
   it('measures a planned shorthand at the reference em with requested-px results', () => {

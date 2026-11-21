@@ -103,6 +103,8 @@ describe('reference-em text advances on a grid-fitting host', () => {
     expect(fill.font).toContain('12px');
     expect(fill.matrix.a).toBe(1);
     expect(runs[0]!.w).toBeCloseTo(3 * (12 + CHAR_SPACE / 4096), 6);
+    // Overlays follow the same decision: the run keeps its plain font.
+    expect(runs[0]!.referenceFont).toBeUndefined();
   });
 
   it('plans vertical glyph cells from the same reference em', () => {

@@ -1249,6 +1249,7 @@ test('text-run projection has an exact root-adapter declaration surface', () => 
     'export function cssTransformFor() {}\n');
   const adapter = `
 import { canvasFontString, PT_TO_PX, referenceTextFont } from '@silurus/ooxml-core';
+import type { TextAdvanceLookup } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer.js';
 import { composeAffine, mapAffinePoint, scaleAffine } from './layout/affine.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
@@ -1260,7 +1261,7 @@ export interface SelectedTextRunsForPageOptions {}
 export interface TextRunsForPageOptions {}
 function projectTextRun() { return [canvasFontString, referenceTextFont, composeAffine, mapAffinePoint,
   scaleAffine, textRunGeometryForPage, cssTransformFor] satisfies unknown; }
-export function textRunsForPage(): DocxTextRunInfo[] { return projectTextRun() as DocxTextRunInfo[]; }
+export function textRunsForPage(_advances?: TextAdvanceLookup): DocxTextRunInfo[] { return projectTextRun() as DocxTextRunInfo[]; }
 export function textRunsForSelectedPage(
   _services?: LayoutServices,
   _layout?: DocumentLayout,

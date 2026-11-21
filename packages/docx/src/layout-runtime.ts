@@ -49,7 +49,7 @@ import {
  * letters and a digit of differing widths, plus the kana and ideograph probes
  * layout already measures. All are in line-layout.ts LAYOUT_SYNTHESIZED_SCALARS, so
  * finite font demand covers them and probing loads no extra font subset. */
-const TEXT_ADVANCE_PROBE_CLUSTERS = Object.freeze(['a', 'e', 'm', 'W', '0', '\u3042', '\u4E00']);
+export const TEXT_ADVANCE_PROBE_CLUSTERS = Object.freeze(['a', 'e', 'm', 'W', '0', '\u3042', '\u4E00']);
 
 function createConcreteBodyLayoutKernel(
   source: LayoutSourceStore,
