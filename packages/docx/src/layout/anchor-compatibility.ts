@@ -21,6 +21,15 @@ export const WORD_PAGE_ANCHOR_LINE_DEFERRAL = defineCompatibilityRule({
   description: 'ECMA-376 does not say where a page-owned drawing goes when its own wrap exclusion pushes its anchor line off the page. Word tests anchor lines in flow order on each page: with the page-owned anchors already accepted on page N whose lines precede line L, plus the anchors on L, Word lays out N again; if L stays on N (any column of the region) those anchors are accepted and the earlier lines wrap around them. Otherwise page N keeps its layout without them, L starts a later page as if the page ended just above L (keepNext and widow control act as for an overflow; a mid-paragraph anchor line splits its paragraph), and the anchors go to the page where L lands. Counterexamples in the same controls: a line that still fits keeps its picture on N, and the first line of a page stays even when its picture pushes it past the body bottom. Unmeasured: a deferral whose line would otherwise fall in an earlier column of a multi-column page moves to the next page, not the next column.',
 });
 
+export const LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY = defineCompatibilityRule({
+  id: 'library-anchor-line-cycle-recovery',
+  evidence: {
+    kind: 'library-policy',
+    reference: 'packages/docx/src/layout/anchor-line-deferral.test.ts#settles a deferral that keepNext extends to an earlier anchor paragraph',
+  },
+  description: 'Library policy, no Office measurement, applied in every compatibility mode and column layout: word-page-anchor-line-deferral tests anchor lines in flow order with the anchors accepted before each, but the layout solver does not record acceptance, so where a test also pushes earlier accepted lines, or a deferral moves a keepNext (§17.3.1.15), keepLines (§17.3.1.14) or widow-control (§17.3.1.44) group with its drawings, those contextual tests can alternate between two layouts for ever. Only such an otherwise-fatal cycle is recovered, so every layout that converges is unchanged. First, later anchor lines on a page are deferred before earlier ones by context-checked proofs; if the run still cycles, the last oscillating drawing in source order gets a floor at the latest page it reached in the cycle, so its anchor line starts no earlier page unless it would start that page, and a persisting cycle floors the next one. Recovery shares one bounded pass budget per run, beyond which layout still fails closed. This recovers convergence where the contextual tests cycle; it is not a fidelity claim, and multi-column layouts are unmeasured. The warning channel is reserved for caller opt-outs, so it reports nothing.',
+});
+
 export const WORD_PAGE_ANCHOR_REGION_REGISTRATION = defineCompatibilityRule({
   id: 'word-page-anchor-region-registration',
   evidence: {

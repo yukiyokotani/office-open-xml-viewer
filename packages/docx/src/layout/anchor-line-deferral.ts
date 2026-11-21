@@ -76,7 +76,8 @@ export function anchorLineFloorKey(occurrenceKey: string): string {
 }
 
 /**
- * A floor settled by the anchor solver's cycle recovery: the line anchoring
+ * A floor settled by the anchor solver's cycle recovery
+ * (LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY, library policy): the line anchoring
  * `occurrenceKey` starts no page before `pageIndex`. Unlike a proof it holds
  * in every page context, so it ends any earlier page above that line, unless
  * the line would start that page (the first line of a page stays). Stored

@@ -4851,6 +4851,7 @@ function resolveAnchorLineTests(
   pass: BodyPaginationPassResult,
   observed: Map<string, PageWrapDestination>,
   previous: AnchorLineDeferrals,
+  prefixTests = false,
 ): Readonly<{ plan: ReadonlyMap<string, PageWrapDestination>; deferrals: AnchorLineDeferrals }> {
   const events = pass.anchorInputs;
   const prescansByPage = new Map<number, number[]>();
@@ -4909,6 +4910,52 @@ function resolveAnchorLineTests(
       deferrals ??= new Map(previous);
       line.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
       continue;
+    }
+    // Prefix tests (LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY, cycle recovery only,
+    // see `converge`): the retest below cannot record that the earlier lines
+    // registered on N were accepted, so a pass that registers them again with
+    // L, the last registered line, and pushes them all would retest the first
+    // of them for ever. Instead L is deferred from N by this pass's proof and
+    // the next pass registers the source-order prefix without L. The proof
+    // applies only where a pass reaches L on N with exactly that prefix
+    // registered, that is, where the prefix fits; when it does not, its own
+    // last line is deferred the same way.
+    if (prefixTests) {
+      const lastKey = [...registeredAt.keys()].reduce<string | null>((latest, key) => {
+        const order = positions!.get(key)?.order;
+        return order !== undefined && (latest === null || order > positions!.get(latest)!.order) ? key : latest;
+      }, null);
+      const lastLineKey = lastKey === null ? null : positions.get(lastKey)!.lineKey;
+      const lastLine = lastKey === null ? [] : [...positions]
+        .filter(([, position]) => position.lineKey === lastLineKey)
+        .map(([key]) => key);
+      const lastRegistration = lastKey === null ? -1 : registeredAt.get(lastKey)!;
+      if (lastKey !== null && lastLineKey !== lineKey
+        && lastLine.every((key) => registeredAt.get(key) === lastRegistration
+          && (observed.get(key)?.pageIndex ?? -1) > pageIndex)) {
+        const proof = createAnchorLineDeferralProof(
+          lastLine,
+          pageIndex,
+          events,
+          pass.serializedAnchorInputs,
+          lastRegistration,
+          pageStartAnchorsIdentity,
+        );
+        deferrals ??= new Map(previous);
+        lastLine.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
+        plan ??= new Map(observed);
+        const deferred = new Set(lastLine);
+        for (const key of registeredAt.keys()) {
+          if (deferred.has(key) || !observed.has(key)) continue;
+          const event = events[registeredAt.get(key)!] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
+          plan.set(key, Object.freeze({
+            ...observed.get(key)!,
+            pageIndex,
+            flowDomainId: event.flowDomainId,
+          }));
+        }
+        continue;
+      }
     }
     plan ??= new Map(observed);
     const registration = events[registrationIndex] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
@@ -5268,6 +5315,10 @@ function* paginateBodyWithAnchorConvergenceSteps(
     }>;
     const noDeferrals: AnchorLineDeferrals = new Map();
     const settledFloors = new Map<string, number>(initialFloors ?? []);
+    // Set by cycle recovery: anchor lines are tested by source-order prefix
+    // (see `resolveAnchorLineTests`). A fixed input of every later pass.
+    let prefixTests = false;
+    let lineRecoveryBudgeted = false;
     // Anchor-line floors settled by cycle recovery, by drawing key.
     const settledLineFloors = new Map<string, number>();
     let restart: AnchorPassCarry | null = null;
@@ -5325,9 +5376,9 @@ function* paginateBodyWithAnchorConvergenceSteps(
             }
             // The unseeded pass registers source-order estimates, not anchor
             // lines that reached their page, so it proves nothing about them.
-            const lineTests = appliedPlan === null
+            const lineTests: ReturnType<typeof resolveAnchorLineTests> = appliedPlan === null
               ? Object.freeze({ plan: observed, deferrals: appliedDeferrals })
-              : resolveAnchorLineTests(pass, observed, appliedDeferrals);
+              : resolveAnchorLineTests(pass, observed, appliedDeferrals, prefixTests);
             const minimumTablePageBySource = new Map<string, number>();
             // Compare all destinations once. Testing every table against a fresh
             // copy of the full plan would make table-heavy documents quadratic.
@@ -5433,34 +5484,45 @@ function* paginateBodyWithAnchorConvergenceSteps(
         const pinned = [...later]
           .filter(([key, pageIndex]) => changed.has(key) && pageIndex > (settledFloors.get(key) ?? -1))
           .sort(([left], [right]) => compareTableSourceOrder(right, left))[0];
-        // `word-page-anchor-line-deferral` tests anchor lines on a page in flow
-        // order, each with the anchors accepted before it. The solver's plan
-        // does not record acceptance, so a test that also pushes earlier
-        // accepted lines (or a keepNext, keepLines or widow-control group that
-        // a deferral moves) can make the run alternate. Without a table to
-        // pin, settle like `word-page-table-later-yields`: floor the last
-        // oscillating drawing in source order at the latest page it reached in
-        // the cycle, so its line starts no earlier page, and let the earlier
-        // lines settle around it. A persisting cycle floors the next one. As
-        // the floors move later lines first, the page keeps the longest
-        // source-order prefix of anchor lines that converges, which is the
-        // order of Word's tests. Only otherwise-fatal cycles get here, so
-        // converging runs keep their output.
-        const floored = pinned ? undefined : [...laterDrawings]
+        // LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY (library policy, not a Word
+        // measurement). `word-page-anchor-line-deferral` tests anchor lines
+        // in flow order, each with the anchors accepted before it, but the
+        // plan does not record acceptance: a test that also pushes earlier
+        // accepted lines, or a deferral that moves a keepNext, keepLines or
+        // widow-control group, can make the run alternate. Without a table to
+        // pin, recover in two stages, each entered once per run:
+        // 1. Prefix tests (`resolveAnchorLineTests`): later lines are deferred
+        //    first by context-checked proofs, on every page in one pass.
+        // 2. If that still cycles, floor the last oscillating drawing in
+        //    source order at the latest page it reached in the cycle, so its
+        //    line starts no earlier page; a persisting cycle floors the next.
+        //    A floor holds in every page context, so a kept group moves with
+        //    it as one unit.
+        // This recovers convergence where the contextual tests cycle, within
+        // the bounded pass budget below (beyond it the run still fails
+        // closed); it claims no fidelity. Only otherwise-fatal cycles get
+        // here, so converging runs keep their output.
+        const drawingCycle = [...changed].some((key) => laterDrawings.has(key));
+        const floored = pinned || !prefixTests ? undefined : [...laterDrawings]
           .filter(([key, { pageIndex }]) => changed.has(key) && pageIndex > (settledLineFloors.get(key) ?? -1))
           .sort(([leftKey, left], [rightKey, right]) => compareDrawingSourceOrder(
             rightKey, right.source, leftKey, left.source,
           ))[0];
         if (pinned) settledFloors.set(pinned[0], pinned[1]);
+        else if (!prefixTests && drawingCycle) prefixTests = true;
         else if (floored) settledLineFloors.set(floored[0], floored[1].pageIndex);
         else throw error;
-        // Every settlement strictly raises a table or anchor-line floor: at
-        // most one raise per table or drawing per page, and no floor passes
-        // the page budget. Table restarts share the original operational pass
-        // budget. An anchor-line floor restarts with the run's own budget: a
-        // drawing whose picture leaves no room for its keepNext group can
-        // need one floor per page it crosses, each a separate settlement.
-        remainingPasses = floored ? anchorPassLimit : remainingPasses - error.passes;
+        // Every settlement strictly raises a table floor or an anchor-line
+        // floor, or enters prefix tests once. All restarts share the run's
+        // operational pass budget, so the total work stays bounded however
+        // many settlements a document needs. Anchor-line recovery adds that
+        // budget once more for the whole run (each drawing's settlement
+        // needs a cycle of a few passes), never per settlement.
+        remainingPasses -= error.passes;
+        if (!pinned && !lineRecoveryBudgeted) {
+          lineRecoveryBudgeted = true;
+          remainingPasses += anchorPassLimit;
+        }
         if (remainingPasses < 2) {
           throw new ExactConvergenceError('limit', error.states, anchorPassLimit);
         }
