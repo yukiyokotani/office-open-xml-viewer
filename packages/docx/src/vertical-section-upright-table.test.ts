@@ -36,21 +36,23 @@ const paragraph = (text: string) =>
 const P = paragraph('あいうえお');
 const cell = (width: number, text: string) =>
   `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
-const table = (rows: number) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
+const table = (rows: number, rowHeightPt?: number) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
   + ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
     .map((edge) => `<w:${edge} w:val="single" w:sz="4"/>`).join('')
   + '</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>'
   + Array.from({ length: rows }, (_, row) =>
-    `<w:tr>${cell(1440, `A${row + 1}`)}${cell(2160, `B${row + 1}`)}</w:tr>`).join('')
+    `<w:tr>${rowHeightPt === undefined ? '' : `<w:trPr><w:trHeight w:val="${rowHeightPt * 20}" w:hRule="atLeast"/></w:trPr>`}`
+    + `${cell(1440, `A${row + 1}`)}${cell(2160, `B${row + 1}`)}</w:tr>`).join('')
   + '</w:tbl>';
 const T = table(2);
 
-type Direction = 'tbRl' | 'tbLrV';
+type Direction = 'tbRl' | 'tbLrV' | 'tbRlV';
 
-function docx(direction: Direction, body: readonly string[]): Uint8Array {
+function docx(direction: Direction, body: readonly string[], columns = 1): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${body.join('')}`
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
+    + (columns > 1 ? `<w:cols w:num="${columns}" w:space="425"/>` : '')
     + `<w:textDirection w:val="${direction}"/><w:docGrid w:type="lines" w:linePitch="360"/>`
     + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
@@ -100,8 +102,8 @@ function layOut(direction: Direction, body: readonly string[]): Page {
   return pages[0]!;
 }
 
-function layOutPages(direction: Direction, body: readonly string[]): Page[] {
-  const archive = new DocxArchive(docx(direction, body));
+function layOutPages(direction: Direction, body: readonly string[], columns = 1): Page[] {
+  const archive = new DocxArchive(docx(direction, body, columns));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
@@ -116,6 +118,7 @@ function layOutPages(direction: Direction, body: readonly string[]): Page[] {
   // The section-logical block origin: the right margin in tbRl (lines advance
   // leftward from it), the left margin in tbLrV.
   const blockOrigin = direction === 'tbRl' ? MARGIN.right : MARGIN.left;
+  // Each column's strips restart at the block origin.
   return layout.pages.map((laidOut) => {
   const page: Page = { tables: [], strips: [] };
   for (const node of laidOut.layers.body) {
@@ -146,7 +149,7 @@ beforeAll(async () => {
 });
 
 describe('upright block table of a vertical section', () => {
-  it.each(['tbRl', 'tbLrV'] as const)(
+  it.each(['tbRl', 'tbLrV', 'tbRlV'] as const)(
     'sits at the column top and the block position of a %s section without advancing the flow',
     (direction) => {
       const { tables, strips } = layOut(direction, [P, T, P, P]);
@@ -212,6 +215,72 @@ describe('upright block table of a vertical section', () => {
     expect(pages[1]!.strips).toEqual([]);
     // The paragraph after the table takes the first strip beside its last fragment.
     expect(pages[2]!.strips).toEqual([[{ block: 0, inlineStart: pages[2]!.tables[0]!.bottom }]]);
+  });
+
+  it('places a table that meets only a stacked table at the first free position from the column top', () => {
+    // X covers strips 1–10, Y (five strips later) stacks under it, and Z
+    // (six strips after Y) meets Y but not X.
+    const strips = (count: number) => Array.from({ length: count }, () => P);
+    const { tables } = layOut('tbRl', [P, T, ...strips(5), T, ...strips(6), T, P]);
+    const [x, y, z] = tables as [Page['tables'][number], Page['tables'][number], Page['tables'][number]];
+    expect(y.top).toBeCloseTo(x.bottom, 6);
+    expect(z.left).toBeCloseTo(tableLeft('tbRl', 12 * PITCH), 6);
+    expect(z.top).toBeCloseTo(MARGIN.top, 6);
+  });
+
+  it('keeps rows whole: a row that fits a fresh page is not cut at the page end', () => {
+    // Two 450 pt rows in a 701.9 pt column.
+    const pages = layOutPages('tbRl', [table(2, 450)]);
+    expect(pages).toHaveLength(2);
+    for (const page of pages) {
+      expect(page.tables).toHaveLength(1);
+      expect(page.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
+      expect(page.tables[0]!.bottom - page.tables[0]!.top).toBeGreaterThanOrEqual(450);
+      expect(page.tables[0]!.bottom).toBeLessThanOrEqual(COLUMN_END);
+    }
+  });
+
+  it('moves a keepNext paragraph with a table that does not fit the block extent left', () => {
+    // 19 strips leave 123.3 pt: the keepNext strip and the 180 pt table need 198.
+    const keepNext = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+    const pages = layOutPages('tbRl', [...Array.from({ length: 19 }, () => P), keepNext, T, P]);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]!.strips).toHaveLength(19);
+    expect(pages[1]!.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+    expect(pages[1]!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
+  });
+
+  describe('in a two-column section', () => {
+    it('settles tables whose strips cannot wrap beside them', () => {
+      const pages = layOutPages('tbRl', [P, table(30), P, table(30), P], 2);
+      expect(pages.flatMap((page) => page.tables)).toHaveLength(2);
+      expect(pages.flatMap((page) => page.strips)).toHaveLength(3);
+    });
+
+    it('leaves a table wider than the block extent left where the flow reached it', () => {
+      const pages = layOutPages('tbRl', [...Array.from({ length: 20 }, () => P), T, P], 2);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', 20 * PITCH), 6);
+      expect(pages[0]!.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
+    });
+
+    it('measures a tall table against the page band, not its column', () => {
+      // 40 rows are taller than one column and shorter than the page band:
+      // the table stays whole where the flow reached it.
+      const pages = layOutPages('tbRl', [P, table(40), P], 2);
+      expect(pages).toHaveLength(1);
+      const [tall] = pages[0]!.tables;
+      expect(tall!.top).toBeCloseTo(MARGIN.top, 6);
+      expect(tall!.bottom).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
+      expect(tall!.bottom).toBeLessThanOrEqual(COLUMN_END);
+    });
+
+    it('starts a table taller than the page band on a fresh page, in its first column', () => {
+      const pages = layOutPages('tbRl', [P, table(80), P], 2);
+      expect(pages[0]!.tables).toHaveLength(0);
+      expect(pages[1]!.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
+      expect(pages[1]!.tables[0]!.bottom).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
+    });
   });
 
   it('settles two tables nearly as tall as the column, with no room for the strips before them', () => {

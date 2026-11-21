@@ -341,7 +341,7 @@ export function measureBodyTableEntry(
  * counter-clockwise section flow (sideways-lr) keeps the library policy of an
  * atomic block at the column bottom that advances the flow by its physical
  * width and registers no exclusion. */
-function uprightBlockPaginates(physical: PhysicalAnchorFrame): boolean {
+export function uprightBlockPaginates(physical: PhysicalAnchorFrame): boolean {
   return physical.writingMode === 'vertical-rl' || physical.writingMode === 'vertical-lr';
 }
 
