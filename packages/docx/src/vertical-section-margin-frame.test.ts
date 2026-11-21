@@ -242,3 +242,63 @@ describe('inline pictures in vertical sections (§20.4.2.7)', () => {
     expect(resource.kind === 'resource' && resource.orientation).toBe('upright-physical');
   });
 });
+
+// A hand-built anchored picture (no parser anchor acquisition) is placed in
+// the section-logical frame itself. The vertical-lr frame is a reflection,
+// so its local inverse must be the transpose, not a quarter turn.
+describe('section-logical anchored pictures in vertical sections', () => {
+  const anchoredOrientation = (textDirection: string) => {
+    const document = sectionDocument(textDirection, ['AB']);
+    (document.body[0] as DocParagraph).runs.push({
+      type: 'image', imagePath: 'word/media/p.png', mimeType: 'image/png',
+      widthPt: 60, heightPt: 40, anchor: true, anchorXPt: 10, anchorYPt: 20,
+      anchorXFromMargin: true, anchorYFromPara: false,
+    } as unknown as DocParagraph['runs'][number]);
+    const page = layoutOf(document).pages[0]!;
+    const paragraph = page.layers.body.find((node): node is ParagraphLayout => node.kind === 'paragraph')!;
+    const command = paragraph.drawings.flatMap((drawing) => drawing.commands)
+      .find((entry) => entry.kind === 'resource');
+    return command?.kind === 'resource' ? command.orientation : undefined;
+  };
+
+  it('cancels each vertical frame with its own inverse', () => {
+    expect(anchoredOrientation('tbRl')).toBe('upright-physical');
+    expect(anchoredOrientation('tbLrV')).toBe('upright-physical-transposed');
+  });
+
+  it('paints a transposed picture upright through the vertical-lr frame', async () => {
+    const { paintRetainedResource } = await import('./paint/canvas-resource.js');
+    let matrix = [0, 1, 1, 0, 0, 0]; // the vertical-lr section frame
+    const multiply = (n: number[]) => {
+      const [a, b, c, d, e, f] = matrix;
+      matrix = [
+        a! * n[0]! + c! * n[1]!, b! * n[0]! + d! * n[1]!,
+        a! * n[2]! + c! * n[3]!, b! * n[2]! + d! * n[3]!,
+        a! * n[4]! + c! * n[5]! + e!, b! * n[4]! + d! * n[5]! + f!,
+      ];
+    };
+    const stack: number[][] = [];
+    let painted: { matrix: number[]; rect: LayoutRect } | undefined;
+    const ctx = {
+      save() { stack.push([...matrix]); },
+      restore() { matrix = stack.pop()!; },
+      translate(x: number, y: number) { multiply([1, 0, 0, 1, x, y]); },
+      rotate(angle: number) {
+        multiply([Math.cos(angle), Math.sin(angle), -Math.sin(angle), Math.cos(angle), 0, 0]);
+      },
+      transform(a: number, b: number, c: number, d: number, e: number, f: number) {
+        multiply([a, b, c, d, e, f]);
+      },
+    };
+    paintRetainedResource('key', 'image', { xPt: 100, yPt: 200, widthPt: 40, heightPt: 60 },
+      'upright-physical-transposed', {
+        ctx,
+        resources: { paint: (_key: string, _kind: string, rect: LayoutRect) => { painted = { matrix: [...matrix], rect }; } },
+      } as never);
+
+    // The picture is drawn with an identity linear part at its physical size:
+    // the 40 x 60 logical box is 60 wide and 40 tall on the page.
+    expect(painted!.matrix.slice(0, 4)).toEqual([1, 0, 0, 1]);
+    expect([painted!.rect.widthPt, painted!.rect.heightPt]).toEqual([60, 40]);
+  });
+});

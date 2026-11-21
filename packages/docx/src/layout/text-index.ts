@@ -107,6 +107,7 @@ const EMPTY_CLIPS = Object.freeze([]) satisfies readonly ElementClipGeometry[];
 
 const CLOCKWISE_QUARTER_TURN = quarterTurnAffine(1);
 const COUNTER_CLOCKWISE_QUARTER_TURN = quarterTurnAffine(-1);
+const TRANSPOSE: Matrix2DData = Object.freeze({ a: 0, b: 1, c: 1, d: 0, e: 0, f: 0 });
 
 function appendRasterPaintOccurrence(
   context: ProjectionContext,
@@ -138,7 +139,9 @@ function appendRasterPaintOccurrence(
       matrix,
       options.orientation === 'upright-physical'
         ? COUNTER_CLOCKWISE_QUARTER_TURN
-        : CLOCKWISE_QUARTER_TURN,
+        : options.orientation === 'upright-physical-transposed'
+          ? TRANSPOSE
+          : CLOCKWISE_QUARTER_TURN,
     );
     [localWidthPt, localHeightPt] = [localHeightPt, localWidthPt];
   }

@@ -193,6 +193,7 @@ import {
   transformRect,
   transformRectEdges,
   uprightPhysicalExtent,
+  uprightPageResourceOrientation,
   uprightResourceOrientation,
 } from './coordinate-space.js';
 import { composeAffine, inverseMapAffinePoint, translationAffine } from './affine.js';
@@ -4597,7 +4598,7 @@ function publicAnchoredResourceDrawing(
       rect,
       ...(options.environment.verticalPageFrame
         ? {
-            orientation: uprightResourceOrientation(
+            orientation: uprightPageResourceOrientation(
               options.environment.verticalPageFrame,
               options.environment.pageWritingMode,
             )!,

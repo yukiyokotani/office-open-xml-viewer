@@ -211,10 +211,13 @@ export type DrawingPaintCommand =
  * owner section's physical page. `upright-physical` cancels the clockwise
  * vertical frame (local quarter turn counter-clockwise);
  * `upright-physical-counter-clockwise` cancels a native counter-clockwise
- * (`sideways-lr`) frame (local quarter turn clockwise). */
+ * (`sideways-lr`) frame (local quarter turn clockwise);
+ * `upright-physical-transposed` cancels the vertical-lr reflection of a
+ * graphic placed directly in that frame (local transpose). */
 export type UprightResourceOrientation =
   | 'upright-physical'
-  | 'upright-physical-counter-clockwise';
+  | 'upright-physical-counter-clockwise'
+  | 'upright-physical-transposed';
 
 export interface DrawingLayout extends LayoutNodeBase {
   readonly kind: 'drawing';
