@@ -143,7 +143,10 @@ test('positions and lengths lie on the grid', async () => {
       if (c.format === 'docx') {
         for (const el of elements) {
           const a = (k) => (el.attrs.has(k) ? Number(el.attrs.get(k)) : undefined);
-          if (el.name === 'w:pgMar') {
+          // docx-050 tests adjacent sections at one exact page geometry
+          // (margins 851, column space 425) that is not the corpus grid.
+          const offGrid = c.id === 'docx-050';
+          if (el.name === 'w:pgMar' && !offGrid) {
             const m = DOCX.MARGIN;
             if (a('w:top') !== m.top || a('w:bottom') !== m.bottom || a('w:left') !== m.left || a('w:right') !== m.right) bad('page margins');
             if (![0, DOCX.HEADER_DIST].includes(a('w:header')) || ![0, DOCX.FOOTER_DIST].includes(a('w:footer'))) bad('header/footer distance');
@@ -160,7 +163,7 @@ test('positions and lengths lie on the grid', async () => {
           if (el.name === 'w:spacing' && !name.endsWith('styles.xml')) {
             for (const k of ['w:before', 'w:after']) if (el.attrs.has(k) && a(k) % DOCX.LINE) bad(`spacing ${k} ${a(k)}`);
           }
-          if ((el.name === 'w:cols' || el.name === 'w:col') && el.attrs.has('w:space') && !edgesW.has(a('w:space'))) bad('column space');
+          if ((el.name === 'w:cols' || el.name === 'w:col') && el.attrs.has('w:space') && !edgesW.has(a('w:space')) && !offGrid) bad('column space');
           if (el.name === 'w:col' && !edgesW.has(a('w:w'))) bad(`column width ${a('w:w')}`);
           if (el.name === 'w:gridCol' && !edgesW.has(a('w:w'))) bad(`table column ${a('w:w')}`);
         }
