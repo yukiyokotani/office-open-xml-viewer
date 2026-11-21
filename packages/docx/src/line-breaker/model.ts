@@ -488,6 +488,9 @@ export interface LayoutImageSeg extends LayoutSegSource {
    * metrics join the line like an inline picture's, but it takes no width,
    * break opportunity or segment slot (the marker is painted separately). */
   markerMetric?: true;
+  /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP applies: a turned DrawingML inline
+   * picture paints clipped to its line box's vertical extent. */
+  clipToLine?: true;
   rotation?: number;
   flipH?: boolean;
   flipV?: boolean;

@@ -601,6 +601,11 @@ export interface ResourcePlacement {
    * box relative to `bounds.yPt`; paint clips the resource to that horizontal
    * band (not horizontally). Relative, so translating `bounds` moves it. */
   readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
+  /** Clockwise turn (degrees) the resource paints with about the centre of
+   * `bounds` (its a:xfrm rot). `bounds` stays the authored paint box; hit
+   * testing and element bounds use its turned, line-clipped outline
+   * (`resourcePlacementOutline` in resource-outline.ts). */
+  readonly rotationDeg?: number;
   readonly advancePt: number;
 }
 

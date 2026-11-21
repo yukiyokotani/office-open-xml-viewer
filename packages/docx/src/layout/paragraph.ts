@@ -172,7 +172,6 @@ import {
   wordGridPictureLineOriginPt,
 } from './anchor-compatibility.js';
 import {
-  wordInlinePictureClipsToLine,
   wordRunVerticalAlignRaisePt,
   wordSnapToCharsEastAsianCellCount,
 } from './line-compatibility.js';
@@ -371,6 +370,8 @@ export interface MeasuredResourcePlanSegment {
   /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: paint clipped to the line box's
    * vertical extent. */
   readonly clipToLine?: true;
+  /** Clockwise turn (degrees) the resource paints with about its box centre. */
+  readonly rotationDeg?: number;
 }
 
 export interface MeasuredUnavailableResourcePlanSegment {
@@ -2010,6 +2011,7 @@ export function planLine(input: PlanLineInput): LineLayout {
           xPt: xPt + (segment.leftOffsetPt ?? 0), yPt: line.baselinePt + segment.topOffsetPt,
           widthPt: segment.widthPt, heightPt: segment.heightPt,
         },
+        ...(segment.rotationDeg === undefined ? {} : { rotationDeg: segment.rotationDeg }),
         ...(segment.clipToLine ? { lineClip: {
           topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
           bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
@@ -4168,7 +4170,8 @@ function planMeasuredLines(
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
-          ...(!image.chart && wordInlinePictureClipsToLine(image.rotation) ? { clipToLine: true as const } : {}),
+          ...(!image.chart && image.clipToLine ? { clipToLine: true as const } : {}),
+          ...(!image.chart && image.rotation && image.rotation % 360 !== 0 ? { rotationDeg: image.rotation } : {}),
         });
       } else if ('math' in segment) {
         const math = segment as LayoutMathSeg;

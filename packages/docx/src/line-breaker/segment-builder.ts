@@ -46,6 +46,7 @@ import {
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordExternalLinkSyntaxBreakOffsets,
   wordInlineDrawingTurnsFootprint,
+  wordInlinePictureClipsToLine,
 } from '../layout/line-compatibility.js';
 import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
@@ -1790,6 +1791,16 @@ function inlineEffectExtentBox(
   };
 }
 
+/** Own clockwise a:xfrm rotation (degrees) of a DrawingML inline picture. A
+ * VML picture (v:imagedata, no DrawingML origin) reports none: the
+ * WORD_INLINE_DRAWING_TURNED_FOOTPRINT and WORD_INLINE_ROTATED_PICTURE_LINE_CLIP
+ * controls are DrawingML only. */
+function drawingMlInlinePictureTurn(
+  run: Partial<Pick<import('../layout/text.js').ParagraphImageRun, 'inlineObjectOrigin' | 'rotation'>>,
+): number | undefined {
+  return run.inlineObjectOrigin === 'drawingml' ? run.rotation : undefined;
+}
+
 /** Own clockwise rotation (degrees) of an inline DrawingML shape or group:
  * a group's grpSpPr xfrm, else a DrawingML shape's xfrm. A VML inline shape
  * reports none (WORD_INLINE_DRAWING_TURNED_FOOTPRINT is unmeasured there). */
@@ -2039,8 +2050,10 @@ function appendRunsToSegments(
         ...(img.anchor ? {} : { inlinePicture: true as const }),
         ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
           img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
-          wordInlineDrawingTurnsFootprint(img.rotation),
+          wordInlineDrawingTurnsFootprint(drawingMlInlinePictureTurn(img)),
         )),
+        ...(!img.anchor && wordInlinePictureClipsToLine(drawingMlInlinePictureTurn(img))
+          ? { clipToLine: true as const } : {}),
         rotation: img.rotation,
         flipH: img.flipH,
         flipV: img.flipV,
