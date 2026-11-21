@@ -13,6 +13,7 @@ import {
   type SectionGridContext,
 } from '../layout-context.js';
 import type { DeepReadonly, SectionFlow, WritingMode } from './types.js';
+import type { AnchorFrameRect } from './anchor-frame.js';
 import {
   logicalPageExtent,
   logicalToPhysicalMatrix,
@@ -149,6 +150,53 @@ export function physicalSectionGeometry(
     marginLeft: edges.left,
     headerDistance: logical.headerDistance,
     footerDistance: logical.footerDistance,
+  };
+}
+
+/**
+ * The upright physical `page` and `margin` anchor reference frames of a
+ * vertical section, rebuilt from its section-logical frames.
+ *
+ * ECMA-376 §20.4.3.4/§20.4.3.5 (ST_RelFromH/ST_RelFromV `page`, `margin`) name
+ * the page and its §17.6.11 `w:pgMar` text margins. Under
+ * `word-vertical-section-physical-drawing-layer` positionH/positionV of a
+ * vertical section resolve on the upright physical page, while retained body
+ * acquisition holds the page box and margins in the section's logical frame.
+ * The physical margins are recovered with {@link physicalSectionGeometry} for
+ * the section's writing mode, the exact inverse of the
+ * {@link logicalSectionGeometry} mapping that produced the logical frame, for
+ * every vertical direction (vertical-rl, vertical-lr and the sideways-lr of a
+ * bottomToTop section flow). The derived left/right/top/bottom and
+ * inside/outside margin edges follow from these two frames.
+ *
+ * Column, character, paragraph and line frames are built from the flow
+ * geometry by `verticalSectionReferenceFrames` (paragraph.ts).
+ */
+export function uprightPhysicalPageFrames<
+  T extends { readonly page: AnchorFrameRect | null; readonly margin: AnchorFrameRect | null },
+>(frames: T, writingMode: WritingMode): T {
+  const { page, margin } = frames;
+  if (!page) return frames;
+  const logical: SectionGeom = {
+    pageWidth: page.widthPt,
+    pageHeight: page.heightPt,
+    marginLeft: margin ? margin.xPt - page.xPt : 0,
+    marginTop: margin ? margin.yPt - page.yPt : 0,
+    marginRight: margin ? page.xPt + page.widthPt - margin.xPt - margin.widthPt : 0,
+    marginBottom: margin ? page.yPt + page.heightPt - margin.yPt - margin.heightPt : 0,
+    headerDistance: 0,
+    footerDistance: 0,
+  };
+  const physical = physicalSectionGeometry(logical, writingMode);
+  return {
+    ...frames,
+    page: { xPt: 0, yPt: 0, widthPt: physical.pageWidth, heightPt: physical.pageHeight },
+    margin: margin && {
+      xPt: physical.marginLeft,
+      yPt: physical.marginTop,
+      widthPt: Math.max(0, physical.pageWidth - physical.marginLeft - physical.marginRight),
+      heightPt: Math.max(0, physical.pageHeight - physical.marginTop - physical.marginBottom),
+    },
   };
 }
 

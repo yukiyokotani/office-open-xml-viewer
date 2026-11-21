@@ -96,6 +96,7 @@ import { isPageObjectSource } from './body-layout-input.js';
 import {
   sectionBodyInsetPt as bodyMarginInsetPt,
   physicalSectionGeometry,
+  uprightPhysicalPageFrames,
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
 import { gridForParagraphContext, nativeUnitMinimumBodyBand, paragraphMeasurementEnvironment } from './measurement-environment.js';
@@ -169,6 +170,7 @@ import type { TableLayoutSource } from './table-source-acquisition.js';
 import { retainedTableFromPassMemo, retainedTablePassKey, retainTableInPassMemo } from './retained-table-pass-cache.js';
 import { collectBodyFrameGroups, prepareBodyFrameMetadata } from './frame.js';
 import {
+  createSectionRegionCoordinateSpace,
   physicalToLogicalMatrix,
   sectionWritingMode,
   transformRect,
@@ -2322,6 +2324,14 @@ function measureFollowingBodyBlock(
   });
 }
 
+/** In a vertical section positionH runs along the block axis, where the
+ * `column` and `character` references follow the anchor paragraph
+ * (`word-vertical-section-flow-anchor-frames`), so the page-start prescan
+ * cannot place them before that paragraph is acquired. */
+function isBlockAxisHostReference(relativeFrom: string | null | undefined): boolean {
+  return relativeFrom === 'column' || relativeFrom === 'character';
+}
+
 function prescanBodyPageAnchors(
   context: BodySessionDependencies,
   request: Parameters<NonNullable<BodyLayoutSession['prescanPageAnchors']>>[0],
@@ -2510,7 +2520,9 @@ function prescanBodyPageAnchors(
           (publicRun.type === 'image' ||
             publicRun.type === 'chart' ||
             publicRun.type === 'shape') &&
-          publicRun.wrapMode === 'none'
+          (publicRun.wrapMode === 'none'
+            || (isVerticalTextDirection(request.location.section.textDirection)
+              && isBlockAxisHostReference(publicRun.anchorXRelativeFrom)))
         )
           return [];
         const candidate: BodyAcquisitionState = {
@@ -2538,33 +2550,37 @@ function prescanBodyPageAnchors(
         `Page-anchor prescan occurrence acquisition mismatch: ${anchor.occurrenceId}`,
       );
     }
+    // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
+    // extent resolve in the upright physical drawing frame, against the
+    // physical page and margins (`uprightPhysicalPageFrames`). The page
+    // registry is section-logical, so page-start prescan must apply the
+    // section writing mode's canonical physical-to-logical affine
+    // inverse before the exclusion can affect earlier body content.
+    // The anchor paragraph's own acquisition registers such an exclusion.
+    if (isVerticalTextDirection(request.location.section.textDirection)
+      && isBlockAxisHostReference(payloads[0]!.run.anchorAcquisitionInput.horizontal.relativeFrom)) {
+      return [];
+    }
+    const verticalSpace = isVerticalTextDirection(request.location.section.textDirection)
+      ? createSectionRegionCoordinateSpace(
+          sectionWritingMode(request.location.section),
+          uprightPhysicalExtent(
+            { widthPt: frames.page.widthPt, heightPt: frames.page.heightPt },
+            sectionWritingMode(request.location.section),
+          ),
+        )
+      : undefined;
     const result = resolveAnchorFrame({
       acquisition: payloads[0]!.run.anchorAcquisitionInput,
-      frames,
+      frames: verticalSpace
+        ? uprightPhysicalPageFrames(frames, sectionWritingMode(request.location.section))
+        : frames,
     });
     if (result.status !== 'resolved') {
       throw new Error(`Page-anchor prescan could not resolve occurrence: ${anchor.occurrenceId}`);
     }
-    // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
-    // extent resolve in the upright physical drawing frame. The page
-    // registry is section-logical, so page-start prescan must apply the
-    // section writing mode's canonical physical-to-logical affine
-    // inverse before the exclusion can affect earlier body content.
-    const retainedResult = isVerticalTextDirection(request.location.section.textDirection)
-      ? (() => {
-          const writingMode = sectionWritingMode(request.location.section);
-          const physicalPage = uprightPhysicalExtent(
-            {
-              widthPt: frames.page.widthPt,
-              heightPt: frames.page.heightPt,
-            },
-            writingMode,
-          );
-          return projectPhysicalAnchorResult(
-            result,
-            physicalToLogicalMatrix(writingMode, physicalPage),
-          );
-        })()
+    const retainedResult = verticalSpace
+      ? projectPhysicalAnchorResult(result, verticalSpace.physicalToLogical)
       : result;
     const wrapBounds = retainedResult.geometry.wrapBounds;
     if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
