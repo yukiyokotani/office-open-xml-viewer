@@ -42,7 +42,7 @@ function shapeXml(id: number, position: Position): string {
     + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
 }
 
-function docx(positions: readonly Position[]): Uint8Array {
+function docx(positions: readonly Position[], tbRl = false): Uint8Array {
   const document = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
     + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
@@ -54,6 +54,7 @@ function docx(positions: readonly Position[]): Uint8Array {
     + '</w:p>'
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1800" w:right="720" w:bottom="1200" w:left="1000" w:header="720" w:footer="720" w:gutter="0"/>'
+    + (tbRl ? '<w:textDirection w:val="tbRl"/>' : '')
     + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
     ['[Content_Types].xml', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
@@ -90,8 +91,8 @@ function measureContext(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function layout(positions: readonly Position[]): DocumentLayout {
-  const archive = new DocxArchive(docx(positions));
+function layout(positions: readonly Position[], tbRl = false): DocumentLayout {
+  const archive = new DocxArchive(docx(positions, tbRl));
   let raw: unknown;
   try {
     raw = JSON.parse(new TextDecoder().decode(archive.parse()));
@@ -108,6 +109,18 @@ function drawingBounds(result: DocumentLayout) {
   return result.pages[0]!.layers.body
     .flatMap((node) => node.kind === 'paragraph' ? node.drawings : [])
     .map((drawing) => drawing.flowBounds);
+}
+
+/** A tbRl page is laid out section-logically; its upright physical page is
+ * turned a quarter clockwise: physical x = page width − (logical y + h). */
+function physicalBounds(result: DocumentLayout) {
+  const physicalWidthPt = 595.3;
+  return drawingBounds(result).map((bounds) => ({
+    xPt: physicalWidthPt - bounds.yPt - bounds.heightPt,
+    yPt: bounds.xPt,
+    widthPt: bounds.heightPt,
+    heightPt: bounds.widthPt,
+  }));
 }
 
 beforeAll(async () => {
@@ -131,5 +144,19 @@ describe('anchored wp:align with wp:effectExtent', () => {
     const [shape] = drawingBounds(layout([{ kind: 'offset' }]));
     expect(shape!.xPt).toBeCloseTo(50, 6);
     expect(shape!.yPt).toBeCloseTo(90, 6);
+  });
+
+  it('resolves a tbRl section against the physical margins', () => {
+    const [leading, trailing, offset] = physicalBounds(layout([
+      { kind: 'align', h: 'left', v: 'top' },
+      { kind: 'align', h: 'right', v: 'bottom' },
+      { kind: 'offset' },
+    ], true));
+    expect(leading!.xPt).toBeCloseTo(50 + 1.5, 6);
+    expect(leading!.yPt).toBeCloseTo(90 + 9, 6);
+    expect(trailing!.xPt + trailing!.widthPt).toBeCloseTo(595.3 - 36 - 9.75, 6);
+    expect(trailing!.yPt + trailing!.heightPt).toBeCloseTo(841.9 - 60 - 1.5, 6);
+    expect(offset!.xPt).toBeCloseTo(50, 6);
+    expect(offset!.yPt).toBeCloseTo(90, 6);
   });
 });

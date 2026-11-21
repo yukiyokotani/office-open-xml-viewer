@@ -4658,6 +4658,27 @@ function resizeDerivedAnchorRect(
  * them into the logical page with the section coordinate space's canonical
  * inverse around the anchor's retained centre. Shape geometry and owned text
  * then share one orientation for both vertical-rl and vertical-lr sections. */
+/** Section-logical anchor reference frames turned into the upright physical
+ * page that wp:positionH/V resolve against (ECMA-376 §17.6.20, §20.4.3.x).
+ * Without a section turn the frames are already physical. */
+export function physicalReferenceFrames(
+  logicalToPhysical: Matrix2DData | undefined,
+  frames: AnchorReferenceFramesInput,
+): AnchorReferenceFramesInput {
+  if (logicalToPhysical === undefined) return frames;
+  const turn = (rect: AnchorFrameRect | null): AnchorFrameRect | null =>
+    rect === null ? null : transformRect(logicalToPhysical, rect);
+  return {
+    page: turn(frames.page),
+    margin: turn(frames.margin),
+    column: turn(frames.column),
+    paragraph: turn(frames.paragraph),
+    line: turn(frames.line),
+    character: turn(frames.character),
+    pageParity: frames.pageParity,
+  };
+}
+
 function uprightPhysicalDrawingTransform(
   rect: LayoutRect,
   physicalToLogical: Matrix2DData,
@@ -4893,9 +4914,23 @@ function acquireAnchorOccurrence(
     && options.anchorCellBounds !== undefined
     ? options.anchorCellBounds
     : null;
+  // ECMA-376 §17.6.20 + §20.4.3.x: anchor positionH/V and extent describe the
+  // upright physical drawing layer. Retained body flow is section-logical, so
+  // the reference frames are turned into the physical page before resolution
+  // and the complete resolved geometry is projected back once before
+  // wrap/collision/paint use.
+  const physicalPage = options.environment.verticalPageFrame && baseFrames?.page
+    ? uprightPhysicalExtent(baseFrames.page, options.environment.pageWritingMode)
+    : undefined;
+  const coordinateSpace = physicalPage === undefined
+    ? undefined
+    : createSectionRegionCoordinateSpace(
+        options.environment.pageWritingMode,
+        physicalPage,
+      );
   const acquiredResult = resolveAnchorFrame({
     acquisition: outer.run.anchorAcquisitionInput,
-    frames: {
+    frames: physicalReferenceFrames(coordinateSpace?.logicalToPhysical, {
       page: baseFrames?.page
         ? layoutInCellFrame
           ? { ...baseFrames.page, ...layoutInCellFrame }
@@ -4950,23 +4985,11 @@ function acquireAnchorOccurrence(
         : referenceBounds,
       character: host.bounds,
       pageParity: baseFrames?.pageParity ?? null,
-    },
+    }),
   });
   if (acquiredResult.status !== 'resolved') {
     return { result: acquiredResult, textBoxes: [], hostLineIndex, hostRange: host.range };
   }
-  // ECMA-376 §17.6.20 + §20.4.3.x: anchor positionH/V and extent describe the
-  // upright physical drawing layer. Retained body flow is section-logical, so
-  // project the complete resolved geometry once before wrap/collision/paint use.
-  const physicalPage = options.environment.verticalPageFrame && baseFrames?.page
-    ? uprightPhysicalExtent(baseFrames.page, options.environment.pageWritingMode)
-    : undefined;
-  const coordinateSpace = physicalPage === undefined
-    ? undefined
-    : createSectionRegionCoordinateSpace(
-        options.environment.pageWritingMode,
-        physicalPage,
-      );
   const result = physicalPage === undefined
     ? acquiredResult
     : projectPhysicalAnchorResult(

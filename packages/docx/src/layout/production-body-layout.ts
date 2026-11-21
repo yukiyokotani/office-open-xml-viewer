@@ -145,7 +145,7 @@ import {
 } from './table-pagination.js';
 import { paragraphGapAdjustment } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, physicalReferenceFrames, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
@@ -170,6 +170,7 @@ import type { TableLayoutSource } from './table-source-acquisition.js';
 import { retainedTableFromPassMemo, retainedTablePassKey, retainTableInPassMemo } from './retained-table-pass-cache.js';
 import { collectBodyFrameGroups, prepareBodyFrameMetadata } from './frame.js';
 import {
+  logicalToPhysicalMatrix,
   physicalToLogicalMatrix,
   sectionWritingMode,
   transformRect,
@@ -2535,19 +2536,13 @@ function prescanBodyPageAnchors(
         `Page-anchor prescan occurrence acquisition mismatch: ${anchor.occurrenceId}`,
       );
     }
-    const result = resolveAnchorFrame({
-      acquisition: payloads[0]!.run.anchorAcquisitionInput,
-      frames,
-    });
-    if (result.status !== 'resolved') {
-      throw new Error(`Page-anchor prescan could not resolve occurrence: ${anchor.occurrenceId}`);
-    }
     // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
     // extent resolve in the upright physical drawing frame. The page
-    // registry is section-logical, so page-start prescan must apply the
-    // section writing mode's canonical physical-to-logical affine
-    // inverse before the exclusion can affect earlier body content.
-    const retainedResult = isVerticalTextDirection(request.location.section.textDirection)
+    // registry is section-logical, so page-start prescan turns the
+    // reference frames into the physical page and applies the section
+    // writing mode's canonical physical-to-logical affine inverse to the
+    // result before the exclusion can affect earlier body content.
+    const verticalSpace = isVerticalTextDirection(request.location.section.textDirection)
       ? (() => {
           const writingMode = sectionWritingMode(request.location.section);
           const physicalPage = uprightPhysicalExtent(
@@ -2557,11 +2552,21 @@ function prescanBodyPageAnchors(
             },
             writingMode,
           );
-          return projectPhysicalAnchorResult(
-            result,
-            physicalToLogicalMatrix(writingMode, physicalPage),
-          );
+          return {
+            logicalToPhysical: logicalToPhysicalMatrix(writingMode, physicalPage),
+            physicalToLogical: physicalToLogicalMatrix(writingMode, physicalPage),
+          };
         })()
+      : undefined;
+    const result = resolveAnchorFrame({
+      acquisition: payloads[0]!.run.anchorAcquisitionInput,
+      frames: physicalReferenceFrames(verticalSpace?.logicalToPhysical, frames),
+    });
+    if (result.status !== 'resolved') {
+      throw new Error(`Page-anchor prescan could not resolve occurrence: ${anchor.occurrenceId}`);
+    }
+    const retainedResult = verticalSpace
+      ? projectPhysicalAnchorResult(result, verticalSpace.physicalToLogical)
       : result;
     const wrapBounds = retainedResult.geometry.wrapBounds;
     if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
