@@ -3,7 +3,8 @@
 //! removed. Whitespace and line-break-only chunks are not visible paragraphs.
 //! Leading empty chunks are omitted, while trailing hard breaks are retained
 //! and marked as belonging to the source paragraph. splitPgBreakAndParaMark
-//! additionally retains the final paragraph mark after a terminal page break.
+//! additionally retains the final paragraph mark after a terminal page break;
+//! a terminal column break always retains it.
 
 use crate::{BreakType, ComplexFieldBoundaryWire, DocParagraph, DocRun};
 
@@ -103,18 +104,23 @@ pub fn visit_para_on_page_breaks<E>(
     // 16 mode 11 also lets this line displace a following near-page-height
     // table; ordinary empty-paragraph layout supplies that behavior unchanged.
     // Rendered-page hints are ignored throughout normalization, not content.
-    let retain_mark = split_pg_break_and_para_mark
-        && matches!(
-            para.runs.iter().rev().find(|run| !matches!(
-                run,
-                DocRun::Break {
-                    break_type: BreakType::RenderedPage
-                }
-            )),
-            Some(DocRun::Break {
-                break_type: BreakType::Page
-            })
-        );
+    // A terminal column break always moves the paragraph mark to a line at
+    // the top of the next column (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN: Windows
+    // Word places the following text one mark line down in that column, for a
+    // break-only paragraph and for a break ending a text paragraph, without
+    // splitPgBreakAndParaMark).
+    let terminal_break = para.runs.iter().rev().find_map(|run| match run {
+        DocRun::Break {
+            break_type: BreakType::RenderedPage,
+        } => None,
+        DocRun::Break { break_type } => Some(Some(break_type.clone())),
+        _ => Some(None),
+    });
+    let retain_mark = match terminal_break.flatten() {
+        Some(BreakType::Page) => split_pg_break_and_para_mark,
+        Some(BreakType::Column) => true,
+        _ => false,
+    };
     let runs = std::mem::take(&mut para.runs);
     let boundaries = std::mem::take(&mut para.complex_field_boundaries);
     let run_count = runs.len();
@@ -286,15 +292,17 @@ mod tests {
     }
 
     #[test]
-    fn split_mark_follows_only_the_last_page_break_and_leaves_columns_unchanged() {
-        for (last, paragraph_count) in [(BreakType::Page, 1), (BreakType::Column, 0)] {
+    fn split_mark_follows_the_last_page_or_column_break() {
+        for (last, paragraph_count) in [(BreakType::Page, 1), (BreakType::Column, 1)] {
             let pieces = split_para_on_page_breaks(
                 DocParagraph {
                     runs: vec![
                         DocRun::Break {
                             break_type: BreakType::Page,
                         },
-                        DocRun::Break { break_type: last },
+                        DocRun::Break {
+                            break_type: last.clone(),
+                        },
                     ],
                     ..Default::default()
                 },
@@ -302,12 +310,11 @@ mod tests {
             );
             assert_eq!(pieces.len(), 2 + paragraph_count);
             assert!(matches!(pieces[0], ParaPiece::PageBreak { .. }));
-            if paragraph_count == 1 {
-                assert!(matches!(pieces[1], ParaPiece::PageBreak { .. }));
-                assert!(matches!(&pieces[2], ParaPiece::Para(p) if p.runs.is_empty()));
-            } else {
-                assert!(matches!(pieces[1], ParaPiece::ColumnBreak));
+            match last {
+                BreakType::Column => assert!(matches!(pieces[1], ParaPiece::ColumnBreak)),
+                _ => assert!(matches!(pieces[1], ParaPiece::PageBreak { .. })),
             }
+            assert!(matches!(&pieces[2], ParaPiece::Para(p) if p.runs.is_empty()));
         }
     }
 

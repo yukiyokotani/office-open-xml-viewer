@@ -4608,6 +4608,11 @@ impl BodyParseCursor {
                     }
                     Some(BreakType::Column) => {
                         output.push(BodyElement::ColumnBreak);
+                        // WORD_COLUMN_BREAK_MARK_NEXT_COLUMN: the paragraph
+                        // mark of a break-only paragraph forms an empty line
+                        // at the top of the next column.
+                        result.runs.clear();
+                        output.push(BodyElement::Paragraph(Box::new(result)));
                         push_section_break(&mut output);
                     }
                     _ => {
@@ -17237,6 +17242,19 @@ mod tests {
                 }
                 // The previous normalizer plus `endsAtHardBreak` on every
                 // paragraph piece that a page or column break follows.
+                // A terminal column break now also retains the paragraph mark
+                // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+                let terminal_column = matches!(
+                    para.runs.iter().rev().find(|run| !matches!(
+                        run,
+                        DocRun::Break {
+                            break_type: BreakType::RenderedPage
+                        }
+                    )),
+                    Some(DocRun::Break {
+                        break_type: BreakType::Column
+                    })
+                );
                 let old = old_split_para_on_page_breaks(para.clone());
                 let followed: Vec<bool> = (0..old.len())
                     .map(|index| {
@@ -17246,7 +17264,7 @@ mod tests {
                         )
                     })
                     .collect();
-                let expected: Vec<_> = old
+                let mut expected: Vec<_> = old
                     .into_iter()
                     .zip(followed)
                     .map(|(piece, followed)| match piece {
@@ -17257,6 +17275,12 @@ mod tests {
                         piece => old_piece_shape(piece),
                     })
                     .collect();
+                if terminal_column {
+                    expected.push(format!(
+                        "p:{}",
+                        serde_json::to_string(&DocParagraph::default()).unwrap()
+                    ));
+                }
                 let actual: Vec<_> = split_para_on_page_breaks(para, false)
                     .into_iter()
                     .map(piece_shape)
@@ -27234,8 +27258,22 @@ mod column_tests {
     #[test]
     fn column_break_only_paragraph_becomes_body_column_break() {
         let body = body_from(r#"<w:p><w:r><w:br w:type="column"/></w:r></w:p>"#);
-        assert_eq!(body.len(), 1);
+        // The break, then the paragraph mark's empty line at the top of the
+        // next column (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+        assert_eq!(body.len(), 2);
         assert!(matches!(body[0], BodyElement::ColumnBreak));
+        assert!(matches!(&body[1], BodyElement::Paragraph(p) if p.runs.is_empty()));
+    }
+
+    #[test]
+    fn terminal_column_break_moves_the_mark_to_the_next_column() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br w:type="column"/></w:r></w:p>"#,
+        );
+        assert_eq!(body.len(), 3);
+        assert!(matches!(&body[0], BodyElement::Paragraph(p) if !p.runs.is_empty()));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty()));
     }
 
     #[test]
@@ -27521,12 +27559,14 @@ mod column_tests {
                </w:sdt>
                <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
         );
-        // Para(cover), ColumnBreak, PageBreak (synthetic, kept), Para(body).
-        assert_eq!(body.len(), 4);
+        // Para(cover), ColumnBreak, the column-break paragraph's mark line,
+        // PageBreak (synthetic, kept), Para(body).
+        assert_eq!(body.len(), 5);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::ColumnBreak));
-        assert!(matches!(body[2], BodyElement::PageBreak { .. }));
-        assert!(matches!(body[3], BodyElement::Paragraph(_)));
+        assert!(matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty()));
+        assert!(matches!(body[3], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[4], BodyElement::Paragraph(_)));
     }
 
     /// ECMA-376 §17.6.x — a `<w:sectPr>` carried in a paragraph's `pPr` defines
