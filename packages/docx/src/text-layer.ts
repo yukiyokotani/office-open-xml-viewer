@@ -1,6 +1,7 @@
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
+import { runOverlayMeasure } from './run-overlay-measure';
 import { setSelectionData } from '@silurus/ooxml-core/internal/selection-data';
 
 /**
@@ -82,19 +83,28 @@ export function buildDocxTextLayer(
     // ECMA-376 §17.6.20 (tbRl) — a vertical page reports `x`/`y` as the PHYSICAL
     // top-left and carries a `transform` (`rotate(90deg)`); rotate the span about
     // its top-left so the horizontal DOM text lies along the drawn (rotated) glyph
-    // run. Horizontal pages carry no transform and place the span at `x`/`y`
-    // untransformed (byte-identical to the pre-vertical overlay).
+    // run. Horizontal pages carry no orientation transform.
     // ECMA-376 §17.3.2.10 縦中横 (#836): a tate-chu-yoko run is drawn compressed
     // into one em cell (`run.w`), so append a `scaleX(run.w / naturalWidth)` (when
     // a measurer is available) so the span's selectable extent matches the drawn
     // cell instead of the natural ~2× glyph width. Ordered AFTER the rotate so it
     // compresses the span's horizontal (pre-rotation) axis — the along-column
     // direction of the cell. A no-op factor of 1 for every ordinary run (see
-    // tate-chu-yoko-overlay.ts), so a non-縦中横 span's transform is unchanged.
+    // tate-chu-yoko-overlay.ts).
+    // A run projected with `referenceFont` is laid out by the browser at the
+    // reference em and scaled onto the run (`scale(k)`, about the same top-left
+    // origin, after the orientation): its transparent glyphs then advance
+    // exactly like the drawn, size-proportional ones even where the host
+    // grid-fits the display size (core reference-advances.ts). Lengths inside
+    // the span (line height, tracking, the clipped hit box) are therefore in
+    // reference px, i.e. divided by k. A run without it keeps `font` as is.
+    const reference = run.referenceFont;
+    const k = reference && reference.scale > 0 && Number.isFinite(reference.scale) ? reference.scale : 1;
     let transformValue = run.transform ?? '';
+    if (k !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scale(${k})`;
     if (measureForFont && run.eastAsianVert) {
-      const k = tateChuYokoOverlayScale(run, measureForFont(run.font));
-      if (k !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${k})`;
+      const tcy = tateChuYokoOverlayScale(run, runOverlayMeasure(run, measureForFont));
+      if (tcy !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${tcy})`;
     }
     const transform = transformValue
       ? `transform:${transformValue};transform-origin:top left;`
@@ -107,14 +117,14 @@ export function buildDocxTextLayer(
     const link = onHyperlinkClick ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
     const letterSpacing = run.letterSpacingPx !== undefined
-      ? `${run.letterSpacingPx}px`
+      ? `${run.letterSpacingPx / k}px`
       : '0';
     // A Word-fitted terminal space shortens the retained run, but the browser
     // still lays out the transparent U+0020 at its natural advance. Clip only
     // that run's hit box so it cannot cover the following run/link. Keep the
     // width percentage-based like its position under responsive canvas scaling.
     const compressedHitBox = run.trailingSpaceCompressionPx !== undefined
-      ? `width:${overlayPercent(run.w, cssWidth)};overflow:hidden;`
+      ? `width:${overlayPercent(run.w / k, cssWidth)};overflow:hidden;`
       : '';
     // Position the span as a % of the page's intended CSS box so it tracks the
     // canvas's actual rendered size under external CSS scaling. `font` /
@@ -125,7 +135,7 @@ export function buildDocxTextLayer(
     span.style.cssText =
       `position:absolute;` +
       `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-      `font:${run.font};line-height:${run.h}px;letter-spacing:${letterSpacing};` +
+      `font:${k !== 1 && reference ? reference.font : run.font};line-height:${run.h / k}px;letter-spacing:${letterSpacing};` +
       compressedHitBox +
       transform +
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;

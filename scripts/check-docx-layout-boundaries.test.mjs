@@ -1248,7 +1248,8 @@ test('text-run projection has an exact root-adapter declaration surface', () => 
   write(root, 'packages/docx/src/paint/affine.ts',
     'export function cssTransformFor() {}\n');
   const adapter = `
-import { canvasFontString, PT_TO_PX } from '@silurus/ooxml-core';
+import { canvasFontString, PT_TO_PX, referenceTextFont } from '@silurus/ooxml-core';
+import type { TextAdvanceLookup } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer.js';
 import { composeAffine, mapAffinePoint, scaleAffine } from './layout/affine.js';
 import { selectDocumentLayoutPage } from './layout/document-layout-variants.js';
@@ -1258,9 +1259,9 @@ import type { DocumentLayout, LayoutServices, Matrix2DData } from './layout/type
 import { cssTransformFor } from './paint/affine.js';
 export interface SelectedTextRunsForPageOptions {}
 export interface TextRunsForPageOptions {}
-function projectTextRun() { return [canvasFontString, composeAffine, mapAffinePoint, scaleAffine,
-  textRunGeometryForPage, cssTransformFor] satisfies unknown; }
-export function textRunsForPage(): DocxTextRunInfo[] { return projectTextRun() as DocxTextRunInfo[]; }
+function projectTextRun() { return [canvasFontString, referenceTextFont, composeAffine, mapAffinePoint,
+  scaleAffine, textRunGeometryForPage, cssTransformFor] satisfies unknown; }
+export function textRunsForPage(_advances?: TextAdvanceLookup): DocxTextRunInfo[] { return projectTextRun() as DocxTextRunInfo[]; }
 export function textRunsForSelectedPage(
   _services?: LayoutServices,
   _layout?: DocumentLayout,

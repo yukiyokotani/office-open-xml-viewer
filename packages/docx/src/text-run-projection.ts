@@ -1,4 +1,5 @@
-import { canvasFontString, PT_TO_PX } from '@silurus/ooxml-core';
+import { canvasFontString, PT_TO_PX, referenceTextFont } from '@silurus/ooxml-core';
+import type { TextAdvanceLookup } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer.js';
 import {
   composeAffine,
@@ -13,6 +14,11 @@ import { cssTransformFor } from './paint/affine.js';
 
 export interface TextRunsForPageOptions {
   readonly scale: number;
+  /** Layout measurement's reference-advance decisions (core
+   * reference-advances.ts). A run whose shorthand layout planned at the
+   * reference em is projected with `referenceFont`; absent, runs keep the
+   * plain `font` contract. */
+  readonly textAdvances?: TextAdvanceLookup;
 }
 
 export interface SelectedTextRunsForPageOptions {
@@ -22,11 +28,13 @@ export interface SelectedTextRunsForPageOptions {
    *  variant as paint (see RenderPageOptions.showTrackedChanges). */
   readonly showTrackedChanges?: boolean;
   readonly width?: number;
+  readonly textAdvances?: TextAdvanceLookup;
 }
 
 function projectTextRun(
   geometry: TextRunGeometry,
   pointToCss: Matrix2DData,
+  textAdvances: TextAdvanceLookup | undefined,
 ): DocxTextRunInfo {
   const { placement } = geometry;
   const origin = mapAffinePoint(pointToCss, placement.bounds);
@@ -37,6 +45,22 @@ function projectTextRun(
   const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
   const transform = cssTransformFor(pointToCss);
   const letterSpacingPt = placement.letterSpacingPt;
+  const font = canvasFontString(
+    placement.fontRoute,
+    placement.fontSizePt * blockScale,
+    placement.fontWeight,
+    placement.fontStyle,
+  );
+  // A run layout measured and paint drew at the reference em (core
+  // reference-advances.ts) is laid out by overlays at that em too: the host
+  // grid-fits this face, so the browser's own layout of `font` would not
+  // follow the drawn advances. Other runs keep the plain `font` contract.
+  const reference = textAdvances?.planned(canvasFontString(
+    placement.fontRoute,
+    placement.fontSizePt,
+    placement.fontWeight,
+    placement.fontStyle,
+  )) ? referenceTextFont(font) : null;
   return {
     source: {
       story: geometry.source.story,
@@ -71,12 +95,8 @@ function projectTextRun(
       }),
     } : {}),
     fontSize: placement.fontSizePt * blockScale,
-    font: canvasFontString(
-      placement.fontRoute,
-      placement.fontSizePt * blockScale,
-      placement.fontWeight,
-      placement.fontStyle,
-    ),
+    font,
+    ...(reference ? { referenceFont: reference } : {}),
     ...(letterSpacingPt !== 0
       ? { letterSpacingPx: letterSpacingPt * inlineScale }
       : {}),
@@ -99,6 +119,7 @@ export function textRunsForPage(
     projectTextRun(
       geometry,
       composeAffine(displayScale, geometry.pointToPage),
+      options.textAdvances,
     )
   ));
 }
@@ -117,5 +138,8 @@ export function textRunsForSelectedPage(
   const scale = (
     options.width ?? selected.page.geometry.widthPt * PT_TO_PX
   ) / selected.page.geometry.widthPt;
-  return textRunsForPage(selected.layout, pageIndex, { scale });
+  return textRunsForPage(selected.layout, pageIndex, {
+    scale,
+    ...(options.textAdvances ? { textAdvances: options.textAdvances } : {}),
+  });
 }

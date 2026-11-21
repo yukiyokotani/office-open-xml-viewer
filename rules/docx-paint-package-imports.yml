@@ -112,6 +112,10 @@ utils:
       # Bounded VML mask/concentric compositing allocates temporary paint-only surfaces.
       - regex: "^createAuxCanvas$"
       - regex: "^withVertFeature$"
+      # Draws retained text at the reference em layout planned for it (core
+      # reference-advances.ts): save/translate/scale/fillText only, never
+      # measureText, so paint stays measurement-free.
+      - regex: "^fillTextAtReference$"
       - regex: "^preferVectorBlip$"
       - regex: "^releaseOwnedBitmap$"
       - regex: "^resolvedCachedBitmapVariantKey$"
@@ -147,6 +151,9 @@ utils:
       - regex: "^TiffRenderer$"
       # Erased SVG decoder capability; paint forwards it to the shared image owner.
       - regex: "^SvgBlobDecoder$"
+      # Read-only lookup of layout's reference-advance decisions; it exposes
+      # no probing or measurement entry point.
+      - regex: "^TextAdvanceLookup$"
   chart-font-sources-value:
     any:
       - regex: "^withChartFontSubstitutions$"
