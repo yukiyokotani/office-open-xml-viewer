@@ -169,14 +169,16 @@ import type { TableLayoutSource } from './table-source-acquisition.js';
 import { retainedTableFromPassMemo, retainedTablePassKey, retainTableInPassMemo } from './retained-table-pass-cache.js';
 import { collectBodyFrameGroups, prepareBodyFrameMetadata } from './frame.js';
 import {
-  logicalToPhysicalMatrix,
   physicalToLogicalMatrix,
   sectionWritingMode,
   transformRect,
-  transformRectEdges,
   uprightPhysicalExtent,
-  type PhysicalPageExtent,
 } from './coordinate-space.js';
+import {
+  physicalAnchorBoxToLogical,
+  physicalDistToLogical,
+  physicalInlineBandTopPt,
+} from './upright-physical-frame.js';
 
 export function createProductionBodyLayoutRuntime(
   source: LayoutSourceStore,
@@ -3809,7 +3811,7 @@ function resolveShapeBox(
       verticalPhysicalContentState(state),
       physicalColumnTopPt(state, state.verticalPhys),
     );
-    return physicalAnchorBoxToLogical(state.verticalPhys, phys.x, phys.y, phys.w, phys.h);
+    return physicalAnchorBoxToLogical(state.verticalPhys, phys);
   }
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
   // the static wp:extent for that axis. The size is `relativeFrom` container
@@ -3920,55 +3922,14 @@ const __test_preRegisterPageFloats = (
 ): void => preRegisterPageFloats(body, startIdx, state);
 
 /** Physical y of the anchor paragraph's column top: the physical top of the
- * column's logical inline band carried through the section frame's
- * logical-to-physical matrix. That is the logical inline start where logical
- * x maps to physical y (vertical-rl and vertical-lr), and the logical inline
- * end in a native counter-clockwise frame (physical y = page height - logical
- * x). The counter-clockwise case is the same generic library policy
- * transformed through its own frame; no comparison with a Word-produced
- * reference has established that placement. */
+ * column's logical inline band in the section frame. The counter-clockwise
+ * case is generic library policy transformed through its own frame; no
+ * comparison with a Word-produced reference has established that placement. */
 function physicalColumnTopPt(
   state: AnchorFloatRegistrationState,
   frame: PhysicalAnchorFrame,
 ): number {
-  return transformRect(
-    logicalToPhysicalMatrix(frame.writingMode, physicalAnchorPage(frame)),
-    { xPt: state.contentX, yPt: 0, widthPt: Math.max(0, state.contentW), heightPt: 0 },
-  ).yPt;
-}
-
-function physicalAnchorPage(frame: PhysicalAnchorFrame): PhysicalPageExtent {
-  return { widthPt: frame.pageWidth, heightPt: frame.pageHeight };
-}
-
-/** Project a box resolved on the upright physical page into the section's
- * logical frame through the inverse of the matrix that paints that frame, so
- * the retained exclusion and the painted drawing stay one geometry. */
-function physicalAnchorBoxToLogical(
-  frame: PhysicalAnchorFrame,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): { x: number; y: number; w: number; h: number } {
-  const box = transformRect(
-    physicalToLogicalMatrix(frame.writingMode, physicalAnchorPage(frame)),
-    { xPt: x, yPt: y, widthPt: w, heightPt: h },
-  );
-  return { x: box.xPt, y: box.yPt, w: box.widthPt, h: box.heightPt };
-}
-
-/** Relabel physical dist* padding with the logical edges of the box, through
- * the same section frame matrix as {@link physicalAnchorBoxToLogical}. */
-function physicalDistToLogical(
-  frame: PhysicalAnchorFrame,
-  dist: Readonly<{ dl: number; dr: number; dt: number; db: number }>,
-): { dl: number; dr: number; dt: number; db: number } {
-  const edges = transformRectEdges(
-    physicalToLogicalMatrix(frame.writingMode, physicalAnchorPage(frame)),
-    { top: dist.dt, right: dist.dr, bottom: dist.db, left: dist.dl },
-  );
-  return { dl: edges.left, dr: edges.right, dt: edges.top, db: edges.bottom };
+  return physicalInlineBandTopPt(frame, state.contentX, state.contentW);
 }
 
 /** ECMA-376 §17.6.20 + §20.4.3.x — an acquisition-state view whose page/margin geometry
@@ -4104,7 +4065,7 @@ function resolveAnchorBox(
       physicalColumnTopPt(state, state.verticalPhys), phys,
       img.anchorYRelativeFrom ?? null, null, null,
     );
-    const box = physicalAnchorBoxToLogical(state.verticalPhys, px, py, w, h);
+    const box = physicalAnchorBoxToLogical(state.verticalPhys, { x: px, y: py, w, h });
     // Rotate the dist* padding one quarter-turn with the box. Symmetric
     // wrapSquare dist is common, but rotate the labels so asymmetric dist
     // stays correct.

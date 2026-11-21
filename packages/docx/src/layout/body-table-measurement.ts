@@ -46,11 +46,10 @@ import {
 } from './table-pagination.js';
 import type { BodyAcquisitionState, PhysicalAnchorFrame } from './acquisition-context.js';
 import {
-  logicalToPhysicalMatrix,
-  physicalToLogicalMatrix,
-  transformRect,
-  type PhysicalPageExtent,
-} from './coordinate-space.js';
+  physicalInlineBandTopPt,
+  uprightBlockPhysicalOrigin,
+  uprightPhysicalRectToLogical,
+} from './upright-physical-frame.js';
 import {
   bodyOccurrenceKey,
   bodyRootFloatingTablePlacementKey,
@@ -129,64 +128,6 @@ export function bodyTableAcquisitionState(
     && !state.acquisitionInputs.tableFormatInput(table).positioning
     && !effectiveTablePositioning(table);
   return upright ? { ...state, uprightPhysicalTable: true } : state;
-}
-
-/**
- * Physical origin of an upright table (or owner segment) occupying the
- * logical block band [cursor y, cursor y + grid width] of a vertical section
- * (§17.6.20) from the column top: the logical rectangle (inline extent = the
- * table's physical height, block extent = its grid width) carried through the
- * section frame's logical-to-physical matrix. The clockwise vertical-rl frame
- * places it at physical x = page width − logical y − grid width, y = logical
- * x; the vertical-lr frame of tbLrV at x = logical y, y = logical x, so the
- * tables follow its left-to-right line progression; a counter-clockwise
- * section frame at x = logical y with the block ending at the column bottom
- * (y = page height − logical x − height). The vertical-lr and counter-clockwise
- * placements are generic library policy transformed through the section's own
- * frame; no comparison with a Word-produced reference has established them.
- */
-function uprightBlockPhysicalOrigin(
-  physical: PhysicalAnchorFrame,
-  cursorPt: Readonly<{ xPt: number; yPt: number }>,
-  gridWidthPt: number,
-  physicalHeightPt: number,
-): Readonly<{ xPt: number; yPt: number }> {
-  const rect = transformRect(
-    logicalToPhysicalMatrix(physical.writingMode, uprightPhysicalPage(physical)),
-    { xPt: cursorPt.xPt, yPt: cursorPt.yPt, widthPt: physicalHeightPt, heightPt: gridWidthPt },
-  );
-  return { xPt: rect.xPt, yPt: rect.yPt };
-}
-
-/** Physical top of the current column, where a text-anchored frame's
- * vertical band starts: the physical top of the logical inline band through
- * the section frame's matrix, as for DrawingML anchors
- * (production-body-layout.ts physicalColumnTopPt). */
-function uprightColumnPhysicalTopPt(
-  physical: PhysicalAnchorFrame,
-  cursorPt: Readonly<{ xPt: number }>,
-  inlineExtentPt: number,
-): number {
-  return transformRect(
-    logicalToPhysicalMatrix(physical.writingMode, uprightPhysicalPage(physical)),
-    { xPt: cursorPt.xPt, yPt: 0, widthPt: Math.max(0, inlineExtentPt), heightPt: 0 },
-  ).yPt;
-}
-
-/** A rectangle of the upright physical page in the section's logical frame:
- * the inverse of the section frame's own canonical matrix. */
-function uprightPhysicalRectToLogical(
-  physical: PhysicalAnchorFrame,
-  rect: LayoutRect,
-): LayoutRect {
-  return Object.freeze(transformRect(
-    physicalToLogicalMatrix(physical.writingMode, uprightPhysicalPage(physical)),
-    rect,
-  ));
-}
-
-function uprightPhysicalPage(physical: PhysicalAnchorFrame): PhysicalPageExtent {
-  return { widthPt: physical.pageWidth, heightPt: physical.pageHeight };
 }
 
 /** The destination page and margin rectangles of the body page. */
@@ -1597,11 +1538,12 @@ function measureOwnerHost(
  *   frame this path already gives nested floating tables: physical page and
  *   margin, a text anchor's horizontal band is the physical margin box and its
  *   vertical band starts at the physical top of the current column
- *   (uprightColumnPhysicalTopPt) — and advances the flow by 0. Its exclusion
+ *   (physicalInlineBandTopPt) — and advances the flow by 0. Its exclusion
  *   enters the logical body registry through the inverse of the section's
  *   upright projection (uprightPhysicalRectToLogical: clockwise, logical
  *   inline = physical y and logical block start = physical page width −
- *   physical right edge; a section flow, its own counter-clockwise inverse), so
+ *   physical right edge; tbLrV, logical block start = physical left edge; a
+ *   section flow, its own counter-clockwise inverse), so
  *   notBeside blocks the vertical lines crossing the host's physical span.
  * Cell content is acquired and reacquired by `acquisitionOwner`, the
  * upright physical owner of the whole table (bodyTableAcquisitionState).
@@ -1682,8 +1624,8 @@ function measureUprightOwnerSegment(
     },
     blockOriginPt: 0,
   };
-  const columnTopPt = uprightColumnPhysicalTopPt(
-    physical, request.location.cursorPt, request.availableInlineExtentPt,
+  const columnTopPt = physicalInlineBandTopPt(
+    physical, request.location.cursorPt.xPt, request.availableInlineExtentPt,
   );
   const frameFor = (extentPt: number) =>
     ownerHostFrameBox(framePr, frame, columnTopPt, gridWidthPt, extentPt);

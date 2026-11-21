@@ -96,9 +96,7 @@ export function sectionBodyInsetPt(marginPt: number): number {
  *   logical top/right/bottom/left margins are the physical right/bottom/left/top.
  * - vertical-lr (tbLrV, Part 4 §14.11.7 ≡ Part 1 §17.18.93 lrV, lines flowing
  *   from left to right): the logical top/right/bottom/left margins are the
- *   physical left/bottom/right/top. Word 16 (Windows) starts a tbLrV body at
- *   the physical left margin and the top margin, as it starts tbRl at the
- *   right margin (A4 controls with distinct margins on all four edges).
+ *   physical left/bottom/right/top (`word-section-tblrv-left-page-frame`).
  * - sideways-lr (a bottomToTop section flow): logical left/right/top/bottom
  *   are the physical bottom/top/left/right margins.
  * - horizontal-tb: the identity.
