@@ -1897,9 +1897,12 @@ export function paragraphAcquisitionInput(
             ...localAnchorInput,
             occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
           }, 'DOCX scoped unavailable drawing anchor acquisition input');
-      const { __anchorAcquisition: _privateAnchor, ...retainedRun } = internalRun;
+      const { __anchorAcquisition: _privateAnchor, __inlinePosition: inlinePosition, ...retainedRun } =
+        internalRun as typeof internalRun & { __inlinePosition?: number };
       return Object.freeze({
         ...retainedRun,
+        ...(typeof inlinePosition === 'number' && Number.isFinite(inlinePosition) && inlinePosition !== 0
+          ? { inlinePositionPt: inlinePosition } : {}),
         ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
       });
     }
@@ -2206,7 +2209,10 @@ function normalizeInternalDocumentModelWithOwnership(
       paragraphRunsWithUnavailableDrawings(element).forEach((wireRun, runIndex) => {
         // Parser-private object position: keep it off the public run and in
         // the run-identity side table (inlineObjectPositionPt).
-        const wirePosition = (wireRun as { readonly __inlinePosition?: unknown }).__inlinePosition;
+        // An unavailable drawing stays in the parser-private sidecar, which
+        // keeps the fact as authored.
+        const wirePosition = wireRun.type === 'unavailableDrawing'
+          ? undefined : (wireRun as { readonly __inlinePosition?: unknown }).__inlinePosition;
         let rawRun = wireRun;
         if (wirePosition !== undefined) {
           const { __inlinePosition: _privatePosition, ...publicRun } = wireRun as typeof wireRun & { __inlinePosition?: unknown };

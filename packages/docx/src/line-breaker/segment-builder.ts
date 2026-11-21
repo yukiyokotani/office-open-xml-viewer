@@ -2162,6 +2162,10 @@ function appendRunsToSegments(
         anchorXFromMargin: false,
         anchorYFromPara: false,
         unavailableResourceKind: run.resourceKind,
+        // WORD_INLINE_OBJECT_POSITION: an inline picture placeholder moves with
+        // its run exactly as the picture would.
+        ...(acquiredAnchor === undefined && run.resourceKind === 'image' && run.inlinePositionPt
+          ? { positionPt: run.inlinePositionPt } : {}),
         measuredWidth: 0,
       });
     } else if (run.type === 'break') {

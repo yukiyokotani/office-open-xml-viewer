@@ -7765,6 +7765,14 @@ fn set_inline_object_position(run: &mut DocRun, position: Option<f64>) {
     match run {
         DocRun::Shape(shape) if shape.inline => shape.inline_position = position,
         DocRun::Image(image) if !image.anchor => image.inline_position = position,
+        // An unavailable inline picture keeps the position its picture would
+        // have (charts keep their established placement either way).
+        DocRun::UnavailableDrawing(drawing)
+            if drawing.anchor_acquisition.is_none()
+                && matches!(drawing.resource_kind, UnavailableDrawingResourceKind::Image) =>
+        {
+            drawing.inline_position = position
+        }
         _ => {}
     }
 }
@@ -9510,6 +9518,7 @@ fn unavailable_drawing_run(
             resource_kind,
             width_pt,
             height_pt,
+            inline_position: None,
             anchor_acquisition,
         },
     )))
@@ -19752,6 +19761,7 @@ mod tests {
                     resource_kind: UnavailableDrawingResourceKind::Image,
                     width_pt: 24.0,
                     height_pt: 24.0,
+                    inline_position: None,
                     anchor_acquisition: None,
                 })),
                 "unavailableDrawing",
@@ -25080,6 +25090,30 @@ mod anchor_image_relative_from_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn unavailable_inline_picture_keeps_its_run_position() {
+        // WORD_INLINE_OBJECT_POSITION: the placeholder takes the hosting run's
+        // §17.3.2.24 position exactly as the available picture would.
+        let body = r#"<w:p><w:r><w:rPr><w:position w:val="-10"/></w:rPr><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <wp:docPr id="1" name="img"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let doc = parse_from_bytes(&build_docx_without_media(body))
+            .expect("a dangling inline image relationship must not abort parsing");
+        let drawing = first_unavailable_drawing(&doc);
+        assert!(drawing.anchor_acquisition.is_none());
+        assert_eq!(drawing.inline_position, Some(-5.0));
     }
 
     #[test]

@@ -963,6 +963,24 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
     });
 
+    it('places an unavailable picture exactly where the picture would stand', () => {
+      const placeholder = (positionPt: number) => ({
+        type: 'unavailableDrawing', resourceKind: 'image', widthPt: 20, heightPt: 30,
+        ...(positionPt ? { __inlinePosition: positionPt } : {}),
+      }) as unknown as DocParagraph['runs'][number];
+      for (const options of [{ exactPt: 24 }, {}] as const) {
+        for (const positionPt of [-5, 5]) {
+          const available = measureInlineParagraph([paragraph.runs[0]!, picture(30, positionPt, 'drawingml')], 1, options);
+          const unavailable = measureInlineParagraph([paragraph.runs[0]!, placeholder(positionPt)], 1, options);
+          const [a, u] = [available.lines[0]!, unavailable.lines[0]!];
+          expect(u.advancePt).toBeCloseTo(a.advancePt, 10);
+          expect(u.baselinePt - u.bounds.yPt).toBeCloseTo(a.baselinePt - a.bounds.yPt, 10);
+          const box = u.placements.find((placement) => placement.kind === 'drawing')!;
+          expect(box.bounds.yPt).toBeCloseTo(resource(available).bounds.yPt, 10);
+        }
+      }
+    });
+
     it('keeps the four-fifths baseline in every story and clips DrawingML outside cells and text boxes', () => {
       for (const [other, clips] of [
         [{ story: 'header', storyInstance: 'header:default', path: [0] }, true],

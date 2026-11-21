@@ -3786,6 +3786,10 @@ pub struct UnavailableDrawingRun {
     pub resource_kind: UnavailableDrawingResourceKind,
     pub width_pt: f64,
     pub height_pt: f64,
+    /// Parser-private §17.3.2.24 position of the hosting run of an inline
+    /// picture placeholder, as on the available picture (`ImageRun`).
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
     #[serde(
         rename = "__anchorAcquisition",
         skip_serializing_if = "Option::is_none"

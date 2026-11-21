@@ -273,6 +273,8 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly heightPt: number;
   /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt). */
   readonly inlineEffectExtent?: readonly number[];
+  /** §17.3.2.24 position of the hosting run of an inline picture placeholder. */
+  readonly inlinePositionPt?: number;
   readonly anchorAcquisitionInput?: AnchorAcquisitionInput;
 }
 

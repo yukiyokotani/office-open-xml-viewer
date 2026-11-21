@@ -3983,8 +3983,9 @@ function planMeasuredLines(
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
       wrapOrigin: raw.topY !== undefined,
+      // An unavailable picture's placeholder stands in for the picture.
       hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
-        && segment.inlinePicture === true),
+        && (segment.inlinePicture === true || segment.unavailableResourceKind === 'image')),
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
     const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
