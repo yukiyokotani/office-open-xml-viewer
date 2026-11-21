@@ -237,6 +237,8 @@ export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }> 
   vmlTextPathInput?: VmlTextPathAcquisitionInput;
   textBoxInput?: TextBoxAcquisitionInput;
   inlineObjectShapeInput?: NumberingMarkerShapeInput;
+  /** §17.3.2.24 raise (+) / lower (-) in pt of the hosting run. */
+  inlinePositionPt?: number;
   inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
   /** Clockwise rotation (degrees) of an inline `wpg:wgp` group's own
    * grpSpPr transform; its children already carry the composed transform. */
@@ -246,6 +248,8 @@ export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }> 
 
 export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>> & Readonly<{
   inlineObjectShapeInput?: NumberingMarkerShapeInput;
+  /** §17.3.2.24 raise (+) / lower (-) in pt of the hosting run. */
+  inlinePositionPt?: number;
   inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
   anchorAcquisitionInput?: AnchorAcquisitionInput;
   /** A picture list label (producers other than DOCX): see
@@ -269,6 +273,15 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly heightPt: number;
   /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt). */
   readonly inlineEffectExtent?: readonly number[];
+  /** §17.3.2.24 position of the hosting run of an inline picture placeholder. */
+  readonly inlinePositionPt?: number;
+  /** A picture placeholder's §20.1.7.6 orientation (`ParagraphImageRun`). */
+  readonly rotation?: number;
+  readonly flipH?: boolean;
+  readonly flipV?: boolean;
+  /** An inline picture placeholder's picture facts (`ParagraphImageRun`). */
+  readonly inlineObjectOrigin?: 'drawingml';
+  readonly inlineObjectShapeInput?: NumberingMarkerShapeInput;
   readonly anchorAcquisitionInput?: AnchorAcquisitionInput;
 }
 

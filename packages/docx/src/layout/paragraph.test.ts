@@ -1,5 +1,5 @@
 import { compatProfile } from '../test-support/compat-environment.test-support.js';
-import { paragraphAcquisitionInput } from '../parser-model.js';
+import { normalizeDocxDocumentModel, paragraphAcquisitionInput } from '../parser-model.js';
 import { lineGapModel } from '../line-breaker/line-gaps.js';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
@@ -18,7 +18,7 @@ import type { MeasuredParagraph } from '../paragraph-measure.js';
 import { measureParagraph } from '../paragraph-measure.js';
 import { buildSegments, layoutLines } from '../line-layout.js';
 import { createLayoutServices } from '../layout-runtime.js';
-import type { DocParagraph } from '../types.js';
+import type { DocParagraph, DocxDocumentModel } from '../types.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
 import type { LayoutRect } from './types.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
@@ -821,11 +821,15 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     } as unknown as CanvasRenderingContext2D;
   }
 
-  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean } = {}) {
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; atLeastPt?: number; vertical?: boolean | 'lr'; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
     const selectedContext = options.context ?? measureContext;
     const value = {
       ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
-      lineSpacing: multiple === null ? null : { rule: 'auto' as const, value: multiple },
+      lineSpacing: options.exactPt !== undefined
+        ? { rule: 'exact' as const, value: options.exactPt, explicit: true }
+        : options.atLeastPt !== undefined
+        ? { rule: 'atLeast' as const, value: options.atLeastPt, explicit: true }
+        : multiple === null ? null : { rule: 'auto' as const, value: multiple },
     };
     const context = { ...acquisitionContext, lineSpacing: value.lineSpacing };
     const placement = {
@@ -848,14 +852,224 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       pageIndex: 0, totalPages: 1, layoutServices,
       compat: compatProfile({ compatibilityMode: options.compatibilityMode ?? 15 }),
       ...(options.admitRunLeading === false ? {} : { inlineObjectRunLeadingAdmitted: true as const }),
+      ...(options.vertical ? {
+        pageWritingMode: options.vertical === 'lr' ? 'vertical-lr' as const : 'vertical-rl' as const, verticalPageFrame: true,
+        uprightResourceOrientation: 'upright-physical' as const,
+      } : {}),
     };
-    const acquired = paragraphAcquisitionInput(value, source);
+    // Parser-private run facts reach acquisition only through normalization.
+    const normalized = runs.some((run) => '__inlinePosition' in run)
+      ? normalizeDocxDocumentModel({
+          body: [{ type: 'paragraph', ...value }],
+          section: { pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72, marginBottom: 72,
+            marginLeft: 72, headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false },
+          headers: { default: null, first: null, even: null },
+          footers: { default: null, first: null, even: null },
+        } as unknown as DocxDocumentModel).body[0] as unknown as typeof value
+      : value;
+    const paragraphSource = options.source ?? source;
+    const acquired = paragraphAcquisitionInput(normalized, paragraphSource);
     const measured = measureParagraph(acquired, context, placement, measurer, environment);
     return paragraphLayoutFromMeasurement(acquired, {
-      id: 'inline-shape-line', source, flowDomainId: 'body', ordinaryFlow: true,
+      id: 'inline-shape-line', source: paragraphSource, flowDomainId: 'body', ordinaryFlow: true,
       context, placement, measurer, environment, exclusions: [],
     } as never, measured);
   }
+
+  describe('inline object run position (§17.3.2.24, WORD_INLINE_OBJECT_POSITION)', () => {
+    const picture = (heightPt: number, positionPt: number, origin?: 'drawingml') => ({
+      type: 'image' as const, imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      ...(origin ? { __inlineObjectOrigin: origin } : {}),
+      __inlineObjectFontFacts: { fontSize: 10, fontFamily: 'Test Sans' },
+      ...(positionPt ? { __inlinePosition: positionPt } : {}),
+    }) as unknown as DocParagraph['runs'][number];
+    const resource = (node: ReturnType<typeof measureInlineParagraph>) =>
+      node.lines[0]!.placements.find((placement) => placement.kind === 'resource')!;
+
+    it('lowers a picture with its run and keeps the text on the shifted union', () => {
+      const text = measureInlineParagraph([paragraph.runs[0]!]).lines[0]!;
+      const textAscent = text.baselinePt - text.bounds.yPt;
+      const textDescent = text.bounds.yPt + text.advancePt - text.baselinePt;
+      const node = measureInlineParagraph([paragraph.runs[0]!, picture(16, -15, 'drawingml')]);
+      const line = node.lines[0]!;
+      // Only 1pt of the 16pt picture stays above the baseline: the text ascent
+      // owns the line top and the lowered 15pt sets the descent.
+      expect(line.baselinePt - line.bounds.yPt).toBeCloseTo(textAscent, 10);
+      expect(line.advancePt).toBeCloseTo(textAscent + Math.max(15, textDescent), 10);
+      const box = resource(node).bounds;
+      expect(box.yPt).toBeCloseTo(line.baselinePt - 1, 10);
+      expect(box.yPt + box.heightPt).toBeCloseTo(line.baselinePt + 15, 10);
+    });
+
+    it('adds a raise to a box-only line and keeps the object at the line top', () => {
+      const node = measureInlineParagraph([picture(16, 5, 'drawingml')]);
+      const line = node.lines[0]!;
+      expect(line.advancePt).toBeCloseTo(21, 10);
+      expect(resource(node).bounds.yPt).toBeCloseTo(line.bounds.yPt, 10);
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 21, 10);
+    });
+
+    it('keeps a lowered box-only line at the object height', () => {
+      const line = measureInlineParagraph([picture(16, -15, 'drawingml')]).lines[0]!;
+      expect(line.advancePt).toBeCloseTo(16, 10);
+    });
+
+    it('stands objects on the four-fifths baseline of an exact line and clips only DrawingML (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
+      for (const origin of ['drawingml', undefined] as const) {
+        const node = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, origin)], 1, { exactPt: 24 });
+        const line = node.lines[0]!;
+        expect(line.advancePt).toBeCloseTo(24, 10);
+        expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 19.2, 10);
+        const placement = resource(node);
+        expect(placement.bounds.yPt).toBeCloseTo(line.baselinePt - 25, 10);
+        expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(origin === 'drawingml');
+      }
+    });
+
+    it('hangs an upright picture from the exact line top in a vertical section (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
+      for (const [heightPt, positionPt] of [[30, -5], [16, 5], [30, 0]] as const) {
+        const node = measureInlineParagraph([picture(heightPt, positionPt, 'drawingml')], 1,
+          { exactPt: 24, vertical: true });
+        const line = node.lines[0]!;
+        expect(line.advancePt).toBeCloseTo(24, 10);
+        const placement = resource(node);
+        // word-vertical-inline-picture-upright-extent: the 20pt physical width runs
+        // across the line and the physical height along it.
+        expect(placement.bounds.heightPt).toBeCloseTo(20, 10);
+        expect(placement.bounds.widthPt).toBeCloseTo(heightPt, 10);
+        expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt - positionPt, 10);
+        expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+      }
+    });
+
+    it('mirrors only a clipped DrawingML picture across a tbLrV strip', () => {
+      for (const origin of ['drawingml', undefined] as const) {
+        const node = measureInlineParagraph([picture(30, -5, origin)], 1, { exactPt: 24, vertical: 'lr' });
+        const line = node.lines[0]!;
+        const placement = resource(node);
+        // 20pt across a 24pt strip: lowered 5pt it starts 5pt from the far
+        // edge when mirrored, 5pt below the near edge otherwise.
+        expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt + (origin ? 24 - 5 - 20 : 5), 10);
+      }
+    });
+
+    it('places a rotated clipped DrawingML picture like an unrotated one in a tbLrV exact line', () => {
+      // A turned picture clips to its line on its own account; its exact-line
+      // placement must not depend on that (180 degrees keeps the footprint).
+      const turned = { ...picture(30, -5, 'drawingml'), rotation: 180 } as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([turned], 1, { exactPt: 24, vertical: 'lr' });
+      const line = node.lines[0]!;
+      const placement = resource(node);
+      expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt + 24 - 5 - 20, 10);
+      expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+    });
+
+    // Availability only changes what is painted: a placeholder lays out as the
+    // picture or chart it stands for.
+    describe('availability parity of inline pictures and charts', () => {
+      const facts = { __inlineObjectFontFacts: { fontSize: 10, fontFamily: 'Test Sans' } };
+      const subject = (kind: 'picture' | 'chart', available: boolean, positionPt: number,
+        orientation: Readonly<{ rotation?: number; flipH?: boolean; flipV?: boolean }> = {}) => {
+        // The parser records a run position on pictures only (charts keep
+        // their established placement), for the picture and its placeholder,
+        // and the picture's a:xfrm orientation on both.
+        const position = kind === 'picture' && positionPt ? { __inlinePosition: positionPt, ...orientation }
+          : kind === 'picture' ? orientation : {};
+        if (kind === 'picture') {
+          return (available
+            ? { type: 'image', imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt: 30,
+              anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+              __inlineObjectOrigin: 'drawingml', ...facts, ...position }
+            : { type: 'unavailableDrawing', resourceKind: 'image', widthPt: 20, heightPt: 30, ...facts, ...position }
+          ) as unknown as DocParagraph['runs'][number];
+        }
+        return (available
+          ? { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } }
+          : { type: 'unavailableDrawing', resourceKind: 'chart', widthPt: 40, heightPt: 30 }
+        ) as unknown as DocParagraph['runs'][number];
+      };
+      const box = (node: ReturnType<typeof measureInlineParagraph>) => {
+        const placement = node.lines[0]!.placements.find((candidate) =>
+          (candidate.kind === 'resource' && candidate.resourceKind !== 'image')
+          || candidate.kind === 'drawing'
+          || (candidate.kind === 'resource' && candidate.resourceKind === 'image'
+            && candidate.bounds.heightPt !== 16 && candidate.bounds.widthPt !== 16))!;
+        return { bounds: placement.bounds,
+          clip: placement.kind === 'resource' || placement.kind === 'drawing' ? placement.lineClip : undefined };
+      };
+      const spacings = [
+        ['single', 1, {}], ['1.5', 1.5, {}], ['exact 24pt', 1, { exactPt: 24 }], ['atLeast 30pt', 1, { atLeastPt: 30 }],
+      ] as const;
+      const stories = [
+        ['body', undefined],
+        ['table cell', { story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] }],
+        ['text box', { story: 'textbox', storyInstance: 'body:body:0.0', path: [0] }],
+      ] as const;
+      const modes = [['lrTb', undefined], ['tbRl', true], ['tbLrV', 'lr']] as const;
+      for (const kind of ['picture', 'chart'] as const) {
+        for (const [spacing, multiple, spacingOptions] of spacings) {
+          for (const [storyName, story] of stories) {
+            for (const [mode, vertical] of modes) {
+              it(`${kind}, ${spacing}, ${storyName}, ${mode}`, () => {
+                const orientations = kind === 'chart' ? [{}] : [0, 90, 180, 270].flatMap((rotation) =>
+                  [{}, { flipH: true }, { flipV: true }].map((flip) => ({ ...(rotation ? { rotation } : {}), ...flip })));
+                for (const [positionPt, layout, orientation] of [-5, 0, 5].flatMap((value) =>
+                  (['text', 'neighbour', 'alone'] as const).flatMap((variant) =>
+                    orientations.map((turn) => [value, variant, turn] as const)))) {
+                  const options = { ...spacingOptions, ...(story ? { source: story as never } : {}),
+                    ...(vertical === undefined ? {} : { vertical }) };
+                  // Beside text; beside text and a 16pt picture, which puts an
+                  // exact line in the inline-object class whichever the subject
+                  // is; and alone in its paragraph.
+                  const runs = (available: boolean) => layout === 'alone'
+                    ? [subject(kind, available, positionPt, orientation)]
+                    : [paragraph.runs[0]!, subject(kind, available, positionPt, orientation),
+                      ...(layout === 'neighbour' ? [picture(16, 0, 'drawingml')] : [])];
+                  const a = measureInlineParagraph(runs(true), multiple, options);
+                  const u = measureInlineParagraph(runs(false), multiple, options);
+                  const [al, ul] = [a.lines[0]!, u.lines[0]!];
+                  expect(ul.advancePt, `advance at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toBeCloseTo(al.advancePt, 10);
+                  expect(ul.baselinePt - ul.bounds.yPt, `baseline at ${positionPt} ${layout} ${JSON.stringify(orientation)}`)
+                    .toBeCloseTo(al.baselinePt - al.bounds.yPt, 10);
+                  const [ab, ub] = [box(a), box(u)];
+                  expect(ub.bounds, `box at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toEqual(ab.bounds);
+                  expect(ub.clip, `clip at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toEqual(ab.clip);
+                }
+              });
+            }
+          }
+        }
+      }
+    });
+
+    it('keeps the four-fifths baseline in every story and clips DrawingML outside cells and text boxes', () => {
+      for (const [other, clips] of [
+        [{ story: 'header', storyInstance: 'header:default', path: [0] }, true],
+        [{ story: 'footnote', storyInstance: 'footnote:1', path: [0] }, true],
+        [{ story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] }, false],
+        [{ story: 'textbox', storyInstance: 'body:body:0.0', path: [0] }, false],
+      ] as const) {
+        for (const exactPt of [8, 48]) {
+          const node = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, 'drawingml')], 1,
+            { exactPt, source: other as never });
+          const line = node.lines[0]!;
+          expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + exactPt * 0.8, 10);
+          const placement = resource(node);
+          expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(clips);
+        }
+      }
+    });
+
+    it('clips a DrawingML picture in an exact line whose baseline the ruby rule selects', () => {
+      const rubyText = { ...paragraph.runs[0]!, ruby: { text: 'r', fontSizePt: 5, hpsRaisePt: 8 } } as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([rubyText, picture(30, -5, 'drawingml')], 1, { exactPt: 24 });
+      const line = node.lines[0]!;
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 19.2, 10);
+      const placement = resource(node);
+      expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+    });
+  });
 
   it('keeps a single-spaced inline shape line exactly its box height', () => {
     const node = measureInlineParagraph([inlineShape(40)]);

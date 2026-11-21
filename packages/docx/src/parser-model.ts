@@ -212,6 +212,11 @@ interface UnavailableDrawingSidecarEntry {
  * The normalized paragraph identity is the ownership boundary: acquisition can
  * reconstruct the authored run order, while callers observing/serializing
  * `DocxDocumentModel` see only the declared `DocRun` union. */
+/** ECMA-376 §17.3.2.24 position (pt) of the run hosting an inline object,
+ * keyed by the normalized public run. The parser wire carries it as a private
+ * field; normalization moves it here so the public model never exposes it. */
+const inlineObjectPositions = new WeakMap<object, number>();
+
 const unavailableDrawingSidecars = new WeakMap<
   DocParagraph,
   readonly UnavailableDrawingSidecarEntry[]
@@ -1236,6 +1241,12 @@ function bodyLayoutSequenceInput(
         block: acquiredBodyTable(source, element),
       });
     }
+    if (element.type === 'pageBreak'
+      && (element as { readonly __pageBreakBefore?: boolean }).__pageBreakBefore === true) {
+      // §17.3.1.23 of a paragraph whose first content is a column break: the
+      // paragraph property, satisfied by an empty page start.
+      return Object.freeze({ kind: 'authored-break' as const, source, break: 'pageBreakBefore' as const });
+    }
     if (element.type === 'pageBreak' || element.type === 'columnBreak') {
       return Object.freeze({
         kind: 'authored-break' as const,
@@ -1756,6 +1767,13 @@ export function paragraphMarkShapeInput(
 
 /** Project the effective outer drawing-run font once; text-box text is a
  * separate story and must not replace its object's automatic-leading face. */
+/** ECMA-376 §17.3.2.24: the raise/lower (pt) of the run hosting an inline
+ * object; the object moves with its run like text. */
+export function inlineObjectPositionPt(run: Readonly<{ type: string }>): number | undefined {
+  if (run.type !== 'image' && run.type !== 'shape') return undefined;
+  return inlineObjectPositions.get(run);
+}
+
 export function inlineObjectShapeInput(run: Readonly<{ type: string }>): NumberingMarkerShapeInput | undefined {
   if (run.type !== 'image' && run.type !== 'shape') return undefined;
   const facts = (run as { readonly __inlineObjectFontFacts?: InternalRunFontFacts }).__inlineObjectFontFacts;
@@ -1885,9 +1903,25 @@ export function paragraphAcquisitionInput(
             ...localAnchorInput,
             occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
           }, 'DOCX scoped unavailable drawing anchor acquisition input');
-      const { __anchorAcquisition: _privateAnchor, ...retainedRun } = internalRun;
+      const {
+        __anchorAcquisition: _privateAnchor,
+        __inlinePosition: inlinePosition,
+        __inlineObjectFontFacts: inlineFontFacts,
+        ...retainedRun
+      } = internalRun as typeof internalRun & {
+        __inlinePosition?: number;
+        __inlineObjectFontFacts?: InternalRunFontFacts;
+      };
+      // An inline picture placeholder takes its picture's acquisition facts:
+      // the hosting run's font (automatic leading) and the DrawingML origin.
+      const placeholderPicture = internalRun.resourceKind === 'image' && anchorInput === undefined;
       return Object.freeze({
         ...retainedRun,
+        ...(placeholderPicture ? { inlineObjectOrigin: 'drawingml' as const } : {}),
+        ...(placeholderPicture && inlineFontFacts
+          ? { inlineObjectShapeInput: nonContentRunShapeInput(inlineFontFacts) } : {}),
+        ...(typeof inlinePosition === 'number' && Number.isFinite(inlinePosition) && inlinePosition !== 0
+          ? { inlinePositionPt: inlinePosition } : {}),
         ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
       });
     }
@@ -1939,6 +1973,7 @@ export function paragraphAcquisitionInput(
       } = run as typeof run & InternalAnchorRunWire & Pick<InternalNoBreakHyphenWire, '__listLabel'>
         & { __inlineObjectFontFacts?: InternalRunFontFacts; __inlineObjectOrigin?: string; __inlineGroupRotation?: number };
       const inlineFont = inlineObjectShapeInput(originalRun);
+      const inlinePositionPt = inlineObjectPositionPt(originalRun);
       const inlineOrigin = privateInlineOrigin === 'drawingml' || privateInlineOrigin === 'vmlStaticTextbox'
         ? privateInlineOrigin : undefined;
       if (run.type !== 'shape') {
@@ -1951,6 +1986,7 @@ export function paragraphAcquisitionInput(
         return Object.freeze({
           ...structuredClone(retainedRun),
           ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+          ...(inlinePositionPt === undefined ? {} : { inlinePositionPt }),
           ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
           ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
           ...(run.type === 'image' && isListLabel(listLabel) ? { listLabel } : {}),
@@ -1977,6 +2013,7 @@ export function paragraphAcquisitionInput(
         type: 'shape' as const,
         ...structuredClone(retainedShape),
         ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+        ...(inlinePositionPt === undefined ? {} : { inlinePositionPt }),
         ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
         ...(typeof privateGroupRotation === 'number' && Number.isFinite(privateGroupRotation)
           ? { inlineGroupRotation: privateGroupRotation } : {}),
@@ -2188,7 +2225,32 @@ function normalizeInternalDocumentModelWithOwnership(
       const hasEmbeddedUnavailableDrawing = (
         element.runs as unknown as readonly Readonly<{ type: string }>[]
       ).some((run) => run.type === 'unavailableDrawing');
-      paragraphRunsWithUnavailableDrawings(element).forEach((rawRun, runIndex) => {
+      paragraphRunsWithUnavailableDrawings(element).forEach((wireRun, runIndex) => {
+        // Parser-private object position: keep it off the public run and in
+        // the run-identity side table (inlineObjectPositionPt).
+        // An unavailable drawing stays in the parser-private sidecar, which
+        // keeps the fact as authored.
+        const wirePosition = wireRun.type === 'unavailableDrawing'
+          ? undefined : (wireRun as { readonly __inlinePosition?: unknown }).__inlinePosition;
+        let rawRun = wireRun;
+        if (wirePosition !== undefined) {
+          const { __inlinePosition: _privatePosition, ...publicRun } = wireRun as typeof wireRun & { __inlinePosition?: unknown };
+          rawRun = publicRun as typeof wireRun;
+          runsChanged = true;
+        }
+        // A run normalized before carries its fact in the side table; any
+        // replacement identity (a cloned shape whose text box changed) must
+        // keep it.
+        const position = typeof wirePosition === 'number'
+          ? wirePosition : inlineObjectPositions.get(wireRun);
+        const firstRunIndex = runs.length;
+        normalizeParagraphRun(rawRun, runIndex);
+        if (position !== undefined && Number.isFinite(position) && position !== 0
+          && runs.length === firstRunIndex + 1) {
+          inlineObjectPositions.set(runs[firstRunIndex]!, position);
+        }
+      });
+      function normalizeParagraphRun(rawRun: Readonly<DocRun | UnavailableDrawingRunWire>, runIndex: number): void {
         const revision = runRevisions[runIndex] ?? undefined;
         const rawRevision = (rawRun as Readonly<{ revision?: DocRun['revision'] }>).revision;
         const run = revision === undefined || rawRevision !== undefined
@@ -2281,7 +2343,7 @@ function normalizeInternalDocumentModelWithOwnership(
         } else {
           runs.push({ ...shape, textBoxContent } as DocRun);
         }
-      });
+      }
       const spacing = resolveAutomaticParagraphMarginsPt(
         element, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true, autoSpacing,
       );

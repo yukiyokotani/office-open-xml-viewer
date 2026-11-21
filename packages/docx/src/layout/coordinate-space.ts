@@ -35,6 +35,24 @@ export function uprightPageResourceOrientation(
   return uprightResourceOrientation(verticalPageFrame, pageWritingMode);
 }
 
+/** Whether a line's paint frame turns the logical block start (logical -y)
+ * to the physical right: the section frame, composed with the line's
+ * block-reflected line frame (line-frame.ts) when it has one. True for the
+ * clockwise vertical-rl frame and for a block-reflected vertical-lr line
+ * (tbLrV, which paints as a tbRl strip); false for the bare vertical-lr
+ * reflection and the counter-clockwise sideways-lr frame.
+ */
+export function logicalBlockStartIsPhysicalRight(
+  writingMode: WritingMode,
+  lineBlockReflected = false,
+): boolean {
+  // The page extent does not affect a direction; any positive extent works.
+  const matrix = logicalToPhysicalMatrix(writingMode, { widthPt: 1, heightPt: 1 });
+  // logical (0, -1), reflected to (0, 1) first by a block-reflected line frame.
+  const blockStartX = lineBlockReflected ? matrix.c : -matrix.c;
+  return blockStartX > 0;
+}
+
 export type PhysicalPageExtent = Readonly<{
   widthPt: number;
   heightPt: number;
