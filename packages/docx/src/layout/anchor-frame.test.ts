@@ -407,6 +407,80 @@ describe('retained anchor frame geometry', () => {
     });
   });
 
+  describe('aligns the extent widened by wp:effectExtent (word-align-includes-effect-extent)', () => {
+    // Margin frame x 60..560, y 80..760; extent 20 x 10; effects t 9, r 9.75, b 1.5, l 1.5.
+    const effects = validEdges(9, 9.75, 1.5, 1.5);
+    const aligned = (
+      horizontal: string,
+      vertical: string,
+      pageParity: 'odd' | 'even' = 'odd',
+      extra: Partial<AnchorAcquisitionInput> = {},
+    ) => {
+      const value = input(anchor({
+        horizontal: { relativeFrom: 'margin', relativeFromStatus: 'valid', choice: { kind: 'align', value: horizontal } },
+        vertical: { relativeFrom: 'margin', relativeFromStatus: 'valid', choice: { kind: 'align', value: vertical } },
+        parentEffectExtent: effects,
+        ...extra,
+      }));
+      value.frames.pageParity = pageParity;
+      return resolveAnchorFrame(value);
+    };
+
+    it('puts the extent inside the leading effect edges for left and top', () => {
+      const result = resolved(aligned('left', 'top'));
+      expect(result.geometry.objectFrame).toMatchObject({ xPt: 61.5, yPt: 89 });
+      expect(result.geometry.inkBounds).toMatchObject({ xPt: 60, yPt: 80 });
+    });
+
+    it('ends the extent inside the trailing effect edges for right and bottom', () => {
+      const result = resolved(aligned('right', 'bottom'));
+      expect(result.geometry.objectFrame).toMatchObject({ xPt: 530.25, yPt: 748.5 });
+      const ink = result.geometry.inkBounds;
+      expect(ink.xPt + ink.widthPt).toBeCloseTo(560, 10);
+      expect(ink.yPt + ink.heightPt).toBeCloseTo(760, 10);
+    });
+
+    it('centres the widened box for center', () => {
+      const result = resolved(aligned('center', 'center'));
+      expect(result.geometry.objectFrame.xPt).toBeCloseTo(60 + (500 - 31.25) / 2 + 1.5, 10);
+      expect(result.geometry.objectFrame.yPt).toBeCloseTo(80 + (680 - 20.5) / 2 + 9, 10);
+    });
+
+    it('applies the same box to inside and outside by page parity', () => {
+      expect(resolved(aligned('inside', 'outside', 'odd')).geometry.objectFrame)
+        .toMatchObject({ xPt: 61.5, yPt: 748.5 });
+      expect(resolved(aligned('inside', 'inside', 'even')).geometry.objectFrame)
+        .toMatchObject({ xPt: 530.25, yPt: 748.5 });
+      expect(resolved(aligned('outside', 'outside', 'even')).geometry.objectFrame)
+        .toMatchObject({ xPt: 61.5, yPt: 89 });
+    });
+
+    it('leaves posOffset placement on the bare extent', () => {
+      const result = resolved(resolveAnchorFrame(input(anchor({
+        horizontal: { relativeFrom: 'margin', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } },
+        vertical: { relativeFrom: 'margin', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } },
+        parentEffectExtent: effects,
+      }))));
+      expect(result.geometry.objectFrame).toMatchObject({ xPt: 60, yPt: 80 });
+    });
+
+    it('keeps wrap distances outside the aligned effect box', () => {
+      const result = resolved(aligned('left', 'top', 'odd', { anchorDistances: validEdges(2, 2, 2, 2) }));
+      expect(result.geometry.wrapBounds).toMatchObject({ xPt: 58, yPt: 78 });
+    });
+
+    it('rejects an aligned anchor whose effect extent is invalid', () => {
+      const result = aligned('left', 'top', 'odd', {
+        parentEffectExtent: { ...effects, leftPt: null, leftStatus: 'invalid' },
+      });
+      expect(result.status).toBe('unsupported');
+      expect(result.issues).toContainEqual(expect.objectContaining({
+        code: 'invalid-effect-extent',
+        path: 'parentEffectExtent.left',
+      }));
+    });
+  });
+
   it('maps tight and through polygons exactly in the fixed Office coordinate space', () => {
     const result = resolved(resolveAnchorFrame(input(anchor({
       extent: {

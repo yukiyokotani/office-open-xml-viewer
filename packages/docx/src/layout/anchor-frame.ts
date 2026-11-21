@@ -6,6 +6,7 @@ import type {
 } from './anchor-input.js';
 import {
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
+  wordAlignedAnchorOriginPt,
   wordZeroRelativeSizeUsesExtent,
 } from './anchor-compatibility.js';
 import { snapshotPlainData } from './plain-data.js';
@@ -598,12 +599,23 @@ function resolveAxis(
       );
       return { diagnostic: unsupportedAxis(axis, acquisition, problem), problem };
     }
+    // ECMA-376 §20.4.2.6 wp:effectExtent widens the extent on each physical
+    // edge; the aligned box is that widened box (`word-align-includes-effect-extent`).
+    // Offsets and percentages position the bare extent.
+    const effects = effectEdges(acquisition.parentEffectExtent, 'parentEffectExtent', false);
+    if (effects.problem || !effects.values) {
+      const problem = effects.problem as AnchorFrameIssue;
+      return { diagnostic: unsupportedAxis(axis, acquisition, problem), problem };
+    }
     const placement = alignedAnchorPlacement(axis, choice.value, frames.pageParity);
-    resolvedOriginPt = placement === 'leading'
-      ? baseResult.base.startPt
-      : placement === 'trailing'
-        ? baseResult.base.endPt - sizePt
-        : baseResult.base.startPt + (lengthPt - sizePt) / 2;
+    resolvedOriginPt = wordAlignedAnchorOriginPt(
+      placement,
+      baseResult.base.startPt,
+      baseResult.base.endPt,
+      sizePt,
+      axis === 'horizontal' ? effects.values.leftPt : effects.values.topPt,
+      axis === 'horizontal' ? effects.values.rightPt : effects.values.bottomPt,
+    );
     value = choice.value;
   } else {
     const problem = issue('invalid-axis-choice', `${path}.choice`, `${axis} choice is invalid`);

@@ -51,6 +51,41 @@ export const WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK = defineCompatibilityRule({
   description: 'Word 2010 accepts only positive wp14:pctWidth and wp14:pctHeight values under [MS-ODRAWXML] notes 125/126. Preserve an authored zero as acquisition evidence while resolving the object from wp:extent. Classification: Microsoft-note derived ([MS-ODRAWXML] notes 125/126). [MS-ODRAWXML] is not in the Microsoft evidence catalog yet, so the evidence stays a regression test.',
 });
 
+/** Evidence: Windows Word 16.0.20527 PDF exports of two synthetic controls
+ * (A4 portrait, horizontal section, margins top 90 / right 36 / bottom 60 /
+ * left 50 pt; a 200 x 60 pt WPS rectangle with an outer shadow and
+ * effectExtent l 1.5 / t 9 / r 9.75 / b 1.5 pt, margin-relative, wrapNone).
+ * Rectangle edges read from the PDF vector paths: align left/top 51.5 / 99.0,
+ * align right/bottom right edge 549.55 / bottom edge 780.4, posOffset 0
+ * 50.0 / 90.0. */
+export const WORD_ALIGN_INCLUDES_EFFECT_EXTENT = defineCompatibilityRule({
+  id: 'word-align-includes-effect-extent',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'anchor-align-effect-extent',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §20.4.2.6 defines wp:effectExtent as the extra extent added to each edge of a drawing object to compensate for its effects; §20.4.3.1 wp:align does not say which box it aligns. Word aligns the extent widened by the effect extent: align left/top puts the extent at the reference start plus the left/top effect extent, align right/bottom puts the extent end at the reference end minus the right/bottom effect extent (Windows Word 16.0.20527 controls, within 0.05pt). A posOffset of 0 places the bare extent at the reference start, so offsets ignore the effect extent. center, inside and outside are not measured: they apply the same widened box (center centres it, inside/outside resolve to the leading or trailing edge by page parity). Vertical sections, percentage offsets and negative effect extents are unmeasured.',
+});
+
+/** Origin of the extent on one axis when its effect-widened box is aligned
+ * (governed by {@link WORD_ALIGN_INCLUDES_EFFECT_EXTENT}). */
+export function wordAlignedAnchorOriginPt(
+  placement: 'leading' | 'center' | 'trailing',
+  baseStartPt: number,
+  baseEndPt: number,
+  sizePt: number,
+  leadingEffectPt: number,
+  trailingEffectPt: number,
+): number {
+  if (placement === 'leading') return baseStartPt + leadingEffectPt;
+  if (placement === 'trailing') return baseEndPt - trailingEffectPt - sizePt;
+  const boxPt = leadingEffectPt + sizePt + trailingEffectPt;
+  return baseStartPt + (baseEndPt - baseStartPt - boxPt) / 2 + leadingEffectPt;
+}
+
 export const WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER = defineCompatibilityRule({
   id: 'word-vertical-section-physical-drawing-layer',
   evidence: {
