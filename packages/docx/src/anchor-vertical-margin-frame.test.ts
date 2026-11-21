@@ -34,6 +34,7 @@ const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const WP = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing';
 const A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const WPS = 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape';
+const WP14 = 'http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const PAGE_W = 11906 / 20;
 const PAGE_H = 16838 / 20;
@@ -53,6 +54,8 @@ interface Shape {
   readonly widthPt: number;
   readonly heightPt: number;
   readonly wrap: string;
+  /** Optional wp14:sizeRelH as [relativeFrom, percent]. */
+  readonly sizeRelH?: readonly [string, number];
 }
 
 const align = (axis: 'H' | 'V', value: string) =>
@@ -70,7 +73,11 @@ function shapeRun(shape: Shape, index: number): string {
     + `<a:graphic><a:graphicData uri="${WPS}"><wps:wsp><wps:cNvSpPr/><wps:spPr>`
     + `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>`
     + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>'
-    + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+    + '</a:graphicData></a:graphic>'
+    + (shape.sizeRelH
+      ? `<wp14:sizeRelH relativeFrom="${shape.sizeRelH[0]}"><wp14:pctWidth>${Math.round(shape.sizeRelH[1] * 1000)}</wp14:pctWidth></wp14:sizeRelH>`
+      : '')
+    + '</wp:anchor></w:drawing></w:r>';
 }
 
 function docx(
@@ -83,7 +90,7 @@ function docx(
   const paragraphs = Array.from({ length: textBefore }, () =>
     '<w:p><w:r><w:t>ABCDEFGHIJKLMNOPQRST</w:t></w:r></w:p>');
   paragraphs.push(`<w:p>${shapes.map(shapeRun).join('')}</w:p>`);
-  const document = `<w:document xmlns:w="${W}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:wps="${WPS}">`
+  const document = `<w:document xmlns:w="${W}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:wps="${WPS}" xmlns:wp14="${WP14}">`
     + `<w:body>${paragraphs.join('')}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>`
     + `<w:pgMar w:top="${tw(margins.top)}" w:right="${tw(margins.right)}" w:bottom="${tw(margins.bottom)}" `
     + `w:left="${tw(margins.left)}" w:header="851" w:footer="992" w:gutter="0"/>`
@@ -123,7 +130,7 @@ function flowDocx(
   paragraphs.push(`<w:p>${parts.map((part) =>
     typeof part === 'number' ? shapeRun(shapes[part]!, part) : text(part)).join('')}</w:p>`);
   const tw = (pt: number) => Math.round(pt * 20);
-  const document = `<w:document xmlns:w="${W}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:wps="${WPS}">`
+  const document = `<w:document xmlns:w="${W}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:wps="${WPS}" xmlns:wp14="${WP14}">`
     + `<w:body>${paragraphs.join('')}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>`
     + `<w:pgMar w:top="${tw(FLOW_MARGINS.top)}" w:right="${tw(FLOW_MARGINS.right)}" `
     + `w:bottom="${tw(FLOW_MARGINS.bottom)}" w:left="${tw(FLOW_MARGINS.left)}" w:header="720" w:footer="720" w:gutter="0"/>`
@@ -373,17 +380,13 @@ describe('vertical-section flow-relative anchor frames resolve on the physical p
     close(boxes[2]?.yPt, FLOW_MARGINS.top + 9 * 10.5);
   });
 
-  it('follows the section mapping for tbLrV, whose lines progress rightward', () => {
-    // The paragraph block-start edge is the image of the logical paragraph
-    // top under the section's own logical frame; character holds the object
-    // from the line's left edge.
-    const logical = logicalSectionGeometry({
-      pageWidth: PAGE_W, pageHeight: PAGE_H,
-      marginLeft: FLOW_MARGINS.left, marginRight: FLOW_MARGINS.right,
-      marginTop: FLOW_MARGINS.top, marginBottom: FLOW_MARGINS.bottom,
-      headerDistance: 0, footerDistance: 0,
-    });
-    const p10Start = logical.marginTop + 10 * 18;
+  // Word (vc06 control): tbLrV lines progress rightward from the physical
+  // left margin, so P10 is the strip [230, 248]; column 0/+50 and character 0
+  // land at x = 230/280/230. Expected to fail until the tbLrV body-text
+  // margin mapping is fixed (PR #2316): the current logical frame starts the
+  // lines at the physical right margin value (36 pt), giving 216/266/216.
+  it.fails('places tbLrV flow anchors where Word does (needs PR #2316)', () => {
+    const p10Start = FLOW_MARGINS.left + 10 * 18;
     const boxes = physicalDrawings(flowDocx('tbLrV', 10, ['あい', 0, 1, 2, 3, 4], [
       flowShape(position('H', 'column', 0), position('V', 'margin', 100)),
       flowShape(position('H', 'column', 50), position('V', 'margin', 150)),
@@ -391,10 +394,20 @@ describe('vertical-section flow-relative anchor frames resolve on the physical p
       flowShape(position('H', 'margin', 0), position('V', 'paragraph', 0), 20, 40),
       flowShape(position('H', 'margin', 40), position('V', 'line', 0), 20, 40),
     ]), 'tbLrV');
+    close(boxes[3]?.yPt, FLOW_MARGINS.top);
+    close(boxes[4]?.yPt, FLOW_MARGINS.top + 10.5);
     close(boxes[0]?.xPt, p10Start);
     close(boxes[1]?.xPt, p10Start + 50);
     close(boxes[2]?.xPt, p10Start);
-    close(boxes[3]?.yPt, FLOW_MARGINS.top);
-    close(boxes[4]?.yPt, FLOW_MARGINS.top + 10.5);
+  });
+
+  it('holds a relatively sized object against the line edge by its resolved width', () => {
+    // wp14:sizeRelH 50 % of the physical margin width (595.3 - 50 - 36).
+    const [box] = physicalDrawings(flowDocx('tbRl', 10, ['あ', 0], [
+      { ...flowShape(position('H', 'character', 0), position('V', 'margin', 100)), sizeRelH: ['margin', 50] },
+    ]), 'tbRl');
+    const widthPt = (PAGE_W - FLOW_MARGINS.left - FLOW_MARGINS.right) / 2;
+    close(box?.widthPt, widthPt);
+    close(box ? box.xPt + box.widthPt : undefined, P10_LEFT);
   });
 });

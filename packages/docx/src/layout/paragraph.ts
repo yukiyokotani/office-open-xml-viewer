@@ -138,7 +138,7 @@ import {
   type RetainedEmphasisMarkInput,
 } from './retained-typography.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
-import { alignedAnchorPlacement, resolveAnchorFrame, type AnchorFrameRect, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
+import { alignedAnchorPlacement, resolveAnchorFrame, resolveAnchorObjectSize, type AnchorFrameRect, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
 import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import {
   translateDrawing,
@@ -4922,10 +4922,7 @@ function acquireAnchorOccurrence(
         paragraphTopPt: options.placement.startYPt,
         line: { ...line, bounds: referenceBounds },
         host,
-        objectWidthPt: outer.run.anchorAcquisitionInput.extent.widthStatus === 'valid'
-          && Number.isFinite(outer.run.anchorAcquisitionInput.extent.widthPt)
-          ? outer.run.anchorAcquisitionInput.extent.widthPt as number
-          : 0,
+        acquisition: outer.run.anchorAcquisitionInput,
       })
     : {
         page: baseFrames?.page
@@ -6198,7 +6195,7 @@ function verticalSectionReferenceFrames(input: Readonly<{
   paragraphTopPt: number;
   line: LineLayout;
   host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>;
-  objectWidthPt: number;
+  acquisition: Readonly<AnchorAcquisitionInput>;
 }>): AnchorReferenceFramesInput {
   const { frames, logicalToPhysical: toPhysical } = input;
   const pageFrames = uprightPhysicalPageFrames(
@@ -6206,6 +6203,19 @@ function verticalSectionReferenceFrames(input: Readonly<{
     input.sectionFlow,
   );
   const cell = input.cellBounds ? transformRect(toPhysical, input.cellBounds) : null;
+  // The character frame holds the object by its edge, so it needs the size
+  // the frame resolution will use: wp14:sizeRelH/sizeRelV resolve against the
+  // page and margin frames only. The column, paragraph and line frames leave
+  // all size arithmetic (alignment) to `resolveAnchorFrame`.
+  const objectWidthPt = resolveAnchorObjectSize(input.acquisition, {
+    page: cell ?? pageFrames.page,
+    margin: cell ?? pageFrames.margin,
+    column: null,
+    paragraph: null,
+    line: null,
+    character: null,
+    pageParity: frames.pageParity ?? null,
+  })?.widthPt ?? 0;
   const logicalColumn = frames.column ?? frames.margin ?? frames.page;
   const column = logicalColumn ? transformRect(toPhysical, logicalColumn) : null;
   const lineBox = transformRect(toPhysical, input.line.bounds);
@@ -6222,7 +6232,7 @@ function verticalSectionReferenceFrames(input: Readonly<{
     yPt: input.line.bounds.yPt,
   }).yPt;
   const characterX = linesProgressLeftward
-    ? lineBox.xPt - input.objectWidthPt
+    ? lineBox.xPt - objectWidthPt
     : lineBox.xPt;
   return {
     page: cell ?? pageFrames.page,
@@ -6238,7 +6248,7 @@ function verticalSectionReferenceFrames(input: Readonly<{
     character: {
       xPt: characterX,
       yPt: lineBox.yPt,
-      widthPt: Math.max(0, input.objectWidthPt),
+      widthPt: Math.max(0, objectWidthPt),
       heightPt: lineBox.heightPt,
     },
     pageParity: frames.pageParity ?? null,
