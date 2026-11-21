@@ -47,6 +47,7 @@ import {
   wordExternalLinkSyntaxBreakOffsets,
   wordInlineDrawingTurnsFootprint,
   wordInlinePictureClipsToLine,
+  wordVerticalInlinePictureExtentPt,
 } from '../layout/line-compatibility.js';
 import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
@@ -2050,8 +2051,13 @@ function appendRunsToSegments(
         ...(img.anchor ? {} : { inlinePicture: true as const }),
         ...(!img.anchor && (img as Partial<import('../layout/text.js').ParagraphImageRun>).inlinePositionPt
           ? { positionPt: (img as Partial<import('../layout/text.js').ParagraphImageRun>).inlinePositionPt } : {}),
+        // An inline picture in a vertical section stays upright: its physical
+        // height runs along the line and its width across it.
         ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
-          img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
+          img.inlineEffectExtent,
+          ...wordVerticalInlinePictureExtentPt(img.widthPt, img.heightPt,
+            environment.uprightResourceOrientation !== undefined),
+          environment.uprightResourceOrientation,
           wordInlineDrawingTurnsFootprint(drawingMlInlinePictureTurn(img)),
         )),
         ...(!img.anchor && wordInlinePictureClipsToLine(drawingMlInlinePictureTurn(img))
@@ -2090,8 +2096,12 @@ function appendRunsToSegments(
         // Pareto controls do not reserve this padding; other chart classes
         // remain unmeasured, so chart effect-extent reservation is unsupported
         // rather than inferred from the picture/shape rule.
-        widthPt: chartRun.widthPt,
-        heightPt: chartRun.heightPt,
+        ...(() => {
+          // Painted upright like a picture (WORD_VERTICAL_INLINE_PICTURE_UPRIGHT).
+          const [widthPt, heightPt] = wordVerticalInlinePictureExtentPt(chartRun.widthPt, chartRun.heightPt,
+            !chartRun.anchor && environment.uprightResourceOrientation !== undefined);
+          return { widthPt, heightPt };
+        })(),
         anchor: chartRun.anchor ?? false,
         anchorXPt: chartRun.anchorXPt ?? 0,
         anchorYPt: chartRun.anchorYPt ?? 0,
@@ -2142,7 +2152,9 @@ function appendRunsToSegments(
         // an unavailable chart must not gain effect-extent padding either.
         ...inlineEffectExtentBox(
           acquiredAnchor !== undefined || run.resourceKind === 'chart' ? undefined : run.inlineEffectExtent,
-          run.widthPt, run.heightPt,
+          ...wordVerticalInlinePictureExtentPt(run.widthPt, run.heightPt,
+            acquiredAnchor === undefined && environment.uprightResourceOrientation !== undefined),
+          acquiredAnchor === undefined ? environment.uprightResourceOrientation : undefined,
         ),
         anchor: acquiredAnchor !== undefined,
         anchorXPt: 0,

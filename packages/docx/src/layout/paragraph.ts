@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -3979,13 +3979,15 @@ function planMeasuredLines(
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
       wrapOrigin: raw.topY !== undefined,
-      vertical: verticalPageFrame,
       hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
         && segment.inlinePicture === true),
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
     const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
     const exactObjectLine = !specified && !exactRubyLine && exactObjectClass;
+    // In a vertical section the upright object hangs from the exact line's
+    // top instead of standing on its baseline.
+    const exactObjectHangs = wordInlineObjectExactLineHangsFromTop(exactObjectClass, verticalPageFrame);
     // Under atLeast the added leading falls before the line, which keeps its
     // own descent above the bottom (atLeast 18pt, the same controls).
     const atLeastRubyLine = !specified && measuredRubyLine(raw)
@@ -4016,6 +4018,9 @@ function planMeasuredLines(
         : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
           : plannedBaselinePt(measuredLine, context, libreOfficeLines);
+    const objectTopOffsetPt = (heightPt: number, positionPt: number | undefined): number => exactObjectHangs
+      ? measuredLine.topYPt - baselinePt - (positionPt ?? 0)
+      : -heightPt - (positionPt ?? 0);
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
@@ -4148,7 +4153,7 @@ function planMeasuredLines(
             measuredWidthPt: image.measuredWidth,
             widthPt: objectWidthPt,
             heightPt: objectHeightPt,
-            topOffsetPt: -image.heightPt - (image.positionPt ?? 0) + effectTopPt + (image.inlineOffsetYPt ?? 0),
+            topOffsetPt: objectTopOffsetPt(image.heightPt, image.positionPt) + effectTopPt + (image.inlineOffsetYPt ?? 0),
             ...(leftOffsetPt ? { leftOffsetPt } : {}),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
@@ -4162,7 +4167,7 @@ function planMeasuredLines(
             measuredWidthPt: image.measuredWidth,
             widthPt: objectWidthPt,
             heightPt: objectHeightPt,
-            topOffsetPt: -image.heightPt - (image.positionPt ?? 0) + effectTopPt,
+            topOffsetPt: objectTopOffsetPt(image.heightPt, image.positionPt) + effectTopPt,
             ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
@@ -4184,7 +4189,8 @@ function planMeasuredLines(
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
           widthPt: objectWidthPt, heightPt: objectHeightPt,
-          topOffsetPt: labelTopPt ?? -image.heightPt - (image.positionPt ?? 0) + effectTopPt,
+          topOffsetPt: labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
+            : objectTopOffsetPt(image.heightPt, image.positionPt)) + effectTopPt,
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),

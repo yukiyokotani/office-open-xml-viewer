@@ -821,7 +821,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     } as unknown as CanvasRenderingContext2D;
   }
 
-  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; vertical?: boolean; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
     const selectedContext = options.context ?? measureContext;
     const value = {
       ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
@@ -850,6 +850,10 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       pageIndex: 0, totalPages: 1, layoutServices,
       compat: compatProfile({ compatibilityMode: options.compatibilityMode ?? 15 }),
       ...(options.admitRunLeading === false ? {} : { inlineObjectRunLeadingAdmitted: true as const }),
+      ...(options.vertical ? {
+        pageWritingMode: 'vertical-rl' as const, verticalPageFrame: true,
+        uprightResourceOrientation: 'upright-physical' as const,
+      } : {}),
     };
     // Parser-private run facts reach acquisition only through normalization.
     const normalized = runs.some((run) => '__inlinePosition' in run)
@@ -918,6 +922,22 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         const placement = resource(node);
         expect(placement.bounds.yPt).toBeCloseTo(line.baselinePt - 25, 10);
         expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(origin === 'drawingml');
+      }
+    });
+
+    it('hangs an upright picture from the exact line top in a vertical section (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
+      for (const [heightPt, positionPt] of [[30, -5], [16, 5], [30, 0]] as const) {
+        const node = measureInlineParagraph([picture(heightPt, positionPt, 'drawingml')], 1,
+          { exactPt: 24, vertical: true });
+        const line = node.lines[0]!;
+        expect(line.advancePt).toBeCloseTo(24, 10);
+        const placement = resource(node);
+        // WORD_VERTICAL_INLINE_PICTURE_UPRIGHT: the 20pt physical width runs
+        // across the line and the physical height along it.
+        expect(placement.bounds.heightPt).toBeCloseTo(20, 10);
+        expect(placement.bounds.widthPt).toBeCloseTo(heightPt, 10);
+        expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt - positionPt, 10);
+        expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
       }
     });
 

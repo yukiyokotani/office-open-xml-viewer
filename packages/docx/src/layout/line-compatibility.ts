@@ -1609,7 +1609,7 @@ export const WORD_INLINE_OBJECT_EXACT_LINE = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text: the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). This holds for exact 8, 10, 24, 36 and 48pt lines, in compatibility modes omitted, 12, 14 and 15, on a 20pt lines grid (the exact line itself does not snap), and in body paragraphs, headers, footers, footnotes, table cells and text boxes. A DrawingML picture is clipped to the line box (a 30pt picture in a 24pt line shows only the 19.2pt above the baseline) in body paragraphs, headers, footers and footnotes, but not in table cells or text boxes; a VML picture is never clipped and overlaps the neighbouring lines. Library scope: horizontal lines without a wrap-conditioned origin (the text rule records a narrow side-gap counterexample there); charts and math keep their established placement, and WPS drawing shapes take the baseline but stay unclipped (their clipping was not measured).',
+  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text: the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). This holds for exact 8, 10, 24, 36 and 48pt lines, in compatibility modes omitted, 12, 14 and 15, on a 20pt lines grid (the exact line itself does not snap), and in body paragraphs, headers, footers, footnotes, table cells and text boxes. A DrawingML picture is clipped to the line box (a 30pt picture in a 24pt line shows only the 19.2pt above the baseline) in body paragraphs, headers, footers and footnotes, but not in table cells or text boxes; a VML picture is never clipped and overlaps the neighbouring lines. Vertical sections (tbRl and tbLrV, exact 24pt, compatibility mode 15; the same DrawingML and VML pictures with position -5, 0 and +5pt) keep the exact line too: the line pitch and the text do not move, but the upright object hangs from the line top moved by its run position instead of standing on the baseline (a 40pt-wide picture lowered 5pt shows the 19pt between its top and the far line edge; DrawingML clipped to the line, VML overlapping the next line). Library scope: lines without a wrap-conditioned origin (the text rule records a narrow side-gap counterexample there); charts and math keep their established placement, and WPS drawing shapes take the baseline but stay unclipped (their clipping was not measured).',
 });
 
 /** WORD_INLINE_OBJECT_EXACT_LINE gate: an exact line with inline objects keeps
@@ -1617,19 +1617,49 @@ export const WORD_INLINE_OBJECT_EXACT_LINE = defineCompatibilityRule({
 export function wordInlineObjectExactLineApplies(input: Readonly<{
   lineSpacing: LineSpacing | null | undefined;
   wrapOrigin: boolean;
-  vertical: boolean;
   hasInlineObject: boolean;
 }>): boolean {
   void WORD_INLINE_OBJECT_EXACT_LINE;
   const spacing = input.lineSpacing;
-  return input.hasInlineObject && !input.wrapOrigin && !input.vertical
+  return input.hasInlineObject && !input.wrapOrigin
     && spacing?.rule === 'exact' && spacing.value > 0;
+}
+
+/** WORD_INLINE_OBJECT_EXACT_LINE: in a vertical section an object of an exact
+ * line hangs from the line top (moved by its run position) instead of standing
+ * on the baseline. */
+export function wordInlineObjectExactLineHangsFromTop(exactObjectLine: boolean, vertical: boolean): boolean {
+  void WORD_INLINE_OBJECT_EXACT_LINE;
+  return exactObjectLine && vertical;
 }
 
 /** WORD_INLINE_OBJECT_EXACT_LINE: a DrawingML inline picture is clipped to its
  * exact line box (outside table cells and text boxes); a VML picture is not. */
 export function wordInlineObjectExactLineClips(origin: 'drawingml' | 'vmlStaticTextbox' | undefined): boolean {
   return origin === 'drawingml';
+}
+
+export const WORD_VERTICAL_INLINE_PICTURE_UPRIGHT = defineCompatibilityRule({
+  id: 'word-vertical-inline-picture-upright',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-inline-picture-extent',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.18.93 (tbRl, tbLrV) turns the text flow of a vertical section but does not say how an inline picture takes part in the turned line. Windows Word 16.0.20527 controls (compatibility mode 15, Times New Roman 10pt; DrawingML wp:inline and VML w:pict pictures 40pt wide and 16pt or 30pt tall, in tbRl and tbLrV sections, single and exact 24pt lines) paint the picture upright and advance the line by its physical height: text after a 30pt-tall picture starts 30pt further down the column, after a 16pt one 16pt further, and the picture\'s physical width runs across the line. The line box therefore takes the physical height as the object\'s inline advance and the physical width as its line-height extent. Library scope: inline charts and unavailable-resource placeholders, which paint upright the same way, take the same extent; anchored objects and inline drawing shapes (which turn with the line) keep their authored axes.',
+});
+
+/** WORD_VERTICAL_INLINE_PICTURE_UPRIGHT: an inline picture's logical
+ * [advance, line extent] in a section whose upright resources turn back. */
+export function wordVerticalInlinePictureExtentPt(
+  widthPt: number,
+  heightPt: number,
+  upright: boolean,
+): readonly [number, number] {
+  void WORD_VERTICAL_INLINE_PICTURE_UPRIGHT;
+  return upright ? [heightPt, widthPt] : [widthPt, heightPt];
 }
 
 export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
