@@ -35,7 +35,7 @@ if($WROnly){ $list=@($list | Where-Object { $WROnly -contains $_.i }) }
 L ('START '+$WRRun+' items '+@($list).Count)
 foreach($it in $list){
  $local=Join-Path $Stage ('{0:D3}.{1}' -f $it.i,$it.fmt); $pdf=Join-Path $Stage ('{0:D3}.pdf' -f $it.i); $vbs=Join-Path $Stage ('{0:D3}.vbs' -f $it.i); $outf=Join-Path $Stage ('{0:D3}.out' -f $it.i)
- $before=$null
+ $before=@(); $beforeSet=$false
  $r=[ordered]@{i=$it.i; fmt=$it.fmt; app=$it.app; mode=$it.mode; driver='cscript-vbs'; startedUTC=[DateTime]::UtcNow.ToString('o'); ok=$false}
  try {
   Copy-Item -LiteralPath (Join-Path $WR ('in\{0:D3}.{1}' -f $it.i,$it.fmt)) -Destination $local -Force
@@ -116,7 +116,7 @@ If a.Presentations.Count = 0 Then a.Quit
    $call='Presentation.SaveAs(path,ppSaveAsPDF) via cscript'
   }
   Set-Content -LiteralPath $vbs -Value $code -Encoding Unicode
-  $before=@(Get-Process $pmap[$it.app] -ErrorAction SilentlyContinue | ForEach-Object Id)
+  $before=@(Get-Process $pmap[$it.app] -ErrorAction SilentlyContinue | ForEach-Object Id); $beforeSet=$true
   $t=[DateTime]::Now
   $p=Start-Process cscript.exe -ArgumentList '//nologo','//U',$vbs -PassThru -NoNewWindow -RedirectStandardOutput $outf
   $done=$p.WaitForExit([int]$it.timeout*1000)
@@ -139,7 +139,7 @@ If a.Presentations.Count = 0 Then a.Quit
   $r.error=$_.Exception.Message
   # A failed item (script error before Quit, no PDF) can leave its Office
   # instance running windowless, which then blocks the next launcher.
-  if($null -ne $before){
+  if($beforeSet){
    $left=@(Get-Process $pmap[$it.app] -ErrorAction SilentlyContinue | Where-Object { $before -notcontains $_.Id })
    foreach($x in $left){ try { Stop-Process -Id $x.Id -Force; L ('STOPPED leftover '+$x.ProcessName+' '+$x.Id) } catch {} }
   }
