@@ -303,16 +303,16 @@ export interface PageAnchorPrescanInput {
         bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
       }>
     | Readonly<{
-        /** `word-vertical-section-upright-block-table`: the exclusion an
-         * upright block table of a vertical section took in the previous
-         * pass, in section-logical page points. `pinned`: the table keeps
-         * this block position instead of the flow position. */
+        /** `word-vertical-section-upright-block-table`: a pin of the
+         * pagination round's upright block plan: the table's exclusion in
+         * section-logical page points, registered at the page start. The
+         * table, in column `tableFlowDomainId`, takes its block position. */
         kind: 'upright-table';
         occurrenceId: string;
         tableSource: SourceRef;
         key: string;
         bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
-        pinned: boolean;
+        tableFlowDomainId: string;
       }>
     | Readonly<{
         /** WORD_LATER_ANCHOR_EARLIER_LINE_WRAP: a paragraph-relative drawing

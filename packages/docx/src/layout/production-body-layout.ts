@@ -2430,8 +2430,8 @@ function prescanBodyPageAnchors(
     }
     if (anchor.kind === 'upright-table') {
       // `word-vertical-section-upright-block-table`: the lines laid out
-      // before the table wrap around the exclusion it took in the previous
-      // pass; the table registers its own placement when it is reached.
+      // before the table wrap around its pinned exclusion; the table takes
+      // the pin's block position when the flow reaches it.
       return [
         Object.freeze({
           kind: 'frame' as const,
@@ -2444,7 +2444,7 @@ function prescanBodyPageAnchors(
           uprightBlockTable: Object.freeze({
             key: anchor.key,
             planned: true,
-            pinned: anchor.pinned,
+            tableFlowDomainId: anchor.tableFlowDomainId,
           }),
         }),
       ];

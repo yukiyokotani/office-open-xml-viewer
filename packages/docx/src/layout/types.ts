@@ -892,10 +892,17 @@ export interface TableLayout extends LayoutNodeBase {
    * layer, story band and occurrence translation leave those axes in place. */
   readonly ownerHostPageAxes?: Readonly<{ horizontal: boolean; vertical: boolean }>;
   /** @internal `word-vertical-section-upright-block-table`: the exclusion of
-   * this upright block table of a vertical section in section-logical page
-   * points (x inline, y block), under its plan key. Pagination carries it to
-   * the start of its page so the lines laid out before the table wrap too. */
-  readonly uprightBlockExclusion?: Readonly<{ key: string; bounds: LayoutRect }>;
+   * this upright block table (its first fragment) of a vertical section in
+   * section-logical page points (x inline, y block), under its plan key.
+   * `flowBlockPt` is the block position the flow had reached at the table,
+   * and `pinned` whether the table was placed at a pin of the round's plan
+   * instead. Pagination pins the table from these (nextUprightBlockPlan). */
+  readonly uprightBlockExclusion?: Readonly<{
+    key: string;
+    bounds: LayoutRect;
+    flowBlockPt: number;
+    pinned: boolean;
+  }>;
 }
 
 /**
@@ -960,11 +967,15 @@ interface FloatRegistryEntryCorePt {
   /** `word-vertical-section-upright-block-table`: the exclusion of an upright
    * block table of a vertical section, in the section-logical frame. Line
    * bands meet it on a closed block interval (WrapExclusion.bandEdgesInclusive).
-   * `planned` marks the page-start registration carried from the previous
-   * pagination pass, which earlier lines of the page wrap around; the table
-   * registers its own exclusion again when the flow reaches it. `pinned`
-   * marks a planned registration whose block position the table keeps. */
-  readonly uprightBlockTable?: Readonly<{ key: string; planned: boolean; pinned: boolean }>;
+   * `planned` marks the page-start registration of a pin of the pagination
+   * round's plan, which earlier lines of the page wrap around; the table in
+   * column `tableFlowDomainId` takes its block position and registers its own
+   * exclusion again when the flow reaches it. */
+  readonly uprightBlockTable?: Readonly<{
+    key: string;
+    planned: boolean;
+    tableFlowDomainId?: string;
+  }>;
 }
 
 /** Point-space snapshot used while final table-fragment float placement is

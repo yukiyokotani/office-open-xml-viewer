@@ -214,6 +214,14 @@ describe('upright block table of a vertical section', () => {
     expect(pages[2]!.strips).toEqual([[{ block: 0, inlineStart: pages[2]!.tables[0]!.bottom }]]);
   });
 
+  it('settles two tables nearly as tall as the column, with no room for the strips before them', () => {
+    // The strip before each table cannot wrap beside it; the upright block
+    // plan pins each table once and ends.
+    const pages = layOutPages('tbRl', [P, table(63), P, table(63), P]);
+    expect(pages.flatMap((page) => page.tables).length).toBeGreaterThanOrEqual(2);
+    expect(pages.flatMap((page) => page.strips)).toHaveLength(3);
+  });
+
   it('keeps the table where the full-length strip before it left the flow', () => {
     // `word-vertical-section-upright-table-rewrapped-strip`: 66 characters of
     // 10.5 pt fill the 701.9 pt column in one strip, but not beside the table.

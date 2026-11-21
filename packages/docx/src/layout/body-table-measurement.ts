@@ -223,65 +223,64 @@ export function measureBodyTableEntry(
     }
     const physical = state.verticalPhys;
     const tableWidthPt = retained.layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+    const paginates = uprightBlockPaginates(physical);
+    const freshRegion = (freshPage: boolean) => Object.freeze({
+      layout: retained.layout,
+      blockExtentPt: 0,
+      nextCursor: Object.freeze({ kind: 'table' as const, cursor }),
+      requiresFreshFlowRegion: true,
+      ...(freshPage ? { requiresFreshPage: true } : {}),
+    });
+    if (request.cursor && !paginates) {
+      throw new Error('An upright physical table must remain atomic');
+    }
+    // A table wider than the block extent left moves to a fresh page (library
+    // policy outside `word-vertical-section-upright-block-table`); in a
+    // multi-column section of that rule it stays where the flow reached it.
+    const singleColumn = request.location.section.columns.length <= 1;
     if (
+      !request.cursor && (singleColumn || !paginates) &&
       tableWidthPt > request.availableBlockExtentPt &&
       request.availableBlockExtentPt < request.freshPageBlockExtentPt
     ) {
-      return Object.freeze({
-        layout: retained.layout,
-        blockExtentPt: 0,
-        nextCursor: Object.freeze({ kind: 'table' as const, cursor }),
-        requiresFreshFlowRegion: true,
-      });
+      return freshRegion(false);
     }
-    const fragmentStart = `${cursor.rowIndex}.${cursor.rowFragmentIndex}`;
     const whole = uprightBlockPlacement(
-      context, request, physical, fragmentStart, tableWidthPt, retained.layout.advancePt,
+      context, request, physical, request.cursor ? 'continuation' : 'first',
+      tableWidthPt, retained.layout.advancePt,
     );
-    // `word-vertical-section-upright-block-table`: the rows run along the
-    // section's inline axis and paginate there as in a horizontal section. A
-    // table that does not fit below its inline start first moves to a fresh
-    // column or page when content precedes it; on a fresh one its rows fill
-    // the column and the rest continues at the next one's flow position.
-    const roomPt = whole.inlineRoomPt;
     let upright: TableLayout;
     let block = whole;
     let nextCursor: Readonly<{ kind: 'table'; cursor: typeof cursor }> | null = null;
-    if (roomPt === null || (cursor.rowIndex === 0 && cursor.rowFragmentIndex === 0
-      && retained.layout.advancePt <= roomPt)) {
+    if (whole.inlineRoomPt === null
+      || (!request.cursor && retained.layout.advancePt <= whole.inlineRoomPt)) {
       upright = takeUprightTableFragment(
         context, request, operations, retained, whole.originPt, acquisitionState,
       );
     } else {
-      const taken = request.pageHasContent === true && !request.cursor
-        ? null
-        : takeUprightTableRows(
-          context, request, operations, retained, whole.originPt, acquisitionState,
-          cursor, roomPt, request.availableInlineExtentPt,
-        );
-      if (!taken?.fragment || taken.requiresFreshPage) {
-        if (request.pageHasContent === true) {
-          return Object.freeze({
-            layout: retained.layout,
-            blockExtentPt: 0,
-            nextCursor: Object.freeze({ kind: 'table' as const, cursor }),
-            requiresFreshFlowRegion: true,
-          });
-        }
-        if (request.cursor) throw new Error('An upright table continuation made no progress');
-        // Nothing of the table fits even a fresh column: keep it whole.
-        upright = takeUprightTableFragment(
-          context, request, operations, retained, whole.originPt, acquisitionState,
-        );
-      } else {
-        upright = taken.fragment;
-        nextCursor = taken.nextCursor
-          ? Object.freeze({ kind: 'table' as const, cursor: taken.nextCursor })
-          : null;
-        block = uprightBlockPlacement(
-          context, request, physical, fragmentStart, tableWidthPt, upright.advancePt,
-        );
+      // `word-vertical-section-upright-block-table`: a table too tall for the
+      // inline extent below its start moves to a fresh page when content
+      // precedes it there. On a fresh page whole rows fill the band and the
+      // rest continues on the next page; a row taller than the band takes a
+      // page of its own.
+      if (!request.cursor && request.pageHasContent === true) return freshRegion(true);
+      const bandPt = whole.inlineBandPt ?? whole.inlineRoomPt;
+      const taken = takeUprightTableRows(
+        context, request, operations, wholeRowAcquisition(retained), whole.originPt,
+        acquisitionState, cursor, whole.inlineRoomPt, bandPt,
+      );
+      if (!taken.fragment) {
+        if (request.pageHasContent === true) return freshRegion(true);
+        throw new Error('An upright table made no progress on a fresh page');
       }
+      upright = taken.fragment;
+      nextCursor = taken.nextCursor
+        ? Object.freeze({ kind: 'table' as const, cursor: taken.nextCursor })
+        : null;
+      block = uprightBlockPlacement(
+        context, request, physical, request.cursor ? 'continuation' : 'first',
+        tableWidthPt, Math.min(upright.advancePt, whole.inlineRoomPt),
+      );
     }
     return Object.freeze({
       layout: upright,
@@ -336,91 +335,124 @@ export function measureBodyTableEntry(
   });
 }
 
+/** Whether an upright block of this section frame follows
+ * `word-vertical-section-upright-block-table` (the vertical-rl and
+ * vertical-lr frames: tbRl, tbLrV and the tokens sharing them). A
+ * counter-clockwise section flow (sideways-lr) keeps the library policy of an
+ * atomic block at the column bottom that advances the flow by its physical
+ * width and registers no exclusion. */
+function uprightBlockPaginates(physical: PhysicalAnchorFrame): boolean {
+  return physical.writingMode === 'vertical-rl' || physical.writingMode === 'vertical-lr';
+}
+
+/** The acquisition with every row kept whole: an upright table breaks only
+ * between rows (`word-vertical-section-upright-block-table`), as §17.4.6
+ * cantSplit rows do. */
+const wholeRowAcquisitions = new WeakMap<RetainedTableAcquisition, RetainedTableAcquisition>();
+function wholeRowAcquisition(retained: RetainedTableAcquisition): RetainedTableAcquisition {
+  if (retained.input.rows.every((row) => row.cantSplit === true)) return retained;
+  let whole = wholeRowAcquisitions.get(retained);
+  if (!whole) {
+    whole = Object.freeze({
+      ...retained,
+      input: Object.freeze({
+        ...retained.input,
+        rows: Object.freeze(retained.input.rows.map((row) => Object.freeze({ ...row, cantSplit: true }))),
+      }),
+    });
+    wholeRowAcquisitions.set(retained, whole);
+  }
+  return whole;
+}
+
 /**
- * `word-vertical-section-upright-block-table`: where an upright block (a
- * top-level table fragment, or an ordinary owner segment, starting at
- * `fragmentStart`: source row and row fragment) of a
+ * `word-vertical-section-upright-block-table`: where an upright block of a
  * §17.6.20 vertical section is placed, what it charges the flow, and the
  * exclusion it registers. `blockExtentPt` is its physical width and
- * `inlineExtentPt` its physical height.
+ * `inlineExtentPt` its physical height. `role` is the first fragment of a
+ * top-level table, a later fragment of one, or an ordinary owner segment.
  *
- * In a vertical-rl or vertical-lr section frame (tbRl, tbLrV and the tokens
- * sharing their frames) the block starts at the current block position with
- * its inline start at the column top, and charges no flow advance: the
- * following paragraph takes the next line strip as if the block were absent. Its section-logical rectangle is a text
- * exclusion met on a closed block interval and extended back to the column
- * top, so every line strip whose block interval meets it starts its inline
- * flow at the block's inline end. A later
- * block whose block interval meets an earlier block of the page (closed
- * interval, the same inline band) starts at that block's inline end, so
- * overlapping tables stack along the inline axis in source order. The strip
- * laid out just before the block ends exactly where the block starts and
- * wraps too; pagination carries the exclusion to the page start for it
- * (body-paginator.ts pageAnchorDestinationPlan), and a planned registration
- * it pinned fixes the block position (`word-vertical-section-upright-table-rewrapped-strip`).
+ * In a vertical-rl or vertical-lr section frame the block starts at the
+ * current block position and charges no flow advance: the following
+ * paragraph takes the next line strip as if the block were absent. Along the
+ * inline axis it takes the first position from the column top at which its
+ * box clears the blocks placed before it on the page whose block interval
+ * meets its own (closed interval), so overlapping tables stack. Its
+ * section-logical box is a text exclusion met on a closed block interval:
+ * every line strip meeting it flows around it, which for a block at the
+ * column top means starting at its inline end.
  *
- * A counter-clockwise section flow (sideways-lr) is outside that rule: it
- * keeps the library policy of a block at the column bottom that advances the
- * flow by its physical width and registers no exclusion.
+ * The strip laid out just before the block ends exactly where the block
+ * starts and wraps too. Pagination therefore registers a first fragment at
+ * the page start once it has pinned it (body-paginator.ts
+ * nextUprightBlockPlan), and the block takes the pin's block position
+ * (`word-vertical-section-upright-table-rewrapped-strip`). Later fragments
+ * and owner segments (library policy) only exclude the lines after them.
  */
 function uprightBlockPlacement(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   physical: PhysicalAnchorFrame,
-  fragmentStart: string,
+  role: 'first' | 'continuation' | 'segment',
   blockExtentPt: number,
   inlineExtentPt: number,
 ): Readonly<{
   originPt: Readonly<{ xPt: number; yPt: number }>;
-  /** Inline extent from the block's inline start to the column end; null
-   * where the block does not paginate along the inline axis. */
+  /** Inline extent from the block's inline start to the end of the page's
+   * body band; null where the block does not paginate along the inline axis. */
   inlineRoomPt: number | null;
+  /** Inline extent of the page's body band from the column top. */
+  inlineBandPt: number | null;
   flowAdvancePt: number;
   registration: Pick<TableMeasureResult, 'flowRegistryDelta'>;
   exclusion: Readonly<{ uprightBlockExclusion?: NonNullable<TableLayout['uprightBlockExclusion']> }>;
 }> {
   const cursorPt = request.location.cursorPt;
-  if (physical.writingMode !== 'vertical-rl' && physical.writingMode !== 'vertical-lr') {
+  if (!uprightBlockPaginates(physical)) {
     return Object.freeze({
       originPt: uprightBlockPhysicalOrigin(physical, cursorPt, blockExtentPt, inlineExtentPt),
       inlineRoomPt: null,
+      inlineBandPt: null,
       flowAdvancePt: blockExtentPt,
       registration: Object.freeze({}),
       exclusion: Object.freeze({}),
     });
   }
   const registry = context.sessionState.floatRegistry;
-  const key = uprightBlockTableKey(request.input.source, fragmentStart);
-  const plannedId = uprightBlockTablePrescanKey(key, request.location.pageIndex);
-  const pinned = registry.entries.find((entry) =>
-    entry.occurrenceId === plannedId && entry.uprightBlockTable?.pinned === true);
-  const blockStartPt = pinned ? pinned.bounds.yPt : cursorPt.yPt;
+  const key = uprightBlockTableKey(request.input.source);
+  const pin = role !== 'first' ? undefined : registry.entries.find((entry) =>
+    entry.occurrenceId === uprightBlockTablePrescanKey(key, request.location.pageIndex)
+    && entry.uprightBlockTable?.tableFlowDomainId === request.location.flowDomainId);
+  const blockStartPt = pin ? pin.bounds.yPt : cursorPt.yPt;
   const blockEndPt = blockStartPt + blockExtentPt;
-  const bandEndPt = cursorPt.xPt + request.availableInlineExtentPt;
+  const columnEndPt = cursorPt.xPt + request.availableInlineExtentPt;
+  // The blocks placed in this pass; a planned registration is a pin, also of
+  // blocks later in source order.
+  const placed = registry.entries.flatMap((entry) => {
+    if (entry.uprightBlockTable?.planned !== false) return [];
+    const box = entry.bounds;
+    return box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt
+      && box.yPt <= blockEndPt && box.yPt + box.heightPt >= blockStartPt ? [box] : [];
+  });
   let inlineStartPt = cursorPt.xPt;
-  for (const entry of registry.entries) {
-    // Only blocks already placed in this pass: a planned registration is the
-    // previous pass's estimate, also of blocks later in source order.
-    if (entry.uprightBlockTable?.planned !== false) continue;
-    const placed = entry.exclusionBounds;
-    const placedInlineEndPt = placed.xPt + placed.widthPt;
-    if (placed.xPt >= bandEndPt || placedInlineEndPt <= cursorPt.xPt) continue;
-    if (placed.yPt > blockEndPt || placed.yPt + placed.heightPt < blockStartPt) continue;
-    inlineStartPt = Math.max(inlineStartPt, placedInlineEndPt);
+  // Every move adopts the inline end of a box it leaves behind for good.
+  for (let moved = true; moved;) {
+    moved = false;
+    for (const box of placed) {
+      const boxEndPt = box.xPt + box.widthPt;
+      if (box.xPt < inlineStartPt + inlineExtentPt && boxEndPt > inlineStartPt) {
+        inlineStartPt = boxEndPt;
+        moved = true;
+      }
+    }
   }
+  const bandEndPt = physical.pageHeight - physical.marginBottom;
+  const inlineRoomPt = bandEndPt - inlineStartPt;
+  const inlineBandPt = bandEndPt - cursorPt.xPt;
   const bounds: LayoutRect = Object.freeze({
     xPt: inlineStartPt,
     yPt: blockStartPt,
     widthPt: inlineExtentPt,
-    heightPt: blockExtentPt,
-  });
-  // A strip meeting the block starts at its inline end, also where the block
-  // stacked below an earlier one that the strip does not meet: the exclusion
-  // runs from the column top, leaving no line space before the block.
-  const exclusionBounds: LayoutRect = Object.freeze({
-    xPt: cursorPt.xPt,
-    yPt: blockStartPt,
-    widthPt: inlineStartPt + inlineExtentPt - cursorPt.xPt,
     heightPt: blockExtentPt,
   });
   const originPt = uprightBlockPhysicalOrigin(
@@ -429,7 +461,8 @@ function uprightBlockPlacement(
   if (!(blockExtentPt > 0) || !(inlineExtentPt > 0)) {
     return Object.freeze({
       originPt,
-      inlineRoomPt: bandEndPt - inlineStartPt,
+      inlineRoomPt,
+      inlineBandPt,
       flowAdvancePt: 0,
       registration: Object.freeze({}),
       exclusion: Object.freeze({}),
@@ -447,20 +480,26 @@ function uprightBlockPlacement(
     paragraphId: registry.nextParagraphId,
     exclusionMode: 'square' as const,
     bounds,
-    exclusionBounds,
-    uprightBlockTable: Object.freeze({ key, planned: false, pinned: false }),
+    exclusionBounds: bounds,
+    uprightBlockTable: Object.freeze({ key, planned: false }),
   });
   return Object.freeze({
     originPt,
-    inlineRoomPt: bandEndPt - inlineStartPt,
+    inlineRoomPt,
+    inlineBandPt,
     flowAdvancePt: 0,
     registration: Object.freeze({
       flowRegistryDelta: Object.freeze({
         floats: floatingTableRegistryDelta(registry, [entry], registry.nextParagraphId + 1),
       }),
     }),
-    exclusion: Object.freeze({
-      uprightBlockExclusion: Object.freeze({ key, bounds: exclusionBounds }),
+    exclusion: role !== 'first' ? Object.freeze({}) : Object.freeze({
+      uprightBlockExclusion: Object.freeze({
+        key,
+        bounds,
+        flowBlockPt: cursorPt.yPt,
+        pinned: pin !== undefined,
+      }),
     }),
   });
 }
@@ -1778,7 +1817,7 @@ function measureUprightOwnerSegment(
       });
     }
     const block = uprightBlockPlacement(
-      context, request, physical, `${segment.rowStart}.0`, gridWidthPt, local.layout.advancePt,
+      context, request, physical, 'segment', gridWidthPt, local.layout.advancePt,
     );
     const layout = takeUprightTableFragment(
       context, request, operations, local, block.originPt, acquisitionOwner,

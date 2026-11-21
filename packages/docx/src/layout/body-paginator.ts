@@ -1130,19 +1130,6 @@ type PageWrapDestination = Readonly<{
   pageIndex: number;
   flowDomainId: string;
 }> | Readonly<{
-  /** `word-vertical-section-upright-block-table`: the section-logical
-   * exclusion an upright block table of a vertical section took in a pass.
-   * `pinned` (cycle recovery, see `converge`): the table keeps this block
-   * position instead of the flow position. */
-  kind: 'upright-table';
-  occurrenceId: string;
-  tableSource: SourceRef;
-  key: string;
-  bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
-  pinned: boolean;
-  pageIndex: number;
-  flowDomainId: string;
-}> | Readonly<{
   kind: 'host-drawing';
   occurrenceId: string;
   paragraphSource: SourceRef;
@@ -1198,6 +1185,7 @@ function* paginateBodyPassSteps(
   balancePlan: BodyBalancePlan,
   observer?: BodyPaginationPassObserver,
   anchorLineDeferrals: AnchorLineDeferrals | null = null,
+  uprightPlan: UprightBlockPlan = NO_UPRIGHT_BLOCK_PLAN,
 ): PaginationSteps<BodyPaginationPassResult> {
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
@@ -1471,13 +1459,17 @@ function* paginateBodyPassSteps(
     }
     anchors.forEach((anchor) => registeredAnchorKeys.add(anchor.occurrenceId));
     const pageObjects = pageObjectsAt(target);
-    if (anchors.length === 0 && pageObjects.length === 0) return;
+    // The upright block plan is a fixed input of every pass of an anchor
+    // run, not a read of its carry, so it is not recorded above.
+    const upright = uprightBlockPrescanAnchors(uprightPlan, at.pageIndex, at.flowDomainId);
+    if (anchors.length === 0 && pageObjects.length === 0 && upright.length === 0) return;
     if (!session.prescanPageAnchors) {
       throw new Error('Page-owned anchors require canonical prescan acquisition');
     }
     const location = acquisitionLocation(target);
     const delta = session.prescanPageAnchors({
-      anchors: pageObjects.length === 0 ? anchors : Object.freeze([...anchors, ...pageObjects]),
+      anchors: pageObjects.length === 0 && upright.length === 0
+        ? anchors : Object.freeze([...anchors, ...upright, ...pageObjects]),
       location,
       availableInlineExtentPt: location.availableBounds.widthPt,
     });
@@ -4509,27 +4501,6 @@ function pageAnchorDestinationPlan(layout: DocumentLayout) {
           }));
         continue;
       }
-      if (node.kind === 'table' && node.uprightBlockExclusion) {
-        // `word-vertical-section-upright-block-table`: the line strip laid
-        // out just before an upright block table ends where the table starts
-        // and wraps around it. The next pass registers this pass's exclusion
-        // where the table's section region opens on the page (the only
-        // page-start registration point of a region's columns), so that
-        // strip sees it too; the exclusion's inline extent confines it to
-        // the table's own column.
-        const { key, bounds } = node.uprightBlockExclusion;
-        destinations.set(key, Object.freeze({
-          kind: 'upright-table',
-          occurrenceId: uprightBlockTablePrescanKey(key, page.pageIndex),
-          tableSource: node.source,
-          key,
-          bounds: Object.freeze({ ...bounds }),
-          pinned: false,
-          pageIndex: page.pageIndex,
-          flowDomainId: regionFlowDomainOpening(page, node.flowDomainId),
-        }));
-        continue;
-      }
       if (node.kind !== 'paragraph') continue;
       for (const drawing of node.drawings) {
         const anchor = drawing.anchorLayer;
@@ -4584,15 +4555,6 @@ function plannedPageStartAnchors(
             paragraphSource: destination.paragraphSource,
             carry: destination.carry,
           })
-        : destination.kind === 'upright-table'
-        ? Object.freeze({
-            kind: 'upright-table' as const,
-            occurrenceId: destination.occurrenceId,
-            tableSource: destination.tableSource,
-            key: destination.key,
-            bounds: destination.bounds,
-            pinned: destination.pinned,
-          })
         : Object.freeze({
             kind: 'floating-table' as const,
             occurrenceId: destination.occurrenceId,
@@ -4609,8 +4571,8 @@ function pageStartAnchorsIdentity(anchors: PageStartAnchors): string {
       : anchor.kind === 'frame'
       ? `frame|${anchor.occurrenceId}|${sourceKey(anchor.paragraphSource)}|${JSON.stringify(anchor.carry)}`
       : anchor.kind === 'upright-table'
-      ? `upright|${anchor.occurrenceId}|${anchor.pinned}|${anchor.bounds.xPt}|${anchor.bounds.yPt}|${
-        anchor.bounds.widthPt}|${anchor.bounds.heightPt}`
+      ? `upright|${anchor.occurrenceId}|${anchor.tableFlowDomainId}|${anchor.bounds.xPt}|${
+        anchor.bounds.yPt}|${anchor.bounds.widthPt}|${anchor.bounds.heightPt}`
       : `table|${anchor.occurrenceId}|${sourceKey(anchor.tableSource)}|${anchor.bounds.xPt}|${
         anchor.bounds.yPt}|${anchor.bounds.widthPt}|${anchor.bounds.heightPt}`)).join('\n');
 }
@@ -5100,40 +5062,6 @@ function compareDrawingSourceOrder(
     : leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 }
 
-type UprightTableDestination = Extract<PageWrapDestination, { kind: 'upright-table' }>;
-
-/** The pin WORD_UPRIGHT_TABLE_REWRAPPED_STRIP applies to an exact-state
- * cycle (see `converge`): the first unpinned upright block table in source
- * order whose destination changed within the cycle, at the earliest page and
- * block position it took there. */
-function oscillatingUprightTablePin(
-  cycle: readonly ReadonlyMap<string, PageWrapDestination>[],
-  changed: ReadonlySet<string>,
-): UprightTableDestination | undefined {
-  // Fragments and owner segments of one table share its source; their keys
-  // end in the "<row>.<row fragment>" they start at (uprightBlockTableKey).
-  const rowStart = (key: string) => Number(key.slice(key.lastIndexOf(':') + 1));
-  const earliest = new Map<string, UprightTableDestination>();
-  const pinnedKeys = new Set<string>();
-  for (const plan of cycle) {
-    for (const [key, destination] of plan) {
-      if (destination.kind !== 'upright-table' || !changed.has(key)) continue;
-      if (destination.pinned) pinnedKeys.add(key);
-      const prior = earliest.get(key);
-      if (!prior || destination.pageIndex < prior.pageIndex
-        || (destination.pageIndex === prior.pageIndex && destination.bounds.yPt < prior.bounds.yPt)) {
-        earliest.set(key, destination);
-      }
-    }
-  }
-  const first = [...earliest.values()]
-    .filter((destination) => !pinnedKeys.has(destination.key))
-    .sort((left, right) => compareTableSourceOrder(
-      `table:${sourceKey(left.tableSource)}`, `table:${sourceKey(right.tableSource)}`,
-    ) || rowStart(left.key) - rowStart(right.key))[0];
-  return first ? Object.freeze({ ...first, pinned: true }) : undefined;
-}
-
 function changedAnchorKeys(
   applied: ReadonlyMap<string, PageWrapDestination>,
   observed: ReadonlyMap<string, PageWrapDestination>,
@@ -5193,11 +5121,172 @@ type LeadingSecondPass = Readonly<{
 
 const ANCHOR_PASS_BASE_LIMIT = 16;
 
-/** Whether a section lays its block tables out as zero-advance upright blocks
- * (`word-vertical-section-upright-block-table`). */
-function uprightBlockWritingMode(section: BodySectionLayoutInput): boolean {
-  const writingMode = sectionWritingMode(section.context);
-  return writingMode === 'vertical-rl' || writingMode === 'vertical-lr';
+/** One upright block table (`word-vertical-section-upright-block-table`) in
+ * the plan a pagination round applies. A pinned table is registered where its
+ * section region opens on its page, so the strips laid out before it wrap
+ * around it, and is placed at `bounds.yPt` whatever block position the flow
+ * has reached (`word-vertical-section-upright-table-rewrapped-strip`).
+ * - `unsure`: taken where the flow reached the table in a round in which an
+ *   earlier table was not registered yet; right unless that table's wrap
+ *   moves the flow.
+ * - `sure`: taken where the flow reached the table with every earlier table
+ *   registered and unmoved, which is its position; its own wrap has not been
+ *   applied yet.
+ * - `settled`: a round has applied the pin. */
+type UprightBlockPin = Readonly<{
+  key: string;
+  tableSource: SourceRef;
+  /** The table's exclusion in section-logical page points. */
+  bounds: LayoutRect;
+  pageIndex: number;
+  /** Where the page prescan registers it: the opening of its section region. */
+  prescanFlowDomainId: string;
+  /** The table's own column. */
+  tableFlowDomainId: string;
+  state: 'unsure' | 'sure' | 'settled';
+}>;
+
+/** The upright block tables a round registers at page starts, and those that
+ * never are (`forwardOnly`): a table the flow reaches outside the page or
+ * column of its pin cannot be placed there, so it is laid out where the flow
+ * reaches it and only the lines after it wrap (library policy). */
+type UprightBlockPlan = Readonly<{
+  entries: ReadonlyMap<string, UprightBlockPin>;
+  forwardOnly: ReadonlySet<string>;
+}>;
+
+const NO_UPRIGHT_BLOCK_PLAN: UprightBlockPlan = Object.freeze({
+  entries: new Map<string, UprightBlockPin>(),
+  forwardOnly: new Set<string>(),
+});
+
+function uprightBlockPrescanAnchors(
+  plan: UprightBlockPlan,
+  pageIndex: number,
+  flowDomainId: string,
+): PageStartAnchors {
+  if (plan.entries.size === 0) return NO_PAGE_START_ANCHORS;
+  return Object.freeze([...plan.entries.values()]
+    .filter((pin) => pin.pageIndex === pageIndex && pin.prescanFlowDomainId === flowDomainId)
+    .map((pin) => Object.freeze({
+      kind: 'upright-table' as const,
+      occurrenceId: uprightBlockTablePrescanKey(pin.key, pin.pageIndex),
+      tableSource: pin.tableSource,
+      key: pin.key,
+      bounds: pin.bounds,
+      tableFlowDomainId: pin.tableFlowDomainId,
+    })));
+}
+
+const NO_PAGE_START_ANCHORS: PageStartAnchors = Object.freeze([]);
+
+/** Lowest page index holding an upright block table, from which a later
+ * round can replace the pages of this one. */
+function firstUprightBlockTablePage(layout: DocumentLayout): number {
+  for (const page of layout.pages) {
+    if (page.layers.body.some((node) => node.kind === 'table' && node.uprightBlockExclusion)) {
+      return page.pageIndex;
+    }
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+/**
+ * The upright block plan the round that applied `plan` implies, or null when
+ * it implies `plan` itself: then every table is settled or forward-only, and
+ * the round's layout has each registered exclusion where its table is.
+ *
+ * Tables are visited in flow order. `exact` holds while every table so far
+ * was registered by this round and left the flow where its pin was taken, so
+ * the flow up to the next table is final:
+ * - a table not in the plan is pinned where the flow reached it: `sure` if no
+ *   table before it was pinned in this visit, else `unsure`;
+ * - a pinned table the flow reached in the page and column of its pin was
+ *   placed there. A `sure` or `unsure` pin becomes `settled`; if the flow
+ *   reached it past the pin (its own wrap pushed text into further strips),
+ *   `exact` ends. An `unsure` pin the flow reached before the pin was taken
+ *   too late and is dropped, which also ends `exact`;
+ * - a pinned table reached elsewhere becomes forward-only, ending `exact`;
+ * - once `exact` has ended, `unsure` pins are dropped and nothing new is
+ *   pinned, because the flow they were taken from has moved.
+ *
+ * Termination: a state only rises (unpinned or unsure, sure, settled,
+ * forward-only). Every change of the plan raises a state, except a round that
+ * only drops `unsure` pins, and that round's first dropped table is `sure`
+ * in the next one. With n tables the plan therefore changes at most 6n times.
+ */
+function nextUprightBlockPlan(layout: DocumentLayout, plan: UprightBlockPlan): UprightBlockPlan | null {
+  const entries = new Map<string, UprightBlockPin>();
+  const forwardOnly = new Set(plan.forwardOnly);
+  const seen = new Set<string>();
+  let exact = true;
+  let pinnedInVisit = false;
+  for (const page of layout.pages) {
+    for (const node of page.layers.body) {
+      if (node.kind !== 'table' || !node.uprightBlockExclusion) continue;
+      const placed = node.uprightBlockExclusion;
+      const { key } = placed;
+      seen.add(key);
+      if (forwardOnly.has(key)) continue;
+      const applied = plan.entries.get(key);
+      if (!applied) {
+        if (!exact) continue;
+        entries.set(key, Object.freeze({
+          key,
+          tableSource: node.source,
+          bounds: Object.freeze({ ...placed.bounds }),
+          pageIndex: page.pageIndex,
+          prescanFlowDomainId: regionFlowDomainOpening(page, node.flowDomainId),
+          tableFlowDomainId: node.flowDomainId,
+          state: pinnedInVisit ? 'unsure' as const : 'sure' as const,
+        }));
+        pinnedInVisit = true;
+        continue;
+      }
+      const honored = placed.pinned && applied.pageIndex === page.pageIndex
+        && applied.tableFlowDomainId === node.flowDomainId;
+      if (applied.state === 'settled') {
+        if (honored) {
+          entries.set(key, applied);
+        } else {
+          forwardOnly.add(key);
+          exact = false;
+        }
+        continue;
+      }
+      if (!exact) {
+        if (applied.state === 'sure') entries.set(key, applied);
+        continue;
+      }
+      if (!honored) {
+        forwardOnly.add(key);
+        exact = false;
+        continue;
+      }
+      if (placed.flowBlockPt < applied.bounds.yPt) {
+        exact = false;
+        continue;
+      }
+      if (pinnedInVisit) {
+        entries.set(key, applied);
+        continue;
+      }
+      entries.set(key, Object.freeze({
+        ...applied,
+        bounds: Object.freeze({ ...placed.bounds }),
+        state: 'settled' as const,
+      }));
+      if (placed.flowBlockPt !== applied.bounds.yPt) exact = false;
+    }
+  }
+  // A pinned table that no longer starts anywhere cannot be placed at its pin.
+  for (const key of plan.entries.keys()) if (!seen.has(key)) forwardOnly.add(key);
+  const identity = (value: UprightBlockPlan) => JSON.stringify([
+    [...value.entries.values()].sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0),
+    [...value.forwardOnly].sort(),
+  ]);
+  const next: UprightBlockPlan = Object.freeze({ entries, forwardOnly });
+  return identity(next) === identity(plan) ? null : next;
 }
 
 /** Passes whose anchor run needed the page-scoped table floor proof (#2012).
@@ -5223,23 +5312,51 @@ function* paginateBodyWithAnchorConvergenceSteps(
   seedPlan?: ReturnType<typeof pageAnchorDestinationPlan>,
   pageScoped = false,
 ): PaginationSteps<BodyPaginationPassResult> {
-  let pageOwnedAnchorCount = 0;
-  // `word-vertical-section-upright-block-table`: a table of a vertical-rl or
-  // vertical-lr section may be an upright block, whose exclusion the lines
-  // before it wrap around, so it needs the anchor convergence like a
-  // page-owned table. A positioned table there only costs the run its
-  // confirming pass.
-  let uprightBlockSection = uprightBlockWritingMode(input.initialSection);
-  for (const entry of input.sequence) {
-    if (entry.kind === 'begin-section') uprightBlockSection = uprightBlockWritingMode(entry.section);
-    if (entry.kind === 'adjacent-table-group') {
-      if (uprightBlockSection) pageOwnedAnchorCount += entry.tables.length;
-      continue;
+  // `word-vertical-section-upright-block-table`: the strip laid out before an
+  // upright block table wraps around it, so the table's exclusion has to be
+  // registered before the flow reaches the table. Each round is a complete
+  // anchor run with a fixed upright block plan; the plan it implies for the
+  // next round (nextUprightBlockPlan) changes at most 6 * tables + 2 times.
+  let plan: UprightBlockPlan = NO_UPRIGHT_BLOCK_PLAN;
+  let scoped = pageScoped;
+  for (let round = 0; ; round += 1) {
+    // Only the first round publishes pages while it runs, and only those
+    // before its first upright block table: later rounds can replace the rest.
+    const pass: BodyPaginationPassResult = yield* paginateBodyAnchorRunSteps(
+      input, services, options, reserves, balancePlan,
+      round === 0 ? publisher : undefined, seedPlan, scoped, plan,
+    );
+    if (pass.terminalDiagnostic !== null) return pass;
+    const next = nextUprightBlockPlan(pass.layout, plan);
+    if (next === null) return pass;
+    if (round > 6 * (next.entries.size + next.forwardOnly.size) + 2) {
+      throw new LayoutInvariantError(
+        'NON_CONVERGENCE',
+        'Upright block table placement exceeded its monotone round bound',
+      );
     }
+    scoped = scoped || pageScopedFloorProofPasses.has(pass);
+    plan = next;
+  }
+}
+
+function* paginateBodyAnchorRunSteps(
+  input: BodyLayoutInput,
+  services: LayoutServices,
+  options: LayoutOptions,
+  reserves: readonly HeaderFooterReserve[],
+  balancePlan: BodyBalancePlan,
+  publisher: BodyPagePublisher | undefined,
+  seedPlan: ReturnType<typeof pageAnchorDestinationPlan> | undefined,
+  pageScoped: boolean,
+  uprightPlan: UprightBlockPlan,
+): PaginationSteps<BodyPaginationPassResult> {
+  let pageOwnedAnchorCount = 0;
+  for (const entry of input.sequence) {
     if (entry.kind !== 'body-block') continue;
     pageOwnedAnchorCount += entry.block.kind === 'paragraph'
       ? entry.block.pageOwnedAnchorOccurrenceIds?.length ?? 0
-      : entry.block.pageOwnedFloatingTable === true || uprightBlockSection ? 1 : 0;
+      : entry.block.pageOwnedFloatingTable === true ? 1 : 0;
   }
   // Operational resource guard, not a claim about the state space. Pages
   // before the first disagreeing read are final (`anchorStablePageLimit`), and
@@ -5256,6 +5373,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
       limit(pass),
       firstHostCarryPage(pass.layout),
       firstFrameCarryPage(pass),
+      firstUprightBlockTablePage(pass.layout),
     );
   // Every anchor pass may publish, but only the leading pages
   // `anchorStablePageLimit` proves every later pass of this run reproduces. A
@@ -5370,6 +5488,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     };
     const first = paginateBodyPassSteps(
       input, services, options, reserves, null, null, balancePlan, firstObserver, null,
+      uprightPlan,
     );
     const secondPublisher = anchorPassObserver(view, () => firstResult !== null)!;
     const secondObserver: BodyPaginationPassObserver = {
@@ -5388,6 +5507,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     };
     const second = paginateBodyPassSteps(
       input, services, options, reserves, view, new Map(), balancePlan, secondObserver, null,
+      uprightPlan,
     );
     // Both passes advance one suspension at a time, each forwarded to the
     // scheduler, so host turns and cancellation are never starved.
@@ -5442,10 +5562,6 @@ function* paginateBodyWithAnchorConvergenceSteps(
       }),
     });
   }
-  // WORD_UPRIGHT_TABLE_REWRAPPED_STRIP: upright block tables whose block
-  // position cycle recovery fixed (see `converge`), by plan key. They hold
-  // for every later pass of this document's anchor runs.
-  const uprightPins = new Map<string, UprightTableDestination>();
   // The plan the most recent converge step observed; at a fixed point it is
   // the plan its returned pass applied.
   let convergedPlan: ReadonlyMap<string, PageWrapDestination> = new Map();
@@ -5517,6 +5633,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
                   balancePlan,
                   publish ? anchorPassObserver(appliedPlan) : undefined,
                   appliedDeferrals.size > 0 ? appliedDeferrals : null,
+                  uprightPlan,
                 );
             const observed = pageAnchorDestinationPlan(pass.layout);
             for (const [key, destination] of keptHostAnchorCarries(appliedPlan, pass.layout)) {
@@ -5524,20 +5641,6 @@ function* paginateBodyWithAnchorConvergenceSteps(
             }
             for (const [key, destination] of keptFrameCarries(appliedPlan, pass)) {
               observed.set(key, destination);
-            }
-            for (const [key, pin] of uprightPins) {
-              const placed = observed.get(key);
-              if (placed?.kind === 'upright-table' && placed.pageIndex === pin.pageIndex
-                && placed.flowDomainId === pin.flowDomainId) {
-                observed.set(key, Object.freeze({
-                  ...placed,
-                  pinned: true,
-                  bounds: Object.freeze({ ...placed.bounds, yPt: pin.bounds.yPt }),
-                }));
-              } else {
-                // The table left the flow domain its pin was proved in.
-                uprightPins.delete(key);
-              }
             }
             // The unseeded pass registers source-order estimates, not anchor
             // lines that reached their page, so it proves nothing about them.
@@ -5673,20 +5776,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
           .sort(([leftKey, left], [rightKey, right]) => compareDrawingSourceOrder(
             rightKey, right.source, leftKey, left.source,
           ))[0];
-        // WORD_UPRIGHT_TABLE_REWRAPPED_STRIP:
-        // `word-vertical-section-upright-block-table` alone has no fixed
-        // point when the line strip before an upright block table fits its
-        // column only at full length: wrapped around the table it overflows
-        // into a new strip, the table follows the flow past that strip, and
-        // the first strip no longer meets it. The first such table in source
-        // order keeps the earliest block position of the cycle, the one it
-        // takes when that strip is laid out at full length, and the
-        // overflowing line lands in the strip beside it, as any later line
-        // does. One table is pinned per recovery, because each pin moves the
-        // text the later tables are placed from.
-        const uprightPin = pinned ? undefined : oscillatingUprightTablePin(cycle, changed);
         if (pinned) settledFloors.set(pinned[0], pinned[1]);
-        else if (uprightPin) uprightPins.set(uprightPin.key, uprightPin);
         else if (!prefixTests && drawingCycle) prefixTests = true;
         else if (floored) settledLineFloors.set(floored[0], floored[1].pageIndex);
         else throw error;
@@ -5712,10 +5802,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
         for (const [key, pageIndex] of settledLineFloors) {
           deferrals.set(anchorLineFloorKey(key), anchorLineFloor(key, pageIndex));
         }
-        const plan = uprightPin
-          ? new Map(latest.carry.plan).set(uprightPin.key, uprightPin)
-          : latest.carry.plan;
-        restart = Object.freeze({ ...latest.carry, plan, minimumTablePageBySource: floors, deferrals });
+        restart = Object.freeze({ ...latest.carry, minimumTablePageBySource: floors, deferrals });
       }
     }
   };
@@ -5729,6 +5816,8 @@ function* paginateBodyWithAnchorConvergenceSteps(
       return yield* paginateBodyPassSteps(
         input, services, options, reserves, null, null, balancePlan,
         publisher ? passPublicationObserver(publisher, carryBounded(livePageIndex)) : undefined,
+        null,
+        uprightPlan,
       );
     }
     const seededThenUnseeded = function* (scoped: boolean) {

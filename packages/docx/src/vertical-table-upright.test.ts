@@ -520,11 +520,11 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
       ...PHYS,
       columns: { count: 2, spacePt: 10, equalWidth: true, sep: false, cols: [] },
     } as SectionProps;
-    // An upright table adds no flow advance: ten 10 pt line strips leave less
-    // than the second table's width of the 146 pt first column.
+    // An upright table adds no flow advance: fifteen 10 pt line strips fill
+    // the 146 pt first column and continue in the second.
     const body = [
       { type: 'table', ...narrow },
-      ...Array.from({ length: 10 }, () => ({ type: 'paragraph', ...bodyParagraph('zz') })),
+      ...Array.from({ length: 15 }, () => ({ type: 'paragraph', ...bodyParagraph('zz') })),
       { type: 'table', ...fixedTable('', 20) },
     ] as unknown as BodyElement[];
     const measure = makeRecordingCanvas();
