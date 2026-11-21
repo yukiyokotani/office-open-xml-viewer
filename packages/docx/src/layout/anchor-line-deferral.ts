@@ -58,6 +58,8 @@ export type AnchorLineDeferralProof = Readonly<{
   /** Serialized later carry reads of the proving pass on page N, in order. */
   inPage: readonly string[];
   identity: string;
+  /** A settled floor (`anchorLineFloor`), not a proof of a page context. */
+  floor?: true;
 }>;
 
 /** Proofs by `anchorLineDeferralKey(anchor, page)`. A proof for one page
@@ -66,6 +68,31 @@ export type AnchorLineDeferrals = ReadonlyMap<string, AnchorLineDeferralProof>;
 
 export function anchorLineDeferralKey(occurrenceKey: string, pageIndex: number): string {
   return `${pageIndex}\u0000${occurrenceKey}`;
+}
+
+/** Key of the settled floor of one anchor (see `anchorLineFloor`). */
+export function anchorLineFloorKey(occurrenceKey: string): string {
+  return `floor\u0000${occurrenceKey}`;
+}
+
+/**
+ * A floor settled by the anchor solver's cycle recovery: the line anchoring
+ * `occurrenceKey` starts no page before `pageIndex`. Unlike a proof it holds
+ * in every page context, so it ends any earlier page above that line, unless
+ * the line would start that page (the first line of a page stays). Stored
+ * under `anchorLineFloorKey` beside the proofs and carried like them.
+ */
+export function anchorLineFloor(occurrenceKey: string, pageIndex: number): AnchorLineDeferralProof {
+  return Object.freeze({
+    keys: Object.freeze([occurrenceKey]),
+    pageIndex,
+    prefix: Object.freeze([]),
+    registrationIndex: -1,
+    expectedRegistration: '',
+    inPage: Object.freeze([]),
+    identity: `floor:${occurrenceKey}@${pageIndex}`,
+    floor: true,
+  });
 }
 
 export function anchorKeysId(keys: readonly string[]): string {
@@ -161,7 +188,7 @@ export function anchorLineDeferralApplies(
   pageIndex: number,
   context: AnchorLineDeferralContext,
 ): boolean {
-  if (proof.pageIndex !== pageIndex || anchorKeysId(proof.keys) !== anchorKeysId(keys)) return false;
+  if (proof.floor || proof.pageIndex !== pageIndex || anchorKeysId(proof.keys) !== anchorKeysId(keys)) return false;
   const { reads } = context;
   if (reads.length !== proof.registrationIndex + 1 + proof.inPage.length) return false;
   for (let index = 0; index < proof.registrationIndex; index += 1) {

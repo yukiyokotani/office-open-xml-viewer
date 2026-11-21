@@ -51,6 +51,8 @@ type Paragraph = Readonly<{
   lines?: number;
   anchorAfterLine?: number;
   keepNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
 }>;
 
 function anchorXml(id: number, anchor: Anchor): string {
@@ -99,7 +101,8 @@ function docx(
       ...(line === after ? [anchors] : []),
     ]).join('');
     return '<w:p><w:pPr>' + (spec.keepNext ? '<w:keepNext/>' : '')
-      + '<w:widowControl w:val="0"/>'
+      + (spec.keepLines ? '<w:keepLines/>' : '')
+      + `<w:widowControl w:val="${spec.widowControl ? 1 : 0}"/>`
       + '<w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
       + `${runs}</w:p>`;
   }).join('');
@@ -314,28 +317,62 @@ describe('page-owned anchor whose own exclusion pushes its anchor line off the p
     expect(lines(result).get('P011')).toMatchObject({ page: 2, yPt: 696 });
   });
 
+  it('defers a keepNext anchor paragraph together with the deferred line it keeps with', () => {
+    // Page 2 opens with P027. P028's square picture fits beside its line;
+    // adding P029's full-width picture pushes P027-P029 below it, so P029 is
+    // deferred, and keepNext (§17.3.1.15) moves P028 and its picture with it.
+    const result = layout(docx(30, {
+      28: { keepNext: true, anchors: [{ wrap: 'square', widthPt: 200, heightPt: 600 }] },
+      29: { anchors: [{ widthPt: 468, heightPt: 600 }] },
+    }));
+    const placed = lines(result);
+    expect(pageRange(result, 2)).toEqual([27, 27]);
+    expect(placed.get('P028')).toMatchObject({ page: 3, yPt: 672 });
+    expect(placed.get('P029')).toMatchObject({ page: 3, yPt: 696 });
+    expect(pictures(result).get(28)).toEqual([{ page: 3, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(29)).toEqual([{ page: 3, xPt: 72, yPt: 72 }]);
+  });
+
   it('converges with every line and picture placed once for generated anchor sets', () => {
-    // Deterministic generated documents: 2-5 anchors of varied heights at
-    // varied paragraphs, many of whose later tests push earlier lines too.
+    // Deterministic generated documents: 2-5 anchors of varied heights and
+    // wraps at varied paragraphs, many of whose later tests push earlier
+    // lines too, with keepNext/keepLines chains, widow control and
+    // multi-line anchor paragraphs around them.
     let seed = 0x2306;
     const next = (bound: number) => {
       seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
       return (seed >>> 8) % bound;
     };
     const heights = [100, 300, 450, 600, 640];
-    for (let sample = 0; sample < 24; sample += 1) {
+    const paragraphs = 45;
+    for (let sample = 0; sample < 32; sample += 1) {
       const special: Record<number, Paragraph> = {};
       const count = 2 + next(4);
       for (let index = 0; index < count; index += 1) {
-        const paragraph = next(40);
+        const paragraph = 20 + next(paragraphs - 20);
         special[paragraph] = {
-          anchors: [...(special[paragraph]?.anchors ?? []), { heightPt: heights[next(heights.length)]! }],
+          ...special[paragraph],
+          anchors: [...(special[paragraph]?.anchors ?? []), {
+            heightPt: heights[next(heights.length)]!,
+            wrap: next(2) === 0 ? 'square' : 'topAndBottom',
+            widthPt: next(2) === 0 ? 200 : 468,
+          }],
         };
+        // A keepNext chain of up to three paragraphs ending at the anchor.
+        for (let chain = next(4); chain > 0 && paragraph - chain >= 0; chain -= 1) {
+          special[paragraph - chain] = { ...special[paragraph - chain], keepNext: true };
+        }
+        if (next(3) === 0) {
+          special[paragraph] = {
+            ...special[paragraph], lines: 3, anchorAfterLine: next(3),
+            keepLines: next(2) === 0, widowControl: next(2) === 0,
+          };
+        }
       }
       const label = JSON.stringify(special);
       let result: DocumentLayout;
       try {
-        result = layout(docx(45, special));
+        result = layout(docx(paragraphs, special));
       } catch (error) {
         throw new Error(`${label}: ${String(error)}`);
       }
@@ -345,18 +382,22 @@ describe('page-owned anchor whose own exclusion pushes its anchor line off the p
           if (node.kind !== 'paragraph') continue;
           for (const line of node.lines) {
             const text = line.placements.map((p) => p.kind === 'text' ? p.text : '').join('');
-            const name = /P\d{3}/.exec(text)?.[0];
+            const name = /P\d{3}(?:\.\d)?/.exec(text)?.[0];
             if (name) placed.set(name, (placed.get(name) ?? 0) + 1);
           }
         }
       }
-      expect([...placed.keys()].sort(), label).toEqual(
-        Array.from({ length: 45 }, (_, index) => `P${String(index).padStart(3, '0')}`),
-      );
+      const expected = Array.from({ length: paragraphs }, (_, index) => {
+        const name = `P${String(index).padStart(3, '0')}`;
+        return Array.from({ length: special[index]?.lines ?? 1 }, (_, line) => (
+          line === 0 ? name : `${name}.${line + 1}`
+        ));
+      }).flat();
+      expect([...placed.keys()].sort(), label).toEqual(expected.sort());
       expect([...placed.values()].every((times) => times === 1), label).toBe(true);
       const drawn = pictures(result);
       for (const [paragraph, spec] of Object.entries(special)) {
-        expect(drawn.get(Number(paragraph))?.length, label).toBe(spec.anchors!.length);
+        expect(drawn.get(Number(paragraph))?.length ?? 0, label).toBe(spec.anchors?.length ?? 0);
       }
       expect([...drawn.values()].flat().length, label).toBe(count);
     }
