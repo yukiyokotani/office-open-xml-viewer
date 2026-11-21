@@ -131,7 +131,7 @@ const GRID_PLAIN_PARAGRAPH_KEYS = new Set([
 ]);
 const GRID_PLAIN_LINE_KEYS = new Set([
   'range', 'bounds', 'baselinePt', 'advancePt', 'gridAfterLeadingPt', 'pageEdgeOverhangPt', 'placements',
-  'wrapBounds', 'wrapFragments',
+  'wrapBounds', 'wrapFragments', 'justificationExpansionPt',
 ]);
 const GRID_PLAIN_TEXT_KEYS = new Set([
   'kind', 'text', 'optionalHyphenGlyph', 'semanticSlotSpans', 'sourceRunIndex',

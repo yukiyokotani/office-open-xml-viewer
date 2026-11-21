@@ -640,6 +640,12 @@ export interface LineLayout {
    * (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: a producer's proportional extra
    * space below the natural line). Placement and paint keep the full advance. */
   readonly pageEdgeOverhangPt?: number;
+  /** Width that justification (ECMA-376 §17.18.44 both/distribute, the
+   * kashida types, thaiDistribute) added to the line beyond its natural
+   * advances and seams; the natural automatic East Asian gaps stay natural.
+   * Absent when nothing was added (a compressed line records nothing). Read
+   * only to recover a line's natural length, never by placement or paint. */
+  readonly justificationExpansionPt?: number;
   readonly placements: readonly ParagraphPlacement[];
   /** §17.18.84 bar-tab vertical rules acquired independently of tab advances. */
   readonly barTabRules?: readonly BorderSegment[];
@@ -1548,6 +1554,12 @@ export interface TableCellLayoutInput {
     tr2bl: TableBorderInput | null;
   }>;
   readonly blocks: readonly TableCellBlockInput[];
+  /** LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP: set only on the cells of a
+   * recovered fragment. A layoutInCell containment interval whose own extent
+   * exceeds it shapes neither the fragment's admission nor this cell's flow
+   * (no row growth, no downward text offset); its drawing keeps its position
+   * and is clipped with the fragment. */
+  readonly recoveryContainmentLimitPt?: number;
   /** ECMA-376 §17.4.72 rotated cell text. Blocks were acquired with
    * `lineLengthPt` as their line width; the cell requires
    * `requiredLineLengthPt` of physical content height. */

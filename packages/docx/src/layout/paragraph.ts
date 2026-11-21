@@ -2246,6 +2246,9 @@ export function planLine(input: PlanLineInput): LineLayout {
     start = end;
   }
   coalesceAdjacentDecorations(placements);
+  // The slack distribution (with its widening of automatic East Asian gaps)
+  // and kashida elongation; natural advances, seams and tab advances excluded.
+  const justificationExpansionPt = distributedWidthPt + kashidaAppliedPt;
   return deepFreezePlainData({
     range: line.range,
     bounds: {
@@ -2256,6 +2259,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     },
     baselinePt: line.baselinePt,
     advancePt: line.advancePt,
+    ...(justificationExpansionPt > 1e-9 ? { justificationExpansionPt } : {}),
     placements,
   });
 }
@@ -2286,9 +2290,12 @@ function retainPhysicalLines(fragments: readonly LineLayout[], physicalIds: read
     if (end === start + 1) lines.push(first);
     else {
       const group = fragments.slice(start, end);
-      const { wrapBounds: _wrapBounds, ...physical } = first;
+      const { wrapBounds: _wrapBounds, justificationExpansionPt: _expansionPt, ...physical } = first;
+      const justificationExpansionPt = group.reduce((sum, fragment) =>
+        sum + (fragment.justificationExpansionPt ?? 0), 0);
       lines.push(sealLineCopy({
         ...physical,
+        ...(justificationExpansionPt > 0 ? { justificationExpansionPt } : {}),
         ...(first.gridAfterLeadingPt === undefined ? {} : {
           gridAfterLeadingPt: group.reduce((leading, fragment) =>
             Math.min(leading, fragment.gridAfterLeadingPt ?? 0), first.gridAfterLeadingPt),
