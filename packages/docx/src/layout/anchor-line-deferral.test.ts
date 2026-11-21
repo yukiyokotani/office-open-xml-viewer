@@ -297,6 +297,71 @@ describe('page-owned anchor whose own exclusion pushes its anchor line off the p
     expect(lines(result).get('P010')).toMatchObject({ page: 2, yPt: 672 });
   });
 
+  it('tests each later anchor with only the source-order prefix accepted before it', () => {
+    // As above, plus P011's 100 pt picture. Registering P010 pushes P011 off
+    // page 1 as well, so P011 is never tested there: P010 is deferred with
+    // only P003 accepted, and P011 is tested on page 2 with P010.
+    const result = layout(docx(30, {
+      3: { anchors: [{}] },
+      10: { anchors: [{ heightPt: 600 }] },
+      11: { anchors: [{ heightPt: 100 }] },
+    }));
+    expect(pageRange(result, 1)).toEqual([0, 9]);
+    expect(pictures(result).get(3)).toEqual([{ page: 1, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(10)).toEqual([{ page: 2, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(11)).toEqual([{ page: 2, xPt: 72, yPt: 72 }]);
+    expect(lines(result).get('P010')).toMatchObject({ page: 2, yPt: 672 });
+    expect(lines(result).get('P011')).toMatchObject({ page: 2, yPt: 696 });
+  });
+
+  it('converges with every line and picture placed once for generated anchor sets', () => {
+    // Deterministic generated documents: 2-5 anchors of varied heights at
+    // varied paragraphs, many of whose later tests push earlier lines too.
+    let seed = 0x2306;
+    const next = (bound: number) => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return (seed >>> 8) % bound;
+    };
+    const heights = [100, 300, 450, 600, 640];
+    for (let sample = 0; sample < 24; sample += 1) {
+      const special: Record<number, Paragraph> = {};
+      const count = 2 + next(4);
+      for (let index = 0; index < count; index += 1) {
+        const paragraph = next(40);
+        special[paragraph] = {
+          anchors: [...(special[paragraph]?.anchors ?? []), { heightPt: heights[next(heights.length)]! }],
+        };
+      }
+      const label = JSON.stringify(special);
+      let result: DocumentLayout;
+      try {
+        result = layout(docx(45, special));
+      } catch (error) {
+        throw new Error(`${label}: ${String(error)}`);
+      }
+      const placed = new Map<string, number>();
+      for (const page of result.pages) {
+        for (const node of page.layers.body) {
+          if (node.kind !== 'paragraph') continue;
+          for (const line of node.lines) {
+            const text = line.placements.map((p) => p.kind === 'text' ? p.text : '').join('');
+            const name = /P\d{3}/.exec(text)?.[0];
+            if (name) placed.set(name, (placed.get(name) ?? 0) + 1);
+          }
+        }
+      }
+      expect([...placed.keys()].sort(), label).toEqual(
+        Array.from({ length: 45 }, (_, index) => `P${String(index).padStart(3, '0')}`),
+      );
+      expect([...placed.values()].every((times) => times === 1), label).toBe(true);
+      const drawn = pictures(result);
+      for (const [paragraph, spec] of Object.entries(special)) {
+        expect(drawn.get(Number(paragraph))?.length, label).toBe(spec.anchors!.length);
+      }
+      expect([...drawn.values()].flat().length, label).toBe(count);
+    }
+  }, 120_000);
+
   it('keeps a picture on its page when its line moves to the next column', () => {
     // Word control: two 222 pt columns. Column 1 stays wrapped below the
     // picture and the anchor paragraph starts column 2 of the same page.

@@ -4840,11 +4840,8 @@ function resolveAnchorLineTests(
   pass: BodyPaginationPassResult,
   observed: Map<string, PageWrapDestination>,
   previous: AnchorLineDeferrals,
-): Readonly<{
-  plan: ReadonlyMap<string, PageWrapDestination>;
-  deferrals: AnchorLineDeferrals;
-  yields?: readonly AnchorLineYield[];
-}> {
+  prefixTests = false,
+): Readonly<{ plan: ReadonlyMap<string, PageWrapDestination>; deferrals: AnchorLineDeferrals }> {
   const events = pass.anchorInputs;
   const prescansByPage = new Map<number, number[]>();
   events.forEach((event, index) => {
@@ -4856,7 +4853,6 @@ function resolveAnchorLineTests(
   let positions: ReturnType<typeof pageOwnedDrawingFlowPositions> | null = null;
   let plan: Map<string, PageWrapDestination> | null = null;
   let deferrals: Map<string, AnchorLineDeferralProof> | null = null;
-  const yields: AnchorLineYield[] = [];
   for (const [pageIndex, indexes] of prescansByPage) {
     const registeredAt = new Map<string, number>();
     for (const index of indexes) {
@@ -4904,36 +4900,50 @@ function resolveAnchorLineTests(
       line.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
       continue;
     }
-    // The retest below cannot tell that the earlier lines registered on N
-    // were accepted. When the last of them, L, was pushed too, this pass is
-    // L's Word test with every earlier line on N taken as accepted. Its proof
-    // applies only in a pass that reaches L on N with exactly those earlier
-    // anchors registered, that is, once they are accepted. It is offered to
-    // the cycle recovery in `converge`, and never enters an ordinary run.
-    const lastKey = [...registeredAt.keys()].reduce<string | null>((latest, key) => {
-      const order = positions!.get(key)?.order;
-      return order !== undefined && (latest === null || order > positions!.get(latest)!.order) ? key : latest;
-    }, null);
-    const lastLineKey = lastKey === null ? null : positions.get(lastKey)!.lineKey;
-    if (lastKey !== null && lastLineKey !== lineKey) {
-      const lastLine = [...positions].filter(([, position]) => position.lineKey === lastLineKey)
+    // Prefix tests (cycle recovery only, see `converge`): the retest below
+    // cannot record that the earlier lines registered on N were accepted, so
+    // a pass that registers them again with L, the last registered line, and
+    // pushes them all would retest the first of them for ever. Instead this
+    // pass is taken as L's Word test with the lines before it accepted: L is
+    // deferred from N and the next pass registers the source-order prefix
+    // without L. The proof applies only where a pass reaches L on N with
+    // exactly that prefix registered, that is, where the prefix fits; when it
+    // does not, its own last line is the next one tested the same way.
+    if (prefixTests) {
+      const lastKey = [...registeredAt.keys()].reduce<string | null>((latest, key) => {
+        const order = positions!.get(key)?.order;
+        return order !== undefined && (latest === null || order > positions!.get(latest)!.order) ? key : latest;
+      }, null);
+      const lastLineKey = lastKey === null ? null : positions.get(lastKey)!.lineKey;
+      const lastLine = lastKey === null ? [] : [...positions]
+        .filter(([, position]) => position.lineKey === lastLineKey)
         .map(([key]) => key);
-      const lastRegistration = registeredAt.get(lastKey)!;
-      if (lastLine.every((key) => registeredAt.get(key) === lastRegistration
-        && (observed.get(key)?.pageIndex ?? -1) > pageIndex)) {
-        yields.push(Object.freeze({
-          order: positions.get(lastKey)!.order,
+      const lastRegistration = lastKey === null ? -1 : registeredAt.get(lastKey)!;
+      if (lastKey !== null && lastLineKey !== lineKey
+        && lastLine.every((key) => registeredAt.get(key) === lastRegistration
+          && (observed.get(key)?.pageIndex ?? -1) > pageIndex)) {
+        const proof = createAnchorLineDeferralProof(
+          lastLine,
           pageIndex,
-          keys: Object.freeze(lastLine),
-          proof: createAnchorLineDeferralProof(
-            lastLine,
+          events,
+          pass.serializedAnchorInputs,
+          lastRegistration,
+          pageStartAnchorsIdentity,
+        );
+        deferrals ??= new Map(previous);
+        lastLine.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
+        plan ??= new Map(observed);
+        const deferred = new Set(lastLine);
+        for (const key of registeredAt.keys()) {
+          if (deferred.has(key) || !observed.has(key)) continue;
+          const event = events[registeredAt.get(key)!] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
+          plan.set(key, Object.freeze({
+            ...observed.get(key)!,
             pageIndex,
-            events,
-            pass.serializedAnchorInputs,
-            lastRegistration,
-            pageStartAnchorsIdentity,
-          ),
-        }));
+            flowDomainId: event.flowDomainId,
+          }));
+        }
+        continue;
       }
     }
     plan ??= new Map(observed);
@@ -4947,22 +4957,8 @@ function resolveAnchorLineTests(
       }));
     }
   }
-  return Object.freeze({
-    plan: plan ?? observed,
-    deferrals: deferrals ?? previous,
-    ...(yields.length > 0 ? { yields: Object.freeze(yields) } : {}),
-  });
+  return Object.freeze({ plan: plan ?? observed, deferrals: deferrals ?? previous });
 }
-
-/** A deferral proof for the last anchor line L registered on a page N, from a
- * pass in which registering L pushed earlier lines registered on N as well
- * (see `resolveAnchorLineTests`). `order` is L's flow position in that pass. */
-type AnchorLineYield = Readonly<{
-  order: number;
-  pageIndex: number;
-  keys: readonly string[];
-  proof: AnchorLineDeferralProof;
-}>;
 
 function anchorPlanIdentity(plan: ReadonlyMap<string, unknown>): string {
   return JSON.stringify([...plan].sort(([left], [right]) => left.localeCompare(right)));
@@ -5289,11 +5285,9 @@ function* paginateBodyWithAnchorConvergenceSteps(
     }>;
     const noDeferrals: AnchorLineDeferrals = new Map();
     const settledFloors = new Map<string, number>(initialFloors ?? []);
-    // Anchor-line deferrals settled by cycle recovery, by deferral key.
-    const settledYields = new Map<string, AnchorLineDeferralProof>();
-    // Yield proofs offered by the passes of this run, by the carry state the
-    // pass produced, for the cycle recovery below.
-    const yieldsByState = new Map<string, readonly AnchorLineYield[]>();
+    // Set by cycle recovery: anchor lines are tested by source-order prefix
+    // (see `resolveAnchorLineTests`). A fixed input of every later pass.
+    let prefixTests = false;
     let restart: AnchorPassCarry | null = null;
     const latest: { carry: AnchorPassCarry | null } = { carry: null };
     let remainingPasses = anchorPassLimit;
@@ -5351,7 +5345,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
             // lines that reached their page, so it proves nothing about them.
             const lineTests: ReturnType<typeof resolveAnchorLineTests> = appliedPlan === null
               ? Object.freeze({ plan: observed, deferrals: appliedDeferrals })
-              : resolveAnchorLineTests(pass, observed, appliedDeferrals);
+              : resolveAnchorLineTests(pass, observed, appliedDeferrals, prefixTests);
             const minimumTablePageBySource = new Map<string, number>();
             // Compare all destinations once. Testing every table against a fresh
             // copy of the full plan would make table-heavy documents quadratic.
@@ -5403,7 +5397,6 @@ function* paginateBodyWithAnchorConvergenceSteps(
               minimumTablePageBySource,
               deferrals: lineTests.deferrals,
             });
-            if (lineTests.yields) yieldsByState.set(identity(latest.carry), lineTests.yields);
             return Object.freeze({
               pass,
               plan: lineTests.plan,
@@ -5437,8 +5430,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
         // Never return a pass with stale exclusions: normal acquisition then
         // rebuilds text and table placement with these floors.
         const repeated = error.states.at(-1)!;
-        const cycleStates = error.states.slice(error.states.indexOf(repeated), -1);
-        const cycle = cycleStates
+        const cycle = error.states.slice(error.states.indexOf(repeated), -1)
           .map((state) => new Map(JSON.parse(state.split('\u0004')[0]!) as Array<[string, PageWrapDestination]>));
         const changed = new Set<string>();
         const later = new Map<string, number>();
@@ -5453,29 +5445,21 @@ function* paginateBodyWithAnchorConvergenceSteps(
           .filter(([key, pageIndex]) => changed.has(key) && pageIndex > (settledFloors.get(key) ?? -1))
           .sort(([left], [right]) => compareTableSourceOrder(right, left))[0];
         // `word-page-anchor-line-deferral` tests the anchor line L on page N
-        // with the anchors accepted before it plus L's own. When that test
-        // also pushes the earlier lines, the next pass retests the first of
-        // them alone; it fits, the plan registers L on N again, and the run
-        // alternates between the two passes, because the plan does not record
-        // that the earlier lines were accepted. Settle the cycle on L's test:
-        // adopt the proof that the full registration pushed L, for the line
-        // latest in flow order. It can only move L to a later page, and it
-        // applies only where the earlier lines are on N with exactly their
-        // own anchors registered, so every pass that uses it is Word's L test.
-        const yielded = pinned ? undefined : cycleStates
-          .flatMap((state) => yieldsByState.get(state) ?? [])
-          .filter((candidate) => candidate.keys.every((key) => (
-            !settledYields.has(anchorLineDeferralKey(key, candidate.pageIndex))
-          )))
-          .sort((left, right) => right.order - left.order || right.pageIndex - left.pageIndex)[0];
+        // with the anchors accepted before it plus L's own. When a test also
+        // pushes earlier accepted lines, the ordinary retest of the first of
+        // them fits, the plan registers every line on N again, and the run
+        // alternates, because the plan does not record acceptance. Without a
+        // table to settle, rerun from the latest carry testing source-order
+        // prefixes (`resolveAnchorLineTests`), which follows Word's line order.
+        // Only otherwise-fatal cycles get here, so converging runs keep their
+        // ordinary tests and output.
         if (pinned) settledFloors.set(pinned[0], pinned[1]);
-        else if (yielded) {
-          for (const key of yielded.keys) {
-            settledYields.set(anchorLineDeferralKey(key, yielded.pageIndex), yielded.proof);
-          }
+        else if (!prefixTests && cycle.some((plan) => [...changedAnchorKeys(cycle[0]!, plan)]
+          .some((key) => plan.get(key)?.kind === 'drawing' || cycle[0]!.get(key)?.kind === 'drawing'))) {
+          prefixTests = true;
         } else throw error;
         // Every settlement strictly raises a table floor (at most one raise
-        // per table per page) or settles a new anchor line and page. Restarts
+        // per table per page) or switches to prefix tests once. Restarts
         // share the original operational pass budget as well, so even a
         // growing page count cannot run unbounded.
         remainingPasses -= error.passes;
@@ -5486,9 +5470,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
         for (const [key, pageIndex] of settledFloors) {
           floors.set(key, Math.max(pageIndex, floors.get(key) ?? pageIndex));
         }
-        const deferrals = new Map(latest.carry.deferrals);
-        for (const [key, proof] of settledYields) deferrals.set(key, proof);
-        restart = Object.freeze({ ...latest.carry, minimumTablePageBySource: floors, deferrals });
+        restart = Object.freeze({ ...latest.carry, minimumTablePageBySource: floors });
       }
     }
   };
