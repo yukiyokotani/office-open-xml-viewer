@@ -4607,11 +4607,21 @@ impl BodyParseCursor {
                         push_section_break(&mut output);
                     }
                     Some(BreakType::Column) => {
+                        // §17.3.1.23: a pageBreakBefore paragraph takes its page
+                        // transition before its column break.
+                        if result.page_break_before {
+                            output.push(BodyElement::PageBreak {
+                                origin: Some(PageBreakOrigin::Authored),
+                                parity: None,
+                                same_paragraph_as_previous: None,
+                            });
+                            result.page_break_before = false;
+                        }
                         output.push(BodyElement::ColumnBreak);
                         // WORD_COLUMN_BREAK_MARK_NEXT_COLUMN: the paragraph
                         // mark of a break-only paragraph forms an empty line
                         // at the top of the next column.
-                        result.runs.clear();
+                        clear_runs_keeping_mark_metadata(&mut result);
                         output.push(BodyElement::Paragraph(Box::new(result)));
                         push_section_break(&mut output);
                     }
@@ -7763,6 +7773,20 @@ fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontS
         theme: theme_values,
         theme_present,
     })
+}
+
+/// Empty a break-only paragraph that keeps only its mark, pointing its
+/// run-indexed metadata (revisions, comment marks, field boundaries) at the
+/// paragraph start so no index outlives the removed break run.
+fn clear_runs_keeping_mark_metadata(paragraph: &mut DocParagraph) {
+    paragraph.runs.clear();
+    paragraph.run_revisions.clear();
+    for mark in &mut paragraph.comment_marks {
+        mark.run_index = 0;
+    }
+    for boundary in &mut paragraph.complex_field_boundaries {
+        boundary.run_index = 0;
+    }
 }
 
 fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
@@ -27263,6 +27287,65 @@ mod column_tests {
         assert_eq!(body.len(), 2);
         assert!(matches!(body[0], BodyElement::ColumnBreak));
         assert!(matches!(&body[1], BodyElement::Paragraph(p) if p.runs.is_empty()));
+    }
+
+    #[test]
+    fn page_break_before_column_break_paragraph_turns_the_page_first() {
+        let body = body_from(
+            r#"<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:br w:type="column"/></w:r></w:p>"#,
+        );
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(
+            matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty() && !p.page_break_before)
+        );
+    }
+
+    #[test]
+    fn column_break_paragraph_mark_survives_rendered_page_hints_and_keeps_indices() {
+        for xml in [
+            r#"<w:p><w:r><w:lastRenderedPageBreak/><w:br w:type="column"/></w:r></w:p>"#,
+            r#"<w:p><w:r><w:br w:type="column"/></w:r><w:r><w:lastRenderedPageBreak/></w:r></w:p>"#,
+            r#"<w:p><w:commentRangeStart w:id="0"/><w:r><w:br w:type="column"/></w:r><w:commentRangeEnd w:id="0"/></w:p>"#,
+        ] {
+            let body = body_from(xml);
+            assert!(matches!(body[0], BodyElement::ColumnBreak), "{xml}");
+            let BodyElement::Paragraph(mark) = &body[1] else {
+                panic!("mark paragraph expected for {xml}");
+            };
+            assert!(mark.runs.is_empty(), "{xml}");
+            assert!(
+                mark.comment_marks
+                    .iter()
+                    .all(|entry| entry.run_index as usize <= mark.runs.len()),
+                "{xml}"
+            );
+            assert!(mark.run_revisions.len() <= mark.runs.len(), "{xml}");
+        }
+    }
+
+    /// A complex field whose cached result is only the column break leaves no
+    /// run-relative fact pointing past the empty mark.
+    #[test]
+    fn column_break_field_result_collapses_onto_the_mark() {
+        let body = body_from(
+            r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF target </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:br w:type="column"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:commentRangeEnd w:id="1"/></w:p>"#,
+        );
+        let BodyElement::Paragraph(mark) = body.last().expect("mark paragraph") else {
+            panic!("expected the mark paragraph last, got {body:?}");
+        };
+        assert!(mark.runs.is_empty());
+        assert!(mark.run_revisions.is_empty());
+        assert!(mark
+            .complex_field_boundaries
+            .iter()
+            .all(|boundary| boundary.run_index as usize <= mark.runs.len()));
+        assert!(mark
+            .comment_marks
+            .iter()
+            .all(|comment| comment.run_index as usize <= mark.runs.len()));
+        assert!(matches!(body[body.len() - 2], BodyElement::ColumnBreak));
     }
 
     #[test]

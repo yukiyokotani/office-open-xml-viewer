@@ -218,6 +218,20 @@ pub fn visit_para_on_page_breaks<E>(
     let visibility: Vec<bool> = chunks.iter().map(|runs| has_visible(runs)).collect();
     let mut emitted = false;
     let mut emitted_paragraph = false;
+    // §17.3.1.23 pageBreakBefore starts the paragraph on a new page; when its
+    // first content is a column break, that page transition precedes the
+    // break, so no later piece may reapply it after the column break.
+    let leads_with_column_break = !visibility.first().copied().unwrap_or(false)
+        && matches!(
+            seps.first().or(trailing.first()),
+            Some(ParaPiece::ColumnBreak)
+        );
+    if para.page_break_before && leads_with_column_break {
+        emit(ParaPiece::PageBreak {
+            same_paragraph_as_previous: false,
+        })?;
+        para.page_break_before = false;
+    }
     for (index, runs) in chunks.into_iter().enumerate() {
         if index == 0 && !has_visible(&runs) {
             continue;
@@ -274,6 +288,15 @@ pub fn visit_para_on_page_breaks<E>(
             para.frame_pr = None;
             para.outline_level = None;
             para.page_break_before = false;
+        } else if retain_mark {
+            // The mark is the only paragraph left: its runs moved out, so its
+            // run-indexed metadata points at the (empty) paragraph start.
+            para.run_revisions.clear();
+            for mark in &mut para.comment_marks {
+                mark.run_index = 0;
+            }
+            // Field boundaries moved out with the runs (§17.16); none remain.
+            para.complex_field_boundaries.clear();
         }
         emit(ParaPiece::Para(para))?;
     }
@@ -316,6 +339,86 @@ mod tests {
             }
             assert!(matches!(&pieces[2], ParaPiece::Para(p) if p.runs.is_empty()));
         }
+    }
+
+    #[test]
+    fn terminal_column_break_keeps_its_mark_beside_rendered_page_hints() {
+        // A w:lastRenderedPageBreak cache hint on either side of the break must
+        // not hide the terminal column break (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+        let hint = || DocRun::Break {
+            break_type: BreakType::RenderedPage,
+        };
+        let column = || DocRun::Break {
+            break_type: BreakType::Column,
+        };
+        for runs in [vec![hint(), column()], vec![column(), hint()]] {
+            let pieces = split_para_on_page_breaks(
+                DocParagraph {
+                    runs,
+                    ..Default::default()
+                },
+                false,
+            );
+            assert_eq!(pieces.len(), 2);
+            assert!(matches!(pieces[0], ParaPiece::ColumnBreak));
+            assert!(matches!(&pieces[1], ParaPiece::Para(p) if p.runs.is_empty()));
+        }
+    }
+
+    #[test]
+    fn page_break_before_precedes_a_leading_column_break() {
+        let pieces = split_para_on_page_breaks(
+            DocParagraph {
+                page_break_before: true,
+                runs: vec![
+                    DocRun::Break {
+                        break_type: BreakType::RenderedPage,
+                    },
+                    DocRun::Break {
+                        break_type: BreakType::Column,
+                    },
+                ],
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(pieces.len(), 3);
+        assert!(matches!(pieces[0], ParaPiece::PageBreak { .. }));
+        assert!(matches!(pieces[1], ParaPiece::ColumnBreak));
+        assert!(matches!(&pieces[2], ParaPiece::Para(p) if !p.page_break_before));
+    }
+
+    #[test]
+    fn retained_mark_keeps_run_indexed_metadata_in_range() {
+        let pieces = split_para_on_page_breaks(
+            DocParagraph {
+                runs: vec![
+                    DocRun::Break {
+                        break_type: BreakType::RenderedPage,
+                    },
+                    DocRun::Break {
+                        break_type: BreakType::Column,
+                    },
+                ],
+                run_revisions: vec![None, None],
+                comment_marks: vec![crate::DocxCommentMark {
+                    id: "0".into(),
+                    kind: "rangeEnd".into(),
+                    run_index: 2,
+                }],
+                ..Default::default()
+            },
+            false,
+        );
+        let ParaPiece::Para(mark) = pieces.last().unwrap() else {
+            panic!("the mark paragraph is last");
+        };
+        assert!(mark.runs.is_empty());
+        assert!(mark.run_revisions.is_empty());
+        assert!(mark
+            .comment_marks
+            .iter()
+            .all(|entry| entry.run_index as usize <= mark.runs.len()));
     }
 
     #[test]
