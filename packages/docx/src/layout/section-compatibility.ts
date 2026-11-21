@@ -114,3 +114,15 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   }
   return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
 }
+
+export const WORD_SECTION_TBLRV_LEFT_PAGE_FRAME = defineCompatibilityRule({
+  id: 'word-section-tblrv-left-page-frame',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-section-body-margins',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A section-level tbLrV (Part 4 §14.11.7, equivalent to lrV: lines flow from left to right) lays its body out in the vertical-lr page frame: the first line strip starts at the physical left margin and the top margin, and later lines advance rightward, so the logical top/right/bottom/left margins are the physical left/bottom/right/top. Evidence: Windows Word PDF exports of A4 one-column sections with an 18pt line grid and distinct margins (left 40, right 90, top 60, bottom 80pt): tbLrV put its first line strip at x 40–58pt with its top at y 60pt and advanced right by 18pt per line, while the tbRl and btLr controls started at the right margin (strip 487.3–505.3pt). Glyph orientation, headers and footers, gutter, mirrorMargins, two-page imposition, upright tables and inline pictures of a tbLrV section are outside this evidence.',
+});
