@@ -3396,7 +3396,8 @@ describe('canonical body producer', () => {
         measureFollowingBlock: () => ({ fullExtentPt: 20, leadContentExtentPt: 20 }),
         prescanPageAnchors: ({ anchors, location }) => {
           events.push(`prescan:${anchors.map((anchor) => (
-            anchor.kind === 'floating-table' ? anchor.tableSource : anchor.paragraphSource
+            anchor.kind === 'floating-table' || anchor.kind === 'upright-table'
+              ? anchor.tableSource : anchor.paragraphSource
           ).path[0]).join(',')}`);
           return {
             floats: {

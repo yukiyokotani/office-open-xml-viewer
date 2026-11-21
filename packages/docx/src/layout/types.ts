@@ -710,6 +710,10 @@ export interface WrapExclusion {
   /** The drawing is wrapTight in a compatibility-mode-14 document; read by
    * WORD_MODE14_TIGHT_ANCHOR_TOP_TOUCH when pagination carries it. */
   readonly wordMode14TightAnchor?: boolean;
+  /** `word-vertical-section-upright-block-table`: a line band also wraps
+   * around this exclusion when it only touches its block-start or block-end
+   * edge (closed block interval). */
+  readonly bandEdgesInclusive?: true;
 }
 
 /** @internal Occurrence-keyed DrawingML object bounds for §20.4.2.3.
@@ -898,6 +902,18 @@ export interface TableLayout extends LayoutNodeBase {
    * page coordinates (a page/margin frame result). Like a page-owned anchor
    * layer, story band and occurrence translation leave those axes in place. */
   readonly ownerHostPageAxes?: Readonly<{ horizontal: boolean; vertical: boolean }>;
+  /** @internal `word-vertical-section-upright-block-table`: the exclusion of
+   * this upright block table (its first fragment) of a vertical section in
+   * section-logical page points (x inline, y block), under its plan key.
+   * `flowBlockPt` is the block position the flow had reached at the table,
+   * and `pinned` whether the table was placed at a pin of the round's plan
+   * instead. Pagination pins the table from these (nextUprightBlockPlan). */
+  readonly uprightBlockExclusion?: Readonly<{
+    key: string;
+    bounds: LayoutRect;
+    flowBlockPt: number;
+    pinned: boolean;
+  }>;
 }
 
 /**
@@ -959,6 +975,18 @@ interface FloatRegistryEntryCorePt {
   readonly topEdgeInclusiveFromYPt?: number;
   /** See WrapExclusion.anchorLineExemptTopPt. */
   readonly anchorLineExemptTopPt?: number;
+  /** `word-vertical-section-upright-block-table`: the exclusion of an upright
+   * block table of a vertical section, in the section-logical frame. Line
+   * bands meet it on a closed block interval (WrapExclusion.bandEdgesInclusive).
+   * `planned` marks the page-start registration of a pin of the pagination
+   * round's plan, which earlier lines of the page wrap around; the table in
+   * column `tableFlowDomainId` takes its block position and registers its own
+   * exclusion again when the flow reaches it. */
+  readonly uprightBlockTable?: Readonly<{
+    key: string;
+    planned: boolean;
+    tableFlowDomainId?: string;
+  }>;
 }
 
 /** Point-space snapshot used while final table-fragment float placement is

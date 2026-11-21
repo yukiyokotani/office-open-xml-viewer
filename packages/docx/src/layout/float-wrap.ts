@@ -106,6 +106,10 @@ interface FloatRectCore {
   /** WORD_MODE14_TIGHT_ANCHOR_LINE_REWRAP: the line starting exactly at this
    * top ignores this float. */
   exemptLineTopPt?: number;
+  /** A square rectangle that a line band meets on the closed interval
+   * [yTop, yBottom]: a band ending exactly at yTop or starting exactly at
+   * yBottom wraps around it too (WrapExclusion.bandEdgesInclusive). */
+  bandEdgesInclusive?: true;
   /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
   imageKey: string;
   /** Absolute X of the object box in the consuming wrap context's linear unit
@@ -703,6 +707,21 @@ function tightEdgeTouch(
   return null;
 }
 
+/** Whether the line band [exactTop, exactBottom] meets a square rectangle's
+ * block interval: a strict overlap, or for a `bandEdgesInclusive` rectangle a
+ * touched edge as well. */
+function bandMeetsRectY(
+  rect: Readonly<FloatRect>,
+  exactTop: ExactRational,
+  exactBottom: ExactRational,
+): boolean {
+  const fromTop = compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop));
+  const fromBottom = compareExactRational(exactTop, unreducedExactFromNumber(rect.yBottom));
+  return rect.bandEdgesInclusive === true && rect.mode === 'square'
+    ? fromTop >= 0 && fromBottom <= 0
+    : fromTop > 0 && fromBottom < 0;
+}
+
 /**
  * The vertical test `lineWindowAtY` uses to decide whether `float` affects a
  * line band [topY, topY + heightPt]: a strict overlap, or a touched tight
@@ -718,8 +737,7 @@ export function createFloatLineBandPredicate(
   return (topY, heightPt) => {
     const exactTop = unreducedExactFromNumber(topY);
     const exactBottom = addUnreducedExact(exactTop, unreducedExactFromNumber(heightPt));
-    const overlaps = compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop)) > 0
-      && compareExactRational(exactTop, unreducedExactFromNumber(rect.yBottom)) < 0;
+    const overlaps = bandMeetsRectY(rect, exactTop, exactBottom);
     if (rect.mode === 'topAndBottom') return overlaps;
     if (rect.exemptLineTopPt === topY) return false;
     return overlaps || tightEdgeTouch(prepared, exactTop, exactBottom) !== null;
@@ -803,8 +821,7 @@ function lineWindowAtY(
     if (rect.mode !== 'square') continue;
     if (rect.exemptLineTopPt === topY) continue;
     const edge = tightEdgeTouch(float, exactTop, exactBottom);
-    if (edge === null && (compareExactRational(exactBottom, exactRectY(rect.yTop)) <= 0
-      || compareExactRational(exactTop, exactRectY(rect.yBottom)) >= 0)) continue;
+    if (edge === null && !bandMeetsRectY(rect, exactTop, exactBottom)) continue;
     if (!floatOverlapsColumnX(rect as FloatRect, paraXLeft, paraXRight)) continue;
     const intervals = edge === null
       ? floatBlockedIntervals(float, topY, probeH, paraXLeft, paraXRight, reference)

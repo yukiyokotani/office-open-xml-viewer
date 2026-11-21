@@ -108,6 +108,7 @@ import { measureTableIntrinsicWidths, resolveTableColumnWidths, spacedAutoFitCon
 import { decideLogicalTable, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import {
   bodyTableAcquisitionState,
+  uprightBlockPaginates,
   measureBodyTableEntry,
   ownerSegmentedFlowExtents,
 } from './body-table-measurement.js';
@@ -2312,6 +2313,31 @@ function measureFollowingBodyBlock(
     request.availableInlineExtentPt,
     services,
   );
+  const physical = candidate.verticalPhys;
+  if (tableState.uprightPhysicalTable === true && physical && uprightBlockPaginates(physical)
+    && !ownerExtents) {
+    // `word-vertical-section-upright-block-table`: what the table needs of
+    // the block axis to start here. A table too tall for the inline extent
+    // below the column top starts a fresh page whenever content precedes it,
+    // so it needs more than is left; otherwise it needs its physical width,
+    // except in a multi-column section, where it never moves.
+    const tooTall = layout.advancePt
+      > physical.pageHeight - physical.marginBottom - request.location.cursorPt.xPt;
+    const neededPt = tooTall
+      ? request.location.availableBounds.heightPt
+      : request.location.section.columns.length <= 1
+        ? layout.columnWidthsPt.reduce((sum, width) => sum + width, 0)
+        : 0;
+    return Object.freeze({
+      fullExtentPt: neededPt,
+      leadContentExtentPt: neededPt,
+      fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
+      leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
+        ...layout,
+        rows: layout.rows.slice(0, 1),
+      }),
+    });
+  }
   return Object.freeze({
     fullExtentPt: ownerExtents?.fullExtentPt ?? layout.advancePt,
     leadContentExtentPt: ownerExtents?.leadContentExtentPt
@@ -2425,6 +2451,27 @@ function prescanBodyPageAnchors(
             ? {} : { topEdgeInclusiveFromYPt: carry.topEdgeInclusiveFromYPt }),
           ...(carry.anchorLineExemptTopPt === undefined
             ? {} : { anchorLineExemptTopPt: carry.anchorLineExemptTopPt }),
+        }),
+      ];
+    }
+    if (anchor.kind === 'upright-table') {
+      // `word-vertical-section-upright-block-table`: the lines laid out
+      // before the table wrap around its pinned exclusion; the table takes
+      // the pin's block position when the flow reaches it.
+      return [
+        Object.freeze({
+          kind: 'frame' as const,
+          occurrenceId: anchor.occurrenceId,
+          exclusionId: anchor.occurrenceId,
+          paragraphId: paragraphIdFor(anchor.tableSource),
+          exclusionMode: 'square' as const,
+          bounds: anchor.bounds,
+          exclusionBounds: anchor.bounds,
+          uprightBlockTable: Object.freeze({
+            key: anchor.key,
+            planned: true,
+            tableFlowDomainId: anchor.tableFlowDomainId,
+          }),
         }),
       ];
     }
@@ -2776,6 +2823,7 @@ function commitBodyFlowRegistryDelta(
         ? {} : { topEdgeInclusiveFromYPt: entry.topEdgeInclusiveFromYPt }),
       ...(entry.anchorLineExemptTopPt === undefined
         ? {} : { exemptLineTopPt: entry.anchorLineExemptTopPt }),
+      ...(entry.uprightBlockTable === undefined ? {} : { bandEdgesInclusive: true as const }),
     };
     return entry.kind === 'table'
       ? {

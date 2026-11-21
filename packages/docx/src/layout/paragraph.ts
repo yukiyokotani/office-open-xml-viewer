@@ -6105,6 +6105,7 @@ function wrapExclusionFloatRects(exclusions: readonly WrapExclusion[]): FloatRec
       ? {} : { exemptLineTopPt: exclusion.anchorLineExemptTopPt }),
     ...(exclusion.topEdgeInclusiveFromYPt === undefined
       ? {} : { topEdgeInclusiveFromYPt: exclusion.topEdgeInclusiveFromYPt }),
+    ...(exclusion.bandEdgesInclusive === true ? { bandEdgesInclusive: true as const } : {}),
   }));
 }
 
@@ -6362,6 +6363,7 @@ function exclusionSetState(exclusions: readonly WrapExclusion[]): string {
     ...(exclusion.topEdgeInclusiveFromYPt === undefined
       ? {} : { topEdgeInclusiveFromYPt: exclusion.topEdgeInclusiveFromYPt }),
     ...(exclusion.wordMode14TightAnchor === true ? { wordMode14TightAnchor: true } : {}),
+    ...(exclusion.bandEdgesInclusive === true ? { bandEdgesInclusive: true } : {}),
   })));
 }
 

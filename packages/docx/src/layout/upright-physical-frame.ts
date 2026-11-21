@@ -80,10 +80,11 @@ export function physicalDistToLogical(
  * it at physical x = page width − logical y − width, y = logical x; the
  * vertical-lr frame of tbLrV at x = logical y, y = logical x, following its
  * left-to-right line progression; a counter-clockwise frame at x = logical y
- * with the block ending at the column bottom. The vertical-lr and
- * counter-clockwise placements are generic library policy transformed
- * through the section's own frame; no comparison with a Word-produced
- * reference has established them. */
+ * with the block ending at the column bottom. The clockwise and vertical-lr
+ * placements are `word-vertical-section-upright-block-table`; the
+ * counter-clockwise placement is generic library policy transformed through
+ * the section's own frame, which no comparison with a Word-produced reference
+ * has established. */
 export function uprightBlockPhysicalOrigin(
   frame: PhysicalAnchorFrame,
   cursorPt: Readonly<{ xPt: number; yPt: number }>,
