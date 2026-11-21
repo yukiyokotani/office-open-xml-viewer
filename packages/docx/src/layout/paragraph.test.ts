@@ -921,17 +921,21 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       }
     });
 
-    it('keeps unmeasured stories on their established exact-line placement', () => {
-      for (const other of [
-        { story: 'header' as const, storyInstance: 'header:default', path: [0] },
-        { story: 'body' as const, storyInstance: 'body', path: [3, 0, 0, 0] },
-      ]) {
-        const node = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, 'drawingml')], 1,
-          { exactPt: 24, source: other as never });
-        const line = node.lines[0]!;
-        expect(line.baselinePt).not.toBeCloseTo(line.bounds.yPt + 19.2, 3);
-        const placement = resource(node);
-        expect(placement.kind === 'resource' && placement.lineClip === undefined).toBe(true);
+    it('keeps the four-fifths baseline in every story and clips DrawingML outside cells and text boxes', () => {
+      for (const [other, clips] of [
+        [{ story: 'header', storyInstance: 'header:default', path: [0] }, true],
+        [{ story: 'footnote', storyInstance: 'footnote:1', path: [0] }, true],
+        [{ story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] }, false],
+        [{ story: 'textbox', storyInstance: 'body:body:0.0', path: [0] }, false],
+      ] as const) {
+        for (const exactPt of [8, 48]) {
+          const node = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, 'drawingml')], 1,
+            { exactPt, source: other as never });
+          const line = node.lines[0]!;
+          expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + exactPt * 0.8, 10);
+          const placement = resource(node);
+          expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(clips);
+        }
       }
     });
 

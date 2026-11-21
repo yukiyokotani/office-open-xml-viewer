@@ -567,7 +567,7 @@ export const WORD_INLINE_OBJECT_GRID_LINE_ALLOCATION = defineCompatibilityRule({
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'Word 16.0 build 20430 on Windows, compatibility mode 14, allocates a single-spaced inline-picture line to ceil(natural height / line pitch) whole cells and centers the object in the extra space. ECMA-376 §20.4.2.8 makes inline objects affect line height like glyphs; §17.6.5 and §17.3.1.32 define grid participation but not this tall-object rounding. Library policy reuses the existing grid allocation and centered baseline when inline pictures, charts or shapes supply the natural ascent and the font design height does not exceed that natural box, with automatic or omitted spacing. Smaller objects retain the taller text line\'s grid policy. The Office evidence establishes the single-spaced picture class only; automatic multiples and other inline payloads reuse that allocation without claiming separately measured Office parity. Off-grid, snap-disabled, exact and atLeast lines retain their existing paths; floating-anchor reference origins are independent. Evidence: issue #1674 / PR #1796 (a 221.2pt picture takes 240pt of grid).',
+  description: 'Word 16.0 build 20430 on Windows, compatibility mode 14, allocates a single-spaced inline-picture line to ceil(natural height / line pitch) whole cells and centers the object in the extra space. ECMA-376 §20.4.2.8 makes inline objects affect line height like glyphs; §17.6.5 and §17.3.1.32 define grid participation but not this tall-object rounding. Library policy reuses the existing grid allocation and centered baseline when inline pictures, charts or shapes supply the natural ascent and the font design height does not exceed that natural box, with automatic or omitted spacing. Smaller objects retain the taller text line\'s grid policy. The Office evidence establishes the single-spaced picture class only; automatic multiples and other inline payloads reuse that allocation without claiming separately measured Office parity. Off-grid, snap-disabled and atLeast lines retain their existing paths, and exact lines follow WORD_INLINE_OBJECT_EXACT_LINE; floating-anchor reference origins are independent. Evidence: issue #1674 / PR #1796 (a 221.2pt picture takes 240pt of grid).',
 });
 
 export const WORD_GRID_AT_LEAST_TALL_LINE_UNSNAPPED = defineCompatibilityRule({
@@ -1609,31 +1609,25 @@ export const WORD_INLINE_OBJECT_EXACT_LINE = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (compatibility mode 15, no grid, exact 24pt lines, Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text (WORD_SPECIFIED_TEXT_LINE_BOX): the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). A DrawingML picture is clipped to the line box (a 30pt picture shows only the 19.2pt above the baseline; one lowered 15pt shows from 1pt above the baseline to the line bottom); a VML picture is drawn whole and overlaps the neighbouring lines. Scope: horizontal paragraphs directly in the main body (not table cells, headers, footers, notes or text boxes) in mode 15 without a line grid or wrap-conditioned origin, exact heights in the 12-30pt interval of the text rule, lines holding an inline picture or drawing shape; the clipping follows the same line class whether the text, ruby or object rule selects the baseline. Charts, math, other stories, other modes, grid lines and heights outside the interval keep their established placement until discriminating controls are measured. WPS drawing shapes take the four-fifths baseline but were not measured for clipping and stay unclipped.',
+  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text: the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). This holds for exact 8, 10, 24, 36 and 48pt lines, in compatibility modes omitted, 12, 14 and 15, on a 20pt lines grid (the exact line itself does not snap), and in body paragraphs, headers, footers, footnotes, table cells and text boxes. A DrawingML picture is clipped to the line box (a 30pt picture in a 24pt line shows only the 19.2pt above the baseline) in body paragraphs, headers, footers and footnotes, but not in table cells or text boxes; a VML picture is never clipped and overlaps the neighbouring lines. Library scope: horizontal lines without a wrap-conditioned origin (the text rule records a narrow side-gap counterexample there); charts and math keep their established placement, and WPS drawing shapes take the baseline but stay unclipped (their clipping was not measured).',
 });
 
 /** WORD_INLINE_OBJECT_EXACT_LINE gate: an exact line with inline objects keeps
  * the four-fifths baseline of an exact text line. */
 export function wordInlineObjectExactLineApplies(input: Readonly<{
   lineSpacing: LineSpacing | null | undefined;
-  mode15: boolean;
-  lineGridActive: boolean;
   wrapOrigin: boolean;
   vertical: boolean;
-  /** A paragraph directly in the main document body (not a cell, header,
-   * footer, note or text box). */
-  topLevelBody: boolean;
   hasInlineObject: boolean;
 }>): boolean {
   void WORD_INLINE_OBJECT_EXACT_LINE;
   const spacing = input.lineSpacing;
-  return input.hasInlineObject && input.mode15 && !input.lineGridActive && !input.wrapOrigin
-    && !input.vertical && input.topLevelBody
-    && spacing?.rule === 'exact' && spacing.value >= 12 && spacing.value <= 30;
+  return input.hasInlineObject && !input.wrapOrigin && !input.vertical
+    && spacing?.rule === 'exact' && spacing.value > 0;
 }
 
 /** WORD_INLINE_OBJECT_EXACT_LINE: a DrawingML inline picture is clipped to its
- * exact line box; a VML picture is not. */
+ * exact line box (outside table cells and text boxes); a VML picture is not. */
 export function wordInlineObjectExactLineClips(origin: 'drawingml' | 'vmlStaticTextbox' | undefined): boolean {
   return origin === 'drawingml';
 }

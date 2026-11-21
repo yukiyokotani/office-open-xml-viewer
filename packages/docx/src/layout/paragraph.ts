@@ -3978,14 +3978,13 @@ function planMeasuredLines(
     // line class, whichever rule (ruby, text or object) selected the baseline.
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
-      mode15: compat.specifiedTextLineBoxMode15,
-      lineGridActive: context.lineGrid.active,
       wrapOrigin: raw.topY !== undefined,
       vertical: verticalPageFrame,
-      topLevelBody: source.story === 'body' && source.path.length === 1,
       hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
         && segment.inlinePicture === true),
     });
+    // Table cells and text boxes leave a DrawingML picture unclipped.
+    const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
     const exactObjectLine = !specified && !exactRubyLine && exactObjectClass;
     // Under atLeast the added leading falls before the line, which keeps its
     // own descent above the bottom (atLeast 18pt, the same controls).
@@ -4189,7 +4188,7 @@ function planMeasuredLines(
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
-          ...(!image.chart && (image.clipToLine || (exactObjectClass
+          ...(!image.chart && (image.clipToLine || (exactObjectClips
             && wordInlineObjectExactLineClips(sourceRun?.type === 'image'
               ? (sourceRun as ParagraphImageRun).inlineObjectOrigin : undefined)))
             ? { clipToLine: true as const } : {}),
