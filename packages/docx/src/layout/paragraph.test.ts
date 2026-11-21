@@ -974,7 +974,10 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
   it('keeps the existing East Asian slot policy when acquiring inline-run leading', () => {
     const context = inlineFontMetricContext(true);
     const options = { context, documentHasEastAsianText: true };
-    const runSingle = measureInlineParagraph([], 1, { ...options, markFontSize: 20 }).advancePt;
+    // The East Asian probe box of the context above at the run's 20pt. An empty
+    // paragraph is no reference: WORD_EMPTY_MARK_ASCII_FACE measures its mark
+    // with the ascii face, while object-run leading keeps the slot policy.
+    const runSingle = 20 * (1.4 + 0.2);
     const object = { ...inlineShape(40), __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
     expect(measureInlineParagraph([object], 1.5, options).lines[0]!.advancePt)
       .toBeCloseTo(40 + runSingle / 2, 10);

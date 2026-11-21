@@ -525,7 +525,7 @@ describe('measureParagraph', () => {
     expect(paragraphOnlyMetrics.contentEndYPt).toBe(22);
   });
 
-  it('keeps useFELayout from selecting an East Asian mark face without a line grid', () => {
+  it('measures an off-grid empty mark with its ascii face whatever its hint (WORD_EMPTY_MARK_ASCII_FACE)', () => {
     const text = createTextLayoutService({
       fonts: createFontResolver(['Latin Mark', 'EA Mark'].map((family) => ({
         requestedFamily: family, resolvedFamily: family, source: 'local' as const,
@@ -539,9 +539,12 @@ describe('measureParagraph', () => {
         }),
       },
     });
-    const advance = (useFeLayout: boolean, eastAsianHint = false): number => measureParagraph(
+    const advance = (useFeLayout: boolean, eastAsianHint = false, gridPitchPt?: number): number => measureParagraph(
       paragraph({ defaultFontSize: 10, defaultFontFamily: 'Latin Mark', defaultFontFamilyEastAsia: 'EA Mark' }),
-      layoutContext({ spaceBeforePt: 0 }),
+      layoutContext({
+        spaceBeforePt: 0,
+        ...(gridPitchPt ? { lineGrid: { active: true, pitchPt: gridPitchPt } } : {}),
+      }),
       placement({ startYPt: 0 }),
       measurer,
       environment({
@@ -557,8 +560,14 @@ describe('measureParagraph', () => {
 
     expect(advance(false)).toBe(10);
     expect(advance(true)).toBe(10);
-    // An authored mark hint still selects the East Asian face without a grid.
-    expect(advance(true, true)).toBe(14);
+    // Windows Word measures an empty mark with its ascii face whatever its
+    // eastAsia hint: the hint does not select the East Asian face off the grid.
+    expect(advance(false, true)).toBe(10);
+    expect(advance(true, true)).toBe(10);
+    // On a line grid the unresolved page-edge interaction keeps the established
+    // hint routing: the taller East Asian face exceeds the 12pt pitch.
+    expect(advance(false, false, 12)).toBe(12);
+    expect(advance(false, true, 12)).toBe(14);
   });
 
   it('applies useFELayout grid-cell allocation to an empty paragraph mark', () => {

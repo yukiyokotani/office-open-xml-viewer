@@ -190,7 +190,7 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     expect(subjGap).toBeCloseTo(refGap, 2);
   });
 
-  it('uses the paragraph mark eastAsia font axis in East Asian document-grid context', () => {
+  it('keeps the ascii face of an off-grid empty mark in an East Asian document (WORD_EMPTY_MARK_ASCII_FACE)', () => {
     const p = {
       ...para(''),
       defaultFontFamily: 'Century',
@@ -214,7 +214,9 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
     } as unknown as CanvasRenderingContext2D;
 
     expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, false, ctx, {})).toBe(10);
-    expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(30);
+    // Windows Word: East Asian document text does not move an empty mark off
+    // its ascii face either.
+    expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(10);
   });
 
   it('uses an arbitrary resolved font resource metric for an empty East Asian mark', () => {

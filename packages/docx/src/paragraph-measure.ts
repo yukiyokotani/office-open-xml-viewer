@@ -195,8 +195,9 @@ export function measureParagraph(
   // boundary: a 16pt East Asian mark on an 18pt grid occupies two cells even
   // when the document contains no literal CJK code point.
   // Keep that compatibility projection inside the active line grid. Part 4
-  // §14.8.3.50 does not select an East Asian font for an otherwise Latin mark;
-  // §17.3.2.26's explicit mark hint remains authoritative without a grid.
+  // §14.8.3.50 does not select an East Asian font for an otherwise Latin mark,
+  // and off the grid WORD_EMPTY_MARK_ASCII_FACE measures the empty mark with
+  // its ascii face whatever its hint (paragraphMarkLineMetrics).
   // Windows Word controls with useFELayout and no grid retain the Latin
   // single-line box (Times New Roman 10pt footnote separators; Ubuntu 12pt
   // body marks and footnote/endnote separators),
@@ -412,6 +413,7 @@ export function measureParagraph(
         paragraph, 1, undefined, false, markUsesEastAsianGrid,
         measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
         environment.layoutServices?.text, shapeInput ?? environment.paragraphMarkShapeInput,
+        false, 0, 'objectRun',
       ).advancePx;
       segment.paragraphMarkSinglePx = shapeInput
         ? measureSingle() : (fallbackSinglePx ??= measureSingle());
@@ -441,7 +443,7 @@ export function measureParagraph(
       if (run.inlineObjectOrigin !== 'drawingml' && !(run.inlineObjectOrigin === 'vmlStaticTextbox' && boxOnly)) continue;
       const minimum = paragraphMarkLineMetrics(paragraph, 1, undefined, false, markUsesEastAsianGrid,
         measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
-        environment.layoutServices?.text, run.inlineObjectShapeInput).advancePx;
+        environment.layoutServices?.text, run.inlineObjectShapeInput, false, 0, 'objectRun').advancePx;
       if (run.inlineObjectOrigin === 'drawingml') segment.objectRunBaselineMinimumPx = minimum;
       else segment.objectRunAdvanceMinimumPx = minimum;
     }
