@@ -45,7 +45,12 @@ import {
   type TableFragmentContext,
 } from './table-pagination.js';
 import type { BodyAcquisitionState, PhysicalAnchorFrame } from './acquisition-context.js';
-import { physicalToLogicalMatrix, sectionWritingMode, transformRect } from './coordinate-space.js';
+import {
+  logicalToPhysicalMatrix,
+  physicalToLogicalMatrix,
+  transformRect,
+  type PhysicalPageExtent,
+} from './coordinate-space.js';
 import {
   bodyOccurrenceKey,
   bodyRootFloatingTablePlacementKey,
@@ -129,13 +134,16 @@ export function bodyTableAcquisitionState(
 /**
  * Physical origin of an upright table (or owner segment) occupying the
  * logical block band [cursor y, cursor y + grid width] of a vertical section
- * (§17.6.20). The Transitional clockwise frame maps it to physical x = page
- * width − logical y − grid width and starts it at the column top (physical
- * y = logical x). A counter-clockwise section frame maps logical y to physical x unchanged
- * and its column starts at the bottom (physical y = page height − logical x),
- * so the block ends there. That native placement is generic library policy
- * transformed through the section's own frame. No comparison with a
- * Word-produced reference has established this placement.
+ * (§17.6.20) from the column top: the logical rectangle (inline extent = the
+ * table's physical height, block extent = its grid width) carried through the
+ * section frame's logical-to-physical matrix. The clockwise vertical-rl frame
+ * places it at physical x = page width − logical y − grid width, y = logical
+ * x; the vertical-lr frame of tbLrV at x = logical y, y = logical x, so the
+ * tables follow its left-to-right line progression; a counter-clockwise
+ * section frame at x = logical y with the block ending at the column bottom
+ * (y = page height − logical x − height). The vertical-lr and counter-clockwise
+ * placements are generic library policy transformed through the section's own
+ * frame; no comparison with a Word-produced reference has established them.
  */
 function uprightBlockPhysicalOrigin(
   physical: PhysicalAnchorFrame,
@@ -143,48 +151,42 @@ function uprightBlockPhysicalOrigin(
   gridWidthPt: number,
   physicalHeightPt: number,
 ): Readonly<{ xPt: number; yPt: number }> {
-  return physical.sectionFlow == null
-    ? { xPt: physical.physicalPageWidthPt - cursorPt.yPt - gridWidthPt, yPt: cursorPt.xPt }
-    : { xPt: cursorPt.yPt, yPt: physical.pageHeight - cursorPt.xPt - physicalHeightPt };
+  const rect = transformRect(
+    logicalToPhysicalMatrix(physical.writingMode, uprightPhysicalPage(physical)),
+    { xPt: cursorPt.xPt, yPt: cursorPt.yPt, widthPt: physicalHeightPt, heightPt: gridWidthPt },
+  );
+  return { xPt: rect.xPt, yPt: rect.yPt };
 }
 
 /** Physical top of the current column, where a text-anchored frame's
- * vertical band starts: the logical inline start in the clockwise frame and
- * the logical inline end in a native counter-clockwise frame, as for
- * DrawingML anchors (production-body-layout.ts physicalColumnTopPt). */
+ * vertical band starts: the physical top of the logical inline band through
+ * the section frame's matrix, as for DrawingML anchors
+ * (production-body-layout.ts physicalColumnTopPt). */
 function uprightColumnPhysicalTopPt(
   physical: PhysicalAnchorFrame,
   cursorPt: Readonly<{ xPt: number }>,
   inlineExtentPt: number,
 ): number {
-  return physical.sectionFlow == null
-    ? cursorPt.xPt
-    : physical.pageHeight - (cursorPt.xPt + inlineExtentPt);
+  return transformRect(
+    logicalToPhysicalMatrix(physical.writingMode, uprightPhysicalPage(physical)),
+    { xPt: cursorPt.xPt, yPt: 0, widthPt: Math.max(0, inlineExtentPt), heightPt: 0 },
+  ).yPt;
 }
 
 /** A rectangle of the upright physical page in the section's logical frame:
- * the established clockwise inverse, or the inverse of the native section's
- * own canonical matrix (sectionWritingMode, never the token alone). */
+ * the inverse of the section frame's own canonical matrix. */
 function uprightPhysicalRectToLogical(
   physical: PhysicalAnchorFrame,
-  section: BodyAcquisitionState['sectionLayout'],
   rect: LayoutRect,
 ): LayoutRect {
-  if (physical.sectionFlow == null) {
-    return Object.freeze({
-      xPt: rect.yPt,
-      yPt: physical.physicalPageWidthPt - rect.xPt - rect.widthPt,
-      widthPt: rect.heightPt,
-      heightPt: rect.widthPt,
-    });
-  }
   return Object.freeze(transformRect(
-    physicalToLogicalMatrix(sectionWritingMode(section), {
-      widthPt: physical.pageWidth,
-      heightPt: physical.pageHeight,
-    }),
+    physicalToLogicalMatrix(physical.writingMode, uprightPhysicalPage(physical)),
     rect,
   ));
+}
+
+function uprightPhysicalPage(physical: PhysicalAnchorFrame): PhysicalPageExtent {
+  return { widthPt: physical.pageWidth, heightPt: physical.pageHeight };
 }
 
 /** The destination page and margin rectangles of the body page. */
@@ -1730,7 +1732,7 @@ function measureUprightOwnerSegment(
     tableFragmentStartKey(request.cursor),
   );
   const toLogical = (xPt: number, yPt: number, widthPt: number, heightPt: number) =>
-    uprightPhysicalRectToLogical(physical, state.sectionLayout, { xPt, yPt, widthPt, heightPt });
+    uprightPhysicalRectToLogical(physical, { xPt, yPt, widthPt, heightPt });
   const base = sessionState.floatRegistry;
   const entries: FloatRegistryEntryPt[] = occupied.w <= 0 || occupied.h <= 0
     ? []

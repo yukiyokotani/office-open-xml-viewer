@@ -4106,7 +4106,7 @@ function composePageStories(
     const geometry = vertical
       // `word-vertical-section-physical-header-footer`
       ? Object.freeze({
-          ...physicalSectionGeometry(page.section.geometry, page.section.sectionFlow),
+          ...physicalSectionGeometry(page.section.geometry, sectionWritingMode(page.section)),
           ...effectiveHeaderFooterInlineMargins(owner.pageLayout, page.pageIndex),
         })
       : horizontalStorySection.geometry;

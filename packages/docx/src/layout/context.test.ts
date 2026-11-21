@@ -451,35 +451,43 @@ describe('section geometry coordinate boundary', () => {
     },
   );
 
-  it('round-trips a physical page box through the vertical logical frame', () => {
-    const physical = geometry({
-      pageWidth: 612,
-      pageHeight: 792,
-      marginTop: 36,
-      marginRight: 54,
-      marginBottom: 72,
-      marginLeft: 90,
-    });
+  it.each(['horizontal-tb', 'vertical-rl', 'vertical-lr', 'sideways-lr'] as const)(
+    'round-trips a physical page box through the %s logical frame',
+    (writingMode) => {
+      const physical = geometry({
+        pageWidth: 612,
+        pageHeight: 792,
+        marginTop: 36,
+        marginRight: 54,
+        marginBottom: 72,
+        marginLeft: 90,
+      });
 
-    expect(physicalSectionGeometry(logicalSectionGeometry(physical))).toEqual(physical);
-  });
+      expect(physicalSectionGeometry(logicalSectionGeometry(physical, writingMode), writingMode))
+        .toEqual(physical);
+    },
+  );
 
-  it('keeps the clockwise margin mapping and gives a native BtoT frame its own edges', () => {
+  it('gives each vertical section frame the margins on the edges it paints', () => {
     const physical = geometry({ marginTop: 36, marginRight: 54, marginBottom: 72, marginLeft: 90 });
-    // Established Transitional vertical frame: logical left/top/right/bottom
-    // are the physical top/right/bottom/left margins.
-    expect(logicalSectionGeometry(physical)).toEqual(geometry({
+    // vertical-rl (tbRl, tbRlV, btLr): lines start at the physical right, so
+    // logical left/top/right/bottom are the physical top/right/bottom/left.
+    expect(logicalSectionGeometry(physical, 'vertical-rl')).toEqual(geometry({
       pageWidth: 792, pageHeight: 612,
       marginLeft: 36, marginTop: 54, marginRight: 72, marginBottom: 90,
     }));
+    // vertical-lr (tbLrV): lines start at the physical left, so logical
+    // left/top/right/bottom are the physical top/left/bottom/right.
+    expect(logicalSectionGeometry(physical, 'vertical-lr')).toEqual(geometry({
+      pageWidth: 792, pageHeight: 612,
+      marginLeft: 36, marginTop: 90, marginRight: 72, marginBottom: 54,
+    }));
     // Native BtoT: lines start at the physical bottom and later lines move
     // right, so logical left/right/top/bottom are physical bottom/top/left/right.
-    const native = logicalSectionGeometry(physical, 'bottomToTop');
-    expect(native).toEqual(geometry({
+    expect(logicalSectionGeometry(physical, 'sideways-lr')).toEqual(geometry({
       pageWidth: 792, pageHeight: 612,
       marginLeft: 72, marginRight: 36, marginTop: 90, marginBottom: 54,
     }));
-    expect(physicalSectionGeometry(native, 'bottomToTop')).toEqual(physical);
   });
 
   it('projects only page-box facts and preserves signed-margin body distance', () => {

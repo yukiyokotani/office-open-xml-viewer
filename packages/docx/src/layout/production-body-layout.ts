@@ -156,7 +156,6 @@ import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-
 import { applyDrawingMLCollisionRegistryDelta, createDrawingMLCollisionRegistry, drawingMLCollisionRegistryDelta, validateDrawingMLCollisionRegistryDelta } from './drawingml-collision-registry.js';
 import { resolveAnchorFrame } from './anchor-frame.js';
 import { isPageLevelWrapFloat } from './anchor-classification.js';
-import { physicalToLogicalAnchorBox } from '../vertical-text.js';
 import type { MeasurementTextContext } from './measurement-capabilities.js';
 import type {
   LayoutFlowBlock,
@@ -170,10 +169,13 @@ import type { TableLayoutSource } from './table-source-acquisition.js';
 import { retainedTableFromPassMemo, retainedTablePassKey, retainTableInPassMemo } from './retained-table-pass-cache.js';
 import { collectBodyFrameGroups, prepareBodyFrameMetadata } from './frame.js';
 import {
+  logicalToPhysicalMatrix,
   physicalToLogicalMatrix,
   sectionWritingMode,
   transformRect,
+  transformRectEdges,
   uprightPhysicalExtent,
+  type PhysicalPageExtent,
 } from './coordinate-space.js';
 
 export function createProductionBodyLayoutRuntime(
@@ -467,7 +469,7 @@ function buildMeasureState(
     // physical branch on `verticalPhys`), otherwise a wrapped shape's exclusion
     // band is reserved at the raw logical rectangle during pagination while the
     // retained paint uses the physical projection — diverging page assignment.
-    // `physicalPageWidthPt` is the physical page width in canonical points.
+    // `writingMode` names the section frame whose matrix maps between them.
     // The direction flags are getters on the current `sectionLayout`, so they
     // follow each owner section. An all-rotated `btLr` section (including a
     // bottomToTop section flow) keeps horizontal glyph metrics through
@@ -489,13 +491,14 @@ function buildMeasureState(
 
 /** Physical page frame of one section context for DrawingML anchors and
  * upright tables, derived only from that context: its logical page box is
- * un-swapped with its own frame (the established clockwise mapping, or a
- * section flow's canonical matrix). Horizontal contexts have no frame. */
+ * un-swapped with its own frame's matrix (sectionWritingMode, so a section
+ * flow fact selects its canonical frame). Horizontal contexts have no frame. */
 function physicalAnchorFrameOf(
   section: DeepReadonly<SectionLayoutContext>,
 ): PhysicalAnchorFrame | undefined {
   if (!isVerticalTextDirection(section.textDirection)) return undefined;
-  const phys = physicalSectionGeometry(section.geometry, section.sectionFlow);
+  const writingMode = sectionWritingMode(section);
+  const phys = physicalSectionGeometry(section.geometry, writingMode);
   return {
     pageWidth: phys.pageWidth,
     pageHeight: phys.pageHeight,
@@ -503,8 +506,7 @@ function physicalAnchorFrameOf(
     marginRight: phys.marginRight,
     marginTop: bodyMarginInsetPt(phys.marginTop),
     marginBottom: bodyMarginInsetPt(phys.marginBottom),
-    physicalPageWidthPt: phys.pageWidth,
-    ...(section.sectionFlow ? { sectionFlow: section.sectionFlow } : {}),
+    writingMode,
   };
 }
 
@@ -1052,9 +1054,7 @@ function layoutBodyStory(
       marginTop: candidate.marginTop,
       marginBottom: candidate.marginBottom,
     };
-    const physical = writingMode === 'horizontal-tb'
-      ? held
-      : physicalSectionGeometry(held, request.section.sectionFlow);
+    const physical = physicalSectionGeometry(held, writingMode);
     const toStory = physicalToLogicalMatrix(
       writingMode,
       { widthPt: physical.pageWidth, heightPt: physical.pageHeight },
@@ -3020,12 +3020,15 @@ function acquireCompleteBodyTextBoxStory(
 ): ReturnType<CompleteTextBoxStoryAcquirer> {
   // An upright physical text box is horizontal: it keeps the owner section's
   // physical page box but not that section's native frame.
-  const { sectionFlow, ...sectionLayout } = owner.sectionLayout;
+  const { sectionFlow: _sectionFlow, ...sectionLayout } = owner.sectionLayout;
   const section =
     request.coordinateSpace === 'upright-physical'
       ? {
           ...sectionLayout,
-          geometry: physicalSectionGeometry(owner.sectionLayout.geometry, sectionFlow),
+          geometry: physicalSectionGeometry(
+            owner.sectionLayout.geometry,
+            sectionWritingMode(owner.sectionLayout),
+          ),
           textDirection: 'lrTb',
         }
       : owner.sectionLayout;
@@ -3916,34 +3919,31 @@ const __test_preRegisterPageFloats = (
   state: AnchorFloatRegistrationState,
 ): void => preRegisterPageFloats(body, startIdx, state);
 
-/** ECMA-376 §17.6.20 + §20.4.3.x — an acquisition-state view whose page/margin geometry
- *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
- *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
- *  under `word-vertical-section-physical-drawing-layer`. Only
- *  the geometry fields `xContainer`/`yContainer`/`resolveAnchorX`/`resolveAnchorY`
- *  read are overridden (page size, margins, and `pageH`); everything else is
- *  the live logical state. Callers map the resolved physical box back into the
- *  logical layout frame with {@link physicalToLogicalAnchorBox}. */
-/** Physical y of the anchor paragraph's column top: the logical inline start
- * in the clockwise frame (physical y = logical x), and the logical inline end
- * in a native counter-clockwise frame (physical y = page height - logical x).
- * The native case is the same generic library policy transformed through its
- * own frame. No comparison with a Word-produced reference has established
- * this placement. */
+/** Physical y of the anchor paragraph's column top: the physical top of the
+ * column's logical inline band carried through the section frame's
+ * logical-to-physical matrix. That is the logical inline start where logical
+ * x maps to physical y (vertical-rl and vertical-lr), and the logical inline
+ * end in a native counter-clockwise frame (physical y = page height - logical
+ * x). The counter-clockwise case is the same generic library policy
+ * transformed through its own frame; no comparison with a Word-produced
+ * reference has established that placement. */
 function physicalColumnTopPt(
   state: AnchorFloatRegistrationState,
   frame: PhysicalAnchorFrame,
 ): number {
-  return frame.sectionFlow == null
-    ? state.contentX
-    : frame.pageHeight - (state.contentX + state.contentW);
+  return transformRect(
+    logicalToPhysicalMatrix(frame.writingMode, physicalAnchorPage(frame)),
+    { xPt: state.contentX, yPt: 0, widthPt: Math.max(0, state.contentW), heightPt: 0 },
+  ).yPt;
+}
+
+function physicalAnchorPage(frame: PhysicalAnchorFrame): PhysicalPageExtent {
+  return { widthPt: frame.pageWidth, heightPt: frame.pageHeight };
 }
 
 /** Project a box resolved on the upright physical page into the section's
- * logical frame. The Transitional vertical frame keeps its established
- * clockwise projection; a bottomToTop section frame applies the inverse of its
- * counter-clockwise matrix (logical x = page height - physical y, logical
- * y = physical x). */
+ * logical frame through the inverse of the matrix that paints that frame, so
+ * the retained exclusion and the painted drawing stay one geometry. */
 function physicalAnchorBoxToLogical(
   frame: PhysicalAnchorFrame,
   x: number,
@@ -3951,25 +3951,34 @@ function physicalAnchorBoxToLogical(
   w: number,
   h: number,
 ): { x: number; y: number; w: number; h: number } {
-  if (frame.sectionFlow == null) {
-    return physicalToLogicalAnchorBox(x, y, w, h, frame.physicalPageWidthPt);
-  }
-  return { x: frame.pageHeight - (y + h), y: x, w: h, h: w };
+  const box = transformRect(
+    physicalToLogicalMatrix(frame.writingMode, physicalAnchorPage(frame)),
+    { xPt: x, yPt: y, widthPt: w, heightPt: h },
+  );
+  return { x: box.xPt, y: box.yPt, w: box.widthPt, h: box.heightPt };
 }
 
-/** Relabel physical dist* padding with the logical edges of the box. Clockwise:
- * physical top/bottom are logical left/right and physical right/left are
- * logical top/bottom. bottomToTop: physical bottom/top are logical left/right
- * and physical left/right are logical top/bottom. */
+/** Relabel physical dist* padding with the logical edges of the box, through
+ * the same section frame matrix as {@link physicalAnchorBoxToLogical}. */
 function physicalDistToLogical(
   frame: PhysicalAnchorFrame,
   dist: Readonly<{ dl: number; dr: number; dt: number; db: number }>,
 ): { dl: number; dr: number; dt: number; db: number } {
-  return frame.sectionFlow == null
-    ? { dl: dist.dt, dr: dist.db, dt: dist.dr, db: dist.dl }
-    : { dl: dist.db, dr: dist.dt, dt: dist.dl, db: dist.dr };
+  const edges = transformRectEdges(
+    physicalToLogicalMatrix(frame.writingMode, physicalAnchorPage(frame)),
+    { top: dist.dt, right: dist.dr, bottom: dist.db, left: dist.dl },
+  );
+  return { dl: edges.left, dr: edges.right, dt: edges.top, db: edges.bottom };
 }
 
+/** ECMA-376 §17.6.20 + §20.4.3.x — an acquisition-state view whose page/margin geometry
+ *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
+ *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
+ *  under `word-vertical-section-physical-drawing-layer`. Only
+ *  the geometry fields `xContainer`/`yContainer`/`resolveAnchorX`/`resolveAnchorY`
+ *  read are overridden (page size, margins, and `pageH`); everything else is
+ *  the live logical state. Callers map the resolved physical box back into the
+ *  logical layout frame with {@link physicalAnchorBoxToLogical}. */
 function physicalAnchorState(
   state: AnchorFloatRegistrationState,
 ): AnchorFloatRegistrationState {
@@ -4008,7 +4017,7 @@ function physicalAnchorState(
  * directions are applied by the table itself either way. */
 function tableCellOwnerState(state: BodyAcquisitionState): BodyAcquisitionState {
   if (!state.uprightPhysicalTable) return state;
-  const { sectionFlow, ...section } = state.sectionLayout;
+  const { sectionFlow: _sectionFlow, ...section } = state.sectionLayout;
   return {
     ...(verticalPhysicalContentState(state) as BodyAcquisitionState),
     // Upright content of a vertical section is outside the measured class of
@@ -4017,7 +4026,10 @@ function tableCellOwnerState(state: BodyAcquisitionState): BodyAcquisitionState 
     uprightPhysicalTable: false,
     sectionLayout: {
       ...section,
-      geometry: physicalSectionGeometry(state.sectionLayout.geometry, sectionFlow),
+      geometry: physicalSectionGeometry(
+        state.sectionLayout.geometry,
+        sectionWritingMode(state.sectionLayout),
+      ),
       textDirection: 'lrTb',
     },
   };
