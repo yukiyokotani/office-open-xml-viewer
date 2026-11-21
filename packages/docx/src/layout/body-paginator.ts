@@ -5138,6 +5138,8 @@ type UprightBlockPin = Readonly<{
   tableSource: SourceRef;
   /** The table's exclusion in section-logical page points. */
   bounds: LayoutRect;
+  /** The block position the flow had reached when the pin was taken. */
+  flowBlockPt: number;
   pageIndex: number;
   /** Where the page prescan registers it: the opening of its section region. */
   prescanFlowDomainId: string;
@@ -5235,6 +5237,7 @@ function nextUprightBlockPlan(layout: DocumentLayout, plan: UprightBlockPlan): U
           key,
           tableSource: node.source,
           bounds: Object.freeze({ ...placed.bounds }),
+          flowBlockPt: placed.flowBlockPt,
           pageIndex: page.pageIndex,
           prescanFlowDomainId: regionFlowDomainOpening(page, node.flowDomainId),
           tableFlowDomainId: node.flowDomainId,
@@ -5263,7 +5266,7 @@ function nextUprightBlockPlan(layout: DocumentLayout, plan: UprightBlockPlan): U
         exact = false;
         continue;
       }
-      if (placed.flowBlockPt < applied.bounds.yPt) {
+      if (placed.flowBlockPt < applied.flowBlockPt) {
         exact = false;
         continue;
       }
@@ -5276,7 +5279,7 @@ function nextUprightBlockPlan(layout: DocumentLayout, plan: UprightBlockPlan): U
         bounds: Object.freeze({ ...placed.bounds }),
         state: 'settled' as const,
       }));
-      if (placed.flowBlockPt !== applied.bounds.yPt) exact = false;
+      if (placed.flowBlockPt !== applied.flowBlockPt) exact = false;
     }
   }
   // A pinned table that no longer starts anywhere cannot be placed at its pin.

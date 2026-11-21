@@ -228,6 +228,42 @@ describe('upright block table of a vertical section', () => {
     expect(z.top).toBeCloseTo(MARGIN.top, 6);
   });
 
+  it('moves a table that does not fit below the table it meets past that table, at the column top', () => {
+    // 45 + 25 rows are taller than the band; each fits it alone.
+    const { tables, strips } = layOut('tbRl', [P, table(45), P, table(25), P]);
+    const [x, y] = tables as [Page['tables'][number], Page['tables'][number]];
+    expect(x.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+    expect(y.top).toBeCloseTo(MARGIN.top, 6);
+    // X ends at block 198; Y clears it by the measured 14.76 pt.
+    expect(y.left).toBeCloseTo(tableLeft('tbRl', PITCH + TABLE_W + 14.76), 6);
+    // The flow is not advanced: the paragraphs keep consecutive strips.
+    expect(strips.map((lines) => lines.map((line) => line.block))).toEqual([[0], [PITCH], [2 * PITCH]]);
+  });
+
+  it('resumes text with no room beside a table past its far edge, at the column top', () => {
+    // 63 rows leave less than one character of room below the table.
+    const { tables, strips } = layOut('tbRl', [table(63), P, P]);
+    expect(COLUMN_END - tables[0]!.bottom).toBeLessThan(10.5);
+    expect(strips.map(([line]) => line!.inlineStart)).toEqual([MARGIN.top, MARGIN.top]);
+    // The measured 7.7 pt past the far edge, then one strip further.
+    expect(strips[0]![0]!.block).toBeCloseTo(TABLE_W + 7.7, 6);
+    expect(strips[1]![0]!.block).toBeCloseTo(TABLE_W + 7.7 + PITCH, 6);
+  });
+
+  it('stacks a later table below the rows a table continues with on the next page', () => {
+    const pages = layOutPages('tbRl', [table(80), P, T, P]);
+    expect(pages).toHaveLength(2);
+    const [rest, later] = pages[1]!.tables as [Page['tables'][number], Page['tables'][number]];
+    expect(rest.top).toBeCloseTo(MARGIN.top, 6);
+    expect(later.top).toBeCloseTo(rest.bottom, 6);
+    expect(later.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+    // Both strips meet the continued rows and the later table.
+    expect(pages[1]!.strips).toEqual([
+      [{ block: 0, inlineStart: later.bottom }],
+      [{ block: PITCH, inlineStart: later.bottom }],
+    ]);
+  });
+
   it('keeps rows whole: a row that fits a fresh page is not cut at the page end', () => {
     // Two 450 pt rows in a 701.9 pt column.
     const pages = layOutPages('tbRl', [table(2, 450)]);
@@ -275,11 +311,12 @@ describe('upright block table of a vertical section', () => {
       expect(tall!.bottom).toBeLessThanOrEqual(COLUMN_END);
     });
 
-    it('starts a table taller than the page band on a fresh page, in its first column', () => {
+    it('keeps a table taller than the page whole and raises it to the page top', () => {
       const pages = layOutPages('tbRl', [P, table(80), P], 2);
-      expect(pages[0]!.tables).toHaveLength(0);
-      expect(pages[1]!.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
-      expect(pages[1]!.tables[0]!.bottom).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.tables).toHaveLength(1);
+      expect(pages[0]!.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+      expect(pages[0]!.tables[0]!.top).toBe(0);
     });
   });
 

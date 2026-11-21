@@ -1,6 +1,10 @@
 import { FLOAT_OVERLAP_EPS } from '../float-layout.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
-import { wordGridFramePreservesEmptyCarrierReference } from './table-compatibility.js';
+import {
+  WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT,
+  WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
+  wordGridFramePreservesEmptyCarrierReference,
+} from './table-compatibility.js';
 import { frameWrapExclusionMode } from '../frame-geometry.js';
 import type { FramePr } from '../types.js';
 import type {
@@ -252,17 +256,19 @@ export function measureBodyTableEntry(
     let upright: TableLayout;
     let block = whole;
     let nextCursor: Readonly<{ kind: 'table'; cursor: typeof cursor }> | null = null;
-    if (whole.inlineRoomPt === null
+    if (whole.leavesBlockExtent && request.pageHasContent === true) return freshRegion(true);
+    if (whole.inlineRoomPt === null || !singleColumn
       || (!request.cursor && retained.layout.advancePt <= whole.inlineRoomPt)) {
       upright = takeUprightTableFragment(
         context, request, operations, retained, whole.originPt, acquisitionState,
       );
     } else {
-      // `word-vertical-section-upright-block-table`: a table too tall for the
-      // inline extent below its start moves to a fresh page when content
-      // precedes it there. On a fresh page whole rows fill the band and the
-      // rest continues on the next page; a row taller than the band takes a
-      // page of its own.
+      // `word-vertical-section-upright-block-table`: in a one-column section
+      // a table too tall for the inline extent below its start moves to a
+      // fresh page when content precedes it there. On a fresh page whole rows
+      // fill the band and the rest continues on the next page; a row taller
+      // than the band takes a page of its own. A multi-column section keeps
+      // the table whole (uprightBlockPlacement).
       if (!request.cursor && request.pageHasContent === true) return freshRegion(true);
       const bandPt = whole.inlineBandPt ?? whole.inlineRoomPt;
       const taken = takeUprightTableRows(
@@ -376,11 +382,14 @@ function wholeRowAcquisition(retained: RetainedTableAcquisition): RetainedTableA
  * current block position and charges no flow advance: the following
  * paragraph takes the next line strip as if the block were absent. Along the
  * inline axis it takes the first position from the column top at which its
- * box clears the blocks placed before it on the page whose block interval
- * meets its own (closed interval), so overlapping tables stack. Its
- * section-logical box is a text exclusion met on a closed block interval:
- * every line strip meeting it flows around it, which for a block at the
- * column top means starting at its inline end.
+ * box clears the blocks placed before it on the page that it meets (up to
+ * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past their far edge), so overlapping
+ * tables stack; a block that fits the band but not below them clears the
+ * nearest along the block axis instead. Its section-logical box, extended by
+ * WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT past its far edge, is a text
+ * exclusion met from its block start inclusive: every line strip meeting it
+ * flows around it, which for a block at the column top means starting at its
+ * inline end.
  *
  * The strip laid out just before the block ends exactly where the block
  * starts and wraps too. Pagination therefore registers a first fragment at
@@ -403,6 +412,8 @@ function uprightBlockPlacement(
   inlineRoomPt: number | null;
   /** Inline extent of the page's body band from the column top. */
   inlineBandPt: number | null;
+  /** The block was moved along the block axis past the block extent left. */
+  leavesBlockExtent: boolean;
   flowAdvancePt: number;
   registration: Pick<TableMeasureResult, 'flowRegistryDelta'>;
   exclusion: Readonly<{ uprightBlockExclusion?: NonNullable<TableLayout['uprightBlockExclusion']> }>;
@@ -413,6 +424,7 @@ function uprightBlockPlacement(
       originPt: uprightBlockPhysicalOrigin(physical, cursorPt, blockExtentPt, inlineExtentPt),
       inlineRoomPt: null,
       inlineBandPt: null,
+      leavesBlockExtent: false,
       flowAdvancePt: blockExtentPt,
       registration: Object.freeze({}),
       exclusion: Object.freeze({}),
@@ -423,30 +435,51 @@ function uprightBlockPlacement(
   const pin = role !== 'first' ? undefined : registry.entries.find((entry) =>
     entry.occurrenceId === uprightBlockTablePrescanKey(key, request.location.pageIndex)
     && entry.uprightBlockTable?.tableFlowDomainId === request.location.flowDomainId);
-  const blockStartPt = pin ? pin.bounds.yPt : cursorPt.yPt;
-  const blockEndPt = blockStartPt + blockExtentPt;
   const columnEndPt = cursorPt.xPt + request.availableInlineExtentPt;
+  const bandEndPt = physical.pageHeight - physical.marginBottom;
   // The blocks placed in this pass; a planned registration is a pin, also of
   // blocks later in source order.
   const placed = registry.entries.flatMap((entry) => {
     if (entry.uprightBlockTable?.planned !== false) return [];
     const box = entry.bounds;
-    return box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt
-      && box.yPt <= blockEndPt && box.yPt + box.heightPt >= blockStartPt ? [box] : [];
+    return box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt ? [box] : [];
   });
+  let blockStartPt = pin ? pin.bounds.yPt : cursorPt.yPt;
   let inlineStartPt = cursorPt.xPt;
-  // Every move adopts the inline end of a box it leaves behind for good.
-  for (let moved = true; moved;) {
-    moved = false;
-    for (const box of placed) {
-      const boxEndPt = box.xPt + box.widthPt;
-      if (box.xPt < inlineStartPt + inlineExtentPt && boxEndPt > inlineStartPt) {
-        inlineStartPt = boxEndPt;
-        moved = true;
+  for (;;) {
+    // An earlier block is met up to the clearance past its far edge.
+    const met = placed.filter((box) => box.yPt <= blockStartPt + blockExtentPt
+      && blockStartPt < box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
+    inlineStartPt = cursorPt.xPt;
+    // Every move adopts the inline end of a box it leaves behind for good.
+    for (let moved = true; moved;) {
+      moved = false;
+      for (const box of met) {
+        const boxEndPt = box.xPt + box.widthPt;
+        if (box.xPt < inlineStartPt + inlineExtentPt && boxEndPt > inlineStartPt) {
+          inlineStartPt = boxEndPt;
+          moved = true;
+        }
       }
     }
+    // A block that fits the band from the column top, but not below the
+    // blocks it meets, clears the nearest of them along the block axis
+    // instead. Each move leaves at least that block behind.
+    if (pin || role !== 'first' || met.length === 0
+      || inlineStartPt + inlineExtentPt <= bandEndPt
+      || cursorPt.xPt + inlineExtentPt > bandEndPt) break;
+    blockStartPt = Math.min(...met.map((box) =>
+      box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT));
   }
-  const bandEndPt = physical.pageHeight - physical.marginBottom;
+  if (request.location.section.columns.length > 1) {
+    // A multi-column section never splits or moves the block: one that
+    // would pass the page's bottom edge is raised to end there, no higher
+    // than the page top.
+    inlineStartPt = Math.max(0, Math.min(inlineStartPt, physical.pageHeight - inlineExtentPt));
+  }
+  const leavesBlockExtent = blockStartPt !== cursorPt.yPt && !pin
+    && blockStartPt + blockExtentPt
+      > request.location.availableBounds.yPt + request.location.availableBounds.heightPt;
   const inlineRoomPt = bandEndPt - inlineStartPt;
   const inlineBandPt = bandEndPt - cursorPt.xPt;
   const bounds: LayoutRect = Object.freeze({
@@ -454,6 +487,11 @@ function uprightBlockPlacement(
     yPt: blockStartPt,
     widthPt: inlineExtentPt,
     heightPt: blockExtentPt,
+  });
+  // Line strips clear the block only past the text clearance at its far edge.
+  const exclusionBounds: LayoutRect = Object.freeze({
+    ...bounds,
+    heightPt: blockExtentPt + WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
   });
   const originPt = uprightBlockPhysicalOrigin(
     physical, { xPt: inlineStartPt, yPt: blockStartPt }, blockExtentPt, inlineExtentPt,
@@ -463,6 +501,7 @@ function uprightBlockPlacement(
       originPt,
       inlineRoomPt,
       inlineBandPt,
+      leavesBlockExtent,
       flowAdvancePt: 0,
       registration: Object.freeze({}),
       exclusion: Object.freeze({}),
@@ -480,13 +519,14 @@ function uprightBlockPlacement(
     paragraphId: registry.nextParagraphId,
     exclusionMode: 'square' as const,
     bounds,
-    exclusionBounds: bounds,
+    exclusionBounds,
     uprightBlockTable: Object.freeze({ key, planned: false }),
   });
   return Object.freeze({
     originPt,
     inlineRoomPt,
     inlineBandPt,
+    leavesBlockExtent,
     flowAdvancePt: 0,
     registration: Object.freeze({
       flowRegistryDelta: Object.freeze({
@@ -496,7 +536,7 @@ function uprightBlockPlacement(
     exclusion: role !== 'first' ? Object.freeze({}) : Object.freeze({
       uprightBlockExclusion: Object.freeze({
         key,
-        bounds,
+        bounds: exclusionBounds,
         flowBlockPt: cursorPt.yPt,
         pinned: pin !== undefined,
       }),

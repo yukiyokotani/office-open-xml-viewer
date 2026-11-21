@@ -2828,7 +2828,7 @@ function commitBodyFlowRegistryDelta(
         ? {} : { topEdgeInclusiveFromYPt: entry.topEdgeInclusiveFromYPt }),
       ...(entry.anchorLineExemptTopPt === undefined
         ? {} : { exemptLineTopPt: entry.anchorLineExemptTopPt }),
-      ...(entry.uprightBlockTable === undefined ? {} : { bandEdgesInclusive: true as const }),
+      ...(entry.uprightBlockTable === undefined ? {} : { bandStartInclusive: true as const }),
     };
     return entry.kind === 'table'
       ? {

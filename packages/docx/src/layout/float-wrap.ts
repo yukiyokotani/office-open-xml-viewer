@@ -106,10 +106,10 @@ interface FloatRectCore {
   /** WORD_MODE14_TIGHT_ANCHOR_LINE_REWRAP: the line starting exactly at this
    * top ignores this float. */
   exemptLineTopPt?: number;
-  /** A square rectangle that a line band meets on the closed interval
-   * [yTop, yBottom]: a band ending exactly at yTop or starting exactly at
-   * yBottom wraps around it too (WrapExclusion.bandEdgesInclusive). */
-  bandEdgesInclusive?: true;
+  /** A square rectangle that a line band also meets when it ends exactly at
+   * yTop, that is on the half-open interval [yTop, yBottom)
+   * (WrapExclusion.bandStartInclusive). */
+  bandStartInclusive?: true;
   /** Hex key of the image bitmap (used to defer drawing until final Y is known). */
   imageKey: string;
   /** Absolute X of the object box in the consuming wrap context's linear unit
@@ -708,8 +708,8 @@ function tightEdgeTouch(
 }
 
 /** Whether the line band [exactTop, exactBottom] meets a square rectangle's
- * block interval: a strict overlap, or for a `bandEdgesInclusive` rectangle a
- * touched edge as well. */
+ * block interval: a strict overlap, or for a `bandStartInclusive` rectangle a
+ * band ending exactly at its top as well. */
 function bandMeetsRectY(
   rect: Readonly<FloatRect>,
   exactTop: ExactRational,
@@ -717,8 +717,8 @@ function bandMeetsRectY(
 ): boolean {
   const fromTop = compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop));
   const fromBottom = compareExactRational(exactTop, unreducedExactFromNumber(rect.yBottom));
-  return rect.bandEdgesInclusive === true && rect.mode === 'square'
-    ? fromTop >= 0 && fromBottom <= 0
+  return rect.bandStartInclusive === true && rect.mode === 'square'
+    ? fromTop >= 0 && fromBottom < 0
     : fromTop > 0 && fromBottom < 0;
 }
 

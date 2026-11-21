@@ -714,10 +714,9 @@ export interface WrapExclusion {
   /** The drawing is wrapTight in a compatibility-mode-14 document; read by
    * WORD_MODE14_TIGHT_ANCHOR_TOP_TOUCH when pagination carries it. */
   readonly wordMode14TightAnchor?: boolean;
-  /** `word-vertical-section-upright-block-table`: a line band also wraps
-   * around this exclusion when it only touches its block-start or block-end
-   * edge (closed block interval). */
-  readonly bandEdgesInclusive?: true;
+  /** `word-vertical-section-upright-block-table`: a line band that ends
+   * exactly at this exclusion's block start wraps around it too. */
+  readonly bandStartInclusive?: true;
 }
 
 /** @internal Occurrence-keyed DrawingML object bounds for §20.4.2.3.
@@ -981,7 +980,7 @@ interface FloatRegistryEntryCorePt {
   readonly anchorLineExemptTopPt?: number;
   /** `word-vertical-section-upright-block-table`: the exclusion of an upright
    * block table of a vertical section, in the section-logical frame. Line
-   * bands meet it on a closed block interval (WrapExclusion.bandEdgesInclusive).
+   * bands meet it from its block start inclusive (WrapExclusion.bandStartInclusive).
    * `planned` marks the page-start registration of a pin of the pagination
    * round's plan, which earlier lines of the page wrap around; the table in
    * column `tableFlowDomainId` takes its block position and registers its own
