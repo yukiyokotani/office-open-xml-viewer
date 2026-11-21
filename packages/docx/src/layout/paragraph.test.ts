@@ -821,12 +821,14 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     } as unknown as CanvasRenderingContext2D;
   }
 
-  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; vertical?: boolean | 'lr'; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; atLeastPt?: number; vertical?: boolean | 'lr'; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
     const selectedContext = options.context ?? measureContext;
     const value = {
       ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
       lineSpacing: options.exactPt !== undefined
         ? { rule: 'exact' as const, value: options.exactPt, explicit: true }
+        : options.atLeastPt !== undefined
+        ? { rule: 'atLeast' as const, value: options.atLeastPt, explicit: true }
         : multiple === null ? null : { rule: 'auto' as const, value: multiple },
     };
     const context = { ...acquisitionContext, lineSpacing: value.lineSpacing };
@@ -963,44 +965,74 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
     });
 
-    it('places an unavailable picture exactly where the picture would stand', () => {
-      const placeholder = (positionPt: number) => ({
-        type: 'unavailableDrawing', resourceKind: 'image', widthPt: 20, heightPt: 30,
-        ...(positionPt ? { __inlinePosition: positionPt } : {}),
-      }) as unknown as DocParagraph['runs'][number];
-      for (const options of [{ exactPt: 24 }, {}] as const) {
-        for (const positionPt of [-5, 5]) {
-          const available = measureInlineParagraph([paragraph.runs[0]!, picture(30, positionPt, 'drawingml')], 1, options);
-          const unavailable = measureInlineParagraph([paragraph.runs[0]!, placeholder(positionPt)], 1, options);
-          const [a, u] = [available.lines[0]!, unavailable.lines[0]!];
-          expect(u.advancePt).toBeCloseTo(a.advancePt, 10);
-          expect(u.baselinePt - u.bounds.yPt).toBeCloseTo(a.baselinePt - a.bounds.yPt, 10);
-          const box = u.placements.find((placement) => placement.kind === 'drawing')!;
-          expect(box.bounds.yPt).toBeCloseTo(resource(available).bounds.yPt, 10);
-          // The same line clip (WORD_INLINE_OBJECT_EXACT_LINE), on the
-          // placement and on the placeholder's visible box.
-          const clip = resource(available).kind === 'resource' ? resource(available).lineClip : undefined;
-          expect(box.kind === 'drawing' ? box.lineClip : undefined).toEqual(clip);
-          const ink = unavailable.drawings[0]!.inkBounds;
-          expect(ink.yPt).toBeCloseTo(box.bounds.yPt + Math.max(0, clip?.topPt ?? 0), 10);
-          expect(ink.heightPt).toBeCloseTo(clip
-            ? Math.min(box.bounds.heightPt, clip.bottomPt) - Math.max(0, clip.topPt)
-            : box.bounds.heightPt, 10);
+    // Availability only changes what is painted: a placeholder lays out as the
+    // picture or chart it stands for.
+    describe('availability parity of inline pictures and charts', () => {
+      const facts = { __inlineObjectFontFacts: { fontSize: 10, fontFamily: 'Test Sans' } };
+      const subject = (kind: 'picture' | 'chart', available: boolean, positionPt: number) => {
+        // The parser records a run position on pictures only (charts keep
+        // their established placement), for the picture and its placeholder.
+        const position = kind === 'picture' && positionPt ? { __inlinePosition: positionPt } : {};
+        if (kind === 'picture') {
+          return (available
+            ? { type: 'image', imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt: 30,
+              anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+              __inlineObjectOrigin: 'drawingml', ...facts, ...position }
+            : { type: 'unavailableDrawing', resourceKind: 'image', widthPt: 20, heightPt: 30, ...facts, ...position }
+          ) as unknown as DocParagraph['runs'][number];
         }
-      }
-      // Table cells and text boxes leave both unclipped.
-      for (const other of [
-        { story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] },
-        { story: 'textbox', storyInstance: 'body:body:0.0', path: [0] },
-      ]) {
-        const options = { exactPt: 24, source: other as never };
-        const available = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, 'drawingml')], 1, options);
-        const unavailable = measureInlineParagraph([paragraph.runs[0]!, placeholder(-5)], 1, options);
-        const placement = resource(available);
-        expect(placement.kind === 'resource' && placement.lineClip).toBeFalsy();
-        const box = unavailable.lines[0]!.placements.find((candidate) => candidate.kind === 'drawing')!;
-        expect(box.kind === 'drawing' && box.lineClip).toBeFalsy();
-        expect(unavailable.drawings[0]!.inkBounds).toEqual(box.bounds);
+        return (available
+          ? { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } }
+          : { type: 'unavailableDrawing', resourceKind: 'chart', widthPt: 40, heightPt: 30 }
+        ) as unknown as DocParagraph['runs'][number];
+      };
+      const box = (node: ReturnType<typeof measureInlineParagraph>) => {
+        const placement = node.lines[0]!.placements.find((candidate) =>
+          (candidate.kind === 'resource' && candidate.resourceKind !== 'image')
+          || candidate.kind === 'drawing'
+          || (candidate.kind === 'resource' && candidate.resourceKind === 'image'
+            && candidate.bounds.heightPt !== 16 && candidate.bounds.widthPt !== 16))!;
+        return { bounds: placement.bounds,
+          clip: placement.kind === 'resource' || placement.kind === 'drawing' ? placement.lineClip : undefined };
+      };
+      const spacings = [
+        ['single', 1, {}], ['1.5', 1.5, {}], ['exact 24pt', 1, { exactPt: 24 }], ['atLeast 30pt', 1, { atLeastPt: 30 }],
+      ] as const;
+      const stories = [
+        ['body', undefined],
+        ['table cell', { story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] }],
+        ['text box', { story: 'textbox', storyInstance: 'body:body:0.0', path: [0] }],
+      ] as const;
+      const modes = [['lrTb', undefined], ['tbRl', true], ['tbLrV', 'lr']] as const;
+      for (const kind of ['picture', 'chart'] as const) {
+        for (const [spacing, multiple, spacingOptions] of spacings) {
+          for (const [storyName, story] of stories) {
+            for (const [mode, vertical] of modes) {
+              it(`${kind}, ${spacing}, ${storyName}, ${mode}`, () => {
+                for (const [positionPt, layout] of [-5, 0, 5].flatMap((value) =>
+                  (['text', 'neighbour', 'alone'] as const).map((variant) => [value, variant] as const))) {
+                  const options = { ...spacingOptions, ...(story ? { source: story as never } : {}),
+                    ...(vertical === undefined ? {} : { vertical }) };
+                  // Beside text; beside text and a 16pt picture, which puts an
+                  // exact line in the inline-object class whichever the subject
+                  // is; and alone in its paragraph.
+                  const runs = (available: boolean) => layout === 'alone' ? [subject(kind, available, positionPt)]
+                    : [paragraph.runs[0]!, subject(kind, available, positionPt),
+                      ...(layout === 'neighbour' ? [picture(16, 0, 'drawingml')] : [])];
+                  const a = measureInlineParagraph(runs(true), multiple, options);
+                  const u = measureInlineParagraph(runs(false), multiple, options);
+                  const [al, ul] = [a.lines[0]!, u.lines[0]!];
+                  expect(ul.advancePt, `advance at ${positionPt} ${layout}`).toBeCloseTo(al.advancePt, 10);
+                  expect(ul.baselinePt - ul.bounds.yPt, `baseline at ${positionPt} ${layout}`)
+                    .toBeCloseTo(al.baselinePt - al.bounds.yPt, 10);
+                  const [ab, ub] = [box(a), box(u)];
+                  expect(ub.bounds, `box at ${positionPt} ${layout}`).toEqual(ab.bounds);
+                  expect(ub.clip, `clip at ${positionPt} ${layout}`).toEqual(ab.clip);
+                }
+              });
+            }
+          }
+        }
       }
     });
 

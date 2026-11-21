@@ -8338,6 +8338,16 @@ fn parse_run_inner(
             let target = match drawing {
                 DocRun::Shape(shape) if shape.inline => Some(&mut shape.inline_object_font_facts),
                 DocRun::Image(image) if !image.anchor => Some(&mut image.inline_object_font_facts),
+                // An inline picture placeholder carries the picture's run facts.
+                DocRun::UnavailableDrawing(drawing)
+                    if drawing.anchor_acquisition.is_none()
+                        && matches!(
+                            drawing.resource_kind,
+                            UnavailableDrawingResourceKind::Image
+                        ) =>
+                {
+                    Some(&mut drawing.inline_object_font_facts)
+                }
                 _ => None,
             };
             if let Some(target) = target {
@@ -9519,6 +9529,7 @@ fn unavailable_drawing_run(
             width_pt,
             height_pt,
             inline_position: None,
+            inline_object_font_facts: None,
             anchor_acquisition,
         },
     )))
@@ -19762,6 +19773,7 @@ mod tests {
                     width_pt: 24.0,
                     height_pt: 24.0,
                     inline_position: None,
+                    inline_object_font_facts: None,
                     anchor_acquisition: None,
                 })),
                 "unavailableDrawing",
@@ -25114,6 +25126,8 @@ mod anchor_image_relative_from_tests {
         let drawing = first_unavailable_drawing(&doc);
         assert!(drawing.anchor_acquisition.is_none());
         assert_eq!(drawing.inline_position, Some(-5.0));
+        // ...and the run's font facts that size an available picture's leading.
+        assert!(drawing.inline_object_font_facts.is_some());
     }
 
     #[test]

@@ -1897,10 +1897,23 @@ export function paragraphAcquisitionInput(
             ...localAnchorInput,
             occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
           }, 'DOCX scoped unavailable drawing anchor acquisition input');
-      const { __anchorAcquisition: _privateAnchor, __inlinePosition: inlinePosition, ...retainedRun } =
-        internalRun as typeof internalRun & { __inlinePosition?: number };
+      const {
+        __anchorAcquisition: _privateAnchor,
+        __inlinePosition: inlinePosition,
+        __inlineObjectFontFacts: inlineFontFacts,
+        ...retainedRun
+      } = internalRun as typeof internalRun & {
+        __inlinePosition?: number;
+        __inlineObjectFontFacts?: InternalRunFontFacts;
+      };
+      // An inline picture placeholder takes its picture's acquisition facts:
+      // the hosting run's font (automatic leading) and the DrawingML origin.
+      const placeholderPicture = internalRun.resourceKind === 'image' && anchorInput === undefined;
       return Object.freeze({
         ...retainedRun,
+        ...(placeholderPicture ? { inlineObjectOrigin: 'drawingml' as const } : {}),
+        ...(placeholderPicture && inlineFontFacts
+          ? { inlineObjectShapeInput: nonContentRunShapeInput(inlineFontFacts) } : {}),
         ...(typeof inlinePosition === 'number' && Number.isFinite(inlinePosition) && inlinePosition !== 0
           ? { inlinePositionPt: inlinePosition } : {}),
         ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),

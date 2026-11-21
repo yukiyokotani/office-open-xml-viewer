@@ -3990,9 +3990,8 @@ function planMeasuredLines(
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
       wrapOrigin: raw.topY !== undefined,
-      // An unavailable picture's placeholder stands in for the picture.
       hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
-        && (segment.inlinePicture === true || segment.unavailableResourceKind === 'image')),
+        && segment.inlinePicture === true),
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
     const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
@@ -4177,30 +4176,10 @@ function planMeasuredLines(
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
           continue;
         }
-        if (image.unavailableResourceKind) {
-          // The placeholder of a DrawingML picture (an unavailable drawing is
-          // always a wp:inline/wp:anchor container) clips and is placed like
-          // the picture it stands for.
-          const placeholderClipped = image.unavailableResourceKind === 'image' && exactObjectClips
-            && wordInlineObjectExactLineClips('drawingml');
-          segments.push({
-            kind: 'unavailable-resource',
-            range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
-            resourceKind: image.unavailableResourceKind,
-            measuredWidthPt: image.measuredWidth,
-            widthPt: objectWidthPt,
-            heightPt: objectHeightPt,
-            topOffsetPt: objectTopOffsetPt(image.heightPt, image.positionPt, placeholderClipped) + effectTopPt,
-            ...(placeholderClipped ? { clipToLine: true as const } : {}),
-            ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
-            drawingId: unavailableDrawingId(source, runIndex ?? 0),
-          });
-          sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
-          continue;
-        }
+        // A placeholder stands for its picture or chart: every placement
+        // decision below is the resource's own; availability only changes
+        // what is painted.
         const resourceKind = image.chart ? 'chart' : 'image';
-        const resourceKey = image.chartResourceKey
-          ?? (image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath));
         // A picture list label's box is centred in the natural line (before
         // any proportional extra), the picture inset within it.
         const labelTopPt = image.listLabel === undefined ? undefined
@@ -4211,19 +4190,40 @@ function planMeasuredLines(
         // Exact-line clipping (and its tbLrV placement) is decided apart from a
         // rotated picture's own clip to the line.
         const exactClipped = !image.chart && exactObjectClips
-          && wordInlineObjectExactLineClips(sourceRun?.type === 'image'
-            ? (sourceRun as ParagraphImageRun).inlineObjectOrigin : undefined);
+          && wordInlineObjectExactLineClips(
+            (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
+              ?.inlineObjectOrigin);
+        const topOffsetPt = labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
+          : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt;
+        const clipToLine = !image.chart && (image.clipToLine || exactClipped);
+        if (image.unavailableResourceKind) {
+          segments.push({
+            kind: 'unavailable-resource',
+            range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+            resourceKind: image.unavailableResourceKind,
+            measuredWidthPt: image.measuredWidth,
+            widthPt: objectWidthPt,
+            heightPt: objectHeightPt,
+            topOffsetPt,
+            ...(clipToLine ? { clipToLine: true as const } : {}),
+            ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
+            drawingId: unavailableDrawingId(source, runIndex ?? 0),
+          });
+          sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
+          continue;
+        }
+        const resourceKey = image.chartResourceKey
+          ?? (image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath));
         segments.push({
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
           widthPt: objectWidthPt, heightPt: objectHeightPt,
-          topOffsetPt: labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
-            : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt,
+          topOffsetPt,
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
-          ...(!image.chart && (image.clipToLine || exactClipped) ? { clipToLine: true as const } : {}),
+          ...(clipToLine ? { clipToLine: true as const } : {}),
           ...(!image.chart && image.rotation && image.rotation % 360 !== 0 ? { rotationDeg: image.rotation } : {}),
         });
       } else if ('math' in segment) {

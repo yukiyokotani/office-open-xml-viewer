@@ -1667,14 +1667,25 @@ export function wordInlineDrawingRunLeadingApplies(
     lineSpacing?: Readonly<LineSpacing> | null;
     numbering?: unknown;
     framePr?: unknown;
-    runs: readonly Readonly<{ type: string; anchor?: boolean; inline?: boolean }>[];
+    runs: readonly InlineObjectRunFacts[];
   }>,
 ): boolean {
   return compat.inlinePictureAutoLeading && !paragraph.numbering && !paragraph.framePr
     && paragraph.lineSpacing?.rule === 'auto' && paragraph.lineSpacing.value > 1
     && paragraph.runs.length > 0
-    && paragraph.runs.every(run => (run.type === 'image' && run.anchor !== true)
-      || (run.type === 'shape' && run.inline === true));
+    && paragraph.runs.every(isInlineDrawingRun);
+}
+
+type InlineObjectRunFacts = Readonly<{
+  type: string; anchor?: boolean; inline?: boolean; resourceKind?: string; anchorAcquisitionInput?: unknown;
+}>;
+
+/** An inline picture or drawing shape run; the placeholder of an unavailable
+ * inline picture is its picture. */
+export function isInlineDrawingRun(run: InlineObjectRunFacts): boolean {
+  return (run.type === 'image' && run.anchor !== true)
+    || (run.type === 'unavailableDrawing' && run.resourceKind === 'image' && run.anchorAcquisitionInput === undefined)
+    || (run.type === 'shape' && run.inline === true);
 }
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */

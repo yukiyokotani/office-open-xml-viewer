@@ -3790,6 +3790,13 @@ pub struct UnavailableDrawingRun {
     /// picture placeholder, as on the available picture (`ImageRun`).
     #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
     pub inline_position: Option<f64>,
+    /// Parser-private font facts of the hosting run of an inline picture
+    /// placeholder, as on the available picture (`ImageRun`).
+    #[serde(
+        rename = "__inlineObjectFontFacts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_font_facts: Option<Box<RunFontFacts>>,
     #[serde(
         rename = "__anchorAcquisition",
         skip_serializing_if = "Option::is_none"

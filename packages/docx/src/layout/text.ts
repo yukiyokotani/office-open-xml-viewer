@@ -275,6 +275,9 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly inlineEffectExtent?: readonly number[];
   /** §17.3.2.24 position of the hosting run of an inline picture placeholder. */
   readonly inlinePositionPt?: number;
+  /** An inline picture placeholder's picture facts (`ParagraphImageRun`). */
+  readonly inlineObjectOrigin?: 'drawingml';
+  readonly inlineObjectShapeInput?: NumberingMarkerShapeInput;
   readonly anchorAcquisitionInput?: AnchorAcquisitionInput;
 }
 
