@@ -828,13 +828,27 @@ function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number): boo
 }
 
 function isUndecoratedInklessMark(layout: ParagraphLayout): boolean {
+  // An anchor-only paragraph is its empty mark (WORD_ANCHOR_HOST_NO_LINE_METRIC):
+  // its floating drawings ride on the mark's line and are not line ink.
+  const anchorOnlyMark = isAnchorOnlyMark(layout);
   return layout.paragraphMark !== undefined
-    && layout.lines.length === 0
+    && (layout.lines.length === 0 || anchorOnlyMark)
     && layout.shading === undefined
     && layout.borders.length === 0
-    && layout.resources.length === 0
-    && layout.drawings.length === 0
-    && layout.textBoxes.length === 0;
+    && (anchorOnlyMark || (layout.resources.length === 0
+      && layout.drawings.length === 0
+      && layout.textBoxes.length === 0));
+}
+
+/** The paragraph's only lines are its empty mark's (an anchor-only paragraph). */
+function isAnchorOnlyMark(layout: ParagraphLayout): boolean {
+  return layout.lines.length > 0 && layout.lines.every((line) => line.markLine === true);
+}
+
+/** Inkless for the paragraph's own mark-line decisions: an empty paragraph,
+ * or an anchor-only paragraph laid out as its empty mark. */
+function inklessMarkLine(block: Readonly<{ inkless?: boolean }>, layout: ParagraphLayout): boolean {
+  return block.inkless === true || isAnchorOnlyMark(layout);
 }
 
 function locationAfter(
@@ -2980,7 +2994,7 @@ function* paginateBodyPassSteps(
           let keepSetBlockedByDeferral = false;
           let bridgeSuccessor = wordEmptyKeepNextBridgesSuccessor({
             keepNext: block.keepNext,
-            inkless: block.inkless === true,
+            inkless: inklessMarkLine(block, acquired.layout),
             undecoratedMark: isUndecoratedInklessMark(acquired.layout),
           });
           for (let nextIndex = entryIndex + 1; nextIndex < input.sequence.length; nextIndex += 1) {
@@ -3133,7 +3147,7 @@ function* paginateBodyPassSteps(
         // mark that starts here without keepNext; any other fragment ignores
         // the reserve, so its whole-note acquisition is not performed (it
         // would otherwise touch every note of a long paragraph per attempt).
-        const markReserveMatters = cursor.boundary === null && block.inkless === true
+        const markReserveMatters = cursor.boundary === null && inklessMarkLine(block, acquired.layout)
           && !block.keepNext && isUndecoratedInklessMark(acquired.layout);
         const markReservePt = markReserveMatters
           ? footnoteAdmission(acquired.layout, location.availableBounds.widthPt).reservePt
@@ -3147,7 +3161,7 @@ function* paginateBodyPassSteps(
         const trailingMarkAdmissionAllowancePt =
           wordTrailingEmptyMarkAdmissionAllowancePt({
             hasContinuationBoundary: cursor.boundary !== null,
-            inkless: block.inkless === true,
+            inkless: inklessMarkLine(block, acquired.layout),
             undecorated: isUndecoratedInklessMark(acquired.layout),
             keepNext: block.keepNext,
             markReservePt,

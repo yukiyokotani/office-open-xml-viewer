@@ -91,6 +91,8 @@ export interface MeasuredLine {
   /** A line whose baseline another path already decided (the empty-mark line
    * that carries an anchor-only paragraph's anchors). */
   readonly baselineOffsetPt?: number;
+  /** The empty mark's line: every line-level fact comes from the mark. */
+  readonly emptyMarkLine?: true;
 }
 
 export interface MeasuredParagraph {

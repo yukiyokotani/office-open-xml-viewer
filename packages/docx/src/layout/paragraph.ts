@@ -4287,7 +4287,16 @@ function planMeasuredLines(
         raw.eastAsian, raw.gridCountSingle,
       ))
       : 0;
-    const retained = context.lineGrid.active ? sealLineCopy({
+    // The empty mark's line of an anchor-only paragraph keeps the mark's own
+    // page-edge facts (its allowance, no grid-leading line relief: the mark's
+    // grid relief is the measured markGridAfterLeadingPt), never facts
+    // recomputed from the line breaker's metrics.
+    const retained = measuredLine.emptyMarkLine ? sealLineCopy({
+      ...planned,
+      markLine: true as const,
+      ...((measured.markPageEdgeOverhangPt ?? 0) > 0
+        ? { pageEdgeOverhangPt: measured.markPageEdgeOverhangPt } : {}),
+    }, [planned]) : context.lineGrid.active ? sealLineCopy({
       ...planned,
       gridAfterLeadingPt: allowsGridLeadingOverhang ? Math.max(0, Math.min(
         (measuredLine.advancePt - ownHeightPt) / 2,
@@ -7333,6 +7342,7 @@ function projectAcquiredParagraphLines(
       topYPt: measured.contentStartYPt,
       advancePt: measured.contentEndYPt - measured.contentStartYPt,
       baselineOffsetPt: markLineBaselineOffsetPt(measured),
+      emptyMarkLine: true,
     }],
   } : measured;
   const occurrences = logicalOccurrenceMap(paragraph, plannedMeasured, options.environment.showTrackedChanges);
