@@ -4,8 +4,8 @@ import { layoutDocument } from './document-layout.js';
 import type { ParagraphLayout, PaintNode } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
 
-// `word-header-footer-off-line-grid`: a §17.6.5 "lines" docGrid pitches the
-// body lines only; header and footer lines keep their own height.
+// `word-header-footer-off-line-grid`: a §17.6.5 docGrid line pitch applies
+// to body lines only; header and footer lines keep their own height.
 
 function makeCtx(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -82,7 +82,12 @@ describe('header and footer on a §17.6.5 line grid', () => {
     expect(heights.footer).toBe(heights.header);
   });
 
-  it('keeps a linesAndChars grid on header and footer lines', () => {
-    expect(lineHeights('linesAndChars')).toMatchObject({ header: 18, footer: 18 });
+  it.each(['linesAndChars', 'snapToChars'])('keeps header and footer lines off a %s grid too', (kind) => {
+    for (const direction of [undefined, 'tbRl']) {
+      const heights = lineHeights(kind, direction);
+      expect(heights.body).toBe(18);
+      expect(heights.header).toBeLessThan(18);
+      expect(heights.footer).toBe(heights.header);
+    }
   });
 });
