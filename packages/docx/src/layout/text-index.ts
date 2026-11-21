@@ -97,6 +97,9 @@ interface NodeProjection {
   readonly paintOrderIndex: number;
   readonly clips: readonly ElementClipGeometry[];
   readonly textBoxVerticalMode?: NonNullable<TextBoxLayout['verticalMode']>;
+  /** Projected inside a line's retained frame; nested stories do not apply
+   * their own (paint/types.ts CanvasPaintContext.lineFramed). */
+  readonly lineFramed?: true;
 }
 
 const IDENTITY_AFFINE = Object.freeze({
@@ -400,10 +403,10 @@ function drawingOwnedContentProjection(
 function lineProjectionPointToPage(
   paragraph: ParagraphLayout,
   line: ParagraphLayout['lines'][number],
-  pointToPage: Matrix2DData,
+  projection: NodeProjection,
 ): Matrix2DData {
-  const lineFrame = lineFrameTransform(paragraph, line);
-  return lineFrame ? composeAffine(pointToPage, lineFrame) : pointToPage;
+  const lineFrame = projection.lineFramed ? null : lineFrameTransform(paragraph, line);
+  return lineFrame ? composeAffine(projection.pointToPage, lineFrame) : projection.pointToPage;
 }
 
 function visitParagraph(
@@ -412,6 +415,26 @@ function visitParagraph(
   context: ProjectionContext,
 ): void {
   const paragraphProjection = withClip(projection, paragraph.clipBounds);
+  // An inline drawing is line content: it projects through its owning
+  // line's frame, as paint draws it (line-frame.ts).
+  const inlineDrawingLines = new Map<string, ParagraphLayout['lines'][number]>();
+  if (paragraph.lineFrame !== undefined) {
+    for (const line of paragraph.lines) {
+      for (const placement of line.placements) {
+        if (placement.kind === 'drawing') inlineDrawingLines.set(placement.drawingId, line);
+      }
+    }
+  }
+  const inlineDrawingProjection = (drawing: DrawingLayout): NodeProjection => {
+    const line = drawing.anchorLayer ? undefined : inlineDrawingLines.get(drawing.id);
+    return line && !paragraphProjection.lineFramed && paragraph.lineFrame !== undefined
+      ? {
+          ...paragraphProjection,
+          lineFramed: true,
+          pointToPage: lineProjectionPointToPage(paragraph, line, paragraphProjection),
+        }
+      : paragraphProjection;
+  };
   const textBoxesById = new Map(
     paragraph.textBoxes.map((textBox) => [textBox.id, textBox]),
   );
@@ -426,14 +449,14 @@ function visitParagraph(
       .filter((drawing) => !drawing.anchorLayer && (drawing.textBoxIds?.length ?? 0) > 0)
       .map((drawing) => [drawing.id, drawing]));
     for (const line of paragraph.lines) {
-      const linePointToPage = lineProjectionPointToPage(paragraph, line, projection.pointToPage);
+      const linePointToPage = lineProjectionPointToPage(paragraph, line, projection);
       for (const retained of line.placements) {
         // ECMA-376 §20.4.2.8: an inline drawing occupies its run's place in
         // paragraph flow. Library selection policy includes nested text there
         // for copy; floating stories keep their separate reading-order policy.
         if (retained.kind === 'drawing') {
           const drawing = inlineTextDrawings.get(retained.drawingId);
-          if (drawing) visitDrawing(textBoxesById, drawing, paragraphProjection, context);
+          if (drawing) visitDrawing(textBoxesById, drawing, inlineDrawingProjection(drawing), context);
         }
         if (retained.kind === 'text') for (const placement of sourceOwnedTextPlacements(retained)) {
           if (context.collectTextRuns) {
@@ -462,7 +485,7 @@ function visitParagraph(
   }
   if (context.collectRasterPaintOccurrences) {
     for (const line of paragraph.lines) {
-      const linePointToPage = lineProjectionPointToPage(paragraph, line, paragraphProjection.pointToPage);
+      const linePointToPage = lineProjectionPointToPage(paragraph, line, paragraphProjection);
       for (const placement of line.placements) {
         if (placement.kind !== 'resource' || placement.resourceKind === 'math') continue;
         appendRasterPaintOccurrence(
@@ -500,7 +523,7 @@ function visitParagraph(
             placement: placement as ResourcePlacement & Readonly<{ resourceKind: 'image' | 'chart' }>,
             index,
             runIndex: placement.sourceRunIndex,
-            pointToPage: lineProjectionPointToPage(paragraph, line, paragraphProjection.pointToPage),
+            pointToPage: lineProjectionPointToPage(paragraph, line, paragraphProjection),
           }];
         }))
     : [];
@@ -516,7 +539,7 @@ function visitParagraph(
   ].sort((left, right) => left.runIndex - right.runIndex || left.index - right.index);
   for (const entry of elementsInSourceOrder) {
     if (entry.kind === 'drawing') {
-      visitDrawing(textBoxesById, entry.drawing, paragraphProjection, context);
+      visitDrawing(textBoxesById, entry.drawing, inlineDrawingProjection(entry.drawing), context);
       continue;
     }
     if (!context.collectDrawings) continue;

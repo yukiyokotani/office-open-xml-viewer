@@ -212,8 +212,9 @@ function paintParagraphDrawingLayout(
 function lineFrameMatrix(
   node: ParagraphLayout,
   line: ParagraphLayout['lines'][number],
+  context: CanvasPaintContext,
 ): Matrix2DData | null {
-  if (node.lineFrame !== 'block-reflected') return null;
+  if (node.lineFrame !== 'block-reflected' || context.lineFramed) return null;
   return { a: 1, b: 0, c: 0, d: -1, e: 0, f: 2 * line.bounds.yPt + line.bounds.heightPt };
 }
 
@@ -420,13 +421,14 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     for (const box of boxes) ctx.fillRect(box.xPt, box.yPt, box.widthPt, box.heightPt);
   }
   for (const line of node.lines) {
-    const lineFrame = lineFrameMatrix(node, line);
+    const lineFrame = lineFrameMatrix(node, line, context);
     if (!lineFrame) {
       paintLineContents(line, context);
       continue;
     }
     const lineContext: CanvasPaintContext = {
       ...context,
+      lineFramed: true,
       pointToCss: composeAffine(context.pointToCss ?? scaleAffine(context.scale), lineFrame),
     };
     canvasPaintFrame(ctx, () => applyCanvasTransform(ctx, lineFrame))(
@@ -440,8 +442,31 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
   for (const border of node.borders) {
     paintStrokeSegment(border, context, paragraphBorderMinimumCssWidthPx);
   }
+  // An inline drawing (shape, group, placeholder, preview) is line content:
+  // it and the stories it owns paint in its owning line's frame.
+  const inlineDrawingLines = new Map<string, ParagraphLayout['lines'][number]>();
+  if (node.lineFrame !== undefined) {
+    for (const line of node.lines) {
+      for (const placement of line.placements) {
+        if (placement.kind === 'drawing') inlineDrawingLines.set(placement.drawingId, line);
+      }
+    }
+  }
   for (const drawing of node.drawings.filter((item) => !item.anchorLayer)) {
-    paintDrawingWithTextBoxes(drawing);
+    const line = inlineDrawingLines.get(drawing.id);
+    const lineFrame = line ? lineFrameMatrix(node, line, context) : null;
+    if (!lineFrame) {
+      paintDrawingWithTextBoxes(drawing);
+      continue;
+    }
+    const lineContext: CanvasPaintContext = {
+      ...context,
+      lineFramed: true,
+      pointToCss: composeAffine(context.pointToCss ?? scaleAffine(context.scale), lineFrame),
+    };
+    canvasPaintFrame(ctx, () => applyCanvasTransform(ctx, lineFrame))(
+      () => paintParagraphDrawingLayout(node, drawing, lineContext),
+    )();
   }
   const front = node.drawings
     .filter((drawing) => drawing.anchorLayer && !drawing.anchorLayer.behindDoc)

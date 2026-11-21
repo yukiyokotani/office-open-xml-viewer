@@ -302,3 +302,80 @@ describe('section-logical anchored pictures in vertical sections', () => {
     expect([painted!.rect.widthPt, painted!.rect.heightPt]).toEqual([60, 40]);
   });
 });
+
+// An inline drawing is line content: in a tbLrV line it paints and projects
+// through the line's block-reflected frame, like the text beside it.
+describe('inline drawings in tbLrV line strips', () => {
+  const shapeDocument = (textDirection: string) => {
+    const document = sectionDocument(textDirection, ['AB']);
+    (document.body[0] as DocParagraph).runs.push({
+      type: 'shape', inline: true, widthPt: 30, heightPt: 20,
+      anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      zOrder: 0, stroke: '#000000', strokeWidth: 1, fill: null,
+      textBlocks: [{ text: 'Q', fontSizePt: 10, fontFamily: 'NotInMetrics', alignment: 'left' }],
+      subpaths: [[
+        { cmd: 'moveTo', x: 0, y: 0 }, { cmd: 'lineTo', x: 30, y: 10 },
+        { cmd: 'lineTo', x: 0, y: 20 }, { cmd: 'close' },
+      ]],
+    } as unknown as DocParagraph['runs'][number]);
+    return document;
+  };
+
+  it.each(['tbRl', 'tbLrV'])('paints a %s inline shape through a turn, as its text', async (textDirection) => {
+    const determinants: Array<{ op: string; determinant: number }> = [];
+    let matrix = [1, 0, 0, 1, 0, 0];
+    const stack: number[][] = [];
+    const multiply = (n: number[]) => {
+      const [a, b, c, d, e, f] = matrix;
+      matrix = [
+        a! * n[0]! + c! * n[1]!, b! * n[0]! + d! * n[1]!,
+        a! * n[2]! + c! * n[3]!, b! * n[2]! + d! * n[3]!,
+        a! * n[4]! + c! * n[5]! + e!, b! * n[4]! + d! * n[5]! + f!,
+      ];
+    };
+    const record = (op: string) => () => {
+      determinants.push({ op, determinant: matrix[0]! * matrix[3]! - matrix[1]! * matrix[2]! });
+    };
+    const ctx = Object.assign(makeCtx() as unknown as Record<string, unknown>, {
+      save() { stack.push([...matrix]); },
+      restore() { matrix = stack.pop()!; },
+      translate(x: number, y: number) { multiply([1, 0, 0, 1, x, y]); },
+      scale(x: number, y: number) { multiply([x, 0, 0, y, 0, 0]); },
+      rotate(angle: number) {
+        multiply([Math.cos(angle), Math.sin(angle), -Math.sin(angle), Math.cos(angle), 0, 0]);
+      },
+      transform(a: number, b: number, c: number, d: number, e: number, f: number) {
+        multiply([a, b, c, d, e, f]);
+      },
+      setTransform(a: number, b: number, c: number, d: number, e: number, f: number) {
+        matrix = [a, b, c, d, e, f];
+      },
+      fillText: record('text'),
+      stroke: record('stroke'),
+      fill: record('fill'),
+      clip() {}, rect() {}, closePath() {}, strokeRect() {}, clearRect() {},
+      setLineDash() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {}, ellipse() {},
+      createLinearGradient() { return { addColorStop() {} }; },
+      globalAlpha: 1, textBaseline: 'alphabetic', lineCap: 'butt', lineJoin: 'miter',
+    });
+    const canvas = { width: 0, height: 0, style: {}, getContext: () => ctx } as unknown as HTMLCanvasElement;
+
+    await renderDocumentToCanvas(shapeDocument(textDirection), canvas, 0, { dpr: 1, width: PAGE.width });
+
+    const strokes = determinants.filter((entry) => entry.op === 'stroke');
+    const texts = determinants.filter((entry) => entry.op === 'text');
+    expect(strokes.length).toBeGreaterThan(0);
+    expect(texts.length).toBeGreaterThan(0);
+    for (const entry of [...strokes, ...texts]) expect(entry.determinant).toBeGreaterThan(0);
+  });
+
+  it('projects the text a tbLrV inline shape owns through its line frame', () => {
+    const shapeRun = (textDirection: string) => textRunsForPage(layoutOf(shapeDocument(textDirection)), 0, { scale: 1 })
+      .find((run) => run.text === 'Q');
+    const rl = shapeRun('tbRl');
+    const lr = shapeRun('tbLrV');
+    expect(rl).toBeDefined();
+    // The owned text is turned exactly as in tbRl, not reflected.
+    expect(lr?.transform).toBe(rl!.transform);
+  });
+});
