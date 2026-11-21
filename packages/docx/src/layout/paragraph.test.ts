@@ -932,7 +932,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         const line = node.lines[0]!;
         expect(line.advancePt).toBeCloseTo(24, 10);
         const placement = resource(node);
-        // WORD_VERTICAL_INLINE_PICTURE_UPRIGHT: the 20pt physical width runs
+        // word-vertical-inline-picture-upright-extent: the 20pt physical width runs
         // across the line and the physical height along it.
         expect(placement.bounds.heightPt).toBeCloseTo(20, 10);
         expect(placement.bounds.widthPt).toBeCloseTo(heightPt, 10);

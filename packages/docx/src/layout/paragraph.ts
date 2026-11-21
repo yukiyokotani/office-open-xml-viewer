@@ -193,6 +193,7 @@ import {
   transformRect,
   transformRectEdges,
   uprightPhysicalExtent,
+  uprightPageResourceOrientation,
   uprightResourceOrientation,
 } from './coordinate-space.js';
 import { composeAffine, inverseMapAffinePoint, translationAffine } from './affine.js';
@@ -2412,6 +2413,7 @@ function finalizeParagraphLayout(input: AcquiredParagraphLayoutInput, frozenSour
     id: input.id,
     source: input.source,
     ...(input.paragraphId !== undefined ? { paragraphId: input.paragraphId } : {}),
+    ...(input.lineFrame ? { lineFrame: input.lineFrame } : {}),
     flowDomainId: input.flowDomainId,
     ordinaryFlow: input.ordinaryFlow,
     ...(input.styleId !== undefined ? { styleId: input.styleId } : {}),
@@ -4620,7 +4622,7 @@ function publicAnchoredResourceDrawing(
       rect,
       ...(options.environment.verticalPageFrame
         ? {
-            orientation: uprightResourceOrientation(
+            orientation: uprightPageResourceOrientation(
               options.environment.verticalPageFrame,
               options.environment.pageWritingMode,
             )!,
@@ -7695,6 +7697,10 @@ function projectAcquiredParagraph(
   const retainedInput: AcquiredParagraphLayoutInput = {
     kind: 'paragraph', id: options.id, source: options.source,
     ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
+    // `word-section-tblrv-line-strip`: lines of a vertical-lr page frame are
+    // reflected across their own block band at projection.
+    ...(options.environment.verticalPageFrame && options.environment.pageWritingMode === 'vertical-lr'
+      ? { lineFrame: 'block-reflected' as const } : {}),
     flowDomainId: options.flowDomainId, ordinaryFlow: options.ordinaryFlow,
     ...(paragraph.styleId !== undefined ? { styleId: paragraph.styleId } : {}),
     ...(!options.continuesFromPrevious && paragraph.bookmarks?.length

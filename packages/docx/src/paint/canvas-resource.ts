@@ -1,5 +1,6 @@
 import type { LayoutRect, PaintResourceKind, UprightResourceOrientation } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
+import { applyCanvasTransform } from './canvas-transform.js';
 
 /** Paint one retained non-text resource using the orientation selected during
  * layout acquisition. A vertical section rotates its section-logical frame a
@@ -23,7 +24,11 @@ export function paintRetainedResource(
     bounds.xPt + bounds.widthPt / 2,
     bounds.yPt + bounds.heightPt / 2,
   );
-  ctx.rotate(orientation === 'upright-physical' ? -Math.PI / 2 : Math.PI / 2);
+  if (orientation === 'upright-physical-transposed') {
+    applyCanvasTransform(ctx, { a: 0, b: 1, c: 1, d: 0, e: 0, f: 0 });
+  } else {
+    ctx.rotate(orientation === 'upright-physical' ? -Math.PI / 2 : Math.PI / 2);
+  }
   context.resources.paint(resourceKey, resourceKind, {
     xPt: -bounds.heightPt / 2,
     yPt: -bounds.widthPt / 2,

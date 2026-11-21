@@ -1639,29 +1639,6 @@ export function wordInlineObjectExactLineClips(origin: 'drawingml' | 'vmlStaticT
   return origin === 'drawingml';
 }
 
-export const WORD_VERTICAL_INLINE_PICTURE_UPRIGHT = defineCompatibilityRule({
-  id: 'word-vertical-inline-picture-upright',
-  evidence: {
-    kind: 'office-observation',
-    syntheticFixtureId: 'vertical-inline-picture-extent',
-    application: 'Microsoft Word',
-    version: '16.0.20527',
-    platform: 'Windows',
-  },
-  description: 'ECMA-376 §17.18.93 (tbRl, tbLrV) turns the text flow of a vertical section but does not say how an inline picture takes part in the turned line. Windows Word 16.0.20527 controls (compatibility mode 15, Times New Roman 10pt; DrawingML wp:inline and VML w:pict pictures 40pt wide and 16pt or 30pt tall, in tbRl and tbLrV sections, single and exact 24pt lines) paint the picture upright and advance the line by its physical height: text after a 30pt-tall picture starts 30pt further down the column, after a 16pt one 16pt further, and the picture\'s physical width runs across the line. The line box therefore takes the physical height as the object\'s inline advance and the physical width as its line-height extent. Library scope: inline charts and unavailable-resource placeholders, which paint upright the same way, take the same extent; anchored objects and inline drawing shapes (which turn with the line) keep their authored axes.',
-});
-
-/** WORD_VERTICAL_INLINE_PICTURE_UPRIGHT: an inline picture's logical
- * [advance, line extent] in a section whose upright resources turn back. */
-export function wordVerticalInlinePictureExtentPt(
-  widthPt: number,
-  heightPt: number,
-  upright: boolean,
-): readonly [number, number] {
-  void WORD_VERTICAL_INLINE_PICTURE_UPRIGHT;
-  return upright ? [heightPt, widthPt] : [widthPt, heightPt];
-}
-
 export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
   id: 'word-empty-mark-ascii-face',
   evidence: {

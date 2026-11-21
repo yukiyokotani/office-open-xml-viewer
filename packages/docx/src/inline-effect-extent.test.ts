@@ -48,25 +48,17 @@ describe('inline wp:effectExtent (ECMA-376 §20.4.2.6)', () => {
     ['upright-physical', [3, 5, 8, 2]],
     ['upright-physical-counter-clockwise', [8, 2, 3, 5]],
   ] as const)('maps physical edges onto the line axes of a %s section', (orientation, logical) => {
+    // The upright 20 x 40pt picture runs its 40pt height along the line and
+    // its 20pt width across it (word-vertical-inline-picture-upright-extent).
     const seg = imageSeg(image([2, 3, 5, 8]), { uprightResourceOrientation: orientation });
     expect(seg.effectExtent).toEqual(logical);
-    // WORD_VERTICAL_INLINE_PICTURE_UPRIGHT: the upright picture's physical
-    // height (40pt) runs along the line and its width (20pt) across it.
-    expect([seg.widthPt, seg.heightPt]).toEqual([40 + logical[0] + logical[2], 20 + logical[1] + logical[3]]);
     expect(seg.objectSizePt).toEqual([40, 20]);
+    expect([seg.widthPt, seg.heightPt]).toEqual([40 + logical[0] + logical[2], 20 + logical[1] + logical[3]]);
   });
 
-  it('turns the line extent of every upright inline resource, but not of an anchor', () => {
-    const upright = { uprightResourceOrientation: 'upright-physical' } as const;
-    const chart = imageSeg({ type: 'chart', widthPt: 20, heightPt: 40, anchor: false } as unknown as DocRun, upright);
-    expect([chart.widthPt, chart.heightPt]).toEqual([40, 20]);
-    const placeholder = imageSeg({ type: 'unavailableDrawing', resourceKind: 'image',
-      widthPt: 20, heightPt: 40 } as unknown as DocRun, upright);
-    expect([placeholder.widthPt, placeholder.heightPt]).toEqual([40, 20]);
-    const plain = imageSeg(image(), upright);
-    expect([plain.widthPt, plain.heightPt]).toEqual([40, 20]);
-    const anchored = imageSeg({ ...image(), anchor: true } as unknown as DocRun, upright);
-    expect([anchored.widthPt, anchored.heightPt]).toEqual([20, 40]);
+  it('swaps an upright picture without an effect extent into the line axes', () => {
+    const seg = imageSeg(image([0, 0, 0, 0]), { uprightResourceOrientation: 'upright-physical' });
+    expect([seg.widthPt, seg.heightPt]).toEqual([40, 20]);
   });
 
   it('reserves the same box for a chart whether or not its resource is available', () => {
@@ -81,4 +73,22 @@ describe('inline wp:effectExtent (ECMA-376 §20.4.2.6)', () => {
     expect(unavailableChart.effectExtent).toBeUndefined();
     expect([unavailableImage.widthPt, unavailableImage.heightPt]).toEqual([27, 51]);
   });
+
+  it.each(['upright-physical', 'upright-physical-counter-clockwise'] as const)(
+    'reserves the same counter-turned box for an unavailable inline resource in a %s section',
+    (orientation) => {
+      const environment = { uprightResourceOrientation: orientation };
+      const extent: [number, number, number, number] = [2, 3, 5, 8];
+      const available = imageSeg(image(extent), environment);
+      const unavailable = imageSeg({ type: 'unavailableDrawing', resourceKind: 'image',
+        widthPt: 20, heightPt: 40, inlineEffectExtent: extent } as unknown as DocRun, environment);
+      expect([unavailable.widthPt, unavailable.heightPt]).toEqual([available.widthPt, available.heightPt]);
+      expect(unavailable.effectExtent).toEqual(available.effectExtent);
+      const chart = imageSeg({ type: 'chart', widthPt: 20, heightPt: 40, anchor: false } as unknown as DocRun, environment);
+      const unavailableChart = imageSeg({ type: 'unavailableDrawing', resourceKind: 'chart',
+        widthPt: 20, heightPt: 40, inlineEffectExtent: extent } as unknown as DocRun, environment);
+      expect([chart.widthPt, chart.heightPt]).toEqual([40, 20]);
+      expect([unavailableChart.widthPt, unavailableChart.heightPt]).toEqual([chart.widthPt, chart.heightPt]);
+    },
+  );
 });
