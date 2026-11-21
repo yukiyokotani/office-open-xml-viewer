@@ -138,7 +138,7 @@ import {
   type RetainedEmphasisMarkInput,
 } from './retained-typography.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
-import { alignedAnchorPlacement, resolveAnchorFrame, uprightPhysicalPageFrames, type AnchorFrameRect, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
+import { alignedAnchorPlacement, resolveAnchorFrame, type AnchorFrameRect, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
 import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import {
   translateDrawing,
@@ -186,6 +186,7 @@ import {
   measureParagraphIntrinsicWidth,
   type BodyFrameGroup,
 } from './frame.js';
+import { uprightPhysicalPageFrames } from './context.js';
 import {
   createSectionRegionCoordinateSpace,
   transformPoint,
@@ -4901,7 +4902,10 @@ function acquireAnchorOccurrence(
         physicalPage,
       );
   const baseFrames = options.anchorFrames && coordinateSpace
-    ? uprightPhysicalPageFrames(options.anchorFrames, coordinateSpace.logicalToPhysical)
+    ? uprightPhysicalPageFrames(
+        options.anchorFrames,
+        options.environment.pageWritingMode === 'sideways-lr' ? 'bottomToTop' : null,
+      )
     : options.anchorFrames;
   const behavior = outer.run.anchorAcquisitionInput.behavior;
   const layoutInCellFrame = behavior.layoutInCellStatus === 'valid'

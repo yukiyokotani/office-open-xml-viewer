@@ -9,8 +9,6 @@ import {
   wordZeroRelativeSizeUsesExtent,
 } from './anchor-compatibility.js';
 import { snapshotPlainData } from './plain-data.js';
-import { transformRect } from './coordinate-space.js';
-import type { Matrix2DData } from './types.js';
 
 export interface AnchorFrameRect {
   xPt: number;
@@ -27,34 +25,6 @@ export interface AnchorReferenceFramesInput {
   line: AnchorFrameRect | null;
   character: AnchorFrameRect | null;
   pageParity: 'odd' | 'even' | null;
-}
-
-/**
- * Carry the section-logical `page` and `margin` reference frames of a vertical
- * section onto the upright physical page.
- *
- * ECMA-376 §20.4.3.4/§20.4.3.5 (ST_RelFromH/ST_RelFromV `page`, `margin`) name
- * the page and its §17.6.11 `w:pgMar` text margins. Under
- * `word-vertical-section-physical-drawing-layer` positionH/positionV of a
- * vertical section resolve on the upright physical page, while retained body
- * acquisition holds the page box and margins in the section's rotated logical
- * frame (logical left = physical top for tbRl, and so on). Resolving those
- * logical rectangles unrotated would swap the margins of the two axes as soon
- * as left/right differ from top/bottom. The derived left/right/top/bottom and
- * inside/outside margin edges follow from these two frames.
- *
- * Column, character, paragraph and line frames keep their section frame: the
- * physical meaning of these flow-owned references in a vertical section is not
- * part of the registered rule's evidence.
- */
-export function uprightPhysicalPageFrames<
-  T extends Pick<AnchorReferenceFramesInput, 'page' | 'margin'>,
->(frames: T, logicalToPhysical: Matrix2DData): T {
-  return {
-    ...frames,
-    page: frames.page && transformRect(logicalToPhysical, frames.page),
-    margin: frames.margin && transformRect(logicalToPhysical, frames.margin),
-  };
 }
 
 export interface AnchorFrameInput {

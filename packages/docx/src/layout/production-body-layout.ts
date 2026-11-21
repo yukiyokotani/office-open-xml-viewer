@@ -96,6 +96,7 @@ import { isPageObjectSource } from './body-layout-input.js';
 import {
   sectionBodyInsetPt as bodyMarginInsetPt,
   physicalSectionGeometry,
+  uprightPhysicalPageFrames,
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
 import { gridForParagraphContext, nativeUnitMinimumBodyBand, paragraphMeasurementEnvironment } from './measurement-environment.js';
@@ -154,7 +155,7 @@ import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisi
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-float-authority.js';
 import { applyDrawingMLCollisionRegistryDelta, createDrawingMLCollisionRegistry, drawingMLCollisionRegistryDelta, validateDrawingMLCollisionRegistryDelta } from './drawingml-collision-registry.js';
-import { resolveAnchorFrame, uprightPhysicalPageFrames } from './anchor-frame.js';
+import { resolveAnchorFrame } from './anchor-frame.js';
 import { isPageLevelWrapFloat } from './anchor-classification.js';
 import type { MeasurementTextContext } from './measurement-capabilities.js';
 import type {
@@ -2557,7 +2558,7 @@ function prescanBodyPageAnchors(
     const result = resolveAnchorFrame({
       acquisition: payloads[0]!.run.anchorAcquisitionInput,
       frames: verticalSpace
-        ? uprightPhysicalPageFrames(frames, verticalSpace.logicalToPhysical)
+        ? uprightPhysicalPageFrames(frames, request.location.section.sectionFlow)
         : frames,
     });
     if (result.status !== 'resolved') {
