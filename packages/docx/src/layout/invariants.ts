@@ -1,5 +1,6 @@
 import { requireResolvedDrawingMLGeometry } from '@silurus/ooxml-core';
 import { LayoutInvariantError } from './diagnostics.js';
+import { atMostWithinFloatingPrecision } from './floating-precision.js';
 import {
   createSectionRegionCoordinateSpace,
   logicalPageExtent,
@@ -267,16 +268,6 @@ function requireDrawingMLShapePlan(
       throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}.plan.stroke.width is negative`);
     }
   }
-}
-
-/** Inclusive geometry comparisons must tolerate the single-ULP drift produced
- * when the same authored boundary is reconstructed through different retained
- * subtraction/addition paths. This is floating-point precision, not a layout
- * tolerance: a geometrically distinct point value remains outside. */
-function atMostWithinFloatingPrecision(left: number, right: number): boolean {
-  if (left <= right) return true;
-  const precision = Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right));
-  return left - right <= precision;
 }
 
 function strictlyLessBeyondFloatingPrecision(left: number, right: number): boolean {
