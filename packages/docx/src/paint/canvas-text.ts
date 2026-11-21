@@ -17,6 +17,7 @@ import {
 } from './affine.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
 import { applyCanvasTransform } from './canvas-transform.js';
+import { lineFrameTransform } from '../layout/line-frame.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
   const optionalGlyph = placement.optionalHyphenGlyph === true;
@@ -207,6 +208,177 @@ function paintParagraphDrawingLayout(
   paintDrawingWithOwnedTextBoxes(drawing, textBoxesForDrawing(node, drawing), context);
 }
 
+function paintLineContents(
+  line: ParagraphLayout['lines'][number],
+  context: CanvasPaintContext,
+): void {
+  const { ctx } = context;
+  for (const rule of line.barTabRules ?? []) {
+    paintStrokeSegment(rule, context, oneDevicePixelCssWidth(context));
+  }
+  for (const placement of line.placements) {
+    if (placement.kind === 'resource') {
+      if (!context.resources) {
+        throw new Error(`Missing retained resource painter for ${placement.resourceKey}`);
+      }
+      const lineClip = placement.lineClip;
+      if (lineClip) {
+        // WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: a band as wide as any turn
+        // of the resource about its centre, cut at the line box.
+        const { xPt, yPt, widthPt, heightPt } = placement.bounds;
+        const reach = Math.hypot(widthPt, heightPt);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(xPt + widthPt / 2 - reach, yPt + lineClip.topPt, 2 * reach, Math.max(0, lineClip.bottomPt - lineClip.topPt));
+        ctx.clip();
+      }
+      if (context.textBoxVerticalMode) {
+        const rotation = context.textBoxVerticalMode === 'vert270' ? Math.PI / 2 : -Math.PI / 2;
+        ctx.save();
+        ctx.translate(
+          placement.bounds.xPt + placement.bounds.widthPt / 2,
+          placement.bounds.yPt + placement.bounds.heightPt / 2,
+        );
+        ctx.rotate(rotation);
+        paintRetainedResource(
+          placement.resourceKey,
+          placement.resourceKind,
+          {
+            xPt: -placement.bounds.heightPt / 2,
+            yPt: -placement.bounds.widthPt / 2,
+            widthPt: placement.bounds.heightPt,
+            heightPt: placement.bounds.widthPt,
+          },
+          placement.orientation,
+          context,
+        );
+        ctx.restore();
+      } else {
+        paintRetainedResource(
+          placement.resourceKey,
+          placement.resourceKind,
+          placement.bounds,
+          placement.orientation,
+          context,
+        );
+      }
+      if (lineClip) ctx.restore();
+      continue;
+    }
+    if (placement.kind === 'tab') {
+      if (placement.leader !== 'none') {
+        if (!placement.leaderGlyphs) {
+          throw new Error('Retained tab leader geometry is missing');
+        }
+        for (const operation of placement.leaderGlyphs) paintRetainedGlyph(operation, context);
+      }
+      for (const decoration of placement.decorations ?? []) {
+        paintStrokeSegment(decoration, context);
+      }
+      continue;
+    }
+    if (placement.kind !== 'text') continue;
+    validateTextSlices(placement);
+    if (placement.unsupportedGeometry?.length) {
+      throw new Error(
+        `Unsupported retained typography geometry: ${placement.unsupportedGeometry.join(', ')}`,
+      );
+    }
+    // ECMA-376 Part 1 §17.3.2.15: run highlighting supersedes shading.
+    if (placement.highlightFragments) {
+      for (const fragment of placement.highlightFragments) {
+        ctx.fillStyle = fragment.color;
+        ctx.fillRect(fragment.rect.xPt, fragment.rect.yPt, fragment.rect.widthPt, fragment.rect.heightPt);
+      }
+    } else if (placement.background || placement.highlight) {
+      ctx.fillStyle = placement.highlight ?? placement.background ?? '#000000';
+      ctx.fillRect(placement.bounds.xPt, placement.bounds.yPt, placement.bounds.widthPt, placement.bounds.heightPt);
+    }
+    ctx.fillStyle = textColor(placement, context);
+    const font = canvasFontString(
+      placement.fontRoute,
+      placement.fontSizePt,
+      placement.fontWeight,
+      placement.fontStyle,
+    );
+    ctx.font = font;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    const previousLetterSpacing = ctx.letterSpacing;
+    const previousKerning = ctx.fontKerning;
+    for (const op of placement.paintOps) {
+      // §17.3.3.29: an unselected optional hyphen must not affect display.
+      // Strip only the paint string, preserving all retained UTF-16 source
+      // ranges for slicing, hit testing and selection. Keep one contextual
+      // draw even for cs runs containing literal U+00AD (Firefox otherwise
+      // gives it native letterSpacing). Selected breaks already contain '-'.
+      const text = op.text.replace(/\u00AD/gu, '');
+      if (text.length === 0) continue;
+      ctx.direction = op.direction;
+      ctx.fontKerning = op.kerning;
+      const originXPt = placement.origin.xPt + op.offset.xPt;
+      const originYPt = placement.origin.yPt + op.offset.yPt;
+      const glyphOffsetXPt = op.glyphOffsetPt?.xPt ?? 0;
+      const glyphOffsetYPt = op.glyphOffsetPt?.yPt ?? 0;
+      if (op.glyphOrientation === 'upright') {
+        ctx.save();
+        ctx.translate(originXPt, originYPt);
+        ctx.rotate(-Math.PI / 2);
+        // The enclosing vertical page transform maps the run's advance axis
+        // onto physical Y. After counter-rotation, w:w therefore scales the
+        // glyph-local Y axis, matching the acquisition-time cell advance.
+        if (op.scaleX !== 1 || op.scaleY !== undefined) {
+          if (op.writingMode === 'vertical-rl') ctx.scale(1, op.scaleX);
+          else ctx.scale(op.scaleX, op.scaleY ?? 1);
+        }
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.letterSpacing = `${op.letterSpacingPt}px`;
+        const draw = (): void => fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
+        if (op.verticalFeature) {
+          withVertFeature(ctx as CanvasRenderingContext2D, draw);
+        }
+        else draw();
+        ctx.restore();
+      } else if (op.glyphOrientation === 'rotate') {
+        ctx.save();
+        ctx.translate(originXPt, originYPt);
+        if (op.scaleX !== 1) ctx.scale(op.scaleX, 1);
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
+        fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
+        ctx.restore();
+      } else if (op.scaleX !== 1) {
+        ctx.save();
+        ctx.translate(originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
+        ctx.scale(op.scaleX, 1);
+        ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
+        fillRetainedText(context, font, text, 0, 0);
+        ctx.restore();
+      } else {
+        ctx.letterSpacing = `${op.letterSpacingPt}px`;
+        fillRetainedText(context, font, text, originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
+      }
+    }
+    ctx.letterSpacing = previousLetterSpacing;
+    ctx.fontKerning = previousKerning;
+    if (placement.ruby) {
+      const uprightRuby = context.textBoxVerticalMode === 'eaVert'
+        || context.textBoxVerticalMode === 'mongolianVert';
+      for (const operation of placement.ruby.paintOps) {
+        paintRetainedGlyph(operation, context, uprightRuby);
+      }
+    }
+    for (const operation of placement.emphasis?.glyphs ?? []) {
+      paintRetainedGlyph(operation, context);
+    }
+    for (const path of placement.emphasis?.paths ?? []) paintRetainedMarkPath(path, context);
+    for (const decoration of placement.decorations) paintStrokeSegment(decoration, context);
+    for (const border of placement.runBorderFragments ?? []) paintStrokeSegment(border, context);
+  }
+}
+
 function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintContext): void {
   const { ctx } = context;
   const ownedTextBoxIds = new Set(node.drawings.flatMap((drawing) => drawing.textBoxIds ?? []));
@@ -239,170 +411,18 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     for (const box of boxes) ctx.fillRect(box.xPt, box.yPt, box.widthPt, box.heightPt);
   }
   for (const line of node.lines) {
-    for (const rule of line.barTabRules ?? []) {
-      paintStrokeSegment(rule, context, oneDevicePixelCssWidth(context));
+    const lineFrame = lineFrameTransform(node, line);
+    if (!lineFrame) {
+      paintLineContents(line, context);
+      continue;
     }
-    for (const placement of line.placements) {
-      if (placement.kind === 'resource') {
-        if (!context.resources) {
-          throw new Error(`Missing retained resource painter for ${placement.resourceKey}`);
-        }
-        const lineClip = placement.lineClip;
-        if (lineClip) {
-          // WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: a band as wide as any turn
-          // of the resource about its centre, cut at the line box.
-          const { xPt, yPt, widthPt, heightPt } = placement.bounds;
-          const reach = Math.hypot(widthPt, heightPt);
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(xPt + widthPt / 2 - reach, yPt + lineClip.topPt, 2 * reach, Math.max(0, lineClip.bottomPt - lineClip.topPt));
-          ctx.clip();
-        }
-        if (context.textBoxVerticalMode) {
-          const rotation = context.textBoxVerticalMode === 'vert270' ? Math.PI / 2 : -Math.PI / 2;
-          ctx.save();
-          ctx.translate(
-            placement.bounds.xPt + placement.bounds.widthPt / 2,
-            placement.bounds.yPt + placement.bounds.heightPt / 2,
-          );
-          ctx.rotate(rotation);
-          paintRetainedResource(
-            placement.resourceKey,
-            placement.resourceKind,
-            {
-              xPt: -placement.bounds.heightPt / 2,
-              yPt: -placement.bounds.widthPt / 2,
-              widthPt: placement.bounds.heightPt,
-              heightPt: placement.bounds.widthPt,
-            },
-            placement.orientation,
-            context,
-          );
-          ctx.restore();
-        } else {
-          paintRetainedResource(
-            placement.resourceKey,
-            placement.resourceKind,
-            placement.bounds,
-            placement.orientation,
-            context,
-          );
-        }
-        if (lineClip) ctx.restore();
-        continue;
-      }
-      if (placement.kind === 'tab') {
-        if (placement.leader !== 'none') {
-          if (!placement.leaderGlyphs) {
-            throw new Error('Retained tab leader geometry is missing');
-          }
-          for (const operation of placement.leaderGlyphs) paintRetainedGlyph(operation, context);
-        }
-        for (const decoration of placement.decorations ?? []) {
-          paintStrokeSegment(decoration, context);
-        }
-        continue;
-      }
-      if (placement.kind !== 'text') continue;
-      validateTextSlices(placement);
-      if (placement.unsupportedGeometry?.length) {
-        throw new Error(
-          `Unsupported retained typography geometry: ${placement.unsupportedGeometry.join(', ')}`,
-        );
-      }
-      // ECMA-376 Part 1 §17.3.2.15: run highlighting supersedes shading.
-      if (placement.highlightFragments) {
-        for (const fragment of placement.highlightFragments) {
-          ctx.fillStyle = fragment.color;
-          ctx.fillRect(fragment.rect.xPt, fragment.rect.yPt, fragment.rect.widthPt, fragment.rect.heightPt);
-        }
-      } else if (placement.background || placement.highlight) {
-        ctx.fillStyle = placement.highlight ?? placement.background ?? '#000000';
-        ctx.fillRect(placement.bounds.xPt, placement.bounds.yPt, placement.bounds.widthPt, placement.bounds.heightPt);
-      }
-      ctx.fillStyle = textColor(placement, context);
-      const font = canvasFontString(
-        placement.fontRoute,
-        placement.fontSizePt,
-        placement.fontWeight,
-        placement.fontStyle,
-      );
-      ctx.font = font;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'alphabetic';
-      const previousLetterSpacing = ctx.letterSpacing;
-      const previousKerning = ctx.fontKerning;
-      for (const op of placement.paintOps) {
-        // §17.3.3.29: an unselected optional hyphen must not affect display.
-        // Strip only the paint string, preserving all retained UTF-16 source
-        // ranges for slicing, hit testing and selection. Keep one contextual
-        // draw even for cs runs containing literal U+00AD (Firefox otherwise
-        // gives it native letterSpacing). Selected breaks already contain '-'.
-        const text = op.text.replace(/\u00AD/gu, '');
-        if (text.length === 0) continue;
-        ctx.direction = op.direction;
-        ctx.fontKerning = op.kerning;
-        const originXPt = placement.origin.xPt + op.offset.xPt;
-        const originYPt = placement.origin.yPt + op.offset.yPt;
-        const glyphOffsetXPt = op.glyphOffsetPt?.xPt ?? 0;
-        const glyphOffsetYPt = op.glyphOffsetPt?.yPt ?? 0;
-        if (op.glyphOrientation === 'upright') {
-          ctx.save();
-          ctx.translate(originXPt, originYPt);
-          ctx.rotate(-Math.PI / 2);
-          // The enclosing vertical page transform maps the run's advance axis
-          // onto physical Y. After counter-rotation, w:w therefore scales the
-          // glyph-local Y axis, matching the acquisition-time cell advance.
-          if (op.scaleX !== 1 || op.scaleY !== undefined) {
-            if (op.writingMode === 'vertical-rl') ctx.scale(1, op.scaleX);
-            else ctx.scale(op.scaleX, op.scaleY ?? 1);
-          }
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.letterSpacing = `${op.letterSpacingPt}px`;
-          const draw = (): void => fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
-          if (op.verticalFeature) {
-            withVertFeature(ctx as CanvasRenderingContext2D, draw);
-          }
-          else draw();
-          ctx.restore();
-        } else if (op.glyphOrientation === 'rotate') {
-          ctx.save();
-          ctx.translate(originXPt, originYPt);
-          if (op.scaleX !== 1) ctx.scale(op.scaleX, 1);
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
-          fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
-          ctx.restore();
-        } else if (op.scaleX !== 1) {
-          ctx.save();
-          ctx.translate(originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
-          ctx.scale(op.scaleX, 1);
-          ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;
-          fillRetainedText(context, font, text, 0, 0);
-          ctx.restore();
-        } else {
-          ctx.letterSpacing = `${op.letterSpacingPt}px`;
-          fillRetainedText(context, font, text, originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
-        }
-      }
-      ctx.letterSpacing = previousLetterSpacing;
-      ctx.fontKerning = previousKerning;
-      if (placement.ruby) {
-        const uprightRuby = context.textBoxVerticalMode === 'eaVert'
-          || context.textBoxVerticalMode === 'mongolianVert';
-        for (const operation of placement.ruby.paintOps) {
-          paintRetainedGlyph(operation, context, uprightRuby);
-        }
-      }
-      for (const operation of placement.emphasis?.glyphs ?? []) {
-        paintRetainedGlyph(operation, context);
-      }
-      for (const path of placement.emphasis?.paths ?? []) paintRetainedMarkPath(path, context);
-      for (const decoration of placement.decorations) paintStrokeSegment(decoration, context);
-      for (const border of placement.runBorderFragments ?? []) paintStrokeSegment(border, context);
-    }
+    const lineContext: CanvasPaintContext = {
+      ...context,
+      pointToCss: composeAffine(context.pointToCss ?? scaleAffine(context.scale), lineFrame),
+    };
+    canvasPaintFrame(ctx, () => applyCanvasTransform(ctx, lineFrame))(
+      () => paintLineContents(line, lineContext),
+    )();
   }
   // Keep authored paragraph-border geometry in retained layout, while matching
   // Word's raster treatment of subpixel rules with at least one device pixel

@@ -768,6 +768,14 @@ export interface ParagraphSpacingLayout {
 
 export interface ParagraphLayout extends LayoutNodeBase {
   readonly kind: 'paragraph';
+  /** Set on a paragraph painted through a vertical-lr (tbLrV) section frame.
+   * That frame is a reflection (physical x = logical y), so each line's
+   * content is reflected across its own block band (bounds.yPt …
+   * bounds.yPt + bounds.heightPt) before the frame applies: glyphs, inline
+   * objects, decorations, ruby and emphasis then keep the arrangement of a
+   * tbRl line strip while the strips advance left to right
+   * (`word-section-tblrv-line-strip`). */
+  readonly lineFrame?: 'block-reflected';
   /** Source `w14:paraId`; identity only, never interpreted by layout or paint. */
   readonly paragraphId?: string;
   readonly styleId?: string | null;
@@ -1361,6 +1369,8 @@ export interface ParagraphLayoutInput {
 
 export interface AcquiredParagraphLayoutInput {
   readonly kind: 'paragraph';
+  /** See {@link ParagraphLayout.lineFrame}. */
+  readonly lineFrame?: 'block-reflected';
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
   /** Source `w14:paraId`; retained for text-run projection. */

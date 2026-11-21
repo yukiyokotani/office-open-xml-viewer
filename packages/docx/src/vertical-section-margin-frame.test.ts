@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { transformRect } from './layout/coordinate-space.js';
-import type { LayoutPage, LayoutRect, ParagraphLayout } from './layout/types.js';
+import { composeAffine } from './layout/affine.js';
+import { lineFrameTransform } from './layout/line-frame.js';
+import type { DocumentLayout, LayoutPage, LayoutRect, ParagraphLayout } from './layout/types.js';
+import { renderDocumentToCanvas } from './renderer.js';
+import { textRunsForPage } from './text-run-projection.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
 
 // ECMA-376 §17.6.11 w:pgMar names physical page edges and §17.6.20 /
@@ -56,6 +60,30 @@ function para(text: string): BodyElement {
 
 const PAGE = { width: 600, height: 800 };
 const MARGINS = { top: 60, right: 90, bottom: 80, left: 40 };
+
+function sectionDocument(textDirection: string, texts = ['AB', 'CD']): DocxDocumentModel {
+  const section = {
+    pageWidth: PAGE.width, pageHeight: PAGE.height,
+    marginTop: MARGINS.top, marginRight: MARGINS.right,
+    marginBottom: MARGINS.bottom, marginLeft: MARGINS.left,
+    headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false,
+    textDirection,
+  } as SectionProps;
+  return {
+    section, body: texts.map(para),
+    headers: { default: null, first: null, even: null },
+    footers: { default: null, first: null, even: null },
+    fontFamilyClasses: {},
+  } as unknown as DocxDocumentModel;
+}
+
+function layoutOf(document: DocxDocumentModel): DocumentLayout {
+  return layoutDocument(
+    document,
+    createLayoutServices(document, { measureContext: makeCtx() }),
+    { currentDateMs: 0 },
+  );
+}
 
 function layoutPage(textDirection: string): LayoutPage {
   const section = {
@@ -113,4 +141,104 @@ describe('vertical section margins on the physical page (§17.6.11, §17.6.20)',
       expect(second!.xPt + second!.widthPt).toBeCloseTo(first!.xPt, 6);
     },
   );
+});
+
+// `word-section-tblrv-line-strip`: inside its strip a tbLrV line has the
+// arrangement of a tbRl line; only the strip order differs.
+describe('tbLrV line strips (§17.6.20)', () => {
+  const texts = ['AB\u3042\u3044', 'CD\u3046'];
+
+  it('projects every text run of a tbLrV strip as the matching tbRl strip', () => {
+    const runsOf = (textDirection: string) => {
+      const layout = layoutOf(sectionDocument(textDirection, texts));
+      const page = layout.pages[0]!;
+      const strips = page.layers.body
+        .filter((node): node is ParagraphLayout => node.kind === 'paragraph')
+        .map((node) => transformRect(
+          page.sectionRegions[0]!.coordinateSpace.logicalToPhysical,
+          node.lines[0]!.bounds,
+        ));
+      return { strips, runs: textRunsForPage(layout, 0, { scale: 1 }) };
+    };
+    const lr = runsOf('tbLrV');
+    const rl = runsOf('tbRl');
+
+    expect(lr.runs.map((run) => run.text)).toEqual(rl.runs.map((run) => run.text));
+    expect(lr.runs.length).toBeGreaterThan(0);
+    lr.runs.forEach((run, index) => {
+      const other = rl.runs[index]!;
+      const strip = lr.strips.find((rect) => run.x > rect.xPt && run.x <= rect.xPt + rect.widthPt + 1e-9)!;
+      const otherStrip = rl.strips.find((rect) => other.x > rect.xPt && other.x <= rect.xPt + rect.widthPt + 1e-9)!;
+      expect(run.transform).toBe(other.transform);
+      expect(run.x - strip.xPt).toBeCloseTo(other.x - otherStrip.xPt, 9);
+      expect(run.y).toBeCloseTo(other.y, 9);
+      expect([run.w, run.h]).toEqual([other.w, other.h]);
+    });
+  });
+
+  it('paints tbLrV glyphs through a turn, never a reflection', async () => {
+    const determinants: number[] = [];
+    let matrix = [1, 0, 0, 1, 0, 0];
+    const stack: number[][] = [];
+    const multiply = (n: number[]) => {
+      const [a, b, c, d, e, f] = matrix;
+      matrix = [
+        a! * n[0]! + c! * n[1]!, b! * n[0]! + d! * n[1]!,
+        a! * n[2]! + c! * n[3]!, b! * n[2]! + d! * n[3]!,
+        a! * n[4]! + c! * n[5]! + e!, b! * n[4]! + d! * n[5]! + f!,
+      ];
+    };
+    const base = makeCtx() as unknown as Record<string, unknown>;
+    const ctx = Object.assign(base, {
+      save() { stack.push([...matrix]); },
+      restore() { matrix = stack.pop()!; },
+      translate(x: number, y: number) { multiply([1, 0, 0, 1, x, y]); },
+      scale(x: number, y: number) { multiply([x, 0, 0, y, 0, 0]); },
+      rotate(angle: number) {
+        multiply([Math.cos(angle), Math.sin(angle), -Math.sin(angle), Math.cos(angle), 0, 0]);
+      },
+      transform(a: number, b: number, c: number, d: number, e: number, f: number) {
+        multiply([a, b, c, d, e, f]);
+      },
+      setTransform(a: number, b: number, c: number, d: number, e: number, f: number) {
+        matrix = [a, b, c, d, e, f];
+      },
+      fillText() { determinants.push(matrix[0]! * matrix[3]! - matrix[1]! * matrix[2]!); },
+      clip() {}, rect() {}, closePath() {}, fill() {}, strokeRect() {}, clearRect() {},
+      setLineDash() {}, arc() {}, quadraticCurveTo() {}, bezierCurveTo() {},
+      createLinearGradient() { return { addColorStop() {} }; },
+      globalAlpha: 1, textBaseline: 'alphabetic',
+    });
+    const canvas = { width: 0, height: 0, style: {}, getContext: () => ctx } as unknown as HTMLCanvasElement;
+
+    await renderDocumentToCanvas(sectionDocument('tbLrV', texts), canvas, 0, { dpr: 1, width: PAGE.width });
+
+    expect(determinants.length).toBeGreaterThan(0);
+    for (const determinant of determinants) expect(determinant).toBeGreaterThan(0);
+  });
+});
+
+// `word-vertical-inline-picture-upright-extent`: an inline picture stays
+// upright at its wp:extent; its height runs along the line.
+describe('inline pictures in vertical sections (§20.4.2.7)', () => {
+  it.each(['tbRl', 'tbLrV'])('keeps a 60 x 40pt picture upright in a %s strip', (textDirection) => {
+    const document = sectionDocument(textDirection, ['AB']);
+    (document.body[0] as DocParagraph).runs.push({
+      type: 'image', imagePath: 'word/media/p.png', mimeType: 'image/png',
+      widthPt: 60, heightPt: 40, anchor: false,
+    } as unknown as DocParagraph['runs'][number]);
+    const page = layoutOf(document).pages[0]!;
+    const paragraph = page.layers.body.find((node): node is ParagraphLayout => node.kind === 'paragraph')!;
+    const line = paragraph.lines[0]!;
+    const resource = line.placements.find((placement) => placement.kind === 'resource')!;
+    const lineFrame = lineFrameTransform(paragraph, line);
+    const region = page.sectionRegions[0]!.coordinateSpace.logicalToPhysical;
+    const toPage = lineFrame ? composeAffine(region, lineFrame) : region;
+    const picture = transformRect(toPage, resource.bounds);
+    const strip = transformRect(toPage, line.bounds);
+
+    expect([picture.widthPt, picture.heightPt]).toEqual([60, 40]);
+    expect(strip.widthPt).toBeGreaterThanOrEqual(60);
+    expect(resource.kind === 'resource' && resource.orientation).toBe('upright-physical');
+  });
 });

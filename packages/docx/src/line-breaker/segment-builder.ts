@@ -1768,6 +1768,11 @@ function inlineEffectExtentBox(
   effectExtent?: readonly [number, number, number, number];
   objectSizePt?: readonly [number, number];
 } {
+  // A counter-turned (upright) object in a vertical page frame keeps its
+  // §20.4.2.7 wp:extent on the physical page: its physical height runs along
+  // the line and its physical width across it, so the logical box swaps the
+  // two (`word-vertical-inline-picture-upright-extent`).
+  if (orientation !== undefined) [widthPt, heightPt] = [heightPt, widthPt];
   const authored = extent && extent.length === 4 && extent.some((edge) => Number.isFinite(edge) && edge !== 0);
   if (!authored && !turnedFootprint) return { widthPt, heightPt };
   const [l, t, r, b] = authored
@@ -2088,8 +2093,11 @@ function appendRunsToSegments(
         // Pareto controls do not reserve this padding; other chart classes
         // remain unmeasured, so chart effect-extent reservation is unsupported
         // rather than inferred from the picture/shape rule.
-        widthPt: chartRun.widthPt,
-        heightPt: chartRun.heightPt,
+        // An inline chart is counter-turned like a picture in a vertical
+        // page frame, so its logical box swaps its extent (inlineEffectExtentBox).
+        ...(!chartRun.anchor && environment.uprightResourceOrientation !== undefined
+          ? { widthPt: chartRun.heightPt, heightPt: chartRun.widthPt }
+          : { widthPt: chartRun.widthPt, heightPt: chartRun.heightPt }),
         anchor: chartRun.anchor ?? false,
         anchorXPt: chartRun.anchorXPt ?? 0,
         anchorYPt: chartRun.anchorYPt ?? 0,

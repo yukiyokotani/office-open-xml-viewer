@@ -128,6 +128,9 @@ const GRID_PLAIN_PARAGRAPH_KEYS = new Set([
   'lines', 'resources', 'events', 'exclusions', 'cellContainmentBounds', 'anchorCollisions',
   'anchorFrames',
   'continuation',
+  // A tbLrV line strip paints as a tbRl strip (word-section-tblrv-line-strip);
+  // its reflection does not move ink across the strip's block edges.
+  'lineFrame',
 ]);
 const GRID_PLAIN_LINE_KEYS = new Set([
   'range', 'bounds', 'baselinePt', 'advancePt', 'gridAfterLeadingPt', 'pageEdgeOverhangPt', 'placements',

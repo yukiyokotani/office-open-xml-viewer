@@ -5,6 +5,7 @@ import {
   translationAffine,
 } from './affine.js';
 import { sourceKey } from './source-key.js';
+import { lineFrameTransform } from './line-frame.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -391,6 +392,17 @@ function drawingOwnedContentProjection(
   return ownedProjection;
 }
 
+/** A line's point-to-page matrix: its paragraph's, composed with the line's
+ * own paint frame (line-frame.ts) as paint composes it. */
+function lineProjectionPointToPage(
+  paragraph: ParagraphLayout,
+  line: ParagraphLayout['lines'][number],
+  pointToPage: Matrix2DData,
+): Matrix2DData {
+  const lineFrame = lineFrameTransform(paragraph, line);
+  return lineFrame ? composeAffine(pointToPage, lineFrame) : pointToPage;
+}
+
 function visitParagraph(
   paragraph: ParagraphLayout,
   projection: NodeProjection,
@@ -411,6 +423,7 @@ function visitParagraph(
       .filter((drawing) => !drawing.anchorLayer && (drawing.textBoxIds?.length ?? 0) > 0)
       .map((drawing) => [drawing.id, drawing]));
     for (const line of paragraph.lines) {
+      const linePointToPage = lineProjectionPointToPage(paragraph, line, projection.pointToPage);
       for (const retained of line.placements) {
         // ECMA-376 §20.4.2.8: an inline drawing occupies its run's place in
         // paragraph flow. Library selection policy includes nested text there
@@ -423,7 +436,7 @@ function visitParagraph(
           if (context.collectTextRuns) {
             context.runs.push(Object.freeze({
               placement,
-              pointToPage: projection.pointToPage,
+              pointToPage: linePointToPage,
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }
@@ -446,6 +459,7 @@ function visitParagraph(
   }
   if (context.collectRasterPaintOccurrences) {
     for (const line of paragraph.lines) {
+      const linePointToPage = lineProjectionPointToPage(paragraph, line, paragraphProjection.pointToPage);
       for (const placement of line.placements) {
         if (placement.kind !== 'resource' || placement.resourceKind === 'math') continue;
         appendRasterPaintOccurrence(
@@ -453,7 +467,7 @@ function visitParagraph(
           placement.resourceKey,
           placement.resourceKind,
           placement.bounds,
-          paragraphProjection.pointToPage,
+          linePointToPage,
           {
             orientation: placement.orientation,
             textBoxVerticalMode: paragraphProjection.textBoxVerticalMode,
@@ -483,6 +497,7 @@ function visitParagraph(
             placement: placement as ResourcePlacement & Readonly<{ resourceKind: 'image' | 'chart' }>,
             index,
             runIndex: placement.sourceRunIndex,
+            pointToPage: lineProjectionPointToPage(paragraph, line, paragraphProjection.pointToPage),
           }];
         }))
     : [];
@@ -508,7 +523,7 @@ function visitParagraph(
         ...paragraph.source,
         path: Object.freeze([...paragraph.source.path, entry.runIndex]),
       }),
-      pointToPage: paragraphProjection.pointToPage,
+      pointToPage: entry.pointToPage,
       clips: paragraphProjection.clips,
       paintOrderIndex: paragraphProjection.paintOrderIndex,
       sourceOrder: context.drawingSourceOrder++,

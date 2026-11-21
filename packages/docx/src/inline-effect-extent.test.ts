@@ -48,9 +48,17 @@ describe('inline wp:effectExtent (ECMA-376 §20.4.2.6)', () => {
     ['upright-physical', [3, 5, 8, 2]],
     ['upright-physical-counter-clockwise', [8, 2, 3, 5]],
   ] as const)('maps physical edges onto the line axes of a %s section', (orientation, logical) => {
+    // The upright 20 x 40pt picture runs its 40pt height along the line and
+    // its 20pt width across it (word-vertical-inline-picture-upright-extent).
     const seg = imageSeg(image([2, 3, 5, 8]), { uprightResourceOrientation: orientation });
     expect(seg.effectExtent).toEqual(logical);
-    expect([seg.widthPt, seg.heightPt]).toEqual([20 + logical[0] + logical[2], 40 + logical[1] + logical[3]]);
+    expect(seg.objectSizePt).toEqual([40, 20]);
+    expect([seg.widthPt, seg.heightPt]).toEqual([40 + logical[0] + logical[2], 20 + logical[1] + logical[3]]);
+  });
+
+  it('swaps an upright picture without an effect extent into the line axes', () => {
+    const seg = imageSeg(image([0, 0, 0, 0]), { uprightResourceOrientation: 'upright-physical' });
+    expect([seg.widthPt, seg.heightPt]).toEqual([40, 20]);
   });
 
   it('reserves the same box for a chart whether or not its resource is available', () => {
