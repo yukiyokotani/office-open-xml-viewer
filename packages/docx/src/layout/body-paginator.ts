@@ -69,6 +69,7 @@ import {
 
 import {
   createPageFlowSectionContext,
+  effectiveHeaderFooterInlineMargins,
   physicalSectionGeometry,
   resolveSectionContextForPage,
 } from './context.js';
@@ -387,6 +388,33 @@ function ownerMap(input: BodyLayoutInput): Map<string, BodySectionLayoutInput> {
 
 function sectionContextForPage(owner: BodySectionLayoutInput, pageIndex: number) {
   return resolveSectionContextForPage(owner.context as SectionLayoutContext, owner.pageLayout, pageIndex);
+}
+
+/** The section frame a horizontal page's header and footer stories are laid
+ * out in. Under two-page imposition their inline extent can differ from the
+ * body's (`word-two-page-sheet-imposition`); otherwise it is the page section. */
+function headerFooterStorySection(
+  owner: BodySectionLayoutInput,
+  pageIndex: number,
+  section: DeepReadonly<SectionLayoutContext>,
+): DeepReadonly<SectionLayoutContext> {
+  const margins = effectiveHeaderFooterInlineMargins(owner.pageLayout, pageIndex);
+  const { geometry } = section;
+  if (margins.marginLeft === geometry.marginLeft && margins.marginRight === geometry.marginRight) {
+    return section;
+  }
+  const storyGeometry = Object.freeze({ ...geometry, ...margins });
+  return Object.freeze({
+    ...section,
+    geometry: storyGeometry,
+    columns: Object.freeze([Object.freeze({
+      xPt: Math.abs(storyGeometry.marginLeft),
+      wPt: Math.max(
+        0,
+        storyGeometry.pageWidth - Math.abs(storyGeometry.marginLeft) - Math.abs(storyGeometry.marginRight),
+      ),
+    })]),
+  });
 }
 
 function flowSection(owner: BodySectionLayoutInput, pageIndex: number) {
@@ -3948,11 +3976,12 @@ function measurePageHeaderFooterReserve(
   session: BodyLayoutSession,
   context: PageStoryContext,
 ): HeaderFooterReserve {
-  const { owner, pageIndex, section, firstPageOfSection, pageNumber } = context;
+  const { owner, pageIndex, firstPageOfSection, pageNumber } = context;
   // Vertical stories paint in physical page space; their overflow must not
   // charge the logical body interval. Use the resolved frame, including native
   // flow facts, rather than the text-direction token alone.
-  if (sectionWritingMode(section) !== 'horizontal-tb') return { top: 0, bottom: 0 };
+  if (sectionWritingMode(context.section) !== 'horizontal-tb') return { top: 0, bottom: 0 };
+  const section = headerFooterStorySection(owner, pageIndex, context.section);
   const inlineExtentPt = Math.max(
     0,
     section.geometry.pageWidth
@@ -4068,10 +4097,13 @@ function composePageStories(
       throw new Error('Page-story composition requires a story-capable layout session');
     }
     const vertical = sectionWritingMode(page.section) !== 'horizontal-tb';
+    const horizontalStorySection = vertical
+      ? page.section
+      : headerFooterStorySection(owner, page.pageIndex, page.section);
     const geometry = vertical
       // `word-vertical-section-physical-header-footer`
       ? physicalSectionGeometry(page.section.geometry, page.section.sectionFlow)
-      : page.section.geometry;
+      : horizontalStorySection.geometry;
     const inlineStartPt = Math.abs(geometry.marginLeft);
     const inlineExtentPt = Math.max(
       0,
@@ -4091,7 +4123,7 @@ function composePageStories(
           })]),
           textDirection: 'lrTb',
         })
-      : page.section;
+      : horizontalStorySection;
     const sourceFor = (kind: 'header' | 'footer') => selectedHeaderFooterStory(
       kind === 'header' ? owner.headers : owner.footers,
       {

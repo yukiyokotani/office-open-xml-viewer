@@ -426,6 +426,7 @@ function sectionInput(
       textDirection: occurrence.textDirection ?? 'lrTb',
       gutterPt: occurrence.gutterPt,
       rtlGutter: occurrence.rtlGutter,
+      sheetOrientation: occurrence.sheetOrientation,
       ...acquired.pageLayoutSettings,
     }),
   });

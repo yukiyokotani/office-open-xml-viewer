@@ -1096,6 +1096,12 @@ pub struct SectionPlacementWire {
     pub page_borders: Option<PageBorders>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_geometry: Option<Box<SectionPageGeometryWire>>,
+    /// §17.6.13 `pgSz/@orient` (ST_PageOrientation, default `portrait`),
+    /// present whenever the sectPr authors `<w:pgSz>`. The page box already
+    /// carries the authored width and height; layout needs the orientation
+    /// only to arrange two editing pages on one sheet (§§17.15.1.11/.13/.64).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_orient: Option<String>,
 }
 
 /// See [`SectionPlacementWire::section_flow`].

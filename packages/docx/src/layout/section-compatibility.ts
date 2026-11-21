@@ -54,13 +54,16 @@ export const WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE = defineCompatibilityRule({
   description: 'For book-fold printing Word places the automatic gutter at the right-margin bisector edge, including reverse book-fold mode.',
 });
 
-export const WORD_BOOK_FOLD_AUTHORED_PAGE_BOX = defineCompatibilityRule({
-  id: 'word-book-fold-authored-page-box',
+export const WORD_TWO_PAGE_SHEET_IMPOSITION = defineCompatibilityRule({
+  id: 'word-two-page-sheet-imposition',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/book-fold-page-box.test.ts#lays out a book-fold section on its authored pgSz page box',
+    kind: 'office-observation',
+    syntheticFixtureId: 'book-fold-two-on-one-imposition',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
   },
-  description: 'ECMA-376 §§17.15.1.11/.13 divide a landscape sheet in half vertically into two editing pages. Word saves that editing page, not the sheet, in pgSz (§17.6.13): with book fold on, w is the half-sheet width and orient names the folded sheet (a Legal-coded landscape sheet is saved as a 7in x 8.5in pgSz with orient="landscape"), and Word lays every page out on the authored box without halving it again. Evidence (observed Office behaviour): Windows Word 16.0.20527 PDF export of a corpus document with bookFoldPrinting and no gutter: every exported page has the authored pgSz and body lines span the full authored width minus the left/right margins. Not measured: a landscape-shaped pgSz under book fold, and printTwoOnOne (§17.15.1.64), which keeps its normative half-sheet division; no synthetic control yet.',
+  description: 'ECMA-376 §§17.15.1.11/.13/.64 describe dividing the section page in half. Word instead keeps the authored pgSz (§17.6.13) as every editing page and uses pgSz/@orient for the sheet arrangement. Margins L/R/T/B, gutter G; page 1, 3, … is the mirrored member (page 2, 4, … under bookFoldRevPrinting). Landscape sheet, book fold or two-up: the normal page has left L and right R+G, the mirrored page left R+G and right L; with gutterAtTop the top becomes T+G, the normal page has left L and right R, and the mirrored page keeps that width but starts at R+G (right L-G). Bottom stays B. Book-fold headers and footers keep the single-page extent (gutter on the left, mirrorMargins and gutterAtTop as usual); two-up headers and footers follow the imposed page without gutterAtTop. Portrait sheet, two-up: left L and right R on every page, the mirrored page has top B+G and bottom T, the other top T and bottom B+G; gutterAtTop and mirrorMargins have no effect; headers and footers use L/R. Portrait sheet, book fold: the body uses L/R/T/B with no gutter or mirroring; headers and footers keep the single-page extent. mirrorMargins left the imposed body unchanged in both measured cases (landscape-sheet book fold, portrait-sheet two-up). Evidence: 28 Windows Word PDF exports (two runs; margins chosen so no two candidate rules coincide) covering book fold and reverse book fold on landscape sheets of portrait and landscape shape, gutterAtTop with both, book fold on a portrait sheet, two-up on portrait and landscape sheets of either shape with and without gutterAtTop, mirrorMargins with book fold and two-up, and single-page controls; plus a corpus document whose half-Legal booklet pages export at the authored 7in x 8.5in. Not measured: reverse book fold or gutterAtTop on a portrait sheet, two-up on a landscape sheet with mirrorMargins, rtlGutter with any imposition, and page parity after a page-number restart (physical page parity is used).',
 });
 
 export const WORD_DEFAULT_LINE_NUMBER_DISTANCE_PT = 18;
@@ -110,8 +113,4 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
     return input.hasFollowingInk ? input.markGridAfterLeadingPt ?? 0 : 0;
   }
   return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
-}
-
-export function wordBookFoldGutterEdge(): 'right' {
-  return 'right';
 }

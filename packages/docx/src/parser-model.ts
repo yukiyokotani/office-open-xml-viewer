@@ -89,6 +89,7 @@ import {
   sectionPageBox,
   type BodySectionIndexInput,
   type BodySectionOccurrence,
+  type PageSheetOrientation,
 } from './layout/context.js';
 import { normalizeAdjacentTables, type AdjacentTableSequenceInput } from './layout/adjacent-tables.js';
 import { repeatedFootnoteLastReferenceIndexes } from './layout/note-reference-ownership.js';
@@ -556,6 +557,8 @@ interface InternalSectionPlacementWire {
     headerDistance?: number | null;
     footerDistance?: number | null;
   }> | null;
+  /** §17.6.13 pgSz/@orient; present whenever the sectPr authors pgSz. */
+  readonly pageOrient?: string | null;
 }
 
 type InternalSectionBreak = Extract<BodyElement, { type: 'sectionBreak' }> & {
@@ -581,6 +584,8 @@ export interface SectionPlacementInput {
   readonly pageBordersAuthored: boolean;
   readonly pageBorders: Readonly<import('./types.js').PageBorders> | null;
   readonly pageGeometry: InternalSectionPlacementWire['pageGeometry'];
+  /** §17.6.13 sheet orientation of an authored pgSz; null when pgSz is absent. */
+  readonly pageOrient: PageSheetOrientation | null;
   /** Canonical counter-clockwise page frame; absent for OOXML sections. */
   readonly sectionFlow?: SectionFlow;
 }
@@ -1296,6 +1301,12 @@ function setBodySectionPlacementInputs(
   byFinalSection.set(finalSection, inputs);
 }
 
+/** ECMA-376 §17.18.65 ST_PageOrientation; an authored pgSz defaults to portrait. */
+function sheetOrientation(value: string | null | undefined): PageSheetOrientation | null {
+  if (value == null) return null;
+  return value === 'landscape' ? 'landscape' : 'portrait';
+}
+
 function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): DocumentSectionPlacementInputs {
   const endingSections = new Map<number, SectionPlacementInput>();
   let ordinal = 0;
@@ -1315,6 +1326,7 @@ function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): Document
       pageBordersAuthored: wire?.pageBordersAuthored ?? false,
       pageBorders: wire?.pageBorders ?? null,
       pageGeometry: wire?.pageGeometry ?? element.geom ?? {},
+      pageOrient: sheetOrientation(wire?.pageOrient),
       ...sectionFlowFacts(wire, element.textDirection),
     }, 'DOCX ending-section placement input'));
     ordinal += 1;
@@ -1339,6 +1351,7 @@ function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): Document
       pageBorders: finalWire?.pageBorders ?? doc.section?.pageBorders ?? null,
       pageGeometry: finalWire?.pageGeometry
         ?? (doc.section ? sectionPageBox(doc.section) : {}),
+      pageOrient: sheetOrientation(finalWire?.pageOrient),
       ...sectionFlowFacts(finalWire, doc.section?.textDirection),
     }, 'DOCX final-section placement input'),
   });
@@ -1395,9 +1408,10 @@ const EMPTY_SECTION_HEADERS_FOOTERS: HeadersFooters = Object.freeze({
  * layout receives no document-model scanning capability or parser-private wire.
  */
 export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexInput {
-  type PendingOccurrence = Omit<BodySectionOccurrence, 'geometry' | 'gutterPt'> & {
+  type PendingOccurrence = Omit<BodySectionOccurrence, 'geometry' | 'gutterPt' | 'sheetOrientation'> & {
     readonly authoredGeometry: Readonly<Partial<import('./types.js').SectionGeom>>;
     readonly authoredGutterPt: number | null;
+    readonly authoredSheetOrientation: PageSheetOrientation | null;
   };
   const pending: PendingOccurrence[] = [];
   const placements = projectSectionPlacementInputs(doc as InternalDocxDocumentModel);
@@ -1430,6 +1444,7 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
       docGridLinePitch: placement.docGridLinePitch,
       docGridCharSpace: placement.docGridCharSpace,
       authoredGutterPt: placement.gutterPt,
+      authoredSheetOrientation: placement.pageOrient,
       rtlGutter: placement.rtlGutter === true,
       pageBordersAuthored: placement.pageBordersAuthored,
       pageBorders: placement.pageBorders,
@@ -1464,6 +1479,7 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
     docGridLinePitch: placement.docGridLinePitch,
     docGridCharSpace: placement.docGridCharSpace,
     authoredGutterPt: placement.gutterPt,
+    authoredSheetOrientation: placement.pageOrient,
     rtlGutter: placement.rtlGutter === true,
     pageBordersAuthored: placement.pageBordersAuthored,
     pageBorders: placement.pageBorders,
@@ -1474,6 +1490,9 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
   const documentGeometry = sectionPageBox(doc.section);
   let followingGeometry: import('./types.js').SectionGeom | null = null;
   let followingGutterPt: number | null = null;
+  // The orientation belongs to pgSz, so it falls back exactly as the page box.
+  const documentSheetOrientation = placements.finalSection.pageOrient ?? 'portrait';
+  let followingSheetOrientation: PageSheetOrientation | null = null;
   for (let index = pending.length - 1; index >= 0; index -= 1) {
     const occurrence = pending[index]!;
     // pgSz/pgMar are optional children and ECMA-376 does not define a Letter /
@@ -1499,14 +1518,19 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
     const gutterPt: number = occurrence.authoredGutterPt
       ?? (occurrence.startType === 'continuous' ? followingGutterPt : null)
       ?? 0;
+    const sheetOrientation: PageSheetOrientation = occurrence.authoredSheetOrientation
+      ?? (occurrence.startType === 'continuous' ? followingSheetOrientation : null)
+      ?? documentSheetOrientation;
     const {
       authoredGeometry: _authoredGeometry,
       authoredGutterPt: _authoredGutterPt,
+      authoredSheetOrientation: _authoredSheetOrientation,
       ...facts
     } = occurrence;
-    occurrences[index] = { ...facts, geometry, gutterPt };
+    occurrences[index] = { ...facts, geometry, gutterPt, sheetOrientation };
     followingGeometry = geometry;
     followingGutterPt = gutterPt;
+    followingSheetOrientation = sheetOrientation;
   }
 
   // Section placement is also consumed independently by public-model callers.

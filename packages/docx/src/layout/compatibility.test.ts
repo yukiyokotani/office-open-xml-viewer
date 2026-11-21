@@ -104,12 +104,12 @@ import {
 } from './script-compatibility.js';
 import {
   WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
+  WORD_TWO_PAGE_SHEET_IMPOSITION,
   WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE,
   WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE_PT,
   WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
-  wordBookFoldGutterEdge,
   wordContinuousSectionRestartDisplayNumber,
   wordLineNumberDistancePt,
   wordTrailingEmptyMarkAdmissionAllowancePt,
@@ -320,6 +320,7 @@ describe('layout compatibility inventory', () => {
       WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
       WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION,
       WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
+      WORD_TWO_PAGE_SHEET_IMPOSITION,
       WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
       WORD_TABLE_BORDER_LAYER_CASCADE,
       WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT,
@@ -602,7 +603,6 @@ describe('layout compatibility inventory', () => {
       epsilonPt: 0.0001,
     })).toBe(false);
     expect(wordContinuousSectionRestartDisplayNumber(4, 8, 6)).toBe(6);
-    expect(wordBookFoldGutterEdge()).toBe('right');
     const trailingMark = {
       hasContinuationBoundary: false,
       inkless: true,
