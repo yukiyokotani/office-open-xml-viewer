@@ -627,6 +627,10 @@ export interface DrawingPlacement {
   readonly range: TextRange;
   readonly drawingId: LayoutNodeId;
   readonly bounds: LayoutRect;
+  /** An unavailable picture's placeholder clipped to its line like the
+   * picture (ResourcePlacement.lineClip): top and bottom of the line box
+   * relative to `bounds.yPt`. */
+  readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
   readonly advancePt: number;
 }
 

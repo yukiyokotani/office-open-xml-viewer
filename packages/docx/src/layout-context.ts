@@ -92,6 +92,9 @@ export interface StoryContext {
   readonly lineNumberingEligible: boolean;
   /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
   readonly quarterTurned?: boolean;
+  /** A text-box story whose outermost host is a header or footer
+   * (`word-header-footer-off-line-grid`). */
+  readonly headerFooterHosted?: true;
   /**
    * The one admission fact of WORD_JUSTIFICATION_PUNCTUATION_HANG: this story
    * position is one Word was measured in, acquired in its section's own flow:
@@ -130,6 +133,9 @@ export function enterTableCellStoryContext(
     containers: [...parent.containers, { kind: 'tableCell' }],
     lineNumberingEligible: false,
     ...(parent.quarterTurned ? { quarterTurned: true } : {}),
+    // `word-header-footer-off-line-grid`: a cell of header/footer-hosted
+    // content is header/footer content too.
+    ...(parent.headerFooterHosted ? { headerFooterHosted: true as const } : {}),
     ...(parent.closingMarkHangAdmitted && parent.story === 'body' && cellFlowsHorizontally
       ? { closingMarkHangAdmitted: true as const } : {}),
   };
@@ -362,13 +368,19 @@ export function resolveParagraphLayoutContext(
   story: StoryContext,
   paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
-  const lineGridActive =
+  const paragraphLineGrid =
     isSectionLineGrid(section.grid.kind)
     && section.grid.linePitchPt != null
     && section.grid.linePitchPt > 0
     && paragraph.snapToGrid !== false
     && paragraph.lineSpacing?.rule !== 'exact'
     && (!hasTableCellContainer(story) || settings.compat.adjustLineHeightInTable);
+  // `word-header-footer-off-line-grid`: every paragraph of a header or footer
+  // story (top level, framed, in table cells) and of the text boxes it hosts
+  // keeps its own line height.
+  const headerFooterContent = story.story === 'header' || story.story === 'footer'
+    || story.headerFooterHosted === true;
+  const lineGridActive = paragraphLineGrid && !headerFooterContent;
   const characterGridActive = isSectionCharacterGrid(section.grid.kind);
   const baseRtl = paragraph.bidi === true;
   const paragraphOffAdmitted = paragraphOffJapaneseAdmitted(settings, section, story, paragraph);

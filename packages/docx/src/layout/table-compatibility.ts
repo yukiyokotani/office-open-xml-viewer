@@ -5,7 +5,7 @@ import type { DocxCompatProfile } from './compat-profile.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { ParagraphLayoutSource, ParagraphAcquisitionInput } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
-import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput, TableCellLayoutInput } from './types.js';
+import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput, TableCellLayoutInput, TableBorderInput } from './types.js';
 
 export const WORD_CELL_OWNED_GRID_FRAME = defineCompatibilityRule({
   id: 'word-cell-owned-grid-frame',
@@ -560,6 +560,26 @@ export const WORD_VERTICAL_MERGE_TERMINAL_BORDER = defineCompatibilityRule({
   },
   description: 'Resolve the bottom edge of a vertically merged cell from its terminal continuation cell before applying shared-edge conflict rules. Library policy, no Office measurement: terminal border of a vertical merge (PR #1032); the ECMA-376 §17.4.66 tcBorders note does not address vMerge.',
 });
+
+export const WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-vertical-merge-interior-border-footprint',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vmerge-interior-border-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.4.85 vMerge joins cells into one merged cell, so no horizontal rule is drawn between its rows, and §17.4.66 tcBorders does not say whether a merged constituent\'s own bottom border still takes space. Windows Word 16.0.20527 controls (4-row tables of 20pt atLeast rows, Times New Roman 11pt, vAlign bottom text; two- and three-row merges in the first column, ending on or before the last row; single 0.5pt and 3pt borders; on and off a 20pt line grid; with and without adjustLineHeightInTable; compatibility modes 14 and 15) show that the bottom border of every constituent except the last one is charged to the row below it like an ordinary rule between rows, though it is not drawn: a 0.5pt border on the first merged cell makes the next row 0.5pt taller and moves its text down 0.5pt (3pt: 3pt), a three-row merge charges both interior borders, a taller next row still grows by the border, and a border only on the last constituent charges nothing inside the merge. The table bottom keeps the terminal continuation border (WORD_VERTICAL_MERGE_TERMINAL_BORDER). The controls set the borders on the cells themselves; a table-level insideH reaching a merged cell was not measured and charges nothing.',
+});
+
+/** WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT: the width a merged
+ * constituent's own bottom border charges to the row below inside the merge. */
+export function wordVerticalMergeInteriorBorderPt(bottom: TableBorderInput | null): number {
+  void WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT;
+  if (!bottom || bottom.authoredStyle === 'nil' || bottom.authoredStyle === 'none') return 0;
+  return Number.isFinite(bottom.widthPt) && bottom.widthPt > 0 ? bottom.widthPt : 0;
+}
 
 export const WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE = defineCompatibilityRule({
   id: 'word-vertical-section-upright-block-table',

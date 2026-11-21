@@ -15,6 +15,7 @@ import {
 import { EAST_ASIAN_RE, LIST_LABEL_PICTURE_INSET_PT } from '../layout/text.js';
 import {
   wordCjkClosingMarkHangRefused,
+  wordInlineObjectPositionedExtentPx,
   wordIsOverflowPunctuation,
   wordIdeographicSpaceLineEndAllowanceCount,
   wordVisiblePrefixFitWidthPx,
@@ -655,13 +656,15 @@ function processImageSegment(context: BreakOpportunityIteratorContext, seg: Layo
   }
   const w = seg.widthPt * scale;
   const h = seg.heightPt;
-  const asc = seg.heightPt * scale;
+  const { ascentPx: asc, descentPx: desc } = wordInlineObjectPositionedExtentPx(
+    seg.heightPt * scale, (seg.positionPt ?? 0) * scale,
+  );
   seg.measuredWidth = w;
   if (breakerState.currentLine.length > 0 && !fitsLineWidth(breakerState.currentWidth + w, availW())) {
     flush(undefined, false, seg.src);
   }
   if (breakerState.currentLine.length === 0 && !fitsLineWidth(w, availW())) context.forcedPlacement(w);
-  addToLine(seg, w, h, asc, 0);
+  addToLine(seg, w, h, asc, desc);
   return;
 }
 
@@ -679,7 +682,10 @@ function commitAlignedTabCell(context: BreakOpportunityIteratorContext): void {
     if ('imagePath' in q) {
       const w = q.widthPt * scale;
       q.measuredWidth = w;
-      addToLine(q, w, q.heightPt, q.heightPt * scale, 0);
+      const { ascentPx, descentPx } = wordInlineObjectPositionedExtentPx(
+        q.heightPt * scale, (q.positionPt ?? 0) * scale,
+      );
+      addToLine(q, w, q.heightPt, ascentPx, descentPx);
     } else if ('math' in q) {
       addToLine(q, q.measuredWidth || 0, q.fontSize, q.mathAscent || 0, q.mathDescent || 0);
     } else {

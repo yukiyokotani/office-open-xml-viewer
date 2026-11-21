@@ -148,7 +148,7 @@ import {
 import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
-import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
+import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -1010,6 +1010,7 @@ function layoutBodyStory(
       containers: [],
       lineNumberingEligible: false,
       ...(request.container.quarterTurned ? { quarterTurned: true } : {}),
+      ...(textBoxStoryHostedByHeaderFooter(request.source) ? { headerFooterHosted: true as const } : {}),
       // WORD_JUSTIFICATION_PUNCTUATION_HANG: Word matches the main body in a
       // header and a footnote (blk-0898-cjk-kincell); footers, endnotes, note
       // separators and text-box stories are unmeasured.
@@ -1842,11 +1843,11 @@ function measureBodyParagraphEntry(
           markBelowBaselinePt: services.text?.libreOfficeLineBoxes === true && !markOnLineGrid
             ? 0 : measured.lastLineBelowBaselinePt,
           markOnLineGrid,
-          // The page-margin observation grants no allowance through floats.
-          // A wrapped mark keeps its complete cell, as plain text does, and
-          // so does every mark of a model source whose grid lines take whole
-          // cells (`plainLineBoxes`, LibreOffice).
-          markGridAfterLeadingPt: layout.exclusions.length === 0
+          // A wrapped mark keeps its complete cell, as plain text does
+          // (a float elsewhere on the page does not wrap it), and so does
+          // every mark of a model source whose grid lines take whole cells
+          // (`plainLineBoxes`, LibreOffice).
+          markGridAfterLeadingPt: !markLineWrapped(layout, measured)
             && services.text?.plainLineBoxes !== true
             ? measured.markGridAfterLeadingPt ?? 0 : 0,
         }
@@ -2395,6 +2396,10 @@ function prescanBodyPageAnchors(
     line: null,
     character: null,
     pageParity: request.location.pageIndex % 2 === 0 ? ('odd' as const) : ('even' as const),
+    pageBandDistances: Object.freeze({
+      headerPt: geometry.headerDistance,
+      footerPt: geometry.footerDistance,
+    }),
   });
   const publicParagraphs = new Set<ParagraphLayoutSource>();
   const paragraphKey = (source: SourceRef) =>
@@ -3080,6 +3085,15 @@ function completeTextBoxStoryAcquirerFor(
 /** Acquire a text box's complete story with its owner's section, page and
  * frame as authority. The section-keyed story cache stays shared because its
  * key includes the full section context. */
+/** Whether a text-box story's outermost host is a header or footer story.
+ * A text-box story instance is `<host story>:<host instance>:<path>`, nested
+ * text boxes prefixing further `textbox` hosts. */
+function textBoxStoryHostedByHeaderFooter(source: SourceRef): boolean {
+  if (source.story !== 'textbox') return false;
+  const host = source.storyInstance.split(':').find((token) => token !== 'textbox');
+  return host === 'header' || host === 'footer';
+}
+
 function acquireCompleteBodyTextBoxStory(
   owner: CompleteTextBoxStoryOwner,
   storyAcquisitionContext: BodyStoryAcquisitionContext,
@@ -4440,4 +4454,15 @@ function effCellMargins(
       preRegisterPageFloats: __test_preRegisterPageFloats,
     }),
   });
+}
+
+/** An empty mark keeps its whole grid cell when a wrap exclusion overlaps
+ * its line cell (WORD_GRID_LINE_CONTENT_FIT_ADMISSION). */
+function markLineWrapped(
+  layout: ParagraphLayout,
+  measured: Readonly<{ contentStartYPt: number; contentEndYPt: number }>,
+): boolean {
+  return layout.exclusions.length > 0 && wordGridLeadingWrapExclusionOverlaps(
+    layout, measured.contentStartYPt, measured.contentEndYPt,
+  );
 }
