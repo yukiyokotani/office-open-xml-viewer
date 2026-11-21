@@ -4827,6 +4827,11 @@ function anchorAxisOwnership(
   // band, so the coordinates must travel with the host when the retained table
   // is placed on the page.
   if (layoutInCell) return 'host';
+  // A projected vertical-page result carries the physical positionH
+  // diagnostic on its logical block axis. There the `column` frame starts at
+  // the anchor paragraph's block-start edge (verticalSectionReferenceFrames),
+  // so that axis follows the host.
+  if (diagnostic.referenceFrame === 'column' && diagnostic.axis !== axis) return 'host';
   return diagnostic.referenceFrame === 'paragraph'
     || diagnostic.referenceFrame === 'line'
     || diagnostic.referenceFrame === 'character'
@@ -4901,76 +4906,86 @@ function acquireAnchorOccurrence(
         options.environment.pageWritingMode,
         physicalPage,
       );
-  const baseFrames = options.anchorFrames && coordinateSpace
-    ? uprightPhysicalPageFrames(
-        options.anchorFrames,
-        options.environment.pageWritingMode === 'sideways-lr' ? 'bottomToTop' : null,
-      )
-    : options.anchorFrames;
+  const baseFrames = options.anchorFrames;
   const behavior = outer.run.anchorAcquisitionInput.behavior;
   const layoutInCellFrame = behavior.layoutInCellStatus === 'valid'
     && behavior.layoutInCell === true
     && options.anchorCellBounds !== undefined
     ? options.anchorCellBounds
     : null;
+  const referenceFrames: AnchorReferenceFramesInput = coordinateSpace && baseFrames
+    ? verticalSectionReferenceFrames({
+        frames: baseFrames,
+        logicalToPhysical: coordinateSpace.logicalToPhysical,
+        sectionFlow: options.environment.pageWritingMode === 'sideways-lr' ? 'bottomToTop' : null,
+        cellBounds: layoutInCellFrame,
+        paragraphTopPt: options.placement.startYPt,
+        line: { ...line, bounds: referenceBounds },
+        host,
+        objectWidthPt: outer.run.anchorAcquisitionInput.extent.widthStatus === 'valid'
+          && Number.isFinite(outer.run.anchorAcquisitionInput.extent.widthPt)
+          ? outer.run.anchorAcquisitionInput.extent.widthPt as number
+          : 0,
+      })
+    : {
+        page: baseFrames?.page
+          ? layoutInCellFrame
+            ? { ...baseFrames.page, ...layoutInCellFrame }
+            : baseFrames.page
+          : null,
+        margin: baseFrames?.margin
+          ? layoutInCellFrame
+            ? { ...baseFrames.margin, ...layoutInCellFrame }
+            : baseFrames.margin
+          : null,
+        column: baseFrames?.column
+          ? layoutInCellFrame
+            ? { ...baseFrames.column, ...layoutInCellFrame }
+            : wordMode14ColumnOriginApplies(outer.run.anchorAcquisitionInput, options)
+              ? {
+                  ...baseFrames.column,
+                  xPt: wordMode14ColumnLineStartOrigin(
+                    baseFrames.column,
+                    externalExclusions,
+                    paragraphOccurrenceIds,
+                    contentStartYPt,
+                    lines[0]?.bounds.heightPt ?? 0,
+                  ),
+                }
+              : baseFrames.column
+          : null,
+        paragraph: {
+          xPt: options.placement.paragraphXPt,
+          // `word-paragraph-anchor-pre-spacing-origin`
+          yPt: options.placement.startYPt + (
+            outer.run.anchorAcquisitionInput.vertical.relativeFrom === 'paragraph'
+            && outer.run.anchorAcquisitionInput.wrap.kind === 'none'
+            && behavior.allowOverlap === true
+            && behavior.layoutInCell === true && options.anchorCellBounds !== undefined
+            && options.environment.pageWritingMode === 'horizontal-tb'
+              ? options.paragraphAnchorReferenceDeltaPt ?? 0 : 0
+          ),
+          widthPt: options.placement.availableWidthPt,
+          heightPt: Math.max(0, paragraphHeightPt),
+        },
+        // WORD_GRID_PICTURE_LINE_ORIGIN keeps text leading separate from the
+        // reference frame; paragraph ownership already precedes before-spacing.
+        // The reference host index owns first-line policy. Distinct physical
+        // lines can share a numeric top; equal coordinates do not transfer it.
+        // Only posOffset was measured: translating the frame for wp:align would
+        // also move the line's center/bottom edge, so alignment keeps the line.
+        line: referenceIsFirstLine && options.context.lineGrid.active && outer.run.type === 'image'
+          && outer.run.anchorAcquisitionInput.vertical.choice.kind === 'offset'
+          ? { ...referenceBounds, yPt: wordGridPictureLineOriginPt(
+              referenceBounds.yPt, options.placement.startYPt, contentStartYPt,
+            ) }
+          : referenceBounds,
+        character: host.bounds,
+        pageParity: baseFrames?.pageParity ?? null,
+      };
   const acquiredResult = resolveAnchorFrame({
     acquisition: outer.run.anchorAcquisitionInput,
-    frames: {
-      page: baseFrames?.page
-        ? layoutInCellFrame
-          ? { ...baseFrames.page, ...layoutInCellFrame }
-          : baseFrames.page
-        : null,
-      margin: baseFrames?.margin
-        ? layoutInCellFrame
-          ? { ...baseFrames.margin, ...layoutInCellFrame }
-          : baseFrames.margin
-        : null,
-      column: baseFrames?.column
-        ? layoutInCellFrame
-          ? { ...baseFrames.column, ...layoutInCellFrame }
-          : wordMode14ColumnOriginApplies(outer.run.anchorAcquisitionInput, options)
-            ? {
-                ...baseFrames.column,
-                xPt: wordMode14ColumnLineStartOrigin(
-                  baseFrames.column,
-                  externalExclusions,
-                  paragraphOccurrenceIds,
-                  contentStartYPt,
-                  lines[0]?.bounds.heightPt ?? 0,
-                ),
-              }
-            : baseFrames.column
-        : null,
-      paragraph: {
-        xPt: options.placement.paragraphXPt,
-        // `word-paragraph-anchor-pre-spacing-origin`
-        yPt: options.placement.startYPt + (
-          outer.run.anchorAcquisitionInput.vertical.relativeFrom === 'paragraph'
-          && outer.run.anchorAcquisitionInput.wrap.kind === 'none'
-          && behavior.allowOverlap === true
-          && behavior.layoutInCell === true && options.anchorCellBounds !== undefined
-          && options.environment.pageWritingMode === 'horizontal-tb'
-            ? options.paragraphAnchorReferenceDeltaPt ?? 0 : 0
-        ),
-        widthPt: options.placement.availableWidthPt,
-        heightPt: Math.max(0, paragraphHeightPt),
-      },
-      // WORD_GRID_PICTURE_LINE_ORIGIN keeps text leading separate from the
-      // reference frame; paragraph ownership already precedes before-spacing.
-      // The reference host index owns first-line policy. Distinct physical
-      // lines can share a numeric top; equal coordinates do not transfer it.
-      // Only posOffset was measured: translating the frame for wp:align would
-      // also move the line's center/bottom edge, so alignment keeps the line.
-      line: referenceIsFirstLine && options.context.lineGrid.active && outer.run.type === 'image'
-        && outer.run.anchorAcquisitionInput.vertical.choice.kind === 'offset'
-        ? { ...referenceBounds, yPt: wordGridPictureLineOriginPt(
-            referenceBounds.yPt, options.placement.startYPt, contentStartYPt,
-          ) }
-        : referenceBounds,
-      character: host.bounds,
-      pageParity: baseFrames?.pageParity ?? null,
-    },
+    frames: referenceFrames,
   });
   if (acquiredResult.status !== 'resolved') {
     return { result: acquiredResult, textBoxes: [], hostLineIndex, hostRange: host.range };
@@ -6150,6 +6165,107 @@ function wordMode14AnchorLineExemptions(
     }
   }
   return exemptions;
+}
+
+/**
+ * Reference frames of a drawing anchored in a vertical section, all on the
+ * upright physical page that `word-vertical-section-physical-drawing-layer`
+ * resolves positionH/positionV on, so no anchor mixes the section-logical and
+ * physical coordinate spaces.
+ *
+ * `page` and `margin` invert the section's logical page box and margins
+ * exactly ({@link uprightPhysicalPageFrames}). The flow-owned references are
+ * the physical images of the logical flow geometry: the block axis of a
+ * vertical section is the physical horizontal axis and its inline axis the
+ * physical vertical one. Their placement rules are the registered
+ * `word-vertical-section-flow-anchor-frames` observation:
+ * - `column` (positionH) starts at the image of the anchor paragraph's
+ *   block-start edge and ends at the physical right edge of the column box;
+ * - `character` (positionH) holds the object against the physical left edge
+ *   of the anchor line, outside the line when lines progress leftward and
+ *   from that edge when they progress rightward;
+ * - `paragraph` (positionV) starts at the column's physical top;
+ * - `line` (positionV) starts at the start of the character before the
+ *   anchor, or at the line start when none precedes it.
+ * The `character` and `line` frames carry no extent of their own: alignment
+ * against them keeps the offset-zero position.
+ */
+function verticalSectionReferenceFrames(input: Readonly<{
+  frames: NonNullable<ParagraphAcquisitionOptions['anchorFrames']>;
+  logicalToPhysical: Matrix2DData;
+  sectionFlow: 'bottomToTop' | null;
+  cellBounds: LayoutRect | null;
+  paragraphTopPt: number;
+  line: LineLayout;
+  host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>;
+  objectWidthPt: number;
+}>): AnchorReferenceFramesInput {
+  const { frames, logicalToPhysical: toPhysical } = input;
+  const pageFrames = uprightPhysicalPageFrames(
+    { page: frames.page ?? null, margin: frames.margin ?? null },
+    input.sectionFlow,
+  );
+  const cell = input.cellBounds ? transformRect(toPhysical, input.cellBounds) : null;
+  const logicalColumn = frames.column ?? frames.margin ?? frames.page;
+  const column = logicalColumn ? transformRect(toPhysical, logicalColumn) : null;
+  const lineBox = transformRect(toPhysical, input.line.bounds);
+  // Sign of the physical x advance per logical block-axis advance: negative
+  // when lines progress leftward (vertical-rl), positive when rightward.
+  const linesProgressLeftward = toPhysical.c < 0;
+  const paragraphEdgeX = transformPoint(toPhysical, {
+    xPt: input.line.bounds.xPt,
+    yPt: input.paragraphTopPt,
+  }).xPt;
+  const precedingStartPt = precedingCharacterStartPt(input.line, input.host);
+  const lineOriginY = transformPoint(toPhysical, {
+    xPt: precedingStartPt,
+    yPt: input.line.bounds.yPt,
+  }).yPt;
+  const characterX = linesProgressLeftward
+    ? lineBox.xPt - input.objectWidthPt
+    : lineBox.xPt;
+  return {
+    page: cell ?? pageFrames.page,
+    margin: cell ?? pageFrames.margin,
+    column: cell ?? (column ? {
+      xPt: paragraphEdgeX,
+      yPt: column.yPt,
+      widthPt: Math.max(0, column.xPt + column.widthPt - paragraphEdgeX),
+      heightPt: column.heightPt,
+    } : null),
+    paragraph: column ? { ...column } : null,
+    line: { xPt: lineBox.xPt, yPt: lineOriginY, widthPt: lineBox.widthPt, heightPt: 0 },
+    character: {
+      xPt: characterX,
+      yPt: lineBox.yPt,
+      widthPt: Math.max(0, input.objectWidthPt),
+      heightPt: lineBox.heightPt,
+    },
+    pageParity: frames.pageParity ?? null,
+  };
+}
+
+/** Logical inline start of the last text character placed before `host` on
+ * its line, or the line start when no character precedes it. */
+function precedingCharacterStartPt(
+  line: LineLayout,
+  host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>,
+): number {
+  const hostPt = host.bounds.xPt;
+  let bestEnd = -Infinity;
+  let bestStart = line.bounds.xPt;
+  for (const placement of line.placements) {
+    if (placement.kind !== 'text') continue;
+    for (const cluster of placement.clusters) {
+      const start = placement.origin.xPt + cluster.offset.xPt;
+      const end = start + cluster.advancePt;
+      if (end <= hostPt + 1e-6 && end > bestEnd) {
+        bestEnd = end;
+        bestStart = start;
+      }
+    }
+  }
+  return bestStart;
 }
 
 function wordMode14ColumnOriginApplies(

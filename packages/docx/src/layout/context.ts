@@ -171,7 +171,8 @@ export function physicalSectionGeometry(
  * the physical right margin on the left. The derived left/right/top/bottom
  * and inside/outside margin edges follow from these two frames.
  *
- * Column, character, paragraph and line frames are outside this mapping.
+ * Column, character, paragraph and line frames are built from the flow
+ * geometry by `verticalSectionReferenceFrames` (paragraph.ts).
  */
 export function uprightPhysicalPageFrames<
   T extends { readonly page: AnchorFrameRect | null; readonly margin: AnchorFrameRect | null },

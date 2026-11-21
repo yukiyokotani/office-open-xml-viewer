@@ -2324,6 +2324,14 @@ function measureFollowingBodyBlock(
   });
 }
 
+/** In a vertical section positionH runs along the block axis, where the
+ * `column` and `character` references follow the anchor paragraph
+ * (`word-vertical-section-flow-anchor-frames`), so the page-start prescan
+ * cannot place them before that paragraph is acquired. */
+function isBlockAxisHostReference(relativeFrom: string | null | undefined): boolean {
+  return relativeFrom === 'column' || relativeFrom === 'character';
+}
+
 function prescanBodyPageAnchors(
   context: BodySessionDependencies,
   request: Parameters<NonNullable<BodyLayoutSession['prescanPageAnchors']>>[0],
@@ -2512,7 +2520,9 @@ function prescanBodyPageAnchors(
           (publicRun.type === 'image' ||
             publicRun.type === 'chart' ||
             publicRun.type === 'shape') &&
-          publicRun.wrapMode === 'none'
+          (publicRun.wrapMode === 'none'
+            || (isVerticalTextDirection(request.location.section.textDirection)
+              && isBlockAxisHostReference(publicRun.anchorXRelativeFrom)))
         )
           return [];
         const candidate: BodyAcquisitionState = {
@@ -2546,6 +2556,11 @@ function prescanBodyPageAnchors(
     // registry is section-logical, so page-start prescan must apply the
     // section writing mode's canonical physical-to-logical affine
     // inverse before the exclusion can affect earlier body content.
+    // The anchor paragraph's own acquisition registers such an exclusion.
+    if (isVerticalTextDirection(request.location.section.textDirection)
+      && isBlockAxisHostReference(payloads[0]!.run.anchorAcquisitionInput.horizontal.relativeFrom)) {
+      return [];
+    }
     const verticalSpace = isVerticalTextDirection(request.location.section.textDirection)
       ? createSectionRegionCoordinateSpace(
           sectionWritingMode(request.location.section),

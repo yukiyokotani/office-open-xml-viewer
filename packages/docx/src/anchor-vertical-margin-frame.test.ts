@@ -101,6 +101,49 @@ function docx(
   ]));
 }
 
+// Geometry of the Word controls for flow-relative references: A4, margins
+// T90 R36 B60 L50, a single column, 18 pt line grid and 10.5 pt text.
+const FLOW_MARGINS: Margins = { left: 50, right: 36, top: 90, bottom: 60 };
+const position = (axis: 'H' | 'V', relativeFrom: string, pt: number) =>
+  `<wp:position${axis} relativeFrom="${relativeFrom}"><wp:posOffset>${Math.round(pt * EMU)}</wp:posOffset></wp:position${axis}>`;
+const aligned = (axis: 'H' | 'V', relativeFrom: string, value: string) =>
+  `<wp:position${axis} relativeFrom="${relativeFrom}"><wp:align>${value}</wp:align></wp:position${axis}>`;
+const text = (value: string) => `<w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>${value}</w:t></w:r>`;
+const NONE = '<wp:wrapNone/>';
+
+/** `before` one-line paragraphs, then one paragraph of `parts` (text, or the
+ * index into `shapes` of the anchor to place there). */
+function flowDocx(
+  direction: string,
+  before: number,
+  parts: readonly (string | number)[],
+  shapes: readonly Shape[],
+): Uint8Array {
+  const paragraphs = Array.from({ length: before }, () => `<w:p>${text('あ')}</w:p>`);
+  paragraphs.push(`<w:p>${parts.map((part) =>
+    typeof part === 'number' ? shapeRun(shapes[part]!, part) : text(part)).join('')}</w:p>`);
+  const tw = (pt: number) => Math.round(pt * 20);
+  const document = `<w:document xmlns:w="${W}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:wps="${WPS}">`
+    + `<w:body>${paragraphs.join('')}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>`
+    + `<w:pgMar w:top="${tw(FLOW_MARGINS.top)}" w:right="${tw(FLOW_MARGINS.right)}" `
+    + `w:bottom="${tw(FLOW_MARGINS.bottom)}" w:left="${tw(FLOW_MARGINS.left)}" w:header="720" w:footer="720" w:gutter="0"/>`
+    + `<w:textDirection w:val="${direction}"/><w:docGrid w:type="lines" w:linePitch="360"/>`
+    + '</w:sectPr></w:body></w:document>';
+  return storeZip(new Map([
+    ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '</Types>')],
+    ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
+    ['word/document.xml', xml(document)],
+  ]));
+}
+
+const flowShape = (h: string, v: string, widthPt = 120, heightPt = 20): Shape =>
+  ({ h, v, widthPt, heightPt, wrap: NONE });
+
 function measureContext(): CanvasRenderingContext2D {
   let font = '10px serif';
   return {
@@ -259,5 +302,99 @@ describe('vertical-section margin-relative drawings resolve on the physical marg
       for (const [start, end] of spans) expect(end <= top + 1e-6 || start >= bottom - 1e-6).toBe(true);
       expect(spans.some(([start]) => Math.abs(start - bottom) < 0.1)).toBe(true);
     }
+  });
+});
+
+// `word-vertical-section-flow-anchor-frames`: Word 16 (Windows) PDFs of the
+// synthetic tbRl/btLr/tbLrV controls. In tbRl the anchor paragraph P10 is the
+// eleventh 18 pt line strip from the right margin, physical x [361.3, 379.3];
+// its block-start edge is x = 595.3 - 36 - 180 = 379.3.
+describe('vertical-section flow-relative anchor frames resolve on the physical page', () => {
+  const RIGHT_EDGE = PAGE_W - FLOW_MARGINS.right;
+  const P10_START = RIGHT_EDGE - 10 * 18;
+  const P10_LEFT = P10_START - 18;
+
+  it.each(['tbRl', 'btLr'])('places column positionH from the paragraph edge in %s', (direction) => {
+    const boxes = physicalDrawings(flowDocx(direction, 10, ['あ', 0, 1, 2, 3, 4], [
+      flowShape(position('H', 'column', 0), position('V', 'margin', 100)),
+      flowShape(position('H', 'column', 50), position('V', 'margin', 150)),
+      flowShape(aligned('H', 'column', 'left'), position('V', 'margin', 200)),
+      flowShape(aligned('H', 'column', 'center'), position('V', 'margin', 250)),
+      flowShape(aligned('H', 'column', 'right'), position('V', 'margin', 300)),
+    ]), direction);
+    expect(boxes.map((box) => Number(box.xPt.toFixed(1)))).toEqual([
+      P10_START, P10_START + 50, P10_START,
+      P10_START + (RIGHT_EDGE - P10_START - 120) / 2, RIGHT_EDGE - 120,
+    ].map((value) => Number(value.toFixed(1))));
+    for (const [index, box] of boxes.entries()) close(box.yPt, FLOW_MARGINS.top + 100 + 50 * index);
+  });
+
+  it.each(['tbRl', 'btLr'])('holds character positionH against the line left edge in %s', (direction) => {
+    // The anchor's position along the line does not move it.
+    const boxes = physicalDrawings(flowDocx(direction, 10, [0, 'あい', 1, 2, 'うえお', 3], [
+      flowShape(position('H', 'character', 0), position('V', 'margin', 100)),
+      flowShape(position('H', 'character', 30), position('V', 'margin', 150)),
+      flowShape(position('H', 'character', -30), position('V', 'margin', 200)),
+      flowShape(position('H', 'character', 0), position('V', 'margin', 250)),
+    ]), direction);
+    expect(boxes.map((box) => Number(box.xPt.toFixed(1)))).toEqual([
+      P10_LEFT - 120, P10_LEFT - 90, P10_LEFT - 150, P10_LEFT - 120,
+    ].map((value) => Number(value.toFixed(1))));
+  });
+
+  it.each(['tbRl', 'btLr'])('resolves paragraph and line positionV on the inline axis in %s', (direction) => {
+    const boxes = physicalDrawings(flowDocx(direction, 10, [0, 1, 'あいう', 2, 3, 'えおか', 4], [
+      flowShape(position('H', 'margin', 0), position('V', 'paragraph', 20), 20, 40),
+      flowShape(position('H', 'margin', 40), position('V', 'line', 0), 20, 40),
+      flowShape(position('H', 'margin', 80), position('V', 'paragraph', -10), 20, 40),
+      flowShape(position('H', 'margin', 120), position('V', 'line', 20), 20, 40),
+      flowShape(position('H', 'margin', 160), position('V', 'line', 0), 20, 40),
+    ]), direction);
+    // Paragraph: the column top. Line: the start of the character before the
+    // anchor (10.5 pt cells), or the line start when none precedes it.
+    expect(boxes.map((box) => Number(box.yPt.toFixed(1)))).toEqual([
+      FLOW_MARGINS.top + 20, FLOW_MARGINS.top, FLOW_MARGINS.top - 10,
+      FLOW_MARGINS.top + 21 + 20, FLOW_MARGINS.top + 52.5,
+    ]);
+    for (const [index, box] of boxes.entries()) close(box.xPt, FLOW_MARGINS.left + 40 * index);
+  });
+
+  it('uses the anchor paragraph and line of a wrapped paragraph', () => {
+    // 3 one-line paragraphs, then 'あ' × 140 wraps into three 65-cell lines;
+    // the anchors sit after the last character.
+    const boxes = physicalDrawings(flowDocx('tbRl', 3, ['あ'.repeat(140), 0, 1, 2], [
+      flowShape(position('H', 'column', 0), position('V', 'margin', 100)),
+      flowShape(position('H', 'character', 0), position('V', 'margin', 150)),
+      flowShape(position('H', 'margin', 0), position('V', 'line', 0), 20, 40),
+    ]), 'tbRl');
+    const paragraphStart = RIGHT_EDGE - 3 * 18;
+    close(boxes[0]?.xPt, paragraphStart);
+    close(boxes[1]?.xPt, paragraphStart - 3 * 18 - 120);
+    close(boxes[2]?.yPt, FLOW_MARGINS.top + 9 * 10.5);
+  });
+
+  it('follows the section mapping for tbLrV, whose lines progress rightward', () => {
+    // The paragraph block-start edge is the image of the logical paragraph
+    // top under the section's own logical frame; character holds the object
+    // from the line's left edge.
+    const logical = logicalSectionGeometry({
+      pageWidth: PAGE_W, pageHeight: PAGE_H,
+      marginLeft: FLOW_MARGINS.left, marginRight: FLOW_MARGINS.right,
+      marginTop: FLOW_MARGINS.top, marginBottom: FLOW_MARGINS.bottom,
+      headerDistance: 0, footerDistance: 0,
+    });
+    const p10Start = logical.marginTop + 10 * 18;
+    const boxes = physicalDrawings(flowDocx('tbLrV', 10, ['あい', 0, 1, 2, 3, 4], [
+      flowShape(position('H', 'column', 0), position('V', 'margin', 100)),
+      flowShape(position('H', 'column', 50), position('V', 'margin', 150)),
+      flowShape(position('H', 'character', 0), position('V', 'margin', 200)),
+      flowShape(position('H', 'margin', 0), position('V', 'paragraph', 0), 20, 40),
+      flowShape(position('H', 'margin', 40), position('V', 'line', 0), 20, 40),
+    ]), 'tbLrV');
+    close(boxes[0]?.xPt, p10Start);
+    close(boxes[1]?.xPt, p10Start + 50);
+    close(boxes[2]?.xPt, p10Start);
+    close(boxes[3]?.yPt, FLOW_MARGINS.top);
+    close(boxes[4]?.yPt, FLOW_MARGINS.top + 10.5);
   });
 });

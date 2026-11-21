@@ -363,19 +363,26 @@ describe('paragraph run resource projection', () => {
     const vertical = acquireSameParagraph(anchor, { verticalPageFrame: true });
     const horizontal = acquireSameParagraph(anchor);
 
+    // `word-vertical-section-flow-anchor-frames`: the column positionH
+    // starts at the physical image of the paragraph's block-start edge
+    // (x = 300 - 10), so the 82 pt offset lands at physical x = 372, i.e.
+    // logical y = 300 - 372 - 30.
     expect(vertical.drawings[0]).toMatchObject({
       orientation: 'upright-physical',
-      flowBounds: { xPt: 10, yPt: 178, widthPt: 20, heightPt: 30 },
-      transform: { a: 0, b: -1, c: 1, d: 0, e: 20, f: 193 },
+      flowBounds: { xPt: 10, yPt: -102, widthPt: 20, heightPt: 30 },
+      transform: { a: 0, b: -1, c: 1, d: 0, e: 20, f: -87 },
     });
     expect(vertical.drawings[0]?.commands[0]).toMatchObject({
       kind: 'resource', resourceKind: 'image',
       rect: { xPt: -15, yPt: -10, widthPt: 30, heightPt: 20 },
     });
     expect(vertical.drawings[0]?.commands[0]).not.toHaveProperty('orientation');
+    // Both physical references follow the anchor paragraph in a vertical
+    // frame: paragraph positionV on the logical inline axis and the column
+    // positionH, which starts at the paragraph, on the logical block axis.
     expect(vertical.drawings[0]?.anchorLayer).toMatchObject({
       horizontalOwnership: 'host',
-      verticalOwnership: 'page',
+      verticalOwnership: 'host',
     });
     expect(horizontal.drawings[0]?.anchorLayer).toMatchObject({
       horizontalOwnership: 'page',
