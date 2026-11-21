@@ -952,6 +952,17 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       }
     });
 
+    it('places a rotated clipped DrawingML picture like an unrotated one in a tbLrV exact line', () => {
+      // A turned picture clips to its line on its own account; its exact-line
+      // placement must not depend on that (180 degrees keeps the footprint).
+      const turned = { ...picture(30, -5, 'drawingml'), rotation: 180 } as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([turned], 1, { exactPt: 24, vertical: 'lr' });
+      const line = node.lines[0]!;
+      const placement = resource(node);
+      expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt + 24 - 5 - 20, 10);
+      expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+    });
+
     it('keeps the four-fifths baseline in every story and clips DrawingML outside cells and text boxes', () => {
       for (const [other, clips] of [
         [{ story: 'header', storyInstance: 'header:default', path: [0] }, true],

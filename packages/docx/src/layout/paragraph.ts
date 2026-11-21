@@ -4194,7 +4194,9 @@ function planMeasuredLines(
             Math.max(raw.ascent + raw.descent, raw.intendedSingle ?? 0)
             - image.heightPt - 2 * LIST_LABEL_PICTURE_INSET_PT
           ) / 2;
-        const exactClipped = !image.chart && !image.clipToLine && exactObjectClips
+        // Exact-line clipping (and its tbLrV placement) is decided apart from a
+        // rotated picture's own clip to the line.
+        const exactClipped = !image.chart && exactObjectClips
           && wordInlineObjectExactLineClips(sourceRun?.type === 'image'
             ? (sourceRun as ParagraphImageRun).inlineObjectOrigin : undefined);
         segments.push({
