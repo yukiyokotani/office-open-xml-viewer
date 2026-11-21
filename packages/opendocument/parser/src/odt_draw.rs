@@ -96,6 +96,8 @@ pub(super) fn inline_image(
 ) -> ImageRun {
     ImageRun {
         inline_object_font_facts: None,
+        // An ODF frame carries no hosting-run raise (§17.3.2.24 is OOXML).
+        inline_position: None,
         inline_object_origin: None,
         inline_effect_extent: None,
         image_path: path,

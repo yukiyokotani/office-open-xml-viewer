@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -211,7 +211,7 @@ export {
   prepareBodyFrameMetadata,
 } from './frame.js';
 export type { BodyFrameGroup } from './frame.js';
-import type { ParagraphAcquisitionInput, ParagraphLayoutSource } from './text.js';
+import type { ParagraphAcquisitionInput, ParagraphImageRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import type {
   DrawingLayout,
@@ -389,6 +389,9 @@ export interface MeasuredUnavailableResourcePlanSegment {
   readonly topOffsetPt: number;
   /** §20.4.2.6 inline effect extent before the object; the advance is unchanged. */
   readonly leftOffsetPt?: number;
+  /** WORD_INLINE_OBJECT_EXACT_LINE: the placeholder is clipped to its line
+   * like the picture it stands for. */
+  readonly clipToLine?: true;
   readonly drawingId: string;
 }
 
@@ -2065,6 +2068,10 @@ export function planLine(input: PlanLineInput): LineLayout {
           widthPt: segment.widthPt,
           heightPt: segment.heightPt,
         },
+        ...(segment.kind === 'unavailable-resource' && segment.clipToLine ? { lineClip: {
+          topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
+          bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
+        } } : {}),
         advancePt: segment.measuredWidthPt,
       });
     } else if (segment.kind === 'anchor-host') {
@@ -3986,6 +3993,8 @@ function planMeasuredLines(
   paragraphMarkShapeInput?: NumberingMarkerShapeInput,
   /** Owner section's counter-turn for upright inline graphics. */
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
+  /** `word-section-tblrv-line-strip`: lines reflected across their block band. */
+  blockReflectedLines = false,
   underlineOverSide = false,
 ): readonly LineLayout[] {
   const { ulTrailSpace, doNotExpandShiftReturn } = compat;
@@ -4045,6 +4054,23 @@ function planMeasuredLines(
       && context.lineSpacing.value <= 30
       && compat.specifiedTextLineBoxMode15
       && !context.lineGrid.active && raw.topY === undefined;
+    // WORD_INLINE_OBJECT_EXACT_LINE: an exact line holding an inline picture or
+    // drawing shape keeps the same four-fifths baseline; the object (moved by
+    // its run's position) stands on that baseline instead of lowering it, and
+    // a DrawingML picture is clipped to the line box. Clipping belongs to the
+    // line class, whichever rule (ruby, text or object) selected the baseline.
+    const exactObjectClass = wordInlineObjectExactLineApplies({
+      lineSpacing: context.lineSpacing,
+      wrapOrigin: raw.topY !== undefined,
+      hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
+        && segment.inlinePicture === true),
+    });
+    // Table cells and text boxes leave a DrawingML picture unclipped.
+    const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
+    const exactObjectLine = !specified && !exactRubyLine && exactObjectClass;
+    // In a vertical section the upright object hangs from the exact line's
+    // top instead of standing on its baseline.
+    const exactObjectHangs = wordInlineObjectExactLineHangsFromTop(exactObjectClass, verticalPageFrame);
     // Under atLeast the added leading falls before the line, which keeps its
     // own descent above the bottom (atLeast 18pt, the same controls).
     const atLeastRubyLine = !specified && measuredRubyLine(raw)
@@ -4070,11 +4096,20 @@ function planMeasuredLines(
           : measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
       : specified
       ? measuredLine.topYPt + specified.baselineOffsetPt
-      : exactRubyLine
+      : exactRubyLine || exactObjectLine
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
           : plannedBaselinePt(measuredLine, context, libreOfficeLines);
+    const objectTopOffsetPt = (heightPt: number, positionPt: number | undefined, clipped = false): number => {
+      if (!exactObjectHangs) return -heightPt - (positionPt ?? 0);
+      const topPt = measuredLine.topYPt - (positionPt ?? 0);
+      // A clipped DrawingML picture of a tbLrV line hangs from the mirrored
+      // edge: its position is reflected across the strip, not with it.
+      return wordInlineObjectExactLineReflectsClipped(clipped, blockReflectedLines)
+        ? 2 * measuredLine.topYPt + measuredLine.advancePt - topPt - heightPt - baselinePt
+        : topPt - baselinePt;
+    };
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
@@ -4207,12 +4242,32 @@ function planMeasuredLines(
             measuredWidthPt: image.measuredWidth,
             widthPt: objectWidthPt,
             heightPt: objectHeightPt,
-            topOffsetPt: -image.heightPt + effectTopPt + (image.inlineOffsetYPt ?? 0),
+            topOffsetPt: objectTopOffsetPt(image.heightPt, image.positionPt) + effectTopPt + (image.inlineOffsetYPt ?? 0),
             ...(leftOffsetPt ? { leftOffsetPt } : {}),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
           continue;
         }
+        // A placeholder stands for its picture or chart: every placement
+        // decision below is the resource's own; availability only changes
+        // what is painted.
+        const resourceKind = image.chart ? 'chart' : 'image';
+        // A picture list label's box is centred in the natural line (before
+        // any proportional extra), the picture inset within it.
+        const labelTopPt = image.listLabel === undefined ? undefined
+          : measuredLine.topYPt - baselinePt + LIST_LABEL_PICTURE_INSET_PT + (
+            Math.max(raw.ascent + raw.descent, raw.intendedSingle ?? 0)
+            - image.heightPt - 2 * LIST_LABEL_PICTURE_INSET_PT
+          ) / 2;
+        // Exact-line clipping (and its tbLrV placement) is decided apart from a
+        // rotated picture's own clip to the line.
+        const exactClipped = !image.chart && exactObjectClips
+          && wordInlineObjectExactLineClips(
+            (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
+              ?.inlineObjectOrigin);
+        const topOffsetPt = labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
+          : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt;
+        const clipToLine = !image.chart && (image.clipToLine || exactClipped);
         if (image.unavailableResourceKind) {
           segments.push({
             kind: 'unavailable-resource',
@@ -4221,33 +4276,26 @@ function planMeasuredLines(
             measuredWidthPt: image.measuredWidth,
             widthPt: objectWidthPt,
             heightPt: objectHeightPt,
-            topOffsetPt: -image.heightPt + effectTopPt,
+            topOffsetPt,
+            ...(clipToLine ? { clipToLine: true as const } : {}),
             ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
           continue;
         }
-        const resourceKind = image.chart ? 'chart' : 'image';
         const resourceKey = image.chartResourceKey
           ?? (image.chart ? chartResourceKey(occurrence) : imageResourceKey(occurrence, image.imagePath));
-        // A picture list label's box is centred in the natural line (before
-        // any proportional extra), the picture inset within it.
-        const labelTopPt = image.listLabel === undefined ? undefined
-          : measuredLine.topYPt - baselinePt + LIST_LABEL_PICTURE_INSET_PT + (
-            Math.max(raw.ascent + raw.descent, raw.intendedSingle ?? 0)
-            - image.heightPt - 2 * LIST_LABEL_PICTURE_INSET_PT
-          ) / 2;
         segments.push({
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
           widthPt: objectWidthPt, heightPt: objectHeightPt,
-          topOffsetPt: labelTopPt ?? -image.heightPt + effectTopPt,
+          topOffsetPt,
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
-          ...(!image.chart && image.clipToLine ? { clipToLine: true as const } : {}),
+          ...(clipToLine ? { clipToLine: true as const } : {}),
           ...(!image.chart && image.rotation && image.rotation % 360 !== 0 ? { rotationDeg: image.rotation } : {}),
         });
       } else if ('math' in segment) {
@@ -7411,6 +7459,7 @@ function projectAcquiredParagraphLines(
       options.environment.verticalPageFrame,
       options.environment.pageWritingMode,
     ),
+    options.environment.verticalPageFrame === true && options.environment.pageWritingMode === 'vertical-lr',
     // `word-vertical-underline-over-side`: upright vertical lines whose paint
     // frame (section frame x line frame) turns the logical top to the
     // physical right.
@@ -7539,13 +7588,23 @@ function projectAcquiredParagraph(
         .flatMap((line) => line.placements)
         .find((candidate) => candidate.kind === 'drawing' && candidate.drawingId === drawingId);
       if (placement?.kind === 'drawing') {
+        // A line-clipped placeholder shows only the part of its box inside
+        // the line, as the clipped picture does.
+        const clip = placement.lineClip;
+        const top = clip ? Math.max(0, clip.topPt) : 0;
+        const bottom = clip ? Math.min(placement.bounds.heightPt, clip.bottomPt) : placement.bounds.heightPt;
+        const inkBounds = clip ? {
+          ...placement.bounds,
+          yPt: placement.bounds.yPt + top,
+          heightPt: Math.max(0, bottom - top),
+        } : placement.bounds;
         drawings.push({
           kind: 'drawing',
           id: drawingId,
           source,
           flowDomainId: options.flowDomainId,
           flowBounds: placement.bounds,
-          inkBounds: placement.bounds,
+          inkBounds,
           advancePt: 0,
           ordinaryFlow: false,
           commands: Object.freeze([{ kind: 'noop' }]),
