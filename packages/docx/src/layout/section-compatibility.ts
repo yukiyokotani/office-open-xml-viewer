@@ -150,3 +150,15 @@ export const WORD_VERTICAL_INLINE_PICTURE_UPRIGHT_EXTENT = defineCompatibilityRu
   },
   description: 'An inline picture in a tbRl or tbLrV section stays upright at its §20.4.2.7 wp:extent: its physical height is its advance along the line and its physical width is its extent across the line, so the line strip grows to hold the width. Evidence: Windows Word PDF exports of a 60 x 40pt inline picture in tbRl and tbLrV A4 sections on an 18pt line grid: the picture painted upright and unmirrored at 60 x 40pt, centred in a 72pt (four-pitch) strip, and the following text started 40pt after the picture start.',
 });
+
+export const WORD_VERTICAL_UNDERLINE_OVER_SIDE = defineCompatibilityRule({
+  id: 'word-vertical-underline-over-side',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-underline-side',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'In an upright vertical section (tbRl, tbLrV; not the all-rotated btLr) a §17.3.2.40 underline lies on the physical right of the glyph column, the over side of the vertical line, for East Asian and turned Latin text alike; strikethrough stays across the column centre. Library implementation: each underline keeps its horizontal geometry and, where the line\'s paint frame turns the logical top to the physical right (the clockwise tbRl frame), is reflected across the centre of its own run\'s or tab\'s font box. The decision uses the composed paint frame (section frame with the line frame): tbRl lines and tbLrV lines, whose block-reflected line frame composes with the vertical-lr section frame to the same turn, are both reflected. Evidence: Windows Word PDF exports of tbRl sections on 36pt and 18pt line grids and a tbLrV section on a 36pt grid with 10.5pt MS Mincho single, double and thick underlines, a 21pt single underline, a Latin-only underlined run and a strikethrough: every underline lay against the right edge of its glyph column (10.5pt single 0.6pt wide from the column edge outward, 21pt single 0.2pt outside, double 0.6pt apart, thick straddling the edge), the strikethrough at the column centre. Exact offsets and widths follow the run font\'s own underline metrics and are not fitted.',
+});

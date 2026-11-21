@@ -133,6 +133,7 @@ import {
   retainedEmphasisGlyphs,
   retainedTextDecorations,
   retainedWavePath,
+  retainedWavePhase,
   rubyPaintOperations,
   type RetainedEmphasisClusterInk,
   type RetainedEmphasisMarkInput,
@@ -193,6 +194,7 @@ import {
   transformRect,
   transformRectEdges,
   uprightPhysicalExtent,
+  logicalBlockStartIsPhysicalRight,
   uprightPageResourceOrientation,
   uprightResourceOrientation,
 } from './coordinate-space.js';
@@ -467,6 +469,10 @@ export interface PlanLineInput {
   readonly thaiProportionalSpread?: boolean;
   /** The paragraph piece ends at a page or column break (its last line). */
   readonly endsAtHardBreak?: boolean;
+  /** The line's paint frame turns its logical top to the physical right in
+   * an upright vertical section: underlines go to that over side
+   * (`word-vertical-underline-over-side`). */
+  readonly underlineOverSide?: true;
   readonly firstLineIndentPt?: number;
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
@@ -1292,7 +1298,7 @@ function sameCoordinateWithinFloatingPrecision(left: number, right: number): boo
   return Math.abs(left - right) <= roundoffBound;
 }
 
-function sameContinuousDecoration(
+function sameContinuousStyle(
   left: TextDecorationLayout,
   right: TextDecorationLayout,
 ): boolean {
@@ -1302,15 +1308,28 @@ function sameContinuousDecoration(
     && left.style === right.style
     && left.color === right.color
     && left.widthPt === right.widthPt
-    && sameCoordinateWithinFloatingPrecision(left.to.xPt, right.from.xPt)
     && sameDashPattern(left.dashPatternPt, right.dashPatternPt);
+}
+
+function sameContinuousDecoration(
+  left: TextDecorationLayout,
+  right: TextDecorationLayout,
+): boolean {
+  return sameContinuousStyle(left, right)
+    && sameCoordinateWithinFloatingPrecision(left.to.xPt, right.from.xPt);
 }
 
 function mergedContinuousDecoration(
   left: TextDecorationLayout,
   right: TextDecorationLayout,
+  overSide = false,
 ): TextDecorationLayout {
-  const yPt = Math.max(left.from.yPt, right.from.yPt);
+  // The merged rule takes the outermost run's offset: the lowest one below a
+  // horizontal line, the highest one on the over side
+  // (`word-vertical-underline-over-side`).
+  const yPt = overSide
+    ? Math.min(left.from.yPt, right.from.yPt)
+    : Math.max(left.from.yPt, right.from.yPt);
   const from = { xPt: left.from.xPt, yPt };
   const to = { xPt: right.to.xPt, yPt };
   const { path: _discardedPath, ...withoutPath } = left;
@@ -1319,7 +1338,7 @@ function mergedContinuousDecoration(
     from,
     to,
     ...(left.style === 'wavy'
-      ? { path: retainedWavePath(from, to, left.widthPt) }
+      ? { path: retainedWavePath(from, to, left.widthPt, retainedWavePhase(left)) }
       : {}),
   };
 }
@@ -1340,7 +1359,7 @@ function trimTerminalUnderline(
     from,
     to,
     ...(decoration.style === 'wavy'
-      ? { path: retainedWavePath(from, to, decoration.widthPt) }
+      ? { path: retainedWavePath(from, to, decoration.widthPt, retainedWavePhase(decoration)) }
       : {}),
   };
 }
@@ -1447,7 +1466,7 @@ function withDecorationClippedAt(placement: TextPlacement, endPt: number): TextP
  * at source seams. Normalize the span before paint while keeping authored
  * style, color, and thickness boundaries intact.
  * `word-contiguous-underline-geometry` */
-function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
+function coalesceAdjacentDecorations(placements: ParagraphPlacement[], overSide = false): void {
   type ActiveDecoration = Readonly<{
     placementIndex: number;
     decorationIndex: number;
@@ -1462,12 +1481,19 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
     const retained: TextDecorationLayout[] = [];
     const nextActive: ActiveDecoration[] = [];
     const consumed = new Set<ActiveDecoration>();
+    const byY = (left: { from: PointPt }, right: { from: PointPt }) => left.from.yPt - right.from.yPt;
     for (const decoration of placement.decorations) {
-      const prior = active
-        .filter((candidate) => !consumed.has(candidate)
-          && sameContinuousDecoration(candidate.decoration, decoration))
-        .sort((left, right) => Math.abs(left.decoration.from.yPt - decoration.from.yPt)
-          - Math.abs(right.decoration.from.yPt - decoration.from.yPt))[0];
+      // Strokes of one multi-stroke rule (a double underline) continue
+      // stroke by stroke: the n-th stroke across the line continues the n-th,
+      // whatever the runs' offsets, and whichever side the rule lies on.
+      const rank = placement.decorations
+        .filter((peer) => sameContinuousStyle(peer, decoration))
+        .sort(byY)
+        .indexOf(decoration);
+      const ranked = active
+        .filter((candidate) => sameContinuousDecoration(candidate.decoration, decoration))
+        .sort((left, right) => byY(left.decoration, right.decoration))[rank];
+      const prior = ranked && !consumed.has(ranked) ? ranked : undefined;
       if (prior) {
         consumed.add(prior);
         const owner = placements[prior.placementIndex];
@@ -1475,7 +1501,7 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
           throw new Error('Continuous decoration owner left the retained line');
         }
         const ownerDecorations = [...owner.decorations];
-        const merged = mergedContinuousDecoration(prior.decoration, decoration);
+        const merged = mergedContinuousDecoration(prior.decoration, decoration, overSide);
         ownerDecorations[prior.decorationIndex] = merged;
         placements[prior.placementIndex] = { ...owner, decorations: ownerDecorations };
         nextActive.push({ ...prior, decoration: merged });
@@ -1982,7 +2008,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     const widthPt = segmentWidth(segment) + internalStretchPt + sourceSpaceDeltaPt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
-      const decorations = segment.underline
+      const tabDecorations = segment.underline
         ? retainedTextDecorations({
             origin: { xPt, yPt: line.baselinePt },
             advancePt: segment.measuredWidthPt,
@@ -1992,6 +2018,13 @@ export function planLine(input: PlanLineInput): LineLayout {
             ...(segment.underline.fontRule ? { fontRule: segment.underline.fontRule } : {}),
           })
         : undefined;
+      // The tab's own font box centres its over-side underline.
+      const decorations = input.underlineOverSide && segment.underline
+        ? overSideUnderlines(
+            tabDecorations,
+            line.baselinePt + (segment.underline.base.descentPt - segment.underline.base.ascentPt) / 2,
+          )
+        : tabDecorations;
       placements.push({
         kind: 'tab', range: segment.range,
         bounds,
@@ -2105,7 +2138,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         xPt,
         yPt: line.baselinePt + baselineOffsetPt,
       };
-      const decorations = retainedGeometry
+      const runDecorations = retainedGeometry
         ? retainedTextDecorations({
             origin: geometryOrigin,
             advancePt: widthPt + ownedTrailingSlackPt,
@@ -2132,6 +2165,15 @@ export function planLine(input: PlanLineInput): LineLayout {
         }),
       } : undefined;
       const highlightFontBox = selectedFaceFontBox ?? retainedGeometry?.base;
+      // The run's own font box centres its over-side underline.
+      const decorations = input.underlineOverSide
+        ? overSideUnderlines(
+            runDecorations,
+            highlightFontBox
+              ? line.baselinePt + baselineOffsetPt + (highlightFontBox.descentPt - highlightFontBox.ascentPt) / 2
+              : line.topPt + line.advancePt / 2,
+          )!
+        : runDecorations;
       const highlightBounds = highlightFontBox ? {
         xPt,
         yPt: line.baselinePt + baselineOffsetPt - highlightFontBox.ascentPt,
@@ -2265,7 +2307,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     placements[start] = { ...first, runBorderFragments: fragments };
     start = end;
   }
-  coalesceAdjacentDecorations(placements);
+  coalesceAdjacentDecorations(placements, input.underlineOverSide === true);
   // The slack distribution (with its widening of automatic East Asian gaps)
   // and kashida elongation; natural advances, seams and tab advances excluded.
   const justificationExpansionPt = distributedWidthPt + kashidaAppliedPt;
@@ -2401,6 +2443,35 @@ export function paragraphContinuingPrefixAdvancesPt(
  * Finalizes the parser-independent paragraph acquisition snapshot. All coordinates
  * are scale-1 points; subsequent Canvas paint is a pure viewport transform.
  */
+/** `word-vertical-underline-over-side`: reflect each underline across the
+ * centre of its own font box, onto the logical side that the line's paint
+ * frame turns to the physical right (the over side of a vertical line).
+ * Strikethrough and overline keep their geometry. */
+function overSideUnderlines(
+  decorations: readonly TextDecorationLayout[] | undefined,
+  centrePt: number,
+): readonly TextDecorationLayout[] | undefined {
+  return decorations?.map((decoration) => (
+    decoration.kind !== 'underline' ? decoration : {
+      ...decoration,
+      from: { ...decoration.from, yPt: 2 * centrePt - decoration.from.yPt },
+      to: { ...decoration.to, yPt: 2 * centrePt - decoration.to.yPt },
+      ...(decoration.path ? {
+        path: decoration.path.map((point) => ({ ...point, yPt: 2 * centrePt - point.yPt })),
+      } : {}),
+    }
+  ));
+}
+
+/** Whether a paragraph's lines carry the block-reflected line frame
+ * (`word-section-tblrv-line-strip`): those laid out in a vertical-lr page
+ * frame. */
+function linesBlockReflected(
+  environment: Pick<ParagraphMeasurementEnvironment, 'verticalPageFrame' | 'pageWritingMode'>,
+): boolean {
+  return environment.verticalPageFrame === true && environment.pageWritingMode === 'vertical-lr';
+}
+
 export function layoutParagraph(input: AcquiredParagraphLayoutInput, frozenSource?: ParagraphLayout): ParagraphLayout {
   return finalizeParagraphLayout(input, frozenSource);
 }
@@ -2487,7 +2558,7 @@ export interface ParagraphAcquisitionOptions {
   readonly sourceRangeStart?: number;
   readonly anchorFrames?: Readonly<Pick<
     AnchorReferenceFramesInput,
-    'page' | 'margin' | 'column' | 'pageParity'
+    'page' | 'margin' | 'column' | 'pageParity' | 'pageBandDistances'
   >>;
   readonly acquireCompleteStory?: CompleteTextBoxStoryAcquirer;
   /**
@@ -3924,6 +3995,7 @@ function planMeasuredLines(
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
   /** `word-section-tblrv-line-strip`: lines reflected across their block band. */
   blockReflectedLines = false,
+  underlineOverSide = false,
 ): readonly LineLayout[] {
   const { ulTrailSpace, doNotExpandShiftReturn } = compat;
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
@@ -4284,6 +4356,7 @@ function planMeasuredLines(
       ...(ulTrailSpace ? { ulTrailSpace } : {}),
       ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
+      ...(underlineOverSide ? { underlineOverSide: true as const } : {}),
       ...(context.runDirectionUnauthored ? { runDirectionUnauthored: true } : {}),
       ...(compat.lineEndJustificationBeforeMode15 ? { lineEndJustificationBeforeMode15: true } : {}),
       ...(paragraph.alignment === 'thaiDistribute' && compat.thaiDistributeProportionalSpread
@@ -5030,6 +5103,7 @@ function acquireAnchorOccurrence(
           : referenceBounds,
         character: host.bounds,
         pageParity: baseFrames?.pageParity ?? null,
+        pageBandDistances: baseFrames?.pageBandDistances ?? null,
       };
   const acquiredResult = resolveAnchorFrame({
     acquisition: outer.run.anchorAcquisitionInput,
@@ -6303,6 +6377,7 @@ function verticalSectionReferenceFrames(input: Readonly<{
       heightPt: lineBox.heightPt,
     },
     pageParity: frames.pageParity ?? null,
+    pageBandDistances: frames.pageBandDistances ?? null,
   };
 }
 
@@ -6690,6 +6765,9 @@ function paragraphAcquisitionKey(
           ]
         : null,
       anchorFrames.pageParity,
+      anchorFrames.pageBandDistances
+        ? [anchorFrames.pageBandDistances.headerPt, anchorFrames.pageBandDistances.footerPt]
+        : null,
     ] : null,
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCellBounds ?? null),
     lineOnly || !hasCompleteTextBox || !options.acquireCompleteStory
@@ -7382,6 +7460,14 @@ function projectAcquiredParagraphLines(
       options.environment.pageWritingMode,
     ),
     options.environment.verticalPageFrame === true && options.environment.pageWritingMode === 'vertical-lr',
+    // `word-vertical-underline-over-side`: upright vertical lines whose paint
+    // frame (section frame x line frame) turns the logical top to the
+    // physical right.
+    options.environment.verticalCJK === true
+      && logicalBlockStartIsPhysicalRight(
+        options.environment.pageWritingMode,
+        linesBlockReflected(options.environment),
+      ),
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
@@ -7734,8 +7820,7 @@ function projectAcquiredParagraph(
     ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
     // `word-section-tblrv-line-strip`: lines of a vertical-lr page frame are
     // reflected across their own block band at projection.
-    ...(options.environment.verticalPageFrame && options.environment.pageWritingMode === 'vertical-lr'
-      ? { lineFrame: 'block-reflected' as const } : {}),
+    ...(linesBlockReflected(options.environment) ? { lineFrame: 'block-reflected' as const } : {}),
     flowDomainId: options.flowDomainId, ordinaryFlow: options.ordinaryFlow,
     ...(paragraph.styleId !== undefined ? { styleId: paragraph.styleId } : {}),
     ...(!options.continuesFromPrevious && paragraph.bookmarks?.length

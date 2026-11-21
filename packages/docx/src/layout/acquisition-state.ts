@@ -41,7 +41,7 @@ type BodyAnchorFrameState = Pick<
   | 'marginBottom'
   | 'contentX'
   | 'contentW'
->;
+> & Partial<Pick<BodyAcquisitionState, 'sectionLayout'>>;
 
 /** Projects the body page, margin, and column reference frames without
  * crossing out of retained layout's canonical point coordinate space. */
@@ -49,7 +49,7 @@ export function bodyAnchorReferenceFrames(
   state: BodyAnchorFrameState,
 ): Readonly<Pick<
   AnchorReferenceFramesInput,
-  'page' | 'margin' | 'column' | 'pageParity'
+  'page' | 'margin' | 'column' | 'pageParity' | 'pageBandDistances'
 >> {
   const blockExtentPt = Math.max(
     0,
@@ -76,6 +76,10 @@ export function bodyAnchorReferenceFrames(
       heightPt: blockExtentPt,
     },
     pageParity: state.pageIndex % 2 === 0 ? 'odd' : 'even',
+    pageBandDistances: state.sectionLayout ? {
+      headerPt: state.sectionLayout.geometry.headerDistance,
+      footerPt: state.sectionLayout.geometry.footerDistance,
+    } : null,
   };
 }
 
