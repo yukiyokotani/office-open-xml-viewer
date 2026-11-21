@@ -564,10 +564,10 @@ describe('measureParagraph', () => {
     // eastAsia hint: the hint does not select the East Asian face off the grid.
     expect(advance(false, true)).toBe(10);
     expect(advance(true, true)).toBe(10);
-    // On a line grid the unresolved page-edge interaction keeps the established
-    // hint routing: the taller East Asian face exceeds the 12pt pitch.
+    // On a line grid the hint does not select the taller East Asian face either:
+    // the ascii mark takes the 12pt pitch instead of exceeding it.
     expect(advance(false, false, 12)).toBe(12);
-    expect(advance(false, true, 12)).toBe(14);
+    expect(advance(false, true, 12)).toBe(12);
   });
 
   it('applies useFELayout grid-cell allocation to an empty paragraph mark', () => {

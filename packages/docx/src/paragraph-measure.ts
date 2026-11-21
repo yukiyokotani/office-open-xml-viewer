@@ -196,8 +196,8 @@ export function measureParagraph(
   // when the document contains no literal CJK code point.
   // Keep that compatibility projection inside the active line grid. Part 4
   // §14.8.3.50 does not select an East Asian font for an otherwise Latin mark,
-  // and off the grid WORD_EMPTY_MARK_ASCII_FACE measures the empty mark with
-  // its ascii face whatever its hint (paragraphMarkLineMetrics).
+  // and WORD_EMPTY_MARK_ASCII_FACE measures the empty mark with its ascii face
+  // whatever its hint (paragraphMarkLineMetrics).
   // Windows Word controls with useFELayout and no grid retain the Latin
   // single-line box (Times New Roman 10pt footnote separators; Ubuntu 12pt
   // body marks and footnote/endnote separators),

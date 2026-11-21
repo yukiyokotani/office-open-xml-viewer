@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, wordEmptyMarkUsesAsciiFace } from '../layout/line-compatibility.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, WORD_EMPTY_MARK_ASCII_FACE } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -342,20 +342,17 @@ export function paragraphMarkLineMetrics(
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
   // WORD_EMPTY_MARK_ASCII_FACE: §17.3.2.26 selects a font slot from a
-  // character, and an empty mark has none. Off the line grid the mark is
-  // measured with its ascii face whatever its hint, language or the
-  // document's scripts. On a line grid the face changes only page-edge
-  // admission, which remains unresolved (see the rule's scope), so grid marks
-  // keep the established routing: the hint or East Asian document text
-  // selects the East Asian face. Grid-cell classification (`eastAsian`) stays
+  // character, and an empty mark has none. The mark is measured with its ascii
+  // face whatever its hint, language, the document's scripts or a line grid;
+  // the grid sets the advance, and this face also owns the content box used
+  // for grid page-edge admission. Grid-cell classification (`eastAsian`) stays
   // content/document based and independent of the face.
   // WORD_PICTURE_BULLET_LINE_PARTICIPATION: beside a picture bullet the empty
   // mark is measured with its own (non-East-Asian) face.
-  const asciiFaceRule = measuredOwner === 'paragraphMark'
-    && wordEmptyMarkUsesAsciiFace(isGridLineRule(grid));
+  void WORD_EMPTY_MARK_ASCII_FACE;
   const routedEastAsian = (eastAsian && minimumAscentPx <= 0)
     || effectiveMarkShapeInput?.fontHint === 'eastAsia';
-  const markUsesEastAsianFace = !asciiFaceRule && routedEastAsian;
+  const markUsesEastAsianFace = measuredOwner === 'objectRun' && routedEastAsian;
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
   const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);

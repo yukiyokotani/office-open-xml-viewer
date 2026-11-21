@@ -38,6 +38,35 @@ interface FillRectCall { x: number; y: number; width: number; height: number; }
 const ASC_RATIO = 0.95;
 const DESC_RATIO = 0.2; // sum = 1.15 em ≠ the old synthetic 0.8 + 0.2 = 1.0 em
 
+it('uses the ascii mark face for grid page-edge geometry in an East Asian document (WORD_EMPTY_MARK_ASCII_FACE)', () => {
+  // Windows Word grid page-edge controls: swapping the ascii and eastAsia
+  // faces changes whether an empty mark stays at the page bottom although both
+  // advance one grid pitch. The ascii face owns that content box.
+  let font = '';
+  const context = {
+    get font() { return font; },
+    set font(value: string) { font = value; },
+    measureText() {
+      const eastAsianFace = font.includes('Grid EA');
+      return {
+        width: 0,
+        fontBoundingBoxAscent: eastAsianFace ? 11 : 9.9,
+        fontBoundingBoxDescent: eastAsianFace ? 3.3 : 1.1,
+        actualBoundingBoxAscent: eastAsianFace ? 11 : 9.9,
+        actualBoundingBoxDescent: eastAsianFace ? 3.3 : 1.1,
+      } as TextMetrics;
+    },
+  } as unknown as CanvasRenderingContext2D;
+  const paragraph = {
+    ...para(''), defaultFontSize: 11,
+    defaultFontFamily: 'Grid ASCII', defaultFontFamilyEastAsia: 'Grid EA',
+  } as DocParagraph;
+  expect(paragraphMarkBelowBaselinePt(
+    paragraph, { type: 'lines', linePitchPt: 16.4 }, false, true,
+    context, {}, null,
+  )).toBeCloseTo(3.8, 6);
+});
+
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: FillTextCall[] } {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
