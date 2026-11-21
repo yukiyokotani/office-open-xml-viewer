@@ -366,6 +366,34 @@ mod tests {
     }
 
     #[test]
+    fn terminal_column_break_keeps_its_mark_whatever_split_pg_break_and_para_mark() {
+        // §14.8.3.38 governs page-break marks only: a column-break mark moves to
+        // the next column with the setting absent or present
+        // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+        for split in [false, true] {
+            let pieces = split_para_on_page_breaks(
+                DocParagraph {
+                    runs: vec![
+                        DocRun::Text(Box::new(crate::TextRun {
+                            text: "A".into(),
+                            ..Default::default()
+                        })),
+                        DocRun::Break {
+                            break_type: BreakType::Column,
+                        },
+                    ],
+                    ..Default::default()
+                },
+                split,
+            );
+            assert_eq!(pieces.len(), 3, "split={split}");
+            assert!(matches!(&pieces[0], ParaPiece::Para(p) if p.runs.len() == 1));
+            assert!(matches!(pieces[1], ParaPiece::ColumnBreak));
+            assert!(matches!(&pieces[2], ParaPiece::Para(p) if p.runs.is_empty()));
+        }
+    }
+
+    #[test]
     fn page_break_before_precedes_a_leading_column_break() {
         let pieces = split_para_on_page_breaks(
             DocParagraph {
