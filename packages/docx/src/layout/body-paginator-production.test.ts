@@ -1270,6 +1270,72 @@ describe('canonical body producer', () => {
   });
 
   it.each([
+    ['ordinary', undefined],
+    ['upright', {
+      coordinateSpace: 'upright-physical' as const, xPt: 10, yPt: 10,
+      sectionFlowOwnership: 'host-flow' as const,
+    }],
+  ])('does not admit an %s table whose retained end crosses the region end beyond floating-point precision', (_kind, placement) => {
+    // Region 36.1..100.1: the extent rounds to 63.99999999999999 and the
+    // fragment charges 64.00000000000001. The charge exceeds the extent by
+    // less than a ULP of the page coordinates, but the retained end
+    // 36.1 + 64.00000000000001 = 100.10000000000002 is two ULPs past the
+    // region end, which page containment rejects. Admission must decide on
+    // that retained end, and must do so for upright placements, which
+    // containment does not re-check.
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const requestedExtentsPt: number[] = [];
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          if (request.input.source.path[0] === 0) {
+            return { layout: table('lead', request.input.source, 26.1), blockExtentPt: 26.1 };
+          }
+          requestedExtentsPt.push(request.availableBlockExtentPt);
+          const extentPt = 64.00000000000001;
+          return {
+            layout: table('boundary', request.input.source, extentPt),
+            blockExtentPt: extentPt,
+            ...(placement ? { placement } : {}),
+          };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const tallSection: SectionLayoutContext = {
+      ...section,
+      geometry: { ...section.geometry, pageHeight: 110.1 },
+    };
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: {
+        ...bodyOwner(),
+        context: tallSection,
+        pageLayout: { ...bodyOwner().pageLayout, physicalGeometry: tallSection.geometry },
+      },
+      sequence: [0, 1].map((index) => ({
+        kind: 'body-block',
+        block: { kind: 'table', source: source(index) },
+      })),
+    } as unknown as BodyLayoutInput;
+
+    expect(() => paginateBody(input, services, { currentDateMs: 0 }))
+      .toThrow('Table footnote admission did not converge');
+    expect(requestedExtentsPt[0]).toBe(63.99999999999999);
+  });
+
+  it.each([
     ['horizontal', undefined],
     ['upright', {
       coordinateSpace: 'upright-physical' as const, xPt: 10, yPt: 10,
