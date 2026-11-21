@@ -45,6 +45,7 @@ import {
   wordBalancedConsecutiveSpaceCellApplies,
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordExternalLinkSyntaxBreakOffsets,
+  wordInlinePictureTurnsFootprint,
 } from '../layout/line-compatibility.js';
 import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
@@ -1746,32 +1747,45 @@ function emitResolvedTextSegment(
  * physical: a picture or chart that a vertical section keeps upright maps
  * them onto the logical line axes (shapes and placeholders turn with the line) (clockwise: logical left/top/right/bottom = physical
  * top/right/bottom/left; counter-clockwise: bottom/left/top/right). Signed
- * values (ST_Coordinate) apply as authored; the box never goes below zero. */
+ * values (ST_Coordinate) apply as authored; the box never goes below zero.
+ *
+ * `turnedFootprint` (WORD_INLINE_PICTURE_QUARTER_TURN_FOOTPRINT) lays the
+ * object out in its quarter-turned footprint, height x width, before the
+ * effect edges apply. The object still paints at its authored size, centred
+ * in that footprint so its rotation about the centre fills it; the returned
+ * `effectExtent` is therefore the object's inset in the box, not the authored
+ * edges alone. */
 function inlineEffectExtentBox(
   extent: readonly number[] | undefined,
   widthPt: number,
   heightPt: number,
   orientation?: import('../layout/types.js').UprightResourceOrientation,
+  turnedFootprint = false,
 ): {
   widthPt: number;
   heightPt: number;
   effectExtent?: readonly [number, number, number, number];
   objectSizePt?: readonly [number, number];
 } {
-  if (!extent || extent.length !== 4 || extent.every((edge) => !Number.isFinite(edge) || edge === 0)) {
-    return { widthPt, heightPt };
-  }
-  const [l, t, r, b] = extent.map((edge) => (Number.isFinite(edge) ? edge : 0)) as [number, number, number, number];
+  const authored = extent && extent.length === 4 && extent.some((edge) => Number.isFinite(edge) && edge !== 0);
+  if (!authored && !turnedFootprint) return { widthPt, heightPt };
+  const [l, t, r, b] = authored
+    ? extent.map((edge) => (Number.isFinite(edge) ? edge : 0)) as [number, number, number, number]
+    : [0, 0, 0, 0];
   const logical: [number, number, number, number] = orientation === 'upright-physical'
     ? [t, r, b, l]
     : orientation === 'upright-physical-counter-clockwise'
       ? [b, l, t, r]
       : [l, t, r, b];
+  // A quarter turn keeps the centre, so the centring is the same in the
+  // physical and the logical frame.
+  const insetX = turnedFootprint ? (heightPt - widthPt) / 2 : 0;
+  const insetY = turnedFootprint ? (widthPt - heightPt) / 2 : 0;
   const [left, top, right, bottom] = logical;
   return {
-    widthPt: Math.max(0, widthPt + left + right),
-    heightPt: Math.max(0, heightPt + top + bottom),
-    effectExtent: logical,
+    widthPt: Math.max(0, widthPt + left + right + 2 * insetX),
+    heightPt: Math.max(0, heightPt + top + bottom + 2 * insetY),
+    effectExtent: [left + insetX, top + insetY, right + insetX, bottom + insetY],
     objectSizePt: [widthPt, heightPt],
   };
 }
@@ -2014,7 +2028,10 @@ function appendRunsToSegments(
         imagePath: img.imagePath,
         mimeType: img.mimeType,
         ...(img.anchor ? {} : { inlinePicture: true as const }),
-        ...inlineEffectExtentBox(img.anchor ? undefined : img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation),
+        ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
+          img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
+          wordInlinePictureTurnsFootprint(img.rotation),
+        )),
         rotation: img.rotation,
         flipH: img.flipH,
         flipV: img.flipV,

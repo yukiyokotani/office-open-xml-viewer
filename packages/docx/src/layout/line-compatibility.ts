@@ -1739,3 +1739,25 @@ export const WORD_PARAGRAPH_OFF_JAPANESE_LINE_EDGES = defineCompatibilityRule({
   evidence: { kind: 'regression-test', reference: 'packages/docx/src/kinsoku-off-edges.test.ts#neither hangs nor pushes the mode15 Japanese OFF closing mark under %s' },
   description: 'Observed original Japanese paragraph-OFF body controls in unset/11/12/14/15: mode15 LEFT/BOTH/distribute and Kashida/Thai alignments retain the closing mark at the next line head without hanging or pushing; pre15 LEFT/BOTH/distribute retain one hanging mark. The version distinction is observed Office compatibility, not implied by ECMA37617.3.1.16. Initial capability requires canonical ordinary single-column horizontal LTR root body, document rules originally enabled, no complete-store floats, frame/section flow, grids other than a lines or charSpace-0 lines-and-chars grid (w2144-kinoff measured those alike), custom table presence including empty, numbering/tabs, ruby, controls, transformed/protected/nontext or complex/RTL runs. Homogeneous explicit Japanese is admitted; absent EA language requires actual Kana and does not synthesize a language tag. Chinese/Korean/mixed language and unmeasured placements keep previous behavior. Explicit punctuation or punctuation/kana compression with low/medium/high Kashida also retains its complete previous paragraph geometry: the existing scalar minima can allocate 6+6pt where the measured 12pt Word ON and OFF pair retains 12+12pt. Changing only the edges exposes that unresolved compression deficit. This withdraws unproved capability until the source-owned compression contract is established (#2079); it does not claim that Word ignores paragraph OFF in that class. Original controls without explicit compression remain admitted. The separately approved pre15 explicit punctuation/kana-compression Thai edge exception retains document head/tail prohibitions except the existing ten confirmed closing heads with overflow on; overflow off retains them all. Kana compression grants no additional head permissions. Head legality, tail legality and the one-character extension budget remain independent. The separate bounded edge view never supplies hanging, compression grouping, intrinsic or paint authority. Existing intrinsic paragraph-table atoms remain unchanged when the paragraph toggle is off. Word-box/partition observations do not establish all ink, source-SPACE or caret geometry.',
 });
+
+/** ECMA-376 §20.4.2.7 defines wp:extent as the object's final displayed size,
+ * and §20.4.2.8 makes an inline object occupy its line like a glyph of that
+ * size; neither (nor [MS-OI29500] for §§20.4.2.6-8 or §20.1.7.6) says how an
+ * a:xfrm rot of the picture itself changes that line box. */
+export const WORD_INLINE_PICTURE_QUARTER_TURN_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-inline-picture-quarter-turn-footprint',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/inline-picture-quarter-turn.test.ts#lays out a %s-degree picture in its turned footprint',
+  },
+  description: 'Word writes wp:extent of an inline picture as its unturned size (equal to its pic:spPr a:xfrm ext) and lays a picture turned by an odd quarter turn (rot 90 or 270 degrees) out in the turned footprint: cy wide and cx tall, widened by wp:effectExtent on its page edges, with the turned picture filling that footprint from the line start. Evidence (observed Office behaviour): Word PDF exports of two corpus documents with rot=5400000 inline photos, a 644 x 483pt extent wider than its 451pt column and a 248 x 186pt extent in a 425pt column: both pictures paint 483 x 644pt and 186 x 248pt with their left edge on the left margin (the effectExtent l=0 edge, within 0.01pt), the first below its paragraph top by the 0.47pt effectExtent t, the turned picture overflowing the column on the right rather than being scaled. Library scope: exact odd quarter turns of standalone inline pictures; other angles, inline shapes, groups and charts keep the authored wp:extent box (no Word measurement).',
+});
+
+/** Projection of {@link WORD_INLINE_PICTURE_QUARTER_TURN_FOOTPRINT}: whether an
+ * inline picture with this clockwise a:xfrm rotation (degrees) is laid out in
+ * its turned (cy x cx) footprint. */
+export function wordInlinePictureTurnsFootprint(rotationDeg: number | null | undefined): boolean {
+  if (rotationDeg == null || !Number.isFinite(rotationDeg)) return false;
+  const turn = ((rotationDeg % 360) + 360) % 360;
+  return turn === 90 || turn === 270;
+}
