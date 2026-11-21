@@ -2213,11 +2213,16 @@ function normalizeInternalDocumentModelWithOwnership(
           rawRun = publicRun as typeof wireRun;
           runsChanged = true;
         }
+        // A run normalized before carries its fact in the side table; any
+        // replacement identity (a cloned shape whose text box changed) must
+        // keep it.
+        const position = typeof wirePosition === 'number'
+          ? wirePosition : inlineObjectPositions.get(wireRun);
         const firstRunIndex = runs.length;
         normalizeParagraphRun(rawRun, runIndex);
-        if (typeof wirePosition === 'number' && Number.isFinite(wirePosition) && wirePosition !== 0
+        if (position !== undefined && Number.isFinite(position) && position !== 0
           && runs.length === firstRunIndex + 1) {
-          inlineObjectPositions.set(runs[firstRunIndex]!, wirePosition);
+          inlineObjectPositions.set(runs[firstRunIndex]!, position);
         }
       });
       function normalizeParagraphRun(rawRun: Readonly<DocRun | UnavailableDrawingRunWire>, runIndex: number): void {

@@ -210,4 +210,34 @@ describe('inline object run position ownership (§17.3.2.24)', () => {
     const again = normalizeInternalDocumentModel(normalized).document.body[0] as DocParagraph;
     expect((paragraphAcquisitionInput(again, source).runs[0] as { inlinePositionPt?: number }).inlinePositionPt).toBe(-15);
   });
+
+  it('keeps the position when normalization replaces a shape whose text box holds math', () => {
+    const shape = {
+      type: 'shape', inline: true, widthPt: 40, heightPt: 16, anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: false, zOrder: 0, subpaths: [], presetGeometry: 'rect',
+      fill: null, stroke: null, textBlocks: [],
+      textBoxContent: [{ ...paragraph(), runs: [{ type: 'math', display: false, nodes: [] }] }],
+      __inlinePosition: -5,
+    };
+    const doc = {
+      body: [{ ...paragraph(), runs: [shape] }],
+      section: { pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72, marginBottom: 72,
+        marginLeft: 72, headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false },
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as unknown as DocxDocumentModel;
+    const source: SourceRef = { story: 'body', storyInstance: 'body', path: [0] };
+    const positionOf = (model: DocxDocumentModel) => (paragraphAcquisitionInput(
+      model.body[0] as DocParagraph, source,
+    ).runs[0] as { inlinePositionPt?: number }).inlinePositionPt;
+    const first = normalizeInternalDocumentModel(doc).document;
+    expect(JSON.stringify(first)).not.toContain('__inlinePosition');
+    expect(positionOf(first)).toBe(-5);
+    const second = normalizeInternalDocumentModel(first).document;
+    // The nested math gets a new identity on every pass, so the shape is
+    // cloned again: the side-table fact must follow the new run.
+    expect((second.body[0] as DocParagraph).runs[0]).not.toBe((first.body[0] as DocParagraph).runs[0]);
+    expect(positionOf(second)).toBe(-5);
+    expect(positionOf(normalizeInternalDocumentModel(second).document)).toBe(-5);
+  });
 });
