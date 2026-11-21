@@ -659,6 +659,10 @@ export interface LineLayout {
    * (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: a producer's proportional extra
    * space below the natural line). Placement and paint keep the full advance. */
   readonly pageEdgeOverhangPt?: number;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: the empty paragraph mark's line of an
+   * anchor-only paragraph. It carries the mark's own facts (geometry and page
+   * edge allowance); pagination treats it as that empty mark. */
+  readonly markLine?: true;
   /** Width that justification (ECMA-376 §17.18.44 both/distribute, the
    * kashida types, thaiDistribute) added to the line beyond its natural
    * advances and seams; the natural automatic East Asian gaps stay natural.

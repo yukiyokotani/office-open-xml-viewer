@@ -1055,3 +1055,34 @@ describe('preRegisterPageFloats — idempotent on repeated pre-scan', () => {
     expect(state.pageAnchorPrescanned?.size).toBe(1);
   });
 });
+
+describe('anchor-only paragraph beside a float (WORD_ANCHOR_HOST_NO_LINE_METRIC)', () => {
+  it('places the host and a character-relative picture at the empty mark wrap window', () => {
+    // A 200pt column (x 20-220) and a square float over x 20-120, y 52-92.
+    // The next paragraph (top 40) holds only a character-relative picture and
+    // a 40pt mark: the float overlaps the mark's line (40-80), not the first
+    // 10pt of it, and moves the mark to x 120.
+    const float = parserAnchor('float', { xPt: 0, yPt: 32, widthPt: 100, heightPt: 40,
+      horizontalRelativeFrom: 'margin', verticalRelativeFrom: 'margin', wrap: 'square' });
+    const glyph = { ...parserAnchor('glyph', { xPt: 5, yPt: 0, widthPt: 10, heightPt: 10, wrap: 'none' }),
+      horizontal: { relativeFrom: 'character', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 5 } },
+      vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid',
+        choice: { kind: 'offset', valuePt: 0 } } } as AnchorAcquisitionInput;
+    const layout = canonicalLayout([
+      paraWith([...parserAnchoredImage(float), textRun('A', 20)]),
+      paraWith(parserAnchoredImage(glyph), { fontSize: 40 }),
+      paraWith([], { fontSize: 40 }),
+    ], { pageWidth: 240 });
+    const [anchorOnly] = sourceParagraphs(layout, 1);
+    const [empty] = sourceParagraphs(layout, 2);
+    const host = anchorOnly!.lines[0]!.placements.find((placement) => placement.kind === 'anchor-host')!;
+    // The empty mark's own wrap window (the same window the following empty
+    // paragraph takes) places the line, its host and the picture.
+    expect(anchorOnly!.paragraphMark?.wrapBounds?.xPt).toBe(120);
+    expect(empty!.paragraphMark?.wrapBounds?.xPt).toBe(120);
+    expect(anchorOnly!.lines[0]!.bounds.xPt).toBe(120);
+    expect(host.bounds.xPt).toBe(120);
+    expect(anchorOnly!.drawings.map((drawing) => drawing.inkBounds.xPt)).toEqual([125]);
+  });
+});

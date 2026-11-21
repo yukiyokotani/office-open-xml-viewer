@@ -141,7 +141,7 @@ export function specifiedTextLineMetrics(
   }
   // Host-face/style changes were not part of the homogeneous controls.
   for (const segment of line.segments) {
-    if ('text' in segment && segment.metricOnly
+    if ('text' in segment && segment.metricOnly && !segment.anchorHostWithoutMetric
       && ((segment.authoredFontFamily ?? segment.fontFamily) !== authoredFamily
         || segment.bold || segment.italic || !referenceSourceAdmitted(segment))) return null;
   }

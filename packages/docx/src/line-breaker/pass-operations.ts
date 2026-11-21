@@ -1090,6 +1090,9 @@ export function performFlush(
   // lowering and therefore opts out of this normalization.
   for (const segment of breakerState.currentLine) {
     if ('isTab' in segment) continue;
+    // A floating drawing and its anchor host carry no line metrics
+    // (WORD_ANCHOR_HOST_NO_LINE_METRIC), so they are no position reference.
+    if (('text' in segment && segment.anchorHostWithoutMetric) || ('imagePath' in segment && segment.anchor)) continue;
     const position = 'text' in segment && segment.positionExtendsLineBox !== false
       ? (segment.position ?? 0) : 0;
     if (breakerState.positionReferencePt === undefined) breakerState.positionReferencePt = position;

@@ -4062,7 +4062,9 @@ function planMeasuredLines(
     const extraAboveLine = (paragraph as { readonly __lineExtraAbove?: boolean }).__lineExtraAbove === true
       && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast'
         || (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value < 1));
-    const baselinePt = extraAboveLine
+    const baselinePt = measuredLine.baselineOffsetPt !== undefined
+      ? measuredLine.topYPt + measuredLine.baselineOffsetPt
+      : extraAboveLine
       ? context.lineSpacing!.rule === 'exact'
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : context.lineSpacing!.rule === 'auto'
@@ -4360,7 +4362,16 @@ function planMeasuredLines(
         raw.eastAsian, raw.gridCountSingle,
       ))
       : 0;
-    const retained = context.lineGrid.active ? sealLineCopy({
+    // The empty mark's line of an anchor-only paragraph keeps the mark's own
+    // page-edge facts (its allowance, no grid-leading line relief: the mark's
+    // grid relief is the measured markGridAfterLeadingPt), never facts
+    // recomputed from the line breaker's metrics.
+    const retained = measuredLine.emptyMarkLine ? sealLineCopy({
+      ...planned,
+      markLine: true as const,
+      ...((measured.markPageEdgeOverhangPt ?? 0) > 0
+        ? { pageEdgeOverhangPt: measured.markPageEdgeOverhangPt } : {}),
+    }, [planned]) : context.lineGrid.active ? sealLineCopy({
       ...planned,
       gridAfterLeadingPt: allowsGridLeadingOverhang ? Math.max(0, Math.min(
         (measuredLine.advancePt - ownHeightPt) / 2,
@@ -4454,6 +4465,12 @@ function rebaseMeasuredLineRanges(
 /** A mark-only paragraph still owns a real line box and baseline when numbering
  * paints there. Materializing that host through `planLine` keeps the marker on
  * the same retained geometry path as a marker followed by body text. */
+/** Baseline of an empty paragraph mark's line below its top. */
+function markLineBaselineOffsetPt(measured: MeasuredParagraph): number {
+  return measured.markPictureBaselineOffsetPt
+    ?? measured.contentEndYPt - measured.contentStartYPt - measured.lastLineBelowBaselinePt;
+}
+
 function numberingMarkerHostLine(
   measured: MeasuredParagraph,
   paragraph: ParagraphAcquisitionInput,
@@ -4473,9 +4490,7 @@ function numberingMarkerHostLine(
     line: {
       range: { start: 0, end: 0 },
       topPt: measured.contentStartYPt,
-      baselinePt: measured.markPictureBaselineOffsetPt === undefined
-        ? measured.contentEndYPt - measured.lastLineBelowBaselinePt
-        : measured.contentStartYPt + measured.markPictureBaselineOffsetPt,
+      baselinePt: measured.contentStartYPt + markLineBaselineOffsetPt(measured),
       advancePt,
       xOffsetPt: 0,
       availableWidthPt,
@@ -7396,12 +7411,26 @@ function projectAcquiredParagraphLines(
     - planningContext.physicalIndentLeftPt
     - planningContext.physicalIndentRightPt
     - rightGridAdjustmentPt;
-  const occurrences = logicalOccurrenceMap(paragraph, measured, options.environment.showTrackedChanges);
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: an anchor-only paragraph is its empty
+  // mark; its anchors ride on that mark's line (the numbered mark host line's
+  // geometry), not on a line of their own.
+  const markAnchorLine = measured.markOnly ? measured.markAnchorLine : undefined;
+  const plannedMeasured: MeasuredParagraph = markAnchorLine ? {
+    ...measured,
+    lines: [{
+      layout: markAnchorLine,
+      topYPt: measured.contentStartYPt,
+      advancePt: measured.contentEndYPt - measured.contentStartYPt,
+      baselineOffsetPt: markLineBaselineOffsetPt(measured),
+      emptyMarkLine: true,
+    }],
+  } : measured;
+  const occurrences = logicalOccurrenceMap(paragraph, plannedMeasured, options.environment.showTrackedChanges);
   const numberingPlan = options.continuesFromPrevious
     ? undefined
     : retainedNumberingPlan(paragraph, planningContext, options);
   let lines = planMeasuredLines(
-    measured, paragraph, paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
+    plannedMeasured, paragraph, paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
     occurrences, numberingPlan, options.environment.layoutServices?.text,
     options.environment.verticalGlyphMeasurement,
     options.environment.verticalPageFrame,

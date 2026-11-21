@@ -15,6 +15,7 @@ import {
   lineBelowBaselinePx,
   lineBoxHeight,
   paragraphMarkLineMetrics,
+  segmentsHaveLineGeometry,
   type DocGridCtx,
   type LineBoundary,
   type LayoutLine,
@@ -28,6 +29,7 @@ import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
 import { compatOf } from './layout/compat-profile.js';
 import {
+  wordAnchorHostLineMetricApplies,
   WORD_INLINE_OBJECT_GRID_LINE_ALLOCATION,
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
@@ -86,9 +88,17 @@ export interface MeasuredLine {
   readonly layout: LayoutLine;
   readonly topYPt: number;
   readonly advancePt: number;
+  /** A line whose baseline another path already decided (the empty-mark line
+   * that carries an anchor-only paragraph's anchors). */
+  readonly baselineOffsetPt?: number;
+  /** The empty mark's line: every line-level fact comes from the mark. */
+  readonly emptyMarkLine?: true;
 }
 
 export interface MeasuredParagraph {
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: the anchors of a paragraph that holds
+   * nothing else, placed on its empty-mark line (`markOnly`). */
+  readonly markAnchorLine?: LayoutLine;
   readonly lineEndSourceRuns?: readonly Readonly<{ runIndex: number; offset: number }>[];
   readonly lines: readonly MeasuredLine[];
   readonly markOnly: boolean;
@@ -258,6 +268,7 @@ export function measureParagraph(
   };
   // `emptyMark`: the paragraph has no content at all. A mark line that only
   // carries wrap-float anchors is not an empty paragraph mark.
+
   const measureMarkOnly = (emptyMark: boolean): MeasuredParagraph => {
     let markTopPt = cursorPt;
     const markMetrics = paragraphMarkLineMetrics(
@@ -366,12 +377,18 @@ export function measureParagraph(
     uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,
+    ...(wordAnchorHostLineMetricApplies() ? { anchorHostsWithoutMetric: true as const } : {}),
     characterGridActive: context.characterGrid.active,
     paragraphRtl: context.baseRtl,
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
   if (segments.length === 0) return measureMarkOnly(true);
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: a line holding only anchors (no other
+  // emitted line geometry) takes the empty paragraph mark's own line, from the
+  // same mark metric path; its anchors stay on the line.
+  const anchorOnlyLine = wordAnchorHostLineMetricApplies() && !segmentsHaveLineGeometry(segments)
+    && segments.some((segment) => 'text' in segment && segment.anchorHostWithoutMetric);
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in
@@ -720,6 +737,25 @@ export function measureParagraph(
     context.lineEdgeRules,
   );
   if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: a paragraph holding only anchors is its
+  // empty paragraph mark, measured and placed by the empty-mark path in full
+  // (line box, baseline, numbering marker, page-edge facts); only its anchors
+  // ride on that mark line.
+  if (anchorOnlyLine) {
+    const mark = measureMarkOnly(true);
+    return {
+      ...mark,
+      // The mark's own wrap window places the line horizontally too: its
+      // leading edge and width, as the empty mark resolves them.
+      markAnchorLine: {
+        ...lines[0]!,
+        segments: lines.flatMap((line) => line.segments),
+        xOffset: mark.markWrapBounds ? mark.markWrapBounds.xPt - paragraphXPt : 0,
+        availWidth: mark.markWrapBounds?.widthPt ?? paragraphWidthPt,
+        ...(mark.markWrapBounds ? { topY: mark.contentStartYPt } : {}),
+      },
+    };
+  }
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
   const measuredLines: MeasuredLine[] = [];

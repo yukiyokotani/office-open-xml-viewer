@@ -609,6 +609,24 @@ export const WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS = defineCompatibilityRule({
   description: 'A zero-ink drawing anchor host reserves its line and grid height while visible neighboring glyphs retain their own ascent, descent, and design-line baseline. Library policy, no Office measurement: line metrics choice for mixed anchor and visible content (PR #1035); nothing measured.',
 });
 
+export const WORD_ANCHOR_HOST_NO_LINE_METRIC = defineCompatibilityRule({
+  id: 'word-anchor-host-no-line-metric',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'anchor-host-inline-object-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §20.4.2.3 anchors a floating drawing in a run, but the anchoring character has no glyph and the standard does not give it line metrics. Windows Word 16.0.20527 controls (Times New Roman 10pt and 11pt paragraphs, a wrapNone DrawingML picture anchored in a 10pt or 40pt run beside an inline 16pt picture, unpositioned or lowered 15pt; an anchored picture alone in its paragraph; and one beside text) size no line from the anchoring run: every paragraph with the inline picture is exactly as tall as without the anchor, also with the 40pt anchoring run, and a paragraph holding only the anchor is as tall as an empty paragraph of its mark (12.65pt for an 11pt Times New Roman mark, not the 40pt run). This holds in compatibility modes 15, 14, 12 and omitted, on a 20pt lines grid (each paragraph one cell), and in body paragraphs, headers and table cells. The anchor host therefore keeps its position but contributes no metrics beside other line content, and a host-only paragraph takes its paragraph mark line (ascii face, WORD_EMPTY_MARK_ASCII_FACE). In footnotes and text boxes the same controls lay the picture out inline in its 40pt run instead of floating it, so no anchor host is left there.',
+});
+
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: an anchoring run sizes no line. */
+export function wordAnchorHostLineMetricApplies(): boolean {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  return true;
+}
+
 export const WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION = defineCompatibilityRule({
   id: 'word-justification-leading-indent-exclusion',
   evidence: {

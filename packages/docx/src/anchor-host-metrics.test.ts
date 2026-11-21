@@ -4,6 +4,7 @@ import { createLayoutServices } from './layout-runtime.js';
 import {
   buildSegments,
   layoutLines,
+  segmentsHaveLineGeometry,
   lineBoxHeight,
   type LayoutSeg,
   type LayoutTextSeg,
@@ -78,10 +79,11 @@ function textRun(text: string, fontSize = 11): DocRun {
   } as DocRun;
 }
 
-function layOut(runs: DocRun[]) {
+function layOut(runs: DocRun[], anchorHostsWithoutMetric = false, layoutServices?: ReturnType<typeof metricServices>) {
   return layoutLines(
     linearCtx(),
-    buildSegments(runs, { pageIndex: 0, totalPages: 1 })
+    buildSegments(runs, { pageIndex: 0, totalPages: 1, ...(anchorHostsWithoutMetric ? { anchorHostsWithoutMetric: true } : {}),
+      ...(layoutServices ? { layoutServices } : {}) })
       .map((segment) => ({ ...segment })) as LayoutSeg[],
     400,
     0,
@@ -181,5 +183,66 @@ describe('floating drawing anchor-host metrics', () => {
     expect(mixed.visibleDescent).toBe(visibleOnly.descent);
     expect(hostOnly.visibleAscent).toBe(hostOnly.ascent);
     expect(hostOnly.visibleDescent).toBe(hostOnly.descent);
+  });
+
+  describe('WORD_ANCHOR_HOST_NO_LINE_METRIC', () => {
+    const mark = true;
+    const picture = { type: 'image', imagePath: 'p.png', mimeType: 'image/png', widthPt: 20, heightPt: 16,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false } as DocRun;
+
+    it('sizes no line from the anchoring run beside other content', () => {
+      const [withHost] = layOut([anchorHost(), picture], mark);
+      const [withoutHost] = layOut([picture], mark);
+      expect(withHost.ascent).toBe(withoutHost.ascent);
+      expect(withHost.descent).toBe(withoutHost.descent);
+      const [text] = layOut([textRun('Caption')], mark);
+      const [textWithHost] = layOut([anchorHost(), textRun('Caption')], mark);
+      expect(textWithHost.ascent).toBe(text.ascent);
+      expect(textWithHost.descent).toBe(text.descent);
+    });
+
+    it('keeps a uniformly positioned line unchanged beside an anchor', () => {
+      // word-uniform-run-position-leading needs face data: a resource face
+      // covering the Latin text.
+      const services = metricServices([[0x41, 0x7a]]);
+      const lowered = { ...textRun('Lowered'), position: -3 } as DocRun;
+      const floating = { ...picture, anchor: true } as DocRun;
+      const [alone] = layOut([lowered], mark, services);
+      const [anchored] = layOut([anchorHost(), floating, lowered], mark, services);
+      expect(anchored.ascent).toBe(alone.ascent);
+      expect(anchored.descent).toBe(alone.descent);
+      expect(anchored.intendedSingle).toBe(alone.intendedSingle);
+      expect(alone.uniformPositionAuto).toBeDefined();
+      expect(anchored.uniformPositionAuto).toEqual(alone.uniformPositionAuto);
+    });
+
+    it('emits every host without metrics in one pass', () => {
+      const runs = [...Array.from({ length: 400 }, () => anchorHost()), textRun('Tail')];
+      let reads = 0;
+      const counted = new Proxy(runs, {
+        get(target, key, receiver) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) reads += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const segments = buildSegments(counted, { pageIndex: 0, totalPages: 1, anchorHostsWithoutMetric: true });
+      expect(segments.filter((segment) => 'text' in segment && segment.anchorHostWithoutMetric)).toHaveLength(400);
+      // A per-host rescan reads the runs about 400 * 401 / 2 times.
+      expect(reads).toBeLessThan(runs.length * 50);
+    });
+
+    it('counts only emitted line geometry as other content', () => {
+      const deleted = { ...textRun('Gone'), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+      const softHyphen = textRun('\u00AD');
+      const floating = { ...picture, anchor: true } as DocRun;
+      for (const runs of [[anchorHost()], [anchorHost(), deleted], [anchorHost(), softHyphen], [anchorHost(), floating]]) {
+        expect(segmentsHaveLineGeometry(buildSegments(runs, { pageIndex: 0, totalPages: 1, anchorHostsWithoutMetric: true })))
+          .toBe(false);
+      }
+      for (const runs of [[anchorHost(), textRun('x')], [anchorHost(), picture], [anchorHost(), textRun(' ')]]) {
+        expect(segmentsHaveLineGeometry(buildSegments(runs, { pageIndex: 0, totalPages: 1, anchorHostsWithoutMetric: true })))
+          .toBe(true);
+      }
+    });
   });
 });
