@@ -2074,11 +2074,14 @@ export function normalizeOwnedInternalDocumentModel(doc: DocxDocumentModel): Nor
 
 type AutomaticSpacingEdges = Parameters<typeof automaticSpacingNeighbourhood>[2];
 /** Box edges that drop automatic paragraph margins (WORD_HTML_PARAGRAPH_AUTO_SPACING):
- * both edges of a table cell and the start of the document body. Other story
- * edges are unobserved and keep them. */
+ * both edges of a table cell, and the start of the document body, a header
+ * and a text box. Footer and note starts and every other end keep them. */
 const CELL_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: true, end: true });
-const BODY_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: true, end: false });
+const STORY_START_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: true, end: false });
 const NO_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: false, end: false });
+/** Which automatic-spacing edges a sibling sequence has; `body` also takes its
+ * neighbours from the body flow participants. */
+type AutomaticSpacingFlow = 'body' | 'cell' | 'header' | 'story';
 /** Stands for a hidden paragraph whose page break still applies. */
 const RETAINED_HIDDEN_BREAK = Object.freeze({ type: 'pageBreak' });
 
@@ -2115,7 +2118,7 @@ function bodyFlowAutoSpacingNeighbourhoods(
   });
   return positions.map((position) => (position < 0
     ? undefined
-    : automaticSpacingNeighbourhood(participants, position, BODY_AUTO_SPACING_EDGES)));
+    : automaticSpacingNeighbourhood(participants, position, STORY_START_AUTO_SPACING_EDGES)));
 }
 
 function normalizeInternalDocumentModelWithOwnership(
@@ -2183,7 +2186,7 @@ function normalizeInternalDocumentModelWithOwnership(
           const textBlocks = shape.textBlocks.map((block, blockIndex, blocks) => {
             const spacing = resolveAutomaticParagraphMarginsPt(
               block, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true,
-              automaticSpacingNeighbourhood(blocks, blockIndex, NO_AUTO_SPACING_EDGES),
+              automaticSpacingNeighbourhood(blocks, blockIndex, STORY_START_AUTO_SPACING_EDGES),
             );
             return spacing.spaceBefore === block.spaceBefore && spacing.spaceAfter === block.spaceAfter
               ? block : { ...block, ...spacing };
@@ -2216,7 +2219,7 @@ function normalizeInternalDocumentModelWithOwnership(
             'textbox',
             textBoxStoryInstance,
             [blockIndex],
-            automaticSpacingNeighbourhood(content, blockIndex, NO_AUTO_SPACING_EDGES),
+            automaticSpacingNeighbourhood(content, blockIndex, STORY_START_AUTO_SPACING_EDGES),
           ) as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
           if (normalized !== block) contentChanged = true;
           textBoxContent[blockIndex] = normalized;
@@ -2298,7 +2301,10 @@ function normalizeInternalDocumentModelWithOwnership(
       for (const kind of ['default', 'first', 'even'] as const) {
         const part = parts[kind];
         if (!part) continue;
-        const nextBody = normalizeBody(part.body, partStory, `section:${elementIndex}:${kind}`);
+        const nextBody = normalizeBody(
+          part.body, partStory, `section:${elementIndex}:${kind}`, [],
+          partStory === 'header' ? 'header' : 'story',
+        );
         if (nextBody === part.body) continue;
         if (result === parts) result = { ...parts };
         result[kind] = { ...part, body: nextBody };
@@ -2316,10 +2322,11 @@ function normalizeInternalDocumentModelWithOwnership(
     story: SourceRef['story'],
     storyInstance: string,
     prefix: number[] = [],
-    flow: 'body' | 'cell' | 'story' = 'story',
+    flow: AutomaticSpacingFlow = 'story',
   ): BodyElement[] => {
     const bodyNeighbourhoods = flow === 'body' ? bodyFlowAutoSpacingNeighbourhoods(body) : undefined;
-    const edges = flow === 'cell' ? CELL_AUTO_SPACING_EDGES : NO_AUTO_SPACING_EDGES;
+    const edges = flow === 'cell' ? CELL_AUTO_SPACING_EDGES
+      : flow === 'header' ? STORY_START_AUTO_SPACING_EDGES : NO_AUTO_SPACING_EDGES;
     const neighbourhoodAt = (elementIndex: number): AutomaticSpacingNeighbourhood | undefined => (
       bodyNeighbourhoods
         ? bodyNeighbourhoods[elementIndex]
@@ -2359,7 +2366,7 @@ function normalizeInternalDocumentModelWithOwnership(
     for (const kind of ['default', 'first', 'even'] as const) {
       const part = parts[kind];
       if (!part) continue;
-      const body = normalizeBody(part.body, story, kind);
+      const body = normalizeBody(part.body, story, kind, [], story === 'header' ? 'header' : 'story');
       if (body === part.body) continue;
       if (result === parts) result = { ...parts };
       result[kind] = { ...part, body };

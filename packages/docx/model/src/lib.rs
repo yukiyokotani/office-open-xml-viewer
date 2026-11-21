@@ -1748,6 +1748,12 @@ pub struct NumberingInfo {
     /// box; they do not select its size or the font governing native AUTO.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pic_bullet_transform: Option<PictureBulletTransform>,
+    /// ECMA-376 §17.9.15 `<w:abstractNumId>` of the referenced `<w:num>`: the
+    /// list instance identity that numIds sharing one abstract definition
+    /// have in common (their running counters are shared). `None` for a
+    /// numId without an abstract reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abstract_num_id: Option<u32>,
 }
 
 #[derive(Serialize, Debug, Clone)]

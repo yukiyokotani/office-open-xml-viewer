@@ -743,6 +743,10 @@ export interface LineSpacing {
 
 export interface NumberingInfo {
   numId: number;
+  /** ECMA-376 §17.9.15 abstractNumId the numId references: numIds sharing
+   *  one abstract definition form one list (shared counters). Absent when
+   *  the numId has no abstract reference. */
+  abstractNumId?: number;
   level: number;
   format: string;
   text: string;       // resolved bullet text, e.g. "1." or "•"

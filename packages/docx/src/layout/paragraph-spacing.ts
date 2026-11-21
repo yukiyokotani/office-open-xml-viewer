@@ -55,14 +55,14 @@ interface AutomaticSpacingParagraph {
   readonly spaceAfter?: number;
   readonly beforeAutospacing?: boolean;
   readonly afterAutospacing?: boolean;
-  readonly numbering?: Readonly<{ numId: number }> | null;
+  readonly numbering?: Readonly<{ numId: number; abstractNumId?: number }> | null;
 }
 
 /**
  * Where a paragraph sits for {@link WORD_HTML_PARAGRAPH_AUTO_SPACING}: whether
  * it opens or closes a box whose edges drop automatic margins, and whether its
- * adjacent sibling paragraphs belong to the same list. The default (no
- * neighbourhood) is a standalone paragraph.
+ * adjacent sibling paragraphs belong to the same list (abstract definition).
+ * The default (no neighbourhood) is a standalone paragraph.
  */
 export interface AutomaticSpacingNeighbourhood {
   readonly dropBefore: boolean;
@@ -77,14 +77,20 @@ function sameList(
 ): boolean {
   const first = a?.type === undefined || a.type === 'paragraph' ? a?.numbering : null;
   const second = b?.type === undefined || b.type === 'paragraph' ? b?.numbering : null;
-  return !!first && !!second && first.numId === second.numId;
+  if (!first || !second) return false;
+  // One list is one abstract definition: numIds that share it continue one
+  // counter (§17.9.15). A numId without an abstract reference is its own list.
+  return first.abstractNumId !== undefined || second.abstractNumId !== undefined
+    ? first.abstractNumId === second.abstractNumId
+    : first.numId === second.numId;
 }
 
 /**
  * Neighbourhood of `blocks[index]` inside one sibling sequence (a story body,
  * a cell, a text box). `edges` says whether the sequence's start and end are
  * box edges that drop automatic margins: both edges of a table cell, and the
- * start of the document body (WORD_HTML_PARAGRAPH_AUTO_SPACING (2)). Only an
+ * start of the document body, a header or a text box
+ * (WORD_HTML_PARAGRAPH_AUTO_SPACING (2)). Only an
  * immediately adjacent paragraph counts as a list neighbour, so a table or a
  * hoisted page break in between separates the items.
  */

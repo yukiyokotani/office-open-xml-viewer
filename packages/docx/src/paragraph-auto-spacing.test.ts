@@ -88,13 +88,13 @@ it('retains stored margins and drops no automatic edge under Word fixed automati
 
 it('resolves Word HTML automatic spacing at cell, document-start and same-list boundaries', () => {
   const lvl = (ilvl: number, text: string) => `<w:lvl w:ilvl="${ilvl}"><w:numFmt w:val="bullet"/><w:lvlText w:val="${text}"/></w:lvl>`;
-  const numbering = `<w:numbering xmlns:w="${W}">${[1, 2].map(id => `<w:abstractNum w:abstractNumId="${id}">${lvl(0, '•')}${lvl(1, 'o')}</w:abstractNum>`).join('')}<w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num></w:numbering>`;
+  const numbering = `<w:numbering xmlns:w="${W}">${[1, 2].map(id => `<w:abstractNum w:abstractNumId="${id}">${lvl(0, '•')}${lvl(1, 'o')}</w:abstractNum>`).join('')}<w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="2"/></w:num><w:num w:numId="3"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
   const stored = p(`${numPr(1)}<w:spacing w:before="40" w:after="60" w:beforeAutospacing="0" w:afterAutospacing="0"/>`, 'stored');
   const normalized = normalizeDocxDocumentModel(parse(
     p('', 'first')
     + table(p('', 'only'), p('', 'top') + p('', 'middle') + p('', 'bottom'), item(1, 0, 'cell 1') + item(1, 0, 'cell 2'))
     + p('', 'lead') + item(1, 0, 'a') + item(1, 0, 'b') + item(1, 1, 'b.i') + item(1, 0, 'c') + stored
-    + p('', 'between') + item(2, 0, 'other list') + item(1, 0, 'back'),
+    + p('', 'between') + item(2, 0, 'other list') + item(1, 0, 'back') + item(3, 0, 'shared abstract'),
     { parts: new Map([['numbering', ['numbering', numbering]]]) },
   ));
   expect(margins(normalized.body)).toEqual([
@@ -103,7 +103,8 @@ it('resolves Word HTML automatic spacing at cell, document-start and same-list b
     [14, 0], [0, 0], [0, 0], [0, 0], // a, b, b.i (level 1), c: same numId
     [2, 3], // stored values of a same-list item stay
     [14, 14], // between: unnumbered
-    [14, 14], [14, 14], // another numId separates the lists
+    [14, 14], [14, 0], // another abstract definition separates the lists
+    [0, 14], // a numId sharing the abstract definition continues the list
   ]);
   // Cell edges drop the first automatic before and the last automatic after.
   expect(cellMargins(normalized.body)).toEqual([
@@ -146,22 +147,23 @@ it('takes body neighbours from flow participants, skipping vanished paragraphs l
 it.each([false, true])('propagates document fixed=%s into inherited cell and story margins', (fixed) => {
   const raw = containersDocument(fixed);
   const normalized = normalizeDocxDocumentModel(raw);
-  // A cell's single paragraph sits on both cell edges; header, footer and
-  // note story edges are not observed box edges.
+  // A cell's single paragraph sits on both cell edges and a header's first
+  // paragraph on the header start; the footer end and note edges keep theirs.
   expect(cellMargins(normalized.body)).toEqual([[fixed ? [5, 5] : [0, 0]]]);
-  for (const content of [normalized.headers.default?.body, normalized.footers.default?.body, normalized.footnotes?.[0]?.content]) {
+  expect(margins(normalized.headers.default?.body)).toEqual([fixed ? [5, 5] : [0, 14]]);
+  for (const content of [normalized.footers.default?.body, normalized.footnotes?.[0]?.content]) {
     expect(margins(content)).toEqual([fixed ? [5, 5] : [14, 14]]);
   }
   expect((raw.headers.default?.body[0] as DocParagraph).spaceBefore).toBe(5);
 });
 
-it('keeps parsed compatibility text-box margins independent of the first inline font', () => {
+it('drops the automatic before of the first text-box paragraph independent of the first inline font', () => {
   const raw = containersDocument(false);
   const normalized = normalizeDocxDocumentModel(raw);
   const shapes = normalized.body.flatMap(e => e.type === 'paragraph' ? e.runs.filter(run => run.type === 'shape') : []);
   expect(shapes).toHaveLength(1);
   const block = shapes[0]?.type === 'shape' ? shapes[0].textBlocks?.[0] : undefined;
   expect(block?.fontSizePt).toBe(24);
-  expect([block?.spaceBefore, block?.spaceAfter]).toEqual([14, 14]);
+  expect([block?.spaceBefore, block?.spaceAfter]).toEqual([0, 14]);
   expect(normalizeDocxDocumentModel(normalized).body).toEqual(normalized.body);
 });
