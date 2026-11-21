@@ -126,3 +126,15 @@ export const WORD_SECTION_TBLRV_LEFT_PAGE_FRAME = defineCompatibilityRule({
   },
   description: 'A section-level tbLrV (Part 4 §14.11.7, equivalent to lrV: lines flow from left to right) lays its body out in the vertical-lr page frame: the first line strip starts at the physical left margin and the top margin, and later lines advance rightward, so the logical top/right/bottom/left margins are the physical left/bottom/right/top. Evidence: Windows Word PDF exports of A4 one-column sections with an 18pt line grid and distinct margins (left 40, right 90, top 60, bottom 80pt): tbLrV put its first line strip at x 40–58pt with its top at y 60pt and advanced right by 18pt per line, while the tbRl and btLr controls started at the right margin (strip 487.3–505.3pt). Glyph orientation, headers and footers, gutter, mirrorMargins, two-page imposition, upright tables and inline pictures of a tbLrV section are outside this evidence.',
 });
+
+export const WORD_HEADER_FOOTER_OFF_LINE_GRID = defineCompatibilityRule({
+  id: 'word-header-footer-off-line-grid',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'header-footer-line-grid',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A §17.6.5 docGrid of type "lines" sets the line pitch of the body but not of the header and footer: their lines keep the paragraph\'s own line height. Evidence: Windows Word PDF exports of A4 sections with an 18pt "lines" grid, a 10.5pt one-line default header and footer and 36pt header/footer distances, in lrTb, tbRl, btLr and tbLrV sections: every header glyph box started 1.5pt below the 36pt header distance and every footer glyph box ended 1.5pt above the footer distance (a 13.6pt natural line), while the body lines of the lrTb section sat centred in 18pt grid lines. Grids of type linesAndChars and snapToChars are outside this evidence and keep the line grid in headers and footers.',
+});

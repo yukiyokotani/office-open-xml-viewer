@@ -364,6 +364,8 @@ export function resolveParagraphLayoutContext(
 ): ParagraphLayoutContext {
   const lineGridActive =
     isSectionLineGrid(section.grid.kind)
+    // `word-header-footer-off-line-grid`
+    && !(section.grid.kind === 'lines' && (story.story === 'header' || story.story === 'footer'))
     && section.grid.linePitchPt != null
     && section.grid.linePitchPt > 0
     && paragraph.snapToGrid !== false
