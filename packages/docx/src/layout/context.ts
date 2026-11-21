@@ -194,13 +194,17 @@ export function effectivePhysicalSectionGeometry(
   if (!Number.isInteger(pageIndex) || pageIndex < 0) {
     throw new RangeError('Physical page index must be a non-negative integer');
   }
-  let { pageWidth, pageHeight } = policy.physicalGeometry;
+  const { pageWidth } = policy.physicalGeometry;
+  let { pageHeight } = policy.physicalGeometry;
   let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
   const bookFold = policy.bookFoldPrinting || policy.bookFoldRevPrinting;
   if (bookFold) {
-    pageWidth /= 2;
-    // ECMA-376 §§17.15.1.11/.13 define a half-sheet editing page and automatic
-    // gutter placement; the bisector edge is compatibility-owned.
+    // ECMA-376 §§17.15.1.11/.13 describe a landscape sheet divided in half
+    // vertically into two editing pages. Word saves the editing page itself
+    // in pgSz (§17.6.13): the half sheet, with orient naming the folded sheet.
+    // Layout therefore uses the authored box as the page and does not halve
+    // it again. `word-book-fold-authored-page-box`
+    // The gutter sits at the bisector edge, which is compatibility-owned.
     // `word-book-fold-gutter-right-edge`
     if (wordBookFoldGutterEdge() === 'right') marginRight += policy.gutterPt;
   } else if (policy.printTwoOnOne) {

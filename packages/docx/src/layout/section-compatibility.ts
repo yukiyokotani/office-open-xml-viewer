@@ -54,6 +54,15 @@ export const WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE = defineCompatibilityRule({
   description: 'For book-fold printing Word places the automatic gutter at the right-margin bisector edge, including reverse book-fold mode.',
 });
 
+export const WORD_BOOK_FOLD_AUTHORED_PAGE_BOX = defineCompatibilityRule({
+  id: 'word-book-fold-authored-page-box',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/book-fold-page-box.test.ts#lays out a book-fold section on its authored pgSz page box',
+  },
+  description: 'ECMA-376 §§17.15.1.11/.13 divide a landscape sheet in half vertically into two editing pages. Word saves that editing page, not the sheet, in pgSz (§17.6.13): with book fold on, w is the half-sheet width and orient names the folded sheet (a Legal-coded landscape sheet is saved as a 7in x 8.5in pgSz with orient="landscape"), and Word lays every page out on the authored box without halving it again. Evidence (observed Office behaviour): Windows Word 16.0.20527 PDF export of a corpus document with bookFoldPrinting and no gutter: every exported page has the authored pgSz and body lines span the full authored width minus the left/right margins. Not measured: a landscape-shaped pgSz under book fold, and printTwoOnOne (§17.15.1.64), which keeps its normative half-sheet division; no synthetic control yet.',
+});
+
 export const WORD_DEFAULT_LINE_NUMBER_DISTANCE_PT = 18;
 
 export function wordLineNumberDistancePt(authoredDistancePt: number | null | undefined): number {

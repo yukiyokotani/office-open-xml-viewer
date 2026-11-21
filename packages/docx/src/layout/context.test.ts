@@ -357,10 +357,10 @@ describe('section geometry coordinate boundary', () => {
 
   it.each([
     ['book fold', { bookFoldPrinting: true }, {
-      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
+      pageWidth: 792, pageHeight: 612, marginRight: 90, marginTop: 72,
     }],
     ['reverse book fold', { bookFoldRevPrinting: true }, {
-      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
+      pageWidth: 792, pageHeight: 612, marginRight: 90, marginTop: 72,
     }],
     ['two-on-one', { printTwoOnOne: true }, {
       pageWidth: 792, pageHeight: 306, marginRight: 72, marginTop: 90,
