@@ -1295,7 +1295,7 @@ function sameCoordinateWithinFloatingPrecision(left: number, right: number): boo
   return Math.abs(left - right) <= roundoffBound;
 }
 
-function sameContinuousDecoration(
+function sameContinuousStyle(
   left: TextDecorationLayout,
   right: TextDecorationLayout,
 ): boolean {
@@ -1305,8 +1305,15 @@ function sameContinuousDecoration(
     && left.style === right.style
     && left.color === right.color
     && left.widthPt === right.widthPt
-    && sameCoordinateWithinFloatingPrecision(left.to.xPt, right.from.xPt)
     && sameDashPattern(left.dashPatternPt, right.dashPatternPt);
+}
+
+function sameContinuousDecoration(
+  left: TextDecorationLayout,
+  right: TextDecorationLayout,
+): boolean {
+  return sameContinuousStyle(left, right)
+    && sameCoordinateWithinFloatingPrecision(left.to.xPt, right.from.xPt);
 }
 
 function mergedContinuousDecoration(
@@ -1471,12 +1478,19 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[], overSide 
     const retained: TextDecorationLayout[] = [];
     const nextActive: ActiveDecoration[] = [];
     const consumed = new Set<ActiveDecoration>();
+    const byY = (left: { from: PointPt }, right: { from: PointPt }) => left.from.yPt - right.from.yPt;
     for (const decoration of placement.decorations) {
-      const prior = active
-        .filter((candidate) => !consumed.has(candidate)
-          && sameContinuousDecoration(candidate.decoration, decoration))
-        .sort((left, right) => Math.abs(left.decoration.from.yPt - decoration.from.yPt)
-          - Math.abs(right.decoration.from.yPt - decoration.from.yPt))[0];
+      // Strokes of one multi-stroke rule (a double underline) continue
+      // stroke by stroke: the n-th stroke across the line continues the n-th,
+      // whatever the runs' offsets, and whichever side the rule lies on.
+      const rank = placement.decorations
+        .filter((peer) => sameContinuousStyle(peer, decoration))
+        .sort(byY)
+        .indexOf(decoration);
+      const ranked = active
+        .filter((candidate) => sameContinuousDecoration(candidate.decoration, decoration))
+        .sort((left, right) => byY(left.decoration, right.decoration))[rank];
+      const prior = ranked && !consumed.has(ranked) ? ranked : undefined;
       if (prior) {
         consumed.add(prior);
         const owner = placements[prior.placementIndex];

@@ -176,4 +176,26 @@ describe('underline side in vertical sections (§17.3.2.40)', () => {
       { text: 'Bb', fontSize: 10, underline: true, underlineStyle: 'wave', bold: true },
     ])).toBe(single);
   });
+
+  it.each([undefined, 'tbRl'])('continues a %s double underline stroke by stroke across a raised run', (direction) => {
+    const strokes = (runs: readonly Run[]) => {
+      const { line } = layoutLine(runs, direction);
+      return line.placements
+        .flatMap((entry) => entry.kind === 'text' ? entry.decorations : [])
+        .filter((decoration) => decoration.kind === 'underline')
+        .map((decoration) => decoration.from.yPt)
+        .sort((a, b) => a - b);
+    };
+    const single = strokes([{ text: 'Aa', fontSize: 10, underline: true, underlineStyle: 'double' }]);
+    expect(single).toHaveLength(2);
+    const merged = strokes([
+      { text: 'Aa', fontSize: 10, underline: true, underlineStyle: 'double' },
+      { text: 'Bb', fontSize: 10, underline: true, underlineStyle: 'double', position: 15 },
+    ]);
+    // The raise exceeds half the stroke pitch, so pairing strokes by nearest
+    // offset would join the inner stroke to the outer one. Two continuous
+    // strokes remain, still one stroke pitch apart.
+    expect(merged).toHaveLength(2);
+    expect(merged[1]! - merged[0]!).toBeCloseTo(single[1]! - single[0]!, 9);
+  });
 });
