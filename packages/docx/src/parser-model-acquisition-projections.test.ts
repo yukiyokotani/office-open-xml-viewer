@@ -183,3 +183,31 @@ describe('parser-to-body-acquisition projection capability', () => {
       .toBe(true);
   });
 });
+
+describe('inline object run position ownership (§17.3.2.24)', () => {
+  it('keeps the parser-private position off the public model and hands it to acquisition', () => {
+    const image = {
+      type: 'image', imagePath: 'word/media/image1.png', mimeType: 'image/png', widthPt: 40, heightPt: 16,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      __inlinePosition: -15,
+    };
+    const doc = {
+      body: [{ ...paragraph(), runs: [image] }],
+      section: { pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72, marginBottom: 72,
+        marginLeft: 72, headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false },
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    } as unknown as DocxDocumentModel;
+    const normalized = normalizeInternalDocumentModel(doc).document;
+    const publicParagraph = normalized.body[0] as DocParagraph;
+    const publicRun = publicParagraph.runs[0]!;
+    expect(Object.keys(publicRun)).not.toContain('__inlinePosition');
+    expect(JSON.stringify(normalized)).not.toContain('__inlinePosition');
+    const source: SourceRef = { story: 'body', storyInstance: 'body', path: [0] };
+    const acquired = paragraphAcquisitionInput(publicParagraph, source);
+    expect((acquired.runs[0] as { inlinePositionPt?: number }).inlinePositionPt).toBe(-15);
+    // Normalizing the public model again keeps the fact on the same run.
+    const again = normalizeInternalDocumentModel(normalized).document.body[0] as DocParagraph;
+    expect((paragraphAcquisitionInput(again, source).runs[0] as { inlinePositionPt?: number }).inlinePositionPt).toBe(-15);
+  });
+});

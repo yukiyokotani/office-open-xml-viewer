@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -208,7 +208,7 @@ export {
   prepareBodyFrameMetadata,
 } from './frame.js';
 export type { BodyFrameGroup } from './frame.js';
-import type { ParagraphAcquisitionInput, ParagraphLayoutSource } from './text.js';
+import type { ParagraphAcquisitionInput, ParagraphImageRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import type {
   DrawingLayout,
@@ -3971,6 +3971,22 @@ function planMeasuredLines(
       && context.lineSpacing.value <= 30
       && compat.specifiedTextLineBoxMode15
       && !context.lineGrid.active && raw.topY === undefined;
+    // WORD_INLINE_OBJECT_EXACT_LINE: an exact line holding an inline picture or
+    // drawing shape keeps the same four-fifths baseline; the object (moved by
+    // its run's position) stands on that baseline instead of lowering it, and
+    // a DrawingML picture is clipped to the line box. Clipping belongs to the
+    // line class, whichever rule (ruby, text or object) selected the baseline.
+    const exactObjectClass = wordInlineObjectExactLineApplies({
+      lineSpacing: context.lineSpacing,
+      mode15: compat.specifiedTextLineBoxMode15,
+      lineGridActive: context.lineGrid.active,
+      wrapOrigin: raw.topY !== undefined,
+      vertical: verticalPageFrame,
+      topLevelBody: source.story === 'body' && source.path.length === 1,
+      hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
+        && segment.inlinePicture === true),
+    });
+    const exactObjectLine = !specified && !exactRubyLine && exactObjectClass;
     // Under atLeast the added leading falls before the line, which keeps its
     // own descent above the bottom (atLeast 18pt, the same controls).
     const atLeastRubyLine = !specified && measuredRubyLine(raw)
@@ -3996,7 +4012,7 @@ function planMeasuredLines(
           : measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
       : specified
       ? measuredLine.topYPt + specified.baselineOffsetPt
-      : exactRubyLine
+      : exactRubyLine || exactObjectLine
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
@@ -4133,7 +4149,7 @@ function planMeasuredLines(
             measuredWidthPt: image.measuredWidth,
             widthPt: objectWidthPt,
             heightPt: objectHeightPt,
-            topOffsetPt: -image.heightPt + effectTopPt + (image.inlineOffsetYPt ?? 0),
+            topOffsetPt: -image.heightPt - (image.positionPt ?? 0) + effectTopPt + (image.inlineOffsetYPt ?? 0),
             ...(leftOffsetPt ? { leftOffsetPt } : {}),
           });
           sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
@@ -4147,7 +4163,7 @@ function planMeasuredLines(
             measuredWidthPt: image.measuredWidth,
             widthPt: objectWidthPt,
             heightPt: objectHeightPt,
-            topOffsetPt: -image.heightPt + effectTopPt,
+            topOffsetPt: -image.heightPt - (image.positionPt ?? 0) + effectTopPt,
             ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
@@ -4169,11 +4185,14 @@ function planMeasuredLines(
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
           widthPt: objectWidthPt, heightPt: objectHeightPt,
-          topOffsetPt: labelTopPt ?? -image.heightPt + effectTopPt,
+          topOffsetPt: labelTopPt ?? -image.heightPt - (image.positionPt ?? 0) + effectTopPt,
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
-          ...(!image.chart && image.clipToLine ? { clipToLine: true as const } : {}),
+          ...(!image.chart && (image.clipToLine || (exactObjectClass
+            && wordInlineObjectExactLineClips(sourceRun?.type === 'image'
+              ? (sourceRun as ParagraphImageRun).inlineObjectOrigin : undefined)))
+            ? { clipToLine: true as const } : {}),
           ...(!image.chart && image.rotation && image.rotation % 360 !== 0 ? { rotationDeg: image.rotation } : {}),
         });
       } else if ('math' in segment) {

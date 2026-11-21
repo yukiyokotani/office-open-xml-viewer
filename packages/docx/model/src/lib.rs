@@ -2244,6 +2244,11 @@ pub struct ShapeRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline object: the object is raised or lowered with its run
+    /// like text. Parser-private; absent for anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
     /// Actual parser origin, not inferred from geometry or font metrics.
     #[serde(
         rename = "__inlineObjectOrigin",
@@ -3618,6 +3623,11 @@ pub struct ImageRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline object: the object is raised or lowered with its run
+    /// like text. Parser-private; absent for anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
     /// Actual parser origin, not inferred from geometry or font metrics.
     #[serde(
         rename = "__inlineObjectOrigin",

@@ -7760,6 +7760,15 @@ fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontS
     })
 }
 
+/// Record a hosting run's §17.3.2.24 position on its inline (non-anchor) object.
+fn set_inline_object_position(run: &mut DocRun, position: Option<f64>) {
+    match run {
+        DocRun::Shape(shape) if shape.inline => shape.inline_position = position,
+        DocRun::Image(image) if !image.anchor => image.inline_position = position,
+        _ => {}
+    }
+}
+
 fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
     let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
     RunFontFacts {
@@ -8306,12 +8315,18 @@ fn parse_run_inner(
         anchor_occurrence_id: None,
         list_label: None,
     };
+    // ECMA-376 §17.3.2.24: the hosting run's raise/lower moves its inline
+    // objects like its text (WORD_INLINE_OBJECT_POSITION).
+    let inline_position = fmt
+        .position
+        .filter(|value| *value != 0.0 && value.is_finite());
     let attach_drawing_run_facts = |drawing_runs: &mut Vec<DocRun>| {
         // An inline drawing is one character of this resolved outer run.
         // Preserve all font slots before its text-box content starts a separate
         // story. It needs automatic leading, not a synthetic anchor character.
         let mut facts = None;
         for drawing in drawing_runs.iter_mut() {
+            set_inline_object_position(drawing, inline_position);
             let target = match drawing {
                 DocRun::Shape(shape) if shape.inline => Some(&mut shape.inline_object_font_facts),
                 DocRun::Image(image) if !image.anchor => Some(&mut image.inline_object_font_facts),
@@ -9175,6 +9190,11 @@ fn parse_run_inner(
                 } else if let Some(img) = parse_object_ole_image(child, media_map, diagnostics) {
                     let anchored = img.anchor;
                     let mut object_runs = vec![DocRun::Image(Box::new(img))];
+                    // The static preview moves with its run's position like any
+                    // inline picture, though it keeps its established leading.
+                    for object in object_runs.iter_mut() {
+                        set_inline_object_position(object, inline_position);
+                    }
                     // Inline OLE previews retain their established allocation:
                     // outer-run leading controls cover ordinary pictures/text
                     // boxes, not an embedded object's static preview.
@@ -9932,6 +9952,7 @@ fn parse_drawing_container(
         };
         return vec![DocRun::Image(Box::new(ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: Some(InlineObjectOrigin::DrawingMl),
             inline_effect_extent: None,
             image_path,
@@ -10193,6 +10214,7 @@ fn parse_drawing_container(
     };
     vec![DocRun::Image(Box::new(ImageRun {
         inline_object_font_facts: None,
+        inline_position: None,
         inline_object_origin: None,
         inline_effect_extent: None,
         image_path,
@@ -11361,6 +11383,7 @@ fn parse_group_pic(
 
     Some(ImageRun {
         inline_object_font_facts: None,
+        inline_position: None,
         inline_object_origin: None,
         inline_effect_extent: None,
         image_path,
@@ -14775,6 +14798,7 @@ fn vml_image_run(
 
     let mut picture = ImageRun {
         inline_object_font_facts: None,
+        inline_position: None,
         inline_object_origin: None,
         inline_effect_extent: None,
         mime_type: mime_from_ext(&image_path).to_string(),
@@ -19672,6 +19696,7 @@ mod tests {
     fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
@@ -23427,6 +23452,7 @@ mod svg_blip_tests {
     fn image_run_serializes_path_fields_not_data_url() {
         let run = ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
@@ -25183,6 +25209,51 @@ mod anchor_image_relative_from_tests {
             let facts = &wire[0]["runs"][0]["__inlineObjectFontFacts"];
             assert_eq!(facts["fontSize"].as_f64(), Some(expected_size), "{wire}");
             assert_eq!(facts["fontFamily"].as_str(), Some(expected_face));
+        }
+    }
+
+    #[test]
+    fn inline_object_run_facts_carry_the_run_position() {
+        // ECMA-376 §17.3.2.24: the hosting run's raise/lower travels with an
+        // inline object (VML picture here); an unpositioned run carries none.
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#,
+        );
+        for (rpr, expected) in [
+            (r#"<w:rPr><w:position w:val="-30"/></w:rPr>"#, Some(-15.0)),
+            (r#"<w:rPr><w:position w:val="0"/></w:rPr>"#, None),
+            ("", None),
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
+              <w:p><w:r>{rpr}<w:pict><v:shape style="width:40pt;height:16pt"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:body></w:document>"#
+            );
+            let xml = XmlDoc::parse(&xml).unwrap();
+            let body = xml
+                .root_element()
+                .children()
+                .find(|n| n.has_tag_name((W_NS, "body")))
+                .unwrap();
+            let mut media = HashMap::new();
+            media.insert("rId1".to_string(), "word/media/image1.png".to_string());
+            let elements = parse_body_elements(
+                body,
+                &styles,
+                &mut NumberingMap::default(),
+                &media,
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            );
+            let wire = serde_json::to_value(&elements).unwrap();
+            let run = wire[0]["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["type"] == "image")
+                .unwrap_or_else(|| panic!("{wire}"));
+            assert_eq!(run["__inlinePosition"].as_f64(), expected, "{wire}");
         }
     }
 

@@ -2048,6 +2048,8 @@ function appendRunsToSegments(
         imagePath: img.imagePath,
         mimeType: img.mimeType,
         ...(img.anchor ? {} : { inlinePicture: true as const }),
+        ...(!img.anchor && (img as Partial<import('../layout/text.js').ParagraphImageRun>).inlinePositionPt
+          ? { positionPt: (img as Partial<import('../layout/text.js').ParagraphImageRun>).inlinePositionPt } : {}),
         ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
           img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
           wordInlineDrawingTurnsFootprint(drawingMlInlinePictureTurn(img)),
@@ -2115,6 +2117,8 @@ function appendRunsToSegments(
         anchorYFromPara: false,
         inlineShape: true,
         inlinePicture: true,
+        ...((run as Partial<import('../layout/text.js').ParagraphShapeRun>).inlinePositionPt
+          ? { positionPt: (run as Partial<import('../layout/text.js').ParagraphShapeRun>).inlinePositionPt } : {}),
         // An inline shape is not counter-turned in a vertical section, so its
         // effect edges stay on the object's own (logical) edges. A DrawingML
         // shape turns by its own xfrm, a group by its grpSpPr xfrm (its

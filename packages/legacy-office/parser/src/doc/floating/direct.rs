@@ -344,6 +344,7 @@ impl Store<'_> {
         let [top, bottom, left, right] = crop;
         let image = ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: None,
             inline_effect_extent: None,
             image_path,

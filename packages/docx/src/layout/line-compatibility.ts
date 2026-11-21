@@ -1575,6 +1575,69 @@ export const WORD_INLINE_PICTURE_AUTO_LEADING = defineCompatibilityRule({
   description: 'For an inline picture or drawing shape (wp:inline WPS or in-flow VML text box) with automatic spacing at or above one line, add the authored leading of the selected text/paragraph-mark face to the natural drawing/text baseline union, rather than multiplying the drawing height. Image-only, text-only and alternating 28.35pt-picture controls at line=240/259 and exact=259 distinguish the two advances; earlier Word controls covered picture heights 5–255pt at auto multiples 1, 1.079 and 1.15. Windows Word 16.0.20527 issue #2063 PDF controls (72 inline cases across no-styles/docDefaults documents, compatibility mode omitted/15) also establish box-only single spacing equal to box height and mixed-text box bottoms on the baseline. At 1.5 spacing a 40pt box with a 10pt Times New Roman mark adds about 5.74pt, not 20pt. Additional Windows mode-15 controls with Times New Roman, Arial and Yu Mincho distinguish document defaults, resolved Normal/default styles, an applied paragraph style, direct drawing-run font/size and direct paragraph-mark formatting: automatic leading follows the effective outer drawing run, with paragraph style below direct run rPr; a direct paragraph mark does not select it. Literal pictures and WPS shapes agree. Grid-snapped allocation remains independent, and the existing document-script font-slot policy is preserved. When an authored face is unavailable, the selected fallback supplies its own metrics; direct paragraph-mark size must not compensate for that resource difference. ECMA-376 §17.7.5.1 leaves omitted document defaults application-defined. Without document/style font declarations, preserve unspecified font slots and selected generic metrics rather than guessing an Office host default or borrowing the direct paragraph mark. In controlled inline-object clones, explicit Times New Roman 10pt default-font declarations make the renderer’s source-case page boundaries agree with Word; their fontless originals can differ. Fully authored Windows mode-15 auto-single controls use outer run8/20pt, object8/40pt and mark8pt: 16 WPS cases cover Times New Roman/Arial, four literal-picture cases cover Times New Roman, and four static VML textbox cases cover Times New Roman. DrawingML WPS and literal pictures reserve their outer-run natural minimum as extra ascent while preserving actual suffix descent; large objects retain their actual geometry. The static in-flow VML textbox controls have the same minimum advance but keep their object top, reserving extra below the visible box. The minimum is limited to horizontal off-grid main-body flow, with mixed ordinary text admitted only for DrawingML; mixed VML, relative VML, active WordArt including retained textbox content, unknown/public origins, ruby, numbering, frames and other stories remain outside this measured class. The parser retains actual source provenance; this minimum is not an invisible glyph or additional descent. The earlier box-height-only observation applies when the resolved outer-run minimum does not exceed the actual union. Minimum-height (atLeast) spacing remains outside this outer-run minimum rule. Controlled cases retain a preexisting object-top mismatch with Word even when line advance agrees; synthetic host metrics must not compensate for that separate limitation. Exact spacing and lines without inline pictures/shapes retain their own allocation.',
 });
 
+export const WORD_INLINE_OBJECT_POSITION = defineCompatibilityRule({
+  id: 'word-inline-object-position',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-object-position-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.2.24 raises or lowers the content of a run by w:position relative to the baseline but does not say how a positioned inline object takes part in its line. Windows Word 16.0.20527 controls (compatibility mode 15, Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures; 16pt and 30pt objects; position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides; automatic single and 1.5 spacing) move the object with its run: its box ends position above the baseline instead of on it, and the line takes the union of that shifted box with the text, exactly as a positioned glyph box. A raised object adds its raise above the baseline; a lowered one moves its descent below the baseline and the text rises toward the line top (a 16pt object lowered 15pt in a text line: 24.4pt line, text 6.6pt higher than unpositioned). DrawingML and VML pictures agree to 0.1pt, and the automatic multiple adds the same leading as without a position. Exact line spacing is a separate rule (WORD_INLINE_OBJECT_EXACT_LINE).',
+});
+
+/** WORD_INLINE_OBJECT_POSITION: an inline object's extent around the
+ * baseline after its run's §17.3.2.24 raise (+) / lower (-). */
+export function wordInlineObjectPositionedExtentPx(
+  heightPx: number,
+  positionPx: number,
+): Readonly<{ ascentPx: number; descentPx: number }> {
+  void WORD_INLINE_OBJECT_POSITION;
+  return {
+    ascentPx: Math.max(0, heightPx + positionPx),
+    descentPx: Math.max(0, -positionPx),
+  };
+}
+
+export const WORD_INLINE_OBJECT_EXACT_LINE = defineCompatibilityRule({
+  id: 'word-inline-object-exact-line',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-object-position-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (compatibility mode 15, no grid, exact 24pt lines, Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text (WORD_SPECIFIED_TEXT_LINE_BOX): the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). A DrawingML picture is clipped to the line box (a 30pt picture shows only the 19.2pt above the baseline; one lowered 15pt shows from 1pt above the baseline to the line bottom); a VML picture is drawn whole and overlaps the neighbouring lines. Scope: horizontal paragraphs directly in the main body (not table cells, headers, footers, notes or text boxes) in mode 15 without a line grid or wrap-conditioned origin, exact heights in the 12-30pt interval of the text rule, lines holding an inline picture or drawing shape; the clipping follows the same line class whether the text, ruby or object rule selects the baseline. Charts, math, other stories, other modes, grid lines and heights outside the interval keep their established placement until discriminating controls are measured. WPS drawing shapes take the four-fifths baseline but were not measured for clipping and stay unclipped.',
+});
+
+/** WORD_INLINE_OBJECT_EXACT_LINE gate: an exact line with inline objects keeps
+ * the four-fifths baseline of an exact text line. */
+export function wordInlineObjectExactLineApplies(input: Readonly<{
+  lineSpacing: LineSpacing | null | undefined;
+  mode15: boolean;
+  lineGridActive: boolean;
+  wrapOrigin: boolean;
+  vertical: boolean;
+  /** A paragraph directly in the main document body (not a cell, header,
+   * footer, note or text box). */
+  topLevelBody: boolean;
+  hasInlineObject: boolean;
+}>): boolean {
+  void WORD_INLINE_OBJECT_EXACT_LINE;
+  const spacing = input.lineSpacing;
+  return input.hasInlineObject && input.mode15 && !input.lineGridActive && !input.wrapOrigin
+    && !input.vertical && input.topLevelBody
+    && spacing?.rule === 'exact' && spacing.value >= 12 && spacing.value <= 30;
+}
+
+/** WORD_INLINE_OBJECT_EXACT_LINE: a DrawingML inline picture is clipped to its
+ * exact line box; a VML picture is not. */
+export function wordInlineObjectExactLineClips(origin: 'drawingml' | 'vmlStaticTextbox' | undefined): boolean {
+  return origin === 'drawingml';
+}
+
 export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
   id: 'word-empty-mark-ascii-face',
   evidence: {
