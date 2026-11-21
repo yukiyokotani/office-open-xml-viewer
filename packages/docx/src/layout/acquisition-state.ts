@@ -104,6 +104,24 @@ function applyNumberingContext(
   });
 }
 
+/** A body-level paragraph (a top-level or framed paragraph of its story)
+ * keeps the facts that decide its line grid (`word-header-footer-off-line-grid`):
+ * a header or footer story identity, and the header/footer hosting of a
+ * text-box story. Every other story position resolves as the body did
+ * before. */
+function bodyLevelStoryContext(storyContext: StoryContext | undefined): StoryContext {
+  if (storyContext?.story === 'header' || storyContext?.story === 'footer') {
+    return Object.freeze({
+      ...BODY_STORY_CONTEXT,
+      story: storyContext.story,
+      ...(storyContext.headerFooterHosted ? { headerFooterHosted: true as const } : {}),
+    });
+  }
+  return storyContext?.headerFooterHosted
+    ? Object.freeze({ ...BODY_STORY_CONTEXT, headerFooterHosted: true as const })
+    : BODY_STORY_CONTEXT;
+}
+
 export function resolveBodyParagraphLayoutContext(
   state: ParagraphContextState & Partial<Pick<BodyAcquisitionState, 'storyContext'>>,
   paragraph: ParagraphLayoutSource,
@@ -117,7 +135,7 @@ export function resolveBodyParagraphLayoutContext(
       // A top-level paragraph keeps the main body's hang admission only
       // when the state is the main body root itself (frame paragraphs
       // reaching here stay outside the class by their framePr).
-      state.storyContext === MAIN_BODY_STORY_CONTEXT ? MAIN_BODY_STORY_CONTEXT : BODY_STORY_CONTEXT,
+      state.storyContext === MAIN_BODY_STORY_CONTEXT ? MAIN_BODY_STORY_CONTEXT : bodyLevelStoryContext(state.storyContext),
       paragraph,
     ),
   );

@@ -151,6 +151,18 @@ export const WORD_VERTICAL_INLINE_PICTURE_UPRIGHT_EXTENT = defineCompatibilityRu
   description: 'An inline picture in a tbRl or tbLrV section stays upright at its §20.4.2.7 wp:extent: its physical height is its advance along the line and its physical width is its extent across the line, so the line strip grows to hold the width. Evidence: Windows Word PDF exports of a 60 x 40pt inline picture in tbRl and tbLrV A4 sections on an 18pt line grid: the picture painted upright and unmirrored at 60 x 40pt, centred in a 72pt (four-pitch) strip, and the following text started 40pt after the picture start.',
 });
 
+export const WORD_HEADER_FOOTER_OFF_LINE_GRID = defineCompatibilityRule({
+  id: 'word-header-footer-off-line-grid',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'header-footer-line-grid',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'The line pitch of a §17.6.5 docGrid (types lines, linesAndChars and snapToChars) applies to the body but not to anything in a header or footer: top-level and framed paragraphs, table cells, and the text boxes the header or footer hosts (VML and DrawingML, inline and anchored, as complete stories or compatibility text) keep the paragraph\'s own line height. Evidence: Windows Word PDF exports of A4 sections with an 18pt line pitch, 10.5pt MS Mincho text and 36pt header/footer distances. A one-line header and footer in lrTb, tbRl, btLr and tbLrV sections under a "lines" grid, and in lrTb and tbRl under linesAndChars and snapToChars grids (charSpace 0): every header glyph box started 1.5pt below the header distance and every footer glyph box ended 1.5pt above the footer distance (a 13.6pt natural line), while body lines stayed centred in 18pt grid lines. Two-paragraph header and footer items in lrTb and tbRl under all three grid types, together and one at a time: plain paragraphs, a one-cell table, an inline and an anchored VML text box and an inline and an anchored DrawingML text box all advanced 13.5 to 13.7pt per line. In the snapToChars controls header and footer glyphs also kept their natural positions and advances while the body moved onto the character grid; a character grid with a non-zero charSpace in headers and footers is outside this evidence.',
+});
+
 export const WORD_VERTICAL_UNDERLINE_OVER_SIDE = defineCompatibilityRule({
   id: 'word-vertical-underline-over-side',
   evidence: {
