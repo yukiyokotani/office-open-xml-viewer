@@ -5433,10 +5433,14 @@ function textBoxParagraphContext(
     cjkClosingMarkHang: _hostCjkClosingMarkHang,
     lineEdgeRules: _hostLineEdgeRules,
     documentKinsoku,
+    textBoxLineGrid,
     ...host
   } = inherited;
   return {
     ...host,
+    // The text box's own grid participation, not the header or footer
+    // paragraph's (`word-header-footer-off-line-grid`).
+    ...(textBoxLineGrid ? { lineGrid: textBoxLineGrid } : {}),
     // This compatibility shape is a separate paragraph; its host OFF toggle
     // and observed line-edge exception do not describe its own source.
     kinsoku: documentKinsoku ?? inherited.kinsoku,

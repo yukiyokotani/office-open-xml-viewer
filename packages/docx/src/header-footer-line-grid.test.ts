@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { readFile } from 'node:fs/promises';
+import { beforeAll, describe, expect, it } from 'vitest';
+import init, { DocxArchive } from './wasm/docx_parser.js';
+import { storeZip } from './conformance/generate.js';
+import { normalizeInternalDocumentModel } from './parser-model.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import type { ParagraphLayout, PaintNode } from './layout/types.js';
@@ -89,5 +93,106 @@ describe('header and footer on a §17.6.5 line grid', () => {
       expect(heights.header).toBeLessThan(18);
       expect(heights.footer).toBe(heights.header);
     }
+  });
+});
+
+// Every paragraph laid out anywhere on the page, by its text, with its first
+// line's advance.
+function lineAdvancesByText(value: unknown, out = new Map<string, number>(), seen = new Set<object>()) {
+  if (value === null || typeof value !== 'object' || seen.has(value)) return out;
+  seen.add(value);
+  const node = value as Partial<ParagraphLayout>;
+  if (node.kind === 'paragraph' && Array.isArray(node.lines) && node.lines.length > 0) {
+    const text = node.lines.flatMap((line) => line.placements)
+      .flatMap((placement) => placement.kind === 'text' ? [placement.text] : []).join('');
+    if (text && !out.has(text)) out.set(text, node.lines[0]!.advancePt);
+  }
+  for (const child of Object.values(value)) lineAdvancesByText(child, out, seen);
+  return out;
+}
+
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const V = 'urn:schemas-microsoft-com:vml';
+
+function parsedHeaderDocument(gridKind: string, textDirection?: string): DocxDocumentModel {
+  const p = (text: string, pPr = '') => `<w:p>${pPr}<w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
+  const frame = '<w:pPr><w:framePr w:w="1440" w:hAnchor="text" w:vAnchor="text" w:x="0" w:y="0" w:wrap="around"/></w:pPr>';
+  const box = '<w:p><w:r><w:pict><v:shape id="box" type="#_x0000_t202" style="width:72pt;height:36pt">'
+    + `<v:textbox inset="0,0,0,0"><w:txbxContent>${p('箱')}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+  const header = p('Plain') + p('Framed', frame) + box;
+  const files = new Map<string, string>([
+    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${p('Body')}`
+      + '<w:sectPr><w:headerReference w:type="default" r:id="hdr"/><w:pgSz w:w="12000" w:h="16000"/>'
+      + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720"/>'
+      + (textDirection ? `<w:textDirection w:val="${textDirection}"/>` : '')
+      + `<w:docGrid w:type="${gridKind}" w:linePitch="360"/></w:sectPr></w:body></w:document>`],
+    ['word/header1.xml', `<w:hdr xmlns:w="${W}" xmlns:v="${V}">${header}</w:hdr>`],
+    ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="hdr" Type="${R}/header" Target="header1.xml"/></Relationships>`],
+    ['_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+      + '</Types>'],
+  ]);
+  const archive = new DocxArchive(storeZip(new Map([...files].map(([name, xml]) => [name, new TextEncoder().encode(xml)]))));
+  try {
+    return normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+}
+
+describe('framed paragraphs and text boxes in a gridded header', () => {
+  beforeAll(async () => {
+    await init({ module_or_path: await readFile(new URL('./wasm/docx_parser_bg.wasm', import.meta.url)) });
+  });
+
+  it.each([
+    ['lines', undefined], ['linesAndChars', undefined], ['snapToChars', undefined],
+    ['lines', 'tbRl'], ['lines', 'btLr'], ['lines', 'tbLrV'],
+  ])('keeps a framed %s header paragraph (%s) off the grid like its plain neighbour', (gridKind, direction) => {
+    const document = parsedHeaderDocument(gridKind, direction);
+    const advances = lineAdvancesByText(layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: makeCtx() }),
+      { currentDateMs: 0 },
+    ).pages[0]!.layers);
+    expect(advances.get('Plain')).toBeLessThan(18);
+    expect(advances.get('Framed')).toBe(advances.get('Plain'));
+    // A text box's own story keeps the grid: the header rule is about header
+    // paragraphs, and Word's text boxes in headers are unmeasured.
+    expect(advances.get('箱')).toBe(18);
+  });
+
+  it('keeps the grid in a compatibility text box hosted by a header paragraph', () => {
+    const section = {
+      pageWidth: 600, pageHeight: 800,
+      marginTop: 60, marginRight: 90, marginBottom: 80, marginLeft: 40,
+      headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false,
+      docGridType: 'lines', docGridLinePitch: 18,
+    } as SectionProps;
+    const host = para('Host') as DocParagraph & BodyElement;
+    host.runs.push({
+      type: 'shape', inline: true, widthPt: 72, heightPt: 36,
+      anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      zOrder: 0, stroke: null, fill: null, subpaths: [],
+      textBlocks: [{ text: '箱', fontSizePt: 10, fontFamily: 'NotInMetrics', alignment: 'left' }],
+    } as unknown as DocParagraph['runs'][number]);
+    const document = {
+      section, body: [para('Body')],
+      headers: { default: { body: [host] }, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const advances = lineAdvancesByText(layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: makeCtx() }),
+      { currentDateMs: 0 },
+    ).pages[0]!.layers);
+    expect(advances.get('箱')).toBe(18);
   });
 });

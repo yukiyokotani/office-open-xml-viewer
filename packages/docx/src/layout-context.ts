@@ -169,6 +169,10 @@ export interface ParagraphLayoutContext {
    * provenance. Complete WordprocessingML stories retain their own context. */
   readonly runDirectionUnauthored?: true;
   readonly lineGrid: LineGridPolicy;
+  /** The line grid a compatibility text box hosted by this paragraph takes
+   * when the paragraph's own story suppresses it
+   * (`word-header-footer-off-line-grid`); absent when it equals lineGrid. */
+  readonly textBoxLineGrid?: LineGridPolicy;
   readonly characterGrid: CharacterGridPolicy;
   readonly rightIndentGrid: RightIndentGridPolicy;
   readonly physicalIndentLeftPt: number;
@@ -362,15 +366,19 @@ export function resolveParagraphLayoutContext(
   story: StoryContext,
   paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
-  const lineGridActive =
+  const paragraphLineGrid =
     isSectionLineGrid(section.grid.kind)
-    // `word-header-footer-off-line-grid`
-    && story.story !== 'header' && story.story !== 'footer'
     && section.grid.linePitchPt != null
     && section.grid.linePitchPt > 0
     && paragraph.snapToGrid !== false
     && paragraph.lineSpacing?.rule !== 'exact'
     && (!hasTableCellContainer(story) || settings.compat.adjustLineHeightInTable);
+  // `word-header-footer-off-line-grid`: the top-level paragraphs of a header
+  // or footer story keep their own line height. Table cells inside the story
+  // and text-box content keep their own grid rules (unmeasured there).
+  const headerFooterTopLevel = (story.story === 'header' || story.story === 'footer')
+    && story.containers.length === 0;
+  const lineGridActive = paragraphLineGrid && !headerFooterTopLevel;
   const characterGridActive = isSectionCharacterGrid(section.grid.kind);
   const baseRtl = paragraph.bidi === true;
   const paragraphOffAdmitted = paragraphOffJapaneseAdmitted(settings, section, story, paragraph);
@@ -419,6 +427,11 @@ export function resolveParagraphLayoutContext(
       active: lineGridActive,
       pitchPt: lineGridActive ? section.grid.linePitchPt : null,
     },
+    // A compatibility text box hosted by this paragraph is not header or
+    // footer text: it keeps the grid the paragraph would otherwise take.
+    ...(paragraphLineGrid && !lineGridActive ? {
+      textBoxLineGrid: { active: true, pitchPt: section.grid.linePitchPt },
+    } : {}),
     characterGrid: {
       active: characterGridActive,
       kind: characterGridActive
