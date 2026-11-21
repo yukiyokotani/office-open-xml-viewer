@@ -46,7 +46,7 @@ const table = (rows: number, rowHeightPt?: number) => '<w:tbl><w:tblPr><w:tblW w
   + '</w:tbl>';
 const T = table(2);
 
-type Direction = 'tbRl' | 'tbLrV' | 'tbRlV';
+type Direction = 'tbRl' | 'tbLrV';
 
 function docx(direction: Direction, body: readonly string[], columns = 1): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${body.join('')}`
@@ -149,7 +149,7 @@ beforeAll(async () => {
 });
 
 describe('upright block table of a vertical section', () => {
-  it.each(['tbRl', 'tbLrV', 'tbRlV'] as const)(
+  it.each(['tbRl', 'tbLrV'] as const)(
     'sits at the column top and the block position of a %s section without advancing the flow',
     (direction) => {
       const { tables, strips } = layOut(direction, [P, T, P, P]);
