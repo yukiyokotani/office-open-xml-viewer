@@ -21,6 +21,7 @@ import {
   clearSelfVrtCandidateOutput,
   prepareSelfVrtCorpus,
   harnessBootstrapDiffViolations,
+  lockfileBootstrapDiffViolations,
   pngPixelsEqual,
   selfVrtBaselineRoot,
   selfVrtInputPath,
@@ -87,6 +88,43 @@ test('harness bootstrap allows only test-renderer alias lines in Vite configs', 
     ].join('\n')),
     ["+  define: { __OOXML_MODEL_SOURCES__: 'false' },"],
   );
+});
+
+test('harness bootstrap allows only @fontsource additions in pnpm-lock.yaml', () => {
+  const addition = [
+    'diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml',
+    '@@ -262,0 +263,3 @@ importers:',
+    "+      '@fontsource/roboto':",
+    '+        specifier: ^5.3.0',
+    '+        version: 5.3.0',
+    '@@ -1080,0 +1084,3 @@ packages:',
+    "+  '@fontsource/roboto@5.3.0':",
+    '+    resolution: {integrity: sha512-AAAA==}',
+    '+',
+    '@@ -5320,0 +5327,2 @@ snapshots:',
+    "+  '@fontsource/roboto@5.3.0': {}",
+    '+',
+  ];
+  assert.deepEqual(lockfileBootstrapDiffViolations(addition.join('\n')), []);
+  // A renderer dependency bump is its own hunk, without a font package.
+  const bump = ['@@ -300 +300 @@ importers:', '-        version: 0.18.5', '+        version: 0.18.6'];
+  assert.deepEqual(lockfileBootstrapDiffViolations([...addition, ...bump].join('\n')), bump.slice(1));
+  // Anything but the package's own structure inside a font hunk is rejected.
+  assert.deepEqual(
+    lockfileBootstrapDiffViolations(['@@ -1 +1 @@', "+  '@fontsource/roboto@5.3.0':", '+    dependencies:'].join('\n')),
+    ['+    dependencies:'],
+  );
+});
+
+test('self-VRT corpora keep public specimen and fast-tier stems in their own trees', () => {
+  assert.equal(selfVrtInputPath({ corpus: 'corpus', file: 'corpus/docx-001.docx' }), 'corpus/docx-001.docx');
+  assert.equal(selfVrtInputPath({ corpus: 'private-fast', file: 'pptx/deck.pptx' }), 'private/pptx/deck.pptx');
+  assert.throws(() => clearSelfVrtCandidateOutput({
+    corpus: 'corpus', stem: 'demo/sample-1', itemKind: 'page',
+  }), /invalid self-VRT output identity/);
+  assert.throws(() => clearSelfVrtCandidateOutput({
+    corpus: 'private-fast', stem: 'corpus/docx-001', itemKind: 'page',
+  }), /invalid self-VRT output identity/);
 });
 
 test('self-VRT corpora keep demo and private stems in their own namespaces', () => {
@@ -396,6 +434,75 @@ test('bypass: a baseline checkout changed mid-run is caught at the next item', (
         );
       },
     );
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+// ── Fast tier ────────────────────────────────────────────────────────────────
+// `private-fast` renders a selected subset; its baseline is bound to the
+// selection digest and holds exactly the selected items.
+
+const FAST = { corpus: 'private-fast', format: 'pptx', stem: 'pptx/deck', itemKind: 'slide' };
+
+function fastFixture() {
+  const fixture = selfVrtFixture();
+  for (const checkout of [fixture.base, fixture.candidate]) {
+    mkdirSync(join(checkout, 'packages/pptx/public/private/pptx'), { recursive: true });
+    writeFileSync(join(checkout, 'packages/pptx/public/private/pptx/deck.pptx'), 'private deck');
+  }
+  return fixture;
+}
+
+function fastRun(checkout, env, { snapshot, digest = 'selection-a', indices = [1, 3], value = 7 }) {
+  return inPackage(checkout, env, () => {
+    prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot, selectionDigest: digest });
+    const differences = indices.map((itemIndex) => captureOrCompareSelfVrtItem({
+      ...FAST, itemIndex, actual: png(value), snapshot,
+    })).filter(Boolean);
+    verifySelfVrtItemManifest({ ...FAST, itemCount: 4, snapshot, itemIndices: indices });
+    return differences;
+  });
+}
+
+test('fast tier compares exactly the selected items under the same selection', () => {
+  const fixture = fastFixture();
+  const { base, candidate, revision } = fixture;
+  const snapshotEnv = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: revision };
+  const compareEnv = { VRT_BASELINE_CHECKOUT: base, VRT_BASELINE_REVISION: revision };
+  try {
+    assert.deepEqual(fastRun(base, snapshotEnv, { snapshot: true }), []);
+    assert.ok(existsSync(join(base, 'packages/pptx/tests/visual/baseline/private-corpus-fast/pptx/deck/slide-4.png')));
+    assert.ok(!existsSync(join(base, 'packages/pptx/tests/visual/baseline/private-corpus-fast/pptx/deck/slide-1.png')));
+    assert.deepEqual(fastRun(candidate, compareEnv, { snapshot: false }), []);
+    assert.equal(fastRun(candidate, compareEnv, { snapshot: false, value: 8 }).length, 2);
+    // A different selection is a different oracle.
+    assert.throws(() => fastRun(candidate, compareEnv, { snapshot: false, digest: 'selection-b' }), /manifest mismatch/);
+    assert.throws(() => fastRun(candidate, compareEnv, { snapshot: false, indices: [1] }), /item set mismatch/);
+  } finally {
+    rmSync(fixture.scratch, { recursive: true, force: true });
+  }
+});
+
+test('fast tier and full corpora refuse each other\'s selection arguments', () => {
+  const fixture = fastFixture();
+  const env = { VRT_BASELINE_CHECKOUT: undefined, VRT_BASELINE_REVISION: fixture.revision };
+  try {
+    inPackage(fixture.base, env, () => {
+      assert.throws(() => prepareSelfVrtCorpus({ ...FAST, files: ['pptx/deck.pptx'], snapshot: true }),
+        /requires a selection digest/);
+      assert.throws(() => prepareSelfVrtCorpus({
+        ...FAST, corpus: 'private', files: ['pptx/deck.pptx'], snapshot: true, selectionDigest: 'x',
+      }), /does not take a selection digest/);
+      assert.throws(() => verifySelfVrtItemManifest({ ...FAST, itemCount: 4, snapshot: true }),
+        /requires the selected item indices/);
+      assert.throws(() => verifySelfVrtItemManifest({
+        ...FAST, itemCount: 4, snapshot: true, itemIndices: [3, 1],
+      }), /invalid slide selection/);
+      assert.throws(() => verifySelfVrtItemManifest({
+        ...FAST, corpus: 'private', itemCount: 4, snapshot: true, itemIndices: [1],
+      }), /does not take item indices/);
+    });
   } finally {
     rmSync(fixture.scratch, { recursive: true, force: true });
   }

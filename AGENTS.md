@@ -349,6 +349,12 @@ verification is acceptable when the user asks to view it.
 
 VRT is local-only because private samples are not redistributable.
 
+The public specimen corpus (`tests/corpus/`, see its README) is the
+exception: anyone can run its self-regression offline, and it is part of the
+default `vrt` runs. When issue work exposes an unimplemented or broken
+feature, hand a minimal self-authored pattern to it (`corpus-specimen` skill,
+`.agents/skills/`).
+
 Regression detection must compare the changed renderer with images produced by
 the previous renderer. It must not use Word/Excel/PowerPoint or PDF reference
 images as the regression oracle. Keep Office-reference fidelity evaluation as a
@@ -411,7 +417,8 @@ For the one-time bootstrap of a harness change against a baseline revision that
 predates it, copy only the allowlisted VRT harness files listed in
 `tests/visual/private-corpus.mjs` into the baseline worktree and set
 `VRT_ALLOW_HARNESS_CHANGES=1` for both the snapshot and the comparison run;
-renderer/parser changes remain forbidden.
+renderer/parser changes remain forbidden (`tests/visual/README.md` lists the
+exceptions).
 
 ### Fidelity scores
 
@@ -436,6 +443,11 @@ UPDATE_SCORES=1 pnpm vrt:fidelity
 This rewrites only `scores.json`, never the reference images. Commit the
 re-recorded scores as their own change that names the source revision. Never
 loosen `RATCHET_DROP_PCT` or `FAIL_ABOVE_PCT` to make a run pass.
+
+A fast private tier for PPTX/XLSX (`tests/visual/README.md`) renders only a
+structural-feature cover of the private corpus. It cannot see wrapping,
+autofit or pagination, so run the full `vrt:private` before a release or when
+geometry changes.
 
 Only update references when the user explicitly asks:
 

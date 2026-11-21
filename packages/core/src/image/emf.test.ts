@@ -1878,12 +1878,13 @@ describe('playEmf — clip rectangles and regions', () => {
 
   it('scopes clips to SAVEDC/RESTOREDC and balances every canvas save', () => {
     const m = run([record(EMR.SAVEDC, () => {}), rect(INTERSECTCLIPRECT, 10, 10, 50, 50), record(EMR.RESTOREDC, (w) => w.i32(-1))]);
-    const saves = m.calls.filter((c) => c.op === 'save').length;
-    expect(saves).toBe(2);
-    expect(m.calls.filter((c) => c.op === 'restore').length).toBe(saves);
-    // An unmatched SAVEDC is also unwound at the end of playback.
+    const ops = m.calls.map((c) => c.op);
+    // RESTOREDC rebuilds the canvas clip from the base save: no clip remains.
+    expect(ops.slice(ops.lastIndexOf('clip'))).toEqual(['clip', 'restore', 'save', 'restore']);
+    expect(ops.filter((o) => o === 'restore').length).toBe(ops.filter((o) => o === 'save').length);
+    // An unmatched SAVEDC leaves only the base save to unwind.
     const open = run([record(EMR.SAVEDC, () => {}), rect(INTERSECTCLIPRECT, 10, 10, 50, 50)]);
-    expect(open.calls.filter((c) => c.op === 'restore').length).toBe(2);
+    expect(open.calls.filter((c) => c.op === 'restore').length).toBe(1);
   });
 
   it('EXTSELECTCLIPRGN RGN_COPY with no region resets a clip set at the same level', () => {
@@ -1891,13 +1892,42 @@ describe('playEmf — clip rectangles and regions', () => {
     expect(m.calls.map((c) => c.op).slice(-4)).toEqual(['clip', 'restore', 'save', 'restore']);
   });
 
-  it('reports a reset that would have to drop a clip inherited from an outer level', () => {
+  it('resets a clip inherited from an outer level exactly, and RESTOREDC brings it back', () => {
     const reported: string[] = [];
-    run(
-      [rect(INTERSECTCLIPRECT, 10, 10, 50, 50), record(EMR.SAVEDC, () => {}), record(EXTSELECTCLIPRGN, (w) => w.u32(0).u32(5))],
+    const m = run(
+      [rect(INTERSECTCLIPRECT, 10, 10, 50, 50), record(EMR.SAVEDC, () => {}), record(EXTSELECTCLIPRGN, (w) => w.u32(0).u32(5)),
+        record(EMR.RESTOREDC, (w) => w.i32(-1))],
       (r) => reported.push(...r),
     );
-    expect(reported).toEqual(['EMR_EXTSELECTCLIPRGN (reset of an inherited clip)']);
+    expect(reported).toEqual([]);
+    const ops = m.calls.map((c) => c.op);
+    // clip, reset (restore+save, no clip), RESTOREDC (restore+save, clip again), end.
+    expect(ops.slice(ops.indexOf('clip'))).toEqual(['clip', 'restore', 'save', 'restore', 'save', 'beginPath', 'moveTo', 'lineTo', 'lineTo', 'lineTo', 'closePath', 'clip', 'restore']);
+  });
+
+  it('OFFSETCLIPRGN moves the clip region by a logical offset, also one inherited across SAVEDC', () => {
+    const OFFSETCLIPRGN = 26;
+    const reported: string[] = [];
+    const m = run(
+      [rect(INTERSECTCLIPRECT, 0, 0, 50, 50), record(EMR.SAVEDC, () => {}), record(OFFSETCLIPRGN, (w) => w.i32(50).i32(50)),
+        record(EMR.RESTOREDC, (w) => w.i32(-1))],
+      (r) => reported.push(...r),
+    );
+    expect(reported).toEqual([]);
+    const translates = m.calls.filter((c) => c.op === 'translate').map((c) => c.args);
+    expect(translates).toHaveLength(2);
+    expect(translates[0][0]).toBeGreaterThan(0);
+    expect(translates[0][1]).toBeGreaterThan(0);
+    expect(translates[1]).toEqual([-translates[0][0], -translates[0][1]]);
+    // RESTOREDC rebuilds the saved, unmoved clip: no translate after the offset clip.
+    const ops = m.calls.map((c) => c.op);
+    expect(ops.lastIndexOf('translate')).toBeLessThan(ops.lastIndexOf('clip'));
+    expect(m.calls.filter((c) => c.op === 'clip')).toHaveLength(3);
+  });
+
+  it('OFFSETCLIPRGN with no clip changes nothing', () => {
+    const m = run([record(26, (w) => w.i32(5).i32(5))]);
+    expect(m.calls.filter((c) => c.op === 'clip' || c.op === 'translate')).toHaveLength(0);
   });
 
   it('EXTSELECTCLIPRGN intersects device-unit region rectangles, and subtracts them for RGN_DIFF', () => {
