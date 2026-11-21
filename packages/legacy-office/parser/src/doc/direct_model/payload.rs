@@ -304,6 +304,7 @@ pub(super) fn section(value: &SectionProps) -> Result<usize, String> {
         total.string(&placement.section_id)?;
         total.option_string(&placement.v_align)?;
         total.option_string(&placement.doc_grid_type)?;
+        total.option_string(&placement.page_orient)?;
         if let Some(geometry) = &placement.page_geometry {
             total.add(std::mem::size_of_val(geometry.as_ref()))?;
         }
@@ -454,6 +455,7 @@ impl Total {
         self.string(&placement.section_id)?;
         self.option_string(&placement.v_align)?;
         self.option_string(&placement.doc_grid_type)?;
+        self.option_string(&placement.page_orient)?;
         if let Some(geometry) = &placement.page_geometry {
             self.add(std::mem::size_of_val(geometry.as_ref()))?;
         }
@@ -657,6 +659,7 @@ mod tests {
             page_borders_authored: None,
             page_borders: None,
             page_geometry: None,
+            page_orient: None,
         }));
         assert_eq!(
             section(&section_value).unwrap(),
