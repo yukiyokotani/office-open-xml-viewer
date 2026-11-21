@@ -1241,6 +1241,12 @@ function bodyLayoutSequenceInput(
         block: acquiredBodyTable(source, element),
       });
     }
+    if (element.type === 'pageBreak'
+      && (element as { readonly __pageBreakBefore?: boolean }).__pageBreakBefore === true) {
+      // §17.3.1.23 of a paragraph whose first content is a column break: the
+      // paragraph property, satisfied by an empty page start.
+      return Object.freeze({ kind: 'authored-break' as const, source, break: 'pageBreakBefore' as const });
+    }
     if (element.type === 'pageBreak' || element.type === 'columnBreak') {
       return Object.freeze({
         kind: 'authored-break' as const,

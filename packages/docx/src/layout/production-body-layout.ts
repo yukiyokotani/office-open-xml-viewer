@@ -1009,6 +1009,7 @@ function layoutBodyStory(
       containers: [],
       lineNumberingEligible: false,
       ...(request.container.quarterTurned ? { quarterTurned: true } : {}),
+      ...(textBoxStoryHostedByHeaderFooter(request.source) ? { headerFooterHosted: true as const } : {}),
       // WORD_JUSTIFICATION_PUNCTUATION_HANG: Word matches the main body in a
       // header and a footnote (blk-0898-cjk-kincell); footers, endnotes, note
       // separators and text-box stories are unmeasured.
@@ -3036,6 +3037,15 @@ function completeTextBoxStoryAcquirerFor(
 /** Acquire a text box's complete story with its owner's section, page and
  * frame as authority. The section-keyed story cache stays shared because its
  * key includes the full section context. */
+/** Whether a text-box story's outermost host is a header or footer story.
+ * A text-box story instance is `<host story>:<host instance>:<path>`, nested
+ * text boxes prefixing further `textbox` hosts. */
+function textBoxStoryHostedByHeaderFooter(source: SourceRef): boolean {
+  if (source.story !== 'textbox') return false;
+  const host = source.storyInstance.split(':').find((token) => token !== 'textbox');
+  return host === 'header' || host === 'footer';
+}
+
 function acquireCompleteBodyTextBoxStory(
   owner: CompleteTextBoxStoryOwner,
   storyAcquisitionContext: BodyStoryAcquisitionContext,

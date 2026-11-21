@@ -1627,6 +1627,7 @@ impl<'a> Reader<'a> {
                             origin: None,
                             parity: None,
                             same_paragraph_as_previous: None,
+                            page_break_before: None,
                         }));
                     } else if let Some((bottom_before, ..)) = previous {
                         // The gap above the table: carried by the preceding
@@ -1656,6 +1657,7 @@ impl<'a> Reader<'a> {
                 origin: None,
                 parity: None,
                 same_paragraph_as_previous: None,
+                page_break_before: None,
             }));
         }
         Ok(out)

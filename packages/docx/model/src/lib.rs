@@ -1173,6 +1173,11 @@ pub enum BodyElement {
             skip_serializing_if = "Option::is_none"
         )]
         same_paragraph_as_previous: Option<bool>,
+        /// Parser-private: the §17.3.1.23 pageBreakBefore of a paragraph whose
+        /// first content is a column break. Layout applies it as that
+        /// paragraph property (an empty page start satisfies it).
+        #[serde(rename = "__pageBreakBefore", skip_serializing_if = "Option::is_none")]
+        page_break_before: Option<bool>,
     },
     /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following
     /// content into the next newspaper column of the current section (or the

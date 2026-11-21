@@ -144,6 +144,7 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     // needs a reviewed entry.
     'AnchorHostMetrics<type=anchorHost>.__anchorOccurrenceId: missing-in-ts': 'internal channel',
     'AnchorHostMetrics<type=anchorHost>.__listLabel: missing-in-ts': 'internal channel',
+    'BodyElement<type=pageBreak>.__pageBreakBefore: missing-in-ts': 'internal channel',
     'BodyElement<type=sectionBreak>.__sectionPlacement: missing-in-ts': 'internal channel',
     'ChartRun<type=chart>.__anchorAcquisition: missing-in-ts': 'internal channel',
     'DocParagraph<type=paragraph>.__complexFieldBoundaries: missing-in-ts': 'internal channel',
