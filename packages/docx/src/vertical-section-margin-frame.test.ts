@@ -117,8 +117,9 @@ function physicalParagraphs(page: LayoutPage): LayoutRect[] {
 }
 
 describe('vertical section margins on the physical page (§17.6.11, §17.6.20)', () => {
-  it('starts a tbLrV body at the physical left and top margins and advances rightward', () => {
-    const page = layoutPage('tbLrV');
+  // tbRlV shares the tbLrV page frame (`word-section-tbrlv-tblrv-page-frame`).
+  it.each(['tbLrV', 'tbRlV'])('starts a %s body at the physical left and top margins and advances rightward', (textDirection) => {
+    const page = layoutPage(textDirection);
     const [first, second] = physicalParagraphs(page);
 
     expect(page.section.geometry).toMatchObject({

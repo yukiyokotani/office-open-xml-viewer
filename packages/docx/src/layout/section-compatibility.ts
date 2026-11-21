@@ -115,6 +115,18 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
 }
 
+export const WORD_SECTION_TBRLV_TBLRV_PAGE_FRAME = defineCompatibilityRule({
+  id: 'word-section-tbrlv-tblrv-page-frame',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-section-tbrlv-frame',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Part 4 §14.11.7 names tbRlV as lines flowing from right to left with rotated glyphs. Word lays a section-level tbRlV out in the page frame of tbLrV (word-section-tblrv-left-page-frame): the first line strip starts at the physical left margin and later lines advance rightward. Evidence: a Windows Word 16.0.20527 PDF of a synthetic A4 one-column tbRlV section (margins left 40, right 90, top 60, bottom 80pt, 18pt line grid, 10.5pt text) holding three one-line paragraphs of Latin and East Asian text around a block table: the line strips are at x 40–58, 58–76 and 76–94pt, and every glyph (upright East Asian, Latin turned clockwise) has the coordinates it has in the tbLrV control with the same content. Outside this evidence, and following tbLrV here: gutter and mirrored margins, headers and footers, columns, two-page imposition, inline pictures and underlines of a tbRlV section. tbRlV on a table cell keeps its own handling.',
+});
+
 export const WORD_SECTION_TBLRV_LEFT_PAGE_FRAME = defineCompatibilityRule({
   id: 'word-section-tblrv-left-page-frame',
   evidence: {

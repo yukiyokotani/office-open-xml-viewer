@@ -92,7 +92,7 @@ export function sectionBodyInsetPt(marginPt: number): number {
  * the frame that lays the body out is the frame that paints it, so a physical
  * margin owns the logical edge it is painted on.
  *
- * - vertical-rl (tbRl, tbRlV, and btLr under
+ * - vertical-rl (tbRl, and btLr under
  *   `word-section-btlr-tbrl-page-frame`): lines advance right to left, so the
  *   logical top/right/bottom/left margins are the physical right/bottom/left/top.
  * - vertical-lr (tbLrV, Part 4 §14.11.7 ≡ Part 1 §17.18.93 lrV, lines flowing
