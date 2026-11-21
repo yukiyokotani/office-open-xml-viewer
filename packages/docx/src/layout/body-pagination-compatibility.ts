@@ -124,7 +124,7 @@ export const WORD_GRID_LINE_CONTENT_FIT_ADMISSION = defineCompatibilityRule({
 const GRID_PLAIN_PARAGRAPH_KEYS = new Set([
   'kind', 'id', 'source', 'flowDomainId', 'ordinaryFlow', 'sectionFlowOwnership',
   'flowBounds', 'inkBounds', 'clipBounds', 'advancePt', 'diagnostics',
-  'paragraphId', 'styleId', 'bookmarkStarts', 'spacing', 'contextualSpacing',
+  'paragraphId', 'styleId', 'bookmarkStarts', 'spacing', 'contextualSpacing', 'additiveParagraphGap',
   'lines', 'resources', 'events', 'exclusions', 'cellContainmentBounds', 'anchorCollisions',
   'anchorFrames',
   'continuation',

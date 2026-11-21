@@ -104,7 +104,7 @@ import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/c
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
-import { isInklessParagraph } from './layout/paragraph-visibility.js';
+import { isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
 import {
   wordHiddenParagraphRetainedBreaks,
   type WordHiddenParagraphRunFact,
@@ -1185,11 +1185,11 @@ function paragraphFrameFact(
 }
 
 /** A vanished, inkless body paragraph acquires no block: body flow consumes
- * its source (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK owns its break). */
+ * its source (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK owns its break).
+ * Model paragraphs keep unavailable drawings in a sidecar, so they are checked
+ * here beside layout's isSwallowedHiddenParagraph. */
 function isSwallowedHiddenBodyParagraph(paragraph: Readonly<DocParagraph>): boolean {
-  return paragraph.markVanish === true
-    && !paragraphHasUnavailableDrawing(paragraph)
-    && isInklessParagraph(paragraph);
+  return !paragraphHasUnavailableDrawing(paragraph) && isSwallowedHiddenParagraph(paragraph);
 }
 
 function bodyLayoutSequenceInput(
@@ -2148,6 +2148,25 @@ function bodyFlowAutoSpacingNeighbourhoods(
     : automaticSpacingNeighbourhood(participants, position, STORY_START_AUTO_SPACING_EDGES)));
 }
 
+/**
+ * Automatic-spacing neighbourhoods of a table cell's flow participants. A cell
+ * swallows a vanished inkless paragraph other than its last one
+ * (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT, the layout side is
+ * isSwallowedHiddenCellParagraph), so it neither opens nor closes the cell
+ * and separates no neighbours; it gets no neighbourhood.
+ */
+function cellFlowAutoSpacingNeighbourhoods(
+  content: readonly BodyElement[],
+): readonly (AutomaticSpacingNeighbourhood | undefined)[] {
+  const participants: BodyElement[] = [];
+  const positions = content.map((element, index) => (
+    index < content.length - 1 && element.type === 'paragraph' && isSwallowedHiddenBodyParagraph(element)
+      ? -1 : participants.push(element) - 1));
+  return positions.map((position) => (position < 0
+    ? undefined
+    : automaticSpacingNeighbourhood(participants, position, CELL_AUTO_SPACING_EDGES)));
+}
+
 function normalizeInternalDocumentModelWithOwnership(
   doc: DocxDocumentModel,
   consumeOwned: boolean,
@@ -2351,12 +2370,12 @@ function normalizeInternalDocumentModelWithOwnership(
     prefix: number[] = [],
     flow: AutomaticSpacingFlow = 'story',
   ): BodyElement[] => {
-    const bodyNeighbourhoods = flow === 'body' ? bodyFlowAutoSpacingNeighbourhoods(body) : undefined;
-    const edges = flow === 'cell' ? CELL_AUTO_SPACING_EDGES
-      : flow === 'header' ? STORY_START_AUTO_SPACING_EDGES : NO_AUTO_SPACING_EDGES;
+    const flowNeighbourhoods = flow === 'body' ? bodyFlowAutoSpacingNeighbourhoods(body)
+      : flow === 'cell' ? cellFlowAutoSpacingNeighbourhoods(body) : undefined;
+    const edges = flow === 'header' ? STORY_START_AUTO_SPACING_EDGES : NO_AUTO_SPACING_EDGES;
     const neighbourhoodAt = (elementIndex: number): AutomaticSpacingNeighbourhood | undefined => (
-      bodyNeighbourhoods
-        ? bodyNeighbourhoods[elementIndex]
+      flowNeighbourhoods
+        ? flowNeighbourhoods[elementIndex]
         : automaticSpacingNeighbourhood(body, elementIndex, edges));
     if (consumeOwned) {
       for (let elementIndex = 0; elementIndex < body.length; elementIndex += 1) {

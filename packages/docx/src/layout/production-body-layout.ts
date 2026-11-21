@@ -143,7 +143,7 @@ import {
   layoutWholeTableOnPage,
   type PageDependentTableBlockRequest,
 } from './table-pagination.js';
-import { paragraphGapAdjustment } from './paragraph-spacing.js';
+import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
@@ -1219,6 +1219,7 @@ function layoutBodyStory(
         paragraph,
         previousAfterPt,
         paragraph.spaceBefore,
+        paragraphGapFoldOf(state.layoutSettings.compat),
       );
       const startYPt = Math.max(
         placement.container.bounds.yPt,

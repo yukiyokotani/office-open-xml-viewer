@@ -1,6 +1,6 @@
 import { resolveBorderConflict, type BorderCandidate } from '../cell-border-conflict.js';
 import { retainedBorderTreatment } from './border-treatment.js';
-import { paragraphGapPt } from './paragraph-spacing.js';
+import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import { snapshotPlainData } from './plain-data.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { firstAuthoredTableBorder } from './table-border-layer.js';
@@ -92,12 +92,12 @@ function resolveCellFlow(
       const beforePt = layout.spacing.beforePt;
       const afterPt = layout.spacing.afterPt;
       const gapPt = previousParagraph
-        ? paragraphGapPt(previousParagraph, layout, previousAfterPt, beforePt)
+        ? paragraphGapPt(previousParagraph, layout, previousAfterPt, beforePt, paragraphGapFoldOf(layout))
         : beforePt;
-      const advancePt = block.structuralTrailing ? 0 : paragraphBlockAdvance(layout);
-      const offsetPt = cursorPt + (block.structuralTrailing ? 0 : gapPt);
+      const advancePt = block.ownsNoCellFlow ? 0 : paragraphBlockAdvance(layout);
+      const offsetPt = cursorPt + (block.ownsNoCellFlow ? 0 : gapPt);
       placements.push({ layout, offsetPt, advancePt });
-      if (!block.structuralTrailing) {
+      if (!block.ownsNoCellFlow) {
         cursorPt = offsetPt + advancePt;
         firstInkTopPt ??= offsetPt;
         lastInkBottomPt = Math.max(lastInkBottomPt, cursorPt);
