@@ -216,6 +216,37 @@ function tiffLzw(data: Uint8Array): Uint8Array {
   return new Uint8Array(output);
 }
 
+/**
+ * Independent TIFF 6.0 §9 PackBits encoder for synthetic fixtures. Each row of
+ * `bytesPerRow` bytes is packed separately: replicate runs of 2..128 equal
+ * bytes (header 1 - n) and literal runs of 1..128 bytes (header n - 1).
+ */
+function tiffPackBits(data: Uint8Array, bytesPerRow: number): Uint8Array {
+  const output: number[] = [];
+  for (let rowStart = 0; rowStart < data.length; rowStart += bytesPerRow) {
+    const rowEnd = Math.min(data.length, rowStart + bytesPerRow);
+    let index = rowStart;
+    while (index < rowEnd) {
+      let run = 1;
+      while (index + run < rowEnd && run < 128 && data[index + run] === data[index]) run++;
+      if (run >= 2) {
+        output.push((257 - run) & 0xff, data[index]);
+        index += run;
+        continue;
+      }
+      let literalEnd = index + 1;
+      while (
+        literalEnd < rowEnd
+        && literalEnd - index < 128
+        && !(literalEnd + 1 < rowEnd && data[literalEnd] === data[literalEnd + 1])
+      ) literalEnd++;
+      output.push(literalEnd - index - 1, ...data.subarray(index, literalEnd));
+      index = literalEnd;
+    }
+  }
+  return new Uint8Array(output);
+}
+
 /** TIFF 6.0 §14 encoder side: replace each sample by its difference from the
  * same component of the previous pixel in the row, modulo 2^8. */
 function horizontallyDifferenced(
@@ -685,6 +716,160 @@ describe('TIFF 6.0 decoder', () => {
     expect(() => decodeTiffRgba(gray({
       strips: [bits('100000000' + '000000001' + '100101100')],
     }))).toThrowError(/Invalid TIFF LZW code: 300/);
+  });
+
+  it('decodes PackBits literal, replicate and no-op runs (TIFF 6.0 §9)', () => {
+    const bytes = classicTiff({
+      width: 9,
+      height: 1,
+      bitsPerSample: [8],
+      compression: 32773,
+      photometric: 1,
+      // literal 2, no-op (-128), replicate 3 (-2), literal 1, replicate 2 (-1), literal 1.
+      strips: [new Uint8Array([0x01, 10, 20, 0x80, 0xfe, 30, 0x00, 40, 0xff, 50, 0x00, 60])],
+    });
+    expect(rgbaRows(decodeTiffRgba(bytes))).toEqual([[10, 20, 30, 30, 30, 40, 50, 50, 60]]);
+  });
+
+  it('decodes PackBits for every supported chunky class exactly like uncompressed strips', () => {
+    // Wide rows cross the 4096-pixel span boundary; runs of equal bytes and
+    // noise both occur, and the second strip is shorter than RowsPerStrip.
+    const cases = [
+      { bitsPerSample: [1], photometric: 0, width: 4096 + 21 },
+      { bitsPerSample: [1], photometric: 1, width: 37 },
+      { bitsPerSample: [8], photometric: 0, width: 4096 + 5 },
+      { bitsPerSample: [8], photometric: 1, width: 300 },
+      { bitsPerSample: [8, 8, 8], photometric: 2, width: 4096 + 3 },
+      { bitsPerSample: [8, 8, 8, 8], photometric: 2, extraSamples: [1], width: 130 },
+      { bitsPerSample: [8, 8, 8, 8], photometric: 2, extraSamples: [2], width: 130 },
+      { bitsPerSample: [8, 8, 8, 8], photometric: 5, inkSet: 1, width: 129 },
+    ];
+    for (const { width, ...layout } of cases) {
+      const samplesPerPixel = layout.bitsPerSample.length;
+      const bytesPerRow = layout.bitsPerSample[0] === 1
+        ? Math.ceil(width / 8)
+        : width * samplesPerPixel;
+      const height = 5;
+      const rowsPerStrip = 3;
+      const samples = noise(bytesPerRow * height, width);
+      // Long replicate runs (more than 128 bytes) inside noise.
+      samples.fill(0xa5, 7, 7 + Math.min(300, bytesPerRow - 7));
+      const strips = (encode: (bytes: Uint8Array) => Uint8Array) => {
+        const result: Uint8Array[] = [];
+        for (let row = 0; row < height; row += rowsPerStrip) {
+          result.push(encode(samples.subarray(
+            row * bytesPerRow,
+            Math.min(height, row + rowsPerStrip) * bytesPerRow,
+          )));
+        }
+        return result;
+      };
+      const common = { ...layout, width, height, rowsPerStrip, samplesPerPixel };
+      const uncompressed = classicTiff({ ...common, strips: strips((bytes) => bytes) });
+      const packBits = classicTiff({
+        ...common,
+        compression: 32773,
+        strips: strips((bytes) => tiffPackBits(bytes, bytesPerRow)),
+      });
+      for (const target of [{}, { targetWidthPx: Math.max(1, Math.floor(width / 3)) }]) {
+        const expected = decodeTiffRgba(uncompressed, target);
+        const decoded = decodeTiffRgba(packBits, target);
+        expect(decoded && { width: decoded.width, height: decoded.height })
+          .toEqual(expected && { width: expected.width, height: expected.height });
+        expect(Buffer.from(decoded?.data ?? []).equals(Buffer.from(expected?.data ?? []))).toBe(true);
+      }
+    }
+  });
+
+  it('decodes a PackBits run that continues into the next row of the same strip', () => {
+    const bytes = classicTiff({
+      width: 2,
+      height: 2,
+      bitsPerSample: [8],
+      compression: 32773,
+      photometric: 1,
+      strips: [new Uint8Array([0xfe, 9, 0x00, 4])],
+    });
+    expect(rgbaRows(decodeTiffRgba(bytes))).toEqual([[9, 9], [9, 4]]);
+  });
+
+  it.each([
+    ['a missing header', [0x00, 1], /TIFF PackBits data is truncated/],
+    ['a short literal', [0x00, 1, 0x02, 2, 3], /TIFF PackBits data is truncated/],
+    ['a missing replicate byte', [0x00, 1, 0xff], /TIFF PackBits data is truncated/],
+    ['only no-ops', [0x80, 0x80], /TIFF PackBits data is truncated/],
+    ['an overrunning literal', [0x02, 1, 2, 3], /TIFF PackBits run exceeds its declared rows/],
+    ['an overrunning replicate', [0xfd, 7], /TIFF PackBits run exceeds its declared rows/],
+  ] as const)('fails closed on PackBits strips with %s', (_name, strip, diagnostic) => {
+    const bytes = classicTiff({
+      width: 2,
+      height: 1,
+      bitsPerSample: [8],
+      compression: 32773,
+      photometric: 1,
+      strips: [new Uint8Array(strip)],
+    });
+    expect(() => decodeTiffRgba(bytes)).toThrowError(TiffDecodeError);
+    expect(() => decodeTiffRgba(bytes)).toThrowError(diagnostic);
+  });
+
+  it('fails closed when a PackBits literal would read past its strip into the next one', () => {
+    // The first strip's literal claims 3 bytes but its byte count holds 2;
+    // the next strip's bytes must not be consumed to satisfy it.
+    const bytes = classicTiff({
+      width: 3,
+      height: 2,
+      rowsPerStrip: 1,
+      bitsPerSample: [8],
+      compression: 32773,
+      photometric: 1,
+      strips: [new Uint8Array([0x02, 1, 2]), new Uint8Array([0x02, 4, 5, 6])],
+    });
+    expect(() => decodeTiffRgba(bytes)).toThrowError(/TIFF PackBits data is truncated/);
+  });
+
+  it('accepts unread padding after the final PackBits run of a strip', () => {
+    const bytes = classicTiff({
+      width: 2,
+      height: 1,
+      bitsPerSample: [8],
+      compression: 32773,
+      photometric: 1,
+      strips: [new Uint8Array([0xff, 6, 0x00])],
+    });
+    expect(rgbaRows(decodeTiffRgba(bytes))).toEqual([[6, 6]]);
+  });
+
+  it('bounds PackBits no-op headers across strips that share one byte range', () => {
+    const strip = new Uint8Array([0x80, 0x80, 0x00, 77]);
+    const bytes = classicTiff({
+      width: 1,
+      height: 2,
+      rowsPerStrip: 1,
+      bitsPerSample: [8],
+      compression: 32773,
+      photometric: 1,
+      strips: [strip, strip],
+    });
+    // Each strip alone fits the image allowance (2 headers per decoded byte);
+    // the allowance is image-wide, so the second strip exceeds it.
+    let failure: unknown;
+    try { decodeTiffRgba(bytes); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(OoxmlDecodedImageLimitError);
+    expect(getOoxmlDecodedImageLimitDetails(failure)).toMatchObject({ metric: 'tiff-packbits-work' });
+  });
+
+  it('refuses the differencing predictor with PackBits', () => {
+    const bytes = classicTiff({
+      width: 2,
+      height: 1,
+      bitsPerSample: [8],
+      compression: 32773,
+      photometric: 1,
+      predictor: 2,
+      strips: [new Uint8Array([0x01, 1, 1])],
+    });
+    expect(() => decodeTiffRgba(bytes)).toThrowError(/Unsupported TIFF Predictor 2 with Compression 32773/);
   });
 
   it('decodes CCITT Group 4 horizontal, vertical and pass modes', () => {
