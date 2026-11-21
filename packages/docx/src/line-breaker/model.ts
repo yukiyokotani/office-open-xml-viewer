@@ -478,8 +478,8 @@ export interface LayoutImageSeg extends LayoutSegSource {
   objectRunAdvanceMinimumPx?: number;
   /** Inset [left, top, right, bottom] (pt) of the painted object inside
    *  widthPt/heightPt: the ECMA-376 §20.4.2.6 inline effect extent, plus the
-   *  centring of a picture laid out in its quarter-turned footprint
-   *  (WORD_INLINE_PICTURE_QUARTER_TURN_FOOTPRINT). */
+   *  centring of a drawing laid out in its quarter-turned base box
+   *  (WORD_INLINE_DRAWING_TURNED_FOOTPRINT). */
   effectExtent?: readonly [number, number, number, number];
   /** Authored object size (pt) when {@link effectExtent} is present; the
    *  object paints at this size even if a negative extent clamps the box. */

@@ -172,6 +172,7 @@ import {
   wordGridPictureLineOriginPt,
 } from './anchor-compatibility.js';
 import {
+  wordInlinePictureClipsToLine,
   wordRunVerticalAlignRaisePt,
   wordSnapToCharsEastAsianCellCount,
 } from './line-compatibility.js';
@@ -367,6 +368,9 @@ export interface MeasuredResourcePlanSegment {
    * extent before the object, or a list label's inset); the advance is unchanged. */
   readonly leftOffsetPt?: number;
   readonly orientation?: import('./types.js').UprightResourceOrientation;
+  /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: paint clipped to the line box's
+   * vertical extent. */
+  readonly clipToLine?: true;
 }
 
 export interface MeasuredUnavailableResourcePlanSegment {
@@ -2006,6 +2010,10 @@ export function planLine(input: PlanLineInput): LineLayout {
           xPt: xPt + (segment.leftOffsetPt ?? 0), yPt: line.baselinePt + segment.topOffsetPt,
           widthPt: segment.widthPt, heightPt: segment.heightPt,
         },
+        ...(segment.clipToLine ? { lineClip: {
+          topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
+          bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
+        } } : {}),
         advancePt: segment.measuredWidthPt,
       });
     } else if (segment.kind === 'unavailable-resource' || segment.kind === 'inline-drawing') {
@@ -4160,6 +4168,7 @@ function planMeasuredLines(
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
+          ...(!image.chart && wordInlinePictureClipsToLine(image.rotation) ? { clipToLine: true as const } : {}),
         });
       } else if ('math' in segment) {
         const math = segment as LayoutMathSeg;

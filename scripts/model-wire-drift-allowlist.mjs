@@ -182,6 +182,7 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'ShapeRun<type=shape>.__anchorAcquisition: missing-in-ts': 'internal channel',
     'ShapeRun<type=shape>.__inlineObjectFontFacts: missing-in-ts': 'internal channel',
     'ShapeRun<type=shape>.__inlineObjectOrigin: missing-in-ts': 'internal channel',
+    'ShapeRun<type=shape>.__inlineGroupRotation: missing-in-ts': 'internal channel',
     'TextRun<type=text>.__listLabel: missing-in-ts': 'internal channel',
     'TextRun<type=text>.__noBreakAfter: missing-in-ts': 'internal channel',
     'TextRun<type=text>.__noBreakBefore: missing-in-ts': 'internal channel',

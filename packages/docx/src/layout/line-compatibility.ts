@@ -1743,21 +1743,43 @@ export const WORD_PARAGRAPH_OFF_JAPANESE_LINE_EDGES = defineCompatibilityRule({
 /** ECMA-376 §20.4.2.7 defines wp:extent as the object's final displayed size,
  * and §20.4.2.8 makes an inline object occupy its line like a glyph of that
  * size; neither (nor [MS-OI29500] for §§20.4.2.6-8 or §20.1.7.6) says how an
- * a:xfrm rot of the picture itself changes that line box. */
-export const WORD_INLINE_PICTURE_QUARTER_TURN_FOOTPRINT = defineCompatibilityRule({
-  id: 'word-inline-picture-quarter-turn-footprint',
+ * a:xfrm rot of the object itself changes that line box. */
+export const WORD_INLINE_DRAWING_TURNED_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-inline-drawing-turned-footprint',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/inline-picture-quarter-turn.test.ts#lays out a %s-degree picture in its turned footprint',
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-drawing-rotation-footprint',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
   },
-  description: 'Word writes wp:extent of an inline picture as its unturned size (equal to its pic:spPr a:xfrm ext) and lays a picture turned by an odd quarter turn (rot 90 or 270 degrees) out in the turned footprint: cy wide and cx tall, widened by wp:effectExtent on its page edges, with the turned picture filling that footprint from the line start. Evidence (observed Office behaviour): Word PDF exports of two corpus documents with rot=5400000 inline photos, a 644 x 483pt extent wider than its 451pt column and a 248 x 186pt extent in a 425pt column: both pictures paint 483 x 644pt and 186 x 248pt with their left edge on the left margin (the effectExtent l=0 edge, within 0.01pt), the first below its paragraph top by the 0.47pt effectExtent t, the turned picture overflowing the column on the right rather than being scaled. Library scope: exact odd quarter turns of standalone inline pictures; other angles, inline shapes, groups and charts keep the authored wp:extent box (no Word measurement).',
+  description: 'Word writes wp:extent of an inline drawing as its unturned size and lays it out in a base box that is the extent turned a quarter turn (cy wide, cx tall) when the object\'s own clockwise a:xfrm rot, taken modulo 360, lies in [45, 135) or [225, 315), and the authored extent otherwise. wp:effectExtent then widens that base box on its page edges as authored; Word does not derive it from the rotation or from effects. The unturned object is centred in the base box and turned about its centre, so at other angles its corners can overflow the line box and the column. Synthetic controls (a 200 x 100pt object between text on one line, Arial 11pt, A4): pictures at 0, 30, 45, 60, 90, 135, 180, 270 and -90 degrees, at 30/45/60/135 both with effectExtent 0 and with effectExtent set to the rotated bounding box; 90 degrees with flipH, flipV and both; 90 degrees with effectExtent l10 t20 r30 b40pt against the same at 0; 90 and 0 degrees with a 10pt outer shadow, with effectExtent 0 and with the shadow offset; a WPS rectangle with text at 0, 30, 45 and 90 degrees (45 also with the bounding-box effectExtent); a two-child wpg group at 0, 45 and 90 degrees. Every control matches the rule within 0.1pt in the following text position, the next line position and the object placement: 45, 60, 90, 270 and -90 are turned and 30, 135 and 180 are not; flips and shadows do not change the box. Corpus Word exports of two 90-degree inline photos agree. 225 and 315 degrees follow from the 180-degree symmetry of the turned box, not a control. Library scope: DrawingML pictures, WPS shapes and groups (an inline chart has no rotation; VML inline shapes are unmeasured and keep the extent box).',
 });
 
-/** Projection of {@link WORD_INLINE_PICTURE_QUARTER_TURN_FOOTPRINT}: whether an
- * inline picture with this clockwise a:xfrm rotation (degrees) is laid out in
- * its turned (cy x cx) footprint. */
-export function wordInlinePictureTurnsFootprint(rotationDeg: number | null | undefined): boolean {
+/** Projection of {@link WORD_INLINE_DRAWING_TURNED_FOOTPRINT}: whether an
+ * inline drawing with this clockwise a:xfrm rotation (degrees) is laid out in
+ * its quarter-turned (cy x cx) base box. */
+export function wordInlineDrawingTurnsFootprint(rotationDeg: number | null | undefined): boolean {
   if (rotationDeg == null || !Number.isFinite(rotationDeg)) return false;
   const turn = ((rotationDeg % 360) + 360) % 360;
-  return turn === 90 || turn === 270;
+  return (turn >= 45 && turn < 135) || (turn >= 225 && turn < 315);
+}
+
+export const WORD_INLINE_ROTATED_PICTURE_LINE_CLIP = defineCompatibilityRule({
+  id: 'word-inline-rotated-picture-line-clip',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-drawing-rotation-footprint',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Word clips an inline picture turned by its own a:xfrm rot to the vertical extent of its line box (line top to line bottom, including the text descent below the picture); horizontally the turned picture is not clipped and may overflow the column and the page margin. ECMA-376 does not define this clip. In the inline-drawing-rotation-footprint controls (Windows Word 16.0.20527) the PDF clip of a 200 x 100pt picture at 30, 45, 60 and 135 degrees with effectExtent 0 is the turned rectangle cut at the line top and at the line bottom 2.3pt below the picture; with effectExtent covering the turned bounding box, at 90, 270, -90 and with flips the clip is the whole picture. WPS shapes and groups at 30 and 45 degrees are not clipped. Unturned pictures (including those in exact or atLeast lines) are outside this rule and unmeasured.',
+});
+
+/** Projection of {@link WORD_INLINE_ROTATED_PICTURE_LINE_CLIP}: whether an inline
+ * picture with this clockwise a:xfrm rotation (degrees) paints clipped to its
+ * line box's vertical extent. */
+export function wordInlinePictureClipsToLine(rotationDeg: number | null | undefined): boolean {
+  return rotationDeg != null && Number.isFinite(rotationDeg) && rotationDeg % 360 !== 0;
 }

@@ -597,6 +597,10 @@ export interface ResourcePlacement {
    * is rotated into a vertical physical page. Absent means flow-relative. */
   readonly orientation?: UprightResourceOrientation;
   readonly bounds: LayoutRect;
+  /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: top and bottom of the owning line
+   * box relative to `bounds.yPt`; paint clips the resource to that horizontal
+   * band (not horizontally). Relative, so translating `bounds` moves it. */
+  readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
   readonly advancePt: number;
 }
 

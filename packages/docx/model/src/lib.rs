@@ -2238,6 +2238,15 @@ pub struct ShapeRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_origin: Option<InlineObjectOrigin>,
+    /// Clockwise `wpg:grpSpPr/a:xfrm@rot` (degrees) of an inline `wpg:wgp`
+    /// flow object. Its children already carry the composed group transform;
+    /// layout reads this only to size the inline footprint
+    /// (compatibility rule `word-inline-drawing-turned-footprint`).
+    #[serde(
+        rename = "__inlineGroupRotation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_group_rotation: Option<f64>,
     /// ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline (`wp:inline`) shape,
     /// [left, top, right, bottom] in points; `None` for anchors and zero.
     #[serde(skip_serializing_if = "Option::is_none")]

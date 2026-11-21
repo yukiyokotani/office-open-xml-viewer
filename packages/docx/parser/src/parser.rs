@@ -9833,8 +9833,14 @@ fn parse_drawing_container(
                     *flip_v = rect.flip_v;
                 }
                 if !children.is_empty() {
+                    let group_rotation = group_xfrm(wgp)
+                        .and_then(|xfrm| xfrm.attribute("rot"))
+                        .and_then(|rot| rot.parse::<i64>().ok())
+                        .map(|rot| rot as f64 / 60000.0)
+                        .filter(|degrees| *degrees != 0.0);
                     return vec![DocRun::Shape(Box::new(ShapeRun {
                         inline: true,
+                        inline_group_rotation: group_rotation,
                         width_pt,
                         height_pt,
                         text_box_content: vec![TextBoxBlockWire::Body(BodyElement::Paragraph(

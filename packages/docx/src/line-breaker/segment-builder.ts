@@ -45,7 +45,7 @@ import {
   wordBalancedConsecutiveSpaceCellApplies,
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordExternalLinkSyntaxBreakOffsets,
-  wordInlinePictureTurnsFootprint,
+  wordInlineDrawingTurnsFootprint,
 } from '../layout/line-compatibility.js';
 import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
@@ -1749,8 +1749,8 @@ function emitResolvedTextSegment(
  * top/right/bottom/left; counter-clockwise: bottom/left/top/right). Signed
  * values (ST_Coordinate) apply as authored; the box never goes below zero.
  *
- * `turnedFootprint` (WORD_INLINE_PICTURE_QUARTER_TURN_FOOTPRINT) lays the
- * object out in its quarter-turned footprint, height x width, before the
+ * `turnedFootprint` (WORD_INLINE_DRAWING_TURNED_FOOTPRINT) lays the object
+ * out in its quarter-turned base box, height x width, before the
  * effect edges apply. The object still paints at its authored size, centred
  * in that footprint so its rotation about the centre fills it; the returned
  * `effectExtent` is therefore the object's inset in the box, not the authored
@@ -1788,6 +1788,15 @@ function inlineEffectExtentBox(
     effectExtent: [left + insetX, top + insetY, right + insetX, bottom + insetY],
     objectSizePt: [widthPt, heightPt],
   };
+}
+
+/** Own clockwise rotation (degrees) of an inline DrawingML shape or group:
+ * a group's grpSpPr xfrm, else a DrawingML shape's xfrm. A VML inline shape
+ * reports none (WORD_INLINE_DRAWING_TURNED_FOOTPRINT is unmeasured there). */
+function inlineShapeTurn(
+  run: Partial<Pick<import('../layout/text.js').ParagraphShapeRun, 'inlineGroupRotation' | 'inlineObjectOrigin' | 'rotation'>>,
+): number | undefined {
+  return run.inlineGroupRotation ?? (run.inlineObjectOrigin === 'drawingml' ? run.rotation : undefined);
 }
 
 /** LIBREOFFICE_FONT_LINE_BOX sides of a tab's own face (its run's ascii
@@ -2030,7 +2039,7 @@ function appendRunsToSegments(
         ...(img.anchor ? {} : { inlinePicture: true as const }),
         ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
           img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
-          wordInlinePictureTurnsFootprint(img.rotation),
+          wordInlineDrawingTurnsFootprint(img.rotation),
         )),
         rotation: img.rotation,
         flipH: img.flipH,
@@ -2094,8 +2103,13 @@ function appendRunsToSegments(
         inlineShape: true,
         inlinePicture: true,
         // An inline shape is not counter-turned in a vertical section, so its
-        // effect edges stay on the object's own (logical) edges.
-        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt),
+        // effect edges stay on the object's own (logical) edges. A DrawingML
+        // shape turns by its own xfrm, a group by its grpSpPr xfrm (its
+        // children carry the composed transform already).
+        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt, undefined,
+          wordInlineDrawingTurnsFootprint(inlineShapeTurn(
+            run as Partial<import('../layout/text.js').ParagraphShapeRun>,
+          ))),
         ...(run.inlineOffsetXPt ? { inlineOffsetXPt: run.inlineOffsetXPt } : {}),
         ...(run.inlineOffsetYPt ? { inlineOffsetYPt: run.inlineOffsetYPt } : {}),
         measuredWidth: 0,
