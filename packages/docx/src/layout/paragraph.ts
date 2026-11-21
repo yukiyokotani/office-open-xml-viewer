@@ -2394,6 +2394,48 @@ export function paragraphContinuingPrefixAdvancesPt(
  * Finalizes the parser-independent paragraph acquisition snapshot. All coordinates
  * are scale-1 points; subsequent Canvas paint is a pure viewport transform.
  */
+/** Underlines of an upright vertical line lie on the over side of the glyph
+ * column, the mirror of their horizontal position across the column's
+ * centre (`word-vertical-underline-over-side`): each retained underline of
+ * a run is reflected across the centre of that run's font box, and a tab's
+ * across the first font box on its line (else the line box). Strikes,
+ * emphasis marks and ruby keep their positions. */
+function verticalOverSideUnderlines(line: LineLayout): LineLayout {
+  const textCentre = (placement: TextPlacement) => {
+    const box = placement.highlightBounds ?? placement.bounds;
+    return box.yPt + box.heightPt / 2;
+  };
+  const firstText = line.placements.find((placement): placement is TextPlacement => placement.kind === 'text');
+  const lineCentre = firstText ? textCentre(firstText) : line.bounds.yPt + line.bounds.heightPt / 2;
+  const reflect = (
+    decorations: readonly TextDecorationLayout[] | undefined,
+    centre: number,
+  ): readonly TextDecorationLayout[] | undefined => decorations?.map((decoration) => (
+    decoration.kind !== 'underline' ? decoration : {
+      ...decoration,
+      from: { ...decoration.from, yPt: 2 * centre - decoration.from.yPt },
+      to: { ...decoration.to, yPt: 2 * centre - decoration.to.yPt },
+      ...(decoration.path ? {
+        path: decoration.path.map((point) => ({ ...point, yPt: 2 * centre - point.yPt })),
+      } : {}),
+    }
+  ));
+  if (!line.placements.some((placement) => (placement.kind === 'text' || placement.kind === 'tab')
+    && placement.decorations?.some((decoration) => decoration.kind === 'underline'))) return line;
+  return {
+    ...line,
+    placements: line.placements.map((placement) => {
+      if (placement.kind === 'text') {
+        return { ...placement, decorations: reflect(placement.decorations, textCentre(placement))! };
+      }
+      if (placement.kind === 'tab' && placement.decorations) {
+        return { ...placement, decorations: reflect(placement.decorations, lineCentre) };
+      }
+      return placement;
+    }),
+  };
+}
+
 export function layoutParagraph(input: AcquiredParagraphLayoutInput, frozenSource?: ParagraphLayout): ParagraphLayout {
   return finalizeParagraphLayout(input, frozenSource);
 }
@@ -7344,6 +7386,8 @@ function projectAcquiredParagraphLines(
     planningContext.baseRtl,
     planningContext.tabStops,
   );
+  // `word-vertical-underline-over-side`
+  if (options.environment.verticalCJK === true) lines = lines.map(verticalOverSideUnderlines);
   if (
     numberingPlan
     && measured.markOnly
