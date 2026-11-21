@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bodySectionIndexInput } from '../parser-model.js';
 import {
   createBodySectionIndex,
+  effectiveHeaderFooterInlineMargins,
   effectivePhysicalSectionGeometry,
   logicalSectionGeometry,
   sectionPageBox,
@@ -347,6 +348,7 @@ describe('section geometry coordinate boundary', () => {
     textDirection: 'lrTb',
     gutterPt: 18,
     rtlGutter: false,
+    sheetOrientation: 'portrait' as const,
     mirrorMargins: false,
     gutterAtTop: false,
     bookFoldPrinting: false,
@@ -355,21 +357,79 @@ describe('section geometry coordinate boundary', () => {
     ...overrides,
   });
 
+  // `word-two-page-sheet-imposition`: Windows Word controls with left 90,
+  // right 27, top 45, bottom 63 and a 21.6pt gutter, values chosen so that no
+  // two candidate rules coincide. Each row lists the body margins
+  // [left, right, top, bottom] and the header/footer [left, right] of physical
+  // pages 1 and 2. The authored page box is never divided.
+  type Margins = readonly [number, number, number, number];
+  type Inline = readonly [number, number];
   it.each([
-    ['book fold', { bookFoldPrinting: true }, {
-      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
-    }],
-    ['reverse book fold', { bookFoldRevPrinting: true }, {
-      pageWidth: 396, pageHeight: 612, marginRight: 90, marginTop: 72,
-    }],
-    ['two-on-one', { printTwoOnOne: true }, {
-      pageWidth: 792, pageHeight: 306, marginRight: 72, marginTop: 90,
-    }],
+    ['landscape book fold', 'landscape', { bookFoldPrinting: true },
+      [48.6, 90, 45, 63], [111.6, 27], [90, 48.6, 45, 63], [111.6, 27]],
+    ['landscape reverse book fold', 'landscape', { bookFoldPrinting: true, bookFoldRevPrinting: true },
+      [90, 48.6, 45, 63], [111.6, 27], [48.6, 90, 45, 63], [111.6, 27]],
+    ['landscape book fold with gutterAtTop', 'landscape', { bookFoldPrinting: true, gutterAtTop: true },
+      [48.6, 68.4, 66.6, 63], [90, 27], [90, 27, 66.6, 63], [90, 27]],
+    ['landscape reverse book fold with gutterAtTop', 'landscape',
+      { bookFoldRevPrinting: true, gutterAtTop: true },
+      [90, 27, 66.6, 63], [90, 27], [48.6, 68.4, 66.6, 63], [90, 27]],
+    ['landscape book fold with mirrorMargins', 'landscape', { bookFoldPrinting: true, mirrorMargins: true },
+      [48.6, 90, 45, 63], [111.6, 27], [90, 48.6, 45, 63], [27, 111.6]],
+    ['portrait book fold', 'portrait', { bookFoldPrinting: true },
+      [90, 27, 45, 63], [111.6, 27], [90, 27, 45, 63], [111.6, 27]],
+    ['landscape two-up', 'landscape', { printTwoOnOne: true },
+      [48.6, 90, 45, 63], [48.6, 90], [90, 48.6, 45, 63], [90, 48.6]],
+    ['landscape two-up with gutterAtTop', 'landscape', { printTwoOnOne: true, gutterAtTop: true },
+      [48.6, 68.4, 66.6, 63], [48.6, 90], [90, 27, 66.6, 63], [90, 48.6]],
+    ['portrait two-up', 'portrait', { printTwoOnOne: true },
+      [90, 27, 84.6, 45], [90, 27], [90, 27, 45, 84.6], [90, 27]],
+    ['portrait two-up with gutterAtTop and mirrorMargins', 'portrait',
+      { printTwoOnOne: true, gutterAtTop: true, mirrorMargins: true },
+      [90, 27, 84.6, 45], [90, 27], [90, 27, 45, 84.6], [90, 27]],
+    // A gutter wider than the left margin: Word keeps the mirrored width and
+    // runs past the page edge (right margin -11.6); columns stop at the edge.
+    ['landscape book fold with gutterAtTop and a 10pt left margin', 'landscape',
+      {
+        bookFoldPrinting: true, gutterAtTop: true,
+        physicalGeometry: geometry({
+          pageWidth: 792, pageHeight: 612,
+          marginLeft: 10, marginRight: 27, marginTop: 45, marginBottom: 63,
+        }),
+      },
+      [48.6, 0, 66.6, 63], [10, 27], [10, 27, 66.6, 63], [10, 27]],
+    // tbRl sections bind on the right.
+    ['tbRl single page', 'landscape', { textDirection: 'tbRl' },
+      [90, 48.6, 45, 63], [90, 48.6], [90, 48.6, 45, 63], [90, 48.6]],
+    ['tbRl landscape book fold', 'landscape', { textDirection: 'tbRl', bookFoldPrinting: true },
+      [90, 48.6, 45, 63], [90, 48.6], [90, 48.6, 45, 63], [90, 48.6]],
+    ['tbRl landscape two-up', 'landscape', { textDirection: 'tbRl', printTwoOnOne: true },
+      [90, 48.6, 45, 63], [90, 48.6], [48.6, 90, 45, 63], [48.6, 90]],
+    ['tbRl portrait two-up', 'portrait', { textDirection: 'tbRl', printTwoOnOne: true },
+      [90, 27, 84.6, 45], [90, 27], [90, 27, 45, 84.6], [90, 27]],
   ] as const)(
-    'applies the authored gutter to the automatic %s imposition edge',
-    (_label, settings, expected) => {
-      expect(effectivePhysicalSectionGeometry(pagePolicy(settings), 0))
-        .toMatchObject(expected);
+    'imposes the Word-observed %s margins on the authored page box',
+    (_label, sheetOrientation, settings, ...pages) => {
+      const policy = pagePolicy({
+        physicalGeometry: geometry({
+          pageWidth: 792, pageHeight: 612,
+          marginLeft: 90, marginRight: 27, marginTop: 45, marginBottom: 63,
+        }),
+        gutterPt: 21.6,
+        sheetOrientation,
+        ...settings,
+      });
+      for (const pageIndex of [0, 1]) {
+        const body = pages[pageIndex * 2] as Margins;
+        const story = pages[pageIndex * 2 + 1] as Inline;
+        const page = effectivePhysicalSectionGeometry(policy, pageIndex);
+        const header = effectiveHeaderFooterInlineMargins(policy, pageIndex);
+        expect([page.pageWidth, page.pageHeight]).toEqual([792, 612]);
+        [page.marginLeft, page.marginRight, page.marginTop, page.marginBottom]
+          .forEach((value, index) => expect(value).toBeCloseTo(body[index]!, 9));
+        expect(header.marginLeft).toBeCloseTo(story[0], 9);
+        expect(header.marginRight).toBeCloseTo(story[1], 9);
+      }
     },
   );
 

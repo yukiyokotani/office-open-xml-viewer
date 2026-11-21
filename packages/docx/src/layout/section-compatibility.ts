@@ -54,6 +54,18 @@ export const WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE = defineCompatibilityRule({
   description: 'For book-fold printing Word places the automatic gutter at the right-margin bisector edge, including reverse book-fold mode.',
 });
 
+export const WORD_TWO_PAGE_SHEET_IMPOSITION = defineCompatibilityRule({
+  id: 'word-two-page-sheet-imposition',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'book-fold-two-on-one-imposition',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §§17.15.1.11/.13/.64 describe dividing the section page in half. Word instead keeps the authored pgSz (§17.6.13) as every editing page and uses pgSz/@orient for the sheet arrangement. Margins L/R/T/B, gutter G; page 1, 3, … is the mirrored member (page 2, 4, … under bookFoldRevPrinting). Landscape sheet, book fold or two-up: the normal page has left L and right R+G, the mirrored page left R+G and right L; with gutterAtTop the top becomes T+G, the normal page has left L and right R, and the mirrored page keeps that width but starts at R+G (right L-G). Bottom stays B. When G exceeds L that right margin is negative and Word runs the mirrored column past the page edge; library policy keeps body columns inside the page box (page-factory invariant), so the right margin stops at 0 and only those lines wrap earlier. Book-fold headers and footers keep the single-page extent (gutter on the left, mirrorMargins and gutterAtTop as usual); two-up headers and footers follow the imposed page without gutterAtTop. Portrait sheet, two-up: left L and right R on every page, the mirrored page has top B+G and bottom T, the other top T and bottom B+G; gutterAtTop and mirrorMargins have no effect; headers and footers use L/R. Portrait sheet, book fold: the body uses L/R/T/B with no gutter or mirroring; headers and footers keep the single-page extent. mirrorMargins left the imposed body unchanged in both measured cases (landscape-sheet book fold, portrait-sheet two-up). A tbRl section binds on the right: its single-page gutter joins the right margin (left L, right R+G, header and footer alike); book fold leaves it on those single-page margins on every page; two-up on a landscape sheet mirrors page 2, 4, … instead (page 1 left L and right R+G, page 2 left R+G and right L, header and footer following); two-up on a portrait sheet is unchanged. Vertical-section headers and footers take these physical margins. Evidence: 44 Windows Word PDF exports in three runs, with margins chosen so that no two candidate rules coincide: book fold and reverse book fold on landscape sheets of portrait and landscape shape, gutterAtTop with both, book fold on a portrait sheet, two-up on portrait and landscape sheets of either shape with and without gutterAtTop, mirrorMargins with book fold and two-up, gutters smaller than, equal to and larger than the left margin under book fold and landscape two-up with and without gutterAtTop, tbRl sections under book fold, landscape and portrait two-up and no imposition, and single-page controls; plus a corpus document whose half-Legal booklet pages export at the authored 7in x 8.5in. Not measured: reverse book fold or gutterAtTop on a portrait sheet, two-up on a landscape sheet with mirrorMargins, rtlGutter with any imposition, gutterAtTop or mirrorMargins in a tbRl section, book fold of a tbRl section on a portrait sheet, other vertical text directions (btLr, tbRlV, tbLrV, lrTbV keep the left-bound rules), and page parity after a page-number restart (physical page parity is used).',
+});
+
 export const WORD_DEFAULT_LINE_NUMBER_DISTANCE_PT = 18;
 
 export function wordLineNumberDistancePt(authoredDistancePt: number | null | undefined): number {
@@ -101,8 +113,4 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
     return input.hasFollowingInk ? input.markGridAfterLeadingPt ?? 0 : 0;
   }
   return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
-}
-
-export function wordBookFoldGutterEdge(): 'right' {
-  return 'right';
 }

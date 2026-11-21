@@ -13,7 +13,6 @@ import {
   type SectionGridContext,
 } from '../layout-context.js';
 import type { DeepReadonly, SectionFlow } from './types.js';
-import { wordBookFoldGutterEdge } from './section-compatibility.js';
 import {
   logicalToPhysicalMatrix,
   physicalToLogicalMatrix,
@@ -174,12 +173,17 @@ export function isVerticalSectionDirection(textDirection: string): boolean {
     || textDirection === 'btLr';
 }
 
+/** ECMA-376 §17.18.65 ST_PageOrientation of the authored pgSz. */
+export type PageSheetOrientation = 'portrait' | 'landscape';
+
 export interface SectionPageLayoutPolicy {
   readonly physicalGeometry: Readonly<SectionGeom>;
   readonly columns: DeepReadonly<ColumnsSpec> | null;
   readonly textDirection: string;
   readonly gutterPt: number;
   readonly rtlGutter: boolean;
+  /** §17.6.13 pgSz/@orient: the sheet arrangement of a two-page imposition. */
+  readonly sheetOrientation: PageSheetOrientation;
   readonly mirrorMargins: boolean;
   readonly gutterAtTop: boolean;
   readonly bookFoldPrinting: boolean;
@@ -187,44 +191,128 @@ export interface SectionPageLayoutPolicy {
   readonly printTwoOnOne: boolean;
 }
 
+interface PageMargins {
+  readonly marginTop: number;
+  readonly marginRight: number;
+  readonly marginBottom: number;
+  readonly marginLeft: number;
+}
+
+interface ImposedPageMargins {
+  readonly body: PageMargins;
+  /** Inline extent of the header and footer stories. */
+  readonly headerFooter: Pick<PageMargins, 'marginLeft' | 'marginRight'>;
+}
+
+function requirePhysicalPageIndex(pageIndex: number): void {
+  if (!Number.isInteger(pageIndex) || pageIndex < 0) {
+    throw new RangeError('Physical page index must be a non-negative integer');
+  }
+}
+
+/** §17.6.11 margins with the §17.15.1.50/§17.6.16 gutter and §17.15.1.57
+ * mirrored margins, for a section printed one page per sheet. */
+function singlePageMargins(policy: SectionPageLayoutPolicy, pageIndex: number): PageMargins {
+  let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
+  if (policy.gutterAtTop && !policy.mirrorMargins) marginTop += policy.gutterPt;
+  // A tbRl section binds on the right: its gutter joins the right margin.
+  // `word-two-page-sheet-imposition`
+  else if (policy.rtlGutter || rightBoundSection(policy)) marginRight += policy.gutterPt;
+  else marginLeft += policy.gutterPt;
+  if (policy.mirrorMargins && pageIndex % 2 === 1) {
+    [marginLeft, marginRight] = [marginRight, marginLeft];
+  }
+  return { marginTop, marginRight, marginBottom, marginLeft };
+}
+
+/** A §17.6.20 tbRl section, whose lines advance right to left. */
+function rightBoundSection(policy: SectionPageLayoutPolicy): boolean {
+  return policy.textDirection === 'tbRl';
+}
+
+/**
+ * ECMA-376 §§17.15.1.11/.13 (book fold) and §17.15.1.64 (two pages per sheet)
+ * arrange two editing pages on one printed sheet. The authored pgSz (§17.6.13)
+ * stays the editing page and pgSz/@orient selects how the two pages share the
+ * sheet; every branch below is the compatibility rule
+ * `word-two-page-sheet-imposition`, whose evidence and limits live with it.
+ */
+function imposedPageMargins(policy: SectionPageLayoutPolicy, pageIndex: number): ImposedPageMargins {
+  const single = singlePageMargins(policy, pageIndex);
+  const bookFold = policy.bookFoldPrinting || policy.bookFoldRevPrinting;
+  if (!bookFold && !policy.printTwoOnOne) return { body: single, headerFooter: single };
+  const {
+    marginTop: top, marginRight: right, marginBottom: bottom, marginLeft: left,
+  } = policy.physicalGeometry;
+  const gutter = policy.gutterPt;
+  const rightBound = rightBoundSection(policy);
+  // A right-bound section is not folded: book fold leaves it on its
+  // single-page margins.
+  if (bookFold && rightBound) return { body: single, headerFooter: single };
+  // Page 1, 3, … of a forward booklet or two-up sheet is the mirrored member;
+  // reverse book fold mirrors page 2, 4, … instead.
+  const mirrored = (pageIndex % 2 === 0) !== (bookFold && policy.bookFoldRevPrinting);
+  if (policy.sheetOrientation === 'portrait') {
+    if (bookFold) {
+      // Book fold on a portrait sheet: the body takes no gutter and no
+      // mirroring; header and footer keep their single-page extent.
+      return {
+        body: { marginTop: top, marginRight: right, marginBottom: bottom, marginLeft: left },
+        headerFooter: single,
+      };
+    }
+    // Two pages stacked on a portrait sheet: the horizontal bisector carries
+    // the gutter, so top and bottom mirror while left and right stay as
+    // authored. gutterAtTop and mirrorMargins do not apply.
+    const horizontal = { marginLeft: left, marginRight: right };
+    return {
+      body: mirrored
+        ? { marginTop: bottom + gutter, marginBottom: top, ...horizontal }
+        : { marginTop: top, marginBottom: bottom + gutter, ...horizontal },
+      headerFooter: horizontal,
+    };
+  }
+  // Two pages side by side on a landscape sheet: the vertical bisector is the
+  // authored right-margin side (`word-book-fold-gutter-right-edge`), which
+  // lies on the left of a mirrored page. A right-bound section orders the
+  // pair right to left, so its mirrored member is page 2, 4, …. With
+  // gutterAtTop the gutter moves to the top, yet a mirrored page still starts
+  // at right + gutter and keeps the unmirrored width, so a gutter wider than
+  // the left margin runs the column past the page edge. Library policy: body
+  // columns stay inside the page box (page-factory invariant), so that right
+  // margin stops at the page edge and only those lines wrap earlier.
+  const sideBySideMirrored = mirrored !== rightBound;
+  const sideBySide = (gutterAtTop: boolean) => sideBySideMirrored
+    ? { marginLeft: right + gutter, marginRight: Math.max(0, left - (gutterAtTop ? gutter : 0)) }
+    : { marginLeft: left, marginRight: right + (gutterAtTop ? 0 : gutter) };
+  return {
+    body: {
+      marginTop: top + (policy.gutterAtTop ? gutter : 0),
+      marginBottom: bottom,
+      ...sideBySide(policy.gutterAtTop),
+    },
+    // Book-fold headers and footers keep the single-page extent; two-up
+    // headers and footers follow the imposed page, without gutterAtTop.
+    headerFooter: bookFold ? single : sideBySide(false),
+  };
+}
+
 export function effectivePhysicalSectionGeometry(
   policy: SectionPageLayoutPolicy,
   pageIndex: number,
 ): SectionGeom {
-  if (!Number.isInteger(pageIndex) || pageIndex < 0) {
-    throw new RangeError('Physical page index must be a non-negative integer');
-  }
-  let { pageWidth, pageHeight } = policy.physicalGeometry;
-  let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
-  const bookFold = policy.bookFoldPrinting || policy.bookFoldRevPrinting;
-  if (bookFold) {
-    pageWidth /= 2;
-    // ECMA-376 §§17.15.1.11/.13 define a half-sheet editing page and automatic
-    // gutter placement; the bisector edge is compatibility-owned.
-    // `word-book-fold-gutter-right-edge`
-    if (wordBookFoldGutterEdge() === 'right') marginRight += policy.gutterPt;
-  } else if (policy.printTwoOnOne) {
-    pageHeight /= 2;
-    // §17.15.1.64 places each editing page on a half-sheet with its top margin
-    // at the bisector; §17.15.1.50 therefore makes that the automatic gutter edge.
-    marginTop += policy.gutterPt;
-  } else {
-    if (policy.gutterAtTop && !policy.mirrorMargins) marginTop += policy.gutterPt;
-    else if (policy.rtlGutter) marginRight += policy.gutterPt;
-    else marginLeft += policy.gutterPt;
-  }
-  if (!bookFold && !policy.printTwoOnOne && policy.mirrorMargins && pageIndex % 2 === 1) {
-    [marginLeft, marginRight] = [marginRight, marginLeft];
-  }
-  return {
-    ...policy.physicalGeometry,
-    pageWidth,
-    pageHeight,
-    marginTop,
-    marginRight,
-    marginBottom,
-    marginLeft,
-  };
+  requirePhysicalPageIndex(pageIndex);
+  return { ...policy.physicalGeometry, ...imposedPageMargins(policy, pageIndex).body };
+}
+
+/** Left/right margins bounding the header and footer stories of a physical
+ * page; they differ from the body margins only under two-page imposition. */
+export function effectiveHeaderFooterInlineMargins(
+  policy: SectionPageLayoutPolicy,
+  pageIndex: number,
+): Readonly<Pick<SectionGeom, 'marginLeft' | 'marginRight'>> {
+  requirePhysicalPageIndex(pageIndex);
+  return imposedPageMargins(policy, pageIndex).headerFooter;
 }
 
 export function resolveSectionContextForPage(
@@ -299,6 +387,8 @@ export interface BodySectionOccurrence {
   readonly docGridCharSpace: number | null;
   readonly gutterPt: number;
   readonly rtlGutter: boolean;
+  /** §17.6.13 pgSz/@orient after page-box inheritance. */
+  readonly sheetOrientation: PageSheetOrientation;
   readonly pageBordersAuthored: boolean;
   readonly pageBorders: Readonly<import('../types.js').PageBorders> | null;
   readonly placement: SectionPlacementFacts;

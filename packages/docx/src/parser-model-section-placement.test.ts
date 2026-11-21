@@ -29,6 +29,7 @@ interface PrivateSectionPlacementWire {
     headerDistance: number | null;
     footerDistance: number | null;
   }> | null;
+  readonly pageOrient: string | null;
 }
 
 type PrivateSectionBreak = Extract<BodyElement, { type: 'sectionBreak' }> & {
@@ -61,6 +62,7 @@ function sectionBreak(sectionId: string): BodyElement {
         marginTop: 25, marginRight: null, marginBottom: null, marginLeft: null,
         headerDistance: null, footerDistance: null,
       },
+      pageOrient: 'landscape',
     },
   } as PrivateSectionBreak;
 }
@@ -113,8 +115,10 @@ describe('parser-private section placement projection', () => {
         marginTop: 25, marginRight: null, marginBottom: null, marginLeft: null,
         headerDistance: null, footerDistance: null,
       },
+      pageOrient: 'landscape',
     });
     expect(workerFinal).toEqual(mainFinal);
+    expect(workerFinal.pageOrient).toBeNull();
     expect(workerFinal.sectionBidi).toBe(false);
     expect(workerFinal.sectionId).toBe('section:1');
     expect(Object.isFrozen(workerEnding)).toBe(true);
@@ -134,9 +138,11 @@ describe('parser-private section placement projection', () => {
       start: occurrence.startBodyIndex,
       end: occurrence.endBodyIndex,
       final: occurrence.final,
+      sheet: occurrence.sheetOrientation,
     }))).toEqual([
-      { id: 'section:0', sectionBidi: true, start: 0, end: 0, final: false },
-      { id: 'section:1', sectionBidi: false, start: 1, end: 1, final: true },
+      { id: 'section:0', sectionBidi: true, start: 0, end: 0, final: false, sheet: 'landscape' },
+      // No authored pgSz orientation: ST_PageOrientation's portrait default.
+      { id: 'section:1', sectionBidi: false, start: 1, end: 1, final: true, sheet: 'portrait' },
     ]);
     expect(Object.isFrozen(projected)).toBe(true);
     expect(Object.isFrozen(projected.occurrences)).toBe(true);

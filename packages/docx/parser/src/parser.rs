@@ -5578,6 +5578,7 @@ fn section_placement_wire(
             page_borders_authored: None,
             page_borders: None,
             page_geometry: None,
+            page_orient: None,
         };
     };
     SectionPlacementWire {
@@ -5613,6 +5614,13 @@ fn section_placement_wire(
         page_borders_authored: child_w(sect_pr, "pgBorders").map(|_| true),
         page_borders: parse_page_borders(sect_pr),
         page_geometry: section_page_geometry_wire(sect_pr).map(Box::new),
+        page_orient: child_w(sect_pr, "pgSz").map(|node| {
+            match attr_w(node, "orient").as_deref() {
+                Some("landscape") => "landscape",
+                _ => "portrait",
+            }
+            .to_string()
+        }),
     }
 }
 
@@ -27655,6 +27663,27 @@ mod column_tests {
             body_from(r#"<w:p><w:pPr><w:sectPr><w:rtlGutter w:val="0"/></w:sectPr></w:pPr></w:p>"#);
         let wire = serde_json::to_value(&body[1]).expect("section break serializes");
         assert_eq!(wire["__sectionPlacement"]["rtlGutter"], false);
+    }
+
+    /// ECMA-376 §17.6.13 `pgSz/@orient` reaches layout as the sheet orientation
+    /// that two-page imposition needs; an authored pgSz without it is the
+    /// ST_PageOrientation default (`portrait`), and no pgSz emits nothing.
+    #[test]
+    fn section_placement_carries_page_orientation() {
+        let orient = |sect_pr: &str| {
+            let body = body_from(&format!(
+                r#"<w:p><w:pPr><w:sectPr>{sect_pr}</w:sectPr></w:pPr></w:p>"#
+            ));
+            serde_json::to_value(&body[1]).expect("section break serializes")["__sectionPlacement"]
+                ["pageOrient"]
+                .clone()
+        };
+        assert_eq!(
+            orient(r#"<w:pgSz w:w="10080" w:h="12240" w:orient="landscape"/>"#),
+            "landscape"
+        );
+        assert_eq!(orient(r#"<w:pgSz w:w="15840" w:h="12240"/>"#), "portrait");
+        assert!(orient(r#"<w:pgMar w:gutter="360"/>"#).is_null());
     }
 
     /// ECMA-376 §17.6.13 `<w:pgSz>` / §17.6.11 `<w:pgMar>` — a mid-body section

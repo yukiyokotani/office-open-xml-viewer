@@ -143,7 +143,7 @@ const bodyOwner = () => ({
   pageBordersAuthored: false, pageBorders: null,
   pageLayout: {
     physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb' as const,
-    gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+    gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
     bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
   },
 });
@@ -468,7 +468,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -766,6 +766,7 @@ describe('canonical body producer', () => {
         textDirection: 'lrTb',
         gutterPt: 0,
         rtlGutter: false,
+        sheetOrientation: 'portrait' as const,
         mirrorMargins: false,
         gutterAtTop: false,
         bookFoldPrinting: false,
@@ -883,6 +884,7 @@ describe('canonical body producer', () => {
           textDirection: 'lrTb',
           gutterPt: 0,
           rtlGutter: false,
+          sheetOrientation: 'portrait' as const,
           mirrorMargins: false,
           gutterAtTop: false,
           bookFoldPrinting: false,
@@ -1131,7 +1133,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -2777,6 +2779,7 @@ describe('canonical body producer', () => {
         textDirection: 'lrTb',
         gutterPt: 0,
         rtlGutter: false,
+        sheetOrientation: 'portrait' as const,
         mirrorMargins: false,
         gutterAtTop: false,
         bookFoldPrinting: false,
@@ -2849,7 +2852,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     });
@@ -2910,7 +2913,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -2988,7 +2991,7 @@ describe('canonical body producer', () => {
         pageLayout: {
           physicalGeometry: twoColumnSection.geometry,
           columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] },
-          textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, mirrorMargins: false,
+          textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false,
           gutterAtTop: false, bookFoldPrinting: false, bookFoldRevPrinting: false,
           printTwoOnOne: false,
         },
@@ -3048,7 +3051,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: centeredSection.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -3100,7 +3103,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -3162,7 +3165,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -3230,7 +3233,7 @@ describe('canonical body producer', () => {
         physicalGeometry: context.geometry, columns: context === balancedSection
           ? { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] }
           : null,
-        textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, mirrorMargins: false,
+        textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false,
         gutterAtTop: false, bookFoldPrinting: false, bookFoldRevPrinting: false,
         printTwoOnOne: false,
       },
@@ -3326,6 +3329,7 @@ describe('canonical body producer', () => {
           textDirection: 'lrTb' as const,
           gutterPt: 0,
           rtlGutter: false,
+          sheetOrientation: 'portrait' as const,
           mirrorMargins: false,
           gutterAtTop: false,
           bookFoldPrinting: false,
@@ -3422,7 +3426,8 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb', gutterPt: 0,
-        rtlGutter: false, mirrorMargins: false, gutterAtTop: false, bookFoldPrinting: false,
+        rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false,
+        gutterAtTop: false, bookFoldPrinting: false,
         bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -3558,6 +3563,7 @@ describe('canonical body producer', () => {
         textDirection: 'lrTb',
         gutterPt: 0,
         rtlGutter: false,
+        sheetOrientation: 'portrait' as const,
         mirrorMargins: false,
         gutterAtTop: false,
         bookFoldPrinting: false,
