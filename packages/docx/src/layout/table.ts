@@ -11,6 +11,7 @@ import {
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
+  wordVerticalMergeInteriorBorderPt,
 } from './table-compatibility.js';
 import { noteOverflowPolicyOf, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import type {
@@ -700,8 +701,17 @@ function collapsedHorizontalBoundaryWidthsPt(
       effectiveCellSpacingPt(input.rows[boundaryIndex - 1]) > 0
       || effectiveCellSpacingPt(input.rows[boundaryIndex]) > 0
     ) return 0;
-    return segments.reduce((maximumPt, segment) => {
-      if (!segment) return maximumPt;
+    return segments.reduce((maximumPt, segment, column) => {
+      if (!segment) {
+        // WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT: inside a vertical
+        // merge no rule is drawn, but the merged constituent above still
+        // charges its own bottom border to the row below.
+        const constituent = boundaryIndex > 0 ? input.rows[boundaryIndex - 1]?.cells.find((cell) => (
+          cell.verticalMerge !== 'none'
+          && cell.columnStart <= column && column < cell.columnStart + cell.columnSpan
+        )) : undefined;
+        return Math.max(maximumPt, wordVerticalMergeInteriorBorderPt(constituent?.borders.bottom ?? null));
+      }
       const winner = resolveBoundary(segment.above.border, segment.below.border, segment.edge);
       return Math.max(maximumPt, winner?.border.widthPt ?? 0);
     }, 0);
