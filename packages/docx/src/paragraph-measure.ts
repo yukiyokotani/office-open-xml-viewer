@@ -28,6 +28,7 @@ import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
 import { compatOf } from './layout/compat-profile.js';
 import {
+  wordAnchorHostLineMetricApplies,
   WORD_INLINE_OBJECT_GRID_LINE_ALLOCATION,
   WORD_PICTURE_BULLET_LINE_PARTICIPATION,
   wordJustifiedInterwordCompressionApplies,
@@ -366,6 +367,16 @@ export function measureParagraph(
     uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,
+    ...(wordAnchorHostLineMetricApplies(compat.specifiedTextLineBoxMode15, context.lineGrid.active)
+      ? { anchorHostLineMetric: Object.freeze({
+          fontSize: environment.paragraphMarkShapeInput?.fontSizePt ?? getDefaultFontSize(paragraph),
+          // WORD_EMPTY_MARK_ASCII_FACE: the mark line uses its ascii face.
+          fontFamily: environment.paragraphMarkShapeInput?.fonts.ascii ?? paragraph.defaultFontFamily ?? null,
+          fontFamilyEastAsia: null,
+          bold: (environment.paragraphMarkShapeInput?.weight ?? 400) >= 600,
+          italic: environment.paragraphMarkShapeInput?.style === 'italic',
+        }) }
+      : {}),
     characterGridActive: context.characterGrid.active,
     paragraphRtl: context.baseRtl,
     autoSpaceDE: paragraph.autoSpaceDE,

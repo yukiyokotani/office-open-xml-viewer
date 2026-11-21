@@ -609,6 +609,24 @@ export const WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS = defineCompatibilityRule({
   description: 'A zero-ink drawing anchor host reserves its line and grid height while visible neighboring glyphs retain their own ascent, descent, and design-line baseline. Library policy, no Office measurement: line metrics choice for mixed anchor and visible content (PR #1035); nothing measured.',
 });
 
+export const WORD_ANCHOR_HOST_NO_LINE_METRIC = defineCompatibilityRule({
+  id: 'word-anchor-host-no-line-metric',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'anchor-host-inline-object-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §20.4.2.3 anchors a floating drawing in a run, but the anchoring character has no glyph and the standard does not give it line metrics. Windows Word 16.0.20527 controls (compatibility mode 15, no grid, Times New Roman 11pt paragraph, a wrapNone DrawingML picture anchored in a 10pt or 40pt run beside an inline 16pt picture, unpositioned or lowered 15pt; and an anchored picture alone in its paragraph) size no line from the anchoring run: every paragraph with the inline picture is exactly as tall as without the anchor, also with the 40pt anchoring run, and a paragraph holding only the anchor is as tall as an empty paragraph of its mark (12.65pt for an 11pt Times New Roman mark, not the 40pt run). The anchor host therefore keeps its position but contributes no metrics beside other line content, and a host-only paragraph takes its paragraph mark line (ascii face, WORD_EMPTY_MARK_ASCII_FACE). Scope: mode 15 without a line grid, as measured; other modes and grid lines keep the established host-run metrics (WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS) until their controls are measured.',
+});
+
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC gate. */
+export function wordAnchorHostLineMetricApplies(mode15: boolean, lineGridActive: boolean): boolean {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  return mode15 && !lineGridActive;
+}
+
 export const WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION = defineCompatibilityRule({
   id: 'word-justification-leading-indent-exclusion',
   evidence: {

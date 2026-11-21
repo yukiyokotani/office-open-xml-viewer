@@ -916,6 +916,21 @@ export function keepsWordLineBoxes(runs: readonly ParagraphLayoutRun[]): boolean
   return runs.some((run) => (run as { textBoxVertical?: boolean }).textBoxVertical === true);
 }
 
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether a paragraph holds anything that
+ * forms a line besides its floating-drawing anchor hosts. */
+function paragraphHasLineContent(runs: readonly ParagraphLayoutRun[]): boolean {
+  return runs.some((run) => {
+    switch (run.type) {
+      case 'anchorHost': return false;
+      case 'image': case 'chart': return !run.anchor;
+      case 'shape': return run.inline === true;
+      case 'unavailableDrawing': return !('anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined);
+      case 'break': return run.breakType === 'line';
+      default: return true;
+    }
+  });
+}
+
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
@@ -2206,91 +2221,105 @@ function appendRunsToSegments(
         ptab: { alignment: run.alignment, relativeTo: run.relativeTo },
       });
     } else if (run.type === 'anchorHost') {
-      const eastAsian = run.fontFamilyEastAsia != null;
-      const bold = run.bold ?? false;
-      const italic = run.italic ?? false;
-      const authoredFamily = run.fontFamilyEastAsia ?? run.fontFamily ?? null;
-      const weight = bold ? 700 : 400;
-      const style = italic ? ('italic' as const) : ('normal' as const);
-      // An anchor host has no glyph of its own. Resolve a script-matched probe
-      // as for an empty paragraph mark, then require selected-face identity and
-      // cmap coverage. Empty text would vacuously admit any subset resource.
-      const probeText = eastAsian ? 'あ' : 'x';
-      const selected = environment.layoutServices?.text.resolve({
-        text: probeText,
-        fonts: {
-          ascii: run.fontFamily,
-          highAnsi: run.fontFamily,
-          eastAsia: run.fontFamilyEastAsia,
-          complexScript: run.fontFamily,
-        },
-        slot: eastAsian ? 'eastAsia' : 'ascii',
-        weight,
-        style,
-      });
-      const localFont = selectedMetric(selected, probeText);
-      // The mark hosting a floating anchor participates in the same natural
-      // atLeast line box as a visible text line.
-      const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
-      const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
-        ? projectedResourceMetric(localFont,
-          fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true))
-        : undefined;
-      const referenceMetric =
-        naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
-          && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
-            ?? environment.layoutServices?.text.localMetrics ?? {}), selected)
-          // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
-          // spans and paragraph marks only; an anchor host is outside its
-          // evidence, so only an exact catalogued tuple lends its geometry.
-          ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
+      // WORD_ANCHOR_HOST_NO_LINE_METRIC: the anchoring run's formatting sizes
+      // no line. Beside other line content the host keeps only its position;
+      // a paragraph holding nothing else takes its paragraph mark's line.
+      const hostMetric = environment.anchorHostLineMetric;
+      if (hostMetric !== undefined && paragraphHasLineContent(runs)) {
+        segs.push({
+          text: '', metricOnly: true, bold: false, italic: false, underline: false, strikethrough: false,
+          fontSize: 0, color: null, fontFamily: run.fontFamily ?? null, vertAlign: null, measuredWidth: 0,
+          anchorHostWithoutMetric: true,
+          ...listLabelOf(run),
+        });
+      } else {
+        const hostRun = hostMetric !== undefined ? { ...run, ...hostMetric } : run;
+        const eastAsian = hostRun.fontFamilyEastAsia != null;
+        const bold = hostRun.bold ?? false;
+        const italic = hostRun.italic ?? false;
+        const authoredFamily = hostRun.fontFamilyEastAsia ?? hostRun.fontFamily ?? null;
+        const weight = bold ? 700 : 400;
+        const style = italic ? ('italic' as const) : ('normal' as const);
+        // An anchor host has no glyph of its own. Resolve a script-matched probe
+        // as for an empty paragraph mark, then require selected-face identity and
+        // cmap coverage. Empty text would vacuously admit any subset resource.
+        const probeText = eastAsian ? 'あ' : 'x';
+        const selected = environment.layoutServices?.text.resolve({
+          text: probeText,
+          fonts: {
+            ascii: hostRun.fontFamily,
+            highAnsi: hostRun.fontFamily,
+            eastAsia: hostRun.fontFamilyEastAsia,
+            complexScript: hostRun.fontFamily,
+          },
+          slot: eastAsian ? 'eastAsia' : 'ascii',
+          weight,
+          style,
+        });
+        const localFont = selectedMetric(selected, probeText);
+        // The mark hosting a floating anchor participates in the same natural
+        // atLeast line box as a visible text line.
+        const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
+        const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
+          ? projectedResourceMetric(localFont,
             fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true))
+          environment.verticalCJK === true || environment.wordLineBoxes === true))
           : undefined;
-      const familyLineMetric = resourceMetric ?? referenceMetric;
-      segs.push({
-        text: '',
-        metricOnly: true,
-        ...(eastAsian ? { metricEastAsian: true as const } : {}),
-        bold,
-        italic,
-        underline: false,
-        strikethrough: false,
-        fontSize: run.fontSize,
-        color: null,
-        fontFamily: selected?.resolvedFamily ?? authoredFamily,
-        authoredFontFamily: selected?.requestedFamily ?? authoredFamily,
-        fontSource: selected?.source,
-        authoredReferenceMetricAllowed: mayUseAuthoredReferenceVerticalMetric(selected),
-        fontRoute: selected?.route,
-        resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
-        ...(resourceMetric?.lineHeightRatio != null
-          ? {
-              resolvedResourceVerticalMetric: true as const,
-              resolvedDesignAscentRatio: resourceMetric.designAscentRatio,
-              resolvedDesignDescentRatio: resourceMetric.designDescentRatio,
-            }
-          : {}),
-        ...(referenceMetric
-          ? {
-              referenceFontVerticalMetric: true as const,
-              resolvedDesignAscentRatio: referenceMetric.designAscentRatio,
-              resolvedDesignDescentRatio: referenceMetric.designDescentRatio,
-            }
-          : {}),
-        ...admittedFaceDecoration(selected, referenceMetric != null),
-        resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
-        vertAlign: null,
-        measuredWidth: 0,
-        eaFloorFamily: eastAsian ? (selected?.resolvedFamily ?? authoredFamily) : null,
-        resolvedEaFloorLineHeightRatio: eastAsian ? familyLineMetric?.lineHeightRatio : undefined,
-        resolvedEaFloorEastAsianLineHeightRatio: eastAsian
-          ? familyLineMetric?.eastAsianLineHeightRatio
-          : undefined,
-        snapToCharacterGrid: false,
-        ...listLabelOf(run),
-      });
+        const referenceMetric =
+          naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
+            && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
+              ?? environment.layoutServices?.text.localMetrics ?? {}), selected)
+            // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
+            // spans and paragraph marks only; an anchor host is outside its
+            // evidence, so only an exact catalogued tuple lends its geometry.
+            ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
+              fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+          environment.verticalCJK === true || environment.wordLineBoxes === true))
+            : undefined;
+        const familyLineMetric = resourceMetric ?? referenceMetric;
+        segs.push({
+          text: '',
+          metricOnly: true,
+          ...(eastAsian ? { metricEastAsian: true as const } : {}),
+          bold,
+          italic,
+          underline: false,
+          strikethrough: false,
+          fontSize: hostRun.fontSize,
+          color: null,
+          fontFamily: selected?.resolvedFamily ?? authoredFamily,
+          authoredFontFamily: selected?.requestedFamily ?? authoredFamily,
+          fontSource: selected?.source,
+          authoredReferenceMetricAllowed: mayUseAuthoredReferenceVerticalMetric(selected),
+          fontRoute: selected?.route,
+          resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
+          ...(resourceMetric?.lineHeightRatio != null
+            ? {
+                resolvedResourceVerticalMetric: true as const,
+                resolvedDesignAscentRatio: resourceMetric.designAscentRatio,
+                resolvedDesignDescentRatio: resourceMetric.designDescentRatio,
+              }
+            : {}),
+          ...(referenceMetric
+            ? {
+                referenceFontVerticalMetric: true as const,
+                resolvedDesignAscentRatio: referenceMetric.designAscentRatio,
+                resolvedDesignDescentRatio: referenceMetric.designDescentRatio,
+              }
+            : {}),
+          ...admittedFaceDecoration(selected, referenceMetric != null),
+          resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
+          vertAlign: null,
+          measuredWidth: 0,
+          eaFloorFamily: eastAsian ? (selected?.resolvedFamily ?? authoredFamily) : null,
+          resolvedEaFloorLineHeightRatio: eastAsian ? familyLineMetric?.lineHeightRatio : undefined,
+          resolvedEaFloorEastAsianLineHeightRatio: eastAsian
+            ? familyLineMetric?.eastAsianLineHeightRatio
+            : undefined,
+          snapToCharacterGrid: false,
+          ...listLabelOf(hostRun),
+        });
+      }
     }
     let sequenceOffset = 0;
     let markerIndex = 0;

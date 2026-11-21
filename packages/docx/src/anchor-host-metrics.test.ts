@@ -78,10 +78,11 @@ function textRun(text: string, fontSize = 11): DocRun {
   } as DocRun;
 }
 
-function layOut(runs: DocRun[]) {
+type MarkFacts = NonNullable<Parameters<typeof buildSegments>[1]['anchorHostLineMetric']>;
+function layOut(runs: DocRun[], anchorHostLineMetric?: MarkFacts) {
   return layoutLines(
     linearCtx(),
-    buildSegments(runs, { pageIndex: 0, totalPages: 1 })
+    buildSegments(runs, { pageIndex: 0, totalPages: 1, ...(anchorHostLineMetric ? { anchorHostLineMetric } : {}) })
       .map((segment) => ({ ...segment })) as LayoutSeg[],
     400,
     0,
@@ -181,5 +182,29 @@ describe('floating drawing anchor-host metrics', () => {
     expect(mixed.visibleDescent).toBe(visibleOnly.descent);
     expect(hostOnly.visibleAscent).toBe(hostOnly.ascent);
     expect(hostOnly.visibleDescent).toBe(hostOnly.descent);
+  });
+
+  describe('WORD_ANCHOR_HOST_NO_LINE_METRIC', () => {
+    const mark: MarkFacts = { fontSize: 11, fontFamily: 'Arial', fontFamilyEastAsia: null, bold: false, italic: false };
+    const picture = { type: 'image', imagePath: 'p.png', mimeType: 'image/png', widthPt: 20, heightPt: 16,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false } as DocRun;
+
+    it('sizes no line from the anchoring run beside other content', () => {
+      const [withHost] = layOut([anchorHost(), picture], mark);
+      const [withoutHost] = layOut([picture], mark);
+      expect(withHost.ascent).toBe(withoutHost.ascent);
+      expect(withHost.descent).toBe(withoutHost.descent);
+      const [text] = layOut([textRun('Caption')], mark);
+      const [textWithHost] = layOut([anchorHost(), textRun('Caption')], mark);
+      expect(textWithHost.ascent).toBe(text.ascent);
+      expect(textWithHost.descent).toBe(text.descent);
+    });
+
+    it('measures a host-only paragraph with its paragraph mark, not the anchoring run', () => {
+      const [hostOnly] = layOut([anchorHost()], mark);
+      const [markSized] = layOut([{ ...anchorHost(), fontSize: 11, fontFamilyEastAsia: null } as DocRun]);
+      expect(hostOnly.ascent + hostOnly.descent).toBe(markSized.ascent + markSized.descent);
+      expect(hostOnly.eastAsian).toBe(false);
+    });
   });
 });

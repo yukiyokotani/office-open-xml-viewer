@@ -112,6 +112,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating-drawing anchor host that keeps
+   * only its position; it carries no face or line metrics. */
+  anchorHostWithoutMetric?: true;
   /** Reserved-separator participant only (rule control or
    * content mark): the bounded selected-face probe whose vertical metrics the
    * metric-only segment keeps. Never display text, glyph ownership, source
@@ -794,6 +797,16 @@ export interface LineLayoutEnvironment {
   /** §17.6.5 effective line-grid gate after section type, paragraph opt-out,
    *  and §17.15.3.1 table-cell compatibility have been resolved. */
   readonly lineGridActive?: boolean;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: when set, a floating-drawing anchor host
+   * contributes no line metrics beside other line content, and a paragraph
+   * holding nothing else is measured with these paragraph-mark facts. */
+  readonly anchorHostLineMetric?: Readonly<{
+    fontSize: number;
+    fontFamily: string | null;
+    fontFamilyEastAsia: null;
+    bold: boolean;
+    italic: boolean;
+  }>;
   /** Explicit paragraph character-allocation fact; omission is unknown. */
   readonly characterGridActive?: boolean;
   /** Paragraph base direction after inherited bidi resolution. */
