@@ -2480,7 +2480,7 @@ export interface ParagraphAcquisitionOptions {
   readonly sourceRangeStart?: number;
   readonly anchorFrames?: Readonly<Pick<
     AnchorReferenceFramesInput,
-    'page' | 'margin' | 'column' | 'pageParity'
+    'page' | 'margin' | 'column' | 'pageParity' | 'pageBandDistances'
   >>;
   readonly acquireCompleteStory?: CompleteTextBoxStoryAcquirer;
   /**
@@ -4982,6 +4982,7 @@ function acquireAnchorOccurrence(
           : referenceBounds,
         character: host.bounds,
         pageParity: baseFrames?.pageParity ?? null,
+        pageBandDistances: baseFrames?.pageBandDistances ?? null,
       };
   const acquiredResult = resolveAnchorFrame({
     acquisition: outer.run.anchorAcquisitionInput,
@@ -6255,6 +6256,7 @@ function verticalSectionReferenceFrames(input: Readonly<{
       heightPt: lineBox.heightPt,
     },
     pageParity: frames.pageParity ?? null,
+    pageBandDistances: frames.pageBandDistances ?? null,
   };
 }
 
@@ -6642,6 +6644,9 @@ function paragraphAcquisitionKey(
           ]
         : null,
       anchorFrames.pageParity,
+      anchorFrames.pageBandDistances
+        ? [anchorFrames.pageBandDistances.headerPt, anchorFrames.pageBandDistances.footerPt]
+        : null,
     ] : null,
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCellBounds ?? null),
     lineOnly || !hasCompleteTextBox || !options.acquireCompleteStory
