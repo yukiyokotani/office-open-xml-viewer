@@ -275,6 +275,10 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly inlineEffectExtent?: readonly number[];
   /** §17.3.2.24 position of the hosting run of an inline picture placeholder. */
   readonly inlinePositionPt?: number;
+  /** A picture placeholder's §20.1.7.6 orientation (`ParagraphImageRun`). */
+  readonly rotation?: number;
+  readonly flipH?: boolean;
+  readonly flipV?: boolean;
   /** An inline picture placeholder's picture facts (`ParagraphImageRun`). */
   readonly inlineObjectOrigin?: 'drawingml';
   readonly inlineObjectShapeInput?: NumberingMarkerShapeInput;

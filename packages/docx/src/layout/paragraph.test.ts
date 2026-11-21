@@ -969,10 +969,13 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     // picture or chart it stands for.
     describe('availability parity of inline pictures and charts', () => {
       const facts = { __inlineObjectFontFacts: { fontSize: 10, fontFamily: 'Test Sans' } };
-      const subject = (kind: 'picture' | 'chart', available: boolean, positionPt: number) => {
+      const subject = (kind: 'picture' | 'chart', available: boolean, positionPt: number,
+        orientation: Readonly<{ rotation?: number; flipH?: boolean; flipV?: boolean }> = {}) => {
         // The parser records a run position on pictures only (charts keep
-        // their established placement), for the picture and its placeholder.
-        const position = kind === 'picture' && positionPt ? { __inlinePosition: positionPt } : {};
+        // their established placement), for the picture and its placeholder,
+        // and the picture's a:xfrm orientation on both.
+        const position = kind === 'picture' && positionPt ? { __inlinePosition: positionPt, ...orientation }
+          : kind === 'picture' ? orientation : {};
         if (kind === 'picture') {
           return (available
             ? { type: 'image', imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt: 30,
@@ -1009,25 +1012,29 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
           for (const [storyName, story] of stories) {
             for (const [mode, vertical] of modes) {
               it(`${kind}, ${spacing}, ${storyName}, ${mode}`, () => {
-                for (const [positionPt, layout] of [-5, 0, 5].flatMap((value) =>
-                  (['text', 'neighbour', 'alone'] as const).map((variant) => [value, variant] as const))) {
+                const orientations = kind === 'chart' ? [{}] : [0, 90, 180, 270].flatMap((rotation) =>
+                  [{}, { flipH: true }, { flipV: true }].map((flip) => ({ ...(rotation ? { rotation } : {}), ...flip })));
+                for (const [positionPt, layout, orientation] of [-5, 0, 5].flatMap((value) =>
+                  (['text', 'neighbour', 'alone'] as const).flatMap((variant) =>
+                    orientations.map((turn) => [value, variant, turn] as const)))) {
                   const options = { ...spacingOptions, ...(story ? { source: story as never } : {}),
                     ...(vertical === undefined ? {} : { vertical }) };
                   // Beside text; beside text and a 16pt picture, which puts an
                   // exact line in the inline-object class whichever the subject
                   // is; and alone in its paragraph.
-                  const runs = (available: boolean) => layout === 'alone' ? [subject(kind, available, positionPt)]
-                    : [paragraph.runs[0]!, subject(kind, available, positionPt),
+                  const runs = (available: boolean) => layout === 'alone'
+                    ? [subject(kind, available, positionPt, orientation)]
+                    : [paragraph.runs[0]!, subject(kind, available, positionPt, orientation),
                       ...(layout === 'neighbour' ? [picture(16, 0, 'drawingml')] : [])];
                   const a = measureInlineParagraph(runs(true), multiple, options);
                   const u = measureInlineParagraph(runs(false), multiple, options);
                   const [al, ul] = [a.lines[0]!, u.lines[0]!];
-                  expect(ul.advancePt, `advance at ${positionPt} ${layout}`).toBeCloseTo(al.advancePt, 10);
-                  expect(ul.baselinePt - ul.bounds.yPt, `baseline at ${positionPt} ${layout}`)
+                  expect(ul.advancePt, `advance at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toBeCloseTo(al.advancePt, 10);
+                  expect(ul.baselinePt - ul.bounds.yPt, `baseline at ${positionPt} ${layout} ${JSON.stringify(orientation)}`)
                     .toBeCloseTo(al.baselinePt - al.bounds.yPt, 10);
                   const [ab, ub] = [box(a), box(u)];
-                  expect(ub.bounds, `box at ${positionPt} ${layout}`).toEqual(ab.bounds);
-                  expect(ub.clip, `clip at ${positionPt} ${layout}`).toEqual(ab.clip);
+                  expect(ub.bounds, `box at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toEqual(ab.bounds);
+                  expect(ub.clip, `clip at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toEqual(ab.clip);
                 }
               });
             }

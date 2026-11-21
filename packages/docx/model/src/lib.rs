@@ -3786,6 +3786,14 @@ pub struct UnavailableDrawingRun {
     pub resource_kind: UnavailableDrawingResourceKind,
     pub width_pt: f64,
     pub height_pt: f64,
+    /// §20.1.7.6 a:xfrm rotation (degrees) and flips of a picture placeholder,
+    /// as on the available picture (`ImageRun`); they shape its line footprint.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub rotation: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_h: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_v: bool,
     /// Parser-private §17.3.2.24 position of the hosting run of an inline
     /// picture placeholder, as on the available picture (`ImageRun`).
     #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]

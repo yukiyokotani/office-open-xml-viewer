@@ -9320,25 +9320,7 @@ fn resolve_inline_blip(
     // picture's orientation. wp:extent owns layout size, while these facts
     // own paint and rotWithShape=false inside the recursive blip evaluator.
     // Restrict lookup to this blip's picture, never a nested text-box drawing.
-    let xfrm = blip_fill
-        .and_then(|fill| fill.parent())
-        .and_then(|picture| {
-            picture
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-        })
-        .and_then(|properties| {
-            properties
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
-        });
-    let rotation = xfrm
-        .and_then(|n| n.attribute("rot"))
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(0) as f64
-        / 60000.0;
-    let flip_h = xfrm.is_some_and(|n| matches!(n.attribute("flipH"), Some("1" | "true")));
-    let flip_v = xfrm.is_some_and(|n| matches!(n.attribute("flipV"), Some("1" | "true")));
+    let (rotation, flip_h, flip_v) = picture_orientation(blip_fill.and_then(|fill| fill.parent()));
     Some(InlineBlip {
         image_path,
         mime_type,
@@ -9516,18 +9498,53 @@ fn unresolved_drawing_resource_kind(
         .then_some(UnavailableDrawingResourceKind::Image)
 }
 
+/// ECMA-376 §20.2.2.6 pic:spPr / §20.1.7.6 a:xfrm of a picture: its rotation
+/// (degrees) and flips. Restricted to this picture, never a nested drawing.
+fn picture_orientation(picture: Option<roxmltree::Node>) -> (f64, bool, bool) {
+    let xfrm = picture
+        .and_then(|picture| {
+            picture
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+        })
+        .and_then(|properties| {
+            properties
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
+        });
+    let rotation = xfrm
+        .and_then(|n| n.attribute("rot"))
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(0) as f64
+        / 60000.0;
+    let flip_h = xfrm.is_some_and(|n| matches!(n.attribute("flipH"), Some("1" | "true")));
+    let flip_v = xfrm.is_some_and(|n| matches!(n.attribute("flipV"), Some("1" | "true")));
+    (rotation, flip_h, flip_v)
+}
+
 fn unavailable_drawing_run(
     container: roxmltree::Node,
     anchor_acquisition: Option<AnchorAcquisitionWire>,
 ) -> Option<DocRun> {
     let resource_kind = unresolved_drawing_resource_kind(container)?;
     let (width_pt, height_pt) = drawing_extent_points(container)?;
+    // A picture placeholder keeps the picture's own orientation, which shapes
+    // its line footprint exactly as for the available picture.
+    let (rotation, flip_h, flip_v) = match resource_kind {
+        UnavailableDrawingResourceKind::Image => picture_orientation(
+            drawing_payload_nodes(container).find(|n| n.tag_name().name() == "pic"),
+        ),
+        UnavailableDrawingResourceKind::Chart => (0.0, false, false),
+    };
     Some(DocRun::UnavailableDrawing(Box::new(
         UnavailableDrawingRun {
             inline_effect_extent: None,
             resource_kind,
             width_pt,
             height_pt,
+            rotation,
+            flip_h,
+            flip_v,
             inline_position: None,
             inline_object_font_facts: None,
             anchor_acquisition,
@@ -19772,6 +19789,9 @@ mod tests {
                     resource_kind: UnavailableDrawingResourceKind::Image,
                     width_pt: 24.0,
                     height_pt: 24.0,
+                    rotation: 0.0,
+                    flip_h: false,
+                    flip_v: false,
                     inline_position: None,
                     inline_object_font_facts: None,
                     anchor_acquisition: None,
@@ -25117,6 +25137,7 @@ mod anchor_image_relative_from_tests {
     <a:graphic><a:graphicData>
       <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
         <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+        <pic:spPr><a:xfrm rot="5400000" flipH="1"><a:off x="0" y="0"/><a:ext cx="304800" cy="304800"/></a:xfrm></pic:spPr>
       </pic:pic>
     </a:graphicData></a:graphic>
   </wp:inline>
@@ -25126,8 +25147,13 @@ mod anchor_image_relative_from_tests {
         let drawing = first_unavailable_drawing(&doc);
         assert!(drawing.anchor_acquisition.is_none());
         assert_eq!(drawing.inline_position, Some(-5.0));
-        // ...and the run's font facts that size an available picture's leading.
+        // ...and the run's font facts that size an available picture's leading,
+        // and the picture's own orientation.
         assert!(drawing.inline_object_font_facts.is_some());
+        assert_eq!(
+            (drawing.rotation, drawing.flip_h, drawing.flip_v),
+            (90.0, true, false)
+        );
     }
 
     #[test]
