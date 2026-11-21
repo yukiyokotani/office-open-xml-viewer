@@ -1,5 +1,9 @@
 import type { VmlShapeAcquisitionFacts } from './layout/types.js';
-import { resolveAutomaticParagraphMarginsPt } from './layout/paragraph-spacing.js';
+import {
+  automaticSpacingNeighbourhood,
+  resolveAutomaticParagraphMarginsPt,
+  type AutomaticSpacingNeighbourhood,
+} from './layout/paragraph-spacing.js';
 import type {
   ReservedNoteSeparatorsInput,
   ReservedNoteSeparatorStoriesInput,
@@ -100,6 +104,10 @@ import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './lay
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
+import {
+  wordHiddenParagraphRetainedBreaks,
+  type WordHiddenParagraphRunFact,
+} from './layout/body-pagination-compatibility.js';
 import {
   cellOwnedGridFramePosition,
   wordTableCellSpacingValuePt,
@@ -419,18 +427,17 @@ function reservedNoteSeparatorsInput(
   if (!isWireRecord(value as unknown)) throw new Error('Unsupported reserved note separator story');
   // Reserved stories are not ordinary numbered-note bodies and do not enter
   // normalizeBody. Resolve their effective automatic spacing flags here with
-  // the same document setting and paragraph-base em as other stories,
-  // before canonical acquisition. At most two kinds × three roles are visited;
-  // clone only changed ancestry, then use the enclosing single frozen snapshot.
+  // the same document setting and amount as other stories (a standalone
+  // paragraph: no box edge or list neighbour), before canonical acquisition.
+  // At most two kinds × three roles are visited; clone only changed
+  // ancestry, then use the enclosing single frozen snapshot.
   const normalizeStory = (story: ReservedNoteSeparatorStoryInput): ReservedNoteSeparatorStoryInput => {
     reservedNoteSeparatorStoryInput(story);
     const authored = story.paragraph;
     if (!isWireRecord(authored) || !isWireRecord(authored.paragraph)) return story;
     const paragraph = authored.paragraph;
     if (paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true) return story;
-    const spacing = resolveAutomaticParagraphMarginsPt(
-      paragraph, paragraph.defaultFontSize ?? 10, fixedParagraphAutoSpacing,
-    );
+    const spacing = resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing);
     if (spacing.spaceBefore === paragraph.spaceBefore && spacing.spaceAfter === paragraph.spaceAfter) return story;
     return { ...story, paragraph: { ...authored, paragraph: { ...paragraph, ...spacing } } };
   };
@@ -464,7 +471,7 @@ function selectedNoteSeparatorParagraphsInput(
     if (paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true) return paragraph;
     return {
       ...paragraph,
-      ...resolveAutomaticParagraphMarginsPt(paragraph, paragraph.defaultFontSize ?? 10, fixedParagraphAutoSpacing),
+      ...resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing),
     };
   };
   const separator = resolve(settings?.footnoteSeparatorParagraph, settings?.footnoteSeparator);
@@ -1172,6 +1179,14 @@ function paragraphFrameFact(
   return { framed: dropCap === 'drop' || dropCap === 'margin' ? 'drop-cap' : 'frame' };
 }
 
+/** A vanished, inkless body paragraph acquires no block: body flow consumes
+ * its source (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK owns its break). */
+function isSwallowedHiddenBodyParagraph(paragraph: Readonly<DocParagraph>): boolean {
+  return paragraph.markVanish === true
+    && !paragraphHasUnavailableDrawing(paragraph)
+    && isInklessParagraph(paragraph);
+}
+
 function bodyLayoutSequenceInput(
   body: readonly BodyElement[],
   sectionAtMarker: (bodyIndex: number) => AcquiredBodySectionReference,
@@ -1196,9 +1211,7 @@ function bodyLayoutSequenceInput(
     const source = bodySourceAt(entryBodyIndex);
     bodyIndex += 1;
     if (element.type === 'paragraph') {
-      if (element.markVanish !== true
-        || paragraphHasUnavailableDrawing(element)
-        || !isInklessParagraph(element)) {
+      if (!isSwallowedHiddenBodyParagraph(element)) {
         return Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
       }
       // Facts only: whether the hidden paragraph's pageBreakBefore
@@ -2062,6 +2075,55 @@ export function normalizeOwnedInternalDocumentModel(doc: DocxDocumentModel): Nor
   return normalizeInternalDocumentModelWithOwnership(doc, true);
 }
 
+type AutomaticSpacingEdges = Parameters<typeof automaticSpacingNeighbourhood>[2];
+/** Box edges that drop automatic paragraph margins (WORD_HTML_PARAGRAPH_AUTO_SPACING):
+ * both edges of a table cell, and the start of the document body, a header
+ * and a text box. Footer and note starts and every other end keep them. */
+const CELL_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: true, end: true });
+const STORY_START_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: true, end: false });
+const NO_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: false, end: false });
+/** Which automatic-spacing edges a sibling sequence has; `body` also takes its
+ * neighbours from the body flow participants. */
+type AutomaticSpacingFlow = 'body' | 'cell' | 'header' | 'story';
+/** Stands for a hidden paragraph whose page break still applies. */
+const RETAINED_HIDDEN_BREAK = Object.freeze({ type: 'pageBreak' });
+
+/**
+ * Automatic-spacing neighbourhoods of the document body's flow participants,
+ * in one linear pass. Body flow swallows vanished inkless paragraphs
+ * (isSwallowedHiddenBodyParagraph), so they neither open the body nor
+ * separate or join list items; one whose pageBreakBefore still applies
+ * (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK) remains a break. Swallowed
+ * paragraphs get no neighbourhood: they lay out no block.
+ */
+function bodyFlowAutoSpacingNeighbourhoods(
+  body: readonly BodyElement[],
+): readonly (AutomaticSpacingNeighbourhood | undefined)[] {
+  const swallowed = (element: BodyElement): boolean =>
+    element.type === 'paragraph' && isSwallowedHiddenBodyParagraph(element);
+  const retainedBreaks = wordHiddenParagraphRetainedBreaks(body, (element): WordHiddenParagraphRunFact => (
+    swallowed(element)
+      ? {
+          hidden: true,
+          framed: element.type === 'paragraph' && paragraphFrameFact(element).framed !== undefined,
+          pageBreakBefore: element.type === 'paragraph' && element.pageBreakBefore === true,
+        }
+      : {
+          hidden: false,
+          blocksJoin: element.type === 'table'
+            || (element.type === 'paragraph' && paragraphFrameFact(element).framed === 'frame'),
+        }));
+  const participants: Parameters<typeof automaticSpacingNeighbourhood>[0][number][] = [];
+  const positions = body.map((element, index) => {
+    if (!swallowed(element)) return participants.push(element) - 1;
+    if (retainedBreaks.has(index)) participants.push(RETAINED_HIDDEN_BREAK);
+    return -1;
+  });
+  return positions.map((position) => (position < 0
+    ? undefined
+    : automaticSpacingNeighbourhood(participants, position, STORY_START_AUTO_SPACING_EDGES)));
+}
+
 function normalizeInternalDocumentModelWithOwnership(
   doc: DocxDocumentModel,
   consumeOwned: boolean,
@@ -2072,6 +2134,7 @@ function normalizeInternalDocumentModelWithOwnership(
     story: SourceRef['story'],
     storyInstance: string,
     path: number[],
+    autoSpacing?: AutomaticSpacingNeighbourhood,
   ): BodyElement => {
     if (element.type === 'paragraph') {
       const internalParagraph = element as InternalDocParagraph;
@@ -2123,9 +2186,10 @@ function normalizeInternalDocumentModelWithOwnership(
         }
         let shape = run as Extract<DocRun, { type: 'shape' }> & InternalShapeRun;
         if (shape.textBlocks?.some(block => block.beforeAutospacing === true || block.afterAutospacing === true)) {
-          const textBlocks = shape.textBlocks.map(block => {
+          const textBlocks = shape.textBlocks.map((block, blockIndex, blocks) => {
             const spacing = resolveAutomaticParagraphMarginsPt(
-              block, block.defaultFontSize ?? block.fontSizePt, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true,
+              block, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true,
+              automaticSpacingNeighbourhood(blocks, blockIndex, STORY_START_AUTO_SPACING_EDGES),
             );
             return spacing.spaceBefore === block.spaceBefore && spacing.spaceAfter === block.spaceAfter
               ? block : { ...block, ...spacing };
@@ -2158,6 +2222,7 @@ function normalizeInternalDocumentModelWithOwnership(
             'textbox',
             textBoxStoryInstance,
             [blockIndex],
+            automaticSpacingNeighbourhood(content, blockIndex, STORY_START_AUTO_SPACING_EDGES),
           ) as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
           if (normalized !== block) contentChanged = true;
           textBoxContent[blockIndex] = normalized;
@@ -2175,8 +2240,7 @@ function normalizeInternalDocumentModelWithOwnership(
         }
       });
       const spacing = resolveAutomaticParagraphMarginsPt(
-        element, element.defaultFontSize ?? 10,
-        doc.settings?.doNotUseHtmlParagraphAutoSpacing === true,
+        element, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true, autoSpacing,
       );
       const spacingChanged = spacing.spaceBefore !== element.spaceBefore
         || spacing.spaceAfter !== element.spaceAfter;
@@ -2205,6 +2269,7 @@ function normalizeInternalDocumentModelWithOwnership(
         element.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
           cell.content = normalizeBody(
             cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
+            'cell',
           ) as typeof cell.content;
         }));
         return element;
@@ -2215,6 +2280,7 @@ function normalizeInternalDocumentModelWithOwnership(
         const cells = row.cells.map((cell, cellIndex) => {
           const content = normalizeBody(
             cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
+            'cell',
           );
           if (content === cell.content) return cell;
           rowChanged = true;
@@ -2238,7 +2304,10 @@ function normalizeInternalDocumentModelWithOwnership(
       for (const kind of ['default', 'first', 'even'] as const) {
         const part = parts[kind];
         if (!part) continue;
-        const nextBody = normalizeBody(part.body, partStory, `section:${elementIndex}:${kind}`);
+        const nextBody = normalizeBody(
+          part.body, partStory, `section:${elementIndex}:${kind}`, [],
+          partStory === 'header' ? 'header' : 'story',
+        );
         if (nextBody === part.body) continue;
         if (result === parts) result = { ...parts };
         result[kind] = { ...part, body: nextBody };
@@ -2256,7 +2325,15 @@ function normalizeInternalDocumentModelWithOwnership(
     story: SourceRef['story'],
     storyInstance: string,
     prefix: number[] = [],
+    flow: AutomaticSpacingFlow = 'story',
   ): BodyElement[] => {
+    const bodyNeighbourhoods = flow === 'body' ? bodyFlowAutoSpacingNeighbourhoods(body) : undefined;
+    const edges = flow === 'cell' ? CELL_AUTO_SPACING_EDGES
+      : flow === 'header' ? STORY_START_AUTO_SPACING_EDGES : NO_AUTO_SPACING_EDGES;
+    const neighbourhoodAt = (elementIndex: number): AutomaticSpacingNeighbourhood | undefined => (
+      bodyNeighbourhoods
+        ? bodyNeighbourhoods[elementIndex]
+        : automaticSpacingNeighbourhood(body, elementIndex, edges));
     if (consumeOwned) {
       for (let elementIndex = 0; elementIndex < body.length; elementIndex += 1) {
         body[elementIndex] = normalizeElement(
@@ -2264,6 +2341,7 @@ function normalizeInternalDocumentModelWithOwnership(
           story,
           storyInstance,
           [...prefix, elementIndex],
+          neighbourhoodAt(elementIndex),
         );
       }
       return body;
@@ -2275,6 +2353,7 @@ function normalizeInternalDocumentModelWithOwnership(
         story,
         storyInstance,
         [...prefix, elementIndex],
+        neighbourhoodAt(elementIndex),
       );
       if (next !== element) changed = true;
       return next;
@@ -2290,14 +2369,14 @@ function normalizeInternalDocumentModelWithOwnership(
     for (const kind of ['default', 'first', 'even'] as const) {
       const part = parts[kind];
       if (!part) continue;
-      const body = normalizeBody(part.body, story, kind);
+      const body = normalizeBody(part.body, story, kind, [], story === 'header' ? 'header' : 'story');
       if (body === part.body) continue;
       if (result === parts) result = { ...parts };
       result[kind] = { ...part, body };
     }
     return result;
   };
-  const body = normalizeBody(doc.body, 'body', 'body');
+  const body = normalizeBody(doc.body, 'body', 'body', [], 'body');
   const headers = normalizeParts(doc.headers, 'header');
   const footers = normalizeParts(doc.footers, 'footer');
   const normalizeNotes = <T extends { id: string; content: BodyElement[] }>(

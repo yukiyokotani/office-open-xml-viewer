@@ -499,31 +499,40 @@ export const WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK = defineCompatibilityRu
   description: 'ECMA-376 does not define how a vanished paragraph mark (§17.3.1.29, §17.3.2.41) interacts with paragraph properties. A run of consecutive hidden, unframed, inkless paragraphs joins the next paragraph and takes its properties, so a pageBreakBefore (§17.3.1.23) in the run is lost; when the run is followed directly by a table or by a non-drop-cap framed paragraph (§17.3.1.11) it cannot join, and the pageBreakBefore of the only break-carrying paragraph in the run applies. Evidence: PR #2195 Word 16 for Mac page counts on synthetic probes (hidden paragraphs with and without text; the break on the first or a later hidden paragraph; page-, margin- and text-anchored frames and a table keep the break; an ordinary following paragraph, directly or after another hidden paragraph, drops it). Untested and left on the previous behaviour (break dropped): runs ending at a section break, an explicit break, the end of the body or a hidden framed paragraph, hidden framed paragraphs themselves (they stay members of their frame group, §17.3.1.11), drop-cap successors, and runs in which more than one paragraph carries pageBreakBefore.',
 });
 
-/** Compatibility projection governed by
- * {@link WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK}: sequence indices of the
- * hidden paragraphs whose pageBreakBefore applies as an authored break. */
-export function wordHiddenParagraphPageBreakEntries(
-  sequence: readonly BodyLayoutSequenceEntryFor<unknown>[],
+/** One flow item for {@link wordHiddenParagraphRetainedBreaks}: a hidden
+ * (swallowed) paragraph, or any other item, which may block the join. */
+export type WordHiddenParagraphRunFact =
+  | Readonly<{ hidden: true; framed: boolean; pageBreakBefore: boolean }>
+  | Readonly<{ hidden: false; blocksJoin: boolean }>;
+
+/** Rule core of {@link WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK} over any
+ * flow representation, in one linear pass: indices of the hidden paragraphs
+ * whose pageBreakBefore applies as an authored break. A run is a sequence of
+ * consecutive unframed hidden paragraphs; `blocksJoin` marks a table or a
+ * non-drop-cap framed paragraph. */
+export function wordHiddenParagraphRetainedBreaks<T>(
+  items: readonly T[],
+  fact: (item: T) => WordHiddenParagraphRunFact,
 ): ReadonlySet<number> {
   const retained = new Set<number>();
-  const runMember = (entry: BodyLayoutSequenceEntryFor<unknown> | undefined): boolean =>
-    entry?.kind === 'consume-source' && entry.framed === undefined;
-  for (let start = 0; start < sequence.length;) {
-    if (!runMember(sequence[start])) {
+  const facts = items.map(fact);
+  const runMember = (index: number): boolean => {
+    const entry = facts[index];
+    return entry?.hidden === true && !entry.framed;
+  };
+  for (let start = 0; start < facts.length;) {
+    if (!runMember(start)) {
       start += 1;
       continue;
     }
     let end = start;
-    while (runMember(sequence[end])) end += 1;
-    const next = sequence[end];
-    const blocksJoin = next?.kind === 'adjacent-table-group'
-      || (next?.kind === 'body-block'
-        && (next.block.kind === 'table' || next.block.framed === 'frame'));
-    if (blocksJoin) {
+    while (runMember(end)) end += 1;
+    const next = facts[end];
+    if (next?.hidden === false && next.blocksJoin) {
       const breaks: number[] = [];
       for (let index = start; index < end; index += 1) {
-        const entry = sequence[index]!;
-        if (entry.kind === 'consume-source' && entry.pageBreakBefore === true) breaks.push(index);
+        const entry = facts[index]!;
+        if (entry.hidden && entry.pageBreakBefore) breaks.push(index);
       }
       // Only a run with exactly one break was observed; several stay dropped.
       if (breaks.length === 1) retained.add(breaks[0]!);
@@ -531,6 +540,23 @@ export function wordHiddenParagraphPageBreakEntries(
     start = end;
   }
   return retained;
+}
+
+/** Compatibility projection governed by
+ * {@link WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK}: sequence indices of the
+ * hidden paragraphs whose pageBreakBefore applies as an authored break. */
+export function wordHiddenParagraphPageBreakEntries(
+  sequence: readonly BodyLayoutSequenceEntryFor<unknown>[],
+): ReadonlySet<number> {
+  return wordHiddenParagraphRetainedBreaks(sequence, (entry): WordHiddenParagraphRunFact => (
+    entry.kind === 'consume-source'
+      ? { hidden: true, framed: entry.framed !== undefined, pageBreakBefore: entry.pageBreakBefore === true }
+      : {
+          hidden: false,
+          blocksJoin: entry.kind === 'adjacent-table-group'
+            || (entry.kind === 'body-block'
+              && (entry.block.kind === 'table' || entry.block.framed === 'frame')),
+        }));
 }
 
 function paragraphHasOnlyDrawingAnchors(layout: ParagraphLayout): boolean {

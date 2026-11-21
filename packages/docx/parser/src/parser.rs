@@ -6438,6 +6438,7 @@ fn resolve_numbering_marker(
         pic_bullet_width_pt,
         pic_bullet_height_pt,
         pic_bullet_transform: None,
+        abstract_num_id: num_map.abstract_num_id(num_id),
     })
 }
 

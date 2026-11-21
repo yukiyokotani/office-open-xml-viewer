@@ -3665,6 +3665,7 @@ mod tests {
                 }
                 let mut numbering = docx_model::NumberingInfo {
                     num_id: 1,
+                    abstract_num_id: None,
                     level: 0,
                     format: "bullet".into(),
                     text: "•".into(),
