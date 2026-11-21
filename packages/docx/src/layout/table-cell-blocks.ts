@@ -73,8 +73,19 @@ export function isStructuralTrailingParagraph(
   if (index !== content.length - 1) return false;
   const current = content[index];
   if (current?.type !== 'paragraph') return false;
-  if (!hideMark && (index === 0 || content[index - 1]?.type !== 'table')) return false;
+  if (!hideMark && previousFlowElement(content, index)?.type !== 'table') return false;
   return current.runs.length === 0;
+}
+
+/** The nearest element before `index` that a cell lays out: swallowed hidden
+ * paragraphs (isSwallowedHiddenCellParagraph) are no neighbour. */
+function previousFlowElement(
+  content: TableCellLayoutSource['content'],
+  index: number,
+): TableCellLayoutSource['content'][number] | undefined {
+  let previous = index - 1;
+  while (previous >= 0 && isSwallowedHiddenCellParagraph(content, previous)) previous -= 1;
+  return previous >= 0 ? content[previous] : undefined;
 }
 
 /**
@@ -146,7 +157,7 @@ export function resolveRetainedCellBlockPlacement(
             blockBeforePt,
             paragraphGapFoldOf(block),
           )
-        : index === 0 || cell.content[index - 1]?.type === 'table'
+        : index === 0 || previousFlowElement(cell.content, index)?.type === 'table'
           ? blockBeforePt
           : 0;
       const lineBlockPt = Math.max(

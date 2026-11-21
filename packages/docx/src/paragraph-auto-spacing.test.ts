@@ -342,6 +342,17 @@ describe('Word hidden cell paragraphs (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT)', 
     }
   });
 
+  it('keeps the empty paragraph after a nested table structural across a hidden paragraph', () => {
+    // A 90pt nested line fills the 100pt band; the required empty paragraph
+    // after the nested table owns no row height, with or without a swallowed
+    // hidden paragraph between them.
+    const nested90 = `<w:tbl>${grid}<w:tr>${tc(`<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1800" w:lineRule="exact"/></w:pPr>${run('N')}</w:p>`)}</w:tr></w:tbl>`;
+    const finalEmpty = probe('', 'w:before="0" w:after="0"');
+    for (const hidden of ['', vanished('w:before="0" w:after="0"')]) {
+      expect(cellPages(nested90 + hidden + finalEmpty), `hidden=${hidden !== ''}`).toEqual({ N: 0, count: 1 });
+    }
+  });
+
   it('keeps a trailing vanished cell paragraph as a line that paginates like content', () => {
     expect(cellPages(`TALL(${run('A')})${hiddenTall}`)).toEqual({ A: 0, count: 2 });
   });
