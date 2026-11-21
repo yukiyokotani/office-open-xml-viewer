@@ -167,6 +167,8 @@ export interface AcquiredTableBlock {
     xPt: number;
     yPt: number;
     sectionFlowOwnership?: 'host-flow' | 'page';
+    /** Retained on the accepted table (TableLayout.uprightBlockExclusion). */
+    uprightBlockExclusion?: NonNullable<TableLayout['uprightBlockExclusion']>;
   }>;
 }
 
@@ -299,6 +301,18 @@ export interface PageAnchorPrescanInput {
         occurrenceId: string;
         tableSource: SourceRef;
         bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
+      }>
+    | Readonly<{
+        /** `word-vertical-section-upright-block-table`: the exclusion an
+         * upright block table of a vertical section took in the previous
+         * pass, in section-logical page points. `pinned`: the table keeps
+         * this block position instead of the flow position. */
+        kind: 'upright-table';
+        occurrenceId: string;
+        tableSource: SourceRef;
+        key: string;
+        bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
+        pinned: boolean;
       }>
     | Readonly<{
         /** WORD_LATER_ANCHOR_EARLIER_LINE_WRAP: a paragraph-relative drawing

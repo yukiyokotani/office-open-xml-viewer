@@ -1619,10 +1619,13 @@ describe('cell-owner row host at the production layout boundary', () => {
       const before = at(controlRuns, text);
       expect(at(hostRuns, text)).toEqual({ ...before, x: before.x + dx, y: before.y + dy });
     }
-    // Zero advance: AFTER starts the vertical flow where the control table
-    // did, instead of one grid width (200) later. A rotated paragraph's run
-    // bounds stay logical, so `y` here is its logical block position.
-    expect(at(controlRuns, 'after').y).toBe(MARGIN + 200);
+    // Zero advance, for the host as for the upright control table
+    // (`word-vertical-section-upright-block-table`): AFTER starts the vertical
+    // flow where the table did, not one grid width (200) later. A rotated
+    // paragraph's run bounds stay logical, so `y` here is its logical block
+    // position and `x` its inline start, which the control table pushes down.
+    expect(at(controlRuns, 'after').y).toBe(MARGIN);
+    expect(at(controlRuns, 'after').x).toBeGreaterThan(at(hostRuns, 'after').x);
     expect(at(hostRuns, 'after').y).toBe(MARGIN);
     // The notBeside exclusion reaches the vertical text through the inverse
     // upright projection: a host spanning physical x∈[200,400] blocks the

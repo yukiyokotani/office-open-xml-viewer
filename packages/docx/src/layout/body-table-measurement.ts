@@ -54,6 +54,8 @@ import {
   bodyOccurrenceKey,
   bodyRootFloatingTablePlacementKey,
   tableFragmentStartKey,
+  uprightBlockTableKey,
+  uprightBlockTablePrescanKey,
 } from './source-key.js';
 import {
   finishOwnerHostLayout,
@@ -235,24 +237,23 @@ export function measureBodyTableEntry(
         requiresFreshFlowRegion: true,
       });
     }
-    const origin = uprightBlockPhysicalOrigin(
-      physical, request.location.cursorPt, tableWidthPt, retained.layout.advancePt,
+    const block = uprightBlockPlacement(
+      context, request, physical, 0, tableWidthPt, retained.layout.advancePt,
     );
-    const physicalLeftPt = origin.xPt;
-    const physicalTopPt = origin.yPt;
-    const upright = takeUprightTableFragment(context, request, operations, retained, {
-      xPt: physicalLeftPt,
-      yPt: physicalTopPt,
-    }, acquisitionState);
+    const upright = takeUprightTableFragment(
+      context, request, operations, retained, block.originPt, acquisitionState,
+    );
     return Object.freeze({
       layout: upright,
-      blockExtentPt: tableWidthPt,
+      blockExtentPt: block.flowAdvancePt,
       nextCursor: null,
+      ...block.registration,
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
-        xPt: physicalLeftPt + upright.flowBounds.xPt,
-        yPt: physicalTopPt + upright.flowBounds.yPt,
+        xPt: block.originPt.xPt + upright.flowBounds.xPt,
+        yPt: block.originPt.yPt + upright.flowBounds.yPt,
         sectionFlowOwnership: 'host-flow' as const,
+        ...block.exclusion,
       }),
     });
   }
@@ -292,6 +293,128 @@ export function measureBodyTableEntry(
     nextCursor: result.nextCursor
       ? Object.freeze({ kind: 'table' as const, cursor: result.nextCursor })
       : null,
+  });
+}
+
+/**
+ * `word-vertical-section-upright-block-table`: where an upright block (a
+ * top-level table, or its ordinary owner segment starting at `rowStart`) of a
+ * §17.6.20 vertical section is placed, what it charges the flow, and the
+ * exclusion it registers. `blockExtentPt` is its physical width and
+ * `inlineExtentPt` its physical height.
+ *
+ * In a vertical-rl or vertical-lr section frame (tbRl, tbLrV and the tokens
+ * sharing their frames) the block starts at the current block position with
+ * its inline start at the column top, and charges no flow advance: the
+ * following paragraph takes the next line strip as if the block were absent. Its section-logical rectangle is a text
+ * exclusion met on a closed block interval and extended back to the column
+ * top, so every line strip whose block interval meets it starts its inline
+ * flow at the block's inline end. A later
+ * block whose block interval meets an earlier block of the page (closed
+ * interval, the same inline band) starts at that block's inline end, so
+ * overlapping tables stack along the inline axis in source order. The strip
+ * laid out just before the block ends exactly where the block starts and
+ * wraps too; pagination carries the exclusion to the page start for it
+ * (body-paginator.ts pageAnchorDestinationPlan), and a planned registration
+ * it pinned fixes the block position (`library-upright-table-cycle-recovery`).
+ *
+ * A counter-clockwise section flow (sideways-lr) is outside that rule: it
+ * keeps the library policy of a block at the column bottom that advances the
+ * flow by its physical width and registers no exclusion.
+ */
+function uprightBlockPlacement(
+  context: BodyTableMeasurementContext,
+  request: BodyTableRequest,
+  physical: PhysicalAnchorFrame,
+  rowStart: number,
+  blockExtentPt: number,
+  inlineExtentPt: number,
+): Readonly<{
+  originPt: Readonly<{ xPt: number; yPt: number }>;
+  flowAdvancePt: number;
+  registration: Pick<TableMeasureResult, 'flowRegistryDelta'>;
+  exclusion: Readonly<{ uprightBlockExclusion?: NonNullable<TableLayout['uprightBlockExclusion']> }>;
+}> {
+  const cursorPt = request.location.cursorPt;
+  if (physical.writingMode !== 'vertical-rl' && physical.writingMode !== 'vertical-lr') {
+    return Object.freeze({
+      originPt: uprightBlockPhysicalOrigin(physical, cursorPt, blockExtentPt, inlineExtentPt),
+      flowAdvancePt: blockExtentPt,
+      registration: Object.freeze({}),
+      exclusion: Object.freeze({}),
+    });
+  }
+  const registry = context.sessionState.floatRegistry;
+  const key = uprightBlockTableKey(request.input.source, rowStart);
+  const plannedId = uprightBlockTablePrescanKey(key, request.location.pageIndex);
+  const pinned = registry.entries.find((entry) =>
+    entry.occurrenceId === plannedId && entry.uprightBlockTable?.pinned === true);
+  const blockStartPt = pinned ? pinned.bounds.yPt : cursorPt.yPt;
+  const blockEndPt = blockStartPt + blockExtentPt;
+  const bandEndPt = cursorPt.xPt + request.availableInlineExtentPt;
+  let inlineStartPt = cursorPt.xPt;
+  for (const entry of registry.entries) {
+    // Only blocks already placed in this pass: a planned registration is the
+    // previous pass's estimate, also of blocks later in source order.
+    if (entry.uprightBlockTable?.planned !== false) continue;
+    const placed = entry.exclusionBounds;
+    const placedInlineEndPt = placed.xPt + placed.widthPt;
+    if (placed.xPt >= bandEndPt || placedInlineEndPt <= cursorPt.xPt) continue;
+    if (placed.yPt > blockEndPt || placed.yPt + placed.heightPt < blockStartPt) continue;
+    inlineStartPt = Math.max(inlineStartPt, placedInlineEndPt);
+  }
+  const bounds: LayoutRect = Object.freeze({
+    xPt: inlineStartPt,
+    yPt: blockStartPt,
+    widthPt: inlineExtentPt,
+    heightPt: blockExtentPt,
+  });
+  // A strip meeting the block starts at its inline end, also where the block
+  // stacked below an earlier one that the strip does not meet: the exclusion
+  // runs from the column top, leaving no line space before the block.
+  const exclusionBounds: LayoutRect = Object.freeze({
+    xPt: cursorPt.xPt,
+    yPt: blockStartPt,
+    widthPt: inlineStartPt + inlineExtentPt - cursorPt.xPt,
+    heightPt: blockExtentPt,
+  });
+  const originPt = uprightBlockPhysicalOrigin(
+    physical, { xPt: inlineStartPt, yPt: blockStartPt }, blockExtentPt, inlineExtentPt,
+  );
+  if (!(blockExtentPt > 0) || !(inlineExtentPt > 0)) {
+    return Object.freeze({
+      originPt,
+      flowAdvancePt: 0,
+      registration: Object.freeze({}),
+      exclusion: Object.freeze({}),
+    });
+  }
+  const occurrenceId = bodyOccurrenceKey(
+    request.input.source,
+    request.location.flowDomainId,
+    tableFragmentStartKey(request.cursor),
+  );
+  const entry: FloatRegistryEntryPt = Object.freeze({
+    kind: 'frame' as const,
+    occurrenceId,
+    exclusionId: occurrenceId,
+    paragraphId: registry.nextParagraphId,
+    exclusionMode: 'square' as const,
+    bounds,
+    exclusionBounds,
+    uprightBlockTable: Object.freeze({ key, planned: false, pinned: false }),
+  });
+  return Object.freeze({
+    originPt,
+    flowAdvancePt: 0,
+    registration: Object.freeze({
+      flowRegistryDelta: Object.freeze({
+        floats: floatingTableRegistryDelta(registry, [entry], registry.nextParagraphId + 1),
+      }),
+    }),
+    exclusion: Object.freeze({
+      uprightBlockExclusion: Object.freeze({ key, bounds: exclusionBounds }),
+    }),
   });
 }
 
@@ -1530,10 +1653,9 @@ function measureOwnerHost(
  * A §17.6.20 vertical section consumes the same owner-run projection over its
  * upright physical table (library policy). Every segment stays
  * atomic, as every upright table does, so no header row ever repeats:
- * - an ordinary segment is an upright block of its own at the flow position,
- *   advancing the vertical flow by its physical grid width, at the same
- *   physical origin an unsegmented upright table takes in the section's own
- *   frame (uprightBlockPhysicalOrigin);
+ * - an ordinary segment is an upright block of its own, placed, charged and
+ *   excluded exactly as an unsegmented upright table is
+ *   (uprightBlockPlacement);
  * - a host resolves its carrier in the upright physical page frame — the
  *   frame this path already gives nested floating tables: physical page and
  *   margin, a text anchor's horizontal band is the physical margin box and its
@@ -1586,24 +1708,23 @@ function measureUprightOwnerSegment(
         requiresFreshFlowRegion: true,
       });
     }
-    const origin = uprightBlockPhysicalOrigin(
-      physical, request.location.cursorPt, gridWidthPt, local.layout.advancePt,
+    const block = uprightBlockPlacement(
+      context, request, physical, segment.rowStart, gridWidthPt, local.layout.advancePt,
     );
-    const physicalLeftPt = origin.xPt;
-    const physicalTopPt = origin.yPt;
-    const layout = takeUprightTableFragment(context, request, operations, local, {
-      xPt: physicalLeftPt,
-      yPt: physicalTopPt,
-    }, acquisitionOwner);
+    const layout = takeUprightTableFragment(
+      context, request, operations, local, block.originPt, acquisitionOwner,
+    );
     return Object.freeze({
       layout,
-      blockExtentPt: gridWidthPt,
+      blockExtentPt: block.flowAdvancePt,
       nextCursor,
+      ...block.registration,
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
-        xPt: physicalLeftPt + layout.flowBounds.xPt,
-        yPt: physicalTopPt + layout.flowBounds.yPt,
+        xPt: block.originPt.xPt + layout.flowBounds.xPt,
+        yPt: block.originPt.yPt + layout.flowBounds.yPt,
         sectionFlowOwnership: 'host-flow' as const,
+        ...block.exclusion,
       }),
     });
   }

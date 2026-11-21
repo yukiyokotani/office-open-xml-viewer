@@ -2428,6 +2428,27 @@ function prescanBodyPageAnchors(
         }),
       ];
     }
+    if (anchor.kind === 'upright-table') {
+      // `word-vertical-section-upright-block-table`: the lines laid out
+      // before the table wrap around the exclusion it took in the previous
+      // pass; the table registers its own placement when it is reached.
+      return [
+        Object.freeze({
+          kind: 'frame' as const,
+          occurrenceId: anchor.occurrenceId,
+          exclusionId: anchor.occurrenceId,
+          paragraphId: paragraphIdFor(anchor.tableSource),
+          exclusionMode: 'square' as const,
+          bounds: anchor.bounds,
+          exclusionBounds: anchor.bounds,
+          uprightBlockTable: Object.freeze({
+            key: anchor.key,
+            planned: true,
+            pinned: anchor.pinned,
+          }),
+        }),
+      ];
+    }
     if (anchor.kind === 'floating-table') {
       // §17.4.57 topFromText is the minimum gap above a positioned
       // table. In controlled Word output, a page-positioned table
@@ -2776,6 +2797,7 @@ function commitBodyFlowRegistryDelta(
         ? {} : { topEdgeInclusiveFromYPt: entry.topEdgeInclusiveFromYPt }),
       ...(entry.anchorLineExemptTopPt === undefined
         ? {} : { exemptLineTopPt: entry.anchorLineExemptTopPt }),
+      ...(entry.uprightBlockTable === undefined ? {} : { bandEdgesInclusive: true as const }),
     };
     return entry.kind === 'table'
       ? {
