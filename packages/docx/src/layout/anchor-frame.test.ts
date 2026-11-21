@@ -513,6 +513,16 @@ describe('retained anchor frame geometry', () => {
       expect(resolved(resolveAnchorFrame(value)).geometry.objectFrame.yPt).toBe(89);
     });
 
+    it('holds the paragraph top for paragraph-relative vertical inside and outside', () => {
+      for (const [value, pageParity] of [['inside', 'odd'], ['outside', 'odd'], ['outside', 'even']] as const) {
+        const result = resolved(aligned('left', 'top', pageParity, {
+          vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid', choice: { kind: 'align', value } },
+        }));
+        // Paragraph frame top 120, effect top 9.
+        expect(result.geometry.objectFrame.yPt).toBe(129);
+      }
+    });
+
     it('requires the header and footer distances for page-relative vertical inside/outside', () => {
       const result = resolveAnchorFrame(input(anchor({
         vertical: { relativeFrom: 'page', relativeFromStatus: 'valid', choice: { kind: 'align', value: 'inside' } },

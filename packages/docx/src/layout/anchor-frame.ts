@@ -8,6 +8,7 @@ import {
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
   wordAlignedAnchorOriginPt,
   wordPageBandAlignInsetsPt,
+  wordParagraphInsideOutsideLeads,
   wordPercentAnchorOriginPt,
   wordZeroRelativeSizeUsesExtent,
 } from './anchor-compatibility.js';
@@ -652,7 +653,9 @@ function resolveAxis(
     const insets = pageBandAligned && frames.pageBandDistances
       ? wordPageBandAlignInsetsPt(frames.pageBandDistances)
       : { leadingPt: 0, trailingPt: 0 };
-    const placement = alignedAnchorPlacement(axis, choice.value, frames.pageParity);
+    const placement = wordParagraphInsideOutsideLeads(axis, authored.relativeFrom, choice.value)
+      ? 'leading'
+      : alignedAnchorPlacement(axis, choice.value, frames.pageParity);
     resolvedOriginPt = wordAlignedAnchorOriginPt(
       placement,
       baseResult.base.startPt + insets.leadingPt,
