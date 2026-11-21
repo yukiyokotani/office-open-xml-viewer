@@ -767,3 +767,15 @@ export function wordContinuousSectionMayShareFootnotePage(
   return compat.continuousSectionKeepsFootnotePage
     || (compat.footnoteLayoutLikeWW8 && !hasColumnBands);
 }
+
+export const WORD_COLUMN_BREAK_PARAGRAPH_MARK = defineCompatibilityRule({
+  id: 'word-column-break-paragraph-mark',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'column-break-paragraph-mark',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A paragraph whose only content is a §17.3.3.1 column break (w:br w:type="column") ends the column at the break, and its paragraph mark opens the next column as an empty line; the following paragraph starts on the second line of that column. Evidence: Windows Word PDF exports of two-column A4 sections (18pt line grid, 36pt column gap) in lrTb, tbRl and tbLrV with three paragraphs, a column-break-only paragraph and three paragraphs: the first paragraph after the break sat on the second line of the second column in every direction. A column break after text inside a paragraph (lrTb, tbRl, tbLrV) put the text after the break on the first line of the next column, unchanged. A paragraph that ends with a column break after visible text is outside this evidence.',
+});

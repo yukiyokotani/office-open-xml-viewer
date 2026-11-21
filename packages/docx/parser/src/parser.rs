@@ -4608,6 +4608,11 @@ impl BodyParseCursor {
                     }
                     Some(BreakType::Column) => {
                         output.push(BodyElement::ColumnBreak);
+                        // `word-column-break-paragraph-mark`: the mark of a
+                        // paragraph holding only a column break opens the
+                        // next column as an empty line.
+                        result.runs.clear();
+                        output.push(BodyElement::Paragraph(Box::new(result)));
                         push_section_break(&mut output);
                     }
                     _ => {
@@ -27234,8 +27239,11 @@ mod column_tests {
     #[test]
     fn column_break_only_paragraph_becomes_body_column_break() {
         let body = body_from(r#"<w:p><w:r><w:br w:type="column"/></w:r></w:p>"#);
-        assert_eq!(body.len(), 1);
+        // `word-column-break-paragraph-mark`: the paragraph mark follows the
+        // break into the next column as an empty paragraph.
+        assert_eq!(body.len(), 2);
         assert!(matches!(body[0], BodyElement::ColumnBreak));
+        assert!(matches!(&body[1], BodyElement::Paragraph(p) if p.runs.is_empty()));
     }
 
     #[test]
@@ -27521,12 +27529,14 @@ mod column_tests {
                </w:sdt>
                <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
         );
-        // Para(cover), ColumnBreak, PageBreak (synthetic, kept), Para(body).
-        assert_eq!(body.len(), 4);
+        // Para(cover), ColumnBreak, Para(the break paragraph's mark), PageBreak
+        // (synthetic, kept), Para(body).
+        assert_eq!(body.len(), 5);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::ColumnBreak));
-        assert!(matches!(body[2], BodyElement::PageBreak { .. }));
-        assert!(matches!(body[3], BodyElement::Paragraph(_)));
+        assert!(matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty()));
+        assert!(matches!(body[3], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[4], BodyElement::Paragraph(_)));
     }
 
     /// ECMA-376 §17.6.x — a `<w:sectPr>` carried in a paragraph's `pPr` defines
