@@ -743,9 +743,14 @@ export function measureParagraph(
     const mark = measureMarkOnly(true);
     return {
       ...mark,
+      // The mark's own wrap window places the line horizontally too: its
+      // leading edge and width, as the empty mark resolves them.
       markAnchorLine: {
         ...lines[0]!,
         segments: lines.flatMap((line) => line.segments),
+        xOffset: mark.markWrapBounds ? mark.markWrapBounds.xPt - paragraphXPt : 0,
+        availWidth: mark.markWrapBounds?.widthPt ?? paragraphWidthPt,
+        ...(mark.markWrapBounds ? { topY: mark.contentStartYPt } : {}),
       },
     };
   }
