@@ -4,6 +4,9 @@ The root [`README.md`](../README.md), the package READMEs and the generated
 public API surfaces are the source of truth for supported features. This
 directory holds the longer guides and the architecture contracts behind them.
 
+This directory is the system of record for agents as well as people: a rule
+that is not here (or beside its implementing source) is not a rule.
+
 Current documents are maintained in English. Parallel translations are not
 kept because they drift from the implementation contract.
 
@@ -53,10 +56,31 @@ because released packages and changelog entries link to them.
 - [`docx-page-layer-order.md`](docx-page-layer-order.md) — DOCX page layer
   ordering.
 
+## Core beliefs
+
+- [`design-docs/core-beliefs.md`](design-docs/core-beliefs.md) — the base
+  fidelity policy and the OOXML implementation rules that follow from it.
+
 ## Contributor workflow
 
-- [`docx-architecture-audit.md`](docx-architecture-audit.md) — the review
-  procedure for DOCX layout changes.
+Procedures and the rules that govern them. The root
+[`AGENTS.md`](../AGENTS.md) is the short entry point that maps into these
+pages; the skills in `.agents/skills/` only point here.
+
+- [`workflow/git-and-prs.md`](workflow/git-and-prs.md) — development flow,
+  worktrees, draft PRs and the merge gate, issues, commit and PR text.
+- [`workflow/testing.md`](workflow/testing.md) — verification commands and
+  which tests are worth keeping.
+- [`workflow/vrt.md`](workflow/vrt.md) — visual regression rules and runbook.
+- [`workflow/adversarial-review.md`](workflow/adversarial-review.md) — the
+  mandatory review before a change is complete.
+- [`workflow/docx-architecture-audit.md`](workflow/docx-architecture-audit.md)
+  — the review procedure for DOCX layout changes.
+- [`workflow/office-reference-export.md`](workflow/office-reference-export.md)
+  — Office controls, reference PDFs and driving Office.
+- [`workflow/documentation-style.md`](workflow/documentation-style.md) — tone
+  and conventions for docs, examples and announcements.
+- [`workflow/release.md`](workflow/release.md) — minor and patch releases.
 - [`../scripts/README.md`](../scripts/README.md) — what each repository script
   does and how to rerun the generators.
 

@@ -1,4 +1,3 @@
-
 # DOCX Architecture Audit
 
 Audit semantics that static identifier checks cannot prove. Report only
@@ -6,7 +5,8 @@ evidence-backed findings with an exact code reference or a reproducible command.
 
 ## Workflow
 
-1. Read `AGENTS.md` and `docs/docx-layout-engine-redesign.md` completely.
+1. Read `AGENTS.md`, the [core beliefs](../design-docs/core-beliefs.md) and
+   [`docx-layout-engine-redesign.md`](../docx-layout-engine-redesign.md) completely.
 2. Inspect the complete change against `main`; do not limit review to the latest
    commit. Read the owning modules and focused tests, not only the diff.
 3. Consult the relevant local `spec/` material before judging OOXML behavior.
