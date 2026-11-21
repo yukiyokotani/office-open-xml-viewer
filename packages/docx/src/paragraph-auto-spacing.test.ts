@@ -113,6 +113,36 @@ it('resolves Word HTML automatic spacing at cell, document-start and same-list b
   ]);
 });
 
+it('takes body neighbours from flow participants, skipping vanished paragraphs layout swallows', () => {
+  const lvl = '<w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="•"/></w:lvl>';
+  const numbering = `<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="1">${lvl}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
+  const hidden = (props = '') => `<w:p><w:pPr>${props}<w:rPr><w:vanish/></w:rPr></w:pPr></w:p>`;
+  const frame = '<w:framePr w:w="2000" w:hAnchor="page" w:vAnchor="page" w:x="1440" w:y="1440"/>';
+  const byText = (raw: DocxDocumentModel) => Object.fromEntries(normalizeDocxDocumentModel(raw).body
+    .flatMap(e => e.type === 'paragraph' && e.runs.length > 0
+      ? [[e.runs.map(run => run.type === 'text' ? run.text : '').join(''), [e.spaceBefore, e.spaceAfter]]] : []));
+  const parts = new Map([['numbering', ['numbering', numbering] as const]]);
+  expect(byText(parse(
+    // A swallowed paragraph before the first block does not move the body start.
+    hidden() + p('', 'first')
+    // An unnumbered swallowed paragraph does not separate same-list items.
+    + item(1, 0, 'a') + hidden() + item(1, 0, 'b') + p('', 'gap')
+    // A numbered swallowed paragraph does not join its visible neighbours.
+    + item(1, 0, 'c') + hidden(`<w:pStyle w:val="Auto"/>${numPr(1)}`) + p('', 'plain')
+    // A swallowed paragraph whose page break applies still separates the items.
+    + item(1, 0, 'd') + hidden('<w:pageBreakBefore/>') + p(`${numPr(1)}${frame}`, 'framed'),
+    { parts },
+  ))).toEqual({
+    first: [0, 14],
+    a: [14, 0], b: [0, 14], gap: [14, 14],
+    c: [14, 14], plain: [14, 14],
+    d: [14, 14], framed: [14, 14],
+  });
+  // Without the applying break the framed item joins the list.
+  expect(byText(parse(p('', 'lead') + item(1, 0, 'd') + hidden() + p(`${numPr(1)}${frame}`, 'framed'), { parts })))
+    .toEqual({ lead: [0, 14], d: [14, 0], framed: [0, 14] });
+});
+
 it.each([false, true])('propagates document fixed=%s into inherited cell and story margins', (fixed) => {
   const raw = containersDocument(fixed);
   const normalized = normalizeDocxDocumentModel(raw);
