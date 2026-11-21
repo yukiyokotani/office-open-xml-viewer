@@ -8,9 +8,11 @@ import type {
   WritingMode,
 } from './types.js';
 
-/** Local counter-turn that keeps a non-text graphic upright in a vertical
- * page of this writing mode: the inverse of the section frame's quarter turn.
- * Horizontal pages need none. */
+/** Local counter-turn that keeps a non-text graphic of a LINE upright in a
+ * vertical page of this writing mode: the inverse of the quarter turn that
+ * paints the line. A vertical-lr line is painted through its block-reflected
+ * line frame (line-frame.ts), which composes to the clockwise turn, so it
+ * shares the clockwise counter-turn. Horizontal pages need none. */
 export function uprightResourceOrientation(
   verticalPageFrame: boolean | undefined,
   pageWritingMode: WritingMode,
@@ -19,6 +21,18 @@ export function uprightResourceOrientation(
   return pageWritingMode === 'sideways-lr'
     ? 'upright-physical-counter-clockwise'
     : 'upright-physical';
+}
+
+/** Local inverse that keeps a non-text graphic placed directly in the
+ * section-logical frame (outside any line) upright: the inverse of the
+ * section frame itself, which for vertical-lr is the reflection
+ * physical (x, y) = logical (y, x), so a turn cannot cancel it. */
+export function uprightPageResourceOrientation(
+  verticalPageFrame: boolean | undefined,
+  pageWritingMode: WritingMode,
+): UprightResourceOrientation | undefined {
+  if (verticalPageFrame && pageWritingMode === 'vertical-lr') return 'upright-physical-transposed';
+  return uprightResourceOrientation(verticalPageFrame, pageWritingMode);
 }
 
 export type PhysicalPageExtent = Readonly<{

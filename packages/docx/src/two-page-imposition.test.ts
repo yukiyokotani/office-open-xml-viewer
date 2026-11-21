@@ -63,6 +63,7 @@ function pageMargins(result: DocumentLayout, pageIndex: number): number[] {
 const LANDSCAPE_SHEET = '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>';
 const PORTRAIT_SHEET = '<w:pgSz w:w="12240" w:h="15840"/>';
 const TBRL = '<w:textDirection w:val="tbRl"/>';
+const TBLRV = '<w:textDirection w:val="tbLrV"/>';
 
 describe('two-page sheet imposition', () => {
   it.each([
@@ -87,6 +88,18 @@ describe('two-page sheet imposition', () => {
     // this pins the vertical page-story path to the header/footer margins.
     ['a tbRl section two-up with gutterAtTop', '<w:gutterAtTop/><w:printTwoOnOne/>', LANDSCAPE_SHEET,
       [792, 612], [90, 27, 66.6, 63, 90, 48.6], [48.6, 68.4, 66.6, 63, 48.6, 90], TBRL],
+    // A tbLrV section binds on the right like tbRl, although its lines start
+    // at the left margin.
+    ['a tbLrV section on single pages', '', PORTRAIT_SHEET, [612, 792],
+      [90, 48.6, 45, 63, 90, 48.6], [90, 48.6, 45, 63, 90, 48.6], TBLRV],
+    ['a tbLrV section with mirrored margins', '<w:mirrorMargins/>', PORTRAIT_SHEET, [612, 792],
+      [90, 48.6, 45, 63, 90, 48.6], [48.6, 90, 45, 63, 48.6, 90], TBLRV],
+    ['a tbLrV section with gutterAtTop', '<w:gutterAtTop/>', PORTRAIT_SHEET, [612, 792],
+      [90, 27, 66.6, 63, 90, 27], [90, 27, 66.6, 63, 90, 27], TBLRV],
+    ['a tbLrV section under book fold', '<w:bookFoldPrinting/>', LANDSCAPE_SHEET, [792, 612],
+      [90, 48.6, 45, 63, 90, 48.6], [90, 48.6, 45, 63, 90, 48.6], TBLRV],
+    ['a tbLrV section two-up on a landscape sheet', '<w:printTwoOnOne/>', LANDSCAPE_SHEET, [792, 612],
+      [90, 48.6, 45, 63, 90, 48.6], [48.6, 90, 45, 63, 48.6, 90], TBLRV],
   ])('lays out %s on the authored page box with Word imposition margins', (
     _label, settings, pgSz, size, first, second, sectionExtra = '',
   ) => {
