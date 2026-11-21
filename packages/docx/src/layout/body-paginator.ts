@@ -3309,10 +3309,7 @@ function* paginateBodyPassSteps(
           // repeatedly moving that unchanged source cut cannot free capacity.
           const fresh = requestAt(freshPageExtent(state));
           const references = footnoteIdsInRetainedSlice(fresh.layout);
-          if (reservedNotes.every(note => references.includes(note.source.storyInstance))) {
-            acquired = fresh;
-            availableBlockExtentPt = freshPageExtent(state);
-          }
+          if (reservedNotes.every(note => references.includes(note.source.storyInstance))) acquired = fresh;
         }
         // A prior pass may know only a larger future-page header band. Once
         // recovery is authorised, this already opened fresh band's measured
@@ -3359,44 +3356,35 @@ function* paginateBodyPassSteps(
           reservePt: notes.reservePt,
           chargePt: flowChargePt(acquired) + notes.reservePt,
         });
-        // ECMA-376 §17.11 places a footnote at the bottom of the page that
-        // holds its reference mark, so the table fragment placed here must
-        // fit the region net of its own notes' reserve: the admitted fragment
-        // F is a fixed point
-        // F = measureTable(H - reserve(F)). The row fit test for a given
-        // request extent belongs to the table measurer (§17.4 row breaking,
-        // with its own fit precision); this loop only adjusts the request.
-        //
-        // The charge-versus-region test below is a shortcut for that fixed
-        // point. It can disagree with the measurer: the region extent is a
-        // difference of page coordinates (block end minus cursor), so its
-        // rounding error scales with those coordinates, not with the small
-        // difference itself, and a fragment the measurer admitted can exceed
-        // it by several ULPs of the difference. The relative ULP tolerance
-        // below mirrors the invariant layer (invariants.ts
-        // atMostWithinFloatingPrecision, inlined because the layout-boundary
-        // gate pins this module's invariants import to exactly
-        // assertAndDeepFreezeDocumentLayout); it is not the termination
-        // rule. Termination is the fixed point: once the next request equals
-        // the extent the current fragment was measured at, the measurer has
-        // already answered it, so the fragment is admitted as measured.
-        //
-        // A measurer that never exceeds its request cannot revisit a
-        // candidate: every retry follows a strictly larger reserve, so the
-        // requests strictly decrease. A candidate admitted within the
-        // measurer's precision but above its request can be revisited when
-        // reserves differ by less than that excess, and the reserve-adjusted
-        // requests then alternate between distinct extents. From the first
-        // revisit the requests are non-increasing: each further one is
-        // strictly smaller and is the region net of a visited candidate's
-        // reserve, a finite set, so the loop reaches a fixed point whose
-        // candidate fits with its own notes up to the measurer's precision.
         const seenCandidates = new Set<string>();
-        let nonIncreasingRequests = false;
+        // The region extent and the fragment charge reconstruct the same
+        // authored boundary through different arithmetic, so the comparison
+        // must tolerate floating-point drift exactly like the invariant
+        // layer's containment test (invariants.ts
+        // atMostWithinFloatingPrecision, mirrored inline here because the
+        // layout-boundary gate pins this module's invariants import to
+        // exactly assertAndDeepFreezeDocumentLayout). The region extent is a
+        // difference of page coordinates (block end, less the committed note
+        // reserve, minus the cursor), so its rounding error scales with those
+        // coordinates, not with the possibly much smaller extent: a table
+        // ending a column exactly can exceed it by several ULPs of the
+        // extent. The precision is therefore taken at the fragment's bottom
+        // edge and the region end in page coordinates, where the invariant
+        // layer compares them, so this test admits exactly the drift that
+        // containment admits. A fragment whose charge exceeds the region only
+        // within that precision is already placed; with an unchanged footnote
+        // reserve the retry request would be identical to the first, so an
+        // operand-scaled test could never converge and would trip the
+        // fingerprint guard below on floating-point dust. Genuine overshoot
+        // still retries and still reaches that guard.
+        const regionStartPt = location.availableBounds.yPt;
         const fitsWithinFloatingPrecision = (chargePt: number, heightPt: number): boolean =>
           chargePt <= heightPt
-          || chargePt - heightPt
-            <= Number.EPSILON * Math.max(1, Math.abs(chargePt), Math.abs(heightPt));
+          || chargePt - heightPt <= Number.EPSILON * Math.max(
+            1,
+            Math.abs(regionStartPt + chargePt),
+            Math.abs(regionStartPt + heightPt),
+          );
         while (
           !acquired.requiresFreshFlowRegion
           && !fitsWithinFloatingPrecision(
@@ -3415,21 +3403,13 @@ function* paginateBodyPassSteps(
             assertAdmission(lastFootnoteAdmission.ids, lastFootnoteAdmission.reservePt, lastFootnoteAdmission.chargePt);
             if (lastFootnoteAdmission.reservePt > 0
               && lastFootnoteAdmission.chargePt > freshPageExtent(state)) break;
-            nonIncreasingRequests = true;
+            throw new Error('Table footnote admission did not converge');
           }
           seenCandidates.add(fingerprint);
-          const reserveAdjustedExtentPt = Math.max(
+          availableBlockExtentPt = Math.max(
             0,
             location.availableBounds.heightPt - notes.reservePt,
           );
-          const nextExtentPt = nonIncreasingRequests
-            ? Math.min(reserveAdjustedExtentPt, availableBlockExtentPt)
-            : reserveAdjustedExtentPt;
-          if (nextExtentPt === availableBlockExtentPt) {
-            assertAdmission(lastFootnoteAdmission.ids, lastFootnoteAdmission.reservePt, lastFootnoteAdmission.chargePt);
-            break;
-          }
-          availableBlockExtentPt = nextExtentPt;
           const previousAcquisition = acquired;
           acquired = requestAt(availableBlockExtentPt);
           if ((recoveryAllowed('footnote', notes.ids) || ownsRecoveredReserve) && acquired.requiresFreshFlowRegion && !state.flow.pageHasContent
