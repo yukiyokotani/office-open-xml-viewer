@@ -139,7 +139,7 @@ import {
 } from './retained-typography.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
 import { alignedAnchorPlacement, resolveAnchorFrame, type AnchorFrameRect, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
-import { paragraphGapPt } from './paragraph-spacing.js';
+import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import {
   translateDrawing,
   translateLine,
@@ -2422,6 +2422,7 @@ function finalizeParagraphLayout(input: AcquiredParagraphLayoutInput, frozenSour
     advancePt,
     spacing: input.spacing,
     contextualSpacing: input.contextualSpacing ?? false,
+    ...(input.additiveParagraphGap ? { additiveParagraphGap: true as const } : {}),
     lines,
     borders: input.borders,
     ...(input.shading ? { shading: input.shading } : {}),
@@ -5825,6 +5826,7 @@ export function acquireShapeTextBoxLayout(
       input,
       previousInput?.spacing.afterPt ?? 0,
       input.spacing.beforePt,
+      paragraphGapFoldOf(compatOf(options.environment)),
     );
     yPt += gapPt;
     const child = acquireParagraphLayout(paragraph, {
@@ -7065,7 +7067,8 @@ export function acquireRetainedFrameGroup(
     group.members.forEach((paragraph, memberIndex) => {
       const context = options.contexts[memberIndex]!;
       const gapPt = Math.max(
-        paragraphGapPt(previous, paragraph, previousAfterPt, context.spaceBeforePt),
+        paragraphGapPt(previous, paragraph, previousAfterPt, context.spaceBeforePt,
+          paragraphGapFoldOf(compatOf(options.environment))),
         previousBorderExtentPt,
       );
       const placement = {
@@ -7556,6 +7559,7 @@ function projectAcquiredParagraph(
       afterPt: trailingExtentPt,
     },
     contextualSpacing: paragraph.contextualSpacing ?? false,
+    ...(compatOf(options.environment).additiveParagraphGap ? { additiveParagraphGap: true as const } : {}),
     lines, borders: borderSegments,
     shading: paragraph.shading ? { color: `#${paragraph.shading}` } : undefined,
     resources, drawings, textBoxes, events,

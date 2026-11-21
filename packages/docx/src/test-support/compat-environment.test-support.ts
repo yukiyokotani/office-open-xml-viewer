@@ -8,7 +8,7 @@ const SETTINGS_KEYS = [
   'compatibilityMode', 'footnoteLayoutLikeWW8', 'adjustLineHeightInTable', 'useFeLayout',
   'balanceSingleByteDoubleByteWidth', 'lineWrapLikeWord6', 'enableOpenTypeFeatures',
   'ulTrailSpace', 'doNotExpandShiftReturn', 'doNotSuppressIndentation', 'ww11IndentRules',
-  'doNotUseIndentAsNumberingTabStop', 'noTabHangInd',
+  'doNotUseIndentAsNumberingTabStop', 'noTabHangInd', 'doNotUseHtmlParagraphAutoSpacing',
 ] as const satisfies readonly (keyof DocxCompatSettingsInput)[];
 
 type SettingsKey = typeof SETTINGS_KEYS[number];

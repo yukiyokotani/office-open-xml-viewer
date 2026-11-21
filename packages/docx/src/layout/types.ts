@@ -779,6 +779,10 @@ export interface ParagraphLayout extends LayoutNodeBase {
   readonly bookmarkStarts?: readonly string[];
   readonly spacing: ParagraphSpacingLayout;
   readonly contextualSpacing: boolean;
+  /** Present when the paragraph was acquired under a document whose spacing
+   * adds instead of folding to the maximum (WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP),
+   * so retained folds such as table cells need no compatibility profile. */
+  readonly additiveParagraphGap?: true;
   readonly lines: readonly LineLayout[];
   /** Note-flow acquisition retains source boundaries so another column can
    * shape the unconsumed suffix at its own width through the same paragraph engine. */
@@ -1370,6 +1374,7 @@ export interface AcquiredParagraphLayoutInput {
   readonly clipBounds?: LayoutRect;
   readonly spacing: ParagraphSpacingLayout;
   readonly contextualSpacing?: boolean;
+  readonly additiveParagraphGap?: true;
   readonly lines: readonly LineLayout[];
   readonly borders: readonly BorderSegment[];
   readonly shading?: FillPaint;

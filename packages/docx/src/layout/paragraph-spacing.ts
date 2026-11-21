@@ -1,5 +1,6 @@
 import {
   WORD_FIXED_PARAGRAPH_AUTO_SPACING_STORED_MARGINS,
+  WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP,
   WORD_HTML_PARAGRAPH_AUTO_SPACING,
 } from './line-compatibility.js';
 export interface ParagraphSpacingParticipant {
@@ -8,27 +9,53 @@ export interface ParagraphSpacingParticipant {
 }
 
 /**
+ * How the space after one paragraph and the space before the next combine:
+ * the ECMA-376 §17.3.1.33 maximum, or their sum under
+ * doNotUseHTMLParagraphAutoSpacing (WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP).
+ */
+export type ParagraphGapFold = 'maximum' | 'additive';
+
+/** The fold named by a document compatibility profile, or carried by a
+ * retained paragraph layout acquired under that profile. */
+export function paragraphGapFoldOf(
+  carrier: Readonly<{ additiveParagraphGap?: boolean }>,
+): ParagraphGapFold {
+  void WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP;
+  return carrier.additiveParagraphGap === true ? 'additive' : 'maximum';
+}
+
+/**
  * ECMA-376 §17.3.1.33 paragraph gap, with the per-side
  * `w:contextualSpacing` suppression from §17.3.1.9.
  *
  * The returned value is the complete distance between the preceding line block
  * and the current line block. Callers use this one rule for ordinary flow,
- * table-cell block folds, and DrawingML/WPS text boxes.
+ * table-cell block folds, frames and DrawingML/WPS text boxes.
+ *
+ * Both folds share one model: the previous paragraph contributes its space
+ * after, and the current one its space before; under the maximum fold the
+ * current contribution is only what exceeds the previous after. A
+ * contextualSpacing side (same style on both paragraphs) removes its own
+ * contribution (WORD_CONTEXTUAL_SPACING_PER_SIDE). The additive fold
+ * (WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP) keeps the whole space before;
+ * its contextualSpacing cases follow this model but were not measured.
  */
 export function paragraphGapPt(
   previous: ParagraphSpacingParticipant | null,
   current: ParagraphSpacingParticipant,
   previousAfterPt: number,
   currentBeforePt: number,
+  fold: ParagraphGapFold,
 ): number {
   if (!previous) return currentBeforePt;
   const sameStyle = !!(previous.styleId && previous.styleId === current.styleId);
   const dropPrevious = !!(sameStyle && previous.contextualSpacing);
   const dropCurrent = !!(sameStyle && current.contextualSpacing);
-  if (dropPrevious && dropCurrent) return 0;
-  if (dropCurrent) return previousAfterPt;
-  if (dropPrevious) return Math.max(currentBeforePt - previousAfterPt, 0);
-  return Math.max(previousAfterPt, currentBeforePt);
+  const previousContributionPt = dropPrevious ? 0 : previousAfterPt;
+  if (dropCurrent) return previousContributionPt;
+  return previousContributionPt + (fold === 'additive'
+    ? currentBeforePt
+    : Math.max(currentBeforePt - previousAfterPt, 0));
 }
 
 /** Cursor adjustment expressed from the shared total-gap authority. */
@@ -37,8 +64,9 @@ export function paragraphGapAdjustment(
   current: ParagraphSpacingParticipant,
   previousAfterPt: number,
   currentBeforePt: number,
+  fold: ParagraphGapFold,
 ): { readonly suppressBefore: boolean; readonly overlap: number } {
-  const gapPt = paragraphGapPt(previous, current, previousAfterPt, currentBeforePt);
+  const gapPt = paragraphGapPt(previous, current, previousAfterPt, currentBeforePt, fold);
   const suppressBefore = gapPt <= previousAfterPt;
   return {
     suppressBefore,
@@ -121,7 +149,9 @@ export function automaticSpacingNeighbourhood(
  * WORD_FIXED_PARAGRAPH_AUTO_SPACING_STORED_MARGINS records the approved Word
  * deviation: that setting preserves the stored resolved pair (and no edge or
  * list suppression is observed or applied). Missing values remain zero;
- * line-unit interpretation stays at its existing parser owner.
+ * line-unit interpretation stays at its existing parser owner. The same
+ * setting makes adjacent spacing add (paragraphGapPt 'additive' fold), a
+ * document-level fact read from the compatibility profile, not from flags.
  * Resolve at the immutable model boundary, before both pagination and line
  * acquisition consume the same pair; paint and paragraph-gap folding do not
  * need to know about automatic flags.

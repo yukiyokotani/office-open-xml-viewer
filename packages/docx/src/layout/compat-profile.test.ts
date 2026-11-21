@@ -25,6 +25,7 @@ function previousGates(s: DocxCompatSettingsInput) {
     continuousSectionKeepsFootnotePage: mode === 15,
     footnoteLayoutLikeWW8: s.footnoteLayoutLikeWW8 === true,
     pageBreakBeforeSuppressesTopSpacing: mode === 15,
+    additiveParagraphGap: s.doNotUseHtmlParagraphAutoSpacing === true,
     tableOriginMeasuredMode: mode === 11 || mode === 12 || mode === 14 || mode === 15,
     tableOriginPlacementMode: mode === undefined || mode === 11 || mode === 12 || mode === 14 || mode === 15,
     tableMode15Geometry: mode === 15,
@@ -114,7 +115,7 @@ function* settingsCases(): Generator<DocxCompatSettingsInput> {
               ...(shared ? {
                 footnoteLayoutLikeWW8: true, __footnoteColumnBands: true, adjustLineHeightInTable: true,
                 useFeLayout: true, balanceSingleByteDoubleByteWidth: true, ulTrailSpace: true,
-                doNotExpandShiftReturn: true,
+                doNotExpandShiftReturn: true, doNotUseHtmlParagraphAutoSpacing: true,
               } : {}),
             };
           }

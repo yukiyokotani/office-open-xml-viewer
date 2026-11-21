@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
-import { beforeAll, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import init, { DocxArchive } from './wasm/docx_parser.js';
 import { storeZip } from './conformance/generate.js';
 import { normalizeDocxDocumentModel, bodyLayoutAcquisitionInput } from './parser-model.js';
+import { layoutDocument } from './document-layout.js';
 import type { BodyElement, DocxDocumentModel, DocParagraph } from './types.js';
 
 beforeAll(async () => {
@@ -166,4 +167,93 @@ it('drops the automatic before of the first text-box paragraph independent of th
   expect(block?.fontSizePt).toBe(24);
   expect([block?.spaceBefore, block?.spaceAfter]).toEqual([0, 14]);
   expect(normalizeDocxDocumentModel(normalized).body).toEqual(normalized.body);
+});
+
+describe('Word fixed automatic-spacing compatibility: additive paragraph gaps', () => {
+  // Mirrors the Windows Word controls of WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP:
+  // exact 12pt lines and stored before/after 3/8pt, so each baseline step is
+  // 12pt plus the gap.
+  const lines = 'w:line="240" w:lineRule="exact"';
+  const probe = (text: string, spacing: string, props = '') =>
+    `<w:p><w:pPr>${props}<w:spacing ${spacing} ${lines}/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const plain = (text: string, props = '') => probe(text, 'w:before="0" w:after="0"', props);
+  const auto = (text: string, props = '') => probe(text, 'w:before="60" w:after="160" w:beforeAutospacing="1" w:afterAutospacing="1"', props);
+  const stored = (text: string, props = '') => probe(text, 'w:before="60" w:after="160"', props);
+  const frame = '<w:framePr w:w="2000" w:hAnchor="page" w:vAnchor="page" w:x="5000" w:y="9000"/>';
+  const box = (content: string) => `<w:p><w:r><w:pict><v:shape id="box" type="#_x0000_t202" style="position:absolute;margin-left:300pt;margin-top:500pt;width:100pt;height:100pt"><v:textbox inset="0,0,0,0"><w:txbxContent>${content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+
+  (globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas ??= class {
+    getContext() {
+      let font = '10px serif';
+      return {
+        get font() { return font; }, set font(v: string) { font = v; },
+        letterSpacing: '0px',
+        measureText: (s: string) => {
+          const size = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+          return { width: [...s].length * size * 0.5, fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2,
+            actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2 } as TextMetrics;
+        },
+      };
+    }
+  };
+
+  /** First baseline of each probe text in its own container's coordinates
+   * (a table cell places each child at its block offset). */
+  function baselines(fixed: boolean): Readonly<Record<string, number>> {
+    const raw = parse(
+      plain('R0') + auto('A1') + auto('A2') + stored('S3') + stored('S4') + plain('R5')
+      + table(auto('CA') + auto('CB') + stored('CC'))
+      + box(auto('TA') + auto('TB'))
+      + auto('FA', frame) + auto('FB', frame) + plain('END'),
+      {
+        fixed,
+        sectPr: '<w:headerReference w:type="default" r:id="header"/>',
+        parts: new Map([['header', ['header', `<w:hdr xmlns:w="${W}">${auto('HA')}${auto('HB')}</w:hdr>`]]]),
+      },
+    );
+    const found: Record<string, number> = {};
+    const visit = (node: unknown, deltaPt = 0): void => {
+      if (node === null || typeof node !== 'object') return;
+      if (Array.isArray(node)) { node.forEach(child => visit(child, deltaPt)); return; }
+      const record = node as Record<string, unknown>;
+      if (record.kind === 'table-cell' && Array.isArray(record.blocks)) {
+        for (const block of record.blocks as Array<{ offsetPt: number; layout: { flowBounds: { yPt: number } } }>) {
+          visit(block.layout, block.offsetPt - block.layout.flowBounds.yPt);
+        }
+        return;
+      }
+      if (record.kind === 'paragraph' && Array.isArray(record.lines)) {
+        for (const line of record.lines as Array<{ baselinePt: number; placements?: Array<{ kind: string; text?: string }> }>) {
+          for (const placement of line.placements ?? []) {
+            if (placement.kind === 'text' && placement.text && !(placement.text in found)) found[placement.text] = line.baselinePt + deltaPt;
+          }
+        }
+      }
+      for (const value of Object.values(record)) visit(value, deltaPt);
+    };
+    const layout = layoutDocument(raw);
+    expect(layout.pages).toHaveLength(1);
+    visit(layout.pages[0]);
+    return found;
+  }
+
+  const steps = (found: Readonly<Record<string, number>>, ...texts: string[]) =>
+    texts.slice(1).map((text, index) => Math.round((found[text]! - found[texts[index]!]!) * 100) / 100);
+
+  it('adds the space after and the next space before in every flow', () => {
+    const fixed = baselines(true);
+    // Body: automatic and stored neighbours both add 8 + 3; a zero side adds nothing.
+    expect(steps(fixed, 'R0', 'A1', 'A2', 'S3', 'S4', 'R5')).toEqual([15, 23, 23, 23, 20]);
+    for (const container of [['CA', 'CB', 'CC'], ['TA', 'TB'], ['HA', 'HB'], ['FA', 'FB']]) {
+      expect(steps(fixed, ...container), container.join()).toEqual(container.slice(1).map(() => 23));
+    }
+  });
+
+  it('keeps the §17.3.1.33 maximum without the setting', () => {
+    const html = baselines(false);
+    expect(steps(html, 'R0', 'A1', 'A2', 'S3', 'S4', 'R5')).toEqual([26, 26, 26, 20, 20]);
+    for (const container of [['CA', 'CB', 'CC'], ['TA', 'TB'], ['HA', 'HB'], ['FA', 'FB']]) {
+      expect(steps(html, ...container), container.join()).toEqual(container.slice(1).map(() => 26));
+    }
+  });
 });

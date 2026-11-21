@@ -1,6 +1,6 @@
 import type { FlowFragment } from './flow-fragment.js';
 import type { ParagraphLayout } from './types.js';
-import { paragraphGapPt } from './paragraph-spacing.js';
+import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import { paragraphFragmentAdvancePt } from './flow-fragment.js';
 import {
   resolveParagraphBorderEdges,
@@ -112,6 +112,7 @@ export function resolveRetainedCellBlockPlacement(
             paragraph,
             previousAfterPt,
             blockBeforePt,
+            paragraphGapFoldOf(block),
           )
         : index === 0 || cell.content[index - 1]?.type === 'table'
           ? blockBeforePt
