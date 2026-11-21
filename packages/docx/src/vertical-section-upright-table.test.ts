@@ -25,6 +25,8 @@ const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships
 const PAGE_W = 11906 / 20;
 const MARGIN = { left: 40, right: 90, top: 60 };
 const PITCH = 18;
+/** Physical y of the column end: page height less the 80 pt bottom margin. */
+const COLUMN_END = 16838 / 20 - 80;
 const TABLE_W = 180;
 const encoder = new TextEncoder();
 const xml = (body: string) => encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${body}`);
@@ -34,12 +36,14 @@ const paragraph = (text: string) =>
 const P = paragraph('あいうえお');
 const cell = (width: number, text: string) =>
   `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
-const T = '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
+const table = (rows: number) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
   + ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
     .map((edge) => `<w:${edge} w:val="single" w:sz="4"/>`).join('')
   + '</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>'
-  + ['1', '2'].map((row) => `<w:tr>${cell(1440, `A${row}`)}${cell(2160, `B${row}`)}</w:tr>`).join('')
+  + Array.from({ length: rows }, (_, row) =>
+    `<w:tr>${cell(1440, `A${row + 1}`)}${cell(2160, `B${row + 1}`)}</w:tr>`).join('')
   + '</w:tbl>';
+const T = table(2);
 
 type Direction = 'tbRl' | 'tbLrV';
 
@@ -91,6 +95,12 @@ interface Page {
 }
 
 function layOut(direction: Direction, body: readonly string[]): Page {
+  const pages = layOutPages(direction, body);
+  expect(pages).toHaveLength(1);
+  return pages[0]!;
+}
+
+function layOutPages(direction: Direction, body: readonly string[]): Page[] {
   const archive = new DocxArchive(docx(direction, body));
   let model: DocxDocumentModel;
   try {
@@ -103,12 +113,12 @@ function layOut(direction: Direction, body: readonly string[]): Page {
     createLayoutServices(model, { measureContext: measureContext() }),
     { currentDateMs: 0 },
   );
-  expect(layout.pages).toHaveLength(1);
   // The section-logical block origin: the right margin in tbRl (lines advance
   // leftward from it), the left margin in tbLrV.
   const blockOrigin = direction === 'tbRl' ? MARGIN.right : MARGIN.left;
+  return layout.pages.map((laidOut) => {
   const page: Page = { tables: [], strips: [] };
-  for (const node of layout.pages[0]!.layers.body) {
+  for (const node of laidOut.layers.body) {
     if (node.kind === 'table') {
       page.tables.push({
         left: node.flowBounds.xPt,
@@ -123,6 +133,7 @@ function layOut(direction: Direction, body: readonly string[]): Page {
     }
   }
   return page;
+  });
 }
 
 /** Physical left edge of a table whose near edge is at block position `block`. */
@@ -177,9 +188,35 @@ describe('upright block table of a vertical section', () => {
     expect(strips.map(([line]) => line!.inlineStart)).toEqual([first.bottom, second.bottom, second.bottom]);
   });
 
+  it('meets the strip that starts at its far edge and not the one after', () => {
+    const { tables, strips } = layOut('tbRl', [T, ...Array.from({ length: 12 }, () => P)]);
+    const starts = strips.map(([line]) => line!.inlineStart);
+    // Strips 0–9 lie inside the 180 pt table and strip 10 starts at its far edge.
+    expect(starts.slice(0, 11)).toEqual(Array.from({ length: 11 }, () => tables[0]!.bottom));
+    expect(starts[11]).toBe(MARGIN.top);
+  });
+
+  it('moves a table taller than the column to a fresh page and continues its rows on the next', () => {
+    const pages = layOutPages('tbRl', [P, table(80), P]);
+    expect(pages).toHaveLength(3);
+    expect(pages[0]!.tables).toHaveLength(0);
+    expect(pages[0]!.strips).toEqual([[{ block: 0, inlineStart: MARGIN.top }]]);
+    // Both fragments start at the column top and the flow start of their page.
+    for (const page of pages.slice(1)) {
+      expect(page.tables).toHaveLength(1);
+      expect(page.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
+      expect(page.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+    }
+    expect(pages[1]!.tables[0]!.bottom).toBeLessThanOrEqual(COLUMN_END);
+    expect(pages[1]!.tables[0]!.bottom).toBeGreaterThan(COLUMN_END - 2 * PITCH);
+    expect(pages[1]!.strips).toEqual([]);
+    // The paragraph after the table takes the first strip beside its last fragment.
+    expect(pages[2]!.strips).toEqual([[{ block: 0, inlineStart: pages[2]!.tables[0]!.bottom }]]);
+  });
+
   it('keeps the table where the full-length strip before it left the flow', () => {
-    // `library-upright-table-cycle-recovery`: 66 characters of 10.5 pt fill
-    // the 701.9 pt column in one strip, but not beside the table.
+    // `word-vertical-section-upright-table-rewrapped-strip`: 66 characters of
+    // 10.5 pt fill the 701.9 pt column in one strip, but not beside the table.
     const { tables, strips } = layOut('tbRl', [paragraph('長'.repeat(66)), T, P]);
     const table = tables[0]!;
     expect(table.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);

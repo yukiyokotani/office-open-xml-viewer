@@ -58,11 +58,12 @@ export function bodyRootFloatingTablePlacementKey(
   return `table:${source.path.join('.')}:root:${pageIndex}:${rowIndex}:${rowFragmentIndex}`;
 }
 
-/** Identity of an upright block table of a vertical section, or of its
- * owner segment starting at `rowStart`, shared by the page-anchor plan, the
- * page prescan and the table's own acquisition. */
-export function uprightBlockTableKey(source: SourceRef, rowStart: number): string {
-  return `upright-table:${sourceKey(source)}:${rowStart}`;
+/** Identity of an upright block table fragment of a vertical section (or of
+ * its owner segment) starting at `fragmentStart`, "<source row>.<row
+ * fragment>", shared by the page-anchor plan, the page prescan and the
+ * table's own acquisition. */
+export function uprightBlockTableKey(source: SourceRef, fragmentStart: string): string {
+  return `upright-table:${sourceKey(source)}:${fragmentStart}`;
 }
 
 /** Registry identity of the page-start registration of {@link uprightBlockTableKey}. */

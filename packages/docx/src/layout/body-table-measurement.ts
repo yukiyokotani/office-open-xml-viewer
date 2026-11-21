@@ -221,9 +221,6 @@ export function measureBodyTableEntry(
         }),
       }, acquisitionState);
     }
-    if (request.cursor) {
-      throw new Error('An upright physical table must remain atomic');
-    }
     const physical = state.verticalPhys;
     const tableWidthPt = retained.layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
     if (
@@ -237,16 +234,59 @@ export function measureBodyTableEntry(
         requiresFreshFlowRegion: true,
       });
     }
-    const block = uprightBlockPlacement(
-      context, request, physical, 0, tableWidthPt, retained.layout.advancePt,
+    const fragmentStart = `${cursor.rowIndex}.${cursor.rowFragmentIndex}`;
+    const whole = uprightBlockPlacement(
+      context, request, physical, fragmentStart, tableWidthPt, retained.layout.advancePt,
     );
-    const upright = takeUprightTableFragment(
-      context, request, operations, retained, block.originPt, acquisitionState,
-    );
+    // `word-vertical-section-upright-block-table`: the rows run along the
+    // section's inline axis and paginate there as in a horizontal section. A
+    // table that does not fit below its inline start first moves to a fresh
+    // column or page when content precedes it; on a fresh one its rows fill
+    // the column and the rest continues at the next one's flow position.
+    const roomPt = whole.inlineRoomPt;
+    let upright: TableLayout;
+    let block = whole;
+    let nextCursor: Readonly<{ kind: 'table'; cursor: typeof cursor }> | null = null;
+    if (roomPt === null || (cursor.rowIndex === 0 && cursor.rowFragmentIndex === 0
+      && retained.layout.advancePt <= roomPt)) {
+      upright = takeUprightTableFragment(
+        context, request, operations, retained, whole.originPt, acquisitionState,
+      );
+    } else {
+      const taken = request.pageHasContent === true && !request.cursor
+        ? null
+        : takeUprightTableRows(
+          context, request, operations, retained, whole.originPt, acquisitionState,
+          cursor, roomPt, request.availableInlineExtentPt,
+        );
+      if (!taken?.fragment || taken.requiresFreshPage) {
+        if (request.pageHasContent === true) {
+          return Object.freeze({
+            layout: retained.layout,
+            blockExtentPt: 0,
+            nextCursor: Object.freeze({ kind: 'table' as const, cursor }),
+            requiresFreshFlowRegion: true,
+          });
+        }
+        if (request.cursor) throw new Error('An upright table continuation made no progress');
+        // Nothing of the table fits even a fresh column: keep it whole.
+        upright = takeUprightTableFragment(
+          context, request, operations, retained, whole.originPt, acquisitionState,
+        );
+      } else {
+        upright = taken.fragment;
+        nextCursor = taken.nextCursor
+          ? Object.freeze({ kind: 'table' as const, cursor: taken.nextCursor })
+          : null;
+        block = uprightBlockPlacement(
+          context, request, physical, fragmentStart, tableWidthPt, upright.advancePt,
+        );
+      }
+    }
     return Object.freeze({
       layout: upright,
       blockExtentPt: block.flowAdvancePt,
-      nextCursor: null,
+      nextCursor,
       ...block.registration,
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
@@ -298,7 +338,8 @@ export function measureBodyTableEntry(
 
 /**
  * `word-vertical-section-upright-block-table`: where an upright block (a
- * top-level table, or its ordinary owner segment starting at `rowStart`) of a
+ * top-level table fragment, or an ordinary owner segment, starting at
+ * `fragmentStart`: source row and row fragment) of a
  * §17.6.20 vertical section is placed, what it charges the flow, and the
  * exclusion it registers. `blockExtentPt` is its physical width and
  * `inlineExtentPt` its physical height.
@@ -316,7 +357,7 @@ export function measureBodyTableEntry(
  * laid out just before the block ends exactly where the block starts and
  * wraps too; pagination carries the exclusion to the page start for it
  * (body-paginator.ts pageAnchorDestinationPlan), and a planned registration
- * it pinned fixes the block position (`library-upright-table-cycle-recovery`).
+ * it pinned fixes the block position (`word-vertical-section-upright-table-rewrapped-strip`).
  *
  * A counter-clockwise section flow (sideways-lr) is outside that rule: it
  * keeps the library policy of a block at the column bottom that advances the
@@ -326,11 +367,14 @@ function uprightBlockPlacement(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   physical: PhysicalAnchorFrame,
-  rowStart: number,
+  fragmentStart: string,
   blockExtentPt: number,
   inlineExtentPt: number,
 ): Readonly<{
   originPt: Readonly<{ xPt: number; yPt: number }>;
+  /** Inline extent from the block's inline start to the column end; null
+   * where the block does not paginate along the inline axis. */
+  inlineRoomPt: number | null;
   flowAdvancePt: number;
   registration: Pick<TableMeasureResult, 'flowRegistryDelta'>;
   exclusion: Readonly<{ uprightBlockExclusion?: NonNullable<TableLayout['uprightBlockExclusion']> }>;
@@ -339,13 +383,14 @@ function uprightBlockPlacement(
   if (physical.writingMode !== 'vertical-rl' && physical.writingMode !== 'vertical-lr') {
     return Object.freeze({
       originPt: uprightBlockPhysicalOrigin(physical, cursorPt, blockExtentPt, inlineExtentPt),
+      inlineRoomPt: null,
       flowAdvancePt: blockExtentPt,
       registration: Object.freeze({}),
       exclusion: Object.freeze({}),
     });
   }
   const registry = context.sessionState.floatRegistry;
-  const key = uprightBlockTableKey(request.input.source, rowStart);
+  const key = uprightBlockTableKey(request.input.source, fragmentStart);
   const plannedId = uprightBlockTablePrescanKey(key, request.location.pageIndex);
   const pinned = registry.entries.find((entry) =>
     entry.occurrenceId === plannedId && entry.uprightBlockTable?.pinned === true);
@@ -384,6 +429,7 @@ function uprightBlockPlacement(
   if (!(blockExtentPt > 0) || !(inlineExtentPt > 0)) {
     return Object.freeze({
       originPt,
+      inlineRoomPt: bandEndPt - inlineStartPt,
       flowAdvancePt: 0,
       registration: Object.freeze({}),
       exclusion: Object.freeze({}),
@@ -406,6 +452,7 @@ function uprightBlockPlacement(
   });
   return Object.freeze({
     originPt,
+    inlineRoomPt: bandEndPt - inlineStartPt,
     flowAdvancePt: 0,
     registration: Object.freeze({
       flowRegistryDelta: Object.freeze({
@@ -430,14 +477,40 @@ function takeUprightTableFragment(
   translationPt: Readonly<{ xPt: number; yPt: number }>,
   owner: BodyAcquisitionState,
 ) {
-  const { dependencies, services, state } = context;
-  const physical = state.verticalPhys;
+  const physical = context.state.verticalPhys;
   if (!physical) throw new Error('An upright table requires a vertical section');
-  const tableWidthPt = retained.layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const physicalBandHeightPt = Math.max(
     retained.layout.advancePt,
     physical.pageHeight - physical.marginTop - physical.marginBottom,
   );
+  const upright = takeUprightTableRows(
+    context, request, operations, retained, translationPt, owner,
+    startTableFragmentCursor(), physicalBandHeightPt, physicalBandHeightPt,
+  );
+  if (!upright.fragment || upright.nextCursor || upright.requiresFreshPage) {
+    throw new Error('Upright table final-frame layout must remain atomic');
+  }
+  return upright.fragment;
+}
+
+/** The rows of a §17.6.20 upright physical table from `cursor` that fit a
+ * physical band `availableHeightPt` tall (a fresh band: `freshHeightPt`),
+ * in the physical page frame translated to `translationPt`. */
+function takeUprightTableRows(
+  context: BodyTableMeasurementContext,
+  request: BodyTableRequest,
+  operations: BodyTableMeasurementOperations,
+  retained: RetainedTableAcquisition,
+  translationPt: Readonly<{ xPt: number; yPt: number }>,
+  owner: BodyAcquisitionState,
+  cursor: ReturnType<typeof startTableFragmentCursor>,
+  physicalBandHeightPt: number,
+  freshHeightPt: number,
+) {
+  const { dependencies, services, state } = context;
+  const physical = state.verticalPhys;
+  if (!physical) throw new Error('An upright table requires a vertical section');
+  const tableWidthPt = retained.layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const flowDomainId = `upright-physical-page:${request.location.pageIndex}`;
   const physicalMargin = {
     xPt: physical.marginLeft,
@@ -446,9 +519,9 @@ function takeUprightTableFragment(
     heightPt: Math.max(0, physical.pageHeight - physical.marginTop - physical.marginBottom),
   };
   const physicalPage = { xPt: 0, yPt: 0, widthPt: physical.pageWidth, heightPt: physical.pageHeight };
-  const upright = takeTableFragment(retained, startTableFragmentCursor(), {
+  return takeTableFragment(retained, cursor, {
     availableHeightPt: physicalBandHeightPt,
-    freshPageHeightPt: physicalBandHeightPt,
+    freshPageHeightPt: freshHeightPt,
     placement: {
       container: {
         id: flowDomainId,
@@ -469,7 +542,7 @@ function takeUprightTableFragment(
     page: {
       physicalPageIndex: request.location.pageIndex,
       displayPageNumber: state.displayPageNumber ?? request.location.pageIndex + 1,
-      occurrenceId: `${retained.input.id}:upright-page:${request.location.pageIndex}`,
+      occurrenceId: `${retained.input.id}:upright-page:${request.location.pageIndex}:${cursor.rowIndex}:${cursor.rowFragmentIndex}`,
     },
     floatingTableFrames: {
       page: physicalPage,
@@ -490,10 +563,6 @@ function takeUprightTableFragment(
       margin: physicalMargin,
     }, translationPt, owner),
   });
-  if (!upright.fragment || upright.nextCursor || upright.requiresFreshPage) {
-    throw new Error('Upright table final-frame layout must remain atomic');
-  }
-  return upright.fragment;
 }
 
 type InFlowTableFragment =
@@ -1709,7 +1778,7 @@ function measureUprightOwnerSegment(
       });
     }
     const block = uprightBlockPlacement(
-      context, request, physical, segment.rowStart, gridWidthPt, local.layout.advancePt,
+      context, request, physical, `${segment.rowStart}.0`, gridWidthPt, local.layout.advancePt,
     );
     const layout = takeUprightTableFragment(
       context, request, operations, local, block.originPt, acquisitionOwner,

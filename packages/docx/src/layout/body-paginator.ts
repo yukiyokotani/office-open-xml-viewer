@@ -5102,7 +5102,7 @@ function compareDrawingSourceOrder(
 
 type UprightTableDestination = Extract<PageWrapDestination, { kind: 'upright-table' }>;
 
-/** The pin LIBRARY_UPRIGHT_TABLE_CYCLE_RECOVERY applies to an exact-state
+/** The pin WORD_UPRIGHT_TABLE_REWRAPPED_STRIP applies to an exact-state
  * cycle (see `converge`): the first unpinned upright block table in source
  * order whose destination changed within the cycle, at the earliest page and
  * block position it took there. */
@@ -5110,8 +5110,8 @@ function oscillatingUprightTablePin(
   cycle: readonly ReadonlyMap<string, PageWrapDestination>[],
   changed: ReadonlySet<string>,
 ): UprightTableDestination | undefined {
-  // Owner segments of one table share its source; their keys end in the row
-  // they start at (uprightBlockTableKey).
+  // Fragments and owner segments of one table share its source; their keys
+  // end in the "<row>.<row fragment>" they start at (uprightBlockTableKey).
   const rowStart = (key: string) => Number(key.slice(key.lastIndexOf(':') + 1));
   const earliest = new Map<string, UprightTableDestination>();
   const pinnedKeys = new Set<string>();
@@ -5442,7 +5442,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
       }),
     });
   }
-  // LIBRARY_UPRIGHT_TABLE_CYCLE_RECOVERY: upright block tables whose block
+  // WORD_UPRIGHT_TABLE_REWRAPPED_STRIP: upright block tables whose block
   // position cycle recovery fixed (see `converge`), by plan key. They hold
   // for every later pass of this document's anchor runs.
   const uprightPins = new Map<string, UprightTableDestination>();
@@ -5673,17 +5673,17 @@ function* paginateBodyWithAnchorConvergenceSteps(
           .sort(([leftKey, left], [rightKey, right]) => compareDrawingSourceOrder(
             rightKey, right.source, leftKey, left.source,
           ))[0];
-        // LIBRARY_UPRIGHT_TABLE_CYCLE_RECOVERY (library policy, not a Word
-        // measurement). `word-vertical-section-upright-block-table` has no
-        // fixed point when the line strip before an upright block table fits
-        // its column only at full length: wrapped around the table it
-        // overflows into a new strip, the table follows the flow past that
-        // strip, and the first strip no longer meets it. The first such table
-        // in source order then keeps the earliest block position of the
-        // cycle, the one it takes when that strip is laid out at full
-        // length, and the overflowing line lands in the strip beside it, as
-        // any later line does. One table is pinned per recovery, because
-        // each pin moves the text the later tables are placed from.
+        // WORD_UPRIGHT_TABLE_REWRAPPED_STRIP:
+        // `word-vertical-section-upright-block-table` alone has no fixed
+        // point when the line strip before an upright block table fits its
+        // column only at full length: wrapped around the table it overflows
+        // into a new strip, the table follows the flow past that strip, and
+        // the first strip no longer meets it. The first such table in source
+        // order keeps the earliest block position of the cycle, the one it
+        // takes when that strip is laid out at full length, and the
+        // overflowing line lands in the strip beside it, as any later line
+        // does. One table is pinned per recovery, because each pin moves the
+        // text the later tables are placed from.
         const uprightPin = pinned ? undefined : oscillatingUprightTablePin(cycle, changed);
         if (pinned) settledFloors.set(pinned[0], pinned[1]);
         else if (uprightPin) uprightPins.set(uprightPin.key, uprightPin);
