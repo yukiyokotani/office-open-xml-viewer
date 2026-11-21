@@ -61,10 +61,13 @@ it('uses the ascii mark face for grid page-edge geometry in an East Asian docume
     ...para(''), defaultFontSize: 11,
     defaultFontFamily: 'Grid ASCII', defaultFontFamilyEastAsia: 'Grid EA',
   } as DocParagraph;
-  expect(paragraphMarkBelowBaselinePt(
+  const belowBaseline = (emptyMark: boolean) => paragraphMarkBelowBaselinePt(
     paragraph, { type: 'lines', linePitchPt: 16.4 }, false, true,
-    context, {}, null,
-  )).toBeCloseTo(3.8, 6);
+    context, {}, null, {}, undefined, undefined, false, emptyMark,
+  );
+  expect(belowBaseline(true)).toBeCloseTo(3.8, 6);
+  // A caller measuring a non-empty stand-in keeps the East Asian routing.
+  expect(belowBaseline(false)).toBeCloseTo(4.35, 6);
 });
 
 function makeRecordingCanvas(): { canvas: HTMLCanvasElement; calls: FillTextCall[] } {
@@ -242,10 +245,14 @@ describe('empty paragraph mark line height (§17.3.1.29 / §17.3.1.33)', () => {
       },
     } as unknown as CanvasRenderingContext2D;
 
-    expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, false, ctx, {})).toBe(10);
+    const height = (eastAsian: boolean) => paragraphMarkLineHeight(
+      p, 1, { type: null, linePitchPt: null }, false, eastAsian, ctx, {},
+      null, {}, undefined, undefined, false, true,
+    );
+    expect(height(false)).toBe(10);
     // Windows Word: East Asian document text does not move an empty mark off
     // its ascii face either.
-    expect(paragraphMarkLineHeight(p, 1, { type: null, linePitchPt: null }, false, true, ctx, {})).toBe(10);
+    expect(height(true)).toBe(10);
   });
 
   it('uses an arbitrary resolved font resource metric for an empty East Asian mark', () => {

@@ -256,7 +256,9 @@ export function measureParagraph(
     if (spacing?.rule === 'atLeast') return Math.min(advancePt, descentPt);
     return Math.max(0, advancePt - ascentPt);
   };
-  const measureMarkOnly = (): MeasuredParagraph => {
+  // `emptyMark`: the paragraph has no content at all. A mark line that only
+  // carries wrap-float anchors is not an empty paragraph mark.
+  const measureMarkOnly = (emptyMark: boolean): MeasuredParagraph => {
     let markTopPt = cursorPt;
     const markMetrics = paragraphMarkLineMetrics(
       paragraph,
@@ -272,6 +274,7 @@ export function measureParagraph(
       environment.paragraphMarkShapeInput,
       compat.useFeLayout,
       firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
+      emptyMark,
     );
     const markAdvancePt = markMetrics.advancePx;
     let markWrapBounds: MeasuredParagraph['markWrapBounds'];
@@ -368,7 +371,7 @@ export function measureParagraph(
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
-  if (segments.length === 0) return measureMarkOnly();
+  if (segments.length === 0) return measureMarkOnly(true);
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in
@@ -413,7 +416,6 @@ export function measureParagraph(
         paragraph, 1, undefined, false, markUsesEastAsianGrid,
         measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
         environment.layoutServices?.text, shapeInput ?? environment.paragraphMarkShapeInput,
-        false, 0, 'objectRun',
       ).advancePx;
       segment.paragraphMarkSinglePx = shapeInput
         ? measureSingle() : (fallbackSinglePx ??= measureSingle());
@@ -443,7 +445,7 @@ export function measureParagraph(
       if (run.inlineObjectOrigin !== 'drawingml' && !(run.inlineObjectOrigin === 'vmlStaticTextbox' && boxOnly)) continue;
       const minimum = paragraphMarkLineMetrics(paragraph, 1, undefined, false, markUsesEastAsianGrid,
         measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
-        environment.layoutServices?.text, run.inlineObjectShapeInput, false, 0, 'objectRun').advancePx;
+        environment.layoutServices?.text, run.inlineObjectShapeInput).advancePx;
       if (run.inlineObjectOrigin === 'drawingml') segment.objectRunBaselineMinimumPx = minimum;
       else segment.objectRunAdvanceMinimumPx = minimum;
     }
@@ -717,7 +719,7 @@ export function measureParagraph(
     },
     context.lineEdgeRules,
   );
-  if (lines.length === 0) return measureMarkOnly();
+  if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
   const measuredLines: MeasuredLine[] = [];

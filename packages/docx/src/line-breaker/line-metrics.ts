@@ -335,14 +335,15 @@ export function paragraphMarkLineMetrics(
   // px — a picture bullet on an empty list item stands on the mark line's
   // baseline: its height is a minimum ascent of the mark line.
   minimumAscentPx = 0,
-  // 'objectRun': the inline-object callers measure the single line of an
-  // object's outer run (or of the mark standing in for it), not an empty
-  // paragraph mark, and keep the established hint/document-script routing.
-  measuredOwner: 'paragraphMark' | 'objectRun' = 'paragraphMark',
+  // true only where an actually empty paragraph mark is measured (the mark
+  // line of a paragraph with no content). Every other caller measures a
+  // stand-in for a non-empty line (a drop-cap anchor paragraph, an inline
+  // object's outer run) and keeps the established hint/document-script routing.
+  emptyMark = false,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
-  // WORD_EMPTY_MARK_ASCII_FACE: §17.3.2.26 selects a font slot from a
-  // character, and an empty mark has none. The mark is measured with its ascii
+  // WORD_EMPTY_MARK_ASCII_FACE (`emptyMark` only): §17.3.2.26 selects a font
+  // slot from a character, and an empty mark has none. The mark is measured with its ascii
   // face whatever its hint, language, the document's scripts or a line grid;
   // the grid sets the advance, and this face also owns the content box used
   // for grid page-edge admission. Grid-cell classification (`eastAsian`) stays
@@ -352,7 +353,7 @@ export function paragraphMarkLineMetrics(
   void WORD_EMPTY_MARK_ASCII_FACE;
   const routedEastAsian = (eastAsian && minimumAscentPx <= 0)
     || effectiveMarkShapeInput?.fontHint === 'eastAsia';
-  const markUsesEastAsianFace = measuredOwner === 'objectRun' && routedEastAsian;
+  const markUsesEastAsianFace = !emptyMark && routedEastAsian;
   const forceCs = effectiveMarkShapeInput?.complexScript === true;
   const fs = effectiveMarkShapeInput?.fontSizePt ?? getDefaultFontSize(para);
   const authoredFamily = getDefaultFontFamily(para, markUsesEastAsianFace);
@@ -581,10 +582,11 @@ export function paragraphMarkLineHeight(
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
+  emptyMark = false,
 ): number {
   return paragraphMarkLineMetrics(
     para, scale, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout,
+    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout, 0, emptyMark,
   ).advancePx;
 }
 
@@ -626,11 +628,12 @@ export function paragraphMarkBelowBaselinePt(
   textLayoutService?: TextLayoutService,
   markShapeInput?: NumberingMarkerShapeInput,
   useFeLayout = false,
+  emptyMark = false,
 ): number {
   // Measured at scale 1 so the returned px value is already in points.
   const m = paragraphMarkLineMetrics(
     para, 1, grid, paraHasRuby, eastAsian, ctx, fontFamilyClasses, effectiveLineSpacing,
-    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout,
+    resolvedLocalFonts, textLayoutService, markShapeInput, useFeLayout, 0, emptyMark,
   );
   return lineBelowBaselinePx(m.advancePx, m.ascentPx, m.descentPx);
 }
