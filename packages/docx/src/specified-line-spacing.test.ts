@@ -8,7 +8,7 @@ import type { ParagraphLayout } from './layout/types.js';
 // usWin boxes): coordinates are quantized to
 // 0.24pt. Expectations below are the measured nominal geometry, not Canvas
 // font boxes (the deliberately different stub cannot supply the Word rule).
-function render(font: string, size: number, spacing: LineSpacing, grid = false, hostSize?: number, mode = 15, underline = false, markSize = size, wrap = false, localAlias: boolean | 'provided' = false, decoratedLast = false, markCsFace?: string, numbered?: { markerSize: number; empty?: boolean }) {
+function render(font: string, size: number, spacing: LineSpacing, grid = false, hostSize?: number, mode = 15, underline = false, markSize = size, wrap = false, localAlias: boolean | 'provided' = false, decoratedLast = false, markCsFace?: string, numbered?: { markerSize: number; empty?: boolean; anchorOnly?: boolean }) {
   let canvasFont = '';
   const context = {
     get font() { return canvasFont; }, set font(v: string) { canvasFont = v; },
@@ -35,7 +35,10 @@ function render(font: string, size: number, spacing: LineSpacing, grid = false, 
     anchorXPt: 80, anchorYPt: 0, anchorXRelativeFrom: 'margin',
     anchorYRelativeFrom: 'margin', anchorYFromPara: false,
     wrapMode: 'square', wrapSide: 'bothSides' } as DocRun);
-  const paragraph = { type: 'paragraph', runs: numbered?.empty ? [] : runs, alignment: 'left',
+  const anchorHost = { type: 'anchorHost', fontFamily: font, fontFamilyEastAsia: font, fontSize: 40,
+    bold: false, italic: false } as DocRun;
+  const paragraph = { type: 'paragraph',
+    runs: numbered?.anchorOnly ? [anchorHost] : numbered?.empty ? [] : runs, alignment: 'left',
     indentLeft: numbered ? 36 : 0,
     indentRight: 0, indentFirst: numbered ? -36 : 0, spaceBefore: 0, spaceAfter: 0,
     lineSpacing: spacing, tabStops: [],
@@ -88,6 +91,40 @@ describe('Word specified spacing for numbered lines (#1884)', () => {
     const line = tall.lines[0];
     expect(line.baselinePt - line.bounds.yPt).toBeCloseTo(baseline, 6);
   });
+});
+
+describe('an anchor-only numbered paragraph is its empty mark (WORD_ANCHOR_HOST_NO_LINE_METRIC)', () => {
+  // The empty-mark line decides everything, the anchors only ride on it: the
+  // same baseline, numbering-marker contribution and advance as the empty item.
+  const spacings: readonly [string, LineSpacing][] = [
+    ['exact 18pt', { rule: 'exact', value: 18, explicit: true }],
+    ['atLeast 30pt', { rule: 'atLeast', value: 30, explicit: true }],
+    ['atLeast 18pt', { rule: 'atLeast', value: 18, explicit: true }],
+    ['auto single', { rule: 'auto', value: 1, explicit: true }],
+    ['auto 1.5', { rule: 'auto', value: 1.5, explicit: true }],
+  ];
+  for (const [name, spacing] of spacings) {
+    for (const grid of [false, true]) {
+      for (const mode of [15, 14]) {
+        it(`${name}, grid ${grid}, mode ${mode}`, () => {
+          const shape = { markerSize: 30 };
+          const empty = render('Arial', 10, spacing, grid, undefined, mode, false, 10, false, false, false,
+            undefined, { ...shape, empty: true });
+          const anchored = render('Arial', 10, spacing, grid, undefined, mode, false, 10, false, false, false,
+            undefined, { ...shape, anchorOnly: true });
+          const [e, a] = [empty.lines[0]!, anchored.lines[0]!];
+          expect(a.bounds.yPt).toBe(e.bounds.yPt);
+          expect(a.baselinePt).toBe(e.baselinePt);
+          expect(a.advancePt).toBe(e.advancePt);
+          expect(anchored.flowBounds.heightPt).toBe(empty.flowBounds.heightPt);
+          const marker = (node: typeof empty) => node.lines[0]!.placements
+            .filter((placement) => placement.kind === 'text').map((placement) => placement.bounds);
+          expect(marker(anchored)).toEqual(marker(empty));
+          expect(anchored.lines[0]!.placements.some((placement) => placement.kind === 'anchor-host')).toBe(true);
+        });
+      }
+    }
+  }
 });
 
 describe('numbered specified lines outside compatibility mode 15 (#1884)', () => {

@@ -88,9 +88,15 @@ export interface MeasuredLine {
   readonly layout: LayoutLine;
   readonly topYPt: number;
   readonly advancePt: number;
+  /** A line whose baseline another path already decided (the empty-mark line
+   * that carries an anchor-only paragraph's anchors). */
+  readonly baselineOffsetPt?: number;
 }
 
 export interface MeasuredParagraph {
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: the anchors of a paragraph that holds
+   * nothing else, placed on its empty-mark line (`markOnly`). */
+  readonly markAnchorLine?: LayoutLine;
   readonly lineEndSourceRuns?: readonly Readonly<{ runIndex: number; offset: number }>[];
   readonly lines: readonly MeasuredLine[];
   readonly markOnly: boolean;
@@ -260,25 +266,25 @@ export function measureParagraph(
   };
   // `emptyMark`: the paragraph has no content at all. A mark line that only
   // carries wrap-float anchors is not an empty paragraph mark.
-  const markLineMetrics = (emptyMark: boolean) => paragraphMarkLineMetrics(
-    paragraph,
-    1,
-    grid,
-    context.hasRuby,
-    markUsesEastAsianGrid,
-    measurer.context,
-    fontFamilyClasses,
-    context.lineSpacing,
-    environment.resolvedLocalFonts,
-    environment.layoutServices?.text,
-    environment.paragraphMarkShapeInput,
-    compat.useFeLayout,
-    firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
-    emptyMark,
-  );
+
   const measureMarkOnly = (emptyMark: boolean): MeasuredParagraph => {
     let markTopPt = cursorPt;
-    const markMetrics = markLineMetrics(emptyMark);
+    const markMetrics = paragraphMarkLineMetrics(
+      paragraph,
+      1,
+      grid,
+      context.hasRuby,
+      markUsesEastAsianGrid,
+      measurer.context,
+      fontFamilyClasses,
+      context.lineSpacing,
+      environment.resolvedLocalFonts,
+      environment.layoutServices?.text,
+      environment.paragraphMarkShapeInput,
+      compat.useFeLayout,
+      firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
+      emptyMark,
+    );
     const markAdvancePt = markMetrics.advancePx;
     let markWrapBounds: MeasuredParagraph['markWrapBounds'];
     let markNumberingLeadingEdgePt: number | undefined;
@@ -379,9 +385,8 @@ export function measureParagraph(
   // WORD_ANCHOR_HOST_NO_LINE_METRIC: a line holding only anchors (no other
   // emitted line geometry) takes the empty paragraph mark's own line, from the
   // same mark metric path; its anchors stay on the line.
-  const anchorOnlyMark = wordAnchorHostLineMetricApplies() && !segmentsHaveLineGeometry(segments)
-    && segments.some((segment) => 'text' in segment && segment.anchorHostWithoutMetric)
-    ? markLineMetrics(true) : undefined;
+  const anchorOnlyLine = wordAnchorHostLineMetricApplies() && !segmentsHaveLineGeometry(segments)
+    && segments.some((segment) => 'text' in segment && segment.anchorHostWithoutMetric);
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in
@@ -500,19 +505,6 @@ export function measureParagraph(
         || (markerFragment.physicalLineIndex !== undefined
           && line.physicalLineIndex === markerFragment.physicalLineIndex));
     for (const [lineIndex, fragment] of lines.entries()) {
-      if (anchorOnlyMark) {
-        allocations.push({
-          layout: {
-            ...fragment,
-            ascent: anchorOnlyMark.ascentPx, descent: anchorOnlyMark.descentPx,
-            visibleAscent: anchorOnlyMark.ascentPx, visibleDescent: anchorOnlyMark.descentPx,
-            intendedSingle: anchorOnlyMark.intendedSinglePx,
-            visibleIntendedSingle: anchorOnlyMark.intendedSinglePx,
-          },
-          advancePt: anchorOnlyMark.advancePx,
-        });
-        continue;
-      }
       const firstPhysicalLine = holdsPictureMarker(fragment, lineIndex);
       const originalLine = firstPhysicalLine && lineIndex !== 0
         ? {
@@ -743,6 +735,20 @@ export function measureParagraph(
     context.lineEdgeRules,
   );
   if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: a paragraph holding only anchors is its
+  // empty paragraph mark, measured and placed by the empty-mark path in full
+  // (line box, baseline, numbering marker, page-edge facts); only its anchors
+  // ride on that mark line.
+  if (anchorOnlyLine) {
+    const mark = measureMarkOnly(true);
+    return {
+      ...mark,
+      markAnchorLine: {
+        ...lines[0]!,
+        segments: lines.flatMap((line) => line.segments),
+      },
+    };
+  }
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
   const measuredLines: MeasuredLine[] = [];
