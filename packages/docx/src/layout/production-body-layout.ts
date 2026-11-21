@@ -154,7 +154,7 @@ import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisi
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-float-authority.js';
 import { applyDrawingMLCollisionRegistryDelta, createDrawingMLCollisionRegistry, drawingMLCollisionRegistryDelta, validateDrawingMLCollisionRegistryDelta } from './drawingml-collision-registry.js';
-import { resolveAnchorFrame } from './anchor-frame.js';
+import { resolveAnchorFrame, uprightPhysicalPageFrames } from './anchor-frame.js';
 import { isPageLevelWrapFloat } from './anchor-classification.js';
 import type { MeasurementTextContext } from './measurement-capabilities.js';
 import type {
@@ -169,6 +169,7 @@ import type { TableLayoutSource } from './table-source-acquisition.js';
 import { retainedTableFromPassMemo, retainedTablePassKey, retainTableInPassMemo } from './retained-table-pass-cache.js';
 import { collectBodyFrameGroups, prepareBodyFrameMetadata } from './frame.js';
 import {
+  createSectionRegionCoordinateSpace,
   physicalToLogicalMatrix,
   sectionWritingMode,
   transformRect,
@@ -2538,33 +2539,32 @@ function prescanBodyPageAnchors(
         `Page-anchor prescan occurrence acquisition mismatch: ${anchor.occurrenceId}`,
       );
     }
+    // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
+    // extent resolve in the upright physical drawing frame, against the
+    // physical page and margins (`uprightPhysicalPageFrames`). The page
+    // registry is section-logical, so page-start prescan must apply the
+    // section writing mode's canonical physical-to-logical affine
+    // inverse before the exclusion can affect earlier body content.
+    const verticalSpace = isVerticalTextDirection(request.location.section.textDirection)
+      ? createSectionRegionCoordinateSpace(
+          sectionWritingMode(request.location.section),
+          uprightPhysicalExtent(
+            { widthPt: frames.page.widthPt, heightPt: frames.page.heightPt },
+            sectionWritingMode(request.location.section),
+          ),
+        )
+      : undefined;
     const result = resolveAnchorFrame({
       acquisition: payloads[0]!.run.anchorAcquisitionInput,
-      frames,
+      frames: verticalSpace
+        ? uprightPhysicalPageFrames(frames, verticalSpace.logicalToPhysical)
+        : frames,
     });
     if (result.status !== 'resolved') {
       throw new Error(`Page-anchor prescan could not resolve occurrence: ${anchor.occurrenceId}`);
     }
-    // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
-    // extent resolve in the upright physical drawing frame. The page
-    // registry is section-logical, so page-start prescan must apply the
-    // section writing mode's canonical physical-to-logical affine
-    // inverse before the exclusion can affect earlier body content.
-    const retainedResult = isVerticalTextDirection(request.location.section.textDirection)
-      ? (() => {
-          const writingMode = sectionWritingMode(request.location.section);
-          const physicalPage = uprightPhysicalExtent(
-            {
-              widthPt: frames.page.widthPt,
-              heightPt: frames.page.heightPt,
-            },
-            writingMode,
-          );
-          return projectPhysicalAnchorResult(
-            result,
-            physicalToLogicalMatrix(writingMode, physicalPage),
-          );
-        })()
+    const retainedResult = verticalSpace
+      ? projectPhysicalAnchorResult(result, verticalSpace.physicalToLogical)
       : result;
     const wrapBounds = retainedResult.geometry.wrapBounds;
     if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {

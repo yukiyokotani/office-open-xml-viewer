@@ -138,7 +138,7 @@ import {
   type RetainedEmphasisMarkInput,
 } from './retained-typography.js';
 import type { RunTypographyAcquisitionInput } from './typography-input.js';
-import { alignedAnchorPlacement, resolveAnchorFrame, type AnchorFrameRect, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
+import { alignedAnchorPlacement, resolveAnchorFrame, uprightPhysicalPageFrames, type AnchorFrameRect, type AnchorReferenceFramesInput, type AnchorFrameResult } from './anchor-frame.js';
 import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import {
   translateDrawing,
@@ -4887,7 +4887,22 @@ function acquireAnchorOccurrence(
   const line = lines[hostLineIndex]!;
   const referenceBounds = lineReference?.bounds ?? line.bounds;
   const referenceIsFirstLine = lineReference?.firstLine ?? (hostLineIndex === 0);
-  const baseFrames = options.anchorFrames;
+  // ECMA-376 §17.6.20 + §20.4.3.x: anchor positionH/V and extent describe the
+  // upright physical drawing layer, while retained body flow is
+  // section-logical. Resolve against physical page/margin frames, then
+  // project the complete resolved geometry once before wrap/collision/paint.
+  const physicalPage = options.environment.verticalPageFrame && options.anchorFrames?.page
+    ? uprightPhysicalExtent(options.anchorFrames.page, options.environment.pageWritingMode)
+    : undefined;
+  const coordinateSpace = physicalPage === undefined
+    ? undefined
+    : createSectionRegionCoordinateSpace(
+        options.environment.pageWritingMode,
+        physicalPage,
+      );
+  const baseFrames = options.anchorFrames && coordinateSpace
+    ? uprightPhysicalPageFrames(options.anchorFrames, coordinateSpace.logicalToPhysical)
+    : options.anchorFrames;
   const behavior = outer.run.anchorAcquisitionInput.behavior;
   const layoutInCellFrame = behavior.layoutInCellStatus === 'valid'
     && behavior.layoutInCell === true
@@ -4956,18 +4971,6 @@ function acquireAnchorOccurrence(
   if (acquiredResult.status !== 'resolved') {
     return { result: acquiredResult, textBoxes: [], hostLineIndex, hostRange: host.range };
   }
-  // ECMA-376 §17.6.20 + §20.4.3.x: anchor positionH/V and extent describe the
-  // upright physical drawing layer. Retained body flow is section-logical, so
-  // project the complete resolved geometry once before wrap/collision/paint use.
-  const physicalPage = options.environment.verticalPageFrame && baseFrames?.page
-    ? uprightPhysicalExtent(baseFrames.page, options.environment.pageWritingMode)
-    : undefined;
-  const coordinateSpace = physicalPage === undefined
-    ? undefined
-    : createSectionRegionCoordinateSpace(
-        options.environment.pageWritingMode,
-        physicalPage,
-      );
   const result = physicalPage === undefined
     ? acquiredResult
     : projectPhysicalAnchorResult(
@@ -5162,7 +5165,10 @@ function acquireAnchorOccurrence(
   const hostFlow = options.hostFlowPageTranslationPt;
   const hostBase = options.hostPageFrames !== undefined
     ? options.hostPageFrames
-    : baseFrames?.page && baseFrames.margin ? { page: baseFrames.page, margin: baseFrames.margin } : null;
+    // The story frames are composed in the section-logical page frame.
+    : options.anchorFrames?.page && options.anchorFrames.margin
+      ? { page: options.anchorFrames.page, margin: options.anchorFrames.margin }
+      : null;
   const storyFramesFor = (placed: PlacedOuter): StoryPageFrames | null => {
     if (!hostBase) return null;
     const inCell = layoutInCell && options.anchorCellBounds !== undefined;
