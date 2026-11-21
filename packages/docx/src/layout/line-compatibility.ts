@@ -1739,3 +1739,47 @@ export const WORD_PARAGRAPH_OFF_JAPANESE_LINE_EDGES = defineCompatibilityRule({
   evidence: { kind: 'regression-test', reference: 'packages/docx/src/kinsoku-off-edges.test.ts#neither hangs nor pushes the mode15 Japanese OFF closing mark under %s' },
   description: 'Observed original Japanese paragraph-OFF body controls in unset/11/12/14/15: mode15 LEFT/BOTH/distribute and Kashida/Thai alignments retain the closing mark at the next line head without hanging or pushing; pre15 LEFT/BOTH/distribute retain one hanging mark. The version distinction is observed Office compatibility, not implied by ECMA37617.3.1.16. Initial capability requires canonical ordinary single-column horizontal LTR root body, document rules originally enabled, no complete-store floats, frame/section flow, grids other than a lines or charSpace-0 lines-and-chars grid (w2144-kinoff measured those alike), custom table presence including empty, numbering/tabs, ruby, controls, transformed/protected/nontext or complex/RTL runs. Homogeneous explicit Japanese is admitted; absent EA language requires actual Kana and does not synthesize a language tag. Chinese/Korean/mixed language and unmeasured placements keep previous behavior. Explicit punctuation or punctuation/kana compression with low/medium/high Kashida also retains its complete previous paragraph geometry: the existing scalar minima can allocate 6+6pt where the measured 12pt Word ON and OFF pair retains 12+12pt. Changing only the edges exposes that unresolved compression deficit. This withdraws unproved capability until the source-owned compression contract is established (#2079); it does not claim that Word ignores paragraph OFF in that class. Original controls without explicit compression remain admitted. The separately approved pre15 explicit punctuation/kana-compression Thai edge exception retains document head/tail prohibitions except the existing ten confirmed closing heads with overflow on; overflow off retains them all. Kana compression grants no additional head permissions. Head legality, tail legality and the one-character extension budget remain independent. The separate bounded edge view never supplies hanging, compression grouping, intrinsic or paint authority. Existing intrinsic paragraph-table atoms remain unchanged when the paragraph toggle is off. Word-box/partition observations do not establish all ink, source-SPACE or caret geometry.',
 });
+
+/** ECMA-376 §20.4.2.7 defines wp:extent as the object's final displayed size,
+ * and §20.4.2.8 makes an inline object occupy its line like a glyph of that
+ * size; neither (nor [MS-OI29500] for §§20.4.2.6-8 or §20.1.7.6) says how an
+ * a:xfrm rot of the object itself changes that line box. */
+export const WORD_INLINE_DRAWING_TURNED_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-inline-drawing-turned-footprint',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-drawing-rotation-footprint',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Word writes wp:extent of an inline drawing as its unturned size and lays it out in a base box that is the extent turned a quarter turn (cy wide, cx tall) when the object\'s own clockwise a:xfrm rot, taken modulo 360, lies in [45, 135) or [225, 315), and the authored extent otherwise. wp:effectExtent then widens that base box on its page edges as authored; Word does not derive it from the rotation or from effects. The unturned object is centred in the base box and turned about its centre, so at other angles its corners can overflow the line box and the column. Synthetic controls (a 200 x 100pt object between text on one line, Arial 11pt, A4): pictures at 0, 30, 45, 60, 90, 135, 180, 270 and -90 degrees, at 30/45/60/135 both with effectExtent 0 and with effectExtent set to the rotated bounding box; 90 degrees with flipH, flipV and both; 90 degrees with effectExtent l10 t20 r30 b40pt against the same at 0; 90 and 0 degrees with a 10pt outer shadow, with effectExtent 0 and with the shadow offset; a WPS rectangle with text at 0, 30, 45 and 90 degrees (45 also with the bounding-box effectExtent); a two-child wpg group at 0, 45 and 90 degrees. Every control matches the rule within 0.1pt in the following text position, the next line position and the object placement: 45, 60, 90, 270 and -90 are turned and 30, 135 and 180 are not; flips and shadows do not change the box. Corpus Word exports of two 90-degree inline photos agree. 225 and 315 degrees follow from the 180-degree symmetry of the turned box, not a control. Library scope: DrawingML pictures, WPS shapes and groups (an inline chart has no rotation; VML inline pictures and shapes, whose rotation is a CSS style, are unmeasured and keep the extent box).',
+});
+
+/** Projection of {@link WORD_INLINE_DRAWING_TURNED_FOOTPRINT}: whether an
+ * inline drawing with this clockwise a:xfrm rotation (degrees) is laid out in
+ * its quarter-turned (cy x cx) base box. */
+export function wordInlineDrawingTurnsFootprint(rotationDeg: number | null | undefined): boolean {
+  if (rotationDeg == null || !Number.isFinite(rotationDeg)) return false;
+  const turn = ((rotationDeg % 360) + 360) % 360;
+  return (turn >= 45 && turn < 135) || (turn >= 225 && turn < 315);
+}
+
+export const WORD_INLINE_ROTATED_PICTURE_LINE_CLIP = defineCompatibilityRule({
+  id: 'word-inline-rotated-picture-line-clip',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'inline-drawing-rotation-footprint',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Word clips an inline picture turned by its own a:xfrm rot to the vertical extent of its line box (line top to line bottom, including the text descent below the picture); horizontally the turned picture is not clipped and may overflow the column and the page margin. ECMA-376 does not define this clip. In the inline-drawing-rotation-footprint controls (Windows Word 16.0.20527) the PDF clip of a 200 x 100pt picture at 30, 45, 60 and 135 degrees with effectExtent 0 is the turned rectangle cut at the line top and at the line bottom 2.3pt below the picture; with effectExtent covering the turned bounding box, at 90, 270, -90 and with flips the clip is the whole picture. WPS shapes and groups at 30 and 45 degrees are not clipped. Unturned pictures (including those in exact or atLeast lines) and VML pictures are outside this rule and unmeasured. Hit testing and element bounds follow the visible, clipped outline.',
+});
+
+/** Projection of {@link WORD_INLINE_ROTATED_PICTURE_LINE_CLIP}: whether an inline
+ * picture with this clockwise a:xfrm rotation (degrees) paints clipped to its
+ * line box's vertical extent. */
+export function wordInlinePictureClipsToLine(rotationDeg: number | null | undefined): boolean {
+  return rotationDeg != null && Number.isFinite(rotationDeg) && rotationDeg % 360 !== 0;
+}

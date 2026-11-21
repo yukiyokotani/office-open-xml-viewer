@@ -245,6 +245,17 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
         if (!context.resources) {
           throw new Error(`Missing retained resource painter for ${placement.resourceKey}`);
         }
+        const lineClip = placement.lineClip;
+        if (lineClip) {
+          // WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: a band as wide as any turn
+          // of the resource about its centre, cut at the line box.
+          const { xPt, yPt, widthPt, heightPt } = placement.bounds;
+          const reach = Math.hypot(widthPt, heightPt);
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(xPt + widthPt / 2 - reach, yPt + lineClip.topPt, 2 * reach, Math.max(0, lineClip.bottomPt - lineClip.topPt));
+          ctx.clip();
+        }
         if (context.textBoxVerticalMode) {
           const rotation = context.textBoxVerticalMode === 'vert270' ? Math.PI / 2 : -Math.PI / 2;
           ctx.save();
@@ -275,6 +286,7 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
             context,
           );
         }
+        if (lineClip) ctx.restore();
         continue;
       }
       if (placement.kind === 'tab') {

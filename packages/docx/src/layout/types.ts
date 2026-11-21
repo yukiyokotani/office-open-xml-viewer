@@ -597,6 +597,15 @@ export interface ResourcePlacement {
    * is rotated into a vertical physical page. Absent means flow-relative. */
   readonly orientation?: UprightResourceOrientation;
   readonly bounds: LayoutRect;
+  /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: top and bottom of the owning line
+   * box relative to `bounds.yPt`; paint clips the resource to that horizontal
+   * band (not horizontally). Relative, so translating `bounds` moves it. */
+  readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
+  /** Clockwise turn (degrees) the resource paints with about the centre of
+   * `bounds` (its a:xfrm rot). `bounds` stays the authored paint box; hit
+   * testing and element bounds use its turned, line-clipped outline
+   * (`resourcePlacementOutline` in resource-outline.ts). */
+  readonly rotationDeg?: number;
   readonly advancePt: number;
 }
 

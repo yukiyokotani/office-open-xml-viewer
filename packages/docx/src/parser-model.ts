@@ -1897,9 +1897,10 @@ export function paragraphAcquisitionInput(
         __listLabel: listLabel,
         __inlineObjectFontFacts: _privateInlineFont,
         __inlineObjectOrigin: privateInlineOrigin,
+        __inlineGroupRotation: privateGroupRotation,
         ...publicRun
       } = run as typeof run & InternalAnchorRunWire & Pick<InternalNoBreakHyphenWire, '__listLabel'>
-        & { __inlineObjectFontFacts?: InternalRunFontFacts; __inlineObjectOrigin?: string };
+        & { __inlineObjectFontFacts?: InternalRunFontFacts; __inlineObjectOrigin?: string; __inlineGroupRotation?: number };
       const inlineFont = inlineObjectShapeInput(originalRun);
       const inlineOrigin = privateInlineOrigin === 'drawingml' || privateInlineOrigin === 'vmlStaticTextbox'
         ? privateInlineOrigin : undefined;
@@ -1940,6 +1941,8 @@ export function paragraphAcquisitionInput(
         ...structuredClone(retainedShape),
         ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
         ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
+        ...(typeof privateGroupRotation === 'number' && Number.isFinite(privateGroupRotation)
+          ? { inlineGroupRotation: privateGroupRotation } : {}),
         ...(vmlTextPathInput === undefined ? {} : { vmlTextPathInput }),
         ...((textBoxInput.kind === 'complete'
           ? textBoxInput.blockCount

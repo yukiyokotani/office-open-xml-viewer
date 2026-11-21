@@ -45,6 +45,8 @@ import {
   wordBalancedConsecutiveSpaceCellApplies,
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordExternalLinkSyntaxBreakOffsets,
+  wordInlineDrawingTurnsFootprint,
+  wordInlinePictureClipsToLine,
 } from '../layout/line-compatibility.js';
 import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
@@ -1746,34 +1748,66 @@ function emitResolvedTextSegment(
  * physical: a picture or chart that a vertical section keeps upright maps
  * them onto the logical line axes (shapes and placeholders turn with the line) (clockwise: logical left/top/right/bottom = physical
  * top/right/bottom/left; counter-clockwise: bottom/left/top/right). Signed
- * values (ST_Coordinate) apply as authored; the box never goes below zero. */
+ * values (ST_Coordinate) apply as authored; the box never goes below zero.
+ *
+ * `turnedFootprint` (WORD_INLINE_DRAWING_TURNED_FOOTPRINT) lays the object
+ * out in its quarter-turned base box, height x width, before the
+ * effect edges apply. The object still paints at its authored size, centred
+ * in that footprint so its rotation about the centre fills it; the returned
+ * `effectExtent` is therefore the object's inset in the box, not the authored
+ * edges alone. */
 function inlineEffectExtentBox(
   extent: readonly number[] | undefined,
   widthPt: number,
   heightPt: number,
   orientation?: import('../layout/types.js').UprightResourceOrientation,
+  turnedFootprint = false,
 ): {
   widthPt: number;
   heightPt: number;
   effectExtent?: readonly [number, number, number, number];
   objectSizePt?: readonly [number, number];
 } {
-  if (!extent || extent.length !== 4 || extent.every((edge) => !Number.isFinite(edge) || edge === 0)) {
-    return { widthPt, heightPt };
-  }
-  const [l, t, r, b] = extent.map((edge) => (Number.isFinite(edge) ? edge : 0)) as [number, number, number, number];
+  const authored = extent && extent.length === 4 && extent.some((edge) => Number.isFinite(edge) && edge !== 0);
+  if (!authored && !turnedFootprint) return { widthPt, heightPt };
+  const [l, t, r, b] = authored
+    ? extent.map((edge) => (Number.isFinite(edge) ? edge : 0)) as [number, number, number, number]
+    : [0, 0, 0, 0];
   const logical: [number, number, number, number] = orientation === 'upright-physical'
     ? [t, r, b, l]
     : orientation === 'upright-physical-counter-clockwise'
       ? [b, l, t, r]
       : [l, t, r, b];
+  // A quarter turn keeps the centre, so the centring is the same in the
+  // physical and the logical frame.
+  const insetX = turnedFootprint ? (heightPt - widthPt) / 2 : 0;
+  const insetY = turnedFootprint ? (widthPt - heightPt) / 2 : 0;
   const [left, top, right, bottom] = logical;
   return {
-    widthPt: Math.max(0, widthPt + left + right),
-    heightPt: Math.max(0, heightPt + top + bottom),
-    effectExtent: logical,
+    widthPt: Math.max(0, widthPt + left + right + 2 * insetX),
+    heightPt: Math.max(0, heightPt + top + bottom + 2 * insetY),
+    effectExtent: [left + insetX, top + insetY, right + insetX, bottom + insetY],
     objectSizePt: [widthPt, heightPt],
   };
+}
+
+/** Own clockwise a:xfrm rotation (degrees) of a DrawingML inline picture. A
+ * VML picture (v:imagedata, no DrawingML origin) reports none: the
+ * WORD_INLINE_DRAWING_TURNED_FOOTPRINT and WORD_INLINE_ROTATED_PICTURE_LINE_CLIP
+ * controls are DrawingML only. */
+function drawingMlInlinePictureTurn(
+  run: Partial<Pick<import('../layout/text.js').ParagraphImageRun, 'inlineObjectOrigin' | 'rotation'>>,
+): number | undefined {
+  return run.inlineObjectOrigin === 'drawingml' ? run.rotation : undefined;
+}
+
+/** Own clockwise rotation (degrees) of an inline DrawingML shape or group:
+ * a group's grpSpPr xfrm, else a DrawingML shape's xfrm. A VML inline shape
+ * reports none (WORD_INLINE_DRAWING_TURNED_FOOTPRINT is unmeasured there). */
+function inlineShapeTurn(
+  run: Partial<Pick<import('../layout/text.js').ParagraphShapeRun, 'inlineGroupRotation' | 'inlineObjectOrigin' | 'rotation'>>,
+): number | undefined {
+  return run.inlineGroupRotation ?? (run.inlineObjectOrigin === 'drawingml' ? run.rotation : undefined);
 }
 
 /** LIBREOFFICE_FONT_LINE_BOX sides of a tab's own face (its run's ascii
@@ -2014,7 +2048,12 @@ function appendRunsToSegments(
         imagePath: img.imagePath,
         mimeType: img.mimeType,
         ...(img.anchor ? {} : { inlinePicture: true as const }),
-        ...inlineEffectExtentBox(img.anchor ? undefined : img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation),
+        ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
+          img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
+          wordInlineDrawingTurnsFootprint(drawingMlInlinePictureTurn(img)),
+        )),
+        ...(!img.anchor && wordInlinePictureClipsToLine(drawingMlInlinePictureTurn(img))
+          ? { clipToLine: true as const } : {}),
         rotation: img.rotation,
         flipH: img.flipH,
         flipV: img.flipV,
@@ -2077,8 +2116,13 @@ function appendRunsToSegments(
         inlineShape: true,
         inlinePicture: true,
         // An inline shape is not counter-turned in a vertical section, so its
-        // effect edges stay on the object's own (logical) edges.
-        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt),
+        // effect edges stay on the object's own (logical) edges. A DrawingML
+        // shape turns by its own xfrm, a group by its grpSpPr xfrm (its
+        // children carry the composed transform already).
+        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt, undefined,
+          wordInlineDrawingTurnsFootprint(inlineShapeTurn(
+            run as Partial<import('../layout/text.js').ParagraphShapeRun>,
+          ))),
         ...(run.inlineOffsetXPt ? { inlineOffsetXPt: run.inlineOffsetXPt } : {}),
         ...(run.inlineOffsetYPt ? { inlineOffsetYPt: run.inlineOffsetYPt } : {}),
         measuredWidth: 0,

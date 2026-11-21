@@ -238,6 +238,9 @@ export type ParagraphShapeRun = DeepReadonly<Extract<DocRun, { type: 'shape' }> 
   textBoxInput?: TextBoxAcquisitionInput;
   inlineObjectShapeInput?: NumberingMarkerShapeInput;
   inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
+  /** Clockwise rotation (degrees) of an inline `wpg:wgp` group's own
+   * grpSpPr transform; its children already carry the composed transform. */
+  inlineGroupRotation?: number;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
