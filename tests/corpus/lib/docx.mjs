@@ -121,15 +121,19 @@ export function colsXml(cols) {
 }
 
 /** sectPr body. section: { type?, cols?, textDirection?, docGrid?, refs?,
- * pgNumType?, titlePg?, pgMar? ({ top, right, bottom, left, header, footer }) } */
+ * pgNumType?, titlePg?, pgMar? ({ top, right, bottom, left, header, footer,
+ * gutter? }), pgSz? ({ w, h, orient? }) }. pgMar and pgSz are for specimens
+ * whose subject is the page geometry (the case sets offGrid). */
 export function sectPrXml(section = {}) {
   const { PAGE_W, PAGE_H, MARGIN } = DOCX;
   return `<w:sectPr>${section.refs ?? ''}`
     + (section.type ? `<w:type w:val="${section.type}"/>` : '')
-    + `<w:pgSz w:w="${PAGE_W}" w:h="${PAGE_H}"/>`
+    + (section.pgSz
+      ? `<w:pgSz w:w="${section.pgSz.w}" w:h="${section.pgSz.h}"${section.pgSz.orient ? ` w:orient="${section.pgSz.orient}"` : ''}/>`
+      : `<w:pgSz w:w="${PAGE_W}" w:h="${PAGE_H}"/>`)
     + (section.pgMar
       // Off-grid page geometry, for a specimen whose subject is that geometry.
-      ? `<w:pgMar w:top="${section.pgMar.top}" w:right="${section.pgMar.right}" w:bottom="${section.pgMar.bottom}" w:left="${section.pgMar.left}" w:header="${section.pgMar.header}" w:footer="${section.pgMar.footer}" w:gutter="0"/>`
+      ? `<w:pgMar w:top="${section.pgMar.top}" w:right="${section.pgMar.right}" w:bottom="${section.pgMar.bottom}" w:left="${section.pgMar.left}" w:header="${section.pgMar.header}" w:footer="${section.pgMar.footer}" w:gutter="${section.pgMar.gutter ?? 0}"/>`
       : `<w:pgMar w:top="${MARGIN.top}" w:right="${MARGIN.right}" w:bottom="${MARGIN.bottom}" w:left="${MARGIN.left}" w:header="${section.headerDist ?? 0}" w:footer="${section.footerDist ?? 0}" w:gutter="0"/>`)
     + (section.pgNumType ?? '')
     + colsXml(section.cols)

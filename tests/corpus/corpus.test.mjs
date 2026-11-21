@@ -143,9 +143,10 @@ test('positions and lengths lie on the grid', async () => {
       if (c.format === 'docx') {
         for (const el of elements) {
           const a = (k) => (el.attrs.has(k) ? Number(el.attrs.get(k)) : undefined);
-          // docx-050 tests adjacent sections at one exact page geometry
-          // (margins 851, column space 425) that is not the corpus grid.
-          const offGrid = c.id === 'docx-050';
+          // A case whose subject is the page geometry (exact margins, a
+          // gutter, Letter paper) sets offGrid; its margins and column
+          // spaces are that geometry, not the corpus grid.
+          const offGrid = c.offGrid === true;
           if (el.name === 'w:pgMar' && !offGrid) {
             const m = DOCX.MARGIN;
             if (a('w:top') !== m.top || a('w:bottom') !== m.bottom || a('w:left') !== m.left || a('w:right') !== m.right) bad('page margins');

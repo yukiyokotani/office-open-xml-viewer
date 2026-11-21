@@ -38,6 +38,7 @@ export const NS = {
   m: 'http://schemas.openxmlformats.org/officeDocument/2006/math',
   wpg: 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup',
   w14: 'http://schemas.microsoft.com/office/word/2010/wordml',
+  wp14: 'http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing',
 };
 
 export const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';

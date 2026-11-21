@@ -31,6 +31,7 @@ export default {
   slug: 'adjacent-sections',
   format: 'docx',
   title: 'Adjacent sections, exact geometry',
+  offGrid: true,
   covers: [
     'word/document.xml|w:type@w:val=continuous',
     'word/document.xml|w:sectPr>w:cols',
