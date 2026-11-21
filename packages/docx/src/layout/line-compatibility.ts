@@ -618,13 +618,13 @@ export const WORD_ANCHOR_HOST_NO_LINE_METRIC = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'ECMA-376 §20.4.2.3 anchors a floating drawing in a run, but the anchoring character has no glyph and the standard does not give it line metrics. Windows Word 16.0.20527 controls (compatibility mode 15, no grid, Times New Roman 11pt paragraph, a wrapNone DrawingML picture anchored in a 10pt or 40pt run beside an inline 16pt picture, unpositioned or lowered 15pt; and an anchored picture alone in its paragraph) size no line from the anchoring run: every paragraph with the inline picture is exactly as tall as without the anchor, also with the 40pt anchoring run, and a paragraph holding only the anchor is as tall as an empty paragraph of its mark (12.65pt for an 11pt Times New Roman mark, not the 40pt run). The anchor host therefore keeps its position but contributes no metrics beside other line content, and a host-only paragraph takes its paragraph mark line (ascii face, WORD_EMPTY_MARK_ASCII_FACE). Scope: mode 15 without a line grid, as measured; other modes and grid lines keep the established host-run metrics (WORD_MIXED_ANCHOR_VISIBLE_LINE_METRICS) until their controls are measured.',
+  description: 'ECMA-376 §20.4.2.3 anchors a floating drawing in a run, but the anchoring character has no glyph and the standard does not give it line metrics. Windows Word 16.0.20527 controls (Times New Roman 10pt and 11pt paragraphs, a wrapNone DrawingML picture anchored in a 10pt or 40pt run beside an inline 16pt picture, unpositioned or lowered 15pt; an anchored picture alone in its paragraph; and one beside text) size no line from the anchoring run: every paragraph with the inline picture is exactly as tall as without the anchor, also with the 40pt anchoring run, and a paragraph holding only the anchor is as tall as an empty paragraph of its mark (12.65pt for an 11pt Times New Roman mark, not the 40pt run). This holds in compatibility modes 15, 14, 12 and omitted, on a 20pt lines grid (each paragraph one cell), and in body paragraphs, headers and table cells. The anchor host therefore keeps its position but contributes no metrics beside other line content, and a host-only paragraph takes its paragraph mark line (ascii face, WORD_EMPTY_MARK_ASCII_FACE). In footnotes and text boxes the same controls lay the picture out inline in its 40pt run instead of floating it, so no anchor host is left there.',
 });
 
-/** WORD_ANCHOR_HOST_NO_LINE_METRIC gate. */
-export function wordAnchorHostLineMetricApplies(mode15: boolean, lineGridActive: boolean): boolean {
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: an anchoring run sizes no line. */
+export function wordAnchorHostLineMetricApplies(): boolean {
   void WORD_ANCHOR_HOST_NO_LINE_METRIC;
-  return mode15 && !lineGridActive;
+  return true;
 }
 
 export const WORD_JUSTIFICATION_LEADING_INDENT_EXCLUSION = defineCompatibilityRule({

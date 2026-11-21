@@ -367,7 +367,7 @@ export function measureParagraph(
     uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,
-    ...(wordAnchorHostLineMetricApplies(compat.specifiedTextLineBoxMode15, context.lineGrid.active)
+    ...(wordAnchorHostLineMetricApplies()
       ? { anchorHostLineMetric: Object.freeze({
           fontSize: environment.paragraphMarkShapeInput?.fontSizePt ?? getDefaultFontSize(paragraph),
           // WORD_EMPTY_MARK_ASCII_FACE: the mark line uses its ascii face.

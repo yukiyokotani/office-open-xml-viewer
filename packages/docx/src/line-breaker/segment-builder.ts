@@ -2224,7 +2224,9 @@ function appendRunsToSegments(
       // WORD_ANCHOR_HOST_NO_LINE_METRIC: the anchoring run's formatting sizes
       // no line. Beside other line content the host keeps only its position;
       // a paragraph holding nothing else takes its paragraph mark's line.
-      const hostMetric = environment.anchorHostLineMetric;
+      // A list label's metric run (a picture bullet's label font) is not an
+      // anchoring run and keeps its metrics.
+      const hostMetric = listLabelOf(run).listLabel === undefined ? environment.anchorHostLineMetric : undefined;
       if (hostMetric !== undefined && paragraphHasLineContent(runs)) {
         segs.push({
           text: '', metricOnly: true, bold: false, italic: false, underline: false, strikethrough: false,
