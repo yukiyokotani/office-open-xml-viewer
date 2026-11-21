@@ -1208,7 +1208,133 @@ describe('canonical body producer', () => {
     expect(layout.pages[1]!.layers.body[0]!.id).toContain('tail-slice');
   });
 
-  it('still reports non-convergence for table overshoot beyond floating-point precision', () => {
+  it('admits a table fragment the measurer fits against a region reconstructed from page coordinates', () => {
+    // A table that ends a page exactly: 54.4 pt + 25.6 pt fill the 80 pt body.
+    // The second table's region extent is 90 - (10 + 54.4), which rounds to
+    // 2 ULPs of 25.6 below 25.6: the rounding scales with the page
+    // coordinates, not with their small difference. The measurer admits its
+    // rows within its own fit precision (table-pagination.ts EPSILON_PT), so
+    // the fragment is final for that request; with no footnote reserve the
+    // admission loop's next request is identical and must accept it.
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const requestedExtentsPt: number[] = [];
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          const extentPt = request.input.source.path[0] === 0 ? 54.4 : 25.6;
+          if (request.input.source.path[0] === 1) requestedExtentsPt.push(request.availableBlockExtentPt);
+          if (extentPt > request.availableBlockExtentPt + 0.0001) {
+            return {
+              layout: table('deferred', request.input.source, 0),
+              blockExtentPt: 0,
+              requiresFreshFlowRegion: true,
+            };
+          }
+          return {
+            layout: table(`table-${request.input.source.path[0]}`, request.input.source, extentPt),
+            blockExtentPt: extentPt,
+          };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [0, 1].map((index) => ({
+        kind: 'body-block',
+        block: { kind: 'table', source: source(index) },
+      })),
+    } as unknown as BodyLayoutInput;
+
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+
+    // The region really was reconstructed below the authored extent.
+    expect(requestedExtentsPt[0]).toBeLessThan(25.6);
+    expect(25.6 - requestedExtentsPt[0]!)
+      .toBeGreaterThan(Number.EPSILON * 25.6);
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.pages[0]!.layers.body.map((node) => node.id))
+      .toEqual([expect.stringContaining('table-0'), expect.stringContaining('table-1')]);
+  });
+
+  it('settles table footnote admission whose reserve-adjusted requests cycle', () => {
+    // Two candidate cuts of one table, each admitted by the measurer within a
+    // few ULPs of its request but each overshooting the region net of the
+    // other's reserve: the larger cut (note x) is chosen at requests >= 50,
+    // the smaller cut (note y) below. Reserve x is a few ULPs larger than
+    // reserve y, so the requests 60 - reserve alternate between two distinct
+    // extents. After the first revisit the requests become non-increasing and
+    // the loop settles on the smaller cut instead of failing the document.
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const ulp50 = 2 ** -47;
+    const reserveYPt = 10;
+    const reserveXPt = 10 + 4 * 2 ** -49;
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          if (request.input.source.path[0] === 0) {
+            return { layout: table('lead', request.input.source, 20), blockExtentPt: 20 };
+          }
+          if (request.cursor) return { layout: table('rest', request.input.source, 5), blockExtentPt: 5 };
+          const larger = request.availableBlockExtentPt >= 50;
+          const extentPt = larger ? 50 + 3 * ulp50 : 50 + 2 * ulp50;
+          return {
+            layout: tableWithFootnote(larger ? 'larger-cut' : 'smaller-cut', request.input.source,
+              extentPt, larger ? 'x' : 'y'),
+            blockExtentPt: extentPt,
+            nextCursor: {
+              kind: 'table' as const,
+              cursor: { rowIndex: larger ? 2 : 1, rowFragmentIndex: 0, cells: [] },
+            },
+          };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: ({ referenceIds }) => referenceIds.includes('x')
+          ? reserveXPt
+          : referenceIds.includes('y') ? reserveYPt : 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [0, 1].map((index) => ({
+        kind: 'body-block',
+        block: { kind: 'table', source: source(index) },
+      })),
+    } as unknown as BodyLayoutInput;
+
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+
+    expect(layout.pages[0]!.layers.body.map((node) => node.id))
+      .toEqual([expect.stringContaining('lead'), expect.stringContaining('smaller-cut')]);
+  });
+
+  it('leaves a measured table overshoot beyond floating-point precision to the containment invariant', () => {
+    // Admission accepts the measurer's answer for an unchanged request; it
+    // does not turn a measurer that exceeds its own request into a layout.
+    // The overshooting fragment still fails page containment.
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
@@ -1221,10 +1347,6 @@ describe('canonical body producer', () => {
           return {
             layout: table('oversized-slice', request.input.source, extentPt),
             blockExtentPt: extentPt,
-            nextCursor: {
-              kind: 'table' as const,
-              cursor: { rowIndex: 1, rowFragmentIndex: 0, cells: [] },
-            },
           };
         },
         measureStoryExtent: () => 0,
@@ -1247,7 +1369,7 @@ describe('canonical body producer', () => {
     } as unknown as BodyLayoutInput;
 
     expect(() => paginateBody(input, services, { currentDateMs: 0 }))
-      .toThrow('Table footnote admission did not converge');
+      .toThrow('BOTTOM_MARGIN_INVASION');
   });
 
   it('admits references from each accepted split-table slice only', () => {
