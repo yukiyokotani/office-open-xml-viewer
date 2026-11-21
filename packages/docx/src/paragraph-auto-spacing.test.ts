@@ -292,11 +292,15 @@ describe('Word hidden cell paragraphs (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT)', 
     `<w:tr>${tc(content)}</w:tr><w:tr>${tc(plain(`XR${index + 1}`))}</w:tr>`).join('')}</w:tbl>${plain('END')}`;
   const order = ['XR0', 'X1', 'XR1', 'X3a', 'X3b', 'XR2', 'X5n', 'X5z', 'XR3', 'X7a', 'XR4'];
 
-  /** Page index of each text in a one-cell table on 100pt body bands, with
-   * exact 60pt lines and zero spacing. */
-  function cellPages(content: string): Readonly<Record<string, number>> {
+  /** Page index of each text in a one-row table on 100pt body bands, with
+   * zero spacing; TALL(runs) is a paragraph of exact 60pt lines. */
+  function cellPages(content: string | readonly string[], before = ''): Readonly<Record<string, number>> {
     const tall = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1200" w:lineRule="exact"/></w:pPr>${text}</w:p>`;
-    const raw = parse(`<w:tbl>${grid}<w:tr>${tc(content.replace(/TALL\(([^)]*)\)/g, (_, runs: string) => tall(runs)))}</w:tr></w:tbl>`, {
+    const cells = (typeof content === 'string' ? [content] : content)
+      .map(cellContent => tc(cellContent.replace(/TALL\(([^)]*)\)/g, (_, runs: string) => tall(runs))));
+    const cellGrid = cells.length === 1 ? grid
+      : `<w:tblPr><w:tblW w:w="8000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>${cells.map(() => '<w:gridCol w:w="4000"/>').join('')}</w:tblGrid>`;
+    const raw = parse(`${before}<w:tbl>${cellGrid}<w:tr>${cells.join('')}</w:tr></w:tbl>`, {
       page: '<w:pgSz w:w="12240" w:h="4880"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>',
     });
     const pages: Record<string, number> = {};
@@ -321,6 +325,21 @@ describe('Word hidden cell paragraphs (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT)', 
     // it in the cell, so it splits A | B whether or not a hidden one leads.
     expect(cellPages(twoLines)).toEqual({ A: 0, B: 1, count: 2 });
     expect(cellPages(vanished() + twoLines)).toEqual({ A: 0, B: 1, count: 2 });
+  });
+
+  it('classifies a cell by its first flow block when a hidden paragraph leads it', () => {
+    // A 50pt paragraph leaves 50pt: the nested 60pt line moves, the 20pt A
+    // stays, B follows. The parallel-cell cut sees the nested table, not the
+    // hidden paragraph before it.
+    const lead = '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1000" w:lineRule="exact"/></w:pPr><w:r><w:t>LEAD</w:t></w:r></w:p>';
+    const empty = '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>';
+    const nestedCell = (hidden: string) => `${hidden}<w:tbl>${grid}<w:tr>${tc(`TALL(${run('N')})`)}</w:tr></w:tbl>${empty}`;
+    const textCell = `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="400" w:lineRule="exact"/></w:pPr>${run('A')}</w:p>TALL(${run('B')})`;
+    const expected = { LEAD: 0, A: 0, N: 1, B: 1, count: 2 };
+    for (const hidden of ['', vanished()]) {
+      expect(cellPages([nestedCell(hidden), textCell], lead), `left, hidden=${hidden !== ''}`).toEqual(expected);
+      expect(cellPages([textCell, nestedCell(hidden)], lead), `right, hidden=${hidden !== ''}`).toEqual(expected);
+    }
   });
 
   it('keeps a trailing vanished cell paragraph as a line that paginates like content', () => {

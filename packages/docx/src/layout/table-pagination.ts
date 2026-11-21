@@ -274,6 +274,21 @@ interface SelectedRow {
 
 const EPSILON_PT = 0.0001;
 
+/** The first block at `cursor` that owns cell flow. A cursor at a block's
+ * start skips the blocks that own none (TableCellBlockInput.ownsNoCellFlow:
+ * they ride along with whichever fragment takes the content after them), so
+ * a decision about what the cell continues with sees that content. */
+function nextFlowBlockAt(
+  cell: TableCellLayoutInput,
+  cursor: TableCellFragmentCursor,
+): TableCellBlockInput | undefined {
+  let index = cursor.blockIndex;
+  if (cursor.paragraphLineStart === 0 && cursor.nestedCursor === null) {
+    while (cell.blocks[index]?.ownsNoCellFlow === true) index += 1;
+  }
+  return cell.blocks[index];
+}
+
 function emptyCellCursor(): TableCellFragmentCursor {
   return Object.freeze({
     blockIndex: 0,
@@ -2003,7 +2018,7 @@ function partialRow(
       hasUnfinishedParagraphWithoutProgress: cells.some((cell, index) => (
         !cell.complete
         && !cellMadeProgress(cell, index)
-        && row.cells[index]?.blocks[cellCursors[index]?.blockIndex ?? 0]?.layout.kind === 'paragraph'
+        && nextFlowBlockAt(row.cells[index]!, cellCursors[index]!)?.layout.kind === 'paragraph'
       )),
     });
   let selectedCells = selectCells();
