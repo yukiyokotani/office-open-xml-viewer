@@ -133,6 +133,7 @@ import {
   retainedEmphasisGlyphs,
   retainedTextDecorations,
   retainedWavePath,
+  retainedWavePhase,
   rubyPaintOperations,
   type RetainedEmphasisClusterInk,
   type RetainedEmphasisMarkInput,
@@ -1311,8 +1312,14 @@ function sameContinuousDecoration(
 function mergedContinuousDecoration(
   left: TextDecorationLayout,
   right: TextDecorationLayout,
+  overSide = false,
 ): TextDecorationLayout {
-  const yPt = Math.max(left.from.yPt, right.from.yPt);
+  // The merged rule takes the outermost run's offset: the lowest one below a
+  // horizontal line, the highest one on the over side
+  // (`word-vertical-underline-over-side`).
+  const yPt = overSide
+    ? Math.min(left.from.yPt, right.from.yPt)
+    : Math.max(left.from.yPt, right.from.yPt);
   const from = { xPt: left.from.xPt, yPt };
   const to = { xPt: right.to.xPt, yPt };
   const { path: _discardedPath, ...withoutPath } = left;
@@ -1321,7 +1328,7 @@ function mergedContinuousDecoration(
     from,
     to,
     ...(left.style === 'wavy'
-      ? { path: retainedWavePath(from, to, left.widthPt) }
+      ? { path: retainedWavePath(from, to, left.widthPt, retainedWavePhase(left)) }
       : {}),
   };
 }
@@ -1342,7 +1349,7 @@ function trimTerminalUnderline(
     from,
     to,
     ...(decoration.style === 'wavy'
-      ? { path: retainedWavePath(from, to, decoration.widthPt) }
+      ? { path: retainedWavePath(from, to, decoration.widthPt, retainedWavePhase(decoration)) }
       : {}),
   };
 }
@@ -1449,7 +1456,7 @@ function withDecorationClippedAt(placement: TextPlacement, endPt: number): TextP
  * at source seams. Normalize the span before paint while keeping authored
  * style, color, and thickness boundaries intact.
  * `word-contiguous-underline-geometry` */
-function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
+function coalesceAdjacentDecorations(placements: ParagraphPlacement[], overSide = false): void {
   type ActiveDecoration = Readonly<{
     placementIndex: number;
     decorationIndex: number;
@@ -1477,7 +1484,7 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[]): void {
           throw new Error('Continuous decoration owner left the retained line');
         }
         const ownerDecorations = [...owner.decorations];
-        const merged = mergedContinuousDecoration(prior.decoration, decoration);
+        const merged = mergedContinuousDecoration(prior.decoration, decoration, overSide);
         ownerDecorations[prior.decorationIndex] = merged;
         placements[prior.placementIndex] = { ...owner, decorations: ownerDecorations };
         nextActive.push({ ...prior, decoration: merged });
@@ -2279,7 +2286,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     placements[start] = { ...first, runBorderFragments: fragments };
     start = end;
   }
-  coalesceAdjacentDecorations(placements);
+  coalesceAdjacentDecorations(placements, input.underlineOverSide === true);
   // The slack distribution (with its widening of automatic East Asian gaps)
   // and kashida elongation; natural advances, seams and tab advances excluded.
   const justificationExpansionPt = distributedWidthPt + kashidaAppliedPt;

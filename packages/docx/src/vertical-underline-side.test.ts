@@ -35,7 +35,10 @@ function makeCtx(): CanvasRenderingContext2D {
   getContext() { return makeCtx(); }
 };
 
-type Run = Readonly<{ text: string; fontSize: number; underline?: boolean; strikethrough?: boolean }>;
+type Run = Readonly<{
+  text: string; fontSize: number; underline?: boolean; strikethrough?: boolean;
+  position?: number; underlineStyle?: string; bold?: boolean;
+}>;
 
 function layoutLine(runs: readonly Run[], textDirection?: string) {
   const paragraph = {
@@ -43,10 +46,12 @@ function layoutLine(runs: readonly Run[], textDirection?: string) {
     alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
     runs: runs.map((run) => ({
-      type: 'text', text: run.text, bold: false, italic: false,
+      type: 'text', text: run.text, bold: run.bold === true, italic: false,
       underline: run.underline === true, strikethrough: run.strikethrough === true,
       fontSize: run.fontSize, color: null, fontFamily: 'NotInMetrics', isLink: false, background: null,
       vertAlign: null, hyperlink: null,
+      ...(run.position !== undefined ? { position: run.position } : {}),
+      ...(run.underlineStyle !== undefined ? { underlineStyle: run.underlineStyle } : {}),
     })),
     defaultFontSize: 10, defaultFontFamily: 'NotInMetrics', widowControl: false,
   } as unknown as DocParagraph & BodyElement;
@@ -134,5 +139,41 @@ describe('underline side in vertical sections (§17.3.2.40)', () => {
     };
     expect(tabOffset()).toBeGreaterThan(0);
     expect(tabOffset('tbRl')).toBeCloseTo(-tabOffset(), 9);
+  });
+
+  it('merges adjacent tbRl underlines on the over side of every run they cover', () => {
+    const { line, toPage } = layoutLine([
+      { text: 'Aa', fontSize: 10, underline: true },
+      { text: 'Bb', fontSize: 10, underline: true, position: 20 },
+    ], 'tbRl');
+    const texts = line.placements.filter((entry): entry is TextPlacement => entry.kind === 'text');
+    const underlines = texts.flatMap((placement) => placement.decorations)
+      .filter((decoration) => decoration.kind === 'underline');
+    // One continuous rule spans both runs.
+    expect(underlines).toHaveLength(1);
+    const ruleX = transformPoint(toPage, underlines[0]!.from).xPt;
+    for (const placement of texts) {
+      const box = transformRect(toPage, placement.highlightBounds!);
+      expect(ruleX).toBeGreaterThan(box.xPt + box.widthPt / 2);
+    }
+  });
+
+  it('keeps a merged over-side wave in its reflected phase', () => {
+    const phase = (runs: readonly Run[]) => {
+      const { line } = layoutLine(runs, 'tbRl');
+      const waves = line.placements
+        .flatMap((entry) => entry.kind === 'text' ? entry.decorations : [])
+        .filter((decoration) => decoration.kind === 'underline');
+      expect(waves).toHaveLength(1);
+      const wave = waves[0]!;
+      return Math.sign(wave.path![0]!.yPt - wave.from.yPt);
+    };
+    const single = phase([{ text: 'Aa', fontSize: 10, underline: true, underlineStyle: 'wave' }]);
+    expect(single).toBe(1);
+    expect(phase([
+      { text: 'Aa', fontSize: 10, underline: true, underlineStyle: 'wave' },
+      // A bold run is a separate placement whose rule continues the first.
+      { text: 'Bb', fontSize: 10, underline: true, underlineStyle: 'wave', bold: true },
+    ])).toBe(single);
   });
 });
