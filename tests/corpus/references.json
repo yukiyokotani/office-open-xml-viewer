@@ -375,6 +375,38 @@
     "source": "72589257ae2e5edc3f4d87251939a1babc9c37b2378dbd05d716fcba77dc2163",
     "pdf": "1cd666827d8fc5a43997af450c504fd680ba38fbe8e3ad8f551468f4f133b0d2"
   },
+  "docx-048-group-geometry.mac.pdf": {
+    "source": "5fbcb612d719580ff8847a2e58d17eceaf7baa91264085f5d3d82a516a049f3c",
+    "pdf": "f8f2dcd39dd64cddc078db4b23b8f720294053f68befcc8ef92abc1419bbe9d5"
+  },
+  "docx-048-group-geometry.win.pdf": {
+    "source": "5fbcb612d719580ff8847a2e58d17eceaf7baa91264085f5d3d82a516a049f3c",
+    "pdf": "622cb0abdb2f6eeaf4d7813f765826af1cc06749ce5265a14089736470bea2ef"
+  },
+  "docx-049-frames-floating-table.mac.pdf": {
+    "source": "cfa939a0de0a80b5557f011676160ce12ff5741115491930c285f530550a44a2",
+    "pdf": "fba0c70903644ead8c8dc3b118e5154bbe9283445beb87093dc1f23be63d0ff8"
+  },
+  "docx-049-frames-floating-table.win.pdf": {
+    "source": "cfa939a0de0a80b5557f011676160ce12ff5741115491930c285f530550a44a2",
+    "pdf": "f580321713c511a9f0b70f87dded297bbab973788643ad38f7fe8563ef7152ca"
+  },
+  "docx-050-adjacent-sections.mac.pdf": {
+    "source": "3785c6fcb62d1c8c9116ab733989a1a83f59487821e8f2cd218a0960b69e1dc4",
+    "pdf": "b422153e126378f1bddbaed738cef88d3bc34b7bb4be12197293ad3116fec85e"
+  },
+  "docx-050-adjacent-sections.win.pdf": {
+    "source": "3785c6fcb62d1c8c9116ab733989a1a83f59487821e8f2cd218a0960b69e1dc4",
+    "pdf": "203ccc45bb05e0cae44427df5e51be9d5506a14b489f92511c0bc1013f11dfe0"
+  },
+  "docx-051-empty-paragraph-grid.mac.pdf": {
+    "source": "0e473b46d50431a997075f70becf328141f9427629e68b0dbd35f43bc27fe35e",
+    "pdf": "ab240e27366774b2883fc7fa9550ecd8f7a94b34905dc0343bcd5c8f731d0b01"
+  },
+  "docx-051-empty-paragraph-grid.win.pdf": {
+    "source": "0e473b46d50431a997075f70becf328141f9427629e68b0dbd35f43bc27fe35e",
+    "pdf": "cae659389b62ef5c6adfe46840944c46a3a051637627c3ba60fc0355f0f92094"
+  },
   "pptx-001-paragraph-levels.mac.pdf": {
     "source": "9a98a374282cfc4e5c9246e36287f9f8974ade19652f0e33a066c0786c77df7d",
     "pdf": "683ae01f7021c4caf144b2bccbe1da518ee113d848aa307092ecc2eec3fe6126"
