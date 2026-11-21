@@ -107,7 +107,9 @@ function offsetFromCentre(placement: TextPlacement, kind: 'underline' | 'striket
 }
 
 describe('underline side in vertical sections (§17.3.2.40)', () => {
-  it.each(['tbRl'])('mirrors a %s underline across its font box in the section frame', (direction) => {
+  // A tbLrV line paints through its block-reflected line frame as a tbRl
+  // strip, so its underline is mirrored in the logical frame as well.
+  it.each(['tbRl', 'tbLrV'])('mirrors a %s underline across its font box in the logical frame', (direction) => {
     const horizontal = offsetFromCentre(underlined(), 'underline');
     expect(horizontal).toBeGreaterThan(0);
     expect(offsetFromCentre(underlined(direction), 'underline')).toBeCloseTo(-horizontal, 9);
