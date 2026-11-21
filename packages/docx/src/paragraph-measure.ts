@@ -15,6 +15,7 @@ import {
   lineBelowBaselinePx,
   lineBoxHeight,
   paragraphMarkLineMetrics,
+  segmentsHaveLineGeometry,
   type DocGridCtx,
   type LineBoundary,
   type LayoutLine,
@@ -259,24 +260,25 @@ export function measureParagraph(
   };
   // `emptyMark`: the paragraph has no content at all. A mark line that only
   // carries wrap-float anchors is not an empty paragraph mark.
+  const markLineMetrics = (emptyMark: boolean) => paragraphMarkLineMetrics(
+    paragraph,
+    1,
+    grid,
+    context.hasRuby,
+    markUsesEastAsianGrid,
+    measurer.context,
+    fontFamilyClasses,
+    context.lineSpacing,
+    environment.resolvedLocalFonts,
+    environment.layoutServices?.text,
+    environment.paragraphMarkShapeInput,
+    compat.useFeLayout,
+    firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
+    emptyMark,
+  );
   const measureMarkOnly = (emptyMark: boolean): MeasuredParagraph => {
     let markTopPt = cursorPt;
-    const markMetrics = paragraphMarkLineMetrics(
-      paragraph,
-      1,
-      grid,
-      context.hasRuby,
-      markUsesEastAsianGrid,
-      measurer.context,
-      fontFamilyClasses,
-      context.lineSpacing,
-      environment.resolvedLocalFonts,
-      environment.layoutServices?.text,
-      environment.paragraphMarkShapeInput,
-      compat.useFeLayout,
-      firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
-      emptyMark,
-    );
+    const markMetrics = markLineMetrics(emptyMark);
     const markAdvancePt = markMetrics.advancePx;
     let markWrapBounds: MeasuredParagraph['markWrapBounds'];
     let markNumberingLeadingEdgePt: number | undefined;
@@ -367,23 +369,19 @@ export function measureParagraph(
     uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
     lineSpacing: context.lineSpacing,
     lineGridActive: context.lineGrid.active,
-    ...(wordAnchorHostLineMetricApplies()
-      ? { anchorHostLineMetric: Object.freeze({
-          fontSize: environment.paragraphMarkShapeInput?.fontSizePt ?? getDefaultFontSize(paragraph),
-          // WORD_EMPTY_MARK_ASCII_FACE: the mark line uses its ascii face.
-          fontFamily: environment.paragraphMarkShapeInput?.fonts.ascii ?? paragraph.defaultFontFamily ?? null,
-          fontFamilyEastAsia: null,
-          bold: (environment.paragraphMarkShapeInput?.weight ?? 400) >= 600,
-          italic: environment.paragraphMarkShapeInput?.style === 'italic',
-          ...(markUsesEastAsianGrid ? { gridEastAsian: true as const } : {}),
-        }) }
-      : {}),
+    ...(wordAnchorHostLineMetricApplies() ? { anchorHostsWithoutMetric: true as const } : {}),
     characterGridActive: context.characterGrid.active,
     paragraphRtl: context.baseRtl,
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
   if (segments.length === 0) return measureMarkOnly(true);
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: a line holding only anchors (no other
+  // emitted line geometry) takes the empty paragraph mark's own line, from the
+  // same mark metric path; its anchors stay on the line.
+  const anchorOnlyMark = wordAnchorHostLineMetricApplies() && !segmentsHaveLineGeometry(segments)
+    && segments.some((segment) => 'text' in segment && segment.anchorHostWithoutMetric)
+    ? markLineMetrics(true) : undefined;
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in
@@ -502,6 +500,19 @@ export function measureParagraph(
         || (markerFragment.physicalLineIndex !== undefined
           && line.physicalLineIndex === markerFragment.physicalLineIndex));
     for (const [lineIndex, fragment] of lines.entries()) {
+      if (anchorOnlyMark) {
+        allocations.push({
+          layout: {
+            ...fragment,
+            ascent: anchorOnlyMark.ascentPx, descent: anchorOnlyMark.descentPx,
+            visibleAscent: anchorOnlyMark.ascentPx, visibleDescent: anchorOnlyMark.descentPx,
+            intendedSingle: anchorOnlyMark.intendedSinglePx,
+            visibleIntendedSingle: anchorOnlyMark.intendedSinglePx,
+          },
+          advancePt: anchorOnlyMark.advancePx,
+        });
+        continue;
+      }
       const firstPhysicalLine = holdsPictureMarker(fragment, lineIndex);
       const originalLine = firstPhysicalLine && lineIndex !== 0
         ? {

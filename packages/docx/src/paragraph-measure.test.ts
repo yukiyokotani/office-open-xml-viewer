@@ -1831,3 +1831,85 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC host-only paragraphs', () => {
       expect(measureAdvance([host], eastAsianDocument, grid)).toBeCloseTo(measureAdvance([], eastAsianDocument, grid), 6);
     });
 });
+
+describe('WORD_ANCHOR_HOST_NO_LINE_METRIC host-only paragraphs share the empty-mark path', () => {
+  const host = { type: 'anchorHost', fontSize: 40, fontFamily: 'Small Mark', fontFamilyEastAsia: null,
+    bold: false, italic: false } as unknown as DocParagraph['runs'][number];
+  const text = createTextLayoutService({
+    fonts: createFontResolver(['Small Mark', 'Theme Mark'].map((family) => ({
+      requestedFamily: family, resolvedFamily: family, source: 'local' as const,
+    }))),
+    measurer: {
+      fingerprint: 'theme-mark-taller-than-direct-mark',
+      measure: (request) => ({
+        advancePt: request.fontSizePt * 0.5,
+        ascentPt: request.fontSizePt * (request.fontRoute.familyList.includes('Theme Mark') ? 1.6 : 0.8),
+        descentPt: request.fontSizePt * 0.2,
+      }),
+    },
+  });
+  const advance = (runs: DocParagraph['runs'], mark: Partial<ParagraphMeasurementEnvironment['paragraphMarkShapeInput'] & object>) =>
+    measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: 10, defaultFontFamily: 'Small Mark' }),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({
+        layoutServices: { text } as NonNullable<ParagraphMeasurementEnvironment['layoutServices']>,
+        paragraphMarkShapeInput: {
+          fonts: { ascii: 'Small Mark', highAnsi: 'Small Mark', eastAsia: 'Small Mark' },
+          fontSizePt: 10, weight: 400, style: 'normal', complexScript: false,
+          ...mark,
+        },
+      }),
+    ).contentEndYPt;
+  const softHyphen = { type: 'text', ...textRun('\u00AD', { fontSize: 30 }) } as DocParagraph['runs'][number];
+  it.each([
+    ['a theme ascii font over the direct one', { themeFonts: { ascii: 'Theme Mark' }, themeFontPresence: { ascii: true } }],
+    ['a bold mark', { weight: 700 }],
+    ['an italic mark', { style: 'italic' as const }],
+  ])('measures an anchor-only paragraph exactly as its empty mark with %s', (_, mark) => {
+    const empty = advance([], mark);
+    expect(advance([host], mark)).toBe(empty);
+    // A zero-width optional-hyphen marker is no line geometry.
+    expect(advance([host, softHyphen], mark)).toBe(empty);
+  });
+
+  it('takes the synthesized bold face proof of the empty mark', () => {
+    // A host whose loaded 400 face paints bold identically (synthesized-face-line-geometry.test.ts).
+    const minchoText = createTextLayoutService({
+      fonts: createFontResolver([{
+        requestedFamily: 'MS Mincho', resolvedFamily: 'private-ms-mincho-400', source: 'local',
+        resourceIdentity: 'office-local:local("MS Mincho")', weight: 400, style: 'normal',
+        coverageProbeFamily: 'private-ms-mincho-400-coverage',
+      }]),
+      measurer: {
+        fingerprint: 'synthesized-bold-mark',
+        measure: (request) => ({
+          advancePt: [...request.text].length * request.fontSizePt,
+          ascentPt: request.fontSizePt * 0.8, descentPt: request.fontSizePt * 0.2,
+        }),
+        sameGlyphRaster: () => true,
+        ownsGlyphs: () => true,
+      },
+    });
+    // MS Mincho has no bold face: the empty mark's synthesized-face geometry
+    // applies to an anchor-only paragraph too.
+    const markAdvance = (runs: DocParagraph['runs']) => measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: 14, defaultFontFamily: 'MS Mincho',
+        defaultFontFamilyEastAsia: 'MS Mincho' } as Partial<DocParagraph>),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0 }),
+      placement({ startYPt: 0 }),
+      measurer,
+      environment({
+        layoutServices: { text: minchoText } as NonNullable<ParagraphMeasurementEnvironment['layoutServices']>,
+        paragraphMarkShapeInput: {
+          fonts: { ascii: 'MS Mincho', highAnsi: 'MS Mincho', eastAsia: 'MS Mincho' },
+          fontSizePt: 14, weight: 700, style: 'normal', complexScript: false,
+        },
+      }),
+    ).contentEndYPt;
+    expect(markAdvance([])).toBeCloseTo(14 * 1.3, 8);
+    expect(markAdvance([host])).toBe(markAdvance([]));
+  });
+});
