@@ -2370,6 +2370,10 @@ function prescanBodyPageAnchors(
     line: null,
     character: null,
     pageParity: request.location.pageIndex % 2 === 0 ? ('odd' as const) : ('even' as const),
+    pageBandDistances: Object.freeze({
+      headerPt: geometry.headerDistance,
+      footerPt: geometry.footerDistance,
+    }),
   });
   const publicParagraphs = new Set<ParagraphLayoutSource>();
   const paragraphKey = (source: SourceRef) =>

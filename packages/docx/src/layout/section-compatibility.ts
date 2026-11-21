@@ -162,3 +162,15 @@ export const WORD_HEADER_FOOTER_OFF_LINE_GRID = defineCompatibilityRule({
   },
   description: 'The line pitch of a §17.6.5 docGrid (types lines, linesAndChars and snapToChars) applies to the body but not to anything in a header or footer: top-level and framed paragraphs, table cells, and the text boxes the header or footer hosts (VML and DrawingML, inline and anchored, as complete stories or compatibility text) keep the paragraph\'s own line height. Evidence: Windows Word PDF exports of A4 sections with an 18pt line pitch, 10.5pt MS Mincho text and 36pt header/footer distances. A one-line header and footer in lrTb, tbRl, btLr and tbLrV sections under a "lines" grid, and in lrTb and tbRl under linesAndChars and snapToChars grids (charSpace 0): every header glyph box started 1.5pt below the header distance and every footer glyph box ended 1.5pt above the footer distance (a 13.6pt natural line), while body lines stayed centred in 18pt grid lines. Two-paragraph header and footer items in lrTb and tbRl under all three grid types, together and one at a time: plain paragraphs, a one-cell table, an inline and an anchored VML text box and an inline and an anchored DrawingML text box all advanced 13.5 to 13.7pt per line. In the snapToChars controls header and footer glyphs also kept their natural positions and advances while the body moved onto the character grid; a character grid with a non-zero charSpace in headers and footers is outside this evidence.',
 });
+
+export const WORD_VERTICAL_UNDERLINE_OVER_SIDE = defineCompatibilityRule({
+  id: 'word-vertical-underline-over-side',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-underline-side',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'In an upright vertical section (tbRl, tbLrV; not the all-rotated btLr) a §17.3.2.40 underline lies on the physical right of the glyph column, the over side of the vertical line, for East Asian and turned Latin text alike; strikethrough stays across the column centre. Library implementation: each underline keeps its horizontal geometry and, where the line\'s paint frame turns the logical top to the physical right (the clockwise tbRl frame), is reflected across the centre of its own run\'s or tab\'s font box. The decision uses the composed paint frame (section frame with the line frame): tbRl lines and tbLrV lines, whose block-reflected line frame composes with the vertical-lr section frame to the same turn, are both reflected. Evidence: Windows Word PDF exports of tbRl sections on 36pt and 18pt line grids and a tbLrV section on a 36pt grid with 10.5pt MS Mincho single, double and thick underlines, a 21pt single underline, a Latin-only underlined run and a strikethrough: every underline lay against the right edge of its glyph column (10.5pt single 0.6pt wide from the column edge outward, 21pt single 0.2pt outside, double 0.6pt apart, thick straddling the edge), the strikethrough at the column centre. Exact offsets and widths follow the run font\'s own underline metrics and are not fitted.',
+});
