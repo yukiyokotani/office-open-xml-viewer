@@ -2144,9 +2144,13 @@ function appendRunsToSegments(
         // The placeholder keeps the allocation its resource would have: an
         // available chart reserves only wp:extent (see the chart branch), so
         // an unavailable chart must not gain effect-extent padding either.
+        // An inline placeholder reserves exactly the box its counter-turned
+        // resource would (inlineEffectExtentBox), so a vertical page frame
+        // swaps it the same way; an anchored one keeps its authored extent.
         ...inlineEffectExtentBox(
           acquiredAnchor !== undefined || run.resourceKind === 'chart' ? undefined : run.inlineEffectExtent,
           run.widthPt, run.heightPt,
+          acquiredAnchor === undefined ? environment.uprightResourceOrientation : undefined,
         ),
         anchor: acquiredAnchor !== undefined,
         anchorXPt: 0,

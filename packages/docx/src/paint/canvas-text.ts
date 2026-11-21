@@ -4,7 +4,7 @@ import {
   withVertFeature,
 } from '@silurus/ooxml-core';
 import { fillRetainedText } from './canvas-text-fill.js';
-import type { ParagraphLayout, TextBoxLayout } from '../layout/types.js';
+import type { Matrix2DData, ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintRetainedResource } from './canvas-resource.js';
@@ -17,7 +17,6 @@ import {
 } from './affine.js';
 import { canvasPaintFrame } from './deferred-paint-frame.js';
 import { applyCanvasTransform } from './canvas-transform.js';
-import { lineFrameTransform } from '../layout/line-frame.js';
 
 function validateTextSlices(placement: import('../layout/types.js').TextPlacement): void {
   const optionalGlyph = placement.optionalHyphenGlyph === true;
@@ -206,6 +205,16 @@ function paintParagraphDrawingLayout(
   context: CanvasPaintContext,
 ): void {
   paintDrawingWithOwnedTextBoxes(drawing, textBoxesForDrawing(node, drawing), context);
+}
+
+/** The retained `lineFrame` contract (layout/types.ts ParagraphLayout):
+ * a `block-reflected` line paints reflected across its own block band. */
+function lineFrameMatrix(
+  node: ParagraphLayout,
+  line: ParagraphLayout['lines'][number],
+): Matrix2DData | null {
+  if (node.lineFrame !== 'block-reflected') return null;
+  return { a: 1, b: 0, c: 0, d: -1, e: 0, f: 2 * line.bounds.yPt + line.bounds.heightPt };
 }
 
 function paintLineContents(
@@ -411,7 +420,7 @@ function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintConte
     for (const box of boxes) ctx.fillRect(box.xPt, box.yPt, box.widthPt, box.heightPt);
   }
   for (const line of node.lines) {
-    const lineFrame = lineFrameTransform(node, line);
+    const lineFrame = lineFrameMatrix(node, line);
     if (!lineFrame) {
       paintLineContents(line, context);
       continue;

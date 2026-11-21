@@ -73,4 +73,22 @@ describe('inline wp:effectExtent (ECMA-376 §20.4.2.6)', () => {
     expect(unavailableChart.effectExtent).toBeUndefined();
     expect([unavailableImage.widthPt, unavailableImage.heightPt]).toEqual([27, 51]);
   });
+
+  it.each(['upright-physical', 'upright-physical-counter-clockwise'] as const)(
+    'reserves the same counter-turned box for an unavailable inline resource in a %s section',
+    (orientation) => {
+      const environment = { uprightResourceOrientation: orientation };
+      const extent: [number, number, number, number] = [2, 3, 5, 8];
+      const available = imageSeg(image(extent), environment);
+      const unavailable = imageSeg({ type: 'unavailableDrawing', resourceKind: 'image',
+        widthPt: 20, heightPt: 40, inlineEffectExtent: extent } as unknown as DocRun, environment);
+      expect([unavailable.widthPt, unavailable.heightPt]).toEqual([available.widthPt, available.heightPt]);
+      expect(unavailable.effectExtent).toEqual(available.effectExtent);
+      const chart = imageSeg({ type: 'chart', widthPt: 20, heightPt: 40, anchor: false } as unknown as DocRun, environment);
+      const unavailableChart = imageSeg({ type: 'unavailableDrawing', resourceKind: 'chart',
+        widthPt: 20, heightPt: 40, inlineEffectExtent: extent } as unknown as DocRun, environment);
+      expect([chart.widthPt, chart.heightPt]).toEqual([40, 20]);
+      expect([unavailableChart.widthPt, unavailableChart.heightPt]).toEqual([chart.widthPt, chart.heightPt]);
+    },
+  );
 });

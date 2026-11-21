@@ -11,7 +11,8 @@ import type { LineLayout, Matrix2DData, ParagraphLayout } from './types.js';
  * across its own block band, y ↦ 2·top + height − y. Composed with the
  * vertical-lr frame this is the clockwise quarter turn of a tbRl page
  * translated onto the strip, which keeps glyphs, inline objects and their
- * decorations unmirrored.
+ * decorations unmirrored. Paint applies the same retained contract
+ * (paint/canvas-text.ts lineFrameMatrix) without importing layout.
  */
 export function lineFrameTransform(
   paragraph: Pick<ParagraphLayout, 'lineFrame'>,
