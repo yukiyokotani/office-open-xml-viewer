@@ -1781,7 +1781,7 @@ function selectCell(
     const sourceBlock = cell.blocks[blockIndex]!;
     const child = sourceBlock.layout;
     if (child.kind === 'paragraph') {
-      if (sourceBlock.structuralTrailing) {
+      if (sourceBlock.ownsNoCellFlow) {
         blocks.push(sourceBlock);
         range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
         blockIndex += 1;
@@ -1814,8 +1814,8 @@ function selectCell(
         containmentLimitPt,
       );
       if (!selected.block || !selected.range) break;
-      blocks.push({ ...selected.block, ...(sourceBlock.structuralTrailing
-        ? { structuralTrailing: true }
+      blocks.push({ ...selected.block, ...(sourceBlock.ownsNoCellFlow
+        ? { ownsNoCellFlow: true }
         : {}) });
       range.push(selected.range);
       if (selected.lineEnd < child.lines.length) {

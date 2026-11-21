@@ -169,6 +169,51 @@ it('drops the automatic before of the first text-box paragraph independent of th
   expect(normalizeDocxDocumentModel(normalized).body).toEqual(normalized.body);
 });
 
+(globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas ??= class {
+  getContext() {
+    let font = '10px serif';
+    return {
+      get font() { return font; }, set font(v: string) { font = v; },
+      letterSpacing: '0px',
+      measureText: (s: string) => {
+        const size = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
+        return { width: [...s].length * size * 0.5, fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2,
+          actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2 } as TextMetrics;
+      },
+    };
+  }
+};
+
+/** First baseline of each probe text on the page (a table cell places each
+ * child at its block offset inside the cell). */
+function pageBaselines(raw: DocxDocumentModel): Readonly<Record<string, number>> {
+  const found: Record<string, number> = {};
+  const visit = (node: unknown, deltaPt = 0): void => {
+    if (node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(child => visit(child, deltaPt)); return; }
+    const record = node as Record<string, unknown>;
+    if (record.kind === 'table-cell' && Array.isArray(record.blocks)) {
+      const cellTopPt = (record.flowBounds as { yPt: number }).yPt;
+      for (const block of record.blocks as Array<{ offsetPt: number; layout: { flowBounds: { yPt: number } } }>) {
+        visit(block.layout, deltaPt + cellTopPt + block.offsetPt - block.layout.flowBounds.yPt);
+      }
+      return;
+    }
+    if (record.kind === 'paragraph' && Array.isArray(record.lines)) {
+      for (const line of record.lines as Array<{ baselinePt: number; placements?: Array<{ kind: string; text?: string }> }>) {
+        for (const placement of line.placements ?? []) {
+          if (placement.kind === 'text' && placement.text && !(placement.text in found)) found[placement.text] = line.baselinePt + deltaPt;
+        }
+      }
+    }
+    for (const value of Object.values(record)) visit(value, deltaPt);
+  };
+  const layout = layoutDocument(raw);
+  expect(layout.pages).toHaveLength(1);
+  visit(layout.pages[0]);
+  return found;
+}
+
 describe('Word fixed automatic-spacing compatibility: additive paragraph gaps', () => {
   // Mirrors the Windows Word controls of WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP:
   // exact 12pt lines and stored before/after 3/8pt, so each baseline step is
@@ -182,26 +227,14 @@ describe('Word fixed automatic-spacing compatibility: additive paragraph gaps', 
   const frame = '<w:framePr w:w="2000" w:hAnchor="page" w:vAnchor="page" w:x="5000" w:y="9000"/>';
   const box = (content: string) => `<w:p><w:r><w:pict><v:shape id="box" type="#_x0000_t202" style="position:absolute;margin-left:300pt;margin-top:500pt;width:100pt;height:100pt"><v:textbox inset="0,0,0,0"><w:txbxContent>${content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
 
-  (globalThis as unknown as { OffscreenCanvas: unknown }).OffscreenCanvas ??= class {
-    getContext() {
-      let font = '10px serif';
-      return {
-        get font() { return font; }, set font(v: string) { font = v; },
-        letterSpacing: '0px',
-        measureText: (s: string) => {
-          const size = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
-          return { width: [...s].length * size * 0.5, fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2,
-            actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2 } as TextMetrics;
-        },
-      };
-    }
-  };
+  const noFlags = 'w:beforeAutospacing="0" w:afterAutospacing="0"';
+  const contextualPair = probe('KA', `w:before="0" w:after="60" ${noFlags}`, '<w:pStyle w:val="Auto"/><w:contextualSpacing/>')
+    + probe('KB', `w:before="160" w:after="0" ${noFlags}`, '<w:pStyle w:val="Auto"/>');
 
-  /** First baseline of each probe text in its own container's coordinates
-   * (a table cell places each child at its block offset). */
   function baselines(fixed: boolean): Readonly<Record<string, number>> {
-    const raw = parse(
+    return pageBaselines(parse(
       plain('R0') + auto('A1') + auto('A2') + stored('S3') + stored('S4') + plain('R5')
+      + contextualPair + plain('R6')
       + table(auto('CA') + auto('CB') + stored('CC'))
       + box(auto('TA') + auto('TB'))
       + auto('FA', frame) + auto('FB', frame) + plain('END'),
@@ -210,31 +243,7 @@ describe('Word fixed automatic-spacing compatibility: additive paragraph gaps', 
         sectPr: '<w:headerReference w:type="default" r:id="header"/>',
         parts: new Map([['header', ['header', `<w:hdr xmlns:w="${W}">${auto('HA')}${auto('HB')}</w:hdr>`]]]),
       },
-    );
-    const found: Record<string, number> = {};
-    const visit = (node: unknown, deltaPt = 0): void => {
-      if (node === null || typeof node !== 'object') return;
-      if (Array.isArray(node)) { node.forEach(child => visit(child, deltaPt)); return; }
-      const record = node as Record<string, unknown>;
-      if (record.kind === 'table-cell' && Array.isArray(record.blocks)) {
-        for (const block of record.blocks as Array<{ offsetPt: number; layout: { flowBounds: { yPt: number } } }>) {
-          visit(block.layout, block.offsetPt - block.layout.flowBounds.yPt);
-        }
-        return;
-      }
-      if (record.kind === 'paragraph' && Array.isArray(record.lines)) {
-        for (const line of record.lines as Array<{ baselinePt: number; placements?: Array<{ kind: string; text?: string }> }>) {
-          for (const placement of line.placements ?? []) {
-            if (placement.kind === 'text' && placement.text && !(placement.text in found)) found[placement.text] = line.baselinePt + deltaPt;
-          }
-        }
-      }
-      for (const value of Object.values(record)) visit(value, deltaPt);
-    };
-    const layout = layoutDocument(raw);
-    expect(layout.pages).toHaveLength(1);
-    visit(layout.pages[0]);
-    return found;
+    ));
   }
 
   const steps = (found: Readonly<Record<string, number>>, ...texts: string[]) =>
@@ -244,6 +253,8 @@ describe('Word fixed automatic-spacing compatibility: additive paragraph gaps', 
     const fixed = baselines(true);
     // Body: automatic and stored neighbours both add 8 + 3; a zero side adds nothing.
     expect(steps(fixed, 'R0', 'A1', 'A2', 'S3', 'S4', 'R5')).toEqual([15, 23, 23, 23, 20]);
+    // An earlier-only contextualSpacing toggle drops the 3pt after and keeps the whole 8pt before.
+    expect(steps(fixed, 'KA', 'KB')).toEqual([20]);
     for (const container of [['CA', 'CB', 'CC'], ['TA', 'TB'], ['HA', 'HB'], ['FA', 'FB']]) {
       expect(steps(fixed, ...container), container.join()).toEqual(container.slice(1).map(() => 23));
     }
@@ -252,8 +263,41 @@ describe('Word fixed automatic-spacing compatibility: additive paragraph gaps', 
   it('keeps the §17.3.1.33 maximum without the setting', () => {
     const html = baselines(false);
     expect(steps(html, 'R0', 'A1', 'A2', 'S3', 'S4', 'R5')).toEqual([26, 26, 26, 20, 20]);
+    // The maximum fold leaves only what the 8pt before exceeds the dropped 3pt after.
+    expect(steps(html, 'KA', 'KB')).toEqual([17]);
     for (const container of [['CA', 'CB', 'CC'], ['TA', 'TB'], ['HA', 'HB'], ['FA', 'FB']]) {
       expect(steps(html, ...container), container.join()).toEqual(container.slice(1).map(() => 26));
     }
+  });
+});
+
+describe('Word hidden cell paragraphs (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT)', () => {
+  const lines = 'w:line="240" w:lineRule="exact"';
+  const probe = (text: string, spacing: string, mark = '') =>
+    `<w:p><w:pPr><w:spacing ${spacing} ${lines}/>${mark}</w:pPr>${text ? `<w:r><w:t>${text}</w:t></w:r>` : ''}</w:p>`;
+  const plain = (text: string) => probe(text, 'w:before="0" w:after="0"');
+  const auto = (text: string) => probe(text, 'w:before="60" w:after="160" w:beforeAutospacing="1" w:afterAutospacing="1"');
+  const vanished = (spacing = 'w:before="100" w:after="220"') => probe('', spacing, '<w:rPr><w:vanish/></w:rPr>');
+  const tc = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+  const grid = '<w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>';
+  const nested = (text: string) => `<w:tbl>${grid}<w:tr>${tc(plain(text))}</w:tr></w:tbl>`;
+  // Each variant row sits between plain one-line reference rows.
+  const rows = [
+    vanished() + vanished() + auto('X1'), // leading: dropped with its own spacing
+    auto('X3a') + vanished() + auto('X3b'), // between: dropped, the neighbours meet
+    vanished() + nested('X5n') + plain('X5z'), // before a nested table: dropped
+    auto('X7a') + vanished('w:before="0" w:after="0"'), // the cell's last paragraph: kept
+  ];
+  const body = `<w:tbl>${grid}<w:tr>${tc(plain('XR0'))}</w:tr>${rows.map((content, index) =>
+    `<w:tr>${tc(content)}</w:tr><w:tr>${tc(plain(`XR${index + 1}`))}</w:tr>`).join('')}</w:tbl>${plain('END')}`;
+  const order = ['XR0', 'X1', 'XR1', 'X3a', 'X3b', 'XR2', 'X5n', 'X5z', 'XR3', 'X7a', 'XR4'];
+
+  it.each([
+    [false, [12, 12, 12, 26, 12, 12, 12, 12, 12, 38]],
+    [true, [15, 20, 15, 23, 20, 12, 12, 12, 15, 32]],
+  ])('lays out no block for a non-final vanished inkless cell paragraph (fixed=%s)', (fixed, expected) => {
+    const found = pageBaselines(parse(body, { fixed }));
+    expect(order.slice(1).map((text, index) => Math.round((found[text]! - found[order[index]!]!) * 100) / 100))
+      .toEqual(expected);
   });
 });

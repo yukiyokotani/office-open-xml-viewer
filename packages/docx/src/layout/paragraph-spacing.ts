@@ -38,7 +38,7 @@ export function paragraphGapFoldOf(
  * contextualSpacing side (same style on both paragraphs) removes its own
  * contribution (WORD_CONTEXTUAL_SPACING_PER_SIDE). The additive fold
  * (WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP) keeps the whole space before;
- * its contextualSpacing cases follow this model but were not measured.
+ * its contextualSpacing cases were measured to follow the same model.
  */
 export function paragraphGapPt(
   previous: ParagraphSpacingParticipant | null,

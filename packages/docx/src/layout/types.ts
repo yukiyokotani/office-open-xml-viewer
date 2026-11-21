@@ -1422,8 +1422,9 @@ export interface TableCellBlockInput {
   readonly widowControl?: boolean;
   /** True when destination-page context can change the acquired child geometry. */
   readonly pageDependent?: boolean;
-  /** The required empty paragraph after a nested table owns no row-height ink. */
-  readonly structuralTrailing?: boolean;
+  /** The paragraph owns no cell flow: no row-height ink, no spacing and no
+   * paragraph neighbourhood (table-cell-blocks.ts cellParagraphOwnsNoFlow). */
+  readonly ownsNoCellFlow?: boolean;
 }
 
 export type TablePreferredWidthConstraint = Readonly<{

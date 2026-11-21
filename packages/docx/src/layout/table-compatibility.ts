@@ -522,6 +522,18 @@ export const WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE = defineCompatibilityRule({
   description: 'Apply the supported first-row table-property exception facts at table scope. An authored first-row tblPrEx/tblW shadows the body width, including auto/nil/zero clearing it; width ceiling selection and column fitting share this effective preference.',
 });
 
+export const WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT = defineCompatibilityRule({
+  id: 'word-hidden-cell-paragraph-joins-next',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'hidden-cell-paragraph-controls',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A table-cell paragraph whose paragraph mark is vanished (ECMA-376 §17.3.1.29 mark run properties, §17.3.2.41 vanish) and which holds no ink lays out nothing in the cell: no line, no stored or automatic spacing, and it is no neighbour of the blocks around it, as in body flow. The cell\'s last paragraph carries the end-of-cell mark and is kept as an ordinary line even when vanished. ECMA-376 does not describe the join; this is observed Word behaviour. Evidence: Windows Word 16.0.20527 PDFs of synthetic cells (Arial, exact 12pt lines, stored before/after 3/8pt, compatibility mode 15) with doNotUseHTMLParagraphAutoSpacing off and on, one variant per row between plain reference rows. Dropped: one and three leading vanished empty paragraphs before an automatic paragraph (it then opens the cell: its automatic before is dropped without the setting, its stored 3pt kept with it); a leading one whose own stored before/after is 5/11pt (its spacing is dropped too); one between two automatic paragraphs (gap 14pt without the setting, 8 + 3pt with it) and between two stored 3/8pt paragraphs (8pt, 11pt); one between an automatic paragraph and a nested table (the paragraph keeps its after before the table); and a leading one before a nested table (the table opens the cell). Kept as a 12pt line: a trailing vanished empty paragraph (the paragraph before it keeps its after) and the sole vanished paragraph of a cell; control 052 of the automatic-spacing matrix agrees. Not covered by this rule: a paragraph with visible text and a vanished mark, which Word joins onto the next paragraph\'s line; which paragraph\'s properties govern that joined line is not measured, so it keeps its own line here, as in body flow.',
+});
+
 export const WORD_TRAILING_STRUCTURAL_CELL_MARKER = defineCompatibilityRule({
   id: 'word-trailing-structural-cell-marker',
   evidence: {

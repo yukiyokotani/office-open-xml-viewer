@@ -94,10 +94,10 @@ function resolveCellFlow(
       const gapPt = previousParagraph
         ? paragraphGapPt(previousParagraph, layout, previousAfterPt, beforePt, paragraphGapFoldOf(layout))
         : beforePt;
-      const advancePt = block.structuralTrailing ? 0 : paragraphBlockAdvance(layout);
-      const offsetPt = cursorPt + (block.structuralTrailing ? 0 : gapPt);
+      const advancePt = block.ownsNoCellFlow ? 0 : paragraphBlockAdvance(layout);
+      const offsetPt = cursorPt + (block.ownsNoCellFlow ? 0 : gapPt);
       placements.push({ layout, offsetPt, advancePt });
-      if (!block.structuralTrailing) {
+      if (!block.ownsNoCellFlow) {
         cursorPt = offsetPt + advancePt;
         firstInkTopPt ??= offsetPt;
         lastInkBottomPt = Math.max(lastInkBottomPt, cursorPt);

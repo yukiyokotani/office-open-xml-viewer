@@ -8,6 +8,8 @@ import {
 } from './paragraph-border-adjacency.js';
 import type { ParagraphLayoutSource } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
+import { isSwallowedHiddenParagraph } from './paragraph-visibility.js';
+import { WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT } from './table-compatibility.js';
 
 type TableCellLayoutSource = TableLayoutSource['rows'][number]['cells'][number];
 
@@ -73,6 +75,36 @@ export function isStructuralTrailingParagraph(
   if (current?.type !== 'paragraph') return false;
   if (!hideMark && (index === 0 || content[index - 1]?.type !== 'table')) return false;
   return current.runs.length === 0;
+}
+
+/**
+ * Whether a cell paragraph is joined into the next block by its vanished mark
+ * (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT): a vanished inkless paragraph other
+ * than the cell's last, which carries the end-of-cell mark.
+ */
+export function isSwallowedHiddenCellParagraph(
+  content: TableCellLayoutSource['content'],
+  index: number,
+): boolean {
+  void WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT;
+  const current = content[index];
+  return index < content.length - 1 && current?.type === 'paragraph'
+    && isSwallowedHiddenParagraph(current);
+}
+
+/**
+ * Whether a cell paragraph owns no cell flow: it adds no row height, no
+ * spacing, and is no paragraph neighbour of the blocks around it. That holds
+ * for a structural trailing paragraph (isStructuralTrailingParagraph) and for
+ * a swallowed hidden paragraph (isSwallowedHiddenCellParagraph).
+ */
+export function cellParagraphOwnsNoFlow(
+  content: TableCellLayoutSource['content'],
+  index: number,
+  hideMark = false,
+): boolean {
+  return isStructuralTrailingParagraph(content, index, hideMark)
+    || isSwallowedHiddenCellParagraph(content, index);
 }
 
 /**

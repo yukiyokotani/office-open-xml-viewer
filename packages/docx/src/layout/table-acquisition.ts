@@ -7,7 +7,7 @@ import type { ParagraphLayoutSource } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
 import {
   acquireTableCellBlocks,
-  isStructuralTrailingParagraph,
+  cellParagraphOwnsNoFlow,
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
@@ -848,12 +848,12 @@ export function acquireRetainedTable<State>(
             ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
               ? { pageDependent: true }
               : {}),
-            ...(isStructuralTrailingParagraph(
+            ...(cellParagraphOwnsNoFlow(
               cell.content,
               sourceBlockIndex,
               cell.hideMark === true,
             )
-              ? { structuralTrailing: true }
+              ? { ownsNoCellFlow: true }
               : {}),
           }];
         });
