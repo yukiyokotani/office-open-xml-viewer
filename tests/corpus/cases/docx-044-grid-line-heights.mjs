@@ -41,9 +41,9 @@ const parts = () => {
       id: 'docx-044',
       title: 'Line heights on a document grid',
       verify: [
-        'Verify: in A each line starts on an 18 pt rule; marks taller',
-        'than 18 pt take two pitches. B, off the grid, sets each line',
-        'at its font height.',
+        'Verify: in A each line starts on an 18 pt rule; marks',
+        'taller than 18 pt take two pitches. B, off the grid,',
+        'sets each line at its font height.',
       ],
     }),
     { kind: 'section', type: 'continuous', docGrid: `<w:docGrid w:type="lines" w:linePitch="${PITCH}"/>` },

@@ -66,9 +66,9 @@ export default {
       id: 'docx-038',
       title: 'Form characters and alignment',
       verify: [
-        'Verify: fitted labels fill their widths; B labels and their',
-        'continuations line up after the squares; C columns align',
-        'with no extra lines; D tabbed names start at column 2.',
+        'Verify: fitted labels fill their widths; B labels and',
+        'continuations line up after the squares; C columns',
+        'align with no extra lines; D names start at column 2.',
       ],
     }),
     caption('A. Fit text: 2 characters to 4, 12 to 8 (two runs, one id); w:w', { at: DOCX.rowLine(2), before: 0 }),

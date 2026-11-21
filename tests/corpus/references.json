@@ -275,13 +275,105 @@
     "source": "82d8b534bac4e1f2994d0e883904d50417856c3952da15e5cad32a4fdb4df10d",
     "pdf": "ab3d93ed014dfc7803ce30bd4456d4593a54bbb44cef5c0a3dfec00dc732bb5a"
   },
+  "docx-035-table-pagination.win.pdf": {
+    "source": "82d8b534bac4e1f2994d0e883904d50417856c3952da15e5cad32a4fdb4df10d",
+    "pdf": "f32d0eea2a67c270a9afa26b2af0d47fa9291eb06d315c79038098e99361ed0f"
+  },
   "docx-036-japanese-punctuation.mac.pdf": {
     "source": "64b1579fcb05b910cc2b6d4562917e027f4dcc86ded3248eeaff082d2b528de2",
     "pdf": "0b1f8ff756df0d0b6806c4f2e0c815ec3399dc8e2f4405178db0ca1510d28742"
   },
+  "docx-036-japanese-punctuation.win.pdf": {
+    "source": "64b1579fcb05b910cc2b6d4562917e027f4dcc86ded3248eeaff082d2b528de2",
+    "pdf": "ad22664a7ba3704bf99fe59ea9b90ad355b6f07141c4cee9d715624d137ce17a"
+  },
   "docx-037-run-decoration.mac.pdf": {
     "source": "56b8f4231607cb2b6c57ea82143e1a7dca582956eb130241ad2d5d072a8d8824",
     "pdf": "fb024ba999a26666bee42fe47492e993a713986d06b6e6c2a1ed5cf41d726d02"
+  },
+  "docx-037-run-decoration.win.pdf": {
+    "source": "56b8f4231607cb2b6c57ea82143e1a7dca582956eb130241ad2d5d072a8d8824",
+    "pdf": "954d576e607e683a33cb07b621f13d0d77a8f1eb4f7b208f1c7c4ddc0b0daa9e"
+  },
+  "docx-038-form-characters.mac.pdf": {
+    "source": "acbe4ba59f988be66df239f8b8385bd95e85f026a4fc1b1837e484f8ea810c3a",
+    "pdf": "d725421bee460a4a77eb77f9947b5fdccedbf7f6072749ac5990896141fa42fd"
+  },
+  "docx-038-form-characters.win.pdf": {
+    "source": "acbe4ba59f988be66df239f8b8385bd95e85f026a4fc1b1837e484f8ea810c3a",
+    "pdf": "3e5b871b1902bf3e4dbf27d95c7b38bc6cdae2841ac63d78b3f1e08d2c8f36c9"
+  },
+  "docx-039-indent-resolution.mac.pdf": {
+    "source": "7ccfa6dc44e24cf67d8a0fb26f1fe40727dfcbec96222d29e9a7c300e66371e2",
+    "pdf": "cd841a44e5d6c5733caf58b6bd28909e89aef70d7a02a36832221ef9fe401129"
+  },
+  "docx-039-indent-resolution.win.pdf": {
+    "source": "7ccfa6dc44e24cf67d8a0fb26f1fe40727dfcbec96222d29e9a7c300e66371e2",
+    "pdf": "035dccb8ec1ec7d0c535dfb609104bc163e5cb031eff1ba517d1d59f17e8cf99"
+  },
+  "docx-040-border-conflicts.mac.pdf": {
+    "source": "ff69d3310dee8c728a4aa22fc3cc18d65baef1c5eb9c5ee303accf421ff5b816",
+    "pdf": "543279ef8651da09faecb8456e7a4697d9197d01ef76890241001b62b6b2855e"
+  },
+  "docx-040-border-conflicts.win.pdf": {
+    "source": "ff69d3310dee8c728a4aa22fc3cc18d65baef1c5eb9c5ee303accf421ff5b816",
+    "pdf": "9c3db743286d893a9e7de1b5530ab663bc4d0a76296791d085096719c3843555"
+  },
+  "docx-041-layout-tables.mac.pdf": {
+    "source": "0d1db4236a453d7412a792907311f33e8b03fe128879df7593f6f4094a5a3ae3",
+    "pdf": "9c14c7b862d4f0d44bdec9d4f63a49a3f16512de2cbdda614e6b698554445c8f"
+  },
+  "docx-041-layout-tables.win.pdf": {
+    "source": "0d1db4236a453d7412a792907311f33e8b03fe128879df7593f6f4094a5a3ae3",
+    "pdf": "b905b3894d4bd69ccbfb01a3d6fa076a24748f27985aef2abe86d41da1f5f209"
+  },
+  "docx-042-shapes-callouts.mac.pdf": {
+    "source": "bf20d3e7fd342ae57c501410fc960b1668b6173dcb074b04425bc06441066fdd",
+    "pdf": "82826376a720146d4560eaf7ba6d45c76a9f0b4902d1fc070fe19cb2ec7c70fd"
+  },
+  "docx-042-shapes-callouts.win.pdf": {
+    "source": "bf20d3e7fd342ae57c501410fc960b1668b6173dcb074b04425bc06441066fdd",
+    "pdf": "71817f6dc9f17998870be3c5393bff2031c364b91617d5fafc90fe1495fdfa4c"
+  },
+  "docx-043-floating-placement.mac.pdf": {
+    "source": "3827da5023ce44d4f722db3b97ffc6a34c152914bc46c8ccc4abd6d2db784ee6",
+    "pdf": "f659c508e959d883d4bd752884824557c4a065a478cebee9207c5e9d5a8213cd"
+  },
+  "docx-043-floating-placement.win.pdf": {
+    "source": "3827da5023ce44d4f722db3b97ffc6a34c152914bc46c8ccc4abd6d2db784ee6",
+    "pdf": "31895124394f5624569fa6ee1f6f2d0403ca880af46fb017662384a61ccdd3d4"
+  },
+  "docx-044-grid-line-heights.mac.pdf": {
+    "source": "d3482a8fd0bcbd5a53e54b4295442021e4c34b8509a576053f7ff2acd5d22d82",
+    "pdf": "067d3844bb2669b1c2f9ccd23bbba77d158aa9bc507662f482d103d3803ea167"
+  },
+  "docx-044-grid-line-heights.win.pdf": {
+    "source": "d3482a8fd0bcbd5a53e54b4295442021e4c34b8509a576053f7ff2acd5d22d82",
+    "pdf": "ac6b19a69bf46edbbcdb47b93753465f00492f8522819d7fe18674f4bedfae9b"
+  },
+  "docx-045-rtl-document.mac.pdf": {
+    "source": "dcb0fc8b4919860019f04b462b274d4f302765ec6c60dbce89cc7c51e20cce4a",
+    "pdf": "fd9125b131f45893ac9b5693be0a7d500a0cab6166ed67d01b656c699ddb9613"
+  },
+  "docx-045-rtl-document.win.pdf": {
+    "source": "dcb0fc8b4919860019f04b462b274d4f302765ec6c60dbce89cc7c51e20cce4a",
+    "pdf": "646b5b06a9a84410ceda1302969ebb9a76f26d2e0e4fd29427686ee25b10e489"
+  },
+  "docx-046-lists-contents-dropcap.mac.pdf": {
+    "source": "a586cf87fb3863834f97d4fe89dda0dfd6e8a0996f7986123e028d61bea7f35e",
+    "pdf": "d7529442b73178f5d84c9e4f663dbd905db2a58a410bd6baac8db9878f49d1fc"
+  },
+  "docx-046-lists-contents-dropcap.win.pdf": {
+    "source": "a586cf87fb3863834f97d4fe89dda0dfd6e8a0996f7986123e028d61bea7f35e",
+    "pdf": "9bc6422cd7d9c825a91d14afef18bd3f3d130827bfb5a747b687c5ce8ca381dd"
+  },
+  "docx-047-background-pictures.mac.pdf": {
+    "source": "72589257ae2e5edc3f4d87251939a1babc9c37b2378dbd05d716fcba77dc2163",
+    "pdf": "7fe87786d889afd0ee7b44a067eccdd708e8f583e9765ec5c249f3472df63828"
+  },
+  "docx-047-background-pictures.win.pdf": {
+    "source": "72589257ae2e5edc3f4d87251939a1babc9c37b2378dbd05d716fcba77dc2163",
+    "pdf": "1cd666827d8fc5a43997af450c504fd680ba38fbe8e3ad8f551468f4f133b0d2"
   },
   "pptx-001-paragraph-levels.mac.pdf": {
     "source": "9a98a374282cfc4e5c9246e36287f9f8974ade19652f0e33a066c0786c77df7d",

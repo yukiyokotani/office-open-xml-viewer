@@ -79,8 +79,8 @@ export default {
       id: 'docx-039',
       title: 'Indent resolution',
       verify: [
-        'Verify: A numbers start at the margin, the body follows them',
-        'and second lines indent; B ignores the 22-inch sentinel;',
+        'Verify: A numbers start at the margin, the body and',
+        'second lines indent; B ignores the 22-inch sentinel;',
         'C rows show which layer sets the indent.',
       ],
     }),

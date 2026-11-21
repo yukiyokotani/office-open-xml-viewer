@@ -97,6 +97,25 @@ test('the package checker rejects malformed XML', () => {
 // Grid discipline: every length that places text or an object comes from
 // lib/grid.mjs. Checked mechanically so a new case cannot slip in an ad-hoc
 // offset. Intentional exceptions are listed with their reason.
+// DrawingML coordinates are integers (ST_Coordinate, ST_PositionOffset);
+// Word refuses to open a document with a fractional one, so a length
+// divided off the grid must be rounded before it is written.
+test('DrawingML offsets and extents are integers', () => {
+  const INT = /^-?\d+$/;
+  const problems = [];
+  for (const c of cases) {
+    const zip = readZip(buildCase(c));
+    for (const name of zip.names.filter((n) => n.endsWith('.xml'))) {
+      const xml = zip.read(name).toString('utf8');
+      for (const [, v] of xml.matchAll(/<wp:posOffset>([^<]*)</g)) if (!INT.test(v)) problems.push(`${c.id} ${name}: posOffset ${v}`);
+      for (const [, tag, attrs] of xml.matchAll(/<(wp:extent|a:off|a:ext|a:chOff|a:chExt)\s([^>]*)>/g)) {
+        for (const [, k, v] of attrs.matchAll(/\b(cx|cy|x|y)="([^"]*)"/g)) if (!INT.test(v)) problems.push(`${c.id} ${name}: ${tag}@${k} ${v}`);
+      }
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+
 const WORD_CHARS_SENTINEL = 31680;
 
 test('positions and lengths lie on the grid', async () => {

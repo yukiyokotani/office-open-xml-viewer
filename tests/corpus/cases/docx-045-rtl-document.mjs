@@ -69,9 +69,9 @@ export default {
       id: 'docx-045',
       title: 'Right-to-left document',
       verify: [
-        'Verify: RTL lines start at the right; the English word and',
-        'numbers keep their order; list markers and the first table',
-        'column are on the right; leaders reach the page numbers.',
+        'Verify: RTL lines start at the right; the English word',
+        'and numbers keep their order; list markers and the',
+        'first column are on the right; leaders reach numbers.',
       ],
     }),
     caption('A. Mixed text, digits and a date in an RTL paragraph', { at: DOCX.rowLine(2), before: 0 }),

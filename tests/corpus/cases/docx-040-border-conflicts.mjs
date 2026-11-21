@@ -84,9 +84,9 @@ export default {
       id: 'docx-040',
       title: 'Table border conflicts',
       verify: [
-        'Verify: on each edge between the rows, every segment shows',
-        'the thick accent, the thin black insideH or no line as Word',
-        'resolves the two cells and the table; compare with the PDF.',
+        'Verify: each edge between the rows shows the thick',
+        'accent, the thin black insideH or no line, as Word',
+        'resolves the cells and the table; see the PDF.',
       ],
     }),
     ...blocks,

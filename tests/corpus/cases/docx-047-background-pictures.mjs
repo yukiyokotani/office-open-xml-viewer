@@ -59,8 +59,8 @@ export default {
         id: 'docx-047',
         title: 'Page background and pictures',
         verify: [
-          'Verify: the page is the accent to every edge with a black',
-          'band at the top and the foot; C, drawn from VML, and D,',
+          'Verify: the page is the accent to every edge, with a',
+          'black band at top and foot; C, drawn from VML, and D,',
           'a TIFF, show a framed square and a framed bar.',
         ],
       }),

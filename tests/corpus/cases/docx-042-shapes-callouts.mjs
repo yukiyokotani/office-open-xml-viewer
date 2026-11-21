@@ -64,7 +64,8 @@ const parts = () => {
     shape({ x: colStart(4) + line(3), y: 0, cx: line(2), cy: line(2), prst: 'mathMinus', fillColor: COLOR.ink, outline: false }),
   ];
   const ticks = [-2, -1, 0, 1, 2].flatMap((v, i) => {
-    const x = (i * DOCX.LIVE_W) / 4;
+    // Whole twips: a fractional DrawingML offset makes the file unreadable.
+    const x = Math.round((i * DOCX.LIVE_W) / 4);
     return [
       shape({ x, y: line(1), cx: 0, cy: line(1), prst: 'line' }),
       shape({ x: x - line(1), y: line(2), cx: line(2), cy: line(1), prst: 'rect', outline: false, text: `<w:p><w:pPr><w:jc w:val="center"/></w:pPr>${r(String(v))}</w:p>` }),
@@ -82,16 +83,16 @@ const parts = () => {
     + '<m:r><m:t>=</m:t></m:r><m:sSub><m:e><m:r><m:t>A</m:t></m:r></m:e><m:sub><m:r><m:t>n</m:t></m:r></m:sub></m:sSub></m:oMath></m:oMathPara>';
   const RUBY = `<w:p><w:r><w:ruby><w:rubyPr><w:rubyAlign w:val="distributeSpace"/><w:hps w:val="9"/><w:hpsRaise w:val="16"/><w:hpsBaseText w:val="18"/><w:lid w:val="ja-JP"/></w:rubyPr>`
     + `<w:rt><w:r><w:rPr>${JA}<w:sz w:val="9"/></w:rPr><w:t>ようし</w:t></w:r></w:rt><w:rubyBase><w:r><w:rPr>${JA}</w:rPr><w:t>用紙</w:t></w:r></w:rubyBase></w:ruby></w:r>${r('の面積', JA)}</w:p>`;
-  const D = [shape({ x: 0, y: 0, cx: span(1, 2), cy: line(5), prst: 'rect', text: `${p(r('Area of An in m²:'))}${MATH}${RUBY}` })];
+  const D = [shape({ x: 0, y: 0, cx: span(1, 2), cy: line(5), prst: 'rect', text: `${p(r('Area of An in m²:'))}${p(MATH)}${RUBY}` })];
 
   return docxPackage([
     ...header({
       id: 'docx-042',
       title: 'Shapes, callouts and stacking',
       verify: [
-        'Verify: A leaders reach far outside their boxes; B connectors',
-        'join the boxes; C squares stack top, middle, back against',
-        'document order; D shows the equation and ruby in the box.',
+        'Verify: A leaders reach outside their boxes; B lines',
+        'join the boxes; C squares stack top, middle, back',
+        'against document order; D shows equation and ruby.',
       ],
     }),
     caption('A. Callouts with leaders outside the box', { at: DOCX.rowLine(2), before: 0 }),
@@ -122,7 +123,7 @@ export default {
     'word/document.xml|a:prstGeom@prst=mathMinus',
     'word/document.xml|wps:wsp>wps:cNvCnPr',
     'word/document.xml|wp:anchor@relativeHeight',
-    'word/document.xml|w:txbxContent>m:oMathPara',
+    'word/document.xml|w:p>m:oMathPara',
     'word/document.xml|w:r>w:ruby',
   ],
   parts,

@@ -73,9 +73,9 @@ const parts = () => {
       id: 'docx-043',
       title: 'Floating placement',
       verify: [
-        'Verify: A flow around each case as Word does; B square sits',
-        'in the cell, top right; C box sits above its paragraph;',
-        'D object follows its offset, the caption the column centre.',
+        'Verify: A text flows around each case as in Word; B',
+        'square sits in the cell, top right; C box is above its',
+        'paragraph; D object at its offset, caption centred.',
       ],
     }),
     caption('A. Wrapping, one parameter at a time', { at: DOCX.rowLine(2), before: 0 }),
