@@ -257,17 +257,18 @@ describe('vertical-section margin-relative drawings resolve on the physical marg
     close(trailing?.yPt, PAGE_H - ASYMMETRIC.bottom - 50);
   });
 
-  it.each([null, 'bottomToTop'] as const)(
-    'inverts the logical section frame exactly (section flow %s)',
-    (sectionFlow) => {
-      // A bottomToTop section flow is only produced from a private wire, so it
-      // is pinned at the frame boundary rather than through parsed XML.
+  it.each(['vertical-rl', 'vertical-lr', 'sideways-lr'] as const)(
+    'inverts the logical section frame exactly (%s)',
+    (writingMode) => {
+      // sideways-lr (a bottomToTop section flow) is only produced from a
+      // private wire, so it is pinned at the frame boundary rather than
+      // through parsed XML.
       const physical: SectionGeom = {
         pageWidth: PAGE_W, pageHeight: PAGE_H,
         marginLeft: 40, marginRight: 90, marginTop: 60, marginBottom: 80,
         headerDistance: 0, footerDistance: 0,
       };
-      const logical = logicalSectionGeometry(physical, sectionFlow);
+      const logical = logicalSectionGeometry(physical, writingMode);
       const frames = uprightPhysicalPageFrames({
         page: { xPt: 0, yPt: 0, widthPt: logical.pageWidth, heightPt: logical.pageHeight },
         margin: {
@@ -276,7 +277,7 @@ describe('vertical-section margin-relative drawings resolve on the physical marg
           widthPt: logical.pageWidth - logical.marginLeft - logical.marginRight,
           heightPt: logical.pageHeight - logical.marginTop - logical.marginBottom,
         },
-      }, sectionFlow);
+      }, writingMode);
       expect(frames.page).toEqual({ xPt: 0, yPt: 0, widthPt: PAGE_W, heightPt: PAGE_H });
       close(frames.margin?.xPt, 40);
       close(frames.margin?.yPt, 60);
@@ -382,10 +383,9 @@ describe('vertical-section flow-relative anchor frames resolve on the physical p
 
   // Word (vc06 control): tbLrV lines progress rightward from the physical
   // left margin, so P10 is the strip [230, 248]; column 0/+50 and character 0
-  // land at x = 230/280/230. Expected to fail until the tbLrV body-text
-  // margin mapping is fixed (PR #2316): the current logical frame starts the
-  // lines at the physical right margin value (36 pt), giving 216/266/216.
-  it.fails('places tbLrV flow anchors where Word does (needs PR #2316)', () => {
+  // land at x = 230/280/230, paragraph positionV at y = 90 and line positionV,
+  // after one 10.5 pt character, at y = 100.5.
+  it('places tbLrV flow anchors where Word does', () => {
     const p10Start = FLOW_MARGINS.left + 10 * 18;
     const boxes = physicalDrawings(flowDocx('tbLrV', 10, ['あい', 0, 1, 2, 3, 4], [
       flowShape(position('H', 'column', 0), position('V', 'margin', 100)),

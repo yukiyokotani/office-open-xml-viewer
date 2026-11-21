@@ -162,21 +162,19 @@ export function physicalSectionGeometry(
  * `word-vertical-section-physical-drawing-layer` positionH/positionV of a
  * vertical section resolve on the upright physical page, while retained body
  * acquisition holds the page box and margins in the section's logical frame.
- * The physical margins are recovered with {@link physicalSectionGeometry}, the
- * exact inverse of the {@link logicalSectionGeometry} mapping that produced
- * the logical frame, for every vertical direction (the clockwise edge mapping
- * of tbRl/tbRlV/tbLrV/btLr, and the counter-clockwise one of a bottomToTop
- * section flow). The paint matrix of a direction is not that inverse in
- * general: tbLrV paints through the vertical-lr reflection, which would put
- * the physical right margin on the left. The derived left/right/top/bottom
- * and inside/outside margin edges follow from these two frames.
+ * The physical margins are recovered with {@link physicalSectionGeometry} for
+ * the section's writing mode, the exact inverse of the
+ * {@link logicalSectionGeometry} mapping that produced the logical frame, for
+ * every vertical direction (vertical-rl, vertical-lr and the sideways-lr of a
+ * bottomToTop section flow). The derived left/right/top/bottom and
+ * inside/outside margin edges follow from these two frames.
  *
  * Column, character, paragraph and line frames are built from the flow
  * geometry by `verticalSectionReferenceFrames` (paragraph.ts).
  */
 export function uprightPhysicalPageFrames<
   T extends { readonly page: AnchorFrameRect | null; readonly margin: AnchorFrameRect | null },
->(frames: T, sectionFlow?: SectionFlow | null): T {
+>(frames: T, writingMode: WritingMode): T {
   const { page, margin } = frames;
   if (!page) return frames;
   const logical: SectionGeom = {
@@ -189,7 +187,7 @@ export function uprightPhysicalPageFrames<
     headerDistance: 0,
     footerDistance: 0,
   };
-  const physical = physicalSectionGeometry(logical, sectionFlow);
+  const physical = physicalSectionGeometry(logical, writingMode);
   return {
     ...frames,
     page: { xPt: 0, yPt: 0, widthPt: physical.pageWidth, heightPt: physical.pageHeight },

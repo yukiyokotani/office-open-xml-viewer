@@ -220,6 +220,7 @@ import type {
   LayoutDiagnostic,
   LayoutRect,
   Matrix2DData,
+  WritingMode,
   NumberingMarkerShapeInput,
   ParagraphLayout,
   ParagraphPlacement,
@@ -4917,7 +4918,7 @@ function acquireAnchorOccurrence(
     ? verticalSectionReferenceFrames({
         frames: baseFrames,
         logicalToPhysical: coordinateSpace.logicalToPhysical,
-        sectionFlow: options.environment.pageWritingMode === 'sideways-lr' ? 'bottomToTop' : null,
+        writingMode: options.environment.pageWritingMode,
         cellBounds: layoutInCellFrame,
         paragraphTopPt: options.placement.startYPt,
         line: { ...line, bounds: referenceBounds },
@@ -6190,7 +6191,7 @@ function wordMode14AnchorLineExemptions(
 function verticalSectionReferenceFrames(input: Readonly<{
   frames: NonNullable<ParagraphAcquisitionOptions['anchorFrames']>;
   logicalToPhysical: Matrix2DData;
-  sectionFlow: 'bottomToTop' | null;
+  writingMode: WritingMode;
   cellBounds: LayoutRect | null;
   paragraphTopPt: number;
   line: LineLayout;
@@ -6200,7 +6201,7 @@ function verticalSectionReferenceFrames(input: Readonly<{
   const { frames, logicalToPhysical: toPhysical } = input;
   const pageFrames = uprightPhysicalPageFrames(
     { page: frames.page ?? null, margin: frames.margin ?? null },
-    input.sectionFlow,
+    input.writingMode,
   );
   const cell = input.cellBounds ? transformRect(toPhysical, input.cellBounds) : null;
   // The character frame holds the object by its edge, so it needs the size

@@ -2573,7 +2573,7 @@ function prescanBodyPageAnchors(
     const result = resolveAnchorFrame({
       acquisition: payloads[0]!.run.anchorAcquisitionInput,
       frames: verticalSpace
-        ? uprightPhysicalPageFrames(frames, request.location.section.sectionFlow)
+        ? uprightPhysicalPageFrames(frames, sectionWritingMode(request.location.section))
         : frames,
     });
     if (result.status !== 'resolved') {
