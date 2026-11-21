@@ -387,6 +387,26 @@ describe('section geometry coordinate boundary', () => {
     ['portrait two-up with gutterAtTop and mirrorMargins', 'portrait',
       { printTwoOnOne: true, gutterAtTop: true, mirrorMargins: true },
       [90, 27, 84.6, 45], [90, 27], [90, 27, 45, 84.6], [90, 27]],
+    // A gutter wider than the left margin: Word keeps the mirrored width and
+    // runs past the page edge (right margin -11.6); columns stop at the edge.
+    ['landscape book fold with gutterAtTop and a 10pt left margin', 'landscape',
+      {
+        bookFoldPrinting: true, gutterAtTop: true,
+        physicalGeometry: geometry({
+          pageWidth: 792, pageHeight: 612,
+          marginLeft: 10, marginRight: 27, marginTop: 45, marginBottom: 63,
+        }),
+      },
+      [48.6, 0, 66.6, 63], [10, 27], [10, 27, 66.6, 63], [10, 27]],
+    // tbRl sections bind on the right.
+    ['tbRl single page', 'landscape', { textDirection: 'tbRl' },
+      [90, 48.6, 45, 63], [90, 48.6], [90, 48.6, 45, 63], [90, 48.6]],
+    ['tbRl landscape book fold', 'landscape', { textDirection: 'tbRl', bookFoldPrinting: true },
+      [90, 48.6, 45, 63], [90, 48.6], [90, 48.6, 45, 63], [90, 48.6]],
+    ['tbRl landscape two-up', 'landscape', { textDirection: 'tbRl', printTwoOnOne: true },
+      [90, 48.6, 45, 63], [90, 48.6], [48.6, 90, 45, 63], [48.6, 90]],
+    ['tbRl portrait two-up', 'portrait', { textDirection: 'tbRl', printTwoOnOne: true },
+      [90, 27, 84.6, 45], [90, 27], [90, 27, 45, 84.6], [90, 27]],
   ] as const)(
     'imposes the Word-observed %s margins on the authored page box',
     (_label, sheetOrientation, settings, ...pages) => {

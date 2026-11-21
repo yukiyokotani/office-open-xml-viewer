@@ -4100,9 +4100,15 @@ function composePageStories(
     const horizontalStorySection = vertical
       ? page.section
       : headerFooterStorySection(owner, page.pageIndex, page.section);
+    // A vertical section's page stories are laid out in the upright physical
+    // page, so they take the physical header/footer margins of the page
+    // (`word-two-page-sheet-imposition`) after the frame conversion.
     const geometry = vertical
       // `word-vertical-section-physical-header-footer`
-      ? physicalSectionGeometry(page.section.geometry, page.section.sectionFlow)
+      ? Object.freeze({
+          ...physicalSectionGeometry(page.section.geometry, page.section.sectionFlow),
+          ...effectiveHeaderFooterInlineMargins(owner.pageLayout, page.pageIndex),
+        })
       : horizontalStorySection.geometry;
     const inlineStartPt = Math.abs(geometry.marginLeft);
     const inlineExtentPt = Math.max(

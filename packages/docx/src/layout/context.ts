@@ -215,12 +215,19 @@ function requirePhysicalPageIndex(pageIndex: number): void {
 function singlePageMargins(policy: SectionPageLayoutPolicy, pageIndex: number): PageMargins {
   let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
   if (policy.gutterAtTop && !policy.mirrorMargins) marginTop += policy.gutterPt;
-  else if (policy.rtlGutter) marginRight += policy.gutterPt;
+  // A tbRl section binds on the right: its gutter joins the right margin.
+  // `word-two-page-sheet-imposition`
+  else if (policy.rtlGutter || rightBoundSection(policy)) marginRight += policy.gutterPt;
   else marginLeft += policy.gutterPt;
   if (policy.mirrorMargins && pageIndex % 2 === 1) {
     [marginLeft, marginRight] = [marginRight, marginLeft];
   }
   return { marginTop, marginRight, marginBottom, marginLeft };
+}
+
+/** A §17.6.20 tbRl section, whose lines advance right to left. */
+function rightBoundSection(policy: SectionPageLayoutPolicy): boolean {
+  return policy.textDirection === 'tbRl';
 }
 
 /**
@@ -238,6 +245,10 @@ function imposedPageMargins(policy: SectionPageLayoutPolicy, pageIndex: number):
     marginTop: top, marginRight: right, marginBottom: bottom, marginLeft: left,
   } = policy.physicalGeometry;
   const gutter = policy.gutterPt;
+  const rightBound = rightBoundSection(policy);
+  // A right-bound section is not folded: book fold leaves it on its
+  // single-page margins.
+  if (bookFold && rightBound) return { body: single, headerFooter: single };
   // Page 1, 3, … of a forward booklet or two-up sheet is the mirrored member;
   // reverse book fold mirrors page 2, 4, … instead.
   const mirrored = (pageIndex % 2 === 0) !== (bookFold && policy.bookFoldRevPrinting);
@@ -263,15 +274,16 @@ function imposedPageMargins(policy: SectionPageLayoutPolicy, pageIndex: number):
   }
   // Two pages side by side on a landscape sheet: the vertical bisector is the
   // authored right-margin side (`word-book-fold-gutter-right-edge`), which
-  // lies on the left of a mirrored page. With gutterAtTop the gutter moves to the top, yet a mirrored page
-  // still starts at right + gutter and keeps the unmirrored width.
-  const sideBySide = (gutterAtTop: boolean) => mirrored
-    ? {
-        marginLeft: right + gutter,
-        // Left/right margins are unsigned (§17.6.11); a gutter wider than the
-        // left margin is unmeasured and clamps at the page edge.
-        marginRight: Math.max(0, left - (gutterAtTop ? gutter : 0)),
-      }
+  // lies on the left of a mirrored page. A right-bound section orders the
+  // pair right to left, so its mirrored member is page 2, 4, …. With
+  // gutterAtTop the gutter moves to the top, yet a mirrored page still starts
+  // at right + gutter and keeps the unmirrored width, so a gutter wider than
+  // the left margin runs the column past the page edge. Library policy: body
+  // columns stay inside the page box (page-factory invariant), so that right
+  // margin stops at the page edge and only those lines wrap earlier.
+  const sideBySideMirrored = mirrored !== rightBound;
+  const sideBySide = (gutterAtTop: boolean) => sideBySideMirrored
+    ? { marginLeft: right + gutter, marginRight: Math.max(0, left - (gutterAtTop ? gutter : 0)) }
     : { marginLeft: left, marginRight: right + (gutterAtTop ? 0 : gutter) };
   return {
     body: {

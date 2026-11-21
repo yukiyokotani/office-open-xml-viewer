@@ -21,10 +21,10 @@ beforeAll(async () => {
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
-function layout(settings: string, pgSz: string): DocumentLayout {
+function layout(settings: string, pgSz: string, sectionExtra = ''): DocumentLayout {
   const paragraph = (text: string, pageBreak = false) =>
     `<w:p>${pageBreak ? '<w:r><w:br w:type="page"/></w:r>' : ''}<w:r><w:t>${text}</w:t></w:r></w:p>`;
-  const document = `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('first')}${paragraph('second', true)}<w:sectPr><w:headerReference w:type="default" r:id="rHdr"/>${pgSz}<w:pgMar w:top="900" w:right="540" w:bottom="1260" w:left="1800" w:header="360" w:footer="360" w:gutter="432"/></w:sectPr></w:body></w:document>`;
+  const document = `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${paragraph('first')}${paragraph('second', true)}<w:sectPr><w:headerReference w:type="default" r:id="rHdr"/>${pgSz}<w:pgMar w:top="900" w:right="540" w:bottom="1260" w:left="1800" w:header="360" w:footer="360" w:gutter="432"/>${sectionExtra}</w:sectPr></w:body></w:document>`;
   const files = new Map<string, string>([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'],
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
@@ -43,24 +43,26 @@ function layout(settings: string, pgSz: string): DocumentLayout {
   return layoutDocument(model, createLayoutServices(model, { measureContext: ctx }), { currentDateMs: 0 });
 }
 
-/** [body left, body right, body top, body bottom, header left, header right]. */
+/** Physical [body left, body right, body top, body bottom, header left,
+ * header right] of a page. */
 function pageMargins(result: DocumentLayout, pageIndex: number): number[] {
   const page = result.pages[pageIndex]!;
-  const { pageWidth, marginTop, marginBottom } = page.section.geometry;
-  const column = page.section.columns[0]!;
+  const { widthPt, heightPt } = page.geometry;
+  const body = page.flowDomains.find((domain) => domain.kind === 'body')!.physicalBounds;
   const header = page.flowDomains.find((domain) => domain.id === `story:header:page:${pageIndex}`)!;
   return [
-    column.xPt,
-    pageWidth - column.xPt - column.wPt,
-    marginTop,
-    marginBottom,
+    body.xPt,
+    widthPt - body.xPt - body.widthPt,
+    body.yPt,
+    heightPt - body.yPt - body.heightPt,
     header.physicalBounds.xPt,
-    pageWidth - header.physicalBounds.xPt - header.physicalBounds.widthPt,
+    widthPt - header.physicalBounds.xPt - header.physicalBounds.widthPt,
   ].map((value) => Math.round(value * 100) / 100);
 }
 
 const LANDSCAPE_SHEET = '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>';
 const PORTRAIT_SHEET = '<w:pgSz w:w="12240" w:h="15840"/>';
+const TBRL = '<w:textDirection w:val="tbRl"/>';
 
 describe('two-page sheet imposition', () => {
   it.each([
@@ -75,10 +77,20 @@ describe('two-page sheet imposition', () => {
       [48.6, 90, 45, 63, 48.6, 90], [90, 48.6, 45, 63, 90, 48.6]],
     ['two-up on a portrait sheet', '<w:printTwoOnOne/>', PORTRAIT_SHEET, [612, 792],
       [90, 27, 84.6, 45, 90, 27], [90, 27, 45, 84.6, 90, 27]],
+    // A tbRl section binds on the right; its physical header and footer take
+    // the same imposed margins as a horizontal section's.
+    ['a tbRl section under book fold', '<w:bookFoldPrinting/>', LANDSCAPE_SHEET, [792, 612],
+      [90, 48.6, 45, 63, 90, 48.6], [90, 48.6, 45, 63, 90, 48.6], TBRL],
+    ['a tbRl section two-up on a landscape sheet', '<w:printTwoOnOne/>', LANDSCAPE_SHEET, [792, 612],
+      [90, 48.6, 45, 63, 90, 48.6], [48.6, 90, 45, 63, 48.6, 90], TBRL],
+    // Body and header margins differ here (the header ignores gutterAtTop), so
+    // this pins the vertical page-story path to the header/footer margins.
+    ['a tbRl section two-up with gutterAtTop', '<w:gutterAtTop/><w:printTwoOnOne/>', LANDSCAPE_SHEET,
+      [792, 612], [90, 27, 66.6, 63, 90, 48.6], [48.6, 68.4, 66.6, 63, 48.6, 90], TBRL],
   ])('lays out %s on the authored page box with Word imposition margins', (
-    _label, settings, pgSz, size, first, second,
+    _label, settings, pgSz, size, first, second, sectionExtra = '',
   ) => {
-    const result = layout(settings, pgSz);
+    const result = layout(settings, pgSz, sectionExtra);
 
     expect(result.pages).toHaveLength(2);
     for (const page of result.pages) {
