@@ -977,7 +977,30 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
           expect(u.baselinePt - u.bounds.yPt).toBeCloseTo(a.baselinePt - a.bounds.yPt, 10);
           const box = u.placements.find((placement) => placement.kind === 'drawing')!;
           expect(box.bounds.yPt).toBeCloseTo(resource(available).bounds.yPt, 10);
+          // The same line clip (WORD_INLINE_OBJECT_EXACT_LINE), on the
+          // placement and on the placeholder's visible box.
+          const clip = resource(available).kind === 'resource' ? resource(available).lineClip : undefined;
+          expect(box.kind === 'drawing' ? box.lineClip : undefined).toEqual(clip);
+          const ink = unavailable.drawings[0]!.inkBounds;
+          expect(ink.yPt).toBeCloseTo(box.bounds.yPt + Math.max(0, clip?.topPt ?? 0), 10);
+          expect(ink.heightPt).toBeCloseTo(clip
+            ? Math.min(box.bounds.heightPt, clip.bottomPt) - Math.max(0, clip.topPt)
+            : box.bounds.heightPt, 10);
         }
+      }
+      // Table cells and text boxes leave both unclipped.
+      for (const other of [
+        { story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] },
+        { story: 'textbox', storyInstance: 'body:body:0.0', path: [0] },
+      ]) {
+        const options = { exactPt: 24, source: other as never };
+        const available = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, 'drawingml')], 1, options);
+        const unavailable = measureInlineParagraph([paragraph.runs[0]!, placeholder(-5)], 1, options);
+        const placement = resource(available);
+        expect(placement.kind === 'resource' && placement.lineClip).toBeFalsy();
+        const box = unavailable.lines[0]!.placements.find((candidate) => candidate.kind === 'drawing')!;
+        expect(box.kind === 'drawing' && box.lineClip).toBeFalsy();
+        expect(unavailable.drawings[0]!.inkBounds).toEqual(box.bounds);
       }
     });
 

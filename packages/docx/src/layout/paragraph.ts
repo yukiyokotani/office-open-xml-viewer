@@ -387,6 +387,9 @@ export interface MeasuredUnavailableResourcePlanSegment {
   readonly topOffsetPt: number;
   /** §20.4.2.6 inline effect extent before the object; the advance is unchanged. */
   readonly leftOffsetPt?: number;
+  /** WORD_INLINE_OBJECT_EXACT_LINE: the placeholder is clipped to its line
+   * like the picture it stands for. */
+  readonly clipToLine?: true;
   readonly drawingId: string;
 }
 
@@ -2032,6 +2035,10 @@ export function planLine(input: PlanLineInput): LineLayout {
           widthPt: segment.widthPt,
           heightPt: segment.heightPt,
         },
+        ...(segment.kind === 'unavailable-resource' && segment.clipToLine ? { lineClip: {
+          topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
+          bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
+        } } : {}),
         advancePt: segment.measuredWidthPt,
       });
     } else if (segment.kind === 'anchor-host') {
@@ -4171,6 +4178,11 @@ function planMeasuredLines(
           continue;
         }
         if (image.unavailableResourceKind) {
+          // The placeholder of a DrawingML picture (an unavailable drawing is
+          // always a wp:inline/wp:anchor container) clips and is placed like
+          // the picture it stands for.
+          const placeholderClipped = image.unavailableResourceKind === 'image' && exactObjectClips
+            && wordInlineObjectExactLineClips('drawingml');
           segments.push({
             kind: 'unavailable-resource',
             range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
@@ -4178,7 +4190,8 @@ function planMeasuredLines(
             measuredWidthPt: image.measuredWidth,
             widthPt: objectWidthPt,
             heightPt: objectHeightPt,
-            topOffsetPt: objectTopOffsetPt(image.heightPt, image.positionPt) + effectTopPt,
+            topOffsetPt: objectTopOffsetPt(image.heightPt, image.positionPt, placeholderClipped) + effectTopPt,
+            ...(placeholderClipped ? { clipToLine: true as const } : {}),
             ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
@@ -7489,13 +7502,23 @@ function projectAcquiredParagraph(
         .flatMap((line) => line.placements)
         .find((candidate) => candidate.kind === 'drawing' && candidate.drawingId === drawingId);
       if (placement?.kind === 'drawing') {
+        // A line-clipped placeholder shows only the part of its box inside
+        // the line, as the clipped picture does.
+        const clip = placement.lineClip;
+        const top = clip ? Math.max(0, clip.topPt) : 0;
+        const bottom = clip ? Math.min(placement.bounds.heightPt, clip.bottomPt) : placement.bounds.heightPt;
+        const inkBounds = clip ? {
+          ...placement.bounds,
+          yPt: placement.bounds.yPt + top,
+          heightPt: Math.max(0, bottom - top),
+        } : placement.bounds;
         drawings.push({
           kind: 'drawing',
           id: drawingId,
           source,
           flowDomainId: options.flowDomainId,
           flowBounds: placement.bounds,
-          inkBounds: placement.bounds,
+          inkBounds,
           advancePt: 0,
           ordinaryFlow: false,
           commands: Object.freeze([{ kind: 'noop' }]),
