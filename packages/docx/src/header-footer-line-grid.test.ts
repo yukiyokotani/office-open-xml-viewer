@@ -115,29 +115,38 @@ const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const V = 'urn:schemas-microsoft-com:vml';
 
-function parsedHeaderDocument(gridKind: string, textDirection?: string): DocxDocumentModel {
+function parsedHeaderDocument(
+  gridKind: string,
+  textDirection?: string,
+  adjustLineHeightInTable = false,
+): DocxDocumentModel {
   const p = (text: string, pPr = '') => `<w:p>${pPr}<w:r><w:rPr><w:sz w:val="20"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
   const frame = '<w:pPr><w:framePr w:w="1440" w:hAnchor="text" w:vAnchor="text" w:x="0" w:y="0" w:wrap="around"/></w:pPr>';
-  const box = '<w:p><w:r><w:pict><v:shape id="box" type="#_x0000_t202" style="width:72pt;height:36pt">'
-    + `<v:textbox inset="0,0,0,0"><w:txbxContent>${p('箱')}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
-  const cell = '<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid>'
-    + `<w:tr><w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${p('Cell')}</w:tc></w:tr></w:tbl>`;
-  const header = p('Plain') + p('Framed', frame) + cell + box;
+  const table = (text: string) => '<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid>'
+    + `<w:tr><w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${p(text)}</w:tc></w:tr></w:tbl>`;
+  // The text box nests a framed paragraph and a table of its own: both stay
+  // header/footer-hosted content.
+  const box = '<w:p><w:r><w:pict><v:shape id="box" type="#_x0000_t202" style="width:144pt;height:108pt">'
+    + `<v:textbox inset="0,0,0,0"><w:txbxContent>${p('箱')}${p('BoxFrame', frame)}${table('BoxCell')}<w:p/></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+  const header = p('Plain') + p('Framed', frame) + table('Cell') + box;
   const files = new Map<string, string>([
     ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${p('Body')}`
       + '<w:sectPr><w:headerReference w:type="default" r:id="hdr"/><w:pgSz w:w="12000" w:h="16000"/>'
       + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720"/>'
       + (textDirection ? `<w:textDirection w:val="${textDirection}"/>` : '')
       + `<w:docGrid w:type="${gridKind}" w:linePitch="360"/></w:sectPr></w:body></w:document>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}"><w:compat>${adjustLineHeightInTable ? '<w:adjustLineHeightInTable/>' : ''}</w:compat></w:settings>`],
     ['word/header1.xml', `<w:hdr xmlns:w="${W}" xmlns:v="${V}">${header}</w:hdr>`],
     ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-      + `<Relationship Id="hdr" Type="${R}/header" Target="header1.xml"/></Relationships>`],
+      + `<Relationship Id="hdr" Type="${R}/header" Target="header1.xml"/>`
+      + `<Relationship Id="set" Type="${R}/settings" Target="settings.xml"/></Relationships>`],
     ['_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
       + '<Default Extension="xml" ContentType="application/xml"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
       + '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
       + '</Types>'],
   ]);
   const archive = new DocxArchive(storeZip(new Map([...files].map(([name, xml]) => [name, new TextEncoder().encode(xml)]))));
@@ -168,6 +177,25 @@ describe('framed paragraphs, table cells and text boxes in a gridded header', ()
     // Table cells and text-box stories inside a header are header content.
     expect(advances.get('Cell')).toBe(advances.get('Plain'));
     expect(advances.get('箱')).toBeLessThan(18);
+  });
+
+  it.each([
+    ['lines', undefined], ['linesAndChars', undefined], ['snapToChars', undefined],
+    ['lines', 'tbRl'], ['lines', 'btLr'], ['lines', 'tbLrV'],
+  ])('keeps frames and tables nested in a %s header text box (%s) off the grid', (gridKind, direction) => {
+    // adjustLineHeightInTable would put table cells on the grid; the cell of
+    // a header-hosted text box stays header/footer content regardless.
+    const document = parsedHeaderDocument(gridKind, direction, true);
+    const advances = lineAdvancesByText(layoutDocument(
+      document,
+      createLayoutServices(document, { measureContext: makeCtx() }),
+      { currentDateMs: 0 },
+    ).pages[0]!.layers);
+    expect(advances.get('Plain')).toBeLessThan(18);
+    expect(advances.get('BoxFrame')).toBe(advances.get('Plain'));
+    expect(advances.get('BoxCell')).toBe(advances.get('Plain'));
+    expect(advances.get('Cell')).toBe(advances.get('Plain'));
+    expect(advances.get('Body')).toBe(18);
   });
 
   it('keeps a compatibility text box hosted by a header paragraph off the grid', () => {

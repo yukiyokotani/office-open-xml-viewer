@@ -133,6 +133,9 @@ export function enterTableCellStoryContext(
     containers: [...parent.containers, { kind: 'tableCell' }],
     lineNumberingEligible: false,
     ...(parent.quarterTurned ? { quarterTurned: true } : {}),
+    // `word-header-footer-off-line-grid`: a cell of header/footer-hosted
+    // content is header/footer content too.
+    ...(parent.headerFooterHosted ? { headerFooterHosted: true as const } : {}),
     ...(parent.closingMarkHangAdmitted && parent.story === 'body' && cellFlowsHorizontally
       ? { closingMarkHangAdmitted: true as const } : {}),
   };
