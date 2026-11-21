@@ -1236,6 +1236,7 @@ impl<'a> Reader<'a> {
                         alpha: None,
                         duotone: None,
                         blip_effects: Vec::new(),
+                        dpi: None,
                         vml: None,
                     });
                 }

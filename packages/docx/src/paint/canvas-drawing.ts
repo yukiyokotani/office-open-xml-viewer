@@ -27,7 +27,15 @@ function paintPageAlignedDrawingMLShape(
 }
 
 export function paintDrawingLayout(node: DrawingLayout, context: CanvasPaintContext): void {
-  for (const command of node.commands) {
+  paintDrawingCommands(node.commands, context);
+}
+
+/** Replay retained drawing commands in the current point space. */
+export function paintDrawingCommands(
+  commands: DrawingLayout['commands'],
+  context: CanvasPaintContext,
+): void {
+  for (const command of commands) {
     if (command.kind === 'noop') continue;
     if (command.kind === 'drawingml-shape') {
       if (command.concentricFill) {

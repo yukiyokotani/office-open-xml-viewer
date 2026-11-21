@@ -159,6 +159,8 @@ export const MODEL_WIRE_DRIFT_ALLOWLIST = {
     'DocTableRow.__tableRowLayout: missing-in-ts': 'internal channel',
     'Document(ts DocxDocumentModel).__documentTypographySettings: missing-in-ts': 'internal channel',
     'Document(ts DocxDocumentModel).__noteLayoutSettings: missing-in-ts': 'internal channel',
+    'Document(ts DocxDocumentModel).__pageBackground: missing-in-ts': 'internal channel',
+    'ShapeFill<fillType=image>.__dpi: missing-in-ts': 'internal channel',
     'Document(ts DocxDocumentModel).__pageLayoutSettings: missing-in-ts': 'internal channel',
     'Document(ts DocxDocumentModel).__pageObjects: missing-in-ts': 'internal channel',
     'DocumentSettings(ts DocSettings).__footnoteColumnBands: missing-in-ts': 'internal channel',

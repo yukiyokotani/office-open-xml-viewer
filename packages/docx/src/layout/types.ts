@@ -538,6 +538,13 @@ export type ImagePaintResourceDescriptor = Readonly<{
   /** Part 4 §19.1.2.21: clr1 replaces black, clr2 replaces coloured pixels. */
   vmlStrokePattern?: DeepReadonly<Duotone>;
   vmlFill?: DeepReadonly<Extract<import('../types.js').ShapeFill, { fillType: 'image' }>['vml']>;
+  /** ECMA-376 §20.1.8.58 DrawingML tile of a shape picture fill, resolved
+   * with the decoded image into a repeating brush registered against the
+   * painted bounds (independent of `intrinsicSize`). */
+  tile?: DeepReadonly<import('@silurus/ooxml-core').TileInfo>;
+  /** ECMA-376 §20.1.8.14 authored positive `blipFill@dpi`. Absent (and an
+   * authored 0) means the DPI declared by the blip itself. */
+  blipDpi?: number;
   blipEffects?: DeepReadonly<import('@silurus/ooxml-core').BlipEffect[]>;
   /** Host shape orientation for CT_Blip effects on a shape blip fill
    * (§20.1.8.45/.49 rotWithShape): the fill paints inside the rotated shape,
@@ -1232,6 +1239,20 @@ export interface PageBorderLayout {
   readonly segments: readonly BorderSegment[];
 }
 
+/** ECMA-376 §17.2.1 document background of one page, in physical page
+ * points. `color` is the page surface colour: whoever owns the page surface
+ * paints it once in place of the default white page fill (same geometry, so
+ * a white background is pixel-identical to no background). `commands` are the
+ * full-page background shape fills replayed above it, before every other page
+ * layer. */
+export interface PageBackgroundLayout {
+  readonly color: string | null;
+  readonly commands: readonly Extract<
+    DrawingPaintCommand,
+    { kind: 'drawingml-shape' | 'drawingml-image-fill' }
+  >[];
+}
+
 /** Physical page-space ink fixed during layout for ECMA-376 §17.6.4
  * `w:cols/@w:sep`. Paint may snap the retained endpoints to device pixels,
  * but it must not recover section-band geometry. */
@@ -1252,6 +1273,8 @@ export interface LayoutPage {
   readonly sectionRegions: readonly PageSectionRegion[];
   readonly columnSeparators: readonly ColumnSeparatorLayout[];
   readonly pageBorder: PageBorderLayout | null;
+  /** §17.2.1 document background; absent when none is displayed. */
+  readonly pageBackground?: PageBackgroundLayout;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
   /** ECMA-376 §17.13.5 markup view only: one margin bar per line containing

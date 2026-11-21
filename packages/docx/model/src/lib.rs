@@ -194,6 +194,34 @@ pub struct Document {
     /// document to the highest page. Empty, and omitted, for DOCX.
     #[serde(rename = "__pageObjects", skip_serializing_if = "Vec::is_empty")]
     pub page_objects: Vec<PageObjectStory>,
+    /// Private parser/layout wire: the ECMA-376 Part 1 §17.2.1 document
+    /// background painted beneath all content of every page. The DOCX parser
+    /// emits it only while §17.15.1.26 `w:displayBackgroundShape` is on, so its
+    /// presence is the decision to paint. Omitted when nothing is painted.
+    #[serde(rename = "__pageBackground", skip_serializing_if = "Option::is_none")]
+    pub page_background: Option<PageBackgroundWire>,
+}
+
+/// Paint-ready document background (see `Document::page_background`). Layers
+/// paint in order over the whole physical page: `color`, each of `fills`,
+/// then the drawings of `body`.
+#[derive(Serialize, Debug, Default, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PageBackgroundWire {
+    /// §17.2.1 `w:color` / `w:themeColor` (+ `w:themeTint` / `w:themeShade`)
+    /// resolved to `RRGGBB`. Absent for `auto` or when neither is authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Part 4 §19.1.2.2 `v:background` fills layered above `color`, in
+    /// document order. Each covers the whole page.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub fills: Vec<ShapeFill>,
+    /// The §17.3.3.9 `w:drawing` children as a fixed story laid out on every
+    /// page above `fills`: page-anchored, page-sized drawings behind the text
+    /// that never wrap it (see the parser's `background_drawing_story`).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub body: Vec<BodyElement>,
 }
 
 /// One physical page's anchored drawings (see `Document::page_objects`).
@@ -2655,6 +2683,12 @@ pub enum ShapeFill {
         blip_effects: Vec<BlipEffect>,
         #[serde(skip_serializing_if = "Option::is_none")]
         vml: Option<VmlImageFill>,
+        /// ECMA-376 §20.1.8.14 `CT_BlipFillProperties@dpi`, as authored (0
+        /// and absence both mean the DPI stored in the blip). It converts
+        /// native image pixels to a physical size for a §20.1.8.58 tile and
+        /// for physical blip effects. Private wire; VML fills carry none.
+        #[serde(rename = "__dpi", skip_serializing_if = "Option::is_none")]
+        dpi: Option<u32>,
     },
 }
 

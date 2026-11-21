@@ -1,5 +1,5 @@
 import { withChartFontSubstitutions } from '@silurus/ooxml-core/internal/chart-font-sources';
-import { acquireVmlImageBrush } from './browser-vml-image-brush.js';
+import { acquireDrawingMLTileBrush, acquireVmlImageBrush } from './browser-vml-image-brush.js';
 import {
   withBitmapCacheLease,
   OoxmlError,
@@ -36,6 +36,7 @@ import {
   isTerminalImageAcquisitionError,
   preloadPaintImages,
   imageKey,
+  drawingMLTileCellKey,
   type DocxFetchImage,
   type DecodedPaintImage,
 } from './browser-images.js';
@@ -167,7 +168,13 @@ export async function renderSelectedDocumentPage<TTextRun>(
   const token = (renderTokens.get(canvas) ?? 0) + 1;
   renderTokens.set(canvas, token);
   const superseded = (): boolean => renderTokens.get(canvas) !== token;
-  const pageResourceKeys = page.layers.capabilities.resourceKeys;
+  // The §17.2.1 page background owns retained picture brushes outside the
+  // page story graph; prepare them with the page's own resources.
+  const backgroundResourceKeys = (page.pageBackground?.commands ?? []).flatMap((command) => (
+    command.kind === 'drawingml-image-fill' ? [command.resourceKey] : []
+  ));
+  const pageResourceKeys = page.layers.capabilities.resourceKeys
+    && [...backgroundResourceKeys, ...page.layers.capabilities.resourceKeys];
   const descriptorByKey = new Map(
     options.registry.descriptors.map((descriptor) => [descriptor.resourceKey, descriptor]),
   );
@@ -574,7 +581,9 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
         paintCanvas.style.height = `${cssHeight}px`;
       }
       context.scale(effectiveDpr, effectiveDpr);
-      context.fillStyle = '#ffffff';
+      // ECMA-376 §17.2.1: a solid document background replaces the white
+      // page surface (one fill, same geometry).
+      context.fillStyle = page.pageBackground?.color ?? '#ffffff';
       context.fillRect(0, 0, cssWidth, cssHeight);
     };
 
@@ -621,6 +630,12 @@ async function renderSelectedDocumentPageLeased<TTextRun>(
           );
         }
         if (image && descriptor.vmlFill) return acquireVmlImageBrush(descriptor, image);
+        if (image && descriptor.tile) {
+          const cell = images.get(drawingMLTileCellKey(descriptor));
+          // A §20.1.8.55 window with no positive extent selects nothing.
+          return acquireDrawingMLTileBrush(descriptor, image, cell as CanvasImageSource | null | undefined)
+            ?? unavailablePaintResourceHandle('picture tile window selects no content');
+        }
         return image ?? unavailablePaintResourceHandle(
           options.fetchImage
             ? 'unsupported image format produced no drawable output'

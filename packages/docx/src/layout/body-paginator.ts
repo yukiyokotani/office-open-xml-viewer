@@ -42,6 +42,7 @@ import {
   createFieldAcquisitionServicesView,
   createParagraphAcquisitionCacheServicesView,
 } from './runtime-state.js';
+import { sectionPhysicalPageExtent, withPageBackground } from './page-background.js';
 import {
   accumulatePagePaintNode,
   accumulatePageSectionRegion,
@@ -433,10 +434,7 @@ function physicalPage(
   interval: ReservedBodyInterval,
 ) {
   const writingMode = sectionWritingMode(section);
-  const extent = uprightPhysicalExtent({
-    widthPt: section.geometry.pageWidth,
-    heightPt: section.geometry.pageHeight,
-  }, writingMode);
+  const extent = sectionPhysicalPageExtent(section);
   if (writingMode !== 'horizontal-tb') {
     return Object.freeze({
       ...extent,
@@ -4028,6 +4026,7 @@ function composePageStories(
   footnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
   endnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
   pageObjects: BodyLayoutInput['pageObjects'] = undefined,
+  backgroundStory: SourceRef | null = null,
 ): DocumentLayout {
   const storyDiagnostics: LayoutDiagnostic[] = [];
   const pageObjectSources = new Map<number, SourceRef[]>();
@@ -4040,7 +4039,8 @@ function composePageStories(
   const pages = layout.pages.map((page, pageIndex) => {
     // A parity blank page carries no stories, except a page object anchored
     // to it (LibreOffice draws it there).
-    if (page.parityBlank && !pageObjectSources.has(page.pageIndex)) return page;
+    // The §17.2.1 background story belongs to every page, parity blanks too.
+    if (page.parityBlank && !pageObjectSources.has(page.pageIndex) && backgroundStory === null) return page;
     const owner = owners.get(page.sectionOccurrenceId);
     if (!owner) throw new Error(`Unknown body section ${page.sectionOccurrenceId}`);
     if (!session.layoutStory) {
@@ -4048,7 +4048,7 @@ function composePageStories(
         || Object.values(owner.footers).some((source) => source !== null)
         || (footnotesByPage.get(page.pageIndex)?.length ?? 0) > 0
         || (endnotesByPage.get(page.pageIndex)?.length ?? 0) > 0;
-      if (!hasPageStories && !pageObjectSources.has(page.pageIndex)) return page;
+      if (!hasPageStories && !pageObjectSources.has(page.pageIndex) && backgroundStory === null) return page;
       throw new Error('Page-story composition requires a story-capable layout session');
     }
     const vertical = sectionWritingMode(page.section) !== 'horizontal-tb';
@@ -4110,6 +4110,33 @@ function composePageStories(
     };
     const header = page.parityBlank ? null : acquire('header');
     const footer = page.parityBlank ? null : acquire('footer');
+    // ECMA-376 §17.2.1: the background drawings (page-anchored, page-sized,
+    // behind text, unwrapped) are a page story laid out in the upright page
+    // frame like a header, over the whole page box, and painted in the
+    // page's `background` layer beneath every other story.
+    const backgroundDomainId = `story:page-background:page:${page.pageIndex}`;
+    const backgroundBounds = Object.freeze({
+      xPt: 0, yPt: 0, widthPt: geometry.pageWidth, heightPt: geometry.pageHeight,
+    });
+    const background = backgroundStory === null ? null : (() => {
+      const { story, translation } = layoutBandStory((band) => session.layoutStory!({
+        source: backgroundStory,
+        pageStoryOwner: owner.sectionOccurrenceId,
+        pageIndex: page.pageIndex,
+        pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
+        section: pageStorySection,
+        container: {
+          id: backgroundDomainId,
+          kind: 'header',
+          // Only page-positioned drawings: a page-sized drawing must not
+          // exhaust a band.
+          capacity: 'unbounded',
+          bounds: backgroundBounds,
+        },
+        ...(band ? { bandTranslationPt: band } : {}),
+      }), 'header', geometry);
+      return translateStoryLayout(story, translation);
+    })();
     // The page's producer page objects: a header-class page story whose
     // drawings are positioned on the page (their wrap was registered on the
     // body at the page's start). It is laid out in the body's own section
@@ -4208,6 +4235,12 @@ function composePageStories(
         ))
       : noteLogicalBounds;
     const storyDomains = [
+      ...(background ? [Object.freeze({
+        id: backgroundDomainId,
+        kind: 'header' as const,
+        logicalBounds: backgroundBounds,
+        physicalBounds: backgroundBounds,
+      })] : []),
       ...(header ? [Object.freeze({
         id: `story:header:page:${page.pageIndex}`,
         kind: 'header' as const,
@@ -4288,6 +4321,9 @@ function composePageStories(
     }
     const noteIndex = lastBodyIndex < 0 ? withHeader.length : lastBodyIndex + 1;
     const entries: PageLayerNode[] = [
+      ...(background?.blocks.map((node): PageLayerNode => ({
+        layer: 'background', node, coordinateSpace,
+      })) ?? []),
       ...withHeader.slice(0, noteIndex),
       ...pageObjectNodes.map((node): PageLayerNode => ({
         layer: 'body', node, coordinateSpace: blankPageObjects ? coordinateSpace : 'section-logical',
@@ -4302,17 +4338,18 @@ function composePageStories(
     ];
     // The body pass collected only body diagnostics; these stories are
     // composed here, so their own diagnostics are collected here.
-    storyDiagnostics.push(...[...(header?.blocks ?? []), ...pageObjectNodes, ...notes,
+    storyDiagnostics.push(...[...(background?.blocks ?? []), ...(header?.blocks ?? []), ...pageObjectNodes, ...notes,
       ...(footer?.blocks ?? [])]
       .flatMap((node) => nestedStoryDiagnostics(node, visited)));
     return Object.freeze({
       ...page,
       // A parity blank page holding a page object is no longer blank: it
       // carries that drawing (LibreOffice draws it on the inserted page).
-      ...(page.parityBlank ? { parityBlank: false } : {}),
+      ...(page.parityBlank && pageObjectSources.has(page.pageIndex) ? { parityBlank: false } : {}),
       flowDomains: Object.freeze([...page.flowDomains, ...storyDomains]),
       layers: createPageLayers(entries),
       readingOrder: Object.freeze([
+        ...(background?.blocks.map((node) => node.id) ?? []),
         ...(header?.blocks.map((node) => node.id) ?? []),
         ...pageObjectNodes.map((node) => node.id),
         ...page.readingOrder,
@@ -5756,6 +5793,7 @@ function composeBodyPaginationResult(
     pass.footnoteLayoutsByPage,
     pass.endnoteLayoutsByPage,
     input.pageObjects,
+    input.pageBackground?.story ?? null,
   );
   const hasRetainedFootnotes = pageStories.pages.some((page) =>
     page.layers.notes.some((note) => note.source.story === 'footnote'));
@@ -5793,7 +5831,12 @@ function composeBodyPaginationResult(
       });
   const finalized = Object.freeze({
     ...withParserDiagnostics,
-    pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
+    // §17.2.1: the document background is a fact of every physical page,
+    // fixed once the page geometry is final.
+    pages: Object.freeze(withParserDiagnostics.pages.map((page) => withPageBackground(
+      finalizePageBookmarkStarts(page),
+      input.pageBackground,
+    ))),
   });
   const withChangeBars = options.showTrackedChanges === true
     ? attachTrackChangeBars(finalized)

@@ -36,7 +36,11 @@ import type {
   VmlTextPathAcquisitionInput,
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
-import { documentPageObjects, type PageObjectStoryWire } from './page-object-wire.js';
+import {
+  documentPageBackgroundStory,
+  documentPageObjects,
+  type PageObjectStoryWire,
+} from './page-object-wire.js';
 import { anchorOccurrenceKey, chartResourceKey, mathResourceKey, sourceKey } from './layout/source-key.js';
 import { mathFallbackText } from './layout/math-fallback-text.js';
 import type {
@@ -92,6 +96,7 @@ import type {
 } from './layout/body-layout-input.js';
 import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
 import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
+import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph } from './layout/paragraph-visibility.js';
@@ -259,7 +264,7 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
   readonly resourceKey: string;
 };
 
-export { documentPageObjects, type PageObjectStoryWire };
+export { documentPageBackgroundStory, documentPageObjects, type PageObjectStoryWire };
 
 /** Private producer settings (never authored by OOXML, and not part of the
  * public `DocumentSettings`): a model source sets them on the settings it
@@ -325,6 +330,9 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
   readonly __documentTypographySettings?: Readonly<{
     normalStyleFontSizePt?: number;
   }>;
+  /** ECMA-376 §17.2.1 background, present only while §17.15.1.26
+   * displayBackgroundShape is on; see layout/page-background.ts. */
+  readonly __pageBackground?: unknown;
 }
 
 export function documentTypographySettingsInput(
@@ -1535,6 +1543,9 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
     repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),
     noteLayoutSettings: documentNoteLayoutSettingsInput(doc),
     pageLayoutSettings: documentPageLayoutSettingsInput(doc),
+    pageBackground: pageBackgroundAcquisitionInput(
+      (doc as InternalDocxDocumentModel).__pageBackground,
+    ),
     parserDiagnostics: mapParseDiagnostics(
       (doc as InternalDocxDocumentModel).diagnostics,
       doc.body.length,
@@ -2318,11 +2329,23 @@ function normalizeInternalDocumentModelWithOwnership(
     });
     if (pageObjectsChanged) pageObjects = normalized;
   }
+  // The §17.2.1 background drawing story normalizes like a header story.
+  const sourceBackground = (doc as InternalDocxDocumentModel).__pageBackground as
+    | (Record<string, unknown> & { body?: BodyElement[] }) | undefined;
+  let pageBackground = sourceBackground;
+  if (sourceBackground && Array.isArray(sourceBackground.body)) {
+    const backgroundBody = normalizeBody(
+      sourceBackground.body, 'header', pageBackgroundStorySource().storyInstance,
+    );
+    if (backgroundBody !== sourceBackground.body) pageBackground = { ...sourceBackground, body: backgroundBody };
+  }
   const changed = body !== doc.body || headers !== doc.headers || footers !== doc.footers
-    || footnotes !== doc.footnotes || endnotes !== doc.endnotes || pageObjects !== sourcePageObjects;
+    || footnotes !== doc.footnotes || endnotes !== doc.endnotes || pageObjects !== sourcePageObjects
+    || pageBackground !== sourceBackground;
   const document = (changed
     ? { ...doc, body, headers, footers, footnotes, endnotes,
-        ...(pageObjects ? { __pageObjects: pageObjects } : {}) }
+        ...(pageObjects ? { __pageObjects: pageObjects } : {}),
+        ...(pageBackground ? { __pageBackground: pageBackground } : {}) }
     : doc) as InternalDocxDocumentModel;
   const sectionPlacementInputs = projectSectionPlacementInputs(document);
   sectionPlacementInputsByDocument.set(document, sectionPlacementInputs);

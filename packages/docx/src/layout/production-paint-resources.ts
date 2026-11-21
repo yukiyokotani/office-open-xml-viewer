@@ -11,8 +11,9 @@ import type {
 import type { ImageMetadataRecord, MathOccurrence, PictureBulletSizeResolver } from './resources.js';
 import type { BodyAcquisitionInputProjections } from './acquisition-input-projections.js';
 import { chartResourceKey, imageResourceKey, vmlPictureResourceKey, vmlStrokeResourceKey, vmlEdgeResourceKey } from './source-key.js';
-import { documentPageObjects } from '../page-object-wire.js';
+import { documentPageBackgroundStory, documentPageObjects } from '../page-object-wire.js';
 import { pageObjectStorySource } from './body-layout-input.js';
+import { pageBackgroundStorySource, type PageBackgroundLayoutInput } from './page-background.js';
 import {
   createPaintResourceRegistry,
 } from './paint-resources.js';
@@ -26,7 +27,7 @@ export function chartPaintResourceKey(source: import('./types.js').SourceRef): s
   return chartResourceKey(source);
 }
 
-type ImageDescriptorOptions = Partial<ImageRun> & Pick<ImagePaintResourceDescriptor, 'vmlFill' | 'vmlStrokePattern' | 'effectHost'>;
+type ImageDescriptorOptions = Partial<ImageRun> & Pick<ImagePaintResourceDescriptor, 'vmlFill' | 'vmlStrokePattern' | 'effectHost' | 'tile' | 'blipDpi'>;
 
 type ImageDescriptorCandidate = Omit<ImagePaintResourceDescriptor, 'intrinsicSize' | 'mimeType'>;
 
@@ -52,6 +53,8 @@ function imageCandidate(
     ...(run.duotone === undefined ? {} : { duotone: { ...run.duotone } }),
     ...(run.vmlStrokePattern === undefined ? {} : { vmlStrokePattern: run.vmlStrokePattern }),
     ...(run.vmlFill === undefined ? {} : { vmlFill: run.vmlFill }),
+    ...(run.tile === undefined ? {} : { tile: { ...run.tile } }),
+    ...(run.blipDpi === undefined ? {} : { blipDpi: run.blipDpi }),
     ...(run.blipEffects?.length ? { blipEffects: run.blipEffects.map(effect => ({ ...effect })) } : {}),
     ...(run.effectHost === undefined ? {} : { effectHost: { ...run.effectHost } }),
   };
@@ -62,6 +65,7 @@ function collectDescriptorCandidates(
   acquisitionInputs: BodyAcquisitionInputProjections | undefined,
   mathOccurrences: readonly MathOccurrence[],
   resolvePictureBulletSize?: PictureBulletSizeResolver,
+  pageBackground?: PageBackgroundLayoutInput,
 ): Readonly<{ imageMetadata: ImageMetadataRecord[]; descriptors: PaintResourceDescriptor[] }> {
   const imageCandidates: ImageDescriptorCandidate[] = [];
   const imageMetadata: ImageMetadataRecord[] = [];
@@ -96,6 +100,10 @@ function collectDescriptorCandidates(
     if (run.type !== 'shape') return;
     const shape = run as ShapeRun & import('./types.js').VmlShapeAcquisitionFacts & Readonly<{ textBoxContent?: BodyElement[] }>;
     if (shape.fill?.fillType === 'image') {
+      // §20.1.8.14 authored DPI (private wire); 0 or absence defers to the blip.
+      const authoredDpi = (shape.fill as { __dpi?: unknown }).__dpi;
+      const blipDpi = typeof authoredDpi === 'number' && Number.isFinite(authoredDpi) && authoredDpi > 0
+        ? authoredDpi : undefined;
       addImage(
         'image', source, shape.fill.imagePath, shape.fill.mimeType,
         shape.widthPt, shape.heightPt,
@@ -113,10 +121,14 @@ function collectDescriptorCandidates(
             effectHost: {
               rotation: shape.rotation, flipH: shape.flipH, flipV: shape.flipV,
               ...(shape.fill.fillRect === undefined ? {} : { fillRect: { ...shape.fill.fillRect } }),
-              ...(shape.fill.tile ? { tileDpi: 96 } : {}),
+              // Physical effects of a tile sample at its DPI; preparation
+              // replaces this with the blip's own DPI when none is authored.
+              ...(shape.fill.tile ? { tileDpi: blipDpi ?? 96 } : {}),
             },
           } : {}),
           ...(shape.fill.vml === undefined ? {} : { vmlFill: shape.fill.vml }),
+          ...(shape.fill.tile === undefined ? {} : { tile: shape.fill.tile }),
+          ...(shape.fill.tile === undefined || blipDpi === undefined ? {} : { blipDpi }),
         },
       );
     }
@@ -251,8 +263,37 @@ function collectDescriptorCandidates(
   documentPageObjects(doc).forEach((object, ordinal) => {
     visitBody(object.body, 'header', pageObjectStorySource(ordinal).storyInstance);
   });
+  visitBody(documentPageBackgroundStory(doc), 'header', pageBackgroundStorySource().storyInstance);
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
+  // ECMA-376 §17.2.1 background picture fills: one resource per physical page
+  // size, whose extent is the host box of the Part 4 §19.1.2.5 brush.
+  for (const fill of pageBackground?.fills ?? []) {
+    if (fill.kind !== 'image') continue;
+    const image = fill.fill;
+    for (const resource of fill.resources) {
+      imageCandidates.push(imageCandidate('image', resource.resourceKey, image.imagePath, {
+        ...(image.svgImagePath === undefined ? {} : { svgImagePath: image.svgImagePath }),
+        ...(image.srcRect === undefined ? {} : { srcRect: { ...image.srcRect } }),
+        ...(image.alpha === undefined ? {} : { alpha: image.alpha }),
+        ...(image.duotone === undefined ? {} : { duotone: { ...image.duotone } }),
+        ...(image.blipEffects?.length ? {
+          blipEffects: structuredClone(image.blipEffects) as ImageRun['blipEffects'],
+          effectHost: {
+            rotation: 0, flipH: false, flipV: false,
+            ...(image.fillRect === undefined ? {} : { fillRect: { ...image.fillRect } }),
+          },
+        } : {}),
+        ...(image.vml === undefined ? {} : { vmlFill: image.vml }),
+      }));
+      imageMetadata.push({
+        resourceKey: resource.resourceKey,
+        mimeType: image.mimeType,
+        widthPt: resource.widthPt,
+        heightPt: resource.heightPt,
+      });
+    }
+  }
 
   const metadataByKey = new Map(imageMetadata.map((record) => [record.resourceKey, record]));
   if (metadataByKey.size !== imageMetadata.length) throw new Error('Duplicate image resource key');
@@ -284,9 +325,10 @@ export function projectDocumentSnapshotResources(
   acquisitionInputs: BodyAcquisitionInputProjections | undefined,
   mathOccurrences: readonly MathOccurrence[],
   resolvePictureBulletSize?: PictureBulletSizeResolver,
+  pageBackground?: PageBackgroundLayoutInput,
 ): DocumentSnapshotResourceProjection {
   const projected = collectDescriptorCandidates(
-    doc, acquisitionInputs, mathOccurrences, resolvePictureBulletSize,
+    doc, acquisitionInputs, mathOccurrences, resolvePictureBulletSize, pageBackground,
   );
   return Object.freeze({
     imageMetadata: Object.freeze(projected.imageMetadata.map((record) => Object.freeze({ ...record }))),
