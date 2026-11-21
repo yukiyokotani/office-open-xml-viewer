@@ -4,8 +4,8 @@
 # one cscript + one Office instance per file: in this guest, Office COM calls
 # hosted in PowerShell (ExportAsFixedFormat, SaveAs) hang with no dialog, while
 # the same calls from VBScript finish in seconds. An item that exceeds its
-# timeout is killed, together with only the Office processes that appeared
-# during it.
+# timeout or fails is cleaned up: only the Office processes that appeared
+# during it are stopped.
 #
 # Usage (from a launcher in the guest):
 #   $WRRoot = '\\<host>\<share>\<run-folder>'   # holds list.json and in\
@@ -35,6 +35,7 @@ if($WROnly){ $list=@($list | Where-Object { $WROnly -contains $_.i }) }
 L ('START '+$WRRun+' items '+@($list).Count)
 foreach($it in $list){
  $local=Join-Path $Stage ('{0:D3}.{1}' -f $it.i,$it.fmt); $pdf=Join-Path $Stage ('{0:D3}.pdf' -f $it.i); $vbs=Join-Path $Stage ('{0:D3}.vbs' -f $it.i); $outf=Join-Path $Stage ('{0:D3}.out' -f $it.i)
+ $before=$null
  $r=[ordered]@{i=$it.i; fmt=$it.fmt; app=$it.app; mode=$it.mode; driver='cscript-vbs'; startedUTC=[DateTime]::UtcNow.ToString('o'); ok=$false}
  try {
   Copy-Item -LiteralPath (Join-Path $WR ('in\{0:D3}.{1}' -f $it.i,$it.fmt)) -Destination $local -Force
@@ -134,7 +135,15 @@ If a.Presentations.Count = 0 Then a.Quit
   $r.pdfSHA256=WrHash $dest
   if($r.pdfSHA256 -ne (WrHash $pdf)){ throw 'PDF copy verification failed' }
   $r.ok=$true
- } catch { $r.error=$_.Exception.Message }
+ } catch {
+  $r.error=$_.Exception.Message
+  # A failed item (script error before Quit, no PDF) can leave its Office
+  # instance running windowless, which then blocks the next launcher.
+  if($null -ne $before){
+   $left=@(Get-Process $pmap[$it.app] -ErrorAction SilentlyContinue | Where-Object { $before -notcontains $_.Id })
+   foreach($x in $left){ try { Stop-Process -Id $x.Id -Force; L ('STOPPED leftover '+$x.ProcessName+' '+$x.Id) } catch {} }
+  }
+ }
  $r.finishedUTC=[DateTime]::UtcNow.ToString('o')
  [IO.File]::AppendAllText($Results,($r | ConvertTo-Json -Compress -Depth 4)+"`r`n")
  L ('ITEM '+$it.i+' '+$it.app+' ok='+$r.ok+' '+$r.seconds+'s '+$r.error)
