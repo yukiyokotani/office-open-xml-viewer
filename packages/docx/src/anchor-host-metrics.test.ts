@@ -79,10 +79,11 @@ function textRun(text: string, fontSize = 11): DocRun {
 }
 
 type MarkFacts = NonNullable<Parameters<typeof buildSegments>[1]['anchorHostLineMetric']>;
-function layOut(runs: DocRun[], anchorHostLineMetric?: MarkFacts) {
+function layOut(runs: DocRun[], anchorHostLineMetric?: MarkFacts, layoutServices?: ReturnType<typeof metricServices>) {
   return layoutLines(
     linearCtx(),
-    buildSegments(runs, { pageIndex: 0, totalPages: 1, ...(anchorHostLineMetric ? { anchorHostLineMetric } : {}) })
+    buildSegments(runs, { pageIndex: 0, totalPages: 1, ...(anchorHostLineMetric ? { anchorHostLineMetric } : {}),
+      ...(layoutServices ? { layoutServices } : {}) })
       .map((segment) => ({ ...segment })) as LayoutSeg[],
     400,
     0,
@@ -198,6 +199,44 @@ describe('floating drawing anchor-host metrics', () => {
       const [textWithHost] = layOut([anchorHost(), textRun('Caption')], mark);
       expect(textWithHost.ascent).toBe(text.ascent);
       expect(textWithHost.descent).toBe(text.descent);
+    });
+
+    it('keeps a uniformly positioned line unchanged beside an anchor', () => {
+      // word-uniform-run-position-leading needs face data: a resource face
+      // covering the Latin text.
+      const services = metricServices([[0x41, 0x7a]]);
+      const lowered = { ...textRun('Lowered'), position: -3 } as DocRun;
+      const floating = { ...picture, anchor: true } as DocRun;
+      const [alone] = layOut([lowered], mark, services);
+      const [anchored] = layOut([anchorHost(), floating, lowered], mark, services);
+      expect(anchored.ascent).toBe(alone.ascent);
+      expect(anchored.descent).toBe(alone.descent);
+      expect(anchored.intendedSingle).toBe(alone.intendedSingle);
+      expect(alone.uniformPositionAuto).toBeDefined();
+      expect(anchored.uniformPositionAuto).toEqual(alone.uniformPositionAuto);
+    });
+
+    it('classifies the hosts once per paragraph, not once per host', () => {
+      const runs = [...Array.from({ length: 400 }, () => anchorHost()), textRun('Tail')];
+      let reads = 0;
+      const counted = new Proxy(runs, {
+        get(target, key, receiver) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) reads += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const segments = buildSegments(counted, { pageIndex: 0, totalPages: 1, anchorHostLineMetric: mark });
+      expect(segments.filter((segment) => 'text' in segment && segment.anchorHostWithoutMetric)).toHaveLength(400);
+      // A per-host rescan reads the runs about 400 * 401 / 2 times.
+      expect(reads).toBeLessThan(runs.length * 50);
+    });
+
+    it('classifies the paragraph by the content revision display emits', () => {
+      const deleted = { ...textRun('Gone'), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+      const [hostAndDeleted] = layOut([anchorHost(), deleted], mark);
+      const [hostOnly] = layOut([anchorHost()], mark);
+      expect(hostAndDeleted.ascent + hostAndDeleted.descent).toBe(hostOnly.ascent + hostOnly.descent);
+      expect(hostOnly.ascent + hostOnly.descent).toBeGreaterThan(0);
     });
 
     it('measures a host-only paragraph with its paragraph mark, not the anchoring run', () => {

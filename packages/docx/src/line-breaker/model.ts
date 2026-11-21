@@ -115,6 +115,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating-drawing anchor host that keeps
    * only its position; it carries no face or line metrics. */
   anchorHostWithoutMetric?: true;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a host measured with its paragraph
+   * mark's facts, kept only when the paragraph emits no other line content. */
+  anchorHostMarkMetric?: true;
   /** Reserved-separator participant only (rule control or
    * content mark): the bounded selected-face probe whose vertical metrics the
    * metric-only segment keeps. Never display text, glyph ownership, source
@@ -806,6 +809,9 @@ export interface LineLayoutEnvironment {
     fontFamilyEastAsia: null;
     bold: boolean;
     italic: boolean;
+    /** The empty mark's grid-cell class (East Asian), independent of its
+     * ascii face (WORD_EMPTY_MARK_ASCII_FACE). */
+    gridEastAsian?: true;
   }>;
   /** Explicit paragraph character-allocation fact; omission is unknown. */
   readonly characterGridActive?: boolean;

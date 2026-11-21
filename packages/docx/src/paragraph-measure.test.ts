@@ -1811,3 +1811,23 @@ it('converges partition-dependent allocations beside tall tight polygons', () =>
     }
   }
 });
+
+describe('WORD_ANCHOR_HOST_NO_LINE_METRIC host-only paragraphs', () => {
+  const host = { type: 'anchorHost', fontSize: 40, fontFamily: 'Arial', fontFamilyEastAsia: null,
+    bold: false, italic: false } as unknown as DocParagraph['runs'][number];
+  const measureAdvance = (runs: DocParagraph['runs'], eastAsianDocument: boolean, grid: boolean) => {
+    const measured = measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: 20, defaultFontFamily: 'Arial',
+        defaultFontFamilyEastAsia: 'Yu Mincho' } as Partial<DocParagraph>),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0, hasEastAsianText: eastAsianDocument,
+        ...(grid ? { lineGrid: { active: true, pitchPt: 20 } } : {}) }),
+      placement({ startYPt: 0 }), measurer, environment({ documentHasEastAsianText: eastAsianDocument }),
+    );
+    return measured.contentEndYPt - (measured.lines[0]?.topYPt ?? measured.contentStartYPt);
+  };
+  it.each([[false, false], [true, false], [true, true], [false, true]] as const)(
+    'measures an anchor-only paragraph as its empty mark (East Asian document %s, grid %s)',
+    (eastAsianDocument, grid) => {
+      expect(measureAdvance([host], eastAsianDocument, grid)).toBeCloseTo(measureAdvance([], eastAsianDocument, grid), 6);
+    });
+});

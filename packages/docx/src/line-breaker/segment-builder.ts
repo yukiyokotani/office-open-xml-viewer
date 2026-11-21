@@ -918,17 +918,29 @@ export function keepsWordLineBoxes(runs: readonly ParagraphLayoutRun[]): boolean
 
 /** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether a paragraph holds anything that
  * forms a line besides its floating-drawing anchor hosts. */
-function paragraphHasLineContent(runs: readonly ParagraphLayoutRun[]): boolean {
-  return runs.some((run) => {
-    switch (run.type) {
-      case 'anchorHost': return false;
-      case 'image': case 'chart': return !run.anchor;
-      case 'shape': return run.inline === true;
-      case 'unavailableDrawing': return !('anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined);
-      case 'break': return run.breakType === 'line';
-      default: return true;
-    }
-  });
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: an anchoring run sizes no line. A host
+ * is built with its paragraph mark's facts; once the paragraph has emitted
+ * other line content (whatever revision display left of its runs), every such
+ * host keeps only its position and contributes no metrics. */
+function withdrawAnchorHostMetrics(segs: LayoutSeg[]): void {
+  let hosts = false;
+  let content = false;
+  for (const segment of segs) {
+    if ('text' in segment && segment.anchorHostMarkMetric) hosts = true;
+    else if (!('imagePath' in segment && segment.anchor)) content = true;
+    if (hosts && content) break;
+  }
+  if (!hosts || !content) return;
+  for (let index = 0; index < segs.length; index += 1) {
+    const segment = segs[index]!;
+    if (!('text' in segment) || !segment.anchorHostMarkMetric) continue;
+    segs[index] = {
+      text: '', metricOnly: true, bold: false, italic: false, underline: false, strikethrough: false,
+      fontSize: 0, color: null, fontFamily: segment.authoredFontFamily ?? segment.fontFamily ?? null,
+      vertAlign: null, measuredWidth: 0, anchorHostWithoutMetric: true,
+      ...(segment.sourceRunIndex === undefined ? {} : { sourceRunIndex: segment.sourceRunIndex }),
+    };
+  }
 }
 
 export function buildSegments(
@@ -1026,6 +1038,7 @@ export function buildSegments(
   };
 
   appendRunsToSegments(runs, environment, segs, segmentBuildContext, selectedMetric);
+  withdrawAnchorHostMetrics(segs);
 
   finalizeBuiltSegments(runs, environment, segs);
   assignEastAsianAutoSpace(segs, environment);
@@ -2227,14 +2240,7 @@ function appendRunsToSegments(
       // A list label's metric run (a picture bullet's label font) is not an
       // anchoring run and keeps its metrics.
       const hostMetric = listLabelOf(run).listLabel === undefined ? environment.anchorHostLineMetric : undefined;
-      if (hostMetric !== undefined && paragraphHasLineContent(runs)) {
-        segs.push({
-          text: '', metricOnly: true, bold: false, italic: false, underline: false, strikethrough: false,
-          fontSize: 0, color: null, fontFamily: run.fontFamily ?? null, vertAlign: null, measuredWidth: 0,
-          anchorHostWithoutMetric: true,
-          ...listLabelOf(run),
-        });
-      } else {
+      {
         const hostRun = hostMetric !== undefined ? { ...run, ...hostMetric } : run;
         const eastAsian = hostRun.fontFamilyEastAsia != null;
         const bold = hostRun.bold ?? false;
@@ -2279,10 +2285,12 @@ function appendRunsToSegments(
           environment.verticalCJK === true || environment.wordLineBoxes === true))
             : undefined;
         const familyLineMetric = resourceMetric ?? referenceMetric;
+        // A host-only paragraph takes its empty mark's grid-cell class even
+        // though the mark is measured with its ascii face.
         segs.push({
           text: '',
           metricOnly: true,
-          ...(eastAsian ? { metricEastAsian: true as const } : {}),
+          ...(eastAsian || hostMetric?.gridEastAsian ? { metricEastAsian: true as const } : {}),
           bold,
           italic,
           underline: false,
@@ -2320,6 +2328,9 @@ function appendRunsToSegments(
             : undefined,
           snapToCharacterGrid: false,
           ...listLabelOf(hostRun),
+          // Withdrawn after the build when the paragraph emits other line
+          // content (withdrawAnchorHostMetrics).
+          ...(hostMetric !== undefined ? { anchorHostMarkMetric: true as const } : {}),
         });
       }
     }

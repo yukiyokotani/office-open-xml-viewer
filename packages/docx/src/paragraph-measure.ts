@@ -375,6 +375,7 @@ export function measureParagraph(
           fontFamilyEastAsia: null,
           bold: (environment.paragraphMarkShapeInput?.weight ?? 400) >= 600,
           italic: environment.paragraphMarkShapeInput?.style === 'italic',
+          ...(markUsesEastAsianGrid ? { gridEastAsian: true as const } : {}),
         }) }
       : {}),
     characterGridActive: context.characterGrid.active,
