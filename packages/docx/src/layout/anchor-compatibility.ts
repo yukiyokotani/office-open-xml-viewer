@@ -51,19 +51,28 @@ export const WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK = defineCompatibilityRule({
   description: 'Word 2010 accepts only positive wp14:pctWidth and wp14:pctHeight values under [MS-ODRAWXML] notes 125/126. Preserve an authored zero as acquisition evidence while resolving the object from wp:extent. Classification: Microsoft-note derived ([MS-ODRAWXML] notes 125/126). [MS-ODRAWXML] is not in the Microsoft evidence catalog yet, so the evidence stays a regression test.',
 });
 
-/** Evidence: Windows Word 16.0.20527 PDF exports of 20 synthetic controls
- * (A4 portrait, margins top 90 / right 36 / bottom 60 / left 50 pt, 200 x 60 pt
- * objects, effectExtent l 1.5 / t 9 / r 9.75 / b 1.5 pt unless noted). Edges
- * read from the PDF vector paths and image placements, all within 0.05 pt of
- * the rule: margin- and page-relative left/top, right/bottom and center;
- * margin-relative inside/outside on odd and even pages with and without
- * mirrorMargins (the mirrored even page swaps the margins, the alignment keeps
- * its parity); page-relative inside/outside horizontally; a tbRl section (the
- * physical margins, as a horizontal section); effectExtent l -6 / t -3 / r -9 /
- * b -12 and l -6 / t 9 / r 9.75 / b -3 pt; wrapSquare and wrapTopAndBottom,
- * whose text wraps at the widened box plus the wrap distances; pictures and
- * wpg groups; and the same effectExtent on an object without effects
- * (Word uses the authored values). posOffset 0 places the bare extent. */
+/** Evidence: Windows Word 16.0.20527 PDF exports of 29 synthetic controls
+ * (A4 portrait, margins top 90 / right 36 / bottom 60 / left 50 pt; 200 x 60
+ * pt objects with effectExtent l 1.5 / t 9 / r 9.75 / b 1.5 pt, or 40 x 20 pt
+ * objects with l 12 / t 18 / r 3 / b 6 pt for percentages). Edges read from
+ * the PDF vector paths and image placements, all within 0.05 pt of the rule:
+ * - align: margin- and page-relative left/top, right/bottom and center;
+ *   inside/outside on odd and even pages with and without mirrorMargins (the
+ *   mirrored even page swaps the margins, the alignment keeps its parity);
+ *   a tbRl section (the same physical margins as a horizontal section);
+ *   effectExtent l -6 / t -3 / r -9 / b -12 and l -6 / t 9 / r 9.75 / b -3;
+ *   wrapSquare and wrapTopAndBottom, whose text wraps at the widened box plus
+ *   the wrap distances; pictures and wpg groups; an object without effects
+ *   (the authored values apply);
+ * - page-relative vertical inside/outside: the widened box starts half the
+ *   header distance below the page top or ends half the footer distance above
+ *   the page bottom (header/footer 36/36 and 50/25 pt, docGrid pitch 15 and
+ *   18 pt and none, zero and non-zero effect extents); page-relative top and
+ *   bottom and margin-relative inside/outside take no inset;
+ * - pctPos: 0 places the bare extent; 1, 25, 50 and 75 % of the margin and
+ *   25 and 50 % of the page add the left/top effect extent to the percentage
+ *   position, also for negative effect extents;
+ * - posOffset 0 places the bare extent. */
 export const WORD_ALIGN_INCLUDES_EFFECT_EXTENT = defineCompatibilityRule({
   id: 'word-align-includes-effect-extent',
   evidence: {
@@ -73,7 +82,7 @@ export const WORD_ALIGN_INCLUDES_EFFECT_EXTENT = defineCompatibilityRule({
     version: '16.0.20527',
     platform: 'Windows',
   },
-  description: 'ECMA-376 §20.4.2.6 defines wp:effectExtent as the extra extent added to each edge of a drawing object to compensate for its effects; §20.4.3.1 wp:align does not say which box it aligns. Word aligns the extent widened by the authored effect extent, signed as authored: leading alignment (left, top, and inside/outside where page parity makes them leading) puts the extent at the reference start plus the left/top effect extent, trailing alignment puts the extent end at the reference end minus the right/bottom effect extent, and center centres the widened box. posOffset places the bare extent. Measured for shapes, pictures and groups, margin- and page-relative references, odd and even pages with and without mirrorMargins, horizontal and tbRl sections, negative and mixed-sign effect extents, and square and topAndBottom wrapping. Not covered: pctPos offsets and page-relative vertical inside/outside, whose Word placements differ from this rule and are tracked by further controls.',
+  description: 'ECMA-376 §20.4.2.6 defines wp:effectExtent as the extra extent added to each edge of a drawing object to compensate for its effects; §20.4.3.1 wp:align and the wp14 percentage offsets do not say which box they place. Word aligns the extent widened by the authored, signed effect extent: leading alignment (left, top, and inside/outside where page parity makes them leading) puts the extent at the reference start plus the left/top effect extent, trailing alignment puts the extent end at the reference end minus the right/bottom effect extent, and center centres the widened box. For a page-relative vertical inside/outside alignment the reference band is the page shortened by half the header distance at the top and half the footer distance at the bottom. A non-zero wp14 pctPosHOffset/pctPosVOffset places the extent at the percentage position plus the left/top effect extent; a zero percentage and posOffset place the bare extent. Measured for shapes, pictures and groups, margin- and page-relative references, odd and even pages with and without mirrorMargins, horizontal and tbRl sections, negative and mixed-sign effect extents, and square and topAndBottom wrapping. Unmeasured and resolved by the same rule: unequal header and footer distances on even pages (the inset follows the edge the parity selects), the page band in a tbRl section, vertical inside/outside against other references (no inset), and negative percentages.',
 });
 
 /** Origin of the extent on one axis when its effect-widened box is aligned
@@ -90,6 +99,26 @@ export function wordAlignedAnchorOriginPt(
   if (placement === 'trailing') return baseEndPt - trailingEffectPt - sizePt;
   const boxPt = leadingEffectPt + sizePt + trailingEffectPt;
   return baseStartPt + (baseEndPt - baseStartPt - boxPt) / 2 + leadingEffectPt;
+}
+
+/** Origin of the extent on one axis for a wp14 percentage offset (governed by
+ * {@link WORD_ALIGN_INCLUDES_EFFECT_EXTENT}). */
+export function wordPercentAnchorOriginPt(
+  baseStartPt: number,
+  baseLengthPt: number,
+  fraction: number,
+  leadingEffectPt: number,
+): number {
+  if (fraction === 0) return baseStartPt;
+  return baseStartPt + baseLengthPt * fraction + leadingEffectPt;
+}
+
+/** Insets of the page band that page-relative vertical inside/outside align
+ * against (governed by {@link WORD_ALIGN_INCLUDES_EFFECT_EXTENT}). */
+export function wordPageBandAlignInsetsPt(
+  distances: Readonly<{ headerPt: number; footerPt: number }>,
+): { leadingPt: number; trailingPt: number } {
+  return { leadingPt: distances.headerPt / 2, trailingPt: distances.footerPt / 2 };
 }
 
 export const WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER = defineCompatibilityRule({

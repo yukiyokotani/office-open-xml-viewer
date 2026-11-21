@@ -7,6 +7,8 @@ import type {
 import {
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
   wordAlignedAnchorOriginPt,
+  wordPageBandAlignInsetsPt,
+  wordPercentAnchorOriginPt,
   wordZeroRelativeSizeUsesExtent,
 } from './anchor-compatibility.js';
 import { snapshotPlainData } from './plain-data.js';
@@ -26,6 +28,9 @@ export interface AnchorReferenceFramesInput {
   line: AnchorFrameRect | null;
   character: AnchorFrameRect | null;
   pageParity: 'odd' | 'even' | null;
+  /** The section's header and footer distances from the page edges
+   * (ECMA-376 §17.6.11 w:header / w:footer), in points. */
+  pageBandDistances?: Readonly<{ headerPt: number; footerPt: number }> | null;
 }
 
 export interface AnchorFrameInput {
@@ -528,6 +533,21 @@ function resolveSize(
   };
 }
 
+/** The authored effect extent on the leading and trailing physical edges of
+ * one axis (ECMA-376 §20.4.2.6); absent extents are zero. */
+function axisEffectEdges(
+  axis: Axis,
+  acquisition: Readonly<AnchorAcquisitionInput>,
+): { values?: { leadingPt: number; trailingPt: number }; problem?: AnchorFrameIssue } {
+  const effects = effectEdges(acquisition.parentEffectExtent, 'parentEffectExtent', false);
+  if (effects.problem || !effects.values) return { problem: effects.problem as AnchorFrameIssue };
+  return {
+    values: axis === 'horizontal'
+      ? { leadingPt: effects.values.leftPt, trailingPt: effects.values.rightPt }
+      : { leadingPt: effects.values.topPt, trailingPt: effects.values.bottomPt },
+  };
+}
+
 function resolveAxis(
   axis: Axis,
   sizePt: number,
@@ -581,7 +601,19 @@ function resolveAxis(
       const problem = issue('invalid-axis-value', `${path}.choice`, 'percentage must be finite');
       return { diagnostic: unsupportedAxis(axis, acquisition, problem), problem };
     }
-    resolvedOriginPt = baseResult.base.startPt + lengthPt * choice.fraction;
+    const effects = axisEffectEdges(axis, acquisition);
+    if (!effects.values) {
+      const problem = effects.problem as AnchorFrameIssue;
+      return { diagnostic: unsupportedAxis(axis, acquisition, problem), problem };
+    }
+    // `word-align-includes-effect-extent`: a non-zero percentage offsets the
+    // extent by the leading effect edge as well.
+    resolvedOriginPt = wordPercentAnchorOriginPt(
+      baseResult.base.startPt,
+      lengthPt,
+      choice.fraction,
+      effects.values.leadingPt,
+    );
     value = choice.fraction;
   } else if (choice.kind === 'align') {
     const valid = axis === 'horizontal'
@@ -601,20 +633,33 @@ function resolveAxis(
     }
     // ECMA-376 §20.4.2.6 wp:effectExtent widens the extent on each physical
     // edge; the aligned box is that widened box (`word-align-includes-effect-extent`).
-    // Offsets and percentages position the bare extent.
-    const effects = effectEdges(acquisition.parentEffectExtent, 'parentEffectExtent', false);
-    if (effects.problem || !effects.values) {
+    const effects = axisEffectEdges(axis, acquisition);
+    if (!effects.values) {
       const problem = effects.problem as AnchorFrameIssue;
       return { diagnostic: unsupportedAxis(axis, acquisition, problem), problem };
     }
+    const pageBandAligned = axis === 'vertical'
+      && authored.relativeFrom === 'page'
+      && (choice.value === 'inside' || choice.value === 'outside');
+    if (pageBandAligned && !frames.pageBandDistances) {
+      const problem = issue(
+        'invalid-reference-frame',
+        'frames.pageBandDistances',
+        'page-relative vertical inside/outside alignment requires the header and footer distances',
+      );
+      return { diagnostic: unsupportedAxis(axis, acquisition, problem), problem };
+    }
+    const insets = pageBandAligned && frames.pageBandDistances
+      ? wordPageBandAlignInsetsPt(frames.pageBandDistances)
+      : { leadingPt: 0, trailingPt: 0 };
     const placement = alignedAnchorPlacement(axis, choice.value, frames.pageParity);
     resolvedOriginPt = wordAlignedAnchorOriginPt(
       placement,
-      baseResult.base.startPt,
-      baseResult.base.endPt,
+      baseResult.base.startPt + insets.leadingPt,
+      baseResult.base.endPt - insets.trailingPt,
       sizePt,
-      axis === 'horizontal' ? effects.values.leftPt : effects.values.topPt,
-      axis === 'horizontal' ? effects.values.rightPt : effects.values.bottomPt,
+      effects.values.leadingPt,
+      effects.values.trailingPt,
     );
     value = choice.value;
   } else {

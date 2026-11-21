@@ -2475,7 +2475,7 @@ export interface ParagraphAcquisitionOptions {
   readonly sourceRangeStart?: number;
   readonly anchorFrames?: Readonly<Pick<
     AnchorReferenceFramesInput,
-    'page' | 'margin' | 'column' | 'pageParity'
+    'page' | 'margin' | 'column' | 'pageParity' | 'pageBandDistances'
   >>;
   readonly acquireCompleteStory?: CompleteTextBoxStoryAcquirer;
   /**
@@ -4676,6 +4676,7 @@ export function physicalReferenceFrames(
     line: turn(frames.line),
     character: turn(frames.character),
     pageParity: frames.pageParity,
+    pageBandDistances: frames.pageBandDistances ?? null,
   };
 }
 
@@ -4985,6 +4986,7 @@ function acquireAnchorOccurrence(
         : referenceBounds,
       character: host.bounds,
       pageParity: baseFrames?.pageParity ?? null,
+      pageBandDistances: baseFrames?.pageBandDistances ?? null,
     }),
   });
   if (acquiredResult.status !== 'resolved') {
@@ -6524,6 +6526,9 @@ function paragraphAcquisitionKey(
           ]
         : null,
       anchorFrames.pageParity,
+      anchorFrames.pageBandDistances
+        ? [anchorFrames.pageBandDistances.headerPt, anchorFrames.pageBandDistances.footerPt]
+        : null,
     ] : null,
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCellBounds ?? null),
     lineOnly || !hasCompleteTextBox || !options.acquireCompleteStory
