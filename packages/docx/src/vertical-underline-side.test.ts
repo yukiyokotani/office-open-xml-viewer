@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
-import type { ParagraphLayout, TextPlacement } from './layout/types.js';
+import type { ParagraphLayout, TabPlacement, TextPlacement } from './layout/types.js';
+import { transformPoint, transformRect } from './layout/coordinate-space.js';
+import { composeAffine } from './layout/affine.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
 
 // `word-vertical-underline-over-side`: an upright vertical line carries its
@@ -33,17 +35,19 @@ function makeCtx(): CanvasRenderingContext2D {
   getContext() { return makeCtx(); }
 };
 
-function underlined(textDirection?: string, strikethrough = false): TextPlacement {
+type Run = Readonly<{ text: string; fontSize: number; underline?: boolean; strikethrough?: boolean }>;
+
+function layoutLine(runs: readonly Run[], textDirection?: string) {
   const paragraph = {
     type: 'paragraph',
     alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
     spaceBefore: 0, spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [],
-    runs: [{
-      type: 'text', text: 'Ab\\u3042', bold: false, italic: false,
-      underline: !strikethrough, strikethrough,
-      fontSize: 10, color: null, fontFamily: 'NotInMetrics', isLink: false, background: null,
+    runs: runs.map((run) => ({
+      type: 'text', text: run.text, bold: false, italic: false,
+      underline: run.underline === true, strikethrough: run.strikethrough === true,
+      fontSize: run.fontSize, color: null, fontFamily: 'NotInMetrics', isLink: false, background: null,
       vertAlign: null, hyperlink: null,
-    }],
+    })),
     defaultFontSize: 10, defaultFontFamily: 'NotInMetrics', widowControl: false,
   } as unknown as DocParagraph & BodyElement;
   const section = {
@@ -64,7 +68,29 @@ function underlined(textDirection?: string, strikethrough = false): TextPlacemen
     { currentDateMs: 0 },
   ).pages[0]!;
   const node = page.layers.body.find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!;
-  return node.lines[0]!.placements.find((entry): entry is TextPlacement => entry.kind === 'text')!;
+  const line = node.lines[0]!;
+  // The paint matrix of this line: its section frame, composed with any
+  // retained line frame the paragraph carries.
+  const region = page.sectionRegions[0]!.coordinateSpace.logicalToPhysical;
+  const lineFrame = (node as { lineFrame?: string }).lineFrame === 'block-reflected'
+    ? { a: 1, b: 0, c: 0, d: -1, e: 0, f: 2 * line.bounds.yPt + line.bounds.heightPt }
+    : null;
+  const toPage = lineFrame ? composeAffine(region, lineFrame) : region;
+  return { line, toPage };
+}
+
+function underlined(textDirection?: string, strikethrough = false): TextPlacement {
+  const { line } = layoutLine([{ text: 'Ab\u3042', fontSize: 10, underline: !strikethrough, strikethrough }], textDirection);
+  return line.placements.find((entry): entry is TextPlacement => entry.kind === 'text')!;
+}
+
+/** Physical x of a run's underline minus the physical centre of its font box. */
+function physicalUnderlineOffset(textDirection: string): number {
+  const { line, toPage } = layoutLine([{ text: 'Ab\u3042', fontSize: 10, underline: true }], textDirection);
+  const placement = line.placements.find((entry): entry is TextPlacement => entry.kind === 'text')!;
+  const decoration = placement.decorations.find((entry) => entry.kind === 'underline')!;
+  const box = transformRect(toPage, placement.highlightBounds!);
+  return transformPoint(toPage, decoration.from).xPt - (box.xPt + box.widthPt / 2);
 }
 
 /** Signed offset of the decoration from the run's font-box centre; negative
@@ -76,7 +102,7 @@ function offsetFromCentre(placement: TextPlacement, kind: 'underline' | 'striket
 }
 
 describe('underline side in vertical sections (§17.3.2.40)', () => {
-  it.each(['tbRl', 'tbLrV'])('puts a %s underline on the over side, mirrored from horizontal', (direction) => {
+  it.each(['tbRl'])('mirrors a %s underline across its font box in the section frame', (direction) => {
     const horizontal = offsetFromCentre(underlined(), 'underline');
     expect(horizontal).toBeGreaterThan(0);
     expect(offsetFromCentre(underlined(direction), 'underline')).toBeCloseTo(-horizontal, 9);
@@ -87,5 +113,26 @@ describe('underline side in vertical sections (§17.3.2.40)', () => {
     expect(offsetFromCentre(underlined('btLr'), 'underline')).toBeCloseTo(horizontal, 9);
     expect(offsetFromCentre(underlined('tbRl', true), 'strikethrough'))
       .toBeCloseTo(offsetFromCentre(underlined(undefined, true), 'strikethrough'), 9);
+  });
+
+  it.each(['tbRl', 'tbLrV'])('paints a %s underline on the physical right of its glyph column', (direction) => {
+    const horizontal = offsetFromCentre(underlined(), 'underline');
+    expect(physicalUnderlineOffset(direction)).toBeCloseTo(horizontal, 9);
+  });
+
+  it('centres an underlined tab on its own font box, not a larger neighbouring run', () => {
+    const tabOffset = (textDirection?: string) => {
+      const { line } = layoutLine([
+        { text: 'A', fontSize: 30 },
+        { text: '\t', fontSize: 10, underline: true },
+      ], textDirection);
+      const tab = line.placements.find((entry): entry is TabPlacement => entry.kind === 'tab')!;
+      const decoration = tab.decorations!.find((entry) => entry.kind === 'underline')!;
+      // The 10pt tab's font box (ascent 8, descent 2) centres 3pt above its
+      // baseline.
+      return decoration.from.yPt - (line.baselinePt - 3);
+    };
+    expect(tabOffset()).toBeGreaterThan(0);
+    expect(tabOffset('tbRl')).toBeCloseTo(-tabOffset(), 9);
   });
 });

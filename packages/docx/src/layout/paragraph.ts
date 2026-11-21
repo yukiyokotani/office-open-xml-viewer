@@ -193,6 +193,7 @@ import {
   transformRect,
   transformRectEdges,
   uprightPhysicalExtent,
+  logicalBlockStartIsPhysicalRight,
   uprightPageResourceOrientation,
   uprightResourceOrientation,
 } from './coordinate-space.js';
@@ -464,6 +465,10 @@ export interface PlanLineInput {
   readonly thaiProportionalSpread?: boolean;
   /** The paragraph piece ends at a page or column break (its last line). */
   readonly endsAtHardBreak?: boolean;
+  /** The line's paint frame turns its logical top to the physical right in
+   * an upright vertical section: underlines go to that over side
+   * (`word-vertical-underline-over-side`). */
+  readonly underlineOverSide?: true;
   readonly firstLineIndentPt?: number;
   readonly numbering?: Readonly<{
     /** Resolved logical-start offset of the first-line body after the marker. */
@@ -1979,7 +1984,7 @@ export function planLine(input: PlanLineInput): LineLayout {
     const widthPt = segmentWidth(segment) + internalStretchPt + sourceSpaceDeltaPt;
     if (segment.kind === 'tab') {
       const bounds = { xPt, yPt: line.topPt, widthPt: segment.measuredWidthPt, heightPt: line.advancePt };
-      const decorations = segment.underline
+      const tabDecorations = segment.underline
         ? retainedTextDecorations({
             origin: { xPt, yPt: line.baselinePt },
             advancePt: segment.measuredWidthPt,
@@ -1989,6 +1994,13 @@ export function planLine(input: PlanLineInput): LineLayout {
             ...(segment.underline.fontRule ? { fontRule: segment.underline.fontRule } : {}),
           })
         : undefined;
+      // The tab's own font box centres its over-side underline.
+      const decorations = input.underlineOverSide && segment.underline
+        ? overSideUnderlines(
+            tabDecorations,
+            line.baselinePt + (segment.underline.base.descentPt - segment.underline.base.ascentPt) / 2,
+          )
+        : tabDecorations;
       placements.push({
         kind: 'tab', range: segment.range,
         bounds,
@@ -2098,7 +2110,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         xPt,
         yPt: line.baselinePt + baselineOffsetPt,
       };
-      const decorations = retainedGeometry
+      const runDecorations = retainedGeometry
         ? retainedTextDecorations({
             origin: geometryOrigin,
             advancePt: widthPt + ownedTrailingSlackPt,
@@ -2125,6 +2137,15 @@ export function planLine(input: PlanLineInput): LineLayout {
         }),
       } : undefined;
       const highlightFontBox = selectedFaceFontBox ?? retainedGeometry?.base;
+      // The run's own font box centres its over-side underline.
+      const decorations = input.underlineOverSide
+        ? overSideUnderlines(
+            runDecorations,
+            highlightFontBox
+              ? line.baselinePt + baselineOffsetPt + (highlightFontBox.descentPt - highlightFontBox.ascentPt) / 2
+              : line.topPt + line.advancePt / 2,
+          )!
+        : runDecorations;
       const highlightBounds = highlightFontBox ? {
         xPt,
         yPt: line.baselinePt + baselineOffsetPt - highlightFontBox.ascentPt,
@@ -2394,46 +2415,33 @@ export function paragraphContinuingPrefixAdvancesPt(
  * Finalizes the parser-independent paragraph acquisition snapshot. All coordinates
  * are scale-1 points; subsequent Canvas paint is a pure viewport transform.
  */
-/** Underlines of an upright vertical line lie on the over side of the glyph
- * column, the mirror of their horizontal position across the column's
- * centre (`word-vertical-underline-over-side`): each retained underline of
- * a run is reflected across the centre of that run's font box, and a tab's
- * across the first font box on its line (else the line box). Strikes,
- * emphasis marks and ruby keep their positions. */
-function verticalOverSideUnderlines(line: LineLayout): LineLayout {
-  const textCentre = (placement: TextPlacement) => {
-    const box = placement.highlightBounds ?? placement.bounds;
-    return box.yPt + box.heightPt / 2;
-  };
-  const firstText = line.placements.find((placement): placement is TextPlacement => placement.kind === 'text');
-  const lineCentre = firstText ? textCentre(firstText) : line.bounds.yPt + line.bounds.heightPt / 2;
-  const reflect = (
-    decorations: readonly TextDecorationLayout[] | undefined,
-    centre: number,
-  ): readonly TextDecorationLayout[] | undefined => decorations?.map((decoration) => (
+/** `word-vertical-underline-over-side`: reflect each underline across the
+ * centre of its own font box, onto the logical side that the line's paint
+ * frame turns to the physical right (the over side of a vertical line).
+ * Strikethrough and overline keep their geometry. */
+function overSideUnderlines(
+  decorations: readonly TextDecorationLayout[] | undefined,
+  centrePt: number,
+): readonly TextDecorationLayout[] | undefined {
+  return decorations?.map((decoration) => (
     decoration.kind !== 'underline' ? decoration : {
       ...decoration,
-      from: { ...decoration.from, yPt: 2 * centre - decoration.from.yPt },
-      to: { ...decoration.to, yPt: 2 * centre - decoration.to.yPt },
+      from: { ...decoration.from, yPt: 2 * centrePt - decoration.from.yPt },
+      to: { ...decoration.to, yPt: 2 * centrePt - decoration.to.yPt },
       ...(decoration.path ? {
-        path: decoration.path.map((point) => ({ ...point, yPt: 2 * centre - point.yPt })),
+        path: decoration.path.map((point) => ({ ...point, yPt: 2 * centrePt - point.yPt })),
       } : {}),
     }
   ));
-  if (!line.placements.some((placement) => (placement.kind === 'text' || placement.kind === 'tab')
-    && placement.decorations?.some((decoration) => decoration.kind === 'underline'))) return line;
-  return {
-    ...line,
-    placements: line.placements.map((placement) => {
-      if (placement.kind === 'text') {
-        return { ...placement, decorations: reflect(placement.decorations, textCentre(placement))! };
-      }
-      if (placement.kind === 'tab' && placement.decorations) {
-        return { ...placement, decorations: reflect(placement.decorations, lineCentre) };
-      }
-      return placement;
-    }),
-  };
+}
+
+/** Whether a paragraph's lines carry the block-reflected line frame
+ * (`word-section-tblrv-line-strip`): those laid out in a vertical-lr page
+ * frame. */
+function linesBlockReflected(
+  environment: Pick<ParagraphMeasurementEnvironment, 'verticalPageFrame' | 'pageWritingMode'>,
+): boolean {
+  return environment.verticalPageFrame === true && environment.pageWritingMode === 'vertical-lr';
 }
 
 export function layoutParagraph(input: AcquiredParagraphLayoutInput, frozenSource?: ParagraphLayout): ParagraphLayout {
@@ -3957,6 +3965,7 @@ function planMeasuredLines(
   paragraphMarkShapeInput?: NumberingMarkerShapeInput,
   /** Owner section's counter-turn for upright inline graphics. */
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
+  underlineOverSide = false,
 ): readonly LineLayout[] {
   const { ulTrailSpace, doNotExpandShiftReturn } = compat;
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
@@ -4278,6 +4287,7 @@ function planMeasuredLines(
       ...(ulTrailSpace ? { ulTrailSpace } : {}),
       ...(doNotExpandShiftReturn ? { doNotExpandShiftReturn } : {}),
       ...(context.endsAtHardBreak ? { endsAtHardBreak: true } : {}),
+      ...(underlineOverSide ? { underlineOverSide: true as const } : {}),
       ...(context.runDirectionUnauthored ? { runDirectionUnauthored: true } : {}),
       ...(compat.lineEndJustificationBeforeMode15 ? { lineEndJustificationBeforeMode15: true } : {}),
       ...(paragraph.alignment === 'thaiDistribute' && compat.thaiDistributeProportionalSpread
@@ -7375,6 +7385,14 @@ function projectAcquiredParagraphLines(
       options.environment.verticalPageFrame,
       options.environment.pageWritingMode,
     ),
+    // `word-vertical-underline-over-side`: upright vertical lines whose paint
+    // frame (section frame x line frame) turns the logical top to the
+    // physical right.
+    options.environment.verticalCJK === true
+      && logicalBlockStartIsPhysicalRight(
+        options.environment.pageWritingMode,
+        linesBlockReflected(options.environment),
+      ),
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);
@@ -7386,8 +7404,6 @@ function projectAcquiredParagraphLines(
     planningContext.baseRtl,
     planningContext.tabStops,
   );
-  // `word-vertical-underline-over-side`
-  if (options.environment.verticalCJK === true) lines = lines.map(verticalOverSideUnderlines);
   if (
     numberingPlan
     && measured.markOnly
@@ -7719,8 +7735,7 @@ function projectAcquiredParagraph(
     ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
     // `word-section-tblrv-line-strip`: lines of a vertical-lr page frame are
     // reflected across their own block band at projection.
-    ...(options.environment.verticalPageFrame && options.environment.pageWritingMode === 'vertical-lr'
-      ? { lineFrame: 'block-reflected' as const } : {}),
+    ...(linesBlockReflected(options.environment) ? { lineFrame: 'block-reflected' as const } : {}),
     flowDomainId: options.flowDomainId, ordinaryFlow: options.ordinaryFlow,
     ...(paragraph.styleId !== undefined ? { styleId: paragraph.styleId } : {}),
     ...(!options.continuesFromPrevious && paragraph.bookmarks?.length
