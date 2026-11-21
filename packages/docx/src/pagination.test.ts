@@ -1783,6 +1783,21 @@ describe('layoutPages — explicit column break (§17.3.1.20)', () => {
     expect(colOf(paras[1])).toBe(1);
   });
 
+  // §17.3.1.23: the parser carries pageBreakBefore of a paragraph whose first
+  // content is a column break as that paragraph's own transition
+  // (`__pageBreakBefore`), satisfied by an empty page start.
+  it('adds no page for a leading pageBreakBefore column break at the document start', () => {
+    const pageBreakBefore = { type: 'pageBreak', origin: 'authored', __pageBreakBefore: true } as unknown as BodyElement;
+    const atStart = layoutPages([pageBreakBefore, colBreak(), para({ text: 'b', fontSize: 20 })], twoCol(), makeCtx());
+    expect(atStart.length).toBe(1);
+    expect(colOf(atStart[0].layers.body.filter((e) => e.kind === 'paragraph')[0])).toBe(1);
+    const afterText = layoutPages([para({ text: 'a', fontSize: 20 }), pageBreakBefore, colBreak(),
+      para({ text: 'b', fontSize: 20 })], twoCol(), makeCtx());
+    expect(afterText.length).toBe(2);
+    expect(textOf(afterText[1].layers.body[0])).toBe('b');
+    expect(colOf(afterText[1].layers.body[0])).toBe(1);
+  });
+
   it('a column break in the LAST column moves to the next page (column 0)', () => {
     const body = [
       para({ text: 'a', fontSize: 20 }),

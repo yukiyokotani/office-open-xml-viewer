@@ -471,6 +471,9 @@ export interface LayoutImageSeg extends LayoutSegSource {
   /** Participates in WORD_INLINE_PICTURE_AUTO_LEADING: an inline picture or
    * drawing shape (WPS/VML text box); chart boxes do not opt in. */
   inlinePicture?: true;
+  /** ECMA-376 §17.3.2.24 raise (+) / lower (-) in pt of the hosting run: the
+   * object box moves off the baseline like the run's text. */
+  positionPt?: number;
   /** Paragraph mark's selected-face natural single line, measured once per paragraph. */
   paragraphMarkSinglePx?: number;
   /** Resolved outer-run minimum for baseline-aligned DrawingML: extra space

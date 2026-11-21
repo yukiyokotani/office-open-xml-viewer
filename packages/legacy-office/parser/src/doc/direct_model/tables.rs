@@ -21,6 +21,8 @@ pub(super) enum Block {
     Table(Box<DocTable>),
     PageBreak {
         same_paragraph_as_previous: Option<bool>,
+        /// §17.3.1.23 pageBreakBefore carried before a leading column break.
+        page_break_before: bool,
     },
     ColumnBreak,
 }

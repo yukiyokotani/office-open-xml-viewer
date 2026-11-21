@@ -68,6 +68,10 @@ export interface CanvasPaintResourcePainter {
 
 export interface CanvasPaintContext {
   readonly ctx: PaintCanvas2D;
+  /** Painting already happens inside a line's retained frame (layout/types.ts
+   * ParagraphLayout.lineFrame): nested stories, such as the text of an inline
+   * shape, must not apply their own line frame again. */
+  readonly lineFramed?: true;
   readonly scale: number;
   readonly dpr: number;
   /** Page-to-device frame for DrawingML pattern fills. Chart and VML hosts

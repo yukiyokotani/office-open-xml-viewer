@@ -178,6 +178,32 @@ describe('paragraph acquisition cache', () => {
     expect(acquire(true)).toEqual(['あ', 'い々', 'う']);
   });
 
+  it('reacquires a compatibility text box when its host line grid changes on a warm cache', () => {
+    const services = scopedServices();
+    const paragraph = { ...textParagraph(), runs: [{
+      type: 'shape', inline: true, widthPt: 60, heightPt: 100, zOrder: 0,
+      anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      subpaths: [], presetGeometry: 'rect', fill: null, stroke: null,
+      textAnchor: 't', textInsetL: 0, textInsetT: 0, textInsetR: 0, textInsetB: 0,
+      textBlocks: [{ text: '\u3042', fontSizePt: 10, alignment: 'left',
+        runs: [{ text: '\u3042', fontSizePt: 10, fontFamily: 'Test Sans' }] }],
+    } as DocRun] };
+    const input = paragraphAcquisitionInput(paragraph, source);
+    const childAdvance = (pitchPt: number | null) => {
+      const result = acquireParagraphResult(input, options(services, {
+        context: { ...context, lineGrid: { active: pitchPt !== null, pitchPt } },
+      })).layout;
+      const child = result.textBoxes[0]?.story.blocks[0];
+      if (child?.kind !== 'paragraph') throw new Error('expected compatibility child');
+      return child.lines[0]!.advancePt;
+    };
+    // The text box inherits its host's grid; each warm request keys on it.
+    expect(childAdvance(18)).toBe(18);
+    expect(childAdvance(24)).toBe(24);
+    expect(childAdvance(null)).toBeLessThan(18);
+    expect(childAdvance(18)).toBe(18);
+  });
+
   it('preserves external numbered frames across body, story, cell and grid cache contexts', () => {
     const services = scopedServices();
     const paragraph = { ...textParagraph('word'), indentLeft: 50, indentFirst: -50,

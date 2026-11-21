@@ -48,7 +48,7 @@ import {
   wordInlineDrawingTurnsFootprint,
   wordInlinePictureClipsToLine,
 } from '../layout/line-compatibility.js';
-import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
+import { type LayoutImageSeg, type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
 import { assignEastAsianAutoSpace } from './east-asian-autospace.js';
 import {
@@ -916,8 +916,6 @@ export function keepsWordLineBoxes(runs: readonly ParagraphLayoutRun[]): boolean
   return runs.some((run) => (run as { textBoxVertical?: boolean }).textBoxVertical === true);
 }
 
-/** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether a paragraph holds anything that
- * forms a line besides its floating-drawing anchor hosts. */
 /** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether a paragraph emitted line
  * geometry besides anchor hosts and floating drawings. A zero-width marker
  * (an unselected optional hyphen) is no geometry. */
@@ -930,6 +928,95 @@ export function segmentsHaveLineGeometry(segs: readonly LayoutSeg[]): boolean {
     }
     return true;
   });
+}
+
+type ImageSegmentSource = Readonly<{
+  imagePath: string;
+  mimeType: string;
+  widthPt: number;
+  heightPt: number;
+  anchor?: boolean;
+  inlineEffectExtent?: readonly number[];
+  inlinePositionPt?: number;
+  inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  anchorXPt?: number;
+  anchorYPt?: number;
+  anchorXFromMargin?: boolean;
+  anchorYFromPara?: boolean;
+  colorReplaceFrom?: string | null;
+  duotone?: unknown;
+  alpha?: number;
+  srcRect?: unknown;
+}>;
+
+/** The line segment of a picture, available or not (§20.4.2.8 inline,
+ * §20.4.2.3 anchor). */
+function imageSegment(img: ImageSegmentSource, environment: LineLayoutEnvironment): LayoutImageSeg {
+  return {
+    imagePath: img.imagePath,
+    mimeType: img.mimeType,
+    ...(img.anchor ? {} : { inlinePicture: true as const }),
+    ...(!img.anchor && img.inlinePositionPt ? { positionPt: img.inlinePositionPt } : {}),
+    ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
+      img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
+      wordInlineDrawingTurnsFootprint(drawingMlInlinePictureTurn(img)),
+    )),
+    ...(!img.anchor && wordInlinePictureClipsToLine(drawingMlInlinePictureTurn(img))
+      ? { clipToLine: true as const } : {}),
+    rotation: img.rotation,
+    flipH: img.flipH,
+    flipV: img.flipV,
+    anchor: img.anchor ?? false,
+    anchorXPt: img.anchorXPt ?? 0,
+    anchorYPt: img.anchorYPt ?? 0,
+    anchorXFromMargin: img.anchorXFromMargin ?? false,
+    anchorYFromPara: img.anchorYFromPara ?? false,
+    colorReplaceFrom: img.colorReplaceFrom ?? undefined,
+    duotone: img.duotone,
+    alpha: img.alpha,
+    srcRect: img.srcRect ?? undefined,
+    measuredWidth: 0,
+  } as LayoutImageSeg;
+}
+
+/** The line segment of a chart, available or not. ECMA-376 §21.2: flowed as a
+ * picture box of the `<wp:extent>` natural size, the same LayoutImageSeg shape
+ * (empty `imagePath`/`mimeType` sentinels so `'imagePath' in seg` routes it
+ * through the image measurement/split path) with only a chart resource marker;
+ * the model payload remains owned by the paint resource registry. A
+ * `<wp:anchor>` chart (§20.4.2.3) carries `anchor: true` and its parsed
+ * page-offset fields, exactly like an anchor ImageRun. */
+function chartSegment(
+  chartRun: Readonly<{
+    widthPt: number; heightPt: number; anchor?: boolean; anchorXPt?: number; anchorYPt?: number;
+    anchorXFromMargin?: boolean; anchorYFromPara?: boolean; resourceKey?: string;
+  }>,
+  environment: LineLayoutEnvironment,
+): LayoutImageSeg {
+  return {
+    imagePath: '',
+    mimeType: '',
+    // Preserve the established wp:extent chart allocation. Office-produced
+    // Pareto controls do not reserve this padding; other chart classes
+    // remain unmeasured, so chart effect-extent reservation is unsupported
+    // rather than inferred from the picture/shape rule.
+    // An inline chart is counter-turned like a picture in a vertical
+    // page frame, so its logical box swaps its extent (inlineEffectExtentBox).
+    ...(!chartRun.anchor && environment.uprightResourceOrientation !== undefined
+      ? { widthPt: chartRun.heightPt, heightPt: chartRun.widthPt }
+      : { widthPt: chartRun.widthPt, heightPt: chartRun.heightPt }),
+    anchor: chartRun.anchor ?? false,
+    anchorXPt: chartRun.anchorXPt ?? 0,
+    anchorYPt: chartRun.anchorYPt ?? 0,
+    anchorXFromMargin: chartRun.anchorXFromMargin ?? false,
+    anchorYFromPara: chartRun.anchorYFromPara ?? false,
+    chart: true,
+    ...(chartRun.resourceKey === undefined ? {} : { chartResourceKey: chartRun.resourceKey }),
+    measuredWidth: 0,
+  };
 }
 
 export function buildSegments(
@@ -1784,6 +1871,11 @@ function inlineEffectExtentBox(
   effectExtent?: readonly [number, number, number, number];
   objectSizePt?: readonly [number, number];
 } {
+  // A counter-turned (upright) object in a vertical page frame keeps its
+  // §20.4.2.7 wp:extent on the physical page: its physical height runs along
+  // the line and its physical width across it, so the logical box swaps the
+  // two (`word-vertical-inline-picture-upright-extent`).
+  if (orientation !== undefined) [widthPt, heightPt] = [heightPt, widthPt];
   const authored = extent && extent.length === 4 && extent.some((edge) => Number.isFinite(edge) && edge !== 0);
   if (!authored && !turnedFootprint) return { widthPt, heightPt };
   const [l, t, r, b] = authored
@@ -2059,63 +2151,9 @@ function appendRunsToSegments(
         }
       }
     } else if (run.type === 'image') {
-      const img = run;
-      segs.push({
-        imagePath: img.imagePath,
-        mimeType: img.mimeType,
-        ...(img.anchor ? {} : { inlinePicture: true as const }),
-        ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
-          img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
-          wordInlineDrawingTurnsFootprint(drawingMlInlinePictureTurn(img)),
-        )),
-        ...(!img.anchor && wordInlinePictureClipsToLine(drawingMlInlinePictureTurn(img))
-          ? { clipToLine: true as const } : {}),
-        rotation: img.rotation,
-        flipH: img.flipH,
-        flipV: img.flipV,
-        anchor: img.anchor ?? false,
-        anchorXPt: img.anchorXPt ?? 0,
-        anchorYPt: img.anchorYPt ?? 0,
-        anchorXFromMargin: img.anchorXFromMargin ?? false,
-        anchorYFromPara: img.anchorYFromPara ?? false,
-        colorReplaceFrom: img.colorReplaceFrom ?? undefined,
-        duotone: img.duotone,
-        alpha: img.alpha,
-        srcRect: img.srcRect ?? undefined,
-        measuredWidth: 0,
-        ...listLabelOf(img),
-      });
+      segs.push({ ...imageSegment(run, environment), ...listLabelOf(run) });
     } else if (run.type === 'chart') {
-      // ECMA-376 §21.2 chart. Flow it as a picture box of the `<wp:extent>`
-      // natural size: the same LayoutImageSeg shape (empty `imagePath`/
-      // `mimeType` sentinels so `'imagePath' in seg` routes it through the image
-      // measurement/split path) with only a chart resource marker; the model
-      // payload remains owned by the paint resource registry.
-      //
-      // A `<wp:anchor>` (floating) chart (§20.4.2.3) carries `anchor: true` and
-      // its parsed page-offset fields, exactly like an anchor ImageRun: the
-      // measure pass zeroes an anchor seg's width (it is not part of the inline
-      // flow) and anchor acquisition retains it at the resolved absolute box.
-      const chartRun = run;
-      segs.push({
-        imagePath: '',
-        mimeType: '',
-        // Preserve the established wp:extent chart allocation. Office-produced
-        // Pareto controls do not reserve this padding; other chart classes
-        // remain unmeasured, so chart effect-extent reservation is unsupported
-        // rather than inferred from the picture/shape rule.
-        widthPt: chartRun.widthPt,
-        heightPt: chartRun.heightPt,
-        anchor: chartRun.anchor ?? false,
-        anchorXPt: chartRun.anchorXPt ?? 0,
-        anchorYPt: chartRun.anchorYPt ?? 0,
-        anchorXFromMargin: chartRun.anchorXFromMargin ?? false,
-        anchorYFromPara: chartRun.anchorYFromPara ?? false,
-        chart: true,
-        chartResourceKey: (chartRun as Partial<import('../layout/text.js').ParagraphChartRun>)
-          .resourceKey,
-        measuredWidth: 0,
-      });
+      segs.push(chartSegment(run, environment));
     } else if (run.type === 'shape' && run.inline === true) {
       // `wp:inline` hosts arbitrary DrawingML, including WPS shapes (§20.4.2.8).
       // Reserve its extent in the same line-breaking path as an inline picture;
@@ -2131,6 +2169,8 @@ function appendRunsToSegments(
         anchorYFromPara: false,
         inlineShape: true,
         inlinePicture: true,
+        ...((run as Partial<import('../layout/text.js').ParagraphShapeRun>).inlinePositionPt
+          ? { positionPt: (run as Partial<import('../layout/text.js').ParagraphShapeRun>).inlinePositionPt } : {}),
         // An inline shape is not counter-turned in a vertical section, so its
         // effect edges stay on the object's own (logical) edges. A DrawingML
         // shape turns by its own xfrm, a group by its grpSpPr xfrm (its
@@ -2144,25 +2184,23 @@ function appendRunsToSegments(
         measuredWidth: 0,
       });
     } else if (run.type === 'unavailableDrawing') {
-      const acquiredAnchor =
-        'anchorAcquisitionInput' in run ? run.anchorAcquisitionInput : undefined;
+      // A placeholder is built as the picture or chart it stands for (same
+      // segment kind, box, position and leading metadata); availability only
+      // changes what is painted.
+      const anchored = 'anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined;
       segs.push({
-        imagePath: '',
-        mimeType: '',
-        // The placeholder keeps the allocation its resource would have: an
-        // available chart reserves only wp:extent (see the chart branch), so
-        // an unavailable chart must not gain effect-extent padding either.
-        ...inlineEffectExtentBox(
-          acquiredAnchor !== undefined || run.resourceKind === 'chart' ? undefined : run.inlineEffectExtent,
-          run.widthPt, run.heightPt,
-        ),
-        anchor: acquiredAnchor !== undefined,
-        anchorXPt: 0,
-        anchorYPt: 0,
-        anchorXFromMargin: false,
-        anchorYFromPara: false,
+        ...(run.resourceKind === 'chart'
+          ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
+          : imageSegment({
+              imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
+              ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
+              ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
+              ...(run.rotation ? { rotation: run.rotation } : {}),
+              ...(run.flipH ? { flipH: true } : {}),
+              ...(run.flipV ? { flipV: true } : {}),
+              inlineObjectOrigin: 'drawingml',
+            }, environment)),
         unavailableResourceKind: run.resourceKind,
-        measuredWidth: 0,
       });
     } else if (run.type === 'break') {
       if (run.breakType === 'line') {

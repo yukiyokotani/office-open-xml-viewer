@@ -103,6 +103,18 @@ export const WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION = defineCompatibilityRule({
   description: 'Admit the final visible paragraph content at a flow-region edge when only its authored trailing space crosses the edge, while retaining that space for placement and paint. Library policy, no Office measurement: trailing space-after admission assumption from PR #1080; nothing measured.',
 });
 
+export const WORD_COLUMN_BREAK_MARK_NEXT_COLUMN = defineCompatibilityRule({
+  id: 'word-column-break-mark-next-column',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'leading-column-break-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.3.1 br type="column" restarts the text in the next column but does not say where the paragraph mark after a terminal break goes (Part 4 §14.8.3.38 splitPgBreakAndParaMark covers only page breaks). Windows Word 16.0.20527 controls (a two-column continuous section, Times New Roman 11pt; compatibility modes 14 and 15, splitPgBreakAndParaMark absent and present) put a paragraph mark that follows a column break on its own empty line at the top of the next column: a paragraph holding only a column break pushes the next column\'s text down by one 12pt mark line (13.8pt), and a text paragraph ending with a column break by one 11pt mark line (12.65pt). Mode 15 and splitPgBreakAndParaMark (in mode 14 and 15) leave this unchanged: the setting governs page-break marks only. A paragraph that starts with a column break keeps no line before the break in the previous column (12pt and 20pt break runs, space before or after, an exact 30pt line, a bookmark before the break), as already laid out. The parser therefore keeps the mark of a terminal column break as an empty paragraph after the column break, with the same ownership rules as the §14.8.3.38 page-break mark; the pageBreakBefore (§17.3.1.23) of a paragraph that starts with a column break stays that paragraph property, applied before the break and satisfied by an empty page start. DOC sources share this normalizer.',
+});
+
 export const WORD_GRID_LINE_CONTENT_FIT_ADMISSION = defineCompatibilityRule({
   id: 'word-grid-line-content-fit-admission',
   evidence: {
@@ -112,7 +124,7 @@ export const WORD_GRID_LINE_CONTENT_FIT_ADMISSION = defineCompatibilityRule({
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'Windows Word 16.0 build 20430 admits a centered text box inside a 20pt line-grid cell when the natural box ends inside the body, even when the cell overhangs the bottom margin. A later-positioned caption whose natural box crosses the body bottom moves to the next page. These inside/outside observations support content-box admission, not baseline-only admission or a fixed overhang tolerance. ECMA-376 §§17.6.5 and 17.3.1.32 define grid participation, not this page-edge rule. trr3 family D further observes the same page boundary for 11pt MS Mincho empty marks and single-character paragraphs on a 16.4pt grid (modes 14/15, lines/linesAndChars, zero/one preceding empty mark): 15pt moves and 15.5pt stays. Empty marks carry the equivalent metric-only allowance through word-trailing-empty-mark-baseline-admission. Only leading added beyond its own natural/authored height is eligible; authored atLeast minima and auto multiples remain charged. The allowance is restricted to a positive whitelist of plain glyph paint in undecorated paragraphs: paragraph/run borders (including between/bar rules), shading/highlight, underline/strike/emphasis, ruby, fields, tabs, objects and unknown retained paint retain the full cell, even when a continuation slice omits paragraph edges. The issue #2099 restriction removes grid-leading relief only for whole source paragraphs with no placements on any acquired line (break-only/empty-line-only, bookmarks allowed), retaining full-box admission. Placements include text, tabs, anchor hosts, resources and drawings. Mixed paragraphs are unmeasured and keep v0.89 behaviour, including blank candidate prefixes and blank-only continuations after earlier placements; the trr3 family C counterexamples and evidence limits are recorded beside the predicate. Off-grid and exact lines retain full-box admission. This observation applies only at the physical body bottom with no intervening reservation; note bands, wrap exclusions and shortened column regions retain the whole grid cell. Evidence: issue #1674 / PR #1796 controls; issue #2099.',
+  description: 'Windows Word 16.0 build 20430 admits a centered text box inside a 20pt line-grid cell when the natural box ends inside the body, even when the cell overhangs the bottom margin. A later-positioned caption whose natural box crosses the body bottom moves to the next page. These inside/outside observations support content-box admission, not baseline-only admission or a fixed overhang tolerance. ECMA-376 §§17.6.5 and 17.3.1.32 define grid participation, not this page-edge rule. trr3 family D further observes the same page boundary for 11pt MS Mincho empty marks and single-character paragraphs on a 16.4pt grid (modes 14/15, lines/linesAndChars, zero/one preceding empty mark): 15pt moves and 15.5pt stays. Empty marks carry the equivalent metric-only allowance through word-trailing-empty-mark-baseline-admission. Only leading added beyond its own natural/authored height is eligible; authored atLeast minima and auto multiples remain charged. The allowance is restricted to a positive whitelist of plain glyph paint in undecorated paragraphs: paragraph/run borders (including between/bar rules), shading/highlight, underline/strike/emphasis, ruby, fields, tabs, objects and unknown retained paint retain the full cell, even when a continuation slice omits paragraph edges. The issue #2099 restriction removes grid-leading relief only for whole source paragraphs with no placements on any acquired line (break-only/empty-line-only, bookmarks allowed), retaining full-box admission. Placements include text, tabs, anchor hosts, resources and drawings. Mixed paragraphs are unmeasured and keep v0.89 behaviour, including blank candidate prefixes and blank-only continuations after earlier placements; the trr3 family C counterexamples and evidence limits are recorded beside the predicate. Off-grid and exact lines retain full-box admission. This observation applies only at the physical body bottom with no intervening reservation; note bands and shortened column regions retain the whole grid cell, and so does a line that a wrap exclusion overlaps. A wrap exclusion elsewhere on the page leaves the allowance: Windows Word 16.0.20527 controls (mode 14, 20pt lines grid, 16.5pt left for a trailing empty mark) keep the mark on the page with a square-wrapped float higher on the page (one or two empty marks) and with a wrapNone float, and move it to the next page when the square float lies beside the mark (16.5 and 17.5pt left) or when only 16.0pt is left. Evidence: issue #1674 / PR #1796 controls; issue #2099.',
 });
 
 // Positive paint whitelist for the bounded plain-caption observation. Unknown
@@ -128,6 +140,9 @@ const GRID_PLAIN_PARAGRAPH_KEYS = new Set([
   'lines', 'resources', 'events', 'exclusions', 'cellContainmentBounds', 'anchorCollisions',
   'anchorFrames',
   'continuation',
+  // A tbLrV line strip paints as a tbRl strip (word-section-tblrv-line-strip);
+  // its reflection does not move ink across the strip's block edges.
+  'lineFrame',
 ]);
 const GRID_PLAIN_LINE_KEYS = new Set([
   'range', 'bounds', 'baselinePt', 'advancePt', 'gridAfterLeadingPt', 'pageEdgeOverhangPt', 'placements',
@@ -195,6 +210,29 @@ function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout)
           && placement.typography.emphasis.status === 'missing')));
 }
 
+/** WORD_GRID_LINE_CONTENT_FIT_ADMISSION: a wrap exclusion cancels the grid
+ * leading relief only where it overlaps the line's band (from the line top to
+ * `bandBottomPt`) inside the paragraph's flow column; one elsewhere on the
+ * page leaves it. */
+export function wordGridLeadingWrapExclusionOverlaps(
+  paragraph: Pick<ParagraphLayout, 'exclusions' | 'flowBounds'>,
+  lineTopPt: number,
+  bandBottomPt: number,
+  blockOffsetPt = 0,
+): boolean {
+  void WORD_GRID_LINE_CONTENT_FIT_ADMISSION;
+  // Keep-next lookahead acquires successors at the current cursor; only
+  // its terminal slice moves by the preceding keep members' full advances;
+  // host-owned exclusions move with it, while page-owned exclusions stay put.
+  return paragraph.exclusions.some(({ bounds, verticalOwnership }) => {
+    const topPt = bounds.yPt + (verticalOwnership === 'host' ? blockOffsetPt : 0);
+    return topPt < bandBottomPt
+      && topPt + bounds.heightPt > lineTopPt + blockOffsetPt
+      && bounds.xPt < paragraph.flowBounds.xPt + paragraph.flowBounds.widthPt
+      && bounds.xPt + bounds.widthPt > paragraph.flowBounds.xPt;
+  });
+}
+
 /** Omit only eligible blank terminal grid leading, preserving paragraph trailing extents
  * and all retained placement/paint geometry. Applies to complete and continuing
  * fragments; earlier lines still consume their full grid cells. The caller
@@ -219,16 +257,9 @@ export function wordGridLineAdmissionExtentPt(
   if (unreservedBodyBottomPt === undefined || additionalReservePt > 0) {
     return logicalLineBoxExtentPt;
   }
-  // Keep-next lookahead acquires successors at the current cursor; only
-  // its terminal slice moves by the preceding keep members' full advances;
-  // host-owned exclusions move with it, while page-owned exclusions stay put.
-  if (lastLine && paragraph.exclusions.some(({ bounds, verticalOwnership }) => {
-    const topPt = bounds.yPt + (verticalOwnership === 'host' ? blockOffsetPt : 0);
-    return topPt < unreservedBodyBottomPt
-      && topPt + bounds.heightPt > lastLine.bounds.yPt + blockOffsetPt
-      && bounds.xPt < paragraph.flowBounds.xPt + paragraph.flowBounds.widthPt
-      && bounds.xPt + bounds.widthPt > paragraph.flowBounds.xPt;
-  })) return logicalLineBoxExtentPt;
+  if (lastLine && wordGridLeadingWrapExclusionOverlaps(
+    paragraph, lastLine.bounds.yPt, unreservedBodyBottomPt, blockOffsetPt,
+  )) return logicalLineBoxExtentPt;
   // Authored paragraph paint also disables gridAfterLeadingPt at acquisition,
   // before continuation/keep-next slicing can remove a top/bottom/between edge.
   if (!lastLine || !wordGridLineHasPlainPaint(paragraph, lastLine)) {

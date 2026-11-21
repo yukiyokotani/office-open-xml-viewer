@@ -1797,6 +1797,7 @@ impl DocxBodyCursor {
                             origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
+                            page_break_before: None,
                         }],
                     });
                 }
@@ -1872,6 +1873,7 @@ impl DocxBodyCursor {
                             origin: Some(PageBreakOrigin::CoverPageSynthetic),
                             parity: None,
                             same_paragraph_as_previous: None,
+                            page_break_before: None,
                         },
                     );
                     for diagnostic in &mut self.diagnostics[diagnostics_start..] {
@@ -4554,9 +4556,6 @@ impl BodyParseCursor {
                         DocRun::Break {
                             break_type: BreakType::Page,
                         } => Some(BreakType::Page),
-                        DocRun::Break {
-                            break_type: BreakType::Column,
-                        } => Some(BreakType::Column),
                         _ => None,
                     }
                 } else {
@@ -4596,6 +4595,7 @@ impl BodyParseCursor {
                                 origin: Some(PageBreakOrigin::Authored),
                                 parity: None,
                                 same_paragraph_as_previous: None,
+                                page_break_before: None,
                             });
                             // §14.8.3.38: retain the mark only when the page
                             // break is not subsumed by the section transition.
@@ -4606,11 +4606,9 @@ impl BodyParseCursor {
                         }
                         push_section_break(&mut output);
                     }
-                    Some(BreakType::Column) => {
-                        output.push(BodyElement::ColumnBreak);
-                        push_section_break(&mut output);
-                    }
                     _ => {
+                        // Column breaks, alone or not, keep their paragraph mark
+                        // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN) in the shared splitter.
                         for piece in split_para_on_page_breaks(result, split_pg_break_and_para_mark)
                         {
                             match piece {
@@ -4624,6 +4622,13 @@ impl BodyParseCursor {
                                     parity: None,
                                     same_paragraph_as_previous: same_paragraph_as_previous
                                         .then_some(true),
+                                    page_break_before: None,
+                                }),
+                                ParaPiece::PageBreakBefore => output.push(BodyElement::PageBreak {
+                                    origin: Some(PageBreakOrigin::Authored),
+                                    parity: None,
+                                    same_paragraph_as_previous: None,
+                                    page_break_before: Some(true),
                                 }),
                                 ParaPiece::ColumnBreak => output.push(BodyElement::ColumnBreak),
                             }
@@ -4811,6 +4816,7 @@ fn parse_story_body_elements(
                 origin: Some(PageBreakOrigin::CoverPageSynthetic),
                 parity: None,
                 same_paragraph_as_previous: None,
+                page_break_before: None,
             });
         }
     }
@@ -7760,6 +7766,23 @@ fn resolved_run_font_slots(fmt: &RunFmt, theme: &ThemeColors) -> Option<RunFontS
     })
 }
 
+/// Record a hosting run's §17.3.2.24 position on its inline (non-anchor) object.
+fn set_inline_object_position(run: &mut DocRun, position: Option<f64>) {
+    match run {
+        DocRun::Shape(shape) if shape.inline => shape.inline_position = position,
+        DocRun::Image(image) if !image.anchor => image.inline_position = position,
+        // An unavailable inline picture keeps the position its picture would
+        // have (charts keep their established placement either way).
+        DocRun::UnavailableDrawing(drawing)
+            if drawing.anchor_acquisition.is_none()
+                && matches!(drawing.resource_kind, UnavailableDrawingResourceKind::Image) =>
+        {
+            drawing.inline_position = position
+        }
+        _ => {}
+    }
+}
+
 fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
     let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
     RunFontFacts {
@@ -8306,15 +8329,31 @@ fn parse_run_inner(
         anchor_occurrence_id: None,
         list_label: None,
     };
+    // ECMA-376 §17.3.2.24: the hosting run's raise/lower moves its inline
+    // objects like its text (WORD_INLINE_OBJECT_POSITION).
+    let inline_position = fmt
+        .position
+        .filter(|value| *value != 0.0 && value.is_finite());
     let attach_drawing_run_facts = |drawing_runs: &mut Vec<DocRun>| {
         // An inline drawing is one character of this resolved outer run.
         // Preserve all font slots before its text-box content starts a separate
         // story. It needs automatic leading, not a synthetic anchor character.
         let mut facts = None;
         for drawing in drawing_runs.iter_mut() {
+            set_inline_object_position(drawing, inline_position);
             let target = match drawing {
                 DocRun::Shape(shape) if shape.inline => Some(&mut shape.inline_object_font_facts),
                 DocRun::Image(image) if !image.anchor => Some(&mut image.inline_object_font_facts),
+                // An inline picture placeholder carries the picture's run facts.
+                DocRun::UnavailableDrawing(drawing)
+                    if drawing.anchor_acquisition.is_none()
+                        && matches!(
+                            drawing.resource_kind,
+                            UnavailableDrawingResourceKind::Image
+                        ) =>
+                {
+                    Some(&mut drawing.inline_object_font_facts)
+                }
                 _ => None,
             };
             if let Some(target) = target {
@@ -9175,6 +9214,11 @@ fn parse_run_inner(
                 } else if let Some(img) = parse_object_ole_image(child, media_map, diagnostics) {
                     let anchored = img.anchor;
                     let mut object_runs = vec![DocRun::Image(Box::new(img))];
+                    // The static preview moves with its run's position like any
+                    // inline picture, though it keeps its established leading.
+                    for object in object_runs.iter_mut() {
+                        set_inline_object_position(object, inline_position);
+                    }
                     // Inline OLE previews retain their established allocation:
                     // outer-run leading controls cover ordinary pictures/text
                     // boxes, not an embedded object's static preview.
@@ -9282,25 +9326,7 @@ fn resolve_inline_blip(
     // picture's orientation. wp:extent owns layout size, while these facts
     // own paint and rotWithShape=false inside the recursive blip evaluator.
     // Restrict lookup to this blip's picture, never a nested text-box drawing.
-    let xfrm = blip_fill
-        .and_then(|fill| fill.parent())
-        .and_then(|picture| {
-            picture
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "spPr")
-        })
-        .and_then(|properties| {
-            properties
-                .children()
-                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
-        });
-    let rotation = xfrm
-        .and_then(|n| n.attribute("rot"))
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(0) as f64
-        / 60000.0;
-    let flip_h = xfrm.is_some_and(|n| matches!(n.attribute("flipH"), Some("1" | "true")));
-    let flip_v = xfrm.is_some_and(|n| matches!(n.attribute("flipV"), Some("1" | "true")));
+    let (rotation, flip_h, flip_v) = picture_orientation(blip_fill.and_then(|fill| fill.parent()));
     Some(InlineBlip {
         image_path,
         mime_type,
@@ -9478,18 +9504,55 @@ fn unresolved_drawing_resource_kind(
         .then_some(UnavailableDrawingResourceKind::Image)
 }
 
+/// ECMA-376 §20.2.2.6 pic:spPr / §20.1.7.6 a:xfrm of a picture: its rotation
+/// (degrees) and flips. Restricted to this picture, never a nested drawing.
+fn picture_orientation(picture: Option<roxmltree::Node>) -> (f64, bool, bool) {
+    let xfrm = picture
+        .and_then(|picture| {
+            picture
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "spPr")
+        })
+        .and_then(|properties| {
+            properties
+                .children()
+                .find(|n| n.is_element() && n.tag_name().name() == "xfrm")
+        });
+    let rotation = xfrm
+        .and_then(|n| n.attribute("rot"))
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(0) as f64
+        / 60000.0;
+    let flip_h = xfrm.is_some_and(|n| matches!(n.attribute("flipH"), Some("1" | "true")));
+    let flip_v = xfrm.is_some_and(|n| matches!(n.attribute("flipV"), Some("1" | "true")));
+    (rotation, flip_h, flip_v)
+}
+
 fn unavailable_drawing_run(
     container: roxmltree::Node,
     anchor_acquisition: Option<AnchorAcquisitionWire>,
 ) -> Option<DocRun> {
     let resource_kind = unresolved_drawing_resource_kind(container)?;
     let (width_pt, height_pt) = drawing_extent_points(container)?;
+    // A picture placeholder keeps the picture's own orientation, which shapes
+    // its line footprint exactly as for the available picture.
+    let (rotation, flip_h, flip_v) = match resource_kind {
+        UnavailableDrawingResourceKind::Image => picture_orientation(
+            drawing_payload_nodes(container).find(|n| n.tag_name().name() == "pic"),
+        ),
+        UnavailableDrawingResourceKind::Chart => (0.0, false, false),
+    };
     Some(DocRun::UnavailableDrawing(Box::new(
         UnavailableDrawingRun {
             inline_effect_extent: None,
             resource_kind,
             width_pt,
             height_pt,
+            rotation,
+            flip_h,
+            flip_v,
+            inline_position: None,
+            inline_object_font_facts: None,
             anchor_acquisition,
         },
     )))
@@ -9932,6 +9995,7 @@ fn parse_drawing_container(
         };
         return vec![DocRun::Image(Box::new(ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: Some(InlineObjectOrigin::DrawingMl),
             inline_effect_extent: None,
             image_path,
@@ -10193,6 +10257,7 @@ fn parse_drawing_container(
     };
     vec![DocRun::Image(Box::new(ImageRun {
         inline_object_font_facts: None,
+        inline_position: None,
         inline_object_origin: None,
         inline_effect_extent: None,
         image_path,
@@ -11361,6 +11426,7 @@ fn parse_group_pic(
 
     Some(ImageRun {
         inline_object_font_facts: None,
+        inline_position: None,
         inline_object_origin: None,
         inline_effect_extent: None,
         image_path,
@@ -14775,6 +14841,7 @@ fn vml_image_run(
 
     let mut picture = ImageRun {
         inline_object_font_facts: None,
+        inline_position: None,
         inline_object_origin: None,
         inline_effect_extent: None,
         mime_type: mime_from_ext(&image_path).to_string(),
@@ -17172,6 +17239,7 @@ mod tests {
             } => {
                 format!("page:{same_paragraph_as_previous}")
             }
+            ParaPiece::PageBreakBefore => "pageBreakBefore".into(),
             ParaPiece::ColumnBreak => "column".into(),
         }
     }
@@ -17237,6 +17305,19 @@ mod tests {
                 }
                 // The previous normalizer plus `endsAtHardBreak` on every
                 // paragraph piece that a page or column break follows.
+                // A terminal column break now also retains the paragraph mark
+                // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+                let terminal_column = matches!(
+                    para.runs.iter().rev().find(|run| !matches!(
+                        run,
+                        DocRun::Break {
+                            break_type: BreakType::RenderedPage
+                        }
+                    )),
+                    Some(DocRun::Break {
+                        break_type: BreakType::Column
+                    })
+                );
                 let old = old_split_para_on_page_breaks(para.clone());
                 let followed: Vec<bool> = (0..old.len())
                     .map(|index| {
@@ -17246,7 +17327,7 @@ mod tests {
                         )
                     })
                     .collect();
-                let expected: Vec<_> = old
+                let mut expected: Vec<_> = old
                     .into_iter()
                     .zip(followed)
                     .map(|(piece, followed)| match piece {
@@ -17257,6 +17338,25 @@ mod tests {
                         piece => old_piece_shape(piece),
                     })
                     .collect();
+                if terminal_column {
+                    // With no content piece the mark keeps every in-range
+                    // field boundary, collapsed onto its start.
+                    let mut mark = DocParagraph::default();
+                    if !expected.iter().any(|piece| piece.starts_with("p:")) {
+                        let mut kept: Vec<_> = para
+                            .complex_field_boundaries
+                            .iter()
+                            .filter(|boundary| boundary.run_index <= para.runs.len())
+                            .cloned()
+                            .collect();
+                        kept.sort_by_key(|boundary| boundary.run_index);
+                        for boundary in &mut kept {
+                            boundary.run_index = 0;
+                        }
+                        mark.complex_field_boundaries = kept;
+                    }
+                    expected.push(format!("p:{}", serde_json::to_string(&mark).unwrap()));
+                }
                 let actual: Vec<_> = split_para_on_page_breaks(para, false)
                     .into_iter()
                     .map(piece_shape)
@@ -19672,6 +19772,7 @@ mod tests {
     fn doc_run_wire_tags_match_ts_acquisition_discriminants() {
         let image = ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
@@ -19727,6 +19828,11 @@ mod tests {
                     resource_kind: UnavailableDrawingResourceKind::Image,
                     width_pt: 24.0,
                     height_pt: 24.0,
+                    rotation: 0.0,
+                    flip_h: false,
+                    flip_v: false,
+                    inline_position: None,
+                    inline_object_font_facts: None,
                     anchor_acquisition: None,
                 })),
                 "unavailableDrawing",
@@ -23427,6 +23533,7 @@ mod svg_blip_tests {
     fn image_run_serializes_path_fields_not_data_url() {
         let run = ImageRun {
             inline_object_font_facts: None,
+            inline_position: None,
             inline_object_origin: None,
             inline_effect_extent: None,
             image_path: "word/media/image1.png".to_string(),
@@ -25057,6 +25164,38 @@ mod anchor_image_relative_from_tests {
     }
 
     #[test]
+    fn unavailable_inline_picture_keeps_its_run_position() {
+        // WORD_INLINE_OBJECT_POSITION: the placeholder takes the hosting run's
+        // §17.3.2.24 position exactly as the available picture would.
+        let body = r#"<w:p><w:r><w:rPr><w:position w:val="-10"/></w:rPr><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="304800" cy="304800"/>
+    <wp:docPr id="1" name="img"/>
+    <a:graphic><a:graphicData>
+      <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:blipFill><a:blip r:embed="rIdPng"/></pic:blipFill>
+        <pic:spPr><a:xfrm rot="5400000" flipH="1"><a:off x="0" y="0"/><a:ext cx="304800" cy="304800"/></a:xfrm></pic:spPr>
+      </pic:pic>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let doc = parse_from_bytes(&build_docx_without_media(body))
+            .expect("a dangling inline image relationship must not abort parsing");
+        let drawing = first_unavailable_drawing(&doc);
+        assert!(drawing.anchor_acquisition.is_none());
+        assert_eq!(drawing.inline_position, Some(-5.0));
+        // ...and the run's font facts that size an available picture's leading,
+        // and the picture's own orientation.
+        assert!(drawing.inline_object_font_facts.is_some());
+        assert_eq!(
+            (drawing.rotation, drawing.flip_h, drawing.flip_v),
+            (90.0, true, false)
+        );
+    }
+
+    #[test]
     fn unavailable_anchored_picture_keeps_anchor_host_and_acquisition_geometry() {
         let body = anchor_body(
             r#"<wp:positionH relativeFrom="page"><wp:posOffset>12700</wp:posOffset></wp:positionH>"#,
@@ -25183,6 +25322,51 @@ mod anchor_image_relative_from_tests {
             let facts = &wire[0]["runs"][0]["__inlineObjectFontFacts"];
             assert_eq!(facts["fontSize"].as_f64(), Some(expected_size), "{wire}");
             assert_eq!(facts["fontFamily"].as_str(), Some(expected_face));
+        }
+    }
+
+    #[test]
+    fn inline_object_run_facts_carry_the_run_position() {
+        // ECMA-376 §17.3.2.24: the hosting run's raise/lower travels with an
+        // inline object (VML picture here); an unpositioned run carries none.
+        let styles = StyleMap::parse(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#,
+        );
+        for (rpr, expected) in [
+            (r#"<w:rPr><w:position w:val="-30"/></w:rPr>"#, Some(-15.0)),
+            (r#"<w:rPr><w:position w:val="0"/></w:rPr>"#, None),
+            ("", None),
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>
+              <w:p><w:r>{rpr}<w:pict><v:shape style="width:40pt;height:16pt"><v:imagedata r:id="rId1"/></v:shape></w:pict></w:r></w:p></w:body></w:document>"#
+            );
+            let xml = XmlDoc::parse(&xml).unwrap();
+            let body = xml
+                .root_element()
+                .children()
+                .find(|n| n.has_tag_name((W_NS, "body")))
+                .unwrap();
+            let mut media = HashMap::new();
+            media.insert("rId1".to_string(), "word/media/image1.png".to_string());
+            let elements = parse_body_elements(
+                body,
+                &styles,
+                &mut NumberingMap::default(),
+                &media,
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                &HashMap::new(),
+            );
+            let wire = serde_json::to_value(&elements).unwrap();
+            let run = wire[0]["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["type"] == "image")
+                .unwrap_or_else(|| panic!("{wire}"));
+            assert_eq!(run["__inlinePosition"].as_f64(), expected, "{wire}");
         }
     }
 
@@ -27234,8 +27418,119 @@ mod column_tests {
     #[test]
     fn column_break_only_paragraph_becomes_body_column_break() {
         let body = body_from(r#"<w:p><w:r><w:br w:type="column"/></w:r></w:p>"#);
-        assert_eq!(body.len(), 1);
+        // The break, then the paragraph mark's empty line at the top of the
+        // next column (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
+        assert_eq!(body.len(), 2);
         assert!(matches!(body[0], BodyElement::ColumnBreak));
+        assert!(matches!(&body[1], BodyElement::Paragraph(p) if p.runs.is_empty()));
+    }
+
+    #[test]
+    fn page_break_before_column_break_paragraph_turns_the_page_first() {
+        let body = body_from(
+            r#"<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:br w:type="column"/></w:r></w:p>"#,
+        );
+        // The paragraph's own idempotent transition, not a hard page break: at
+        // an empty page start it adds no page.
+        assert_eq!(body.len(), 3);
+        assert!(matches!(
+            body[0],
+            BodyElement::PageBreak {
+                page_break_before: Some(true),
+                ..
+            }
+        ));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(
+            matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty() && !p.page_break_before)
+        );
+    }
+
+    #[test]
+    fn break_only_mark_keeps_a_field_end_begun_in_an_earlier_paragraph() {
+        for hint in ["", r#"<w:r><w:lastRenderedPageBreak/></w:r>"#] {
+            let body = body_from(&format!(
+                r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF target </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>result</w:t></w:r></w:p><w:p>{hint}<w:r><w:br w:type="column"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+            ));
+            let BodyElement::Paragraph(first) = &body[0] else {
+                panic!("expected the field paragraph first, got {body:?}");
+            };
+            let BodyElement::Paragraph(mark) = body.last().expect("mark paragraph") else {
+                panic!("expected the mark paragraph last, got {body:?}");
+            };
+            let start = first
+                .complex_field_boundaries
+                .iter()
+                .find(|boundary| boundary.boundary == "start")
+                .expect("field start in the first paragraph");
+            let end = mark
+                .complex_field_boundaries
+                .iter()
+                .find(|boundary| boundary.boundary == "end")
+                .unwrap_or_else(|| panic!("field end kept on the mark ({hint:?}): {mark:?}"));
+            assert_eq!(end.occurrence_id, start.occurrence_id, "{hint}");
+            assert_eq!(end.run_index, 0, "{hint}");
+        }
+    }
+
+    #[test]
+    fn column_break_paragraph_mark_survives_rendered_page_hints_and_keeps_indices() {
+        for xml in [
+            r#"<w:p><w:r><w:lastRenderedPageBreak/><w:br w:type="column"/></w:r></w:p>"#,
+            r#"<w:p><w:r><w:br w:type="column"/></w:r><w:r><w:lastRenderedPageBreak/></w:r></w:p>"#,
+            r#"<w:p><w:commentRangeStart w:id="0"/><w:r><w:br w:type="column"/></w:r><w:commentRangeEnd w:id="0"/></w:p>"#,
+        ] {
+            let body = body_from(xml);
+            assert!(matches!(body[0], BodyElement::ColumnBreak), "{xml}");
+            let BodyElement::Paragraph(mark) = &body[1] else {
+                panic!("mark paragraph expected for {xml}");
+            };
+            assert!(mark.runs.is_empty(), "{xml}");
+            assert!(
+                mark.comment_marks
+                    .iter()
+                    .all(|entry| entry.run_index as usize <= mark.runs.len()),
+                "{xml}"
+            );
+            assert!(mark.run_revisions.len() <= mark.runs.len(), "{xml}");
+        }
+    }
+
+    /// A complex field whose cached result is only the column break leaves no
+    /// run-relative fact pointing past the empty mark.
+    #[test]
+    fn column_break_field_result_collapses_onto_the_mark() {
+        let body = body_from(
+            r#"<w:p><w:commentRangeStart w:id="1"/><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF target </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:br w:type="column"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:commentRangeEnd w:id="1"/></w:p>"#,
+        );
+        let BodyElement::Paragraph(mark) = body.last().expect("mark paragraph") else {
+            panic!("expected the mark paragraph last, got {body:?}");
+        };
+        assert!(mark.runs.is_empty());
+        assert!(mark.run_revisions.is_empty());
+        // Both result boundaries survive, collapsed onto the empty mark.
+        let kinds: Vec<_> = mark
+            .complex_field_boundaries
+            .iter()
+            .map(|boundary| (boundary.boundary.as_str(), boundary.run_index))
+            .collect();
+        assert_eq!(kinds, [("start", 0), ("end", 0)]);
+        assert!(mark
+            .comment_marks
+            .iter()
+            .all(|comment| comment.run_index as usize <= mark.runs.len()));
+        assert!(matches!(body[body.len() - 2], BodyElement::ColumnBreak));
+    }
+
+    #[test]
+    fn terminal_column_break_moves_the_mark_to_the_next_column() {
+        let body = body_from(
+            r#"<w:p><w:r><w:t>before</w:t></w:r><w:r><w:br w:type="column"/></w:r></w:p>"#,
+        );
+        assert_eq!(body.len(), 3);
+        assert!(matches!(&body[0], BodyElement::Paragraph(p) if !p.runs.is_empty()));
+        assert!(matches!(body[1], BodyElement::ColumnBreak));
+        assert!(matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty()));
     }
 
     #[test]
@@ -27521,12 +27816,14 @@ mod column_tests {
                </w:sdt>
                <w:p><w:r><w:t>body</w:t></w:r></w:p>"#,
         );
-        // Para(cover), ColumnBreak, PageBreak (synthetic, kept), Para(body).
-        assert_eq!(body.len(), 4);
+        // Para(cover), ColumnBreak, the column-break paragraph's mark line,
+        // PageBreak (synthetic, kept), Para(body).
+        assert_eq!(body.len(), 5);
         assert!(matches!(body[0], BodyElement::Paragraph(_)));
         assert!(matches!(body[1], BodyElement::ColumnBreak));
-        assert!(matches!(body[2], BodyElement::PageBreak { .. }));
-        assert!(matches!(body[3], BodyElement::Paragraph(_)));
+        assert!(matches!(&body[2], BodyElement::Paragraph(p) if p.runs.is_empty()));
+        assert!(matches!(body[3], BodyElement::PageBreak { .. }));
+        assert!(matches!(body[4], BodyElement::Paragraph(_)));
     }
 
     /// ECMA-376 §17.6.x — a `<w:sectPr>` carried in a paragraph's `pPr` defines

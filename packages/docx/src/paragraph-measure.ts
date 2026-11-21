@@ -36,6 +36,7 @@ import {
   wordJustifiedLineFit,
   wordUnmarkedArabicKashidaChargesSourceSpace,
   wordInlineDrawingRunLeadingApplies,
+  isInlineDrawingRun,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -425,8 +426,8 @@ export function measureParagraph(
       if (!('imagePath' in segment) || segment.inlinePicture !== true) continue;
       const run = segment.sourceRunIndex === undefined
         ? undefined : paragraph.runs[segment.sourceRunIndex];
-      const objectRun = run && (run.type === 'shape' || run.type === 'image')
-        ? run as ParagraphShapeRun | ParagraphImageRun
+      const objectRun = run && (run.type === 'shape' || run.type === 'image' || run.type === 'unavailableDrawing')
+        ? run as Pick<ParagraphShapeRun | ParagraphImageRun, 'inlineObjectShapeInput'>
         : undefined;
       const shapeInput = useRunFont ? objectRun?.inlineObjectShapeInput : undefined;
       const measureSingle = () => paragraphMarkLineMetrics(
@@ -452,13 +453,16 @@ export function measureParagraph(
     && environment.verticalCJK !== true && environment.verticalPageFrame !== true
     && !context.lineGrid.active && !context.characterGrid.active && !context.baseRtl
     && !context.hasRuby) {
-    const boxOnly = paragraph.runs.every(run => (run.type === 'image' && !run.anchor)
-      || (run.type === 'shape' && run.inline === true));
+    const boxOnly = paragraph.runs.every(isInlineDrawingRun);
     for (const segment of segments) {
       if (!('imagePath' in segment) || !segment.inlinePicture || segment.sourceRunIndex === undefined) continue;
       const sourceRun = paragraph.runs[segment.sourceRunIndex];
-      const run = sourceRun as ParagraphShapeRun | ParagraphImageRun | undefined;
-      if (!run || (run.type !== 'shape' && run.type !== 'image') || !run.inlineObjectShapeInput) continue;
+      // An inline picture placeholder carries its picture's facts.
+      const run = sourceRun as Pick<ParagraphShapeRun | ParagraphImageRun, 'type' | 'inlineObjectShapeInput'
+        | 'inlineObjectOrigin'> | { readonly type: 'unavailableDrawing'; readonly inlineObjectShapeInput?:
+        NumberingMarkerShapeInput; readonly inlineObjectOrigin?: 'drawingml' } | undefined;
+      if (!run || (run.type !== 'shape' && run.type !== 'image' && run.type !== 'unavailableDrawing')
+        || !run.inlineObjectShapeInput) continue;
       if (run.inlineObjectOrigin !== 'drawingml' && !(run.inlineObjectOrigin === 'vmlStaticTextbox' && boxOnly)) continue;
       const minimum = paragraphMarkLineMetrics(paragraph, 1, undefined, false, markUsesEastAsianGrid,
         measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,

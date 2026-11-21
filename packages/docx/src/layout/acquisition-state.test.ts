@@ -73,6 +73,26 @@ describe('layout acquisition state', () => {
       margin: { xPt: 40, yPt: 60, widthPt: 510, heightPt: 670 },
       column: { xPt: 50, yPt: 60, widthPt: 200, heightPt: 670 },
       pageParity: 'even',
+      pageBandDistances: null,
+    });
+  });
+
+  it('carries the section header and footer distances for page-band alignment', () => {
+    const { sectionLayout } = paragraphState();
+    expect(bodyAnchorReferenceFrames({
+      pageIndex: 0,
+      pageWidth: 600,
+      pageH: 800,
+      marginLeft: 40,
+      marginRight: 50,
+      marginTop: 60,
+      marginBottom: 70,
+      contentX: 50,
+      contentW: 200,
+      sectionLayout,
+    }).pageBandDistances).toEqual({
+      headerPt: sectionLayout.geometry.headerDistance,
+      footerPt: sectionLayout.geometry.footerDistance,
     });
   });
 
@@ -92,6 +112,7 @@ describe('layout acquisition state', () => {
       margin: { xPt: 20, yPt: 40, widthPt: 250, heightPt: 0 },
       column: { xPt: 20, yPt: 40, widthPt: 150, heightPt: 0 },
       pageParity: 'odd',
+      pageBandDistances: null,
     });
   });
 

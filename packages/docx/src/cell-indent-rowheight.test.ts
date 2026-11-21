@@ -171,3 +171,37 @@ describe('canonical retained row height — paragraph indent affects wrap (§17.
     expect(h2).toBeGreaterThan(h1 * 1.8);
   });
 });
+
+describe('vertical merge interior border footprint (WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT)', () => {
+  const single = { width: 0.5, color: null, style: 'single' };
+  const mergedCell = (vMerge: boolean, bottom: typeof single | null) => ({
+    ...cellWith(para('A', 0)),
+    vMerge,
+    borders: { top: null, bottom, left: null, right: null, insideH: null, insideV: null },
+  }) as unknown as DocTableCell;
+  const plainRow = () => rowWith(para('A', 0));
+  const advances = (restartBottom: typeof single | null, continuationBottom: typeof single | null) =>
+    layoutBodyTableRowAdvances({
+      ...table(),
+      rows: [plainRow(),
+        { ...plainRow(), cells: [mergedCell(true, restartBottom)] },
+        { ...plainRow(), cells: [mergedCell(false, continuationBottom)] },
+        plainRow()],
+    } as DocTable, SECTION, makeMeasureContext());
+
+  it('charges the first merged cell\'s own bottom border to the next row although no rule is drawn', () => {
+    const none = advances(null, null);
+    const restart = advances(single, null);
+    expect(restart[1]).toBeCloseTo(none[1]!, 10);
+    expect(restart[2]).toBeCloseTo(none[2]! + 0.5, 10);
+    expect(restart[3]).toBeCloseTo(none[3]!, 10);
+  });
+
+  it('charges nothing inside the merge for a border on the last constituent only', () => {
+    const none = advances(null, null);
+    const terminal = advances(null, single);
+    expect(terminal[2]).toBeCloseTo(none[2]!, 10);
+    // The terminal border is the rule between the merge and the next row.
+    expect(terminal[3]).toBeCloseTo(none[3]! + 0.5, 10);
+  });
+});

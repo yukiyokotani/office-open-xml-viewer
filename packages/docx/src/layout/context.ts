@@ -249,8 +249,8 @@ function requirePhysicalPageIndex(pageIndex: number): void {
 function singlePageMargins(policy: SectionPageLayoutPolicy, pageIndex: number): PageMargins {
   let { marginTop, marginRight, marginBottom, marginLeft } = policy.physicalGeometry;
   if (policy.gutterAtTop && !policy.mirrorMargins) marginTop += policy.gutterPt;
-  // A tbRl section binds on the right: its gutter joins the right margin.
-  // `word-two-page-sheet-imposition`
+  // A tbRl or tbLrV section binds on the right: its gutter joins the right
+  // margin. `word-two-page-sheet-imposition`
   else if (policy.rtlGutter || rightBoundSection(policy)) marginRight += policy.gutterPt;
   else marginLeft += policy.gutterPt;
   if (policy.mirrorMargins && pageIndex % 2 === 1) {
@@ -259,9 +259,12 @@ function singlePageMargins(policy: SectionPageLayoutPolicy, pageIndex: number): 
   return { marginTop, marginRight, marginBottom, marginLeft };
 }
 
-/** A §17.6.20 tbRl section, whose lines advance right to left. */
+/** A §17.6.20 section that binds on the right under
+ * `word-two-page-sheet-imposition`: tbRl, whose lines advance right to left,
+ * and tbLrV, bound the same way by that rule although its lines advance left
+ * to right. */
 function rightBoundSection(policy: SectionPageLayoutPolicy): boolean {
-  return policy.textDirection === 'tbRl';
+  return policy.textDirection === 'tbRl' || policy.textDirection === 'tbLrV';
 }
 
 /**

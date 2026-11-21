@@ -1173,6 +1173,11 @@ pub enum BodyElement {
             skip_serializing_if = "Option::is_none"
         )]
         same_paragraph_as_previous: Option<bool>,
+        /// Parser-private: the §17.3.1.23 pageBreakBefore of a paragraph whose
+        /// first content is a column break. Layout applies it as that
+        /// paragraph property (an empty page start satisfies it).
+        #[serde(rename = "__pageBreakBefore", skip_serializing_if = "Option::is_none")]
+        page_break_before: Option<bool>,
     },
     /// ECMA-376 §17.3.1.20 `<w:br w:type="column"/>` — force the following
     /// content into the next newspaper column of the current section (or the
@@ -2244,6 +2249,11 @@ pub struct ShapeRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline object: the object is raised or lowered with its run
+    /// like text. Parser-private; absent for anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
     /// Actual parser origin, not inferred from geometry or font metrics.
     #[serde(
         rename = "__inlineObjectOrigin",
@@ -3618,6 +3628,11 @@ pub struct ImageRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub inline_object_font_facts: Option<Box<RunFontFacts>>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline object: the object is raised or lowered with its run
+    /// like text. Parser-private; absent for anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
     /// Actual parser origin, not inferred from geometry or font metrics.
     #[serde(
         rename = "__inlineObjectOrigin",
@@ -3776,6 +3791,25 @@ pub struct UnavailableDrawingRun {
     pub resource_kind: UnavailableDrawingResourceKind,
     pub width_pt: f64,
     pub height_pt: f64,
+    /// §20.1.7.6 a:xfrm rotation (degrees) and flips of a picture placeholder,
+    /// as on the available picture (`ImageRun`); they shape its line footprint.
+    #[serde(skip_serializing_if = "is_zero_f64")]
+    pub rotation: f64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_h: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub flip_v: bool,
+    /// Parser-private §17.3.2.24 position of the hosting run of an inline
+    /// picture placeholder, as on the available picture (`ImageRun`).
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
+    /// Parser-private font facts of the hosting run of an inline picture
+    /// placeholder, as on the available picture (`ImageRun`).
+    #[serde(
+        rename = "__inlineObjectFontFacts",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inline_object_font_facts: Option<Box<RunFontFacts>>,
     #[serde(
         rename = "__anchorAcquisition",
         skip_serializing_if = "Option::is_none"
