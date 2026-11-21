@@ -291,6 +291,26 @@ describe('canonical body layout input', () => {
     expect(JSON.stringify(input)).not.toContain('__sectionPlacement');
   });
 
+  it('projects a parser-private pageBreakBefore transition without retaining the wire field', () => {
+    const document = {
+      body: [
+        { type: 'pageBreak', origin: 'authored', __pageBreakBefore: true },
+        { type: 'columnBreak' },
+        paragraph('mark'),
+      ],
+      section: finalSection(),
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const input = createBodyLayoutInput(document);
+    expect(input.sequence.slice(0, 2)).toMatchObject([
+      { kind: 'authored-break', break: 'pageBreakBefore' },
+      { kind: 'authored-break', break: 'column' },
+    ]);
+    expect(JSON.stringify(input)).not.toContain('__pageBreakBefore');
+  });
+
   it('retains page-break parity and authored versus synthetic provenance during acquisition', () => {
     const document = {
       body: [

@@ -256,6 +256,12 @@ function canonicalLayoutBody(
       }),
     } as unknown as LayoutTableBlock;
     }
+    if (element.type === 'pageBreak') {
+      const { __pageBreakBefore: _pageBreakBefore, ...pageBreak } = element as typeof element & {
+        __pageBreakBefore?: unknown;
+      };
+      return structuredClone(pageBreak) as unknown as LayoutStoryBlock;
+    }
     if (element.type !== 'sectionBreak') return structuredClone(element);
     const {
       __sectionPlacement: _sectionPlacement,
@@ -368,6 +374,10 @@ function canonicalOwnedLayoutBody(
         });
       });
       retainedBody[elementIndex] = table;
+      continue;
+    }
+    if (element.type === 'pageBreak') {
+      delete (element as typeof element & { __pageBreakBefore?: unknown }).__pageBreakBefore;
       continue;
     }
     if (element.type !== 'sectionBreak') continue;

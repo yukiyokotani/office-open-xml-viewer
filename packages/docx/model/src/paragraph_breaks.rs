@@ -24,7 +24,13 @@ fn work(units: usize) {
 #[allow(clippy::large_enum_variant)]
 pub enum ParaPiece {
     Para(DocParagraph),
-    PageBreak { same_paragraph_as_previous: bool },
+    PageBreak {
+        same_paragraph_as_previous: bool,
+    },
+    /// §17.3.1.23 pageBreakBefore of a paragraph whose first content is a
+    /// column break: the page transition precedes that break and, like the
+    /// paragraph property, is satisfied by an empty page start.
+    PageBreakBefore,
     ColumnBreak,
 }
 
@@ -104,11 +110,8 @@ pub fn visit_para_on_page_breaks<E>(
     // 16 mode 11 also lets this line displace a following near-page-height
     // table; ordinary empty-paragraph layout supplies that behavior unchanged.
     // Rendered-page hints are ignored throughout normalization, not content.
-    // A terminal column break always moves the paragraph mark to a line at
-    // the top of the next column (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN: Windows
-    // Word places the following text one mark line down in that column, for a
-    // break-only paragraph and for a break ending a text paragraph, without
-    // splitPgBreakAndParaMark).
+    // A terminal column break always retains the paragraph mark
+    // (WORD_COLUMN_BREAK_MARK_NEXT_COLUMN).
     let terminal_break = para.runs.iter().rev().find_map(|run| match run {
         DocRun::Break {
             break_type: BreakType::RenderedPage,
@@ -227,9 +230,7 @@ pub fn visit_para_on_page_breaks<E>(
             Some(ParaPiece::ColumnBreak)
         );
     if para.page_break_before && leads_with_column_break {
-        emit(ParaPiece::PageBreak {
-            same_paragraph_as_previous: false,
-        })?;
+        emit(ParaPiece::PageBreakBefore)?;
         para.page_break_before = false;
     }
     for (index, runs) in chunks.into_iter().enumerate() {
@@ -288,15 +289,25 @@ pub fn visit_para_on_page_breaks<E>(
             para.frame_pr = None;
             para.outline_level = None;
             para.page_break_before = false;
-        } else if retain_mark {
+        } else {
             // The mark is the only paragraph left: its runs moved out, so its
             // run-indexed metadata points at the (empty) paragraph start.
             para.run_revisions.clear();
             for mark in &mut para.comment_marks {
                 mark.run_index = 0;
             }
-            // Field boundaries moved out with the runs (§17.16); none remain.
-            para.complex_field_boundaries.clear();
+        }
+        // Field boundaries (§17.16) that no emitted piece took, such as the end
+        // of a field that began in an earlier paragraph, stay with the mark.
+        if !emitted_paragraph {
+            para.complex_field_boundaries = boundary_chunks
+                .iter_mut()
+                .flat_map(std::mem::take)
+                .map(|mut boundary| {
+                    boundary.run_index = 0;
+                    boundary
+                })
+                .collect();
         }
         emit(ParaPiece::Para(para))?;
     }
@@ -410,10 +421,59 @@ mod tests {
             },
             false,
         );
+        // The paragraph's own transition, satisfied by an empty page start,
+        // not an unconditional page break.
         assert_eq!(pieces.len(), 3);
-        assert!(matches!(pieces[0], ParaPiece::PageBreak { .. }));
+        assert!(matches!(pieces[0], ParaPiece::PageBreakBefore));
         assert!(matches!(pieces[1], ParaPiece::ColumnBreak));
         assert!(matches!(&pieces[2], ParaPiece::Para(p) if !p.page_break_before));
+    }
+
+    #[test]
+    fn break_only_mark_keeps_the_end_of_a_field_from_an_earlier_paragraph() {
+        // A field begun in an earlier paragraph ends after this paragraph's
+        // column break (a rendered-page hint before the break routes it
+        // through the splitter): the end boundary stays with the mark.
+        let boundary = |run_index| crate::ComplexFieldBoundaryWire {
+            occurrence_id: 7,
+            boundary: "end".into(),
+            run_index,
+            field_type: "other".into(),
+            instruction: "PAGE".into(),
+            hyperlink_anchor: None,
+        };
+        for runs in [
+            vec![
+                DocRun::Break {
+                    break_type: BreakType::RenderedPage,
+                },
+                DocRun::Break {
+                    break_type: BreakType::Column,
+                },
+            ],
+            vec![DocRun::Break {
+                break_type: BreakType::Column,
+            }],
+        ] {
+            let end = runs.len();
+            let pieces = split_para_on_page_breaks(
+                DocParagraph {
+                    runs,
+                    complex_field_boundaries: vec![boundary(end)],
+                    ..Default::default()
+                },
+                false,
+            );
+            let ParaPiece::Para(mark) = pieces.last().unwrap() else {
+                panic!("the mark paragraph is last");
+            };
+            assert_eq!(mark.complex_field_boundaries.len(), 1);
+            let kept = &mark.complex_field_boundaries[0];
+            assert_eq!(
+                (kept.occurrence_id, kept.boundary.as_str(), kept.run_index),
+                (7, "end", 0)
+            );
+        }
     }
 
     #[test]
