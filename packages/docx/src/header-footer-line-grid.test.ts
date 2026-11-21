@@ -120,7 +120,9 @@ function parsedHeaderDocument(gridKind: string, textDirection?: string): DocxDoc
   const frame = '<w:pPr><w:framePr w:w="1440" w:hAnchor="text" w:vAnchor="text" w:x="0" w:y="0" w:wrap="around"/></w:pPr>';
   const box = '<w:p><w:r><w:pict><v:shape id="box" type="#_x0000_t202" style="width:72pt;height:36pt">'
     + `<v:textbox inset="0,0,0,0"><w:txbxContent>${p('箱')}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
-  const header = p('Plain') + p('Framed', frame) + box;
+  const cell = '<w:tbl><w:tblPr><w:tblW w:w="2880" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2880"/></w:tblGrid>'
+    + `<w:tr><w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${p('Cell')}</w:tc></w:tr></w:tbl>`;
+  const header = p('Plain') + p('Framed', frame) + cell + box;
   const files = new Map<string, string>([
     ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${p('Body')}`
       + '<w:sectPr><w:headerReference w:type="default" r:id="hdr"/><w:pgSz w:w="12000" w:h="16000"/>'
@@ -146,7 +148,7 @@ function parsedHeaderDocument(gridKind: string, textDirection?: string): DocxDoc
   }
 }
 
-describe('framed paragraphs and text boxes in a gridded header', () => {
+describe('framed paragraphs, table cells and text boxes in a gridded header', () => {
   beforeAll(async () => {
     await init({ module_or_path: await readFile(new URL('./wasm/docx_parser_bg.wasm', import.meta.url)) });
   });
@@ -154,7 +156,7 @@ describe('framed paragraphs and text boxes in a gridded header', () => {
   it.each([
     ['lines', undefined], ['linesAndChars', undefined], ['snapToChars', undefined],
     ['lines', 'tbRl'], ['lines', 'btLr'], ['lines', 'tbLrV'],
-  ])('keeps a framed %s header paragraph (%s) off the grid like its plain neighbour', (gridKind, direction) => {
+  ])('keeps framed, cell and text-box text of a %s header (%s) off the grid', (gridKind, direction) => {
     const document = parsedHeaderDocument(gridKind, direction);
     const advances = lineAdvancesByText(layoutDocument(
       document,
@@ -163,12 +165,12 @@ describe('framed paragraphs and text boxes in a gridded header', () => {
     ).pages[0]!.layers);
     expect(advances.get('Plain')).toBeLessThan(18);
     expect(advances.get('Framed')).toBe(advances.get('Plain'));
-    // A text box's own story keeps the grid: the header rule is about header
-    // paragraphs, and Word's text boxes in headers are unmeasured.
-    expect(advances.get('箱')).toBe(18);
+    // Table cells and text-box stories inside a header are header content.
+    expect(advances.get('Cell')).toBe(advances.get('Plain'));
+    expect(advances.get('箱')).toBeLessThan(18);
   });
 
-  it('keeps the grid in a compatibility text box hosted by a header paragraph', () => {
+  it('keeps a compatibility text box hosted by a header paragraph off the grid', () => {
     const section = {
       pageWidth: 600, pageHeight: 800,
       marginTop: 60, marginRight: 90, marginBottom: 80, marginLeft: 40,
@@ -193,6 +195,7 @@ describe('framed paragraphs and text boxes in a gridded header', () => {
       createLayoutServices(document, { measureContext: makeCtx() }),
       { currentDateMs: 0 },
     ).pages[0]!.layers);
-    expect(advances.get('箱')).toBe(18);
+    expect(advances.get('箱')).toBeLessThan(18);
+    expect(advances.get('Body')).toBe(18);
   });
 });
