@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -3915,6 +3915,8 @@ function planMeasuredLines(
   paragraphMarkShapeInput?: NumberingMarkerShapeInput,
   /** Owner section's counter-turn for upright inline graphics. */
   resourceOrientation?: import('./types.js').UprightResourceOrientation,
+  /** `word-section-tblrv-line-strip`: lines reflected across their block band. */
+  blockReflectedLines = false,
 ): readonly LineLayout[] {
   const { ulTrailSpace, doNotExpandShiftReturn } = compat;
   // WORD_GRID_LINE_CONTENT_FIT_ADMISSION covers plain captions only. Decide
@@ -4020,9 +4022,15 @@ function planMeasuredLines(
         : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
           : plannedBaselinePt(measuredLine, context, libreOfficeLines);
-    const objectTopOffsetPt = (heightPt: number, positionPt: number | undefined): number => exactObjectHangs
-      ? measuredLine.topYPt - baselinePt - (positionPt ?? 0)
-      : -heightPt - (positionPt ?? 0);
+    const objectTopOffsetPt = (heightPt: number, positionPt: number | undefined, clipped = false): number => {
+      if (!exactObjectHangs) return -heightPt - (positionPt ?? 0);
+      const topPt = measuredLine.topYPt - (positionPt ?? 0);
+      // A clipped DrawingML picture of a tbLrV line hangs from the mirrored
+      // edge: its position is reflected across the strip, not with it.
+      return wordInlineObjectExactLineReflectsClipped(clipped, blockReflectedLines)
+        ? 2 * measuredLine.topYPt + measuredLine.advancePt - topPt - heightPt - baselinePt
+        : topPt - baselinePt;
+    };
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
@@ -4186,20 +4194,20 @@ function planMeasuredLines(
             Math.max(raw.ascent + raw.descent, raw.intendedSingle ?? 0)
             - image.heightPt - 2 * LIST_LABEL_PICTURE_INSET_PT
           ) / 2;
+        const exactClipped = !image.chart && !image.clipToLine && exactObjectClips
+          && wordInlineObjectExactLineClips(sourceRun?.type === 'image'
+            ? (sourceRun as ParagraphImageRun).inlineObjectOrigin : undefined);
         segments.push({
           kind: 'resource', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
           ...(runIndex === undefined ? {} : { sourceRunIndex: runIndex }),
           resourceKey, resourceKind, measuredWidthPt: image.measuredWidth,
           widthPt: objectWidthPt, heightPt: objectHeightPt,
           topOffsetPt: labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
-            : objectTopOffsetPt(image.heightPt, image.positionPt)) + effectTopPt,
+            : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt,
           ...(labelTopPt !== undefined ? { leftOffsetPt: LIST_LABEL_PICTURE_INSET_PT }
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
-          ...(!image.chart && (image.clipToLine || (exactObjectClips
-            && wordInlineObjectExactLineClips(sourceRun?.type === 'image'
-              ? (sourceRun as ParagraphImageRun).inlineObjectOrigin : undefined)))
-            ? { clipToLine: true as const } : {}),
+          ...(!image.chart && (image.clipToLine || exactClipped) ? { clipToLine: true as const } : {}),
           ...(!image.chart && image.rotation && image.rotation % 360 !== 0 ? { rotationDeg: image.rotation } : {}),
         });
       } else if ('math' in segment) {
@@ -7357,6 +7365,7 @@ function projectAcquiredParagraphLines(
       options.environment.verticalPageFrame,
       options.environment.pageWritingMode,
     ),
+    options.environment.verticalPageFrame === true && options.environment.pageWritingMode === 'vertical-lr',
   );
   if (options.sourceRangeStart !== undefined) {
     lines = rebaseMeasuredLineRanges(lines, options.sourceRangeStart);

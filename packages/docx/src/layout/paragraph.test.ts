@@ -821,7 +821,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
     } as unknown as CanvasRenderingContext2D;
   }
 
-  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; vertical?: boolean; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; vertical?: boolean | 'lr'; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
     const selectedContext = options.context ?? measureContext;
     const value = {
       ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
@@ -851,7 +851,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       compat: compatProfile({ compatibilityMode: options.compatibilityMode ?? 15 }),
       ...(options.admitRunLeading === false ? {} : { inlineObjectRunLeadingAdmitted: true as const }),
       ...(options.vertical ? {
-        pageWritingMode: 'vertical-rl' as const, verticalPageFrame: true,
+        pageWritingMode: options.vertical === 'lr' ? 'vertical-lr' as const : 'vertical-rl' as const, verticalPageFrame: true,
         uprightResourceOrientation: 'upright-physical' as const,
       } : {}),
     };
@@ -938,6 +938,17 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         expect(placement.bounds.widthPt).toBeCloseTo(heightPt, 10);
         expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt - positionPt, 10);
         expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+      }
+    });
+
+    it('mirrors only a clipped DrawingML picture across a tbLrV strip', () => {
+      for (const origin of ['drawingml', undefined] as const) {
+        const node = measureInlineParagraph([picture(30, -5, origin)], 1, { exactPt: 24, vertical: 'lr' });
+        const line = node.lines[0]!;
+        const placement = resource(node);
+        // 20pt across a 24pt strip: lowered 5pt it starts 5pt from the far
+        // edge when mirrored, 5pt below the near edge otherwise.
+        expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt + (origin ? 24 - 5 - 20 : 5), 10);
       }
     });
 
