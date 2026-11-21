@@ -21,10 +21,10 @@ const item = (numId: number, level: number, text: string) => p(numPr(numId, leve
 
 function parse(
   body: string,
-  options: Readonly<{ fixed?: boolean; parts?: ReadonlyMap<string, readonly [type: string, xml: string]>; sectPr?: string }> = {},
+  options: Readonly<{ fixed?: boolean; parts?: ReadonlyMap<string, readonly [type: string, xml: string]>; sectPr?: string; page?: string }> = {},
 ): DocxDocumentModel {
   const files = new Map<string, string>([
-    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${O}" xmlns:v="urn:schemas-microsoft-com:vml"><w:body>${body}<w:sectPr>${options.sectPr ?? ''}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`],
+    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${O}" xmlns:v="urn:schemas-microsoft-com:vml"><w:body>${body}<w:sectPr>${options.sectPr ?? ''}${options.page ?? '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>'}</w:sectPr></w:body></w:document>`],
     ['word/styles.xml', `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>${AUTO_STYLE}</w:styles>`],
     ['word/settings.xml', `<w:settings xmlns:w="${W}"><w:compat>${options.fixed ? '<w:doNotUseHTMLParagraphAutoSpacing/>' : ''}</w:compat></w:settings>`],
   ]);
@@ -291,6 +291,41 @@ describe('Word hidden cell paragraphs (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT)', 
   const body = `<w:tbl>${grid}<w:tr>${tc(plain('XR0'))}</w:tr>${rows.map((content, index) =>
     `<w:tr>${tc(content)}</w:tr><w:tr>${tc(plain(`XR${index + 1}`))}</w:tr>`).join('')}</w:tbl>${plain('END')}`;
   const order = ['XR0', 'X1', 'XR1', 'X3a', 'X3b', 'XR2', 'X5n', 'X5z', 'XR3', 'X7a', 'XR4'];
+
+  /** Page index of each text in a one-cell table on 100pt body bands, with
+   * exact 60pt lines and zero spacing. */
+  function cellPages(content: string): Readonly<Record<string, number>> {
+    const tall = (text: string) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1200" w:lineRule="exact"/></w:pPr>${text}</w:p>`;
+    const raw = parse(`<w:tbl>${grid}<w:tr>${tc(content.replace(/TALL\(([^)]*)\)/g, (_, runs: string) => tall(runs)))}</w:tr></w:tbl>`, {
+      page: '<w:pgSz w:w="12240" w:h="4880"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>',
+    });
+    const pages: Record<string, number> = {};
+    const visit = (node: unknown, pageIndex: number): void => {
+      if (node === null || typeof node !== 'object') return;
+      if (Array.isArray(node)) { node.forEach(child => visit(child, pageIndex)); return; }
+      const record = node as Record<string, unknown>;
+      if (record.kind === 'text' && typeof record.text === 'string' && record.text) pages[record.text] ??= pageIndex;
+      for (const value of Object.values(record)) visit(value, pageIndex);
+    };
+    const layout = layoutDocument(raw);
+    layout.pages.forEach((page, index) => visit(page, index));
+    pages.count = layout.pages.length;
+    return pages;
+  }
+  const run = (text: string) => `<w:r><w:t>${text}</w:t></w:r>`;
+  const twoLines = `TALL(${run('A')}<w:r><w:br/></w:r>${run('B')})`;
+  const hiddenTall = '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="1200" w:lineRule="exact"/><w:rPr><w:vanish/></w:rPr></w:pPr></w:p>';
+
+  it('does not count a swallowed hidden paragraph as content when a cell paragraph splits', () => {
+    // Widow control cannot relocate the two-line paragraph: nothing precedes
+    // it in the cell, so it splits A | B whether or not a hidden one leads.
+    expect(cellPages(twoLines)).toEqual({ A: 0, B: 1, count: 2 });
+    expect(cellPages(vanished() + twoLines)).toEqual({ A: 0, B: 1, count: 2 });
+  });
+
+  it('keeps a trailing vanished cell paragraph as a line that paginates like content', () => {
+    expect(cellPages(`TALL(${run('A')})${hiddenTall}`)).toEqual({ A: 0, count: 2 });
+  });
 
   it.each([
     [false, [12, 12, 12, 26, 12, 12, 12, 12, 12, 38]],

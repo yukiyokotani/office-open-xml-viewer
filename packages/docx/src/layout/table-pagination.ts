@@ -1641,6 +1641,9 @@ function selectParagraph(
   context: TableFragmentContext,
   overflowFirstUnit = false,
   containmentLimitPt = Number.POSITIVE_INFINITY,
+  /** Flow content precedes the paragraph in this cell fragment. Blocks that
+   * own no cell flow (TableCellBlockInput.ownsNoCellFlow) are not content. */
+  followsFlowContent = selectedBlocks.some((block) => block.ownsNoCellFlow !== true),
 ): Readonly<{
   block: TableCellBlockInput | null;
   range: BlockContinuationRange | null;
@@ -1662,7 +1665,7 @@ function selectParagraph(
   // rather than being clipped below that indivisible unit on the same page.
   if (lineEnd === start && overflowFirstUnit && start < paragraph.lines.length) lineEnd = start + 1;
   if (lineEnd === start) return { block: null, range: null, lineEnd: start, advancePt: 0 };
-  const canRelocate = start === 0 && (selectedBlocks.length > 0 || canGainPageSpace);
+  const canRelocate = start === 0 && (followsFlowContent || canGainPageSpace);
   // §17.3.1.14 / §17.3.1.44 apply to cell paragraphs too. The selected
   // line count is the retained paragraph's count; no substitute-font or
   // manual-break-specific compatibility rule changes it here.
@@ -1775,6 +1778,10 @@ function selectCell(
   // Paragraph and whole blocks selected from the cell's start to its end are
   // the source's; a nested table's fragment is only when its own pass says so.
   let wholeSource = blockIndex === 0 && paragraphLineStart === 0 && nestedCursor === null;
+  // Blocks that own no cell flow (a swallowed hidden or structural trailing
+  // paragraph) ride along with the selection but are not content: they never
+  // make a fragment non-empty for first-unit recovery, relocation or progress.
+  let flowBlockCount = 0;
 
   while (blockIndex < cell.blocks.length) {
     context.chargeSourceScan?.(1);
@@ -1794,8 +1801,9 @@ function selectCell(
       if (child.lines.length === 0) {
         if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock], containmentLimitPt)
           > availableContentHeightPt + EPSILON_PT
-          && !(retainsFirstUnit && blocks.length === 0)) break;
+          && !(retainsFirstUnit && flowBlockCount === 0)) break;
         blocks.push(sourceBlock);
+        flowBlockCount += 1;
         range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
         blockIndex += 1;
         paragraphLineStart = 0;
@@ -1810,13 +1818,13 @@ function selectCell(
         freshAvailableContentHeightPt,
         canGainPageSpace,
         context,
-        retainsFirstUnit && blocks.length === 0,
+        retainsFirstUnit && flowBlockCount === 0,
         containmentLimitPt,
+        flowBlockCount > 0,
       );
       if (!selected.block || !selected.range) break;
-      blocks.push({ ...selected.block, ...(sourceBlock.ownsNoCellFlow
-        ? { ownsNoCellFlow: true }
-        : {}) });
+      blocks.push(selected.block);
+      flowBlockCount += 1;
       range.push(selected.range);
       if (selected.lineEnd < child.lines.length) {
         paragraphLineStart = selected.lineEnd;
@@ -1850,6 +1858,7 @@ function selectCell(
       if (!nestedResult.fragment) break;
       if (nestedResult.wholeSource !== true) wholeSource = false;
       blocks.push({ layout: nestedResult.fragment, sourceBlockIndex: sourceBlock.sourceBlockIndex });
+      flowBlockCount += 1;
       range.push({
         kind: 'nested-table',
         blockIndex: sourceBlock.sourceBlockIndex,
@@ -1869,11 +1878,23 @@ function selectCell(
     if (measureTableCellBlockFlowHeightPt([...blocks, sourceBlock], containmentLimitPt)
       > availableContentHeightPt + EPSILON_PT) break;
     blocks.push(sourceBlock);
+    flowBlockCount += 1;
     range.push({ kind: 'whole', blockIndex: sourceBlock.sourceBlockIndex });
     blockIndex += 1;
   }
 
   const complete = blockIndex >= cell.blocks.length;
+  if (!complete && flowBlockCount === 0) {
+    // Only no-flow blocks were taken before content that does not fit: the
+    // cell made no progress, and the next fragment takes those blocks again.
+    return {
+      input: { ...cell, blocks: [] },
+      range: [],
+      next: cursor,
+      complete: false,
+      wholeSource: false,
+    };
+  }
   return {
     input: { ...cell, blocks },
     range,
