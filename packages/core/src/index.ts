@@ -334,7 +334,7 @@ export {
   type RasterBlobInspection,
   type RasterFormat,
 } from './image/raster-blob-inspection';
-export { sniffRasterResolution, type RasterResolution } from './image/raster-resolution';
+export type { RasterResolution } from './image/raster-resolution';
 export {
   chartImageFillKey,
   chartImageFillPixelTransform,
