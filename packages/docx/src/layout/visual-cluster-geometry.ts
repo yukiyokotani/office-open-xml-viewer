@@ -56,7 +56,7 @@ export function bidiPlacedOffsets(
 }
 
 type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>
-  & Partial<Pick<TextPlacement, 'advancePt'>>
+  & Partial<Pick<TextPlacement, 'advancePt' | 'tateChuYoko'>>
   & Readonly<{ kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[] }>;
 type VisualClusters = Readonly<{
   /** Visual start of each cluster from the left edge of the piece's box. */
@@ -215,8 +215,21 @@ export function clusterBoxes(
 ): ClusterBox[] {
   const visual = visualClusters(placement);
   const boxes: ClusterBox[] = [];
+  // §17.3.2.10 tate-chu-yoko: the characters are compressed together into
+  // the run's one-em cell, so each takes its natural share of the cell.
+  const cell = tateChuYokoCell(placement);
   for (let index = first; index < last; index += 1) {
     const cluster = placement.clusters[index]!;
+    if (cell) {
+      boxes.push({
+        start: Math.max(cluster.range.start, textStart) - textStart,
+        end: Math.min(cluster.range.end, textEnd) - textStart,
+        xPt: placement.bounds.xPt + (cluster.offset.xPt - cell.originPt) * cell.compression - originXPt,
+        widthPt: cluster.advancePt * cell.compression,
+        rtl: false,
+      });
+      continue;
+    }
     const startPt = visualClusterStartXPt(placement, index);
     const final = index === placement.clusters.length - 1;
     const widthPt = visual ? visual.advancesPt[index]!
@@ -234,4 +247,21 @@ export function clusterBoxes(
     });
   }
   return boxes;
+}
+
+/** A tate-chu-yoko run's clusters keep their natural advances while the run
+ * paints them compressed into its one-em cell: the ratio of that
+ * compression and the natural origin it applies from; null for any other
+ * run, or one whose characters already fit their cell. */
+function tateChuYokoCell(placement: ClusteredText): Readonly<{ compression: number; originPt: number }> | null {
+  if (!placement.tateChuYoko || placement.clusters.length === 0) return null;
+  let start = Number.POSITIVE_INFINITY;
+  let end = Number.NEGATIVE_INFINITY;
+  for (const cluster of placement.clusters) {
+    start = Math.min(start, cluster.offset.xPt);
+    end = Math.max(end, cluster.offset.xPt + cluster.advancePt);
+  }
+  const natural = end - start;
+  if (!(natural > placement.bounds.widthPt + 1e-9) || !(placement.bounds.widthPt > 0)) return null;
+  return { compression: placement.bounds.widthPt / natural, originPt: start };
 }
