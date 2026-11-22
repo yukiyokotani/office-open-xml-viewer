@@ -84,7 +84,8 @@ export function buildDocxTextLayer(
     // readDocxTextSelectionContext skips; a run straddling a clip edge is
     // split at the edge, by its painted clusters, into visible and hidden
     // spans. Other runs keep one span.
-    const pieces = runPieces(run);
+    // Each piece is fitted to its painted clusters (scaledPieces).
+    const pieces = scaledPieces(run, runPieces(run), measureForFont);
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
     // CSS rule cannot drift the trailing edge of the selection. Kerning /
@@ -154,8 +155,7 @@ export function buildDocxTextLayer(
       // included): scaled along the run so its glyph advances, and with them
       // native selection and the hit box, match the paint. Without a measurer
       // the box is sized to the painted width instead.
-      const paintScale = piece.width !== undefined && measureForFont && !run.eastAsianVert
-        ? paintedScale(run, piece, measureForFont) : undefined;
+      const paintScale = piece.scale;
       const pieceTransformValue = paintScale !== undefined && Math.abs(paintScale - 1) > 1e-3
         ? `${transformValue ? `${transformValue} ` : ''}scaleX(${paintScale})` : transformValue;
       const pieceTransform = pieceTransformValue
@@ -196,6 +196,11 @@ interface RunPiece {
    * run carries cluster boxes. */
   readonly width?: number;
   readonly hidden: boolean;
+  /** The piece's cluster boxes, `[first, last]`, when the run has them. */
+  readonly first?: number;
+  readonly last?: number;
+  /** Horizontal scale fitting the piece's natural text to its painted width. */
+  readonly scale?: number;
 }
 
 /** WORD_CELL_CONTENT_CLIP: the visible and hidden pieces of `run`'s text under
@@ -214,7 +219,7 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
   for (const box of boxes ?? []) paintedEnd = Math.max(paintedEnd, box.x + box.width);
   const whole = (hidden: boolean): readonly RunPiece[] => [{
     start: 0, end: run.text.length, offset: 0, hidden,
-    ...(paintedEnd > 0 ? { width: paintedEnd } : {}),
+    ...(paintedEnd > 0 ? { width: paintedEnd, first: 0, last: boxes!.length - 1 } : {}),
   }];
   if (!run.clips) return whole(false);
   if (!clippedBoxVisible(
@@ -243,6 +248,8 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
     }
     return {
       width: Math.max(0, right - offset),
+      first: group.first,
+      last: group.last,
       start: index === 0 ? 0 : boxes[group.first]!.start,
       end: index === groups.length - 1 ? run.text.length : boxes[groups[index + 1]!.first]!.start,
       offset,
@@ -251,16 +258,71 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
   });
 }
 
-/** The horizontal scale that stretches `piece`'s natural text (its font and
- * tracking, measured once) to its painted width; undefined when the text
- * has no measurable width. */
-function paintedScale(
+/** Relative difference of cluster scales within one span. */
+const UNIFORM_SCALE_TOLERANCE = 0.02;
+
+/** Fit each piece's spans to where its clusters are painted. A span is
+ * scaled along the run so its glyph advances, and with them native
+ * selection, the caret and the hit box, match the paint. One scale fits a
+ * piece whose clusters are painted at a uniform scale of their natural
+ * advances (the common, unscaled case is measured once and left as is).
+ * Where they are not (a compressed trailing space, tracking with character
+ * scaling, justification), the piece is divided into contiguous groups of
+ * uniformly scaled clusters, down to one per cluster, each its own span at
+ * its painted position with its own scale. Each cluster is measured once,
+ * so the work is linear. Without a measurer, or for tate-chu-yoko text (its
+ * own scale), pieces are unchanged. */
+function scaledPieces(
   run: Readonly<DocxTextRunInfo>,
-  piece: RunPiece,
-  measureForFont: (font: string) => (s: string) => number,
-): number | undefined {
-  const text = run.text.slice(piece.start, piece.end);
-  const natural = runOverlayMeasure(run as DocxTextRunInfo, measureForFont)(text)
-    + countSpacingCharacters(text).pitchBearing * (run.letterSpacingPx ?? 0);
-  return natural > 0 && piece.width! > 0 ? piece.width! / natural : undefined;
+  pieces: readonly RunPiece[],
+  measureForFont: ((font: string) => (s: string) => number) | undefined,
+): readonly RunPiece[] {
+  const boxes = run.clusterBoxes;
+  if (!measureForFont || run.eastAsianVert || !boxes) return pieces;
+  const measure = runOverlayMeasure(run as DocxTextRunInfo, measureForFont);
+  const pitch = run.letterSpacingPx ?? 0;
+  const natural = (text: string) => measure(text) + countSpacingCharacters(text).pitchBearing * pitch;
+  return pieces.flatMap((piece): RunPiece[] => {
+    if (piece.width === undefined || piece.first === undefined || piece.last === undefined) return [piece];
+    const whole = natural(run.text.slice(piece.start, piece.end));
+    if (!(whole > 0) || !(piece.width > 0)) return [piece];
+    const ratio = piece.width / whole;
+    if (Math.abs(ratio - 1) <= 1e-3) return [{ ...piece, scale: 1 }];
+    // Per-cluster scales, grouped while they stay uniform.
+    const groups: Array<{ first: number; last: number; natural: number; scale: number | null }> = [];
+    for (let index = piece.first; index <= piece.last; index++) {
+      const box = boxes[index]!;
+      const own = natural(run.text.slice(box.start, box.end));
+      const scale = own > 0 && box.width > 0 ? box.width / own : null;
+      const previous = groups.at(-1);
+      if (previous && (scale === null || previous.scale === null
+        || Math.abs(scale / previous.scale - 1) <= UNIFORM_SCALE_TOLERANCE)) {
+        previous.last = index;
+        previous.natural += own;
+        previous.scale ??= scale;
+      } else {
+        groups.push({ first: index, last: index, natural: own, scale });
+      }
+    }
+    if (groups.length <= 1) return [{ ...piece, scale: ratio }];
+    return groups.map((group, index) => {
+      let offset = Infinity;
+      let right = -Infinity;
+      for (let member = group.first; member <= group.last; member++) {
+        offset = Math.min(offset, boxes[member]!.x);
+        right = Math.max(right, boxes[member]!.x + boxes[member]!.width);
+      }
+      const width = Math.max(0, right - offset);
+      return {
+        start: index === 0 ? piece.start : boxes[group.first]!.start,
+        end: index === groups.length - 1 ? piece.end : boxes[groups[index + 1]!.first]!.start,
+        offset,
+        width,
+        hidden: piece.hidden,
+        first: group.first,
+        last: group.last,
+        ...(group.natural > 0 && width > 0 ? { scale: width / group.natural } : {}),
+      };
+    });
+  });
 }

@@ -13,6 +13,7 @@ import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
 import { clippedBoxBounds, clippedBoxVisible } from './run-clip.js';
+import { clusterBoxes } from './layout/visual-cluster-geometry.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import { resolveDocxCommentThreads } from './comments.js';
 import type { LayoutRect, ParagraphLayout, TableLayout } from './layout/types.js';
@@ -585,5 +586,21 @@ describe('hit testing a zero-width cell', () => {
     }]);
     const middle = clip.yPt + clip.heightPt / 2;
     expect(hitTestDocxElementContext(layout, 0, { xPt: clip.xPt, yPt: middle }, registry)).toBeNull();
+  });
+});
+
+describe('tate-chu-yoko cluster boxes', () => {
+  it('divide the one-em cell among the characters by their compressed advances', () => {
+    // '２９': two 10pt natural advances compressed into a 10pt cell.
+    const placement = {
+      text: '２９', range: { start: 0, end: 2 }, direction: 'ltr' as const, tateChuYoko: true,
+      origin: { xPt: 50, yPt: 0 }, bounds: { xPt: 50, yPt: 0, widthPt: 10, heightPt: 10 },
+      clusters: [
+        { range: { start: 0, end: 1 }, offset: { xPt: 0, yPt: 0 }, advancePt: 10 },
+        { range: { start: 1, end: 2 }, offset: { xPt: 10, yPt: 0 }, advancePt: 10 },
+      ],
+    };
+    const boxes = clusterBoxes(placement as never, 0, 2, 0, 2, 50);
+    expect(boxes.map((box) => [box.xPt, box.widthPt])).toEqual([[0, 5], [5, 5]]);
   });
 });

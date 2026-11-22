@@ -298,6 +298,59 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(text).toBe('CD');
   });
 
+  /** The caret offset in the span under each probe point (page px from the
+   * layer origin), with its text. */
+  const carets = (runs: DocxTextRunInfo[], points: Array<[number, number]>) => page.evaluate(({ runs, points }) => {
+    const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
+    const layer = document.getElementById('layer') as HTMLDivElement;
+    layer.style.width = '800px';
+    layer.style.height = '600px';
+    const canvas = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D;
+    const measureForFont = (font: string) => (text: string) => { canvas.font = font; return canvas.measureText(text).width; };
+    api.buildDocxTextLayer(layer, runs, 800, 600, undefined, measureForFont, 0);
+    const origin = layer.getBoundingClientRect();
+    return points.map(([x, y]) => {
+      const position = document.caretPositionFromPoint?.(origin.left + x, origin.top + y);
+      const node = position?.offsetNode;
+      const span = node?.parentElement;
+      if (!span || span.tagName !== 'SPAN') return null;
+      // Offset in the run: the span's text starts where the run's text does.
+      const runText = runs[0]!.text;
+      const prefix = runText.indexOf(span.textContent ?? '');
+      return prefix + position!.offset;
+    });
+  }, { runs, points });
+
+  it('places the caret by painted clusters where a trailing space is compressed', async () => {
+    // 'ABC ': 12px letters, the final space compressed to 1px.
+    const run: DocxTextRunInfo = {
+      text: 'ABC ', x: 100, y: 100, w: 37, h: 20, fontSize: 20, font: '20px monospace',
+      clusterBoxes: [0, 1, 2, 3].map((index) => ({ start: index, end: index + 1, x: index * 12, width: index === 3 ? 1 : 12, rtl: false })),
+    };
+    // 16.8px into the run is in 'B' (12-24): offset 1 before its midpoint.
+    expect(await carets([run], [[116.8, 110]])).toEqual([1]);
+  });
+
+  it('places the caret by painted clusters under tracking with character scaling', async () => {
+    // 'WWWWiiii' in a proportional face at 200% with 20px tracking: each
+    // cluster is painted at twice its glyph advance plus the tracking.
+    const font = '20px serif';
+    const [w, i] = await page.evaluate((font) => {
+      const canvas = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D;
+      canvas.font = font;
+      return [canvas.measureText('W').width, canvas.measureText('i').width];
+    }, font);
+    const advances = [...'WWWWiiii'].map((character) => 2 * (character === 'W' ? w : i) + 20);
+    const starts = advances.map((_, index) => advances.slice(0, index).reduce((sum, advance) => sum + advance, 0));
+    const run: DocxTextRunInfo = {
+      text: 'WWWWiiii', x: 0, y: 100, w: starts[7]! + advances[7]!, h: 20, fontSize: 20, font, letterSpacingPx: 20,
+      clusterBoxes: advances.map((width, index) => ({ start: index, end: index + 1, x: starts[index]!, width, rtl: false })),
+    };
+    // Just inside the last 'W' and just inside the first 'i' (at its left).
+    const endOfW = starts[4]!;
+    expect(await carets([run], [[endOfW - 2, 110], [endOfW + 2, 110]])).toEqual([4, 4]);
+  });
+
   it('keeps a clipped link on its painted text after browser find', async () => {
     const run = {
       ...cellRun('LINKtailtoken', 100, 12, [{ x: 100, y: 90, width: 40, height: 40 }]),
@@ -341,9 +394,9 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
   it('splits a long run with linear work', async () => {
     const text = 'x'.repeat(10_000);
     const result = await selectAll([cellRun(text, 0, 0.05, [{ x: 250, y: 90, width: 400, height: 40 }])]);
-    // No prefix is measured to split it; each span's own text, once, to fit
-    // it to its painted width.
-    expect(result.measured).toBeLessThanOrEqual(text.length);
+    // No prefix is measured to split it; to fit spans to the paint, each
+    // piece's text and at most each cluster are measured once.
+    expect(result.measured).toBeLessThanOrEqual(2 * text.length);
     expect(result.text.length).toBe(5_000);
   });
 
