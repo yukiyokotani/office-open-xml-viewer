@@ -2513,10 +2513,11 @@ fn parse_notes(
         out.push(crate::types::DocxNote { id, content });
     }
     // A role without a listed story takes the default separator story of
-    // word-note-separator-geometry.
+    // word-note-separator-geometry: single-spaced, with no space after,
+    // whatever the Normal style's spacing.
     let mut default_story = |mark: &str| {
         let xml = format!(
-            r#"<w:{element_name} xmlns:w="{}"><w:p><w:r><w:{mark}/></w:r></w:p></w:{element_name}>"#,
+            r#"<w:{element_name} xmlns:w="{}"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:{mark}/></w:r></w:p></w:{element_name}>"#,
             ooxml_common::ns::wordprocessingml::TRANSITIONAL
         );
         parse_guarded(&xml).ok().and_then(|doc| {
@@ -2595,34 +2596,60 @@ fn selected_note_separator_paragraph(
         .filter(|child| child.is_element())
         .peekable();
     let properties = children.next_if(|child| is_w(*child, "pPr"));
-    // A marker run formatted unlike the paragraph mark shares the mark's line
-    // and contributes its own metrics there; it is retained as one
-    // non-breaking space run with the run's properties.
+    // The story's runs: plain text runs (rPr, text, tabs) around exactly one
+    // marker run (rPr and one marker). A marker run formatted like the
+    // paragraph mark and alone in the paragraph keeps the run-free shape;
+    // otherwise the marker is retained in place as one U+FFFC run that
+    // layout lays out as the inline rule (word-note-separator-geometry).
+    let runs: Vec<_> = children.collect();
     let mut marker_run = None;
-    let mark = if let Some(run) = children.next() {
-        if !is_w(run, "r") || children.next().is_some() {
+    let mut text_runs = 0usize;
+    for run in &runs {
+        if !is_w(*run, "r") {
             return None;
         }
         let mut run_children = run.children().filter(|child| child.is_element()).peekable();
         let run_properties = run_children.next_if(|child| is_w(*child, "rPr"));
-        let marker = run_children.next()?;
-        if run_children.next().is_some() || !is_w_ns(marker.tag_name().namespace()) {
+        let content: Vec<_> = run_children.collect();
+        let marker = match content.as_slice() {
+            [marker]
+                if is_w_ns(marker.tag_name().namespace())
+                    && matches!(
+                        marker.tag_name().name(),
+                        "separator" | "continuationSeparator"
+                    ) =>
+            {
+                Some(*marker)
+            }
+            _ => None,
+        };
+        if let Some(marker) = marker {
+            if marker_run.is_some() {
+                return None;
+            }
+            marker_run = Some((*run, marker, run_properties));
+        } else if !content.is_empty()
+            && content
+                .iter()
+                .all(|child| is_w(*child, "t") || is_w(*child, "tab"))
+        {
+            text_runs += 1;
+        } else {
             return None;
         }
-        let mark = match marker.tag_name().name() {
-            "separator" => NoteSeparatorMark::Short,
-            "continuationSeparator" => NoteSeparatorMark::Full,
-            _ => return None,
-        };
-        let mark_properties = properties.and_then(|node| child_w(node, "rPr"));
-        marker_run = (!same_xml_element(mark_properties, run_properties)).then_some((run, marker));
-        mark
-    } else if properties.is_none() {
+    }
+    let mark = match marker_run {
+        Some((_, marker, _)) if marker.tag_name().name() == "separator" => NoteSeparatorMark::Short,
+        Some(_) => NoteSeparatorMark::Full,
         // Bare empty stories suppress rule ink but keep their inherited line box.
-        NoteSeparatorMark::None
-    } else {
-        return None;
+        None if runs.is_empty() && properties.is_none() => NoteSeparatorMark::None,
+        None => return None,
     };
+    let mark_properties = properties.and_then(|node| child_w(node, "rPr"));
+    let marker_run = marker_run.filter(|(_, _, run_properties)| {
+        text_runs > 0 || !same_xml_element(mark_properties, *run_properties)
+    });
+    let marker_run = marker_run.map(|(run, marker, _)| (run, marker));
     let substituted =
         marker_run.and_then(|(_, marker)| marker_space_paragraph_xml(paragraph, marker));
     let substituted_doc = match substituted.as_deref().map(parse_guarded) {
@@ -2650,9 +2677,15 @@ fn selected_note_separator_paragraph(
         &mut FieldState::default(),
         &mut Vec::new(),
     );
-    let marker_space =
-        |runs: &[DocRun]| matches!(runs, [DocRun::Text(text)] if text.text == "\u{a0}");
-    if !(parsed.runs.is_empty() || (substituted_doc.is_some() && marker_space(&parsed.runs)))
+    let marker_runs = |runs: &[DocRun]| {
+        runs.iter().all(|run| matches!(run, DocRun::Text(_)))
+            && runs
+                .iter()
+                .filter(|run| matches!(run, DocRun::Text(text) if text.text == "\u{fffc}"))
+                .count()
+                == 1
+    };
+    if !(parsed.runs.is_empty() || (substituted_doc.is_some() && marker_runs(&parsed.runs)))
         || parsed.numbering.is_some()
         || parsed.frame_pr.is_some()
         || parsed.borders.is_some()
@@ -2664,8 +2697,8 @@ fn selected_note_separator_paragraph(
     Some((mark, parsed))
 }
 
-/// The separator story paragraph with its marker element replaced by a
-/// non-breaking space, wrapped with every namespace in scope.
+/// The separator story paragraph with its marker element replaced by one
+/// U+FFFC text, wrapped with every namespace in scope.
 fn marker_space_paragraph_xml(
     paragraph: roxmltree::Node<'_, '_>,
     marker: roxmltree::Node<'_, '_>,
@@ -2688,10 +2721,7 @@ fn marker_space_paragraph_xml(
         .collect();
     let range = paragraph.range();
     let marker_range = marker.range();
-    let space = format!(
-        r#"<{t} xml:space="preserve">&#160;</{t}>"#,
-        t = element("t")
-    );
+    let space = format!(r#"<{t}>&#65532;</{t}>"#, t = element("t"));
     Some(format!(
         "<{root}{declarations}>{}{space}{}</{root}>",
         input.get(range.start..marker_range.start)?,
@@ -2931,6 +2961,18 @@ mod note_separator_tests {
             );
             assert!(settings.footnote_separator_paragraph.is_some());
             assert!(settings.endnote_separator_paragraph.is_some());
+            if properties.is_none() {
+                // Word's default story is single-spaced with no space after,
+                // over the package's exact 12pt default line.
+                for paragraph in [
+                    settings.footnote_separator_paragraph.as_deref().unwrap(),
+                    settings.endnote_continuation_separator_paragraph.as_deref().unwrap(),
+                ] {
+                    assert_eq!(paragraph.space_after, 0.0);
+                    let spacing = paragraph.line_spacing.as_ref().unwrap();
+                    assert_eq!((spacing.rule.as_str(), spacing.value), ("auto", 1.0));
+                }
+            }
         }
     }
 
@@ -3100,29 +3142,29 @@ mod note_separator_tests {
             )
             .note_layout_settings
             .unwrap_or_default();
-            // The authored Short mark survives; a marker run formatted
-            // unlike its mark is retained as one non-breaking space, any
-            // other unrepresented content leaves only the mark.
+            // The authored Short mark survives in every case.
             assert_eq!(
                 settings.footnote_separator,
                 Some(crate::types::NoteSeparatorMark::Short),
                 "{paragraph}"
             );
-            let marker_space = settings
+            let marker = settings
                 .footnote_separator_paragraph
                 .as_ref()
                 .map(|paragraph| {
-                    matches!(paragraph.runs.as_slice(), [DocRun::Text(text)] if text.text == "\u{a0}")
+                    paragraph
+                        .runs
+                        .iter()
+                        .any(|run| matches!(run, DocRun::Text(text) if text.text == "\u{fffc}"))
                 });
-            let unequal_marker_run = !paragraph.contains("pBdr")
+            // A marker run formatted unlike its mark, or beside a text run,
+            // is retained in place; ink, borders, a hidden mark and text
+            // inside the marker run are not represented.
+            let represented = !paragraph.contains("pBdr")
                 && !paragraph.contains("shd")
                 && !paragraph.contains("vanish")
-                && !paragraph.contains("<w:t>");
-            assert_eq!(
-                marker_space,
-                unequal_marker_run.then_some(true),
-                "{paragraph}"
-            );
+                && !paragraph.contains("<w:separator/><w:t>");
+            assert_eq!(marker, represented.then_some(true), "{paragraph}");
         }
     }
 
@@ -3591,21 +3633,20 @@ fn parse_note_layout_settings(
             .and_then(|node| child_w(node, name))
             .and_then(|node| attr_w(node, "val"))
     };
-    let footnote_numbering = child_w(root, "footnotePr").and_then(note_numbering_wire);
-    let endnote_numbering = child_w(root, "endnotePr").and_then(note_numbering_wire);
-    let footnote_numbering = footnote_numbering.unwrap_or_default();
-    let endnote_numbering = endnote_numbering.unwrap_or_default();
+    // word-section-note-numbering: the document-wide numFmt, numStart and
+    // numRestart of settings.xml do not number notes; each section's own
+    // footnotePr/endnotePr (or the defaults) does. They are not retained.
     let result = crate::types::NoteLayoutSettingsWire {
         footnote_position: value("footnotePr", "pos"),
         endnote_position: value("endnotePr", "pos"),
-        footnote_number_format: footnote_numbering.format,
-        footnote_number_start: footnote_numbering.start,
-        endnote_number_format: endnote_numbering.format,
-        endnote_number_start: endnote_numbering.start,
-        footnote_number_restart: footnote_numbering.restart,
-        endnote_number_restart: endnote_numbering.restart,
-        footnote_number_custom_format: footnote_numbering.custom_format,
-        endnote_number_custom_format: endnote_numbering.custom_format,
+        footnote_number_format: None,
+        footnote_number_start: None,
+        endnote_number_format: None,
+        endnote_number_start: None,
+        footnote_number_restart: None,
+        endnote_number_restart: None,
+        footnote_number_custom_format: None,
+        endnote_number_custom_format: None,
         section_note_numbering: Vec::new(),
         footnote_separator: None,
         endnote_separator: None,
@@ -3800,27 +3841,22 @@ mod note_layout_settings_tests {
     }
 
     #[test]
-    fn preserves_document_wide_note_number_formats_and_starts() {
+    fn does_not_retain_document_wide_note_numbering() {
+        // word-section-note-numbering: settings.xml numbering does not number
+        // notes, so only the position facts survive.
         let xml = r#"<w:settings
                        xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-                     <w:footnotePr><w:numFmt w:val="upperLetter"/><w:numStart w:val="4"/></w:footnotePr>
-                     <w:endnotePr><w:numFmt w:val="lowerRoman"/><w:numStart w:val="x"/></w:endnotePr>
+                     <w:footnotePr><w:numFmt w:val="upperLetter"/><w:numStart w:val="4"/><w:numRestart w:val="eachPage"/></w:footnotePr>
+                     <w:endnotePr><w:pos w:val="sectEnd"/><w:numFmt w:val="lowerRoman"/></w:endnotePr>
                    </w:settings>"#;
         let settings = parse_note_layout_settings(xml)
             .0
-            .expect("authored note numbering");
-        assert_eq!(
-            settings.footnote_number_format.as_deref(),
-            Some("upperLetter")
-        );
-        assert_eq!(settings.footnote_number_start, Some(4));
-        assert_eq!(
-            settings.endnote_number_format.as_deref(),
-            Some("lowerRoman")
-        );
-        // An invalid ST_DecimalNumber keeps the default start.
-        assert_eq!(settings.endnote_number_start, None);
-        assert_eq!(settings.footnote_position, None);
+            .expect("authored note position");
+        assert_eq!(settings.footnote_number_format, None);
+        assert_eq!(settings.footnote_number_start, None);
+        assert_eq!(settings.footnote_number_restart, None);
+        assert_eq!(settings.endnote_number_format, None);
+        assert_eq!(settings.endnote_position.as_deref(), Some("sectEnd"));
     }
 
     #[test]

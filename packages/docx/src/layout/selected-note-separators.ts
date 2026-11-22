@@ -37,6 +37,7 @@ const SELECTED_ROLE_BY_INSTANCE: ReadonlyMap<string, SelectedNoteSeparatorRole> 
 export type SelectedNoteSeparatorParagraphAcquirer = (
   paragraph: DeepReadonly<DocParagraph>,
   source: SourceRef,
+  mark: 'short' | 'full' | 'none',
 ) => ParagraphAcquisitionInput;
 
 export interface NormalizedSelectedNoteSeparators {
@@ -94,10 +95,10 @@ export function normalizeSelectedNoteSeparators(
     if (paragraph === undefined) continue;
     const mark = marks[role];
     if (mark !== 'short' && mark !== 'full' && mark !== 'none') reject(`${role} paragraph has no selected mark`);
-    // The closed shape the parser admits: no runs besides the omitted mark
-    // (or its non-breaking space when the marker run is formatted unlike the
-    // mark), and no paragraph ink, numbering, frame or hidden mark.
-    if ((paragraph.runs ?? []).length !== 0 && !isNoteSeparatorMarkerSpace(paragraph.runs)) {
+    // The closed shape the parser admits: no runs besides the omitted mark,
+    // or text runs around the marker sentinel, and no paragraph ink,
+    // numbering, frame or hidden mark.
+    if ((paragraph.runs ?? []).length !== 0 && !isNoteSeparatorMarkerRuns(paragraph.runs)) {
       reject(`${role} paragraph carries runs`);
     }
     if (paragraph.numbering != null || paragraph.framePr != null || paragraph.borders != null
@@ -107,15 +108,33 @@ export function normalizeSelectedNoteSeparators(
     const root = selectedNoteSeparatorSource(role, [], kind);
     const paragraphSource = selectedNoteSeparatorSource(role, [0], kind);
     definitions[role] = Object.freeze({ role, root, paragraph: paragraphSource });
-    stories.push(Object.freeze({ source: root, body: Object.freeze([acquire(paragraph, paragraphSource)]) }));
+    stories.push(Object.freeze({ source: root, body: Object.freeze([acquire(paragraph, paragraphSource, mark)]) }));
   }
   return Object.freeze({ definitions: Object.freeze(definitions), stories: Object.freeze(stories) });
 }
 
-/** The one run of a separator story whose marker run is formatted unlike
- * its paragraph mark: a non-breaking space carrying the marker's
- * properties (the parser's selected-story projection). */
-export function isNoteSeparatorMarkerSpace(runs: readonly Readonly<{ type: string }>[]): boolean {
-  return runs.length === 1 && runs[0]!.type === 'text'
-    && (runs[0] as Readonly<{ text?: string }>).text === '\u00a0';
+/** The parser's marker sentinel of a separator story with text or with a
+ * marker run formatted unlike its paragraph mark (one U+FFFC text run). */
+export const NOTE_SEPARATOR_MARKER_TEXT = '\ufffc';
+
+/** Parser wire of a separator story paragraph holding its marker in place:
+ * text runs only, exactly one of them the marker sentinel. */
+export function isNoteSeparatorMarkerRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
+  return runs.length > 0 && runs.every((run) => run.type === 'text')
+    && runs.filter((run) => (run as Readonly<{ text?: string }>).text === NOTE_SEPARATOR_MARKER_TEXT).length === 1;
+}
+
+/** Acquired separator story paragraph: text runs around the one inline
+ * object that lays the marker out. */
+export function isAcquiredNoteSeparatorMarkerRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
+  return runs.length > 0 && runs.filter((run) => run.type === 'shape').length === 1
+    && runs.every((run) => run.type === 'text' || run.type === 'shape' || run.type === 'break');
+}
+
+/** Inline advance of the separator marker object: the ordinary mark's 144pt
+ * (min(144pt, area width) is applied to the drawn rule). The continuation
+ * mark fills its own line instead: it advances nothing and line breaks
+ * separate it from text before and after it (WORD_NOTE_SEPARATOR_GEOMETRY). */
+export function noteSeparatorMarkerAdvancePt(mark: string | undefined): number {
+  return mark === 'full' ? 0 : 144;
 }

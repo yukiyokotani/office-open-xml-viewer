@@ -102,7 +102,7 @@ import type {
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
 import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
-import { isNoteSeparatorMarkerSpace } from './layout/selected-note-separators.js';
+import { isNoteSeparatorMarkerRuns, NOTE_SEPARATOR_MARKER_TEXT, noteSeparatorMarkerAdvancePt } from './layout/selected-note-separators.js';
 import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
@@ -2181,13 +2181,34 @@ export function reservedNoteSeparatorParagraphAcquisitionInput(
 export function selectedNoteSeparatorParagraphAcquisitionInput(
   paragraph: DeepReadonly<DocParagraph>,
   source: SourceRef,
+  mark: 'short' | 'full' | 'none' = 'short',
 ): ParagraphAcquisitionInput {
-  // The run-free shape, or the one non-breaking space that carries a marker
-  // run formatted unlike its paragraph mark.
+  // The run-free shape, or text runs around the marker: the marker run keeps
+  // its properties as a zero-width text run (its line metrics) followed by
+  // one empty inline object of the marker's advance, where layout draws the
+  // rule; a continuation marker owns its whole line
+  // (WORD_NOTE_SEPARATOR_GEOMETRY).
+  const authored = (paragraph.runs ?? []) as readonly DocRun[];
+  const markerIndex = isNoteSeparatorMarkerRuns(authored)
+    ? authored.findIndex((run) => run.type === 'text' && run.text === NOTE_SEPARATOR_MARKER_TEXT) : -1;
+  const lineBreak = { type: 'break', breakType: 'line' } as DocRun;
+  const runs = markerIndex < 0 ? [] : authored.flatMap((run, index) => {
+    if (index !== markerIndex) return [run];
+    const fillsLine = mark === 'full';
+    return [
+      ...(fillsLine && index > 0 ? [lineBreak] : []),
+      { ...run, text: '\u200b' } as DocRun,
+      {
+        type: 'shape', inline: true, widthPt: noteSeparatorMarkerAdvancePt(mark), heightPt: 0,
+        subpaths: [], fill: null, stroke: null, wrapMode: null,
+      } as unknown as DocRun,
+      ...(fillsLine && index < authored.length - 1 ? [lineBreak] : []),
+    ];
+  });
   return paragraphAcquisitionInput({
     ...(paragraph as unknown as DocParagraph),
     type: 'paragraph',
-    runs: isNoteSeparatorMarkerSpace(paragraph.runs ?? []) ? paragraph.runs : [],
+    runs,
   } as unknown as ParagraphLayoutSource, source);
 }
 

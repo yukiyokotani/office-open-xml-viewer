@@ -1123,7 +1123,7 @@ describe('canonical producer with a real document model', () => {
     expect(empty?.flowBounds).toEqual(standard?.flowBounds);
   });
 
-  it('uses the authored continuation rule width on a retained note fragment', () => {
+  it('uses the ordinary separator rule on a retained footnote fragment', () => {
     const section = {
       pageWidth: 200, pageHeight: 100,
       marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
@@ -1163,17 +1163,17 @@ describe('canonical producer with a real document model', () => {
     expect(width(short[0]!)).toBeCloseTo(width(full[0]!), 5);
     // WORD_NOTE_SEPARATOR_GEOMETRY: the short rule is min(144pt, width).
     expect(width(short[1]!)).toBeCloseTo(144, 5);
-    expect(width(full[1]!)).toBeCloseTo(180, 5);
-    // A missing footnote continuation story takes Word's default, the short
-    // rule (WORD_NOTE_SEPARATOR_GEOMETRY), never an explicit empty rule.
+    // WORD_NOTE_SEPARATOR_GEOMETRY: a continued footnote takes the ordinary
+    // separator, whatever its continuation story authors.
+    expect(width(full[1]!)).toBeCloseTo(144, 5);
     const absent = render();
     expect(absent.map(width)).toEqual(short.map(width));
     const emptyFirst = render('full', 'none');
     expect(width(emptyFirst[0]!)).toBe(0);
-    expect(width(emptyFirst[1]!)).toBeCloseTo(180, 5);
+    expect(width(emptyFirst[1]!)).toBe(0);
     const emptyContinuation = render('none');
     expect(width(emptyContinuation[0]!)).toBeCloseTo(144, 5);
-    expect(width(emptyContinuation[1]!)).toBe(0);
+    expect(width(emptyContinuation[1]!)).toBeCloseTo(144, 5);
     expect(emptyContinuation.map(note => note.advancePt)).toEqual(full.map(note => note.advancePt));
     // A note taller than a physical page must be acquired before partitioning.
     const long = render('full', undefined, 30);

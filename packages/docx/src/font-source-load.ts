@@ -116,11 +116,12 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | { texts: string[]
   ]) {
     if (format !== undefined && !ASCII_NUMBER_FORMATS.has(format)) return 'all';
   }
-  // A separator marker run formatted unlike its paragraph mark is measured
-  // as one non-breaking space.
+  // Separator story text, and the marker measured as a zero-width text run.
   for (const paragraph of [settings?.footnoteSeparatorParagraph, settings?.footnoteContinuationSeparatorParagraph,
     settings?.endnoteSeparatorParagraph, settings?.endnoteContinuationSeparatorParagraph]) {
-    for (const run of paragraph?.runs ?? []) if (typeof run.text === 'string') literal.push(run.text);
+    for (const run of paragraph?.runs ?? []) {
+      if (typeof run.text === 'string') literal.push(run.text === '\ufffc' ? '\u200b' : run.text);
+    }
   }
   const pending: unknown[] = [doc];
   const seen = new Set<object>();
