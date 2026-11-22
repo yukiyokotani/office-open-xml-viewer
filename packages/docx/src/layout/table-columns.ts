@@ -726,8 +726,6 @@ function contentResolutionColumns(
       }
     }
   }
-  const fractionTotal = fractions.reduce((sum, fraction) => sum + fraction, 0);
-  if (fractionTotal >= 1 - EPSILON_PT && kinds.some((kind) => kind !== 'pct')) return null;
   return { kinds, minimums, maximums, fractions };
 }
 
@@ -744,7 +742,10 @@ function contentResolutionDesiredWidthPt(columns: ContentResolutionColumns): num
     else otherPt += maximums[column]!;
   });
   if (fractionTotal <= 0) return otherPt;
-  return otherPt > 0 ? Math.max(desiredPt, otherPt / (1 - fractionTotal)) : desiredPt;
+  if (otherPt <= 0) return desiredPt;
+  // Percentages that leave no share for the other columns ask for all the
+  // width there is.
+  return fractionTotal >= 1 - EPSILON_PT ? Infinity : Math.max(desiredPt, otherPt / (1 - fractionTotal));
 }
 
 /** Minimum plus the same fraction of every interval to the maximum. */
@@ -770,7 +771,11 @@ function contentResolutionWidthsPt(input: TableColumnLayoutInput, columnCount: n
   if (!columns) return null;
   const { kinds, minimums, maximums, fractions } = columns;
   const minimumPt = minimums.reduce((sum, width) => sum + width, 0);
-  const ceilingPt = input.availableWidthPt === null ? Infinity : finiteNonNegative(input.availableWidthPt);
+  const ceilingPt = input.availableWidthPt === null ? Infinity
+    : Math.max(0, finiteNonNegative(input.availableWidthPt) - finiteNonNegative(input.contentResolutionCeilingInsetPt));
+  const binds = minimumPt > ceilingPt + EPSILON_PT || (input.tablePreferredWidthPt === null
+    && contentResolutionDesiredWidthPt(columns) > ceilingPt + EPSILON_PT);
+  if (binds && input.contentResolutionCeilingEstablished === false) return null;
   if (minimumPt > ceilingPt + EPSILON_PT) {
     // The minima do not fit the ceiling: §17.18.87 leaves the distribution
     // open; keep the proportional reduction of the general solver.
@@ -778,23 +783,31 @@ function contentResolutionWidthsPt(input: TableColumnLayoutInput, columnCount: n
   }
   const tableWidthPt = Math.max(minimumPt, Math.min(ceilingPt,
     input.tablePreferredWidthPt ?? contentResolutionDesiredWidthPt(columns)));
+  if (!Number.isFinite(tableWidthPt)) return null;
   const widths = new Array<number>(columnCount).fill(0);
   const percentages = kinds.flatMap((kind, column) => (kind === 'pct' ? [column] : []));
   const others = kinds.flatMap((kind, column) => (kind === 'pct' ? [] : [column]));
   const fractionTotal = fractions.reduce((sum, fraction) => sum + fraction, 0);
-  // Percentage columns alone share the whole table by their percentages.
-  const fractionScale = others.length === 0 && fractionTotal > 0 ? 1 / fractionTotal : 1;
+  // Each percentage column takes its share in turn, as far as the table
+  // reaches; percentage columns alone share what their percentages leave.
+  const fractionScale = others.length === 0 && fractionTotal > 0 && fractionTotal < 1 ? 1 / fractionTotal : 1;
   let restPt = tableWidthPt;
   for (const column of percentages) {
-    widths[column] = Math.max(minimums[column]!, tableWidthPt * fractions[column]! * fractionScale);
+    widths[column] = Math.max(0, Math.min(restPt, tableWidthPt * fractions[column]! * fractionScale));
     restPt -= widths[column]!;
   }
-  if (others.length === 0) {
-    // Minima that pushed a share up are taken back from the other shares.
-    const excessPt = -restPt;
-    if (excessPt > EPSILON_PT) interpolateToward(widths, percentages, minimums, [...widths], tableWidthPt);
-    return cleanWidths(widths);
+  // The other columns keep at least their content, and so does every
+  // percentage column: what that takes comes off the shares above it.
+  const othersMinimumPt = others.reduce((total, column) => total + minimums[column]!, 0);
+  const shares = [...widths];
+  for (const column of percentages) widths[column] = Math.max(widths[column]!, minimums[column]!);
+  const percentagesPt = percentages.reduce((total, column) => total + widths[column]!, 0);
+  if (percentagesPt > tableWidthPt - othersMinimumPt + EPSILON_PT) {
+    interpolateToward(widths, percentages, minimums,
+      shares.map((share, column) => Math.max(share, minimums[column]!)), tableWidthPt - othersMinimumPt);
   }
+  restPt = tableWidthPt - percentages.reduce((total, column) => total + widths[column]!, 0);
+  if (others.length === 0) return cleanWidths(widths);
   const sum = (set: readonly number[], values: readonly number[]) =>
     set.reduce((total, column) => total + values[column]!, 0);
   const autos = others.filter((column) => kinds[column] === 'auto');

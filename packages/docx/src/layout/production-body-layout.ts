@@ -133,12 +133,13 @@ import type { DocGridCtx } from '../line-layout.js';
 import {
   acquireRetainedTable,
   layoutTableFragment,
+  retainedEdges,
   type RetainedTableAcquisition,
   shareRotatedCellReacquisition,
   retainedTableAcquisitionIsReusableAcrossPages,
 } from './table-acquisition.js';
 import { combineAdjacentTableLayoutInputs } from './adjacent-table-layout-input.js';
-import { layoutTable as layoutRetainedTableInput } from './table.js';
+import { collapsedRowSideRuleWidthsPt, layoutTable as layoutRetainedTableInput } from './table.js';
 import {
   hasPagePlacedTableContent,
   layoutWholeTableOnPage,
@@ -3469,6 +3470,37 @@ function resolveColumnWidths(
   return [...resolveTableColumnWidths(normalized)];
 }
 
+/** Widths of the collapsed side rules of each cell of row `rowIndex`. */
+function collapsedRowSideRulesPt(
+  table: TableLayoutSource,
+  format: TableMemberDecision['source']['format'],
+  rowIndex: number,
+): ReturnType<typeof collapsedRowSideRuleWidthsPt> {
+  const row = table.rows[rowIndex]!;
+  const columnCount = Math.max(table.colWidths?.length ?? 0, ...table.rows.map((candidate) =>
+    Math.max(0, candidate.gridBefore ?? 0) + candidate.cells.reduce((sum, cell) => sum + Math.max(1, cell.colSpan), 0)));
+  let columnStart = Math.max(0, row.gridBefore ?? 0);
+  const exception = format.rows[rowIndex]?.exception?.borders;
+  return collapsedRowSideRuleWidthsPt(
+    row.cells.map((cell) => {
+      const start = columnStart;
+      columnStart += Math.max(1, cell.colSpan);
+      return { borders: retainedEdges(cell.borders), columnStart: start, columnSpan: Math.max(1, cell.colSpan) };
+    }),
+    retainedEdges(table.borders),
+    exception ? retainedEdges(exception) : null,
+    rowIndex, table.rows.length, columnCount, table.bidiVisual === true,
+  );
+}
+
+/** Half the table's own left and right rules, which its border box adds to
+ * its grid in compatibility mode 15. */
+function outerHalfRulesPt(table: TableLayoutSource): number {
+  const visible = (border: { width: number; style: string } | null | undefined): number =>
+    (border && border.style !== 'nil' && border.style !== 'none' ? Math.max(0, border.width) : 0);
+  return (visible(table.borders.left) + visible(table.borders.right)) / 2;
+}
+
 function acquireTableColumnInput(
   table: TableLayoutSource,
   contentWPt: number,
@@ -3489,10 +3521,26 @@ function acquireTableColumnInput(
     const ownerFormat = ownerDecision.source.format;
     const ownerLayout = ownerDecision.effectiveLayout;
     const ownerMargins = new WeakMap<object, Readonly<{ left: number; right: number }>>();
-    owner.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
-      const acquired = ownerFormat.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
-      ownerMargins.set(cell, acquired ?? effCellMargins(cell, owner));
-    }));
+    owner.rows.forEach((row, rowIndex) => {
+      // WORD_AUTOFIT_CONTENT_RESOLUTION: in mode 15 content keeps clear of
+      // each side by the cell margin (half a point when omitted) or, if
+      // larger, by half the collapsed rule on that side.
+      const sideRules = ownerDecision.contentInset ? collapsedRowSideRulesPt(owner, ownerFormat, rowIndex) : null;
+      row.cells.forEach((cell, cellIndex) => {
+        const cellFormat = ownerFormat.rows[rowIndex]?.cells[cellIndex];
+        const margins = cellFormat?.marginsPt ?? effCellMargins(cell, owner);
+        const rules = sideRules?.[cellIndex];
+        if (!rules) {
+          ownerMargins.set(cell, margins);
+          return;
+        }
+        const omittedPt = cellFormat?.horizontalMarginsOmitted === true ? 0.5 : 0;
+        ownerMargins.set(cell, {
+          left: Math.max(margins.left, omittedPt, rules.leftPt / 2),
+          right: Math.max(margins.right, omittedPt, rules.rightPt / 2),
+        });
+      });
+    });
     return (cell, preferredWidth) => {
       const cellStory = enterTableCellStoryContext(ownerStory, tableCellFlowsHorizontally(cell));
       return measureTableCellIntrinsicWidths(
@@ -3543,8 +3591,8 @@ function acquireTableColumnInput(
               // columns (notably the 5:1 control). Only the measured auto-column
               // growth path needs this uncapped interval; preferred and nested
               // paths retain their existing measurement ceiling.
-              contentGrowth === 'band' && owner === table && ownerLayout !== 'fixed'
-                && preferredWidth === null
+              ownerDecision.contentResolution || (contentGrowth === 'band' && owner === table && ownerLayout !== 'fixed'
+                && preferredWidth === null)
                 ? Number.MAX_SAFE_INTEGER
                 : contentWPt,
               { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
@@ -3575,9 +3623,17 @@ function acquireTableColumnInput(
               { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true,
                 tableCellDepth: (tableDecisionEnvironment(state).tableCellDepth ?? 0) + 1 });
             const intrinsic = intrinsicWidthsForTable(nested, nestedDecision.logical, cellStory);
-            return measureTableIntrinsicWidths({ ...projectTableColumnLayoutInput(source, contentWPt,
+            const nestedWidths = measureTableIntrinsicWidths({ ...projectTableColumnLayoutInput(source, contentWPt,
               (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt),
               contentResolution: nestedDecision.logical.contentResolution });
+            // WORD_AUTOFIT_CONTENT_RESOLUTION: in mode 15 a nested table
+            // without cell spacing takes its grid and half its outer rules.
+            const rulesPt = ownerDecision.contentResolution && state.layoutSettings.compat.tableMode15Geometry
+              && nestedDecision.logical.source.format.rows.every((row) => row.cellSpacingPt === 0)
+              ? outerHalfRulesPt(nested) : 0;
+            return rulesPt > 0
+              ? { minWidthPt: nestedWidths.minWidthPt + rulesPt, maxWidthPt: nestedWidths.maxWidthPt + rulesPt }
+              : nestedWidths;
           },
         },
         ownerLayout,
@@ -3602,6 +3658,13 @@ function acquireTableColumnInput(
     ...columnInput,
     outerMarginAllowancePt: forcedFitOuterMarginsPt,
     contentResolution: decision.contentResolution,
+    ...(decision.contentResolution && state.layoutSettings.compat.tableMode15Geometry
+      ? { contentResolutionCeilingInsetPt: outerHalfRulesPt(table) } : {}),
+    // The ceiling an automatic table is held to is measured for the leading
+    // indent band and, in mode 15, for an unindented or nested table.
+    contentResolutionCeilingEstablished: decision.usesLeadingIndentBand
+      || (state.layoutSettings.compat.tableMode15Geometry
+        && (decision.tableIndentPt === 0 || tableDecisionEnvironment(state).inTableCell)),
     growUnpreferredColumns: contentGrowth === 'band' ? true : contentGrowth === 'nonbinding' ? 'nonbinding' : false,
     // The ceiling the intrinsic maxima above were capped at.
     contentBandPt: contentWPt,

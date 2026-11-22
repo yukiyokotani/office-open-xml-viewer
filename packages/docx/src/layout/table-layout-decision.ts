@@ -337,7 +337,9 @@ function memberContext(
     effectiveLayout,
     rowTranslationsPt: Object.freeze(rowTranslationsPt), maximumTableWidthPt,
     isFixedNestedTable, usesLeadingIndentBand, contentGrowth, forcedFitOuterMarginsPt,
-    percentWidthBasePt, spacingGeometry, contentResolution });
+    percentWidthBasePt, spacingGeometry, contentResolution,
+    // The mode 15 side inset of cell content that belongs to the rule.
+    contentInset: contentResolution && state.compat.tableMode15Geometry });
 }
 
 export type TableMemberDecision = ReturnType<typeof memberContext>;
@@ -489,19 +491,19 @@ export function decideLogicalTable(
     rowOverrides,
     gridSkips,
   });
-  // WORD_AUTOFIT_CONTENT_RESOLUTION: one leading, unindented AutoFit table
-  // of a single-column body, or nested once in a body table cell.
+  // WORD_AUTOFIT_CONTENT_RESOLUTION: one AutoFit table of a single-column
+  // body, or nested once in a body table cell.
   const contentResolution = input.layout !== 'fixed' && singleTable && commonFrame && commonGrid
-    && environment.compat.tableMode15Geometry && environment.story === 'body'
-    && ((environment.topLevel && environment.singleColumn) || environment.tableCellDepth === 1)
+    && environment.compat.tableOriginPlacementMode && environment.story === 'body'
+    && ((environment.topLevel && environment.singleColumn)
+      // Nested: mode 15, leading, left-to-right and unindented only.
+      || (environment.tableCellDepth === 1 && environment.compat.tableMode15Geometry && table.bidiVisual !== true
+        && (table.jc == null || table.jc === 'left' || table.jc === 'start') && origin.tableIndentPt === 0))
     && !isVerticalTextDirection(environment.textDirection) && environment.quarterTurnedStory !== true
     && format.ordinaryFlow && format.positioning == null && format.outerEdgeIndent !== true
-    && !rowOverrides && !gridSkips && table.bidiVisual !== true
-    && (table.jc == null || table.jc === 'left' || table.jc === 'start') && origin.tableIndentPt === 0
-    // Only omitted (zero) side margins are in the rule.
+    && !rowOverrides && !gridSkips
     && format.rows.every((row) => row.cellSpacingPt === 0
-      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true
-        && cell.marginsPt.left === 0 && cell.marginsPt.right === 0));
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true));
   const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry, contentResolution });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
     usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);

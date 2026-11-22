@@ -10,7 +10,7 @@ import {
   cellParagraphOwnsNoFlow,
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
+import { collapsedRowSideRuleWidthsPt, layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { unmeasuredTableMemberDecision, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import { snapshotPlainData } from './plain-data.js';
@@ -310,7 +310,7 @@ function retainedBorder(border: BorderSpec | null): TableBorderInput | null {
   });
 }
 
-function retainedEdges(edges: CellBorders | TableBorders): TableEdgeInputs {
+export function retainedEdges(edges: CellBorders | TableBorders): TableEdgeInputs {
   return Object.freeze({
     top: retainedBorder(edges.top),
     right: retainedBorder(edges.right),
@@ -641,13 +641,36 @@ export function acquireRetainedTable<State>(
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
+    // WORD_AUTOFIT_CONTENT_RESOLUTION: in mode 15 content keeps clear of each
+    // side by the cell margin (half a point when omitted) or, if larger, by
+    // half the collapsed rule on that side; the widths were resolved with
+    // the same.
+    let ruleColumnStart = columnStart;
+    const sideRulesPt = member.contentInset === true ? collapsedRowSideRuleWidthsPt(
+      row.cells.map((cell) => {
+        const start = ruleColumnStart;
+        const span = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - start));
+        ruleColumnStart += span;
+        return { borders: retainedEdges(cell.borders), columnStart: start, columnSpan: span };
+      }),
+      retainedEdges(table.borders),
+      rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
+      rowIndex, table.rows.length, columnWidthsPt.length, table.bidiVisual === true,
+    ) : null;
     const cells = row.cells.map((cell, cellIndex) => {
-      const formatMargins = rowFormat?.cells[cellIndex]?.marginsPt ?? {
+      const authoredMargins = rowFormat?.cells[cellIndex]?.marginsPt ?? {
         top: cell.marginTop ?? table.cellMarginTop,
         right: cell.marginRight ?? table.cellMarginRight,
         bottom: cell.marginBottom ?? table.cellMarginBottom,
         left: cell.marginLeft ?? table.cellMarginLeft,
       };
+      const sideRules = sideRulesPt?.[cellIndex];
+      const omittedPt = rowFormat?.cells[cellIndex]?.horizontalMarginsOmitted === true ? 0.5 : 0;
+      const formatMargins = sideRules ? {
+        ...authoredMargins,
+        left: Math.max(authoredMargins.left, omittedPt, sideRules.leftPt / 2),
+        right: Math.max(authoredMargins.right, omittedPt, sideRules.rightPt / 2),
+      } : authoredMargins;
       const currentColumnStart = columnStart;
       const columnSpan = Math.min(
         Math.max(1, cell.colSpan),

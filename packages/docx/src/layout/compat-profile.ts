@@ -77,6 +77,7 @@ export interface DocxCompatProfile {
    * @compatRule word-table-origin-compatibility
    * @compatRule word-table-nonleading-indent-scope
    * @compatRule word-table-margin-hang-scope
+   * @compatRule word-autofit-content-resolution
    */
   readonly tableOriginPlacementMode: boolean;
   /**

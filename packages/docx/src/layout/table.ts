@@ -486,7 +486,7 @@ function toConflictCandidate(
 }
 
 function physicalCellEdges(
-  cell: TableCellLayoutInput,
+  cell: Pick<TableCellLayoutInput, 'borders' | 'columnStart' | 'columnSpan'>,
   table: TableEdgeInputs,
   exception: TableEdgeInputs | null,
   rowIndex: number,
@@ -557,6 +557,42 @@ function physicalCellEdges(
   return bidiVisual
     ? { top, right: logicalLeft, bottom, left: logicalRight }
     : { top, right: logicalRight, bottom, left: logicalLeft };
+}
+
+/**
+ * Widths of the collapsed rules on the physical left and right of each cell
+ * of one row, before the cells are acquired. Cells of the same row decide a
+ * side rule (ECMA-376 §17.4.66); a skipped grid column leaves the cell's own
+ * candidate.
+ */
+export function collapsedRowSideRuleWidthsPt(
+  cells: readonly (Pick<TableCellLayoutInput, 'borders' | 'columnStart' | 'columnSpan'>
+    /** The row exception of the row that opens the cell's vertical merge. */
+    & { readonly ownerException?: TableEdgeInputs | null })[],
+  table: TableEdgeInputs,
+  exception: TableEdgeInputs | null,
+  rowIndex: number,
+  rowCount: number,
+  columnCount: number,
+  bidiVisual: boolean,
+): readonly Readonly<{ leftPt: number; rightPt: number }>[] {
+  const edges = cells.map((cell) =>
+    physicalCellEdges(cell, table, cell.ownerException === undefined ? exception : cell.ownerException,
+      rowIndex, rowIndex, rowCount, columnCount, bidiVisual));
+  const widthPt = (first: BorderCandidate | null, second: BorderCandidate | null): number =>
+    visibleBorder(resolveBorderConflict(first, second))?.widthPt ?? 0;
+  return cells.map((cell, index) => {
+    const before = cells[index - 1];
+    const after = cells[index + 1];
+    const beforeEdges = before && before.columnStart + before.columnSpan === cell.columnStart ? edges[index - 1]! : null;
+    const afterEdges = after && cell.columnStart + cell.columnSpan === after.columnStart ? edges[index + 1]! : null;
+    const leftNeighbour = bidiVisual ? afterEdges : beforeEdges;
+    const rightNeighbour = bidiVisual ? beforeEdges : afterEdges;
+    return {
+      leftPt: widthPt(leftNeighbour?.right ?? null, edges[index]!.left),
+      rightPt: widthPt(edges[index]!.right, rightNeighbour?.left ?? null),
+    };
+  });
 }
 
 function candidateInput(candidate: BorderCandidate | null): TableBorderInput | null {

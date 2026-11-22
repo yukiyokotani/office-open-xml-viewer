@@ -1488,6 +1488,12 @@ export interface TableColumnLayoutInput {
   /** WORD_AUTOFIT_CONTENT_RESOLUTION: resolve the columns from content and
    * preferred widths, without the saved grid. */
   readonly contentResolution?: boolean;
+  /** Half the table's outer rules, which the ceiling holds beside the grid
+   * (compatibility mode 15). */
+  readonly contentResolutionCeilingInsetPt?: number;
+  /** Whether the ceiling of an automatic table is a measured one; a table
+   * that would bind another ceiling is outside the rule. */
+  readonly contentResolutionCeilingEstablished?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
   /** The text band the intrinsic maxima were capped at; a 'nonbinding'
