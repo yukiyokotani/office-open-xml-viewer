@@ -1592,6 +1592,10 @@ export interface FloatingTablePositionInput {
 export interface TableCellLayoutInput {
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
+  /** For a continuation that opens its merge in a page fragment: the row
+   * exception borders of the row that opens the merge in the source, which
+   * govern its rules in place of its own row's. */
+  readonly mergeOpenerExceptionBorders?: TableEdgeInputs | null;
   readonly columnStart: number;
   readonly columnSpan: number;
   readonly verticalMerge: 'none' | 'restart' | 'continue';

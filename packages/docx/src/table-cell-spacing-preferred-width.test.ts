@@ -557,6 +557,43 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     }
   });
 
+  it.each([
+    // [what the merge's rows author, painted rule between the columns]
+    ['an 8 pt right rule on the continuations, which the merge never shows',
+      '', '<w:tcBorders><w:right w:val="single" w:sz="64"/></w:tcBorders>', '', 0.5],
+    ['a 6 pt right rule on the cell that opens the merge',
+      '<w:tcBorders><w:right w:val="single" w:sz="48"/></w:tcBorders>', '', '', 6],
+    ['a 6 pt insideV in the row exception of the row that opens the merge',
+      '', '', '<w:tblPrEx><w:tblBorders><w:insideV w:val="single" w:sz="48"/></w:tblBorders></w:tblPrEx>', 6],
+  ])('keeps a nested table clear of the rule painted beside a merge on a later page: %s', (_name, restart, continuation, exception, rulePt) => {
+    // Mode 15, no cell margins, rows that do not split, the first column
+    // merged over every row; the last row holds a 100% spaced table.
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const nested = tableXml('<w:tblW w:w="5000" w:type="pct"/>' + spacing(2), [600, 600], [cell(600, 'n1') + cell(600, 'n2')]);
+    const rowCount = 140;
+    const rows = Array.from({ length: rowCount }, (_unused, row) => `<w:tr>${row === 0 ? exception : ''}<w:trPr><w:cantSplit/></w:trPr>`
+      + cell(1440, row === 0 ? 'A' : '', row === 0 ? `<w:vMerge w:val="restart"/>${restart}` : `<w:vMerge/>${continuation}`)
+      + (row === rowCount - 1
+        ? `<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${nested}${paragraph('B')}</w:tc>` : cell(2880, `B${row}`))
+      + '</w:tr>').join('');
+    const pages = tablePages(`<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>${rows}</w:tbl>`, 15);
+    expect(pages.length).toBeGreaterThan(1);
+    const page = pages.at(-1)!;
+    const host = page.rows.at(-1)!.cells.at(-1)!;
+    // The rule painted between the columns beside the last row.
+    const shared = page.borders.filter((border) => border.from.xPt === border.to.xPt
+      && Math.abs(border.from.xPt - host.flowBounds.xPt) < 0.01
+      && Math.max(border.from.yPt, border.to.yPt) >= host.flowBounds.yPt + host.flowBounds.heightPt - 1);
+    expect(shared.length).toBeGreaterThan(0);
+    expect(Math.max(...shared.map((border) => border.widthPt))).toBe(rulePt);
+    const inner = host.blocks.map((block) => block.layout).find((block) => block.kind === 'table');
+    if (inner?.kind !== 'table') throw new Error('expected a nested table');
+    // The nested table's border box starts where the painted rule ends.
+    const firstBox = inner.rows[0]!.cells[0]!.flowBounds.xPt;
+    expect(firstBox - 4 - 0.25).toBeCloseTo(rulePt / 2, 6);
+  });
+
   it('keeps the upright table of a two-column vertical section on its previous geometry', () => {
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 2).table).toBeCloseTo(180, 6);
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 1).table).toBeCloseTo(192, 6);

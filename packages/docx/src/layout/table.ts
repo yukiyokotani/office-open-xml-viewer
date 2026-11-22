@@ -683,7 +683,9 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
     return physicalCellEdges(
       cell,
       input.borders,
-      input.rows[exceptionRowIndex]?.exceptionBorders ?? null,
+      cell === owner.input && cell.mergeOpenerExceptionBorders !== undefined
+        ? cell.mergeOpenerExceptionBorders
+        : input.rows[exceptionRowIndex]?.exceptionBorders ?? null,
       owner.rowIndex,
       owner.lastRowIndex,
       rowCount,

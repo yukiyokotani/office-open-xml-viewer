@@ -321,21 +321,22 @@ function sourceRowFor(
   return source.input.rows[inputRowIndexOf(source, logicalRowIndex)];
 }
 
-const mergeOpenersBySource = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, TableCellLayoutInput>>();
+type MergeOpener = Readonly<{ cell: TableCellLayoutInput; row: TableRowLayoutInput }>;
+const mergeOpenersBySource = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, MergeOpener>>();
 
 /** For every continuation cell of the source, by id, the cell that opens its
- * vertical merge: one pass over the rows, carried column by column. */
-function mergeOpeners(source: RetainedTableAcquisition): ReadonlyMap<string, TableCellLayoutInput> {
+ * vertical merge and that cell's row: one pass over the rows, carried column by column. */
+function mergeOpeners(source: RetainedTableAcquisition): ReadonlyMap<string, MergeOpener> {
   const cached = mergeOpenersBySource.get(source);
   if (cached) return cached;
-  const openers = new Map<string, TableCellLayoutInput>();
-  const open = new Map<string, TableCellLayoutInput>();
+  const openers = new Map<string, MergeOpener>();
+  const open = new Map<string, MergeOpener>();
   source.input.rows.forEach((row, rowIndex) => {
     const above = source.input.rows[rowIndex - 1];
-    const next = new Map<string, TableCellLayoutInput>();
+    const next = new Map<string, MergeOpener>();
     for (const cell of row.cells) {
       const key = `${cell.columnStart}:${cell.columnSpan}`;
-      if (cell.verticalMerge === 'restart') next.set(key, cell);
+      if (cell.verticalMerge === 'restart') next.set(key, { cell, row });
       else if (cell.verticalMerge === 'continue'
         && continuesMergeFromAbove(above, row, cell.columnStart, cell.columnSpan)) {
         const opener = open.get(key);
@@ -2176,8 +2177,8 @@ function materializeFragment(
     rows: selected.map((row, rowIndex) => {
       // A continuation that opens its merge in this fragment (table.ts
       // gridMergeRole) stands for the cell that opened it in the source: it
-      // carries that cell's shading and side rules, which the content beside
-      // the merge was acquired against.
+      // carries that cell's shading and side rules, at cell and row-exception
+      // level, which the content beside the merge was acquired against.
       const above = selected[rowIndex - 1]?.input;
       let cells: TableCellLayoutInput[] | undefined;
       row.input.cells.forEach((cell, cellIndex) => {
@@ -2187,8 +2188,10 @@ function materializeFragment(
         const { background: _own, ...rest } = cell;
         cells[cellIndex] = {
           ...rest,
-          ...(opener.background ? { background: opener.background } : {}),
-          borders: { ...cell.borders, left: opener.borders.left, right: opener.borders.right, insideV: opener.borders.insideV },
+          ...(opener.cell.background ? { background: opener.cell.background } : {}),
+          borders: { ...cell.borders, left: opener.cell.borders.left, right: opener.cell.borders.right,
+            insideV: opener.cell.borders.insideV },
+          mergeOpenerExceptionBorders: opener.row.exceptionBorders,
         };
       });
       return cells ? { ...row.input, cells } : row.input;
