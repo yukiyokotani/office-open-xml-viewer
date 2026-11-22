@@ -7798,8 +7798,9 @@ function projectAcquiredParagraph(
         const horizontal = side === 'top' || side === 'between' || side === 'bottom';
         const atEnd = side === 'right' || side === 'bottom';
         // WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: a top, between or bottom
-        // stroke lies wholly outside the border box, its inner edge on the box.
-        const strokeShiftPt = horizontal ? paragraphBorderStrokeOutsetPt(edge) - edge.width / 2 : 0;
+        // border's strokes lie wholly outside the border box; the painted
+        // pattern is centred in that band.
+        const strokeShiftPt = horizontal ? paragraphBorderStrokeOutsetPt(edge) / 2 : 0;
         const coordinate = horizontal
           ? borderBounds.yPt + (atEnd ? borderBounds.heightPt + strokeShiftPt : -strokeShiftPt)
           : borderBounds.xPt + (atEnd ? borderBounds.widthPt : 0);

@@ -21,23 +21,32 @@ export interface ParagraphBorderSegment {
   y2: number;
 }
 
-/** Compound ST_Border styles (§17.18.2) paint several strokes or a relief
- * whose total thickness is not the authored `w:sz`. Their placement keeps the
- * earlier centred-stroke geometry until their own Office controls exist. */
-function compoundParagraphBorder(style: string): boolean {
-  return style === 'double' || style === 'triple' || style === 'wave' || style === 'doubleWave'
-    || style === 'threeDEmboss' || style === 'threeDEngrave' || style === 'outset' || style === 'inset'
-    || /^(?:thinThick|thickThin|thinThickThin)(?:Small|Medium|Large)Gap$/.test(style);
+/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: the total thickness Word gives a
+ * paragraph border of ST_Border style `style` (§17.18.2) and authored stroke
+ * width `width` (w:sz / 8): the sum of its strokes and the gaps between them. */
+export function wordParagraphBorderThicknessPt(style: string, width: number): number {
+  void WORD_PARAGRAPH_BORDER_FLOW_RESERVATION;
+  const w = Math.max(0, width);
+  switch (style) {
+    case 'double': return 3 * w;
+    case 'triple': return 5 * w;
+    case 'thinThickSmallGap': case 'thickThinSmallGap': return w + 1.5;
+    case 'thinThickThinSmallGap': return w + 3;
+    case 'thinThickMediumGap': case 'thickThinMediumGap': return 2 * w;
+    case 'thinThickThinMediumGap': return 3 * w;
+    case 'thinThickLargeGap': case 'thickThinLargeGap': return w + 2.25;
+    case 'thinThickThinLargeGap': return 2 * w + 3;
+    case 'threeDEmboss': case 'threeDEngrave': return w + 2 * Math.min(1.5, Math.max(0.75, w / 2));
+    case 'wave': return w === 1.5 ? 3.75 : 3;
+    case 'doubleWave': return 5.25;
+    default: return w;
+  }
 }
 
-/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: how far a single-stroke paragraph
- * border's painted line lies outside the border box (text ± `w:space`). The
- * whole stroke is outside the box, so the reservation is space + full width;
- * a compound style keeps the earlier half-width (centred) geometry. */
+/** How far a paragraph border's strokes lie outside the border box (text ±
+ * `w:space`): its whole thickness. */
 export function paragraphBorderStrokeOutsetPt(edge: ParaBorderEdge): number {
-  void WORD_PARAGRAPH_BORDER_FLOW_RESERVATION;
-  const width = Math.max(0, edge.width ?? 0);
-  return compoundParagraphBorder(edge.style) ? width / 2 : width;
+  return wordParagraphBorderThicknessPt(edge.style, edge.width ?? 0);
 }
 
 /** Vertical extent reserved below text for a visible bottom paragraph border
@@ -65,8 +74,7 @@ export function topBorderExtentPt(
   const top = borders[edge];
   if (!top || top.style === 'none' || top.style === 'nil') return 0;
   const space = top.space ?? 0;
-  const between = edge === 'between' && !compoundParagraphBorder(top.style);
-  return (between ? 2 * space : space) + paragraphBorderStrokeOutsetPt(top);
+  return (edge === 'between' ? 2 * space : space) + paragraphBorderStrokeOutsetPt(top);
 }
 
 function effectiveEdge(edge: ParaBorderEdge | null | undefined): ParaBorderEdge | null {
