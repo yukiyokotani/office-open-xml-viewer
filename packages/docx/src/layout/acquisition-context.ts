@@ -197,5 +197,6 @@ export type BodyMeasurementContext = Readonly<Pick<
   | 'noteReferenceNumber'
   | 'verticalCJK'
   | 'verticalAllRotated'
+  | 'uprightPhysicalTable'
   | 'containerShading'
 >>;

@@ -341,7 +341,7 @@ export function projectTableColumnLayoutInput(
     rowIndex: number, cellIndex: number, preferredWidth: TablePreferredWidthConstraint | null,
   ) => CellIntrinsicWidths,
   maximumWidthPt: number | null = availableWidthPt,
-  spacingGeometry?: Readonly<{ spacingPt: number; borderPt: number }> | null,
+  spacingGeometry?: Readonly<{ spacingPt: number; borderPt: number; hostRuleInsetPt?: number }> | null,
 ): TableColumnLayoutInput {
   const table = input.semantic;
   const { widthsPt: gridWidthsPt, widthKeys: gridWidthKeys } = tableGridLayout(input);
@@ -365,7 +365,11 @@ export function projectTableColumnLayoutInput(
   );
   return {
     layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
-    ...(spacingGeometry ? { separatedCellSpacingPt: spacingGeometry.spacingPt } : {}),
+    ...(spacingGeometry ? {
+      separatedCellSpacingPt: spacingGeometry.spacingPt,
+      separatedBorderPt: spacingGeometry.borderPt,
+      ...(spacingGeometry.hostRuleInsetPt ? { separatedHostInsetPt: spacingGeometry.hostRuleInsetPt } : {}),
+    } : {}),
     availableWidthPt: maximumWidthPt === null ? null : Math.max(0, maximumWidthPt),
     gridWidthsPt,
     gridWidthKeys,

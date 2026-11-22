@@ -36,6 +36,14 @@ export type DeepReadonly<T> =
   : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
   : T;
 
+/* Retained-geometry primitives (`PointPt`, `LayoutRect`, `Matrix2DData`,
+ * `ClipPathData`) stay DOCX-local on purpose. They are plain data of the
+ * retained DOCX page result, with lengths in points, whereas
+ * core/src/types/common.ts models authored cross-format OOXML values (mostly
+ * EMU). `Matrix2DData` is a serialized affine result, not the DrawingML
+ * group-transform parsing in ooxml-common. XLSX and PPTX do not use these
+ * types; move them to core only when another format retains the same kind of
+ * page result. */
 export interface PointPt {
   readonly xPt: number;
   readonly yPt: number;
@@ -1498,6 +1506,10 @@ export interface TableColumnLayoutInput {
   readonly contentResolutionAbsoluteWidthUnbounded?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
+  /** Width of the uniform table border rule of the spaced geometry. */
+  readonly separatedBorderPt?: number;
+  /** The side-rule inset of the cell around a nested spaced table. */
+  readonly separatedHostInsetPt?: number;
   /** The text band the intrinsic maxima were capped at; a 'nonbinding'
    * fit must stay strictly inside it, so no maximum was capped. */
   readonly contentBandPt?: number;
@@ -1603,6 +1615,10 @@ export interface FloatingTablePositionInput {
 export interface TableCellLayoutInput {
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
+  /** For a continuation that opens its merge in a page fragment: the row
+   * exception borders of the row that opens the merge in the source, which
+   * govern its rules in place of its own row's. */
+  readonly mergeOpenerExceptionBorders?: TableEdgeInputs | null;
   readonly columnStart: number;
   readonly columnSpan: number;
   readonly verticalMerge: 'none' | 'restart' | 'continue';

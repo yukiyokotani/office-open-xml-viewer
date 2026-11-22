@@ -1102,6 +1102,7 @@ viewer.setSelection('B2:D6');`,
         rationale: 'Selection details differ for text, cells and elements, so code must first check which kind it received.',
         paragraphs: [
           'The DocxSelectionContext and XlsxSelectionContext types can now contain selected text, XLSX cells, or an element such as a chart or picture. Check context.kind first so TypeScript knows which details are available.',
+          'Code that stores one branch can import its type directly: DocxTextSelectionContext for DOCX text and XlsxRangeSelectionContext for an XLSX cell range. The getter and callback keep the union type so a later kind can be handled without a second context API.',
           'The native DOCX helper readDocxSelectionContext() is renamed to readDocxTextSelectionContext() because it reads only a DOM text selection. Use DocxViewer.getSelectionContext() for the text-or-element union.',
           'PptxElementSelectionContext is renamed to PptxElementContext. The data shape is unchanged, and the new name also fits direct point queries where no Viewer selection exists.',
         ],
@@ -1155,9 +1156,10 @@ if (context?.kind === 'text') {
           'Use ooxml_get_active_context for the active OOXML preview and its current text, range or element context. This replaces the earlier active-selection tool name and keeps one routing entry point for all three formats.',
         ],
         bullets: [
-          'Replace xlsx_get_sheet_names with xlsx_parse.',
+          'Replace xlsx_get_sheet_names with xlsx_parse, and read the names from sheets[].name in its result instead of a string array.',
           'Replace docx_get_paragraph with docx_get_body_element.',
-          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element.',
+          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element. Rename the shape_index argument to element_index; the result names the index elementIndex instead of shapeIndex. For the old text-only tool, read textBody from the element result when the element has text.',
+          'docx_get_body_element keeps the path and index arguments of docx_get_paragraph; the indexed body item is not always a paragraph (it can be a table or a break), so check its type before reading paragraph fields.',
           'Replace ooxml_get_active_selection with ooxml_get_active_context.',
         ],
       },
@@ -1294,8 +1296,9 @@ document.destroy();`,
           'parsePptx() → await materializePptxPresentation().',
           'parseXlsx() → await materializeXlsxWorkbookIndex() for metadata/index only.',
           'parseXlsxSheet() → await materializeXlsxWorksheet() for one caller-owned worksheet.',
-          'parseXlsxAllSheets() → await materializeXlsxWorkbook() for the index and every worksheet; this has the highest time and retained-memory cost.',
-          'PPTX image and media extraction → await session.getImage() or session.getMedia() on openPptxPresentation().',
+          'parseXlsxAllSheets() → await materializeXlsxWorkbook() for the index and every worksheet; this has the highest time and retained-memory cost. The result is { workbookIndex, worksheets } with worksheets in sheet-index order, replacing the old { workbook, worksheets } record keyed by sheet name.',
+          'extractPptxImage(buffer, path) → await session.getImage(path, mimeType) on openPptxPresentation(). It resolves to a Blob, not a Uint8Array: use new Uint8Array(await blob.arrayBuffer()) where bytes are needed. A size limit passed to the old helper moves to resourceLimits.maxArchiveEntryBytes in the session options.',
+          'extractPptxMedia(buffer, path) → await session.getMedia(path, mimeType?) on openPptxPresentation(), which also resolves to a Blob.',
         ],
         examples: [
           {
@@ -1315,7 +1318,7 @@ try {
       {
         title: 'Render one XLSX sheet into a canvas',
         paragraphs: [
-          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs, footer controls or a native scrollbar.',
+          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs or footer controls. Native worksheet scrollbars are shown by default; from 0.76.2, set showScrollbars: false only when the host provides its own viewport navigation.',
           'This is an XLSX-specific Viewer boundary. A worksheet is not treated as equivalent to a DOCX page or PPTX slide; each format keeps the Viewer split that matches its own document model.',
           'fromWorkbook() does not materialize an arbitrary first worksheet. The first goToSheet(index) materializes only the requested sheet, which keeps parse-once multi-window integrations efficient. The full XlsxViewer still starts its initial sheet display immediately.',
         ],

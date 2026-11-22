@@ -192,7 +192,9 @@ function tableInput(
     source: { story: 'body', storyInstance: 'body', path: [0] },
     flowDomainId: 'body', ordinaryFlow: true,
     alignment: 'left', indentPt: 0, bidiVisual: false,
-    columnWidthsPt, borders, rows,
+    columnWidthsPt, borders,
+    // Source rows follow each other unless a test says otherwise.
+    rows: rows.map((row, index) => ({ logicalRowIndex: index, ...(row as object) })),
   } as unknown as TableLayoutInput;
 }
 

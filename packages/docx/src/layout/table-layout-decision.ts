@@ -14,11 +14,17 @@ export interface TableDecisionEnvironment {
   readonly topLevel: boolean;
   readonly singleColumn: boolean;
   readonly textDirection: string | null | undefined;
+  /** The table is the upright block table of a vertical section, whose cells
+   * are laid out horizontally; omitted by hand-built environments. */
+  readonly uprightTable?: boolean;
   /** A story laid out in a quarter-turned text box; omitted by hand-built environments. */
   readonly quarterTurnedStory?: boolean;
   readonly inTableCell: boolean;
   /** Number of enclosing table cells; omitted by hand-built environments. */
   readonly tableCellDepth?: number;
+  /** Half of each collapsed side rule of the enclosing cell that its margin
+   * does not cover; omitted outside a table cell. */
+  readonly hostCellRuleInsetPt?: Readonly<{ leftPt: number; rightPt: number }>;
   readonly contentX: number;
   readonly pageWidth: number;
 }
@@ -71,11 +77,15 @@ interface MemberScopeExtensions {
   readonly nestedNegativeIndentIgnored: boolean;
   /** WORD_AUTOFIT_CONTENT_COLUMN_GROWTH for a content-sized table. */
   readonly contentFitted: boolean;
+  /** The spaced table is the AutoFit form with preferred widths. */
+  readonly spacedPreferredSized?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY, absent outside measured structures. */
-  readonly spacingGeometry: Readonly<{ spacingPt: number; borderPt: number }> | null;
+  readonly spacingGeometry: SpacingGeometry | null;
   /** WORD_AUTOFIT_CONTENT_RESOLUTION. */
   readonly contentResolution: boolean;
 }
+/** `hostRuleInsetPt` narrows the width ceiling of a nested table. */
+type SpacingGeometry = Readonly<{ spacingPt: number; borderPt: number; hostRuleInsetPt?: number }>;
 const NO_SCOPE_EXTENSIONS: MemberScopeExtensions = Object.freeze({
   marginHang: 'none', nestedNegativeIndentIgnored: false, contentFitted: false, spacingGeometry: null,
   contentResolution: false,
@@ -96,6 +106,7 @@ function memberContext(
   extensions: MemberScopeExtensions = NO_SCOPE_EXTENSIONS,
 ) {
   const { marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry, contentResolution } = extensions;
+  const spacedPreferredSized = spacingGeometry !== null && extensions.spacedPreferredSized === true;
   const format = source.format;
   const firstRowException = format.firstRowException;
   // MS-OI29500 §2.1.156/158: first-logical-row indent/layout authority
@@ -145,6 +156,7 @@ function memberContext(
   const rowTranslationsPt = format.rows.map((row) => spacingGeometry ? wordSpacedTableTranslationPt({
     compat: state.compat, justification: row.justification ?? table.jc, bidi: table.bidiVisual === true,
     indentPt: tableIndentPt, indentAuthored: origin.indentAuthored, ...spacingGeometry,
+    hostRuleInsetPt: state.hostCellRuleInsetPt,
     leadingMarginPt: table.bidiVisual ? row.cells[0]?.marginsPt.right ?? 0 : row.cells[0]?.marginsPt.left ?? 0,
     trailingMarginPt: table.bidiVisual ? row.cells.at(-1)?.marginsPt.left ?? 0 : row.cells.at(-1)?.marginsPt.right ?? 0,
   }) : wordTableOriginTranslationPt({
@@ -247,9 +259,12 @@ function memberContext(
   // the logical-table boundary) content-fits whatever its jc and mode when
   // its content fits the established ceiling; a binding fit there is
   // unmeasured and keeps the previous solve.
+  // A spaced AutoFit table with preferred widths grows its other cells as
+  // it does without spacing; a fixed one has nothing to grow.
+  const unspacedGrowth = usesLeadingIndentBand ? 'band' : contentFitted ? 'nonbinding' : 'none';
   const contentGrowth: 'band' | 'nonbinding' | 'none' = spacingGeometry
-    ? (contentFitted ? 'nonbinding' : 'none')
-    : usesLeadingIndentBand ? 'band' : contentFitted ? 'nonbinding' : 'none';
+    ? (contentFitted ? 'nonbinding' : effectiveLayout === 'fixed' ? 'none' : unspacedGrowth)
+    : unspacedGrowth;
   const outerCellMarginsHangOutsideBand = state.compat.autofitOuterMarginsHangOutsideBand;
   const textBandPt = usesLeadingIndentBand
     ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) => {
@@ -260,7 +275,13 @@ function memberContext(
         // origin translation is acquired separately under WORD_TABLE_ORIGIN_COMPATIBILITY.
         return leading || outerCellMarginsHangOutsideBand ? contentWPt - indentPt : contentWPt;
       })))
-    : contentWPt;
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: an automatic spaced table ends with
+    // its column wherever the leading-indent band is not established.
+    : spacingGeometry && effectiveLayout !== 'fixed' && !hasPreferredTableWidth
+      ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) =>
+          (justification == null || justification === 'left' || justification === 'start'
+            ? contentWPt - indentPt : contentWPt))))
+      : contentWPt;
   // WORD_AUTOFIT_OUTER_CELL_MARGIN_BAND (table-compatibility.ts): an AutoFit
   // grid can include outer §17.4.42 cell margins beyond the text band. For a
   // preferred-width table, only the margin overhang already represented by
@@ -276,6 +297,8 @@ function memberContext(
     || (isLeadingMarginPageStoryTable && !usesLeadingIndentBand)
     || isVerticalTextDirection(state.textDirection)
     || state.inTableCell
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: the preferred-width form ends with its column.
+    || spacedPreferredSized
     || format.rows.length === 0
     ? 0
     : format.rows.reduce((minimumPt, row, rowIndex) => {
@@ -305,6 +328,8 @@ function memberContext(
   // page ceiling (its authored width may reach the page edge); the auto-width
   // band above supersedes it for tables without a preferred width.
   const containerMaximumPt = (isLeadingMarginPageStoryTable && !usesLeadingIndentBand
+    // An automatic spaced table keeps the band clamped above in every mode.
+    && !(spacedPreferredSized && !hasPreferredTableWidth)
     ? Math.max(contentWPt, pageFitCeilingPt)
     : textBandPt) + outerCellMarginsPt;
   // Windows Word 16.0 #1881 controls: an AutoFit table whose effective tblW is
@@ -407,17 +432,33 @@ export function decideLogicalTable(
   // WORD_TABLE_CELL_SPACING_GEOMETRY: select once for the logical table.
   // Every unmeasured neighbour keeps the old source projection and geometry.
   const spacingPt = format.rows[0]?.cellSpacingPt ?? 0;
-  const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table) : null;
-  let spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
-    && singleTable && commonFrame && commonGrid && topLevelBody && environment.singleColumn
-    && !environment.inTableCell && !isVerticalTextDirection(environment.textDirection)
+  // An AutoFit table with a preferred table or cell width (dxa or pct).
+  const preferredSized = input.layout !== 'fixed' && !contentSized && input.gridWidthsPt.length > 0;
+  const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table, preferredSized) : null;
+  const vertical = isVerticalTextDirection(environment.textDirection);
+  const hostRuleInsetPt = (environment.hostCellRuleInsetPt?.leftPt ?? 0) + (environment.hostCellRuleInsetPt?.rightPt ?? 0);
+  let spacingGeometry: SpacingGeometry | null = spacingPt > 0 && uniformBorderPt !== null
+    && singleTable && commonFrame && commonGrid
+    // The preferred-sized form is also in scope nested in a body table cell
+    // and in a multi-column section.
+    && (topLevelBody || (preferredSized && environment.story === 'body' && environment.tableCellDepth === 1
+      // Nested: leading, left-to-right, unindented, mode 15 only.
+      && environment.compat.tableMode15Geometry && table.bidiVisual !== true && origin.tableIndentPt === 0
+      && (table.jc == null || table.jc === 'left' || table.jc === 'start')))
+    && (environment.singleColumn || preferredSized)
+    // The upright block table of a vertical section is measured for fixed
+    // and preferred-sized tables only.
+    && (!environment.inTableCell || preferredSized) && (!vertical || (environment.uprightTable === true && !contentSized && environment.singleColumn))
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
     // ECMA-376 §17.4.43 puts trPr spacing inside text margins; §17.4.45
-    // puts tblPr spacing outside. The observation covers only the latter,
-    // including inherited table styles. Equal effective row values do not
-    // establish that provenance; tblPrEx (§17.4.44) is also unmeasured.
-    && source.lexical.rows.every(({ row }) => row?.cellSpacing == null && row?.exception?.cellSpacing == null)
+    // puts tblPr spacing outside. Equal effective row values do not
+    // establish that provenance: the rule admits trPr spacing for the
+    // preferred-sized form only, and never tblPrEx (§17.4.44) spacing.
+    && source.lexical.rows.every(({ row }) => row?.exception?.cellSpacing == null)
+    && (source.lexical.rows.every(({ row }) => row?.cellSpacing == null)
+      || (preferredSized && source.lexical.table?.cellSpacing == null
+        && source.lexical.rows.every(({ row }) => row?.cellSpacing != null && row.styleCellSpacing == null)))
     // The blk-0898 table controls (spaced one-row tables, modes 11/12/14/15
     // and omitted, tblInd -360) place modes 11/12 like 14 and move a leading
     // table by a negative indent like a positive one.
@@ -426,18 +467,20 @@ export function decideLogicalTable(
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
     && ((input.layout === 'fixed' && table.widthPt != null
         && table.widthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && table.widthPct == null)
+      || (preferredSized && contentWidthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt)
       || (contentSized && input.gridWidthsPt.length > 0
         && contentWidthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && input.rows.every((row) =>
         row.cells.length === input.gridWidthsPt.length && row.cells.every((cell, index) =>
           cell.columnSpan === 1 && cell.columnStart === index))))
-    ? Object.freeze({ spacingPt, borderPt: uniformBorderPt }) : null;
+    ? Object.freeze({ spacingPt, borderPt: uniformBorderPt,
+      ...(hostRuleInsetPt > 0 ? { hostRuleInsetPt } : {}) }) : null;
   if (spacingGeometry && input.layout === 'autofit') {
     // Binding distribution is outside WORD_TABLE_CELL_SPACING_GEOMETRY.
     // Resolve this before origin, content constraints, child acquisition or
     // row geometry change. A width-only fallback cannot restore the base path.
     const candidate = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
       usesLogicalProperties, omittedMarginEndOrigin, false,
-      { ...NO_SCOPE_EXTENSIONS, contentFitted: true, spacingGeometry });
+      { ...NO_SCOPE_EXTENSIONS, contentFitted: contentSized, spacingGeometry, spacedPreferredSized: preferredSized });
     if (spacedAutoFitContentFits?.(candidate) !== true) spacingGeometry = null;
   }
   // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: the measured content-sized class.
@@ -504,7 +547,8 @@ export function decideLogicalTable(
     && !rowOverrides && !gridSkips
     && format.rows.every((row) => row.cellSpacingPt === 0
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true));
-  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry, contentResolution });
+  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry,
+    spacedPreferredSized: preferredSized, contentResolution });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
     usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);
   return Object.freeze({ measuredOrigin, usesLogicalProperties, dropsUnusedLeadingGrid, logical,

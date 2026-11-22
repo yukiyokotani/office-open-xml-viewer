@@ -2,8 +2,13 @@
 // One-command ODT corpus harness (#1934), run from the checkout under test:
 //
 //   node packages/opendocument/tests/corpus/run.mjs [--build]
-//     [--jobs 4] [--filter substr] [--limit N] [--label name] [--fresh]
-//     [--worst 40] [--port 5191]
+//     [--jobs 4] [--filter substr] [--list file] [--limit N] [--label name]
+//     [--fresh] [--worst 40] [--port 5191] [--skip-browser]
+//
+// --list names a file of corpus-relative paths. ODF_HARNESS_MAX_PAGES=N
+// compares only the first N pages of each document. ODF_HARNESS_LO_FACES=1
+// serves LibreOffice's PDF faces (see odt-corpus.spec.ts). Requirements are
+// listed in convert.mjs.
 //
 // 1. Lists every ODT with a LibreOffice PDF in the private corpus that
 //    convert.mjs built (main checkout, packages/opendocument/public/private/odt).
