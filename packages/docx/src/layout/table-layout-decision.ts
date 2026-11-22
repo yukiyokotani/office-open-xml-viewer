@@ -498,8 +498,10 @@ export function decideLogicalTable(
     && format.ordinaryFlow && format.positioning == null && format.outerEdgeIndent !== true
     && !rowOverrides && !gridSkips && table.bidiVisual !== true
     && (table.jc == null || table.jc === 'left' || table.jc === 'start') && origin.tableIndentPt === 0
+    // Only omitted (zero) side margins are in the rule.
     && format.rows.every((row) => row.cellSpacingPt === 0
-      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true));
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true
+        && cell.marginsPt.left === 0 && cell.marginsPt.right === 0));
   const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry, contentResolution });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
     usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);
