@@ -3147,12 +3147,18 @@ function openConcreteBodyLayoutSession(
     endnote: noteSettings?.endnoteNumbering ?? { format: wordNoteNumberFormat('endnote', undefined), start: 1 },
   };
   const sectionNumbering = noteSettings?.sectionNoteNumbering;
+  // §17.11.19 eachPage footnote numbering reads the previous pagination
+  // iteration's reference pages (the pagination field fixed point).
+  const footnoteReferencePageMap = fieldAcquisitionContextOf(services).footnoteReferencePages;
   const numbered = (kind: 'footnote' | 'endnote', notes: typeof sourceFootnotes) => buildSectionedNoteNumbers(
     notes,
     source.blocks.body,
     kind,
     (sectionIndex) => sectionNumbering?.[Math.min(sectionIndex, sectionNumbering.length - 1)]?.[kind]
       ?? documentNumbering[kind],
+    undefined,
+    kind === 'footnote' && footnoteReferencePageMap
+      ? (id) => footnoteReferencePageMap.get(id) : undefined,
   );
   const footnoteNumbers = numbered('footnote', sourceFootnotes);
   const endnoteNumbers = numbered('endnote', sourceEndnotes);

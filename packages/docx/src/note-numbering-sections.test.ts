@@ -120,3 +120,77 @@ describe('section-aware note numbering', () => {
       .toBe(true);
   });
 });
+
+/** Six footnote references, two per page (hard page breaks), optional
+ * document-wide footnotePr children. */
+function pagedControl(documentPr: string, sectionPr = ''): DocxDocumentModel {
+  const ref = (id: number) => `<w:r><w:footnoteReference w:id="${id}"/></w:r>`;
+  const paragraphs = [1, 2, 3, 4, 5, 6].map((id) => `<w:p><w:r><w:t>P${id}</w:t></w:r>${ref(id)}`
+    + `${id % 2 === 0 && id < 6 ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`).join('');
+  const notes = [1, 2, 3, 4, 5, 6].map((id) => `<w:footnote w:id="${id}"><w:p><w:r><w:footnoteRef/></w:r>`
+    + `<w:r><w:t>N${id}</w:t></w:r></w:p></w:footnote>`).join('');
+  const parts = new Map<string, string>([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>'
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>'],
+    ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
+    ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="n" Type="${R}/footnotes" Target="footnotes.xml"/><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/></Relationships>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}"><w:footnotePr>${documentPr}</w:footnotePr></w:settings>`],
+    ['word/document.xml', `<w:document xmlns:w="${W}"><w:body>${paragraphs}<w:sectPr>`
+      + `${sectionPr ? `<w:footnotePr>${sectionPr}</w:footnotePr>` : ''}<w:pgSz w:w="12240" w:h="15840"/>`
+      + '<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr></w:body></w:document>'],
+    ['word/footnotes.xml', `<w:footnotes xmlns:w="${W}">${notes}</w:footnotes>`],
+  ]);
+  const archive = new DocxArchive(storeZip(new Map([...parts].map(([name, xml]) => [name, encode(xml)]))));
+  try {
+    return normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+}
+
+/** Body reference labels and in-note number labels, per page. */
+function pagedLabels(model: DocxDocumentModel): Array<{ body: string[]; notes: string[] }> {
+  const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+  return layout.pages.map((page) => {
+    const collect = (nodes: readonly PaintNode[], out: string[]) => {
+      for (const node of nodes) {
+        if (node.kind === 'paragraph') {
+          for (const line of node.lines) for (const placement of line.placements) {
+            if (placement.kind === 'text' && placement.noteReference && placement.text.length > 0) out.push(placement.text);
+          }
+        } else if (node.kind === 'note') {
+          collect(node.story.blocks, out);
+        }
+      }
+      return out;
+    };
+    return { body: collect(page.layers.body, []), notes: collect(page.layers.notes as readonly PaintNode[], []) };
+  });
+}
+
+describe('numRestart eachPage (pagination fixed point)', () => {
+  it('restarts footnote numbering on every page, in references and notes', () => {
+    expect(pagedLabels(pagedControl('<w:numRestart w:val="eachPage"/>'))).toEqual([
+      { body: ['1', '2'], notes: ['1', '2'] },
+      { body: ['1', '2'], notes: ['1', '2'] },
+      { body: ['1', '2'], notes: ['1', '2'] },
+    ]);
+  });
+
+  it('restarts at numStart in the page format, also from a section override', () => {
+    expect(pagedLabels(pagedControl('<w:numFmt w:val="lowerRoman"/><w:numStart w:val="3"/><w:numRestart w:val="eachPage"/>'))
+      .map((page) => page.body)).toEqual([['iii', 'iv'], ['iii', 'iv'], ['iii', 'iv']]);
+    expect(pagedLabels(pagedControl('', '<w:numRestart w:val="eachPage"/>')).map((page) => page.body))
+      .toEqual([['1', '2'], ['1', '2'], ['1', '2']]);
+  });
+
+  it('keeps continuous numbering without eachPage', () => {
+    expect(pagedLabels(pagedControl('')).map((page) => page.body)).toEqual([['1', '2'], ['3', '4'], ['5', '6']]);
+  });
+});
+

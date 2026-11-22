@@ -22,7 +22,7 @@ import type { LayoutServices } from './types.js';
 
 const fieldAcquisitionContractIsReduced: Exclude<
   keyof FieldAcquisitionContext,
-  'totalPages' | 'resolveDestinationPage'
+  'totalPages' | 'resolveDestinationPage' | 'footnoteReferencePages'
 > extends never ? true : false = true;
 
 function attachUnusedKernel(services: LayoutServices): void {

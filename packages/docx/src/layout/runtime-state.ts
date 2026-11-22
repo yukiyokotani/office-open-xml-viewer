@@ -379,6 +379,9 @@ export interface FieldAcquisitionContext {
   readonly resolveDestinationPage?: (
     physicalPageIndex: number,
   ) => PageFieldAcquisitionContext | undefined;
+  /** §17.11.19 eachPage: the physical page of each footnote reference in the
+   * previous pagination iteration, keyed by footnote id. */
+  readonly footnoteReferencePages?: ReadonlyMap<string, number>;
 }
 
 export interface PageFieldAcquisitionContext {
