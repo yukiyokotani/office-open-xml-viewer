@@ -313,7 +313,7 @@ function retainedBorder(border: BorderSpec | null): TableBorderInput | null {
   });
 }
 
-export function retainedEdges(edges: CellBorders | TableBorders): TableEdgeInputs {
+function retainedEdges(edges: CellBorders | TableBorders): TableEdgeInputs {
   return Object.freeze({
     top: retainedBorder(edges.top),
     right: retainedBorder(edges.right),
@@ -323,6 +323,48 @@ export function retainedEdges(edges: CellBorders | TableBorders): TableEdgeInput
     insideV: retainedBorder(edges.insideV),
   });
 }
+
+/**
+ * The collapsed side rules of every cell of `table`, by row and by the
+ * cell's first grid column, in a grid of `columnCount` columns. Spaced cells
+ * keep their own boxes and have none. The cell that opens a vertical merge,
+ * carried from row to row, owns the side rules of all its rows, with the row
+ * exception of its own row. Column sizing and cell layout both read this.
+ */
+export function tableSideRulesByRow(
+  table: TableLayoutSource,
+  format: TableFormatInput,
+  columnCount: number,
+): ReadonlyMap<number, Readonly<{ leftPt: number; rightPt: number; continues: boolean }>>[] {
+  type SourceCell = TableLayoutSource['rows'][number]['cells'][number];
+  const openers = new Map<number, Readonly<{ cell: SourceCell; rowIndex: number }>>();
+  return table.rows.map((row, rowIndex) => {
+    const rowFormat = format.rows[rowIndex];
+    let start = Math.max(0, Math.min(columnCount, row.gridBefore ?? 0));
+    const skeleton = row.cells.map((cell) => {
+      const columnStart = start;
+      const columnSpan = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnCount - columnStart));
+      start += columnSpan;
+      if (cell.vMerge === true) openers.set(columnStart, { cell, rowIndex });
+      else if (cell.vMerge !== false) openers.delete(columnStart);
+      const opener = cell.vMerge === false ? openers.get(columnStart) : undefined;
+      if (!opener) return { borders: retainedEdges(cell.borders), columnStart, columnSpan };
+      const openerException = format.rows[opener.rowIndex]?.exception?.borders;
+      return { borders: retainedEdges(opener.cell.borders), columnStart, columnSpan,
+        ownerException: openerException ? retainedEdges(openerException) : null };
+    });
+    const widths = (rowFormat?.cellSpacingPt ?? 0) > 0 ? [] : collapsedRowSideRuleWidthsPt(
+      skeleton,
+      retainedEdges(table.borders),
+      rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
+      rowIndex, table.rows.length, columnCount, table.bidiVisual === true,
+    );
+    return new Map(skeleton.flatMap((entry, cellIndex) => (widths[cellIndex]
+      ? [[entry.columnStart, { ...widths[cellIndex]!, continues: row.cells[cellIndex]!.vMerge === false }] as const]
+      : [])));
+  });
+}
+
 
 function physicalAlignment(
   value: string | null | undefined,
@@ -648,36 +690,8 @@ export function acquireRetainedTable<State>(
   // keeps content clear of its rules (WORD_AUTOFIT_CONTENT_RESOLUTION); the cell that
   // opens a vertical merge, carried from row to row, owns the side rules of
   // all its rows.
-  type SourceCell = TableLayoutSource['rows'][number]['cells'][number];
-  let sideRulesByRow: ReadonlyMap<number, Readonly<{ leftPt: number; rightPt: number; continues: boolean }>>[] | undefined;
-  const sideRules = () => sideRulesByRow ??= (() => {
-    const openers = new Map<number, Readonly<{ cell: SourceCell; rowIndex: number }>>();
-    return table.rows.map((row, rowIndex) => {
-      const rowFormat = format.rows[rowIndex];
-      let start = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
-      const skeleton = row.cells.map((cell) => {
-        const columnStart = start;
-        const columnSpan = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - columnStart));
-        start += columnSpan;
-        if (cell.vMerge === true) openers.set(columnStart, { cell, rowIndex });
-        else if (cell.vMerge !== false) openers.delete(columnStart);
-        const opener = cell.vMerge === false ? openers.get(columnStart) : undefined;
-        if (!opener) return { borders: retainedEdges(cell.borders), columnStart, columnSpan };
-        const openerException = format.rows[opener.rowIndex]?.exception?.borders;
-        return { borders: retainedEdges(opener.cell.borders), columnStart, columnSpan,
-          ownerException: openerException ? retainedEdges(openerException) : null };
-      });
-      const widths = (rowFormat?.cellSpacingPt ?? 0) > 0 ? [] : collapsedRowSideRuleWidthsPt(
-        skeleton,
-        retainedEdges(table.borders),
-        rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
-        rowIndex, table.rows.length, columnWidthsPt.length, bidiVisual,
-      );
-      return new Map(skeleton.flatMap((entry, cellIndex) => (widths[cellIndex]
-        ? [[entry.columnStart, { ...widths[cellIndex]!, continues: row.cells[cellIndex]!.vMerge === false }] as const]
-        : [])));
-    });
-  })();
+  let sideRulesByRow: ReturnType<typeof tableSideRulesByRow> | undefined;
+  const sideRules = () => sideRulesByRow ??= tableSideRulesByRow(table, format, columnWidthsPt.length);
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));

@@ -133,13 +133,13 @@ import type { DocGridCtx } from '../line-layout.js';
 import {
   acquireRetainedTable,
   layoutTableFragment,
-  retainedEdges,
+  tableSideRulesByRow,
   type RetainedTableAcquisition,
   shareRotatedCellReacquisition,
   retainedTableAcquisitionIsReusableAcrossPages,
 } from './table-acquisition.js';
 import { combineAdjacentTableLayoutInputs } from './adjacent-table-layout-input.js';
-import { collapsedRowSideRuleWidthsPt, layoutTable as layoutRetainedTableInput } from './table.js';
+import { layoutTable as layoutRetainedTableInput } from './table.js';
 import {
   hasPagePlacedTableContent,
   layoutWholeTableOnPage,
@@ -3475,27 +3475,11 @@ function resolveColumnWidths(
   return [...resolveTableColumnWidths(normalized)];
 }
 
-/** Widths of the collapsed side rules of each cell of row `rowIndex`. */
-function collapsedRowSideRulesPt(
-  table: TableLayoutSource,
-  format: TableMemberDecision['source']['format'],
-  rowIndex: number,
-): ReturnType<typeof collapsedRowSideRuleWidthsPt> {
-  const row = table.rows[rowIndex]!;
-  const columnCount = Math.max(table.colWidths?.length ?? 0, ...table.rows.map((candidate) =>
-    Math.max(0, candidate.gridBefore ?? 0) + candidate.cells.reduce((sum, cell) => sum + Math.max(1, cell.colSpan), 0)));
-  let columnStart = Math.max(0, row.gridBefore ?? 0);
-  const exception = format.rows[rowIndex]?.exception?.borders;
-  return collapsedRowSideRuleWidthsPt(
-    row.cells.map((cell) => {
-      const start = columnStart;
-      columnStart += Math.max(1, cell.colSpan);
-      return { borders: retainedEdges(cell.borders), columnStart: start, columnSpan: Math.max(1, cell.colSpan) };
-    }),
-    retainedEdges(table.borders),
-    exception ? retainedEdges(exception) : null,
-    rowIndex, table.rows.length, columnCount, table.bidiVisual === true,
-  );
+/** The grid columns a table's rows reach, before its columns are resolved:
+ * the grid as acquisition counts it once they are. */
+function sourceColumnCount(table: TableLayoutSource): number {
+  return Math.max(table.colWidths?.length ?? 0, ...table.rows.map((row) =>
+    Math.max(0, row.gridBefore ?? 0) + row.cells.reduce((sum, cell) => sum + Math.max(1, cell.colSpan), 0)));
 }
 
 /** Half the table's own left and right rules, which its border box adds to
@@ -3526,15 +3510,20 @@ function acquireTableColumnInput(
     const ownerFormat = ownerDecision.source.format;
     const ownerLayout = ownerDecision.effectiveLayout;
     const ownerMargins = new WeakMap<object, Readonly<{ left: number; right: number }>>();
+    // WORD_AUTOFIT_CONTENT_RESOLUTION: in mode 15 content keeps clear of each
+    // side by the cell margin (half a point when omitted) or, if larger, by
+    // half the collapsed rule on that side: the rules cell layout reads
+    // (table-acquisition.ts), the cell that opens a vertical merge owning
+    // those of its rows.
+    const columnCount = sourceColumnCount(owner);
+    const sideRules = ownerDecision.contentInset ? tableSideRulesByRow(owner, ownerFormat, columnCount) : null;
     owner.rows.forEach((row, rowIndex) => {
-      // WORD_AUTOFIT_CONTENT_RESOLUTION: in mode 15 content keeps clear of
-      // each side by the cell margin (half a point when omitted) or, if
-      // larger, by half the collapsed rule on that side.
-      const sideRules = ownerDecision.contentInset ? collapsedRowSideRulesPt(owner, ownerFormat, rowIndex) : null;
+      let columnStart = Math.max(0, Math.min(columnCount, row.gridBefore ?? 0));
       row.cells.forEach((cell, cellIndex) => {
         const cellFormat = ownerFormat.rows[rowIndex]?.cells[cellIndex];
         const margins = cellFormat?.marginsPt ?? effCellMargins(cell, owner);
-        const rules = sideRules?.[cellIndex];
+        const rules = sideRules?.[rowIndex]?.get(columnStart);
+        columnStart += Math.min(Math.max(1, cell.colSpan), Math.max(0, columnCount - columnStart));
         if (!rules) {
           ownerMargins.set(cell, margins);
           return;

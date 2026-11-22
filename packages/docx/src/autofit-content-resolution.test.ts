@@ -97,8 +97,8 @@ function measureContext(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-/** Column widths of the table and of the table nested in its first cell. */
-function columns(body: string, mode: number | null = 15): { outer: number[]; nested: number[] } {
+/** The laid-out table. */
+function tableNode(body: string, mode: number | null = 15) {
   const archive = new DocxArchive(docx(body, mode));
   let model: DocxDocumentModel;
   try {
@@ -113,6 +113,12 @@ function columns(body: string, mode: number | null = 15): { outer: number[]; nes
   );
   const laidOut = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
   if (laidOut?.kind !== 'table') throw new Error('expected a table');
+  return laidOut;
+}
+
+/** Column widths of the table and of the table nested in its first cell. */
+function columns(body: string, mode: number | null = 15): { outer: number[]; nested: number[] } {
+  const laidOut = tableNode(body, mode);
   const inner = laidOut.rows[0]!.cells[0]!.blocks.map((block) => block.layout).find((block) => block.kind === 'table');
   return {
     outer: [...laidOut.columnWidthsPt],
@@ -337,6 +343,26 @@ describe('AutoFit column widths from content and preferred widths', () => {
       }
       for (const mode of [null, 11, 12, 14]) expectWidths(columns(body(''), mode).outer, expected);
     });
+  });
+
+  it('sizes and lays out a cell beside a vertical merge with the rule the merge opens with', () => {
+    // The first column is one merged cell whose opening cell has a 6 pt
+    // right rule; its continuation carries none of its own. The second
+    // column has no width and holds its widest text in the second row.
+    const sixWide = 'W'.repeat(6); // 31.5 pt
+    const body = `<w:tbl><w:tblPr>${AUTO}${BORDERS}</w:tblPr><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>`
+      + `<w:tr>${cell(TWO, 72, '<w:vMerge w:val="restart"/><w:tcBorders><w:right w:val="single" w:sz="48"/></w:tcBorders>')}${cell(TWO)}</w:tr>`
+      + `<w:tr>${cell('', 72, '<w:vMerge/>')}${cell(sixWide)}</w:tr></w:tbl>`;
+    const laidOut = tableNode(body);
+    // Sizing: the text, half the 6 pt rule on its left, half a point on its right.
+    expect(laidOut.columnWidthsPt[1]).toBeCloseTo(31.5 + 3 + 0.5, 6);
+    // Layout: the same inset, so the text has exactly its own width.
+    const second = laidOut.rows[1]!.cells.at(-1)!;
+    expect(second.contentBounds.xPt - second.flowBounds.xPt).toBeCloseTo(3, 6);
+    expect(second.contentBounds.widthPt).toBeCloseTo(31.5, 6);
+    const paragraphLayout = second.blocks[0]!.layout;
+    if (paragraphLayout.kind !== 'paragraph') throw new Error('expected a paragraph');
+    expect(paragraphLayout.lines.length).toBe(1);
   });
 
   describe('further shares', () => {
