@@ -234,3 +234,31 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
     expect(span!.style.transform ?? '').toBe('');
   });
 });
+
+describe('buildDocxTextLayer — without a measurer', () => {
+  const scaled = () => run({
+    // `ABCD` painted at twice its natural advances: 12px per cluster.
+    text: 'ABCD', x: 10, w: 48,
+    clusterBoxes: [0, 1, 2, 3].map((index) => ({ start: index, end: index + 1, x: index * 12, width: 12, rtl: false })),
+  });
+
+  it('measures with a canvas of the document, so a scaled run keeps its painted caret positions', () => {
+    const canvas = { getContext: () => ({ font: '', measureText: (text: string) => ({ width: text.length * 6 }) }) };
+    vi.stubGlobal('document', { createElement: (tag: string) => (tag === 'canvas' ? canvas : makeEl(tag)) });
+    const layer = makeEl('div');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [scaled()], 100, 100);
+    expect(layer.children).toHaveLength(1);
+    expect(layer.children[0]!.textContent).toBe('ABCD');
+    // 48px painted over 24px natural: the span's advances are scaled to it.
+    expect(layer.children[0]!.style.transform).toBe('scaleX(2)');
+    expect(layer.children[0]!.style.width ?? '').toBe('');
+  });
+
+  it('sizes the span to its painted width where the document cannot measure', () => {
+    vi.stubGlobal('document', { createElement: (tag: string) => makeEl(tag) });
+    const layer = makeEl('div');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [scaled()], 100, 100);
+    expect(layer.children).toHaveLength(1);
+    expect(layer.children[0]!.style.width).toBe('48%');
+  });
+});

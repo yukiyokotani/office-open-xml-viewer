@@ -8,6 +8,7 @@ import {
 import { sourceKey } from './source-key.js';
 import type { ClusterBox } from './visual-cluster-geometry.js';
 import { lineFrameTransform } from './line-frame.js';
+import { resourcePlacementOutline } from './resource-outline.js';
 import type {
   DocumentLayout,
   DrawingLayout,
@@ -480,6 +481,36 @@ function lineProjectionPointToPage(
   return lineFrame ? composeAffine(projection.pointToPage, lineFrame) : projection.pointToPage;
 }
 
+/** The box a tab or inline object is painted in on its line: its bounds,
+ * or for a picture or drawing the part its line clip leaves (the bounding
+ * box of a turned picture's visible outline). Null when nothing is left. */
+function inlineContentBounds(
+  placement: Extract<ParagraphLayout['lines'][number]['placements'][number], { kind: 'tab' | 'resource' | 'drawing' }>,
+): LayoutRect | null {
+  if (placement.kind === 'tab') return placement.bounds ?? null;
+  if (placement.kind === 'resource') {
+    if (!placement.lineClip && !placement.rotationDeg) return placement.bounds;
+    const outline = resourcePlacementOutline(placement);
+    if (outline.length === 0) return null;
+    let left = Infinity;
+    let top = Infinity;
+    let right = -Infinity;
+    let bottom = -Infinity;
+    for (const point of outline) {
+      left = Math.min(left, point.xPt);
+      top = Math.min(top, point.yPt);
+      right = Math.max(right, point.xPt);
+      bottom = Math.max(bottom, point.yPt);
+    }
+    return { xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top };
+  }
+  const clip = placement.lineClip;
+  if (!clip) return placement.bounds;
+  const top = Math.max(placement.bounds.yPt, placement.bounds.yPt + clip.topPt);
+  const bottom = Math.min(placement.bounds.yPt + placement.bounds.heightPt, placement.bounds.yPt + clip.bottomPt);
+  return bottom > top ? { ...placement.bounds, yPt: top, heightPt: bottom - top } : null;
+}
+
 function visitParagraph(
   paragraph: ParagraphLayout,
   projection: NodeProjection,
@@ -545,21 +576,30 @@ function visitParagraph(
           if (drawing) visitDrawing(textBoxesById, drawing, inlineDrawingProjection(drawing), context);
         }
         // A tab or an inline object occupies its run's place on the line:
-        // readers that mark a range of source runs (comments) cover it.
-        if (context.collectTextRuns && (retained.kind === 'tab' || retained.kind === 'resource' || retained.kind === 'drawing')) {
+        // readers that mark a range of source runs (comments) cover it, and
+        // a paragraph that holds only such content still has geometry.
+        if (retained.kind === 'tab' || retained.kind === 'resource' || retained.kind === 'drawing') {
           const runIndex = retained.kind === 'drawing'
             ? inlineDrawingRunIndexes.get(retained.drawingId) : retained.sourceRunIndex;
-          const bounds = retained.bounds;
+          const bounds = inlineContentBounds(retained);
           if (runIndex !== undefined && bounds && (retained.kind !== 'resource' || retained.resourceKind !== 'picture-bullet')) {
-            context.runs.push(Object.freeze({
-              inlineContent: retained.kind === 'tab' ? 'tab' as const : 'object' as const,
-              bounds,
-              sourceRunIndex: runIndex,
-              pointToPage: linePointToPage,
-              clips: retained.kind !== 'tab' && retained.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips,
-              source: paragraph.source,
-              ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
-            }));
+            if (context.collectTextRuns) {
+              context.runs.push(Object.freeze({
+                inlineContent: retained.kind === 'tab' ? 'tab' as const : 'object' as const,
+                bounds,
+                sourceRunIndex: runIndex,
+                pointToPage: linePointToPage,
+                clips: retained.kind !== 'tab' && retained.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips,
+                source: paragraph.source,
+                ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
+              }));
+            }
+            if (context.collectTextRunSources) {
+              const key = sourceKey(paragraph.source);
+              const indices = context.sourceRuns.get(key) ?? new Set<number>();
+              if (!context.sourceRuns.has(key)) context.sourceRuns.set(key, indices);
+              indices.add(runIndex);
+            }
           }
         }
         if (retained.kind === 'text') for (const placement of sourceOwnedTextPlacements(retained)) {

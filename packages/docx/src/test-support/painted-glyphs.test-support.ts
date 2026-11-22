@@ -9,7 +9,7 @@ import { orientation } from '../run-clip.js';
 import { paintLayoutPage } from '../paint/canvas-page.js';
 import { normalizeInternalDocumentModel } from '../parser-model.js';
 import { textRunsForPage } from '../text-run-projection.js';
-import type { DocxTextRunInfo } from '../types.js';
+import type { DocxDocumentModel, DocxTextRunInfo } from '../types.js';
 
 /**
  * A paint oracle for overlay geometry: a Canvas 2D stand-in that keeps the
@@ -100,8 +100,16 @@ export function intersect(left: PageBox, right: PageBox | null): PageBox | null 
 }
 
 /** A canvas whose 2D context records the glyphs drawn on it. */
-export function glyphRecordingCanvas(): { canvas: HTMLCanvasElement; glyphs: PaintedGlyph[] } {
+export function glyphRecordingCanvas(): {
+  canvas: HTMLCanvasElement;
+  glyphs: PaintedGlyph[];
+  /** The box and clip of every resource (picture) painted on the canvas,
+   * when its page is painted with `resources`. */
+  pictures: { box: PageBox; clip: PageBox | null }[];
+  resources: { paint(key: string, kind: string, bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>): void };
+} {
   const glyphs: PaintedGlyph[] = [];
+  const pictures: { box: PageBox; clip: PageBox | null }[] = [];
   let matrix: Matrix = [1, 0, 0, 1, 0, 0];
   let clip: PageBox | null = null;
   let path: PageBox[] | null = [];
@@ -211,11 +219,46 @@ export function glyphRecordingCanvas(): { canvas: HTMLCanvasElement; glyphs: Pai
     },
   });
   const canvas = { width: 0, height: 0, style: {}, getContext: () => ctx };
-  return { canvas: canvas as unknown as HTMLCanvasElement, glyphs };
+  const resources = {
+    paint(_key: string, _kind: string, bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>) {
+      pictures.push({
+        box: bounding([map(bounds.xPt, bounds.yPt), map(bounds.xPt + bounds.widthPt, bounds.yPt),
+          map(bounds.xPt + bounds.widthPt, bounds.yPt + bounds.heightPt), map(bounds.xPt, bounds.yPt + bounds.heightPt)]),
+        clip,
+      });
+    },
+  };
+  return { canvas: canvas as unknown as HTMLCanvasElement, glyphs, pictures, resources };
 }
 
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+const DRAWING = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+  + 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+  + 'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" '
+  + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
 const PKG = 'http://schemas.openxmlformats.org/package/2006/relationships';
+
+/** A one-pixel PNG, and the package entries that make it `rIdP` of the main
+ * document part. */
+const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='),
+  (character) => character.charCodeAt(0));
+export const PICTURE_PART = {
+  parts: { 'word/media/picture.png': PNG },
+  relationships: '<Relationship Id="rIdP" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" '
+    + 'Target="media/picture.png"/>',
+  contentTypes: '<Default Extension="png" ContentType="image/png"/>',
+} as const;
+
+/** A run holding an inline DrawingML picture of `widthPt` by `heightPt`. */
+export function inlinePictureRun(widthPt: number, heightPt: number, properties = ''): string {
+  const extent = `cx="${widthPt * 12700}" cy="${heightPt * 12700}"`;
+  return `<w:r><w:rPr>${properties}</w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent ${extent}/>`
+    + '<wp:docPr id="1" name="Picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+    + '<pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr>'
+    + '<pic:blipFill><a:blip r:embed="rIdP"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
+    + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext ${extent}/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`
+    + '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+}
 const encode = (text: string) => new TextEncoder().encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${text}`);
 
 let ready: Promise<unknown> | undefined;
@@ -232,10 +275,17 @@ export async function paintedDocument(body: string, options: Readonly<{
   section?: string;
   /** Kerned pairs, by the ems the first character's advance loses. */
   kerning?: Readonly<Record<string, number>>;
+  /** Further package parts by name, with the relationships of the main
+   * document part to them and their content-type declarations. */
+  parts?: Readonly<Record<string, string | Uint8Array>>;
+  relationships?: string;
+  contentTypes?: string;
 }> = {}): Promise<{
   layout: DocumentLayout;
+  model: DocxDocumentModel;
   runs: DocxTextRunInfo[];
   glyphs: PaintedGlyph[];
+  pictures: { box: PageBox; clip: PageBox | null }[];
 }> {
   const section = '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
     + `w:header="0" w:footer="0" w:gutter="0"/>${options.vertical ? '<w:textDirection w:val="tbRl"/>' : ''}${options.section ?? ''}`;
@@ -244,14 +294,18 @@ export async function paintedDocument(body: string, options: Readonly<{
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>')],
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
+      + `${options.contentTypes ?? ''}</Types>`)],
     ['_rels/.rels', encode(`<Relationships xmlns="${PKG}"><Relationship Id="rId1" `
       + 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
     ['word/_rels/document.xml.rels', encode(`<Relationships xmlns="${PKG}"><Relationship Id="rIdT" `
-      + 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>')],
+      + 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>'
+      + `${options.relationships ?? ''}</Relationships>`)],
     ['word/settings.xml', encode(`<w:settings ${W}><w:compat><w:compatSetting w:name="compatibilityMode" `
       + 'w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>')],
-    ['word/document.xml', encode(`<w:document ${W}><w:body>${body}<w:sectPr>${section}</w:sectPr></w:body></w:document>`)],
+    ['word/document.xml', encode(`<w:document ${W} ${DRAWING}><w:body>${body}<w:sectPr>${section}</w:sectPr></w:body></w:document>`)],
+    ...Object.entries(options.parts ?? {}).map(([name, content]) => (
+      [name, typeof content === 'string' ? encode(content) : content] as [string, Uint8Array])),
   ]));
   await initParser();
   const archive = new DocxArchive(bytes);
@@ -263,9 +317,9 @@ export async function paintedDocument(body: string, options: Readonly<{
   kernedPairs = options.kerning ?? {};
   try {
     const layout = layoutDocument(model, createLayoutServices(model, { measureContext: oracleMeasureContext() }), { currentDateMs: 0 });
-    const { canvas, glyphs } = glyphRecordingCanvas();
-    await paintLayoutPage(layout, 0, canvas, { dpr: 1, scale: 1 }, { paint() {} });
-    return { layout, runs: textRunsForPage(layout, 0, { scale: 1 }), glyphs };
+    const { canvas, glyphs, pictures, resources } = glyphRecordingCanvas();
+    await paintLayoutPage(layout, 0, canvas, { dpr: 1, scale: 1 }, resources as never);
+    return { layout, model, runs: textRunsForPage(layout, 0, { scale: 1 }), glyphs, pictures };
   } finally {
     kernedPairs = {};
   }

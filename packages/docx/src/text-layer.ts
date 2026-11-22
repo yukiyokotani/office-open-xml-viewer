@@ -44,7 +44,9 @@ import { setSelectionData } from '@silurus/ooxml-core/internal/selection-data';
  *                         caller's URL sanitisation. When omitted, link runs are
  *                         rendered exactly like plain runs (no click affordance).
  * @param measureForFont   optional width-measurer factory (primed with a run's
- *                         `font`), used ONLY to clamp a §17.3.2.10 縦中横
+ *                         `font`); when omitted, one is made from a canvas of
+ *                         the layer's document where it has one. It fits
+ *                         spans to scaled or fitted paint and clamps a §17.3.2.10 縦中横
  *                         (eastAsianVert) span to its drawn one-em cell (#836):
  *                         the span composes a `scaleX(run.w / naturalWidth)` so
  *                         its selection extent matches the compressed glyphs
@@ -66,6 +68,9 @@ export function buildDocxTextLayer(
   setSelectionData(layer, 'pageIndex', pageIndex === undefined ? undefined : String(pageIndex));
 
   const ownerDocument = layer.ownerDocument ?? document;
+  // A host that passes no measurer still gets spans fitted to the paint
+  // where the document can measure text itself.
+  measureForFont ??= documentMeasurer(ownerDocument);
   const clipFrames = new OverlayClipFrames(layer, cssWidth, cssHeight);
   // Span metrics (font size, line height, tracking) are written in container
   // query units of the layer, so a span keeps its size relative to the page
@@ -186,6 +191,23 @@ export function buildDocxTextLayer(
       frame.parent.appendChild(span);
     }
   }
+}
+
+/** A width-measurer factory over a 2D canvas of `ownerDocument`; undefined
+ * where the document has no canvas to measure with. */
+function documentMeasurer(ownerDocument: Document): ((font: string) => (s: string) => number) | undefined {
+  let context: CanvasRenderingContext2D | null | undefined;
+  try {
+    context = (ownerDocument.createElement('canvas') as Partial<HTMLCanvasElement>).getContext?.('2d');
+  } catch {
+    return undefined;
+  }
+  if (!context) return undefined;
+  const ctx = context;
+  return (font) => (text) => {
+    ctx.font = font;
+    return ctx.measureText(text).width;
+  };
 }
 
 interface RunPiece {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveDocxCommentThreads } from './comments.js';
+import { DocxFindController } from './find.js';
 import { intersect, pageBoxOf, paintedDocument } from './test-support/painted-glyphs.test-support.js';
 
 describe('a comment on text that crosses its cell clip', () => {
@@ -27,5 +28,21 @@ describe('a comment on text that crosses its cell clip', () => {
     const rects = thread!.anchors[0]!.rects.map(pageBoxOf);
     expect(rects).toHaveLength(1);
     for (const side of ['left', 'top', 'right', 'bottom'] as const) expect(rects[0]![side]).toBeCloseTo(visible[side], 6);
+  });
+});
+
+describe('find in text a cell clips away', () => {
+  it('returns no match for a run painted wholly beyond the cell edge', async () => {
+    // A -60pt indent puts the short first run left of the cell.
+    const { runs, glyphs } = await paintedDocument(
+      '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>'
+      + '<w:p><w:pPr><w:ind w:left="-1200"/></w:pPr>'
+      + '<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t xml:space="preserve">Hidden </w:t></w:r>'
+      + '<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>and the shown text</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>');
+    expect(glyphs.filter((glyph) => glyph.character === 'H').every((glyph) => intersect(glyph.box, glyph.clip) === null)).toBe(true);
+    const find = new DocxFindController(() => 1, async () => runs);
+    expect(await find.find('Hidden')).toEqual([]);
+    expect((await find.find('shown')).map((match) => match.text)).toEqual(['shown']);
   });
 });
