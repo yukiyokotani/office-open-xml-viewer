@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { resolveDocxCommentThreads } from './comments.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
 import {
-  overlayBoxes, placeRunRect, runAdvanceRects, runOverlayRects, runTextVisible,
+  clipRunRect, overlayBoxes, placeRunRect, runAdvanceRects, runGlyphRects, runOverlayRects, runTextVisible,
 } from './overlay-geometry.js';
 import {
   fakeElement, intersect, layerBoxes, pageBoxOf, paintedDocument, withFakeDocument, type PageBox, type PaintedGlyph,
@@ -201,18 +201,27 @@ function violations(testCase: Case, runs: readonly DocxTextRunInfo[], glyphs: re
     }
   }
   // Invariants 4 and 5: a comment over some runs of a paragraph marks
-  // exactly their painted glyphs inside the clips, never anything else.
+  // their painted glyphs inside the clips and the advance after each
+  // (tracking, justification, elongation), and nothing else.
   const paragraphs = [...new Set(runs.map((run) => JSON.stringify(run.source?.path)))];
   for (const [paragraph, first, end] of testCase.commented) {
     const anchored = runs.filter((run) => JSON.stringify(run.source?.path) === paragraphs[paragraph]
       && run.sourceRunIndex !== undefined && run.sourceRunIndex >= first && run.sourceRunIndex < end);
     const expected = anchored.flatMap((run) => [...run.text].flatMap((character, index) => {
+      // The advance box of the character, over the extent its glyph has
+      // across the run.
+      const glyph = runGlyphRects(run, index, index + 1)[0];
+      const advance = runAdvanceRects(run, index, index + 1)
+        .flatMap((rect) => clipRunRect(run, glyph ? { ...rect, y: glyph.y, height: glyph.height } : rect))
+        .map((rect) => pageBoxOf(placeRunRect(run, rect)));
       if (character !== ' ') {
+        // A glyph its clips hide whole marks nothing, its advance included.
         const box = visibleOf(character);
-        return box ? [box] : [];
+        return box ? [box, ...advance] : [];
       }
       // A space is drawn many times: its own rect stands for it.
-      return runOverlayRects(run, index, index + 1).map((rect) => pageBoxOf(placeRunRect(run, rect)));
+      const own = runOverlayRects(run, index, index + 1).map((rect) => pageBoxOf(placeRunRect(run, rect)));
+      return own.length > 0 || !glyph ? [...own, ...advance] : [];
     }));
     const boxes = overlayBoxes(anchored).map(pageBoxOf);
     const difference = regionDifference(boxes, expected);
@@ -326,5 +335,56 @@ describe('comment highlights are the painted glyphs of the commented runs', () =
     for (const other of paintedBoxes(glyphs, '34גד')) {
       expect(rects.some((rect) => intersect(rect, other) !== null)).toBe(false);
     }
+  });
+});
+
+describe('a comment highlight covers everything in its range of runs and nothing outside it', () => {
+  const run = (text: string, properties = '') => `<w:r><w:rPr>${properties}<w:sz w:val="24"/></w:rPr>${text}</w:r>`;
+  const text = (value: string) => `<w:t xml:space="preserve">${value}</w:t>`;
+  const commentRects = (runs: DocxTextRunInfo[], first: number, end: number): PageBox[] => {
+    const source = runs[0]!.source!;
+    const [thread] = resolveDocxCommentThreads([{ id: '1', author: 'A', text: 'c' }], [{
+      commentId: '1', source, startRunIndex: first, endRunIndex: end,
+      reference: { source, runIndex: end, affinity: 'preceding' as const },
+    }], runs);
+    return thread!.anchors[0]!.rects.map(pageBoxOf);
+  };
+  const body = `<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="2880"/></w:tabs></w:pPr>${run(text('ab'))}${run('<w:tab/>')}${run(text('cd'))}</w:p>`;
+
+  it('tints a tab between two commented runs with the text around it', async () => {
+    const { runs, glyphs } = await paintedDocument(body);
+    const [a] = paintedBoxes(glyphs, 'a');
+    const [d] = paintedBoxes(glyphs, 'd');
+    const rects = commentRects(runs, 0, 3);
+    expect(rects).toHaveLength(1);
+    for (const [side, expected] of [['left', a!.left], ['top', a!.top], ['right', d!.right], ['bottom', d!.bottom]] as const) {
+      expect(rects[0]![side]).toBeCloseTo(expected, 6);
+    }
+    // The tab stop is 144pt from the text edge: the tab is most of the tint.
+    expect(d!.left - a!.right).toBeGreaterThan(100);
+  });
+
+  it('leaves a tab outside the commented runs untinted', async () => {
+    const { runs, glyphs } = await paintedDocument(body);
+    // Two comments, one on each text run: neither covers the tab between.
+    const before = commentRects(runs, 0, 1);
+    const after = commentRects(runs, 2, 3);
+    expect(regionDifference(before, paintedBoxes(glyphs, 'ab'))).toBeNull();
+    expect(regionDifference(after, paintedBoxes(glyphs, 'cd'))).toBeNull();
+  });
+
+  it('tints the tracking and the widened spaces inside the range, and none of the text after it', async () => {
+    const { runs, glyphs } = await paintedDocument(
+      `<w:p><w:pPr><w:jc w:val="both"/><w:ind w:right="7600"/></w:pPr>${run(text('ab cd '), '<w:spacing w:val="60"/>')}`
+      + `${run(text('ef gh ij kl mn op'))}</w:p>`);
+    const rects = commentRects(runs, 0, 1);
+    const [a] = paintedBoxes(glyphs, 'a');
+    const [d] = paintedBoxes(glyphs, 'd');
+    const [e] = paintedBoxes(glyphs, 'e');
+    // One unbroken tint from the first glyph past the last one of the range.
+    expect(rects).toHaveLength(1);
+    expect(rects[0]!.left).toBeCloseTo(a!.left, 6);
+    expect(rects[0]!.right).toBeGreaterThanOrEqual(d!.right + 3 - 1e-6);
+    expect(rects[0]!.right).toBeLessThanOrEqual(e!.left + 1e-6);
   });
 });

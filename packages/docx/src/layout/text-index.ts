@@ -27,6 +27,19 @@ import type {
   UprightResourceOrientation,
 } from './types.js';
 
+/** Inline content of a line that is not text (a tab, an inline picture,
+ * chart, equation or drawing): the box it occupies, addressed by its source
+ * run like the text around it. */
+export interface InlineContentGeometry {
+  readonly inlineContent: 'tab' | 'object';
+  readonly bounds: LayoutRect;
+  readonly sourceRunIndex: number;
+  readonly pointToPage: Matrix2DData;
+  readonly clips: readonly ElementClipGeometry[];
+  readonly source: ParagraphLayout['source'];
+  readonly paragraphId?: string;
+}
+
 export interface TextRunGeometry {
   readonly placement: SourceOwnedTextGeometry;
   /** Where each cluster of the run is painted, from `placement.bounds.xPt`,
@@ -91,7 +104,7 @@ interface ProjectionContext {
   readonly drawingPaintOrder: ReadonlyMap<string, number>;
   readonly emittedTextBoxes: Set<string>;
   readonly emittedDrawings: Set<string>;
-  readonly runs: TextRunGeometry[];
+  readonly runs: (TextRunGeometry | InlineContentGeometry)[];
   readonly sourceRuns: Map<string, Set<number>>;
   readonly completedParagraphSources: Set<string>;
   readonly drawings: DrawingGeometry[];
@@ -516,6 +529,11 @@ function visitParagraph(
     const inlineTextDrawings = new Map(paragraph.drawings
       .filter((drawing) => !drawing.anchorLayer && (drawing.textBoxIds?.length ?? 0) > 0)
       .map((drawing) => [drawing.id, drawing]));
+    const inlineDrawingRunIndexes = new Map(paragraph.drawings.flatMap((drawing) => {
+      const runIndex = drawing.source.path.at(-1);
+      return !drawing.anchorLayer && runIndex !== undefined && Number.isSafeInteger(runIndex) && runIndex >= 0
+        ? [[drawing.id, runIndex] as const] : [];
+    }));
     for (const line of paragraph.lines) {
       const linePointToPage = lineProjectionPointToPage(paragraph, line, projection);
       for (const retained of line.placements) {
@@ -525,6 +543,24 @@ function visitParagraph(
         if (retained.kind === 'drawing') {
           const drawing = inlineTextDrawings.get(retained.drawingId);
           if (drawing) visitDrawing(textBoxesById, drawing, inlineDrawingProjection(drawing), context);
+        }
+        // A tab or an inline object occupies its run's place on the line:
+        // readers that mark a range of source runs (comments) cover it.
+        if (context.collectTextRuns && (retained.kind === 'tab' || retained.kind === 'resource' || retained.kind === 'drawing')) {
+          const runIndex = retained.kind === 'drawing'
+            ? inlineDrawingRunIndexes.get(retained.drawingId) : retained.sourceRunIndex;
+          const bounds = retained.bounds;
+          if (runIndex !== undefined && bounds && (retained.kind !== 'resource' || retained.resourceKind !== 'picture-bullet')) {
+            context.runs.push(Object.freeze({
+              inlineContent: retained.kind === 'tab' ? 'tab' as const : 'object' as const,
+              bounds,
+              sourceRunIndex: runIndex,
+              pointToPage: linePointToPage,
+              clips: retained.kind !== 'tab' && retained.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips,
+              source: paragraph.source,
+              ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
+            }));
+          }
         }
         if (retained.kind === 'text') for (const placement of sourceOwnedTextPlacements(retained)) {
           if (context.collectTextRuns) {
@@ -814,15 +850,25 @@ function pageGeometryIndex(
   return context;
 }
 
+/** The text runs of a page; with `'line-content'`, also the tabs and inline
+ * objects between them, in the order their lines hold them. */
+export function textRunGeometryForPage(layout: DocumentLayout, pageIndex: number): readonly TextRunGeometry[];
 export function textRunGeometryForPage(
   layout: DocumentLayout,
   pageIndex: number,
-): readonly TextRunGeometry[] {
-  return Object.freeze(pageGeometryIndex(layout, pageIndex, {
+  content: 'line-content',
+): readonly (TextRunGeometry | InlineContentGeometry)[];
+export function textRunGeometryForPage(
+  layout: DocumentLayout,
+  pageIndex: number,
+  content?: 'line-content',
+): readonly (TextRunGeometry | InlineContentGeometry)[] {
+  const runs = pageGeometryIndex(layout, pageIndex, {
     collectTextRuns: true,
     collectTextRunSources: false,
     collectDrawings: false,
-  }).runs);
+  }).runs;
+  return Object.freeze(content === 'line-content' ? runs : runs.filter((geometry) => 'placement' in geometry));
 }
 
 /** Lightweight index of text placements that actually survived final-state

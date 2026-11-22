@@ -94,14 +94,16 @@ describe('resolvePageCommentAnchors', () => {
     expect(laterPage.margin.children).toHaveLength(0);
   });
 
-  it('joins the tints of touching runs of a cell line in the shared clip container, and bridges no gap', () => {
+  it('merges the tints of a cell line across a commented tab into one tint in the shared clip container', () => {
     installDom();
     const comments = [{ id: 'cell', author: 'Ada', text: 'In a cell' }];
     const clips = [{ x: 0, y: 0, width: 300, height: 100 }];
-    const tints = (secondX: number) => {
+    const tints = (between: DocxTextRunInfo[]) => {
+      // Two runs of one comment either side of a 40px gap, in the same cell clip.
       const runs: DocxTextRunInfo[] = [
         { ...run([1]), x: 10, w: 40, clips },
-        { ...run([1]), x: secondX, w: 40, clips },
+        ...between,
+        { ...run([1]), x: 90, w: 40, clips },
       ];
       const tint = makeEl('div');
       buildDocxCommentMargin(tint as unknown as HTMLDivElement, null, runs,
@@ -109,10 +111,11 @@ describe('resolvePageCommentAnchors', () => {
       expect(tint.children).toHaveLength(1);
       return tint.children[0]!.children.length;
     };
-    // Two runs of one comment painted one after the other: one tint.
-    expect(tints(50)).toBe(1);
-    // Either side of a tab: whatever is painted between them is not tinted.
-    expect(tints(90)).toBe(2);
+    // The gap is a tab of the commented run: one tint over text and tab.
+    expect(tints([{ ...run([1]), text: '', inlineContent: 'tab', x: 50, w: 40, clips }])).toBe(1);
+    // The gap holds content outside the comment: it stays untinted.
+    expect(tints([{ ...run([1]), sourceRunIndex: 7, x: 50, w: 40, clips }])).toBe(2);
+    expect(tints([])).toBe(2);
   });
 
   it('uses the same font box and clips for the tint as the comment API', () => {

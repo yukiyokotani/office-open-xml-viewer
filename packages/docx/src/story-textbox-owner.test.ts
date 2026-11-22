@@ -155,7 +155,8 @@ it.each([
   const layout = layoutDocument(doc, createLayoutServices(doc, { measureContext: context() }), { currentDateMs: 0 });
   expect(layout.pages).toHaveLength(fields.pages);
   fields.numbers.forEach((number, index) => {
-    const runs = textRunsForPage(layout, index, { scale: 1 });
+    // Text only: the inline drawings that hold the boxes are listed as well.
+    const runs = textRunsForPage(layout, index, { scale: 1 }).filter(run => run.inlineContent === undefined);
     expect(runs.filter(run => run.source?.story === 'body').map(run => run.text)).toEqual([number]);
     expect(runs.filter(run => run.source?.story === fields.kind).map(run => run.text)).toEqual([number, number]);
     expect(runs.filter(run => run.source?.story === 'textbox').map(run => run.text)).toEqual([number, number, number]);
