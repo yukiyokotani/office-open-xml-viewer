@@ -40,7 +40,7 @@ import type { FloatRegistryEntryPt, LayoutRect, ParagraphLayout } from './types.
  *   its page, from the frame it keeps. Tables never move for a drawing laid
  *   out after them and a drawing a table has moved never moves back, so the
  *   two cannot chase each other; how that holds for a drawing that follows
- *   its own text is stated at UprightDrawingMoves (paragraph.ts).
+ *   its own text is stated at AnchorReflowMoves (paragraph.ts).
  * - What a box obstructs. A table box obstructs only the fragments after
  *   it in body order (`boxOrders`). A box of a later fragment is on the
  *   page early only as a pin, and the layout that pinned it placed the

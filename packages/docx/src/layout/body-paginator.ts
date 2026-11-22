@@ -3441,7 +3441,7 @@ function* paginateBodyPassSteps(
             // drawing positioned relative to its character or line. The
             // tables do not follow it: the fragment is laid out with its
             // drawings below the planned box, as below a table in place
-            // (UprightDrawingMoves), so the planning is one plan and one
+            // (AnchorReflowMoves), so the planning is one plan and one
             // layout however the drawings move. The plan is accepted only
             // when the drawings of that fragment, the one committed, leave
             // its box clear. One that does not (a drawing the paragraph's

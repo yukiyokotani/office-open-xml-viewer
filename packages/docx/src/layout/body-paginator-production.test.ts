@@ -3609,4 +3609,93 @@ describe('canonical body producer', () => {
     expect(commitCounts.length).toBeGreaterThan(0);
     expect(commitCounts.every((count) => count === 1)).toBe(true);
   });
+
+  // `word-vertical-section-upright-table-rewrapped-strip`: the plan made
+  // with the paragraph fragment before an upright table is accepted only
+  // when the wrapped drawings of the fragment that is committed leave its
+  // box clear. The session stands in for an anchor bridge whose drawing the
+  // paragraph's acquisition does not place below the planned box.
+  it.each([
+    { name: 'drops the plan when a drawing of the wrapped fragment covers its box', drawingXPt: 20, accepted: false },
+    { name: 'commits the plan when the drawings of the wrapped fragment leave its box clear', drawingXPt: 70, accepted: true },
+  ])('$name', ({ drawingXPt, accepted }) => {
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const vertical: SectionLayoutContext = { ...section, textDirection: 'tbRl' };
+    const plannedBox = { xPt: 10, yPt: 25, widthPt: 40, heightPt: 30 };
+    const plan = Object.freeze({
+      box: plannedBox,
+      boxOrder: 1,
+      slots: Object.freeze([]),
+      exclusions: Object.freeze([]),
+      tail: Object.freeze({ sourceIndex: 1, flowDomainId: 'body', bounds: plannedBox }),
+    });
+    const committedPlans: unknown[] = [];
+    const committedDrawings: string[] = [];
+    const measuredBeside: boolean[] = [];
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: ({ input, besideUprightBlocks }) => {
+          measuredBeside.push(besideUprightBlocks !== undefined);
+          const retained = paragraph(besideUprightBlocks ? 'wrapped' : 'unwrapped', input.source, 15);
+          if (!besideUprightBlocks) return { layout: retained, blockExtentPt: 15, fragmentation: { kind: 'indivisible' } };
+          const frame = { xPt: drawingXPt, yPt: 30, widthPt: 20, heightPt: 10 };
+          return {
+            layout: {
+              ...retained,
+              drawings: [{ kind: 'drawing', anchorLayer: { occurrenceId: 'anchor:bridge' }, flowBounds: frame, inkBounds: frame, commands: [] }],
+            } as unknown as ParagraphLayout,
+            blockExtentPt: 15,
+            fragmentation: { kind: 'indivisible' },
+            flowRegistryDelta: {
+              floats: {
+                coordinateSpace: 'logical-page-points' as const,
+                flowDomainId: 'body',
+                baseEntries: [],
+                baseNextParagraphId: 0,
+                nextParagraphId: 1,
+                entries: [{
+                  kind: 'shape' as const, occurrenceId: 'anchor:bridge', exclusionId: 'anchor:bridge',
+                  paragraphId: 0, bounds: frame, exclusionBounds: frame, wrap: 'square' as const,
+                }],
+              },
+            },
+          } as never;
+        },
+        measureTable: ({ input }) => ({ layout: table('upright', input.source, 30), blockExtentPt: 0 }),
+        planUprightBlocks: () => plan,
+        commitUprightBlocks: (registration) => { committedPlans.push(registration); },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: (delta) => {
+          committedDrawings.push(...(delta.floats?.entries.map((entry) => entry.occurrenceId) ?? []));
+        },
+      }),
+    });
+    const layout = paginateBody({
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: { ...bodyOwner(), context: vertical },
+      sequence: [
+        { kind: 'body-block', block: {
+          kind: 'paragraph', source: source(0), pageBreakBefore: false,
+          keepLines: false, keepNext: false, widowControl: true,
+          spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
+        } },
+        { kind: 'body-block', block: { kind: 'table', source: source(1) } },
+      ],
+    } as unknown as BodyLayoutInput, services, { currentDateMs: 0 });
+
+    // Laid out without the table, then once around the plan.
+    expect(measuredBeside).toEqual([false, true]);
+    expect(layout.pages[0]!.layers.body[0]!.id.endsWith(accepted ? '/wrapped' : '/unwrapped')).toBe(true);
+    expect(committedPlans).toEqual(accepted ? [plan] : []);
+    expect(committedDrawings).toEqual(accepted ? ['anchor:bridge'] : []);
+  });
 });

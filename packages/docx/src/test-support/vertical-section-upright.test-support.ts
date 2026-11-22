@@ -76,6 +76,8 @@ export const romanPageTable = (paragraphs: number, rowPt: number, format: 'Roman
 };
 
 export type Direction = 'tbRl' | 'tbLrV';
+/** The block content of the section's default header and footer. */
+export type Stories = Readonly<{ header?: string; footer?: string }>;
 
 function docx(
   direction: Direction,
@@ -84,9 +86,13 @@ function docx(
   linePitch = 360,
   numberingLevel?: string,
   styles?: string,
+  stories: Stories = {},
 ): Uint8Array {
-  const document = `<w:document xmlns:w="${W}"><w:body>${body.join('')}`
-    + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+  const storyKinds = (['header', 'footer'] as const).filter((kind) => stories[kind] !== undefined);
+  const document = `<w:document xmlns:w="${W}" xmlns:r="${REL}"><w:body>${body.join('')}`
+    + '<w:sectPr>'
+    + storyKinds.map((kind) => `<w:${kind}Reference w:type="default" r:id="rId${kind}"/>`).join('')
+    + '<w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
     + (columns > 1 ? `<w:cols w:num="${columns}" w:space="425"/>` : '')
     + `<w:textDirection w:val="${direction}"/><w:docGrid w:type="lines" w:linePitch="${linePitch}"/>`
@@ -100,16 +106,22 @@ function docx(
         : '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>')
       + (styles === undefined ? ''
         : '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>')
+      + storyKinds.map((kind) => `<Override PartName="/word/${kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`).join('')
       + '</Types>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
-    ...(numberingLevel === undefined && styles === undefined ? [] : [
+    ...(numberingLevel === undefined && styles === undefined && storyKinds.length === 0 ? [] : [
       ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         + (numberingLevel === undefined ? '' : `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/>`)
         + (styles === undefined ? '' : `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>`)
+        + storyKinds.map((kind) => `<Relationship Id="rId${kind}" Type="${REL}/${kind}" Target="${kind}1.xml"/>`).join('')
         + '</Relationships>')],
     ] as Array<[string, Uint8Array]>),
+    ...storyKinds.map((kind): [string, Uint8Array] => [
+      `word/${kind}1.xml`,
+      xml(`<w:${kind === 'header' ? 'hdr' : 'ftr'} xmlns:w="${W}">${stories[kind]}</w:${kind === 'header' ? 'hdr' : 'ftr'}>`),
+    ]),
     ...(numberingLevel === undefined ? [] : [
       ['word/numbering.xml', xml(`<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0">${numberingLevel}</w:abstractNum>`
         + '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>')],
@@ -161,7 +173,8 @@ export interface Page {
 
 /** `linePitch`: the section's line grid pitch in twentieths of a point.
  * `numberingLevel`: the `w:lvl` of level 0 of the list `w:numId` 1.
- * `styles`: the `w:style` elements of the styles part. */
+ * `styles`: the `w:style` elements of the styles part.
+ * `stories`: the section's default header and footer. */
 export function layOutPages(
   direction: Direction,
   body: readonly string[],
@@ -169,8 +182,9 @@ export function layOutPages(
   linePitch = 360,
   numberingLevel?: string,
   styles?: string,
+  stories?: Stories,
 ): Page[] {
-  const archive = new DocxArchive(docx(direction, body, columns, linePitch, numberingLevel, styles));
+  const archive = new DocxArchive(docx(direction, body, columns, linePitch, numberingLevel, styles, stories));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;

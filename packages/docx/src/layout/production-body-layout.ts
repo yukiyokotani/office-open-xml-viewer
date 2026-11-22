@@ -652,13 +652,10 @@ function acquireBodyParagraphAtLocation(
       exclusions,
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       // `word-vertical-section-upright-block-table`: a wrapped drawing lies
-      // below the upright tables in place when its paragraph is laid out.
-      // Every body paragraph of a section that lays block tables out
-      // upright resolves its drawings the same bounded way, also where no
-      // table is in place yet (UprightDrawingMoves).
+      // below the upright tables in place when its paragraph is laid out
+      // (AnchorReflowMoves).
       ...(source.path.length === 1
-        && ((state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0) || plannedUprightTableBoxes
-          || (state.verticalPhys && uprightBlockPaginates(state.verticalPhys)))
+        && ((state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0) || plannedUprightTableBoxes)
         && paragraph.runs.some((run) => run.type === 'anchorHost')
         ? {
             uprightTables: {
