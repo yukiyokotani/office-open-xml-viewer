@@ -125,7 +125,7 @@ const alignments = ['left', 'both'] as const;
 const underlines: readonly object[] = [{}, { underline: true }, { underline: true, underlineStyle: 'dash' }];
 const modes = [12, 14, 15] as const;
 const grids: readonly object[] = [{}, { docGridType: 'lines', docGridLinePitch: 20 }];
-const containers = ['body', 'body near the page end', 'cell', 'header', 'footnote'] as const;
+const containers = ['body', 'body near the page end', 'cell', 'cell of a row split across pages', 'header', 'footnote'] as const;
 const directions: readonly (string | null)[] = [null, 'tbRlV'];
 const widths = [200, 100] as const;
 const lineSpacings: readonly (object | null)[] = [null, { rule: 'auto', value: 1.5, explicit: true },
@@ -242,6 +242,14 @@ function model(testCase: Case, subject: readonly Run[]): { model: DocxDocumentMo
       body = [paragraph([textRun('x')], { lineSpacing: { rule: 'exact', value: testCase.filler, explicit: true } }), subjectParagraph, after];
       break;
     case 'cell': body = [table([subjectParagraph, paragraph([textRun('y')])]), after]; break;
+    case 'cell of a row split across pages':
+      // The row is taller than the page: its lines are placed page by page,
+      // and the subject stands on either side of the split.
+      body = [table([
+        ...Array.from({ length: Math.round(testCase.filler / 12) }, () => paragraph([textRun('y')])),
+        subjectParagraph, paragraph([textRun('y')]), paragraph([textRun('y')]),
+      ]), after];
+      break;
     case 'header': body = [after]; header = [subjectParagraph]; break;
     case 'footnote': {
       prefixRuns = 1;
@@ -526,13 +534,24 @@ describe('a floating anchor at any source boundary changes nothing but the drawi
         const expected = boundaryPosition(plain.paragraphs[hostParagraph]!, prefix + offset);
         if (expected) {
           expect([hostLine, round(host.bounds!.xPt)], `${label}: host position`).toEqual([expected.line, round(expected.xPt)]);
+          // The host carries where its source-preceding character starts,
+          // relative to itself: still true of the finished page, whatever
+          // repositioned or copied the line's placements after planning.
+          const recorded = (host as { precedingCharacterOffsetPt?: number | null }).precedingCharacterOffsetPt;
+          expect(recorded, `${label}: preceding character record`).not.toBeUndefined();
+          expect(recorded == null ? null : round(host.bounds!.xPt + recorded), `${label}: preceding character`)
+            .toBe(expected.precedingPt === null ? null : round(expected.precedingPt));
           // The drawing itself, positioned from its character and line: at
-          // the boundary on a horizontal line; on a vertical line, at the
-          // start of the character before it (the line start when none).
-          if (kind === 'character' && testCase.container.startsWith('body')) {
+          // the boundary on a horizontal line; on a line of a vertical
+          // section's body, at the start of the character before it (the
+          // line start when none). A cell lays its lines out in its own
+          // horizontal frame, in a row split across pages as well, where the
+          // host placements are repositioned after planning.
+          if (kind === 'character' && (testCase.container.startsWith('body') || testCase.container.startsWith('cell'))) {
             const line = lines[hostLine]!.bounds;
             expect(anchored.drawings, `${label}: drawing position`).toEqual([[
-              round(testCase.vertical ? expected.precedingPt ?? line.xPt : expected.xPt), round(line.yPt)]]);
+              round(testCase.vertical && testCase.container.startsWith('body') ? expected.precedingPt ?? line.xPt : expected.xPt),
+              round(line.yPt)]]);
           }
         }
       });

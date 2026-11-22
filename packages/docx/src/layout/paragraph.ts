@@ -2366,8 +2366,8 @@ function planContentLine(
         baselinePt: line.baselinePt,
         ...(host.sourceMetrics ? { sourceMetrics: host.sourceMetrics } : {}),
         ...(host.anchorOccurrenceId ? { anchorOccurrenceId: host.anchorOccurrenceId } : {}),
+        precedingCharacterOffsetPt: precedingStartPt === null ? null : precedingStartPt - hostXPt,
       };
-      precedingCharacterStarts.set(placed, precedingStartPt);
       hostPlacements.push(placed);
     };
     const lastClusterStartPt = (segmentIndex: number): number | null => {
@@ -6565,8 +6565,8 @@ function precedingCharacterStartPt(
 ): number {
   // The line planner records the source-preceding character of each host it
   // places; the search below serves hosts planned elsewhere.
-  const recorded = precedingCharacterStarts.get(host);
-  if (recorded !== undefined) return recorded ?? line.bounds.xPt;
+  const recorded = host.precedingCharacterOffsetPt;
+  if (recorded !== undefined) return recorded === null ? line.bounds.xPt : host.bounds.xPt + recorded;
   // The line's clusters by ascending end, indexed once per placement list:
   // every host of the line searches the same list.
   let ends = clusterEndsByLine.get(line.placements);
@@ -6594,9 +6594,6 @@ function precedingCharacterStartPt(
   return low === 0 ? line.bounds.xPt : ends[low - 1]!.start;
 }
 
-/** Visual start of the character that precedes a host in source order on
- * its line (null: none), recorded where the host is placed. */
-const precedingCharacterStarts = new WeakMap<ParagraphPlacement, number | null>();
 const clusterEndsByLine = new WeakMap<LineLayout['placements'], readonly Readonly<{ end: number; start: number }>[]>();
 
 function wordMode14ColumnOriginApplies(

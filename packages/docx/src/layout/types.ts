@@ -519,6 +519,13 @@ export interface AnchorHostPlacement {
   readonly baselinePt: number;
   readonly sourceMetrics?: Readonly<{ ascentPt: number; descentPt: number }>;
   readonly anchorOccurrenceId?: string;
+  /** Where the character that precedes this host in source order on its
+   * line starts, as an inline offset from the host (so it moves with the
+   * host); null when no character precedes it. Recorded by the line planner
+   * for the line-relative position of a vertical section's drawing: with
+   * right-to-left text the preceding character is not the one before the
+   * host's position. */
+  readonly precedingCharacterOffsetPt?: number | null;
 }
 
 export type InlineResourceKind = 'image' | 'chart' | 'math' | 'picture-bullet';
