@@ -54,34 +54,112 @@ export function retractLeadingKinsoku(
   }
 
   const lastText = lastSeg as LayoutTextSeg;
-  // WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is indivisible. It moves whole,
-  // every piece of it, unless it alone holds the line or is glued to what
-  // precedes it.
   if (lastText.rubyGroup !== undefined) {
+    // An opener left at the line end by the retracted cell moves with it;
+    // when that opener would empty the line, the cell stays (blocked) and
+    // the forbidden leader is kept with it instead.
     const line = breakerState.currentLine;
     let start = line.length - 1;
-    while (start > 0) {
-      const before = line[start - 1]!;
-      if (!('text' in before) || before.rubyGroup !== lastText.rubyGroup) break;
+    while (start > 0 && 'text' in line[start - 1]! && (line[start - 1] as LayoutTextSeg).rubyGroup === lastText.rubyGroup) {
       start -= 1;
     }
-    const pieces = line.slice(start) as LayoutTextSeg[];
-    if (start === 0 || pieces[0]!.hardJoinPrev === true) return { kind: 'blocked' };
-    materializeLatinSpaceCompression();
-    breakerState.latinLineHomogeneous = false;
-    for (let index = pieces.length - 1; index >= 0; index -= 1) {
-      breakerState.currentWidth -= pieces[index]!.measuredWidth;
-      popMixedLineItem(breakerState);
+    const before = start > 0 ? line[start - 1] : undefined;
+    if (before && 'text' in before && before.text.length > 0
+      && [...before.text].every((char) => kinsoku.lineEndForbidden.has(char.codePointAt(0)!))
+      && start - 1 === 0) {
+      return { kind: 'blocked' };
     }
-    return { kind: 'retracted', tail: pieces[0]!, followers: pieces.slice(1) };
+    const cell = retractRubyCell(breakerState, materializeLatinSpaceCompression);
+    if (cell.kind !== 'retracted') return cell;
+    const opener = retractLineEndForbidden(breakerState, kinsoku, materializeLatinSpaceCompression, strAdvance, scale);
+    return opener.kind === 'retracted'
+      ? { kind: 'retracted', tail: opener.tail,
+        followers: [...(opener.followers ?? []), cell.tail, ...(cell.followers ?? [])] }
+      : cell;
   }
   const chars = [...lastText.text];
   const minKeep = breakerState.currentLine.length > 1 ? 0 : 1;
   const retractCount = crossRunKinsokuRetract(chars, kinsoku, minKeep);
   if (retractCount <= 0) return { kind: 'none' };
+  return retractSuffix(breakerState, materializeLatinSpaceCompression, strAdvance, lastText,
+    chars.slice(0, chars.length - retractCount).join('').length, scale);
+}
 
-  const headText = chars.slice(0, chars.length - retractCount).join('');
-  const split = headText.length;
+/** §17.3.1.16: a line must not end with a line-end-forbidden character
+ * (an opening bracket). When the unit after it moves to the next line, the
+ * forbidden suffix of the line's last segment, or that whole ruby cell,
+ * moves with it. */
+export function retractLineEndForbidden(
+  breakerState: ReturnType<typeof createLineBreakerState>,
+  kinsoku: KinsokuRules,
+  materializeLatinSpaceCompression: () => void,
+  strAdvance: (segment: LayoutTextSeg, text: string, retainTrailingPunctuationCompression?: boolean) => number,
+  scale: number,
+): CrossRunKinsokuRetraction {
+  const lastSeg = breakerState.currentLine.at(-1);
+  if (!kinsoku.enabled || lastSeg === undefined || !('text' in lastSeg)) return { kind: 'none' };
+  const lastText = lastSeg as LayoutTextSeg;
+  const chars = [...lastText.text];
+  let count = 0;
+  while (count < chars.length && kinsoku.lineEndForbidden.has(chars[chars.length - 1 - count]!.codePointAt(0)!)) {
+    count += 1;
+  }
+  if (count === 0) return { kind: 'none' };
+  if (lastText.rubyGroup !== undefined) return retractRubyCell(breakerState, materializeLatinSpaceCompression);
+  if (count === chars.length && breakerState.currentLine.length === 1) return { kind: 'blocked' };
+  return retractSuffix(breakerState, materializeLatinSpaceCompression, strAdvance, lastText,
+    chars.slice(0, chars.length - count).join('').length, scale);
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is indivisible. It moves whole,
+ * every piece of it, unless it alone holds the line or is glued to what
+ * precedes it; the line returns to its state before the cell was admitted
+ * (its extents included), which placeRubyCell recorded. */
+function retractRubyCell(
+  breakerState: ReturnType<typeof createLineBreakerState>,
+  materializeLatinSpaceCompression: () => void,
+): CrossRunKinsokuRetraction {
+  const line = breakerState.currentLine;
+  const group = (line.at(-1) as LayoutTextSeg).rubyGroup;
+  let start = line.length - 1;
+  while (start > 0) {
+    const before = line[start - 1]!;
+    if (!('text' in before) || before.rubyGroup !== group) break;
+    start -= 1;
+  }
+  const pieces = line.slice(start) as LayoutTextSeg[];
+  if (start === 0 || pieces[0]!.hardJoinPrev === true) return { kind: 'blocked' };
+  materializeLatinSpaceCompression();
+  for (let index = pieces.length - 1; index >= 0; index -= 1) {
+    breakerState.currentWidth -= pieces[index]!.measuredWidth;
+    popMixedLineItem(breakerState);
+  }
+  const admitted = breakerState.rubyCellStart;
+  breakerState.latinLineHomogeneous = false;
+  if (!admitted || admitted.group !== group || admitted.line !== line || admitted.lineLength !== start) {
+    return { kind: 'retracted', tail: pieces[0]!, followers: pieces.slice(1) };
+  }
+  const mixedSpace = breakerState.mixedSpace;
+  Object.assign(breakerState, admitted.scalars);
+  breakerState.mixedSpace = mixedSpace;
+  breakerState.snapBlock = admitted.snapBlock ? { ...admitted.snapBlock } : null;
+  breakerState.latinLineGaps.length = admitted.latinLineGapCount;
+  breakerState.latinLineHomogeneous = false;
+  breakerState.rubyCellStart = null;
+  return { kind: 'retracted', tail: pieces[0]!, followers: pieces.slice(1) };
+}
+
+/** Retract `lastText` from `split` on: the head stays, the suffix leads the
+ * next line. */
+function retractSuffix(
+  breakerState: ReturnType<typeof createLineBreakerState>,
+  materializeLatinSpaceCompression: () => void,
+  strAdvance: (segment: LayoutTextSeg, text: string, retainTrailingPunctuationCompression?: boolean) => number,
+  lastText: LayoutTextSeg,
+  split: number,
+  scale: number,
+): CrossRunKinsokuRetraction {
+  const headText = lastText.text.slice(0, split);
   // Moving the whole segment would cut the hard source seam immediately
   // before it. A protected no-break edge is equally indivisible.
   if (
@@ -95,12 +173,15 @@ export function retractLeadingKinsoku(
   breakerState.latinLineHomogeneous = false;
 
   const tailText = lastText.text.slice(split);
-  const tail: LayoutTextSeg = {
+  const tailSlice: LayoutTextSeg = {
     ...lastText,
     ...RESET_SLICED_TEXT_MEASUREMENT,
     text: tailText,
     ...slicedTextMetadata(lastText, split, lastText.text.length),
-    measuredWidth: strAdvance(lastText, tailText, true),
+  };
+  const tail: LayoutTextSeg = {
+    ...tailSlice,
+    measuredWidth: strAdvance(tailSlice, tailText, true),
     // The retraction creates a real line boundary. The old source seam was
     // either retained in `headText` or was soft; it must not be projected
     // onto this newly-created suffix.

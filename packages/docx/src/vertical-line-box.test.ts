@@ -816,3 +816,196 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 6)', () =>
     expect(headOf('TallFace') - headOf('NotInMetrics')).toBeCloseTo(2.5, 1);
   });
 });
+
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 7)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+  const column = (pt: number) => ({ pageHeight: 60 + 80 + pt });
+  const guide = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+
+  it('admits a fitText ruby base piece by its whole cell', () => {
+    const fitted = (piece: 0 | 1, length: number) => lineTexts(layoutParagraph([
+      { text: '前' },
+      { text: '東', ruby: guide, ...(piece === 0 ? { extra: { fitTextVal: 300, fitTextId: 41 } } : {}) },
+      { text: '京', extra: { rubyBaseContinuation: true, ...(piece === 1 ? { fitTextVal: 300, fitTextId: 42 } : {}) } },
+    ], 'tbRl', null, column(length)).lines);
+    // 前 (10pt) and the 25pt cell need 35pt.
+    expect(fitted(0, 32)).toEqual(['前', '東京']);
+    expect(fitted(1, 22)).toEqual(['前', '東京']);
+  });
+
+  it('moves a line-end-forbidden opener with the ruby cell after it', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前「' }, { text: '東京', ruby: guide }], 'tbRl', null, column(35),
+    );
+    expect(lineTexts(lines)).toEqual(['前', '「東京']);
+  });
+
+  it('keeps a forbidden ruby leader on a column it cannot leave', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '東京', ruby: guide }, { text: 'ゃ', ruby: guide }], 'tbRl', null, column(25),
+    );
+    expect(lineTexts(lines)).toEqual(['東京ゃ']);
+  });
+
+  it('restores the column extents a retracted ruby cell had added', () => {
+    const raised = { text: 'か', fontSizePt: 5, hpsRaisePt: 9 };
+    const retracted = layoutParagraph(
+      [{ text: '前' }, { text: '東A', ruby: raised }, { text: 'ゃ' }], 'tbRl', null, column(40),
+    ).lines;
+    expect(lineTexts(retracted)).toEqual(['前', '東Aゃ']);
+    const same = paragraphOf([{ text: '前' }, { text: '東A', ruby: raised }, { text: 'ゃ' }]);
+    const broken = { ...same, runs: [same.runs[0], { type: 'break', breakType: 'line' }, ...same.runs.slice(1)] } as unknown as DocParagraph & BodyElement;
+    const explicit = layoutBody([broken], 'tbRl', column(40)).layers.body
+      .find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!.lines[0]!;
+    const axis = (line: LineLayout) => line.baselinePt - line.bounds.yPt;
+    expect(axis(retracted[0]!)).toBeCloseTo(axis(explicit), 6);
+  });
+
+  it('shapes guide runs as one text when their characters select one face', () => {
+    const run = (eastAsia: string) => ({ ascii: 'Same', highAnsi: 'Same', eastAsia, complexScript: 'Same' });
+    const ruby = {
+      text: 'سلام', fontSizePt: 5, hpsRaisePt: 9,
+      guideRuns: [{ text: 'سل', fonts: run('KanaOne') }, { text: 'ام', fonts: run('KanaTwo') }],
+    };
+    const line = layoutParagraph([{ text: '漢字', ruby }]).lines[0]!;
+    expect(textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps.map((op) => op.text)).toEqual(['سلام']);
+  });
+
+  it('turns a sideways guide in an upright cell about the guide face', () => {
+    const offsetOf = (face: string) => {
+      const fonts = { ascii: face, highAnsi: face, eastAsia: face };
+      const ruby = { text: 'A', fontSizePt: 5, hpsRaisePt: 9, guideRuns: [{ text: 'A', fonts }] };
+      const line = layoutCellParagraph([{ text: '漢', ruby }], 'tbRlV')[0]!;
+      return textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps[0]!.glyphOffsetPt?.yPt ?? 0;
+    };
+    expect(offsetOf('NotInMetrics')).toBeCloseTo(1.5, 6);
+    expect(offsetOf('TallFace')).toBeCloseTo(3, 6);
+  });
+});
+
+describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () => {
+  // Deterministic generator: ruby cells with split base runs, fitText pieces,
+  // kinsoku leaders and openers, in lrTb, tbRl and tbLrV columns of varied
+  // length.
+  const random = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const KANJI = [...'一二三四五六七八九十百千万東京都庁前後中左右上下山川田林森村町市区円年月日火水木金土'];
+  const LEADERS = [...'ゃょー」'];
+  const LINE_START_FORBIDDEN = new Set(LEADERS);
+  const LINE_END_FORBIDDEN = new Set(['「']);
+  const ALIGNS = ['center', 'left', 'right', 'distributeLetter', undefined];
+  type Cell = { id: number; base: string; guide: string };
+
+  function generate(seed: number) {
+    const next = random(seed);
+    const pick = <T,>(items: readonly T[]) => items[Math.floor(next() * items.length)]!;
+    const pool = [...KANJI];
+    const take = () => pool.splice(Math.floor(next() * pool.length), 1)[0]!;
+    const runs: Run[] = [];
+    const cells: Cell[] = [];
+    let fitId = 100;
+    const items = 3 + Math.floor(next() * 6);
+    for (let index = 0; index < items; index++) {
+      if (next() < 0.5) {
+        let text = Array.from({ length: 1 + Math.floor(next() * 3) }, take).join('');
+        if (next() < 0.3) text = pick(LEADERS) + text;
+        if (next() < 0.25) text += '「';
+        runs.push({ text });
+        continue;
+      }
+      const pieces = [take() + (next() < 0.3 ? 'A' : ''), ...(next() < 0.5 ? [take()] : [])];
+      const guide = 'あいうえおかきくけこ'.slice(0, 1 + Math.floor(next() * 6));
+      const ruby = { text: guide, fontSizePt: 5, hpsRaisePt: next() < 0.5 ? 9 : 4, align: pick(ALIGNS) };
+      const fitPiece = next() < 0.3 ? Math.floor(next() * pieces.length) : -1;
+      pieces.forEach((text, piece) => runs.push({
+        text,
+        ...(piece === 0 ? { ruby } : {}),
+        extra: {
+          ...(piece > 0 ? { rubyBaseContinuation: true } : {}),
+          ...(piece === fitPiece ? { fitTextVal: 200 + Math.floor(next() * 400), fitTextId: fitId++ } : {}),
+        },
+      }));
+      cells.push({ id: cells.length, base: pieces.join(''), guide });
+    }
+    const direction = pick([undefined, 'tbRl', 'tbLrV']);
+    const lengthPt = 25 + Math.floor(next() * 60);
+    const grid = next() < 0.3
+      ? { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 } as Partial<SectionProps> : {};
+    return { runs, cells, direction, lengthPt, grid };
+  }
+
+  const lineText = (line: LineLayout) => textPlacements(line).map((entry) => entry.text).join('');
+  const sectionFor = (direction: string | undefined, lengthPt: number, grid: Partial<SectionProps>) =>
+    ({ ...grid, ...(direction ? { pageHeight: 60 + 80 + lengthPt } : { pageWidth: 40 + 90 + lengthPt }) });
+
+  /** The same runs with an explicit break wherever the layout broke. */
+  function explicitlyBroken(runs: readonly Run[], lines: readonly LineLayout[]): DocParagraph & BodyElement {
+    const ends = new Set<number>();
+    let offset = 0;
+    for (const line of lines.slice(0, -1)) ends.add(offset += [...lineText(line)].length);
+    const out: unknown[] = [];
+    const base = paragraphOf(runs);
+    let position = 0;
+    runs.forEach((run, index) => {
+      const source = base.runs[index] as unknown as { text: string };
+      const chars = [...run.text];
+      let start = 0;
+      for (let at = 1; at <= chars.length; at++) {
+        if (!ends.has(position + at)) continue;
+        out.push({ ...source, text: chars.slice(start, at).join('') });
+        out.push({ type: 'break', breakType: 'line' });
+        start = at;
+      }
+      if (start < chars.length) out.push({ ...source, text: chars.slice(start).join('') });
+      position += chars.length;
+    });
+    return { ...base, runs: out } as unknown as DocParagraph & BodyElement;
+  }
+
+  it.each(Array.from({ length: 200 }, (_, seed) => seed + 1))('keeps every ruby cell whole and every line edge legal (seed %i)', (seed) => {
+    const { runs, cells, direction, lengthPt, grid } = generate(seed);
+    const section = sectionFor(direction, lengthPt, grid);
+    const { lines } = layoutParagraph(runs, direction, null, section);
+    const texts = lines.map(lineText);
+    expect(texts.join('')).toBe(runs.map((run) => run.text).join(''));
+    for (const cell of cells) {
+      // One line holds the whole base, and its guide is painted once.
+      // Each cell's kanji are unique in the paragraph ('A' may repeat).
+      const own = [...cell.base].filter((char) => char !== 'A');
+      expect(texts.filter((text) => own.some((char) => text.includes(char))), cell.base).toHaveLength(1);
+      expect(texts.some((text) => text.includes(cell.base)), cell.base).toBe(true);
+      const guides = lines.flatMap((line) => textPlacements(line))
+        .filter((entry) => entry.ruby && cell.base.startsWith(entry.text))
+        .map((entry) => entry.ruby!.paintOps.map((op) => op.text).join(''));
+      expect(guides, cell.base).toEqual([cell.guide]);
+    }
+    const context = `${direction ?? "lrTb"} ${lengthPt}pt ${grid.docGridType ?? ''} ${JSON.stringify(texts)} ${JSON.stringify(runs.map((run) => [run.text, run.ruby?.text ?? "", run.extra ?? {}]))}`;
+    texts.forEach((text, index) => {
+      if (index > 0) expect(LINE_START_FORBIDDEN.has([...text][0]!), `${index} of ${context}`).toBe(false);
+      if (index < texts.length - 1 && LINE_END_FORBIDDEN.has([...text].at(-1)!)) {
+        // Unavoidable only when the opener and the cell after it exceed a
+        // whole line.
+        const following = textPlacements(lines[index + 1]!);
+        const cell = cells.find((candidate) => following[0]?.ruby && candidate.base.startsWith(following[0].text));
+        const cellAdvance = cell ? following.filter((entry) => cell.base.includes(entry.text))
+          .reduce((sum, entry) => sum + entry.advancePt, 0) : 0;
+        expect(cell !== undefined && cellAdvance + 10 > lengthPt, `${index} of ${context}`).toBe(true);
+      }
+    });
+    // Each line's extents are those of its own content: breaking the same
+    // runs explicitly at the same places gives the same lines.
+    const explicit = layoutBody([explicitlyBroken(runs, lines)], direction, section).layers.body
+      .find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!.lines;
+    expect(explicit.map(lineText)).toEqual(texts);
+    explicit.forEach((line, index) => {
+      const laid = lines[index]!;
+      expect(laid.advancePt, `${index}`).toBeCloseTo(line.advancePt, 6);
+      expect(laid.baselinePt - laid.bounds.yPt, `${index}`).toBeCloseTo(line.baselinePt - line.bounds.yPt, 6);
+    });
+  });
+});

@@ -224,7 +224,7 @@ export class LineMeasurementAdapter {
     const service = right.textLayoutService;
     if (!left || !l || !r || l.kerning !== true || !service || service !== left.textLayoutService
       || !left.text.endsWith(' ') || right.text.startsWith(' ') || !right.text
-      || left.metricOnly || right.metricOnly || left.ruby || right.ruby
+      || left.metricOnly || right.metricOnly || left.ruby || right.ruby || left.rubyPiece || right.rubyPiece
       || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
       || left.verticalRun || right.verticalRun || left.rtl || right.rtl
       || l.complexScript || r.complexScript

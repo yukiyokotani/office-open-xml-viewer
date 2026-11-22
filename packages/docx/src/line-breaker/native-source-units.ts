@@ -65,7 +65,7 @@ export function acquireNativeSourceUnits(
   let hasVisibleCut = false;
   let unitIndex = 0;
   for (const segment of original) {
-    if (!('text' in segment) || !segment.textShapeRequest || segment.metricOnly || segment.ruby
+    if (!('text' in segment) || !segment.textShapeRequest || segment.metricOnly || segment.ruby || segment.rubyPiece
       || segment.tateChuYoko || segment.vertAlign != null || segment.script === 'eastAsia'
       || segment.latinSpaceCompressionEligible || segment.mixedSpaceAverageWidthRatio !== undefined
       || segment.widthBalanceSpaceSequence || segment.fitTextRegionIndex !== undefined || segment.verticalRun

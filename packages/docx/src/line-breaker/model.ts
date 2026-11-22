@@ -82,6 +82,9 @@ export interface RubyGuideUnit {
   readonly orientation?: 'upright' | 'rotate' | 'sideways';
   readonly verticalFeature?: true;
   readonly drawOffsetPx?: Readonly<{ xPt: number; yPt: number }>;
+  /** The selected face's box at the guide size (a horizontally shaped unit):
+   * an upright frame turns the unit about it. */
+  readonly faceBoxPx?: Readonly<{ ascentPx: number; descentPx: number }>;
 }
 
 /** The single geometry of a ruby run's cell, at the layout scale it was

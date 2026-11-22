@@ -2074,7 +2074,7 @@ function withoutLatinIdeographicSpaceGaps(line: readonly LayoutSeg[]): LineGap[]
   const cells: number[] = [];
   const cellAt = new Map<string, number>();
   projected.forEach(({ text }, si) => {
-    if (text === undefined || ('ruby' in line[si]! && line[si]!.ruby)) {
+    if (text === undefined || ('text' in line[si]! && (line[si]!.ruby || line[si]!.rubyPiece))) {
       cells.push(OPAQUE);
       return;
     }
@@ -2145,7 +2145,7 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     const start = segment.text.indexOf(' ');
     const singleSpace = start >= 0 && segment.text.indexOf(' ', start + 1) < 0;
     const spaceClusters = segment.shapedSpaceClusters ?? segment.shapedClusters;
-    if (spaceClusters && !segment.ruby) {
+    if (spaceClusters && !segment.ruby && !segment.rubyPiece) {
       // One contextual space has no index-dependent width: use the existing
       // scalar representation without allocating three temporary Maps. The
       // retained offset is UTF-16, not a codepoint index. No isolated-space
@@ -2175,7 +2175,7 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     }
     // U+3000 is a text cell for gaps; only the advances of those in the
     // trailing U+0020/U+3000 run are needed, where a line-end U+3000 hangs.
-    if (state.lineEndIdeographicSpaceHangs === true && segment.text.includes('\u3000') && !segment.ruby) {
+    if (state.lineEndIdeographicSpaceHangs === true && segment.text.includes('\u3000') && !segment.ruby && !segment.rubyPiece) {
       const characters = [...segment.text];
       let start = segment.text.length;
       for (let off = characters.length - 1; off >= 0 && (characters[off] === ' ' || characters[off] === '\u3000'); off--) {
@@ -2185,12 +2185,12 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
           { ...segment, text: '\u3000', ...slicedTextMetadata(segment, start, start + 1) }, '\u3000'));
       }
     }
-    const spacePx = scalarSpacePx ?? spaceWidths?.values().next().value ?? (start >= 0 && !segment.ruby
+    const spacePx = scalarSpacePx ?? spaceWidths?.values().next().value ?? (start >= 0 && !segment.ruby && !segment.rubyPiece
       ? state.strAdvance({ ...segment, text: ' ', ...slicedTextMetadata(segment, start, start + 1) }, ' ')
       : 0);
     const leadingGapPx = leadingAutoSpacePx(state, segment);
     return {
-      text: segment.metricOnly ? '' : segment.ruby ? undefined : segment.text,
+      text: segment.metricOnly ? '' : segment.ruby || segment.rubyPiece ? undefined : segment.text,
       widthPx: segment.measuredWidth, spacePx,
       ...(spaceWidths ? { spaceWidths } : {}),
       ...(ideographicSpaceWidths ? { ideographicSpaceWidths } : {}),
@@ -2256,7 +2256,7 @@ function certifiedCapRefusalOverflow(state: Pick<PassOperationState,
     // Width-mutating legacy compression/condensation keeps its original
     // model path; this receipt omission is only for ordinary stable advances.
     if (!('text' in segment) || segment.text.length === 0 || segment.text === ' '
-      || segment.metricOnly || segment.ruby || segment.verticalRun || segment.tateChuYoko
+      || segment.metricOnly || segment.ruby || segment.rubyPiece || segment.verticalRun || segment.tateChuYoko
       || segment.fitTextRegionIndex !== undefined || segment.fitTextPerGapPx !== undefined
       || segment.snapGridClass !== undefined || segment.autoSpaceBeforePt !== undefined
       || segment.autoSpaceLeadingPx !== undefined || segment.autoSpaceCompressible
@@ -2348,7 +2348,7 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   if (state.justifiedCompressionAdmissionOnly === true) {
     for (const group of [breaker.currentLine, members]) {
       for (const segment of group) {
-        if ('text' in segment && segment.text.includes(' ') && !segment.ruby && !segment.metricOnly
+        if ('text' in segment && segment.text.includes(' ') && !segment.ruby && !segment.rubyPiece && !segment.metricOnly
           && segment.textLayoutService && segment.textShapeRequest) {
           segment.shapedSpaceClusters = state.measurement.acquireCompressionSpaceClusters(segment);
         }
@@ -2482,7 +2482,7 @@ export function performTextSegmentBox(
   s.leadingWordBoundaryPx = undefined;
   // Fitting needs the spaces' contextual advances, not every prefix of a
   // possibly overlong word. Full cluster acquisition belongs to final slices.
-  const measured = justifiedCompressionApplies(operationState) && s.text.includes(' ') && !s.ruby
+  const measured = justifiedCompressionApplies(operationState) && s.text.includes(' ') && !s.ruby && !s.rubyPiece
     && (!operationState.justifiedCompressionAdmissionOnly || s.metricOnly)
     ? measurement.measureSegment(s, 'spaces')
     : measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');

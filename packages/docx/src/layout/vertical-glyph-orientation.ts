@@ -76,7 +76,11 @@ export function uprightFrameRuby(placement: TextPlacement): TextPlacement['ruby'
       if (EAST_ASIAN_RE.test(op.text)) {
         return { ...op, origin: { xPt: op.origin.xPt + advance / 2, yPt: op.origin.yPt }, glyphOrientation: 'upright' as const };
       }
-      const offset = placement.fontSizePt > 0 ? baseOffset * op.fontSizePt / placement.fontSizePt : 0;
+      // A turned unit's baseline lies (ascent - descent) / 2 of its own face
+      // tailward of the guide axis, as in a vertical section.
+      const offset = op.faceBoxPt
+        ? (op.faceBoxPt.ascentPt - op.faceBoxPt.descentPt) / 2
+        : placement.fontSizePt > 0 ? baseOffset * op.fontSizePt / placement.fontSizePt : 0;
       return { ...op, glyphOrientation: 'sideways' as const, ...(offset !== 0 ? { glyphOffsetPt: { xPt: 0, yPt: offset } } : {}) };
     }),
   };

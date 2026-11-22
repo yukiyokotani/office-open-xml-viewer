@@ -67,7 +67,7 @@ export function retainClosingPairAdvances(runs: readonly ParagraphLayoutSource['
   if (runs.some(run => {
     if (run.type !== 'text') return true;
     const source: ParagraphTextBearingRun = run;
-    return source.ruby || source.optionalHyphen || source.noteRef || source.fitTextVal != null
+    return source.ruby || source.rubyBaseContinuation || source.optionalHyphen || source.noteRef || source.fitTextVal != null
       || source.noBreakRanges?.length || source.noBreakBefore || source.noBreakAfter
       || source.eastAsianVert || source.allCaps || source.smallCaps || /[\p{Cc}\p{Cf}]/u.test(run.text);
   })) return;

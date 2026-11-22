@@ -98,7 +98,8 @@ export function prepareBreakQueue(
     if (
       candidate.fitTextRegionIndex !== undefined ||
       candidate.tateChuYoko === true ||
-      candidate.ruby !== undefined
+      candidate.ruby !== undefined ||
+      candidate.rubyPiece === true
     ) {
       // buildSegments can split an atomic source run before its U+3000 tail
       // (ruby is retained only on the first emitted segment). Undo any markers
@@ -308,5 +309,20 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineEastAsian: false,
     queue: new SegmentQueue(),
     trailingBreakFontSize: null as number | null,
+    /** The line as it was before the last ruby cell was admitted, restored
+     * when kinsoku retracts that cell (WORD_RUBY_ALIGN_PLACEMENT). */
+    rubyCellStart: null as RubyCellStart | null,
   };
+}
+
+/** See `rubyCellStart`: the line's scalar state, its snapToChars block and
+ * its Latin gap count when a ruby cell's first piece was admitted at
+ * `lineLength` of `line`. */
+export interface RubyCellStart {
+  readonly group: object;
+  readonly line: readonly unknown[];
+  readonly lineLength: number;
+  readonly scalars: Readonly<Record<string, unknown>>;
+  readonly snapBlock: SnapBlockState | null;
+  readonly latinLineGapCount: number;
 }

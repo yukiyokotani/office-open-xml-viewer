@@ -58,7 +58,7 @@ export function wordTabGlueUnit(
   const text = head.text;
   if (text.length === 0 || /^\s/u.test(text)) return false;
   if (follower && 'text' in follower && follower.joinPrev === true) return false;
-  if (head.fitTextRegionIndex !== undefined || head.ruby || head.tateChuYoko || head.hardJoinPrev
+  if (head.fitTextRegionIndex !== undefined || head.ruby || head.rubyPiece || head.tateChuYoko || head.hardJoinPrev
     || head.noBreakRanges?.length || head.seaBreaks !== undefined || head.optionalHyphen
     || head.optionalHyphenBreaks?.length || hasCJKBreakOpportunity(text)) return false;
   const visibleEnd = text.replace(/\s+$/u, '').length;

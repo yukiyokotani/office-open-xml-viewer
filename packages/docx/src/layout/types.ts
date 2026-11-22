@@ -306,6 +306,9 @@ export interface RetainedGlyphPaintOperation {
    * (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). Absent operations paint one grapheme
    * or keep the context's kerning. */
   readonly kerning?: 'normal' | 'none';
+  /** The selected face's box (a horizontally shaped ruby guide unit): an
+   * upright frame centres a turned unit's box on its axis. */
+  readonly faceBoxPt?: Readonly<{ ascentPt: number; descentPt: number }>;
   /** Tight selected-face ink relative to this operation's baseline origin. */
   readonly inkBounds?: Readonly<{
     xMinPt: number;

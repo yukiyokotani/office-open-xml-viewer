@@ -144,7 +144,7 @@ export function lineGapModel(
 
 /** Shared first-follower boundary for collection and natural admission. */
 function candidateUnitStopsBefore(next: LayoutSeg, hasSeparator: boolean): boolean {
-  if (!('text' in next) || next.ruby || next.fitTextRegionIndex !== undefined
+  if (!('text' in next) || next.ruby || next.rubyPiece || next.fitTextRegionIndex !== undefined
     || (hasSeparator && /[^ ]/u.test(next.text) && !next.joinPrev && !next.hardJoinPrev)
     // A WORD_EAST_ASIAN_AUTO_SPACE seam is a legal East Asian/Latin break
     // (UAX #14) unless segmentation glued it.
@@ -156,7 +156,7 @@ function candidateUnitStopsBefore(next: LayoutSeg, hasSeparator: boolean): boole
  * this unit. An included empty/SPACE piece already makes it non-singleton;
  * do not skip ahead or allocate the complete unit merely to inspect its size. */
 export function candidateUnitIsSingleton(first: LayoutSeg, next: LayoutSeg | undefined): boolean {
-  if (!('text' in first) || first.ruby || first.fitTextRegionIndex !== undefined) return true;
+  if (!('text' in first) || first.ruby || first.rubyPiece || first.fitTextRegionIndex !== undefined) return true;
   return next === undefined || candidateUnitStopsBefore(next, first.text.endsWith(' '));
 }
 
@@ -164,7 +164,7 @@ export function candidateUnitIsSingleton(first: LayoutSeg, next: LayoutSeg | und
  * indivisible units of their own. No following-word eligibility lookahead. */
 export function candidateUnit(first: LayoutSeg, queue: Iterable<LayoutSeg>): LayoutSeg[] {
   const segments = [first];
-  if (!('text' in first) || first.ruby || first.fitTextRegionIndex !== undefined) return segments;
+  if (!('text' in first) || first.ruby || first.rubyPiece || first.fitTextRegionIndex !== undefined) return segments;
   let hasSeparator = first.text.endsWith(' ');
   for (const next of queue) {
     if (candidateUnitStopsBefore(next, hasSeparator)) break;

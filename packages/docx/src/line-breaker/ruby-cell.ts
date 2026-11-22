@@ -77,6 +77,7 @@ function horizontalUnits(
       fontRoute: span.fontRoute,
       fontWeight: span.font.weight,
       fontStyle: span.font.style,
+      faceBoxPx: { ascentPx: span.ascentPt, descentPx: span.descentPt },
       ...(kerned ? { kerning: 'normal' as const } : {}),
     });
     whole = joined ? { span, index: units.length - 1 } : undefined;
@@ -169,18 +170,25 @@ function verticalUnits(cells: readonly SpanGuideCell[], spaced: boolean): GuideU
 /** The guide's w:rt runs (§17.3.3.24) shaped at the guide size, each with
  * its own faces over the base run's request: the authored runs when they
  * spell the guide, else the whole guide in the base run's faces. */
+type GuideShape = NonNullable<ReturnType<NonNullable<LayoutTextSeg['textLayoutService']>['shape']>>;
+
+/** The guide's w:rt runs (§17.3.3.24) shaped at the guide size, each with
+ * its own faces over the base run's request: the authored runs when they
+ * spell the guide, else the whole guide in the base run's faces. Adjacent
+ * runs whose characters select the same face are shaped as one text, so a
+ * run seam inside a word keeps its contextual (joining, kerned) forms; an
+ * rFonts slot no character uses does not separate them. */
 function guideShapes(
   first: LayoutTextSeg,
   ruby: NonNullable<LayoutTextSeg['ruby']>,
   sizePx: number,
   vertical: boolean,
-): readonly Readonly<{ start: number; text: string; shape: NonNullable<ReturnType<NonNullable<LayoutTextSeg['textLayoutService']>['shape']>> }>[] | undefined {
+): readonly Readonly<{ start: number; text: string; shape: GuideShape }>[] | undefined {
   const service = first.textLayoutService;
   const request = first.textShapeRequest;
   if (!service || !request) return undefined;
-  const runs = ruby.guideRuns ? mergedGuideRuns(ruby.guideRuns) : [{ text: ruby.text }];
-  let start = 0;
-  return runs.map((run) => {
+  const runs: readonly (RubyGuideRunFace | { readonly text: string })[] = ruby.guideRuns ?? [{ text: ruby.text }];
+  const shapeRun = (run: RubyGuideRunFace | { readonly text: string }, text: string): GuideShape => {
     const own = 'fonts' in run ? run : undefined;
     const fonts = own ? {
       ascii: own.fonts.ascii ?? request.fonts.ascii,
@@ -188,8 +196,8 @@ function guideShapes(
       eastAsia: own.fonts.eastAsia ?? request.fonts.eastAsia,
       complexScript: own.fonts.complexScript ?? request.fonts.complexScript,
     } : undefined;
-    const shape = service.shape({
-      ...independentTextShapeRequest(request, run.text),
+    return service.shape({
+      ...independentTextShapeRequest(request, text),
       // The guide run's faces are resolved, theme references included.
       ...(fonts ? { fonts, themeFonts: undefined, themeFontPresence: undefined } : {}),
       ...(own ? { weight: own.bold ? 700 : 400, style: own.italic ? 'italic' as const : 'normal' as const } : {}),
@@ -199,27 +207,26 @@ function guideShapes(
       // its faces are read from the shape.
       ...(vertical ? { clusterGeometry: false } : {}),
     });
-    const entry = { start, text: run.text, shape };
-    start += run.text.length;
-    return entry;
-  });
-}
-
-/** Adjacent w:rt runs that select the same faces shape as one text, so a
- * run seam inside a word keeps its contextual (joining, kerned) forms. */
-function mergedGuideRuns(runs: readonly RubyGuideRunFace[]): RubyGuideRunFace[] {
-  const merged: RubyGuideRunFace[] = [];
-  const slots = ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const;
+  };
+  const faceOf = (shape: GuideShape): string | undefined => {
+    const keys = new Set(shape.spans.map((span) => `${span.fontRoute.fingerprint}|${span.font.weight}|${span.font.style}`));
+    return keys.size === 1 ? [...keys][0] : undefined;
+  };
+  const entries: { start: number; text: string; shape: GuideShape; run: RubyGuideRunFace | { readonly text: string } }[] = [];
+  let start = 0;
   for (const run of runs) {
-    const previous = merged.at(-1);
-    if (previous && previous.bold === run.bold && previous.italic === run.italic
-      && slots.every((slot) => (previous.fonts[slot] ?? null) === (run.fonts[slot] ?? null))) {
-      merged[merged.length - 1] = { ...previous, text: previous.text + run.text };
+    const shape = shapeRun(run, run.text);
+    const previous = entries.at(-1);
+    const face = faceOf(shape);
+    if (previous && face !== undefined && faceOf(previous.shape) === face) {
+      const text = previous.text + run.text;
+      entries[entries.length - 1] = { ...previous, text, shape: shapeRun(previous.run, text) };
     } else {
-      merged.push(run);
+      entries.push({ start, text: run.text, shape, run });
     }
+    start += run.text.length;
   }
-  return merged;
+  return entries.map(({ start: entryStart, text, shape }) => ({ start: entryStart, text, shape }));
 }
 
 /** A vertical guide is planned, and so painted, without kerning. */

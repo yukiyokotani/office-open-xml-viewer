@@ -2753,6 +2753,9 @@ function textPlacement(
         fontStyle: unit.fontStyle,
         color,
         ...(unit.kerning ? { kerning: unit.kerning } : {}),
+        ...(unit.faceBoxPx ? { faceBoxPt: {
+          ascentPt: unit.faceBoxPx.ascentPx / rubyScale, descentPt: unit.faceBoxPx.descentPx / rubyScale,
+        } } : {}),
         ...(unit.orientation ? { glyphOrientation: unit.orientation } : {}),
         ...(unit.verticalFeature ? { verticalFeature: true as const } : {}),
         ...(unit.drawOffsetPx ? { glyphOffsetPt: {
