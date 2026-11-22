@@ -133,9 +133,26 @@ describe('section-aware note numbering', () => {
     expect(formatCustomNoteNumber(3, 'Ω')).toBe('3');
   });
 
+  it('applies XSLT format tokens: digit families, prefix and suffix, bijective letters', () => {
+    expect(formatCustomNoteNumber(3, '٠٠١')).toBe('٠٠٣');
+    expect(formatCustomNoteNumber(3, '(01)')).toBe('(03)');
+    expect([26, 27, 28, 29].map((value) => formatCustomNoteNumber(value, 'A'))).toEqual(['Z', 'AA', 'AB', 'AC']);
+    expect(formatCustomNoteNumber(28, 'a')).toBe('ab');
+    expect(formatCustomNoteNumber(3, '(1), (2), ...')).toBe('(3)');
+    const arabic = '<w:numFmt w:val="custom" w:format="&#x660;&#x660;&#x661;"/><w:numStart w:val="3"/>';
+    expect(render({ kind: 'footnote', sectionPr: [arabic, arabic] })).toEqual(['٠٠٣', '٠٠٤', '٠٠٥', '٠٠٦']);
+  });
+
   it('numbers an automatic note 0 from numStart 0, never as a custom mark', () => {
     const zero = '<w:numStart w:val="0"/>';
     expect(render({ kind: 'footnote', sectionPr: [zero, zero] })).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('takes the footnote position of the section over settings.xml ([MS-OI29500] §2.1.309)', () => {
+    const model = control({ kind: 'footnote', sectionPr: ['<w:pos w:val="beneathText"/>', '<w:pos w:val="beneathText"/>'] });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+    expect(layout.diagnostics.map((diagnostic) => diagnostic.message))
+      .toContainEqual(expect.stringContaining('footnote position "beneathText"'));
   });
 
   it('gives a final section without its own sectPr the default numbering', () => {

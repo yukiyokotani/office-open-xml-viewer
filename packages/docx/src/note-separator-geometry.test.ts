@@ -7,6 +7,7 @@ import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import type { DocxDocumentModel } from './types.js';
 import type { DocumentLayout, NoteLayout } from './layout/types.js';
+import { textRunGeometryForPage } from './layout/text-index.js';
 import {
   noteSeparatorRuleSpan, wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt, wordShortNoteSeparatorLengthPt,
 } from './layout/body-pagination-compatibility.js';
@@ -267,5 +268,17 @@ describe('word-note-separator-geometry', () => {
     const plain = bands(render(control({ kind: 'endnote' })))[0]!;
     const automatic = bands(render(control({ kind: 'endnote', normalPPr: '<w:spacing w:afterAutospacing="1"/>' })))[0]!;
     expect(automatic).toEqual(plain);
+  });
+
+  it('accepts range markup around the marker and keeps the marker metrics out of the text index', () => {
+    const layout = render(control({ kind: 'footnote', listed: true,
+      separatorParagraph: '<w:p><w:proofErr w:type="spellStart"/><w:bookmarkStart w:id="1" w:name="s"/>'
+        + '<w:r><w:t>Sources</w:t><w:separator/></w:r><w:bookmarkEnd w:id="1"/><w:r><w:t>Below</w:t></w:r></w:p>' }));
+    const note = leadingOf(layout);
+    expect(note.leading?.rule).toBeDefined();
+    expect(paragraphTexts(note)).toEqual(['SourcesBelow']);
+    const texts = textRunGeometryForPage(layout, 0).map((run) => run.placement.text).join('');
+    expect(texts).toContain('Sources');
+    expect(texts).not.toContain('\u200b');
   });
 });

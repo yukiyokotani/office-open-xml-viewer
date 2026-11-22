@@ -2491,7 +2491,9 @@ fn parse_notes(
                 selected_stories.separator_story,
             ) = story();
         }
-        if id.is_empty() || id == "-1" || id == "0" || is_special {
+        // §17.18.33: a special story is identified by its w:type, not its
+        // id; a normal note may use any id, including 0 (§17.11.10).
+        if id.is_empty() || is_special {
             continue;
         }
         // Footnote/endnote bodies carry no nested sections; pass an empty map.
@@ -2602,11 +2604,39 @@ fn selected_note_separator_story(
     if blocks.is_empty() || !blocks.iter().all(|block| is_w(*block, "p")) {
         return None;
     }
-    // Structure only: paragraph properties and runs of run properties, text,
-    // tabs, text-wrapping breaks and the marker. Any other content (foreign
-    // or not represented here) leaves the story unsupported.
+    // Structure only: paragraph properties, zero-width range markup (§17.13
+    // bookmarks, comment, permission and move ranges, proofing marks) and
+    // runs of run properties, text, tabs, text-wrapping breaks and the marker.
+    // Any other content (foreign or not represented here) leaves the story
+    // unsupported.
+    let range_markup = |node: &roxmltree::Node<'_, '_>| {
+        is_w_ns(node.tag_name().namespace())
+            && matches!(
+                node.tag_name().name(),
+                "bookmarkStart"
+                    | "bookmarkEnd"
+                    | "proofErr"
+                    | "permStart"
+                    | "permEnd"
+                    | "commentRangeStart"
+                    | "commentRangeEnd"
+                    | "moveFromRangeStart"
+                    | "moveFromRangeEnd"
+                    | "moveToRangeStart"
+                    | "moveToRangeEnd"
+                    | "customXmlInsRangeStart"
+                    | "customXmlInsRangeEnd"
+                    | "customXmlDelRangeStart"
+                    | "customXmlDelRangeEnd"
+                    | "customXmlMoveFromRangeStart"
+                    | "customXmlMoveFromRangeEnd"
+                    | "customXmlMoveToRangeStart"
+                    | "customXmlMoveToRangeEnd"
+            )
+    };
     let run_content = |node: &roxmltree::Node<'_, '_>| {
         is_w(*node, "rPr")
+            || is_w(*node, "lastRenderedPageBreak")
             || is_w(*node, "t")
             || is_w(*node, "tab")
             || is_w(*node, "cr")
@@ -2618,6 +2648,7 @@ fn selected_note_separator_story(
     let supported = blocks.iter().all(|paragraph| {
         paragraph.children().filter(|child| child.is_element()).all(|child| {
             is_w(child, "pPr")
+                || range_markup(&child)
                 || (is_w(child, "r")
                     && child.children().filter(|node| node.is_element()).all(|node| run_content(&node)))
         })
@@ -2651,6 +2682,15 @@ fn selected_note_separator_story(
         );
         PARSING_SEPARATOR_STORY.with(|flag| flag.set(false));
         let mut parsed = parsed;
+        // §17.3.1.20: a saved page-break hint is no content of the story.
+        parsed.runs.retain(|run| {
+            !matches!(
+                run,
+                DocRun::Break {
+                    break_type: BreakType::RenderedPage
+                }
+            )
+        });
         if synthesized {
             parsed.numbering = None;
             parsed.frame_pr = None;
@@ -3156,6 +3196,32 @@ mod note_separator_tests {
     }
 
     #[test]
+    fn keeps_a_normal_note_with_id_zero() {
+        // §17.18.33: w:type marks a special story, not its id (§17.11.10).
+        let document = selected_note_package(
+            None,
+            crate::xml_util::W_NS,
+            "42",
+            Some(r#"<w:footnote w:id="0"><w:p><w:r><w:t>ZERO</w:t></w:r></w:p></w:footnote>"#),
+        );
+        let ids: Vec<_> = document.footnotes.iter().map(|note| note.id.as_str()).collect();
+        assert_eq!(ids, ["0", "1"]);
+    }
+
+    #[test]
+    fn reads_the_section_footnote_position() {
+        let xml = format!(
+            r#"<w:sectPr xmlns:w="{}"><w:footnotePr><w:pos w:val="beneathText"/></w:footnotePr></w:sectPr>"#,
+            crate::xml_util::W_NS
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        assert_eq!(
+            section_note_numbering_wire(doc.root_element()).footnote_position.as_deref(),
+            Some("beneathText")
+        );
+    }
+
+    #[test]
     fn listed_separator_stories_keep_their_whole_content() {
         use crate::types::NoteSeparatorMark::{None as NoRule, Short};
         let listed = Some(r#"<w:footnotePr><w:footnote w:id="42"/></w:footnotePr>"#);
@@ -3200,6 +3266,11 @@ mod note_separator_tests {
                 crate::xml_util::W_NS
             )),
             (Some(Short), vec![vec![text("W1"), marker.clone(), text("W2"), text("A1")]])
+        );
+        // Range markup around the marker run is zero-width.
+        assert_eq!(
+            parse(r#"<w:p><w:proofErr w:type="spellStart"/><w:bookmarkStart w:id="1" w:name="s"/><w:r><w:t>Sources</w:t><w:lastRenderedPageBreak/><w:separator/></w:r><w:bookmarkEnd w:id="1"/></w:p>"#),
+            (Some(Short), vec![vec![text("Sources"), marker.clone()]])
         );
         // Authored U+FFFC and U+200B stay text; only the marker is flagged.
         assert_eq!(
@@ -3776,6 +3847,9 @@ fn section_note_numbering_wire(sect_pr: roxmltree::Node) -> crate::types::Sectio
     crate::types::SectionNoteNumberingWire {
         footnote: child_w(sect_pr, "footnotePr").and_then(note_numbering_wire),
         endnote: child_w(sect_pr, "endnotePr").and_then(note_numbering_wire),
+        footnote_position: child_w(sect_pr, "footnotePr")
+            .and_then(|properties| child_w(properties, "pos"))
+            .and_then(|node| attr_w(node, "val")),
     }
 }
 
