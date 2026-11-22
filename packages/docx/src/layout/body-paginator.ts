@@ -1628,8 +1628,9 @@ function* paginateBodyPassSteps(
   let drawingReplayPending = false;
   /** This layout of the live page found pins that are not registered yet. */
   let uprightReplayPending = false;
-  /** Pins asked for, by page and pin key: each is asked for once per page. */
-  const uprightPinnedOnce = new Set<string>();
+  /** The pins asked for on the live page, by pin key: each is asked for
+   * once per page. Started anew with the page (uprightPinsOf). */
+  let uprightPinnedOnce = new Set<string>();
   /** The page on which each released table was released, by table key. */
   const uprightReleasedOnPage = new Map<string, number>();
   const uprightReleasedHere = (tableKey: string): boolean =>
@@ -1657,6 +1658,7 @@ function* paginateBodyPassSteps(
     if (uprightPinPage !== pageIndex) {
       uprightPinPage = pageIndex;
       uprightPins = new Map();
+      uprightPinnedOnce = new Set();
       uprightDrawingPins = new Map();
       foundDrawingPins = new Map();
       drawingReplayPending = false;
@@ -1699,8 +1701,7 @@ function* paginateBodyPassSteps(
       // drawings where they lie.
       for (const [occurrenceId, pin] of foundDrawingPins) uprightDrawingPins.set(occurrenceId, pin);
       uprightPins = new Map();
-      const asked = `${state.flow.pageIndex}|`;
-      for (const key of uprightPinnedOnce) if (key.startsWith(asked)) uprightPinnedOnce.delete(key);
+      uprightPinnedOnce = new Set();
       throw new UprightBlockPageReplay();
     }
     let replay = uprightReplayPending;
@@ -3694,10 +3695,10 @@ function* paginateBodyPassSteps(
           // again when it closes, with every pin this layout of it found.
           const tableKey = sourceKey(block.source);
           const pinKey = uprightPinKey(tableKey, fragmentStartKey);
-          const askedKey = `${state.flow.pageIndex}|${pinKey}`;
-          if (!uprightPinnedOnce.has(askedKey) && !uprightReleasedHere(tableKey) && !uprightPinsDroppedHere()) {
-            uprightPinnedOnce.add(askedKey);
-            uprightPinsOf(state.flow.pageIndex).set(pinKey, {
+          const pagePins = uprightPinsOf(state.flow.pageIndex);
+          if (!uprightPinnedOnce.has(pinKey) && !uprightReleasedHere(tableKey) && !uprightPinsDroppedHere()) {
+            uprightPinnedOnce.add(pinKey);
+            pagePins.set(pinKey, {
               tableKey, sourceIndex: block.source.path[0]!, registration: acquired.uprightPagePin, consumed: false,
             });
             uprightReplayPending = true;

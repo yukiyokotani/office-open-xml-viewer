@@ -76,14 +76,24 @@ type Counts = {
   members: number; drawings: number;
   /** Float registry entries of wrapped drawings. */
   floats: number;
+  /** Frames of anchor occurrences serialized into keys (JSON.stringify of
+   * [occurrence, frame] pairs). */
+  frameKeys: number;
+  /** Table pin keys read by iterating a Set. */
+  pinKeys: number;
   /** Elements an insertion into or removal from an array of drawings moves. */
   drawingShifts: number;
 };
 
 /** Lays `run` out while counting the visits described above. */
-function counting<Result>(run: () => Result): Readonly<{ result: Result; counts: Counts }> {
+function counting<Result>(
+  run: () => Result,
+  /** Count `pinKeys` too: every Set iteration of the layout is then wrapped. */
+  setIteration = false,
+): Readonly<{ result: Result; counts: Counts }> {
   const counts: Counts = {
     boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0, drawings: 0, floats: 0,
+    frameKeys: 0, pinKeys: 0,
     drawingShifts: 0,
   };
   const visit = (value: unknown): void => {
@@ -145,6 +155,30 @@ function counting<Result>(run: () => Result): Readonly<{ result: Result; counts:
       for (let index = 0; index < copy.length; index += 1) visit(copy[index]);
       return copy;
     });
+  }
+  const stringify = JSON.stringify;
+  JSON.stringify = ((value: unknown, ...rest: never[]) => {
+    if (Array.isArray(value) && Array.isArray(value[0]) && typeof value[0][0] === 'string'
+      && value[0][1] !== null && typeof value[0][1] === 'object' && 'xPt' in value[0][1]) {
+      counts.frameKeys += value.length;
+    }
+    return stringify(value, ...rest);
+  }) as typeof JSON.stringify;
+  restore.push(() => { JSON.stringify = stringify; });
+  if (setIteration) {
+    const setIterator = Set.prototype[Symbol.iterator];
+    Set.prototype[Symbol.iterator] = function (this: Set<unknown>) {
+      const iterator = setIterator.call(this);
+      return (function* () {
+        for (let next = iterator.next(); !next.done; next = iterator.next()) {
+          if (typeof next.value === 'string' && next.value.includes('body:body:') && next.value.includes('|')) {
+            counts.pinKeys += 1;
+          }
+          yield next.value;
+        }
+      })() as never;
+    };
+    restore.push(() => { Set.prototype[Symbol.iterator] = setIterator; });
   }
   try {
     return { result: run(), counts };
@@ -338,6 +372,50 @@ describe('upright block table placement work', () => {
     const large = measure(8);
     expect(large.layouts).toBe(small.layouts);
     expect(large.drawings).toBeLessThanOrEqual(2 * small.drawings + 16);
+  }, 300_000);
+
+  it('keys a paragraph on the pinned frames of its own drawings', () => {
+    // The pairs of the test above: after the page is laid out again every
+    // page-positioned rectangle is pinned. Each anchoring paragraph is keyed
+    // on the pins of its own rectangles, not on every pin of the page.
+    const measure = (pairs: number) => {
+      const body = [table(2), ...Array.from({ length: pairs }, (_, at) => [
+        P.replace('</w:p>', `${anchoredRectangle(70 + 30 * at, 310, 10, 20, 'paragraph')}</w:p>`),
+        P.replace('</w:p>', `${anchoredRectangle(70 + 30 * at, 380, 10, 20, 'page', 'page', false)}</w:p>`),
+      ]).flat()];
+      const { result, counts } = counting(() => layOutPages('tbLrV', body, 1, 240));
+      expect(result[0]!.drawings).toHaveLength(2 * pairs);
+      return counts.frameKeys;
+    };
+    const small = measure(4);
+    const large = measure(8);
+    expect(small).toBeGreaterThan(0);
+    expect(large).toBeLessThanOrEqual(2 * small);
+  }, 300_000);
+
+  it('lays a page out again for its drawings without reading the pins asked for on earlier pages', () => {
+    // Pages that each hold a table pinned for the rectangle anchored after
+    // it, and a pair as above, for which the page is laid out again and its
+    // table pins are found anew. What was asked for on the pages before is
+    // not read.
+    const pageBreak = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+    const measure = (pages: number) => {
+      const body = Array.from({ length: pages }, () => [
+        table(1),
+        P.replace('</w:p>', `${anchoredRectangle(60, 62, 6, 5)}</w:p>`),
+        P.replace('</w:p>', `${anchoredRectangle(300, 310, 10, 20, 'paragraph')}</w:p>`),
+        P.replace('</w:p>', `${anchoredRectangle(300, 380, 10, 20, 'page', 'page', false)}</w:p>`),
+        pageBreak,
+      ]).flat();
+      const { result, counts } = counting(() => layOutPages('tbLrV', body), true);
+      expect(result.length).toBeGreaterThanOrEqual(pages);
+      for (let page = 0; page < pages; page += 1) {
+        expect(result[page]!.tables).toHaveLength(1);
+        expect(result[page]!.drawings).toHaveLength(3);
+      }
+      return counts.pinKeys;
+    };
+    expect(measure(8)).toBe(measure(4));
   }, 300_000);
 
   it('compares each drawing registered at the page start with its own registration only', () => {

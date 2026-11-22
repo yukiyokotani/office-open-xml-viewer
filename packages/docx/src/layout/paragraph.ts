@@ -6708,6 +6708,23 @@ function mergeAnchorCollisions(
  * inputs. Active line grids and wrap authorities are gated below before line
  * reuse; the exact key still includes all of their original facts.
  */
+/** The entries of `frames` for the anchor occurrences of `paragraph`, in
+ * run order, as a key; null when it holds none of them. */
+function ownAnchorFramesKey(
+  paragraph: ParagraphAcquisitionInput,
+  frames: ReadonlyMap<string, LayoutRect> | undefined,
+): string | null {
+  if (!frames || frames.size === 0) return null;
+  let own: Array<readonly [string, LayoutRect]> | null = null;
+  for (const run of paragraph.runs) {
+    if (!anchoredPayloadRun(run)) continue;
+    const occurrenceId = run.anchorAcquisitionInput!.occurrenceId;
+    const frame = frames.get(occurrenceId);
+    if (frame) (own ??= []).push([occurrenceId, frame]);
+  }
+  return own ? JSON.stringify(own) : null;
+}
+
 function paragraphAcquisitionKey(
   cache: ParagraphAcquisitionRuntimeCache,
   paragraph: ParagraphAcquisitionInput,
@@ -6899,12 +6916,10 @@ function paragraphAcquisitionKey(
       options.uprightTables.planned ? JSON.stringify(options.uprightTables.planned) : null,
     ]),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
-    lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
-      ? null
-      : JSON.stringify([...options.frozenAnchorFrames].sort(([left], [right]) => left.localeCompare(right))),
-    lineOnly || !hasAnchoredPayload || !options.pinnedAnchorFrames?.size
-      ? null
-      : JSON.stringify([...options.pinnedAnchorFrames].sort(([left], [right]) => left.localeCompare(right))),
+    // By the frames of this paragraph's own anchors only: the frames kept
+    // for the other drawings of its page do not reach its acquisition.
+    lineOnly || !hasAnchoredPayload ? null : ownAnchorFramesKey(paragraph, options.frozenAnchorFrames),
+    lineOnly || !hasAnchoredPayload ? null : ownAnchorFramesKey(paragraph, options.pinnedAnchorFrames),
     continuation ? JSON.stringify(continuation) : null,
     lineOnly ? null : options.paragraphBorderEdges
       ? [options.paragraphBorderEdges.top, options.paragraphBorderEdges.bottom]
