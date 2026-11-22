@@ -42,12 +42,18 @@ export function eastAsianAutoSpacePairApplies(
 }
 
 /** Text that participates in automatic spacing as an ordinary inline cell.
- * Fixed-width fitText cells, ruby, tate-chu-yoko and complex-script text keep
- * their own geometry; each interrupts adjacency like a tab or an object. */
+ * Fixed-width fitText cells, tate-chu-yoko and complex-script text keep
+ * their own geometry; each interrupts adjacency like a tab or an object. A
+ * ruby base (rubyCell) is spaced only inside itself. */
 function participates(segment: LayoutTextSeg): boolean {
-  return segment.fitTextRegionIndex === undefined && !segment.ruby && !segment.tateChuYoko
+  return segment.fitTextRegionIndex === undefined && !segment.tateChuYoko
     && segment.script !== 'complexScript' && segment.optionalHyphen === undefined
     && !segment.optionalHyphenGlyph;
+}
+
+/** A piece of a ruby base: its first piece carries `ruby`. */
+function rubyCell(segment: LayoutTextSeg): boolean {
+  return segment.ruby !== undefined || segment.rubyPiece === true;
 }
 
 function firstScalar(text: string): string | undefined {
@@ -121,7 +127,8 @@ export function assignEastAsianAutoSpace(
   for (let index = 0; index < segs.length; index += 1) {
     const segment = segs[index]!;
     const splits: number[] = [];
-    if (!('text' in segment) || !participates(segment)) {
+    if (!('text' in segment) || !participates(segment) || rubyCell(segment)) {
+      // A ruby base's pieces are spaced at their seams below, never split.
       before = undefined;
     } else if (segment.text.length > 0) {
       const sea = segment.seaBreaks !== undefined;
@@ -153,6 +160,9 @@ export function assignEastAsianAutoSpace(
       previous = undefined;
       continue;
     }
+    // WORD_EAST_ASIAN_AUTO_SPACE: a ruby cell's edges interrupt adjacency;
+    // its base pieces are spaced among themselves.
+    if (segment.ruby || (previous && rubyCell(previous) && !segment.rubyPiece)) previous = undefined;
     segment.autoSpaceBeforePt = undefined;
     segment.autoSpaceCompressible = undefined;
     // An empty metric host (an anchor character) has no glyph and no

@@ -1386,6 +1386,10 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     wForFit,
     admitsTrailingOverflowPunctuation,
   } = frame;
+  if (s.rubyGroup !== undefined) {
+    placeRubyCell(context, frame);
+    return;
+  }
   if (
     (fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW()) &&
       breakerState.latinAppliedPerGap === 0) ||
@@ -1397,8 +1401,6 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     s.measuredWidth = w;
     addToLine(s, w, h, asc, desc);
     appendQueuedIdeographicSpaceSegment(s);
-  } else if (s.rubyGroup !== undefined) {
-    placeRubyCell(context, frame);
   } else if (admitsTrailingOverflowPunctuation) {
     s.measuredWidth = w;
     addToLine(s, w, h, asc, desc);
@@ -1588,19 +1590,25 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
 }
 
 /** WORD_RUBY_ALIGN_PLACEMENT: a ruby cell (every piece of one ruby run, its
- * widening included) is one indivisible unit, so none of the CJK, SEA,
- * hanging-punctuation or emergency split paths may cut its base or charge
- * less than its advance. A cell that does not fit after content moves whole
+ * widening included) is one indivisible unit, admitted by its whole advance,
+ * so none of the CJK, SEA, hanging-punctuation or emergency split paths may
+ * cut its base or charge less than its advance. A cell that does not fit after content moves whole
  * to a fresh line; on a line it would start it overflows whole. */
 function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitFrame): void {
-  const { breakerState, flush, addToLine, availW, segAdvance } = context;
+  const { breakerState, flush, addToLine, availW, segAdvance, fitsMeasuredWidth } = context;
   const { s, w, h, asc, desc, wForFit } = frame;
   const group = s.rubyGroup!;
   if ((s.rubyPieceIndex ?? 0) === 0) {
+    // The first piece is admitted by the whole cell, its later pieces with it.
     let unitWidth = wForFit;
     for (const follower of breakerState.queue) {
       if (!('text' in follower) || follower.rubyGroup !== group) break;
       unitWidth += segAdvance(follower);
+    }
+    if (fitsMeasuredWidth(breakerState.currentWidth + unitWidth, availW())) {
+      s.measuredWidth = w;
+      addToLine(s, w, h, asc, desc);
+      return;
     }
     const startsLine = breakerState.currentLine.length === 0
       || (s.listLabel === undefined && breakerState.currentWidth < availW()
@@ -1618,7 +1626,7 @@ function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitF
       return;
     }
     context.forcedPlacement(unitWidth);
-  } else {
+  } else if (!fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW())) {
     // A later piece never starts a line: its cell's first piece is placed.
     const unitStart = joinedUnitStart(breakerState.currentLine);
     context.forcedPlacement(lineAdvanceFrom(breakerState.currentLine, unitStart) + wForFit, unitStart);
@@ -1667,6 +1675,8 @@ function prepareAtomicTextFit(
     && breakerState.currentLine.every(isListLabelItem);
   if (
     !s.joinPrev &&
+    // A ruby cell is admitted whole by placeRubyCell.
+    s.rubyGroup === undefined &&
     !listLabelOnlyLine &&
     breakerState.currentLine.length > 0 &&
     (follower?.joinPrev || preferWholeWord && follower?.explicitBreakBefore) &&

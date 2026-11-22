@@ -1420,11 +1420,13 @@ export function performAddToLine(
       if (rubyCellWidened(operationState, s)) {
         // WORD_RUBY_ALIGN_PLACEMENT: a widened ruby piece takes its own allocation
         // plus its share of the cell's widening, which is whole cells.
+        // A widened Latin base keeps its natural box, the one its guide was
+        // compared with: the cell's whole cells come from the widening.
         const share = rubyPieceWideningPx(s, performRubyCell(operationState, s));
         const baseNatural = naturalWidth - share;
-        const allocated = snapToCharsAllocatedWidthPx(baseNatural, kind, snapPitchPx,
-          kind === 'eastAsia' ? eastAsianSnapCellCount(s) : 1);
-        const leading = kind === 'latin' ? (allocated - baseNatural) / 2 : 0;
+        const allocated = kind === 'latin' ? baseNatural : snapToCharsAllocatedWidthPx(baseNatural, kind, snapPitchPx,
+          eastAsianSnapCellCount(s));
+        const leading = 0;
         committedWidth = allocated + share;
         s.snapGridLeadingPadPx = leading;
         s.snapGridTrailingPadPx = committedWidth - baseNatural - leading - rubyBaseOffsetPx(s);
@@ -1697,22 +1699,27 @@ export function performRubyCell(
   const rubyPx = ruby.fontSizePt * scale;
   const verticalLine = first.verticalRun === true || first.tateChuYoko === true
     || first.verticalFrameRun === 'upright';
+  // A later piece's automatic East Asian gap lies inside the base
+  // (WORD_EAST_ASIAN_AUTO_SPACE); the first piece takes none.
   const naturalBasePx = (piece: LayoutTextSeg) => segAdvanceWidth(
     piece,
     measureText(piece).width + verticalInkExtra(piece, piece.text),
     characterGrid,
     scale,
     condensedNaturalClusters(operationState, piece, piece.text),
-  );
+  ) + (piece === first ? 0 : leadingAutoSpacePx(operationState, piece));
   const snapKind = (piece: LayoutTextSeg) => snapPitchPx != null && piece.text.length > 0
     ? snapToCharsClass(piece, characterGrid) : null;
   return rubyCellGeometry(s, {
     scale,
+    // The box its guide is aligned on (rubyGuideOriginsPx): an East Asian
+    // base's whole cells, a Latin base's own glyphs, which share their
+    // script block's cells unless the guide widens them.
     baseAdvancePx: (piece) => {
       const natural = naturalBasePx(piece);
-      const kind = snapKind(piece);
-      return kind ? snapToCharsAllocatedWidthPx(natural, kind, snapPitchPx!,
-        kind === 'eastAsia' ? eastAsianSnapCellCount(piece) : 1) : natural;
+      return snapKind(piece) === 'eastAsia'
+        ? snapToCharsAllocatedWidthPx(natural, 'eastAsia', snapPitchPx!, eastAsianSnapCellCount(piece))
+        : natural;
     },
     fallbackGuideAdvancePx: (text) => {
       const previousFont = ctx.font;
@@ -1795,8 +1802,10 @@ export function performStandaloneSnapAdvance(
 
   const kind = snapToCharsClass(s, characterGrid);
   if (!kind || snapPitchPx == null || s.text.length === 0) return naturalWidth;
-  // A ruby piece's share of its cell's widening is already whole cells.
+  // A ruby piece's share of its cell's widening is already whole cells; a
+  // widened Latin base keeps its natural box (performRubyCell).
   const rubyShare = rubyPieceWideningPx(s, performRubyCell(operationState, s));
+  if (kind === 'latin' && rubyCellWidened(operationState, s)) return naturalWidth;
   return snapToCharsAllocatedWidthPx(
     naturalWidth - rubyShare,
     kind,

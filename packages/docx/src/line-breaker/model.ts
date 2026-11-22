@@ -47,6 +47,19 @@ export interface LayoutSegSource {
 }
 
 
+/** One w:rt run of a ruby guide: its text and the faces it selects. */
+export interface RubyGuideRunFace {
+  readonly text: string;
+  readonly fonts: Readonly<{
+    ascii?: string | null;
+    highAnsi?: string | null;
+    eastAsia?: string | null;
+    complexScript?: string | null;
+  }>;
+  readonly bold: boolean;
+  readonly italic: boolean;
+}
+
 /** One placed unit of a ruby guide (WORD_RUBY_ALIGN_PLACEMENT): a grapheme,
  * a contextual span that paints whole (a joining or pair-kerned script), or a
  * planned vertical cell (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). */
@@ -312,6 +325,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
     align?: string;
     /** The run's complete base text, of which this is the first piece. */
     baseText?: string;
+    /** The w:rt runs (§17.3.3.24) in order, whose texts make up `text`,
+     * each with its own faces. */
+    guideRuns?: readonly RubyGuideRunFace[];
   };
   /** The ruby run this segment is a piece of, shared by every piece (the
    * first also carries `ruby`). Its cell geometry is computed once and read

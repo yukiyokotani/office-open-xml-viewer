@@ -165,6 +165,45 @@ function verticalUnits(cells: readonly SpanGuideCell[], spaced: boolean): GuideU
   });
 }
 
+/** The guide's w:rt runs (§17.3.3.24) shaped at the guide size, each with
+ * its own faces over the base run's request: the authored runs when they
+ * spell the guide, else the whole guide in the base run's faces. */
+function guideShapes(
+  first: LayoutTextSeg,
+  ruby: NonNullable<LayoutTextSeg['ruby']>,
+  sizePx: number,
+  vertical: boolean,
+): readonly Readonly<{ start: number; text: string; shape: NonNullable<ReturnType<NonNullable<LayoutTextSeg['textLayoutService']>['shape']>> }>[] | undefined {
+  const service = first.textLayoutService;
+  const request = first.textShapeRequest;
+  if (!service || !request) return undefined;
+  const runs = ruby.guideRuns ?? [{ text: ruby.text }];
+  let start = 0;
+  return runs.map((run) => {
+    const own = 'fonts' in run ? run : undefined;
+    const fonts = own ? {
+      ascii: own.fonts.ascii ?? request.fonts.ascii,
+      highAnsi: own.fonts.highAnsi ?? request.fonts.highAnsi,
+      eastAsia: own.fonts.eastAsia ?? request.fonts.eastAsia,
+      complexScript: own.fonts.complexScript ?? request.fonts.complexScript,
+    } : undefined;
+    const shape = service.shape({
+      ...independentTextShapeRequest(request, run.text),
+      // The guide run's faces are resolved, theme references included.
+      ...(fonts ? { fonts, themeFonts: undefined, themeFontPresence: undefined } : {}),
+      ...(own ? { weight: own.bold ? 700 : 400, style: own.italic ? 'italic' as const : 'normal' as const } : {}),
+      fontSizePt: sizePx,
+      measure: true,
+      // A vertical guide takes its geometry from its planned cells; only
+      // its faces are read from the shape.
+      ...(vertical ? { clusterGeometry: false } : {}),
+    });
+    const entry = { start, text: run.text, shape };
+    start += run.text.length;
+    return entry;
+  });
+}
+
 /** A vertical guide is planned, and so painted, without kerning. */
 const GUIDE_PLAN_KERNING = 'none' as const;
 
@@ -181,20 +220,14 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   const sizePx = ruby.fontSizePt * inputs.scale;
   const service = inputs.verticalGlyphMeasurement;
   const vertical = service !== undefined && (first.verticalRun === true || first.tateChuYoko === true);
-  const shape = first.textLayoutService && first.textShapeRequest
-    ? first.textLayoutService.shape({
-        ...independentTextShapeRequest(first.textShapeRequest, ruby.text),
-        fontSizePt: sizePx,
-        measure: true,
-        // A vertical guide takes its geometry from its planned cells; only
-        // its face is read from the shape.
-        ...(vertical ? { clusterGeometry: false } : {}),
-      })
-    : undefined;
-  if (vertical && shape && shape.spans.length === 0) throw new Error('Ruby shaping produced no selected-face span');
+  // §17.3.3.24: each w:rt run is shaped with its own faces (guideShapes).
+  const shapes = guideShapes(first, ruby, sizePx, vertical);
+  if (vertical && shapes?.some(({ shape }) => shape.spans.length === 0)) {
+    throw new Error('Ruby shaping produced no selected-face span');
+  }
   // Each font span (its rFonts slot) is planned in its own face.
   let spanPenPx = 0;
-  const cells = vertical && shape ? shape.spans.flatMap((span): SpanGuideCell[] => {
+  const cells = vertical && shapes ? shapes.flatMap(({ shape, start }) => shape.spans.flatMap((span): SpanGuideCell[] => {
     const plan = (part: string) => service!.planRun({
       text: part,
       font: canvasFontString(span.fontRoute, sizePx, span.font.weight, span.font.style),
@@ -208,10 +241,11 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     const advanceOf = (part: string) => plan(part).reduce((sum, cell) => sum + cell.advancePt, 0);
     const face = { fontRoute: span.fontRoute, fontWeight: span.font.weight, fontStyle: span.font.style };
     const originPx = spanPenPx;
+    const spanStart = start + span.start;
     const planned = plan(span.text).map((cell): SpanGuideCell => ({
       cell: {
         ...cell,
-        range: { start: span.start + cell.range.start, end: span.start + cell.range.end },
+        range: { start: spanStart + cell.range.start, end: spanStart + cell.range.end },
         originPt: originPx + cell.originPt,
       },
       face,
@@ -219,10 +253,18 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     }));
     spanPenPx += planned.reduce((sum, { cell }) => sum + cell.advancePt, 0);
     return planned;
+  })) : undefined;
+  let runPenPx = 0;
+  const horizontal = !cells && shapes ? shapes.flatMap(({ shape, start, text }) => {
+    const penPx = runPenPx;
+    runPenPx += shape.advancePt;
+    return horizontalUnits(shape, text).map((unit) => ({
+      ...unit, start: start + unit.start, end: start + unit.end, offsetPx: penPx + unit.offsetPx,
+    }));
   }) : undefined;
   const guidePx = cells
     ? spanPenPx
-    : shape?.advancePt ?? inputs.fallbackGuideAdvancePx(ruby.text);
+    : shapes ? runPenPx : inputs.fallbackGuideAdvancePx(ruby.text);
   const basePx = pieces.reduce((sum, piece) => sum + inputs.baseAdvancePx(piece), 0);
   // Only an authored alignment widens the base to a longer guide.
   const widenedPx = ruby.align ? Math.max(basePx, guidePx) : basePx;
@@ -230,7 +272,7 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   // letter (wordRubyGuideSpacing).
   const spaced = widenedPx > guidePx
     && (ruby.align === 'distributeLetter' || ruby.align === 'distributeSpace');
-  const units = cells ? verticalUnits(cells, spaced) : shape ? horizontalUnits(shape, ruby.text) : [];
+  const units = cells ? verticalUnits(cells, spaced) : horizontal ?? [];
   const pitch = inputs.snapPitchPx;
   const advancePx = pitch && pitch > 0 && widenedPx > basePx
     ? Math.ceil(widenedPx / pitch - 1e-9) * pitch

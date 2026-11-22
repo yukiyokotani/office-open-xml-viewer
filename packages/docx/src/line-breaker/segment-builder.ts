@@ -288,12 +288,25 @@ export function appendTextPiece(
   // the annotation only to the first emitted segment.
   const baseRuby = r.ruby;
   const rubyAlign = acquiredValue(acquiredTypography?.ruby?.align, undefined);
+  // §17.3.3.24: each w:rt run keeps its own properties; the guide is shaped
+  // run by run when the runs spell the guide text.
+  const authoredGuideRuns = acquiredTypography?.ruby?.guideRuns;
+  const guideRuns = baseRuby && authoredGuideRuns && authoredGuideRuns.length > 0
+    && authoredGuideRuns.map((guideRun) => guideRun.text).join('') === baseRuby.text
+    ? authoredGuideRuns.map((guideRun) => ({
+        text: guideRun.text,
+        fonts: guideRun.fonts ?? {},
+        bold: guideRun.bold,
+        italic: guideRun.italic,
+      }))
+    : undefined;
   const ruby = baseRuby
     ? {
         text: baseRuby.text,
         fontSizePt: baseRuby.fontSizePt,
         ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
         ...(rubyAlign ? { align: rubyAlign } : {}),
+        ...(guideRuns ? { guideRuns } : {}),
       }
     : undefined;
   const revision = r.revision;
@@ -1203,7 +1216,8 @@ interface SegmentEmissionState {
   readonly effectiveCharacterScale: number | undefined;
   readonly effectiveKerningThreshold: number | undefined;
   readonly effectiveSnapToGrid: boolean | undefined;
-  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number; align?: string } | undefined;
+  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number; align?: string;
+    guideRuns?: readonly import('./model.js').RubyGuideRunFace[] } | undefined;
   readonly revision:
     | {
         readonly kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;

@@ -42,7 +42,8 @@ function makeCtx(): CanvasRenderingContext2D {
   getContext() { return makeCtx(); }
 };
 
-type Ruby = Readonly<{ text: string; fontSizePt: number; hpsRaisePt: number; align?: string }>;
+type GuideRun = Readonly<{ text: string; fonts: Readonly<Record<string, string>> }>;
+type Ruby = Readonly<{ text: string; fontSizePt: number; hpsRaisePt: number; align?: string; guideRuns?: readonly GuideRun[] }>;
 type Run = Readonly<{ text: string; ruby?: Ruby; position?: number; fontFamily?: string; eastAsianVert?: boolean; fontSize?: number; extra?: Record<string, unknown> }>;
 
 function typographyInput(ruby: Ruby) {
@@ -52,7 +53,12 @@ function typographyInput(ruby: Ruby) {
   return {
     ruby: {
       align: value(ruby.align), baseFontSizePt: value(undefined),
-      raisePt: value(ruby.hpsRaisePt), language: value(undefined), guideRuns: [],
+      raisePt: value(ruby.hpsRaisePt), language: value(undefined),
+      guideRuns: (ruby.guideRuns ?? []).map((run) => ({
+        text: run.text, fontFamily: run.fonts.ascii ?? null, fontSizePt: ruby.fontSizePt,
+        bold: false, italic: false, color: null, language: null,
+        fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null, ...run.fonts },
+      })),
     },
   };
 }
@@ -125,23 +131,40 @@ function layoutCellParagraph(
   textDirection: string,
   sectionExtra: Partial<SectionProps> = {},
 ): readonly LineLayout[] {
+  return layoutCell(runs, textDirection, sectionExtra).lines;
+}
+
+/** The lines of a one-cell table and the page-space origin of each line's
+ * first placement, with an optional uniform rule and cell margin. */
+function layoutCell(
+  runs: readonly Run[],
+  textDirection: string,
+  sectionExtra: Partial<SectionProps> = {},
+  rulePt = 0,
+  marginPt = 0,
+): Readonly<{ lines: readonly LineLayout[]; cellTransform?: { a: number; b: number; c: number; d: number; e: number; f: number } }> {
   const cell = {
     content: [paragraphOf(runs)], colSpan: 1, vMerge: null,
     borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
     background: null, vAlign: 'top', widthPt: 200, textDirection,
   };
+  const rule = rulePt > 0 ? { width: rulePt, color: '000000', style: 'single' } : null;
   const table = {
     type: 'table', colWidths: [200],
     rows: [{ cells: [cell], rowHeight: 200, rowHeightRule: 'exact', isHeader: false }],
-    borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
-    cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
+    borders: { top: rule, bottom: rule, left: rule, right: rule, insideH: null, insideV: null },
+    cellMarginTop: marginPt, cellMarginBottom: marginPt, cellMarginLeft: marginPt, cellMarginRight: marginPt,
     jc: 'left', layout: 'fixed',
   } as unknown as BodyElement;
   const page = layoutBody([table], undefined, sectionExtra);
   const found: LineLayout[] = [];
+  let cellTransform: { a: number; b: number; c: number; d: number; e: number; f: number } | undefined;
   const visit = (node: unknown): void => {
     if (!node || typeof node !== 'object') return;
     const record = node as Record<string, unknown>;
+    if (record.kind === 'table-cell' && record.verticalText) {
+      cellTransform = (record.verticalText as { transform: typeof cellTransform }).transform;
+    }
     if (record.kind === 'paragraph' && Array.isArray(record.lines)) {
       found.push(...(record.lines as LineLayout[]));
       return;
@@ -152,7 +175,7 @@ function layoutCellParagraph(
     }
   };
   page.layers.body.forEach(visit);
-  return found;
+  return { lines: found, ...(cellTransform ? { cellTransform } : {}) };
 }
 
 // Vertical single lines are whole twips (wordVerticalSingleLinePx).
@@ -587,7 +610,7 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 4)', () =>
 
   it('keeps an unwidened ruby base in its snapToChars script block', () => {
     const grid = { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0, pageWidth: 40 + 90 + 35 } as Partial<SectionProps>;
-    const ruby = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const ruby = { text: 'か', fontSizePt: 3.5, hpsRaisePt: 9, align: 'center' };
     const narrow = { charScale: 0.4 };
     const { lines } = layoutParagraph([
       { text: 'I' }, { text: 'i', ruby, extra: narrow }, { text: 'i', extra: narrow }, { text: '後' },
@@ -598,17 +621,17 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 4)', () =>
 
   it('centres an unwidened guide on its base as placed in the snapToChars block', () => {
     const grid = { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0, pageWidth: 40 + 90 + 35 } as Partial<SectionProps>;
-    const ruby = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const ruby = { text: 'か', fontSizePt: 3.5, hpsRaisePt: 9, align: 'center' };
     const narrow = { charScale: 0.4 };
     const line = layoutParagraph([
       { text: 'I' }, { text: 'i', ruby, extra: narrow }, { text: 'i', extra: narrow }, { text: '後' },
     ], undefined, null, grid).lines[0]!;
     const annotated = textPlacements(line).find((entry) => entry.ruby)!;
     const base = annotated.paintOps.find((op) => op.text === 'i')!;
-    // The 40%-wide i is 4pt; the 5pt guide centres on it.
+    // The 40%-wide i is 4pt; the 3.5pt guide centres on it.
     const baseCentre = annotated.origin.xPt + base.offset.xPt + 2;
     const guide = annotated.ruby!.paintOps[0]!;
-    expect(guide.origin.xPt + 2.5).toBeCloseTo(baseCentre, 6);
+    expect(guide.origin.xPt + 1.75).toBeCloseTo(baseCentre, 6);
   });
 
   it.each(['tbRl', 'tbLrV'])('retracts a character ahead of a ruby cell led by a forbidden kana (%s)', (direction) => {
@@ -639,5 +662,85 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 4)', () =>
     const turned = ops.find((op) => op.glyphOrientation === 'sideways')!;
     expect(turned.text).toBe('AV');
     expect(turned.kerning).toBe('none');
+  });
+});
+
+describe('rotated cell rule inset (WORD_ROTATED_CELL_RULE_INSET)', () => {
+  // The physical x of the local frame's line-start corner of the cell.
+  const frameX = (direction: string, rulePt: number, marginPt: number) =>
+    layoutCell([{ text: '漢字' }], direction, {}, rulePt, marginPt).cellTransform!.e;
+
+  it('starts a btLr cell\'s first column the rule width in from a margin-free edge', () => {
+    expect(frameX('btLr', 1.5, 0) - frameX('btLr', 0, 0)).toBeCloseTo(1.5, 6);
+    expect(frameX('tbRl', 1.5, 0) - frameX('tbRl', 0, 0)).toBeCloseTo(0, 6);
+  });
+
+  it('measures a cell margin from the rule centre', () => {
+    expect(frameX('btLr', 0.5, 5.4) - frameX('btLr', 0, 0)).toBeCloseTo(5.65, 6);
+    expect(frameX('tbRl', 0.5, 5.4) - frameX('tbRl', 0, 0)).toBeCloseTo(-5.15, 6);
+  });
+});
+
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 5)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+
+  it.each(['tbRl', 'tbLrV'])('admits a split ruby base by its whole cell (%s)', (direction) => {
+    const ruby = { text: 'かきくけ', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const { lines } = layoutParagraph(
+      [{ text: '前前前' }, { text: 'ゃA', ruby }], direction, null, { pageHeight: 60 + 80 + 40 },
+    );
+    expect(lineTexts(lines)).toEqual(['前前', '前ゃA']);
+  });
+
+  it('widens a guide longer than its Latin base glyphs on a character grid', () => {
+    const grid = { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 } as Partial<SectionProps>;
+    const ruby = { text: 'かか', fontSizePt: 4, hpsRaisePt: 9, align: 'center' };
+    const narrow = { charScale: 0.4 };
+    const line = layoutParagraph([
+      { text: 'i', ruby, extra: narrow }, { text: 'i', ruby, extra: narrow },
+    ], undefined, null, grid).lines[0]!;
+    const [first, second] = textPlacements(line).filter((entry) => entry.ruby);
+    const firstEnd = Math.max(...first!.ruby!.paintOps.map((op) => op.origin.xPt + (op.advancePt ?? 0)));
+    const secondStart = Math.min(...second!.ruby!.paintOps.map((op) => op.origin.xPt));
+    // Each 8pt guide widens its 4pt base to one whole 10pt cell.
+    expect(secondStart).toBeGreaterThanOrEqual(firstEnd - 1e-6);
+    expect(second!.origin.xPt - first!.origin.xPt).toBeCloseTo(10, 6);
+  });
+
+  it('sizes the mark column after a trailing manual break as an empty paragraph\'s mark', () => {
+    const breaks = paragraphOf([{ text: '漢' }]);
+    const lineBreak = { type: 'break', breakType: 'line' };
+    const withBreaks = { ...breaks, runs: [...breaks.runs, lineBreak, lineBreak] } as unknown as DocParagraph & BodyElement;
+    const page = layoutBody([withBreaks, paragraphOf([])], 'tbRl');
+    const [broken, empty] = page.layers.body.filter((entry): entry is ParagraphLayout => entry.kind === 'paragraph');
+    expect(broken!.lines).toHaveLength(3);
+    expect(broken!.lines.at(-1)!.advancePt).toBeCloseTo(empty!.advancePt, 6);
+  });
+
+  it.each([undefined, 'tbRl'])('shapes each guide run in its own faces (%s)', (direction) => {
+    const fonts = (face: string) => ({ ascii: face, highAnsi: face, eastAsia: face });
+    const ruby = {
+      text: 'ABか', fontSizePt: 5, hpsRaisePt: 9,
+      guideRuns: [{ text: 'AB', fonts: fonts('GuideLatin') }, { text: 'か', fonts: fonts('GuideKana') }],
+    };
+    const line = layoutParagraph([{ text: '漢字', ruby, fontFamily: 'BaseFace' }], direction).lines[0]!;
+    const ops = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps;
+    const faceOf = (text: string) => JSON.stringify(ops.find((op) => op.text.includes(text))!.fontRoute);
+    expect(faceOf('A')).toContain('GuideLatin');
+    expect(faceOf('か')).toContain('GuideKana');
+  });
+
+  it.each([undefined, 'tbRl'])('spaces a mixed ruby base inside its cell, not at its edges (%s)', (direction) => {
+    const ruby = { text: 'あいうえおかきくけ', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const line = layoutParagraph([{ text: '前' }, { text: '東A', ruby }, { text: '後' }], direction).lines[0]!;
+    const placements = textPlacements(line);
+    const at = (text: string) => placements.find((entry) => entry.text === text)!;
+    const glyph = (text: string) => at(text).origin.xPt + at(text).paintOps[0]!.offset.xPt;
+    const cellStart = at('東').origin.xPt;
+    // The quarter-em gap (WORD_EAST_ASIAN_AUTO_SPACE) lies between 東 and A,
+    // inside the 45pt cell; 後 follows the cell directly.
+    expect(at('後').origin.xPt + at('後').paintOps[0]!.offset.xPt - cellStart - (direction ? 5 : 0)).toBeCloseTo(45, 6);
+    expect(glyph('A') - glyph('東') - (direction ? -5 : 0)).toBeCloseTo(10 + 2.5, 6);
   });
 });

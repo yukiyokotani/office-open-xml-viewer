@@ -612,6 +612,7 @@ mod private_typography_wire_tests {
         assert_eq!(ruby["language"]["value"], "ja-jp");
         assert_eq!(ruby["guideRuns"][0]["text"], "かん");
         assert_eq!(ruby["guideRuns"][0]["fontFamily"], "Yu Gothic");
+        assert_eq!(ruby["guideRuns"][0]["fonts"]["ascii"], "Yu Gothic");
         assert_eq!(ruby["guideRuns"][0]["fontSizePt"], 6.0);
         assert_eq!(ruby["guideRuns"][0]["bold"], true);
         assert_eq!(ruby["guideRuns"][0]["italic"], true);
@@ -7899,11 +7900,17 @@ fn ruby_typography_wire(
                 .and_then(|lang| attr_w(lang, "val"))
                 .map(|value| value.to_lowercase());
             let east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+            let ascii = theme.resolve_font_ref(fmt.font_family_ascii.clone());
+            let fonts = RubyGuideRunFontsWire {
+                ascii: ascii.clone(),
+                high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi.clone()),
+                east_asia: east_asia.clone(),
+                complex_script: theme.resolve_font_ref(fmt.font_family_cs.clone()),
+            };
             Some(RubyGuideRunTypographyWire {
                 text,
-                font_family: theme
-                    .resolve_font_ref(fmt.font_family_ascii.clone())
-                    .or(east_asia),
+                font_family: ascii.or(east_asia),
+                fonts,
                 font_size_pt: fmt.font_size,
                 bold: fmt.bold.unwrap_or(false),
                 italic: fmt.italic.unwrap_or(false),

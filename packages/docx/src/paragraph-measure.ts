@@ -743,8 +743,32 @@ export function measureParagraph(
     context.lineEdgeRules,
   );
   if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
+  // WORD_VERTICAL_LINE_CENTRED_BOX: the empty line a terminal manual break
+  // opens (§17.3.3.1) holds only the paragraph mark, so a vertical line is
+  // measured as an empty paragraph's mark line (WORD_EMPTY_MARK_ASCII_FACE),
+  // one vertical single line of the mark.
+  // Library scope: a float-wrapped paragraph keeps the line its wrap search
+  // allocated (the allocation is fixed by then).
+  const verticalMarkLine = environment.verticalCJK === true || environment.verticalFrameLines !== undefined;
+  const finalLine = lines.at(-1)!;
+  const trailingMark = verticalMarkLine && !placement.wrap && lines.length > 1
+    && finalLine.segments.length === 0 && finalLine.endsWithBreak !== true
+    ? paragraphMarkLineMetrics(
+        paragraph, 1, grid, context.hasRuby, markUsesEastAsianGrid, measurer.context, fontFamilyClasses,
+        context.lineSpacing, environment.resolvedLocalFonts, environment.layoutServices?.text,
+        environment.paragraphMarkShapeInput, compat.useFeLayout, 0, true, true,
+      )
+    : undefined;
+  if (trailingMark) {
+    finalLine.ascent = trailingMark.ascentPx;
+    finalLine.descent = trailingMark.descentPx;
+    finalLine.intendedSingle = trailingMark.intendedSinglePx;
+  }
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
+  if (trailingMark && !context.hasRuby) {
+    allocations[allocations.length - 1] = { layout: finalLine, advancePt: trailingMark.advancePx };
+  }
   const measuredLines: MeasuredLine[] = [];
   let physicalLineIndex: number | undefined;
   let physicalTopPt = cursorPt;

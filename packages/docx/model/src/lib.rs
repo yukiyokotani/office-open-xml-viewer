@@ -2946,9 +2946,22 @@ pub struct EastAsianLayoutTypographyWire {
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+pub struct RubyGuideRunFontsWire {
+    pub ascii: Option<String>,
+    pub high_ansi: Option<String>,
+    pub east_asia: Option<String>,
+    pub complex_script: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct RubyGuideRunTypographyWire {
     pub text: String,
     pub font_family: Option<String>,
+    /// The guide run's resolved §17.3.2.26 rFonts slots (theme references
+    /// resolved), so each guide letter selects its own face by script.
+    pub fonts: RubyGuideRunFontsWire,
     pub font_size_pt: Option<f64>,
     pub bold: bool,
     pub italic: bool,

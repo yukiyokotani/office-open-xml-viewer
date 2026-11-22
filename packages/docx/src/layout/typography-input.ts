@@ -61,6 +61,13 @@ export interface InternalRunTypographyWire {
     guideRuns: readonly Readonly<{
       text: string;
       fontFamily: string | null;
+      /** The run's resolved §17.3.2.26 rFonts slots (absent from older wires). */
+      fonts?: Readonly<{
+        ascii: string | null;
+        highAnsi: string | null;
+        eastAsia: string | null;
+        complexScript: string | null;
+      }>;
       fontSizePt: number | null;
       bold: boolean;
       italic: boolean;
