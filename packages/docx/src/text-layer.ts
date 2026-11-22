@@ -1,4 +1,5 @@
-import { clippedBoxVisible, OverlayClipFrames } from './run-clip.js';
+import { clippedBoxVisible, OverlayClipFrames, runPartVisible, runStraddlesClip } from './run-clip.js';
+import { countSpacingCharacters } from './character-spacing.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -78,23 +79,12 @@ export function buildDocxTextLayer(
     /(\d+(?:\.\d+)?)px/u, (_match, size: string) => pageLength(Number(size)),
   );
   for (const [runIndex, run] of runs.entries()) {
-    const span = ownerDocument.createElement('span');
-    setSelectionData(span, 'ooxmlSelectionRun', 'docx');
-    setSelectionData(span, 'runIndex', String(runIndex));
-    // WORD_CELL_CONTENT_CLIP: a run its clips hide wholly is not selectable
-    // text: it is unselectable and readDocxTextSelectionContext skips it.
-    const clippedAway = run.clips !== undefined && !clippedBoxVisible(
-      { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
-      run.clips,
-    );
-    if (clippedAway) setSelectionData(span, 'clippedAway', '');
-    if (run.paragraphId !== undefined) setSelectionData(span, 'paragraphId', run.paragraphId);
-    if (run.source !== undefined) {
-      setSelectionData(span, 'sourceStory', run.source.story);
-      setSelectionData(span, 'sourceStoryInstance', run.source.storyInstance);
-      setSelectionData(span, 'sourcePath', JSON.stringify(run.source.path));
-    }
-    span.textContent = run.text;
+    // WORD_CELL_CONTENT_CLIP: text its clips hide is not selectable. A run
+    // hidden wholly becomes one unselectable span that
+    // readDocxTextSelectionContext skips; a run straddling a clip edge is
+    // split at the edge, by its drawn character advances, into visible and
+    // hidden spans. Other runs keep one span.
+    const pieces = runPieces(run, measureForFont);
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
     // CSS rule cannot drift the trailing edge of the selection. Kerning /
@@ -138,7 +128,6 @@ export function buildDocxTextLayer(
     // painted on the canvas), so a link run's selection behaviour is otherwise
     // identical to a plain run. A non-link run is byte-identical to before.
     const link = onHyperlinkClick ? run.hyperlink : undefined;
-    const cursor = link ? 'pointer' : 'text';
     const letterSpacing = run.letterSpacingPx !== undefined
       ? pageLength(run.letterSpacingPx / k)
       : '0';
@@ -146,32 +135,94 @@ export function buildDocxTextLayer(
     // still lays out the transparent U+0020 at its natural advance. Clip only
     // that run's hit box so it cannot cover the following run/link. Keep the
     // width percentage-based like its position under responsive canvas scaling.
-    const compressedHitBox = run.trailingSpaceCompressionPx !== undefined
-      ? `width:${frame.width(run.w / k)};overflow:hidden;`
-      : '';
     // Position the span as a % of the page's intended CSS box, and size its
     // glyph metrics in units of the layer width, so it tracks the canvas's
     // actual rendered size under external CSS scaling. A
     // vertical (tbRl) run's rotate is about `top left`, so the %-placed origin
     // rotates into the column exactly as before at 1× scale.
-    span.style.cssText =
-      `position:absolute;` +
-      frame.position(0, 0) +
-      `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
-      compressedHitBox +
-      transform +
-      `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;` +
-      (clippedAway ? 'user-select:none;-webkit-user-select:none;' : '');
-    if (link && onHyperlinkClick) {
-      span.title = link.kind === 'external' ? link.url : link.ref;
-      span.addEventListener('click', (event) => {
-        // Hyperlink activation owns this click. The Viewer-level element-context
-        // listener observes defaultPrevented and must not focus a drawing under
-        // link text in the same gesture.
-        event.preventDefault();
-        onHyperlinkClick(link);
-      });
+    for (const piece of pieces) {
+      const span = ownerDocument.createElement('span');
+      setSelectionData(span, 'ooxmlSelectionRun', 'docx');
+      setSelectionData(span, 'runIndex', String(runIndex));
+      if (piece.hidden) setSelectionData(span, 'clippedAway', '');
+      if (run.paragraphId !== undefined) setSelectionData(span, 'paragraphId', run.paragraphId);
+      if (run.source !== undefined) {
+        setSelectionData(span, 'sourceStory', run.source.story);
+        setSelectionData(span, 'sourceStoryInstance', run.source.storyInstance);
+        setSelectionData(span, 'sourcePath', JSON.stringify(run.source.path));
+      }
+      span.textContent = run.text.slice(piece.start, piece.end);
+      const pieceLink = piece.hidden ? undefined : link;
+      span.style.cssText =
+        `position:absolute;` +
+        frame.position(piece.offset, 0) +
+        `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
+        (piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
+          ? `width:${frame.width((run.w - piece.offset) / k)};overflow:hidden;` : '') +
+        transform +
+        `white-space:pre;color:transparent;cursor:${pieceLink ? 'pointer' : 'text'};pointer-events:all;` +
+        (piece.hidden ? 'user-select:none;-webkit-user-select:none;' : '');
+      if (pieceLink && onHyperlinkClick) {
+        const link = pieceLink;
+        span.title = link.kind === 'external' ? link.url : link.ref;
+        span.addEventListener('click', (event) => {
+          // Hyperlink activation owns this click. The Viewer-level element-context
+          // listener observes defaultPrevented and must not focus a drawing under
+          // link text in the same gesture.
+          event.preventDefault();
+          onHyperlinkClick(link);
+        });
+      }
+      frame.parent.appendChild(span);
     }
-    frame.parent.appendChild(span);
   }
+}
+
+interface RunPiece {
+  readonly start: number;
+  readonly end: number;
+  /** Offset of the piece along the run's axis, in CSS px. */
+  readonly offset: number;
+  readonly hidden: boolean;
+}
+
+/** WORD_CELL_CONTENT_CLIP: the visible and hidden pieces of `run`'s text under
+ * its clips. Characters are placed by the run's drawn advances (measured as
+ * the find overlay measures them, with its tracking); a run that is wholly
+ * visible or wholly hidden, or has no measurer, is one piece. */
+function runPieces(
+  run: Readonly<DocxTextRunInfo>,
+  measureForFont: ((font: string) => (s: string) => number) | undefined,
+): readonly RunPiece[] {
+  const whole = (hidden: boolean): readonly RunPiece[] => [{ start: 0, end: run.text.length, offset: 0, hidden }];
+  if (!run.clips) return whole(false);
+  if (!clippedBoxVisible(
+    { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
+    run.clips,
+  )) return whole(true);
+  if (!measureForFont || !runStraddlesClip(run)) return whole(false);
+  const measure = runOverlayMeasure(run as DocxTextRunInfo, measureForFont);
+  const tcy = run.eastAsianVert ? tateChuYokoOverlayScale(run as DocxTextRunInfo, measure) : 1;
+  const pitch = run.letterSpacingPx ?? 0;
+  // Code-point boundaries and their offsets along the run.
+  const boundaries: number[] = [0];
+  for (const character of run.text) boundaries.push(boundaries.at(-1)! + character.length);
+  const offsetAt = (index: number): number => {
+    const prefix = run.text.slice(0, index);
+    return (measure(prefix) + countSpacingCharacters(prefix).pitchBearing * pitch) * tcy;
+  };
+  const offsets = boundaries.map(offsetAt);
+  const pieces: RunPiece[] = [];
+  for (let index = 0; index + 1 < boundaries.length; index++) {
+    const width = offsets[index + 1]! - offsets[index]!;
+    const previous = pieces.at(-1);
+    // A character without advance goes with the one before it.
+    const hidden = width > 0 ? !runPartVisible(run, offsets[index]!, width) : previous?.hidden ?? false;
+    if (previous && previous.hidden === hidden) {
+      pieces[pieces.length - 1] = { ...previous, end: boundaries[index + 1]! };
+    } else {
+      pieces.push({ start: boundaries[index]!, end: boundaries[index + 1]!, offset: offsets[index]!, hidden });
+    }
+  }
+  return pieces.length > 0 ? pieces : whole(false);
 }

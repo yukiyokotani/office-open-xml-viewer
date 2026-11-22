@@ -187,7 +187,9 @@ export function readDocxTextSelectionContext(
     maxLocators: options.maxRunLocators,
   });
   if (!bounded) return null;
-  const runs = [...bounded.locators].sort(
+  // A run split at a clip edge (text-layer.ts) has one locator.
+  const unique = new Map(bounded.locators.map((locator) => [`${locator.pageIndex}:${locator.runIndex}`, locator]));
+  const runs = [...unique.values()].sort(
     (left, right) => left.pageIndex - right.pageIndex || left.runIndex - right.runIndex,
   );
   return {

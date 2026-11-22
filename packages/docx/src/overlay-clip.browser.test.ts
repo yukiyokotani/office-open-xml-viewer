@@ -177,6 +177,38 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(result.native).not.toContain('Hidden');
   });
 
+  it('leaves the hidden part of a run straddling its cell edge out of a drag selection', async () => {
+    const result = await page.evaluate(() => {
+      const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
+      const layer = document.getElementById('layer') as HTMLDivElement;
+      layer.style.width = '800px';
+      layer.style.height = '600px';
+      const canvas = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D;
+      const measureForFont = (font: string) => (text: string) => { canvas.font = font; return canvas.measureText(text).width; };
+      const font = '20px monospace';
+      const advance = measureForFont(font)('M');
+      // 'HIDDEN' lies left of the cell edge, 'visible' right of it.
+      const cell = { x: 100 + 6 * advance, y: 90, width: 300, height: 40 };
+      const runs = [{
+        text: 'HIDDENvisible', x: 100, y: 100, w: 13 * advance, h: 20, fontSize: 20, font, clips: [cell],
+      }];
+      api.buildDocxTextLayer(layer, runs, 800, 600, undefined, measureForFont, 0);
+      const range = document.createRange();
+      range.selectNodeContents(layer);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const context = api.readDocxTextSelectionContext(layer, selection);
+      const native = selection.toString();
+      selection.removeAllRanges();
+      return { text: context?.text ?? '', runs: context?.runs.length ?? 0, native, spans: layer.querySelectorAll('span').length };
+    });
+    expect(result.text).toBe('visible');
+    expect(result.runs).toBe(1);
+    expect(result.native).not.toContain('HIDDEN');
+    expect(result.spans).toBe(2);
+  });
+
   it('keeps a link out of reach under an empty clip union', async () => {
     const box = { x: 50, y: 50, width: 400, height: 200, rects: [] };
     expect(await hits([link({ clips: [box] })], 800, [[150, 110]])).toEqual(['']);

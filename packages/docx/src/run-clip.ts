@@ -189,6 +189,29 @@ export function runHighlightRect(run: Readonly<DocxTextRunInfo>): Readonly<{
   return run.clips ? { ...rect, clips: run.clips } : rect;
 }
 
+/** Whether the part of `run` from `offset` along its own axis, `length`
+ * long and as high as the run, survives its clips. */
+export function runPartVisible(run: Readonly<DocxTextRunInfo>, offset: number, length: number): boolean {
+  const [a, b] = orientation(run.transform);
+  return clippedBoxVisible({
+    x: run.x + a * offset, y: run.y + b * offset, width: length, height: run.h,
+    ...(run.transform ? { transform: run.transform } : {}),
+  }, run.clips);
+}
+
+/** Whether `run`'s clips cut its box partly: some of it is visible and some
+ * hidden. */
+export function runStraddlesClip(run: Readonly<DocxTextRunInfo>): boolean {
+  if (!run.clips) return false;
+  const box = { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) };
+  const visible = clippedBoxBounds(box, run.clips);
+  if (!visible) return false;
+  const [whole, , opposite] = boundingPolygon([placedPolygon(box.x, box.y, box.width, box.height, box.transform)]);
+  const eps = 1e-6;
+  return visible.x > whole!.x + eps || visible.y > whole!.y + eps
+    || visible.x + visible.width < opposite!.x - eps || visible.y + visible.height < opposite!.y - eps;
+}
+
 /** Two highlight boxes (placed like DocxTextRunInfo.highlightBounds) of one
  * rendered line, joined across the gap between them: they must share their
  * orientation, height and position across the line, measured in their own
