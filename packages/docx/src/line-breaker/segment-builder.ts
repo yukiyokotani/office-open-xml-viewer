@@ -3,7 +3,7 @@ import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
 import { runIsOmitted } from '../layout/revision-visibility.js';
-import { isFloatingPayloadRun } from '../layout/anchor-classification.js';
+import { anchorFreeRuns, isAnchoringRun } from '../layout/metric-visible-runs.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
 import { acquireTextSequences } from './text-sequence.js';
@@ -1006,9 +1006,157 @@ function chartSegment(
   };
 }
 
+/**
+ * WORD_ANCHOR_HOST_NO_LINE_METRIC by construction (metric-visible-runs): the
+ * segments of a paragraph that anchors floating drawings are the segments of
+ * the same paragraph without them, built from exactly those runs, with the
+ * anchors added afterwards as position-only items. No sequence, join,
+ * automatic-spacing or eligibility decision of the content build can see an
+ * anchor, so the text of both paragraphs is segmented, shaped and joined
+ * identically, apart from the sequence boundary at the anchoring character
+ * itself.
+ */
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
+): LayoutSeg[] {
+  const content = anchorFreeRuns(runs);
+  if (content === runs) return buildContentSegments(runs, environment);
+  // The native source-unit capability owns a complete single-run paragraph
+  // (eligibleNativeSourceText) and is withdrawn for every body band that
+  // holds a floating source; its cursor never spans an anchor.
+  const sourceIndex: number[] = [];
+  // The anchoring character still separates the text before it from the text
+  // after it: the two are shaped as separate sequences (as around any other
+  // character between them), which also keeps the anchor's exact position in
+  // the line. Content runs that follow a displayed anchor start a sequence.
+  const sequenceBarriers = new Set<number>();
+  let afterAnchor = false;
+  runs.forEach((run, runIndex) => {
+    if (isAnchoringRun(run)) {
+      afterAnchor ||= !runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges);
+      return;
+    }
+    if (afterAnchor) sequenceBarriers.add(sourceIndex.length);
+    afterAnchor = false;
+    sourceIndex.push(runIndex);
+  });
+  const segs = buildContentSegments(content, { ...environment, nativeUnitMinimumBandPt: undefined }, sequenceBarriers);
+  restoreSourceRunIndices(segs, sourceIndex);
+  return withAnchorPlacementSegments(segs, runs, environment);
+}
+
+/** Rewrite the content build's run indices (into the anchor-free runs) to
+ * indices into the source runs, wherever a segment retains one. */
+function restoreSourceRunIndices(segs: LayoutSeg[], sourceIndex: readonly number[]): void {
+  const sequences = new Map<NonNullable<LayoutSeg['sourceTextSequence']>, NonNullable<LayoutSeg['sourceTextSequence']>>();
+  const glyph = <G extends LayoutTextSeg>(owned: G): G => owned.sourceRunIndex === undefined ? owned
+    : Object.freeze({ ...owned, sourceRunIndex: sourceIndex[owned.sourceRunIndex]! });
+  for (const segment of segs) {
+    if (segment.sourceRunIndex !== undefined) segment.sourceRunIndex = sourceIndex[segment.sourceRunIndex]!;
+    const sequence = segment.sourceTextSequence;
+    if (sequence) {
+      let restored = sequences.get(sequence);
+      if (!restored) {
+        restored = Object.freeze(sequence.map((source) =>
+          Object.freeze({ ...source, runIndex: sourceIndex[source.runIndex]! })));
+        sequences.set(sequence, restored);
+      }
+      segment.sourceTextSequence = restored;
+    }
+    if (!('text' in segment)) continue;
+    if (segment.optionalHyphen) segment.optionalHyphen = glyph(segment.optionalHyphen);
+    if (segment.optionalHyphenBreaks) {
+      segment.optionalHyphenBreaks = Object.freeze(segment.optionalHyphenBreaks.map((opportunity) =>
+        Object.freeze({ ...opportunity, glyph: glyph(opportunity.glyph) })));
+    }
+  }
+}
+
+/** The position-only items an anchoring run puts in the segment stream: its
+ * host's position, or a floating picture/chart payload. A floating shape is
+ * placed from its run and puts nothing here. */
+function anchorPlacementSegments(
+  run: ParagraphLayoutRun,
+  runIndex: number,
+  environment: LineLayoutEnvironment,
+): LayoutSeg[] {
+  switch (run.type) {
+    case 'anchorHost':
+      return [{
+        text: '', metricOnly: true, bold: false, italic: false, underline: false, strikethrough: false,
+        fontSize: 0, color: null, fontFamily: run.fontFamily ?? null, vertAlign: null, measuredWidth: 0,
+        anchorHostWithoutMetric: true, sourceRunIndex: runIndex,
+      }];
+    case 'image':
+      return [{ ...imageSegment({ ...run, anchor: true }, environment), sourceRunIndex: runIndex }];
+    case 'chart':
+      return [{ ...chartSegment({ ...run, anchor: true }, environment), sourceRunIndex: runIndex }];
+    case 'unavailableDrawing':
+      return [{ ...unavailableDrawingSegment(run, true, environment), sourceRunIndex: runIndex }];
+    default:
+      return [];
+  }
+}
+
+/** A placeholder is built as the picture or chart it stands for (same
+ * segment kind, box, position and leading metadata); availability only
+ * changes what is painted. */
+function unavailableDrawingSegment(
+  run: Extract<ParagraphLayoutRun, { type: 'unavailableDrawing' }>,
+  anchored: boolean,
+  environment: LineLayoutEnvironment,
+): LayoutImageSeg {
+  return {
+    ...(run.resourceKind === 'chart'
+      ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
+      : imageSegment({
+          imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
+          ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
+          ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
+          ...(run.rotation ? { rotation: run.rotation } : {}),
+          ...(run.flipH ? { flipH: true } : {}),
+          ...(run.flipV ? { flipV: true } : {}),
+          inlineObjectOrigin: 'drawingml',
+        }, environment)),
+    unavailableResourceKind: run.resourceKind,
+  };
+}
+
+/**
+ * Add each displayed anchor to the content segments at its source position:
+ * before the first segment of the content that follows it. The line breaker
+ * never sees these items (prepareBreakQueue), so their place in the array
+ * opens no break opportunity and splits no joined unit. One forward sweep.
+ */
+function withAnchorPlacementSegments(
+  content: LayoutSeg[],
+  runs: readonly ParagraphLayoutRun[],
+  environment: LineLayoutEnvironment,
+): LayoutSeg[] {
+  const result: LayoutSeg[] = [];
+  let cursor = 0;
+  for (const [runIndex, run] of runs.entries()) {
+    if (!isAnchoringRun(run) || runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges)) continue;
+    // A text sequence never spans a displayed anchor (sequenceBarriers), so
+    // a segment's first source run orders it against the anchor.
+    while (cursor < content.length && (content[cursor]!.sourceRunIndex ?? runIndex) < runIndex) {
+      result.push(content[cursor]!);
+      cursor += 1;
+    }
+    result.push(...anchorPlacementSegments(run, runIndex, environment));
+  }
+  while (cursor < content.length) {
+    result.push(content[cursor]!);
+    cursor += 1;
+  }
+  return result;
+}
+
+function buildContentSegments(
+  runs: readonly ParagraphLayoutRun[],
+  environment: LineLayoutEnvironment,
+  sequenceBarriers?: ReadonlySet<number>,
 ): LayoutSeg[] {
   if (environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.wordLineBoxes === undefined
     && keepsWordLineBoxes(runs)) {
@@ -1100,7 +1248,7 @@ export function buildSegments(
     selectedAverageWidth,
   };
 
-  appendRunsToSegments(runs, environment, segs, segmentBuildContext, selectedMetric);
+  appendRunsToSegments(runs, environment, segs, segmentBuildContext, selectedMetric, sequenceBarriers);
 
   finalizeBuiltSegments(runs, environment, segs);
   assignEastAsianAutoSpace(segs, environment);
@@ -1936,13 +2084,14 @@ function appendRunsToSegments(
   segs: LayoutSeg[],
   segmentBuildContext: SegmentBuildContext,
   selectedMetric: SegmentBuildContext['selectedMetric'],
+  sequenceBarriers?: ReadonlySet<number>,
 ): void {
   // A reserved-separator paragraph holds only text-free metric
   // participants; coalescing them would drop a participant's own properties.
   const sequences = runs.some((run) => run.type === 'text'
     && (run as ParagraphTextBearingRun).noteSeparatorCharacter !== undefined)
     ? new Map<number, never>()
-    : acquireTextSequences(runs, environment, (text, run) => transformedRunText(text, run, environment));
+    : acquireTextSequences(runs, environment, (text, run) => transformedRunText(text, run, environment), sequenceBarriers);
   let sequenceEnd = -1;
   let joinNextVisibleText = false;
   for (const [runIndex, sourceRun] of runs.entries()) {
@@ -2137,10 +2286,10 @@ function appendRunsToSegments(
         }
       }
     } else if (run.type === 'image') {
-      segs.push({ ...imageSegment({ ...run, anchor: isFloatingPayloadRun(run) }, environment), ...listLabelOf(run) });
+      segs.push({ ...imageSegment(run, environment), ...listLabelOf(run) });
     } else if (run.type === 'chart') {
-      segs.push(chartSegment({ ...run, anchor: isFloatingPayloadRun(run) }, environment));
-    } else if (run.type === 'shape' && !isFloatingPayloadRun(run)) {
+      segs.push(chartSegment(run, environment));
+    } else if (run.type === 'shape') {
       // `wp:inline` hosts arbitrary DrawingML, including WPS shapes (§20.4.2.8).
       // Reserve its extent in the same line-breaking path as an inline picture;
       // paragraph acquisition replaces the sentinel with a retained drawing
@@ -2173,21 +2322,7 @@ function appendRunsToSegments(
       // A placeholder is built as the picture or chart it stands for (same
       // segment kind, box, position and leading metadata); availability only
       // changes what is painted.
-      const anchored = isFloatingPayloadRun(run);
-      segs.push({
-        ...(run.resourceKind === 'chart'
-          ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
-          : imageSegment({
-              imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
-              ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
-              ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
-              ...(run.rotation ? { rotation: run.rotation } : {}),
-              ...(run.flipH ? { flipH: true } : {}),
-              ...(run.flipV ? { flipV: true } : {}),
-              inlineObjectOrigin: 'drawingml',
-            }, environment)),
-        unavailableResourceKind: run.resourceKind,
-      });
+      segs.push(unavailableDrawingSegment(run, false, environment));
     } else if (run.type === 'break') {
       if (run.breakType === 'line') {
         // Determine font size for the line break height from surrounding text runs
@@ -2246,18 +2381,11 @@ function appendRunsToSegments(
         ptab: { alignment: run.alignment, relativeTo: run.relativeTo },
       });
     } else if (run.type === 'anchorHost') {
-      // WORD_ANCHOR_HOST_NO_LINE_METRIC: the anchoring run's formatting sizes
-      // no line. Beside other line content the host keeps only its position;
-      // a paragraph holding nothing else takes its paragraph mark's line.
-      // A list label's metric run (a picture bullet's label font) is not an
-      // anchoring run and keeps its metrics.
-      if (environment.anchorHostsWithoutMetric === true && listLabelOf(run).listLabel === undefined) {
-        segs.push({
-          text: '', metricOnly: true, bold: false, italic: false, underline: false, strikethrough: false,
-          fontSize: 0, color: null, fontFamily: run.fontFamily ?? null, vertAlign: null, measuredWidth: 0,
-          anchorHostWithoutMetric: true,
-        });
-      } else {
+      // Only a list label's metric run (a picture bullet's label font) has
+      // this type here: it is not an anchoring run and keeps its metrics. A
+      // floating drawing's anchor host never reaches the content build
+      // (anchorPlacementSegments).
+      {
         const hostRun = run;
         const eastAsian = hostRun.fontFamilyEastAsia != null;
         const bold = hostRun.bold ?? false;

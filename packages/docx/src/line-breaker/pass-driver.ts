@@ -22,6 +22,7 @@ import {
   type LayoutTextSeg,
   type LineBoundary,
   type WrapLayoutCtx,
+  isAnchorPlacementSegment,
 } from './model.js';
 import { createLineBreakerState, prepareBreakQueue } from './break-queue.js';
 import { SegmentQueue } from './segment-queue.js';
@@ -262,7 +263,11 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
   // at the source end while that empty line still remains. Restore the same
   // pending flush (and break font size) as an uninterrupted pass; otherwise
   // acquisition falls back to an unrelated, indivisible paragraph-mark box.
-  const terminalSegment = segs.at(-1);
+  // Anchor placement items after that break are no queue items
+  // (prepareBreakQueue): the break is still the paragraph's terminal segment.
+  let terminalIndex = segs.length - 1;
+  while (terminalIndex >= 0 && isAnchorPlacementSegment(segs[terminalIndex]!)) terminalIndex -= 1;
+  const terminalSegment = segs[terminalIndex];
   if (startBoundary?.trailingEmptyLine === true
     && startBoundary.segIndex === segs.length && startBoundary.charOffset === 0
     && terminalSegment && 'lineBreak' in terminalSegment) {

@@ -499,25 +499,27 @@ export function wordEmptyKeepNextBridgesSuccessor(input: Readonly<{
 
 type InklessMarkBlockFacts = Readonly<{
   inkless?: boolean;
-  anchorOnly?: Readonly<{ final: boolean; markup: boolean }>;
+  markOnlyView?: Readonly<{ final: boolean; markup: boolean }>;
 }>;
 
-/** WORD_ANCHOR_HOST_NO_LINE_METRIC: the paragraph displays only floating
- * drawings in the given revision view (isAnchorOnlyParagraph). */
-export function wordAnchorOnlyBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: a paragraph with source content displays
+ * only its mark in the given revision view: nothing but floating drawings
+ * and content the view omits (displaysOnlyParagraphMark). */
+export function wordMarkOnlyViewBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
   void WORD_ANCHOR_HOST_NO_LINE_METRIC;
-  const anchorOnly = block.anchorOnly;
-  return anchorOnly !== undefined && (showTrackedChanges === true ? anchorOnly.markup : anchorOnly.final);
+  const view = block.markOnlyView;
+  return view !== undefined && (showTrackedChanges === true ? view.markup : view.final);
 }
 
 /** The one classification of a paragraph's mark for page admission and
- * spacing: an empty paragraph, or one displaying only floating drawings,
+ * spacing: an empty paragraph, or one whose metric-visible runs display
+ * nothing but the mark (only floating drawings and omitted revisions),
  * which Windows Word paginates as its empty mark (page-top spacing
  * suppression, keepNext bridging, trailing-mark admission). It decides how
  * the paragraph is placed, never whether its content (anchors, numbering,
  * revision-visible text) is kept: no path may omit content through it. */
 export function wordInklessMarkBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
-  return block.inkless === true || wordAnchorOnlyBlock(block, showTrackedChanges);
+  return block.inkless === true || wordMarkOnlyViewBlock(block, showTrackedChanges);
 }
 
 /** Whether a later paragraph puts ink on the page (look-ahead): anything but

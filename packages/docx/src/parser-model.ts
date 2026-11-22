@@ -104,7 +104,8 @@ import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/c
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
-import { isAnchorOnlyParagraph, isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { displaysOnlyParagraphMark, isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { anchorFreeRuns } from './layout/metric-visible-runs.js';
 import {
   wordHiddenParagraphRetainedBreaks,
   type WordHiddenParagraphRunFact,
@@ -1126,6 +1127,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
       return [anchorOccurrenceKey(source, acquisition.occurrenceId)];
     }),
   )]);
+  const inkless = !paragraphHasUnavailableDrawing(paragraph) && isInklessParagraph(paragraph);
   return Object.freeze({
     kind: 'paragraph' as const,
     source,
@@ -1140,11 +1142,13 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     spaceAfterPt: paragraph.spaceAfter ?? 0,
     contextualSpacing: paragraph.contextualSpacing === true,
     styleId: paragraph.styleId ?? null,
-    inkless: !paragraphHasUnavailableDrawing(paragraph) && isInklessParagraph(paragraph),
-    onlyTextualContent: !paragraphHasUnavailableDrawing(paragraph)
-      && paragraph.runs.every((run) => run.type === 'text'
-        || (run.type === 'break' && run.breakType === 'line')),
-    ...anchorOnlyFact(paragraphRunsWithUnavailableDrawings(paragraph)),
+    inkless,
+    // Floating drawings are no inline content (metric-visible-runs): the
+    // paragraph is classified as the same paragraph without them.
+    onlyTextualContent: anchorFreeRuns(paragraphRunsWithUnavailableDrawings(paragraph) as readonly Readonly<{ type: string }>[])
+      .every((run) => run.type === 'text'
+        || (run.type === 'break' && (run as { breakType?: string }).breakType === 'line')),
+    ...(inkless ? {} : markOnlyViewFact(paragraphRunsWithUnavailableDrawings(paragraph))),
     ...(paragraph.numbering && (paragraph.numbering.text !== '' || paragraph.numbering.picBulletImagePath)
       ? { visibleNumbering: true as const } : {}),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
@@ -1192,15 +1196,16 @@ function paragraphFrameFact(
   return { framed: dropCap === 'drop' || dropCap === 'margin' ? 'drop-cap' : 'frame' };
 }
 
-/** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether the paragraph displays only
- * floating drawings, per revision view (isAnchorOnlyParagraph). */
-function anchorOnlyFact(
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether a paragraph with source content
+ * displays only its mark (besides floating drawings), per revision view
+ * (displaysOnlyParagraphMark). */
+function markOnlyViewFact(
   runs: readonly Readonly<DocRun | UnavailableDrawingRunWire>[],
-): Readonly<{ anchorOnly?: Readonly<{ final: boolean; markup: boolean }> }> {
-  const facts = runs as unknown as Parameters<typeof isAnchorOnlyParagraph>[0];
-  const final = isAnchorOnlyParagraph(facts, false);
-  const markup = isAnchorOnlyParagraph(facts, true);
-  return final || markup ? { anchorOnly: Object.freeze({ final, markup }) } : {};
+): Readonly<{ markOnlyView?: Readonly<{ final: boolean; markup: boolean }> }> {
+  const facts = runs as unknown as Parameters<typeof displaysOnlyParagraphMark>[0];
+  const final = displaysOnlyParagraphMark(facts, false);
+  const markup = displaysOnlyParagraphMark(facts, true);
+  return final || markup ? { markOnlyView: Object.freeze({ final, markup }) } : {};
 }
 
 /** A vanished, inkless body paragraph acquires no block: body flow consumes

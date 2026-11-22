@@ -79,10 +79,16 @@ function textRun(text: string, fontSize = 11): DocRun {
   } as DocRun;
 }
 
-function layOut(runs: DocRun[], anchorHostsWithoutMetric = false, layoutServices?: ReturnType<typeof metricServices>) {
+/** The label font's zero-advance metric run before a picture list label: the
+ * one anchor-host run that keeps line metrics (it anchors nothing). */
+function labelMetricRun(): DocRun {
+  return { ...anchorHost(), listLabel: 'start' } as unknown as DocRun;
+}
+
+function layOut(runs: DocRun[], layoutServices?: ReturnType<typeof metricServices>) {
   return layoutLines(
     linearCtx(),
-    buildSegments(runs, { pageIndex: 0, totalPages: 1, ...(anchorHostsWithoutMetric ? { anchorHostsWithoutMetric: true } : {}),
+    buildSegments(runs, { pageIndex: 0, totalPages: 1,
       ...(layoutServices ? { layoutServices } : {}) })
       .map((segment) => ({ ...segment })) as LayoutSeg[],
     400,
@@ -103,11 +109,11 @@ function layOut(runs: DocRun[], anchorHostsWithoutMetric = false, layoutServices
 }
 
 describe('floating drawing anchor-host metrics', () => {
-  it('admits selected host geometry for auto and atLeast, but not exact spacing', () => {
+  it('admits selected label-metric geometry for auto and atLeast, but not exact spacing', () => {
     const covered = metricServices([[0x3042, 0x3042]]);
     const partial = metricServices([[0x41, 0x5a]]);
     const segment = (layoutServices: ReturnType<typeof metricServices>, rule?: 'exact' | 'atLeast') =>
-      buildSegments([anchorHost()], {
+      buildSegments([labelMetricRun()], {
         pageIndex: 0, totalPages: 1, layoutServices,
         ...(rule ? { lineSpacing: { rule, value: 18, explicit: true } } : {}),
       })[0] as LayoutTextSeg;
@@ -117,8 +123,8 @@ describe('floating drawing anchor-host metrics', () => {
     expect(segment(covered, 'atLeast').resolvedLineHeightRatio).toBe(1.5);
   });
 
-  it('emits a zero-width metric segment using the anchor character formatting', () => {
-    const segments = buildSegments([anchorHost()], { pageIndex: 0, totalPages: 1 });
+  it('emits a zero-width metric segment using the label metric run formatting', () => {
+    const segments = buildSegments([labelMetricRun()], { pageIndex: 0, totalPages: 1 });
 
     expect(segments).toHaveLength(1);
     expect(segments[0]).toMatchObject({
@@ -132,7 +138,7 @@ describe('floating drawing anchor-host metrics', () => {
   });
 
   it('uses the zero-width metric segment to allocate East Asian document-grid cells', () => {
-    const segments = buildSegments([anchorHost()], { pageIndex: 0, totalPages: 1 });
+    const segments = buildSegments([labelMetricRun()], { pageIndex: 0, totalPages: 1 });
     const [line] = layoutLines(
       linearCtx(),
       segments.map((segment) => ({ ...segment })) as LayoutSeg[],
@@ -167,10 +173,10 @@ describe('floating drawing anchor-host metrics', () => {
     )).toBe(36);
   });
 
-  it('reserves host line height without using its zero-ink box for a visible run baseline', () => {
-    const [hostOnly] = layOut([anchorHost()]);
+  it('reserves the label metric height without using its zero-ink box for a visible run baseline', () => {
+    const [hostOnly] = layOut([labelMetricRun()]);
     const [visibleOnly] = layOut([textRun('Caption')]);
-    const [mixed] = layOut([anchorHost(), textRun('Caption')]);
+    const [mixed] = layOut([labelMetricRun(), textRun('Caption')]);
 
     // The host formatting still reserves the same two-cell line advance used by
     // anchor-only rows; only the visible glyph baseline comes from visible ink.
@@ -186,17 +192,16 @@ describe('floating drawing anchor-host metrics', () => {
   });
 
   describe('WORD_ANCHOR_HOST_NO_LINE_METRIC', () => {
-    const mark = true;
     const picture = { type: 'image', imagePath: 'p.png', mimeType: 'image/png', widthPt: 20, heightPt: 16,
       anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false } as DocRun;
 
     it('sizes no line from the anchoring run beside other content', () => {
-      const [withHost] = layOut([anchorHost(), picture], mark);
-      const [withoutHost] = layOut([picture], mark);
+      const [withHost] = layOut([anchorHost(), picture]);
+      const [withoutHost] = layOut([picture]);
       expect(withHost.ascent).toBe(withoutHost.ascent);
       expect(withHost.descent).toBe(withoutHost.descent);
-      const [text] = layOut([textRun('Caption')], mark);
-      const [textWithHost] = layOut([anchorHost(), textRun('Caption')], mark);
+      const [text] = layOut([textRun('Caption')]);
+      const [textWithHost] = layOut([anchorHost(), textRun('Caption')]);
       expect(textWithHost.ascent).toBe(text.ascent);
       expect(textWithHost.descent).toBe(text.descent);
     });
@@ -207,8 +212,8 @@ describe('floating drawing anchor-host metrics', () => {
       const services = metricServices([[0x41, 0x7a]]);
       const lowered = { ...textRun('Lowered'), position: -3 } as DocRun;
       const floating = { ...picture, anchor: true } as DocRun;
-      const [alone] = layOut([lowered], mark, services);
-      const [anchored] = layOut([anchorHost(), floating, lowered], mark, services);
+      const [alone] = layOut([lowered], services);
+      const [anchored] = layOut([anchorHost(), floating, lowered], services);
       expect(anchored.ascent).toBe(alone.ascent);
       expect(anchored.descent).toBe(alone.descent);
       expect(anchored.intendedSingle).toBe(alone.intendedSingle);
@@ -225,7 +230,7 @@ describe('floating drawing anchor-host metrics', () => {
           return Reflect.get(target, key, receiver);
         },
       });
-      const segments = buildSegments(counted, { pageIndex: 0, totalPages: 1, anchorHostsWithoutMetric: true });
+      const segments = buildSegments(counted, { pageIndex: 0, totalPages: 1 });
       expect(segments.filter((segment) => 'text' in segment && segment.anchorHostWithoutMetric)).toHaveLength(400);
       // A per-host rescan reads the runs about 400 * 401 / 2 times.
       expect(reads).toBeLessThan(runs.length * 50);
@@ -268,9 +273,12 @@ describe('floating drawing anchor-host metrics', () => {
       const deleted = { ...textRun('Gone'), revision: { kind: 'deletion', author: 'A' } } as DocRun;
       const softHyphen = textRun('\u00AD');
       const floating = { ...picture, anchor: true } as DocRun;
-      for (const runs of [[anchorHost()], [anchorHost(), deleted], [anchorHost(), softHyphen], [anchorHost(), floating]]) {
+      for (const runs of [[anchorHost()], [anchorHost(), deleted], [anchorHost(), floating], [floating]]) {
         expect(isAnchorOnlyParagraph(runs as never, false)).toBe(true);
       }
+      // What remains without the anchors decides, exactly as for the
+      // paragraph without them: a soft hyphen is that paragraph's content.
+      expect(isAnchorOnlyParagraph([anchorHost(), softHyphen] as never, false)).toBe(false);
       // Markup view shows the deletion; a list label's metric run is content.
       expect(isAnchorOnlyParagraph([anchorHost(), deleted] as never, true)).toBe(false);
       expect(isAnchorOnlyParagraph([{ ...anchorHost(), listLabel: 'start' }] as never, false)).toBe(false);

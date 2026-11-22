@@ -1871,8 +1871,8 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC host-only paragraphs share the empty-m
   ])('measures an anchor-only paragraph exactly as its empty mark with %s', (_, mark) => {
     const empty = advance([], mark);
     expect(advance([host], mark)).toBe(empty);
-    // A zero-width optional-hyphen marker is no line geometry.
-    expect(advance([host, softHyphen], mark)).toBe(empty);
+    // Beside other content the paragraph is that content's paragraph.
+    expect(advance([host, softHyphen], mark)).toBe(advance([softHyphen], mark));
   });
 
   it('takes the synthesized bold face proof of the empty mark', () => {

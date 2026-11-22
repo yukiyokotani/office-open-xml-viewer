@@ -113,6 +113,9 @@ export function acquireTextSequences(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
   displayText: (text: string, run: Extract<ParagraphTextBearingRun, { type: 'text' }>) => string,
+  /** Run indices that start a sequence whatever precedes them: the content
+   * after a floating drawing's anchoring character (buildSegments). */
+  barriers?: ReadonlySet<number>,
 ): ReadonlyMap<number, TextSequence> {
   const sequences = new Map<number, TextSequence>();
   let start = -1;
@@ -143,6 +146,10 @@ export function acquireTextSequences(
     offset = 0;
   };
   for (const [runIndex, run] of runs.entries()) {
+    if (barriers?.has(runIndex)) {
+      finish();
+      key = undefined;
+    }
     // ECMA-376 §17.13.5: deleted/moved-away content has no final-view glyphs or breaks.
     // It contributes neither formatting nor a shaping seam to visible neighbors;
     // markup view retains its own revision formatting and source ownership.

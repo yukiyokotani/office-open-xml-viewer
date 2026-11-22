@@ -216,22 +216,13 @@ export interface RunLayoutContext {
 
 /** The context facts a paragraph's runs (rather than its properties)
  * decide; every other ParagraphLayoutContext field comes from paragraph,
- * section, story and document properties. */
+ * section, story and document properties. Measurement and line planning
+ * take them from the metric-visible paragraph (metricVisibleParagraph), so
+ * revisions the view omits decide nothing. */
 export function paragraphContentFacts(
   paragraph: ParagraphLayoutSource,
 ): Readonly<Pick<ParagraphLayoutContext, 'hasRuby' | 'hasEastAsianText'>> {
   return { hasRuby: paragraphHasRuby(paragraph), hasEastAsianText: paragraphHasEastAsianText(paragraph) };
-}
-
-/** An empty paragraph with this paragraph's mark and properties: no runs,
- * the context facts runs decide recomputed for that. Measuring it measures
- * exactly what the empty paragraph would be. */
-export function emptyParagraphEquivalent<P extends ParagraphLayoutSource>(
-  paragraph: P,
-  context: ParagraphLayoutContext,
-): Readonly<{ paragraph: P; context: ParagraphLayoutContext }> {
-  const empty = { ...paragraph, runs: [] } as P;
-  return { paragraph: empty, context: { ...context, ...paragraphContentFacts(empty) } };
 }
 
 function paragraphHasRuby(paragraph: ParagraphLayoutSource): boolean {

@@ -9,6 +9,7 @@ import {
 import type { ParagraphLayoutSource } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
 import { isSwallowedHiddenParagraph } from './paragraph-visibility.js';
+import { anchorFreeRuns } from './metric-visible-runs.js';
 import { WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT } from './table-compatibility.js';
 
 type TableCellLayoutSource = TableLayoutSource['rows'][number]['cells'][number];
@@ -74,7 +75,10 @@ export function isStructuralTrailingParagraph(
   const current = content[index];
   if (current?.type !== 'paragraph') return false;
   if (!hideMark && previousFlowElement(content, index)?.type !== 'table') return false;
-  return current.runs.length === 0;
+  // Floating drawings are no inline content (metric-visible-runs): a mark
+  // that only anchors them is the same structural mark. Its drawings are
+  // still acquired and placed; only its flow is not owned.
+  return anchorFreeRuns(current.runs).length === 0;
 }
 
 /** The nearest element before `index` that a cell lays out: swallowed hidden

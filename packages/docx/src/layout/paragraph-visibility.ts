@@ -1,6 +1,5 @@
 import type { DocParagraph } from '../types.js';
-import { runIsOmitted } from './revision-visibility.js';
-import { isFloatingPayloadRun } from './anchor-classification.js';
+import { hasVisibleAnchoringRun, metricVisibleRuns } from './metric-visible-runs.js';
 
 /**
  * A paragraph whose mark is vanished (ECMA-376 §17.3.2.41 on the paragraph
@@ -22,7 +21,7 @@ export function isInklessParagraph(paragraph: Readonly<DocParagraph>): boolean {
   });
 }
 
-type AnchorOnlyRunFacts = Readonly<{
+type MarkOnlyRunFacts = Readonly<{
   type: string;
   text?: string;
   anchor?: boolean;
@@ -34,33 +33,26 @@ type AnchorOnlyRunFacts = Readonly<{
   revision?: Readonly<{ kind?: string }> | null;
 }>;
 
-/** WORD_ANCHOR_HOST_NO_LINE_METRIC: the paragraph displays nothing but
- * floating drawings (their anchor hosts), so it is laid out and paginated as
- * its empty paragraph mark. Text hidden by revision display and unselected
- * optional hyphens are no content; a picture list label's metric run is. The
- * single classification for layout (paragraph-measure) and pagination. */
-export function isAnchorOnlyParagraph(
-  runs: readonly AnchorOnlyRunFacts[],
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: the paragraph displays nothing but its
+ * mark in the given revision view: its metric-visible runs (metricVisibleRuns:
+ * no floating drawing, no anchoring character, nothing the view omits) are
+ * inkless exactly as isInklessParagraph defines for a source paragraph. Such
+ * a paragraph is laid out and paginated as that empty paragraph, whether or
+ * not it anchors floating drawings. A picture list label's metric run is
+ * content. The single classification for layout (paragraph-measure) and
+ * pagination. */
+export function displaysOnlyParagraphMark(
+  runs: readonly MarkOnlyRunFacts[],
   showTrackedChanges: boolean | undefined,
 ): boolean {
-  let anchored = false;
-  for (const run of runs) {
-    // A run the view omits emits nothing, whatever its type (the segment
-    // builder's own predicate).
-    if (runIsOmitted(run, showTrackedChanges)) continue;
-    if (run.type === 'anchorHost') {
-      if (run.listLabel !== undefined || run.__listLabel !== undefined) return false;
-      anchored = true;
-      continue;
-    }
-    // A floating payload is an anchor whether or not a separate anchor-host
-    // run precedes it (public models carry none).
-    if (isFloatingPayloadRun(run)) {
-      anchored = true;
-      continue;
-    }
-    if (run.type === 'text' && (run.text ?? '').replace(/\u00AD/g, '') === '') continue;
-    return false;
-  }
-  return anchored;
+  return metricVisibleRuns(runs, showTrackedChanges).every((run) => run.type === 'text' && (run.text ?? '') === '');
+}
+
+/** A paragraph that displays only its mark and anchors at least one floating
+ * drawing the view displays. */
+export function isAnchorOnlyParagraph(
+  runs: readonly MarkOnlyRunFacts[],
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  return hasVisibleAnchoringRun(runs, showTrackedChanges) && displaysOnlyParagraphMark(runs, showTrackedChanges);
 }

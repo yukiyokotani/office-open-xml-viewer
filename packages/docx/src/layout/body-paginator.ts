@@ -132,7 +132,7 @@ import {
   wordPreBreakInlineDrawingResource,
   wordPerColumnFootnoteBandsApply,
   wordContinuousSectionMayShareFootnotePage,
-  wordAnchorOnlyBlock,
+  wordMarkOnlyViewBlock,
   wordInklessMarkBlock,
   wordBlockHasInk,
 } from './body-pagination-compatibility.js';
@@ -807,7 +807,7 @@ function paragraphFragmentStartKey(cursor: ParagraphFragmentCursor): string {
     ? 'root'
     : cursor.boundary.sourceTextStart !== undefined
       ? `source:${cursor.boundary.sourceTextStart + cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`
-    : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`;
+    : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}${cursor.boundary.afterAnchorLine ? ':after-anchor-line' : ''}`;
 }
 
 function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number, showTrackedChanges: boolean | undefined): boolean {
@@ -831,11 +831,12 @@ function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number, show
 }
 
 /** An undecorated inkless mark: no line, paint, resource or drawing of its
- * own. An anchor-only paragraph is judged as its empty equivalent: its
- * floating drawings and anchor hosts are not the mark's, while anything else
- * on its mark line (a numbering marker) still is. */
-function isUndecoratedInklessMark(layout: ParagraphLayout, anchorOnly = false): boolean {
-  const lines = anchorOnly
+ * own. A paragraph that displays only its mark besides floating drawings
+ * (`markOnlyView`) is judged as its empty equivalent: its floating drawings
+ * and anchor hosts are not the mark's, while anything else on its mark line
+ * (a numbering marker) still is. */
+function isUndecoratedInklessMark(layout: ParagraphLayout, markOnlyView = false): boolean {
+  const lines = markOnlyView
     // Its anchor hosts and its floating drawings' placements (it has no
     // inline object by classification) are not the mark's.
     ? layout.lines.filter((line) => line.placements.some((placement) =>
@@ -845,7 +846,7 @@ function isUndecoratedInklessMark(layout: ParagraphLayout, anchorOnly = false): 
     && lines.length === 0
     && layout.shading === undefined
     && layout.borders.length === 0
-    && (anchorOnly || (layout.resources.length === 0
+    && (markOnlyView || (layout.resources.length === 0
       && layout.drawings.length === 0
       && layout.textBoxes.length === 0));
 }
@@ -2994,7 +2995,7 @@ function* paginateBodyPassSteps(
           let bridgeSuccessor = wordEmptyKeepNextBridgesSuccessor({
             keepNext: block.keepNext,
             inkless: wordInklessMarkBlock(block, options.showTrackedChanges),
-            undecoratedMark: isUndecoratedInklessMark(acquired.layout, wordAnchorOnlyBlock(block, options.showTrackedChanges)),
+            undecoratedMark: isUndecoratedInklessMark(acquired.layout, wordMarkOnlyViewBlock(block, options.showTrackedChanges)),
           });
           for (let nextIndex = entryIndex + 1; nextIndex < input.sequence.length; nextIndex += 1) {
             const nextEntry = input.sequence[nextIndex]!;
@@ -3146,9 +3147,9 @@ function* paginateBodyPassSteps(
         // mark that starts here without keepNext; any other fragment ignores
         // the reserve, so its whole-note acquisition is not performed (it
         // would otherwise touch every note of a long paragraph per attempt).
-        const anchorOnlyMark = wordAnchorOnlyBlock(block, options.showTrackedChanges);
+        const markOnlyView = wordMarkOnlyViewBlock(block, options.showTrackedChanges);
         const markReserveMatters = cursor.boundary === null && wordInklessMarkBlock(block, options.showTrackedChanges)
-          && !block.keepNext && isUndecoratedInklessMark(acquired.layout, anchorOnlyMark);
+          && !block.keepNext && isUndecoratedInklessMark(acquired.layout, markOnlyView);
         const markReservePt = markReserveMatters
           ? footnoteAdmission(acquired.layout, location.availableBounds.widthPt).reservePt
           : 0;
@@ -3162,7 +3163,7 @@ function* paginateBodyPassSteps(
           wordTrailingEmptyMarkAdmissionAllowancePt({
             hasContinuationBoundary: cursor.boundary !== null,
             inkless: wordInklessMarkBlock(block, options.showTrackedChanges),
-            undecorated: isUndecoratedInklessMark(acquired.layout, anchorOnlyMark),
+            undecorated: isUndecoratedInklessMark(acquired.layout, markOnlyView),
             keepNext: block.keepNext,
             markReservePt,
             pageBottomIsUnreserved,

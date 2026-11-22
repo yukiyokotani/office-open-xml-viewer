@@ -155,10 +155,12 @@ export interface BodyParagraphSourceInput {
   readonly inkless?: boolean;
   /** Parser-established text/line-break-only content, including an empty mark; excludes objects. */
   readonly onlyTextualContent?: boolean;
-  /** WORD_ANCHOR_HOST_NO_LINE_METRIC (isAnchorOnlyParagraph): the paragraph
-   * displays only floating drawings, in the final view and in the markup
-   * view; pagination treats it as its empty mark (inklessMarkBlock). */
-  readonly anchorOnly?: Readonly<{ final: boolean; markup: boolean }>;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC (displaysOnlyParagraphMark): a paragraph
+   * with source content whose metric-visible runs display nothing but its
+   * mark (only floating drawings, or only content the view omits), in the
+   * final view and in the markup view; pagination treats it as its empty mark
+   * (wordInklessMarkBlock). */
+  readonly markOnlyView?: Readonly<{ final: boolean; markup: boolean }>;
   /** A list marker (text or picture bullet) is painted: visible ink that no
    * spacing or collapsing role may remove. */
   readonly visibleNumbering?: true;

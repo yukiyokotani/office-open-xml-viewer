@@ -1138,7 +1138,7 @@ describe('anchor-only paragraphs keep their content before a continuous section 
 
   it('classifies the mark per active revision view, and painted numbering as ink', () => {
     // Anchor beside deleted text: anchor-only in the final view only.
-    const tracked = { inkless: false, anchorOnly: { final: true, markup: false } };
+    const tracked = { inkless: false, markOnlyView: { final: true, markup: false } };
     expect(wordInklessMarkBlock(tracked, false)).toBe(true);
     expect(wordInklessMarkBlock(tracked, true)).toBe(false);
     expect(wordBlockHasInk(tracked, false)).toBe(false);
@@ -1146,7 +1146,7 @@ describe('anchor-only paragraphs keep their content before a continuous section 
     // A numbered empty or anchor-only paragraph places as its mark but its
     // painted marker is ink for the look-ahead.
     for (const numbered of [{ inkless: true, visibleNumbering: true as const },
-      { inkless: false, anchorOnly: { final: true, markup: true }, visibleNumbering: true as const }]) {
+      { inkless: false, markOnlyView: { final: true, markup: true }, visibleNumbering: true as const }]) {
       expect(wordInklessMarkBlock(numbered, false)).toBe(true);
       expect(wordBlockHasInk(numbered, false)).toBe(true);
     }

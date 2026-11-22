@@ -33,6 +33,8 @@ import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
 import { runIsOmitted } from './revision-visibility.js';
+import { metricVisibleParagraph, type MetricVisibleParagraph } from './metric-visible-runs.js';
+import { isAnchorPlacementSegment, metricSegments } from '../line-breaker/model.js';
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
@@ -49,6 +51,7 @@ import {
   effectiveParagraphTabStops,
   paragraphGridRightAdjustmentPt,
   type ParagraphLayoutContext,
+  paragraphContentFacts,
 } from '../layout-context.js';
 import {
   measureParagraph,
@@ -409,6 +412,10 @@ export interface MeasuredInlineDrawingPlanSegment {
 
 export interface MeasuredAnchorHostPlanSegment {
   readonly noteReference?: TextPlacement['noteReference'];
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating drawing's anchor host, a
+   * position-only item (isAnchorPlacementSegment). planLine plans the line
+   * without it and places it at the content that follows it. */
+  readonly anchorPlacement?: true;
   readonly kind: 'anchor-host';
   readonly measuredWidthPt: 0;
   readonly range: import('./types.js').TextRange;
@@ -1571,7 +1578,32 @@ function withAutoSpaceExpansion(
 /** Converts a measured line snapshot into final point-space visual geometry.
  * Bidi order, alignment, compression, justification, and tab advances are
  * resolved here; paint consumes the resulting placements without source access. */
+/**
+ * WORD_ANCHOR_HOST_NO_LINE_METRIC by construction: the line is aligned,
+ * justified and ordered from its content segments alone, exactly as the same
+ * line without floating anchors; each anchor host is then placed at the
+ * leading edge of the content that follows it (the line's end when none
+ * does). A host takes no cell, gap or bidi position of its own.
+ */
 export function planLine(input: PlanLineInput): LineLayout {
+  const hosts = input.line.segments.filter(isAnchorPlacementPlanSegment);
+  if (hosts.length === 0) return planContentLine(input, hosts);
+  return planContentLine({
+    ...input,
+    line: { ...input.line, segments: input.line.segments.filter((segment) => !isAnchorPlacementPlanSegment(segment)) },
+  }, hosts);
+}
+
+function isAnchorPlacementPlanSegment(
+  segment: MeasuredLinePlanSegment,
+): segment is MeasuredAnchorHostPlanSegment {
+  return segment.kind === 'anchor-host' && segment.anchorPlacement === true;
+}
+
+function planContentLine(
+  input: PlanLineInput,
+  anchorHosts: readonly MeasuredAnchorHostPlanSegment[],
+): LineLayout {
   const { line } = input;
   let segments = line.segments;
   const bidi = input.baseRtl || segmentsHaveRtl(segments);
@@ -1992,9 +2024,32 @@ export function planLine(input: PlanLineInput): LineLayout {
   }
   const placements: ParagraphPlacement[] = [];
   const terminalDecorationTrims = new Map<number, number>();
+  // Each anchor host stands at the leading edge of the first content segment
+  // at or after its source position; the hosts after all content stand at the
+  // line's logical end.
+  const hostsBefore = new Map<number, MeasuredAnchorHostPlanSegment[]>();
+  for (const host of anchorHosts) {
+    let target = segments.findIndex((segment) => segment.range.start >= host.range.start);
+    if (target < 0) target = segments.length;
+    hostsBefore.set(target, [...(hostsBefore.get(target) ?? []), host]);
+  }
+  const placeHosts = (target: number, hostXPt: number): void => {
+    for (const host of hostsBefore.get(target) ?? []) {
+      placements.push({
+        kind: 'anchor-host', range: host.range,
+        bounds: { xPt: hostXPt, yPt: line.topPt, widthPt: 0, heightPt: line.advancePt },
+        baselinePt: line.baselinePt,
+        ...(host.sourceMetrics ? { sourceMetrics: host.sourceMetrics } : {}),
+        ...(host.anchorOccurrenceId ? { anchorOccurrenceId: host.anchorOccurrenceId } : {}),
+      });
+    }
+  };
+  // A right-to-left base ends at the line's start-of-pen side.
+  if (input.baseRtl) placeHosts(segments.length, xPt);
   for (const segmentIndex of visual.order) {
     const segment = segments[segmentIndex];
     if (!segment) continue;
+    if (!visual.rtl[segmentIndex]) placeHosts(segmentIndex, xPt);
     const stretch = stretchByIndex?.get(segmentIndex);
     // Each atomic source-space cell owns its existing positive allocation.
     // Non-space cuts and every legacy/negative path keep their old plan.
@@ -2246,8 +2301,11 @@ export function planLine(input: PlanLineInput): LineLayout {
       placements.push(placed);
     }
     xPt += widthPt;
+    // A right-to-left segment's leading edge is its right edge.
+    if (visual.rtl[segmentIndex]) placeHosts(segmentIndex, xPt);
     if (geometryStretch?.trailingGap) xPt += geometryStretch.trailingDelta ?? perGapPt;
   }
+  if (!input.baseRtl) placeHosts(segments.length, xPt);
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
   // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to
   // the line's band edge. A snapToChars underline keeps
@@ -3390,6 +3448,7 @@ function textPlanSegment(
     const sourceMetrics = selectedFaceSourceMetrics(segment);
     return {
       kind: 'anchor-host', measuredWidthPt: 0,
+      ...(segment.anchorHostWithoutMetric ? { anchorPlacement: true as const } : {}),
       ...(sourceRun?.type === 'text' && (sourceRun.noteRef?.kind === 'footnote' || sourceRun.noteRef?.kind === 'endnote')
         ? { noteReference: { kind: sourceRun.noteRef.kind, id: sourceRun.noteRef.id } } : {}),
       range: { start: sourceOffset, end: sourceOffset },
@@ -3978,6 +4037,8 @@ function segmentOccurrenceLength(segment: LayoutTextSeg | LayoutTabSeg | LayoutI
 function planMeasuredLines(
   measured: MeasuredParagraph,
   paragraph: ParagraphAcquisitionInput,
+  /** The paragraph as measurement classified it (measureParagraph). */
+  metricParagraph: MetricVisibleParagraph<ParagraphAcquisitionInput>,
   paragraphXPt: number,
   availableWidthPt: number,
   source: SourceRef,
@@ -4030,8 +4091,8 @@ function planMeasuredLines(
       : undefined;
   // LIBREOFFICE_FONT_LINE_BOX scope (keepsWordLineBoxes).
   const libreOfficeLines = textService?.libreOfficeLineBoxes === true && !verticalPageFrame
-    && !keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
-  const specifiedParagraph = specifiedTextParagraphIsHomogeneous(paragraph,
+    && !keepsWordLineBoxes(metricParagraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
+  const specifiedParagraph = specifiedTextParagraphIsHomogeneous(metricParagraph,
     context.lineGrid.active || !compat.specifiedTextLineBoxMode15);
   return retainPhysicalLines(measured.lines.map((measuredLine, lineIndex) => {
     const raw = measuredLine.layout;
@@ -4061,7 +4122,7 @@ function planMeasuredLines(
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
       wrapOrigin: raw.topY !== undefined,
-      hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
+      hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !isAnchorPlacementSegment(segment)
         && segment.inlinePicture === true),
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
@@ -4340,8 +4401,10 @@ function planMeasuredLines(
       }
       sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);
     }
-    const onlyMath = raw.segments.length === 1 && 'math' in (raw.segments[0] ?? {} as object)
-      ? raw.segments[0] as LayoutMathSeg
+    // Anchor placement items are no line content (metricSegments).
+    const lineContent = metricSegments(raw.segments);
+    const onlyMath = lineContent.length === 1 && 'math' in (lineContent[0] ?? {} as object)
+      ? lineContent[0] as LayoutMathSeg
       : undefined;
     const planned = planLine({
       paragraphXPt, availableWidthPt, alignment: paragraph.alignment,
@@ -6927,6 +6990,16 @@ export function acquireParagraphResult(
   if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
     options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
   }
+  // The facts runs decide (ruby, East Asian text) are those of the
+  // metric-visible paragraph in measurement and in line planning alike:
+  // revisions the view omits decide nothing (metric-visible-runs).
+  const metricParagraph = metricVisibleParagraph(paragraph, options.environment.showTrackedChanges);
+  if (metricParagraph !== paragraph) {
+    const facts = paragraphContentFacts(metricParagraph);
+    if (facts.hasRuby !== options.context.hasRuby || facts.hasEastAsianText !== options.context.hasEastAsianText) {
+      options = { ...options, context: { ...options.context, ...facts } };
+    }
+  }
   const cache = options.environment.layoutServices
     ? paragraphAcquisitionCacheOf(options.environment.layoutServices)
     : undefined;
@@ -7477,7 +7550,7 @@ function projectAcquiredParagraphLines(
     ? undefined
     : retainedNumberingPlan(paragraph, planningContext, options);
   let lines = planMeasuredLines(
-    plannedMeasured, paragraph, paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
+    plannedMeasured, paragraph, metricVisibleParagraph(paragraph, options.environment.showTrackedChanges), paragraphXPt, availableWidthPt, options.source, options.id, planningContext,
     occurrences, numberingPlan, options.environment.layoutServices?.text,
     options.environment.verticalGlyphMeasurement,
     options.environment.verticalPageFrame,

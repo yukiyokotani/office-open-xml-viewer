@@ -495,7 +495,9 @@ describe('retained text-frame grouping', () => {
     const exclusion = retained.exclusions.find((candidate) =>
       candidate.anchorOccurrenceId?.endsWith('frame-top-and-bottom'));
 
-    expect(lineTexts).toEqual(['AAAAAAAA', 'A', 'BBBBBBBB']);
+    // The anchor between the two runs opens no break opportunity: the lines
+    // break as the unbroken word does (WORD_ANCHOR_HOST_NO_LINE_METRIC).
+    expect(lineTexts).toEqual(['AAAAAAAA', 'ABBBBBBB', 'B']);
     expect(retained.lines[0]!.bounds.yPt).toBe(retained.flowBounds.yPt + 20);
     expect(exclusion?.bounds.yPt).toBe(retained.flowBounds.yPt);
   });

@@ -1,4 +1,5 @@
 import type { FramePr } from '../types.js';
+import { anchorFreeRuns } from './metric-visible-runs.js';
 import { ownValue } from '@silurus/ooxml-core/internal/own-key';
 import { defineCompatibilityRule } from './compatibility.js';
 import type { DocxCompatProfile } from './compat-profile.js';
@@ -142,7 +143,8 @@ export const WORD_AUTOFIT_NOWRAP_AUTO_FORCED_FIT = defineCompatibilityRule({
 export function wordAutofitEmptyParagraphHasNoIntrinsicContent(
   paragraph: Pick<ParagraphLayoutSource, 'runs' | 'numbering'>,
 ): boolean {
-  return paragraph.runs.length === 0 && paragraph.numbering == null;
+  // Floating drawings are no inline content (metric-visible-runs).
+  return anchorFreeRuns(paragraph.runs).length === 0 && paragraph.numbering == null;
 }
 
 export const WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING = defineCompatibilityRule({

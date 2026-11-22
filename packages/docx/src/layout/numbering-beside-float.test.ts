@@ -263,12 +263,16 @@ describe('numbered first line across float gaps (#2055, word-numbered-first-line
       { compatibilityMode: 15, advancePt: 10 })[0]).toMatchObject({ topPt: 0, text: 'A.' });
   });
 
-  it('hangs a lone mark after its float anchor on retry, as break time does', () => {
-    // '.' (20pt) after the anchor: the first gap rejects it; the later gap
-    // leaves 15pt after its body and hangs it.
+  it('places a lone mark as the head of its line wherever the float anchor stands', () => {
+    // WORD_ANCHOR_HOST_NO_LINE_METRIC: the anchor is no item of the line, so
+    // a lone '.' (20pt) heads it before and after the anchor alike. No gap
+    // beside the float holds it (the later gap leaves 15pt after its body,
+    // and a line head does not hang), so it goes below the float.
     const custom = { marker: '1', ind: '<w:tabs><w:tab w:val="left" w:pos="1700"/><w:tab w:val="left" w:pos="9780"/></w:tabs><w:ind w:left="0" w:hanging="0"/>' };
-    expect(anchoredParagraphLines(squareShape(40, 100, 50, 60), '.', custom,
-      { compatibilityMode: 15, advancePt: 20 })[0]).toMatchObject({ topPt: 0, text: '.' });
+    for (const anchorsLast of [false, true]) {
+      expect(anchoredParagraphLines(squareShape(40, 100, 50, 60), '.', custom,
+        { compatibilityMode: 15, advancePt: 20, anchorsLast })[0]).toMatchObject({ topPt: 60, text: '.' });
+    }
   });
 
   it('does not hang punctuation in a retried gap that ends at an exclusion', () => {
