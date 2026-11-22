@@ -33,7 +33,8 @@ issues.
   and deleted.
 
 Outside `docs/`, Markdown is limited to `README.md`, `AGENTS.md`, `CLAUDE.md`,
-`SKILL.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md` and `THIRD_PARTY_NOTICES.md`.
+`SKILL.md`, `CHANGELOG.md`, `CODE_OF_CONDUCT.md` and `THIRD_PARTY_NOTICES.md`,
+plus the Storybook landing page `.storybook/Introduction.mdx`.
 A directory `README.md` says what the directory is and how to run it; usage of
 one script belongs in that script's header.
 

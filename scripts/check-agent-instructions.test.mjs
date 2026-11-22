@@ -61,6 +61,11 @@ const FENCED_BLOCK = /^[ \t]*```[^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$/gm;
 function markdownLinks(text) {
   const body = text
     .replace(FENCED_BLOCK, '')
+    // An indented code block: lines indented four or more columns after a
+    // blank line that follows a paragraph starting in the first column.
+    .replace(/(^\S[^\n]*\n(?:[ \t]*\n)+)((?: {4,}|\t)[^\n]*(?:\n|$)(?:(?: {4,}|\t)[^\n]*(?:\n|$)|[ \t]*\n)*)/gm, (block, lead) =>
+      /^(?:[-*+]|\d+[.)])\s/.test(lead) ? block : lead,
+    )
     .replace(/<!--[\s\S]*?-->/g, '')
     // A code span may wrap across lines.
     .replace(/`[^`]*`/g, '');
@@ -136,6 +141,8 @@ test('Markdown links are the destinations a reader can follow', () => {
   ]);
   assert.deepEqual(markdownLinks('<img src="docs/images/icon.png" width="80" alt="icon" />'), ['docs/images/icon.png']);
   assert.deepEqual(markdownLinks('See <https://example.org/docs/a.md> and <span>text</span>.'), ['https://example.org/docs/a.md']);
+  assert.deepEqual(markdownLinks('Example:\n\n    [unused](docs/orphan.md)\n\nAfter [a](a.md).\n'), ['a.md']);
+  assert.deepEqual(markdownLinks('- item\n\n    continued [b](b.md)\n'), ['b.md']);
   assert.deepEqual(markdownLinks('Prose ](docs/missing.md) and ![alt](a.png).'), ['a.png']);
   assert.deepEqual(markdownLinks('Example: `wrapped\n[fake](docs/missing.md)` end.'), []);
   assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);
@@ -307,12 +314,12 @@ function linkedDocs(path, text, blobUrl, renderedProperties = new Set()) {
     // property that some site component renders as `href={item.property}`
     // (`renderedProperties`). A URL in prose or in an unused constant is not
     // counted.
-    for (const [, target] of code.matchAll(new RegExp(String.raw`href=["']` + url, 'g'))) absolute(target);
+    for (const [, target] of code.matchAll(new RegExp(String.raw`(?<![\w-])href=["']` + url, 'g'))) absolute(target);
     for (const [, name, target] of code.matchAll(new RegExp(String.raw`\b(\w+)\s*:\s*["'\`]` + url, 'g'))) {
       if (renderedProperties.has(name)) absolute(target);
     }
     for (const [, name, target] of code.matchAll(new RegExp(String.raw`\bconst\s+(\w+)\s*=\s*["'\`]` + url, 'g'))) {
-      if (new RegExp(String.raw`href=\{\s*${name}\s*\}`).test(code)) absolute(target);
+      if (new RegExp(String.raw`(?<![\w-])href=\{\s*${name}\s*\}`).test(code)) absolute(target);
     }
     return found;
   }
@@ -324,7 +331,7 @@ function linkedDocs(path, text, blobUrl, renderedProperties = new Set()) {
 // Names of the data properties a site component renders as a link target:
 // `href={item.property}`.
 const renderedLinkProperties = (text) =>
-  new Set([...withoutComments(text).matchAll(/href=\{\s*[\w$]+(?:\?)?\.([\w$]+)\s*\}/g)].map((match) => match[1]));
+  new Set([...withoutComments(text).matchAll(/(?<![\w-])href=\{\s*[\w$]+(?:\?)?\.([\w$]+)\s*\}/g)].map((match) => match[1]));
 
 // A repository path without its source extension, as a relative import names it.
 const moduleName = (path) => path.replace(/\.[cm]?[jt]sx?$|\.astro$/, '');
@@ -359,6 +366,10 @@ test('a consumer link to a guide is a real link destination, not incidental text
     ['docs/example.md'],
   );
   assert.deepEqual(links('site/src/pages/a.astro', '<p>See docs/example.md for details</p>'), []);
+  assert.deepEqual(
+    links('site/src/pages/a.astro', '<button data-href="https://github.com/o/r/blob/main/docs/example.md">x</button>'),
+    [],
+  );
   const constant = "const guide = 'https://github.com/o/r/blob/main/docs/example.md';\n";
   assert.deepEqual(links('site/src/pages/a.astro', `${constant}<a href={guide}>guide</a>`), ['docs/example.md']);
   assert.deepEqual(links('site/src/pages/a.astro', `${constant}<p>no link</p>`), []);
@@ -592,7 +603,8 @@ test('paths and pnpm scripts named in agent knowledge exist', () => {
   // Every workspace manifest, by package name and by `./path` filter.
   const byName = new Map();
   const byDir = new Map();
-  for (const manifest of tracked().filter((path) => /(^|\/)package\.json$/.test(path))) {
+  // Members of the root pnpm workspace (`pnpm-workspace.yaml`: packages/*, site).
+  for (const manifest of tracked().filter((path) => /^(packages\/[^/]+\/|site\/)?package\.json$/.test(path))) {
     const { name, scripts = {} } = JSON.parse(read(join(ROOT, manifest)));
     const names = new Set(Object.keys(scripts));
     const dir = posix.dirname(manifest);

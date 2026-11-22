@@ -1297,8 +1297,8 @@ document.destroy();`,
           'parseXlsx() → await materializeXlsxWorkbookIndex() for metadata/index only.',
           'parseXlsxSheet() → await materializeXlsxWorksheet() for one caller-owned worksheet.',
           'parseXlsxAllSheets() → await materializeXlsxWorkbook() for the index and every worksheet; this has the highest time and retained-memory cost. The result is { workbookIndex, worksheets } with worksheets in sheet-index order, replacing the old { workbook, worksheets } record keyed by sheet name.',
-          'extractPptxImage() → await session.getImage() on openPptxPresentation().',
-          'extractPptxMedia() → await session.getMedia() on openPptxPresentation().',
+          'extractPptxImage(buffer, path) → await session.getImage(path, mimeType) on openPptxPresentation(). It resolves to a Blob, not a Uint8Array: use new Uint8Array(await blob.arrayBuffer()) where bytes are needed. A size limit passed to the old helper moves to resourceLimits.maxArchiveEntryBytes in the session options.',
+          'extractPptxMedia(buffer, path) → await session.getMedia(path, mimeType?) on openPptxPresentation(), which also resolves to a Blob.',
         ],
         examples: [
           {

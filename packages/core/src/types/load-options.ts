@@ -219,10 +219,13 @@ export interface LoadOptions {
    * which happens before the initial page, slide or sheet render; a failed
    * acquisition keeps the previous engine, but a failed initial render does not.
    *
-   * To choose values, read `largestInflatedEntryBytes` (for
-   * `maxArchiveEntryBytes`) and `distinctInflatedBytes` (for
-   * `maxTotalInflatedBytes`) from the debug resource report of representative
-   * documents, add headroom, and confirm on the lowest-memory device supported.
+   * To choose values, open representative documents and exercise their
+   * content first (pages, slides, sheets, images and media are read lazily, so
+   * the report emitted at load is too early), then read
+   * `largestInflatedEntryBytes` (for `maxArchiveEntryBytes`) and
+   * `distinctInflatedBytes` (for `maxTotalInflatedBytes`) from
+   * `getResourceMetrics().usage`, add headroom, and confirm on the
+   * lowest-memory device supported.
    */
   resourceLimits?: OoxmlResourceLimits;
   /**
