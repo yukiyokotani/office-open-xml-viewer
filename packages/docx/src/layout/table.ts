@@ -895,16 +895,25 @@ function materializeBorders(
     input.rows.forEach((row, rowIndex) => {
       const spacing = rowSpacingInsets(input.rows, rowIndex);
       for (const cell of row.cells) {
+        // A vertically merged cell is one box from its first row to its last.
+        if (cell.verticalMerge === 'continue') continue;
+        let lastRowIndex = rowIndex;
+        if (cell.verticalMerge === 'restart') {
+          while (input.rows[lastRowIndex + 1]?.cells.some((below) =>
+            below.columnStart === cell.columnStart && below.verticalMerge === 'continue')) lastRowIndex += 1;
+        }
+        const lastSpacing = lastRowIndex === rowIndex ? spacing : rowSpacingInsets(input.rows, lastRowIndex);
         const start = columnX(rowIndex, cell.columnStart);
         const end = columnX(rowIndex, cell.columnStart + cell.columnSpan);
         const insets = tableCellHorizontalSpacingInsets(row.cellSpacingPt, cell.columnStart,
           cell.columnSpan, input.columnWidthsPt.length, true);
-        const edges = physicalCellEdges(cell, input.borders, null, rowIndex, rowIndex,
+        const edges = physicalCellEdges(cell, input.borders, null, rowIndex, lastRowIndex,
           input.rows.length, input.columnWidthsPt.length, input.bidiVisual);
         rectangle(Math.min(start, end) + (input.bidiVisual ? insets.endPt : insets.startPt),
           rowY(rowIndex) + spacing.topPt + (rowIndex === 0 ? t : 0),
           Math.max(start, end) - (input.bidiVisual ? insets.startPt : insets.endPt),
-          rowY(rowIndex + 1) - spacing.bottomPt - (rowIndex === input.rows.length - 1 ? t : 0),
+          rowY(lastRowIndex + 1) - lastSpacing.bottomPt
+            - (lastRowIndex === input.rows.length - 1 ? t : 0),
           { top: visibleBorder(edges.top), bottom: visibleBorder(edges.bottom),
             left: visibleBorder(edges.left), right: visibleBorder(edges.right) });
       }

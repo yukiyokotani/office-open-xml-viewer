@@ -3439,6 +3439,7 @@ function tableDecisionEnvironment(state: BodyMeasurementContext) {
     singleColumn: state.sectionLayout?.columns.length === 1,
     textDirection: state.sectionLayout.textDirection,
     quarterTurnedStory: state.storyContext?.quarterTurned === true,
+    uprightTable: state.uprightPhysicalTable === true,
     inTableCell: state.storyContext?.containers.some((container) => container.kind === 'tableCell') ?? false,
     tableCellDepth: state.storyContext?.containers.filter((container) => container.kind === 'tableCell').length ?? 0,
     contentX: state.contentX,

@@ -640,6 +640,36 @@ function fitToAvailableWidth(
   return cleanWidths(result.map((width) => width * scale));
 }
 
+/** WORD_TABLE_CELL_SPACING_GEOMETRY, AutoFit tables with a preferred table
+ * or cell width: the cell boxes are the widths the table resolves to without
+ * spacing. Without a preferred table width they keep those widths and the
+ * gaps widen the table, up to its width ceiling; with one, or past the
+ * ceiling, the gaps are carved out of them proportionally, as for a fixed
+ * table. Returns null for a content-sized table (its own class below), and
+ * when a carved box is narrower than its content (binding fits are not
+ * established). */
+function spacedAutoFitPreferredBoxesPt(
+  input: TableColumnLayoutInput,
+  columnCount: number,
+  spacingPt: number,
+): readonly number[] | null {
+  const preferred = input.tablePreferredWidthPt !== null || input.rows.some((row) =>
+    row.before !== null || row.after !== null || row.cells.some((cell) => cell.preferredWidth !== null));
+  if (!preferred) return null;
+  const resolved = solveTableColumnWidths({ ...input, separatedCellSpacingPt: undefined });
+  const totalPt = resolved.reduce((sum, width) => sum + width, 0);
+  const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
+  const ceilingPt = finiteNonNegative(input.availableWidthPt);
+  if (input.tablePreferredWidthPt === null && totalPt + gapBudgetPt <= ceilingPt + EPSILON_PT) {
+    return resolved;
+  }
+  const targetPt = input.tablePreferredWidthPt === null ? ceilingPt : totalPt;
+  if (targetPt <= gapBudgetPt || totalPt <= EPSILON_PT) return null;
+  const boxes = resolved.map((width) => width * (targetPt - gapBudgetPt) / totalPt);
+  const { minimums } = singleColumnBounds(input.rows, columnCount, totalPt);
+  return boxes.every((width, column) => width + EPSILON_PT >= (minimums[column] ?? 0)) ? boxes : null;
+}
+
 /** WORD_TABLE_CELL_SPACING_GEOMETRY establishes only nonbinding content fits.
  * Use this same admission test before selecting the geometry and when solving
  * it. A binding table must retain its original constraints, ceiling and boxes,
@@ -647,8 +677,10 @@ function fitToAvailableWidth(
 export function spacedAutoFitContentWidthsPt(input: TableColumnLayoutInput): readonly number[] | null {
   const columnCount = requiredColumnCount(input);
   const spacingPt = input.separatedCellSpacingPt ?? 0;
-  if (input.layout !== 'autofit' || spacingPt <= 0 || columnCount === 0
-    || input.growUnpreferredColumns !== 'nonbinding') return null;
+  if (input.layout !== 'autofit' || spacingPt <= 0 || columnCount === 0) return null;
+  const preferredBoxes = spacedAutoFitPreferredBoxesPt(input, columnCount, spacingPt);
+  if (preferredBoxes) return preferredBoxes;
+  if (input.growUnpreferredColumns !== 'nonbinding') return null;
   const allUnpreferred = input.rows.every((row) => row.before === null && row.after === null
     && row.cells.length === columnCount && row.cells.every((cell, index) =>
       cell.columnSpan === 1 && cell.columnStart === index && cell.preferredWidth === null));

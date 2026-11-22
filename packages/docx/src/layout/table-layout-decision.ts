@@ -14,6 +14,9 @@ export interface TableDecisionEnvironment {
   readonly topLevel: boolean;
   readonly singleColumn: boolean;
   readonly textDirection: string | null | undefined;
+  /** The table is the upright block table of a vertical section, whose cells
+   * are laid out horizontally; omitted by hand-built environments. */
+  readonly uprightTable?: boolean;
   /** A story laid out in a quarter-turned text box; omitted by hand-built environments. */
   readonly quarterTurnedStory?: boolean;
   readonly inTableCell: boolean;
@@ -402,17 +405,26 @@ export function decideLogicalTable(
   // WORD_TABLE_CELL_SPACING_GEOMETRY: select once for the logical table.
   // Every unmeasured neighbour keeps the old source projection and geometry.
   const spacingPt = format.rows[0]?.cellSpacingPt ?? 0;
-  const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table) : null;
+  // An AutoFit table with a preferred table or cell width (dxa or pct).
+  const preferredSized = input.layout !== 'fixed' && !contentSized && input.gridWidthsPt.length > 0;
+  const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table, preferredSized) : null;
+  const vertical = isVerticalTextDirection(environment.textDirection);
   let spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
-    && singleTable && commonFrame && commonGrid && topLevelBody && environment.singleColumn
-    && !environment.inTableCell && !isVerticalTextDirection(environment.textDirection)
+    && singleTable && commonFrame && commonGrid && topLevelBody
+    // Measured in a two-column section for the preferred-sized form only.
+    && (environment.singleColumn || preferredSized)
+    // The upright block table of a vertical section is measured for fixed
+    // and preferred-sized tables only.
+    && !environment.inTableCell && (!vertical || (environment.uprightTable === true && !contentSized))
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
     // ECMA-376 §17.4.43 puts trPr spacing inside text margins; §17.4.45
     // puts tblPr spacing outside. The observation covers only the latter,
     // including inherited table styles. Equal effective row values do not
     // establish that provenance; tblPrEx (§17.4.44) is also unmeasured.
-    && source.lexical.rows.every(({ row }) => row?.cellSpacing == null && row?.exception?.cellSpacing == null)
+    // A preferred-sized table measures the same with the spacing on its rows.
+    && source.lexical.rows.every(({ row }) => (row?.cellSpacing == null || preferredSized)
+      && row?.exception?.cellSpacing == null)
     // The blk-0898 table controls (spaced one-row tables, modes 11/12/14/15
     // and omitted, tblInd -360) place modes 11/12 like 14 and move a leading
     // table by a negative indent like a positive one.
@@ -421,6 +433,7 @@ export function decideLogicalTable(
       && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true))
     && ((input.layout === 'fixed' && table.widthPt != null
         && table.widthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && table.widthPct == null)
+      || (preferredSized && contentWidthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt)
       || (contentSized && input.gridWidthsPt.length > 0
         && contentWidthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && input.rows.every((row) =>
         row.cells.length === input.gridWidthsPt.length && row.cells.every((cell, index) =>
