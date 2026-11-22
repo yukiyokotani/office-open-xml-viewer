@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { resolveDocxCommentThreads } from './comments.js';
 import { DocxFindController } from './find.js';
-import { intersect, pageBoxOf, paintedDocument } from './test-support/painted-glyphs.test-support.js';
+import {
+  inlinePictureRun, intersect, pageBoxOf, paintedDocument, PICTURE_PART,
+} from './test-support/painted-glyphs.test-support.js';
 
 describe('a comment on text that crosses its cell clip', () => {
   it('tints the visible part of a condensed glyph whose advance lies outside the cell', async () => {
@@ -44,5 +46,27 @@ describe('find in text a cell clips away', () => {
     const find = new DocxFindController(() => 1, async () => runs);
     expect(await find.find('Hidden')).toEqual([]);
     expect((await find.find('shown')).map((match) => match.text)).toEqual(['shown']);
+  });
+});
+
+describe('a comment on a turned picture its cell clips away', () => {
+  it('marks nothing where the picture is turned out of the cell', async () => {
+    // A 30pt picture turned 45 degrees, 65pt into a 60pt cell with an exact
+    // 12pt row: its bounding box reaches back into the cell, its outline
+    // does not.
+    const { runs } = await paintedDocument(
+      '<w:tbl><w:tblPr><w:tblW w:w="1200" w:type="dxa"/><w:tblLayout w:type="fixed"/>'
+      + '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="1200"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="240" w:hRule="exact"/></w:trPr>'
+      + '<w:tc><w:tcPr><w:tcW w:w="1200" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:ind w:left="1300"/></w:pPr>'
+      + `${inlinePictureRun(30, 30, '', 45)}</w:p></w:tc></w:tr></w:tbl><w:p/>`, PICTURE_PART);
+    const picture = runs.find((run) => run.inlineContent === 'object')!;
+    // The picture keeps its source run, with nothing to show.
+    expect(picture.sourceRunIndex).toBeDefined();
+    const source = picture.source!;
+    expect(resolveDocxCommentThreads([{ id: '1', author: 'A', text: 'c' }], [{
+      commentId: '1', source, startRunIndex: picture.sourceRunIndex!, endRunIndex: picture.sourceRunIndex! + 1,
+      reference: { source, runIndex: picture.sourceRunIndex! + 1, affinity: 'preceding' },
+    }], runs)).toEqual([]);
   });
 });

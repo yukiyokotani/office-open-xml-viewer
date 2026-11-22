@@ -1,6 +1,7 @@
 import { sourceOwnedTextPlacements, type SourceOwnedTextGeometry } from './text-source-ownership.js';
 import {
   composeAffine,
+  inverseMapAffinePoint,
   mapAffinePoint,
   quarterTurnAffine,
   translationAffine,
@@ -481,37 +482,80 @@ function lineProjectionPointToPage(
   return lineFrame ? composeAffine(projection.pointToPage, lineFrame) : projection.pointToPage;
 }
 
-/** The box a tab or inline object is painted in on its line: its bounds,
- * or for a picture or drawing the part its line clip leaves (the bounding
- * box of a turned picture's visible outline). An object its line clip hides
- * whole keeps its place with a box without height: it still owns its source
- * run, so a reader that marks that run finds it, with nothing to mark. Null
- * for a tab without a box. */
+/** The box a tab or inline object is painted in on its line, in the line's
+ * coordinates: its bounds, or for a picture or drawing the part its line clip
+ * leaves. A turned picture is its visible outline cut by the clips it is
+ * painted under (`clips`, with the line's `pointToPage`), then bounded: the
+ * bounding box of the whole outline could reach into a clip the picture
+ * itself never enters. An object of which nothing is left keeps its place
+ * with a box without height: it still owns its source run, so a reader that
+ * marks that run finds it, with nothing to mark. Null for a tab without a
+ * box. */
 function inlineContentBounds(
   placement: Extract<ParagraphLayout['lines'][number]['placements'][number], { kind: 'tab' | 'resource' | 'drawing' }>,
+  pointToPage: Matrix2DData,
+  clips: readonly ElementClipGeometry[],
 ): LayoutRect | null {
   if (placement.kind === 'tab') return placement.bounds ?? null;
+  const hidden = { ...placement.bounds, heightPt: 0 };
   if (placement.kind === 'resource') {
     if (!placement.lineClip && !placement.rotationDeg) return placement.bounds;
-    const outline = resourcePlacementOutline(placement);
-    if (outline.length === 0) return { ...placement.bounds, heightPt: 0 };
+    let pieces: PointPt[][] = [[...resourcePlacementOutline(placement)]];
+    if (placement.rotationDeg) {
+      for (const clip of clips) {
+        pieces = pieces.flatMap((piece) => {
+          // The piece in the clip's own space, cut by each of its rectangles.
+          const local = piece.map((point) => inverseMapAffinePoint(clip.pointToPage, mapAffinePoint(pointToPage, point)));
+          if (local.some((point) => point === null)) return [piece];
+          return (clip.rects ?? [clip.bounds]).map((rect) => cutToRect(local as PointPt[], rect)
+            .flatMap((point) => inverseMapAffinePoint(pointToPage, mapAffinePoint(clip.pointToPage, point)) ?? []));
+        }).filter((piece) => piece.length >= 3);
+      }
+    }
     let left = Infinity;
     let top = Infinity;
     let right = -Infinity;
     let bottom = -Infinity;
-    for (const point of outline) {
+    for (const point of pieces.flat()) {
       left = Math.min(left, point.xPt);
       top = Math.min(top, point.yPt);
       right = Math.max(right, point.xPt);
       bottom = Math.max(bottom, point.yPt);
     }
-    return { xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top };
+    return right - left > 1e-9 && bottom - top > 1e-9
+      ? { xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top } : hidden;
   }
   const clip = placement.lineClip;
   if (!clip) return placement.bounds;
   const top = Math.max(placement.bounds.yPt, placement.bounds.yPt + clip.topPt);
   const bottom = Math.min(placement.bounds.yPt + placement.bounds.heightPt, placement.bounds.yPt + clip.bottomPt);
-  return bottom > top ? { ...placement.bounds, yPt: top, heightPt: bottom - top } : { ...placement.bounds, heightPt: 0 };
+  return bottom > top ? { ...placement.bounds, yPt: top, heightPt: bottom - top } : hidden;
+}
+
+/** A convex polygon cut to an axis-aligned rectangle of its own space
+ * (Sutherland-Hodgman); empty when nothing is inside. */
+function cutToRect(polygon: readonly PointPt[], rect: LayoutRect): PointPt[] {
+  const edges: readonly (readonly ['xPt' | 'yPt', number, 1 | -1])[] = [
+    ['xPt', rect.xPt, 1], ['xPt', rect.xPt + rect.widthPt, -1], ['yPt', rect.yPt, 1], ['yPt', rect.yPt + rect.heightPt, -1],
+  ];
+  let points = [...polygon];
+  for (const [axis, edge, side] of edges) {
+    const kept: PointPt[] = [];
+    for (let index = 0; index < points.length; index += 1) {
+      const current = points[index]!;
+      const previous = points[(index + points.length - 1) % points.length]!;
+      const currentIn = side * (current[axis] - edge) >= 0;
+      const previousIn = side * (previous[axis] - edge) >= 0;
+      if (currentIn !== previousIn) {
+        const t = (edge - previous[axis]) / (current[axis] - previous[axis]);
+        kept.push({ xPt: previous.xPt + t * (current.xPt - previous.xPt), yPt: previous.yPt + t * (current.yPt - previous.yPt) });
+      }
+      if (currentIn) kept.push(current);
+    }
+    points = kept;
+    if (points.length === 0) break;
+  }
+  return points;
 }
 
 function visitParagraph(
@@ -584,7 +628,8 @@ function visitParagraph(
         if (retained.kind === 'tab' || retained.kind === 'resource' || retained.kind === 'drawing') {
           const runIndex = retained.kind === 'drawing'
             ? inlineDrawingRunIndexes.get(retained.drawingId) : retained.sourceRunIndex;
-          const bounds = inlineContentBounds(retained);
+          const contentClips = retained.kind !== 'tab' && retained.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips;
+          const bounds = inlineContentBounds(retained, linePointToPage, contentClips);
           if (runIndex !== undefined && bounds && (retained.kind !== 'resource' || retained.resourceKind !== 'picture-bullet')) {
             if (context.collectTextRuns) {
               context.runs.push(Object.freeze({
@@ -592,7 +637,7 @@ function visitParagraph(
                 bounds,
                 sourceRunIndex: runIndex,
                 pointToPage: linePointToPage,
-                clips: retained.kind !== 'tab' && retained.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips,
+                clips: contentClips,
                 source: paragraph.source,
                 ...(paragraph.paragraphId !== undefined ? { paragraphId: paragraph.paragraphId } : {}),
               }));

@@ -272,31 +272,54 @@ function withoutOverlap<Rect extends RunRect & { readonly order?: number }>(rect
   const overlaps = (left: RunRect, right: RunRect): boolean => (
     Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x) > TOUCH
     && Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y) > TOUCH);
-  // Groups of rects connected by overlap, found by a sweep across the run:
-  // a rect is compared only with the rects still open where it starts, so
-  // rects of other lines are never looked at.
+  // Groups of rects connected by overlap. Rects are first parted into bands
+  // across the run that share no extent (lines); within a band a sweep along
+  // the run compares a rect only with the rects still open where it starts.
+  // The comparisons are bounded by the rects that share a place along the
+  // run in one band, not by the rects of the page or of the line.
   const group = rects.map((_, index) => index);
   const find = (index: number): number => {
     while (group[index] !== index) index = group[index] = group[group[index]!]!;
     return index;
   };
   let any = false;
+  const sweep = (band: number[]): void => {
+    band.sort((left, right) => rects[left]!.x - rects[right]!.x);
+    let open: number[] = [];
+    for (const index of band) {
+      const rect = rects[index]!;
+      if (open.length > 0) open = open.filter((other) => rects[other]!.x + rects[other]!.width - rect.x > TOUCH);
+      for (const other of open) {
+        if (overlaps(rects[other]!, rect)) {
+          group[find(index)] = find(other);
+          any = true;
+        }
+      }
+      open.push(index);
+    }
+  };
   const byStart = rects.map((_, index) => index).sort((left, right) => rects[left]!.y - rects[right]!.y);
-  let open: number[] = [];
+  let band: number[] = [];
+  let bandEnd = Number.NEGATIVE_INFINITY;
   for (const index of byStart) {
     const rect = rects[index]!;
-    open = open.filter((other) => rects[other]!.y + rects[other]!.height - rect.y > TOUCH);
-    for (const other of open) {
-      if (overlaps(rects[other]!, rect)) {
-        group[find(index)] = find(other);
-        any = true;
-      }
+    if (band.length > 0 && rect.y - bandEnd >= -TOUCH) {
+      sweep(band);
+      band = [];
+      bandEnd = Number.NEGATIVE_INFINITY;
     }
-    open.push(index);
+    band.push(index);
+    bandEnd = Math.max(bandEnd, rect.y + rect.height);
   }
+  sweep(band);
   if (!any) return [...rects];
   const members = new Map<number, Rect[]>();
-  rects.forEach((rect, index) => members.set(find(index), [...(members.get(find(index)) ?? []), rect]));
+  rects.forEach((rect, index) => {
+    const root = find(index);
+    const parts = members.get(root);
+    if (parts) parts.push(rect);
+    else members.set(root, [rect]);
+  });
   const result: Rect[] = [];
   for (const parts of members.values()) {
     if (parts.length === 1) {

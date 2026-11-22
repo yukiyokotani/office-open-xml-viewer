@@ -164,3 +164,28 @@ describe('resolvePageCommentAnchors', () => {
     expect(tints([turned(200, 100), turned(200, 150)])).toBe(2);
   });
 });
+
+describe('a comment whose text the page clips away', () => {
+  it('gets no tint and no card, while the same comment on visible text gets both', () => {
+    installDom();
+    const comments = [{ id: 'clipped', author: 'Ada', text: 'Hidden' }];
+    const anchors = [anchor('clipped', [1])];
+    const render = (clips: DocxTextRunInfo['clips']) => {
+      const tint = makeEl('div');
+      const margin = makeEl('div');
+      margin.clientHeight = 800;
+      const runs = [{ ...run([1]), clips }];
+      buildDocxCommentMargin(tint as unknown as HTMLDivElement, margin as unknown as HTMLDivElement, runs,
+        { comments, anchors }, 600, 800, null, () => undefined, 1, 260, false);
+      return { tint, margin, resolved: resolvePageCommentAnchors(anchors, runs) };
+    };
+    // The run is painted at y=20..34; the row's clip ends above it.
+    const hidden = render([{ x: 0, y: 0, width: 300, height: 12 }]);
+    expect(hidden.resolved).toEqual([]);
+    expect(hidden.tint.children).toHaveLength(0);
+    expect(hidden.margin.children).toHaveLength(0);
+    const shown = render([{ x: 0, y: 0, width: 300, height: 100 }]);
+    expect(shown.resolved).toHaveLength(1);
+    expect(shown.margin.children).toHaveLength(1);
+  });
+});
