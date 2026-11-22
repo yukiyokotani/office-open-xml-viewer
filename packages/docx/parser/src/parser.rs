@@ -2705,10 +2705,13 @@ fn selected_note_separator_story(
             || is_w(*node, "sym")
             || is_w(*node, "noBreakHyphen")
             || is_w(*node, "softHyphen")
-            // An inline (§20.4.2.8 wp:inline) DrawingML object; its picture
-            // is checked once parsed.
-            || (is_w(*node, "drawing")
-                && node.children().filter(|child| child.is_element()).all(|child| child.tag_name().name() == "inline"))
+            // Drawing content (§17.3.3.9 drawing, VML pict, a §M.3 markup
+            // compatibility choice): only an inline picture survives the
+            // representability check after parsing and MC selection.
+            || is_w(*node, "drawing")
+            || is_w(*node, "pict")
+            || (node.tag_name().name() == "AlternateContent"
+                && node.tag_name().namespace() == Some("http://schemas.openxmlformats.org/markup-compatibility/2006"))
             || (is_w(*node, "br")
                 && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
     };
@@ -2810,6 +2813,11 @@ fn selected_note_separator_story(
                         break_type: BreakType::Line
                     }
             ) || matches!(run, DocRun::Image(image) if !image.anchor)
+                // An inline VML picture.
+                || matches!(run, DocRun::Shape(shape) if shape.inline
+                    && shape.vml_picture.is_some()
+                    && shape.text_blocks.is_empty()
+                    && shape.text_box_content.is_empty())
         });
         // Paragraph borders and shading (§17.3.1.24/.31) are laid out and
         // painted with the story's paragraph.
