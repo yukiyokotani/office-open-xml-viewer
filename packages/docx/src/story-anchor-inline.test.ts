@@ -691,6 +691,48 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
     }
   });
 
+  describe('carried deleted note shapes over carrier kinds', () => {
+    const reference = '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="1"/></w:r>';
+    const cell = (content: string, tcPr = '') => `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>${tcPr}</w:tcPr>${content}</w:tc>`;
+    const table = (rows: string) => '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr>'
+      + `<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>${rows}</w:tbl>`;
+    const first = `<w:p><w:r><w:t>BODY</w:t></w:r>${reference}</w:p>`;
+    const textBox = '<w:p><w:r><w:t>LAST</w:t></w:r><w:r><w:pict><v:shape id="tbx" style="position:absolute;margin-left:0;margin-top:30pt;'
+      + 'width:100pt;height:40pt;mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin" filled="f" stroked="f">'
+      + '<v:textbox inset="0,0,0,0"><w:txbxContent><w:p><w:r><w:t>BOX</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>';
+    const carriers: Readonly<Record<string, string>> = {
+      'an exact-height final row': first + table(`<w:tr><w:trPr><w:trHeight w:val="600" w:hRule="exact"/></w:trPr>${cell('<w:p><w:r><w:t>ROW</w:t></w:r></w:p>')}</w:tr>`),
+      'a vertical-merge continuation': first + table(`<w:tr>${cell('<w:p><w:r><w:t>TOP</w:t></w:r></w:p>', '<w:vMerge w:val="restart"/>')}</w:tr>`
+        + `<w:tr>${cell('<w:p/>', '<w:vMerge/>')}</w:tr>`),
+      'a nested table': first + table(`<w:tr>${cell(table(`<w:tr>${cell('<w:p><w:r><w:t>INNER</w:t></w:r></w:p>')}</w:tr>`) + '<w:p/>')}</w:tr>`),
+      'a text box in the last paragraph': first + textBox,
+    };
+    const deleted = `<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:del>`;
+    const probe = (body: string, storyRuns: string, markup: boolean) => {
+      variant = { body, storyRuns, markup };
+      const pages = layOutDocument('endnote', 'vml-text-square').pages;
+      const carried = pages.flatMap((page) => page.layers.paintOrder.flatMap((entry) =>
+        entry.kind === 'drawing' && entry.node.flowBounds.widthPt === 40 ? [entry] : []));
+      const geometry = pages.map((page) => page.layers.body.map((node) => [node.kind, node.flowBounds.yPt, node.flowBounds.heightPt]));
+      return { carried, geometry };
+    };
+    it.each(Object.keys(carriers))('keeps %s unchanged and shows the shape unclipped in markup view', (name) => {
+      const body = carriers[name]!;
+      try {
+        const plain = probe(body, '', true);
+        const markup = probe(body, deleted, true);
+        expect(markup.geometry).toEqual(plain.geometry);
+        expect(markup.carried).toHaveLength(1);
+        expect(markup.carried[0]!.kind === 'drawing' && markup.carried[0]!.frames.some((frame) => frame.kind === 'clip')).toBe(false);
+        const final = probe(body, deleted, false);
+        expect(final.geometry).toEqual(probe(body, '', false).geometry);
+        expect(final.carried).toHaveLength(0);
+      } finally {
+        variant = {};
+      }
+    });
+  });
+
   it('keeps an empty-result field paragraph on its mark line beside a carried deleted shape', () => {
     const body = '<w:p><w:pPr><w:spacing w:line="14000" w:lineRule="exact"/></w:pPr><w:r><w:t>BODY</w:t></w:r>'
       + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="1"/></w:r></w:p>'

@@ -6925,14 +6925,9 @@ function immutableMeasuredLine(
 }
 
 /** @internal Acquires the measurement and retained layout as one final candidate. */
-/** The paragraph without its carried trailing anchor runs, one object per
- * source paragraph so the acquisition caches keep their identity. */
+/** The paragraph without its carried anchor runs, one object per source
+ * paragraph so the acquisition caches keep their identity. */
 const carrierParagraphs = new WeakMap<ParagraphAcquisitionInput, ParagraphAcquisitionInput>();
-
-function carriedAnchorCount(paragraph: ParagraphAcquisitionInput): number {
-  const count = (paragraph as Readonly<{ __carriedAnchorCount?: number }>).__carriedAnchorCount;
-  return typeof count === 'number' && count > 0 ? Math.min(count, paragraph.runs.length) : 0;
-}
 
 /**
  * Note shapes carried by this paragraph (parser-model withNoteShapeHostParagraph):
@@ -6945,12 +6940,13 @@ function carriedAnchorCount(paragraph: ParagraphAcquisitionInput): number {
 function withCarriedAnchors(
   acquired: AcquiredParagraphResult,
   paragraph: ParagraphAcquisitionInput,
-  carriedFrom: number,
   options: ParagraphAcquisitionOptions,
 ): AcquiredParagraphResult {
+  const carriedFrom = paragraph.runs.length;
   const payloadsByOccurrence = new Map<string, Array<Readonly<{ run: AnchoredPayloadRun; runIndex: number }>>>();
-  paragraph.runs.forEach((run, runIndex) => {
-    if (runIndex < carriedFrom || !anchoredPayloadRun(run)) return;
+  (paragraph.carriedAnchorRuns ?? []).forEach((run, carriedIndex) => {
+    const runIndex = carriedFrom + carriedIndex;
+    if (!anchoredPayloadRun(run)) return;
     const kind = (run as Readonly<{ revision?: Readonly<{ kind?: string }> }>).revision?.kind;
     if (revisionIsOmitted(kind, options.environment.showTrackedChanges)) return;
     const payloads = payloadsByOccurrence.get(run.anchorAcquisitionInput!.occurrenceId) ?? [];
@@ -6974,6 +6970,8 @@ function withCarriedAnchors(
   const textBoxes = [...layout.textBoxes];
   const drawingPlacements: ParagraphPlacement[] = [];
   const occurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
+  // The carried runs read by index, after the paragraph's own.
+  const withCarried = { ...paragraph, runs: [...paragraph.runs, ...(paragraph.carriedAnchorRuns ?? [])] } as ParagraphAcquisitionInput;
   for (const [occurrenceId, payloads] of payloadsByOccurrence) {
     const host: Extract<ParagraphPlacement, { kind: 'anchor-host' }> = {
       kind: 'anchor-host',
@@ -6989,7 +6987,7 @@ function withCarriedAnchors(
       occurrenceId,
       payloads,
       [{ ...hostLine, placements: [...hostLine.placements, host] }],
-      paragraph,
+      withCarried,
       options,
       measured.contentEndYPt - options.placement.startYPt,
       options.exclusions,
@@ -7021,17 +7019,14 @@ export function acquireParagraphResult(
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
-  const carried = carriedAnchorCount(paragraph);
-  if (carried > 0) {
-    const carriedFrom = paragraph.runs.length - carried;
+  if (paragraph.carriedAnchorRuns?.length) {
     let carrier = carrierParagraphs.get(paragraph);
     if (!carrier) {
-      const { __carriedAnchorCount: _carried, ...rest } = paragraph as ParagraphAcquisitionInput
-        & Readonly<{ __carriedAnchorCount?: number }>;
-      carrier = Object.freeze({ ...rest, runs: paragraph.runs.slice(0, carriedFrom) }) as ParagraphAcquisitionInput;
+      const { carriedAnchorRuns: _carried, ...rest } = paragraph;
+      carrier = Object.freeze(rest) as ParagraphAcquisitionInput;
       carrierParagraphs.set(paragraph, carrier);
     }
-    return withCarriedAnchors(acquireParagraphResult(carrier, options, continuation), paragraph, carriedFrom, options);
+    return withCarriedAnchors(acquireParagraphResult(carrier, options, continuation), paragraph, options);
   }
   if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
     options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };

@@ -237,6 +237,13 @@ function collectDescriptorCandidates(
         visitRun(run, { ...source, path: [...source.path, authoredRunIndex] });
       }
     });
+    // Note shapes the paragraph carries, numbered after its runs.
+    const carried = (paragraph as Readonly<{ __carriedAnchorRuns?: readonly DocRun[] }>).__carriedAnchorRuns ?? [];
+    carried.forEach((run, carriedIndex) => {
+      if (run.type === 'image' || run.type === 'chart' || run.type === 'shape') {
+        visitRun(run, { ...source, path: [...source.path, acquiredRuns.length + carriedIndex] });
+      }
+    });
   };
   const visitBody = (
     body: BodyElement[],

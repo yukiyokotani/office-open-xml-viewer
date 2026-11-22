@@ -105,6 +105,7 @@ import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './lay
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { cellParagraphOwnsNoFlow } from './layout/table-cell-blocks.js';
 import {
   wordHiddenParagraphRetainedBreaks,
   type WordHiddenParagraphRunFact,
@@ -1840,11 +1841,13 @@ export function paragraphAcquisitionInput(
     __paragraphTypographyAcquisition: _privateParagraphTypography,
     __complexFieldBoundaries: _privateComplexFieldBoundaries,
     __runRevisions: _privateRunRevisions,
+    __carriedAnchorRuns: carriedRuns,
     ...semanticParagraph
   } = paragraph as DocParagraph & Record<string, unknown> & {
     __paragraphTypographyAcquisition?: InternalParagraphTypographyWire;
     __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
     __runRevisions?: readonly (DocRun['revision'] | null)[];
+    __carriedAnchorRuns?: readonly DocRun[];
   };
   const typographyInput = paragraphTypographyAcquisitionInput(parserParagraph);
   const complexFieldBoundaries = (
@@ -1902,7 +1905,11 @@ export function paragraphAcquisitionInput(
       }
     }
   }
-  const runs = runPairs.map(({ run, originalRun }, runIndex): ParagraphAcquisitionRun => {
+  const projectRun = (
+    run: DocRun | UnavailableDrawingRunWire,
+    originalRun: DocRun | UnavailableDrawingRunWire,
+    runIndex: number,
+  ): ParagraphAcquisitionRun => {
     const internalRun = run as UnavailableDrawingRunWire;
     if (internalRun.type === 'unavailableDrawing') {
       const localAnchorInput = anchorAcquisitionInput(originalRun);
@@ -2066,10 +2073,16 @@ export function paragraphAcquisitionInput(
       }) as ParagraphAcquisitionRun;
     }
     return Object.freeze(structuredClone(run)) as ParagraphAcquisitionRun;
-  });
+  };
+  const runs = runPairs.map(({ run, originalRun }, runIndex) => projectRun(run, originalRun, runIndex));
+  // Note shapes carried by this paragraph (withNoteShapeHostParagraph):
+  // projected like its runs, numbered after them, but never part of them,
+  // so no rule that reads the paragraph's runs sees them.
+  const carriedAnchorRuns = (carriedRuns ?? []).map((run, index) => projectRun(run, run, runPairs.length + index));
   return deepFreezePlainData({
     ...snapshot,
     runs: runs as readonly ParagraphAcquisitionRun[],
+    ...(carriedAnchorRuns.length > 0 ? { carriedAnchorRuns } : {}),
     ...(complexFieldBoundaries?.length
       ? { complexFieldBoundaries }
       : {}),
@@ -2269,30 +2282,47 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
   if (!visible) {
     // Every shape is deleted (or its note's references are): the markup view
     // shows them marked deleted and the final view omits them. They are
-    // carried by the story's last paragraph in document order (inside a table
-    // cell when the body ends with a table) as trailing runs that layout
-    // attaches only after that paragraph is laid out (`__carriedAnchorCount`,
-    // see layout/paragraph.ts): they form no segment, so the carrier's lines,
-    // mark and pagination are those of the paragraph without them.
-    const appendToLast = (blocks: readonly unknown[]): unknown[] | undefined => {
+    // carried by the story's last paragraph in document order that takes part
+    // in the retained flow (inside a table cell when the body ends with a
+    // table) in a private list beside its runs (`__carriedAnchorRuns`), which
+    // layout places only after that paragraph is laid out
+    // (layout/paragraph.ts): no rule that reads the carrier's runs sees them,
+    // so its lines, mark and pagination are those of the paragraph alone.
+    // Each carried run keeps its own revision (the carrier's __runRevisions
+    // never see them).
+    const carriedRuns = runs.map((run, index) => {
+      const revision = revisions[index];
+      return (revision ? { ...run, revision } : run) as DocRun;
+    });
+    const carry = (paragraph: DocParagraph): BodyElement => {
+      const existing = (paragraph as Readonly<{ __carriedAnchorRuns?: readonly DocRun[] }>).__carriedAnchorRuns ?? [];
+      return { ...paragraph, __carriedAnchorRuns: [...existing, ...carriedRuns] } as unknown as BodyElement;
+    };
+    // The last paragraph that takes part in the retained flow: a swallowed
+    // hidden paragraph, a cell's structural trailing paragraph and a
+    // vertical-merge continuation lay out no content of their own.
+    const appendToLast = (blocks: readonly unknown[], inCell?: Readonly<{ hideMark: boolean }>): unknown[] | undefined => {
       for (let index = blocks.length - 1; index >= 0; index -= 1) {
         const element = blocks[index] as BodyElement;
         if (element.type === 'paragraph') {
-          const last = element as DocParagraph & Readonly<{ __carriedAnchorCount?: number }>;
+          const ownsNoFlow = inCell
+            ? cellParagraphOwnsNoFlow(blocks as Parameters<typeof cellParagraphOwnsNoFlow>[0], index, inCell.hideMark)
+            : index < blocks.length - 1 && isSwallowedHiddenBodyParagraph(element);
+          if (ownsNoFlow) continue;
           const next = [...blocks];
-          next[index] = {
-            ...last,
-            runs: [...last.runs, ...runs],
-            __carriedAnchorCount: (last.__carriedAnchorCount ?? 0) + runs.length,
-            ...withRevisions(element, last.runs.length, (last as InternalDocParagraph).__runRevisions ?? []),
-          };
+          next[index] = carry(element);
           return next;
         }
         if (element.type === 'table') {
           for (let row = element.rows.length - 1; row >= 0; row -= 1) {
             const cells = element.rows[row]!.cells;
             for (let cell = cells.length - 1; cell >= 0; cell -= 1) {
-              const content = appendToLast(cells[cell]!.content);
+              // A §17.4.85 vertical-merge continuation lays out none of its
+              // content.
+              if (cells[cell]!.vMerge === false) continue;
+              const content = appendToLast(cells[cell]!.content, {
+                hideMark: (cells[cell] as Readonly<{ hideMark?: boolean }>).hideMark === true,
+              });
               if (!content) continue;
               const rows = [...element.rows];
               const nextCells = [...cells];

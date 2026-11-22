@@ -318,6 +318,10 @@ export interface ComplexFieldBoundaryInput {
 export type ParagraphAcquisitionInput = DeepReadonly<Omit<DocParagraph, 'runs'>> & Readonly<{
   typographyInput?: Readonly<InternalParagraphTypographyWire>;
   runs: readonly ParagraphAcquisitionRun[];
+  /** Markup-only note shapes this paragraph carries (parser-model
+   * withNoteShapeHostParagraph), numbered after `runs` but never among them:
+   * layout places them after the paragraph is laid out. */
+  carriedAnchorRuns?: readonly ParagraphAcquisitionRun[];
   complexFieldBoundaries?: readonly ComplexFieldBoundaryInput[];
   numberingMarkerShapeInput?: NumberingMarkerShapeInput;
   paragraphMarkShapeInput?: NumberingMarkerShapeInput;

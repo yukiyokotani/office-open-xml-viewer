@@ -1,3 +1,4 @@
+import { isStoryPagePositionedDrawing } from './story-page-anchors.js';
 import type {
   DrawingLayout,
   Matrix2DData,
@@ -128,7 +129,12 @@ function visitAnchoredDrawings(
         drawing,
         owner: node,
         textBoxes: textBoxesForDrawing(node, drawing),
-        frames: Object.freeze([...paragraphFrames]),
+        // A page-positioned story shape (WORD_STORY_VML_PAGE_POSITION; a
+        // note shape carried by a table cell paragraph) keeps its owner's
+        // placement but none of its table, cell or paragraph clips.
+        frames: Object.freeze(isStoryPagePositionedDrawing(drawing)
+          ? paragraphFrames.filter((frame) => frame.kind !== 'clip')
+          : [...paragraphFrames]),
         layoutTranslationPt: Object.freeze({ ...layoutTranslationPt }),
         encounterOrder: candidates.length,
         root,
