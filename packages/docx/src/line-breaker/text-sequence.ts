@@ -42,6 +42,13 @@ type SequenceRun = Extract<ParagraphTextBearingRun, { type: 'text' }> & Readonly
   typographyInput?: RunTypographyAcquisitionInput;
 }>;
 
+/** Whether every scalar of `run` takes the complex-script slot. */
+const forcedComplexScript = (run: Pick<SequenceRun, 'cs' | 'rtl'>): boolean => run.cs === true || run.rtl === true;
+
+/** The effective w:val of `run`'s text: none on a forced complex-script run. */
+const westernLanguageOf = (run: SequenceRun): string | undefined =>
+  forcedComplexScript(run) ? undefined : canvasLanguageTag(run.lang);
+
 function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, westernLanguage = true): string {
   const input = run.typographyInput;
   const effective = <T>(value: TypographyValueInput<T> | undefined, fallback: T | undefined) =>
@@ -59,8 +66,10 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, wes
     boldCs: run.boldCs, italicCs: run.italicCs, rtl: run.rtl, cs: run.cs,
     // The effective w:val (canvasLanguageTag): x-none, ill-formed and absent
     // tags are one state and never delimit a sequence.
+    // A run forced onto the complex-script slot (§17.3.2.7 w:cs, §17.3.2.30
+    // w:rtl) never uses w:val, so it cannot delimit (e.g. Arabic joining).
     langBidi: run.langBidi, langEastAsia: run.langEastAsia,
-    ...(westernLanguage ? { lang: canvasLanguageTag(run.lang) } : {}),
+    ...(westernLanguage ? { lang: westernLanguageOf(run) } : {}),
     vertAlign: effective(input?.verticalAlign, run.vertAlign ?? undefined),
     position: effective(input?.positionPt, run.position),
     charSpacing: input?.characterSpacingPt ?? run.charSpacing,
@@ -308,7 +317,7 @@ export function acquireTextSequences(
     // range in effect: a third run may carry the cluster's language again
     // while its seam with the second still differs in w:val.
     if (visible && first && last && (join
-      ? canvasLanguageTag(visible.lang) !== (languages ? languages.at(-1)!.lang : canvasLanguageTag(first.lang))
+      ? westernLanguageOf(visible) !== (languages ? languages.at(-1)!.lang : westernLanguageOf(first))
       : scope === lastScope
         && formattingKey(visible, environment, false) === formattingKey(last, environment, false))) {
       crossing = tail.crossing(display);
@@ -318,10 +327,10 @@ export function acquireTextSequences(
     key = nextKey;
     if (!visible) continue;
     if (!first) { start = runIndex; first = visible; }
-    else if (!languages && crossing > 0) languages = [{ end: offset, lang: canvasLanguageTag(first.lang) }];
+    else if (!languages && crossing > 0) languages = [{ end: offset, lang: westernLanguageOf(first) }];
     if (languages) {
       if (crossing > 0) extendLanguage(offset + crossing, languageAt(offset - tail.clusterLength));
-      if (display.length > crossing) extendLanguage(offset + display.length, canvasLanguageTag(visible.lang));
+      if (display.length > crossing) extendLanguage(offset + display.length, westernLanguageOf(visible));
     }
     last = visible;
     lastScope = scope;

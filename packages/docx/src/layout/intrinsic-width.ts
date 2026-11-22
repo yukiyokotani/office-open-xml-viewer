@@ -153,9 +153,10 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
       // Authored §17.3.2.20 languages delimit text sequences, so production
       // shapes pieces of different languages apart even when neither is
       // admitted to Canvas; an untagged key is unchanged.
-      ...(canvasLanguageTag(request.language) !== undefined
+      // A forced complex-script request never uses w:val.
+      ...((request.complexScript ? undefined : canvasLanguageTag(request.language)) !== undefined
         || canvasLanguageTag(request.complexScriptLanguage) !== undefined
-        ? [['lang', canvasLanguageTag(request.language) ?? null,
+        ? [['lang', (request.complexScript ? undefined : canvasLanguageTag(request.language)) ?? null,
           canvasLanguageTag(request.complexScriptLanguage) ?? null]] : []),
     ] : null,
     segment.bold,

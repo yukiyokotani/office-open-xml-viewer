@@ -1171,6 +1171,11 @@ impl<'a> Reader<'a> {
                     all_caps: text.all_caps,
                     small_caps: text.small_caps,
                     double_strikethrough: text.double_strikethrough,
+                    // The field result is text of the same style: its
+                    // §17.3.2.20-equivalent language axes too.
+                    lang: text.lang.clone(),
+                    lang_east_asia: text.lang_east_asia.clone(),
+                    lang_bidi: text.lang_bidi.clone(),
                     ..FieldRun::default()
                 }))]
             }
@@ -1757,6 +1762,10 @@ impl RunProperties {
             bold_cs: Some(self.bold),
             italic_cs: Some(self.italic),
             kerning: self.kerning,
+            // The paragraph mark's text style carries its languages as well.
+            lang: self.lang.as_deref().map(str::to_string),
+            lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
+            lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
             ..RunFontFacts::default()
         }
     }

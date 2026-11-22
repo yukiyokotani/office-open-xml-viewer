@@ -189,7 +189,7 @@ impl Formatting<'_> {
         fc: usize,
         prm: u16,
         prcs: &[&[u8]],
-    ) -> Result<Option<(TextRun, Option<&'static str>)>, String> {
+    ) -> Result<Option<(TextRun, GuideRunLanguages)>, String> {
         let Some(run) =
             self.direct_text_run(paragraph_style, table_style, fc, prm, prcs, String::new())?
         else {
@@ -198,7 +198,11 @@ impl Formatting<'_> {
         let languages = self
             .run_properties_with_table(paragraph_style, table_style, fc, prm, prcs)?
             .resolved_languages()?;
-        Ok(Some((run, languages.default)))
+        Ok(Some((run, GuideRunLanguages {
+            default: languages.default,
+            east_asia: languages.east_asia,
+            bidi: languages.bidi,
+        })))
     }
 
     /// MS-DOC 2.6.1 sprmCFRMarkIns with sprmCIbstRMark (index into
@@ -431,4 +435,12 @@ mod revision_tests {
         assert_eq!(dttm(0).unwrap(), None);
         assert!(dttm(0x0000_003c).is_err());
     }
+}
+
+/// The three ECMA-376 17.3.2.20 language axes of a ruby guide run, resolved
+/// from MS-DOC 2.6.1 sprmCRgLid0_80 / sprmCRgLid1_80 / sprmCLidBi.
+pub(in crate::doc) struct GuideRunLanguages {
+    pub(in crate::doc) default: Option<&'static str>,
+    pub(in crate::doc) east_asia: Option<&'static str>,
+    pub(in crate::doc) bidi: Option<&'static str>,
 }

@@ -349,8 +349,10 @@ describe('Canvas lang at measure and paint', () => {
   });
 
   it('admits only well-formed BCP 47 tags', () => {
-    expect(['sr-Latn-RS', 'i-klingon', 'zh-min-nan', 'x-private', 'iw', 'zh-cmn-Hans-CN', 'zh-yue-HK'].map(canvasLanguageTag))
-      .toEqual(['sr-latn-rs', 'i-klingon', 'zh-min-nan', 'x-private', 'he', 'zh-hans-cn', 'yue-hk']);
+    expect(['sr-Latn-RS', 'i-klingon', 'zh-min-nan', 'x-private', 'iw', 'zh-cmn-Hans-CN', 'ar-arb'].map(canvasLanguageTag))
+      .toEqual(['sr-latn-rs', 'i-klingon', 'zh-min-nan', 'x-private', 'he', 'zh-hans-cn', 'ar']);
+    // An extlang under another prefix is not admitted.
+    expect(['en-cmn-Hans-CN', 'en-yue-HK'].map(canvasLanguageTag)).toEqual([undefined, undefined]);
     expect(['en-a', 'en-us-gb', 'x-none', 'inherit', '', `en-${'a'.repeat(70)}`].map(canvasLanguageTag))
       .toEqual([undefined, undefined, undefined, undefined, undefined, undefined]);
   });
@@ -365,6 +367,20 @@ describe('Canvas lang at measure and paint', () => {
     expect(untagged).toEqual([['fi', 0, 'inherit']]);
     expect(await drawn('x-none')).toEqual(untagged);
     expect(await drawn('en-a')).toEqual(untagged);
+  });
+
+  it('keeps Arabic joining across runs whose unused w:val differs', async () => {
+    const drawn = async (secondLang: string) => {
+      const { canvas, draws } = recordingCanvas();
+      await renderDocumentToCanvas(documentOf([
+        run('\u0633\u0644', { cs: true, lang: 'en-us', langBidi: 'ar-sa' }),
+        run('\u0627\u0645', { cs: true, lang: secondLang, langBidi: 'ar-sa' }),
+      ]), canvas, 0, { dpr: 1, width: 600 });
+      return draws.map(draw => draw.text);
+    };
+    const same = await drawn('en-us');
+    expect(same).toEqual(['\u0633\u0644\u0627\u0645']);
+    expect(await drawn('fr-fr')).toEqual(same);
   });
 
   it('measures overlay slices in the run language', () => {

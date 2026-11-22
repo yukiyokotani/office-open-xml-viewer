@@ -1,8 +1,9 @@
 import type { DocxDocumentModel } from './types.js';
 
 // Run languages (lang, langEastAsia, langBidi) and ruby guide languages
-// (w:rubyPr/w:lid and guide-run w:lang, stored as `language`).
-const LANGUAGE_KEYS = new Set(['lang', 'langEastAsia', 'langBidi', 'language']);
+// (w:rubyPr/w:lid and guide-run w:val as `language`; guide-run w:eastAsia
+// and w:bidi as `eastAsiaLanguage` and `bidiLanguage`).
+const LANGUAGE_KEYS = new Set(['lang', 'langEastAsia', 'langBidi', 'language', 'eastAsiaLanguage', 'bidiLanguage']);
 
 /**
  * Whether the document names any §17.3.2.20 run language (other than Word's

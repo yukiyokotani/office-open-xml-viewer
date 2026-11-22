@@ -135,6 +135,37 @@ fn western_language_and_country_become_the_run_language() {
 }
 
 #[test]
+fn fields_and_paragraph_marks_carry_the_run_language() {
+    let automatic = r#"<style:style style:name="Sr" style:family="text"><style:text-properties fo:language="sr" fo:country="rs" style:language-asian="ja" style:country-asian="jp"/></style:style><style:style style:name="SrP" style:family="paragraph"><style:text-properties fo:language="sr" fo:country="rs" style:language-complex="ar" style:country-complex="sa"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r#"<text:p><text:span text:style-name="Sr"><text:page-number>1</text:page-number></text:span></text:p><text:p text:style-name="SrP"/>"#,
+        ..Fixture::default()
+    });
+    let paragraphs = paragraphs(&document.body);
+    let field = paragraphs[0]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Field(field) => Some(field),
+            _ => None,
+        })
+        .expect("page-number field");
+    assert_eq!(
+        (field.lang.as_deref(), field.lang_east_asia.as_deref()),
+        (Some("sr-RS"), Some("ja-JP"))
+    );
+    let mark = paragraphs[1]
+        .paragraph_mark_font_facts
+        .as_ref()
+        .expect("paragraph mark facts");
+    assert_eq!(
+        (mark.lang.as_deref(), mark.lang_bidi.as_deref()),
+        (Some("sr-RS"), Some("ar-SA"))
+    );
+}
+
+#[test]
 fn collapses_white_space_and_keeps_spaces_tabs_and_breaks() {
     let document = read_fixture(Fixture {
         body:

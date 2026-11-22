@@ -13,13 +13,21 @@ describe('documentCarriesRunLanguage', () => {
   });
 
   it('finds a language authored only on a ruby guide, and ignores x-none', () => {
-    const ruby = (language: unknown, guideLanguage: string | null) => model({ body: [{ runs: [{
-      type: 'text', text: '漢',
-      typographyInput: { ruby: { language, guideRuns: [{ text: 'かん', language: guideLanguage }] } },
-    }] }] });
+    const ruby = (language: unknown, guideLanguage: string | null, axes: Record<string, string | null> = {}) =>
+      model({ body: [{ runs: [{
+        type: 'text', text: '漢',
+        typographyInput: { ruby: { language, guideRuns: [{
+          text: 'かん', language: guideLanguage, eastAsiaLanguage: null, bidiLanguage: null, ...axes,
+        }] } },
+      }] }] });
     expect(documentCarriesRunLanguage(ruby({ status: 'valid', value: 'ja-JP' }, null))).toBe(true);
     expect(documentCarriesRunLanguage(ruby({ status: 'absent', value: null }, 'ja-jp'))).toBe(true);
     expect(documentCarriesRunLanguage(ruby({ status: 'absent', value: null }, null))).toBe(false);
+    // A guide's East Asian or bidi language alone is a run language too.
+    expect(documentCarriesRunLanguage(ruby({ status: 'absent', value: null }, null, { eastAsiaLanguage: 'ja-jp' })))
+      .toBe(true);
+    expect(documentCarriesRunLanguage(ruby({ status: 'absent', value: null }, null, { bidiLanguage: 'ar-sa' })))
+      .toBe(true);
     expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ lang: 'x-none' }] }] }))).toBe(false);
   });
 });

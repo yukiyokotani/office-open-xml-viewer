@@ -26,6 +26,10 @@ export function createCanvasFontRoute(
 }
 
 const languageRoutes = new WeakMap<CanvasFontRoute, Map<string, CanvasFontRoute>>();
+/** Languages interned per base route. Past it a derived route is created
+ * afresh: its fingerprint, the identity consumers compare and key by, is the
+ * same string, so only object reuse is lost. */
+const INTERNED_LANGUAGES_PER_ROUTE = 64;
 const faceRoutes = new WeakMap<CanvasFontRoute, CanvasFontRoute>();
 
 /**
@@ -55,7 +59,7 @@ export function canvasFontRouteWithLanguage(
       fingerprint: `${route.fingerprint}:lang:${encodeURIComponent(lang)}`,
       lang: lang,
     });
-    routes.set(lang, derived);
+    if (routes.size < INTERNED_LANGUAGES_PER_ROUTE) routes.set(lang, derived);
     faceRoutes.set(derived, route);
   }
   return derived;

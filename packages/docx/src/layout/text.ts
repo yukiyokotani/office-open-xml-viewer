@@ -616,7 +616,7 @@ const GRANDFATHERED_TAGS = new Set([
 const PRIVATE_USE_TAG = /^x(?:-[a-z0-9]{1,8})+$/u;
 /** RFC 5646 §2.2.2 extlang (one is permitted; two more are reserved): a
  * primary language followed by a 3-letter extended language subtag. */
-const EXTLANG_TAG = /^[a-z]{2,3}-([a-z]{3})(-.+)?$/u;
+const EXTLANG_TAG = /^([a-z]{2,3})-([a-z]{3})(-.+)?$/u;
 
 /** `tag` as a lower-case BCP 47 tag, or undefined when it names no language:
  * Word's `x-none`, the Canvas keyword `inherit`, or an ill-formed (RFC 5646
@@ -641,9 +641,16 @@ export function canvasLanguageTag(tag: string | undefined): string | undefined {
     canonical = canonicalize(lower);
     // ECMA-402's grammar has no extlang. RFC 5646 §4.5 makes the extlang
     // form equivalent to the extended language as primary subtag
-    // (zh-cmn-Hans-CN ≡ cmn-Hans-CN), which it does accept.
+    // (zh-cmn-Hans-CN ≡ cmn-Hans-CN) when the registry pairs that extlang
+    // with that prefix. The pair is admitted only where ECMA-402's
+    // macrolanguage aliasing confirms it (cmn → zh); any other extlang tag
+    // names no language (an unconfirmed valid pair shapes as untagged).
     const extlang = canonical === null ? EXTLANG_TAG.exec(lower) : null;
-    if (extlang) canonical = canonicalize(`${extlang[1]}${extlang[2] ?? ''}`);
+    if (extlang) {
+      const candidate = canonicalize(`${extlang[2]}${extlang[3] ?? ''}`);
+      canonical = candidate !== null && candidate.split('-')[0] === canonicalize(extlang[1]!)?.split('-')[0]
+        ? candidate : null;
+    }
     if (canonicalTags.size >= 256) canonicalTags.clear();
     canonicalTags.set(lower, canonical);
   }
