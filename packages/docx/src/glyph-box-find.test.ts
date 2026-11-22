@@ -33,16 +33,21 @@ function measureContext(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function runsOf(paragraph: string, vertical: boolean): DocxTextRunInfo[] {
-  const section = '<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
-    + 'w:header="0" w:footer="0" w:gutter="0"/>' + (vertical ? '<w:textDirection w:val="tbRl"/>' : '');
+function runsOf(paragraph: string, vertical: boolean, sectionExtra = '', textWidthTwips = 9360): DocxTextRunInfo[] {
+  const section = `<w:pgSz w:w="${textWidthTwips + 2880}" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" `
+    + 'w:header="0" w:footer="0" w:gutter="0"/>' + (vertical ? '<w:textDirection w:val="tbRl"/>' : '') + sectionExtra;
   const bytes = storeZip(new Map([
     ['[Content_Types].xml', encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/>'
-      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>')],
     ['_rels/.rels', encode(`<Relationships xmlns="${PKG}"><Relationship Id="rId1" `
       + 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/_rels/document.xml.rels', encode(`<Relationships xmlns="${PKG}"><Relationship Id="rIdT" `
+      + 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>')],
+    ['word/settings.xml', encode(`<w:settings ${NS}><w:compat><w:compatSetting w:name="compatibilityMode" `
+      + 'w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>')],
     ['word/document.xml', encode(`<w:document ${NS}><w:body>${paragraph}<w:sectPr>${section}</w:sectPr></w:body></w:document>`)],
   ]));
   const archive = new DocxArchive(bytes);
@@ -113,6 +118,87 @@ describe('find highlights cover the glyph box: the natural advance from the pen,
       close(lefts[0]!, run.x);
       if (kind === 'fitText') close(lefts.at(-1)! + 6, run.x + 24);
       for (let index = 1; index < lefts.length; index += 1) close(lefts[index]! - lefts[index - 1]!, 6 + pitch);
+    }
+  });
+});
+
+describe('find highlights leave out what is added between glyphs', () => {
+  /** Every character's highlight of every run whose text is in `texts`. */
+  const allHighlights = (runs: DocxTextRunInfo[], keep: (run: DocxTextRunInfo) => boolean) =>
+    runs.filter(keep).flatMap((run) => highlights(run).map((box, index) => ({ run, index, box })));
+  const ordered = (found: ReturnType<typeof allHighlights>) => {
+    // Glyph boxes of one run never overlap: each starts at or after the
+    // previous one's end, in paint order.
+    const byRun = new Map<DocxTextRunInfo, Box[]>();
+    for (const { run, box } of found) byRun.set(run, [...(byRun.get(run) ?? []), box]);
+    for (const boxes of byRun.values()) {
+      const sorted = [...boxes].sort((left, right) => left.left - right.left);
+      for (let index = 1; index < sorted.length; index += 1) {
+        expect(sorted[index]!.left).toBeGreaterThanOrEqual(sorted[index - 1]!.left + sorted[index - 1]!.width - 1e-6);
+      }
+    }
+  };
+
+  it('distributed CJK text: each highlight is its 6pt glyph, the distributed space left out', () => {
+    // 31pt band (620tw), jc=distribute: lines are spread to the band.
+    const text = '\u6f22\u5b57\u6771\u4eac\u5927\u962a\u4eac\u90fd';
+    const runs = runsOf(`<w:p><w:pPr><w:jc w:val="distribute"/></w:pPr><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`,
+      false, '', 620);
+    const found = allHighlights(runs, (run) => /[\u4e00-\u9fff]/u.test(run.text));
+    expect(found).toHaveLength([...text].length);
+    for (const { box } of found) close(box.width, 6);
+    ordered(found);
+    // Some line is spread: there are gaps between its glyphs.
+    const gaps = runs.filter((run) => run.text.length > 1).some((run) => run.w > run.text.length * 6 + 1e-6);
+    expect(gaps).toBe(true);
+  });
+
+  it.each([
+    ['CJK', '\u6f22\u5b57'],
+    ['Latin', 'ab'],
+  ])('%s text on a snapToChars character grid: each highlight is its 6pt glyph, the cell padding left out', (_, text) => {
+    const grid = '<w:docGrid w:type="snapToChars" w:linePitch="360" w:charSpace="8192"/>';
+    const runs = runsOf(`<w:p><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`, false, grid);
+    const found = allHighlights(runs, (run) => run.text.length > 0 && [...run.text].every((character) => text.includes(character)));
+    expect(found).toHaveLength([...text].length);
+    for (const { box } of found) close(box.width, 6);
+    ordered(found);
+  });
+
+  it('kashida-justified Arabic: each highlight is its 6pt glyph, the elongation left out', () => {
+    const word = '\u0628\u062a\u062a\u0628\u062a';
+    const text = Array.from({ length: 12 }, () => word).join(' ');
+    const runs = runsOf(`<w:p><w:pPr><w:bidi/><w:jc w:val="highKashida"/></w:pPr><w:r><w:rPr><w:rtl/><w:sz w:val="24"/></w:rPr>`
+      + `<w:t>${text}</w:t></w:r></w:p>`, false, '', 2600);
+    const found = allHighlights(runs, (run) => /[\u0600-\u06ff]/u.test(run.text))
+      .filter(({ run, index }) => run.text[index] !== ' ');
+    expect(found.length).toBeGreaterThan(0);
+    for (const { box } of found) close(box.width, 6);
+    ordered(found);
+  });
+});
+
+describe('find highlights only what its clips show', () => {
+  it('gives no highlight to text painted below an exact-height row', () => {
+    // 12pt text in a 12pt exact row, its line exactly 40pt: the glyphs paint
+    // at the bottom of the line box, below the row's clip.
+    const table = '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="240" w:hRule="exact"/></w:trPr>'
+      + '<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:spacing w:before="0" w:after="0" '
+      + 'w:line="800" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Gone</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>';
+    const run = runsOf(table, false).find((candidate) => candidate.text === 'Gone')!;
+    expect(run.clips).toBeDefined();
+    const element = () => ({ style: { cssText: '' }, children: [] as unknown[], appendChild(child: unknown) { this.children.push(child); } });
+    vi.stubGlobal('document', { createElement: element });
+    try {
+      const layer = element();
+      buildDocxHighlightLayer(layer as never, [run], [{ active: false, slices: [{ runIndex: 0, start: 0, end: 4 }] }],
+        1000, 1000, () => (value: string) => [...value].length * 6);
+      const boxes = (node: { children: unknown[] }): number => node.children.reduce<number>((sum, child) =>
+        sum + 1 + boxes(child as { children: unknown[] }), 0);
+      expect(boxes(layer)).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

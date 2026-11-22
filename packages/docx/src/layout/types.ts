@@ -337,6 +337,11 @@ export interface TextClusterLayout {
   readonly range: TextRange;
   readonly offset: PointPt;
   readonly advancePt: number;
+  /** The advance paint draws the cluster's glyph at, from its pen: its font
+   * advance with character scaling, without tracking, justification,
+   * distribution, kashida or grid-cell padding (which belong to `advancePt`
+   * and the pens). Absent where the glyph fills its advance. */
+  readonly glyphAdvancePt?: number;
 }
 
 export interface TextPaintOp {

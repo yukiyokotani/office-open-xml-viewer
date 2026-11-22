@@ -1,5 +1,5 @@
 import { countSpacingCharacters } from './character-spacing.js';
-import { OverlayClipFrames } from './run-clip.js';
+import { OverlayClipFrames, runPartVisible } from './run-clip.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -97,6 +97,10 @@ export function buildDocxHighlightLayer(
         : [measuredSliceInterval(run, start, end, pitch, measureForFont)];
       for (const { x, width, y, height } of intervals) {
         if (width <= 0) continue;
+        // WORD_CELL_CONTENT_CLIP: a highlight only where its glyphs are
+        // painted inside the clips (the glyph box along the run, the font box
+        // across it), as the text layer decides what is selectable.
+        if (run.clips && !runPartVisible(run, x, width)) continue;
         // WORD_CELL_CONTENT_CLIP: a clipped run's box lies in a container sized
         // to its clip, which cuts it like the glyphs.
         const frame = clipFrames.place(run);

@@ -20,6 +20,10 @@ import * as bodyPagination from './body-pagination.js';
 import { NoteRecoveryProgress } from './note-recovery-progress.js';
 import { NOTE_RECOVERY_WORK_MULTIPLIER, NoteOverflowPolicy, NoteOverflowRecoveryRequired } from './note-overflow-policy.js';
 
+/** The retained glyph advances of text clusters (overlay geometry, not
+ * placement) are left out, so the digests pin the placement bytes. */
+const withoutGlyphAdvances = (key: string, value: unknown) => key === 'glyphAdvancePt' ? undefined : value;
+
 type Kind = 'footnote' | 'endnote';
 const context = {
   font: '10px serif', letterSpacing: '0px', fontKerning: 'auto',
@@ -839,7 +843,7 @@ describe('reviewed note admission regressions', () => {
     expectConserved(layout, shape === 'three-heads'
       ? { '7': 'head-7;tail-7;', '8': 'head-8;tail-8;', '9': 'head-9;tail-9;' } : { '7': expected }, kind);
     expect(layout.pages.length).toBeLessThanOrEqual(2);
-    expect(createHash('sha256').update(JSON.stringify(layout)).digest('hex')).toBe(digest);
+    expect(createHash('sha256').update(JSON.stringify(layout, withoutGlyphAdvances)).digest('hex')).toBe(digest);
   });
 
   it.each(['footnote', 'endnote'] as const)('bounds overflow balancing for a twelve-paragraph %s', kind => {

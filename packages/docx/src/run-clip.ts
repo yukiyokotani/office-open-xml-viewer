@@ -185,8 +185,21 @@ export function runHighlightRect(run: Readonly<DocxTextRunInfo>): Readonly<{
     ...(run.transform ? { transform: run.transform } : {}),
   };
   if (!(rect.width > 0 && rect.height > 0)) return null;
-  if (run.clips && !clippedBoxVisible(rect, run.clips)) return null;
+  if (run.clips && !runGlyphsVisible(run)) return null;
   return run.clips ? { ...rect, clips: run.clips } : rect;
+}
+
+/** WORD_CELL_CONTENT_CLIP: whether any glyph of `run` is painted inside its
+ * clips: a glyph box (DocxTextRunInfo.clusterBoxes) along the run, the font
+ * box across it; tracking after a glyph paints nothing. A run without
+ * cluster boxes is judged by its font box. */
+export function runGlyphsVisible(run: Readonly<DocxTextRunInfo>): boolean {
+  const boxes = run.clusterBoxes;
+  if (!boxes || boxes.length === 0) return runPartVisible(run, 0, run.highlightBounds?.width ?? run.w);
+  return boxes.some((box) => {
+    const width = box.glyphWidth ?? box.width;
+    return width > 0 && runPartVisible(run, box.glyphX ?? box.x, width);
+  });
 }
 
 /** The painted box of the part of `run` from `offset` along its own axis

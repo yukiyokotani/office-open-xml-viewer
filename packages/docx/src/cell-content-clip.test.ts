@@ -397,7 +397,8 @@ describe('overlay clip containers', () => {
     vi.stubGlobal('document', { createElement: () => element() });
     try {
       const layer = element();
-      const clip = { x: 20, y: 10, width: 40, height: 20 };
+      // The clip shows the turned run's first two letters (down to y=40).
+      const clip = { x: 20, y: 10, width: 40, height: 30 };
       const run = {
         text: 'abc', x: 30, y: 20, w: 30, h: 10, fontSize: 10, font: '10px serif',
         transform: 'rotate(90deg)', clips: [clip],
@@ -410,12 +411,12 @@ describe('overlay clip containers', () => {
       const container = layer.children[0]!;
       expect(container.style.overflow).toBe('clip');
       expect([container.style.left, container.style.top, container.style.width, container.style.height])
-        .toEqual(['20%', '10%', '40%', '20%']);
+        .toEqual(['20%', '10%', '40%', '30%']);
       const [whole, partial] = container.children;
-      expect([whole!.style.left, whole!.style.top, whole!.style.width]).toEqual(['25%', '50%', '75%']);
+      expect([whole!.style.left, whole!.style.top, whole!.style.width]).toEqual(['25%', '33.33333333333333%', '75%']);
       expect(whole!.style.transform).toBe('matrix(0, 1, -1, 0, 0, 0)');
       // A slice 10px into the run advances down the turned run, not across.
-      expect([partial!.style.left, partial!.style.top]).toEqual(['25%', '100%']);
+      expect([partial!.style.left, partial!.style.top]).toEqual(['25%', '66.66666666666666%']);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -589,6 +590,26 @@ describe('a VML text box union with a degenerate rectangle', () => {
     const threads = resolveDocxCommentThreads([{ id: 'c', author: 'A', text: 'x' }] as never, [{
       commentId: 'c', source: hid.source!, startRunIndex: hid.sourceRunIndex!, endRunIndex: hid.sourceRunIndex! + 1,
       reference: { source: hid.source!, runIndex: hid.sourceRunIndex! + 1, affinity: 'preceding' },
+    }] as never, runs);
+    expect(JSON.stringify(threads)).not.toContain('"width"');
+  });
+});
+
+describe('comment highlights of clipped glyphs', () => {
+  it('gives no highlight to a letter whose glyph is clipped although its tracking is not', () => {
+    // A 16pt I expanded by 16pt, indented 12pt out of its cell: its glyph
+    // (5pt from its pen) lies left of the cell; its tracking reaches in.
+    const paragraph = '<w:p><w:pPr><w:ind w:left="-240"/></w:pPr><w:r><w:rPr><w:spacing w:val="320"/><w:sz w:val="32"/></w:rPr>'
+      + '<w:t>I</w:t></w:r><w:r><w:t>xyz</w:t></w:r></w:p>';
+    const runs = textRunsForPage(layoutDocx(docx(paragraph)), 0, { scale: 1 });
+    const letter = runs.find((run) => run.text === 'I')!;
+    const [box] = letter.clusterBoxes!;
+    const clip = letter.clips![0]!;
+    expect(letter.x + box!.glyphX! + box!.glyphWidth!).toBeLessThan(clip.x);
+    expect(letter.x + box!.x + box!.width).toBeGreaterThan(clip.x);
+    const threads = resolveDocxCommentThreads([{ id: 'c', author: 'A', text: 'x' }] as never, [{
+      commentId: 'c', source: letter.source!, startRunIndex: letter.sourceRunIndex!, endRunIndex: letter.sourceRunIndex! + 1,
+      reference: { source: letter.source!, runIndex: letter.sourceRunIndex! + 1, affinity: 'preceding' },
     }] as never, runs);
     expect(JSON.stringify(threads)).not.toContain('"width"');
   });
