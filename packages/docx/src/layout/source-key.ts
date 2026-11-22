@@ -86,6 +86,16 @@ export function anchorOccurrenceKey(source: SourceRef, parserLocalId: string): s
   return `anchor:${sourceKey(source)}:${encodeURIComponent(parserLocalId)}`;
 }
 
+/** The top-level index of the story block that owns an anchor occurrence key
+ * of `story` (the inverse of the key above for a block of that story), or
+ * null for a key of another story or shape. */
+export function anchorOccurrenceBlockIndex(occurrenceId: string, story: SourceRef): number | null {
+  const prefix = `anchor:${story.story}:${encodeURIComponent(story.storyInstance)}:`;
+  if (!occurrenceId.startsWith(prefix)) return null;
+  const index = Number.parseInt(occurrenceId.slice(prefix.length), 10);
+  return Number.isInteger(index) ? index : null;
+}
+
 /** Separate ownership permits the same part to have different fill/pen effects. */
 export function vmlStrokeResourceKey(source: SourceRef, partPath: string): string {
   return `${imageResourceKey(source, partPath)}:vml-stroke`;

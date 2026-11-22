@@ -199,6 +199,15 @@ const MAX_OPENED_RESERVE_IDENTITIES = 16;
  * body could not advance in that geometry. Retry the same reserve iteration
  * with these observations, rather than opening an unbounded run of empty pages.
  * This is a convergence signal, never a speculative fit or a copied note plan. */
+/** The live page is laid out again from its start with a changed set of
+ * upright block pins (`word-vertical-section-upright-block-table`). */
+class UprightBlockPageReplay extends Error {
+  constructor() {
+    super('Upright block page replay');
+    this.name = 'UprightBlockPageReplay';
+  }
+}
+
 class OpenedPageReserveObservation extends Error {
   constructor(readonly reserves: readonly HeaderFooterReserve[]) {
     super('An empty opened page requires reserve observation before continuing');
@@ -511,6 +520,15 @@ function activeRegion(state: BodyPaginationState): PageSectionRegionInput {
   const region = page?.accumulator.sectionRegions.at(-1);
   if (!page || page.kind !== 'content' || !region) throw new Error('Missing active body region');
   return region;
+}
+
+/** Whether the flow's column is the last one populated in its region. */
+function inLastColumn(state: BodyPaginationState): boolean {
+  const region = activeRegion(state);
+  const columnIndexes = region.columnIndexes
+    ?? region.section.columns.map((_, index) => index);
+  return (region.columnFlowDirection === 'rtl' ? columnIndexes[0] : columnIndexes.at(-1))
+    === state.flow.columnIndex;
 }
 
 function activeBlockEndPt(state: BodyPaginationState): number {
@@ -1521,6 +1539,66 @@ function* paginateBodyPassSteps(
   let beforeNotePageClose = () => {};
   let resetNotePage = () => {};
   let placePendingFootnoteContinuations: () => void = () => {};
+  // `word-vertical-section-upright-block-table`: the upright block tables of
+  // the live page placed ahead of the flow reaching them, by table source key.
+  //
+  // A table is placed where the flow reaches it when everything before it is
+  // laid out without it, and never moves afterwards. Two kinds of text laid
+  // out before the table still have to flow around it: the strip that ends
+  // where the table starts (planned with that strip's paragraph, below), and
+  // the text of an earlier column that a multi-column section raises the
+  // table over. For the latter the table's measurement returns a page pin
+  // (uprightPagePin); the page is then laid out once more from its start with
+  // the pin registered, and the table takes the pinned position in whichever
+  // column the flow now reaches it.
+  //
+  // A table placed ahead of the flow that the flow then reaches on a later
+  // page (its own exclusion, or a note reserve, moved what precedes it off
+  // the page) cannot keep that position. Library policy, not measured: the
+  // page is laid out again without it, the table is placed where the flow
+  // reaches it and only the text after it flows around it.
+  //
+  // Termination: a table is pinned at most once and released at most once
+  // per pass, and each replay does one of the two, so a page is laid out at
+  // most twice per table on it, plus once.
+  type UprightPagePin = { registration: UprightBlockRegistration; consumed: boolean };
+  let uprightPinPage = -1;
+  let uprightPins = new Map<string, UprightPagePin>();
+  const uprightPinnedOnce = new Set<string>();
+  const uprightForwardOnly = new Set<string>();
+  const uprightPinsOf = (pageIndex: number): Map<string, UprightPagePin> => {
+    if (uprightPinPage !== pageIndex) {
+      uprightPinPage = pageIndex;
+      uprightPins = new Map();
+    }
+    return uprightPins;
+  };
+  /** Keeps a plan for replays of the page: every table in its slot for good. */
+  const retainUprightPlan = (
+    tableKey: string,
+    registration: UprightBlockRegistration,
+  ): UprightBlockRegistration => {
+    const pinned = Object.freeze({
+      ...registration,
+      slots: Object.freeze(registration.slots.map((slot) =>
+        Object.freeze({ ...slot, reserved: true, pinned: true }))),
+    });
+    if (canRecoverOnPage) uprightPinsOf(state.flow.pageIndex).set(tableKey, { registration: pinned, consumed: false });
+    return pinned;
+  };
+  /** Before the live page closes: releases the tables placed ahead of the
+   * flow that it never reached there, and lays the page out again. */
+  const releaseUnreachedUprightPins = (): void => {
+    if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex) return;
+    let released = false;
+    for (const [tableKey, pin] of uprightPins) {
+      if (pin.consumed) continue;
+      uprightPins.delete(tableKey);
+      uprightForwardOnly.add(tableKey);
+      released = true;
+    }
+    if (released) throw new UprightBlockPageReplay();
+  };
   const commitTransition = function* (
     transition: ReturnType<typeof applyAuthoredBreak>,
     nextEntryIndex: number,
@@ -1533,6 +1611,7 @@ function* paginateBodyPassSteps(
     }
     const previousPageIndex = state.flow.pageIndex;
     if (transition.state.pageIndex !== previousPageIndex) {
+      releaseUnreachedUprightPins();
       beforeNotePageClose();
       flushAnchorInputs();
     }
@@ -3002,6 +3081,7 @@ function* paginateBodyPassSteps(
               availableInlineExtentPt: location.availableBounds.widthPt,
               precedingBlockExtentPt: keepSetExtentPt,
               freshPageBlockExtentPt: freshPageExtent(state),
+              lastColumnOfPage: inLastColumn(state),
             });
             const continues = nextBlock.kind === 'paragraph'
               && (nextBlock.keepNext || bridgeSuccessor);
@@ -3231,18 +3311,20 @@ function* paginateBodyPassSteps(
         // second layout is kept when it still ends the paragraph in this
         // region; its overflow fills the following strips beside the tables
         // and the flow continues after it, while the tables take the planned
-        // slots when the flow reaches them. Otherwise (library policy, not
-        // measured: the wrapped strip overflows out of the tables' column)
-        // the first layout stands, nothing is planned, and only the lines
-        // after the tables wrap. Each fragment is tried once and nothing
-        // placed earlier is revised, so a pass needs no further pass for it.
+        // slots when the flow reaches them. Otherwise the tables keep their
+        // place all the same and the paragraph is paginated beside them like
+        // any other (measured: a two-line result that the column cannot
+        // hold moves to the next column whole, the table staying behind).
+        // Each fragment is tried once and no table placed earlier moves.
         let uprightBlocks: UprightBlockRegistration | null = null;
+        let uprightBlocksFor = '';
         const tableAfter = input.sequence[entryIndex + 1];
         if (
           session.planUprightBlocks
           && selected.fragment && selected.nextCursor === null && !selected.requiresFreshFlowRegion
           && tableAfter?.kind === 'body-block' && tableAfter.block.kind === 'table'
           && activeRegion(state).writingMode !== 'horizontal-tb'
+          && !uprightForwardOnly.has(sourceKey(tableAfter.block.source))
         ) {
           const unwrappedChargePt = Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt);
           const unwrappedReservePt = notePlans
@@ -3264,6 +3346,7 @@ function* paginateBodyPassSteps(
             availableBlockExtentPt: tableLocation.availableBounds.heightPt,
             freshPageBlockExtentPt: freshPageExtent(state),
             pageHasContent: true,
+            lastColumnOfPage: inLastColumn(state),
           });
           if (planned) {
             const wrapped = session.measureParagraph({ ...paragraphRequest, besideUprightBlocks: planned });
@@ -3273,6 +3356,16 @@ function* paginateBodyPassSteps(
               acquired = wrapped;
               ({ selected, notePlans } = wrappedChoice);
               uprightBlocks = planned;
+              uprightBlocksFor = sourceKey(tableAfter.block.source);
+            } else if (canRecoverOnPage) {
+              // The paragraph no longer ends here beside the tables: it is
+              // paginated again as any paragraph beside an exclusion (its
+              // lines move to the next column or page as they must), and the
+              // tables keep their place.
+              // Pinned: the flow can reach them in another column.
+              session.commitUprightBlocks?.(retainUprightPlan(sourceKey(tableAfter.block.source), planned));
+              session.moveAcquisitionCursor(location);
+              continue;
             }
           }
           session.moveAcquisitionCursor(location);
@@ -3324,7 +3417,10 @@ function* paginateBodyPassSteps(
           );
           if (acceptedDelta) session.commitFlowRegistryDelta(acceptedDelta);
         }
-        if (uprightBlocks) session.commitUprightBlocks?.(uprightBlocks);
+        if (uprightBlocks) {
+          session.commitUprightBlocks?.(uprightBlocks);
+          retainUprightPlan(uprightBlocksFor, uprightBlocks);
+        }
         cursor = selected.nextCursor;
         if (cursor) {
           yield* commitTransition(
@@ -3401,10 +3497,24 @@ function* paginateBodyPassSteps(
             availableBlockExtentPt,
             freshPageBlockExtentPt: freshPageExtent(state),
             pageHasContent: state.flow.pageHasContent,
+            lastColumnOfPage: inLastColumn(state),
             ...(cursor ? { cursor } : {}),
           });
         let availableBlockExtentPt = location.availableBounds.heightPt;
         let acquired = requestAt(availableBlockExtentPt);
+        if (acquired.uprightPagePin && canRecoverOnPage && block.kind === 'table') {
+          // `word-vertical-section-upright-block-table`: the table lies over
+          // a column laid out before its own. Pin it and lay the page out
+          // again, so that column's text flows around it.
+          const tableKey = sourceKey(block.source);
+          if (!uprightPinnedOnce.has(tableKey) && !uprightForwardOnly.has(tableKey)) {
+            uprightPinnedOnce.add(tableKey);
+            uprightPinsOf(state.flow.pageIndex).set(tableKey, {
+              registration: acquired.uprightPagePin, consumed: false,
+            });
+            throw new UprightBlockPageReplay();
+          }
+        }
         const reservedNotes = footnoteLayoutsByPage.get(state.flow.pageIndex) ?? [];
         const authorizedReserve = state.footnoteReservePt > 0 && reservedNotes.length > 0
           && reservedNotes.every(note => recoveryAllowed('footnote', [note.source.storyInstance]));
@@ -3592,6 +3702,10 @@ function* paginateBodyPassSteps(
         }
         // `word-vertical-section-upright-block-table`
         if (acquired.uprightBlocks) session.commitUprightBlocks?.(acquired.uprightBlocks);
+        if (block.kind === 'table' && uprightPinPage === state.flow.pageIndex) {
+          const pin = uprightPins.get(sourceKey(block.source));
+          if (pin) pin.consumed = true;
+        }
         cursor = acquired.nextCursor ?? undefined;
         unwrappedLocation = undefined;
         complete = cursor === undefined;
@@ -3656,18 +3770,27 @@ function* paginateBodyPassSteps(
       const capacityRecovery = error instanceof NoteOverflowRecoveryRequired
         && canRecoverOnPage && notePolicy?.recover(error) === true;
       if (error instanceof OpenedPageReserveObservation) throw error;
-      if (!capacityRecovery && !(error instanceof PageNoteReplay)) noteProgress.fail(error);
+      const uprightReplay = error instanceof UprightBlockPageReplay;
+      if (!capacityRecovery && !uprightReplay && !(error instanceof PageNoteReplay)) noteProgress.fail(error);
       resumeEntry = restorePageCheckpoint();
       restartEntryIndex = resumeEntry.entryIndex;
       session.resetPageAcquisition(acquisitionLocation(state));
       yield* prescanPageAnchors(state, restartEntryIndex);
-      if (capacityRecovery) {
+      // The page's upright block pins hold for every layout of it.
+      for (const pin of uprightPinsOf(state.flow.pageIndex).values()) {
+        pin.consumed = false;
+        session.commitUprightBlocks?.(pin.registration);
+      }
+      if (capacityRecovery || uprightReplay) {
         resetNotePage();
         replayIncomingNotes = true;
       } else installModernNoteArea();
     }
   }
   currentEntryResume = () => ({ kind: 'entry', entryIndex: input.sequence.length });
+  // Every body table has been reached: nothing is left to release.
+  uprightPinPage = -1;
+  uprightPins = new Map();
   // ECMA-376 §17.11.22: document-end notes are flow following the main
   // story, not decoration of its terminal page. Paginate them here through
   // the same column/page transitions, before draining footnote tails, so

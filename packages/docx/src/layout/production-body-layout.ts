@@ -2347,6 +2347,7 @@ function measureFollowingBodyBlock(
       availableBlockExtentPt: leftPt,
       freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
       pageHasContent: true,
+      ...(request.lastColumnOfPage === undefined ? {} : { lastColumnOfPage: request.lastColumnOfPage }),
     }, tableOperations);
     return Object.freeze({
       fullExtentPt: 0,
@@ -2899,6 +2900,7 @@ function commitBodyUprightBlocks(
   if (registration.box) addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
   for (const slot of registration.slots) index.slots.set(slot.sourceIndex, slot);
   for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
+  if (registration.tail) index.tail = registration.tail;
 }
 
 /**

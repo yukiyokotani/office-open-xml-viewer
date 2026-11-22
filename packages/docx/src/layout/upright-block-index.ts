@@ -29,6 +29,8 @@ export interface UprightBlockPageIndex {
   /** Boxes spanning more buckets than MAX_BUCKET_SPAN; every query reads them. */
   readonly wide: LayoutRect[];
   readonly slots: Map<number, UprightBlockSlot>;
+  /** The table placed last (UprightBlockTail). */
+  tail: UprightBlockTail | null;
   /** Text exclusions by `${block bucket}:${inline bucket}`. */
   readonly exclusionCells: Map<string, UprightBlockExclusionEntry[]>;
   /** Exclusions covering more cells than MAX_EXCLUSION_CELLS; every query reads them. */
@@ -50,22 +52,34 @@ export type UprightBlockExclusionEntry = Readonly<{ exclusion: UprightBlockExclu
 /** A table placed ahead of the flow reaching it. */
 export interface UprightBlockSlot {
   readonly sourceIndex: number;
-  /** The column the table was placed for; a table reached elsewhere has no slot. */
+  /** The column the table was placed for. A table the flow reaches in
+   * another column has no slot, unless the slot is `pinned`. */
   readonly flowDomainId: string;
   /** Its box between the outer edges of its border rules. */
   readonly bounds: LayoutRect;
-  /** Placed with the paragraph before it, which already wraps around it: the
-   * text exclusion is registered and the placement is final. */
+  /** Placed with the paragraph before it, which already wraps around it, or
+   * pinned: the text exclusion is registered and the placement is final. */
   readonly reserved: boolean;
+  /** Registered when the page's layout started (a page pin): the table takes
+   * the slot in whichever column of the page the flow reaches it. */
+  readonly pinned: boolean;
+  /** The table does not fit the band from `bounds` and is cut between rows
+   * there; the rest continues on the next page. */
+  readonly splitRows: boolean;
 }
 
+/** The last upright block table placed in a column and where it ends: the
+ * table that directly follows it in the body continues from there. */
+export type UprightBlockTail = Readonly<{ sourceIndex: number; flowDomainId: string; bounds: LayoutRect }>;
+
 /** What accepting upright blocks adds to the page: at most one box for the
- * index, the slots of tables placed ahead of the flow, and the text
- * exclusions of the blocks placed now. */
+ * index, the slots of tables placed ahead of the flow, the text exclusions
+ * of the blocks placed now, and the new tail. */
 export interface UprightBlockRegistration {
   readonly box: LayoutRect | null;
   readonly slots: readonly UprightBlockSlot[];
   readonly exclusions: readonly UprightBlockExclusion[];
+  readonly tail?: UprightBlockTail;
 }
 
 const BUCKET_PT = 72;
@@ -77,6 +91,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     buckets: new Map(),
     wide: [],
     slots: new Map(),
+    tail: null,
     exclusionCells: new Map(),
     wideExclusions: [],
     lastExclusionBucket: Number.NEGATIVE_INFINITY,

@@ -111,6 +111,8 @@ export interface BodyTableAcquisitionInput {
   readonly freshPageBlockExtentPt: number;
   /** Whether flow content already occupies the current page. */
   readonly pageHasContent?: boolean;
+  /** Whether no further column of the page follows the current one. */
+  readonly lastColumnOfPage?: boolean;
   readonly cursor?: BodyTableContinuationCursor;
 }
 
@@ -173,6 +175,11 @@ export interface AcquiredTableBlock {
    * fragment adds to the page's upright blocks
    * (BodyLayoutSession.commitUprightBlocks). */
   readonly uprightBlocks?: UprightBlockRegistration;
+  /** `word-vertical-section-upright-block-table`: the fragment's block lies
+   * over a column laid out before its own. Registered when the page's layout
+   * starts (commitUprightBlocks), it makes the text of that column flow
+   * around the block and the table take this position again. */
+  readonly uprightPagePin?: UprightBlockRegistration;
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body' | 'upright-physical';
     xPt: number;
@@ -271,6 +278,8 @@ export interface FollowingBodyBlockMeasurementInput {
   readonly precedingBlockExtentPt?: number;
   /** Block extent of a fresh page, as given to measureTable. */
   readonly freshPageBlockExtentPt?: number;
+  /** As given to measureTable. */
+  readonly lastColumnOfPage?: boolean;
 }
 
 export interface FollowingBodyBlockMeasurement {

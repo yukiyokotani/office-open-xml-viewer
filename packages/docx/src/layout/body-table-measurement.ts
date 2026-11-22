@@ -57,10 +57,10 @@ import {
 import {
   bodyOccurrenceKey,
   bodyRootFloatingTablePlacementKey,
+  anchorOccurrenceBlockIndex,
   tableFragmentStartKey,
   uprightBlockTableKey,
 } from './source-key.js';
-import { footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
 import {
   emptyUprightBlockPageIndex,
   uprightBlockBoxesMet,
@@ -428,14 +428,41 @@ function uprightBlockRegistrationOf(
   box: LayoutRect | null,
   slots: UprightBlockRegistration['slots'],
   exclusions: UprightBlockRegistration['exclusions'],
-): Pick<TableMeasureResult, 'uprightBlocks'> {
+  tail?: NonNullable<UprightBlockRegistration['tail']>,
+): UprightBlockRegistration | null {
   const sized = (rect: LayoutRect) => rect.widthPt > 0 && rect.heightPt > 0;
   const kept = exclusions.filter((exclusion) => sized(exclusion.bounds));
   const keptBox = box && sized(box) ? box : null;
-  if (!keptBox && slots.length === 0 && kept.length === 0) return Object.freeze({});
+  if (!keptBox && slots.length === 0 && kept.length === 0) return null;
   return Object.freeze({
-    uprightBlocks: Object.freeze({ box: keptBox, slots: Object.freeze([...slots]), exclusions: Object.freeze(kept) }),
+    box: keptBox,
+    slots: Object.freeze([...slots]),
+    exclusions: Object.freeze(kept),
+    ...(tail ? { tail: Object.freeze(tail) } : {}),
   });
+}
+
+/** The wrapped anchored drawings of the page that a paragraph before the
+ * table anchors, as boxes in the same section-logical page points: an upright
+ * block table meets them as it meets a table placed before it, without the
+ * table clearance, and stacks below them
+ * (`word-vertical-section-upright-block-table`, which also records what is
+ * not implemented: a drawing anchored after the table is not met, and
+ * floating tables are not met either, their registered exclusion in a
+ * vertical section not being stated in this frame). */
+function uprightBlockObstacles(state: BodyAcquisitionState, table: SourceRef): LayoutRect[] {
+  const obstacles: LayoutRect[] = [];
+  const tableIndex = table.path[0]!;
+  for (const float of state.floats) {
+    // A wrapNone drawing excludes no text (paragraphWrapExclusions).
+    if (float.kind !== 'shape' || !float.anchorOccurrenceId || float.authoredWrap === undefined) continue;
+    const anchorIndex = anchorOccurrenceBlockIndex(float.anchorOccurrenceId, table);
+    if (anchorIndex === null || anchorIndex >= tableIndex) continue;
+    obstacles.push({
+      xPt: float.xLeft, yPt: float.yTop, widthPt: float.xRight - float.xLeft, heightPt: float.yBottom - float.yTop,
+    });
+  }
+  return obstacles;
 }
 
 /**
@@ -448,18 +475,21 @@ function uprightBlockRegistrationOf(
  * takes the first position from the column top at which its box clears the
  * boxes it meets (an earlier box is met up to
  * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past its far edge), so overlapping
- * tables stack. A multi-column section never splits or moves a block: one
- * that would pass the page's bottom edge from the column top is first raised
- * to end there, no higher than the page top, and the search starts from that
- * raised position, so it is never raised into an earlier box.
+ * tables stack. Wrapped drawings anchored before the table (`obstacles`) are
+ * met where their block range overlaps the block's.
+ * A multi-column section never splits or moves a block: one that would pass
+ * the page's bottom edge from the column top is first raised to end there,
+ * no higher than the page top, and the search starts from that raised
+ * position, so it is never raised into an earlier box.
  *
- * `first` (the first fragment of a top-level table, with the tables that run
- * on from it): a block that does not fit below the boxes it meets clears the
- * nearest of them along the block axis instead. In a one-column section that
- * holds for a block that fits the band from the column top (a taller one
+ * `first` (the first fragment of a table, with the tables that run on from
+ * it): a block that does not fit below the boxes it meets clears the nearest
+ * of them along the block axis instead. In a one-column section that holds
+ * for a block that fits the band from the column top (a taller one
  * paginates); a multi-column section lets it run to the bottom page edge.
  * Later fragments and owner segments stay at the flow's block position
- * (library policy).
+ * (library policy). `from` starts the search at a given position instead of
+ * the flow's: rows that continue the table placed just before them.
  *
  * The result depends only on the request and the boxes placed before, and
  * every box it returns clears all of them: each pass over the met boxes moves
@@ -469,11 +499,13 @@ function uprightBlockRegistrationOf(
  */
 function searchUprightBlock(
   index: UprightBlockPageIndex,
+  obstacles: readonly LayoutRect[],
   physical: PhysicalAnchorFrame,
   request: BodyTableRequest,
   first: boolean,
   inlineExtentPt: number,
   boxBlockExtentPt: number,
+  from?: Readonly<{ blockStartPt: number; inlineStartPt: number }>,
 ): Readonly<{
   blockStartPt: number;
   inlineStartPt: number;
@@ -487,28 +519,38 @@ function searchUprightBlock(
   const cursorPt = request.location.cursorPt;
   const multiColumn = request.location.section.columns.length > 1;
   const bandEndPt = physical.pageHeight - physical.marginBottom;
-  const inlineOriginPt = multiColumn
+  const inlineOriginPt = from ? from.inlineStartPt : multiColumn
     ? Math.max(0, Math.min(cursorPt.xPt, physical.pageHeight - inlineExtentPt))
     : cursorPt.xPt;
-  let blockStartPt = cursorPt.yPt;
+  const flowBlockPt = from ? from.blockStartPt : cursorPt.yPt;
+  let blockStartPt = flowBlockPt;
   let inlineStartPt = inlineOriginPt;
   for (;;) {
-    const met = uprightBlockBoxesMet(
-      index, blockStartPt, blockStartPt + boxBlockExtentPt, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT,
-    );
-    // The met boxes come ordered by inline start, so one pass leaves the
+    const blockEndPt = blockStartPt + boxBlockExtentPt;
+    const met = uprightBlockBoxesMet(index, blockStartPt, blockEndPt, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
+    let nearestEndPt = Number.POSITIVE_INFINITY;
+    for (const box of met) {
+      nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
+    }
+    let metObstacle = false;
+    for (const box of obstacles) {
+      if (!(box.yPt < blockEndPt && blockStartPt < box.yPt + box.heightPt)) continue;
+      met.push(box);
+      metObstacle = true;
+      nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt);
+    }
+    if (metObstacle) met.sort((left, right) => left.xPt - right.xPt);
+    // The met boxes are ordered by inline start, so one pass leaves the
     // block clear of all of them: a box passed without overlap ends at or
     // before the block's start, which only grows.
     inlineStartPt = inlineOriginPt;
-    let nearestEndPt = Number.POSITIVE_INFINITY;
     for (const box of met) {
       const boxEndPt = box.xPt + box.widthPt;
       if (box.xPt < inlineStartPt + inlineExtentPt && boxEndPt > inlineStartPt) inlineStartPt = boxEndPt;
-      nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
     }
     const fitsBelow = inlineStartPt + inlineExtentPt <= (multiColumn ? physical.pageHeight : bandEndPt);
     if (!first || inlineStartPt === inlineOriginPt || fitsBelow
-      || (!multiColumn && cursorPt.xPt + inlineExtentPt > bandEndPt)) break;
+      || (!multiColumn && inlineOriginPt + inlineExtentPt > bandEndPt)) break;
     blockStartPt = nearestEndPt;
   }
   return Object.freeze({
@@ -516,7 +558,7 @@ function searchUprightBlock(
     inlineStartPt,
     inlineRoomPt: bandEndPt - inlineStartPt,
     inlineBandPt: bandEndPt - cursorPt.xPt,
-    leavesBlockExtent: blockStartPt !== cursorPt.yPt
+    leavesBlockExtent: blockStartPt !== flowBlockPt
       && blockStartPt + boxBlockExtentPt
         > request.location.availableBounds.yPt + request.location.availableBounds.heightPt,
   });
@@ -551,11 +593,15 @@ function uprightRunMember(
   });
 }
 
-/** Whether a one-column section moves a table with this box to a fresh
- * region: its box (grid and border rules) is wider than the block extent
- * left and a fresh page has more. */
+/** Whether a table with this box starts a fresh region because its box (grid
+ * and border rules) is wider than the block extent left while a fresh page
+ * has more. That holds in the last column of a page, and so in a one-column
+ * section; in an earlier column of a multi-column section the table stays
+ * where the flow reached it, overflowing. */
 function uprightBlockTooWide(request: BodyTableRequest, boxBlockExtentPt: number): boolean {
-  return boxBlockExtentPt > request.availableBlockExtentPt
+  const multiColumn = request.location.section.columns.length > 1;
+  return (!multiColumn || request.lastColumnOfPage === true)
+    && boxBlockExtentPt > request.availableBlockExtentPt
     && request.availableBlockExtentPt < request.freshPageBlockExtentPt;
 }
 
@@ -566,29 +612,33 @@ type UprightRunPlan =
   | Readonly<{ kind: 'fresh-region'; freshPage: boolean }>
   /** A one-column section paginates the table by rows from this position. */
   | Readonly<{ kind: 'rows'; found: ReturnType<typeof searchUprightBlock> }>
-  /** `members[0]` and the tables after it that run on from it are placed
-   * whole, each in its slot; `box` bounds them all. */
-  | Readonly<{ kind: 'whole'; members: readonly UprightRunMember[]; slots: readonly UprightBlockSlot[]; box: LayoutRect }>;
+  /** `slots[0]` is the table's, the others those of the tables after it
+   * that run on from it on this page; `box` bounds the tables placed whole
+   * (the last slot can be one that splits by rows and is not in it). */
+  | Readonly<{ kind: 'placed'; slots: readonly UprightBlockSlot[]; box: LayoutRect; lastSourceIndex: number }>;
 
 /**
  * `word-vertical-section-upright-block-table`: places the upright block table
  * `leader` the flow reaches at `request.location`, together with the upright
  * block tables that directly follow it in the body with nothing between them.
- * Such tables run on from one another as one block: each starts where the
- * one before it ends, at the same block position.
  *
- * A multi-column section never splits or moves a table, so the whole run is
- * one block there: it is placed, and raised from the bottom page edge, by
- * its total inline extent and its widest box. A one-column section places
- * the leader by its own box and lets the following tables run on while each
- * fits the band below the one before it, is not too wide for the block
- * extent left and meets no other box; the first that does not is placed on
- * its own when the flow reaches it (library policy: no control has directly
- * following tables in one column).
+ * Under that rule such tables are laid out as one table: the rows of each
+ * start where the rows of the one before end, their left edges aligned, and the whole takes
+ * the positions, the pagination and the exclusion of a single table as wide
+ * as its widest member. So the run is placed by its total inline extent and
+ * its widest box, and its narrower tables lie at the physical left of that
+ * box (the far edge in the clockwise frame, the near edge in vertical-lr).
  *
- * `reserving` plans the tables for the paragraph fragment before them
- * (planUprightBlocks): the run then ends before a table whose cells hold
- * footnote references, whose page admission can still move it.
+ * A multi-column section never splits or moves a table: the whole run is one
+ * block, raised together from the bottom page edge. In a one-column section
+ * a run taller than the inline extent below its start starts a fresh page
+ * when content precedes it; on a fresh page its tables fill the band whole
+ * until one does not fit, which is cut between rows there and continues on
+ * the next page, where the tables after it follow its last rows
+ * (`continuing`).
+ *
+ * Evidence boundary: the controls have tables of equal border rules; a run
+ * whose tables differ in them is aligned by their boxes (library policy).
  */
 function planUprightRun(
   context: BodyTableMeasurementContext,
@@ -600,111 +650,86 @@ function planUprightRun(
 ): UprightRunPlan {
   const { dependencies, state, effectiveTablePositioning } = context;
   const index = uprightBlockIndexOf(state);
+  const obstacles = uprightBlockObstacles(state, request.input.source);
   const flowDomainId = request.location.flowDomainId;
   const multiColumn = request.location.section.columns.length > 1;
   const pageHasContent = request.pageHasContent === true;
-  /** The upright block table at body index `sourceIndex` if it runs on. */
-  const followerAt = (sourceIndex: number): UprightRunMember | null => {
-    const element = dependencies.source.blocks.body[sourceIndex];
-    if (element?.type !== 'table') return null;
+  const members = [leader];
+  let totalInlinePt = leader.inlineExtentPt;
+  let boxBlockExtentPt = leader.boxBlockExtentPt;
+  for (let next = leader.sourceIndex + 1; ; next += 1) {
+    const element = dependencies.source.blocks.body[next];
+    if (element?.type !== 'table') break;
     const memberState = bodyTableAcquisitionState(state, element, effectiveTablePositioning);
-    if (memberState.uprightPhysicalTable !== true) return null;
-    operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, sourceIndex);
-    const retained = retainedTableRecord(state, sourceIndex).acquisition;
-    if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) return null;
-    if (reserving && footnoteIdsInRetainedSlice(retained.layout).length > 0) return null;
-    return uprightRunMember(
-      physical, Object.freeze({ ...request.input.source, path: Object.freeze([sourceIndex]) }), retained,
+    if (memberState.uprightPhysicalTable !== true) break;
+    operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, next);
+    const retained = retainedTableRecord(state, next).acquisition;
+    if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) break;
+    const member = uprightRunMember(
+      physical, Object.freeze({ ...request.input.source, path: Object.freeze([next]) }), retained,
     );
-  };
-  const slotOf = (member: UprightRunMember, blockStartPt: number, inlineStartPt: number): UprightBlockSlot =>
-    Object.freeze({
+    members.push(member);
+    totalInlinePt += member.inlineExtentPt;
+    boxBlockExtentPt = Math.max(boxBlockExtentPt, member.boxBlockExtentPt);
+  }
+  // The tables placed whole from `inlineStartPt`, then at most one cut by rows.
+  const placedOf = (blockStartPt: number, inlineStartPt: number, wholeCount: number): UprightRunPlan => {
+    const slots: UprightBlockSlot[] = [];
+    let inlineEndPt = inlineStartPt;
+    const slotOf = (member: UprightRunMember, splitRows: boolean): UprightBlockSlot => Object.freeze({
       sourceIndex: member.sourceIndex,
       flowDomainId,
       bounds: Object.freeze({
-        xPt: inlineStartPt,
-        yPt: blockStartPt,
+        xPt: inlineEndPt,
+        yPt: physical.writingMode === 'vertical-lr'
+          ? blockStartPt : blockStartPt + boxBlockExtentPt - member.boxBlockExtentPt,
         widthPt: member.inlineExtentPt,
         heightPt: member.boxBlockExtentPt,
       }),
       reserved: reserving,
+      pinned: false,
+      splitRows,
     });
-  const wholeOf = (
-    members: readonly UprightRunMember[],
-    blockStartPt: number,
-    inlineStartPt: number,
-  ): UprightRunPlan => {
-    const slots: UprightBlockSlot[] = [];
-    let inlineEndPt = inlineStartPt;
-    let boxBlockExtentPt = 0;
-    for (const member of members) {
-      slots.push(slotOf(member, blockStartPt, inlineEndPt));
+    for (const member of members.slice(0, wholeCount)) {
+      slots.push(slotOf(member, false));
       inlineEndPt += member.inlineExtentPt;
-      boxBlockExtentPt = Math.max(boxBlockExtentPt, member.boxBlockExtentPt);
     }
+    const box: LayoutRect = Object.freeze({
+      xPt: inlineStartPt, yPt: blockStartPt, widthPt: inlineEndPt - inlineStartPt, heightPt: boxBlockExtentPt,
+    });
+    if (wholeCount < members.length) slots.push(slotOf(members[wholeCount]!, true));
     return Object.freeze({
-      kind: 'whole' as const,
-      members,
-      slots,
-      box: Object.freeze({
-        xPt: inlineStartPt, yPt: blockStartPt, widthPt: inlineEndPt - inlineStartPt, heightPt: boxBlockExtentPt,
-      }),
+      kind: 'placed' as const, slots, box, lastSourceIndex: members[wholeCount - 1]!.sourceIndex,
     });
   };
-  if (multiColumn) {
-    const members = [leader];
-    let inlineExtentPt = leader.inlineExtentPt;
-    let boxBlockExtentPt = leader.boxBlockExtentPt;
-    for (let next = leader.sourceIndex + 1; ; next += 1) {
-      const follower = followerAt(next);
-      if (!follower) break;
-      members.push(follower);
-      inlineExtentPt += follower.inlineExtentPt;
-      boxBlockExtentPt = Math.max(boxBlockExtentPt, follower.boxBlockExtentPt);
-    }
-    const found = searchUprightBlock(index, physical, request, true, inlineExtentPt, boxBlockExtentPt);
-    if (found.leavesBlockExtent && pageHasContent) return Object.freeze({ kind: 'fresh-region', freshPage: true });
-    return wholeOf(members, found.blockStartPt, found.inlineStartPt);
-  }
-  // A table whose box is wider than the block extent left moves to a fresh
-  // page; in a multi-column section it stays where the flow reached it.
-  if (uprightBlockTooWide(request, leader.boxBlockExtentPt)) {
-    return Object.freeze({ kind: 'fresh-region', freshPage: false });
-  }
+  // Rows that continue the upright table placed just before this one in the
+  // same column start where it ends and are cut where the band ends.
+  const tail = index.tail;
+  const continuing = !multiColumn && tail !== null && tail.sourceIndex === leader.sourceIndex - 1
+    && tail.flowDomainId === flowDomainId;
+  if (uprightBlockTooWide(request, boxBlockExtentPt)) return Object.freeze({ kind: 'fresh-region', freshPage: false });
   const found = searchUprightBlock(
-    index, physical, request, true, leader.inlineExtentPt, leader.boxBlockExtentPt,
+    index, obstacles, physical, request, !continuing, totalInlinePt, boxBlockExtentPt,
+    continuing ? { blockStartPt: tail.bounds.yPt, inlineStartPt: tail.bounds.xPt + tail.bounds.widthPt } : undefined,
   );
   if (found.leavesBlockExtent && pageHasContent) return Object.freeze({ kind: 'fresh-region', freshPage: true });
-  if (leader.inlineExtentPt > found.inlineRoomPt) {
-    // A table too tall for the inline extent below its start moves to a
-    // fresh page when content precedes it there; on a fresh page whole rows
-    // fill the band and the rest continues on the next page.
-    return pageHasContent
-      ? Object.freeze({ kind: 'fresh-region', freshPage: true })
-      : Object.freeze({ kind: 'rows', found });
+  if (multiColumn || totalInlinePt <= found.inlineRoomPt) {
+    return placedOf(found.blockStartPt, found.inlineStartPt, members.length);
   }
-  const members = [leader];
-  const bandEndPt = physical.pageHeight - physical.marginBottom;
-  const blockEndPt = request.location.availableBounds.yPt + request.location.availableBounds.heightPt;
-  let inlineEndPt = found.inlineStartPt + leader.inlineExtentPt;
-  for (let next = leader.sourceIndex + 1; ; next += 1) {
-    const follower = followerAt(next);
-    if (!follower
-      || uprightBlockTooWide(request, follower.boxBlockExtentPt)
-      || inlineEndPt + follower.inlineExtentPt > bandEndPt
-      || (found.blockStartPt !== request.location.cursorPt.yPt
-        && found.blockStartPt + follower.boxBlockExtentPt > blockEndPt)) break;
-    const followerEndPt = inlineEndPt + follower.inlineExtentPt;
-    const startPt = inlineEndPt;
-    const meets = uprightBlockBoxesMet(
-      index, found.blockStartPt, found.blockStartPt + follower.boxBlockExtentPt,
-      WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT,
-    ).some((box) => box.xPt < followerEndPt && box.xPt + box.widthPt > startPt);
-    if (meets) break;
-    members.push(follower);
-    inlineEndPt = followerEndPt;
+  // Too tall for the inline extent below its start: a fresh page when
+  // content precedes it, unless it continues the table before it.
+  if (pageHasContent && !continuing) return Object.freeze({ kind: 'fresh-region', freshPage: true });
+  let wholeCount = 0;
+  let filledPt = 0;
+  while (filledPt + members[wholeCount]!.inlineExtentPt <= found.inlineRoomPt) {
+    filledPt += members[wholeCount]!.inlineExtentPt;
+    wholeCount += 1;
   }
-  return wholeOf(members, found.blockStartPt, found.inlineStartPt);
+  // A plan for the paragraph before the tables holds whole tables only.
+  if (wholeCount === 0 || reserving) return reserving
+    ? Object.freeze({ kind: 'fresh-region', freshPage: true })
+    : Object.freeze({ kind: 'rows', found });
+  return placedOf(found.blockStartPt, found.inlineStartPt, wholeCount);
 }
 
 /** `word-vertical-section-upright-block-table`: the top-level upright block
@@ -729,6 +754,44 @@ function uprightBlockLeader(
   return { leader: uprightRunMember(physical, request.input.source, retained), physical };
 }
 
+/** The exclusion of the tables placed whole by a plan: one rectangle over
+ * their common box, as of one table. */
+function uprightRunExclusion(
+  request: BodyTableRequest,
+  box: LayoutRect,
+): UprightBlockRegistration['exclusions'] {
+  return [uprightBlockExclusion(request.input.source, tableFragmentStartKey(undefined), box)];
+}
+
+/** Whether a block placed at `box` from `request.location` lies over the
+ * inline band of a column laid out before its own: a multi-column section
+ * raised it above its column's top, and its column is not the first. Text
+ * laid out there earlier has to flow around it too. */
+function uprightBlockReachesEarlierColumn(request: BodyTableRequest, box: LayoutRect): boolean {
+  const columns = request.location.section.columns;
+  if (columns.length <= 1 || !(box.xPt < request.location.cursorPt.xPt)) return false;
+  let firstColumnStartPt = Number.POSITIVE_INFINITY;
+  for (const column of columns) firstColumnStartPt = Math.min(firstColumnStartPt, column.xPt);
+  return request.location.cursorPt.xPt > firstColumnStartPt;
+}
+
+/** A plan's blocks as a page pin: every table in its slot for good, with the
+ * exclusion, to be registered when the page's layout starts
+ * (BodyLayoutSession.commitUprightBlocks). */
+function uprightPagePin(
+  request: BodyTableRequest,
+  box: LayoutRect,
+  slots: readonly UprightBlockSlot[],
+  lastSourceIndex: number,
+): UprightBlockRegistration {
+  return Object.freeze({
+    box,
+    slots: Object.freeze(slots.map((slot) => Object.freeze({ ...slot, reserved: true, pinned: true }))),
+    exclusions: Object.freeze(uprightRunExclusion(request, box)),
+    tail: Object.freeze({ sourceIndex: lastSourceIndex, flowDomainId: request.location.flowDomainId, bounds: box }),
+  });
+}
+
 /**
  * Keep-with-next look-ahead for an upright block table
  * (`word-vertical-section-upright-block-table`): whether the table of
@@ -749,6 +812,8 @@ export function bodyUprightBlockStartsHere(
   try {
     const found = uprightBlockLeader(context, request, operations);
     if (!found) return null;
+    const slot = uprightBlockIndexOf(state).slots.get(found.leader.sourceIndex);
+    if (slot && (slot.pinned || slot.flowDomainId === request.location.flowDomainId)) return true;
     return planUprightRun(context, request, operations, found.physical, found.leader, false).kind
       !== 'fresh-region';
   } finally {
@@ -761,12 +826,10 @@ export function bodyUprightBlockStartsHere(
  * (`word-vertical-section-upright-table-rewrapped-strip`): the upright block
  * tables placed whole on this page when the flow reaches the table of
  * `request` at its location, as slots the tables take when the flow does
- * reach them, with their text exclusions. The paginator asks this for the
+ * reach them, with their text exclusion. The paginator asks this for the
  * paragraph fragment that ends just before the table, laid out without the
  * table, and lays that fragment out again around the result. Null when the
- * table is not placed whole there, already has a slot, or holds footnote
- * references (library policy: its page admission can still move it, so only
- * the lines after it wrap).
+ * table is not placed whole there or already has a slot.
  */
 export function planBodyUprightBlocks(
   context: BodyTableMeasurementContext,
@@ -781,12 +844,14 @@ export function planBodyUprightBlocks(
     if (!found || request.cursor) return null;
     const { leader, physical } = found;
     if (uprightBlockIndexOf(state).slots.has(leader.sourceIndex)) return null;
-    if (footnoteIdsInRetainedSlice(leader.retained.layout).length > 0) return null;
     const plan = planUprightRun(context, request, operations, physical, leader, true);
-    if (plan.kind !== 'whole') return null;
-    return uprightBlockRegistrationOf(plan.box, plan.slots, plan.members.map((member, at) =>
-      uprightBlockExclusion(member.source, tableFragmentStartKey(undefined), plan.slots[at]!.bounds),
-    )).uprightBlocks ?? null;
+    if (plan.kind !== 'placed') return null;
+    return Object.freeze({
+      box: plan.box,
+      slots: Object.freeze([...plan.slots]),
+      exclusions: Object.freeze(uprightRunExclusion(request, plan.box)),
+      tail: Object.freeze({ sourceIndex: plan.lastSourceIndex, flowDomainId: request.location.flowDomainId, bounds: plan.box }),
+    });
   } finally {
     operations.setBodyAcquisitionLocation(services, state, sessionState, restore);
   }
@@ -804,11 +869,16 @@ export function planBodyUprightBlocks(
  * inline end.
  *
  * Placement is decided once and never revised: a table with a slot (placed
- * with the paragraph before it, or as one of the tables running on from an
- * earlier one) takes it; any other first fragment is placed here with the
- * tables that run on from it (planUprightRun). A table placed with the
- * paragraph before it is where that plan put it, whatever block position the
- * flow has reached since (`word-vertical-section-upright-table-rewrapped-strip`).
+ * with the paragraph before it, as one of the tables running on from an
+ * earlier one, or pinned when the page's layout started) takes it; any other
+ * first fragment is placed here with the tables that run on from it
+ * (planUprightRun). A table placed ahead of the flow is where that plan put
+ * it, whatever block position the flow has reached since
+ * (`word-vertical-section-upright-table-rewrapped-strip`).
+ *
+ * `uprightPagePin`: the block lies over a column laid out before its own,
+ * whose text has to flow around it as well. The paginator lays the page out
+ * again with the pin registered from its start (body-paginator.ts).
  */
 function measureUprightBlockTable(
   context: BodyTableMeasurementContext,
@@ -821,7 +891,7 @@ function measureUprightBlockTable(
   sourceIndex: number,
 ): TableMeasureResult {
   const index = uprightBlockIndexOf(context.state);
-  const singleColumn = request.location.section.columns.length <= 1;
+  const flowDomainId = request.location.flowDomainId;
   const leader = uprightRunMember(physical, request.input.source, retained);
   const freshRegion = (freshPage: boolean) => Object.freeze({
     layout: retained.layout,
@@ -834,14 +904,16 @@ function measureUprightBlockTable(
     layout: TableLayout,
     bounds: LayoutRect,
     nextCursor: TableMeasureResult['nextCursor'],
-    registration: Pick<TableMeasureResult, 'uprightBlocks'>,
+    registration: UprightBlockRegistration | null,
+    pin: UprightBlockRegistration | null = null,
   ): TableMeasureResult => {
     const origin = uprightBlockGridOrigin(physical, bounds, leader.gridExtentPt, leader.edges);
     return Object.freeze({
       layout,
       blockExtentPt: 0,
       nextCursor,
-      ...registration,
+      ...(registration ? { uprightBlocks: registration } : {}),
+      ...(pin ? { uprightPagePin: pin } : {}),
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
         xPt: origin.xPt,
@@ -857,17 +929,16 @@ function measureUprightBlockTable(
     ),
     acquisitionState,
   ) as TableLayout;
-  const ownExclusion = (bounds: LayoutRect) =>
-    uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), bounds);
-
-  /** Whole rows from `cursor` that fit the band below `found`; a row taller
+  /** Whole rows from `cursor` that fit the band below `at`; a row taller
    * than the band takes a page of its own. Every fragment keeps the box edges
    * of the whole table: rows continued on a later page stay offset by a rule
    * only earlier rows carry. */
-  const rowsAt = (found: ReturnType<typeof searchUprightBlock>): TableMeasureResult => {
+  const rowsAt = (at: Readonly<{
+    blockStartPt: number; inlineStartPt: number; inlineRoomPt: number; inlineBandPt: number;
+  }>): TableMeasureResult => {
     const searched: LayoutRect = {
-      xPt: found.inlineStartPt,
-      yPt: found.blockStartPt,
+      xPt: at.inlineStartPt,
+      yPt: at.blockStartPt,
       widthPt: leader.inlineExtentPt,
       heightPt: leader.boxBlockExtentPt,
     };
@@ -876,7 +947,7 @@ function measureUprightBlockTable(
       uprightBlockTranslationPt(
         uprightBlockGridOrigin(physical, searched, leader.gridExtentPt, leader.edges), retained.layout,
       ),
-      acquisitionState, cursor, found.inlineRoomPt, found.inlineBandPt,
+      acquisitionState, cursor, at.inlineRoomPt, at.inlineBandPt,
     );
     if (!taken.fragment) {
       if (request.pageHasContent === true) return freshRegion(true);
@@ -885,44 +956,83 @@ function measureUprightBlockTable(
     // The fragment lies inside the position found for the whole table.
     const bounds: LayoutRect = Object.freeze({
       ...searched,
-      widthPt: Math.min(taken.fragment.advancePt, Math.max(0, found.inlineRoomPt)),
+      widthPt: Math.min(taken.fragment.advancePt, Math.max(0, at.inlineRoomPt)),
     });
     return placed(
       taken.fragment as TableLayout,
       bounds,
       taken.nextCursor ? Object.freeze({ kind: 'table' as const, cursor: taken.nextCursor }) : null,
-      uprightBlockRegistrationOf(bounds, [], [ownExclusion(bounds)]),
+      uprightBlockRegistrationOf(
+        bounds, [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), bounds)],
+        { sourceIndex, flowDomainId, bounds },
+      ),
     );
   };
 
   if (!request.cursor) {
     const slot = index.slots.get(sourceIndex);
-    if (slot && slot.flowDomainId === request.location.flowDomainId) {
-      // A table that runs on from an earlier one still moves to a fresh page
+    if (slot && (slot.pinned || slot.flowDomainId === flowDomainId)) {
+      // A table that runs on from an earlier one still starts a fresh region
       // when the block extent left has shrunk below its box since.
-      if (!slot.reserved && singleColumn && uprightBlockTooWide(request, leader.boxBlockExtentPt)) {
-        return freshRegion(false);
+      if (!slot.reserved && uprightBlockTooWide(request, leader.boxBlockExtentPt)) return freshRegion(false);
+      if (slot.splitRows) {
+        const bandEndPt = physical.pageHeight - physical.marginBottom;
+        return rowsAt({
+          blockStartPt: slot.bounds.yPt,
+          inlineStartPt: slot.bounds.xPt,
+          inlineRoomPt: bandEndPt - slot.bounds.xPt,
+          inlineBandPt: bandEndPt - request.location.cursorPt.xPt,
+        });
       }
-      return placed(wholeAt(slot.bounds), slot.bounds, null, slot.reserved
-        ? Object.freeze({})
-        : uprightBlockRegistrationOf(null, [], [ownExclusion(slot.bounds)]));
+      // Placed with the paragraph before it and raised over an earlier
+      // column: the tables of its plan become a page pin.
+      let pin: UprightBlockRegistration | null = null;
+      if (slot.reserved && uprightBlockReachesEarlierColumn(request, slot.bounds)) {
+        const slots = [slot];
+        let box = slot.bounds;
+        for (let next = sourceIndex + 1; ; next += 1) {
+          const follower = index.slots.get(next);
+          if (!follower || !follower.reserved || follower.flowDomainId !== slot.flowDomainId) break;
+          slots.push(follower);
+          const startPt = Math.min(box.yPt, follower.bounds.yPt);
+          const endPt = Math.max(box.yPt + box.heightPt, follower.bounds.yPt + follower.bounds.heightPt);
+          box = {
+            xPt: box.xPt,
+            yPt: startPt,
+            widthPt: follower.bounds.xPt + follower.bounds.widthPt - box.xPt,
+            heightPt: endPt - startPt,
+          };
+        }
+        pin = uprightPagePin(request, Object.freeze(box), slots, slots.at(-1)!.sourceIndex);
+      }
+      return placed(wholeAt(slot.bounds), slot.bounds, null, null, pin);
     }
     const plan = planUprightRun(context, request, operations, physical, leader, false);
     if (plan.kind === 'fresh-region') return freshRegion(plan.freshPage);
-    if (plan.kind === 'whole') {
+    if (plan.kind === 'placed') {
       const bounds = plan.slots[0]!.bounds;
       return placed(
         wholeAt(bounds), bounds, null,
-        uprightBlockRegistrationOf(plan.box, plan.slots.slice(1), [ownExclusion(bounds)]),
+        Object.freeze({
+          box: plan.box,
+          slots: Object.freeze(plan.slots.slice(1)),
+          exclusions: Object.freeze(uprightRunExclusion(request, plan.box)),
+          tail: Object.freeze({ sourceIndex: plan.lastSourceIndex, flowDomainId, bounds: plan.box }),
+        }),
+        uprightBlockReachesEarlierColumn(request, plan.box)
+          ? uprightPagePin(request, plan.box, plan.slots, plan.lastSourceIndex) : null,
       );
     }
     return rowsAt(plan.found);
   }
-  if (!singleColumn) throw new Error('An upright block table of a multi-column section must remain whole');
+  if (request.location.section.columns.length > 1) {
+    throw new Error('An upright block table of a multi-column section must remain whole');
+  }
   // Rows continued on a later page stay at the flow's block position and
   // clear the blocks they meet along the inline axis (library policy).
   return rowsAt(searchUprightBlock(
-    index, physical, request, false, leader.inlineExtentPt, leader.boxBlockExtentPt,
+    index, uprightBlockObstacles(context.state, request.input.source), physical, request, false,
+    leader.inlineExtentPt, leader.boxBlockExtentPt,
   ));
 }
 
@@ -2262,7 +2372,8 @@ function measureUprightOwnerSegment(
     const edges = uprightBlockEdgeOverhangsPt(local.layout, gridWidthPt, physical);
     const boxExtentPt = edges.nearPt + gridWidthPt + edges.farPt;
     const found = searchUprightBlock(
-      uprightBlockIndexOf(context.state), physical, request, false, local.layout.advancePt, boxExtentPt,
+      uprightBlockIndexOf(context.state), uprightBlockObstacles(context.state, request.input.source), physical, request, false,
+      local.layout.advancePt, boxExtentPt,
     );
     const bounds: LayoutRect = Object.freeze({
       xPt: found.inlineStartPt, yPt: found.blockStartPt, widthPt: local.layout.advancePt, heightPt: boxExtentPt,
@@ -2271,13 +2382,15 @@ function measureUprightOwnerSegment(
     const layout = takeUprightTableFragment(
       context, request, operations, local, uprightBlockTranslationPt(origin, local.layout), acquisitionOwner,
     );
+    const registered = uprightBlockRegistrationOf(bounds, [], [
+      uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), bounds),
+    ]);
+    const segmentRegistration = registered ? { uprightBlocks: registered } : {};
     return Object.freeze({
       layout,
       blockExtentPt: 0,
       nextCursor,
-      ...uprightBlockRegistrationOf(bounds, [], [
-        uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), bounds),
-      ]),
+      ...segmentRegistration,
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
         xPt: origin.xPt,

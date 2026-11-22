@@ -515,8 +515,8 @@ describe('upright block table of a vertical section', () => {
     });
 
     it.each([1, 2])('keeps a table that runs on clear of an earlier table in %i column(s)', (columns) => {
-      // X at the column top, Y stacked under it, then Z and a table that runs
-      // on from Z, which both meet Y but not X.
+      // X at the column top, Y stacked under it, then Z and a table that
+      // directly follows Z, which both meet Y but not X.
       const pages = layOutPages('tbRl', [P, T, ...strips(5), T, ...strips(6), T, T], columns);
       expect(pages).toHaveLength(1);
       expect(pages[0]!.tables).toHaveLength(4);
@@ -525,17 +525,11 @@ describe('upright block table of a vertical section', () => {
         Page['tables'][number], Page['tables'][number], Page['tables'][number], Page['tables'][number],
       ];
       expect(y.top).toBeCloseTo(x.bottom, 6);
+      // Z and the table after it are laid out as one table: it does not fit
+      // above Y and is placed below it.
       expect(follower.left).toBeCloseTo(z.left, 6);
-      if (columns === 1) {
-        // Z returns to the column top; the table after it cannot run on
-        // below Z, where Y is, and takes the first free position below Y.
-        expect(z.top).toBeCloseTo(MARGIN.top, 6);
-        expect(follower.top).toBeCloseTo(y.bottom, 6);
-      } else {
-        // The two are one block, placed below Y.
-        expect(z.top).toBeCloseTo(y.bottom, 6);
-        expect(follower.top).toBeCloseTo(z.bottom, 6);
-      }
+      expect(z.top).toBeCloseTo(y.bottom, 6);
+      expect(follower.top).toBeCloseTo(z.bottom, 6);
     });
 
     it('lays out generated table and paragraph sequences without overlapping tables', () => {
@@ -583,5 +577,163 @@ describe('upright block table of a vertical section', () => {
         }
       }
     }, 120_000);
+  });
+
+  describe('text laid out before a table that is raised over it', () => {
+    const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+    const strips = (count: number) => Array.from({ length: count }, () => P);
+    /** Block position at which text resumes past a table whose box starts at `block`. */
+    const past = (block: number) => block + TABLE_W + RULE + 7.14;
+
+    it.each(['tbRl', 'tbLrV'] as const)('flows the first column of a %s page around a table raised from the second', (direction) => {
+      // Measured: the 800 pt table of column 2 is raised over both columns,
+      // one strip into the flow (the empty strip of the column-break
+      // paragraph). The twelve strips of column 1 have no room beside it and
+      // resume past it, as the text of column 2 does.
+      const pages = layOutPages(direction, [...strips(12), columnBreak, table(1, 800), P], 2);
+      expect(pages).toHaveLength(1);
+      const [page] = pages;
+      expect(page!.tables[0]!.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
+      expect(page!.tables[0]!.bottom).toBeCloseTo(16838 / 20, 6);
+      const first = page!.strips.slice(0, 12).map(([line]) => line!);
+      first.forEach((line, at) => {
+        expect(line.block).toBeCloseTo(past(PITCH) + at * PITCH, 6);
+        expect(line.inlineStart).toBe(MARGIN.top);
+      });
+      // The paragraph after the table: one strip after the empty one.
+      expect(page!.strips.at(-1)![0]!.block).toBeCloseTo(past(PITCH) + PITCH, 6);
+    });
+
+    it('keeps the table where the flow reaches it when the text before it is laid out without it', () => {
+      // Measured: 27 strips fill column 1 (25) and start column 2, so the
+      // table lies two strips into column 2. Raised, it takes the room of
+      // both columns from there: column 1 keeps one strip before it and
+      // thirteen past it, and column 2 holds the rest the same way.
+      const pages = layOutPages('tbRl', [...strips(27), table(1, 800), P], 2);
+      expect(pages).toHaveLength(1);
+      const [page] = pages;
+      expect(page!.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', 2 * PITCH), 6);
+      const lines = page!.strips.map(([line]) => line!);
+      expect(lines).toHaveLength(28);
+      const columnTwoTop = lines[14]!.inlineStart;
+      expect(columnTwoTop).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
+      const expected = (at: number) => at === 0 ? 0 : past(2 * PITCH) + (at - 1) * PITCH;
+      lines.forEach((line, at) => {
+        const inColumn = at < 14 ? at : at - 14;
+        expect(line.block, `strip ${at}`).toBeCloseTo(expected(inColumn), 6);
+        expect(line.inlineStart, `strip ${at}`).toBe(at < 14 ? MARGIN.top : columnTwoTop);
+      });
+    });
+
+    it('leaves a table in the first column when the strip before it moves to the second', () => {
+      // Measured: 24 strips and a full-length strip fill column 1; the table
+      // after them is wider than the block extent left and stays, overflowing.
+      // Beside it the full-length strip needs a second line that column 1 has
+      // no room for, so the paragraph moves to column 2 and the table stays.
+      const full = paragraph('長'.repeat(32));
+      const pages = layOutPages('tbLrV', [...strips(24), full, T, P], 2);
+      expect(pages).toHaveLength(1);
+      const [page] = pages;
+      expect(page!.tables[0]!.left).toBeCloseTo(tableLeft('tbLrV', 25 * PITCH), 6);
+      expect(page!.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
+      const [moved, after] = page!.strips.slice(-2) as [Page['strips'][number], Page['strips'][number]];
+      expect(moved[0]!.block).toBe(0);
+      expect(moved[0]!.inlineStart).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
+      expect(after[0]!.block).toBe(moved.length * PITCH);
+    });
+
+    it('starts the next page with a table too wide for the block extent left in the last column', () => {
+      // Measured: the same at the end of column 2. The table does not stay
+      // there overflowing: it starts page 2, and the strip before it is not
+      // wrapped.
+      const full = paragraph('長'.repeat(32));
+      const pages = layOutPages('tbRl', [P, columnBreak, ...strips(23), full, T, P], 2);
+      expect(pages).toHaveLength(2);
+      expect(pages[0]!.tables).toHaveLength(0);
+      expect(pages[0]!.strips.at(-1)).toHaveLength(1);
+      expect(pages[1]!.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+      expect(pages[1]!.strips[0]![0]!.inlineStart).toBeCloseTo(pages[1]!.tables[0]!.bottom, 6);
+    });
+  });
+
+  describe('tables that directly follow one another', () => {
+    const narrow = (rows: number) => table(rows).replaceAll('"1440"', '"720"').replaceAll('"2160"', '"1080"');
+
+    it.each([
+      ['a wide table then a narrow one', (): string[] => [T, narrow(2)], 1],
+      ['a narrow table then a wide one', (): string[] => [narrow(2), T], 0],
+    ] as const)('lays out %s as one table, left edges aligned', (_name, tables, narrowAt) => {
+      // Measured in tbRl and tbLrV: the second table starts where the first
+      // ends, both at the left edge of the wider one, and every strip beside
+      // either starts below both.
+      for (const direction of ['tbRl', 'tbLrV'] as const) {
+        const [page] = layOutPages(direction, [P, ...tables(), P, P], 2);
+        const [first, second] = page!.tables as [Page['tables'][number], Page['tables'][number]];
+        expect(second.top).toBeCloseTo(first.bottom, 6);
+        expect(second.left).toBeCloseTo(first.left, 6);
+        expect(page!.tables[narrowAt]!.paintedRight - page!.tables[narrowAt]!.paintedLeft).toBeCloseTo(90 + RULE, 6);
+        expect(page!.tables[1 - narrowAt]!.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
+        for (const [line] of page!.strips) expect(line!.inlineStart).toBeCloseTo(second.bottom, 6);
+      }
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('paginates %s tables taller than the column together as one table', (direction) => {
+      // Measured: a paragraph, 40 rows and 25 rows. Together they do not fit
+      // the column, so both start the next page; the second is cut between
+      // rows at the band end and continues on a third page, where the last
+      // paragraph starts at its bottom edge.
+      const pages = layOutPages(direction, [P, table(40), table(25), P]);
+      expect(pages).toHaveLength(3);
+      expect(pages[0]!.tables).toHaveLength(0);
+      const [first, second] = pages[1]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(first.top).toBeCloseTo(MARGIN.top, 6);
+      expect(second.top).toBeCloseTo(first.bottom, 6);
+      expect(second.bottom).toBeLessThanOrEqual(COLUMN_END);
+      expect(second.bottom).toBeGreaterThan(COLUMN_END - 2 * PITCH);
+      const [rest] = pages[2]!.tables;
+      expect(rest!.top).toBeCloseTo(MARGIN.top, 6);
+      expect(pages[2]!.strips).toEqual([[{ block: 0, inlineStart: rest!.bottom }]]);
+    });
+
+    it('continues below the last rows of the table before it', () => {
+      // Measured: 40, 25 and 2 rows. The third follows the second's last
+      // rows on the page they end on.
+      const pages = layOutPages('tbRl', [table(40), table(25), T, P]);
+      expect(pages).toHaveLength(2);
+      const [rest, last] = pages[1]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(last.top).toBeCloseTo(rest.bottom, 6);
+      expect(last.left).toBeCloseTo(rest.left, 6);
+      expect(pages[1]!.strips[0]![0]!.inlineStart).toBeCloseTo(last.bottom, 6);
+    });
+  });
+
+  it.each(['tbRl', 'tbLrV'] as const)('stacks a %s table below a wrapped drawing anchored before it', (direction) => {
+    // Measured: a square-wrapped 80 x 40 pt rectangle at a page position over
+    // the place the table would take, anchored by the paragraph before it.
+    // The table is placed directly below the rectangle; the strip before the
+    // table holds its text above the table.
+    const x = direction === 'tbRl' ? 400 : 150;
+    const drawing = '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+      + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+      + '<wp:simplePos x="0" y="0"/>'
+      + `<wp:positionH relativeFrom="page"><wp:posOffset>${x * 12700}</wp:posOffset></wp:positionH>`
+      + `<wp:positionV relativeFrom="page"><wp:posOffset>${66 * 12700}</wp:posOffset></wp:positionV>`
+      + `<wp:extent cx="${80 * 12700}" cy="${40 * 12700}"/><wp:wrapSquare wrapText="bothSides"/>`
+      + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+      + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+      + '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr>'
+      + `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${80 * 12700}" cy="${40 * 12700}"/></a:xfrm>`
+      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>'
+      + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+    const [page] = layOutPages(direction, [P.replace('</w:p>', `${drawing}</w:p>`), T, P]);
+    const placed = page!.tables[0]!;
+    expect(placed.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
+    expect(placed.top).toBeCloseTo(66 + 40, 6);
+    expect(page!.strips[0]![0]!.inlineStart).toBe(MARGIN.top);
+    // The strip after the table lies beside the rectangle in tbRl and starts
+    // below the table; in tbLrV the rectangle is further along the block
+    // axis and the strip uses the room above the table.
+    expect(page!.strips[1]![0]!.inlineStart)
+      .toBeCloseTo(direction === 'tbRl' ? placed.bottom : MARGIN.top, 6);
   });
 });
