@@ -108,6 +108,10 @@
           "title": "Part 1 Section 17.11.18, numFmt (Footnote Numbering Format)"
         },
         {
+          "id": "2.1.308",
+          "title": "Part 1 Section 17.11.20, numStart (Footnote and Endnote Numbering Starting Value)"
+        },
+        {
           "id": "2.1.389",
           "title": "Part 1 Section 17.15.1.11, bookFoldPrinting (Book Fold Printing)"
         },

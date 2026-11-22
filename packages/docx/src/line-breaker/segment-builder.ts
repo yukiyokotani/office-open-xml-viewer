@@ -2072,11 +2072,7 @@ function appendRunsToSegments(
           noteText != null
             ? formatNoteNumber(
                 noteText,
-                t.noteRef.kind === 'footnote'
-                  ? environment.noteNumbering?.footnote
-                  : t.noteRef.kind === 'endnote'
-                    ? environment.noteNumbering?.endnote
-                    : undefined,
+                noteNumberingOf(environment.noteNumbering, t.noteRef.kind, t.noteRef.id),
               )
             : t.text || '';
         if (label.length > 0) {
@@ -2438,4 +2434,17 @@ function admittedFaceDecoration(
 function listLabelOf(run: object): { listLabel?: LayoutTextSeg['listLabel'] } {
   const listLabel = (run as { listLabel?: LayoutTextSeg['listLabel'] }).listLabel;
   return listLabel === undefined ? {} : { listLabel };
+}
+
+/** The numbering a note reference label uses: its own section format when
+ * the note's number is a display value (NoteNumbering.formats), else its
+ * kind's format and start. */
+function noteNumberingOf(
+  numbering: LineLayoutEnvironment['noteNumbering'],
+  kind: string,
+  id: string,
+): Readonly<{ format: string; start: number }> | undefined {
+  if (!numbering || (kind !== 'footnote' && kind !== 'endnote')) return undefined;
+  const format = id ? numbering.formats?.get(`${kind}:${id}`) : undefined;
+  return format === undefined ? numbering[kind] : { format, start: 1 };
 }

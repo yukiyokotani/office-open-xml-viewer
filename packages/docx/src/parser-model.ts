@@ -10,9 +10,11 @@ import type {
   ReservedNoteSeparatorStoryInput,
   NoteSeparatorMark,
   NoteSeparatorInput,
+  NoteNumberingInput,
+  SectionNoteNumberingInput,
   SelectedNoteSeparatorParagraphsInput,
 } from './layout/body-layout-input.js';
-import { wordKerningApplies, wordNoteNumberFormat } from './layout/line-compatibility.js';
+import { wordKerningApplies, wordNoteNumberFormat, wordNoteNumberStartIsValid } from './layout/line-compatibility.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -100,6 +102,7 @@ import type {
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
 import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
+import { isNoteSeparatorMarkerSpace } from './layout/selected-note-separators.js';
 import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
@@ -327,6 +330,15 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     footnoteNumberStart?: number;
     endnoteNumberFormat?: string;
     endnoteNumberStart?: number;
+    footnoteNumberRestart?: string;
+    endnoteNumberRestart?: string;
+    footnoteNumberCustomFormat?: string;
+    endnoteNumberCustomFormat?: string;
+    /** §17.11.5/.11 section-wide overrides, one entry per body section. */
+    sectionNoteNumbering?: readonly Readonly<{
+      footnote?: InternalNoteNumberingWire;
+      endnote?: InternalNoteNumberingWire;
+    }>[];
     footnoteSeparator?: NoteSeparatorMark;
     endnoteSeparator?: NoteSeparatorMark;
     endnoteContinuationSeparator?: NoteSeparatorMark;
@@ -383,11 +395,20 @@ function documentPageLayoutSettingsInput(
   }, 'DOCX page layout settings input');
 }
 
+/** Parser wire of one note properties element's numbering facts. */
+interface InternalNoteNumberingWire {
+  readonly format?: string;
+  readonly customFormat?: string;
+  readonly start?: number;
+  readonly restart?: string;
+}
+
 export interface DocumentNoteLayoutSettingsInput {
   readonly footnotePosition: string;
   readonly endnotePosition: string;
-  readonly footnoteNumbering: Readonly<{ format: string; start: number }>;
-  readonly endnoteNumbering: Readonly<{ format: string; start: number }>;
+  readonly footnoteNumbering: NoteNumberingInput;
+  readonly endnoteNumbering: NoteNumberingInput;
+  readonly sectionNoteNumbering?: readonly SectionNoteNumberingInput[];
   readonly footnoteSeparator: NoteSeparatorInput;
   readonly endnoteSeparator: NoteSeparatorInput;
   readonly endnoteContinuationSeparator: NoteSeparatorInput;
@@ -498,16 +519,44 @@ function selectedNoteSeparatorParagraphsInput(
   };
 }
 
-/** Effective note numbering: the §17.11.17/.18 numFmt under Word's defaults
- * (WORD_NOTE_NUMBER_FORMAT_DEFAULTS) and the §17.11.20 numStart, 1 when absent. */
+/** Effective note numbering of one note kind: the §17.11.17/.18 numFmt
+ * (`custom:<pattern>` for a custom numFmt/@format) under Word's defaults,
+ * the §17.11.20 numStart and the §17.11.19 numRestart
+ * (WORD_NOTE_NUMBER_FORMAT_DEFAULTS). Word reads numStart as an
+ * unsignedShort; another producer keeps any safe integer. */
 function noteNumberingInput(
   kind: 'footnote' | 'endnote',
-  format: string | undefined,
-  start: number | undefined,
-): Readonly<{ format: string; start: number }> {
+  wire: InternalNoteNumberingWire,
+  word: boolean,
+): NoteNumberingInput {
+  const start = wire.start;
+  const restart = wire.restart === 'eachSect' || (wire.restart === 'eachPage' && kind === 'footnote')
+    ? wire.restart
+    : 'continuous';
   return {
-    format: wordNoteNumberFormat(kind, format),
-    start: typeof start === 'number' && Number.isSafeInteger(start) ? start : 1,
+    format: wire.format === 'custom' && typeof wire.customFormat === 'string' && wire.customFormat.length > 0
+      ? `custom:${wire.customFormat}`
+      : wordNoteNumberFormat(kind, wire.format),
+    start: typeof start === 'number' && Number.isSafeInteger(start)
+      && (!word || wordNoteNumberStartIsValid(start)) ? start : 1,
+    restart,
+  };
+}
+
+/** Field-wise §17.11.5/.11 override of document-wide numbering facts. */
+function mergedNoteNumberingWire(
+  document: InternalNoteNumberingWire,
+  section: InternalNoteNumberingWire | undefined,
+): InternalNoteNumberingWire {
+  if (!section) return document;
+  const format = section.format ?? document.format;
+  return {
+    ...(format === undefined ? {} : { format }),
+    ...(section.format !== undefined
+      ? (section.customFormat === undefined ? {} : { customFormat: section.customFormat })
+      : (document.customFormat === undefined ? {} : { customFormat: document.customFormat })),
+    ...((section.start ?? document.start) === undefined ? {} : { start: section.start ?? document.start }),
+    ...((section.restart ?? document.restart) === undefined ? {} : { restart: section.restart ?? document.restart }),
   };
 }
 
@@ -515,20 +564,36 @@ function documentNoteLayoutSettingsInput(
   doc: DocxDocumentModel,
 ): DocumentNoteLayoutSettingsInput {
   const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
+  const word = (doc.settings as Readonly<{ __libreOfficeLineBoxes?: boolean }> | undefined)
+    ?.__libreOfficeLineBoxes !== true;
+  const documentWire = (kind: 'footnote' | 'endnote'): InternalNoteNumberingWire => {
+    const format = kind === 'footnote' ? settings?.footnoteNumberFormat : settings?.endnoteNumberFormat;
+    const customFormat = kind === 'footnote'
+      ? settings?.footnoteNumberCustomFormat : settings?.endnoteNumberCustomFormat;
+    const start = kind === 'footnote' ? settings?.footnoteNumberStart : settings?.endnoteNumberStart;
+    const restart = kind === 'footnote' ? settings?.footnoteNumberRestart : settings?.endnoteNumberRestart;
+    return {
+      ...(format === undefined ? {} : { format }),
+      ...(customFormat === undefined ? {} : { customFormat }),
+      ...(start === undefined ? {} : { start }),
+      ...(restart === undefined ? {} : { restart }),
+    };
+  };
+  const footnoteWire = documentWire('footnote');
+  const endnoteWire = documentWire('endnote');
+  const sectionNoteNumbering = settings?.sectionNoteNumbering?.length
+    ? settings.sectionNoteNumbering.map((section) => ({
+      footnote: noteNumberingInput('footnote', mergedNoteNumberingWire(footnoteWire, section.footnote), word),
+      endnote: noteNumberingInput('endnote', mergedNoteNumberingWire(endnoteWire, section.endnote), word),
+    }))
+    : undefined;
   return snapshotPlainData({
     // §17.11.21/.22 defaults when document-wide w:pos is absent.
     footnotePosition: settings?.footnotePosition ?? 'pageBottom',
     endnotePosition: settings?.endnotePosition ?? 'docEnd',
-    footnoteNumbering: noteNumberingInput(
-      'footnote',
-      settings?.footnoteNumberFormat,
-      settings?.footnoteNumberStart,
-    ),
-    endnoteNumbering: noteNumberingInput(
-      'endnote',
-      settings?.endnoteNumberFormat,
-      settings?.endnoteNumberStart,
-    ),
+    footnoteNumbering: noteNumberingInput('footnote', footnoteWire, word),
+    endnoteNumbering: noteNumberingInput('endnote', endnoteWire, word),
+    ...(sectionNoteNumbering ? { sectionNoteNumbering } : {}),
     footnoteSeparator: noteSeparatorInput(settings?.footnoteSeparator),
     endnoteSeparator: noteSeparatorInput(settings?.endnoteSeparator),
     endnoteContinuationSeparator: noteSeparatorInput(settings?.endnoteContinuationSeparator),
@@ -2117,10 +2182,12 @@ export function selectedNoteSeparatorParagraphAcquisitionInput(
   paragraph: DeepReadonly<DocParagraph>,
   source: SourceRef,
 ): ParagraphAcquisitionInput {
+  // The run-free shape, or the one non-breaking space that carries a marker
+  // run formatted unlike its paragraph mark.
   return paragraphAcquisitionInput({
     ...(paragraph as unknown as DocParagraph),
     type: 'paragraph',
-    runs: [],
+    runs: isNoteSeparatorMarkerSpace(paragraph.runs ?? []) ? paragraph.runs : [],
   } as unknown as ParagraphLayoutSource, source);
 }
 

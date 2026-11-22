@@ -6690,6 +6690,9 @@ function paragraphAcquisitionKey(
           environment.noteNumbering.footnote.start,
           environment.noteNumbering.endnote.format,
           environment.noteNumbering.endnote.start,
+          environment.noteNumbering.formats
+            ? [...environment.noteNumbering.formats.entries()].sort(([left], [right]) => left.localeCompare(right))
+            : null,
         ]
         : null,
       lineOnly ? null : environment.pageWritingMode,

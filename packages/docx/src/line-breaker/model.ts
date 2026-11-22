@@ -12,6 +12,9 @@ import type { MathLayoutResource } from '../layout/resources.js';
 export interface NoteNumbering {
   readonly footnote: Readonly<{ format: string; start: number }>;
   readonly endnote: Readonly<{ format: string; start: number }>;
+  /** Per-note format (`kind:id`) of a note whose section numbers its notes
+   * differently (§17.11.5/.11); the note number is then its display value. */
+  readonly formats?: ReadonlyMap<string, string>;
 }
 
 export interface LineBoundary {

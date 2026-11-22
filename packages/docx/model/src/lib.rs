@@ -396,6 +396,23 @@ pub struct NoteLayoutSettingsWire {
     /// §17.11.20 document-wide `w:endnotePr/w:numStart/@w:val`. Absent means 1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_number_start: Option<i64>,
+    /// §17.11.19 / §17.18.74 document-wide `w:footnotePr/w:numRestart/@w:val`.
+    /// Absent means continuous.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_number_restart: Option<String>,
+    /// §17.11.19 document-wide `w:endnotePr/w:numRestart/@w:val`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_number_restart: Option<String>,
+    /// `w:numFmt/@w:format` of a document-wide footnote `custom` format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_number_custom_format: Option<String>,
+    /// `w:numFmt/@w:format` of a document-wide endnote `custom` format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_number_custom_format: Option<String>,
+    /// §17.11.5 / §17.11.11 section-wide note numbering overrides, one entry
+    /// per section (`w:sectPr`) in body order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub section_note_numbering: Vec<SectionNoteNumberingWire>,
     /// ECMA-376 §17.11.1/.23: mark kind is independent of reserved story role.
     /// Absence retains the historical ordinary default; explicit Short stays
     /// authored. None represents the supported bare-empty DOCX observation.
@@ -1055,6 +1072,35 @@ pub struct ColSpec {
     pub width_pt: f64,
     /// `@w:space` — space after this column in pt (converted from twips).
     pub space_pt: f64,
+}
+
+/// Numbering facts of one footnote or endnote properties element
+/// (§17.11.4/.5/.11/.12): numFmt (§17.11.17/.18), numStart (§17.11.20) and
+/// numRestart (§17.11.19).
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteNumberingWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// `w:numFmt/@w:format` when `format` is `custom`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart: Option<String>,
+}
+
+/// Section-wide note numbering overrides of one section, in body order.
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SectionNoteNumberingWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote: Option<NoteNumberingWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote: Option<NoteNumberingWire>,
 }
 
 /** Parser-private section placement facts. This wire is deliberately emitted

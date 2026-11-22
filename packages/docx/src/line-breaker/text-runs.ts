@@ -59,7 +59,38 @@ export function formatNoteNumber(
   numbering: Readonly<{ format: string; start: number }> | undefined,
 ): string {
   if (!numbering) return String(ordinal);
-  return formatOrdinalNumber(numbering.start + ordinal - 1, numbering.format as NumberFormat);
+  const value = numbering.start + ordinal - 1;
+  return numbering.format.startsWith('custom:')
+    ? formatCustomNoteNumber(value, numbering.format.slice('custom:'.length))
+    : formatOrdinalNumber(value, numbering.format as NumberFormat);
+}
+
+/** A custom numFmt/@format pattern (ECMA-376 §17.11.17/.18 `format`, "the
+ * syntax defined by the XSLT format attribute"): its first alphanumeric
+ * format token numbers the value (XSLT 1.0 §7.7.1). A run of ASCII or
+ * full-width digits ending in one zero-pads to the token's length in that
+ * digit family (`001`, `０１`); `a`, `A`, `i` and `I` select letters and
+ * Roman numerals; any other token numbers in decimal. A pattern such as
+ * "001, 002, 003, ..." lists sample values: only its first token numbers a
+ * single note, and its separators and later tokens add no prefix or suffix. */
+export function formatCustomNoteNumber(value: number, pattern: string): string {
+  const token = /[\p{L}\p{Nd}]+/u.exec(pattern)?.[0];
+  if (!token || !Number.isSafeInteger(value) || value < 0) return String(value);
+  for (const zero of [0x30, 0xff10]) {
+    const digits = [...token].map((digit) => digit.codePointAt(0)! - zero);
+    if (digits.every((digit) => digit >= 0 && digit <= 9) && digits.at(-1) === 1
+      && digits.slice(0, -1).every((digit) => digit === 0)) {
+      return [...String(value).padStart(digits.length, '0')]
+        .map((digit) => String.fromCodePoint(zero + Number(digit))).join('');
+    }
+  }
+  switch (token) {
+    case 'a': return formatOrdinalNumber(value, 'lowerLetter');
+    case 'A': return formatOrdinalNumber(value, 'upperLetter');
+    case 'i': return formatOrdinalNumber(value, 'lowerRoman');
+    case 'I': return formatOrdinalNumber(value, 'upperRoman');
+    default: return String(value);
+  }
 }
 
 

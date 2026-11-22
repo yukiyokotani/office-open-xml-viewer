@@ -99,10 +99,28 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | { texts: string[]
   const literal: string[] = [];
   let verticalForms = false;
   let kashida = false;
-  const settings = (doc as { __noteLayoutSettings?: { footnoteNumberFormat?: string; endnoteNumberFormat?: string } })
+  const settings = (doc as { __noteLayoutSettings?: {
+    footnoteNumberFormat?: string; endnoteNumberFormat?: string;
+    sectionNoteNumbering?: readonly { footnote?: { format?: string }; endnote?: { format?: string } }[];
+    footnoteSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
+    footnoteContinuationSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
+    endnoteSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
+    endnoteContinuationSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
+  } })
     .__noteLayoutSettings;
-  for (const format of [settings?.footnoteNumberFormat, settings?.endnoteNumberFormat]) {
+  // Document- and section-wide note formats (a custom pattern is never ASCII
+  // by this check, so it demands every glyph).
+  for (const format of [
+    settings?.footnoteNumberFormat, settings?.endnoteNumberFormat,
+    ...(settings?.sectionNoteNumbering ?? []).flatMap((section) => [section.footnote?.format, section.endnote?.format]),
+  ]) {
     if (format !== undefined && !ASCII_NUMBER_FORMATS.has(format)) return 'all';
+  }
+  // A separator marker run formatted unlike its paragraph mark is measured
+  // as one non-breaking space.
+  for (const paragraph of [settings?.footnoteSeparatorParagraph, settings?.footnoteContinuationSeparatorParagraph,
+    settings?.endnoteSeparatorParagraph, settings?.endnoteContinuationSeparatorParagraph]) {
+    for (const run of paragraph?.runs ?? []) if (typeof run.text === 'string') literal.push(run.text);
   }
   const pending: unknown[] = [doc];
   const seen = new Set<object>();

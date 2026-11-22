@@ -1203,6 +1203,8 @@ struct DocumentBodyPreflight {
     plan: DocumentBodyPlan,
     table_sequences: Vec<Option<LogicalTableSequenceContext>>,
     sections: Vec<StreamedSectionFact>,
+    /// §17.11.5/.11 numbering of every body section, in body order.
+    section_note_numbering: Vec<crate::types::SectionNoteNumberingWire>,
     final_body_block_ordinal: Option<usize>,
     section: SectionProps,
     ref_leading_breaks: HashMap<String, String>,
@@ -1223,6 +1225,7 @@ fn preflight_document_body(
         open_document_body_projector(zip, Rc::clone(&environment.renderable_chartex_rids))?;
     let mut sequence_facts = Vec::new();
     let mut sections = Vec::new();
+    let mut section_note_numbering = Vec::new();
     let mut running_refs = SectionRefs::default();
     let mut final_candidate: Option<(usize, SectionProps, SectionPlacementWire)> = None;
     let mut emitted_section_break_candidates = 0usize;
@@ -1271,6 +1274,9 @@ fn preflight_document_body(
         for node in root.descendants().filter(roxmltree::Node::is_element) {
             if possible_field {
                 ref_instructions.observe_node(node);
+            }
+            if is_body_section_properties(node) {
+                section_note_numbering.push(section_note_numbering_wire(node));
             }
             if is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == "sectPr" {
                 merge_section_refs(node, &environment.rel_map, &mut running_refs);
@@ -1340,6 +1346,7 @@ fn preflight_document_body(
         plan,
         table_sequences,
         sections,
+        section_note_numbering,
         final_body_block_ordinal,
         section,
         ref_leading_breaks,
@@ -1551,6 +1558,15 @@ pub fn parse(zip: &mut Zip) -> Result<Document, String> {
     // above already merged the run text transparently — this gives consumers
     // (MCP / agents) the revision metadata without disturbing rendering.
     let revisions = collect_revisions(body_node);
+    let mut environment = environment;
+    attach_section_note_numbering(
+        &mut environment.note_layout_settings,
+        body_node
+            .descendants()
+            .filter(|node| is_body_section_properties(*node))
+            .map(section_note_numbering_wire)
+            .collect(),
+    );
 
     finish_document(
         zip,
@@ -1636,6 +1652,10 @@ impl DocxBodyCursor {
                 theme: Box::new(environment.theme.clone()),
             })?;
         let degraded_theme = environment.theme.clone();
+        attach_section_note_numbering(
+            &mut environment.note_layout_settings,
+            preflight.section_note_numbering.clone(),
+        );
 
         let final_section_fact = preflight
             .final_body_block_ordinal
@@ -2447,7 +2467,12 @@ fn parse_notes(
                 theme,
             )
             .map_or_else(
-                || (reserved_note_separator_mark(n), None),
+                || {
+                    (
+                        reserved_note_separator_mark(n).or_else(|| authored_note_separator_mark(n)),
+                        None,
+                    )
+                },
                 |(mark, paragraph)| (Some(mark), Some(Box::new(paragraph))),
             )
         };
@@ -2487,12 +2512,8 @@ fn parse_notes(
         commit_story_diagnostics(local_diagnostics, diagnostics);
         out.push(crate::types::DocxNote { id, content });
     }
-    // word-note-separator-geometry: Word ignores special stories that
-    // settings.xml does not list (and lists without a matching story) and
-    // lays out its default separator, a bare Normal-style mark paragraph. Its
-    // default footnote continuation mark is the short one; the endnote one
-    // spans the note area. A listed story this class cannot represent keeps
-    // its absent-story fallback.
+    // A role without a listed story takes the default separator story of
+    // word-note-separator-geometry.
     let mut default_story = |mark: &str| {
         let xml = format!(
             r#"<w:{element_name} xmlns:w="{}"><w:p><w:r><w:{mark}/></w:r></w:p></w:{element_name}>"#,
@@ -2574,6 +2595,10 @@ fn selected_note_separator_paragraph(
         .filter(|child| child.is_element())
         .peekable();
     let properties = children.next_if(|child| is_w(*child, "pPr"));
+    // A marker run formatted unlike the paragraph mark shares the mark's line
+    // and contributes its own metrics there; it is retained as one
+    // non-breaking space run with the run's properties.
+    let mut marker_run = None;
     let mark = if let Some(run) = children.next() {
         if !is_w(run, "r") || children.next().is_some() {
             return None;
@@ -2590,9 +2615,7 @@ fn selected_note_separator_paragraph(
             _ => return None,
         };
         let mark_properties = properties.and_then(|node| child_w(node, "rPr"));
-        if !same_xml_element(mark_properties, run_properties) {
-            return None;
-        }
+        marker_run = (!same_xml_element(mark_properties, run_properties)).then_some((run, marker));
         mark
     } else if properties.is_none() {
         // Bare empty stories suppress rule ink but keep their inherited line box.
@@ -2600,6 +2623,21 @@ fn selected_note_separator_paragraph(
     } else {
         return None;
     };
+    let substituted =
+        marker_run.and_then(|(_, marker)| marker_space_paragraph_xml(paragraph, marker));
+    let substituted_doc = match substituted.as_deref().map(parse_guarded) {
+        Some(Ok(doc)) => Some(doc),
+        Some(Err(_)) => return None,
+        None => None,
+    };
+    let paragraph = substituted_doc
+        .as_ref()
+        .and_then(|doc| {
+            doc.root_element()
+                .children()
+                .find(|child| is_w(*child, "p"))
+        })
+        .unwrap_or(paragraph);
     let parsed = parse_paragraph_with_diagnostics(
         paragraph,
         style_map,
@@ -2612,7 +2650,9 @@ fn selected_note_separator_paragraph(
         &mut FieldState::default(),
         &mut Vec::new(),
     );
-    if !parsed.runs.is_empty()
+    let marker_space =
+        |runs: &[DocRun]| matches!(runs, [DocRun::Text(text)] if text.text == "\u{a0}");
+    if !(parsed.runs.is_empty() || (substituted_doc.is_some() && marker_space(&parsed.runs)))
         || parsed.numbering.is_some()
         || parsed.frame_pr.is_some()
         || parsed.borders.is_some()
@@ -2622,6 +2662,42 @@ fn selected_note_separator_paragraph(
         return None;
     }
     Some((mark, parsed))
+}
+
+/// The separator story paragraph with its marker element replaced by a
+/// non-breaking space, wrapped with every namespace in scope.
+fn marker_space_paragraph_xml(
+    paragraph: roxmltree::Node<'_, '_>,
+    marker: roxmltree::Node<'_, '_>,
+) -> Option<String> {
+    let input = paragraph.document().input_text();
+    let prefix = paragraph
+        .namespaces()
+        .find(|namespace| is_w_ns(Some(namespace.uri())))
+        .map(|namespace| namespace.name())?;
+    let element = |local: &str| match prefix {
+        Some(prefix) => format!("{prefix}:{local}"),
+        None => local.to_string(),
+    };
+    let declarations: String = paragraph
+        .namespaces()
+        .map(|namespace| match namespace.name() {
+            Some(name) => format!(r#" xmlns:{name}="{}""#, namespace.uri()),
+            None => format!(r#" xmlns="{}""#, namespace.uri()),
+        })
+        .collect();
+    let range = paragraph.range();
+    let marker_range = marker.range();
+    let space = format!(
+        r#"<{t} xml:space="preserve">&#160;</{t}>"#,
+        t = element("t")
+    );
+    Some(format!(
+        "<{root}{declarations}>{}{space}{}</{root}>",
+        input.get(range.start..marker_range.start)?,
+        input.get(marker_range.end..range.end)?,
+        root = element("separatorStory"),
+    ))
 }
 
 /// Element equality by expanded names, attributes and child elements.
@@ -2702,6 +2778,44 @@ fn reserved_note_separator_mark(
         "continuationSeparator" => Some(NoteSeparatorMark::Full),
         _ => None,
     }
+}
+
+/// The marker kind of a listed story this projection cannot otherwise
+/// represent (authored text, borders, several runs): its one
+/// WordprocessingML `w:separator` or `w:continuationSeparator` element
+/// (§17.11.23 / §17.11.1), so the rule keeps its authored width.
+fn authored_note_separator_mark(
+    note: roxmltree::Node<'_, '_>,
+) -> Option<crate::types::NoteSeparatorMark> {
+    use crate::types::NoteSeparatorMark;
+    let is_w = |node: Option<roxmltree::Node<'_, '_>>, name: &str| {
+        node.is_some_and(|node| {
+            is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == name
+        })
+    };
+    // Only a marker of a run of one of the story's own paragraphs counts.
+    let mut marks = note.descendants().filter(|node| {
+        let run = node.parent();
+        let paragraph = run.and_then(|run| run.parent());
+        node.is_element()
+            && is_w_ns(node.tag_name().namespace())
+            && matches!(
+                node.tag_name().name(),
+                "separator" | "continuationSeparator"
+            )
+            && is_w(run, "r")
+            && is_w(paragraph, "p")
+            && paragraph.and_then(|paragraph| paragraph.parent()) == Some(note)
+    });
+    let mark = marks.next()?;
+    if marks.next().is_some() {
+        return None;
+    }
+    Some(if mark.tag_name().name() == "separator" {
+        NoteSeparatorMark::Short
+    } else {
+        NoteSeparatorMark::Full
+    })
 }
 
 #[cfg(test)]
@@ -2986,9 +3100,27 @@ mod note_separator_tests {
             )
             .note_layout_settings
             .unwrap_or_default();
-            assert_eq!(settings.footnote_separator, None, "{paragraph}");
-            assert!(
-                settings.footnote_separator_paragraph.is_none(),
+            // The authored Short mark survives; a marker run formatted
+            // unlike its mark is retained as one non-breaking space, any
+            // other unrepresented content leaves only the mark.
+            assert_eq!(
+                settings.footnote_separator,
+                Some(crate::types::NoteSeparatorMark::Short),
+                "{paragraph}"
+            );
+            let marker_space = settings
+                .footnote_separator_paragraph
+                .as_ref()
+                .map(|paragraph| {
+                    matches!(paragraph.runs.as_slice(), [DocRun::Text(text)] if text.text == "\u{a0}")
+                });
+            let unequal_marker_run = !paragraph.contains("pBdr")
+                && !paragraph.contains("shd")
+                && !paragraph.contains("vanish")
+                && !paragraph.contains("<w:t>");
+            assert_eq!(
+                marker_space,
+                unequal_marker_run.then_some(true),
                 "{paragraph}"
             );
         }
@@ -3459,18 +3591,22 @@ fn parse_note_layout_settings(
             .and_then(|node| child_w(node, name))
             .and_then(|node| attr_w(node, "val"))
     };
-    // §17.11.20 numStart is an ST_DecimalNumber; an unparsable value is
-    // treated as absent (the default start of 1).
-    let start = |properties: &str| {
-        value(properties, "numStart").and_then(|value| value.trim().parse::<i64>().ok())
-    };
+    let footnote_numbering = child_w(root, "footnotePr").and_then(note_numbering_wire);
+    let endnote_numbering = child_w(root, "endnotePr").and_then(note_numbering_wire);
+    let footnote_numbering = footnote_numbering.unwrap_or_default();
+    let endnote_numbering = endnote_numbering.unwrap_or_default();
     let result = crate::types::NoteLayoutSettingsWire {
         footnote_position: value("footnotePr", "pos"),
         endnote_position: value("endnotePr", "pos"),
-        footnote_number_format: value("footnotePr", "numFmt"),
-        footnote_number_start: start("footnotePr"),
-        endnote_number_format: value("endnotePr", "numFmt"),
-        endnote_number_start: start("endnotePr"),
+        footnote_number_format: footnote_numbering.format,
+        footnote_number_start: footnote_numbering.start,
+        endnote_number_format: endnote_numbering.format,
+        endnote_number_start: endnote_numbering.start,
+        footnote_number_restart: footnote_numbering.restart,
+        endnote_number_restart: endnote_numbering.restart,
+        footnote_number_custom_format: footnote_numbering.custom_format,
+        endnote_number_custom_format: endnote_numbering.custom_format,
+        section_note_numbering: Vec::new(),
         footnote_separator: None,
         endnote_separator: None,
         endnote_continuation_separator: None,
@@ -3487,6 +3623,8 @@ fn parse_note_layout_settings(
         && result.footnote_number_start.is_none()
         && result.endnote_number_format.is_none()
         && result.endnote_number_start.is_none()
+        && result.footnote_number_restart.is_none()
+        && result.endnote_number_restart.is_none()
     {
         (None, special_references)
     } else {
@@ -3494,10 +3632,115 @@ fn parse_note_layout_settings(
     }
 }
 
+/// Numbering facts of a footnote or endnote properties element (§17.11.4/.5/
+/// .11/.12): numFmt (§17.11.17/.18, with its `format` pattern when `custom`),
+/// numStart (§17.11.20, an unparsable value is absent) and numRestart
+/// (§17.11.19). A numFmt inside `mc:AlternateContent` takes the branch a
+/// consumer that understands WordprocessingML 2010 selects (Part 3 §10.2).
+fn note_numbering_wire(properties: roxmltree::Node) -> Option<crate::types::NoteNumberingWire> {
+    let understood = |namespace: &str| {
+        crate::document_projector::docx_understands_namespace(namespace)
+            || namespace == crate::xml_util::W14_NS
+    };
+    let num_fmt = properties
+        .children()
+        .filter(|node| node.is_element())
+        .find_map(|node| {
+            if is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == "numFmt" {
+                return Some(node);
+            }
+            if node.tag_name().namespace() == Some(ooxml_common::bounded_xml::MCE_NS)
+                && node.tag_name().name() == "AlternateContent"
+            {
+                return ooxml_common::mce::select_alternate_content(node, &understood)
+                    .and_then(|branch| child_w(branch, "numFmt"));
+            }
+            None
+        });
+    let format = num_fmt.and_then(|node| attr_w(node, "val"));
+    let custom_format = num_fmt
+        .filter(|_| format.as_deref() == Some("custom"))
+        .and_then(|node| attr_w(node, "format"));
+    let start = child_w(properties, "numStart")
+        .and_then(|node| attr_w(node, "val"))
+        .and_then(|value| value.trim().parse::<i64>().ok());
+    let restart = child_w(properties, "numRestart").and_then(|node| attr_w(node, "val"));
+    let wire = crate::types::NoteNumberingWire {
+        format,
+        custom_format,
+        start,
+        restart,
+    };
+    (wire != crate::types::NoteNumberingWire::default()).then_some(wire)
+}
+
+/// Retain section-wide note numbering only when a section overrides it.
+fn attach_section_note_numbering(
+    settings: &mut Option<crate::types::NoteLayoutSettingsWire>,
+    list: Vec<crate::types::SectionNoteNumberingWire>,
+) {
+    if list
+        .iter()
+        .all(|entry| *entry == crate::types::SectionNoteNumberingWire::default())
+    {
+        return;
+    }
+    settings
+        .get_or_insert_with(Default::default)
+        .section_note_numbering = list;
+}
+
+/// §17.11.5 / §17.11.11 section-wide note numbering of one `w:sectPr`.
+fn section_note_numbering_wire(sect_pr: roxmltree::Node) -> crate::types::SectionNoteNumberingWire {
+    crate::types::SectionNoteNumberingWire {
+        footnote: child_w(sect_pr, "footnotePr").and_then(note_numbering_wire),
+        endnote: child_w(sect_pr, "endnotePr").and_then(note_numbering_wire),
+    }
+}
+
+/// A body `w:sectPr` (paragraph-level or final), not a tracked former one.
+fn is_body_section_properties(node: roxmltree::Node) -> bool {
+    node.is_element()
+        && is_w_ns(node.tag_name().namespace())
+        && node.tag_name().name() == "sectPr"
+        && !node
+            .parent()
+            .is_some_and(|parent| parent.tag_name().name() == "sectPrChange")
+}
+
 #[cfg(test)]
 mod page_layout_settings_tests {
     use super::*;
     use ooxml_common::ns::wordprocessingml;
+
+    /// §17.11.4/.5/.11/.12 numbering facts: numFmt (with a custom pattern,
+    /// also inside mc:AlternateContent), numStart and numRestart.
+    #[test]
+    fn note_numbering_reads_format_pattern_start_and_restart() {
+        let xml = r#"<w:root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+            xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+          <w:footnotePr><mc:AlternateContent><mc:Choice Requires="w14"><w:numFmt w:val="custom" w:format="001, 002, 003, ..."/></mc:Choice><mc:Fallback><w:numFmt w:val="decimal"/></mc:Fallback></mc:AlternateContent>
+            <w:numStart w:val="3"/><w:numRestart w:val="eachPage"/></w:footnotePr>
+          <w:endnotePr><w:numFmt w:val="upperLetter"/><w:numRestart w:val="eachSect"/></w:endnotePr>
+          <w:sectPr/></w:root>"#;
+        let doc = roxmltree::Document::parse(xml).expect("fixture");
+        let root = doc.root_element();
+        let footnote = note_numbering_wire(child_w(root, "footnotePr").unwrap()).unwrap();
+        assert_eq!(footnote.format.as_deref(), Some("custom"));
+        assert_eq!(
+            footnote.custom_format.as_deref(),
+            Some("001, 002, 003, ...")
+        );
+        assert_eq!(footnote.start, Some(3));
+        assert_eq!(footnote.restart.as_deref(), Some("eachPage"));
+        let endnote = note_numbering_wire(child_w(root, "endnotePr").unwrap()).unwrap();
+        assert_eq!(endnote.format.as_deref(), Some("upperLetter"));
+        assert_eq!(endnote.custom_format, None);
+        assert_eq!(endnote.restart.as_deref(), Some("eachSect"));
+        let section = section_note_numbering_wire(child_w(root, "sectPr").unwrap());
+        assert_eq!(section, crate::types::SectionNoteNumberingWire::default());
+    }
 
     #[test]
     fn reads_only_direct_wordprocessingml_settings_children() {

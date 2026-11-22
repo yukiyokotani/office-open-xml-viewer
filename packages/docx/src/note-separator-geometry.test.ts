@@ -8,7 +8,7 @@ import { layoutDocument } from './document-layout.js';
 import type { DocxDocumentModel } from './types.js';
 import type { DocumentLayout, NoteLayout } from './layout/types.js';
 import {
-  wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt, wordShortNoteSeparatorLengthPt,
+  noteSeparatorRuleSpan, wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt, wordShortNoteSeparatorLengthPt,
 } from './layout/body-pagination-compatibility.js';
 
 // WORD_NOTE_SEPARATOR_GEOMETRY: synthetic reductions of the Windows Word
@@ -38,16 +38,19 @@ interface Control {
   readonly noSeparatorStories?: boolean;
   readonly textWidthPt?: number;
   readonly noteLines?: number;
+  /** Size on the marker run alone (its paragraph mark stays 10pt). */
+  readonly markerRunHalfPoints?: number;
 }
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const encode = (xml: string) => new TextEncoder().encode(xml);
 
-function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2 }: Control): DocxDocumentModel {
+function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints }: Control): DocxDocumentModel {
   const rPr = markHalfPoints ? `<w:rPr><w:sz w:val="${markHalfPoints}"/></w:rPr>` : '';
+  const runRPr = markerRunHalfPoints ? `<w:rPr><w:sz w:val="${markerRunHalfPoints}"/></w:rPr>` : rPr;
   const special = (role: string, id: number, mark: string) => `<w:${kind} w:type="${role}" w:id="${id}">`
-    + `<w:p><w:pPr>${rPr}</w:pPr><w:r>${rPr}<w:${mark}/></w:r></w:p></w:${kind}>`;
+    + `<w:p><w:pPr>${rPr}</w:pPr><w:r>${runRPr}<w:${mark}/></w:r></w:p></w:${kind}>`;
   const stories = noSeparatorStories ? ''
     : special('separator', -1, 'separator') + special('continuationSeparator', 0, 'continuationSeparator');
   const lines = Array.from({ length: noteLines }, (_, index) => `<w:p><w:r><w:t>N${index}</w:t></w:r></w:p>`).join('');
@@ -134,5 +137,36 @@ describe('word-note-separator-geometry', () => {
       expect(continued.length).toBeGreaterThan(1);
       expect(continued[1]!.ruleLengthPt).toBe(expected);
     }
+  });
+
+  it('keeps the rule inside the note area for page-wide, right-to-left and other producers', () => {
+    const columns = [{ xPt: 72, wPt: 120 }, { xPt: 212, wPt: 120 }];
+    const span = (overrides: Partial<Parameters<typeof noteSeparatorRuleSpan>[0]>) => noteSeparatorRuleSpan({
+      word: true, kind: 'footnote', mode: 'short', continuing: false, pageWide: true, rtl: false,
+      container: { xPt: 72, widthPt: 120 }, columns, ...overrides,
+    });
+    // Mode 15: the page-wide area spans both columns (72-332).
+    expect(span({})).toEqual({ fromXPt: 72, toXPt: 216 });
+    // Right to left: the rule starts at the area's right edge, never past it.
+    expect(span({ rtl: true, container: { xPt: 212, widthPt: 120 } })).toEqual({ fromXPt: 188, toXPt: 332 });
+    // A page-wide endnote continuation spans the whole area, not one column.
+    expect(span({ kind: 'endnote', mode: 'default', continuing: true })).toEqual({ fromXPt: 72, toXPt: 332 });
+    // Per-column bands keep their column.
+    expect(span({ pageWide: false })).toEqual({ fromXPt: 72, toXPt: 192 });
+    // Another producer keeps the library policy: a third of the column, and
+    // a story-less continuation spans it.
+    expect(span({ word: false, container: { xPt: 72, widthPt: 300 } })).toEqual({ fromXPt: 72, toXPt: 172 });
+    expect(span({ word: false, mode: 'default', continuing: true, container: { xPt: 72, widthPt: 300 } }))
+      .toEqual({ fromXPt: 72, toXPt: 372 });
+  });
+
+  it.each(['footnote', 'endnote'] as const)('sizes a %s band and rule from a marker run formatted unlike its mark', (kind) => {
+    const bare = bands(render(control({ kind, listed: true })))[0]!;
+    const marker = bands(render(control({ kind, listed: true, markerRunHalfPoints: 40 })))[0]!;
+    // The 20pt marker run shares the 10pt mark's line and sizes the rule.
+    expect(marker.heightPt).toBeGreaterThan(bare.heightPt);
+    expect(marker.ruleWidthPt).toBe(1);
+    expect(marker.ruleOffsetPt).toBeCloseTo(marker.heightPt / 2 + 2.5, 5);
+    expect(marker.ruleLengthPt).toBe(144);
   });
 });

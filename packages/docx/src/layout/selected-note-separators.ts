@@ -94,9 +94,12 @@ export function normalizeSelectedNoteSeparators(
     if (paragraph === undefined) continue;
     const mark = marks[role];
     if (mark !== 'short' && mark !== 'full' && mark !== 'none') reject(`${role} paragraph has no selected mark`);
-    // The closed shape the parser admits: no runs besides the omitted mark,
-    // and no paragraph ink, numbering, frame or hidden mark.
-    if ((paragraph.runs ?? []).length !== 0) reject(`${role} paragraph carries runs`);
+    // The closed shape the parser admits: no runs besides the omitted mark
+    // (or its non-breaking space when the marker run is formatted unlike the
+    // mark), and no paragraph ink, numbering, frame or hidden mark.
+    if ((paragraph.runs ?? []).length !== 0 && !isNoteSeparatorMarkerSpace(paragraph.runs)) {
+      reject(`${role} paragraph carries runs`);
+    }
     if (paragraph.numbering != null || paragraph.framePr != null || paragraph.borders != null
       || paragraph.shading != null || paragraph.markVanish === true) {
       reject(`${role} paragraph carries unrepresented properties`);
@@ -107,4 +110,12 @@ export function normalizeSelectedNoteSeparators(
     stories.push(Object.freeze({ source: root, body: Object.freeze([acquire(paragraph, paragraphSource)]) }));
   }
   return Object.freeze({ definitions: Object.freeze(definitions), stories: Object.freeze(stories) });
+}
+
+/** The one run of a separator story whose marker run is formatted unlike
+ * its paragraph mark: a non-breaking space carrying the marker's
+ * properties (the parser's selected-story projection). */
+export function isNoteSeparatorMarkerSpace(runs: readonly Readonly<{ type: string }>[]): boolean {
+  return runs.length === 1 && runs[0]!.type === 'text'
+    && (runs[0] as Readonly<{ text?: string }>).text === '\u00a0';
 }

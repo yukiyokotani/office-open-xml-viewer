@@ -30,6 +30,45 @@ export function wordShortNoteSeparatorLengthPt(areaWidthPt: number): number {
   return Math.max(0, Math.min(144, areaWidthPt));
 }
 
+/** Horizontal extent of a note separator rule.
+ *
+ * Word (WORD_NOTE_SEPARATOR_GEOMETRY): the rule lies in the note area, every
+ * column of the section for a page-wide area, and starts at the area's
+ * start edge (the right edge in a right-to-left section). The continuation
+ * mark spans the area and the ordinary mark is min(144pt, area width); a
+ * story-less role takes Word's default marks (short, full for an endnote
+ * continuation). Another producer keeps the library policy: the rule starts
+ * at the column's left edge, the ordinary mark is a third of the column and
+ * a story-less continuation spans it. */
+export function noteSeparatorRuleSpan(input: Readonly<{
+  word: boolean;
+  kind: 'footnote' | 'endnote';
+  mode: 'short' | 'full' | 'none' | 'default' | undefined;
+  continuing: boolean;
+  pageWide: boolean;
+  rtl: boolean;
+  container: Readonly<{ xPt: number; widthPt: number }>;
+  columns: readonly Readonly<{ xPt: number; wPt: number }>[];
+}>): Readonly<{ fromXPt: number; toXPt: number }> {
+  const storyless = input.mode === undefined || input.mode === 'default';
+  if (!input.word) {
+    const full = input.mode === 'full' || (storyless && input.continuing);
+    const length = full ? input.container.widthPt : input.container.widthPt / 3;
+    return { fromXPt: input.container.xPt, toXPt: input.container.xPt + length };
+  }
+  const pageWide = input.pageWide && input.columns.length > 1;
+  const left = pageWide ? Math.min(...input.columns.map((column) => column.xPt)) : input.container.xPt;
+  const right = pageWide
+    ? Math.max(...input.columns.map((column) => column.xPt + column.wPt))
+    : input.container.xPt + input.container.widthPt;
+  const width = Math.max(0, right - left);
+  const full = input.mode === 'full' || (storyless && input.continuing && input.kind === 'endnote');
+  const length = full ? width : wordShortNoteSeparatorLengthPt(width);
+  return input.rtl
+    ? { fromXPt: right - length, toXPt: right }
+    : { fromXPt: left, toXPt: left + length };
+}
+
 /** Word note separator rule thickness: one twentieth of the mark font size. */
 export function wordNoteSeparatorRuleWidthPt(markFontSizePt: number): number {
   return markFontSizePt / 20;

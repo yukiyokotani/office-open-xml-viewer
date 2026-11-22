@@ -105,8 +105,8 @@ describe('canonical body layout input', () => {
       endnotePosition: 'docEnd',
       // §17.11.18/.20 defaults; endnotes take Word's lowerRoman default
       // (WORD_NOTE_NUMBER_FORMAT_DEFAULTS, [MS-OI29500] §2.1.306).
-      footnoteNumbering: { format: 'decimal', start: 1 },
-      endnoteNumbering: { format: 'lowerRoman', start: 1 },
+      footnoteNumbering: { format: 'decimal', start: 1, restart: 'continuous' },
+      endnoteNumbering: { format: 'lowerRoman', start: 1, restart: 'continuous' },
       footnoteSeparator: 'default',
       endnoteSeparator: 'default',
       endnoteContinuationSeparator: 'default',
@@ -135,8 +135,8 @@ describe('canonical body layout input', () => {
     expect(createBodyLayoutInput(document).noteLayoutSettings).toEqual({
       footnotePosition: 'beneathText',
       endnotePosition: 'sectEnd',
-      footnoteNumbering: { format: 'upperLetter', start: 4 },
-      endnoteNumbering: { format: 'lowerRoman', start: 1 },
+      footnoteNumbering: { format: 'upperLetter', start: 4, restart: 'continuous' },
+      endnoteNumbering: { format: 'lowerRoman', start: 1, restart: 'continuous' },
       footnoteSeparator: 'none',
       endnoteSeparator: 'default',
       endnoteContinuationSeparator: 'default',

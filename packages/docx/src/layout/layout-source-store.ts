@@ -21,6 +21,7 @@ import {
   reservedNoteSeparatorRole,
 } from './reserved-note-separators.js';
 import {
+  isNoteSeparatorMarkerSpace,
   isSelectedNoteSeparatorInstance,
   selectedNoteSeparatorSource,
 } from './selected-note-separators.js';
@@ -221,7 +222,7 @@ function validateReservedNoteSeparatorRoles(
       const story = blocks.storyRoot(root);
       const paragraph = blocks.resolve(definition.paragraph);
       if (story.length !== 1 || story[0] !== paragraph || paragraph.type !== 'paragraph'
-        || paragraph.runs.length !== 0) {
+        || !(paragraph.runs.length === 0 || isNoteSeparatorMarkerSpace(paragraph.runs))) {
         throw new TypeError(`Note separator story paragraph mismatch: ${sourceKey(root)}`);
       }
     }
@@ -776,3 +777,4 @@ export function createLayoutBlockRepository(
     storyRoot,
   });
 }
+

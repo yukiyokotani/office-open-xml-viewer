@@ -275,6 +275,7 @@ export interface BodyLayoutInput {
     endnotePosition: string;
     footnoteNumbering?: NoteNumberingInput;
     endnoteNumbering?: NoteNumberingInput;
+    sectionNoteNumbering?: readonly SectionNoteNumberingInput[];
     footnoteSeparator?: NoteSeparatorInput;
     endnoteSeparator?: NoteSeparatorInput;
     endnoteContinuationSeparator?: NoteSeparatorInput;
@@ -294,12 +295,23 @@ export interface BodyLayoutInput {
   }>;
 }
 
-/** ECMA-376 §17.11.17/.18 numFmt and §17.11.20 numStart for one note kind. */
+/** ECMA-376 §17.11.17/.18 numFmt, §17.11.20 numStart and §17.11.19
+ * numRestart for one note kind. */
 export interface NoteNumberingInput {
-  /** ST_NumberFormat (§17.18.59); `decimal` when not authored. */
+  /** ST_NumberFormat (§17.18.59), or `custom:<pattern>` for a custom
+   * numFmt/@format; WORD_NOTE_NUMBER_FORMAT_DEFAULTS when not authored. */
   readonly format: string;
   /** First automatic note number; 1 when not authored. */
   readonly start: number;
+  /** ST_RestartNumber (§17.18.74); continuous when not authored. */
+  readonly restart?: 'continuous' | 'eachSect' | 'eachPage';
+}
+
+/** Effective note numbering of one section (§17.11.5/.11 over the
+ * document-wide §17.11.4/.12 facts), in body section order. */
+export interface SectionNoteNumberingInput {
+  readonly footnote: NoteNumberingInput;
+  readonly endnote: NoteNumberingInput;
 }
 
 export interface BodyLayoutAcquisitionInput {
@@ -315,6 +327,7 @@ export interface BodyLayoutAcquisitionInput {
     endnotePosition: string;
     footnoteNumbering?: NoteNumberingInput;
     endnoteNumbering?: NoteNumberingInput;
+    sectionNoteNumbering?: readonly SectionNoteNumberingInput[];
     footnoteSeparator?: NoteSeparatorInput;
     endnoteSeparator?: NoteSeparatorInput;
     endnoteContinuationSeparator?: NoteSeparatorInput;
