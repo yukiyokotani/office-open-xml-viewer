@@ -38,6 +38,7 @@ import { isAnchorPlacementSegment, metricSegments } from '../line-breaker/model.
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
+import { bidiPlacedOffsets, visualBoundaryXPt } from './visual-cluster-geometry.js';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -1108,58 +1109,6 @@ function levelDirection(level: number): 'ltr' | 'rtl' {
   return level % 2 === 1 ? 'rtl' : 'ltr';
 }
 
-/** WORD_CONDENSED_SPACING_ADVANCE_FLOOR splits a segment's paint at floored
- * clusters, and Canvas resolves bidirectional order only inside one
- * `fillText`. Place the split operations as the single operation they replace
- * would have been drawn: UAX#9 levels of the painted text in the paint
- * direction (Canvas applies no higher-level overrides), then each L2 reversal
- * (highest level first, down to the lowest odd level) mirrors its contiguous
- * run of operations within the run's own span. Operations are level-uniform
- * (split at level changes). A floored cluster drawn alone at an odd level
- * keeps its glyph's trailing edge on the right-to-left pen, its drawn
- * advance behind it. Work is linear per level. */
-function bidiPlacedOffsets(
-  items: readonly Readonly<{ xPt: number; advancePt: number; drawnAdvancePt?: number; level: number }>[],
-): number[] {
-  const xs = items.map((item) => item.xPt);
-  let order = items.map((_, index) => index);
-  let highest = 0;
-  let lowestOdd = Number.POSITIVE_INFINITY;
-  for (const item of items) {
-    highest = Math.max(highest, item.level);
-    if (item.level % 2 === 1) lowestOdd = Math.min(lowestOdd, item.level);
-  }
-  for (let level = highest; level >= lowestOdd; level -= 1) {
-    const next: number[] = [];
-    let cursor = 0;
-    while (cursor < order.length) {
-      if (items[order[cursor]!]!.level < level) {
-        next.push(order[cursor]!);
-        cursor += 1;
-        continue;
-      }
-      let end = cursor;
-      let startPt = Number.POSITIVE_INFINITY;
-      let endPt = Number.NEGATIVE_INFINITY;
-      while (end < order.length && items[order[end]!]!.level >= level) {
-        const index = order[end]!;
-        startPt = Math.min(startPt, xs[index]!);
-        endPt = Math.max(endPt, xs[index]! + items[index]!.advancePt);
-        end += 1;
-      }
-      for (let member = end - 1; member >= cursor; member -= 1) {
-        const index = order[member]!;
-        xs[index] = startPt + endPt - xs[index]! - items[index]!.advancePt;
-        next.push(index);
-      }
-      cursor = end;
-    }
-    order = next;
-  }
-  return items.map((item, index) => item.drawnAdvancePt !== undefined && item.level % 2 === 1
-    ? xs[index]! + item.advancePt - item.drawnAdvancePt
-    : xs[index]!);
-}
 
 /** Per-operation visible advance from the retained clusters (both run in
  * source order; clusters from `visibleEnd` on are trailing whitespace). */
@@ -1485,6 +1434,8 @@ function coalesceAdjacentDecorations(placements: ParagraphPlacement[], overSide 
   }>;
   let active: ActiveDecoration[] = [];
   placements.forEach((placement, placementIndex) => {
+    // A position-only host takes no part in the line's decoration.
+    if (placement.kind === 'anchor-host') return;
     if ((placement.kind !== 'text' && placement.kind !== 'tab') || !placement.decorations) {
       active = [];
       return;
@@ -2336,23 +2287,14 @@ function planContentLine(
     const inside = hostsInside.get(segmentIndex);
     const placedText = inside ? placements.at(-1) : undefined;
     if (inside && placedText?.kind === 'text') {
-      // The host stands at the retained position of the cluster it precedes
-      // (after the last one, at the piece's end), so every adjustment the
-      // piece's clusters carry is the host's as well.
+      // The host stands at the visual position of its logical boundary in
+      // the piece's retained clusters (visualBoundaryXPt), so every
+      // adjustment and reordering the piece's clusters carry is the host's.
       const clusters = placedText.clusters;
-      const first = clusters[0];
-      const last = clusters.at(-1);
-      /** Pen position before cluster `index`, from the piece's logical start. */
-      const penPt = (index: number): number => !first || !last ? 0
-        : index < clusters.length
-          ? clusters[index]!.offset.xPt - first.offset.xPt
-          : last.offset.xPt + last.advancePt - first.offset.xPt;
       let cluster = 0;
       for (const planned of inside) {
         while (cluster < clusters.length && clusters[cluster]!.range.start < planned.at) cluster += 1;
-        placeHost(planned, visual.rtl[segmentIndex]
-          ? xPt - penPt(cluster)
-          : placedText.origin.xPt + (first?.offset.xPt ?? 0) + penPt(cluster));
+        placeHost(planned, visualBoundaryXPt(placedText, cluster));
       }
     }
     // A right-to-left segment's leading edge is its right edge.

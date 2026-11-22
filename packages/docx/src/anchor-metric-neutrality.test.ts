@@ -181,6 +181,8 @@ import { buildSegments } from './line-layout.js';
 import { withAnchorPlacementSegments } from './line-breaker/segment-builder.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { textRunsForPage } from './text-run-projection.js';
+import { visualBoundaryXPt } from './layout/visual-cluster-geometry.js';
+import { sourceOwnedTextPlacements } from './layout/text-source-ownership.js';
 import { wordFollowingInkContent } from './layout/body-pagination-compatibility.js';
 
 function documentContext(): CanvasRenderingContext2D {
@@ -991,4 +993,130 @@ describe('a line with many anchors inside its text is planned in linear work', (
     expect(answers([mark, table], false)).toEqual([true, true]);
     expect(answers([mark, mark], false)).toEqual([false, false]);
   });
+});
+
+describe('a floating anchor inside a text piece changes nothing derived from that piece', () => {
+  const lay = (runs: readonly Run[]) => {
+    const model = documentModel([bodyParagraph(runs)], null, { compatibilityMode: 15 });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+      { currentDateMs: 0 });
+    const paragraph = layout.pages[0]!.layers.body.find((node) => node.kind === 'paragraph');
+    if (paragraph?.kind !== 'paragraph') throw new Error('Expected a paragraph');
+    const placements = paragraph.lines.flatMap((line) => line.placements);
+    const texts = placements.flatMap((placement) => placement.kind === 'text' ? [placement] : []);
+    return {
+      hosts: placements.flatMap((placement) => placement.kind === 'anchor-host' ? [placement] : []),
+      texts,
+      // Everything painted or measured from the text, without source ranges
+      // (the anchoring character shifts the ranges after it by one).
+      painted: texts.map((placement) => ({
+        text: placement.text, origin: placement.origin, bounds: placement.bounds, direction: placement.direction,
+        clusters: placement.clusters.map((cluster) => [round(cluster.offset.xPt), round(cluster.advancePt)]),
+        paint: placement.paintOps.map((op) => [op.text, round(op.offset.xPt), op.direction]),
+        decorations: placement.decorations,
+      })),
+      selection: textRunsForPage(layout, 0, { scale: 1 }).map((run) =>
+        [run.text, round(run.x), round(run.y), round(run.w), round(run.h)]),
+    };
+  };
+  const anchor = documentAnchorShapes[0]![1];
+  const rtl = (value: string, extra: object = {}): Run => word(value, 12, { rtl: true, ...extra });
+
+  it('keeps right-to-left selection rectangles where the text is painted', () => {
+    const { selection } = lay([rtl('\u05d0\u05d1'), ...anchor(), rtl('\u05d2\u05d3')]);
+    const first = selection.find(([value]) => value === '\u05d0\u05d1')!;
+    const second = selection.find(([value]) => value === '\u05d2\u05d3')!;
+    // The logically first run is painted on the right.
+    expect(first[1]).toBe((second[1] as number) + (second[3] as number));
+    expect(first[3]).toBe(12);
+  });
+
+  it('keeps the box of a right-to-left piece that ends in a space', () => {
+    // Painted left to right: space, dalet, gimel, bet, alef (6pt each). The
+    // first run fills the right 12pt of the piece's box, and the boundary
+    // before gimel is its right edge.
+    const { texts, hosts, selection } = lay([rtl('\u05d0\u05d1'), ...anchor(), rtl('\u05d2\u05d3 ')]);
+    expect(texts.map((placement) => placement.text)).toEqual(['\u05d0\u05d1\u05d2\u05d3 ']);
+    const box = texts[0]!.bounds;
+    expect(box.widthPt).toBe(30);
+    const first = selection.find(([value]) => value === '\u05d0\u05d1')!;
+    expect([first[1], first[3]]).toEqual([box.xPt + 18, 12]);
+    expect(hosts[0]!.bounds.xPt).toBe(box.xPt + 18);
+  });
+
+  it('places a host at the visual position of its boundary inside a digit run of right-to-left text', () => {
+    // The boundary before "3" is its left edge, between "2" and "3".
+    const { texts, hosts } = lay([rtl('\u05d0\u05d112'), ...anchor(), rtl('3\u05d2\u05d3')]);
+    expect(texts.map((placement) => placement.text).join('')).toHaveLength(7);
+    const digits = texts.find((placement) => placement.text.includes('3'))!;
+    const three = digits.clusters.findIndex((cluster) =>
+      digits.text[cluster.range.start - digits.range.start] === '3');
+    expect(hosts[0]!.bounds.xPt).toBe(visualBoundaryXPt(digits, three));
+    expect(hosts[0]!.bounds.xPt).toBe(lay([rtl('\u05d0\u05d1123\u05d2\u05d3')]).texts
+      .find((placement) => placement.text.includes('3'))!.bounds.xPt + (digits.text === '123' ? 12 : 24));
+  });
+
+  it('maps logical boundaries of one mixed-direction piece to where they are painted', () => {
+    // One right-to-left piece, 6pt clusters in logical pen order. Painted
+    // left to right: dalet gimel 1 2 3 bet alef.
+    const value = '\u05d0\u05d1123\u05d2\u05d3';
+    // The paint origin need not be the left edge of the piece's box.
+    const piece = { text: value, range: { start: 0, end: 7 }, direction: 'rtl' as const,
+      origin: { xPt: 103, yPt: 0 }, bounds: { xPt: 100, yPt: 0, widthPt: 42, heightPt: 12 },
+      clusters: [...value].map((_, index) => ({ range: { start: index, end: index + 1 },
+        offset: { xPt: index * 6, yPt: 0 }, advancePt: 6 })) };
+    const boundary = (index: number) => visualBoundaryXPt(piece as never, index) - 100;
+    expect(boundary(0)).toBe(42);   // before alef: its right edge
+    expect(boundary(1)).toBe(36);
+    expect(boundary(2)).toBe(12);   // before "1": its left edge
+    expect(boundary(4)).toBe(24);   // between "2" and "3"
+    expect(boundary(5)).toBe(12);   // before gimel: its right edge
+    expect(boundary(7)).toBe(0);    // after dalet: its left edge
+    // Source ownership reports the same painted rectangles.
+    const owned = sourceOwnedTextPlacements({ ...piece, kind: 'text', advancePt: 42, paintOps: [],
+      sourceRuns: [{ sourceRunIndex: 0, range: { start: 0, end: 4 } }, { sourceRunIndex: 2, range: { start: 4, end: 7 } }],
+    } as never);
+    // alef bet 1 2: [12, 42); 3 gimel dalet: [0, 30).
+    expect(owned.map((part) => [part.text, part.bounds.xPt, part.bounds.widthPt]))
+      .toEqual([['\u05d0\u05d112', 112, 30], ['3\u05d2\u05d3', 100, 30]]);
+    expect(owned.map((part) => part.origin.xPt)).toEqual([112, 100]);
+    expect(owned.map((part) => part.clusters[0]!.offset.xPt)).toEqual([0, 0]);
+  });
+
+  it('continues a dashed underline across the anchor and the next formatting boundary', () => {
+    const dash = { underline: true, underlineStyle: 'dash' };
+    const plain = lay([word('A', 12, dash), word('AA', 12, dash), word('BBB', 12, { ...dash, bold: true })]);
+    const anchored = lay([word('A', 12, dash), ...anchor(), word('AA', 12, dash), word('BBB', 12, { ...dash, bold: true })]);
+    expect(plain.painted.flatMap((placement) => placement.decorations ?? [])).toHaveLength(1);
+    expect(anchored.painted).toEqual(plain.painted);
+  });
+
+  const underlines: readonly (readonly [string, object])[] = [
+    ['no underline', {}],
+    ['single underline', { underline: true }],
+    ['dashed underline', { underline: true, underlineStyle: 'dash' }],
+    ['wave underline', { underline: true, underlineStyle: 'wave' }],
+    ['double underline', { underline: true, underlineStyle: 'double' }],
+  ];
+  const scripts: readonly (readonly [string, (value: string, extra: object) => Run, string, string, string])[] = [
+    ['left-to-right', (value, extra) => word(value, 12, extra), 'ab', 'cd', ' ef'],
+    ['right-to-left', rtl, '\u05d0\u05d1', '\u05d2\u05d3', ' \u05d4\u05d5'],
+    ['right-to-left with digits', rtl, '\u05d0\u05d112', '3\u05d2\u05d3', ' 45'],
+    ['left-to-right with right-to-left words', (value, extra) => word(value, 12, extra), 'a\u05d0', '\u05d1b', ' c'],
+    ['Arabic joining', rtl, '\u0644\u0627\u0645', '\u0644\u0627', ' \u0628\u0627'],
+    ['ligature', (value, extra) => word(value, 12, extra), 'of', 'fice', ' fi'],
+  ];
+  for (const [scriptName, make, before, after, tail] of scripts) {
+    for (const [underlineName, underline] of underlines) {
+      for (const [shapeName, shape] of documentAnchorShapes) {
+        it(`${scriptName}, ${underlineName}, ${shapeName}`, () => {
+          const end = make(tail, { ...underline, bold: true });
+          const plain = lay([make(before, underline), make(after, underline), end]);
+          const anchored = lay([make(before, underline), ...shape(), make(after, underline), end]);
+          expect(anchored.painted).toEqual(plain.painted);
+          expect(anchored.selection).toEqual(plain.selection);
+        });
+      }
+    }
+  }
 });
