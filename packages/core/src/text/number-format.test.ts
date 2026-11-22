@@ -133,7 +133,8 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       ['chineseCountingThousand', [
         [1, '一'], [10, '一十'], [11, '一十一'], [20, '二十'], [100, '一百'],
         [111, '一百一十一'], [1000, '一千'], [1001, '一千零一'],
-        [2024, '二千零二十四'], [10000, '一万'], [10005, '一万零五'],
+        // No 零 between 万 and a small ones group below 100,000 ([MS-OI29500] §2.1.548 (e)).
+        [2024, '二千零二十四'], [10000, '一万'], [10005, '一万五'],
         [12345, '一万二千三百四十五'],
       ]],
       // taiwaneseCountingThousand mirrors chineseCountingThousand's rules.
@@ -353,6 +354,9 @@ describe('formatOrdinalNumber — [MS-OI29500] §2.1.548 wrap rules and limits',
     ['decimal', 2147483647, '2147483647'], ['decimal', 2147483648, ''],
     // (r), (u) chosung and ganada start at 1 again past 14.
     ['chosung', 15, 'ㄱ'], ['ganada', 15, '가'],
+    // (e) chineseCountingThousand writes no 零 between 万 and a small ones
+    // group below 100,000; the legal format keeps it.
+    ['chineseCountingThousand', 10005, '\u4E00\u4E07\u4E94'],
     // (s) decimalEnclosedCircleChinese: ten enclosed numbers, then decimal.
     ['decimalEnclosedCircleChinese', 10, '⑩'], ['decimalEnclosedCircleChinese', 11, '11'],
   ] as const)('%s(%d) is %j', (format, value, expected) => {

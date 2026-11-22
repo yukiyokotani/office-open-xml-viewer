@@ -388,6 +388,12 @@ describe('word-note-separator-geometry', () => {
     expect(labels.map((label) => label.replace(/\s+/gu, ''))).toEqual(['1.A', '2.B']);
   });
 
+  it('keeps text after the marker in the same run', () => {
+    const note = separatorOf('<w:p><w:r><w:separator/><w:noBreakHyphen/><w:t>Sources</w:t></w:r></w:p>');
+    expect(clean(paragraphTexts(note))).toEqual(['-Sources']);
+    expect(note.leading?.rule).toBeDefined();
+  });
+
   it('drops a hidden marker and keeps the visible separator text', () => {
     const note = separatorOf('<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:separator/></w:r><w:r><w:t>Sources</w:t></w:r></w:p>');
     expect(paragraphTexts(note)).toEqual(['Sources']);

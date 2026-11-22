@@ -503,7 +503,7 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
       return n >= 1 ? toChineseCounting(n, DIGITS_TAIWANESE) : String(n);
     // Grouped counting / legal CJK.
     case 'chineseCountingThousand':
-      return n >= 1 ? toMyriadGrouped(n, MYRIAD_CHINESE) : String(n);
+      return n >= 1 ? toMyriadGrouped(n, MYRIAD_CHINESE, true) : String(n);
     case 'taiwaneseCountingThousand':
       return n >= 1 ? toMyriadGrouped(n, MYRIAD_TAIWANESE) : String(n);
     case 'chineseLegalSimplified':
@@ -726,7 +726,7 @@ function renderMyriadGroup(group: number, t: MyriadTable, elideOne: boolean): st
  *  additional symbol at one hundred million" but does not fully table it, so the
  *  高位 rendering is a faithful extension of the documented < 10^8 algorithm.
  *  Caller guarantees n ≥ 1. */
-function toMyriadGrouped(n: number, t: MyriadTable): string {
+function toMyriadGrouped(n: number, t: MyriadTable, omitSmallMyriadGapZero = false): string {
   if (n >= 100000000) {
     // 億 = 10^8. Recurse: <upper>億<remainder>, remainder rendered with no leading
     // elision quirk changes. (U+5104 億 for JP/CN, U+5104 shared.)
@@ -751,7 +751,11 @@ function toMyriadGrouped(n: number, t: MyriadTable): string {
     // but the 万 group is present (e.g. 10005 → 一万零五): a gap exists between 万
     // and the ones group (§17.18.59 "if no groups are formed … write 零"). Only
     // for formats that specify the 零 rule.
-    if (t.insertZero && upperGroup > 0 && lowerGroup < 1000) out += t.digits[0];
+    // [MS-OI29500] §2.1.548 (e): chineseCountingThousand writes no 零 here
+    // below 100,000 (10005 → 一万五).
+    if (t.insertZero && upperGroup > 0 && lowerGroup < 1000 && !(omitSmallMyriadGapZero && n < 100000)) {
+      out += t.digits[0];
+    }
     out += renderMyriadGroup(lowerGroup, t, t.elideOne);
   }
   return out;

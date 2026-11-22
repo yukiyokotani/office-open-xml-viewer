@@ -8634,7 +8634,11 @@ fn has_mergeformat_switch(instr: &str) -> bool {
 /// contents — merging text into (or out of) such a run would be wrong even
 /// if the annotation happened to match.
 fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
-    !a.optional_hyphen
+    // A separator marker run stays its own empty run: text before or after
+    // it in the same `w:r` never joins it.
+    !a.note_separator_marker
+        && !b.note_separator_marker
+        && !a.optional_hyphen
         && !b.optional_hyphen
         && a.ruby.is_none()
         && b.ruby.is_none()
