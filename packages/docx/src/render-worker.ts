@@ -77,6 +77,7 @@ import { normalizeLayoutOptions } from './layout/options.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { hitTestSelectedDocxElementContext } from './element-context.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
+import { documentCarriesRunLanguage } from './run-language-capability.js';
 import {
   renderWorkerLayoutMeta,
   projectRenderWorkerLayoutMeta,
@@ -350,10 +351,13 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       // here) applies them too, judged by the oracle whose capability the
       // text service's fingerprint records (core createNamedFamilyOracle).
       // Otherwise glyph ownership, symbol codes and run languages would be
-      // judged here and declined there.
+      // judged here and declined there. A document naming a run language
+      // also needs Canvas `lang` here (`available`): without it every tag
+      // would be withheld here while the main realm may apply them.
       if (nativeSentinels && nativeSentinels.length > 0 && typeof OffscreenCanvas !== 'undefined') {
         const measuring = new OffscreenCanvas(1, 1).getContext('2d');
-        if (measuring && !createNamedFamilyOracle(measuring).sentinelsApply) {
+        const oracle = measuring ? createNamedFamilyOracle(measuring) : undefined;
+        if (oracle && !(documentCarriesRunLanguage(pulledModels.document) ? oracle.available : oracle.sentinelsApply)) {
           unloadOfficeFontFallbacks(nativeSentinels);
           nativeSentinels = null;
         }

@@ -33,6 +33,19 @@ describe('text sequences across §17.3.2.20 language seams', () => {
       .toEqual([[0, 0, 2], [1, 2, 4], [2, 4, 5]]);
   });
 
+  it('keeps a cluster whole across three runs whose last carries the base language again', () => {
+    const joined = sequences([run('\u0433', 'sr-rs'), run('\u0301', 'en-us'), run('\u0323x', 'sr-rs')]);
+    const sequence = joined.get(0)!;
+    expect(sequence.run.text).toBe('\u0433\u0301\u0323x');
+    expect(languages(sequence)).toBeUndefined();
+    expect(sequence.run.lang).toBe('sr-rs');
+    expect(sequence.sources.map((source) => [source.runIndex, source.start, source.end]))
+      .toEqual([[0, 0, 1], [1, 1, 2], [2, 2, 4]]);
+    // With a third language the units after the cluster keep their own.
+    const third = sequences([run('\u0433', 'sr-rs'), run('\u0301', 'en-us'), run('\u0323x', 'de-de')]).get(0)!;
+    expect(languages(third)).toEqual([[3, 'sr-rs'], [4, 'de-de']]);
+  });
+
   it('joins a base and a mark however long the text before the base', () => {
     for (const length of [0, 63, 64, 65, 5000]) {
       const joined = sequences([run(`${'x'.repeat(length)}a`, 'sr-rs'), run('\u0301', 'en-us')]);

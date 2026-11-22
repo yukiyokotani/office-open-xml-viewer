@@ -20,7 +20,9 @@ import type {
   FontResolver,
   FontStyle,
 } from './font-service.js';
-import { canvasFontRouteWithLanguage, type CanvasFontRoute } from '@silurus/ooxml-core';
+import {
+  canvasFontRouteWithLanguage, verticalBracketFormSubstitute, verticalFormSubstitute, type CanvasFontRoute,
+} from '@silurus/ooxml-core';
 export type { ResolvedFontMetric, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
 import type {
@@ -384,6 +386,10 @@ export interface TextShapeRequest {
    * probes) retain the decision: text of that group shapes through the same
    * route, language included, that the piece is painted through. */
   readonly canvasLanguagePin?: CanvasLanguagePin;
+  /** The text is set in a vertical CJK line (§17.6.20 tbRl), where layout
+   * draws vertical presentation forms in place of some characters: a
+   * language is admitted only when named families draw those forms too. */
+  readonly verticalForms?: true;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
@@ -567,6 +573,21 @@ export function replaceTextShapeRequest(
   } };
 }
 
+/** `text` followed by the vertical presentation forms a vertical line may
+ * draw for its characters (core vertical-orientation.ts), each once. */
+function withVerticalForms(text: string): string {
+  let forms = '';
+  for (const scalar of text) {
+    const cp = scalar.codePointAt(0)!;
+    for (const form of [verticalBracketFormSubstitute(cp), verticalFormSubstitute(cp)]) {
+      if (form === null) continue;
+      const glyph = String.fromCodePoint(form);
+      if (!forms.includes(glyph)) forms += glyph;
+    }
+  }
+  return forms ? text + forms : text;
+}
+
 /** §17.3.2.20 language axes: w:val (ascii/highAnsi), w:eastAsia, w:bidi. */
 export type LanguageSlotGroup = 'latin' | 'eastAsia' | 'complexScript';
 
@@ -579,19 +600,41 @@ export type CanvasLanguagePin = Readonly<{ group: LanguageSlotGroup; lang: strin
  * primary subtag, then alphanumeric subtags of at most eight characters),
  * bounded in length. Canvas `lang` takes such a tag; anything else names no
  * language and never enters a route identity or cache key. */
-const LANGUAGE_TAG = /^[a-z]{2,8}(?:-[a-z0-9]{1,8}){0,8}$/i;
+/** Longest tag admitted: bounds what enters route fingerprints and keys. */
+const MAX_LANGUAGE_TAG_UNITS = 64;
+const canonicalTags = new Map<string, string | null>();
+
+/** `tag` as a canonical, lower-case BCP 47 tag (RFC 5646 well-formed, via
+ * ECMA-402 Intl.getCanonicalLocales, which also maps grandfathered and
+ * deprecated tags), or undefined when it names no language: Word's `x-none`,
+ * the Canvas keyword `inherit`, or an ill-formed or oversized value. */
+export function canvasLanguageTag(tag: string | undefined): string | undefined {
+  if (!tag || tag.length > MAX_LANGUAGE_TAG_UNITS) return undefined;
+  const lower = tag.toLowerCase();
+  if (lower === 'x-none' || lower === 'inherit') return undefined;
+  let canonical = canonicalTags.get(lower);
+  if (canonical === undefined) {
+    try {
+      canonical = typeof Intl !== 'undefined' && typeof Intl.getCanonicalLocales === 'function'
+        ? Intl.getCanonicalLocales(lower)[0]?.toLowerCase() ?? null : null;
+    } catch {
+      canonical = null;
+    }
+    if (canonicalTags.size >= 256) canonicalTags.clear();
+    canonicalTags.set(lower, canonical);
+  }
+  return canonical ?? undefined;
+}
 
 /** The §17.3.2.20 w:lang attribute that governs text of one §17.3.2.26 font
  * slot: the same classification that selects the slot's face selects its
- * language. Word's `x-none` names no language (it is not a well-formed tag),
- * nor does the Canvas keyword `inherit`. */
+ * language ({@link canvasLanguageTag}). */
 export function scriptSlotLanguage(
   request: Readonly<Pick<TextShapeRequest, 'language' | 'eastAsiaLanguage' | 'complexScriptLanguage'>>,
   slot: FontScriptSlot,
 ): string | undefined {
-  const tag = slot === 'eastAsia' ? request.eastAsiaLanguage
-    : slot === 'complexScript' ? request.complexScriptLanguage : request.language;
-  return tag && LANGUAGE_TAG.test(tag) && tag.toLowerCase() !== 'inherit' ? tag : undefined;
+  return canvasLanguageTag(slot === 'eastAsia' ? request.eastAsiaLanguage
+    : slot === 'complexScript' ? request.complexScriptLanguage : request.language);
 }
 
 export interface TextFontResolveRequest {
@@ -1780,9 +1823,13 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     if (request.baseDirection !== undefined) shapeParts.push(['baseDirection', request.baseDirection]);
     if (request.language !== undefined || request.complexScriptLanguage !== undefined
       || request.canvasLanguagePin !== undefined) {
-      shapeParts.push(['lang', request.language ?? null, request.complexScriptLanguage ?? null,
+      shapeParts.push(['lang', canvasLanguageTag(request.language) ?? null,
+        canvasLanguageTag(request.complexScriptLanguage) ?? null,
         request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.lang ?? null]);
     }
+    // Vertical forms join the language proof only for text that has a language.
+    if (request.verticalForms && (request.language !== undefined || request.eastAsiaLanguage !== undefined
+      || request.complexScriptLanguage !== undefined)) shapeParts.push('verticalForms');
     const shapeKey = JSON.stringify(shapeParts);
     const retainedShape = cached(shapeCache, shapeKey);
     if (retainedShape) return retainedShape;
@@ -1946,7 +1993,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       const lang = slotLang === undefined ? undefined
         : pin !== undefined && pin.group === languageSlotGroup(group.script) ? pin.lang ?? undefined
           : input.measurer.namedFamiliesDraw?.({
-            text: group.text, fontRoute: font.route, weight: font.weight, style: font.style,
+            text: request.verticalForms ? withVerticalForms(group.text) : group.text,
+            fontRoute: font.route, weight: font.weight, style: font.style,
           }) === true ? slotLang : undefined;
       const fontRoute = canvasFontRouteWithLanguage(font.route, lang);
       const measurement = request.measure === false ? {

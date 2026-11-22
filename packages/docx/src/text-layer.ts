@@ -55,7 +55,7 @@ export function buildDocxTextLayer(
   cssWidth: number,
   cssHeight: number,
   onHyperlinkClick?: (target: HyperlinkTarget) => void,
-  measureForFont?: (font: string) => (s: string) => number,
+  measureForFont?: (font: string, lang?: string) => (s: string) => number,
   pageIndex?: number,
 ): void {
   layer.innerHTML = '';

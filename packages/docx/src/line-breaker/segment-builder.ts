@@ -1277,8 +1277,15 @@ function pushSegmentPiece(
   if (languageRanges) {
     const pieceStart = retainedContext.offset;
     const pieceEnd = pieceStart + text.length;
+    // First range ending after the piece's start: binary search over the
+    // ascending ends keeps a sequence of many pieces and ranges linearithmic.
     let index = 0;
-    while (index < languageRanges.length - 1 && languageRanges[index]!.end <= pieceStart) index += 1;
+    let high = languageRanges.length - 1;
+    while (index < high) {
+      const middle = (index + high) >>> 1;
+      if (languageRanges[middle]!.end <= pieceStart) index = middle + 1;
+      else high = middle;
+    }
     if (languageRanges[index]!.end < pieceEnd) {
       let partStart = pieceStart;
       let previousPart = '';
@@ -1388,6 +1395,8 @@ function pushSegmentPiece(
     // §17.3.2.20 languages of the other slots, present only when authored so
     // runs without a language keep their requests and cache keys.
     ...(westernLanguage ? { language: westernLanguage } : {}),
+    // Vertical presentation forms join the language proof (TextShapeRequest).
+    ...(environment.verticalCJK && r.eastAsianVert !== true ? { verticalForms: true as const } : {}),
     ...(r.langBidi ? { complexScriptLanguage: r.langBidi } : {}),
     kerning:
       wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),

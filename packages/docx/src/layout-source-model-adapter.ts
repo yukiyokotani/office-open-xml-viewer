@@ -44,6 +44,7 @@ import { sourceKey } from './layout/source-key.js';
 import type { BodyElement, DocNote } from './types.js';
 import type { SourceRef } from './layout/types.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
+import { documentCarriesRunLanguage } from './run-language-capability.js';
 import { defaultSectionGeometry } from './layout/context.js';
 
 /** The public compatibility model and the sealed layout source are separate
@@ -524,6 +525,7 @@ function buildLayoutSourceModelAdapter(
     [...storyBodies(privateDocument), ...endnotes.map((note) => note.content)],
   );
   const requiresDomVerticalGlyphLayout = documentRequiresDomVerticalGlyphLayout(privateDocument);
+  const carriesRunLanguage = documentCarriesRunLanguage(privateDocument);
   const fatalParse = privateDocument.parseError === undefined ? null : {
     message: privateDocument.parseError,
     pageSize: {
@@ -715,6 +717,7 @@ function buildLayoutSourceModelAdapter(
     paintDescriptors: resources.paintResources.descriptors,
     hasPaginationFields,
     requiresDomVerticalGlyphLayout,
+    carriesRunLanguage,
     fatalParse: fatalParse === null ? null : deepFreezePlainData(fatalParse),
   });
   const adapter = Object.freeze({ document: publicInput.document, source });

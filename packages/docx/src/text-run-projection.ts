@@ -97,6 +97,7 @@ function projectTextRun(
     fontSize: placement.fontSizePt * blockScale,
     font,
     ...(reference ? { referenceFont: reference } : {}),
+    ...(placement.fontRoute.lang !== undefined ? { lang: placement.fontRoute.lang } : {}),
     ...(letterSpacingPt !== 0
       ? { letterSpacingPx: letterSpacingPt * inlineScale }
       : {}),

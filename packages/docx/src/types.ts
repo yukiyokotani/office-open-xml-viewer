@@ -1890,6 +1890,10 @@ export interface DocxTextRunInfo {
    * `scale` maps its measurements onto this run's CSS px; overlays measure and
    * lay out the run's text with it. */
   referenceFont?: Readonly<{ font: string; scale: number }>;
+  /** Canvas `lang` (BCP 47) the run was laid out and drawn in, when its
+   * §17.3.2.20 language was applied: language-specific glyph forms can change
+   * advances, so overlays measure the run's text in it too. */
+  lang?: string;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;
   /** CSS transform used by the overlay for vertical-page text. */

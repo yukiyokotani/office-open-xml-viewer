@@ -132,6 +132,10 @@ export interface LayoutSourceStoreInput {
   readonly paintDescriptors: readonly PaintResourceDescriptor[];
   readonly hasPaginationFields: boolean;
   readonly requiresDomVerticalGlyphLayout: boolean;
+  /** Whether any text names a §17.3.2.20 run language (run-language-
+   * capability.ts). False: no run language is ever judged, so the text
+   * service keeps the measurer identity and work of untagged text. */
+  readonly carriesRunLanguage?: boolean;
   readonly fatalParse: FatalParseFact | null;
 }
 
@@ -643,6 +647,7 @@ function sealLayoutSourceStoreWithBody(
     imageMetadata: input.imageMetadata,
     hasPaginationFields: input.hasPaginationFields,
     requiresDomVerticalGlyphLayout: input.requiresDomVerticalGlyphLayout,
+    ...(input.carriesRunLanguage !== undefined ? { carriesRunLanguage: input.carriesRunLanguage } : {}),
     fatalParse: input.fatalParse,
     acquisition,
     paintResources: indexSealedPaintResourceDescriptors(input.paintDescriptors),

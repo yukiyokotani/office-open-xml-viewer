@@ -13,8 +13,7 @@ import { dropBrowserImageCache } from './paint/browser-images.js';
 import { canvasPageScale, renderSelectedDocumentPage, acquireDocumentCanvasTargetContext } from './paint/canvas-document.js';
 import { ensureDocumentLayoutVariants } from './layout/document.js';
 import { prepareMathResources } from './paint/math-resources.js';
-import { createLayoutServices, measuringFontSet } from './layout-runtime.js';
-import { loadNativeRouteSentinels, unloadOfficeFontFallbacks } from '@silurus/ooxml-core';
+import { createLayoutServices } from './layout-runtime.js';
 import {
   type LayoutSourceStore,
 } from './layout/layout-source-store.js';
@@ -165,36 +164,20 @@ function normalizeRenderOptions(
 /** Internal production entry: paint from the same sealed source used by layout.
  * A source that failed to parse comes with its error page's code loaded
  * (`errorPageLayoutReady`, #2248): whatever produced it asynchronously awaited
- * that, so with retained layout services this adapter stays free of waits
- * ahead of the paint's render token.
- *
- * Without retained services the layout is built here, measuring in the
- * target canvas's own realm. That realm then gets what a document session
- * prepares for its measuring realm: the route sentinels, registered in the
- * FontFaceSet that shapes the canvas (an iframe canvas: its document's) and
- * kept until the page is painted. Glyph ownership, symbol codes and run
- * languages are judged with them (core createNamedFamilyOracle verifies that
- * the measuring context applies them); a realm without a FontFaceSet has
- * nothing to register and is not made to wait. */
+ * that, so this adapter stays free of waits ahead of the paint's render token. */
 export async function renderLayoutSourceToCanvas(
   source: LayoutSourceStore,
   canvas: HTMLCanvasElement | OffscreenCanvas,
   pageIndex: number,
   opts: RenderDocumentOptions & { readonly callerOwnedCanvasTarget?: boolean } = {},
 ): Promise<void> {
-  const fontSet = opts.layoutServices || typeof FontFace === 'undefined' ? null : measuringFontSet(canvas);
-  const sentinels = fontSet ? await loadNativeRouteSentinels(fontSet) : null;
-  try {
-    const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);
-    return await renderSelectedDocumentPage(
-      normalized.selection.layout,
-      normalized.selection.page,
-      canvas,
-      normalized.paintOptions,
-    );
-  } finally {
-    if (sentinels) unloadOfficeFontFallbacks(sentinels);
-  }
+  const normalized = normalizeRenderOptions(source, canvas, pageIndex, opts);
+  return renderSelectedDocumentPage(
+    normalized.selection.layout,
+    normalized.selection.page,
+    canvas,
+    normalized.paintOptions,
+  );
 }
 
 export async function renderDocumentToCanvas(

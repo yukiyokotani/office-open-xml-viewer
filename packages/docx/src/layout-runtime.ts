@@ -110,15 +110,6 @@ export async function prepareMainThreadNativeRouteMetrics(
     : { faces: [] };
 }
 
-/** The FontFaceSet that shapes text measured in `canvas`'s 2D context: a
- * caller canvas may belong to a popup/iframe, whose document owns the faces;
- * any other canvas uses this realm's set. CSS face admission inspects it, and
- * the route sentinels that glyph ownership, symbol codes and run languages
- * are judged with (core route-sentinels.ts) must be registered in it. */
-export function measuringFontSet(canvas: unknown): FontFaceSet | null {
-  return (isHTMLCanvas(canvas) ? canvas.ownerDocument?.fonts : undefined) ?? activeFontSet();
-}
-
 export function createLayoutServices(
   input: DocxDocumentModel | LayoutSourceStore,
   options: {
@@ -275,7 +266,10 @@ export function createLayoutServices(
     ...(advancePlanner ? { textAdvancePlanner: advancePlanner } : {}),
     symbolProbeOwner: canvasContext,
     ...(options.createCanvas ? { symbolProbeCanvas: options.createCanvas } : {}),
-    fontSet: measuringFontSet(canvasElement),
+    // A caller canvas may belong to a popup/iframe. CSS face admission must
+    // inspect the FontFaceSet that also shapes this context's glyphs.
+    fontSet: (isHTMLCanvas(canvasElement) ? canvasElement.ownerDocument?.fonts : undefined)
+      ?? activeFontSet(),
     verticalGlyphMeasurement,
   });
   // Body layout and text measurement share one immutable resource snapshot,

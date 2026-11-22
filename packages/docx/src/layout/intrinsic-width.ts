@@ -150,6 +150,11 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
       request.genericFamily ?? null,
       request.letterSpacingPt ?? null,
       request.kerning ?? null,
+      // Authored §17.3.2.20 languages delimit text sequences, so production
+      // shapes pieces of different languages apart even when neither is
+      // admitted to Canvas; an untagged key is unchanged.
+      ...(request.language !== undefined || request.complexScriptLanguage !== undefined
+        ? [['lang', request.language ?? null, request.complexScriptLanguage ?? null]] : []),
     ] : null,
     segment.bold,
     segment.italic,

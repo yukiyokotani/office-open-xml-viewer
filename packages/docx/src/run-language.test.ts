@@ -4,21 +4,17 @@ import { describe, expect, it, vi } from 'vitest';
 // named-family ownership there (core createNamedFamilyOracle). Rendering tests
 // below use faces their recording canvas draws itself.
 // 'ж' stands for text only a generic fallback draws.
-const sentinels = vi.hoisted(() => ({
-  load: vi.fn(async (_fontSet: unknown): Promise<unknown[] | null> => null),
-  unload: vi.fn((_faces: unknown) => undefined),
-}));
 vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
-  loadNativeRouteSentinels: sentinels.load,
-  unloadOfficeFontFallbacks: sentinels.unload,
   createNamedFamilyOracle: () => ({
     sentinelsApply: true,
     available: true,
     // U+0640 (a generated justification kashida) is drawn by named families
     // of "Kashida Face" only.
     // '〓' likewise stands for East Asian text only a fallback draws.
+    // "Fallback Face" stands for a route no named family of which draws.
     draws: (list: string, _w: number, _s: string, text: string) => !/[ж〓]/u.test(text)
+      && !list.includes('Fallback Face')
       && (!text.includes('\u0640') || list.includes('Kashida Face')),
   }),
 }));
@@ -27,6 +23,7 @@ import { createFontResolver } from './layout/font-service.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { createLayoutServices } from './layout-runtime.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
+import { runOverlayMeasure } from './run-overlay-measure.js';
 import { createTextLayoutService, rubyGuideShapeRequest, sliceTextShapeRequest, type GlyphMeasureRequest } from './layout/text.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, NumberingInfo, SectionProps } from './types';
@@ -194,8 +191,10 @@ describe('Canvas lang at measure and paint', () => {
         const p = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? String(FONT_PX));
         // Serbian forms are narrower, so fitting depends on the language.
         const em = this.lang.startsWith('sr') ? 0.4 * p : 0.5 * p;
+        // An 'fi' ligature makes advances non-additive across a seam.
+        const ligatures = s.split('fi').length - 1;
         return {
-          width: [...s].length * em,
+          width: ([...s].length - 0.5 * ligatures) * em,
           fontBoundingBoxAscent: p * 0.8, fontBoundingBoxDescent: p * 0.2,
           actualBoundingBoxAscent: p * 0.8, actualBoundingBoxDescent: p * 0.2,
         } as TextMetrics;
@@ -342,6 +341,27 @@ describe('Canvas lang at measure and paint', () => {
     ]);
   });
 
+  it('draws a cluster spread over three runs as one string in its base language', async () => {
+    const { canvas, draws } = recordingCanvas();
+    await renderDocumentToCanvas(documentOf([
+      run('\u0433', { lang: 'sr-rs' }), run('\u0301', { lang: 'en-us' }), run('\u0323', { lang: 'sr-rs' }),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['\u0433\u0301\u0323', 'sr-rs']]);
+  });
+
+  it('measures overlay slices in the run language', () => {
+    const calls: Array<[string, string | undefined]> = [];
+    const measureForFont = (font: string, lang?: string) => {
+      calls.push([font, lang]);
+      return (s: string) => s.length;
+    };
+    const base = { text: 'где', x: 0, y: 0, w: 1, h: 1, fontSize: 10, font: '10px A' };
+    runOverlayMeasure({ ...base, lang: 'sr-rs' }, measureForFont);
+    runOverlayMeasure({ ...base, lang: 'sr-rs', referenceFont: { font: '64px A', scale: 0.25 } }, measureForFont);
+    runOverlayMeasure(base, measureForFont);
+    expect(calls).toEqual([['10px A', 'sr-rs'], ['64px A', 'sr-rs'], ['10px A', undefined]]);
+  });
+
   it('measures every fragment of a wrapped piece in the language it is painted with', async () => {
     const { canvas, draws, measures } = recordingCanvas();
     // The piece contains text no named family draws, so it is untagged as a
@@ -402,6 +422,22 @@ describe('Canvas lang at measure and paint', () => {
       .toBeCloseTo(6 * serbian + 4 * other, 6);
     // Tagged-but-withheld next to untagged text is one state: still merged.
     expect(maxContent([run('гдеж', { lang: 'sr-rs' }), run('гдеж')])).toBeCloseTo(8 * other, 6);
+    // A ligature across a language seam: 'ж' (highAnsi, drawn only by a
+    // fallback) and 'f'/'i' (ascii) are separate slot spans. Different
+    // authored languages are separate sequences, so 'f' and 'i' are shaped
+    // apart, each in its own admitted language, and never form 'fi'.
+    expect(maxContent([run('жf', { lang: 'sr-rs' }), run('iж', { lang: 'ru-ru' })]))
+      .toBeCloseTo(other + serbian + other + other, 6);
+    // One language: one sequence, one 'fi' span with its ligature.
+    expect(maxContent([run('жf', { lang: 'sr-rs' }), run('iж', { lang: 'sr-rs' })]))
+      .toBeCloseTo(other + 1.5 * serbian + other, 6);
+    // Both languages withheld (no named family draws the route): the two
+    // sequences are still shaped apart, as paint draws them.
+    const fallback = { fontFamily: 'Fallback Face' };
+    expect(maxContent([run('f', { lang: 'sr-rs', ...fallback }), run('i', { lang: 'ru-ru', ...fallback })]))
+      .toBeCloseTo(2 * other, 6);
+    expect(maxContent([run('f', { lang: 'sr-rs', ...fallback }), run('i', { lang: 'sr-rs', ...fallback })]))
+      .toBeCloseTo(1.5 * other, 6);
   });
 
   it('declines a kashida whose elongated text the route language was not admitted for', async () => {
@@ -480,33 +516,5 @@ describe('Canvas lang at measure and paint', () => {
     const after = await rendered([run('a  b ', { langEastAsia: 'sr-rs' }), run('c  d', { langEastAsia: 'ru-ru' })]);
     expect(gap(after.draws, 'a', 'b')).not.toBeCloseTo(gap(alone.draws, 'c', 'd'), 6);
     expect(gap(after.draws, 'c', 'd')).toBeCloseTo(gap(alone.draws, 'c', 'd'), 6);
-  });
-  it('registers the route sentinels in the realm a standalone render measures in', async () => {
-    // A canvas owned by another document (an iframe): its FontFaceSet shapes
-    // the text, so the sentinels are registered there for the render.
-    class OwnerCanvas {}
-    const fonts = { owner: 'iframe' };
-    const { canvas, draws } = recordingCanvas();
-    const element = Object.assign(Object.create(OwnerCanvas.prototype) as object, canvas, {
-      nodeType: 1, localName: 'canvas',
-      ownerDocument: { defaultView: { HTMLCanvasElement: OwnerCanvas }, fonts },
-    }) as unknown as HTMLCanvasElement;
-    const faces = [{ family: 'sentinel' }];
-    sentinels.load.mockClear().mockResolvedValueOnce(faces);
-    sentinels.unload.mockClear();
-    vi.stubGlobal('FontFace', class {});
-    try {
-      await renderDocumentToCanvas(documentOf([run('где', { lang: 'sr-rs' })]), element, 0, { dpr: 1, width: 600 });
-    } finally {
-      vi.unstubAllGlobals();
-    }
-    expect(sentinels.load.mock.calls).toEqual([[fonts]]);
-    // Kept until the page is painted, then released.
-    expect(draws.map(draw => draw.lang)).toEqual(['sr-rs']);
-    expect(sentinels.unload.mock.calls).toEqual([[faces]]);
-    // A realm without font registration is not made to wait or register.
-    sentinels.load.mockClear();
-    await renderDocumentToCanvas(documentOf([run('где')]), recordingCanvas().canvas, 0, { dpr: 1, width: 600 });
-    expect(sentinels.load).not.toHaveBeenCalled();
   });
 });

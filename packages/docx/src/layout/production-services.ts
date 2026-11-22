@@ -333,7 +333,9 @@ export function createProductionTextLayoutService(
   const supportsDirectedContext = context !== null
     && ['ltr', 'rtl', 'inherit'].includes(context.direction ?? '')
     && ['start', 'end', 'left', 'right', 'center'].includes(context.textAlign ?? '');
-  const namedFamilyOracle = context
+  // Only a document that names a run language ever judges one; any other
+  // keeps the untagged measurer identity and does no capability work.
+  const namedFamilyOracle = context && source.carriesRunLanguage !== false
     ? createNamedFamilyOracle(options.symbolProbeOwner ?? context, options.symbolProbeCanvas)
     : undefined;
   const measure = (request: Readonly<GlyphMeasureRequest>) => {
@@ -510,14 +512,16 @@ export function createProductionTextLayoutService(
       // fingerprint, independently of source occurrence or cache history.
       // v6/v3: a shorthand the context grid-fits at its own size is measured
       // at the reference em (core reference-advances.ts).
-      // v7/v4: run languages reach Canvas only for named-family text, and
-      // only in a font set that can prove it (named-family-lang).
-      fingerprint: (supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v7'
-        : context ? 'canvas-text-metrics-v4' : 'deterministic-text-metrics-v1')
+      // +named-family-lang: run languages reach Canvas (named-family text, in
+      // a font set that can prove it); untagged documents keep the identity.
+      fingerprint: (supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v6'
+        : context ? 'canvas-text-metrics-v3' : 'deterministic-text-metrics-v1')
         + (namedFamilyOracle?.available ? '+named-family-lang' : ''),
       ...(context ? {
         sameGlyphRaster,
         ownsGlyphs,
+      } : {}),
+      ...(namedFamilyOracle ? {
         // Judged in the font set of the canvas that measures and paints (the
         // symbol oracle's owner); results live with this service's snapshot.
         namedFamiliesDraw: (request: Readonly<import('./text.js').NamedFamilyDrawRequest>) =>

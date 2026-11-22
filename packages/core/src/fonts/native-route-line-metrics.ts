@@ -510,10 +510,13 @@ export function createNamedFamilyOracle(
         listIds.set(fonts[0], listId);
         listUnits += fonts[0].length;
       }
+      // CSS Fonts 4 §5.4 matches a face per grapheme cluster; scalar probes
+      // cannot certify a cluster, so without a segmenter nothing is admitted.
       const segmenter = getGraphemeSegmenter();
-      const clusters: Iterable<string> = segmenter
-        ? { *[Symbol.iterator]() { for (const part of segmenter.segment(text)) yield part.segment; } }
-        : text;
+      if (!segmenter) return false;
+      const clusters: Iterable<string> = {
+        *[Symbol.iterator]() { for (const part of segmenter.segment(text)) yield part.segment; },
+      };
       for (const cluster of clusters) {
         const key = listId !== undefined && cluster.length <= OWNERSHIP_CACHED_CLUSTER_UNITS
           ? `${listId}\u0000${cluster}` : undefined;

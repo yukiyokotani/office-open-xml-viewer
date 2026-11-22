@@ -1630,6 +1630,7 @@ export interface DocxTextRunInfo {
         font: string;
         scale: number;
     }>;
+    lang?: string;
     letterSpacingPx?: number;
     transform?: string;
     hyperlink?: HyperlinkTarget;

@@ -301,9 +301,13 @@ export function acquireTextSequences(
     // also select regional faces, so their seams keep delimiting sequences.
     let join = visible !== undefined && nextKey === key;
     let crossing = 0;
-    if (visible && first && last && visible.lang !== (languages ? languages.at(-1)!.lang : first.lang)
-      && (join || (scope === lastScope
-        && formattingKey(visible, environment, false) === formattingKey(last, environment, false)))) {
+    // Judged against the previous run (whose seam this is), not the language
+    // range in effect: a third run may carry the cluster's language again
+    // while its seam with the second still differs in w:val.
+    if (visible && first && last && (join
+      ? visible.lang !== (languages ? languages.at(-1)!.lang : first.lang)
+      : scope === lastScope
+        && formattingKey(visible, environment, false) === formattingKey(last, environment, false))) {
       crossing = tail.crossing(display);
       if (crossing > 0) join = true;
     }

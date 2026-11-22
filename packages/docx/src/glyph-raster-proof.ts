@@ -153,8 +153,11 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
   const font = `${request.style} ${request.weight} 100px ${quoteCssFontFamily(request.coverageProbeFamily)}`;
   let context: RasterContext | null | undefined;
   for (const part of parts) {
-    const key = request.baseDirection === undefined && request.lang === undefined ? `${font}\u0000${part}`
-      : `directed\u0000${JSON.stringify([font, part, request.baseDirection ?? null, request.lang ?? null])}`;
+    // Keys of requests without a language are those used before languages.
+    const key = request.lang !== undefined
+      ? `lang\u0000${JSON.stringify([font, part, request.baseDirection ?? null, request.lang])}`
+      : request.baseDirection === undefined ? `${font}\u0000${part}`
+        : `directed\u0000${JSON.stringify([font, part, request.baseDirection])}`;
     let owned = ownership.get(key);
     if (owned === undefined) {
       context ??= sharedContext(1, PROBE_EM_PX * 2);
