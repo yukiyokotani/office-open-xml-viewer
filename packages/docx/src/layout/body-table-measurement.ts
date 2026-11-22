@@ -251,7 +251,7 @@ export function measureBodyTableEntry(
     }
     const whole = uprightBlockPlacement(
       context, request, physical, request.cursor ? 'continuation' : 'first',
-      tableWidthPt, retained.layout.advancePt,
+      tableWidthPt, retained.layout.advancePt, retained.layout,
     );
     let upright: TableLayout;
     let block = whole;
@@ -285,7 +285,7 @@ export function measureBodyTableEntry(
         : null;
       block = uprightBlockPlacement(
         context, request, physical, request.cursor ? 'continuation' : 'first',
-        tableWidthPt, Math.min(upright.advancePt, whole.inlineRoomPt),
+        tableWidthPt, Math.min(upright.advancePt, whole.inlineRoomPt), retained.layout,
       );
     }
     return Object.freeze({
@@ -295,7 +295,7 @@ export function measureBodyTableEntry(
       ...block.registration,
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
-        xPt: block.originPt.xPt + upright.flowBounds.xPt,
+        xPt: uprightBlockPlacedXPt(physical, block.originPt.xPt, upright),
         yPt: block.originPt.yPt + upright.flowBounds.yPt,
         sectionFlowOwnership: 'host-flow' as const,
         ...block.exclusion,
@@ -371,6 +371,36 @@ function wholeRowAcquisition(retained: RetainedTableAcquisition): RetainedTableA
   return whole;
 }
 
+/** Physical x of an upright block placed with its near edge at `originXPt`.
+ * Under `word-vertical-section-upright-block-table` the table's §17.4.50
+ * indent does not move it: its edge stays at the block position. Elsewhere
+ * the acquired inline offset applies as before. */
+function uprightBlockPlacedXPt(
+  physical: PhysicalAnchorFrame,
+  originXPt: number,
+  table: TableLayout,
+): number {
+  return uprightBlockPaginates(physical) ? originXPt : originXPt + table.flowBounds.xPt;
+}
+
+/** Widths of the border rules on an upright block's near and far block
+ * edges: its physical right and left table edges in the clockwise frame, left
+ * and right in the vertical-lr frame. */
+function uprightBlockEdgeBordersPt(
+  table: TableLayout,
+  physicalWidthPt: number,
+  physical: PhysicalAnchorFrame,
+): Readonly<{ nearPt: number; farPt: number }> {
+  const leftPt = table.flowBounds.xPt;
+  const widthAt = (xPt: number) => table.borders.reduce((widest, border) => (
+    border.from.xPt === border.to.xPt && Math.abs(border.from.xPt - xPt) < FLOAT_OVERLAP_EPS
+      ? Math.max(widest, border.widthPt) : widest), 0);
+  const left = widthAt(leftPt);
+  const right = widthAt(leftPt + physicalWidthPt);
+  return physical.writingMode === 'vertical-lr'
+    ? { nearPt: left, farPt: right } : { nearPt: right, farPt: left };
+}
+
 /**
  * `word-vertical-section-upright-block-table`: where an upright block of a
  * §17.6.20 vertical section is placed, what it charges the flow, and the
@@ -383,7 +413,8 @@ function wholeRowAcquisition(retained: RetainedTableAcquisition): RetainedTableA
  * paragraph takes the next line strip as if the block were absent. Along the
  * inline axis it takes the first position from the column top at which its
  * box clears the blocks placed before it on the page that it meets (up to
- * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past their far edge), so overlapping
+ * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past their far edge, plus half of
+ * each of the two facing border rules), so overlapping
  * tables stack; a block that fits the band but not below them clears the
  * nearest along the block axis instead. Its section-logical box, extended by
  * WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT past its far edge, is a text
@@ -405,6 +436,7 @@ function uprightBlockPlacement(
   role: 'first' | 'continuation' | 'segment',
   blockExtentPt: number,
   inlineExtentPt: number,
+  table: TableLayout,
 ): Readonly<{
   originPt: Readonly<{ xPt: number; yPt: number }>;
   /** Inline extent from the block's inline start to the end of the page's
@@ -439,17 +471,23 @@ function uprightBlockPlacement(
   const bandEndPt = physical.pageHeight - physical.marginBottom;
   // The blocks placed in this pass; a planned registration is a pin, also of
   // blocks later in source order.
+  const edgeBorders = uprightBlockEdgeBordersPt(table, blockExtentPt, physical);
+  // The block end up to which an earlier block is met: the clearance past
+  // its far edge, wider by half of each of the two facing border rules.
   const placed = registry.entries.flatMap((entry) => {
     if (entry.uprightBlockTable?.planned !== false) return [];
     const box = entry.bounds;
-    return box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt ? [box] : [];
+    if (box.xPt >= columnEndPt || box.xPt + box.widthPt <= cursorPt.xPt) return [];
+    const metEndPt = box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT
+      + ((entry.uprightBlockTable.farBorderPt ?? 0) + edgeBorders.nearPt) / 2;
+    return [{ ...box, metEndPt }];
   });
   let blockStartPt = pin ? pin.bounds.yPt : cursorPt.yPt;
   let inlineStartPt = cursorPt.xPt;
   for (;;) {
     // An earlier block is met up to the clearance past its far edge.
     const met = placed.filter((box) => box.yPt <= blockStartPt + blockExtentPt
-      && blockStartPt < box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
+      && blockStartPt < box.metEndPt);
     inlineStartPt = cursorPt.xPt;
     // Every move adopts the inline end of a box it leaves behind for good.
     for (let moved = true; moved;) {
@@ -468,8 +506,7 @@ function uprightBlockPlacement(
     if (pin || role !== 'first' || met.length === 0
       || inlineStartPt + inlineExtentPt <= bandEndPt
       || cursorPt.xPt + inlineExtentPt > bandEndPt) break;
-    blockStartPt = Math.min(...met.map((box) =>
-      box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT));
+    blockStartPt = Math.min(...met.map((box) => box.metEndPt));
   }
   if (request.location.section.columns.length > 1) {
     // A multi-column section never splits or moves the block: one that
@@ -520,7 +557,7 @@ function uprightBlockPlacement(
     exclusionMode: 'square' as const,
     bounds,
     exclusionBounds,
-    uprightBlockTable: Object.freeze({ key, planned: false }),
+    uprightBlockTable: Object.freeze({ key, planned: false, farBorderPt: edgeBorders.farPt }),
   });
   return Object.freeze({
     originPt,
@@ -1857,7 +1894,7 @@ function measureUprightOwnerSegment(
       });
     }
     const block = uprightBlockPlacement(
-      context, request, physical, 'segment', gridWidthPt, local.layout.advancePt,
+      context, request, physical, 'segment', gridWidthPt, local.layout.advancePt, local.layout,
     );
     const layout = takeUprightTableFragment(
       context, request, operations, local, block.originPt, acquisitionOwner,
@@ -1869,7 +1906,7 @@ function measureUprightOwnerSegment(
       ...block.registration,
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
-        xPt: block.originPt.xPt + layout.flowBounds.xPt,
+        xPt: uprightBlockPlacedXPt(physical, block.originPt.xPt, layout),
         yPt: block.originPt.yPt + layout.flowBounds.yPt,
         sectionFlowOwnership: 'host-flow' as const,
         ...block.exclusion,

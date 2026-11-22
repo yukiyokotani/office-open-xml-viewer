@@ -234,10 +234,17 @@ describe('upright block table of a vertical section', () => {
     const [x, y] = tables as [Page['tables'][number], Page['tables'][number]];
     expect(x.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
     expect(y.top).toBeCloseTo(MARGIN.top, 6);
-    // X ends at block 198; Y clears it by the measured 14.76 pt.
-    expect(y.left).toBeCloseTo(tableLeft('tbRl', PITCH + TABLE_W + 14.76), 6);
+    // X ends at block 198; Y clears it by the measured 14.25 pt plus half of
+    // each of the two facing 0.5 pt border rules.
+    expect(y.left).toBeCloseTo(tableLeft('tbRl', PITCH + TABLE_W + 14.25 + 0.5), 6);
     // The flow is not advanced: the paragraphs keep consecutive strips.
     expect(strips.map((lines) => lines.map((line) => line.block))).toEqual([[0], [PITCH], [2 * PITCH]]);
+  });
+
+  it('leaves a table with a table indent at the block position', () => {
+    const indented = T.replace('<w:tblBorders>', '<w:tblInd w:w="200" w:type="dxa"/><w:tblBorders>');
+    const { tables } = layOut('tbRl', [P, indented, P]);
+    expect(tables[0]!.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
   });
 
   it('resumes text with no room beside a table past its far edge, at the column top', () => {
