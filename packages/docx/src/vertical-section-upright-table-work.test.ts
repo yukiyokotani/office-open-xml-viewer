@@ -68,12 +68,15 @@ vi.mock('./layout/acquisition-state.js', async (importOriginal) => {
 type Counts = {
   boxes: number; exclusions: number; slots: number; registryEntries: number; rows: number; history: number;
   members: number; drawings: number;
+  /** Elements an insertion into or removal from an array of drawings moves. */
+  drawingShifts: number;
 };
 
 /** Lays `run` out while counting the visits described above. */
 function counting<Result>(run: () => Result): Readonly<{ result: Result; counts: Counts }> {
   const counts: Counts = {
     boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0, drawings: 0,
+    drawingShifts: 0,
   };
   const visit = (value: unknown): void => {
     if (value === null || typeof value !== 'object') return;
@@ -117,6 +120,15 @@ function counting<Result>(run: () => Result): Readonly<{ result: Result; counts:
       visit(value);
       return callback(accumulator, value, ...rest);
     }) as never, ...(initial as never[]));
+  });
+  replace('splice', (original) => function (this: unknown[], ...args: unknown[]) {
+    const first = this[0];
+    if (first !== null && typeof first === 'object' && 'anchorIndex' in first && 'frame' in first) {
+      const start = Number(args[0]);
+      const removed = args.length > 1 ? Number(args[1]) : this.length - start;
+      counts.drawingShifts += Math.max(0, this.length - start - removed);
+    }
+    return original.call(this, ...(args as never[]));
   });
   for (const name of ['slice', 'concat']) {
     replace(name, (original) => function (this: unknown[], ...args: unknown[]) {
@@ -408,4 +420,19 @@ describe('upright block table placement work', () => {
       work.failPinnedLayouts = false;
     }
   }, 120_000);
+  it('records drawings ending at the same inline position without shifting the earlier ones', () => {
+    // Narrow rectangles side by side along the block axis at one inline
+    // position share their cells and their inline end: each is recorded
+    // after the others.
+    const measure = (count: number) => {
+      const body = [P.replace('</w:p>', `${Array.from({ length: count }, (_, at) =>
+        anchoredRectangle(382 + at, 700, 0.5, 5)).join('')}</w:p>`), T, P];
+      const { result, counts } = counting(() => layOutPages('tbRl', body));
+      expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
+      return counts.drawingShifts;
+    };
+    const small = measure(16);
+    const large = measure(64);
+    expect(large).toBeLessThanOrEqual(Math.max(16, 4.5 * small));
+  }, 300_000);
 });

@@ -22,7 +22,7 @@ import type {
   PageAnchorPrescanInput,
 } from './body-layout-kernel.js';
 import { NoteCapacityExceededError, noteBandKey } from './body-layout-kernel.js';
-import type { UprightBlockRegistration } from './upright-block-index.js';
+import { uprightPrecedingDrawings, type UprightBlockRegistration } from './upright-block-index.js';
 import { NoteStack } from './note-stack.js';
 import { PageNoteController, PageNoteReplay } from './page-note-controller.js';
 import { acquireNoteColumnPartition as acquireNoteColumnPartitionBase, destinationOwnedNote } from './note-column-acquisition.js';
@@ -3118,6 +3118,12 @@ function* paginateBodyPassSteps(
           ? physicalBodyBottomPt : undefined;
         if (cursor.boundary === null && block.keepNext && state.flow.pageHasContent) {
           let keepSetExtentPt = acquired.blockExtentPt;
+          // The wrapped drawings the keep set's paragraphs anchor, not
+          // committed yet: an upright block table the keep set ends with is
+          // placed against them (uprightPrecedingDrawings).
+          const keepSetDrawings = uprightPrecedingDrawings(
+            acquired.flowRegistryDelta?.floats?.entries, acquired.layout,
+          );
           const keepSetReferenceIds = new Set(footnoteIdsInRetainedSlice(acquired.layout));
           let terminalGridParagraph: ParagraphLayout | undefined;
           let terminalWholeParagraphHasPlacements = true;
@@ -3145,7 +3151,9 @@ function* paginateBodyPassSteps(
               precedingBlockExtentPt: keepSetExtentPt,
               freshPageBlockExtentPt: freshPageExtent(state),
               lastColumnOfPage: inLastColumn(state),
+              ...(keepSetDrawings.length > 0 ? { precedingDrawings: Object.freeze([...keepSetDrawings]) } : {}),
             });
+            if (following.precedingDrawings) keepSetDrawings.push(...following.precedingDrawings);
             const continues = nextBlock.kind === 'paragraph'
               && (nextBlock.keepNext || bridgeSuccessor);
             bridgeSuccessor = false;
@@ -3408,11 +3416,9 @@ function* paginateBodyPassSteps(
           });
           // The wrapped drawings this fragment anchors are committed with it,
           // after the plan: the plan meets them as they will lie.
-          const fragmentDelta = acquired.flowRegistryDelta
-            ? paragraphFlowRegistryDeltaForAcceptedFragment(acquired.flowRegistryDelta, selected.fragment)
-            : null;
-          const precedingDrawings = (fragmentDelta?.floats?.entries ?? []).flatMap((entry) =>
-            entry.kind === 'shape' && entry.wrap !== undefined ? [entry.exclusionBounds] : []);
+          const precedingDrawings = uprightPrecedingDrawings(
+            acquired.flowRegistryDelta?.floats?.entries, selected.fragment,
+          );
           const planned = session.planUprightBlocks({
             input: tableAfter,
             location: tableLocation,

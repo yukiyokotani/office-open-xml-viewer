@@ -1,4 +1,4 @@
-import type { LayoutRect } from './types.js';
+import type { FloatRegistryEntryPt, LayoutRect, ParagraphLayout } from './types.js';
 
 /**
  * The upright block tables of one page under
@@ -70,6 +70,8 @@ export interface UprightBlockPageIndex {
    * (syncUprightDrawings). */
   readonly drawingCells: Map<string, UprightPageDrawing[]>;
   readonly wideDrawings: UprightPageDrawing[];
+  /** Drawings inserted into the cells so far; numbers their insertions. */
+  drawingInsertions: number;
   drawingsSeen: number;
   /** Identifies the boxes of `tableBuckets` in registration order: equal for
    * two pages (or two layouts of one page) exactly when they hold the same
@@ -139,6 +141,8 @@ export type UprightPageDrawing = {
   /** The frame as the page's wrap rectangles hold it, which the text laid
    * out so far wraps around. */
   readonly registeredFrame: LayoutRect;
+  /** The ordinal of its last insertion into the cells (insertDrawing). */
+  insertion?: number;
 };
 
 /** What accepting upright blocks adds to the page: at most one box for the
@@ -182,6 +186,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     tableBoxesVersion: 0,
     drawingCells: new Map(),
     wideDrawings: [],
+    drawingInsertions: 0,
     drawingsSeen: 0,
     exclusionCells: new Map(),
     wideExclusions: [],
@@ -442,14 +447,17 @@ function drawingCells(drawing: UprightPageDrawing): Readonly<{
   return { firstBlock, lastBlock, firstInline, lastInline };
 }
 
-/** Position in `drawings` (ordered by inline end, furthest first) of the
- * first drawing whose inline end is at or before `endPt`. */
-function firstEndingAtOrBefore(drawings: readonly UprightPageDrawing[], endPt: number): number {
+/** Position in `drawings` (ordered by inline end, furthest first, and by
+ * insertion among equal ends) of the first drawing after a drawing ending at
+ * `endPt` inserted `insertion`-th: binary search on that order. */
+function positionAfter(drawings: readonly UprightPageDrawing[], endPt: number, insertion: number): number {
   let low = 0;
   let high = drawings.length;
   while (low < high) {
     const middle = (low + high) >>> 1;
-    if (drawingInlineEndPt(drawings[middle]!) > endPt) low = middle + 1;
+    const other = drawings[middle]!;
+    const otherEndPt = drawingInlineEndPt(other);
+    if (otherEndPt > endPt || (otherEndPt === endPt && other.insertion! < insertion)) low = middle + 1;
     else high = middle;
   }
   return low;
@@ -461,13 +469,21 @@ function insertDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing
     index.wideDrawings.push(drawing);
     return;
   }
+  // The latest insertion goes after every drawing of the same end, so a
+  // run of drawings ending alike is appended, not shifted.
+  drawing.insertion = index.drawingInsertions;
+  index.drawingInsertions += 1;
   const endPt = drawingInlineEndPt(drawing);
   for (let block = cells.firstBlock; block <= cells.lastBlock; block += 1) {
     for (let inline = cells.firstInline; inline <= cells.lastInline; inline += 1) {
       const key = `${block}:${inline}`;
       const drawings = index.drawingCells.get(key);
       if (!drawings) index.drawingCells.set(key, [drawing]);
-      else drawings.splice(firstEndingAtOrBefore(drawings, endPt), 0, drawing);
+      else {
+        const at = positionAfter(drawings, endPt, drawing.insertion);
+        if (at === drawings.length) drawings.push(drawing);
+        else drawings.splice(at, 0, drawing);
+      }
     }
   }
 }
@@ -482,10 +498,8 @@ function removeDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing
   for (let block = cells.firstBlock; block <= cells.lastBlock; block += 1) {
     for (let inline = cells.firstInline; inline <= cells.lastInline; inline += 1) {
       const drawings = index.drawingCells.get(`${block}:${inline}`)!;
-      // The drawings ending further come first; it is among those ending at
-      // the same position.
-      let at = firstEndingAtOrBefore(drawings, endPt);
-      while (drawings[at] !== drawing) at += 1;
+      const at = positionAfter(drawings, endPt, drawing.insertion!);
+      if (drawings[at] !== drawing) throw new Error('A recorded drawing is missing from its cell');
       drawings.splice(at, 1);
     }
   }
@@ -570,4 +584,32 @@ export function uprightPageDrawingsNear(
     }
   }
   return near;
+}
+
+/**
+ * `word-vertical-section-upright-block-table`: the text exclusions of the
+ * wrapped drawings that `fragment` anchors, among the float registry
+ * entries its acquisition would commit. A table placed after the fragment
+ * before those entries are committed (planned with the fragment, or looked
+ * ahead to from a keep set that holds it) meets these instead
+ * (BodyTableAcquisitionInput.precedingDrawings). Placement and look-ahead
+ * both take them from here.
+ */
+export function uprightPrecedingDrawings(
+  entries: readonly FloatRegistryEntryPt[] | undefined,
+  fragment: ParagraphLayout,
+): LayoutRect[] {
+  if (!entries || entries.length === 0) return [];
+  const anchored = new Set<string>();
+  for (const drawing of fragment.drawings) {
+    const occurrenceId = drawing.anchorLayer?.acquisitionOccurrenceId ?? drawing.anchorLayer?.occurrenceId;
+    if (occurrenceId !== undefined) anchored.add(occurrenceId);
+  }
+  const drawings: LayoutRect[] = [];
+  for (const entry of entries) {
+    if (entry.kind === 'shape' && entry.wrap !== undefined && anchored.has(entry.occurrenceId)) {
+      drawings.push(entry.exclusionBounds);
+    }
+  }
+  return drawings;
 }

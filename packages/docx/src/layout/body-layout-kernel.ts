@@ -286,6 +286,9 @@ export interface FollowingBodyBlockMeasurementInput {
   readonly freshPageBlockExtentPt?: number;
   /** As given to measureTable. */
   readonly lastColumnOfPage?: boolean;
+  /** The wrapped drawings the keep set before this block anchors, which are
+   * not committed yet (BodyTableAcquisitionInput.precedingDrawings). */
+  readonly precedingDrawings?: readonly LayoutRect[];
 }
 
 export interface FollowingBodyBlockMeasurement {
@@ -305,6 +308,9 @@ export interface FollowingBodyBlockMeasurement {
    * fresh region, and a keep set ending with it starts there too
    * (`word-vertical-section-upright-block-table`). */
   readonly startsFreshRegion?: true;
+  /** Paragraph only: the text exclusions of the wrapped drawings it anchors
+   * (uprightPrecedingDrawings), which its keep set is not committed with. */
+  readonly precedingDrawings?: readonly LayoutRect[];
   /** Paragraph only: page-owned drawing occurrence keys anchored on each
    * measured line, so keepNext can honour an anchor-line deferral. */
   readonly pageOwnedAnchorKeysByLine?: readonly (readonly string[])[];

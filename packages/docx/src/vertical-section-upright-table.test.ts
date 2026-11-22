@@ -1237,6 +1237,28 @@ describe('upright block table of a vertical section', () => {
       },
     );
 
+    it.each([0, 1])('moves a keepNext set with a table that a drawing of the set sends to the next page (%i before)', (before) => {
+      // The last keepNext paragraph anchors a 90 x 400 pt rectangle relative
+      // to itself; the 350 pt table after it stacks below the rectangle,
+      // which leaves it no room on page 1. The look-ahead meets the
+      // rectangle as the placement does, whether it measures the paragraph
+      // that anchors it or a keepNext paragraph before that one, so the
+      // keep set starts page 2 with the table.
+      const keepNext = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+      const anchoring = keepNext.replace('</w:p>', `${anchoredRectangle(160, 4, 90, 400, 'paragraph')}</w:p>`);
+      const pages = layOutPages('tbRl', [
+        ...Array.from({ length: 14 - before }, () => P), ...Array.from({ length: before }, () => keepNext),
+        anchoring, table(1, 350), P,
+      ]);
+      expect(pages).toHaveLength(2);
+      expect(pages[0]!.strips).toHaveLength(14 - before);
+      expect(pages[0]!.tables).toHaveLength(0);
+      expect(pages[1]!.drawings).toHaveLength(1);
+      expect(pages[1]!.tables).toHaveLength(1);
+      expect(pages[1]!.strips[0]![0]!.block).toBe(0);
+      expect(collisions(pages)).toEqual([]);
+    });
+
     it('lays out generated sequences of tables, continued tables and drawings without overlap', () => {
       // A fixed pseudo-random stream (mulberry32) of paragraphs, some
       // anchoring square-wrapped rectangles at page or paragraph-relative

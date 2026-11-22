@@ -161,6 +161,7 @@ import {
   emptyUprightBlockPageIndex,
   inlineShiftBelowUprightTablesPt,
   moveUprightPageDrawingsBelowTableBox,
+  uprightPrecedingDrawings,
   uprightBlockExclusionsAhead,
   type UprightBlockExclusion,
   type UprightBlockRegistration,
@@ -2241,6 +2242,7 @@ function measureFollowingBodyBlock(
       freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
       pageHasContent: true,
       ...(request.lastColumnOfPage === undefined ? {} : { lastColumnOfPage: request.lastColumnOfPage }),
+      ...(request.precedingDrawings ? { precedingDrawings: request.precedingDrawings } : {}),
     }, tableOperations);
     if (upright) {
       return Object.freeze({
@@ -2310,6 +2312,11 @@ function measureFollowingBodyBlock(
   if (request.input.kind === 'paragraph') {
     if (element.type !== 'paragraph') throw new Error('Following paragraph source kind mismatch');
     addUprightBlockExclusionFloats(candidate, request.location, element);
+    // As measureParagraph acquires its floats, so that its wrapped drawings
+    // are known to an upright table the keep set ends with.
+    const publicFloats = acquirePublicParagraphFloats(
+      sessionState, context.publicAnchorBridge, element, request.input.source, candidate,
+    );
     const { layout } = acquireBodyParagraphAtLocation(
       candidate,
       element,
@@ -2359,6 +2366,12 @@ function measureFollowingBodyBlock(
       fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
       leadFootnoteReferenceIds: firstLine ? footnoteIdsInRetainedLines([firstLine]) : [],
       pageOwnedAnchorKeysByLine: pageOwnedAnchorKeysByLine(layout),
+      ...(() => {
+        const precedingDrawings = uprightPrecedingDrawings(
+          [...publicFloats, ...retainedBodyParagraphFloatEntries(sessionState, layout)], layout,
+        );
+        return precedingDrawings.length > 0 ? { precedingDrawings: Object.freeze(precedingDrawings) } : {};
+      })(),
     });
   }
   if (element.type !== 'table') throw new Error('Following table source kind mismatch');
