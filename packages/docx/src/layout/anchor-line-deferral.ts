@@ -225,15 +225,16 @@ export function pageOwnedAnchorKeysByLine(layout: ParagraphLayout): readonly (re
 }
 
 /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: the first line of `layout` that
- * anchors a paragraph- or line-relative (host-owned) square or topAndBottom
- * float whose box would end below `bodyBottomPt`, or undefined. */
+ * anchors a paragraph- or line-relative (host-owned) wrapping float (square,
+ * topAndBottom, tight or through) whose box would end below `bodyBottomPt`, or undefined. */
 export function hostFloatCrossingLineIndex(layout: ParagraphLayout, bodyBottomPt: number): number | undefined {
   void WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL;
   if (layout.drawings.length === 0 || layout.exclusions.length === 0) return undefined;
   const drawings = new Map(layout.drawings.map((drawing) => [drawing.id, drawing]));
   const crossing = new Set(layout.exclusions
     .filter((exclusion) => exclusion.verticalOwnership === 'host'
-      && (exclusion.wrap === 'square' || exclusion.wrap === 'topAndBottom')
+      && (exclusion.wrap === 'square' || exclusion.wrap === 'topAndBottom'
+        || exclusion.wrap === 'tight' || exclusion.wrap === 'through')
       && exclusion.bounds.yPt + exclusion.bounds.heightPt > bodyBottomPt + CROSSING_EPSILON_PT)
     .map((exclusion) => exclusion.anchorOccurrenceId)
     .filter((id): id is string => id !== undefined));

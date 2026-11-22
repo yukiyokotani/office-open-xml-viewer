@@ -52,7 +52,7 @@ const PNG = Uint8Array.from(Buffer.from(
 const encoder = new TextEncoder();
 
 type Anchor = Readonly<{
-  wrap?: 'topAndBottom' | 'square';
+  wrap?: 'topAndBottom' | 'square' | 'tight';
   relativeFrom?: 'margin' | 'page' | 'paragraph';
   xPt?: number;
   yPt?: number;
@@ -79,7 +79,11 @@ function anchorXml(id: number, anchor: Anchor): string {
   const xPt = anchor.xPt ?? (horizontal === 'page' ? 72 : 0);
   const wrap = anchor.wrap === 'square'
     ? '<wp:wrapSquare wrapText="bothSides"/>'
-    : '<wp:wrapTopAndBottom/>';
+    : anchor.wrap === 'tight'
+      ? '<wp:wrapTight wrapText="bothSides"><wp:wrapPolygon edited="0"><wp:start x="0" y="0"/>'
+        + '<wp:lineTo x="0" y="21600"/><wp:lineTo x="21600" y="21600"/><wp:lineTo x="21600" y="0"/>'
+        + '<wp:lineTo x="0" y="0"/></wp:wrapPolygon></wp:wrapTight>'
+      : '<wp:wrapTopAndBottom/>';
   return '<w:r><w:drawing>'
     + '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
     + `relativeHeight="${251659264 + id}" behindDoc="0" locked="0" layoutInCell="1" `
@@ -561,10 +565,10 @@ describe('WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL', () => {
   // 27 exact 24pt lines fill the 648pt US Letter body (72-720pt). A 20pt
   // paragraph-relative float anchored in P025 (top 672pt) at +40pt would end
   // at 732pt, below the body.
-  const crossing = (mode: number, yPt: number, wrap: 'square' | 'topAndBottom' = 'square') => lines(layout(docx(27, {
+  const crossing = (mode: number, yPt: number, wrap: 'square' | 'topAndBottom' | 'tight' = 'square') => lines(layout(docx(27, {
     25: { anchors: [{ wrap, relativeFrom: 'paragraph', yPt, widthPt: 100, heightPt: 20 }] },
   }, 1, mode)));
-  it.each(['square', 'topAndBottom'] as const)('moves the anchor line of a crossing %s float to the next page in mode 15', (wrap) => {
+  it.each(['square', 'topAndBottom', 'tight'] as const)('moves the anchor line of a crossing %s float to the next page in mode 15', (wrap) => {
     const placed = crossing(15, 40, wrap);
     expect(placed.get('P025')).toMatchObject({ page: 2, yPt: 72 });
     expect(placed.get('P024')?.page).toBe(1);

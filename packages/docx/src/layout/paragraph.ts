@@ -6254,13 +6254,42 @@ function wordMode14ColumnLineStartOrigin(
 
 /** WORD_MODE14_TIGHT_ANCHOR_LINE_REWRAP: host lines (laid out without their
  * own objects) whose content the unpadded tight polygon does not meet. */
+/** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL (mode 15): an anchor line on a line
+ * grid ignores its own square or topAndBottom float when the float's top is at
+ * or below the line's centred content box, inside its trailing grid leading. */
+function wordMode15AnchorLineGridLeadingExemptions(
+  options: ParagraphAcquisitionOptions,
+  layout: ParagraphLayout,
+  ownedExclusions: readonly WrapExclusion[],
+): Map<string, number> {
+  const exemptions = new Map<string, number>();
+  if (!compatOf(options.environment).anchorLineOwnFloatGridLeadingExempt) return exemptions;
+  for (const exclusion of ownedExclusions) {
+    if ((exclusion.wrap !== 'square' && exclusion.wrap !== 'topAndBottom')
+      || exclusion.anchorOccurrenceId === undefined) continue;
+    // Measured for an anchor in the paragraph's first line, whose unwrapped
+    // top is the paragraph's content start (the projection may already have
+    // moved the line below the float).
+    const line = layout.lines[0];
+    if (!line?.placements.some((placement) => placement.kind === 'anchor-host'
+      && placement.anchorOccurrenceId === exclusion.anchorOccurrenceId)) continue;
+    const leading = line.gridAfterLeadingPt ?? 0;
+    if (!(leading > 0)) continue;
+    const topPt = options.placement.startYPt + layout.spacing.beforePt;
+    if (exclusion.bounds.yPt >= topPt + line.advancePt - leading - 1e-6) {
+      exemptions.set(exclusion.anchorOccurrenceId, topPt);
+    }
+  }
+  return exemptions;
+}
+
 function wordMode14AnchorLineExemptions(
   paragraph: ParagraphAcquisitionInput,
   options: ParagraphAcquisitionOptions,
   layout: ParagraphLayout,
   ownedExclusions: readonly WrapExclusion[],
 ): ReadonlyMap<string, number> {
-  const exemptions = new Map<string, number>();
+  const exemptions = wordMode15AnchorLineGridLeadingExemptions(options, layout, ownedExclusions);
   if (!compatOf(options.environment).mode14TightAnchor) return exemptions;
   for (const exclusion of ownedExclusions) {
     if (exclusion.wrap !== 'tight' || exclusion.anchorOccurrenceId === undefined) continue;
