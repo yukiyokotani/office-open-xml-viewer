@@ -468,6 +468,9 @@ export interface LayoutImageSeg extends LayoutSegSource {
   /** Participates in WORD_INLINE_PICTURE_AUTO_LEADING: an inline picture or
    * drawing shape (WPS/VML text box); chart boxes do not opt in. */
   inlinePicture?: true;
+  /** ECMA-376 §17.3.2.24 raise (+) / lower (-) in pt of the hosting run: the
+   * object box moves off the baseline like the run's text. */
+  positionPt?: number;
   /** Paragraph mark's selected-face natural single line, measured once per paragraph. */
   paragraphMarkSinglePx?: number;
   /** Resolved outer-run minimum for baseline-aligned DrawingML: extra space
@@ -476,16 +479,21 @@ export interface LayoutImageSeg extends LayoutSegSource {
   /** Static VML textbox minimum changes physical advance, never visible
    * ascent/descent or baseline (its measured box-only class stays top-aligned). */
   objectRunAdvanceMinimumPx?: number;
-  /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt),
-   *  already included in widthPt/heightPt; the object paints inside it. */
+  /** Inset [left, top, right, bottom] (pt) of the painted object inside
+   *  widthPt/heightPt: the ECMA-376 §20.4.2.6 inline effect extent, plus the
+   *  centring of a drawing laid out in its quarter-turned base box
+   *  (WORD_INLINE_DRAWING_TURNED_FOOTPRINT). */
   effectExtent?: readonly [number, number, number, number];
-  /** Authored object size (pt) when {@link effectExtent} widens the box; the
+  /** Authored object size (pt) when {@link effectExtent} is present; the
    *  object paints at this size even if a negative extent clamps the box. */
   objectSizePt?: readonly [number, number];
   /** A picture-bullet marker's height on the paragraph's first line: its
    * metrics join the line like an inline picture's, but it takes no width,
    * break opportunity or segment slot (the marker is painted separately). */
   markerMetric?: true;
+  /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP applies: a turned DrawingML inline
+   * picture paints clipped to its line box's vertical extent. */
+  clipToLine?: true;
   rotation?: number;
   flipH?: boolean;
   flipV?: boolean;

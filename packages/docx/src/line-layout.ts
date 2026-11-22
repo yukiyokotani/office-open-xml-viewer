@@ -229,12 +229,15 @@ export function layoutLines(
  *   month and weekday names, AM/PM; `formatDateTimePicture`), tab leaders
  *   `.` `-` `_` (layout/paragraph.ts), optional and automatic hyphens `-`
  *   (segment-builder.ts), the `x` metric probe, the underline probe `_` and
- *   baseline probe `M` (paragraph.ts), and the shared Canvas sentinels;
+ *   baseline probe `M` (paragraph.ts), the reference-advance probe letters
+ *   and digit (layout-runtime.ts), and the shared Canvas sentinels;
  * - U+00B7 MIDDLE DOT: the `middleDot` tab leader (layout/paragraph.ts);
  * - U+3042 HIRAGANA LETTER A: the East Asian paragraph-mark probe
- *   (line-breaker/line-metrics.ts, segment-builder.ts);
+ *   (line-breaker/line-metrics.ts, segment-builder.ts) and the
+ *   reference-advance probe (layout-runtime.ts);
  * - U+4E00 CJK UNIFIED IDEOGRAPH-4E00: the ideographic-cell probe of
- *   character-grid and full-width punctuation metrics (segment-builder.ts).
+ *   character-grid and full-width punctuation metrics (segment-builder.ts)
+ *   and the reference-advance probe (layout-runtime.ts).
  *
  * `font-demand-coverage.test.ts` asserts that finite demand covers every
  * scalar layout measures or paints over a representative corpus.

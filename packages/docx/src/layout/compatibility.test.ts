@@ -22,6 +22,7 @@ import {
   WORD_PARAGRAPH_ANCHOR_PRE_SPACING_ORIGIN,
   WORD_VERTICAL_SECTION_PHYSICAL_HEADER_FOOTER,
   WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER,
+  WORD_VERTICAL_SECTION_FLOW_ANCHOR_FRAMES,
   WORD_ZERO_RELATIVE_SIZE_EXTENT_FALLBACK,
   wordPageLevelAnchorY,
   wordPreservesLowerLayerSameParagraphComposition,
@@ -104,12 +105,12 @@ import {
 } from './script-compatibility.js';
 import {
   WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
+  WORD_TWO_PAGE_SHEET_IMPOSITION,
   WORD_CONTINUOUS_SECTION_PAGE_NUMBER_RESTART,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE,
   WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION,
   WORD_DEFAULT_LINE_NUMBER_DISTANCE_PT,
   WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
-  wordBookFoldGutterEdge,
   wordContinuousSectionRestartDisplayNumber,
   wordLineNumberDistancePt,
   wordTrailingEmptyMarkAdmissionAllowancePt,
@@ -320,6 +321,7 @@ describe('layout compatibility inventory', () => {
       WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION,
       WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION,
       WORD_BOOK_FOLD_GUTTER_RIGHT_EDGE,
+      WORD_TWO_PAGE_SHEET_IMPOSITION,
       WORD_EXACT_ROW_HEIGHT_BOTTOM_PADDING,
       WORD_TABLE_BORDER_LAYER_CASCADE,
       WORD_SPACED_CELL_INSIDE_BORDER_CONFLICT,
@@ -369,6 +371,7 @@ describe('layout compatibility inventory', () => {
       WORD_PARAGRAPH_BORDER_FLOW_RESERVATION,
       WORD_EMPTY_MARK_FLOAT_SIDE_GAP,
       WORD_VERTICAL_SECTION_PHYSICAL_DRAWING_LAYER,
+      WORD_VERTICAL_SECTION_FLOW_ANCHOR_FRAMES,
       WORD_PAGE_LEVEL_FLOAT_PRESCAN,
       WORD_PARAGRAPH_ANCHOR_PRE_SPACING_ORIGIN,
       WORD_VERTICAL_SECTION_PHYSICAL_HEADER_FOOTER,
@@ -602,7 +605,6 @@ describe('layout compatibility inventory', () => {
       epsilonPt: 0.0001,
     })).toBe(false);
     expect(wordContinuousSectionRestartDisplayNumber(4, 8, 6)).toBe(6);
-    expect(wordBookFoldGutterEdge()).toBe('right');
     const trailingMark = {
       hasContinuationBoundary: false,
       inkless: true,
@@ -614,10 +616,10 @@ describe('layout compatibility inventory', () => {
       hasFollowingInk: true,
       followsNextPageSectionBoundary: false,
       markExtentPt: 12,
-      markBelowBaselinePt: 3,
       markOnLineGrid: false,
     };
-    expect(wordTrailingEmptyMarkAdmissionAllowancePt(trailingMark)).toBe(3);
+    // Off the grid the whole mark line must fit (Windows Word, excess4).
+    expect(wordTrailingEmptyMarkAdmissionAllowancePt(trailingMark)).toBe(0);
     expect(wordTrailingEmptyMarkAdmissionAllowancePt({
       ...trailingMark,
       hasFollowingInk: false,

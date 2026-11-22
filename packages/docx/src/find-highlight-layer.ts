@@ -29,6 +29,7 @@ import {
 } from '@silurus/ooxml-core';
 import type { DocxTextRunInfo } from './renderer';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
+import { runOverlayMeasure } from './run-overlay-measure';
 
 /** One page's highlight input: the run-slices a match covers, and whether that
  *  match is the active one (emphasis colour). */
@@ -84,7 +85,9 @@ export function buildDocxHighlightLayer(
     for (const slice of match.slices) {
       const run = runs[slice.runIndex];
       if (!run) continue;
-      const measure = measureForFont(run.font);
+      // Measure the way the run was laid out and drawn (its reference-em font
+      // scaled onto the run when projected with one).
+      const measure = runOverlayMeasure(run, measureForFont);
       const extent = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
       // Match offsets are UTF-16; count tracking with the same rendered-
       // character rule as layout. Marks and unselected SHY add no run pitch.

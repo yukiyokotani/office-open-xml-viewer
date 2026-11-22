@@ -688,6 +688,12 @@ impl NumberingMap {
         map
     }
 
+    /// ECMA-376 §17.9.15: the abstract numbering definition `num_id`
+    /// references, if any.
+    pub fn abstract_num_id(&self, num_id: u32) -> Option<u32> {
+        self.num_to_abstract.get(&num_id).copied()
+    }
+
     /// The EFFECTIVE level definition for (numId, level): the numId's own
     /// `<w:lvlOverride><w:lvl>` substitution when present (§17.9.7), else the
     /// abstract definition's level (§17.9.6).

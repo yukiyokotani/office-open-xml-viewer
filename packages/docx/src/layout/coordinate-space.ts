@@ -8,9 +8,11 @@ import type {
   WritingMode,
 } from './types.js';
 
-/** Local counter-turn that keeps a non-text graphic upright in a vertical
- * page of this writing mode: the inverse of the section frame's quarter turn.
- * Horizontal pages need none. */
+/** Local counter-turn that keeps a non-text graphic of a LINE upright in a
+ * vertical page of this writing mode: the inverse of the quarter turn that
+ * paints the line. A vertical-lr line is painted through its block-reflected
+ * line frame (line-frame.ts), which composes to the clockwise turn, so it
+ * shares the clockwise counter-turn. Horizontal pages need none. */
 export function uprightResourceOrientation(
   verticalPageFrame: boolean | undefined,
   pageWritingMode: WritingMode,
@@ -19,6 +21,36 @@ export function uprightResourceOrientation(
   return pageWritingMode === 'sideways-lr'
     ? 'upright-physical-counter-clockwise'
     : 'upright-physical';
+}
+
+/** Local inverse that keeps a non-text graphic placed directly in the
+ * section-logical frame (outside any line) upright: the inverse of the
+ * section frame itself, which for vertical-lr is the reflection
+ * physical (x, y) = logical (y, x), so a turn cannot cancel it. */
+export function uprightPageResourceOrientation(
+  verticalPageFrame: boolean | undefined,
+  pageWritingMode: WritingMode,
+): UprightResourceOrientation | undefined {
+  if (verticalPageFrame && pageWritingMode === 'vertical-lr') return 'upright-physical-transposed';
+  return uprightResourceOrientation(verticalPageFrame, pageWritingMode);
+}
+
+/** Whether a line's paint frame turns the logical block start (logical -y)
+ * to the physical right: the section frame, composed with the line's
+ * block-reflected line frame (line-frame.ts) when it has one. True for the
+ * clockwise vertical-rl frame and for a block-reflected vertical-lr line
+ * (tbLrV, which paints as a tbRl strip); false for the bare vertical-lr
+ * reflection and the counter-clockwise sideways-lr frame.
+ */
+export function logicalBlockStartIsPhysicalRight(
+  writingMode: WritingMode,
+  lineBlockReflected = false,
+): boolean {
+  // The page extent does not affect a direction; any positive extent works.
+  const matrix = logicalToPhysicalMatrix(writingMode, { widthPt: 1, heightPt: 1 });
+  // logical (0, -1), reflected to (0, 1) first by a block-reflected line frame.
+  const blockStartX = lineBlockReflected ? matrix.c : -matrix.c;
+  return blockStartX > 0;
 }
 
 export type PhysicalPageExtent = Readonly<{
@@ -43,15 +75,20 @@ export function writingModeFromTextDirection(textDirection: string): WritingMode
     case 'rl':
     case 'rlV':
     case 'tbRl':
-    case 'tbRlV':
       return 'vertical-rl';
+    case 'tbRlV':
+      // Compatibility rule `word-section-tbrlv-tblrv-page-frame`.
+      return 'vertical-lr';
     case 'btLr':
       // Compatibility rule `word-section-btlr-tbrl-page-frame`; the evidence
       // resolves to the table-driven coordinate-space regression test.
       return 'vertical-rl';
     case 'lr':
     case 'lrV':
+      return 'vertical-lr';
     case 'tbLrV':
+      // Part 4 §14.11.7 (≡ lrV); its page frame is the compatibility rule
+      // `word-section-tblrv-left-page-frame`.
       return 'vertical-lr';
     default:
       throw new RangeError(`Unsupported Transitional text direction ${JSON.stringify(textDirection)}`);

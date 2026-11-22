@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { wordGridLineAdmissionExtentPt } from './body-pagination-compatibility.js';
+import { wordGridLeadingWrapExclusionOverlaps, wordGridLineAdmissionExtentPt } from './body-pagination-compatibility.js';
 import { selectParagraphFragment } from './paragraph-pagination.js';
 import type { LineLayout, ParagraphLayout } from './types.js';
 
@@ -492,5 +492,23 @@ describe('paragraph page-local reserve selection', () => {
     expect(selected.fragment?.lines.map(line => line.range)).toEqual([{ start: 4, end: 5 }, { start: 5, end: 6 }]);
     expect(selected.nextCursor).toBeNull();
     expect(selected.additionalReservePt).toBe(16);
+  });
+});
+
+describe('grid leading relief beside wrap exclusions (WORD_GRID_LINE_CONTENT_FIT_ADMISSION)', () => {
+  // A trailing empty mark's cell at 752-772pt in a 72-540pt column.
+  const paragraph = (yPt: number, heightPt: number, xPt = 72) => ({
+    flowBounds: { xPt: 72, yPt: 752, widthPt: 468, heightPt: 20 },
+    exclusions: [{ id: 'float', wrap: 'square' as const,
+      bounds: { xPt, yPt, widthPt: 200, heightPt }, polygon: [] }],
+  });
+  it('keeps the relief for a float higher on the page', () => {
+    expect(wordGridLeadingWrapExclusionOverlaps(paragraph(150, 100), 752, 772)).toBe(false);
+  });
+  it('cancels the relief for a float beside the mark', () => {
+    expect(wordGridLeadingWrapExclusionOverlaps(paragraph(700, 60), 752, 772)).toBe(true);
+  });
+  it('keeps the relief for a float beside the band but outside the column', () => {
+    expect(wordGridLeadingWrapExclusionOverlaps(paragraph(700, 60, 560), 752, 772)).toBe(false);
   });
 });

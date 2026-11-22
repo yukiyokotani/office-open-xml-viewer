@@ -1,6 +1,6 @@
 import { resolveBorderConflict, type BorderCandidate } from '../cell-border-conflict.js';
 import { retainedBorderTreatment } from './border-treatment.js';
-import { paragraphGapPt } from './paragraph-spacing.js';
+import { paragraphGapFoldOf, paragraphGapPt } from './paragraph-spacing.js';
 import { snapshotPlainData } from './plain-data.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { firstAuthoredTableBorder } from './table-border-layer.js';
@@ -11,6 +11,7 @@ import {
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
+  wordVerticalMergeInteriorBorderPt,
 } from './table-compatibility.js';
 import { noteOverflowPolicyOf, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import type {
@@ -73,7 +74,10 @@ function paragraphBlockAdvance(layout: ParagraphLayout): number {
  * between adjacent paragraphs, so it cannot be recovered by summing each
  * child's advance independently after table placement.
  */
-function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeometry {
+function resolveCellFlow(
+  blocks: readonly TableCellBlockInput[],
+  containmentLimitPt = Number.POSITIVE_INFINITY,
+): CellFlowGeometry {
   const placements: TableCellBlockLayout[] = [];
   let cursorPt = 0;
   let previousParagraph: ParagraphLayout | null = null;
@@ -89,22 +93,25 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
       const beforePt = layout.spacing.beforePt;
       const afterPt = layout.spacing.afterPt;
       const gapPt = previousParagraph
-        ? paragraphGapPt(previousParagraph, layout, previousAfterPt, beforePt)
+        ? paragraphGapPt(previousParagraph, layout, previousAfterPt, beforePt, paragraphGapFoldOf(layout))
         : beforePt;
-      const advancePt = block.structuralTrailing ? 0 : paragraphBlockAdvance(layout);
-      const offsetPt = cursorPt + (block.structuralTrailing ? 0 : gapPt);
+      const advancePt = block.ownsNoCellFlow ? 0 : paragraphBlockAdvance(layout);
+      const offsetPt = cursorPt + (block.ownsNoCellFlow ? 0 : gapPt);
       placements.push({ layout, offsetPt, advancePt });
-      if (!block.structuralTrailing) {
+      if (!block.ownsNoCellFlow) {
         cursorPt = offsetPt + advancePt;
         firstInkTopPt ??= offsetPt;
         lastInkBottomPt = Math.max(lastInkBottomPt, cursorPt);
         previousParagraph = layout;
         previousAfterPt = afterPt;
       }
-      if (layout.cellContainmentBounds) {
-        const containmentTopPt = offsetPt
-          + layout.cellContainmentBounds.yPt
-          - layout.flowBounds.yPt;
+      const ownContainmentTopPt = layout.cellContainmentBounds
+        ? layout.cellContainmentBounds.yPt - layout.flowBounds.yPt
+        : 0;
+      if (layout.cellContainmentBounds
+        && Math.max(0, ownContainmentTopPt + layout.cellContainmentBounds.heightPt)
+          - Math.min(0, ownContainmentTopPt) <= containmentLimitPt + 1e-6) {
+        const containmentTopPt = offsetPt + ownContainmentTopPt;
         const containmentBottomPt = containmentTopPt
           + layout.cellContainmentBounds.heightPt;
         firstInkTopPt = firstInkTopPt === undefined
@@ -143,6 +150,16 @@ function resolveCellFlow(blocks: readonly TableCellBlockInput[]): CellFlowGeomet
   };
 }
 
+/** A cell's flow as row layout materializes it; a recovered fragment's cell
+ * applies its admission containment limit (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP)
+ * so its text sits where pagination admitted it. */
+function cellFlow(cell: TableCellLayoutInput): CellFlowGeometry {
+  return resolveCellFlow(
+    cell.verticalMerge === 'continue' ? [] : cell.blocks,
+    cell.recoveryContainmentLimitPt,
+  );
+}
+
 function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
   const containmentTopPt = flow.cellContainmentTopPt ?? 0;
   const containmentBottomPt = flow.cellContainmentBottomPt ?? 0;
@@ -157,11 +174,17 @@ function cellContentRequiredHeightPt(flow: CellFlowGeometry): number {
  * Return the authored block-flow height used by table row layout. Pagination
  * calls this same fold while choosing legal fragment boundaries so paragraph
  * spacing collapse cannot disagree with the geometry materialized afterwards.
+ *
+ * `containmentLimitPt` is for the fresh-band recovery only: a paragraph's
+ * layoutInCell containment interval whose own extent exceeds it is left out,
+ * top and bottom alike (LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP). The recovered
+ * cells carry the same limit, so row layout materializes the admitted flow.
  */
 export function measureTableCellBlockFlowHeightPt(
   blocks: readonly TableCellBlockInput[],
+  containmentLimitPt = Number.POSITIVE_INFINITY,
 ): number {
-  return cellContentRequiredHeightPt(resolveCellFlow(blocks));
+  return cellContentRequiredHeightPt(resolveCellFlow(blocks, containmentLimitPt));
 }
 
 interface RowSpacingInsets {
@@ -678,8 +701,17 @@ function collapsedHorizontalBoundaryWidthsPt(
       effectiveCellSpacingPt(input.rows[boundaryIndex - 1]) > 0
       || effectiveCellSpacingPt(input.rows[boundaryIndex]) > 0
     ) return 0;
-    return segments.reduce((maximumPt, segment) => {
-      if (!segment) return maximumPt;
+    return segments.reduce((maximumPt, segment, column) => {
+      if (!segment) {
+        // WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT: inside a vertical
+        // merge no rule is drawn, but the merged constituent above still
+        // charges its own bottom border to the row below.
+        const constituent = boundaryIndex > 0 ? input.rows[boundaryIndex - 1]?.cells.find((cell) => (
+          cell.verticalMerge !== 'none'
+          && cell.columnStart <= column && column < cell.columnStart + cell.columnSpan
+        )) : undefined;
+        return Math.max(maximumPt, wordVerticalMergeInteriorBorderPt(constituent?.borders.bottom ?? null));
+      }
       const winner = resolveBoundary(segment.above.border, segment.below.border, segment.edge);
       return Math.max(maximumPt, winner?.border.widthPt ?? 0);
     }, 0);
@@ -1411,7 +1443,7 @@ export function layoutTable(
   }
   const flows = new Map<string, CellFlowGeometry>();
   input.rows.forEach((row) => row.cells.forEach((cell) => {
-    flows.set(cell.id, resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks));
+    flows.set(cell.id, cellFlow(cell));
   }));
   const boundaries = resolvedBoundaries(input);
   const ruleInsetsPt = rowRuleInsetsPt(input, boundaries);
@@ -1738,7 +1770,7 @@ export function laidOutTableTracks(
       }
       const flows = new Map(candidate.cells.map((cell) => [
         cell.id,
-        resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks),
+        cellFlow(cell),
       ] as const));
       return materializeTableRow(input, rowIndex, { ...frame, flows }, placement, candidate);
     },
@@ -1873,7 +1905,7 @@ export function tablePrefixTracks(input: TableLayoutInput, services?: LayoutServ
   const flowOf = (cell: TableCellLayoutInput): CellFlowGeometry => {
     let flow = flows.get(cell);
     if (!flow) {
-      flow = resolveCellFlow(cell.verticalMerge === 'continue' ? [] : cell.blocks);
+      flow = cellFlow(cell);
       flows.set(cell, flow);
     }
     return flow;

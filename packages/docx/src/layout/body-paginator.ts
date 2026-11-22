@@ -37,11 +37,13 @@ import {
   type CanonicalPageDraft,
 } from './body-pagination.js';
 import { assertAndDeepFreezeDocumentLayoutSteps } from './invariants.js';
+import { atMostWithinFloatingPrecision } from './floating-precision.js';
 import {
   bodyLayoutKernelOf,
   createFieldAcquisitionServicesView,
   createParagraphAcquisitionCacheServicesView,
 } from './runtime-state.js';
+import { sectionPhysicalPageExtent, withPageBackground } from './page-background.js';
 import {
   accumulatePagePaintNode,
   accumulatePageSectionRegion,
@@ -67,6 +69,7 @@ import {
 
 import {
   createPageFlowSectionContext,
+  effectiveHeaderFooterInlineMargins,
   physicalSectionGeometry,
   resolveSectionContextForPage,
 } from './context.js';
@@ -82,6 +85,8 @@ import {
 import {
   anchorKeysId,
   anchorLineDeferralApplies,
+  anchorLineFloor,
+  anchorLineFloorKey,
   anchorLineDeferralKey,
   anchorLineDeferralsIdentity,
   createAnchorLineDeferralProof,
@@ -101,7 +106,7 @@ import {
   type FootnoteCursor,
 } from './footnote-fragmentation.js';
 import { noteSeparatorOccurrence } from './reserved-note-separators.js';
-import { paragraphGapAdjustment } from './paragraph-spacing.js';
+import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import {
   endnoteIdsInRetainedSlice,
   footnoteIdsInRetainedLines,
@@ -385,6 +390,33 @@ function sectionContextForPage(owner: BodySectionLayoutInput, pageIndex: number)
   return resolveSectionContextForPage(owner.context as SectionLayoutContext, owner.pageLayout, pageIndex);
 }
 
+/** The section frame a horizontal page's header and footer stories are laid
+ * out in. Under two-page imposition their inline extent can differ from the
+ * body's (`word-two-page-sheet-imposition`); otherwise it is the page section. */
+function headerFooterStorySection(
+  owner: BodySectionLayoutInput,
+  pageIndex: number,
+  section: DeepReadonly<SectionLayoutContext>,
+): DeepReadonly<SectionLayoutContext> {
+  const margins = effectiveHeaderFooterInlineMargins(owner.pageLayout, pageIndex);
+  const { geometry } = section;
+  if (margins.marginLeft === geometry.marginLeft && margins.marginRight === geometry.marginRight) {
+    return section;
+  }
+  const storyGeometry = Object.freeze({ ...geometry, ...margins });
+  return Object.freeze({
+    ...section,
+    geometry: storyGeometry,
+    columns: Object.freeze([Object.freeze({
+      xPt: Math.abs(storyGeometry.marginLeft),
+      wPt: Math.max(
+        0,
+        storyGeometry.pageWidth - Math.abs(storyGeometry.marginLeft) - Math.abs(storyGeometry.marginRight),
+      ),
+    })]),
+  });
+}
+
 function flowSection(owner: BodySectionLayoutInput, pageIndex: number) {
   const context = sectionContextForPage(owner, pageIndex);
   return createPageFlowSectionContext({
@@ -433,10 +465,7 @@ function physicalPage(
   interval: ReservedBodyInterval,
 ) {
   const writingMode = sectionWritingMode(section);
-  const extent = uprightPhysicalExtent({
-    widthPt: section.geometry.pageWidth,
-    heightPt: section.geometry.pageHeight,
-  }, writingMode);
+  const extent = sectionPhysicalPageExtent(section);
   if (writingMode !== 'horizontal-tb') {
     return Object.freeze({
       ...extent,
@@ -1444,17 +1473,26 @@ function* paginateBodyPassSteps(
   const anchorLineDeferred = (keys: readonly string[]): boolean => {
     if (anchorLineDeferrals === null || keys.length === 0) return false;
     const pageIndex = state.flow.pageIndex;
-    if (registeredAnchorPage === pageIndex && keys.some((key) => registeredAnchorKeys.has(key))) {
-      return false;
-    }
     const keysId = anchorKeysId(keys);
-    if (deferralPage === pageIndex && appliedDeferralKeys.has(keysId)) return true;
-    let proof: AnchorLineDeferralProof | undefined;
-    for (const key of keys) {
-      proof = anchorLineDeferrals.get(anchorLineDeferralKey(key, pageIndex));
-      if (proof) break;
+    // A settled floor holds in every context, also against a stale
+    // registration of the line's own anchors on this page.
+    const floored = state.flow.pageHasContent && keys.some((key) => (
+      (anchorLineDeferrals.get(anchorLineFloorKey(key))?.pageIndex ?? -1) > pageIndex
+    ));
+    if (!floored) {
+      if (registeredAnchorPage === pageIndex && keys.some((key) => registeredAnchorKeys.has(key))) {
+        return false;
+      }
+      if (deferralPage === pageIndex && appliedDeferralKeys.has(keysId)) return true;
+      let proof: AnchorLineDeferralProof | undefined;
+      for (const key of keys) {
+        proof = anchorLineDeferrals.get(anchorLineDeferralKey(key, pageIndex));
+        if (proof) break;
+      }
+      if (!proof || !anchorLineDeferralApplies(proof, keys, pageIndex, deferralContext)) return false;
+    } else if (deferralPage === pageIndex && appliedDeferralKeys.has(keysId)) {
+      return true;
     }
-    if (!proof || !anchorLineDeferralApplies(proof, keys, pageIndex, deferralContext)) return false;
     if (deferralPage !== pageIndex) {
       deferralPage = pageIndex;
       appliedDeferralKeys.clear();
@@ -2776,7 +2814,8 @@ function* paginateBodyPassSteps(
       const spacing = resumed?.kind === 'paragraph'
         ? { suppressBefore: resumed.suppressBefore, overlap: 0 }
         : paragraphGapAdjustment(previousParagraph, block, previousAfterPt,
-          block.continuousSectionRole === 'suppress-before' ? 0 : block.spaceBeforePt);
+          block.continuousSectionRole === 'suppress-before' ? 0 : block.spaceBeforePt,
+          paragraphGapFoldOf(compat));
       const spacingOverlap = block.continuousSectionRole === 'drop-previous-after'
         ? previousAfterPt
         : spacing.overlap;
@@ -3117,8 +3156,8 @@ function* paginateBodyPassSteps(
             hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
             followsNextPageSectionBoundary,
             markExtentPt: acquired.blockExtentPt,
-            markBelowBaselinePt: acquired.markBelowBaselinePt ?? 0,
             markOnLineGrid: acquired.markOnLineGrid === true,
+            markMultipleLeadingPt: acquired.markMultipleLeadingPt ?? 0,
             markGridAfterLeadingPt: acquired.markGridAfterLeadingPt,
           });
         // A proven anchor-line deferral ends this page just above that line.
@@ -3348,27 +3387,31 @@ function* paginateBodyPassSteps(
           chargePt: flowChargePt(acquired) + notes.reservePt,
         });
         const seenCandidates = new Set<string>();
-        // The region extent and the fragment charge reconstruct the same
-        // authored boundary through different arithmetic, so the comparison
-        // must tolerate single-ULP drift exactly like the invariant layer
-        // (invariants.ts atMostWithinFloatingPrecision, mirrored inline here
-        // because the layout-boundary gate pins this module's invariants
-        // import to exactly assertAndDeepFreezeDocumentLayout): a fragment
-        // whose charge exceeds the region only within floating-point
-        // precision is already placed, and with an unchanged footnote
-        // reserve the retry request would be identical to the first — a
-        // raw `>` here could never converge and would trip the fingerprint
-        // guard below on floating-point dust.
-        const fitsWithinFloatingPrecision = (chargePt: number, heightPt: number): boolean =>
-          chargePt <= heightPt
-          || chargePt - heightPt
-            <= Number.EPSILON * Math.max(1, Math.abs(chargePt), Math.abs(heightPt));
+        // Admission decides fit exactly as page containment will check it
+        // (invariants.ts, through the shared floating-precision predicate):
+        // the allocation end placeFlowNode will retain, cursor + charge,
+        // against the region end net of the committed and candidate note
+        // reserves. The region extent handed to the measurer is a difference
+        // of page coordinates whose rounding scales with those coordinates,
+        // so a table that ends a column exactly can exceed that extent by
+        // several ULPs of the extent; comparing charge with the extent would
+        // reject a fragment containment accepts, or accept one it rejects.
+        // A fragment whose end agrees with the region end within
+        // floating-point precision is already placed: with an unchanged
+        // footnote reserve the retry request would be identical to the
+        // first and would trip the fingerprint guard below. Genuine
+        // overshoot still retries and still reaches that guard. An
+        // allocation that charges no block extent and no reserve claims no
+        // space and fits even a region the cursor has already reached.
+        const admittedEndFits = (chargePt: number, reservePt: number): boolean =>
+          (chargePt <= 0 && reservePt <= 0)
+          || atMostWithinFloatingPrecision(
+            state.flow.cursorBlockPt + chargePt,
+            activeBlockEndPt(state) - state.footnoteReservePt - reservePt,
+          );
         while (
           !acquired.requiresFreshFlowRegion
-          && !fitsWithinFloatingPrecision(
-            flowChargePt(acquired) + notes.reservePt,
-            location.availableBounds.heightPt,
-          )
+          && !admittedEndFits(flowChargePt(acquired), notes.reservePt)
         ) {
           const fingerprint = JSON.stringify({
             advancePt: acquired.blockExtentPt,
@@ -3934,11 +3977,12 @@ function measurePageHeaderFooterReserve(
   session: BodyLayoutSession,
   context: PageStoryContext,
 ): HeaderFooterReserve {
-  const { owner, pageIndex, section, firstPageOfSection, pageNumber } = context;
+  const { owner, pageIndex, firstPageOfSection, pageNumber } = context;
   // Vertical stories paint in physical page space; their overflow must not
   // charge the logical body interval. Use the resolved frame, including native
   // flow facts, rather than the text-direction token alone.
-  if (sectionWritingMode(section) !== 'horizontal-tb') return { top: 0, bottom: 0 };
+  if (sectionWritingMode(context.section) !== 'horizontal-tb') return { top: 0, bottom: 0 };
+  const section = headerFooterStorySection(owner, pageIndex, context.section);
   const inlineExtentPt = Math.max(
     0,
     section.geometry.pageWidth
@@ -4028,6 +4072,7 @@ function composePageStories(
   footnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
   endnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
   pageObjects: BodyLayoutInput['pageObjects'] = undefined,
+  backgroundStory: SourceRef | null = null,
 ): DocumentLayout {
   const storyDiagnostics: LayoutDiagnostic[] = [];
   const pageObjectSources = new Map<number, SourceRef[]>();
@@ -4040,7 +4085,8 @@ function composePageStories(
   const pages = layout.pages.map((page, pageIndex) => {
     // A parity blank page carries no stories, except a page object anchored
     // to it (LibreOffice draws it there).
-    if (page.parityBlank && !pageObjectSources.has(page.pageIndex)) return page;
+    // The §17.2.1 background story belongs to every page, parity blanks too.
+    if (page.parityBlank && !pageObjectSources.has(page.pageIndex) && backgroundStory === null) return page;
     const owner = owners.get(page.sectionOccurrenceId);
     if (!owner) throw new Error(`Unknown body section ${page.sectionOccurrenceId}`);
     if (!session.layoutStory) {
@@ -4048,14 +4094,23 @@ function composePageStories(
         || Object.values(owner.footers).some((source) => source !== null)
         || (footnotesByPage.get(page.pageIndex)?.length ?? 0) > 0
         || (endnotesByPage.get(page.pageIndex)?.length ?? 0) > 0;
-      if (!hasPageStories && !pageObjectSources.has(page.pageIndex)) return page;
+      if (!hasPageStories && !pageObjectSources.has(page.pageIndex) && backgroundStory === null) return page;
       throw new Error('Page-story composition requires a story-capable layout session');
     }
     const vertical = sectionWritingMode(page.section) !== 'horizontal-tb';
+    const horizontalStorySection = vertical
+      ? page.section
+      : headerFooterStorySection(owner, page.pageIndex, page.section);
+    // A vertical section's page stories are laid out in the upright physical
+    // page, so they take the physical header/footer margins of the page
+    // (`word-two-page-sheet-imposition`) after the frame conversion.
     const geometry = vertical
       // `word-vertical-section-physical-header-footer`
-      ? physicalSectionGeometry(page.section.geometry, page.section.sectionFlow)
-      : page.section.geometry;
+      ? Object.freeze({
+          ...physicalSectionGeometry(page.section.geometry, sectionWritingMode(page.section)),
+          ...effectiveHeaderFooterInlineMargins(owner.pageLayout, page.pageIndex),
+        })
+      : horizontalStorySection.geometry;
     const inlineStartPt = Math.abs(geometry.marginLeft);
     const inlineExtentPt = Math.max(
       0,
@@ -4075,7 +4130,7 @@ function composePageStories(
           })]),
           textDirection: 'lrTb',
         })
-      : page.section;
+      : horizontalStorySection;
     const sourceFor = (kind: 'header' | 'footer') => selectedHeaderFooterStory(
       kind === 'header' ? owner.headers : owner.footers,
       {
@@ -4110,6 +4165,33 @@ function composePageStories(
     };
     const header = page.parityBlank ? null : acquire('header');
     const footer = page.parityBlank ? null : acquire('footer');
+    // ECMA-376 §17.2.1: the background drawings (page-anchored, page-sized,
+    // behind text, unwrapped) are a page story laid out in the upright page
+    // frame like a header, over the whole page box, and painted in the
+    // page's `background` layer beneath every other story.
+    const backgroundDomainId = `story:page-background:page:${page.pageIndex}`;
+    const backgroundBounds = Object.freeze({
+      xPt: 0, yPt: 0, widthPt: geometry.pageWidth, heightPt: geometry.pageHeight,
+    });
+    const background = backgroundStory === null ? null : (() => {
+      const { story, translation } = layoutBandStory((band) => session.layoutStory!({
+        source: backgroundStory,
+        pageStoryOwner: owner.sectionOccurrenceId,
+        pageIndex: page.pageIndex,
+        pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
+        section: pageStorySection,
+        container: {
+          id: backgroundDomainId,
+          kind: 'header',
+          // Only page-positioned drawings: a page-sized drawing must not
+          // exhaust a band.
+          capacity: 'unbounded',
+          bounds: backgroundBounds,
+        },
+        ...(band ? { bandTranslationPt: band } : {}),
+      }), 'header', geometry);
+      return translateStoryLayout(story, translation);
+    })();
     // The page's producer page objects: a header-class page story whose
     // drawings are positioned on the page (their wrap was registered on the
     // body at the page's start). It is laid out in the body's own section
@@ -4208,6 +4290,12 @@ function composePageStories(
         ))
       : noteLogicalBounds;
     const storyDomains = [
+      ...(background ? [Object.freeze({
+        id: backgroundDomainId,
+        kind: 'header' as const,
+        logicalBounds: backgroundBounds,
+        physicalBounds: backgroundBounds,
+      })] : []),
       ...(header ? [Object.freeze({
         id: `story:header:page:${page.pageIndex}`,
         kind: 'header' as const,
@@ -4288,6 +4376,9 @@ function composePageStories(
     }
     const noteIndex = lastBodyIndex < 0 ? withHeader.length : lastBodyIndex + 1;
     const entries: PageLayerNode[] = [
+      ...(background?.blocks.map((node): PageLayerNode => ({
+        layer: 'background', node, coordinateSpace,
+      })) ?? []),
       ...withHeader.slice(0, noteIndex),
       ...pageObjectNodes.map((node): PageLayerNode => ({
         layer: 'body', node, coordinateSpace: blankPageObjects ? coordinateSpace : 'section-logical',
@@ -4302,17 +4393,18 @@ function composePageStories(
     ];
     // The body pass collected only body diagnostics; these stories are
     // composed here, so their own diagnostics are collected here.
-    storyDiagnostics.push(...[...(header?.blocks ?? []), ...pageObjectNodes, ...notes,
+    storyDiagnostics.push(...[...(background?.blocks ?? []), ...(header?.blocks ?? []), ...pageObjectNodes, ...notes,
       ...(footer?.blocks ?? [])]
       .flatMap((node) => nestedStoryDiagnostics(node, visited)));
     return Object.freeze({
       ...page,
       // A parity blank page holding a page object is no longer blank: it
       // carries that drawing (LibreOffice draws it on the inserted page).
-      ...(page.parityBlank ? { parityBlank: false } : {}),
+      ...(page.parityBlank && pageObjectSources.has(page.pageIndex) ? { parityBlank: false } : {}),
       flowDomains: Object.freeze([...page.flowDomains, ...storyDomains]),
       layers: createPageLayers(entries),
       readingOrder: Object.freeze([
+        ...(background?.blocks.map((node) => node.id) ?? []),
         ...(header?.blocks.map((node) => node.id) ?? []),
         ...pageObjectNodes.map((node) => node.id),
         ...page.readingOrder,
@@ -4803,6 +4895,7 @@ function resolveAnchorLineTests(
   pass: BodyPaginationPassResult,
   observed: Map<string, PageWrapDestination>,
   previous: AnchorLineDeferrals,
+  prefixTests = false,
 ): Readonly<{ plan: ReadonlyMap<string, PageWrapDestination>; deferrals: AnchorLineDeferrals }> {
   const events = pass.anchorInputs;
   const prescansByPage = new Map<number, number[]>();
@@ -4862,6 +4955,52 @@ function resolveAnchorLineTests(
       line.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
       continue;
     }
+    // Prefix tests (LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY, cycle recovery only,
+    // see `converge`): the retest below cannot record that the earlier lines
+    // registered on N were accepted, so a pass that registers them again with
+    // L, the last registered line, and pushes them all would retest the first
+    // of them for ever. Instead L is deferred from N by this pass's proof and
+    // the next pass registers the source-order prefix without L. The proof
+    // applies only where a pass reaches L on N with exactly that prefix
+    // registered, that is, where the prefix fits; when it does not, its own
+    // last line is deferred the same way.
+    if (prefixTests) {
+      const lastKey = [...registeredAt.keys()].reduce<string | null>((latest, key) => {
+        const order = positions!.get(key)?.order;
+        return order !== undefined && (latest === null || order > positions!.get(latest)!.order) ? key : latest;
+      }, null);
+      const lastLineKey = lastKey === null ? null : positions.get(lastKey)!.lineKey;
+      const lastLine = lastKey === null ? [] : [...positions]
+        .filter(([, position]) => position.lineKey === lastLineKey)
+        .map(([key]) => key);
+      const lastRegistration = lastKey === null ? -1 : registeredAt.get(lastKey)!;
+      if (lastKey !== null && lastLineKey !== lineKey
+        && lastLine.every((key) => registeredAt.get(key) === lastRegistration
+          && (observed.get(key)?.pageIndex ?? -1) > pageIndex)) {
+        const proof = createAnchorLineDeferralProof(
+          lastLine,
+          pageIndex,
+          events,
+          pass.serializedAnchorInputs,
+          lastRegistration,
+          pageStartAnchorsIdentity,
+        );
+        deferrals ??= new Map(previous);
+        lastLine.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
+        plan ??= new Map(observed);
+        const deferred = new Set(lastLine);
+        for (const key of registeredAt.keys()) {
+          if (deferred.has(key) || !observed.has(key)) continue;
+          const event = events[registeredAt.get(key)!] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
+          plan.set(key, Object.freeze({
+            ...observed.get(key)!,
+            pageIndex,
+            flowDomainId: event.flowDomainId,
+          }));
+        }
+        continue;
+      }
+    }
     plan ??= new Map(observed);
     const registration = events[registrationIndex] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
     for (const key of line) {
@@ -4889,6 +5028,25 @@ function compareTableSourceOrder(left: string, right: string): number {
     if (a[index] !== b[index]) return a[index]! - b[index]!;
   }
   return a.length - b.length || (left < right ? -1 : left > right ? 1 : 0);
+}
+
+/** Source order of two page-owned drawings: their anchor paragraphs' body
+ * paths element by element, then their occurrence keys (whose trailing
+ * number follows the anchors' document order within one paragraph). */
+function compareDrawingSourceOrder(
+  leftKey: string,
+  left: SourceRef,
+  rightKey: string,
+  right: SourceRef,
+): number {
+  for (let index = 0; index < Math.min(left.path.length, right.path.length); index += 1) {
+    if (left.path[index] !== right.path[index]) return left.path[index]! - right.path[index]!;
+  }
+  if (left.path.length !== right.path.length) return left.path.length - right.path.length;
+  const ordinal = (key: string) => Number(/(\d+)$/.exec(key)?.[1] ?? NaN);
+  const byOrdinal = ordinal(leftKey) - ordinal(rightKey);
+  return Number.isFinite(byOrdinal) && byOrdinal !== 0 ? byOrdinal
+    : leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 }
 
 function changedAnchorKeys(
@@ -5201,6 +5359,12 @@ function* paginateBodyWithAnchorConvergenceSteps(
     }>;
     const noDeferrals: AnchorLineDeferrals = new Map();
     const settledFloors = new Map<string, number>(initialFloors ?? []);
+    // Set by cycle recovery: anchor lines are tested by source-order prefix
+    // (see `resolveAnchorLineTests`). A fixed input of every later pass.
+    let prefixTests = false;
+    let lineRecoveryBudgeted = false;
+    // Anchor-line floors settled by cycle recovery, by drawing key.
+    const settledLineFloors = new Map<string, number>();
     let restart: AnchorPassCarry | null = null;
     const latest: { carry: AnchorPassCarry | null } = { carry: null };
     let remainingPasses = anchorPassLimit;
@@ -5256,9 +5420,9 @@ function* paginateBodyWithAnchorConvergenceSteps(
             }
             // The unseeded pass registers source-order estimates, not anchor
             // lines that reached their page, so it proves nothing about them.
-            const lineTests = appliedPlan === null
+            const lineTests: ReturnType<typeof resolveAnchorLineTests> = appliedPlan === null
               ? Object.freeze({ plan: observed, deferrals: appliedDeferrals })
-              : resolveAnchorLineTests(pass, observed, appliedDeferrals);
+              : resolveAnchorLineTests(pass, observed, appliedDeferrals, prefixTests);
             const minimumTablePageBySource = new Map<string, number>();
             // Compare all destinations once. Testing every table against a fresh
             // copy of the full plan would make table-heavy documents quadratic.
@@ -5347,9 +5511,16 @@ function* paginateBodyWithAnchorConvergenceSteps(
           .map((state) => new Map(JSON.parse(state.split('\u0004')[0]!) as Array<[string, PageWrapDestination]>));
         const changed = new Set<string>();
         const later = new Map<string, number>();
+        const laterDrawings = new Map<string, Readonly<{ pageIndex: number; source: SourceRef }>>();
         for (const plan of cycle) {
           for (const key of changedAnchorKeys(cycle[0]!, plan)) changed.add(key);
           for (const [key, destination] of plan) {
+            if (destination.kind === 'drawing') {
+              const prior = laterDrawings.get(key);
+              if (!prior || destination.pageIndex > prior.pageIndex) {
+                laterDrawings.set(key, { pageIndex: destination.pageIndex, source: destination.paragraphSource });
+              }
+            }
             if (destination.kind !== 'floating-table') continue;
             later.set(key, Math.max(later.get(key) ?? -1, destination.pageIndex));
           }
@@ -5357,12 +5528,45 @@ function* paginateBodyWithAnchorConvergenceSteps(
         const pinned = [...later]
           .filter(([key, pageIndex]) => changed.has(key) && pageIndex > (settledFloors.get(key) ?? -1))
           .sort(([left], [right]) => compareTableSourceOrder(right, left))[0];
-        if (!pinned) throw error;
-        settledFloors.set(pinned[0], pinned[1]);
-        // Every settlement strictly raises a table floor: at most one raise
-        // per table per page. Restarts share the original operational pass
-        // budget as well, so even a growing page count cannot run unbounded.
+        // LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY (library policy, not a Word
+        // measurement). `word-page-anchor-line-deferral` tests anchor lines
+        // in flow order, each with the anchors accepted before it, but the
+        // plan does not record acceptance: a test that also pushes earlier
+        // accepted lines, or a deferral that moves a keepNext, keepLines or
+        // widow-control group, can make the run alternate. Without a table to
+        // pin, recover in two stages, each entered once per run:
+        // 1. Prefix tests (`resolveAnchorLineTests`): later lines are deferred
+        //    first by context-checked proofs, on every page in one pass.
+        // 2. If that still cycles, floor the last oscillating drawing in
+        //    source order at the latest page it reached in the cycle, so its
+        //    line starts no earlier page; a persisting cycle floors the next.
+        //    A floor holds in every page context, so a kept group moves with
+        //    it as one unit.
+        // This recovers convergence where the contextual tests cycle, within
+        // the bounded pass budget below (beyond it the run still fails
+        // closed); it claims no fidelity. Only otherwise-fatal cycles get
+        // here, so converging runs keep their output.
+        const drawingCycle = [...changed].some((key) => laterDrawings.has(key));
+        const floored = pinned || !prefixTests ? undefined : [...laterDrawings]
+          .filter(([key, { pageIndex }]) => changed.has(key) && pageIndex > (settledLineFloors.get(key) ?? -1))
+          .sort(([leftKey, left], [rightKey, right]) => compareDrawingSourceOrder(
+            rightKey, right.source, leftKey, left.source,
+          ))[0];
+        if (pinned) settledFloors.set(pinned[0], pinned[1]);
+        else if (!prefixTests && drawingCycle) prefixTests = true;
+        else if (floored) settledLineFloors.set(floored[0], floored[1].pageIndex);
+        else throw error;
+        // Every settlement strictly raises a table floor or an anchor-line
+        // floor, or enters prefix tests once. All restarts share the run's
+        // operational pass budget, so the total work stays bounded however
+        // many settlements a document needs. Anchor-line recovery adds that
+        // budget once more for the whole run (each drawing's settlement
+        // needs a cycle of a few passes), never per settlement.
         remainingPasses -= error.passes;
+        if (!pinned && !lineRecoveryBudgeted) {
+          lineRecoveryBudgeted = true;
+          remainingPasses += anchorPassLimit;
+        }
         if (remainingPasses < 2) {
           throw new ExactConvergenceError('limit', error.states, anchorPassLimit);
         }
@@ -5370,7 +5574,11 @@ function* paginateBodyWithAnchorConvergenceSteps(
         for (const [key, pageIndex] of settledFloors) {
           floors.set(key, Math.max(pageIndex, floors.get(key) ?? pageIndex));
         }
-        restart = Object.freeze({ ...latest.carry, minimumTablePageBySource: floors });
+        const deferrals = new Map(latest.carry.deferrals);
+        for (const [key, pageIndex] of settledLineFloors) {
+          deferrals.set(anchorLineFloorKey(key), anchorLineFloor(key, pageIndex));
+        }
+        restart = Object.freeze({ ...latest.carry, minimumTablePageBySource: floors, deferrals });
       }
     }
   };
@@ -5756,6 +5964,7 @@ function composeBodyPaginationResult(
     pass.footnoteLayoutsByPage,
     pass.endnoteLayoutsByPage,
     input.pageObjects,
+    input.pageBackground?.story ?? null,
   );
   const hasRetainedFootnotes = pageStories.pages.some((page) =>
     page.layers.notes.some((note) => note.source.story === 'footnote'));
@@ -5793,7 +6002,12 @@ function composeBodyPaginationResult(
       });
   const finalized = Object.freeze({
     ...withParserDiagnostics,
-    pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
+    // §17.2.1: the document background is a fact of every physical page,
+    // fixed once the page geometry is final.
+    pages: Object.freeze(withParserDiagnostics.pages.map((page) => withPageBackground(
+      finalizePageBookmarkStarts(page),
+      input.pageBackground,
+    ))),
   });
   const withChangeBars = options.showTrackedChanges === true
     ? attachTrackChangeBars(finalized)

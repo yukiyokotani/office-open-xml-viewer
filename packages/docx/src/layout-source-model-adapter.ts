@@ -11,6 +11,7 @@ import {
   reservedNoteSeparatorParagraphAcquisitionInput,
   selectedNoteSeparatorParagraphAcquisitionInput,
   tableSourceAcquisitionInput,
+  documentPageBackgroundStory,
   documentPageObjects,
   producerDocumentSettings,
   type InternalShapeRun,
@@ -18,6 +19,7 @@ import {
 } from './parser-model.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import { pageObjectStorySource } from './layout/body-layout-input.js';
+import { pageBackgroundStorySource } from './layout/page-background.js';
 import type {
   BodyLayoutInput,
   ReservedNoteSeparatorRolesInput,
@@ -109,6 +111,9 @@ function forEachPageObject(
   documentPageObjects(document).forEach((object, ordinal) => {
     visit(object.body, { ...pageObjectStorySource(ordinal), path: [] });
   });
+  // The §17.2.1 background drawing story is another header-class page story.
+  const background = documentPageBackgroundStory(document);
+  if (background.length > 0) visit(background, { ...pageBackgroundStorySource(), path: [] });
 }
 
 function traverseParagraphSources(
@@ -251,6 +256,12 @@ function canonicalLayoutBody(
       }),
     } as unknown as LayoutTableBlock;
     }
+    if (element.type === 'pageBreak') {
+      const { __pageBreakBefore: _pageBreakBefore, ...pageBreak } = element as typeof element & {
+        __pageBreakBefore?: unknown;
+      };
+      return structuredClone(pageBreak) as unknown as LayoutStoryBlock;
+    }
     if (element.type !== 'sectionBreak') return structuredClone(element);
     const {
       __sectionPlacement: _sectionPlacement,
@@ -363,6 +374,10 @@ function canonicalOwnedLayoutBody(
         });
       });
       retainedBody[elementIndex] = table;
+      continue;
+    }
+    if (element.type === 'pageBreak') {
+      delete (element as typeof element & { __pageBreakBefore?: unknown }).__pageBreakBefore;
       continue;
     }
     if (element.type !== 'sectionBreak') continue;
@@ -495,7 +510,7 @@ function buildLayoutSourceModelAdapter(
       widthPt: numbering.picBulletWidthPt ?? marker.fontSizePt,
       heightPt: numbering.picBulletHeightPt ?? marker.fontSizePt,
     };
-  });
+  }, bodyLayoutInput.pageBackground);
   const footnotes = frozenNotes(privateDocument.footnotes);
   const endnotes = frozenNotes(privateDocument.endnotes);
   const hasPaginationFields = paginatedFlowHasPaginationDependentFields(
@@ -625,6 +640,13 @@ function buildLayoutSourceModelAdapter(
         body: canonicalizeBody(object.body, { ...pageObjectStorySource(ordinal), path: [] },
           paragraphInputs),
       })),
+    }),
+    ...(documentPageBackgroundStory(privateDocument).length === 0 ? {} : {
+      __pageBackground: {
+        ...(privateDocument as unknown as { __pageBackground: Record<string, unknown> }).__pageBackground,
+        body: canonicalizeBody(documentPageBackgroundStory(privateDocument),
+          { ...pageBackgroundStorySource(), path: [] }, paragraphInputs),
+      },
     }),
     footnotes: footnotes.map(({ content, ...note }) => ({
       ...structuredClone(note),

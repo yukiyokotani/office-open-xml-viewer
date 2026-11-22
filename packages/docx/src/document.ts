@@ -62,6 +62,7 @@ import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
   layoutVariantStoreOf,
+  textAdvanceLookupOf,
 } from './layout/runtime-state.js';
 import {
   type LayoutSourceStore,
@@ -2197,6 +2198,7 @@ export class DocxDocument {
       defaultCurrentDateMs: runtime.defaultCurrentDateMs,
       width: wireOpts.width,
       showTrackedChanges: wireOpts.showTrackedChanges,
+      textAdvances: textAdvanceLookupOf(services),
     });
   }
 

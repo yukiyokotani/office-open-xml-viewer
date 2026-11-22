@@ -8,7 +8,6 @@ import {
   drawTateChuYokoRun,
   drawUprightBox,
   planVerticalRunWithCapability,
-  physicalToLogicalAnchorBox,
   verticalRunInkExtraPx,
   verticalRunInkExtraPxWithCapability,
 } from './vertical-text.js';
@@ -996,72 +995,5 @@ describe('drawUprightBox (§17.6.20 — keep images upright inside the rotated p
     // Balanced save/restore.
     expect(ops[0]).toEqual({ op: 'save' });
     expect(ops[ops.length - 1]).toEqual({ op: 'restore' });
-  });
-});
-
-describe('physicalToLogicalAnchorBox (§17.6.20 + §20.4.3.x — physical anchor ↦ logical flow)', () => {
-  it('projects a physical image box into the swapped logical frame (w↔h swap)', () => {
-    // sample-26 ground truth (px at scale=1 = pt): physical page width 842pt,
-    // image physical TL (444.3, 397.85), size 96.2 × 123.0. Word's physical
-    // centroid (PDF-verified) is (492.4, 459.35).
-    const cssW = 842;
-    const box = physicalToLogicalAnchorBox(444.3, 397.85, 96.2, 123.0, cssW);
-    // logical.x = physical.y ; logical.y = cssW − (physical.x + w) ; w↔h swap.
-    expect(box.x).toBeCloseTo(397.85, 5);
-    expect(box.y).toBeCloseTo(842 - (444.3 + 96.2), 5); // 301.5
-    expect(box.w).toBeCloseTo(123.0, 5);
-    expect(box.h).toBeCloseTo(96.2, 5);
-  });
-
-  it('round-trips: drawUprightBox on the logical box lands the image at the physical centroid', () => {
-    // Feed the logical box through drawUprightBox and reconstruct the physical
-    // rectangle by composing the page transform (translate(cssW,0)·rotate(+90))
-    // with drawUprightBox's own (translate(centre)·rotate(−90)) — the net must be
-    // the physical image box, upright.
-    const cssW = 842;
-    const px = 444.3;
-    const py = 397.85;
-    const w = 96.2;
-    const h = 123.0;
-    const box = physicalToLogicalAnchorBox(px, py, w, h, cssW);
-    const { ctx, ops } = mockCtx();
-    let local: number[] | null = null;
-    drawUprightBox(ctx, box.x, box.y, box.w, box.h, (dx, dy, dw, dh) => {
-      local = [dx, dy, dw, dh];
-    });
-    // The draw rect corners, transformed through page·drawUprightBox, must span
-    // the physical image box.
-    const translate = ops.find(
-      (o): o is Extract<Op, { op: 'translate' }> => o.op === 'translate',
-    );
-    // Compose: physical = P · translate(cx,cy) · rotate(−90) · localCorner.
-    const cx = translate?.x ?? 0;
-    const cy = translate?.y ?? 0;
-    const P = (lx: number, ly: number): [number, number] => {
-      // page transform: translate(cssW,0) then rotate(+90): (x,y) → (cssW−y, x)
-      return [cssW - ly, lx];
-    };
-    const boxLocal = (dx: number, dy: number): [number, number] => {
-      // drawUprightBox frame: translate(cx,cy)·rotate(−90): (x,y)→(cx+y, cy−x)
-      const rx = cx + dy;
-      const ry = cy - dx;
-      return P(rx, ry);
-    };
-    const [dx, dy, dw, dh] = local as unknown as number[];
-    const corners = [
-      boxLocal(dx, dy),
-      boxLocal(dx + dw, dy),
-      boxLocal(dx, dy + dh),
-      boxLocal(dx + dw, dy + dh),
-    ];
-    const xs = corners.map((c) => c[0]);
-    const ys = corners.map((c) => c[1]);
-    expect(Math.min(...xs)).toBeCloseTo(px, 4); // physical left
-    expect(Math.min(...ys)).toBeCloseTo(py, 4); // physical top
-    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(w, 4); // physical width
-    expect(Math.max(...ys) - Math.min(...ys)).toBeCloseTo(h, 4); // physical height
-    // Centroid matches Word / PDF ground truth.
-    expect((Math.min(...xs) + Math.max(...xs)) / 2).toBeCloseTo(492.4, 3);
-    expect((Math.min(...ys) + Math.max(...ys)) / 2).toBeCloseTo(459.35, 3);
   });
 });

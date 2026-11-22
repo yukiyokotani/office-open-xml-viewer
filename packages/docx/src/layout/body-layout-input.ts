@@ -15,6 +15,12 @@ import {
 import type { SectionStartType, AuthoredBreak } from './paginator.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import { snapshotPlainData } from './plain-data.js';
+import {
+  projectPageBackgroundLayoutInput,
+  sectionOwnerPhysicalPageExtent,
+  type PageBackgroundAcquisitionInput,
+  type PageBackgroundLayoutInput,
+} from './page-background.js';
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
 import {
   wordContinuousSectionRole,
@@ -256,6 +262,9 @@ export interface BodyLayoutInput {
   readonly pageObjects?: readonly PageObjectInput[];
   /** Immutable parse facts; attached only after geometry convergence. */
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
+  /** ECMA-376 §17.2.1 background of every page, bound to one retained image
+   * resource per physical page size the sections produce. */
+  readonly pageBackground?: PageBackgroundLayoutInput;
   /** §17.11 document-end note stories, in authored numbering order. */
   readonly endnoteIds?: readonly string[];
   /** Footnote ids the body references more than once, each with the
@@ -321,6 +330,8 @@ export interface BodyLayoutAcquisitionInput {
     bookFoldRevPrinting: boolean;
     printTwoOnOne: boolean;
   }>;
+  /** §17.2.1 document background (parser-gated by §17.15.1.26). */
+  readonly pageBackground?: PageBackgroundAcquisitionInput | null;
   readonly sequence: readonly BodyLayoutSequenceEntryFor<Readonly<{
     sectionOccurrenceId: string;
     startType: string;
@@ -415,6 +426,7 @@ function sectionInput(
       textDirection: occurrence.textDirection ?? 'lrTb',
       gutterPt: occurrence.gutterPt,
       rtlGutter: occurrence.rtlGutter,
+      sheetOrientation: occurrence.sheetOrientation,
       ...acquired.pageLayoutSettings,
     }),
   });
@@ -428,6 +440,13 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
   const initialOccurrence = acquired.sectionIndex.occurrences[0];
   if (!initialOccurrence) throw new Error('DOCX body requires a final section owner');
   const initialSection = sections.get(initialOccurrence.sectionOccurrenceId)!;
+  const pageBackground = projectPageBackgroundLayoutInput(
+    acquired.pageBackground,
+    [...sections.values()].map((section) => sectionOwnerPhysicalPageExtent(
+      section.context,
+      section.pageLayout,
+    )),
+  );
   const hiddenPageBreaks = wordHiddenParagraphPageBreakEntries(acquired.sequence);
   // The spacing role depends only on the authored section start type, already
   // present in the acquisition sequence. Resolve section owners and roles in
@@ -465,5 +484,6 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
     noteLayoutSettings: acquired.noteLayoutSettings,
     ...(acquired.pageObjects && acquired.pageObjects.length > 0
       ? { pageObjects: acquired.pageObjects } : {}),
+    ...(pageBackground === null ? {} : { pageBackground }),
   }, 'DOCX body layout input') as BodyLayoutInput;
 }

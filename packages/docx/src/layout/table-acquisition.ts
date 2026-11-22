@@ -7,7 +7,7 @@ import type { ParagraphLayoutSource } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
 import {
   acquireTableCellBlocks,
-  isStructuralTrailingParagraph,
+  cellParagraphOwnsNoFlow,
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
@@ -493,9 +493,9 @@ function verticalCellMode(
 
 /**
  * Line extent of rotated cell content at an acquired line width: each line's
- * placement span (independent of its alignment on that
- * line) plus the paragraph's side indents and, on the first line, a positive
- * first-line indent. The line box advance is also a minimum along the rotated
+ * natural placement span (independent of its alignment on that line) plus the
+ * paragraph's side indents and, on the first line, a positive first-line
+ * indent. The line box advance is also a minimum along the rotated
  * row axis, even when a glyph is narrower; see WORD_ROTATED_CELL_AUTO_ROW_WRAP.
  * The unconstrained extent is an upper bound on the row height needed to fit
  * the rotated content; it is not the auto-row minimum.
@@ -525,7 +525,14 @@ function naturalLineExtentPt(
       }
       if (endPt < startPt) return;
       const firstLinePt = lineIndex === 0 ? Math.max(0, paragraph?.indentFirst ?? 0) : 0;
-      extentPt = Math.max(extentPt, endPt - startPt + sideIndentsPt + firstLinePt);
+      // ECMA-376 §17.18.44 `distribute` spreads every line, the last one too,
+      // across whatever line length it is given (as `both` does to a line its
+      // compatibility rules justify), so a justified span is the trial length
+      // itself. The natural length removes only the expansion paragraph
+      // layout recorded; natural seams such as automatic East Asian spacing
+      // (WORD_EAST_ASIAN_AUTO_SPACE) stay inside it.
+      const spanPt = Math.max(0, endPt - startPt - (line.justificationExpansionPt ?? 0));
+      extentPt = Math.max(extentPt, spanPt + sideIndentsPt + firstLinePt);
     });
   });
   return Math.min(MAXIMUM_ROTATED_LINE_LENGTH_PT, Math.ceil(extentPt * 100) / 100);
@@ -841,12 +848,12 @@ export function acquireRetainedTable<State>(
             ...((layout.kind === 'paragraph' && paragraphHasPageDependency(layout))
               ? { pageDependent: true }
               : {}),
-            ...(isStructuralTrailingParagraph(
+            ...(cellParagraphOwnsNoFlow(
               cell.content,
               sourceBlockIndex,
               cell.hideMark === true,
             )
-              ? { structuralTrailing: true }
+              ? { ownsNoCellFlow: true }
               : {}),
           }];
         });

@@ -228,6 +228,7 @@ pub(super) fn resolve(
                         clr2: color,
                     }),
                     blip_effects: Vec::new(),
+                    dpi: None,
                     vml: Some(VmlImageFill {
                         repeat: kind != "frame",
                         size,
@@ -304,6 +305,7 @@ pub(super) fn pen_image<'a>(
         alpha: attr("opacity").and_then(fraction),
         duotone: None,
         blip_effects: Vec::new(),
+        dpi: None,
         vml: Some(VmlImageFill {
             repeat: kind == "tile",
             size: attr("imagesize")

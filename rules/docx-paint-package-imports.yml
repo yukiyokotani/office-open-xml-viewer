@@ -94,6 +94,15 @@ utils:
       # DPR to choose a retained decode. These resource-policy primitives neither
       # measure nor feed geometry back into DocumentLayout.
       - regex: "^MAX_RASTER_PIXELS$"
+      # Per-axis ceiling admitting a composed §20.1.8.58 tile cell before its
+      # scratch surface is allocated; a resource-policy constant only.
+      - regex: "^MAX_RASTER_DIMENSION$"
+      # The authored frame of a grown effect surface and the neighbour periods
+      # its outset reaches: the §20.1.8.58 tile period and cell composition.
+      # Decoded-image geometry and a work ceiling only.
+      - regex: "^imageEffectFrame$"
+      - regex: "^imageEffectOutsetPeriods$"
+      - regex: "^MAX_IMAGE_EFFECT_PIXEL_WORK$"
       # Decoded-image policy is shared across all format painters. DOCX supplies
       # immutable paint demands and consumes the returned target plan; neither
       # operation may feed measurement or pagination.
@@ -103,6 +112,10 @@ utils:
       # Bounded VML mask/concentric compositing allocates temporary paint-only surfaces.
       - regex: "^createAuxCanvas$"
       - regex: "^withVertFeature$"
+      # Draws retained text at the reference em layout planned for it (core
+      # reference-advances.ts): save/translate/scale/fillText only, never
+      # measureText, so paint stays measurement-free.
+      - regex: "^fillTextAtReference$"
       - regex: "^preferVectorBlip$"
       - regex: "^releaseOwnedBitmap$"
       - regex: "^resolvedCachedBitmapVariantKey$"
@@ -138,6 +151,9 @@ utils:
       - regex: "^TiffRenderer$"
       # Erased SVG decoder capability; paint forwards it to the shared image owner.
       - regex: "^SvgBlobDecoder$"
+      # Read-only lookup of layout's reference-advance decisions; it exposes
+      # no probing or measurement entry point.
+      - regex: "^TextAdvanceLookup$"
   chart-font-sources-value:
     any:
       - regex: "^withChartFontSubstitutions$"

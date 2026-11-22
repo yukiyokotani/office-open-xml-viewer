@@ -185,7 +185,7 @@ describe('ShapeRun drawing command planner', () => {
     expect(structuredClone(result.command)).toEqual(result.command);
   });
 
-  it('diagnoses tiled blip fills instead of silently stretching them', () => {
+  it('plans a §20.1.8.58 tiled blip fill as a retained brush resource', () => {
     const result = planShapeDrawing(shape({
       fill: {
         fillType: 'image', imagePath: 'word/media/tile.png', mimeType: 'image/png',
@@ -193,15 +193,15 @@ describe('ShapeRun drawing command planner', () => {
       },
     }), { xPt: 0, yPt: 0, widthPt: 100, heightPt: 40 }, undefined, undefined, 'image:tile');
 
-    expect(result).toEqual({
-      status: 'unsupported',
-      command: { kind: 'noop' },
-      diagnostics: [{
-        code: 'UNSUPPORTED_FEATURE',
-        severity: 'error',
-        message: 'Tiled DrawingML shape image fills are not rendered',
-      }],
+    expect(result).toMatchObject({
+      status: 'planned',
+      command: {
+        kind: 'drawingml-image-fill',
+        resourceKey: 'image:tile',
+        plan: { rect: { x: 0, y: 0, w: 100, h: 40 }, fill: null },
+      },
     });
+    expect(result.command).not.toHaveProperty('fillRect');
   });
 
   it('retains authored textPath shaping and fitshape geometry as a clone-safe command', () => {

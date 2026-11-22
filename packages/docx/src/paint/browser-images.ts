@@ -11,7 +11,13 @@ import {
   captureDecodedBitmapCacheEpoch,
   decodedBitmapTargetResizeOptions,
   duotoneImageData,
+  MAX_IMAGE_EFFECT_PIXEL_WORK,
+  MAX_RASTER_DIMENSION,
   MAX_RASTER_PIXELS,
+  createAuxCanvas,
+  imageEffectFrame,
+  imageEffectOutsetPeriods,
+  imageNaturalSize,
   dropCachedDerivedBitmapNamespace,
   getCachedBitmapByPath,
   getCachedDerivedBitmap,
@@ -105,9 +111,191 @@ function requestKey(request: ImageDecodeRequest): string {
 }
 
 const DOCX_COLOR_EFFECT_CACHE_NAMESPACE = 'docx-color-effects';
+const DOCX_TILE_CELL_CACHE_NAMESPACE = 'docx-tile-cells';
 
 export function dropBrowserImageCache(fetchImage: DocxFetchImage): void {
   dropCachedDerivedBitmapNamespace(fetchImage, DOCX_COLOR_EFFECT_CACHE_NAMESPACE);
+  dropCachedDerivedBitmapNamespace(fetchImage, DOCX_TILE_CELL_CACHE_NAMESPACE);
+}
+
+/** Decoded-image map key of an image descriptor's (effect-applied) source. */
+export function paintImageDecodeKey(descriptor: DeepReadonly<ImagePaintResourceDescriptor>): string {
+  return descriptor.blipEffects?.length ? descriptor.resourceKey : imageKey(
+    descriptor.partPath,
+    descriptor.colorReplaceFrom,
+    descriptor.duotone as Duotone | undefined,
+    descriptor.vmlStrokePattern as Duotone | undefined,
+    descriptor.blipEffects,
+  );
+}
+
+/** Physical resolution declared by each decoded tile source's own bytes
+ * (§20.1.8.14: an absent or zero `blipFill@dpi` uses "the DPI in the blip").
+ * Keyed by the decoded surface that the brush repeats. */
+const embeddedTileDpi = new WeakMap<object, BlipDpi>();
+
+export interface BlipDpi { readonly x: number; readonly y: number }
+
+/** Library policy when neither the blip fill nor the blip states a DPI (GIF,
+ * WebP, SVG, metafiles, unitless headers): the 96-DPI image-coordinate
+ * convention every format painter already uses. */
+const DEFAULT_BLIP_DPI = 96;
+
+/** Effective §20.1.8.14 DPI of a tile source: the authored positive
+ * `blipFill@dpi`, else the blip's declared resolution, else 96. */
+export function drawingMLTileDpi(
+  descriptor: DeepReadonly<ImagePaintResourceDescriptor>,
+  source: object,
+): BlipDpi {
+  if (descriptor.blipDpi !== undefined) return { x: descriptor.blipDpi, y: descriptor.blipDpi };
+  return embeddedTileDpi.get(source) ?? { x: DEFAULT_BLIP_DPI, y: DEFAULT_BLIP_DPI };
+}
+
+/** Decoded-image map key of a descriptor's composed tile cell. */
+export function drawingMLTileCellKey(descriptor: DeepReadonly<ImagePaintResourceDescriptor>): string {
+  const crop = descriptor.srcRect ?? { l: 0, t: 0, r: 0, b: 0 };
+  return `${paintImageDecodeKey(descriptor)}|tile-cell:${descriptor.tile?.flip ?? 'none'}:${crop.l}:${crop.t}:${crop.r}:${crop.b}`;
+}
+
+const sourceIdentities = new WeakMap<object, number>();
+let nextSourceIdentity = 1;
+/** Identity of one decoded source variant: a source decoded at another grid
+ * (another page size, another effect surface) is a different cell input. */
+function sourceIdentity(source: object): number {
+  let identity = sourceIdentities.get(source);
+  if (identity === undefined) {
+    identity = nextSourceIdentity++;
+    sourceIdentities.set(source, identity);
+  }
+  return identity;
+}
+
+export interface DrawingMLTileGeometry {
+  /** The §20.1.8.55 window of the authored frame, in source pixels. */
+  readonly windowX: number; readonly windowY: number;
+  readonly windowWidth: number; readonly windowHeight: number;
+  /** The authored frame inside a grown effect surface (§20.1.8.13). */
+  readonly frame: Readonly<{ x: number; y: number; width: number; height: number }>;
+  readonly naturalWidth: number; readonly naturalHeight: number;
+  readonly cropped: boolean;
+  /** Neighbour periods whose effect outset reaches into a period. */
+  readonly padX: number; readonly padY: number;
+  /** Backing pixels of one period: at least one per positive extent. */
+  readonly tileWidthPx: number; readonly tileHeightPx: number;
+  readonly flipX: boolean; readonly flipY: boolean;
+  /** Whether the repeating image must be composed rather than the source. */
+  readonly needsCell: boolean;
+}
+
+/** §20.1.8.58 repeats the authored picture frame windowed by §20.1.8.55
+ * (Annex L.4.8.4.3), so the period is that window, never the grown surface
+ * of a spatial effect. A fractional window is a valid physical period. A
+ * window with no positive extent selects nothing (`null`). */
+export function drawingMLTileGeometry(
+  descriptor: DeepReadonly<ImagePaintResourceDescriptor>,
+  source: CanvasImageSource,
+): DrawingMLTileGeometry | null {
+  const natural = imageNaturalSize(source);
+  const frame = imageEffectFrame(source as object) ?? { x: 0, y: 0, width: natural.w, height: natural.h };
+  const crop = descriptor.srcRect ?? { l: 0, t: 0, r: 0, b: 0 };
+  const windowWidth = frame.width * (1 - crop.l - crop.r);
+  const windowHeight = frame.height * (1 - crop.t - crop.b);
+  const windowX = frame.x + frame.width * crop.l;
+  const windowY = frame.y + frame.height * crop.t;
+  if (![windowWidth, windowHeight, windowX, windowY].every(Number.isFinite)) {
+    throw new OoxmlDecodedImageLimitError('image-effect-work', MAX_IMAGE_EFFECT_PIXEL_WORK, Number.MAX_SAFE_INTEGER);
+  }
+  if (!(windowWidth > 0 && windowHeight > 0)) return null;
+  const cropped = descriptor.srcRect != null;
+  // A cropped picture paints no outset (drawImageCropped); otherwise grown
+  // effect pixels overlap neighbouring periods.
+  const pad = imageEffectOutsetPeriods(source as object, cropped);
+  const flipX = descriptor.tile?.flip === 'x' || descriptor.tile?.flip === 'xy';
+  const flipY = descriptor.tile?.flip === 'y' || descriptor.tile?.flip === 'xy';
+  const tileWidthPx = Math.max(1, Math.round(windowWidth));
+  const tileHeightPx = Math.max(1, Math.round(windowHeight));
+  const whole = windowX === 0 && windowY === 0
+    && windowWidth === natural.w && windowHeight === natural.h;
+  return {
+    windowX, windowY, windowWidth, windowHeight, frame,
+    naturalWidth: natural.w, naturalHeight: natural.h, cropped,
+    padX: pad.x, padY: pad.y, tileWidthPx, tileHeightPx, flipX, flipY,
+    needsCell: flipX || flipY || !whole || tileWidthPx !== windowWidth || tileHeightPx !== windowHeight,
+  };
+}
+
+/** Compose a tile cell as a document-owned derived bitmap: one period (or
+ * the 2x1 / 2x2 mirror block of `flip`), with every neighbour whose effect
+ * outset reaches into it composited cyclically so the cell repeats
+ * seamlessly. The cell and its draw work are admitted against the shared
+ * per-surface axis/pixel ceilings and the per-picture effect work ceiling
+ * before allocation; the bitmap is then retained under the shared
+ * decoded-surface cache (weighted LRU, decode slots, render-pass lease,
+ * aggregate byte ceiling), keyed by the decoded source variant, and the
+ * scratch surface is released once baked. */
+async function drawingMLTileCell(
+  descriptor: DeepReadonly<ImagePaintResourceDescriptor>,
+  source: DecodedImage,
+  fetchImage: DocxFetchImage,
+): Promise<ImageBitmap | null> {
+  const geometry = drawingMLTileGeometry(descriptor, source);
+  if (!geometry?.needsCell) return null;
+  const tilesX = geometry.flipX ? 2 : 1;
+  const tilesY = geometry.flipY ? 2 : 1;
+  const cellWidth = geometry.tileWidthPx * tilesX;
+  const cellHeight = geometry.tileHeightPx * tilesY;
+  const pixels = cellWidth * cellHeight;
+  if (cellWidth > MAX_RASTER_DIMENSION || cellHeight > MAX_RASTER_DIMENSION || pixels > MAX_RASTER_PIXELS) {
+    throw new OoxmlDecodedImageLimitError('image-pixels', MAX_RASTER_PIXELS, pixels);
+  }
+  const draws = (tilesX + 2 * geometry.padX) * (tilesY + 2 * geometry.padY);
+  const work = draws * pixels;
+  if (!Number.isSafeInteger(work) || work > MAX_IMAGE_EFFECT_PIXEL_WORK) {
+    throw new OoxmlDecodedImageLimitError('image-effect-work', MAX_IMAGE_EFFECT_PIXEL_WORK,
+      Number.isSafeInteger(work) ? work : Number.MAX_SAFE_INTEGER);
+  }
+  const scaleX = geometry.tileWidthPx / geometry.windowWidth;
+  const scaleY = geometry.tileHeightPx / geometry.windowHeight;
+  const epoch = captureDecodedBitmapCacheEpoch(fetchImage, DOCX_TILE_CELL_CACHE_NAMESPACE);
+  return getCachedDerivedBitmap(
+    DOCX_TILE_CELL_CACHE_NAMESPACE,
+    `${drawingMLTileCellKey(descriptor)}|src:${sourceIdentity(source)}:${geometry.naturalWidth}x${geometry.naturalHeight}`,
+    fetchImage,
+    async () => {
+      const canvas = createAuxCanvas(cellWidth, cellHeight);
+      const context = canvas?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
+      if (!canvas || !context) throw new Error('2D canvas is unavailable for a picture tile cell');
+      try {
+        for (let row = -geometry.padY; row < tilesY + geometry.padY; row++) {
+          for (let column = -geometry.padX; column < tilesX + geometry.padX; column++) {
+            // The first period is unmirrored; neighbours alternate by parity.
+            const mirrorX = geometry.flipX && ((column % 2) + 2) % 2 === 1;
+            const mirrorY = geometry.flipY && ((row % 2) + 2) % 2 === 1;
+            context.save();
+            context.translate(
+              (column + (mirrorX ? 1 : 0)) * geometry.tileWidthPx,
+              (row + (mirrorY ? 1 : 0)) * geometry.tileHeightPx,
+            );
+            context.scale(mirrorX ? -1 : 1, mirrorY ? -1 : 1);
+            if (geometry.cropped) {
+              context.drawImage(source, geometry.windowX, geometry.windowY,
+                geometry.windowWidth, geometry.windowHeight, 0, 0, geometry.tileWidthPx, geometry.tileHeightPx);
+            } else {
+              // The whole effect surface, its authored frame on the period.
+              context.drawImage(source, -geometry.windowX * scaleX, -geometry.windowY * scaleY,
+                geometry.naturalWidth * scaleX, geometry.naturalHeight * scaleY);
+            }
+            context.restore();
+          }
+        }
+        return { bitmap: await createImageBitmap(canvas as unknown as ImageBitmapSource), owned: true };
+      } finally {
+        canvas.width = 1;
+        canvas.height = 1;
+      }
+    },
+    epoch,
+  );
 }
 
 function applyExactColorReplacement(data: ImageData, colorHex: string): void {
@@ -273,6 +461,7 @@ function imageDecodeRequests(
   descriptors: readonly DeepReadonly<PaintResourceDescriptor>[],
   rasterPaintOccurrences: readonly DeepReadonly<RasterPaintOccurrence>[],
   devicePixelsPerPoint?: number,
+  embeddedDpi: ReadonlyMap<string, BlipDpi> = new Map(),
 ): ImageDecodeRequest[] {
   const requests = new Map<string, ImageDecodeRequest>();
   const naturalSizeChartKeys = new Set<string>();
@@ -307,6 +496,13 @@ function imageDecodeRequests(
     // frame: the srcRect window stretched over the (fillRect-inset) extent.
     // A tiled fill instead samples its source at the fill DPI (§20.1.8.58).
     const tileDpi = image.blipEffects?.length ? image.effectHost?.tileDpi : undefined;
+    // §20.1.8.14: without an authored DPI the blip's own resolution samples
+    // a tiled chain's physical effects.
+    const sampledDpi = tileDpi === undefined
+      ? undefined
+      : image.tile && image.blipDpi === undefined
+        ? embeddedDpi.get(image.resourceKey) ?? { x: tileDpi, y: tileDpi }
+        : { x: tileDpi, y: tileDpi };
     const raster = tileDpi !== undefined
       ? { widthPt: 0, heightPt: 0 }
       : image.blipEffects?.length
@@ -329,7 +525,7 @@ function imageDecodeRequests(
           ...(image.effectHost
             ? { hostRotation: image.effectHost.rotation, hostFlipH: image.effectHost.flipH, hostFlipV: image.effectHost.flipV }
             : { hostRotation: image.rotation, hostFlipH: image.flipH, hostFlipV: image.flipV }),
-          ...(tileDpi === undefined ? {} : { emuPerPixelX: 914400 / tileDpi, emuPerPixelY: 914400 / tileDpi }),
+          ...(sampledDpi === undefined ? {} : { emuPerPixelX: 914400 / sampledDpi.x, emuPerPixelY: 914400 / sampledDpi.y }),
         } } : {}),
       ...(image.vmlStrokePattern === undefined ? {} : { vmlStrokePattern: image.vmlStrokePattern as Duotone }),
       widthPt: raster.widthPt,
@@ -348,9 +544,10 @@ function imageDecodeRequests(
       request.targetHeightPx = target.height;
     }
     const key = requestKey(request);
-    // VML image brushes use native pixel dimensions for size/aspect. Preserve
-    // the source grid even when another occurrence shares this decoded image.
-    if (image.vmlFill) naturalSizeChartKeys.add(key);
+    // VML image brushes and §20.1.8.58 DrawingML tiles take their size from
+    // the native pixel dimensions. Preserve the source grid even when another
+    // occurrence shares this decoded image.
+    if (image.vmlFill || image.tile) naturalSizeChartKeys.add(key);
     const existing = requests.get(key);
     if (!existing) {
       requests.set(key, request);
@@ -485,10 +682,26 @@ export async function preloadPaintImages(
         workerDecoder: svgDecoder,
       })
     : getCachedSvgImageByPath(path, fetchImage);
+  // §20.1.8.14: a tile without a positive authored `blipFill@dpi` uses the
+  // DPI declared by the blip's own header (read from the cached source).
+  const demanded = new Set(rasterPaintOccurrences.map((occurrence) => occurrence.resourceKey));
+  const embeddedDpi = new Map<string, BlipDpi>();
+  await Promise.all(descriptors.map(async (descriptor) => {
+    if ((descriptor.kind !== 'image' && descriptor.kind !== 'picture-bullet') || !descriptor.tile
+      || descriptor.blipDpi !== undefined || !demanded.has(descriptor.resourceKey)) return;
+    const inspection = await inspectCachedRasterSource(descriptor.partPath, descriptor.mimeType, fetchImage)
+      .catch((error: unknown) => {
+        if (error instanceof OoxmlResourceLimitError || isOoxmlDecodedImageLimitError(error)) throw error;
+        return null;
+      });
+    const resolution = inspection?.resolution;
+    if (resolution) embeddedDpi.set(descriptor.resourceKey, { x: resolution.dpiX, y: resolution.dpiY });
+  }));
   const requests = imageDecodeRequests(
     descriptors,
     rasterPaintOccurrences,
     devicePixelsPerPoint,
+    embeddedDpi,
   );
   const demands = (await Promise.all(requests.map(async (request) => {
     if (!request.targetWidthPx || !request.targetHeightPx) return null;
@@ -618,6 +831,19 @@ export async function preloadPaintImages(
   const decoded = new Map<string, DecodedPaintImage>();
   for (const entry of entries) {
     if (entry) decoded.set(entry[0], entry[1]);
+  }
+  // §20.1.8.58 brushes derive from the decoded sources above: record the
+  // blip's declared DPI on the decoded surface and compose any cell.
+  for (const descriptor of descriptors) {
+    if ((descriptor.kind !== 'image' && descriptor.kind !== 'picture-bullet') || !descriptor.tile) continue;
+    const source = decoded.get(paintImageDecodeKey(descriptor));
+    if (!source || isOptionalImageCodecUnavailableError(source, 'tiff')) continue;
+    const dpi = embeddedDpi.get(descriptor.resourceKey);
+    if (dpi) embeddedTileDpi.set(source, dpi);
+    const key = drawingMLTileCellKey(descriptor);
+    if (decoded.has(key)) continue;
+    const cell = await drawingMLTileCell(descriptor, source as DecodedImage, fetchImage);
+    if (cell) decoded.set(key, cell);
   }
   return decoded;
 }

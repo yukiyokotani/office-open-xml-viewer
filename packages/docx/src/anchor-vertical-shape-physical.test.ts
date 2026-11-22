@@ -51,7 +51,7 @@ const verticalState = {
     marginRight: MARGIN,
     marginTop: MARGIN,
     marginBottom: MARGIN,
-    physicalPageWidthPt: PHYS_W,
+    writingMode: 'vertical-rl',
   },
 } as unknown as AnchorFloatRegistrationState;
 

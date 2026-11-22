@@ -211,10 +211,13 @@ export type DrawingPaintCommand =
  * owner section's physical page. `upright-physical` cancels the clockwise
  * vertical frame (local quarter turn counter-clockwise);
  * `upright-physical-counter-clockwise` cancels a native counter-clockwise
- * (`sideways-lr`) frame (local quarter turn clockwise). */
+ * (`sideways-lr`) frame (local quarter turn clockwise);
+ * `upright-physical-transposed` cancels the vertical-lr reflection of a
+ * graphic placed directly in that frame (local transpose). */
 export type UprightResourceOrientation =
   | 'upright-physical'
-  | 'upright-physical-counter-clockwise';
+  | 'upright-physical-counter-clockwise'
+  | 'upright-physical-transposed';
 
 export interface DrawingLayout extends LayoutNodeBase {
   readonly kind: 'drawing';
@@ -538,6 +541,13 @@ export type ImagePaintResourceDescriptor = Readonly<{
   /** Part 4 §19.1.2.21: clr1 replaces black, clr2 replaces coloured pixels. */
   vmlStrokePattern?: DeepReadonly<Duotone>;
   vmlFill?: DeepReadonly<Extract<import('../types.js').ShapeFill, { fillType: 'image' }>['vml']>;
+  /** ECMA-376 §20.1.8.58 DrawingML tile of a shape picture fill, resolved
+   * with the decoded image into a repeating brush registered against the
+   * painted bounds (independent of `intrinsicSize`). */
+  tile?: DeepReadonly<import('@silurus/ooxml-core').TileInfo>;
+  /** ECMA-376 §20.1.8.14 authored positive `blipFill@dpi`. Absent (and an
+   * authored 0) means the DPI declared by the blip itself. */
+  blipDpi?: number;
   blipEffects?: DeepReadonly<import('@silurus/ooxml-core').BlipEffect[]>;
   /** Host shape orientation for CT_Blip effects on a shape blip fill
    * (§20.1.8.45/.49 rotWithShape): the fill paints inside the rotated shape,
@@ -590,6 +600,15 @@ export interface ResourcePlacement {
    * is rotated into a vertical physical page. Absent means flow-relative. */
   readonly orientation?: UprightResourceOrientation;
   readonly bounds: LayoutRect;
+  /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: top and bottom of the owning line
+   * box relative to `bounds.yPt`; paint clips the resource to that horizontal
+   * band (not horizontally). Relative, so translating `bounds` moves it. */
+  readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
+  /** Clockwise turn (degrees) the resource paints with about the centre of
+   * `bounds` (its a:xfrm rot). `bounds` stays the authored paint box; hit
+   * testing and element bounds use its turned, line-clipped outline
+   * (`resourcePlacementOutline` in resource-outline.ts). */
+  readonly rotationDeg?: number;
   readonly advancePt: number;
 }
 
@@ -608,6 +627,10 @@ export interface DrawingPlacement {
   readonly range: TextRange;
   readonly drawingId: LayoutNodeId;
   readonly bounds: LayoutRect;
+  /** An unavailable picture's placeholder clipped to its line like the
+   * picture (ResourcePlacement.lineClip): top and bottom of the line box
+   * relative to `bounds.yPt`. */
+  readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
   readonly advancePt: number;
 }
 
@@ -640,6 +663,12 @@ export interface LineLayout {
    * (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: a producer's proportional extra
    * space below the natural line). Placement and paint keep the full advance. */
   readonly pageEdgeOverhangPt?: number;
+  /** Width that justification (ECMA-376 §17.18.44 both/distribute, the
+   * kashida types, thaiDistribute) added to the line beyond its natural
+   * advances and seams; the natural automatic East Asian gaps stay natural.
+   * Absent when nothing was added (a compressed line records nothing). Read
+   * only to recover a line's natural length, never by placement or paint. */
+  readonly justificationExpansionPt?: number;
   readonly placements: readonly ParagraphPlacement[];
   /** §17.18.84 bar-tab vertical rules acquired independently of tab advances. */
   readonly barTabRules?: readonly BorderSegment[];
@@ -746,6 +775,14 @@ export interface ParagraphSpacingLayout {
 
 export interface ParagraphLayout extends LayoutNodeBase {
   readonly kind: 'paragraph';
+  /** Set on a paragraph painted through a vertical-lr (tbLrV) section frame.
+   * That frame is a reflection (physical x = logical y), so each line's
+   * content is reflected across its own block band (bounds.yPt …
+   * bounds.yPt + bounds.heightPt) before the frame applies: glyphs, inline
+   * objects, decorations, ruby and emphasis then keep the arrangement of a
+   * tbRl line strip while the strips advance left to right
+   * (`word-section-tblrv-line-strip`). */
+  readonly lineFrame?: 'block-reflected';
   /** Source `w14:paraId`; identity only, never interpreted by layout or paint. */
   readonly paragraphId?: string;
   readonly styleId?: string | null;
@@ -757,6 +794,10 @@ export interface ParagraphLayout extends LayoutNodeBase {
   readonly bookmarkStarts?: readonly string[];
   readonly spacing: ParagraphSpacingLayout;
   readonly contextualSpacing: boolean;
+  /** Present when the paragraph was acquired under a document whose spacing
+   * adds instead of folding to the maximum (WORD_FIXED_PARAGRAPH_SPACING_ADDITIVE_GAP),
+   * so retained folds such as table cells need no compatibility profile. */
+  readonly additiveParagraphGap?: true;
   readonly lines: readonly LineLayout[];
   /** Note-flow acquisition retains source boundaries so another column can
    * shape the unconsumed suffix at its own width through the same paragraph engine. */
@@ -1226,6 +1267,20 @@ export interface PageBorderLayout {
   readonly segments: readonly BorderSegment[];
 }
 
+/** ECMA-376 §17.2.1 document background of one page, in physical page
+ * points. `color` is the page surface colour: whoever owns the page surface
+ * paints it once in place of the default white page fill (same geometry, so
+ * a white background is pixel-identical to no background). `commands` are the
+ * full-page background shape fills replayed above it, before every other page
+ * layer. */
+export interface PageBackgroundLayout {
+  readonly color: string | null;
+  readonly commands: readonly Extract<
+    DrawingPaintCommand,
+    { kind: 'drawingml-shape' | 'drawingml-image-fill' }
+  >[];
+}
+
 /** Physical page-space ink fixed during layout for ECMA-376 §17.6.4
  * `w:cols/@w:sep`. Paint may snap the retained endpoints to device pixels,
  * but it must not recover section-band geometry. */
@@ -1246,6 +1301,8 @@ export interface LayoutPage {
   readonly sectionRegions: readonly PageSectionRegion[];
   readonly columnSeparators: readonly ColumnSeparatorLayout[];
   readonly pageBorder: PageBorderLayout | null;
+  /** §17.2.1 document background; absent when none is displayed. */
+  readonly pageBackground?: PageBackgroundLayout;
   readonly layers: PageLayers;
   readonly readingOrder: readonly LayoutNodeId[];
   /** ECMA-376 §17.13.5 markup view only: one margin bar per line containing
@@ -1319,6 +1376,8 @@ export interface ParagraphLayoutInput {
 
 export interface AcquiredParagraphLayoutInput {
   readonly kind: 'paragraph';
+  /** See {@link ParagraphLayout.lineFrame}. */
+  readonly lineFrame?: 'block-reflected';
   readonly id: LayoutNodeId;
   readonly source: SourceRef;
   /** Source `w14:paraId`; retained for text-run projection. */
@@ -1332,6 +1391,7 @@ export interface AcquiredParagraphLayoutInput {
   readonly clipBounds?: LayoutRect;
   readonly spacing: ParagraphSpacingLayout;
   readonly contextualSpacing?: boolean;
+  readonly additiveParagraphGap?: true;
   readonly lines: readonly LineLayout[];
   readonly borders: readonly BorderSegment[];
   readonly shading?: FillPaint;
@@ -1379,8 +1439,9 @@ export interface TableCellBlockInput {
   readonly widowControl?: boolean;
   /** True when destination-page context can change the acquired child geometry. */
   readonly pageDependent?: boolean;
-  /** The required empty paragraph after a nested table owns no row-height ink. */
-  readonly structuralTrailing?: boolean;
+  /** The paragraph owns no cell flow: no row-height ink, no spacing and no
+   * paragraph neighbourhood (table-cell-blocks.ts cellParagraphOwnsNoFlow). */
+  readonly ownsNoCellFlow?: boolean;
 }
 
 export type TablePreferredWidthConstraint = Readonly<{
@@ -1548,6 +1609,12 @@ export interface TableCellLayoutInput {
     tr2bl: TableBorderInput | null;
   }>;
   readonly blocks: readonly TableCellBlockInput[];
+  /** LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP: set only on the cells of a
+   * recovered fragment. A layoutInCell containment interval whose own extent
+   * exceeds it shapes neither the fragment's admission nor this cell's flow
+   * (no row growth, no downward text offset); its drawing keeps its position
+   * and is clipped with the fragment. */
+  readonly recoveryContainmentLimitPt?: number;
   /** ECMA-376 §17.4.72 rotated cell text. Blocks were acquired with
    * `lineLengthPt` as their line width; the cell requires
    * `requiredLineLengthPt` of physical content height. */

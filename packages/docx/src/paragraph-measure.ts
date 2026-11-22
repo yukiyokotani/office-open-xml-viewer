@@ -34,6 +34,7 @@ import {
   wordJustifiedLineFit,
   wordUnmarkedArabicKashidaChargesSourceSpace,
   wordInlineDrawingRunLeadingApplies,
+  isInlineDrawingRun,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -97,6 +98,10 @@ export interface MeasuredParagraph {
   /** LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: the empty mark line's
    * proportional extra space below its natural line. */
   readonly markPageEdgeOverhangPt?: number;
+  /** WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION: an off-grid empty mark's
+   * automatic-multiple extra space below its single line, which may hang
+   * below the page bottom. */
+  readonly markMultipleLeadingPt?: number;
   /** Selected empty-mark wrap gap, retained for measurement-free shading. */
   readonly markWrapBounds?: { readonly xPt: number; readonly yPt: number; readonly widthPt: number; readonly heightPt: number };
   /** An empty numbered item whose marker leading edge a float moved: that
@@ -195,8 +200,9 @@ export function measureParagraph(
   // boundary: a 16pt East Asian mark on an 18pt grid occupies two cells even
   // when the document contains no literal CJK code point.
   // Keep that compatibility projection inside the active line grid. Part 4
-  // §14.8.3.50 does not select an East Asian font for an otherwise Latin mark;
-  // §17.3.2.26's explicit mark hint remains authoritative without a grid.
+  // §14.8.3.50 does not select an East Asian font for an otherwise Latin mark,
+  // and WORD_EMPTY_MARK_ASCII_FACE measures the empty mark with its ascii face
+  // whatever its hint (paragraphMarkLineMetrics).
   // Windows Word controls with useFELayout and no grid retain the Latin
   // single-line box (Times New Roman 10pt footnote separators; Ubuntu 12pt
   // body marks and footnote/endnote separators),
@@ -255,7 +261,9 @@ export function measureParagraph(
     if (spacing?.rule === 'atLeast') return Math.min(advancePt, descentPt);
     return Math.max(0, advancePt - ascentPt);
   };
-  const measureMarkOnly = (): MeasuredParagraph => {
+  // `emptyMark`: the paragraph has no content at all. A mark line that only
+  // carries wrap-float anchors is not an empty paragraph mark.
+  const measureMarkOnly = (emptyMark: boolean): MeasuredParagraph => {
     let markTopPt = cursorPt;
     const markMetrics = paragraphMarkLineMetrics(
       paragraph,
@@ -271,6 +279,7 @@ export function measureParagraph(
       environment.paragraphMarkShapeInput,
       compat.useFeLayout,
       firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
+      emptyMark,
     );
     const markAdvancePt = markMetrics.advancePx;
     let markWrapBounds: MeasuredParagraph['markWrapBounds'];
@@ -352,6 +361,13 @@ export function measureParagraph(
         ? { markPageEdgeOverhangPt: Math.max(0, markAdvancePt - Math.max(
           markMetrics.ascentPx + markMetrics.descentPx, markMetrics.intendedSinglePx)) }
         : {}),
+      // WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION: an automatic multiple's
+      // extra space below the mark's single line, off the grid.
+      ...(environment.layoutServices?.text.libreOfficeLineBoxes !== true && !context.lineGrid.active
+        && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
+        ? { markMultipleLeadingPt: Math.max(0, markAdvancePt - Math.max(
+          markMetrics.ascentPx + markMetrics.descentPx, markMetrics.intendedSinglePx)) }
+        : {}),
       placement: recordedPlacement,
     };
   };
@@ -367,7 +383,7 @@ export function measureParagraph(
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
-  if (segments.length === 0) return measureMarkOnly();
+  if (segments.length === 0) return measureMarkOnly(true);
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in
@@ -404,8 +420,8 @@ export function measureParagraph(
       if (!('imagePath' in segment) || segment.inlinePicture !== true) continue;
       const run = segment.sourceRunIndex === undefined
         ? undefined : paragraph.runs[segment.sourceRunIndex];
-      const objectRun = run && (run.type === 'shape' || run.type === 'image')
-        ? run as ParagraphShapeRun | ParagraphImageRun
+      const objectRun = run && (run.type === 'shape' || run.type === 'image' || run.type === 'unavailableDrawing')
+        ? run as Pick<ParagraphShapeRun | ParagraphImageRun, 'inlineObjectShapeInput'>
         : undefined;
       const shapeInput = useRunFont ? objectRun?.inlineObjectShapeInput : undefined;
       const measureSingle = () => paragraphMarkLineMetrics(
@@ -431,13 +447,16 @@ export function measureParagraph(
     && environment.verticalCJK !== true && environment.verticalPageFrame !== true
     && !context.lineGrid.active && !context.characterGrid.active && !context.baseRtl
     && !context.hasRuby) {
-    const boxOnly = paragraph.runs.every(run => (run.type === 'image' && !run.anchor)
-      || (run.type === 'shape' && run.inline === true));
+    const boxOnly = paragraph.runs.every(isInlineDrawingRun);
     for (const segment of segments) {
       if (!('imagePath' in segment) || !segment.inlinePicture || segment.sourceRunIndex === undefined) continue;
       const sourceRun = paragraph.runs[segment.sourceRunIndex];
-      const run = sourceRun as ParagraphShapeRun | ParagraphImageRun | undefined;
-      if (!run || (run.type !== 'shape' && run.type !== 'image') || !run.inlineObjectShapeInput) continue;
+      // An inline picture placeholder carries its picture's facts.
+      const run = sourceRun as Pick<ParagraphShapeRun | ParagraphImageRun, 'type' | 'inlineObjectShapeInput'
+        | 'inlineObjectOrigin'> | { readonly type: 'unavailableDrawing'; readonly inlineObjectShapeInput?:
+        NumberingMarkerShapeInput; readonly inlineObjectOrigin?: 'drawingml' } | undefined;
+      if (!run || (run.type !== 'shape' && run.type !== 'image' && run.type !== 'unavailableDrawing')
+        || !run.inlineObjectShapeInput) continue;
       if (run.inlineObjectOrigin !== 'drawingml' && !(run.inlineObjectOrigin === 'vmlStaticTextbox' && boxOnly)) continue;
       const minimum = paragraphMarkLineMetrics(paragraph, 1, undefined, false, markUsesEastAsianGrid,
         measurer.context, fontFamilyClasses, null, environment.resolvedLocalFonts,
@@ -715,7 +734,7 @@ export function measureParagraph(
     },
     context.lineEdgeRules,
   );
-  if (lines.length === 0) return measureMarkOnly();
+  if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
   const measuredLines: MeasuredLine[] = [];

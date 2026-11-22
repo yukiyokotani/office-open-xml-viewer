@@ -3,8 +3,8 @@
 // consistently support them. Keep this compatibility codec deliberately
 // tag-defined: classic TIFF, first IFD, stripped top-left chunky pixels, the
 // baseline bilevel/grayscale/RGB/process-CMYK classes listed below, stored
-// uncompressed or LZW-compressed (optionally with the horizontal differencing
-// predictor), plus CCITT Group 4 bilevel images.
+// uncompressed, PackBits-compressed or LZW-compressed (LZW optionally with the
+// horizontal differencing predictor), plus CCITT Group 4 bilevel images.
 
 import {
   MAX_RASTER_DIMENSION,
@@ -306,6 +306,7 @@ type ChunkyLayout = Exclude<PixelLayout, { kind: 'group4' }>;
 const COMPRESSION_NONE = 1;
 const COMPRESSION_CCITT_GROUP4 = 4;
 const COMPRESSION_LZW = 5;
+const COMPRESSION_PACKBITS = 32773;
 
 interface ParsedTiff {
   directory: Directory;
@@ -378,6 +379,7 @@ function parseLayout(directory: Directory, width: number): { compression: number
     compression !== COMPRESSION_NONE
     && compression !== COMPRESSION_CCITT_GROUP4
     && compression !== COMPRESSION_LZW
+    && compression !== COMPRESSION_PACKBITS
   ) {
     fail(`Unsupported TIFF compression: ${compression}`);
   }
@@ -686,12 +688,12 @@ function uncompressedRowReader(parsed: ParsedTiff, layout: ChunkyLayout): Source
 }
 
 /**
- * Pixels decoded per LZW span. A multiple of 8 keeps 1-bit spans byte-aligned.
+ * Pixels decoded per compressed span. A multiple of 8 keeps 1-bit spans byte-aligned.
  * The span buffer (at most 4 bytes per pixel) bounds decode memory
  * independently of the source width, which may far exceed the retained width
  * when a compact strip is downsampled.
  */
-const LZW_SPAN_PIXELS = 4096;
+const COMPRESSED_SPAN_PIXELS = 4096;
 
 /** Bytes holding `pixels` consecutive pixels from a byte-aligned row start. */
 function spanBytes(layout: ChunkyLayout, pixels: number): number {
@@ -707,20 +709,25 @@ function spanBytes(layout: ChunkyLayout, pixels: number): number {
   }
 }
 
+/** A per-strip byte-stream decompressor (TIFF 6.0 §9 PackBits, §13 LZW). */
+interface StripByteDecoder {
+  beginStrip(byteOffset: number, byteLength: number): void;
+  /** Fill `bytes` completely with the next decoded bytes of the active strip. */
+  fill(bytes: Uint8Array): void;
+  finishStrip(): void;
+}
+
 /**
- * Decode LZW strips span by span into one reusable buffer, so memory stays
- * one span plus the fixed 4096-entry code table instead of a decompressed
+ * Decode compressed strips span by span into one reusable buffer, so memory
+ * stays one span plus the decoder's fixed state instead of a decompressed
  * row, strip or frame.
  */
-function lzwRowReader(parsed: ParsedTiff, layout: ChunkyLayout): SourceRowReader {
-  // Library work policy derived from the source-pixel envelope: at most four
-  // decoded bytes per pixel (including byte-padded bilevel rows). Data codes
-  // cannot outnumber decoded bytes; allow even one clear per data code plus
-  // an initial clear and EOI per strip. Expansion + reads thus fit 3B + 2S,
-  // bounded by 14 * MAX_RASTER_SOURCE_PIXELS, without a compressed-size gate.
-  const workLimit = 3 * layout.bytesPerRow * parsed.height + 2 * parsed.stripCount;
-  const decoder = new TiffLzwDecoder(parsed.directory.reader.bytes, workLimit);
-  const spanPixels = Math.min(parsed.width, LZW_SPAN_PIXELS);
+function compressedRowReader(
+  parsed: ParsedTiff,
+  layout: ChunkyLayout,
+  decoder: StripByteDecoder,
+): SourceRowReader {
+  const spanPixels = Math.min(parsed.width, COMPRESSED_SPAN_PIXELS);
   const buffer = new Uint8Array(spanBytes(layout, spanPixels));
   const stride = parsed.differencingStride;
   const previousPixel = new Uint8Array(4);
@@ -728,11 +735,11 @@ function lzwRowReader(parsed: ParsedTiff, layout: ChunkyLayout): SourceRowReader
   let activeStrip = -1;
   let nextSourceY = 0;
   return (sourceY, visit) => {
-    if (sourceY !== nextSourceY) fail('Internal TIFF LZW row sequence failure');
+    if (sourceY !== nextSourceY) fail('Internal TIFF compressed row sequence failure');
     nextSourceY++;
     const strip = Math.floor(sourceY / parsed.rowsPerStrip);
     if (strip !== activeStrip) {
-      // TIFF 6.0 §13: every strip is compressed independently.
+      // TIFF 6.0 §9 and §13: every strip is compressed independently.
       decoder.beginStrip(parsed.stripOffsets.at(strip), parsed.stripByteCounts.at(strip));
       activeStrip = strip;
     }
@@ -754,6 +761,35 @@ function lzwRowReader(parsed: ParsedTiff, layout: ChunkyLayout): SourceRowReader
       decoder.finishStrip();
     }
   };
+}
+
+function lzwRowReader(parsed: ParsedTiff, layout: ChunkyLayout): SourceRowReader {
+  // Library work policy derived from the source-pixel envelope: at most four
+  // decoded bytes per pixel (including byte-padded bilevel rows). Data codes
+  // cannot outnumber decoded bytes; allow even one clear per data code plus
+  // an initial clear and EOI per strip. Expansion + reads thus fit 3B + 2S,
+  // bounded by 14 * MAX_RASTER_SOURCE_PIXELS, without a compressed-size gate.
+  const workLimit = 3 * layout.bytesPerRow * parsed.height + 2 * parsed.stripCount;
+  return compressedRowReader(
+    parsed,
+    layout,
+    new TiffLzwDecoder(parsed.directory.reader.bytes, workLimit),
+  );
+}
+
+function packBitsRowReader(parsed: ParsedTiff, layout: ChunkyLayout): SourceRowReader {
+  // Library work policy derived from the source-pixel envelope: every literal
+  // or replicate header yields at least one decoded byte, so data headers
+  // cannot outnumber the B decoded bytes. Strips may share byte ranges, so the
+  // otherwise legal no-op header (-128) is charged too, with an allowance of
+  // another B headers, bounded by 8 * MAX_RASTER_SOURCE_PIXELS, without a
+  // compressed-size gate.
+  const workLimit = 2 * layout.bytesPerRow * parsed.height;
+  return compressedRowReader(
+    parsed,
+    layout,
+    new TiffPackBitsDecoder(parsed.directory.reader.bytes, workLimit),
+  );
 }
 
 /**
@@ -781,9 +817,14 @@ function undoHorizontalDifferencing(
 }
 
 function chunkyRowReader(parsed: ParsedTiff, layout: ChunkyLayout): SourceRowReader {
-  return parsed.compression === COMPRESSION_LZW
-    ? lzwRowReader(parsed, layout)
-    : uncompressedRowReader(parsed, layout);
+  switch (parsed.compression) {
+    case COMPRESSION_LZW:
+      return lzwRowReader(parsed, layout);
+    case COMPRESSION_PACKBITS:
+      return packBitsRowReader(parsed, layout);
+    default:
+      return uncompressedRowReader(parsed, layout);
+  }
 }
 
 function decodeChunkyExact(
@@ -998,7 +1039,7 @@ function decodeChunkyArea(
 ): void {
   const readRow = chunkyRowReader(parsed, parsed.layout as ChunkyLayout);
   // The target never upscales, so one source row overlaps at most two
-  // consecutive output rows. Rows are visited once (LZW spans cannot be
+  // consecutive output rows. Rows are visited once (compressed spans cannot be
   // replayed), so each in-flight output row keeps its own accumulator.
   const accumulators = [
     new Float64Array(plan.width * 4),
@@ -1079,7 +1120,7 @@ const LZW_TABLE_SIZE = 1 << LZW_MAX_CODE_WIDTH;
  * length), so expansion costs one write per output byte. Code reads and
  * expansion bytes share an image-wide budget, including strip finalization.
  */
-class TiffLzwDecoder {
+class TiffLzwDecoder implements StripByteDecoder {
   private readonly prefix = new Uint16Array(LZW_TABLE_SIZE);
   private readonly suffix = new Uint8Array(LZW_TABLE_SIZE);
   private readonly first = new Uint8Array(LZW_TABLE_SIZE);
@@ -1205,6 +1246,86 @@ class TiffLzwDecoder {
     }
     this.pendingStart = 0;
     this.pendingEnd = length;
+  }
+}
+
+/**
+ * TIFF 6.0 §9 PackBits decoder for one strip at a time. Each header byte n,
+ * read as a signed 8-bit value, introduces
+ * - 0..127: a literal run of the next n + 1 bytes;
+ * - -127..-1: a replicate run of the next byte, repeated -n + 1 times;
+ * - -128: no operation.
+ *
+ * §9 asks writers to pack each row separately. A run that continues into the
+ * next row of the same strip decodes to the same bytes either way, stays
+ * within the strip's validated range and is decoded as a byte stream, like
+ * LZW. Fail closed instead when a header or literal needs bytes past the strip
+ * byte count (truncation), or a run continues past the strip's declared rows
+ * (overrun). Unread bytes after the strip's final run are padding.
+ */
+class TiffPackBitsDecoder implements StripByteDecoder {
+  private cursor = 0;
+  private end = 0;
+  /** Literal bytes still to copy from `cursor`, already range-checked. */
+  private literal = 0;
+  private repeat = 0;
+  private repeatByte = 0;
+  private work = 0;
+
+  constructor(
+    private readonly bytes: Uint8Array,
+    private readonly workLimit: number,
+  ) {}
+
+  beginStrip(byteOffset: number, byteLength: number): void {
+    this.cursor = byteOffset;
+    this.end = byteOffset + byteLength;
+    this.literal = 0;
+    this.repeat = 0;
+  }
+
+  fill(row: Uint8Array): void {
+    let written = 0;
+    while (written < row.length) {
+      if (this.literal > 0) {
+        const count = Math.min(this.literal, row.length - written);
+        row.set(this.bytes.subarray(this.cursor, this.cursor + count), written);
+        this.cursor += count;
+        this.literal -= count;
+        written += count;
+      } else if (this.repeat > 0) {
+        const count = Math.min(this.repeat, row.length - written);
+        row.fill(this.repeatByte, written, written + count);
+        this.repeat -= count;
+        written += count;
+      } else {
+        this.readHeader();
+      }
+    }
+  }
+
+  finishStrip(): void {
+    if (this.literal > 0 || this.repeat > 0) {
+      fail('TIFF PackBits run exceeds its declared rows');
+    }
+  }
+
+  private readHeader(): void {
+    if (this.cursor >= this.end) fail('TIFF PackBits data is truncated');
+    const header = this.bytes[this.cursor++];
+    this.work++;
+    if (this.work > this.workLimit) {
+      throw new OoxmlDecodedImageLimitError('tiff-packbits-work', this.workLimit, this.work);
+    }
+    if (header < 128) {
+      const count = header + 1;
+      if (count > this.end - this.cursor) fail('TIFF PackBits data is truncated');
+      this.literal = count;
+    } else if (header > 128) {
+      if (this.cursor >= this.end) fail('TIFF PackBits data is truncated');
+      this.repeatByte = this.bytes[this.cursor++];
+      this.repeat = 257 - header;
+    }
   }
 }
 
