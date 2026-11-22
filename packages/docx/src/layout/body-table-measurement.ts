@@ -670,6 +670,16 @@ type UprightRunPlan =
  * combined acquisition is made once (combinedAdjacentGroupAcquisition). */
 const uprightGroupInputsBySession = new WeakMap<object, Map<number, AdjacentBodyTableRequest['input']>>();
 
+/** The logical tables acquired upright whose members are reusable across
+ * pages, by layout session and first body index, with the extents they were
+ * acquired for. */
+const uprightLogicalTablesBySession = new WeakMap<object, Map<number, Readonly<{
+  retained: RetainedTableAcquisition;
+  lastSourceIndex: number;
+  availableInlineExtentPt: number;
+  freshPageBlockExtentPt: number;
+}>>>();
+
 /**
  * The upright table that starts at body index `index` in a vertical section:
  * a single table, or the tables the parser grouped into one logical table
@@ -706,6 +716,16 @@ function uprightTableAcquisitionAt(
     operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, index);
     return { source, retained: retainedTableRecord(state, index).acquisition, lastSourceIndex: index };
   }
+  // A logical table continued over pages is asked for on each of them: one
+  // whose members hold nothing page-dependent is acquired once.
+  let logicalTables = uprightLogicalTablesBySession.get(context.sessionState);
+  if (!logicalTables) uprightLogicalTablesBySession.set(context.sessionState, logicalTables = new Map());
+  const reusable = logicalTables.get(index);
+  if (reusable && reusable.lastSourceIndex === lastIndex
+    && reusable.availableInlineExtentPt === request.availableInlineExtentPt
+    && reusable.freshPageBlockExtentPt === request.freshPageBlockExtentPt) {
+    return { source, retained: reusable.retained, lastSourceIndex: lastIndex };
+  }
   const members: Array<Readonly<{ table: typeof element; sourceIndex: number }>> = [];
   for (let at = index; at <= lastIndex; at += 1) {
     const table = body[at];
@@ -735,6 +755,21 @@ function uprightTableAcquisitionAt(
   const retained = combinedAdjacentGroupAcquisition(
     context, { ...request, input: groupInput } as AdjacentBodyTableRequest, operations, records,
   );
+  let reusableAcrossPages = true;
+  for (const member of members) {
+    if (!retainedTableRecord(state, member.sourceIndex).reusableAcrossPages) {
+      reusableAcrossPages = false;
+      break;
+    }
+  }
+  if (reusableAcrossPages) {
+    logicalTables.set(index, {
+      retained,
+      lastSourceIndex: lastIndex,
+      availableInlineExtentPt: request.availableInlineExtentPt,
+      freshPageBlockExtentPt: request.freshPageBlockExtentPt,
+    });
+  } else logicalTables.delete(index);
   return { source, retained, lastSourceIndex: lastIndex };
 }
 
@@ -881,8 +916,8 @@ function uprightRunMemberBlockStartPt(
  * the next page, where the tables after it follow its last rows
  * (`continuing`).
  *
- * Evidence boundary: the controls have tables of equal border rules; a run
- * whose tables differ in them is aligned by their boxes (library policy).
+ * Library policy: a run whose tables differ in their border rules is aligned
+ * by the tables' boxes.
  */
 function planUprightRun(
   context: BodyTableMeasurementContext,
@@ -972,9 +1007,13 @@ function planUprightRun(
   // Too tall for the inline extent below its start: a fresh page when
   // content precedes it, unless it continues the table before it.
   if (pageHasContent && !continuing) return Object.freeze({ kind: 'fresh-region', freshPage: true });
+  // The tables that fit whole, summed in body order. That sum and the run's
+  // recorded total are taken in different orders and can differ by rounding,
+  // so a run the total calls too tall can still fit to its last table here.
   let wholeCount = 0;
   let filledPt = 0;
-  while (filledPt + members[at + wholeCount]!.inlineExtentPt <= found.inlineRoomPt) {
+  while (at + wholeCount < members.length
+    && filledPt + members[at + wholeCount]!.inlineExtentPt <= found.inlineRoomPt) {
     filledPt += members[at + wholeCount]!.inlineExtentPt;
     wholeCount += 1;
   }
@@ -2622,8 +2661,17 @@ function measureUprightOwnerSegment(
     const local = ownerSegmentAcquisition(
       retained, segment, [], request.availableInlineExtentPt, services,
     );
-    if (gridWidthPt > request.availableBlockExtentPt
-      && request.availableBlockExtentPt < request.freshPageBlockExtentPt) {
+    // An ordinary segment of a vertical-rl or vertical-lr frame is fitted as
+    // an upright block table is: by its box, grid and border rules, from the
+    // last column of its page. A counter-clockwise flow fits its grid.
+    const tooWide = uprightBlockPaginates(physical)
+      ? uprightBlockTooWide(request, (() => {
+          const edges = uprightBlockEdgeOverhangsPt(local.layout, gridWidthPt, physical);
+          return edges.nearPt + gridWidthPt + edges.farPt;
+        })())
+      : gridWidthPt > request.availableBlockExtentPt
+        && request.availableBlockExtentPt < request.freshPageBlockExtentPt;
+    if (tooWide) {
       return Object.freeze({
         layout: local.layout,
         blockExtentPt: 0,

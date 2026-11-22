@@ -6746,10 +6746,11 @@ function paragraphAcquisitionKey(
     ],
     lineOnly ? null : JSON.stringify(options.exclusions),
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
-    // By the content of the page's table boxes, not the index object: a
-    // later pass that places the same tables reuses the acquisition.
+    // By the version of the page's table boxes, which stands for their
+    // content: a later pass that places the same tables reuses the
+    // acquisition.
     ...(lineOnly || !hasAnchoredPayload || !options.uprightTables ? [null, null] : [
-      options.uprightTables.index.tableBoxesKey,
+      options.uprightTables.index.tableBoxesVersion,
       options.uprightTables.beforeSourceIndex,
     ]),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,

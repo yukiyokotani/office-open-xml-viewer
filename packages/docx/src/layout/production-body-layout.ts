@@ -163,6 +163,7 @@ import {
   uprightBlockExclusionsAhead,
   type UprightBlockExclusion,
   type UprightBlockRegistration,
+  type UprightTableBoxVersions,
 } from './upright-block-index.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
@@ -2906,6 +2907,10 @@ function uprightBlockExclusionFloat(
   };
 }
 
+/** By layout services, which every pass of one layout execution shares and
+ * whose acquisition cache the versions key. */
+const uprightTableBoxVersionsByServices = new WeakMap<object, UprightTableBoxVersions>();
+
 /**
  * BodyLayoutSession.commitUprightBlocks. Upright blocks are kept beside the
  * float registry, not in it: a registration appends one box to the page's
@@ -2926,7 +2931,11 @@ function commitBodyUprightBlocks(
   for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
   if (registration.tail) {
     index.tail = registration.tail;
-    if (registration.box) addUprightTableBox(index, registration.tail.sourceIndex, registration.box);
+    if (registration.box) {
+      let versions = uprightTableBoxVersionsByServices.get(context.services);
+      if (!versions) uprightTableBoxVersionsByServices.set(context.services, versions = new Map());
+      addUprightTableBox(index, registration.tail.sourceIndex, registration.box, versions);
+    }
   }
 }
 

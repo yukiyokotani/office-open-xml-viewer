@@ -36,11 +36,11 @@ export interface UprightBlockPageIndex {
   readonly tableBuckets: Map<number, UprightTableBox[]>;
   /** Number of boxes in `tableBuckets`. */
   tableCount: number;
-  /** The boxes of `tableBuckets` written out in registration order: equal
-   * for two pages (or two layouts of one page) exactly when they hold the
-   * same boxes for the same tables, so a result that depends on them can be
-   * keyed by it across layouts. */
-  tableBoxesKey: string;
+  /** Identifies the boxes of `tableBuckets` in registration order: equal for
+   * two pages (or two layouts of one page) exactly when they hold the same
+   * boxes for the same tables, so a result that depends on them can be keyed
+   * by it across layouts (UprightTableBoxVersions). */
+  tableBoxesVersion: number;
   /** Text exclusions by `${block bucket}:${inline bucket}`. */
   readonly exclusionCells: Map<string, UprightBlockExclusionEntry[]>;
   /** Exclusions covering more cells than MAX_EXCLUSION_CELLS; every query reads them. */
@@ -113,7 +113,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     tail: null,
     tableBuckets: new Map(),
     tableCount: 0,
-    tableBoxesKey: '',
+    tableBoxesVersion: 0,
     exclusionCells: new Map(),
     wideExclusions: [],
     lastExclusionBucket: Number.NEGATIVE_INFINITY,
@@ -247,11 +247,24 @@ export function uprightBlockBoxesMet(
   return met.sort((left, right) => left.xPt - right.xPt);
 }
 
+/**
+ * Numbers the histories of placed table boxes of one layout execution. A
+ * history is its predecessor extended by one box, so each gets one number
+ * from one short key, and two histories have the same number exactly when
+ * they hold the same boxes in the same order. Zero is the empty history.
+ */
+export type UprightTableBoxVersions = Map<string, number>;
+
 /** The box of placed tables that end at body index `sourceIndex`. */
 export type UprightTableBox = Readonly<{ sourceIndex: number; box: LayoutRect }>;
 
 /** Records the box of placed tables ending at body index `sourceIndex`. */
-export function addUprightTableBox(index: UprightBlockPageIndex, sourceIndex: number, box: LayoutRect): void {
+export function addUprightTableBox(
+  index: UprightBlockPageIndex,
+  sourceIndex: number,
+  box: LayoutRect,
+  versions: UprightTableBoxVersions,
+): void {
   const entry: UprightTableBox = Object.freeze({ sourceIndex, box });
   // Registered in at most MAX_BUCKET_SPAN + 1 buckets from its block start:
   // no page is wide enough for a query past that range to meet the box.
@@ -263,7 +276,11 @@ export function addUprightTableBox(index: UprightBlockPageIndex, sourceIndex: nu
     else index.tableBuckets.set(bucket, [entry]);
   }
   index.tableCount += 1;
-  index.tableBoxesKey += `${sourceIndex}:${box.xPt},${box.yPt},${box.widthPt},${box.heightPt};`;
+  // The version of this history: the one before it extended by this box.
+  const step = `${index.tableBoxesVersion}|${sourceIndex}:${box.xPt},${box.yPt},${box.widthPt},${box.heightPt}`;
+  let version = versions.get(step);
+  if (version === undefined) versions.set(step, version = versions.size + 1);
+  index.tableBoxesVersion = version;
 }
 
 /**

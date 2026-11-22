@@ -804,6 +804,21 @@ describe('upright block table of a vertical section', () => {
         for (const [line] of page!.strips.slice(1)) expect(line!.inlineStart).toBeCloseTo(after.bottom, 6);
       });
 
+      it('moves an ordinary segment whose border rules pass the block extent left to the next page', () => {
+        // Fifteen strips leave 195.3 pt. The logical table's 195 pt grid
+        // fits; its first segment's box with two 3 pt side rules is 198 pt
+        // wide and does not, like that of a table without owner segments.
+        const wide = T.replaceAll('w:sz="4"', 'w:sz="24"').replaceAll('"2160"', '"2460"');
+        const framed = wide.replace('<w:p><w:pPr>', '<w:p><w:pPr><w:framePr w:w="2000" w:hSpace="141"'
+          + ' w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="4000" w:y="6000"/>');
+        const pages = layOutStyled('tbRl', [...Array.from({ length: 15 }, () => P), wide, framed, P]);
+        expect(pages).toHaveLength(2);
+        expect(pages[0]!.tables).toHaveLength(0);
+        expect(pages[0]!.strips).toHaveLength(15);
+        expect(pages[1]!.tables.length).toBeGreaterThan(0);
+        expect(pages[1]!.tables[0]!.paintedRight).toBeCloseTo(PAGE_W - MARGIN.right, 6);
+      });
+
       it('runs a logical table on from a table of another style', () => {
         const other = T.replace('<w:tblPr>', '<w:tblPr><w:tblStyle w:val="Other"/>');
         const [page] = layOutStyled('tbRl', [P, other, T, T, P]);
@@ -816,6 +831,26 @@ describe('upright block table of a vertical section', () => {
         for (const [line] of page!.strips) expect(line!.inlineStart).toBeCloseTo(grouped.bottom, 6);
         expect(page!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
       });
+    });
+
+    it('fills the band exactly with a run whose total rounds past it', () => {
+      // Three borderless one-row tables of exactly 4001, 4002 and 6035
+      // twips: 701.9 pt, the band. Summed in body order they fit it; the
+      // run's recorded total, summed the other way, rounds just past it.
+      const exact = (twips: number) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'
+        + '<w:tblGrid><w:gridCol w:w="3600"/></w:tblGrid>'
+        + `<w:tr><w:trPr><w:trHeight w:val="${twips}" w:hRule="exact"/></w:trPr>`
+        + `<w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/></w:tcPr>${paragraph('A')}</w:tc></w:tr></w:tbl>`;
+      const pages = layOutPages('tbRl', [exact(4001), exact(4002), exact(6035)]);
+      expect(pages).toHaveLength(1);
+      const [first, second, third] = pages[0]!.tables as [
+        Page['tables'][number], Page['tables'][number], Page['tables'][number],
+      ];
+      expect(pages[0]!.tables).toHaveLength(3);
+      expect(first.top).toBeCloseTo(MARGIN.top, 6);
+      expect(second.top).toBeCloseTo(first.bottom, 6);
+      expect(third.top).toBeCloseTo(second.bottom, 6);
+      expect(third.bottom).toBeCloseTo(COLUMN_END, 6);
     });
 
     it('continues below the last rows of the table before it', () => {

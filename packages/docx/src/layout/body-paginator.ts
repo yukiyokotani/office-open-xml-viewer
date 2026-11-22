@@ -1555,7 +1555,7 @@ function* paginateBodyPassSteps(
   // with them, and each table takes its pinned position in whichever column
   // the flow now reaches it. Library policy: a table pinned in the same
   // layout as an earlier one keeps the position it had before the earlier
-  // pin moved text (no control has two such tables on a page).
+  // pin moved text.
   //
   // A table placed ahead of the flow that the flow then reaches on a later
   // page (its own exclusion, or a note reserve, moved what precedes it off

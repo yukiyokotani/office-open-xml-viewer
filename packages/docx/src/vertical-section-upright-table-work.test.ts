@@ -21,6 +21,7 @@ import {
 //   slot of a table placed ahead of the flow, or a float registry entry of an
 //   upright block (there are none: the blocks are kept beside that registry),
 // - an entry of the page's history of placed table boxes,
+// - a member of a logical table as it is handed to its acquisition,
 // - a retained row of a table.
 // Reads of a table's retained record are counted by a second passthrough.
 // These are the collections whose rescans made earlier revisions quadratic.
@@ -54,17 +55,21 @@ vi.mock('./layout/acquisition-state.js', async (importOriginal) => {
 
 type Counts = {
   boxes: number; exclusions: number; slots: number; registryEntries: number; rows: number; history: number;
+  members: number;
 };
 
 /** Lays `run` out while counting the visits described above. */
 function counting<Result>(run: () => Result): Readonly<{ result: Result; counts: Counts }> {
-  const counts: Counts = { boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0 };
+  const counts: Counts = {
+    boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0,
+  };
   const visit = (value: unknown): void => {
     if (value === null || typeof value !== 'object') return;
     if (work.boxes.has(value)) counts.boxes += 1;
     else if ('bandStartInclusive' in value) counts.exclusions += 1;
     else if ('reserved' in value && 'sourceIndex' in value) counts.slots += 1;
     else if ('box' in value && 'sourceIndex' in value) counts.history += 1;
+    else if ('table' in value && 'sourceIndex' in value) counts.members += 1;
     else if ('kind' in value && value.kind === 'table-row') counts.rows += 1;
     else if ('occurrenceId' in value && typeof value.occurrenceId === 'string'
       && value.occurrenceId.includes('upright-table')) counts.registryEntries += 1;
@@ -281,5 +286,22 @@ describe('upright block table placement work', () => {
       expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
       expect(counts.history, `${count} pairs`).toBe(0);
     }
+  }, 300_000);
+
+  it('continues a logical table over pages without acquiring its members again on each', () => {
+    // A default table style makes the tables one logical table; one 400 pt
+    // row each puts one of them on a page. Its members hold nothing
+    // page-dependent, so the table is acquired once, not once per page.
+    const styles = '<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/></w:style>';
+    const measure = (count: number) => {
+      const body = Array.from({ length: count }, () => table(1, 400));
+      const { result, counts } = counting(() => layOutPages('tbRl', body, 1, 360, undefined, styles));
+      expect(result).toHaveLength(count);
+      return counts.members;
+    };
+    const small = measure(8);
+    const large = measure(16);
+    expect(small).toBeGreaterThan(0);
+    expect(large).toBeLessThanOrEqual(2.6 * small);
   }, 300_000);
 });
