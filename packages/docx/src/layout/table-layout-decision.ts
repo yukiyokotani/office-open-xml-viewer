@@ -431,7 +431,10 @@ export function decideLogicalTable(
     && singleTable && commonFrame && commonGrid
     // The preferred-sized form is also in scope nested in a body table cell
     // and in a multi-column section.
-    && (topLevelBody || (preferredSized && environment.story === 'body' && environment.tableCellDepth === 1))
+    && (topLevelBody || (preferredSized && environment.story === 'body' && environment.tableCellDepth === 1
+      // Nested: leading, left-to-right, unindented, mode 15 only.
+      && environment.compat.tableMode15Geometry && table.bidiVisual !== true && origin.tableIndentPt === 0
+      && (table.jc == null || table.jc === 'left' || table.jc === 'start')))
     && (environment.singleColumn || preferredSized)
     // The upright block table of a vertical section is measured for fixed
     // and preferred-sized tables only.
@@ -442,8 +445,10 @@ export function decideLogicalTable(
     // puts tblPr spacing outside. Equal effective row values do not
     // establish that provenance: the rule admits trPr spacing for the
     // preferred-sized form only, and never tblPrEx (§17.4.44) spacing.
-    && source.lexical.rows.every(({ row }) => (row?.cellSpacing == null || preferredSized)
-      && row?.exception?.cellSpacing == null)
+    && source.lexical.rows.every(({ row }) => row?.exception?.cellSpacing == null)
+    && (source.lexical.rows.every(({ row }) => row?.cellSpacing == null)
+      || (preferredSized && source.lexical.table?.cellSpacing == null
+        && source.lexical.rows.every(({ row }) => row?.cellSpacing != null && row.styleCellSpacing == null)))
     // The blk-0898 table controls (spaced one-row tables, modes 11/12/14/15
     // and omitted, tblInd -360) place modes 11/12 like 14 and move a leading
     // table by a negative indent like a positive one.

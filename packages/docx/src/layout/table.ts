@@ -260,15 +260,30 @@ export function mergeEndRow(
 ): number {
   let endRow = startRow;
   for (let rowIndex = startRow + 1; rowIndex < rows.length; rowIndex += 1) {
-    const continuation = rows[rowIndex]?.cells.find((cell) => (
-      cell.columnStart === columnStart
-      && cell.columnSpan === columnSpan
-      && cell.verticalMerge === 'continue'
-    ));
-    if (!continuation) break;
+    if (!continuesMergeFromAbove(rows[rowIndex - 1], rows[rowIndex]!, columnStart, columnSpan)) break;
     endRow = rowIndex;
   }
   return endRow;
+}
+
+/**
+ * Whether `row` continues, in these grid columns, a vertical merge of the
+ * row `above` it. ECMA-376 §17.4.84 relates a continuation to the cell above
+ * it in the table: the two rows follow each other in the source. A repeated
+ * header row and the body row a page fragment places under it do not, so
+ * their merges stay apart.
+ */
+export function continuesMergeFromAbove(
+  above: TableRowLayoutInput | undefined,
+  row: TableRowLayoutInput,
+  columnStart: number,
+  columnSpan: number,
+): boolean {
+  const matches = (cell: TableCellLayoutInput): boolean =>
+    cell.columnStart === columnStart && cell.columnSpan === columnSpan;
+  return above !== undefined && above.logicalRowIndex + 1 === row.logicalRowIndex
+    && row.cells.some((cell) => matches(cell) && cell.verticalMerge === 'continue')
+    && above.cells.some((cell) => matches(cell) && cell.verticalMerge !== 'none');
 }
 
 /**
@@ -309,12 +324,7 @@ export function projectedMergeRole(
   if (cell.verticalMerge !== 'continue' || row.logicalRowIndex !== segmentOpeningLogicalRowIndex) {
     return cell.verticalMerge;
   }
-  const mergedAbove = above?.cells.some((candidate) => (
-    candidate.verticalMerge !== 'none'
-    && candidate.columnStart === cell.columnStart
-    && candidate.columnSpan === cell.columnSpan
-  )) ?? false;
-  return mergedAbove ? 'continue' : 'restart';
+  return continuesMergeFromAbove(above, row, cell.columnStart, cell.columnSpan) ? 'continue' : 'restart';
 }
 
 function semanticRowFloor(row: TableRowLayoutInput): number {
@@ -930,19 +940,10 @@ function materializeBorders(
       for (const cell of row.cells) {
         // A vertically merged cell is one box from its first row here to
         // its last; after a page break its first row is a continuation.
-        // Rows of one merge follow each other in the source; a repeated
-        // header row and the body row after it do not.
-        const follows = (upper: number): boolean =>
-          input.rows[upper + 1]?.logicalRowIndex === input.rows[upper]!.logicalRowIndex + 1;
-        const mergedAbove = cell.verticalMerge === 'continue' && rowIndex > 0 && follows(rowIndex - 1)
-          && input.rows[rowIndex - 1]!.cells.some((above) =>
-            above.columnStart === cell.columnStart && above.verticalMerge !== 'none');
-        if (mergedAbove) continue;
-        let lastRowIndex = rowIndex;
-        if (cell.verticalMerge !== 'none') {
-          while (follows(lastRowIndex) && input.rows[lastRowIndex + 1]!.cells.some((below) =>
-            below.columnStart === cell.columnStart && below.verticalMerge === 'continue')) lastRowIndex += 1;
-        }
+        if (cell.verticalMerge === 'continue'
+          && continuesMergeFromAbove(input.rows[rowIndex - 1], row, cell.columnStart, cell.columnSpan)) continue;
+        const lastRowIndex = cell.verticalMerge === 'none' ? rowIndex
+          : mergeEndRow(input.rows, rowIndex, cell.columnStart, cell.columnSpan);
         const lastSpacing = lastRowIndex === rowIndex ? spacing : rowSpacingInsets(input.rows, lastRowIndex);
         const start = columnX(rowIndex, cell.columnStart);
         const end = columnX(rowIndex, cell.columnStart + cell.columnSpan);

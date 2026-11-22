@@ -47,7 +47,7 @@ const twoColumns = (tableProperties: string, widths: readonly [number, number] =
   tableXml(tableProperties, widths, ['1', '2'].map((row) =>
     cell(widths[0], `A${row}`) + cell(widths[1], `B${row}`)));
 
-function docx(table: string, direction: string | null, columns = 1): Uint8Array {
+function docx(table: string, direction: string | null, columns = 1, mode: number | null = null): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${paragraph('before')}${table}${paragraph('after')}`
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
@@ -59,7 +59,13 @@ function docx(table: string, direction: string | null, columns = 1): Uint8Array 
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
       + '</Types>')],
+    ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${REL}/settings" Target="settings.xml"/></Relationships>`)],
+    ['word/settings.xml', xml(`<w:settings xmlns:w="${W}"><w:compat>`
+      + (mode === null ? '' : `<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/>`)
+      + '</w:compat></w:settings>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
@@ -114,8 +120,8 @@ function tableOf(table: string, direction: string | null = null, columns = 1) {
 
 /** Cell boxes of the table nested in the first cell of `table`: their widths
  * and the first one's offset from the outer cell's content box. */
-function nestedCells(table: string): { widths: number[]; firstCellXPt: number } {
-  const archive = new DocxArchive(docx(table, null));
+function nestedCells(table: string, mode: number | null = 15): { widths: number[]; firstCellXPt: number } {
+  const archive = new DocxArchive(docx(table, null, 1, mode));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
@@ -139,8 +145,8 @@ function nestedCells(table: string): { widths: number[]; firstCellXPt: number } 
 }
 
 /** The table fragments of every page, in page order. */
-function tablePages(table: string) {
-  const archive = new DocxArchive(docx(table, null));
+function tablePages(table: string, mode: number | null = null) {
+  const archive = new DocxArchive(docx(table, null, 1, mode));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
@@ -270,8 +276,8 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     const { widths, firstCellXPt } = nestedCells(outer);
     expect(widths).toEqual([boxPt, boxPt].map((width) => Math.round(width * 1e6) / 1e6));
     // From the cell's content box: the half rule its margin leaves
-    // uncovered, then the gap.
-    expect(firstCellXPt).toBeCloseTo(Math.max(0, 0.25 - marginPt) + 4, 6);
+    // uncovered, half the table's own rule (mode 15), then the gap.
+    expect(firstCellXPt).toBeCloseTo(Math.max(0, 0.25 - marginPt) + 0.25 + 4, 6);
   });
 
   it('draws the box of a vertically merged cell on every page it continues on', () => {
@@ -380,6 +386,10 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       const leftRules = page.borders.filter((border) => border.from.xPt === border.to.xPt
         && Math.abs(border.from.xPt - page.flowBounds.xPt - 4.25) < 0.01);
       expect(leftRules.length).toBe(2);
+      // The header cell itself (its fill) ends with the two header rows.
+      const headerCell = page.rows[0]!.cells[0]!;
+      const headerRows = page.rows[0]!.advancePt + page.rows[1]!.advancePt;
+      expect(headerCell.flowBounds.heightPt).toBeLessThanOrEqual(headerRows);
     }
   });
 
@@ -392,13 +402,56 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       + '<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>'
       + `<w:tr>${cell(1440, 'A', '<w:vMerge w:val="restart"/><w:tcBorders><w:right w:val="single" w:sz="48"/></w:tcBorders>')}${cell(2880, 'B1')}</w:tr>`
       + `<w:tr>${cell(1440, '', '<w:vMerge/>')}<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${nested}${paragraph('B2')}</w:tc></w:tr></w:tbl>`;
-    const inner = tablePages(outer)[0]!.rows[1]!.cells.at(-1)!.blocks.map((block) => block.layout)
+    const inner = tablePages(outer, 15)[0]!.rows[1]!.cells.at(-1)!.blocks.map((block) => block.layout)
       .find((block) => block.kind === 'table');
     if (inner?.kind !== 'table') throw new Error('expected a nested table');
     const boxes = inner.rows[0]!.cells.map((box) => box.flowBounds);
     // Half the 6 pt rule on the left, half the 0.5 pt table rule on the right.
-    expect(boxes[0]!.xPt).toBeCloseTo(3 + 4, 6);
+    expect(boxes[0]!.xPt).toBeCloseTo(3 + 0.25 + 4, 6);
     expect(boxes[0]!.widthPt).toBeCloseTo((144 - 3 - 0.25 - 0.5 - 12) / 2, 6);
+  });
+
+  it('keeps a nested table outside mode 15, or right-aligned, on its previous geometry', () => {
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const outer = (nestedProperties: string) => `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+      + '<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid><w:tr>'
+      + `<w:tc><w:tcPr><w:tcW w:w="1440" w:type="dxa"/></w:tcPr>${tableXml(nestedProperties, [600, 600], [cell(600, 'n1') + cell(600, 'n2')])}${paragraph('A1')}</w:tc>`
+      + `${cell(2160, 'B1')}</w:tr></w:tbl>`;
+    const full = '<w:tblW w:w="5000" w:type="pct"/>';
+    const inRule = nestedCells(outer(full + spacing(2))).widths;
+    expect(inRule).toEqual([29.5, 29.5]);
+    // The rule's boxes are not used: the previous geometry gives other widths.
+    expect(nestedCells(outer(full + spacing(2)), null).widths).not.toEqual(inRule);
+    expect(nestedCells(outer(full + '<w:jc w:val="right"/>' + spacing(2))).widths).not.toEqual(inRule);
+    expect(nestedCells(outer(full + '<w:bidiVisual/>' + spacing(2))).widths).not.toEqual(inRule);
+  });
+
+  it('keeps table spacing mixed with row spacing on its previous geometry', () => {
+    // tblPr spacing and the same spacing on one row only: outside the rule,
+    // the table keeps its 180 pt.
+    const mixed = tableXml(AUTO + spacing(2), [1440, 2160], [
+      cell(1440, 'A1') + cell(2160, 'B1'),
+      `<w:trPr>${spacing(2)}</w:trPr>` + cell(1440, 'A2') + cell(2160, 'B2'),
+    ]);
+    expect(tableOf(mixed).table).toBeCloseTo(180, 6);
+  });
+
+  it('carries the cell that opens a merge down a long table', () => {
+    // Four rows, first column merged with a 6 pt right rule, a nested spaced
+    // table in the last row: it starts inside that rule.
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const nested = tableXml('<w:tblW w:w="5000" w:type="pct"/>' + spacing(2), [600, 600], [cell(600, 'n1') + cell(600, 'n2')]);
+    const rows = Array.from({ length: 4 }, (_unused, row) => `<w:tr>`
+      + cell(1440, row === 0 ? 'A' : '', row === 0
+        ? '<w:vMerge w:val="restart"/><w:tcBorders><w:right w:val="single" w:sz="48"/></w:tcBorders>' : '<w:vMerge/>')
+      + (row === 3 ? `<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${nested}${paragraph('B')}</w:tc>` : cell(2880, `B${row}`))
+      + '</w:tr>').join('');
+    const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>${rows}</w:tbl>`;
+    const inner = tablePages(outer, 15)[0]!.rows[3]!.cells.at(-1)!.blocks.map((block) => block.layout)
+      .find((block) => block.kind === 'table');
+    if (inner?.kind !== 'table') throw new Error('expected a nested table');
+    expect(inner.rows[0]!.cells[0]!.flowBounds.xPt).toBeCloseTo(3 + 0.25 + 4, 6);
   });
 
   it('applies both forms to the upright block table of a tbRl section', () => {

@@ -641,10 +641,19 @@ export function acquireRetainedTable<State>(
   const nestedById: Record<string, RetainedTableAcquisition> = {};
   const floatingTables: NestedFloatingTableOccurrence[] = [];
   const rotatedCells: RotatedCellAcquisition[] = [];
+  const mergeOpeners = new Map<number, TableLayoutSource['rows'][number]['cells'][number]>();
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
     let ruleColumnStart = columnStart;
+    // The cell opening the vertical merge each column is in, carried from row to row.
+    let openerColumnStart = columnStart;
+    for (const cell of row.cells) {
+      if (cell.vMerge === true) mergeOpeners.set(openerColumnStart, cell);
+      else if (cell.vMerge !== false) mergeOpeners.delete(openerColumnStart);
+      openerColumnStart += Math.max(1, cell.colSpan);
+    }
+    const rowMergeOpeners = new Map(mergeOpeners);
     // Spaced cells keep their own boxes; only collapsed rules straddle the
     // cell edge. Resolved once per row, and only for a nested spaced table.
     let sideRulesPt: ReturnType<typeof collapsedRowSideRuleWidthsPt> | undefined;
@@ -654,17 +663,7 @@ export function acquireRetainedTable<State>(
         const span = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - start));
         ruleColumnStart += span;
         // The cell that opens a vertical merge owns the side rules of all its rows.
-        let owner = cell;
-        for (let above = rowIndex - 1; owner.vMerge === false && above >= 0; above -= 1) {
-          let aboveStart = Math.max(0, table.rows[above]!.gridBefore ?? 0);
-          const match = table.rows[above]!.cells.find((candidate) => {
-            const found = aboveStart === start;
-            aboveStart += Math.max(1, candidate.colSpan);
-            return found;
-          });
-          if (!match || match.vMerge == null) break;
-          owner = match;
-        }
+        const owner = cell.vMerge === false ? rowMergeOpeners.get(start) ?? cell : cell;
         return { borders: retainedEdges(owner.borders), columnStart: start, columnSpan: span };
       }),
       retainedEdges(table.borders),
