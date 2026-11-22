@@ -209,7 +209,7 @@ describe('paragraph page-local reserve selection', () => {
       exclusions: [{ id: 'float', wrap: 'square' as const,
         bounds: { xPt: 0, yPt: 0, widthPt: 40, heightPt: 9 }, polygon: [] }],
     };
-    // Mode 14 charges the whole cell beside the float; mode 15 keeps the relief.
+    // word-grid-line-content-fit-admission: the mode-15 flag keeps the relief.
     expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 9)).toBe(10);
     expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 9, 0, 0, true)).toBe(8);
   });
@@ -222,8 +222,8 @@ describe('paragraph page-local reserve selection', () => {
       exclusions: [{ id: 'float', wrap: 'square' as const,
         bounds: { xPt: 0, yPt: 9, widthPt: 40, heightPt: 20 }, polygon: [] }],
     };
-    // Body bottom 9pt, cell 0-10pt: the float below the margin still lies
-    // beside the cell (Windows Word mode-14 line2 control, float at +20pt).
+    // Body bottom 9pt, cell 0-10pt: the band is the whole cell
+    // (word-grid-line-content-fit-admission).
     expect(wordGridLineAdmissionExtentPt(candidate, true, 10, 9)).toBe(10);
   });
 

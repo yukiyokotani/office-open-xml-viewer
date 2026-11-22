@@ -224,27 +224,73 @@ export function pageOwnedAnchorKeysByLine(layout: ParagraphLayout): readonly (re
   }));
 }
 
-/** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: the first line of `layout` that
- * anchors a paragraph- or line-relative (host-owned) wrapping float (square,
- * topAndBottom, tight or through) whose box would end below `bodyBottomPt`, or undefined. */
-export function hostFloatCrossingLineIndex(layout: ParagraphLayout, bodyBottomPt: number): number | undefined {
+/** One host-owned (paragraph- or line-relative) wrapping float anchored on a
+ * line: its acquisition key and the bottom of its drawing box. */
+export type HostFloatAnchor = Readonly<{ key: string; bottomPt: number }>;
+
+/** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: for each line of `layout`, the
+ * host-owned square, topAndBottom, tight or through floats anchored on it.
+ * The bottom is the drawing box (§20.4.2.7 extent), not its wrap exclusion:
+ * wrap distances (§20.4.2.3 distB) are left out. */
+export function hostWrappingFloatsByLine(layout: ParagraphLayout): readonly (readonly HostFloatAnchor[])[] {
   void WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL;
-  if (layout.drawings.length === 0 || layout.exclusions.length === 0) return undefined;
-  const drawings = new Map(layout.drawings.map((drawing) => [drawing.id, drawing]));
-  const crossing = new Set(layout.exclusions
+  if (layout.drawings.length === 0 || layout.exclusions.length === 0) return layout.lines.map(() => []);
+  const wrapping = new Set(layout.exclusions
     .filter((exclusion) => exclusion.verticalOwnership === 'host'
       && (exclusion.wrap === 'square' || exclusion.wrap === 'topAndBottom'
-        || exclusion.wrap === 'tight' || exclusion.wrap === 'through')
-      && exclusion.bounds.yPt + exclusion.bounds.heightPt > bodyBottomPt + CROSSING_EPSILON_PT)
+        || exclusion.wrap === 'tight' || exclusion.wrap === 'through'))
     .map((exclusion) => exclusion.anchorOccurrenceId)
     .filter((id): id is string => id !== undefined));
-  if (crossing.size === 0) return undefined;
+  const drawings = new Map(layout.drawings.map((drawing) => [drawing.id, drawing]));
+  return layout.lines.map((line) => line.placements.flatMap((placement): HostFloatAnchor[] => {
+    if (placement.kind !== 'drawing') return [];
+    const drawing = drawings.get(placement.drawingId);
+    const anchor = drawing?.anchorLayer;
+    if (!drawing || !anchor || anchor.verticalOwnership !== 'host') return [];
+    if (!wrapping.has(anchor.occurrenceId)
+      && !(anchor.acquisitionOccurrenceId !== undefined && wrapping.has(anchor.acquisitionOccurrenceId))) return [];
+    return [Object.freeze({
+      key: anchor.acquisitionOccurrenceId ?? anchor.occurrenceId,
+      bottomPt: drawing.flowBounds.yPt + drawing.flowBounds.heightPt,
+    })];
+  }));
+}
+
+/** The first line whose host floats would end below `bodyBottomPt` once the
+ * paragraph is moved down by `offsetPt`, or undefined. Line 0 is skipped
+ * when it already starts its region (`firstLineMayMove` false): it stays, and
+ * a later crossing line is still found. */
+export function hostFloatDeferralLineIndex(
+  byLine: readonly (readonly HostFloatAnchor[])[],
+  bodyBottomPt: number,
+  firstLineMayMove: boolean,
+  offsetPt = 0,
+  lineCount = byLine.length,
+): number | undefined {
+  for (let index = firstLineMayMove ? 0 : 1; index < Math.min(lineCount, byLine.length); index += 1) {
+    if (byLine[index]!.some((float) => float.bottomPt + offsetPt > bodyBottomPt + CROSSING_EPSILON_PT)) return index;
+  }
+  return undefined;
+}
+
+/** Keys of the host floats on `lineIndex` that end below `bodyBottomPt`. */
+export function hostFloatsCrossingOnLine(
+  byLine: readonly (readonly HostFloatAnchor[])[],
+  lineIndex: number,
+  bodyBottomPt: number,
+): readonly string[] {
+  return (byLine[lineIndex] ?? [])
+    .filter((float) => float.bottomPt > bodyBottomPt + CROSSING_EPSILON_PT)
+    .map((float) => float.key);
+}
+
+/** The first line of `layout` that anchors any drawing keyed in `keys`. */
+export function anchorLineIndexOf(layout: ParagraphLayout, keys: ReadonlySet<string>): number | undefined {
+  const drawings = new Map(layout.drawings.map((drawing) => [drawing.id, drawing]));
   const index = layout.lines.findIndex((line) => line.placements.some((placement) => {
     if (placement.kind !== 'drawing') return false;
     const anchor = drawings.get(placement.drawingId)?.anchorLayer;
-    return anchor !== undefined && anchor.verticalOwnership === 'host'
-      && (crossing.has(anchor.occurrenceId)
-        || (anchor.acquisitionOccurrenceId !== undefined && crossing.has(anchor.acquisitionOccurrenceId)));
+    return anchor !== undefined && keys.has(anchor.acquisitionOccurrenceId ?? anchor.occurrenceId);
   }));
   return index < 0 ? undefined : index;
 }

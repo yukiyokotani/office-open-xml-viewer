@@ -20,7 +20,28 @@ const wrap = (top: number, excludeLeading: boolean): WrapLayoutCtx => ({
   ...(excludeLeading ? { probeTrailingLeading: (_line, advance) => (advance - 10) / 2 } : {}),
 });
 
+// Mixed sizes: a 20pt word takes two 20pt cells, so a line holding it has a
+// larger trailing leading than the same line without it.
+const sizedContext = { font: '10px Arial', measureText(this: { font: string }, text: string) {
+  const px = Number(/([\d.]+)px/.exec(this.font)?.[1] ?? 10);
+  return { width: text.length * px / 2, fontBoundingBoxAscent: px * 0.8, fontBoundingBoxDescent: px * 0.2 };
+} } as unknown as CanvasRenderingContext2D;
+const sized = (text: string, fontSize: number): LayoutTextSeg => ({ ...token(text), fontSize });
+const squareRight = (top: number, gapPt: number): FloatRect => ({ ...float(top), mode: 'square', authoredWrap: 'square',
+  imageW: 360 - gapPt, xRight: 360 - gapPt, side: 'right' });
+
 describe('mode-15 grid line wrap band', () => {
+  it('converges when a taller word raises the leading its band leaves out', () => {
+    const ctx: WrapLayoutCtx = { floats: [squareRight(18, 21)], paraX: 0, startPageY: 0, columnXPt: 0,
+      columnWidthPt: 360, readingDirection: 'ltr', pageH: 800,
+      lineBoxH: (ascent, descent) => Math.ceil((ascent + descent) / 20) * 20,
+      probeTrailingLeading: (line, advance) => Math.max(0, (advance - (line.ascent + line.descent)) / 2) };
+    const lines = layoutLines(sizedContext,
+      [sized('ab ', 10), sized('W ', 20), sized('cd ef gh ij kl mn op qr st uv wx yz ', 10)],
+      360, 0, 1, [], ctx);
+    expect(lines.length).toBeGreaterThan(1);
+  });
+
   it('keeps a line whose trailing leading alone reaches a topAndBottom float', () => {
     expect(layoutLines(context, [token('Hello')], 360, 0, 1, [], wrap(17, true))[0]!.topY).toBe(0);
   });

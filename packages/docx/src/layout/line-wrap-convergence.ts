@@ -85,6 +85,9 @@ const MAX_LINE_WRAP_PASSES = 16;
  *   latest resolved allocation. A taller band only removes gap content, so a
  *   short probe admitting a tall unit and a tall probe excluding it cannot
  *   alternate.
+ * - A probe band that leaves out trailing grid leading (`trailingLeading`) is
+ *   held at its running maximum per physical line too, never above the floor,
+ *   so a leading that grows with a taller advance cannot shrink the band.
  * - If the plain iteration still revisits a state (an advance feedback, e.g. a
  *   paragraph-wide ruby/grid allocation that depends on the partition), it
  *   restarts from the largest advances seen and keeps every physical line's
@@ -111,7 +114,8 @@ export function convergeLineWrap<TLine extends LineWrapStateLine>(
     lines: TLine[];
     probeHeights: readonly number[];
     probeFloors: readonly number[];
-    probeLeadings: readonly number[] | null;
+    /** Running maximum of each physical line's leading-reduced probe. */
+    probeBands: readonly number[] | null;
     state: string;
   }>;
   const leadings = (lines: readonly TLine[], advances: readonly number[]): readonly number[] | null => {
@@ -125,6 +129,28 @@ export function convergeLineWrap<TLine extends LineWrapStateLine>(
     });
     return Object.freeze(out);
   };
+  // The leading-reduced band (probe minus trailing leading) is held at its
+  // running maximum per physical line, like the probe floors: a taller advance
+  // can raise the leading while the floor stays, and an unheld band could then
+  // shrink and readmit content the larger band excluded.
+  const bands = (
+    floors: readonly number[],
+    lineLeadings: readonly number[] | null,
+    previous: readonly number[] | null | undefined,
+  ): readonly number[] | null => lineLeadings === null ? null
+    : Object.freeze(floors.map((floor, index) => Math.min(floor, Math.max(
+      floor - (lineLeadings[index] ?? 0),
+      previous?.[index] ?? Number.NEGATIVE_INFINITY,
+    ))));
+  // The probe leadings a pass with `floors` receives so its band is `held`.
+  const leadingsFor = (
+    floors: readonly number[] | null,
+    held: readonly number[] | null | undefined,
+  ): readonly number[] | null => !floors || !held ? null
+    : Object.freeze(floors.map((floor, index) =>
+      held[index] === undefined ? 0 : Math.max(0, floor - held[index]!)));
+  const bandState = (held: readonly number[] | null): string =>
+    held ? `|${held.join(',')}` : '';
   const resolved = (lines: readonly TLine[]): readonly number[] => {
     const advances = resolveLineAdvances?.(lines);
     return Object.freeze(lines.flatMap((line, index) =>
@@ -136,6 +162,7 @@ export function convergeLineWrap<TLine extends LineWrapStateLine>(
       Math.max(left[index] ?? Number.NEGATIVE_INFINITY, right[index] ?? Number.NEGATIVE_INFINITY)));
   // Running maxima of every resolved allocation, used if a cycle appears.
   let seen: readonly number[] = [];
+  let seenBands: readonly number[] | null = null;
   let passes = 0;
   try {
     try {
@@ -143,16 +170,16 @@ export function convergeLineWrap<TLine extends LineWrapStateLine>(
         step: (previous) => {
           passes += 1;
           const lines = measure(previous?.probeHeights ?? null, previous?.probeFloors ?? null,
-            previous?.probeLeadings ?? null);
+            leadingsFor(previous?.probeFloors ?? null, previous?.probeBands));
           const probeHeights = resolved(lines);
           seen = maximum(seen, probeHeights);
           const probeFloors = previous ? maximum(probeHeights, previous.probeFloors)
             .slice(0, probeHeights.length) : probeHeights;
-          const probeLeadings = leadings(lines, probeHeights);
+          const probeBands = bands(probeFloors, leadings(lines, probeHeights), previous?.probeBands);
+          seenBands = probeBands && (seenBands ? maximum(seenBands, probeBands) : probeBands);
           return Object.freeze({
-            lines, probeHeights, probeFloors: Object.freeze(probeFloors), probeLeadings,
-            state: lineWrapState(lines, probeHeights, probeFloors)
-              + (probeLeadings ? `|${probeLeadings.join(',')}` : ''),
+            lines, probeHeights, probeFloors: Object.freeze(probeFloors), probeBands,
+            state: lineWrapState(lines, probeHeights, probeFloors) + bandState(probeBands),
           });
         },
         stateOf: (pass) => pass.state,
@@ -164,16 +191,17 @@ export function convergeLineWrap<TLine extends LineWrapStateLine>(
     }
     // Monotone advances: inputs only rise, so the walk is finite.
     let held = seen;
+    let heldBands: readonly number[] | null = seenBands;
     return convergeExactState<Pass>({
       step: (previous) => {
         const input = previous ? maximum(held, previous.probeHeights) : held;
         held = input;
-        const lines = measure(input, input, previous?.probeLeadings ?? null);
+        const lines = measure(input, input, leadingsFor(input, heldBands));
         const probeHeights = resolved(lines);
-        const probeLeadings = leadings(lines, probeHeights);
+        heldBands = bands(input, leadings(lines, probeHeights), heldBands);
         return Object.freeze({
-          lines, probeHeights, probeFloors: input, probeLeadings,
-          state: lineWrapState(lines, input, input) + (probeLeadings ? `|${probeLeadings.join(',')}` : ''),
+          lines, probeHeights, probeFloors: input, probeBands: heldBands,
+          state: lineWrapState(lines, input, input) + bandState(heldBands),
         });
       },
       stateOf: (pass) => pass.state,

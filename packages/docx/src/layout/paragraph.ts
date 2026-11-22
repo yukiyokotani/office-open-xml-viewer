@@ -2589,6 +2589,10 @@ export interface ParagraphAcquisitionOptions {
   /** Cell-grid wrap preserves an empty carrier's insertion reference while
    * its paragraph flow is admitted below the grid. Paragraph-local points. */
   readonly paragraphAnchorReferenceDeltaPt?: number;
+  /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: anchor occurrences whose line
+   * moves to a later region. Their objects take no part in this acquisition's
+   * text wrap, so the lines left behind do not wrap around them. */
+  readonly deferredAnchorOccurrenceIds?: ReadonlySet<string>;
 }
 
 function runSource(source: SourceRef, runIndex: number): SourceRef {
@@ -6728,6 +6732,8 @@ function paragraphAcquisitionKey(
     lineOnly ? null : JSON.stringify(options.exclusions),
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
+    lineOnly || !hasAnchoredPayload || !options.deferredAnchorOccurrenceIds?.size
+      ? null : [...options.deferredAnchorOccurrenceIds].sort(),
     lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
       ? null
       : JSON.stringify([...options.frozenAnchorFrames].sort(([left], [right]) => left.localeCompare(right))),
@@ -7553,7 +7559,9 @@ function projectAcquiredParagraph(
     if (!acquired.drawing) continue;
     drawings.push(acquired.drawing);
     textBoxes.push(...acquired.textBoxes);
-    if (acquired.exclusion) anchorExclusions.push(acquired.exclusion);
+    if (acquired.exclusion && !options.deferredAnchorOccurrenceIds?.has(occurrenceId)) {
+      anchorExclusions.push(acquired.exclusion);
+    }
     if (acquired.collision) anchorCollisions.push(acquired.collision);
     const hostLine = lines[acquired.hostLineIndex];
     if (hostLine) {

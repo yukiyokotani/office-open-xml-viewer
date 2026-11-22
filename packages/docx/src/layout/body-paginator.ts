@@ -88,7 +88,9 @@ import {
   anchorLineFloor,
   anchorLineFloorKey,
   anchorLineDeferralKey,
-  hostFloatCrossingLineIndex,
+  anchorLineIndexOf,
+  hostFloatDeferralLineIndex,
+  hostFloatsCrossingOnLine,
   anchorLineDeferralsIdentity,
   createAnchorLineDeferralProof,
   pageOwnedAnchorKeysByLine,
@@ -2847,7 +2849,7 @@ function* paginateBodyPassSteps(
       while (cursor) {
         const fragmentStartKey = paragraphFragmentStartKey(cursor);
         let location = acquisitionLocation(state);
-        const acquired = session.measureParagraph({
+        const acquisitionRequest = Object.freeze({
           input: block,
           location,
           availableInlineExtentPt: location.availableBounds.widthPt,
@@ -2885,6 +2887,7 @@ function* paginateBodyPassSteps(
             ),
           continuation: cursor,
         });
+        let acquired = session.measureParagraph(acquisitionRequest);
         if (acquired.placement) {
           const notes = footnoteAdmission(
             acquired.layout,
@@ -2971,6 +2974,10 @@ function* paginateBodyPassSteps(
           && (reserves[state.flow.pageIndex]?.bottom ?? 0) === 0
           && state.footnoteReservePt === 0
           ? physicalBodyBottomPt : undefined;
+        // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL is measured at the physical
+        // body bottom of a single-column region only.
+        const hostFloatDeferralRegion = compat.hostFloatBottomMarginDeferral
+          && unreservedBodyBottomPt !== undefined && activeRegion(state).columns.length === 1;
         if (cursor.boundary === null && block.keepNext && state.flow.pageHasContent) {
           let keepSetExtentPt = acquired.blockExtentPt;
           const keepSetReferenceIds = new Set(footnoteIdsInRetainedSlice(acquired.layout));
@@ -3007,6 +3014,13 @@ function* paginateBodyPassSteps(
               ? following.pageOwnedAnchorKeysByLine
               : following.pageOwnedAnchorKeysByLine?.slice(0, 1);
             if (keptLines?.some((keys) => anchorLineDeferred(keys))) {
+              keepSetBlockedByDeferral = true;
+            }
+            // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL at the successor's
+            // projected position: its kept lines start below the set so far.
+            if (hostFloatDeferralRegion && following.hostFloatsByLine
+              && hostFloatDeferralLineIndex(following.hostFloatsByLine, unreservedBodyBottomPt!, true,
+                keepSetExtentPt, continues ? undefined : 1) !== undefined) {
               keepSetBlockedByDeferral = true;
             }
             keepSetExtentPt += continues
@@ -3131,6 +3145,36 @@ function* paginateBodyPassSteps(
             continue;
           }
         }
+        // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: a host-owned wrapping float
+        // whose drawing would cross the unreserved body bottom moves its
+        // anchor line on; a line that already starts its region stays. The
+        // lines left behind are acquired again without the moved floats.
+        let hostFloatLineBreak: number | undefined;
+        if (hostFloatDeferralRegion && acquired.hostFloatsByLine) {
+          const firstLineMayMove = pageCanGainSpaceByRelocating();
+          const deferred = new Set<string>();
+          for (;;) {
+            const crossing = acquired.hostFloatsByLine
+              ? hostFloatDeferralLineIndex(acquired.hostFloatsByLine, unreservedBodyBottomPt!, firstLineMayMove)
+              : undefined;
+            const anchored = deferred.size === 0 ? undefined : anchorLineIndexOf(acquired.layout, deferred);
+            if (deferred.size > 0 && (anchored === undefined || (anchored === 0 && !firstLineMayMove))) {
+              // Without the moved floats their anchors start the region: the
+              // first line stays, so nothing is deferred.
+              acquired = session.measureParagraph(acquisitionRequest);
+              hostFloatLineBreak = undefined;
+              break;
+            }
+            hostFloatLineBreak = crossing === undefined ? anchored
+              : anchored === undefined ? crossing : Math.min(crossing, anchored);
+            if (crossing === undefined || crossing === 0 || (anchored !== undefined && anchored < crossing)) break;
+            const keys = hostFloatsCrossingOnLine(acquired.hostFloatsByLine!, crossing, unreservedBodyBottomPt!);
+            keys.forEach((key) => deferred.add(key));
+            acquired = session.measureParagraph(Object.freeze({
+              ...acquisitionRequest, deferredHostAnchorKeys: Object.freeze([...deferred].sort()),
+            }));
+          }
+        }
         // The empty-mark allowance can apply only to an undecorated inkless
         // mark that starts here without keepNext; any other fragment ignores
         // the reserve, so its whole-note acquisition is not performed (it
@@ -3164,16 +3208,9 @@ function* paginateBodyPassSteps(
           });
         // A proven anchor-line deferral ends this page just above that line.
         const provenAnchorLineBreak = deferredAnchorLineIndex(acquired.layout);
-        // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: a host-owned wrapping float
-        // that would cross the unreserved body bottom moves its anchor line
-        // on; a line that already starts its region stays.
-        const hostFloatLineBreak = compat.hostFloatBottomMarginDeferral && unreservedBodyBottomPt !== undefined
-          ? hostFloatCrossingLineIndex(acquired.layout, unreservedBodyBottomPt) : undefined;
-        const admittedHostFloatLineBreak = hostFloatLineBreak !== undefined
-          && (hostFloatLineBreak > 0 || pageCanGainSpaceByRelocating()) ? hostFloatLineBreak : undefined;
-        const anchorLineBreak = provenAnchorLineBreak === undefined ? admittedHostFloatLineBreak
-          : admittedHostFloatLineBreak === undefined ? provenAnchorLineBreak
-            : Math.min(provenAnchorLineBreak, admittedHostFloatLineBreak);
+        const anchorLineBreak = provenAnchorLineBreak === undefined ? hostFloatLineBreak
+          : hostFloatLineBreak === undefined ? provenAnchorLineBreak
+            : Math.min(provenAnchorLineBreak, hostFloatLineBreak);
         // Same fresh-region rule as framed paragraphs: a page whose band
         // holds carried note lines is not fresh (pageCanGainSpaceByRelocating).
         const canRelocateParagraph = pageCanGainSpaceByRelocating();
