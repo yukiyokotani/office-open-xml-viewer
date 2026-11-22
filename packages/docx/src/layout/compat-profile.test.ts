@@ -42,7 +42,7 @@ function previousGates(s: DocxCompatSettingsInput) {
     inlinePictureAutoLeading: mode === 15,
     gridEdgeBesideFloatKeepsRelief: mode === 15,
     hostFloatBottomMarginDeferral: mode === 15,
-    anchorLineOwnFloatGridLeadingExempt: mode === 15,
+    gridLineWrapBandExcludesTrailingLeading: mode === 15,
     lineEndJustificationBeforeMode15: mode !== 15,
     thaiDistributeProportionalSpread: (mode ?? 0) < 15,
     kashidaLineFitMode15: mode === 15,

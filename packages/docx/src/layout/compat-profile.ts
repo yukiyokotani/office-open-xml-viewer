@@ -140,11 +140,11 @@ export interface DocxCompatProfile {
    */
   readonly gridEdgeBesideFloatKeepsRelief: boolean;
   /**
-   * Compatibility mode 15: a line-grid anchor line does not wrap around its
-   * own float when the float only reaches the cell's trailing grid leading.
-   * @compatRule word-host-float-bottom-margin-deferral
+   * Compatibility mode 15: a snapped line-grid line meets floats with its
+   * content box, without its trailing grid leading.
+   * @compatRule word-grid-line-content-fit-admission
    */
-  readonly anchorLineOwnFloatGridLeadingExempt: boolean;
+  readonly gridLineWrapBandExcludesTrailingLeading: boolean;
   /**
    * Compatibility mode 15: a paragraph- or line-relative wrapping float that
    * would cross the body bottom moves its anchor line to the next page.
@@ -326,7 +326,7 @@ export function buildDocxCompatProfile(
     inlinePictureAutoLeading: mode15,
     gridEdgeBesideFloatKeepsRelief: mode15,
     hostFloatBottomMarginDeferral: mode15,
-    anchorLineOwnFloatGridLeadingExempt: mode15,
+    gridLineWrapBandExcludesTrailingLeading: mode15,
     lineEndJustificationBeforeMode15: !mode15,
     thaiDistributeProportionalSpread: preMode15,
     kashidaLineFitMode15: mode15,

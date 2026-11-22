@@ -651,6 +651,15 @@ export function measureParagraph(
         ...(environment.numberingFirstLine && !continuation
           ? { numberingFirstLine: environment.numberingFirstLine } : {}),
         lineWindow: (input) => placement.wrap!.lineWindow(input),
+        // WORD_GRID_LINE_CONTENT_FIT_ADMISSION (mode 15): a snapped automatic
+        // single line meets floats with its centred content box; the trailing
+        // grid leading below it does not reach a float.
+        ...(compat.gridLineWrapBandExcludesTrailingLeading && isGridLineRule(grid)
+          && (context.lineSpacing == null
+            || (context.lineSpacing.rule === 'auto' && context.lineSpacing.value === 1))
+          ? { probeTrailingLeading: (line: LayoutLine, advancePx: number) =>
+            Math.max(0, (advancePx - Math.max(line.ascent + line.descent, line.intendedSingle ?? 0)) / 2) }
+          : {}),
         lineBoxH: (ascent, descent, _hasRuby, intendedSingle, eastAsian, gridCountSingle, uniformPositionAuto, inlinePictureTextSingle, latinGridCountSingle) => lineBoxHeight(
           context.lineSpacing,
           ascent,

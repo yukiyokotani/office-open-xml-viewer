@@ -720,8 +720,8 @@ export function createFloatLineBandPredicate(
     const exactBottom = addUnreducedExact(exactTop, unreducedExactFromNumber(heightPt));
     const overlaps = compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop)) > 0
       && compareExactRational(exactTop, unreducedExactFromNumber(rect.yBottom)) < 0;
-    if (rect.exemptLineTopPt === topY) return false;
     if (rect.mode === 'topAndBottom') return overlaps;
+    if (rect.exemptLineTopPt === topY) return false;
     return overlaps || tightEdgeTouch(prepared, exactTop, exactBottom) !== null;
   };
 }
@@ -794,7 +794,6 @@ function lineWindowAtY(
   );
   const exactRectY = (value: number): ExactRational => unreducedExactFromNumber(value);
   if (prepared.floats.some(({ rect }) => rect.mode === 'topAndBottom'
-    && rect.exemptLineTopPt !== topY
     && floatOverlapsColumnX(rect as FloatRect, columnXLeftPt, columnXRightPt)
     && compareExactRational(exactBottom, exactRectY(rect.yTop)) > 0
     && compareExactRational(exactTop, exactRectY(rect.yBottom)) < 0)) return null;

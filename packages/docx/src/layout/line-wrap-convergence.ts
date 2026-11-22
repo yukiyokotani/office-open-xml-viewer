@@ -96,16 +96,35 @@ const MAX_LINE_WRAP_PASSES = 16;
  * of rises plus two, and the unchanged 16-state budget fails closed past it.
  */
 export function convergeLineWrap<TLine extends LineWrapStateLine>(
-  measure: (probeHeights: readonly number[] | null, probeFloors: readonly number[] | null) => TLine[],
+  measure: (
+    probeHeights: readonly number[] | null,
+    probeFloors: readonly number[] | null,
+    probeLeadings: readonly number[] | null,
+  ) => TLine[],
   lineBoxHeight: (line: TLine) => number,
   resolveLineAdvances?: (lines: readonly TLine[]) => readonly number[],
+  /** Trailing part of a physical line's advance that its exclusion probe
+   * leaves out (WORD_GRID_LINE_CONTENT_FIT_ADMISSION mode-15 band). */
+  trailingLeading?: (line: TLine, advance: number) => number,
 ): TLine[] {
   type Pass = Readonly<{
     lines: TLine[];
     probeHeights: readonly number[];
     probeFloors: readonly number[];
+    probeLeadings: readonly number[] | null;
     state: string;
   }>;
+  const leadings = (lines: readonly TLine[], advances: readonly number[]): readonly number[] | null => {
+    if (!trailingLeading) return null;
+    let physical = 0;
+    const out: number[] = [];
+    lines.forEach((line, index) => {
+      if (samePhysicalLine(line, lines[index + 1])) return;
+      out.push(Math.max(0, trailingLeading(line, advances[physical] ?? 0)));
+      physical += 1;
+    });
+    return Object.freeze(out);
+  };
   const resolved = (lines: readonly TLine[]): readonly number[] => {
     const advances = resolveLineAdvances?.(lines);
     return Object.freeze(lines.flatMap((line, index) =>
@@ -123,14 +142,17 @@ export function convergeLineWrap<TLine extends LineWrapStateLine>(
       return convergeExactState<Pass>({
         step: (previous) => {
           passes += 1;
-          const lines = measure(previous?.probeHeights ?? null, previous?.probeFloors ?? null);
+          const lines = measure(previous?.probeHeights ?? null, previous?.probeFloors ?? null,
+            previous?.probeLeadings ?? null);
           const probeHeights = resolved(lines);
           seen = maximum(seen, probeHeights);
           const probeFloors = previous ? maximum(probeHeights, previous.probeFloors)
             .slice(0, probeHeights.length) : probeHeights;
+          const probeLeadings = leadings(lines, probeHeights);
           return Object.freeze({
-            lines, probeHeights, probeFloors: Object.freeze(probeFloors),
-            state: lineWrapState(lines, probeHeights, probeFloors),
+            lines, probeHeights, probeFloors: Object.freeze(probeFloors), probeLeadings,
+            state: lineWrapState(lines, probeHeights, probeFloors)
+              + (probeLeadings ? `|${probeLeadings.join(',')}` : ''),
           });
         },
         stateOf: (pass) => pass.state,
@@ -146,10 +168,12 @@ export function convergeLineWrap<TLine extends LineWrapStateLine>(
       step: (previous) => {
         const input = previous ? maximum(held, previous.probeHeights) : held;
         held = input;
-        const lines = measure(input, input);
+        const lines = measure(input, input, previous?.probeLeadings ?? null);
+        const probeHeights = resolved(lines);
+        const probeLeadings = leadings(lines, probeHeights);
         return Object.freeze({
-          lines, probeHeights: resolved(lines), probeFloors: input,
-          state: lineWrapState(lines, input, input),
+          lines, probeHeights, probeFloors: input, probeLeadings,
+          state: lineWrapState(lines, input, input) + (probeLeadings ? `|${probeLeadings.join(',')}` : ''),
         });
       },
       stateOf: (pass) => pass.state,
