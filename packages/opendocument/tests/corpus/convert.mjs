@@ -21,7 +21,8 @@
 // config it sees no system CJK fonts and paints CJK as blank glyphs. The
 // Homebrew fontconfig configuration scans the system font folders.
 //
-// Requires LibreOffice (SOFFICE, default /Applications/LibreOffice.app) and
+// Requires LibreOffice (SOFFICE, the `soffice` executable; default
+// /Applications/LibreOffice.app/Contents/MacOS/soffice) and
 // Homebrew `fontconfig` (FONTCONFIG_FILE, default
 // /opt/homebrew/etc/fonts/fonts.conf). The harnesses that read this corpus
 // (run.mjs, run-odp.mjs) also need Poppler (`pdftoppm`, `pdfinfo`), Chrome

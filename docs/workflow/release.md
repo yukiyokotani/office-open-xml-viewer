@@ -14,7 +14,10 @@ explanation the user approves.
   tag `v0.x.0`. Backport only the fixes chosen for the patch, as cherry-pick
   PRs against that branch; never push to it directly, and never cut a patch
   from `main` while `main` carries features. Verify each fix in the
-  environment where it was reported before release.
+  environment where it was reported before release. A backport PR goes through
+  the same merge gate with the release branch in place of `main`: its VRT
+  baseline is the head of the release branch, and `main` is never merged into
+  it.
 
 ## Release gate: no regression against Office
 
@@ -48,8 +51,8 @@ there.
    - `site/src/components/Capabilities.astro` when capabilities changed.
    - `site/src/pages/bundle-size.astro` with the latest production measurements.
      Measure with `node scripts/measure-bundle-size.mjs` after `pnpm build:wasm && pnpm build`.
-4. Add a new top `CHANGELOG.md` section:
-   `## 0.x.0 — YYYY-MM-DD`.
+4. Add a new top `CHANGELOG.md` section for the version being released:
+   `## <version> — YYYY-MM-DD`.
 5. Bump all versions consistently:
    - root `package.json`,
    - `packages/{core,pptx,xlsx,docx,markdown,node,vscode-extension}/package.json`,
@@ -78,11 +81,13 @@ there.
    publishes only the missing companions.
 6. Run `cargo check -p ooxml-mcp-server` after bumping the MCP server so
    `Cargo.lock` follows.
-7. Open PR `chore(release): 0.x.0`.
+7. Open PR `chore(release): <version>` against the release's base branch
+   (`main` for a minor release, the release branch for a patch).
 8. Merge through the merge gate in [Git, PRs and issues](git-and-prs.md): a
    merge commit with `gh pr merge <number> --merge --match-head-commit <sha>`.
-9. Pull the release's base branch, create and push the annotated tag:
-   `git tag -a v0.x.0 -m "v0.x.0"` and `git push origin v0.x.0`.
+9. Pull the release's base branch, create and push the annotated tag for the
+   version being released: `git tag -a v<version> -m "v<version>"` and
+   `git push origin v<version>`.
 10. Create the GitHub Release with notes based on the changelog and a full
     changelog comparison link.
 

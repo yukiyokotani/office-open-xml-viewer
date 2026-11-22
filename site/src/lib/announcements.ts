@@ -1159,7 +1159,7 @@ if (context?.kind === 'text') {
           'Replace xlsx_get_sheet_names with xlsx_parse.',
           'Replace docx_get_paragraph with docx_get_body_element.',
           'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element. Rename the shape_index argument to element_index; for the old text-only tool, read textBody from the element result when the element has text.',
-          'docx_get_body_element keeps the path and index arguments of docx_get_paragraph; the indexed body item can be a paragraph or a table.',
+          'docx_get_body_element keeps the path and index arguments of docx_get_paragraph; the indexed body item is not always a paragraph (it can be a table or a break), so check its type before reading paragraph fields.',
           'Replace ooxml_get_active_selection with ooxml_get_active_context.',
         ],
       },

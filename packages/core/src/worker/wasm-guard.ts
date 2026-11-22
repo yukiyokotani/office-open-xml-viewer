@@ -17,7 +17,7 @@ export class WasmTrapError extends Error {
 /**
  * Classify by boundary error type/name, never by message substring.
  *
- * With `panic = "abort"`, a Rust panic, allocation failure or `unreachable`
+ * With `panic = "abort"`, a Rust panic, an aborting allocation failure or `unreachable`
  * ends the export in a trap without a typed `Result`, and engines may report
  * OOM or stack exhaustion through implementation-defined errors (for example
  * `RangeError`, `InternalError` or `OOMError`). The cause is not preserved, so

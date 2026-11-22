@@ -71,6 +71,8 @@ function markdownLinks(text) {
   });
   const targets = [
     ...[...prose.matchAll(/\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
+    // Raw HTML: <img src="…">, <a href="…">.
+    ...[...prose.matchAll(/<(?:img|a|source|video)\b[^>]*?\b(?:src|href)=["']([^"']+)["']/gi)].map((match) => match[1]),
     // Autolinks: <https://…>.
     ...[...prose.matchAll(/<([a-z][a-z0-9+.-]*:\/\/[^\s<>]+)>/gi)].map((match) => match[1]),
   ];
@@ -131,6 +133,7 @@ test('Markdown links are the destinations a reader can follow', () => {
   assert.deepEqual(markdownLinks('[a](x.md) and [b][ref] and [ref] and [c][].\n\n[ref]: y.md\n[c]: z.md "t"\n'), [
     'x.md', 'y.md', 'y.md', 'z.md',
   ]);
+  assert.deepEqual(markdownLinks('<img src="docs/images/icon.png" width="80" alt="icon" />'), ['docs/images/icon.png']);
   assert.deepEqual(markdownLinks('See <https://example.org/docs/a.md> and <span>text</span>.'), ['https://example.org/docs/a.md']);
   assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);
   assert.deepEqual(markdownLinks('```\n[fenced](f.md)\n```\n[guide][g]\n\n[g]: missing.md\n'), ['missing.md']);
@@ -289,11 +292,10 @@ function linkedDocs(path, text, blobUrl) {
   const url = String.raw`(https:\/\/github\.com\/[^\s"'\`<>)]+?\.md)(?![\w-]|\.\w)`;
   if (path.startsWith('site/')) {
     // A site file links a page where the URL is rendered as a link: an `href`
-    // attribute, a constant an `href={name}` uses, or a property named
-    // `…Href` / `…Url` that a page renders. A URL in an unused constant or in
-    // prose is not a link.
+    // attribute, or a constant an `href={name}` of the same file uses. A URL in
+    // prose, in an unused constant or in a data object is not counted, because
+    // nothing here shows that a page renders it.
     for (const [, target] of code.matchAll(new RegExp(String.raw`href=["']` + url, 'g'))) absolute(target);
-    for (const [, target] of code.matchAll(new RegExp(String.raw`\b\w*(?:[hH]ref|[uU]rl)\s*:\s*["'\`]` + url, 'g'))) absolute(target);
     for (const [, name, target] of code.matchAll(new RegExp(String.raw`\bconst\s+(\w+)\s*=\s*["'\`]` + url, 'g'))) {
       if (new RegExp(String.raw`href=\{\s*${name}\s*\}`).test(code)) absolute(target);
     }
@@ -331,7 +333,7 @@ test('a consumer link to a guide is a real link destination, not incidental text
   assert.deepEqual(links('site/src/pages/a.astro', `${constant}<p>no link</p>`), []);
   assert.deepEqual(
     links('site/src/lib/a.ts', "export const entry = { detailsHref: 'https://github.com/o/r/blob/main/docs/example.md' };"),
-    ['docs/example.md'],
+    [],
   );
   assert.deepEqual(links('README.md', 'See <https://github.com/o/r/blob/main/docs/example.md>.'), ['docs/example.md']);
   assert.deepEqual(links('site/src/pages/a.astro', '<!-- https://github.com/o/r/blob/main/docs/example.md -->'), []);
@@ -419,7 +421,7 @@ test('docs/ carries no task lists', () => {
 // command can run: those of the package a `--filter` names, otherwise those
 // of the page's own working directory (the repository root, plus the package
 // a package-level page belongs to).
-function missingReferences(file, text, { exists, scriptsOf }) {
+function missingReferences(file, text, { exists, hasFileNamed, scriptsOf }) {
   const pnpmBuiltins = new Set(['install', 'exec', 'add', 'run', 'dlx', 'why', 'pack', 'publish']);
   // Generated, git-ignored or local-only locations a page may legitimately name.
   const localOnly = [/^(\.\.\/)*spec(\/|$)/, /(^|\/)src\/wasm(\/|$)/, /(^|\/)public\/private(\/|$)/, /^node_modules\//, /(^|\/)dist(\/|$)/, /^\/?tmp\//];
@@ -432,8 +434,22 @@ function missingReferences(file, text, { exists, scriptsOf }) {
   const words = [
     ...[...text.matchAll(FENCED_BLOCK)].map((match) => match[1]),
     ...[...text.replace(FENCED_BLOCK, '').matchAll(/`([^`\n]+)`/g)].map((match) => match[1]),
-  ].flatMap((code) => code.split(/\s+/)).map((word) => word.replace(/^["'(]+|["'),;:]+$/g, ''));
+  ]
+    .flatMap((code) => code.split(/\s+/))
+    .map((word) => word.replace(/^["'(]+|["'),;:]+$/g, ''))
+    // `packages/{docx,xlsx}/package.json` names one path per alternative.
+    .flatMap((word) => {
+      const list = /^([^{}]*)\{([\w@.-]+(?:,[\w@.-]+)+)\}([^{}]*)$/.exec(word);
+      return list ? list[2].split(',').map((item) => `${list[1]}${item}${list[3]}`) : [word];
+    });
   for (const span of new Set(words)) {
+    // A bare file name (`sgconfig.yml`): some tracked file must carry it.
+    // Files of the git-ignored private corpus are not tracked by design.
+    const privateCorpusFile = /\.local\.|^reference-windows-manifest\.json$/;
+    if (/^[\w@-][\w@.-]*$/.test(span) && sourceFile.test(span) && !privateCorpusFile.test(span)) {
+      if (!hasFileNamed(span)) missing.push(`${file}: ${span}`);
+      continue;
+    }
     // A repository path: at least one slash, no placeholders, globs or assignments.
     if (!/^\.?[\w@.-]+(\/[\w@.-]+)+\/?$/.test(span) || /^(https?:|@silurus\/|origin\/|refs\/)/.test(span)) continue;
     if (localOnly.some((pattern) => pattern.test(span)) || packageParts.test(span)) continue;
@@ -461,6 +477,7 @@ test('a removed path or a script of another package is reported', () => {
   const all = new Set(Object.values(scripts).flatMap((names) => [...names]));
   const context = {
     exists: (path) => present.has(path.replace(/\/$/, '')),
+    hasFileNamed: (name) => [...present].some((path) => path.split('/').at(-1) === name),
     scriptsOf: (filter) => (filter ? (scripts[filter] ?? new Set()) : all),
   };
   const check = (text) => missingReferences('AGENTS.md', text, context);
@@ -471,6 +488,12 @@ test('a removed path or a script of another package is reported', () => {
   ]);
   assert.deepEqual(check('4. Run the gates:\n\n   ```bash\n   mise exec -- node scripts/removed.mjs --final\n   ```\n'), [
     'AGENTS.md: scripts/removed.mjs',
+  ]);
+  assert.deepEqual(check('`a.mjs`, `notes.local.md`, `packages/{docx}/x`, `Array.isArray`'), []);
+  assert.deepEqual(check('`sgconfig.yml` and `packages/{docx,xlsx}/package.json`'), [
+    'AGENTS.md: sgconfig.yml',
+    'AGENTS.md: packages/docx/package.json',
+    'AGENTS.md: packages/xlsx/package.json',
   ]);
   assert.deepEqual(check('`scripts/gone.mjs` and `rules/example.yml`'), [
     'AGENTS.md: scripts/gone.mjs',
@@ -508,10 +531,12 @@ test('paths and pnpm scripts named in agent knowledge exist', () => {
     }
     return names;
   };
+  const basenames = new Set(tracked().map((path) => path.split('/').at(-1)));
   const missing = sources.flatMap((source) => {
     const file = rel(source);
     return missingReferences(file, read(source), {
       exists: (path) => existsSync(join(ROOT, path)),
+      hasFileNamed: (name) => basenames.has(name),
       scriptsOf: (filter) => (filter ? (byName.get(filter) ?? new Set()) : scriptsAt(file)),
     });
   });
