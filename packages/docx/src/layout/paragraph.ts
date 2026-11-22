@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, WORD_VERTICAL_RUBY_UPRIGHT_GUIDE, wordRubyGuideSpacing, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -2779,6 +2779,7 @@ function textPlacement(
         baseOrigin: { xPt: 0, yPt: 0 },
         baseAdvancePt: segment.measuredWidth,
         guideAdvancePt: rubyShape.advancePt,
+        ...(segment.ruby.align ? { align: segment.ruby.align } : {}),
         ...(rubyRaisePt === undefined ? {} : { raisePt: rubyRaisePt }),
         ...(baseShape?.inkBounds && rubyShape.inkBounds ? {
           baseInkTopPt: -baseShape.inkBounds.ascentPt,
@@ -3375,6 +3376,54 @@ function retainedGeometryPlan(
   };
 }
 
+/** WORD_VERTICAL_RUBY_UPRIGHT_GUIDE: plan the guide of a vertical ruby run as
+ * a vertical run of its own size, so its glyphs face as base text would, and
+ * align the planned cells along the run (WORD_RUBY_ALIGN_PLACEMENT). */
+function verticalRubyGuide(
+  segment: LayoutTextSeg,
+  ruby: NonNullable<TextPlacement['ruby']>,
+  verticalGlyphMeasurement: VerticalGlyphMeasurementService,
+  writingMode: import('./types.js').WritingMode | undefined,
+): NonNullable<TextPlacement['ruby']> {
+  const first = ruby.paintOps[0];
+  if (!first || !segment.ruby) return ruby;
+  void WORD_VERTICAL_RUBY_UPRIGHT_GUIDE;
+  const cells = verticalGlyphMeasurement.planRun({
+    text: segment.ruby.text,
+    font: canvasFontString(first.fontRoute, first.fontSizePt, first.fontWeight, first.fontStyle),
+    fontKerning: 'none',
+    fontSizePt: first.fontSizePt,
+    letterSpacingPt: 0,
+    charScale: 1,
+    growTrRotateInk: false,
+    writingMode: writingMode ?? 'vertical-rl',
+  });
+  const guideAdvancePt = cells.reduce((sum, cell) => sum + cell.advancePt, 0);
+  const spacing = wordRubyGuideSpacing(
+    segment.ruby.align, segment.measuredWidth - guideAdvancePt, cells.length,
+  );
+  // The authored rightVertical guide stands half its size nearer the base.
+  const axisYPt = first.origin.yPt
+    + (segment.ruby.align === 'rightVertical' ? first.fontSizePt / 2 : 0);
+  return {
+    ...ruby,
+    advancePt: guideAdvancePt,
+    paintOps: cells.map((cell, index) => ({
+      text: cell.text,
+      origin: { xPt: spacing.leadPt + cell.originPt + index * spacing.gapPt, yPt: axisYPt },
+      fontRoute: first.fontRoute,
+      fontSizePt: first.fontSizePt,
+      fontWeight: first.fontWeight,
+      fontStyle: first.fontStyle,
+      color: first.color,
+      glyphOrientation: cell.orientation,
+      ...(cell.verticalFeature ? { verticalFeature: true as const } : {}),
+      ...(cell.drawOffsetPt.xPt !== 0 || cell.drawOffsetPt.yPt !== 0
+        ? { glyphOffsetPt: cell.drawOffsetPt } : {}),
+    })),
+  };
+}
+
 function textPlanSegment(
   segment: LayoutTextSeg,
   paragraph: ParagraphLayoutSource,
@@ -3399,9 +3448,16 @@ function textPlanSegment(
         : {}),
     };
   }
-  const projected = { ...textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0),
-    ...(sourceRuns ? { sourceRuns } : {}) };
-  if (projected.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
+  const horizontalProjection = textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0);
+  if (horizontalProjection.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
+  const projected = {
+    ...horizontalProjection,
+    ...(segment.verticalRun && verticalGlyphMeasurement && horizontalProjection.ruby
+      ? { ruby: verticalRubyGuide(segment, horizontalProjection.ruby, verticalGlyphMeasurement,
+        horizontalProjection.paintOps[0]?.writingMode) }
+      : {}),
+    ...(sourceRuns ? { sourceRuns } : {}),
+  };
   const pitchPt = segLetterSpacingPx(segment, characterGrid, 1);
   // fitText replaces run tracking with its existing per-scalar allocation.
   const gridPt = segment.fitTextPerGapPx ?? segmentCharacterGridDeltaPx(segment, characterGrid, 1);
@@ -3472,6 +3528,7 @@ function textPlanSegment(
           cluster.offsetPt * scaleX
           + (segment.leadingWordBoundaryPx ?? 0)
           + (segment.autoSpaceLeadingPx ?? 0)
+          + (segment.rubyBaseOffsetPx ?? 0)
           + prefixSpacingPt
           + precedingWidthBalanceAdjustment
           + precedingPunctuationCompression,
@@ -3860,7 +3917,7 @@ function textPlanSegment(
         xPt: clusterOriginPaintOps
           ? operation.offset.xPt
           : operation.offset.xPt + (segment.leadingWordBoundaryPx ?? 0)
-            + (segment.autoSpaceLeadingPx ?? 0) },
+            + (segment.autoSpaceLeadingPx ?? 0) + (segment.rubyBaseOffsetPx ?? 0) },
       // Measurement resolves w:spacing, docGrid character pitch, and w:fitText
       // into one authoritative per-scalar pitch. A planned vertical upright or
       // rotate cell already owns that pitch in its retained origin and advance;
@@ -4093,6 +4150,12 @@ function planMeasuredLines(
       && context.lineSpacing?.rule === 'atLeast'
       && compat.specifiedTextLineBoxMode15
       && !context.lineGrid.active && raw.topY === undefined;
+    // WORD_VERTICAL_LINE_CENTRED_BOX: an off-grid atLeast line of an upright
+    // vertical section keeps its centred box at the tail and puts the added
+    // minimum before it.
+    const atLeastVerticalLine = !specified && context.lineSpacing?.rule === 'atLeast'
+      && !context.lineGrid.active
+      && raw.segments.some((segment) => 'text' in segment && (segment.verticalRun === true || segment.tateChuYoko === true));
     // A model source's fixed or minimum line in LibreOffice's placement
     // (`__lineExtraAbove`; DOCX never sets it): a minimum line puts all extra
     // space above the text, so the baseline sits the text's descent above the
@@ -4104,7 +4167,7 @@ function planMeasuredLines(
     const extraAboveLine = (paragraph as { readonly __lineExtraAbove?: boolean }).__lineExtraAbove === true
       && (context.lineSpacing?.rule === 'exact' || context.lineSpacing?.rule === 'atLeast'
         || (context.lineSpacing?.rule === 'auto' && context.lineSpacing.value < 1));
-    const baselinePt = extraAboveLine
+    const flowBaselinePt = extraAboveLine
       ? context.lineSpacing!.rule === 'exact'
         ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
         : context.lineSpacing!.rule === 'auto'
@@ -4114,9 +4177,24 @@ function planMeasuredLines(
       ? measuredLine.topYPt + exactBaselinePt
       : specified
       ? measuredLine.topYPt + specified.baselineOffsetPt
-      : atLeastRubyLine
+      : atLeastRubyLine || atLeastVerticalLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
           : plannedBaselinePt(measuredLine, context, libreOfficeLines);
+    // WORD_VERTICAL_LINE_CENTRED_BOX: the space an automatic multiple adds
+    // after the line and an atLeast minimum adds before it follow the strip
+    // order. A tbLrV line is reflected across its band at paint, so its extra
+    // space moves to the other logical side to stay in that order.
+    const verticalExtraSpacePt = blockReflectedLines && !specified
+      && raw.segments.some((segment) => 'text' in segment && (segment.verticalRun === true || segment.tateChuYoko === true))
+      && !context.lineGrid.active
+      && ((context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1)
+        || context.lineSpacing?.rule === 'atLeast')
+      ? Math.max(0, measuredLine.advancePt - Math.max(
+        (raw.visibleAscent ?? raw.ascent) + (raw.visibleDescent ?? raw.descent),
+        raw.visibleIntendedSingle ?? raw.intendedSingle))
+      : 0;
+    const baselinePt = flowBaselinePt
+      + (context.lineSpacing?.rule === 'atLeast' ? -verticalExtraSpacePt : verticalExtraSpacePt);
     const objectTopOffsetPt = (heightPt: number, positionPt: number | undefined, clipped = false): number => {
       if (!exactObjectHangs) return -heightPt - (positionPt ?? 0);
       const topPt = measuredLine.topYPt - (positionPt ?? 0);

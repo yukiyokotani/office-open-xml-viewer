@@ -9,6 +9,7 @@ import type {
   TextDecorationLayout,
 } from './types.js';
 import { retainedBorderTreatment } from './border-treatment.js';
+import { wordRubyGuideSpacing } from './line-compatibility.js';
 import type { GlyphInkBounds, GlyphMeasurement } from './text.js';
 
 export interface ShapedLeaderInput extends Omit<RetainedGlyphPaintOperation, 'text' | 'origin'> {
@@ -51,6 +52,8 @@ export function rubyPaintOperations(input: Readonly<{
   baseOrigin: PointPt;
   baseAdvancePt: number;
   guideAdvancePt: number;
+  /** Valid authored ST_RubyAlign (WORD_RUBY_ALIGN_PLACEMENT); centred when absent. */
+  align?: string;
   raisePt?: number;
   /** Used only for the specification-independent touching-ink fallback. */
   baseInkTopPt?: number;
@@ -70,11 +73,13 @@ export function rubyPaintOperations(input: Readonly<{
       'Ruby geometry requires authored w:hpsRaise or retained base/guide ink bounds',
     );
   }
-  const startXPt = input.baseOrigin.xPt
-    + (input.baseAdvancePt - input.guideAdvancePt) / 2;
-  return input.spans.map((span) => ({
+  const spacing = wordRubyGuideSpacing(
+    input.align, input.baseAdvancePt - input.guideAdvancePt, input.spans.length,
+  );
+  const startXPt = input.baseOrigin.xPt + spacing.leadPt;
+  return input.spans.map((span, index) => ({
     text: span.text,
-    origin: { xPt: startXPt + span.offsetPt, yPt: baselinePt },
+    origin: { xPt: startXPt + span.offsetPt + index * spacing.gapPt, yPt: baselinePt },
     fontRoute: span.fontRoute,
     fontSizePt: span.fontSizePt,
     fontWeight: span.fontWeight,

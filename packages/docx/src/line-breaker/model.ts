@@ -141,6 +141,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Admitted reference profile has no Far East code-page bits; its Latin
    * single-line design height owns whole line-grid cells (#1674). */
   resolvedLatinGridCellAllocation?: boolean;
+  /** The admitted resource or reference profile sets an OS/2 Far East
+   * code-page bit (Word's 1.3 x usWin single-line class). */
+  resolvedFarEastLineClass?: true;
   resolvedLineHeightRatio?: number;
   /** A selected route supplied this ratio from measured or parsed geometry. */
   resolvedResourceVerticalMetric?: true;
@@ -244,7 +247,18 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box) around the text. */
   border?: DocxRunBorder | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
-  ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number };
+  ruby?: {
+    text: string;
+    fontSizePt: number;
+    hpsRaisePt?: number;
+    /** Valid authored §17.3.3.1 w:rubyAlign (ST_RubyAlign). */
+    align?: string;
+    /** This segment holds the whole base text (it was not split into pieces). */
+    wholeBase?: true;
+  };
+  /** WORD_RUBY_ALIGN_PLACEMENT: offset of the base text inside a ruby run
+   * widened to a longer guide. */
+  rubyBaseOffsetPx?: number;
   /** Every piece of a ruby-annotated run (only the first carries `ruby`):
    * none takes a WORD_KERNED_SPACE_PAIRS seam pair. */
   rubyPiece?: true;

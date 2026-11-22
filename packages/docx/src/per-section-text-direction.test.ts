@@ -170,14 +170,15 @@ describe('per-section text direction (§17.6.20, issue #1000) — paginator stam
   });
 
   // Height- AND width-sensitive: the vertical section must paginate against its
-  // SWAPPED frame. Physical 200(w)×300(h), margins all 20 ⇒ logical page 300×200,
-  // content height 160 (8 × 20pt one-line paras), wrap width 260 (a 10-char 20pt
-  // para = 200pt fits on ONE line). If the frame were left physical: content
-  // height 260 and wrap width 160 (two lines per para) — a totally different
-  // distribution — so this fails the moment the swap is dropped.
+  // SWAPPED frame. Physical 206(w)×300(h), margins all 20 ⇒ logical page 300×206,
+  // content height 166 (8 one-line paras: a 20pt vertical single line is
+  // 20 + 20/30pt, WORD_VERTICAL_LINE_CENTRED_BOX), wrap width 260 (a 10-char
+  // 20pt para = 200pt fits on ONE line). If the frame were left physical:
+  // content height 260 and wrap width 166 (two lines per para) — a totally
+  // different distribution — so this fails the moment the swap is dropped.
   it('paginates a vertical mid-section against its SWAPPED logical frame', () => {
     const vertPhys: SectionGeom = {
-      pageWidth: 200, pageHeight: 300,
+      pageWidth: 206, pageHeight: 300,
       marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
       headerDistance: 0, footerDistance: 0,
     };
@@ -562,14 +563,15 @@ describe('per-section text direction (§17.6.20, issue #1000) — split slices a
 
 describe('per-section text direction (§17.6.20, issue #1000) — HF reserve', () => {
   it('reserves NOTHING on a vertical page (paint draws its HF physically, reserve-free)', () => {
-    // Vertical mid-section: physical 200×300, margins 20 ⇒ logical content height
-    // 160 ⇒ exactly 8 one-line 20pt paras. A 40pt footer whose extent (10+40)
+    // Vertical mid-section: physical 206×300, margins 20 ⇒ logical content height
+    // 166 ⇒ exactly 8 one-line 20pt paras (20 + 20/30pt vertical single lines,
+    // WORD_VERTICAL_LINE_CENTRED_BOX). A 40pt footer whose extent (10+40)
     // overflows the 20pt logical bottom margin would phantom-reserve 30pt and
     // push A7/A8 off the page — the paint pass never reserves on vertical pages
     // (issue #988: vertical HF draw horizontally at the physical margins), so
     // pagination must not either.
     const vertPhys: SectionGeom = {
-      pageWidth: 200, pageHeight: 300,
+      pageWidth: 206, pageHeight: 300,
       marginTop: 20, marginRight: 20, marginBottom: 20, marginLeft: 20,
       headerDistance: 0, footerDistance: 10,
     };

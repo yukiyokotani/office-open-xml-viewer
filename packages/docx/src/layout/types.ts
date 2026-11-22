@@ -311,6 +311,11 @@ export interface RetainedGlyphPaintOperation {
     ascentPt: number;
     descentPt: number;
   }>;
+  /** A vertical ruby guide cell (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE): painted
+   * like a vertical base text cell of the same orientation. */
+  readonly glyphOrientation?: 'sideways' | 'upright' | 'rotate';
+  readonly verticalFeature?: true;
+  readonly glyphOffsetPt?: PointPt;
 }
 
 export type RetainedMarkPath = Readonly<{

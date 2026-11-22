@@ -113,7 +113,24 @@ function paintRetainedGlyph(
   ctx.font = font;
   const previousKerning = ctx.fontKerning;
   if (operation.kerning) ctx.fontKerning = operation.kerning;
-  if (upright) {
+  const offsetXPt = operation.glyphOffsetPt?.xPt ?? 0;
+  const offsetYPt = operation.glyphOffsetPt?.yPt ?? 0;
+  if (operation.glyphOrientation === 'upright' || operation.glyphOrientation === 'rotate') {
+    // WORD_VERTICAL_RUBY_UPRIGHT_GUIDE: a planned vertical guide cell paints
+    // centred on its origin exactly like a base cell of that orientation.
+    ctx.save();
+    ctx.translate(operation.origin.xPt, operation.origin.yPt);
+    if (operation.glyphOrientation === 'upright') ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const draw = (): void => fillRetainedText(context, font, operation.text, offsetXPt, offsetYPt);
+    if (operation.verticalFeature) withVertFeature(ctx as CanvasRenderingContext2D, draw);
+    else draw();
+    ctx.restore();
+  } else if (operation.glyphOrientation === 'sideways') {
+    fillRetainedText(context, font, operation.text,
+      operation.origin.xPt + offsetXPt, operation.origin.yPt + offsetYPt);
+  } else if (upright) {
     ctx.save();
     ctx.translate(operation.origin.xPt, operation.origin.yPt);
     ctx.rotate(-Math.PI / 2);

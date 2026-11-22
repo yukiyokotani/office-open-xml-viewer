@@ -256,13 +256,14 @@ describe('§17.3.2.10 縦中横 (horizontal-in-vertical) — sample-26 "9月29�
     expect(nine, '"９" reported').toBeDefined();
     expect(tcy, '"２９" reported').toBeDefined();
 
-    // The 縦中横 cell's ALONG-column advance (`h` in vertical reporting) is ONE
-    // em — NOT 2·FONT_PX (full width) and NOT 2·FONT_PX·0.67 (the #813
-    // regression). One cell = FONT_PX at scale 1.
-    expect(tcy!.h).toBeCloseTo(FONT_PX, 6);
+    // The 縦中横 cell's ALONG-column advance (the run's inline extent `w`; `h`
+    // is the line's extent across the column) is ONE em — NOT 2·FONT_PX (full
+    // width) and NOT 2·FONT_PX·0.67 (the #813 regression). One cell = FONT_PX
+    // at scale 1.
+    expect(tcy!.w).toBeCloseTo(FONT_PX, 6);
     // A normal single CJK cell ("９") is also one em — so "２９" occupies the same
     // along-column extent as a single character, exactly as sample-26.pdf shows.
-    expect(tcy!.h).toBeCloseTo(nine!.h, 6);
+    expect(tcy!.w).toBeCloseTo(nine!.w, 6);
   });
 
   it('draws "２９" as ONE upright fillText and the following "日" does not overlap', async () => {
@@ -288,11 +289,11 @@ describe('§17.3.2.10 縦中横 (horizontal-in-vertical) — sample-26 "9月29�
     const nichi = runs.find((r) => r.text === NICHI)!;
 
     // Cells abut DOWN the column (along-column axis = `y`): each starts where the
-    // previous ended (start + advance `h`). No overlap between "月" → "２９" →
+    // previous ended (start + advance `w`). No overlap between "月" → "２９" →
     // "日" (the regression symptom: "２９" overran its cell and "日" was pulled
     // back over it).
-    expect(tcy.y).toBeCloseTo(getsu.y + getsu.h, 6);
-    expect(nichi.y).toBeCloseTo(tcy.y + tcy.h, 6);
+    expect(tcy.y).toBeCloseTo(getsu.y + getsu.w, 6);
+    expect(nichi.y).toBeCloseTo(tcy.y + tcy.w, 6);
     // "日" starts exactly ONE cell after "２９", which is one cell after "月":
     // "月" → "日" spans two 1-em cells ("２９" occupies exactly one of them).
     expect(nichi.y - getsu.y).toBeCloseTo(2 * FONT_PX, 6);

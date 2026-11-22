@@ -61,3 +61,33 @@ export function rubyAscentReservePx(
   }
   throw new Error('Ruby without hpsRaise requires retained base and guide ink');
 }
+
+/** Natural advance of the ruby guide text at its own size, from the same
+ * selected route the guide paints with (WORD_RUBY_ALIGN_PLACEMENT widens a
+ * ruby run to a longer guide). */
+export function rubyGuideAdvancePx(
+  segment: LayoutTextSeg,
+  scale: number,
+  ctx: MeasurementTextContext,
+  fontFamilyClasses: Record<string, string> = {},
+): number {
+  if (!segment.ruby) return 0;
+  if (segment.textLayoutService && segment.textShapeRequest) {
+    return segment.textLayoutService.shape({
+      ...independentTextShapeRequest(segment.textShapeRequest, segment.ruby.text),
+      fontSizePt: segment.ruby.fontSizePt * scale,
+      measure: true,
+      clusterGeometry: false,
+    }).advancePt;
+  }
+  const previousFont = ctx.font;
+  try {
+    ctx.font = buildFont(
+      segment.bold, segment.italic, segment.ruby.fontSizePt * scale,
+      segment.fontFamily, fontFamilyClasses, segment.fontRoute,
+    );
+    return ctx.measureText(segment.ruby.text).width;
+  } finally {
+    ctx.font = previousFont;
+  }
+}

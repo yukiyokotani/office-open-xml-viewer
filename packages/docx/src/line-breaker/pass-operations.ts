@@ -21,6 +21,8 @@ import {
   wordJustifiedCompressionExceedsCap,
   wordIsOverflowPunctuation,
   WORD_RUBY_LINE_ASCENT,
+  wordVerticalSingleLineExtraPx,
+  wordRubyBaseOffset,
 } from '../layout/line-compatibility.js';
 import {
   type LayoutImageSeg,
@@ -69,7 +71,7 @@ import {
   segmentEastAsiaFloorSingleLinePx,
   segmentIntendedSingleLinePx,
 } from './font-routes.js';
-import { rubyAscentReservePx } from './ruby-metrics.js';
+import { rubyAscentReservePx, rubyGuideAdvancePx } from './ruby-metrics.js';
 import { fitCJKPrefix, fitsLineWidth, hasEastAsianVisiblePredecessor } from './fit-search.js';
 import { rebaseSeaBreaks, hasCJKBreakOpportunity } from './text-runs.js';
 import {
@@ -1534,7 +1536,7 @@ export function performAddToLine(
             ts.text,
           )
         : null;
-    const designIntended =
+    const horizontalDesignIntended =
       ts.textBoxLineFloor && ts.ruby
         ? 0
         : Math.max(
@@ -1543,11 +1545,18 @@ export function performAddToLine(
               ? segmentEastAsiaFloorSingleLinePx(ts, intendedEm, segScriptHint)
               : 0,
           );
+    // WORD_VERTICAL_LINE_CENTRED_BOX: a vertical run's single line adds its
+    // measured fraction of the em to the horizontal design single line.
+    const verticalExtra = ts.verticalRun || ts.tateChuYoko
+      ? wordVerticalSingleLineExtraPx(intendedEm, verticalFarEastClass(ts)) : 0;
+    const designIntended = horizontalDesignIntended > 0
+      ? horizontalDesignIntended + verticalExtra : 0;
     if (paintsInlineInk && !metricEastAsian && !ts.ruby
       && ts.resolvedLatinGridCellAllocation === true) {
       breakerState.lineLatinGridCountSingle = Math.max(breakerState.lineLatinGridCountSingle, designIntended);
     }
-    const intended = Math.max(designIntended, (nativeRatio ?? 0) * intendedEm);
+    const intended = Math.max(designIntended,
+      nativeRatio == null ? 0 : nativeRatio * intendedEm + verticalExtra);
     if (intended > breakerState.lineIntendedSingle) breakerState.lineIntendedSingle = intended;
     if (paintsInlineInk && intended > breakerState.lineVisibleIntendedSingle) {
       breakerState.lineVisibleIntendedSingle = intended;
@@ -2296,6 +2305,16 @@ export function performTextSegmentBox(
     scale,
     condensedNaturalClusters(operationState, s, s.text),
   ) + leadingAutoSpacePx(operationState, s);
+  // WORD_RUBY_ALIGN_PLACEMENT: a guide longer than its whole base widens the
+  // run; the base sits inside it by the authored alignment.
+  s.rubyBaseOffsetPx = undefined;
+  if (s.ruby?.wholeBase) {
+    const overhang = rubyGuideAdvancePx(s, scale, ctx, fontFamilyClasses) - width;
+    if (overhang > 0) {
+      s.rubyBaseOffsetPx = wordRubyBaseOffset(s.ruby.align, overhang);
+      width += overhang;
+    }
+  }
   s.snapGridNaturalWidthPx = width;
   // The seam pair with the preceding piece (WORD_KERNED_SPACE_PAIRS; for
   // max-content also the separator pair of registered physical units, whose
@@ -2373,6 +2392,17 @@ export function performTextSegmentBox(
     s.resolvedDesignDescentRatio != null;
   let ascent = designOwnsSides ? s.resolvedDesignAscentRatio! * metricEmPx : corrected.ascent;
   let descent = designOwnsSides ? s.resolvedDesignDescentRatio! * metricEmPx : corrected.descent;
+  // WORD_VERTICAL_LINE_CENTRED_BOX: across an upright vertical line the run's
+  // box is centred on the axis the glyphs paint on, one vertical single line
+  // high (the horizontal box plus the measured addition).
+  const verticalLineRun = s.verticalRun === true || s.tateChuYoko === true;
+  const verticalSingle = verticalLineRun
+    ? ascent + descent + wordVerticalSingleLineExtraPx(metricEmPx, verticalFarEastClass(s))
+    : 0;
+  if (verticalLineRun) {
+    ascent = verticalSingle / 2;
+    descent = verticalSingle / 2;
+  }
   if (s.positionExtendsLineBox !== false) {
     const positionPx = (s.position ?? 0) * scale;
     if (positionPx > 0) ascent += positionPx;
@@ -2392,11 +2422,31 @@ export function performTextSegmentBox(
     // stands that far above the base baseline, and the line's ascent is the
     // larger of the base ascent and the guide's top. Without hpsRaise the
     // retained ink-derived reserve keeps its established additive form.
+    // In a vertical line the guide is centred hpsRaise from the axis and
+    // reserves half of its own vertical single line toward the head
+    // (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE).
+    const rubyPx = s.ruby.fontSizePt * scale;
+    const farEast = verticalFarEastClass(s);
+    const guideHeadPx = verticalLineRun
+      ? ((verticalSingle - wordVerticalSingleLineExtraPx(metricEmPx, farEast)) / metricEmPx * rubyPx
+        + wordVerticalSingleLineExtraPx(rubyPx, farEast)) / 2
+        // The rightVertical guide stands half its size nearer the base.
+        - (s.ruby.align === 'rightVertical' ? rubyPx / 2 : 0)
+      : rubyPx;
     ascent = s.ruby.hpsRaisePt != null
-      ? Math.max(ascent, reserve + s.ruby.fontSizePt * scale)
+      ? Math.max(ascent, reserve + guideHeadPx)
       : ascent + reserve;
   }
   return { width, height: s.fontSize, ascent, descent };
+}
+
+/** WORD_VERTICAL_LINE_CENTRED_BOX: the run's face is of Word's Far East
+ * single-line class. Without admitted face data, East Asian text takes the
+ * Far East fallback class its single line already uses. */
+function verticalFarEastClass(s: LayoutTextSeg): boolean {
+  if (s.resolvedFarEastLineClass) return true;
+  if (s.resolvedLineHeightRatio != null) return false;
+  return s.metricEastAsian === true || EAST_ASIAN_RE.test(s.text);
 }
 
 export function performAppendQueuedIdeographicSpaceSegment(

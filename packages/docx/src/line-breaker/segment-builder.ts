@@ -287,11 +287,13 @@ export function appendTextPiece(
   // Splitting on word boundaries would lose the association, so attach
   // the annotation only to the first emitted segment.
   const baseRuby = r.ruby;
+  const rubyAlign = acquiredValue(acquiredTypography?.ruby?.align, undefined);
   const ruby = baseRuby
     ? {
         text: baseRuby.text,
         fontSizePt: baseRuby.fontSizePt,
         ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
+        ...(rubyAlign ? { align: rubyAlign } : {}),
       }
     : undefined;
   const revision = r.revision;
@@ -1179,7 +1181,7 @@ interface SegmentEmissionState {
   readonly effectiveCharacterScale: number | undefined;
   readonly effectiveKerningThreshold: number | undefined;
   readonly effectiveSnapToGrid: boolean | undefined;
-  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number } | undefined;
+  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number; align?: string } | undefined;
   readonly revision:
     | {
         readonly kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
@@ -1726,6 +1728,9 @@ function emitResolvedTextSegment(
     resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
     resolvedLatinGridCellAllocation: (resourceFamilyLineMetric?.farEastCodePage
       ?? referenceLineMetric?.farEastCodePage) === false,
+    ...((resourceFamilyLineMetric?.farEastCodePage
+      ?? referenceLineMetric?.farEastCodePage) === true
+      ? { resolvedFarEastLineClass: true as const } : {}),
     ...(resourceFamilyLineMetric?.lineHeightRatio != null
       ? {
           resolvedResourceVerticalMetric: true as const,
@@ -1773,7 +1778,9 @@ function emitResolvedTextSegment(
     background: base.background ?? null,
     colorAuto: r.colorAuto ?? false,
     border: r.border ?? null,
-    ruby: emissionState.firstSeg ? ruby : undefined,
+    ruby: emissionState.firstSeg && ruby
+      ? ('text' in r && r.text === text ? { ...ruby, wholeBase: true as const } : ruby)
+      : undefined,
     ...(ruby ? { rubyPiece: true as const } : {}),
     revision,
     ...(revision && environment.showTrackedChanges === true

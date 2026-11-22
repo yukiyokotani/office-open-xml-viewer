@@ -1959,3 +1959,90 @@ export const WORD_INLINE_ROTATED_PICTURE_LINE_CLIP = defineCompatibilityRule({
 export function wordInlinePictureClipsToLine(rotationDeg: number | null | undefined): boolean {
   return rotationDeg != null && Number.isFinite(rotationDeg) && rotationDeg % 360 !== 0;
 }
+
+/** ECMA-376 §17.3.1.33 sizes lines and Part 4 §14.11.7 (§17.18.93
+ * ST_TextDirection) turns them for tbRl/tbLrV sections, but neither says
+ * where upright East Asian glyphs and turned Latin text sit across a
+ * vertical line, nor that its single line differs from the horizontal one. */
+export const WORD_VERTICAL_LINE_CENTRED_BOX = defineCompatibilityRule({
+  id: 'word-vertical-line-centred-box',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-section-line-box',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'In a tbRl or tbLrV section every text run contributes a line box centred on the line axis instead of the horizontal ascent/descent partition: upright East Asian glyphs are centred on the axis (their em box at its middle) and turned Latin text has its baseline the run face\'s (ascent - descent) / 2 tailward of it, so a line holding only Latin, only East Asian or mixed text places its axis halfway across its single line. The single line itself is the horizontal one plus one thirtieth of the run\'s em, the addition inside the Far East 1.3 x usWin multiplier for faces of that class (wordVerticalSingleLineExtraPx). Automatic multiples keep the axis half a single line from the edge where the strip starts in line order and add the extra space after it, atLeast lines taller than their content put the extra space before the line, also in line order (so in a tbLrV section, whose strips are reflected, both sit on the opposite side of the strip from a tbRl line); exact lines put the axis 0.8 of the line from the head side in both directions; line-grid lines centre the box in their cells. A tate-chu-yoko run takes the same centred box. Evidence: Windows Word 16.0.20625 PDF exports (vert1 set) of A4 sections in lrTb, tbRl and tbLrV with identical paragraphs: three East-Asian-only, three Latin-only and three mixed paragraphs at 9, 10.5 and 14pt for MS Mincho, Times New Roman/MS Mincho, Arial/MS Gothic, Century/Yu Mincho, Calibri/Yu Gothic and Arial/Meiryo (embedded as authored), with and without an 18pt line grid; auto 1/1.5/2, exact 12/18/24/36 and atLeast 12/24 paragraphs; Latin-only runs over four eastAsia faces. Vertical single lines were the horizontal ones plus 0.031-0.035 em per Latin face (Arial 10.5pt: 12.41 against 12.07pt over seven lines) and 1.3 x (usWin + 0.034 em) per Far East face (MS Mincho: 12.11, 14.12 and 18.81pt at 9, 10.5 and 14pt over eight lines, against 11.69, 13.62 and 18.17pt horizontally); every predicted line in the set lay within 0.09pt of the PDF (mean -0.01pt). The unused eastAsia face of a Latin-only run did not change its line. Upright glyph centres sat within 0.2pt of the line middle in every face; the turned Latin baseline lay 0.33, 0.34 and 0.36 em tailward of the axis for Times New Roman, Arial and MS Mincho, which the face\'s (ascent - descent) / 2 reproduces within 0.015 em, while Century (0.40 em) and Calibri (0.37 em) sit 0.02-0.03 em further than that projection. Exact lines put the axis 0.8 of the line from the head (12, 18, 24 and 36pt). In tbLrV the auto 1.5/2 lines put their axis 7.0 and 7.1pt (half a 14.1pt single line) from the left edge of the strip and the atLeast 24pt line 16.9pt from it, while the exact lines kept the axis 0.2 of the line from the left edge, as the reflected tbRl strip. Library scope: the exact-line axis follows the horizontal exact-line baseline placement on the symmetric box; that horizontal rule (and the whole-cell grid allocation of Latin-only paragraphs in a Far East face, which Word applied to the 14pt vertical lines of the grid controls as it does horizontally) is owned by WORD_SPECIFIED_TEXT_LINE_BOX, whose evidence and gate are horizontal. Outside this evidence: runs with a w:position offset (Word moved a 3pt raised run about 1.7pt across a vertical line, which the library does not reproduce), empty paragraphs, and vertical table cells and text boxes, which keep their own frames.',
+});
+
+/** One thirtieth of an em: the vertical single-line addition measured by
+ * WORD_VERTICAL_LINE_CENTRED_BOX across 9-14pt Latin and Far East faces. */
+export const WORD_VERTICAL_SINGLE_LINE_EXTRA_EM = 1 / 30;
+
+/** WORD_VERTICAL_LINE_CENTRED_BOX: the run's addition to its single line in
+ * an upright vertical section, scaled by the Far East multiplier when the
+ * face is of that code-page class. */
+export function wordVerticalSingleLineExtraPx(emPx: number, farEast: boolean): number {
+  return emPx * WORD_VERTICAL_SINGLE_LINE_EXTRA_EM
+    * (farEast ? WORD_FAR_EAST_SINGLE_LINE_FACTOR : 1);
+}
+
+/** ECMA-376 §17.3.3.1 (rubyAlign) and §17.18.75 (ST_RubyAlign) name the
+ * guide alignments with prose examples only; the run's own advance when the
+ * guide is longer than its base is not specified. */
+export const WORD_RUBY_ALIGN_PLACEMENT = defineCompatibilityRule({
+  id: 'word-ruby-align-placement',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'ruby-align-placement',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'A ruby run advances by the larger of its base and guide text. When the guide is shorter, the slack S along the base is placed by w:rubyAlign: center keeps S/2 before the guide, left none, right all of it, distributeLetter puts the first and last guide letters at the base edges with S/(n-1) between letters (a single letter centres), and distributeSpace gives each of the n letters S/n, half of it at either end. When the guide is longer the guide starts at the run start with its natural spacing and the base sits inside the widened run: at its start for left, at its end for right and centred otherwise, the neighbouring text following the widened run. Evidence: Windows Word 16.0.20625 PDF exports (vert1 set) of MS Mincho 10.5pt base text with 5pt MS Mincho guides, each value over a three-letter base with a two-letter guide and over a one-letter base with a five-letter guide, in lrTb, tbRl and tbLrV sections: every guide and base letter lay within 0.15pt of these positions along the line in all three directions. rightVertical in a tbRl or tbLrV section aligns like center along the line (its across-line offset is WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). In a horizontal line Word sets a rightVertical guide as a vertical column to the right of a narrowed base, which the library does not lay out; it keeps the center placement there. A guide longer than a base of several letters (whether Word then spreads the base letters) is outside this evidence; the base stays one block.',
+});
+
+/** WORD_RUBY_ALIGN_PLACEMENT: where the base sits inside a run widened by
+ * `overhang` to a longer guide. */
+export function wordRubyBaseOffset(align: string | undefined, overhang: number): number {
+  if (!(overhang > 0)) return 0;
+  if (align === 'left') return 0;
+  if (align === 'right') return overhang;
+  return overhang / 2;
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT: the lead before the first of `count` guide
+ * letters and the gap added after each letter when the guide is `slack`
+ * shorter than its base. */
+export function wordRubyGuideSpacing(
+  align: string | undefined,
+  slack: number,
+  count: number,
+): Readonly<{ leadPt: number; gapPt: number }> {
+  if (align === 'left' || count <= 0 || slack === 0) return { leadPt: 0, gapPt: 0 };
+  // A guide longer than a base that was not widened to it (a base split into
+  // pieces) overhangs by the same alignment, without letter spacing.
+  if (slack < 0) return { leadPt: align === 'right' ? slack : slack / 2, gapPt: 0 };
+  if (align === 'right') return { leadPt: slack, gapPt: 0 };
+  if (align === 'distributeLetter') {
+    return count > 1 ? { leadPt: 0, gapPt: slack / (count - 1) } : { leadPt: slack / 2, gapPt: 0 };
+  }
+  if (align === 'distributeSpace') return { leadPt: slack / (2 * count), gapPt: slack / count };
+  return { leadPt: slack / 2, gapPt: 0 };
+}
+
+/** ECMA-376 §17.3.3.25 places the guide above the base; Part 4 §14.11.7 and
+ * §17.18.93 turn the line in vertical sections but do not say how the guide's
+ * glyphs face. */
+export const WORD_VERTICAL_RUBY_UPRIGHT_GUIDE = defineCompatibilityRule({
+  id: 'word-vertical-ruby-upright-guide',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-ruby-upright-guide',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'In a tbRl or tbLrV section a ruby guide is a vertical run of its own size: its glyphs take the orientation the base text would give them (kana, ideographs, the long vowel mark, small kana, full-width brackets and full-width Latin upright; Latin letters and digits turned, their baseline (ascent - descent) / 2 tailward of the guide axis), and the guide axis lies hpsRaise from the base axis toward the line head (rightVertical: hpsRaise minus half the guide size). The guide reserves half of its own vertical single line beyond its axis, so a ruby line extends max(base half line, hpsRaise + half the guide single line) toward its head (WORD_VERTICAL_LINE_CENTRED_BOX). Evidence: Windows Word 16.0.20625 PDF exports (vert1 set) of MS Mincho and Century/Yu Mincho 10.5pt base text in tbRl and tbLrV sections with guides of 3.5, 5, 7 and 10.5pt at hpsRaise 9pt and 5pt guides at 5 and 15pt: guide centres lay 8.82-9.03pt (Yu Mincho 8.70-8.88pt), 4.92 and 15.00pt from the base glyph centres; 5pt rightVertical guides 6.48-6.50pt (Yu Mincho 6.36pt); the Tokyo and 2026 guides were turned with their baselines 1.77pt from the guide axis; line pitches of the 5, 7 and 10.5pt guide lines and of the 5 and 15pt raises lay within 0.12pt of the reserve above. A guide with several fonts plans every span with the first span\'s face; that mixed case is outside this evidence.',
+});
