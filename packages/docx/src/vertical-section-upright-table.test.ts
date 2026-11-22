@@ -695,6 +695,19 @@ describe('upright block table of a vertical section', () => {
       expect(pages[2]!.strips).toEqual([[{ block: 0, inlineStart: rest!.bottom }]]);
     });
 
+    it('keeps the shared left edge of a run on the page its rows continue on', () => {
+      // A 90 pt wide table of 45 rows of 18 pt, taller than the band, directly
+      // before a 180 pt wide table: on page 2 the wide table follows the
+      // narrow one's last rows at the same left edge.
+      const pages = layOutPages('tbRl', [narrow(45).replaceAll('<w:tr>', '<w:tr><w:trPr><w:trHeight w:val="360" w:hRule="atLeast"/></w:trPr>'), T]);
+      expect(pages).toHaveLength(2);
+      const [rest, wide] = pages[1]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(wide.top).toBeCloseTo(rest.bottom, 6);
+      expect(rest.paintedLeft).toBeCloseTo(wide.paintedLeft, 6);
+      expect(pages[0]!.tables[0]!.paintedLeft).toBeCloseTo(wide.paintedLeft, 6);
+      expect(wide.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+    });
+
     it('continues below the last rows of the table before it', () => {
       // Measured: 40, 25 and 2 rows. The third follows the second's last
       // rows on the page they end on.

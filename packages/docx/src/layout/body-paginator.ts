@@ -3315,9 +3315,9 @@ function* paginateBodyPassSteps(
         // and the flow continues after it, while the tables take the planned
         // slots when the flow reaches them. Otherwise the tables keep their
         // place all the same and the paragraph is paginated beside them like
-        // any other (measured: a two-line result that the column cannot
-        // hold moves to the next column whole, the table staying behind).
-        // Each fragment is tried once and no table placed earlier moves.
+        // any other paragraph beside an exclusion (the rule records the
+        // control). Each fragment is tried once and no table placed earlier
+        // moves.
         let uprightBlocks: UprightBlockRegistration | null = null;
         let uprightBlocksFor = '';
         const tableAfter = input.sequence[entryIndex + 1];

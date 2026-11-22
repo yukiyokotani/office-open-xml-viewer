@@ -18,12 +18,14 @@ import {
 // - an upright block's text exclusion among the page's wrap rectangles, a
 //   slot of a table placed ahead of the flow, or a float registry entry of an
 //   upright block (there are none: the blocks are kept beside that registry),
+// - an entry of the page's history of placed table boxes,
 // - a retained row of a table.
+// Reads of a table's retained record are counted by a second passthrough.
 // These are the collections whose rescans made earlier revisions quadratic.
 // Indexed loops and Map lookups are not counted, and nothing here measures
 // time: the counts bound array traversals only.
 
-const work = vi.hoisted(() => ({ boxes: new WeakSet<object>(), registered: 0 }));
+const work = vi.hoisted(() => ({ boxes: new WeakSet<object>(), registered: 0, recordReads: 0 }));
 
 vi.mock('./layout/upright-block-index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./layout/upright-block-index.js')>();
@@ -37,16 +39,30 @@ vi.mock('./layout/upright-block-index.js', async (importOriginal) => {
   };
 });
 
-type Counts = { boxes: number; exclusions: number; slots: number; registryEntries: number; rows: number };
+vi.mock('./layout/acquisition-state.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./layout/acquisition-state.js')>();
+  return {
+    ...actual,
+    retainedTableRecord: (...args: Parameters<typeof actual.retainedTableRecord>) => {
+      work.recordReads += 1;
+      return actual.retainedTableRecord(...args);
+    },
+  };
+});
+
+type Counts = {
+  boxes: number; exclusions: number; slots: number; registryEntries: number; rows: number; history: number;
+};
 
 /** Lays `run` out while counting the visits described above. */
 function counting<Result>(run: () => Result): Readonly<{ result: Result; counts: Counts }> {
-  const counts: Counts = { boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0 };
+  const counts: Counts = { boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0 };
   const visit = (value: unknown): void => {
     if (value === null || typeof value !== 'object') return;
     if (work.boxes.has(value)) counts.boxes += 1;
     else if ('bandStartInclusive' in value) counts.exclusions += 1;
     else if ('reserved' in value && 'sourceIndex' in value) counts.slots += 1;
+    else if ('box' in value && 'sourceIndex' in value) counts.history += 1;
     else if ('kind' in value && value.kind === 'table-row') counts.rows += 1;
     else if ('occurrenceId' in value && typeof value.occurrenceId === 'string'
       && value.occurrenceId.includes('upright-table')) counts.registryEntries += 1;
@@ -140,6 +156,9 @@ describe('upright block table placement work', () => {
     // not against those of every table of the page.
     expect(small.exclusions).toBeGreaterThan(0);
     expect(large.exclusions).toBeLessThanOrEqual(6 * small.exclusions);
+    // No paragraph here anchors a drawing: none reads the history of placed
+    // table boxes.
+    expect(large.history).toBe(0);
   }, 120_000);
 
   it('places a table on each page in work that does not grow with the pages before it', () => {
@@ -175,6 +194,39 @@ describe('upright block table placement work', () => {
     const large = measure(160);
     // Four times the rows over four times the pages: summing the remaining
     // rows for every page would read sixteen times as many.
+    expect(large).toBeLessThanOrEqual(5 * small);
+  }, 120_000);
+
+  it('pins a run raised over the first column once, however many tables it holds', () => {
+    // A paragraph and a column break, then one-row tables with nothing
+    // between them ending with an 800 pt one: the run is raised over column 1
+    // and the page laid out once more. The tables after the first are already
+    // pinned then and ask for nothing further.
+    const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+    for (const count of [4, 8, 16]) {
+      const before = work.registered;
+      const pages = layOutPages('tbLrV', [
+        P, columnBreak, ...Array.from({ length: count - 1 }, () => table(1, 18)), table(1, 800),
+      ], 2);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.tables).toHaveLength(count);
+      // One box when the strip before the run plans it, one when the page
+      // starts again with the pin.
+      expect(work.registered - before, `${count} tables`).toBeLessThanOrEqual(2);
+    }
+  }, 120_000);
+
+  it('reads the tables of a run that spans pages in proportion to their number', () => {
+    // One 400 pt row each: one table a page. The run's dimensions are taken
+    // once, not again from every page's first table.
+    const measure = (count: number) => {
+      const before = work.recordReads;
+      const pages = layOutPages('tbLrV', Array.from({ length: count }, () => table(1, 400)));
+      expect(pages).toHaveLength(count);
+      return work.recordReads - before;
+    };
+    const small = measure(20);
+    const large = measure(80);
     expect(large).toBeLessThanOrEqual(5 * small);
   }, 120_000);
 });

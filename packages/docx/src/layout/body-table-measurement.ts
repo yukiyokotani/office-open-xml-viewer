@@ -618,6 +618,104 @@ type UprightRunPlan =
    * (the last slot can be one that splits by rows and is not in it). */
   | Readonly<{ kind: 'placed'; slots: readonly UprightBlockSlot[]; box: LayoutRect; lastSourceIndex: number }>;
 
+/** A run of upright block tables that directly follow one another in the
+ * body: its tables in order, the inline extent of each table and all after
+ * it, and the box extent of the widest. */
+type UprightRun = Readonly<{
+  availableInlineExtentPt: number;
+  writingMode: PhysicalAnchorFrame['writingMode'];
+  startIndex: number;
+  members: readonly UprightRunMember[];
+  /** `suffixInlinePt[i]`: inline extent of members `i` and later. */
+  suffixInlinePt: Float64Array;
+  boxBlockExtentPt: number;
+}>;
+
+/** By layout session: a later session can measure the same tables differently. */
+const uprightRunsBySession = new WeakMap<object, Map<number, UprightRun>>();
+
+/**
+ * The run of directly following upright block tables that holds the table at
+ * body index `sourceIndex`, and the table's place in it. A run is laid out
+ * as one table over however many pages it takes, so its dimensions are taken
+ * once, when the flow first reaches one of its tables, and every later page
+ * reads them instead of walking the rest of the run again.
+ */
+function uprightRunAt(
+  context: BodyTableMeasurementContext,
+  request: BodyTableRequest,
+  operations: BodyTableMeasurementOperations,
+  physical: PhysicalAnchorFrame,
+  sourceIndex: number,
+): Readonly<{ run: UprightRun; at: number }> {
+  const { dependencies, state, effectiveTablePositioning } = context;
+  let runs = uprightRunsBySession.get(context.sessionState);
+  if (!runs) uprightRunsBySession.set(context.sessionState, runs = new Map());
+  const cached = runs.get(sourceIndex);
+  if (cached && cached.availableInlineExtentPt === request.availableInlineExtentPt
+    && cached.writingMode === physical.writingMode) {
+    return { run: cached, at: sourceIndex - cached.startIndex };
+  }
+  const memberAt = (index: number): UprightRunMember | null => {
+    const element = dependencies.source.blocks.body[index];
+    if (element?.type !== 'table') return null;
+    const memberState = bodyTableAcquisitionState(state, element, effectiveTablePositioning);
+    if (memberState.uprightPhysicalTable !== true) return null;
+    operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, index);
+    const retained = retainedTableRecord(state, index).acquisition;
+    if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) return null;
+    return uprightRunMember(
+      physical, Object.freeze({ ...request.input.source, path: Object.freeze([index]) }), retained,
+    );
+  };
+  const before: UprightRunMember[] = [];
+  for (let index = sourceIndex - 1; index >= 0; index -= 1) {
+    const member = memberAt(index);
+    if (!member) break;
+    before.push(member);
+  }
+  const precedingCount = before.length;
+  const members = before.reverse();
+  for (let index = sourceIndex; ; index += 1) {
+    const member = memberAt(index);
+    if (!member) break;
+    members.push(member);
+  }
+  if (members.length === precedingCount) {
+    throw new Error('An upright block table run must hold its own table');
+  }
+  const suffixInlinePt = new Float64Array(members.length + 1);
+  let boxBlockExtentPt = 0;
+  for (let index = members.length - 1; index >= 0; index -= 1) {
+    suffixInlinePt[index] = suffixInlinePt[index + 1]! + members[index]!.inlineExtentPt;
+    boxBlockExtentPt = Math.max(boxBlockExtentPt, members[index]!.boxBlockExtentPt);
+  }
+  const run: UprightRun = Object.freeze({
+    availableInlineExtentPt: request.availableInlineExtentPt,
+    writingMode: physical.writingMode,
+    startIndex: members[0]!.sourceIndex,
+    members,
+    suffixInlinePt,
+    boxBlockExtentPt,
+  });
+  for (const member of members) runs.set(member.sourceIndex, run);
+  return { run, at: sourceIndex - run.startIndex };
+}
+
+/** Block start of a table's box inside its run's box, which starts at
+ * `runBlockStartPt`: the tables of a run share the physical left edge, the
+ * far edge of the box in the clockwise frame and the near edge in
+ * vertical-lr. */
+function uprightRunMemberBlockStartPt(
+  physical: PhysicalAnchorFrame,
+  run: UprightRun,
+  runBlockStartPt: number,
+  boxBlockExtentPt: number,
+): number {
+  return physical.writingMode === 'vertical-lr'
+    ? runBlockStartPt : runBlockStartPt + run.boxBlockExtentPt - boxBlockExtentPt;
+}
+
 /**
  * `word-vertical-section-upright-block-table`: places the upright block table
  * `leader` the flow reaches at `request.location`, together with the upright
@@ -649,31 +747,17 @@ function planUprightRun(
   leader: UprightRunMember,
   reserving: boolean,
 ): UprightRunPlan {
-  const { dependencies, state, effectiveTablePositioning } = context;
+  const { state } = context;
   const index = uprightBlockIndexOf(state);
   const obstacles = uprightBlockObstacles(state, request.input.source);
   const flowDomainId = request.location.flowDomainId;
   const multiColumn = request.location.section.columns.length > 1;
   const pageHasContent = request.pageHasContent === true;
-  const members = [leader];
-  let totalInlinePt = leader.inlineExtentPt;
-  let boxBlockExtentPt = leader.boxBlockExtentPt;
-  for (let next = leader.sourceIndex + 1; ; next += 1) {
-    const element = dependencies.source.blocks.body[next];
-    if (element?.type !== 'table') break;
-    const memberState = bodyTableAcquisitionState(state, element, effectiveTablePositioning);
-    if (memberState.uprightPhysicalTable !== true) break;
-    operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, next);
-    const retained = retainedTableRecord(state, next).acquisition;
-    if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) break;
-    const member = uprightRunMember(
-      physical, Object.freeze({ ...request.input.source, path: Object.freeze([next]) }), retained,
-    );
-    members.push(member);
-    totalInlinePt += member.inlineExtentPt;
-    boxBlockExtentPt = Math.max(boxBlockExtentPt, member.boxBlockExtentPt);
-  }
-  // The tables placed whole from `inlineStartPt`, then at most one cut by rows.
+  const { run, at } = uprightRunAt(context, request, operations, physical, leader.sourceIndex);
+  const { members, boxBlockExtentPt } = run;
+  const totalInlinePt = run.suffixInlinePt[at]!;
+  // `wholeCount` tables from this one placed whole from `inlineStartPt`,
+  // then at most one cut by rows.
   const placedOf = (blockStartPt: number, inlineStartPt: number, wholeCount: number): UprightRunPlan => {
     const slots: UprightBlockSlot[] = [];
     let inlineEndPt = inlineStartPt;
@@ -682,8 +766,7 @@ function planUprightRun(
       flowDomainId,
       bounds: Object.freeze({
         xPt: inlineEndPt,
-        yPt: physical.writingMode === 'vertical-lr'
-          ? blockStartPt : blockStartPt + boxBlockExtentPt - member.boxBlockExtentPt,
+        yPt: uprightRunMemberBlockStartPt(physical, run, blockStartPt, member.boxBlockExtentPt),
         widthPt: member.inlineExtentPt,
         heightPt: member.boxBlockExtentPt,
       }),
@@ -691,16 +774,17 @@ function planUprightRun(
       pinned: false,
       splitRows,
     });
-    for (const member of members.slice(0, wholeCount)) {
+    for (let offset = 0; offset < wholeCount; offset += 1) {
+      const member = members[at + offset]!;
       slots.push(slotOf(member, false));
       inlineEndPt += member.inlineExtentPt;
     }
     const box: LayoutRect = Object.freeze({
       xPt: inlineStartPt, yPt: blockStartPt, widthPt: inlineEndPt - inlineStartPt, heightPt: boxBlockExtentPt,
     });
-    if (wholeCount < members.length) slots.push(slotOf(members[wholeCount]!, true));
+    if (at + wholeCount < members.length) slots.push(slotOf(members[at + wholeCount]!, true));
     return Object.freeze({
-      kind: 'placed' as const, slots, box, lastSourceIndex: members[wholeCount - 1]!.sourceIndex,
+      kind: 'placed' as const, slots, box, lastSourceIndex: members[at + wholeCount - 1]!.sourceIndex,
     });
   };
   // Rows that continue the upright table placed just before this one in the
@@ -715,15 +799,15 @@ function planUprightRun(
   );
   if (found.leavesBlockExtent && pageHasContent) return Object.freeze({ kind: 'fresh-region', freshPage: true });
   if (multiColumn || totalInlinePt <= found.inlineRoomPt) {
-    return placedOf(found.blockStartPt, found.inlineStartPt, members.length);
+    return placedOf(found.blockStartPt, found.inlineStartPt, members.length - at);
   }
   // Too tall for the inline extent below its start: a fresh page when
   // content precedes it, unless it continues the table before it.
   if (pageHasContent && !continuing) return Object.freeze({ kind: 'fresh-region', freshPage: true });
   let wholeCount = 0;
   let filledPt = 0;
-  while (filledPt + members[wholeCount]!.inlineExtentPt <= found.inlineRoomPt) {
-    filledPt += members[wholeCount]!.inlineExtentPt;
+  while (filledPt + members[at + wholeCount]!.inlineExtentPt <= found.inlineRoomPt) {
+    filledPt += members[at + wholeCount]!.inlineExtentPt;
     wholeCount += 1;
   }
   // A plan for the paragraph before the tables holds whole tables only.
@@ -948,16 +1032,18 @@ function measureUprightBlockTable(
     ),
     acquisitionState,
   ) as TableLayout;
-  /** Whole rows from `cursor` that fit the band below `at`; a row taller
-   * than the band takes a page of its own. Every fragment keeps the box edges
-   * of the whole table: rows continued on a later page stay offset by a rule
-   * only earlier rows carry. */
+  const { run } = uprightRunAt(context, request, operations, physical, sourceIndex);
+  /** Whole rows from `cursor` that fit the band below `at`, the position of
+   * the run's box; a row taller than the band takes a page of its own. Every
+   * fragment keeps the box edges of the whole table (rows continued on a
+   * later page stay offset by a rule only earlier rows carry) and its place
+   * in the box of its run, whose extent it registers. */
   const rowsAt = (at: Readonly<{
     blockStartPt: number; inlineStartPt: number; inlineRoomPt: number; inlineBandPt: number;
   }>): TableMeasureResult => {
     const searched: LayoutRect = {
       xPt: at.inlineStartPt,
-      yPt: at.blockStartPt,
+      yPt: uprightRunMemberBlockStartPt(physical, run, at.blockStartPt, leader.boxBlockExtentPt),
       widthPt: leader.inlineExtentPt,
       heightPt: leader.boxBlockExtentPt,
     };
@@ -977,13 +1063,16 @@ function measureUprightBlockTable(
       ...searched,
       widthPt: Math.min(taken.fragment.advancePt, Math.max(0, at.inlineRoomPt)),
     });
+    const box: LayoutRect = Object.freeze({
+      xPt: bounds.xPt, yPt: at.blockStartPt, widthPt: bounds.widthPt, heightPt: run.boxBlockExtentPt,
+    });
     return placed(
       taken.fragment as TableLayout,
       bounds,
       taken.nextCursor ? Object.freeze({ kind: 'table' as const, cursor: taken.nextCursor }) : null,
       uprightBlockRegistrationOf(
-        bounds, [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), bounds)],
-        { sourceIndex, flowDomainId, bounds },
+        box, [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), box)],
+        { sourceIndex, flowDomainId, bounds: box },
       ),
     );
   };
@@ -997,7 +1086,8 @@ function measureUprightBlockTable(
       if (slot.splitRows) {
         const bandEndPt = physical.pageHeight - physical.marginBottom;
         return rowsAt({
-          blockStartPt: slot.bounds.yPt,
+          blockStartPt: physical.writingMode === 'vertical-lr'
+            ? slot.bounds.yPt : slot.bounds.yPt + slot.bounds.heightPt - run.boxBlockExtentPt,
           inlineStartPt: slot.bounds.xPt,
           inlineRoomPt: bandEndPt - slot.bounds.xPt,
           inlineBandPt: bandEndPt - request.location.cursorPt.xPt,
@@ -1006,13 +1096,14 @@ function measureUprightBlockTable(
       // Placed with the paragraph before it and raised over an earlier
       // column: the tables of its plan become a page pin.
       let pin: UprightBlockRegistration | null = null;
-      if (slot.reserved && (uprightBlockReachesEarlierColumn(request, slot.bounds)
+      if (slot.reserved && !slot.pinned && (uprightBlockReachesEarlierColumn(request, slot.bounds)
         || uprightBlockCoversLaterDrawing(context.state, request.input.source, slot.bounds))) {
         const slots = [slot];
         let box = slot.bounds;
         for (let next = sourceIndex + 1; ; next += 1) {
           const follower = index.slots.get(next);
-          if (!follower || !follower.reserved || follower.flowDomainId !== slot.flowDomainId) break;
+          if (!follower || !follower.reserved || follower.pinned
+            || follower.flowDomainId !== slot.flowDomainId) break;
           slots.push(follower);
           const startPt = Math.min(box.yPt, follower.bounds.yPt);
           const endPt = Math.max(box.yPt + box.heightPt, follower.bounds.yPt + follower.bounds.heightPt);
@@ -1053,7 +1144,7 @@ function measureUprightBlockTable(
   // clear the blocks they meet along the inline axis (library policy).
   return rowsAt(searchUprightBlock(
     index, uprightBlockObstacles(context.state, request.input.source), physical, request, false,
-    leader.inlineExtentPt, leader.boxBlockExtentPt,
+    leader.inlineExtentPt, run.boxBlockExtentPt,
   ));
 }
 

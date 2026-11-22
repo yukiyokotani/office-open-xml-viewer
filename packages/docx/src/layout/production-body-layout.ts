@@ -157,6 +157,7 @@ import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasuremen
 import {
   addUprightBlockBox,
   addUprightBlockExclusion,
+  addUprightTableBox,
   emptyUprightBlockPageIndex,
   inlineShiftPastBoxesPt,
   uprightBlockExclusionsAhead,
@@ -647,7 +648,8 @@ function acquireBodyParagraphAtLocation(
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       // `word-vertical-section-upright-block-table`: a wrapped drawing lies
       // below the upright tables before its paragraph.
-      ...(source.path.length === 1 && state.uprightBlockIndex
+      ...(source.path.length === 1 && state.uprightBlockIndex && state.uprightBlockIndex.tables.length > 0
+        && paragraph.runs.some((run) => run.type === 'anchorHost')
         ? { uprightTableBoxes: uprightTableBoxesBefore(state.uprightBlockIndex, source.path[0]!) }
         : {}),
       containerShading: state.containerShading,
@@ -2921,7 +2923,7 @@ function commitBodyUprightBlocks(
   for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
   if (registration.tail) {
     index.tail = registration.tail;
-    if (registration.box) index.tables.push({ sourceIndex: registration.tail.sourceIndex, box: registration.box });
+    if (registration.box) addUprightTableBox(index, registration.tail.sourceIndex, registration.box);
   }
 }
 

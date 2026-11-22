@@ -32,7 +32,7 @@ export interface UprightBlockPageIndex {
   /** The table placed last (UprightBlockTail). */
   tail: UprightBlockTail | null;
   /** The boxes of the placed top-level tables with the body index of the
-   * last table in each, in registration order. */
+   * last table in each, in body order (addUprightTableBox). */
   readonly tables: Array<Readonly<{ sourceIndex: number; box: LayoutRect }>>;
   /** Text exclusions by `${block bucket}:${inline bucket}`. */
   readonly exclusionCells: Map<string, UprightBlockExclusionEntry[]>;
@@ -229,20 +229,40 @@ export function uprightBlockBoxesMet(
   return met.sort((left, right) => left.xPt - right.xPt);
 }
 
+/** Records the box of placed tables ending at body index `sourceIndex`.
+ * The history is kept in body order: tables are placed in that order except
+ * those pinned when a page's layout starts. */
+export function addUprightTableBox(index: UprightBlockPageIndex, sourceIndex: number, box: LayoutRect): void {
+  const { tables } = index;
+  let at = tables.length;
+  while (at > 0 && tables[at - 1]!.sourceIndex > sourceIndex) at -= 1;
+  tables.splice(at, 0, { sourceIndex, box });
+}
+
 /**
  * `word-vertical-section-upright-block-table`: the boxes of the upright block
  * tables placed so far for tables before body index `beforeSourceIndex`: the
  * ones a wrapped drawing anchored by the paragraph at that index is moved
- * below.
+ * below. Asked only for a paragraph that anchors a drawing.
  */
 export function uprightTableBoxesBefore(
   index: UprightBlockPageIndex | undefined,
   beforeSourceIndex: number,
 ): readonly LayoutRect[] {
   if (!index || index.tables.length === 0) return NO_BOXES;
+  const { tables } = index;
+  // First entry at or past the paragraph, by bisection of the ordered history.
+  let low = 0;
+  let high = tables.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (tables[middle]!.sourceIndex < beforeSourceIndex) low = middle + 1;
+    else high = middle;
+  }
+  if (low === 0) return NO_BOXES;
   const boxes: LayoutRect[] = [];
-  for (const table of index.tables) if (table.sourceIndex < beforeSourceIndex) boxes.push(table.box);
-  return boxes.length === 0 ? NO_BOXES : boxes;
+  for (let at = 0; at < low; at += 1) boxes.push(tables[at]!.box);
+  return boxes;
 }
 
 const NO_BOXES: readonly LayoutRect[] = Object.freeze([]);
