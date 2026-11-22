@@ -2565,6 +2565,38 @@ struct SelectedNoteSeparators {
     continuation_separator_story: Option<Vec<DocParagraph>>,
 }
 
+/// Keeps the runs `keep` accepts and re-indexes the paragraph's run-indexed
+/// ranges (run revisions, comment marks, complex-field boundaries) onto them.
+fn retain_paragraph_runs(
+    paragraph: &mut DocParagraph,
+    keep: impl Fn(&DocRun, Option<&RunRevision>) -> bool,
+) {
+    let runs = std::mem::take(&mut paragraph.runs);
+    let revisions = std::mem::take(&mut paragraph.run_revisions);
+    let had_revisions = !revisions.is_empty();
+    let mut kept_before = Vec::with_capacity(runs.len() + 1);
+    let mut kept_revisions = Vec::new();
+    for (index, run) in runs.into_iter().enumerate() {
+        kept_before.push(paragraph.runs.len());
+        let revision = revisions.get(index).cloned().flatten();
+        if keep(&run, revision.as_ref()) {
+            paragraph.runs.push(run);
+            kept_revisions.push(revision);
+        }
+    }
+    kept_before.push(paragraph.runs.len());
+    if had_revisions {
+        paragraph.run_revisions = kept_revisions;
+    }
+    let remap = |index: usize| kept_before[index.min(kept_before.len() - 1)];
+    for mark in &mut paragraph.comment_marks {
+        mark.run_index = remap(mark.run_index as usize) as u32;
+    }
+    for boundary in &mut paragraph.complex_field_boundaries {
+        boundary.run_index = remap(boundary.run_index);
+    }
+}
+
 thread_local! {
     /// Set while a listed separator story is parsed: only there does a
     /// §17.11.23/§17.11.1 marker become a marker run.
@@ -2638,19 +2670,60 @@ fn selected_note_separator_story(
         is_w(*node, "rPr")
             || is_w(*node, "lastRenderedPageBreak")
             || is_w(*node, "t")
+            || is_w(*node, "delText")
             || is_w(*node, "tab")
             || is_w(*node, "cr")
+            || is_w(*node, "fldChar")
+            || is_w(*node, "instrText")
+            || is_w(*node, "delInstrText")
             || is_w(*node, "separator")
             || is_w(*node, "continuationSeparator")
             || (is_w(*node, "br")
                 && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
     };
+    // Inline containers (§17.16.22 hyperlinks, §17.16.19 simple fields,
+    // §17.5.1 smart tags and custom XML, §17.5.2 content controls, §17.13.5
+    // tracked insertions, deletions and moves) hold the same content.
+    fn inline_content(
+        node: roxmltree::Node<'_, '_>,
+        range_markup: &dyn Fn(&roxmltree::Node<'_, '_>) -> bool,
+        run_content: &dyn Fn(&roxmltree::Node<'_, '_>) -> bool,
+    ) -> bool {
+        let w = |name: &str| is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == name;
+        let children_ok = |skip: &[&str]| {
+            node.children().filter(|child| child.is_element()).all(|child| {
+                (is_w_ns(child.tag_name().namespace()) && skip.contains(&child.tag_name().name()))
+                    || inline_content(child, range_markup, run_content)
+            })
+        };
+        if range_markup(&node) {
+            true
+        } else if w("r") {
+            node.children().filter(|child| child.is_element()).all(|child| run_content(&child))
+        } else if w("hyperlink") || w("ins") || w("del") || w("moveFrom") || w("moveTo") {
+            children_ok(&[])
+        } else if w("fldSimple") {
+            children_ok(&["fldData"])
+        } else if w("smartTag") {
+            children_ok(&["smartTagPr"])
+        } else if w("customXml") {
+            children_ok(&["customXmlPr"])
+        } else if w("sdt") {
+            children_ok(&["sdtPr", "sdtEndPr", "sdtContent"])
+                && node
+                    .children()
+                    .filter(|child| child.is_element() && child.tag_name().name() == "sdtContent")
+                    .all(|content| {
+                        content.children().filter(|child| child.is_element())
+                            .all(|child| inline_content(child, range_markup, run_content))
+                    })
+        } else {
+            false
+        }
+    }
     let supported = blocks.iter().all(|paragraph| {
         paragraph.children().filter(|child| child.is_element()).all(|child| {
-            is_w(child, "pPr")
-                || range_markup(&child)
-                || (is_w(child, "r")
-                    && child.children().filter(|node| node.is_element()).all(|node| run_content(&node)))
+            is_w(child, "pPr") || inline_content(child, &range_markup, &run_content)
         })
     });
     if !supported {
@@ -2682,14 +2755,16 @@ fn selected_note_separator_story(
         );
         PARSING_SEPARATOR_STORY.with(|flag| flag.set(false));
         let mut parsed = parsed;
-        // §17.3.1.20: a saved page-break hint is no content of the story.
-        parsed.runs.retain(|run| {
+        // §17.3.1.20: a saved page-break hint is no content of the story,
+        // and the story shows its final text: deleted and moved-away runs
+        // (§17.13.5) leave it.
+        retain_paragraph_runs(&mut parsed, |run, revision| {
             !matches!(
                 run,
                 DocRun::Break {
                     break_type: BreakType::RenderedPage
                 }
-            )
+            ) && !revision.is_some_and(|revision| matches!(revision.kind.as_str(), "deletion" | "moveFrom"))
         });
         if synthesized {
             parsed.numbering = None;
@@ -2701,6 +2776,7 @@ fn selected_note_separator_story(
             matches!(
                 run,
                 DocRun::Text(_)
+                    | DocRun::Field(_)
                     | DocRun::Break {
                         break_type: BreakType::Line
                     }
@@ -3267,6 +3343,18 @@ mod note_separator_tests {
             )),
             (Some(Short), vec![vec![text("W1"), marker.clone(), text("W2"), text("A1")]])
         );
+        // Inline containers hold story text: a hyperlink, a content control,
+        // a smart tag, an insertion; a deletion leaves the final story.
+        assert_eq!(
+            parse(r#"<w:p><w:r><w:separator/></w:r></w:p><w:p><w:hyperlink w:anchor="src"><w:r><w:t>Return to source</w:t></w:r></w:hyperlink><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>S</w:t></w:r></w:sdtContent></w:sdt><w:smartTag w:uri="u" w:element="e"><w:r><w:t>T</w:t></w:r></w:smartTag><w:ins w:id="1" w:author="a"><w:r><w:t>I</w:t></w:r></w:ins><w:del w:id="2" w:author="a"><w:r><w:delText>D</w:delText></w:r></w:del></w:p>"#),
+            (
+                Some(Short),
+                vec![
+                    vec![marker.clone()],
+                    vec![text("Return to source"), text("S"), text("T"), text("I")]
+                ]
+            )
+        );
         // Range markup around the marker run is zero-width.
         assert_eq!(
             parse(r#"<w:p><w:proofErr w:type="spellStart"/><w:bookmarkStart w:id="1" w:name="s"/><w:r><w:t>Sources</w:t><w:lastRenderedPageBreak/><w:separator/></w:r><w:bookmarkEnd w:id="1"/></w:p>"#),
@@ -3748,7 +3836,9 @@ fn parse_note_layout_settings(
     // numRestart of settings.xml do not number notes; each section's own
     // footnotePr/endnotePr (or the defaults) does. They are not retained.
     let result = crate::types::NoteLayoutSettingsWire {
-        footnote_position: value("footnotePr", "pos"),
+        // word-footnote-beneath-text: a document-wide footnote position in
+        // settings.xml places no footnote; only a section's own does.
+        footnote_position: None,
         endnote_position: value("endnotePr", "pos"),
         footnote_number_format: None,
         footnote_number_start: None,
@@ -3937,7 +4027,7 @@ mod note_layout_settings_tests {
     use ooxml_common::ns::wordprocessingml;
 
     #[test]
-    fn preserves_document_wide_note_positions_for_layout_diagnostics() {
+    fn keeps_the_endnote_position_but_no_document_footnote_position() {
         for namespace in [wordprocessingml::TRANSITIONAL, wordprocessingml::STRICT] {
             let xml = format!(
                 r#"<w:settings xmlns:w="{namespace}">
@@ -3949,7 +4039,9 @@ mod note_layout_settings_tests {
             let settings = parse_note_layout_settings(&xml)
                 .0
                 .expect("authored note settings");
-            assert_eq!(settings.footnote_position.as_deref(), Some("beneathText"));
+            // word-footnote-beneath-text: only a section footnote position
+            // places footnotes.
+            assert_eq!(settings.footnote_position, None);
             assert_eq!(settings.endnote_position.as_deref(), Some("sectEnd"));
         }
     }

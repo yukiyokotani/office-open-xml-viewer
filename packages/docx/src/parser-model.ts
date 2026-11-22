@@ -590,10 +590,12 @@ function documentNoteLayoutSettingsInput(
     : undefined;
   return snapshotPlainData({
     // §17.11.21/.22 defaults when w:pos is absent. A section's own footnotePr
-    // position (§17.11.11) places its footnotes; a document-wide position in
-    // settings.xml does not (WORD_FOOTNOTE_BENEATH_TEXT). The document
+    // position (§17.11.11) places its footnotes; the DOCX parser keeps no
+    // settings.xml position (WORD_FOOTNOTE_BENEATH_TEXT). The document
     // reports the first section position other than pageBottom.
-    footnotePosition: (settings?.sectionNoteNumbering ?? [])
+    // The DOCX parser states section positions only; another producer
+    // (legacy DOC, ODT) states one document position.
+    footnotePosition: settings?.footnotePosition ?? (settings?.sectionNoteNumbering ?? [])
       .map((section) => section.footnotePosition ?? 'pageBottom')
       .find((position) => position !== 'pageBottom') ?? 'pageBottom',
     ...(settings?.sectionNoteNumbering?.some((section) => section.footnotePosition !== undefined) ? {

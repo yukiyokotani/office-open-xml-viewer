@@ -799,6 +799,43 @@ describe('canonical producer with a real document model', () => {
     expect(painted.replace(/\s/g, '')).toBe('endnote'.repeat(80));
   });
 
+  it.each([
+    ['beneathText', true, false],
+    ['sectEnd', false, true],
+  ] as const)('lays a producer document position %s out or reports it', (position, beneath, unsupported) => {
+    const section = {
+      pageWidth: 200, pageHeight: 300,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const model = {
+      section,
+      body: [paragraph() as unknown as BodyElement],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [{ id: '7', content: [ordinaryParagraph('footnote')] }],
+      endnotes: [],
+      fontFamilyClasses: {},
+      __noteLayoutSettings: { footnotePosition: position },
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), { currentDateMs: 0 });
+    const page = layout.pages[0]!;
+    const bodyBottom = Math.max(...page.layers.body.map((node) => node.flowBounds.yPt + node.flowBounds.heightPt));
+    const noteTop = Math.min(...page.layers.notes.map((note) => note.flowBounds.yPt));
+    expect(Math.abs(noteTop - bodyBottom) < 0.01).toBe(beneath);
+    expect(layout.diagnostics.some((diagnostic) => diagnostic.message.includes('footnote position'))).toBe(unsupported);
+  });
+
+  it('reports beneathText footnotes it keeps in per-column bands at the page bottom', () => {
+    const model = columnStoryDocument([paragraph()], [{ id: '7', content: [ordinaryParagraph('footnote')] }]);
+    (model as unknown as Record<string, unknown>).settings = { compatibilityMode: 14 };
+    (model as unknown as Record<string, unknown>).__noteLayoutSettings = { footnotePosition: 'beneathText' };
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), { currentDateMs: 0 });
+    expect(layout.diagnostics.map((diagnostic) => diagnostic.message))
+      .toContainEqual(expect.stringContaining('Unsupported footnote position "beneathText"'));
+  });
+
   it('surfaces unsupported authored note positions instead of silently treating them as defaults', () => {
     const section = {
       pageWidth: 200, pageHeight: 140,
