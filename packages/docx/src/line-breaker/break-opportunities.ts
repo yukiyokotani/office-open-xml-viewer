@@ -297,16 +297,29 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // before anything after it is judged, and never starts a line.
   if (placedUnitOf(s) === undefined && s.fitTextRegionIndex === undefined && !s.tateChuYoko) {
     const continuation = lineClusterContinuation(breakerState.currentLine, s);
-    if (continuation >= s.text.length && continuation > 0) {
-      s.measuredWidth = w;
-      addToLine(s, w, h, asc, desc);
-      return;
-    }
+    const whole = continuation >= s.text.length;
     // A segment that goes on past the cluster and fits is placed whole as
-    // it is; one that does not fit leaves the rest of the cluster here.
-    if (continuation > 0 && !fitsLineWidth(breakerState.currentWidth + prospectiveWidth, availW())) {
+    // it is by the paths below.
+    if (continuation > 0 && (whole || !fitsLineWidth(breakerState.currentWidth + prospectiveWidth, availW()))) {
       const head = s.text.slice(0, continuation);
-      const headWidth = context.strNaturalAdvance(s, head);
+      const headWidth = whole ? w : context.strNaturalAdvance(s, head);
+      // The rest of the cluster does not fit beside its first character: the
+      // line ends at the legal break before the cluster, which moves down
+      // whole. Only when nothing before it can stay does it overflow here.
+      if (!fitsLineWidth(breakerState.currentWidth + headWidth, availW())) {
+        const retraction = context.retractLineEndForbidden(s, () => true);
+        if (retraction.kind === 'retracted') {
+          flush(undefined, false, retraction.tail.src);
+          breakerState.queue.unshift(s);
+          queueRetraction(breakerState.queue, retraction);
+          return;
+        }
+      }
+      if (whole) {
+        s.measuredWidth = w;
+        addToLine(s, w, h, asc, desc);
+        return;
+      }
       addToLine({
         ...s,
         ...RESET_SLICED_TEXT_MEASUREMENT,

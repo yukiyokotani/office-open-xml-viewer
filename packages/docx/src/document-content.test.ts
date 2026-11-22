@@ -32,6 +32,24 @@ describe('docx rendered text inventory', () => {
     expect(docxFontPreloadNames(doc)).toContain('GuideOnly');
   });
 
+  it('demands a ruby guide run\'s complex-script face with its complex-script bold and italic', () => {
+    // §17.3.2.2 / §17.3.2.17: the guide's complex-script text is shaped with
+    // bCs and iCs, so that is the variant its face is demanded in.
+    const fonts = { ascii: null, highAnsi: null, eastAsia: null, complexScript: 'GuideComplex' };
+    const doc = documentWithRun({
+      type: 'text', text: '漢', fontSize: 10, fontFamily: 'BaseFace',
+      ruby: { text: 'سلام', fontSizePt: 5 },
+      __typographyAcquisition: { ruby: { guideRuns: [{
+        text: 'سلام', fontFamily: null, fonts, fontSizePt: 5, bold: false, italic: false,
+        boldCs: true, italicCs: true, rtl: true, cs: false, fontHint: null, color: null, language: null,
+      }] } },
+    });
+    for (const collection of ['font-demand', 'native-preflight'] as const) {
+      const usages = [...docxRenderedTextUsages(doc, collection)].filter((usage) => usage.fontFamilies.includes('GuideComplex'));
+      expect(usages.map((usage) => [usage.bold, usage.italic]), collection).toEqual([[true, true]]);
+    }
+  });
+
   it('preloads an inline drawing run face even when its text box has no text', () => {
     const doc = documentWithRun({ type: 'shape', inline: true, textBlocks: [],
       __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Courier New', bold: true } });

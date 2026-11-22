@@ -1281,6 +1281,33 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 11)', () =
   });
 });
 
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 12)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+
+  it('breaks before a cluster whose rest, in a run of other formatting, does not fit', () => {
+    const flag = ['\u{1F1EF}', '\u{1F1F5}'];
+    for (const direction of [undefined, 'tbRl']) {
+      const section = (lengthPt: number) => (direction ? { pageHeight: 60 + 80 + lengthPt } : { pageWidth: 40 + 90 + lengthPt });
+      const split = [{ text: `前${flag[0]}` }, { text: flag[1]!, extra: { bold: true } }];
+      expect(lineTexts(layoutParagraph(split, direction, null, section(20)).lines), direction).toEqual(['前', flag.join('')]);
+      // Nothing before the cluster can stay: it keeps its line whole.
+      const alone = [{ text: flag[0]! }, { text: flag[1]!, extra: { bold: true } }];
+      expect(lineTexts(layoutParagraph(alone, direction, null, section(10)).lines), direction).toEqual([flag.join('')]);
+    }
+  });
+
+  it('paints the forms the vertical planner selects for a guide\'s punctuation', () => {
+    const ops = (text: string) => {
+      const line = layoutParagraph([{ text: '漢字', ruby: { text, fontSizePt: 5, hpsRaisePt: 9 } }], 'tbRl').lines[0]!;
+      return textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps.map((op) => op.text);
+    };
+    expect(ops('「A、か」')).toEqual(['\uFE41', 'A', '\uFE11', 'か', '\uFE42']);
+    // A mark stays with the form selected for its base.
+    expect(ops('、\u3099か')).toEqual(['\uFE11\u3099', 'か']);
+  });
+});
+
 describe('grapheme clusters at kinsoku breaks (§17.3.1.16, UAX #29)', () => {
   const lineTexts = (lines: readonly LineLayout[]) =>
     lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
@@ -1354,8 +1381,17 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
   const GUIDE_FACES = ['FaceA', 'FaceB', 'TallFace'];
   /** One source run of the paragraph, as the document model holds it. */
   type Source = Readonly<{ run: Record<string, unknown>; text: string; sizePt: number }>;
-  type Cell = Readonly<{ runs: readonly number[]; guide: string; guideRuns?: readonly GuideRun[] }>;
+  type Cell = Readonly<{
+    runs: readonly number[]; guide: string; guideRuns?: readonly GuideRun[];
+    /** The text the guide paints, when it is not the guide text itself. */
+    painted?: string;
+  }>;
   const VARIATION_SELECTOR = '\u{E0100}';
+  // A flag is one cluster of two regional indicators.
+  const FLAG = ['\u{1F1EF}', '\u{1F1F5}'];
+  // The forms the vertical planner paints for punctuation without a
+  // vertical glyph of its own.
+  const VERTICAL_FORMS: Readonly<Record<string, string>> = { '「': '\uFE41', '」': '\uFE42', '、': '\uFE11' };
   // An emoji joiner sequence: one cluster of three characters.
   const EMOJI = '\u{1F469}\u200D\u{1F4BB}';
   /** The UTF-16 offsets at which `value` may be divided between clusters. */
@@ -1434,6 +1470,8 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           // selector alone, a selector opening a run, an emoji sequence.
           const [head, tail] = pick([
             [take(), VARIATION_SELECTOR], [take(), VARIATION_SELECTOR + take()], ['\u{1F469}', '\u200D\u{1F4BB}'],
+            // A flag: two regional indicators, each with an advance.
+            [FLAG[0]!, FLAG[1]!],
           ]);
           text(head!);
           text(tail!, { bold: true });
@@ -1484,7 +1522,10 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           : family === 'graphemes'
             // Kana with a combining voiced mark, kanji with a variation selector.
             ? Array.from({ length: Math.min(length, 3) }, () => pick(['か\u3099', 'き', '辻' + VARIATION_SELECTOR, 'く\u3099', EMOJI])).join('')
-            : 'あいうえおかきくけこ'.slice(0, length);
+            : family === 'tateChuYoko'
+              // Punctuation, which a vertical guide paints in its vertical forms.
+              ? Array.from({ length }, () => pick([...'あいう「」、A'])).join('')
+              : 'あいうえおかきくけこ'.slice(0, length);
       const guideRuns: GuideRun[] | undefined = family === 'guideFaces'
         ? [...letters].reduce<GuideRun[]>((runs, letter) => {
           // One to three letters per run, each run with its own slots.
@@ -1533,7 +1574,10 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         ...(sharedRegion?.fit ?? {}),
       }));
       sharedRegion?.runs.push(...runs);
-      cells.push({ runs, guide: letters, ...(guideRuns ? { guideRuns } : {}) });
+      cells.push({
+        runs, guide: letters, ...(guideRuns ? { guideRuns } : {}),
+        ...(family === 'tateChuYoko' ? { painted: [...letters].map((letter) => VERTICAL_FORMS[letter] ?? letter).join('') } : {}),
+      });
       leaderAllowed = true;
     }
     const indentPt = family === 'list' ? 20 : 0;
@@ -1604,7 +1648,8 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       const holding = lines.filter((line) => content(line).some((entry) => cell.runs.includes(entry.sourceRunIndex!)));
       expect(holding, context).toHaveLength(1);
       const guides = content(holding[0]!).filter((entry) => entry.ruby && cell.runs.includes(entry.sourceRunIndex!));
-      expect(guides.map((entry) => entry.ruby!.paintOps.map((op) => op.text).join('')), context).toEqual([cell.guide]);
+      expect(guides.map((entry) => entry.ruby!.paintOps.map((op) => op.text).join('')), context)
+        .toEqual([cell.painted ?? cell.guide]);
       // UAX #29: no paint operation of a guide parts a grapheme cluster (a
       // combining mark, a variation selector, an emoji sequence).
       const guideBoundaries = clusterBoundaries(cell.guide);
@@ -1693,6 +1738,13 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       consumed += chars.length;
       // §17.3.1.16: no line starts with a line-start-forbidden character.
       if (index > 0) expect(LINE_START_FORBIDDEN.has(chars[0]!), `${index} of ${context}`).toBe(false);
+      // A line that ends with a flag whose halves are separate runs holds it
+      // within the line: the line broke before the flag rather than overrun.
+      if (text.endsWith(FLAG.join('')) && chars.length > 2 && !LINE_END_FORBIDDEN.has(chars.at(-3)!)
+        && !cells.some((cell) => content(lines[index]!).some((entry) => cell.runs.includes(entry.sourceRunIndex!)))) {
+        const advance = content(lines[index]!).reduce((sum, entry) => sum + entry.advancePt, 0);
+        expect(advance, `${index} of ${context}`).toBeLessThanOrEqual(lengthPt - indentPt + 1e-6);
+      }
       // No line starts inside a grapheme cluster.
       if (index > 0) expect(lineStarts.has(startOffset), `${index} of ${context}`).toBe(true);
       startOffset += text.length;

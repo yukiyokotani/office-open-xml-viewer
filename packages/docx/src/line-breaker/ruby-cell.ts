@@ -428,13 +428,17 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     // What opens the span inside a cluster belongs to the cell before it.
     const firstBase = offsets[0] ?? spanEnd;
     if (lastCell && firstBase > spanStart) {
+      lastCell.cell.text += ruby.text.slice(lastCell.cell.range.end, firstBase);
       lastCell.cell.range.end = firstBase;
-      lastCell.cell.text = ruby.text.slice(lastCell.cell.range.start, firstBase);
     }
     const spanCells = (planned === '' ? [] : plan(planned)).map((cell): SpanGuideCell => {
       const range = { start: offsets[cell.range.start]!, end: offsets[cell.range.end] ?? spanEnd };
+      // The cell paints the text the planner selected for it (a vertical
+      // form may stand for the source character), then the rest of its
+      // cluster, which was not planned.
+      const plannedEnd = offsets[cell.range.end - 1]! + 1;
       return {
-        cell: { ...cell, range, text: ruby.text.slice(range.start, range.end), originPt: originPx + cell.originPt },
+        cell: { ...cell, range, text: cell.text + ruby.text.slice(plannedEnd, range.end), originPt: originPx + cell.originPt },
         face,
         advanceOf,
       };
