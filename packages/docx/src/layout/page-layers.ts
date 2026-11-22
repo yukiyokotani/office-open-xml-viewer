@@ -114,6 +114,7 @@ function visitAnchoredDrawings(
       candidates,
     );
     if (node.leading?.paragraph) visit(node.leading.paragraph, frames);
+    for (const block of node.leading?.followingParagraphs ?? []) visit(block, frames);
     for (const block of node.story.blocks) visit(block, noteFrames);
     if (node.trailing?.paragraph) visit(node.trailing.paragraph, frames);
     return;

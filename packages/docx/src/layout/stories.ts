@@ -65,6 +65,10 @@ function translateNoteSeparatorLayout(
     flowBounds: translateRect(occurrence.flowBounds, delta),
     ...(occurrence.paragraph
       ? { paragraph: translateCompleteParagraphLayout(occurrence.paragraph, delta) } : {}),
+    ...(occurrence.followingParagraphs ? {
+      followingParagraphs: Object.freeze(occurrence.followingParagraphs.map((block) =>
+        translateCompleteParagraphLayout(block, delta))),
+    } : {}),
     ...(occurrence.rule ? {
       rule: Object.freeze({ ...occurrence.rule, segment: translateBorder(occurrence.rule.segment, delta) }),
     } : {}),

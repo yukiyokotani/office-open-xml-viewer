@@ -2085,12 +2085,12 @@ fn finish_document(
         settings.endnote_separator = endnote_stories.separator;
         settings.endnote_continuation_separator = endnote_stories.continuation_separator;
         settings.footnote_continuation_separator = footnote_stories.continuation_separator;
-        settings.footnote_separator_paragraph = footnote_stories.separator_paragraph;
-        settings.footnote_continuation_separator_paragraph =
-            footnote_stories.continuation_separator_paragraph;
-        settings.endnote_separator_paragraph = endnote_stories.separator_paragraph;
-        settings.endnote_continuation_separator_paragraph =
-            endnote_stories.continuation_separator_paragraph;
+        settings.footnote_separator_story = footnote_stories.separator_story;
+        settings.footnote_continuation_separator_story =
+            footnote_stories.continuation_separator_story;
+        settings.endnote_separator_story = endnote_stories.separator_story;
+        settings.endnote_continuation_separator_story =
+            endnote_stories.continuation_separator_story;
     }
 
     Ok(Document {
@@ -2456,7 +2456,7 @@ fn parse_notes(
         // they author no pPr: their line height still inherits from styles.
         // Prefer retained paragraph metrics over the absent-story scalar fallback.
         let mut story = || {
-            selected_note_separator_paragraph(
+            selected_note_separator_story(
                 n,
                 style_map,
                 num_map,
@@ -2473,14 +2473,14 @@ fn parse_notes(
                         None,
                     )
                 },
-                |(mark, paragraph)| (Some(mark), Some(Box::new(paragraph))),
+                |(mark, paragraphs)| (Some(mark), Some(paragraphs)),
             )
         };
         if selected && note_type.as_deref() == Some("continuationSeparator") {
             listed_continuation = true;
             (
                 selected_stories.continuation_separator,
-                selected_stories.continuation_separator_paragraph,
+                selected_stories.continuation_separator_story,
             ) = story();
         } else if selected
             && (note_type.as_deref() == Some("separator") || (id == "-1" && note_type.is_none()))
@@ -2488,7 +2488,7 @@ fn parse_notes(
             listed_separator = true;
             (
                 selected_stories.separator,
-                selected_stories.separator_paragraph,
+                selected_stories.separator_story,
             ) = story();
         }
         if id.is_empty() || id == "-1" || id == "0" || is_special {
@@ -2517,11 +2517,11 @@ fn parse_notes(
     // whatever the Normal style's spacing.
     let mut default_story = |mark: &str| {
         let xml = format!(
-            r#"<w:{element_name} xmlns:w="{}"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:{mark}/></w:r></w:p></w:{element_name}>"#,
+            r#"<w:{element_name} xmlns:w="{}"><w:p><w:pPr><w:spacing w:after="0" w:afterAutospacing="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:{mark}/></w:r></w:p></w:{element_name}>"#,
             ooxml_common::ns::wordprocessingml::TRANSITIONAL
         );
         parse_guarded(&xml).ok().and_then(|doc| {
-            selected_note_separator_paragraph(
+            selected_note_separator_story(
                 doc.root_element(),
                 style_map,
                 num_map,
@@ -2534,9 +2534,9 @@ fn parse_notes(
         })
     };
     if !listed_separator {
-        if let Some((mark, paragraph)) = default_story("separator") {
+        if let Some((mark, paragraphs)) = default_story("separator") {
             selected_stories.separator = Some(mark);
-            selected_stories.separator_paragraph = Some(Box::new(paragraph));
+            selected_stories.separator_story = Some(paragraphs);
         }
     }
     if !listed_continuation {
@@ -2545,9 +2545,9 @@ fn parse_notes(
         } else {
             "continuationSeparator"
         };
-        if let Some((mark, paragraph)) = default_story(mark) {
+        if let Some((mark, paragraphs)) = default_story(mark) {
             selected_stories.continuation_separator = Some(mark);
-            selected_stories.continuation_separator_paragraph = Some(Box::new(paragraph));
+            selected_stories.continuation_separator_story = Some(paragraphs);
         }
     }
     (out, selected_stories)
@@ -2559,22 +2559,30 @@ fn parse_notes(
 struct SelectedNoteSeparators {
     separator: Option<crate::types::NoteSeparatorMark>,
     continuation_separator: Option<crate::types::NoteSeparatorMark>,
-    separator_paragraph: Option<Box<DocParagraph>>,
-    continuation_separator_paragraph: Option<Box<DocParagraph>>,
+    separator_story: Option<Vec<DocParagraph>>,
+    continuation_separator_story: Option<Vec<DocParagraph>>,
 }
 
-/// The closed single-paragraph class of a listed story (§17.11.3/.9):
-/// a bare empty `w:p`, or a paragraph holding optional `w:pPr` and runs of
-/// text, tabs and line breaks with exactly one §17.11.23/§17.11.1 mark among
-/// them. Its effective paragraph (style cascade, §17.3.1.33 spacing, line
-/// rule) is kept so layout measures the band from these facts instead of a
-/// mark-only scalar.
-/// A mark-only paragraph whose mark run's rPr equals the mark's rPr child for
-/// child shares the paragraph mark's line (§17.3.1.29) and keeps the run-free
-/// shape. Paragraph ink, numbering, frames, a hidden mark and other run
-/// content are not represented; those stories stay unsupported (absent).
+thread_local! {
+    /// Set while a listed separator story is parsed: only there does a
+    /// §17.11.23/§17.11.1 marker become a marker run.
+    static PARSING_SEPARATOR_STORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The closed class of a listed story (§17.11.3/.9): one or more `w:p`
+/// whose runs hold text, tabs and text-wrapping breaks, with at most one
+/// §17.11.23/§17.11.1 marker among them, parsed in place as an empty marker
+/// run (`note_separator_marker`). Each paragraph's effective properties (style
+/// cascade, §17.3.1.33 spacing, line rule) are kept so layout measures the band
+/// from them instead of a mark-only scalar. A story without a marker draws no
+/// rule (mark None).
+/// A one-paragraph story whose only run is a marker formatted like its
+/// paragraph mark (rPr equal child for child) shares the mark's line
+/// (§17.3.1.29) and keeps the run-free shape. Paragraph ink, numbering, frames,
+/// a hidden mark, tables and other run content are not represented; those
+/// stories stay unsupported (absent).
 #[allow(clippy::too_many_arguments)]
-fn selected_note_separator_paragraph(
+fn selected_note_separator_story(
     note: roxmltree::Node<'_, '_>,
     style_map: &StyleMap,
     num_map: &mut NumberingMap,
@@ -2585,104 +2593,71 @@ fn selected_note_separator_paragraph(
     // The default story is the application's own paragraph: Normal's
     // paragraph ink, numbering and frame do not apply to it.
     synthesized: bool,
-) -> Option<(crate::types::NoteSeparatorMark, DocParagraph)> {
+) -> Option<(crate::types::NoteSeparatorMark, Vec<DocParagraph>)> {
     use crate::types::NoteSeparatorMark;
     let is_w = |node: roxmltree::Node<'_, '_>, name: &str| {
         is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == name
     };
-    let mut blocks = note.children().filter(|child| child.is_element());
-    let paragraph = blocks.next()?;
-    if !is_w(paragraph, "p") || blocks.next().is_some() {
+    let blocks: Vec<_> = note.children().filter(|child| child.is_element()).collect();
+    if blocks.is_empty() || !blocks.iter().all(|block| is_w(*block, "p")) {
         return None;
     }
-    let mut children = paragraph
-        .children()
-        .filter(|child| child.is_element())
-        .peekable();
-    let properties = children.next_if(|child| is_w(*child, "pPr"));
-    // The story's runs: plain text runs (rPr, then text, tabs and line
-    // breaks), one of which holds exactly one marker anywhere among its
-    // content. A marker run formatted like the paragraph mark and alone in
-    // the paragraph keeps the run-free shape; otherwise the marker is
-    // retained in place as one U+FFFC run that layout lays out as the inline
-    // rule (word-note-separator-geometry).
-    let runs: Vec<_> = children.collect();
-    let mut marker_run = None;
-    let mut text_runs = 0usize;
-    for run in &runs {
-        if !is_w(*run, "r") {
-            return None;
-        }
-        let mut run_children = run.children().filter(|child| child.is_element()).peekable();
-        let run_properties = run_children.next_if(|child| is_w(*child, "rPr"));
-        let content: Vec<_> = run_children.collect();
-        let is_marker = |node: &roxmltree::Node<'_, '_>| {
-            is_w_ns(node.tag_name().namespace())
-                && matches!(node.tag_name().name(), "separator" | "continuationSeparator")
-        };
-        let is_text = |node: &roxmltree::Node<'_, '_>| {
-            is_w(*node, "t")
-                || is_w(*node, "tab")
-                || is_w(*node, "cr")
-                || (is_w(*node, "br")
-                    && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
-        };
-        if !content.iter().all(|child| is_marker(child) || is_text(child)) {
-            return None;
-        }
-        let markers: Vec<_> = content.iter().filter(|child| is_marker(child)).collect();
-        if content.len() > markers.len() {
-            text_runs += 1;
-        }
-        match markers.as_slice() {
-            [] => {}
-            [marker] if marker_run.is_none() => {
-                marker_run = Some((*run, **marker, run_properties));
-            }
-            _ => return None,
-        }
-    }
-    let mark = match marker_run {
-        Some((_, marker, _)) if marker.tag_name().name() == "separator" => NoteSeparatorMark::Short,
-        Some(_) => NoteSeparatorMark::Full,
-        // Bare empty stories suppress rule ink but keep their inherited line box.
-        None if runs.is_empty() && properties.is_none() => NoteSeparatorMark::None,
-        None => return None,
+    // Structure only: paragraph properties and runs of run properties, text,
+    // tabs, text-wrapping breaks and the marker. Any other content (foreign
+    // or not represented here) leaves the story unsupported.
+    let run_content = |node: &roxmltree::Node<'_, '_>| {
+        is_w(*node, "rPr")
+            || is_w(*node, "t")
+            || is_w(*node, "tab")
+            || is_w(*node, "cr")
+            || is_w(*node, "separator")
+            || is_w(*node, "continuationSeparator")
+            || (is_w(*node, "br")
+                && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
     };
-    let mark_properties = properties.and_then(|node| child_w(node, "rPr"));
-    let marker_run = marker_run.filter(|(_, _, run_properties)| {
-        text_runs > 0 || !same_xml_element(mark_properties, *run_properties)
-    });
-    let marker_run = marker_run.map(|(run, marker, _)| (run, marker));
-    let substituted =
-        marker_run.and_then(|(_, marker)| marker_space_paragraph_xml(paragraph, marker));
-    let substituted_doc = match substituted.as_deref().map(parse_guarded) {
-        Some(Ok(doc)) => Some(doc),
-        Some(Err(_)) => return None,
-        None => None,
-    };
-    let paragraph = substituted_doc
-        .as_ref()
-        .and_then(|doc| {
-            doc.root_element()
-                .children()
-                .find(|child| is_w(*child, "p"))
+    let supported = blocks.iter().all(|paragraph| {
+        paragraph.children().filter(|child| child.is_element()).all(|child| {
+            is_w(child, "pPr")
+                || (is_w(child, "r")
+                    && child.children().filter(|node| node.is_element()).all(|node| run_content(&node)))
         })
-        .unwrap_or(paragraph);
-    let parsed = parse_paragraph_with_diagnostics(
-        paragraph,
-        style_map,
-        num_map,
-        media_map,
-        chart_map,
-        rel_map,
-        theme,
-        None,
-        &mut FieldState::default(),
-        &mut Vec::new(),
-    );
-    let marker_runs = |runs: &[DocRun]| {
-        runs.iter().all(|run| {
+    });
+    if !supported {
+        return None;
+    }
+    let markers: Vec<_> = note
+        .descendants()
+        .filter(|node| {
+            is_w(*node, "separator") || is_w(*node, "continuationSeparator")
+        })
+        .collect();
+    if markers.len() > 1 {
+        return None;
+    }
+    let mut paragraphs = Vec::with_capacity(blocks.len());
+    for paragraph in &blocks {
+        PARSING_SEPARATOR_STORY.with(|flag| flag.set(true));
+        let parsed = parse_paragraph_with_diagnostics(
+            *paragraph,
+            style_map,
+            num_map,
+            media_map,
+            chart_map,
+            rel_map,
+            theme,
+            None,
+            &mut FieldState::default(),
+            &mut Vec::new(),
+        );
+        PARSING_SEPARATOR_STORY.with(|flag| flag.set(false));
+        let mut parsed = parsed;
+        if synthesized {
+            parsed.numbering = None;
+            parsed.frame_pr = None;
+            parsed.borders = None;
+            parsed.shading = None;
+        }
+        let representable = parsed.runs.iter().all(|run| {
             matches!(
                 run,
                 DocRun::Text(_)
@@ -2690,77 +2665,40 @@ fn selected_note_separator_paragraph(
                         break_type: BreakType::Line
                     }
             )
-        })
-            && runs
-                .iter()
-                .filter(|run| matches!(run, DocRun::Text(text) if text.text == "\u{fffc}"))
-                .count()
-                == 1
-    };
-    let mut parsed = parsed;
-    if synthesized {
-        parsed.numbering = None;
-        parsed.frame_pr = None;
-        parsed.borders = None;
-        parsed.shading = None;
+        });
+        if !representable
+            || parsed.numbering.is_some()
+            || parsed.frame_pr.is_some()
+            || parsed.borders.is_some()
+            || parsed.shading.is_some()
+            || parsed.mark_vanish
+        {
+            return None;
+        }
+        paragraphs.push(parsed);
     }
-    if !(parsed.runs.is_empty() || (substituted_doc.is_some() && marker_runs(&parsed.runs)))
-        || parsed.numbering.is_some()
-        || parsed.frame_pr.is_some()
-        || parsed.borders.is_some()
-        || parsed.shading.is_some()
-        || parsed.mark_vanish
-    {
+    let marked = paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .filter(|run| matches!(run, DocRun::Text(text) if text.note_separator_marker))
+        .count();
+    // Every marker element must be one parsed marker run.
+    if marked != markers.len() {
         return None;
     }
-    Some((mark, parsed))
-}
-
-/// The separator story paragraph with its marker element replaced by one
-/// U+FFFC text, wrapped with every namespace in scope.
-fn marker_space_paragraph_xml(
-    paragraph: roxmltree::Node<'_, '_>,
-    marker: roxmltree::Node<'_, '_>,
-) -> Option<String> {
-    let input = paragraph.document().input_text();
-    let prefix = paragraph
-        .namespaces()
-        .find(|namespace| is_w_ns(Some(namespace.uri())))
-        .map(|namespace| namespace.name())?;
-    let element = |local: &str| match prefix {
-        Some(prefix) => format!("{prefix}:{local}"),
-        None => local.to_string(),
+    let mark = match markers.first() {
+        Some(marker) if marker.tag_name().name() == "separator" => NoteSeparatorMark::Short,
+        Some(_) => NoteSeparatorMark::Full,
+        None => NoteSeparatorMark::None,
     };
-    let declarations: String = paragraph
-        .namespaces()
-        .map(|namespace| match namespace.name() {
-            Some(name) => format!(r#" xmlns:{name}="{}""#, namespace.uri()),
-            None => format!(r#" xmlns="{}""#, namespace.uri()),
-        })
-        .collect();
-    let range = paragraph.range();
-    let marker_range = marker.range();
-    // The marker becomes a run of its own with its run's properties, so text
-    // before and after it in the same run stays around it.
-    let run_properties = marker
-        .parent_element()
-        .and_then(|run| {
-            run.children()
-                .find(|child| child.is_element() && child.tag_name().name() == "rPr")
-        })
-        .and_then(|properties| input.get(properties.range()))
-        .unwrap_or("");
-    let space = format!(
-        r#"</{r}><{r}>{run_properties}<{t}>&#65532;</{t}></{r}><{r}>{run_properties}"#,
-        r = element("r"),
-        t = element("t"),
-    );
-    Some(format!(
-        "<{root}{declarations}>{}{space}{}</{root}>",
-        input.get(range.start..marker_range.start)?,
-        input.get(marker_range.end..range.end)?,
-        root = element("separatorStory"),
-    ))
+    if let ([paragraph], [marker]) = (paragraphs.as_mut_slice(), markers.as_slice()) {
+        let mark_properties = child_w(blocks[0], "pPr").and_then(|node| child_w(node, "rPr"));
+        let marker_properties = marker.parent_element().and_then(|run| child_w(run, "rPr"));
+        if paragraph.runs.len() == 1 && same_xml_element(mark_properties, marker_properties) {
+            paragraph.runs.clear();
+        }
+    }
+    Some((mark, paragraphs))
 }
 
 /// Element equality by expanded names, attributes and child elements.
@@ -2992,14 +2930,14 @@ mod note_separator_tests {
                 Some(end_continuation),
                 "{properties:?}"
             );
-            assert!(settings.footnote_separator_paragraph.is_some());
-            assert!(settings.endnote_separator_paragraph.is_some());
+            assert!(settings.footnote_separator_story.is_some());
+            assert!(settings.endnote_separator_story.is_some());
             if properties.is_none() {
                 // Word's default story is single-spaced with no space after,
                 // over the package's exact 12pt default line.
                 for paragraph in [
-                    settings.footnote_separator_paragraph.as_deref().unwrap(),
-                    settings.endnote_continuation_separator_paragraph.as_deref().unwrap(),
+                    &settings.footnote_separator_story.as_deref().unwrap()[0],
+                    &settings.endnote_continuation_separator_story.as_deref().unwrap()[0],
                 ] {
                     assert_eq!(paragraph.space_after, 0.0);
                     let spacing = paragraph.line_spacing.as_ref().unwrap();
@@ -3049,8 +2987,9 @@ mod note_separator_tests {
         // Mark kind still wins over role (§17.11.1/.23).
         assert_eq!(settings.footnote_continuation_separator, Some(Short));
         let separator = settings
-            .footnote_separator_paragraph
-            .expect("A24 paragraph");
+            .footnote_separator_story
+            .expect("A24 paragraph")
+            .remove(0);
         let line = separator
             .line_spacing
             .as_ref()
@@ -3060,8 +2999,9 @@ mod note_separator_tests {
         assert!(separator.runs.is_empty(), "the marker is not text");
         assert_eq!(separator.default_font_size, Some(10.0));
         let continuation = settings
-            .footnote_continuation_separator_paragraph
-            .expect("formatted continuation paragraph");
+            .footnote_continuation_separator_story
+            .expect("formatted continuation paragraph")
+            .remove(0);
         assert_eq!(continuation.line_spacing.as_ref().unwrap().value, 6.0);
 
         let continued_endnotes = selected_note_package(
@@ -3078,8 +3018,9 @@ mod note_separator_tests {
         );
         assert_eq!(
             continued_endnotes
-                .endnote_continuation_separator_paragraph
+                .endnote_continuation_separator_story
                 .unwrap()
+                .remove(0)
                 .line_spacing
                 .unwrap()
                 .value,
@@ -3104,12 +3045,12 @@ mod note_separator_tests {
             ),
             (Some(Short), Some(Full))
         );
-        for paragraph in [
-            bare.footnote_separator_paragraph,
-            bare.footnote_continuation_separator_paragraph,
+        for story in [
+            bare.footnote_separator_story,
+            bare.footnote_continuation_separator_story,
         ] {
             let paragraph =
-                paragraph.expect("bare selected story retains inherited paragraph metrics");
+                story.expect("bare selected story retains inherited paragraph metrics").remove(0);
             assert_eq!(paragraph.line_spacing.as_ref().unwrap().value, 12.0);
             assert!(paragraph.runs.is_empty());
         }
@@ -3124,8 +3065,9 @@ mod note_separator_tests {
         );
         assert_eq!(
             empty
-                .footnote_separator_paragraph
+                .footnote_separator_story
                 .unwrap()
+                .remove(0)
                 .line_spacing
                 .unwrap()
                 .value,
@@ -3133,8 +3075,9 @@ mod note_separator_tests {
         );
         assert_eq!(
             empty
-                .endnote_separator_paragraph
+                .endnote_separator_story
                 .unwrap()
+                .remove(0)
                 .line_spacing
                 .unwrap()
                 .value,
@@ -3182,13 +3125,13 @@ mod note_separator_tests {
                 "{paragraph}"
             );
             let marker = settings
-                .footnote_separator_paragraph
+                .footnote_separator_story
                 .as_ref()
-                .map(|paragraph| {
-                    paragraph
+                .map(|story| {
+                    story[0]
                         .runs
                         .iter()
-                        .any(|run| matches!(run, DocRun::Text(text) if text.text == "\u{fffc}"))
+                        .any(|run| matches!(run, DocRun::Text(text) if text.note_separator_marker))
                 });
             // A marker run formatted unlike its mark, beside a text run or
             // with text inside it, is retained in place; ink, borders and a
@@ -3199,17 +3142,70 @@ mod note_separator_tests {
             assert_eq!(marker, represented.then_some(true), "{paragraph}");
             if paragraph.contains("<w:separator/><w:t>") {
                 // The marker is split from the text of its run.
-                let runs = &settings.footnote_separator_paragraph.as_ref().unwrap().runs;
+                let runs = &settings.footnote_separator_story.as_ref().unwrap()[0].runs;
                 let texts: Vec<_> = runs
                     .iter()
                     .filter_map(|run| match run {
-                        DocRun::Text(text) => Some(text.text.as_str()),
+                        DocRun::Text(text) => Some((text.text.as_str(), text.note_separator_marker)),
                         _ => None,
                     })
                     .collect();
-                assert_eq!(texts, ["\u{fffc}", "x"], "{paragraph}");
+                assert_eq!(texts, [("", true), ("x", false)], "{paragraph}");
             }
         }
+    }
+
+    #[test]
+    fn listed_separator_stories_keep_their_whole_content() {
+        use crate::types::NoteSeparatorMark::{None as NoRule, Short};
+        let listed = Some(r#"<w:footnotePr><w:footnote w:id="42"/></w:footnotePr>"#);
+        let parse = |content: &str| {
+            let story = format!(r#"<w:footnote w:type="separator" w:id="42">{content}</w:footnote>"#);
+            let settings = selected_note_package(listed, crate::xml_util::W_NS, "42", Some(&story))
+                .note_layout_settings
+                .unwrap_or_default();
+            let texts: Vec<Vec<(String, bool)>> = settings
+                .footnote_separator_story
+                .unwrap_or_default()
+                .iter()
+                .map(|paragraph| {
+                    paragraph
+                        .runs
+                        .iter()
+                        .filter_map(|run| match run {
+                            DocRun::Text(text) => Some((text.text.clone(), text.note_separator_marker)),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            (settings.footnote_separator, texts)
+        };
+        let text = |value: &str| (value.to_string(), false);
+        let marker = (String::new(), true);
+        // A story without a marker keeps its text and draws no rule.
+        assert_eq!(
+            parse("<w:p><w:r><w:t>NOTES</w:t></w:r></w:p>"),
+            (Some(NoRule), vec![vec![text("NOTES")]])
+        );
+        // Text in another paragraph than the marker is kept.
+        assert_eq!(
+            parse("<w:p><w:r><w:t>NOTES</w:t></w:r></w:p><w:p><w:r><w:t>A</w:t></w:r><w:r><w:separator/></w:r></w:p>"),
+            (Some(Short), vec![vec![text("NOTES")], vec![text("A"), marker.clone()]])
+        );
+        // A second prefix bound to WordprocessingML reads the same runs.
+        assert_eq!(
+            parse(&format!(
+                r#"<w:p xmlns:a="{}"><w:r><w:t>W1</w:t><w:separator/><w:t>W2</w:t></w:r><a:r><a:t>A1</a:t></a:r></w:p>"#,
+                crate::xml_util::W_NS
+            )),
+            (Some(Short), vec![vec![text("W1"), marker.clone(), text("W2"), text("A1")]])
+        );
+        // Authored U+FFFC and U+200B stay text; only the marker is flagged.
+        assert_eq!(
+            parse("<w:p><w:r><w:t>\u{fffc}</w:t></w:r><w:r><w:t>\u{200b}</w:t></w:r><w:r><w:separator/></w:r><w:r><w:t>AFTER</w:t></w:r></w:p>"),
+            (Some(Short), vec![vec![text("\u{fffc}"), text("\u{200b}"), marker, text("AFTER")]])
+        );
     }
 
     #[test]
@@ -3696,10 +3692,10 @@ fn parse_note_layout_settings(
         endnote_separator: None,
         endnote_continuation_separator: None,
         footnote_continuation_separator: None,
-        footnote_separator_paragraph: None,
-        footnote_continuation_separator_paragraph: None,
-        endnote_separator_paragraph: None,
-        endnote_continuation_separator_paragraph: None,
+        footnote_separator_story: None,
+        footnote_continuation_separator_story: None,
+        endnote_separator_story: None,
+        endnote_continuation_separator_story: None,
         reserved_separators: None,
     };
     if result.footnote_position.is_none()
@@ -8896,6 +8892,7 @@ fn parse_run_inner(
                         east_asian_combine,
                         east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
+                        note_separator_marker: false,
                         typography_acquisition: typography_acquisition.clone(),
                     };
                     match runs.last_mut() {
@@ -8918,6 +8915,74 @@ fn parse_run_inner(
                         _ => runs.push(DocRun::Text(Box::new(this))),
                     }
                 }
+                preserve_next_comment_boundary = false;
+            }
+            "separator" | "continuationSeparator"
+                if is_w_ns(child.tag_name().namespace())
+                    && PARSING_SEPARATOR_STORY.with(std::cell::Cell::get) =>
+            {
+                // §17.11.23 / §17.11.1: the separator marker of a separator
+                // story, kept in place as an empty marker run with its run
+                // properties (only listed separator stories read it).
+                let this = TextRun {
+                    text: String::new(),
+                    no_break_before: false,
+                    no_break_after: false,
+                    no_break_hyphen_offsets: Vec::new(),
+                    optional_hyphen: false,
+                    space_advance_pt: None,
+                    list_label: None,
+                    bold,
+                    italic,
+                    underline,
+                    underline_style: underline_style.clone(),
+                    underline_color: underline_color.clone(),
+                    strikethrough,
+                    font_size,
+                    color: color.clone(),
+                    font_family: font_family.clone(),
+                    font_family_high_ansi: font_family_high_ansi.clone(),
+                    font_slots: font_slots.clone(),
+                    font_family_east_asia: font_family_east_asia.clone(),
+                    font_hint: font_hint.clone(),
+                    is_link,
+                    background: fmt.background.clone(),
+                    color_auto,
+                    border: border.clone(),
+                    vert_align: vert_align.clone(),
+                    hyperlink: hyperlink.clone(),
+                    hyperlink_anchor: hyperlink_anchor.clone(),
+                    all_caps,
+                    small_caps,
+                    double_strikethrough,
+                    highlight: highlight.clone(),
+                    emphasis_mark: emphasis_mark.clone(),
+                    ruby: None,
+                    revision: revision.cloned(),
+                    rtl,
+                    cs: cs_toggle,
+                    font_family_cs: font_family_cs.clone(),
+                    font_size_cs,
+                    bold_cs,
+                    italic_cs,
+                    lang_bidi: lang_bidi.clone(),
+                    lang_east_asia: lang_east_asia.clone(),
+                    snap_to_grid,
+                    char_spacing,
+                    fit_text_val,
+                    fit_text_id: fit_text_id.clone(),
+                    char_scale,
+                    position,
+                    kerning,
+                    east_asian_vert,
+                    east_asian_vert_compress,
+                    east_asian_combine,
+                    east_asian_combine_brackets: east_asian_combine_brackets.clone(),
+                    note_ref: None,
+                    note_separator_marker: true,
+                    typography_acquisition: typography_acquisition.clone(),
+                };
+                runs.push(DocRun::Text(Box::new(this)));
                 preserve_next_comment_boundary = false;
             }
             "commentReference" if is_w_ns(child.tag_name().namespace()) => {
@@ -9006,6 +9071,7 @@ fn parse_run_inner(
                         east_asian_combine,
                         east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                         note_ref: None,
+                        note_separator_marker: false,
                         typography_acquisition: typography_acquisition.clone(),
                     })));
                 }
@@ -9067,6 +9133,7 @@ fn parse_run_inner(
                     east_asian_combine,
                     east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
+                    note_separator_marker: false,
                     typography_acquisition: typography_acquisition.clone(),
                 })));
             }
@@ -9181,6 +9248,7 @@ fn parse_run_inner(
                     east_asian_combine,
                     east_asian_combine_brackets: east_asian_combine_brackets.clone(),
                     note_ref: None,
+                    note_separator_marker: false,
                     typography_acquisition: typography_acquisition.clone(),
                 };
                 if optional {
@@ -9430,6 +9498,7 @@ fn parse_run_inner(
                             .and_then(parse_on_off)
                             == Some(true),
                     }),
+                    note_separator_marker: false,
                     typography_acquisition: typography_acquisition.clone(),
                 })));
             }

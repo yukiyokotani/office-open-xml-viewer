@@ -102,7 +102,7 @@ import type {
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
 import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
-import { isNoteSeparatorMarkerRuns, NOTE_SEPARATOR_MARKER_TEXT, noteSeparatorMarkerAdvancePt } from './layout/selected-note-separators.js';
+import { isNoteSeparatorMarkerRun, noteSeparatorMarkerAdvancePt } from './layout/selected-note-separators.js';
 import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
@@ -345,10 +345,10 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     footnoteContinuationSeparator?: NoteSeparatorMark;
     /** Ordinary DOCX producer only: effective paragraphs of listed separator
      * stories; see SelectedNoteSeparatorParagraphsInput. */
-    footnoteSeparatorParagraph?: DocParagraph;
-    footnoteContinuationSeparatorParagraph?: DocParagraph;
-    endnoteSeparatorParagraph?: DocParagraph;
-    endnoteContinuationSeparatorParagraph?: DocParagraph;
+    footnoteSeparatorStory?: DocParagraph[];
+    footnoteContinuationSeparatorStory?: DocParagraph[];
+    endnoteSeparatorStory?: DocParagraph[];
+    endnoteContinuationSeparatorStory?: DocParagraph[];
     /** Producer extension only (not WordprocessingML); see
      * ReservedNoteSeparatorsInput. */
     reservedSeparators?: ReservedNoteSeparatorsInput;
@@ -492,21 +492,19 @@ function selectedNoteSeparatorParagraphsInput(
   fixedParagraphAutoSpacing: boolean,
 ): Readonly<{ footnoteSeparatorParagraphs?: SelectedNoteSeparatorParagraphsInput;
   endnoteSeparatorParagraphs?: SelectedNoteSeparatorParagraphsInput }> {
-  const resolve = (paragraph: DocParagraph | undefined, mark: unknown): DocParagraph | undefined => {
-    if (paragraph === undefined) return undefined;
+  const resolve = (story: readonly DocParagraph[] | undefined, mark: unknown): readonly DocParagraph[] | undefined => {
+    if (story === undefined) return undefined;
     if (mark !== 'short' && mark !== 'full' && mark !== 'none') throw new Error('Unsupported note separator story paragraph');
-    if (paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true) return paragraph;
-    return {
-      ...paragraph,
-      ...resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing),
-    };
+    return story.map((paragraph) => paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true
+      ? paragraph
+      : { ...paragraph, ...resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing) });
   };
-  const separator = resolve(settings?.footnoteSeparatorParagraph, settings?.footnoteSeparator);
+  const separator = resolve(settings?.footnoteSeparatorStory, settings?.footnoteSeparator);
   const continuationSeparator = resolve(
-    settings?.footnoteContinuationSeparatorParagraph, settings?.footnoteContinuationSeparator,
+    settings?.footnoteContinuationSeparatorStory, settings?.footnoteContinuationSeparator,
   );
-  const endnoteSeparator = resolve(settings?.endnoteSeparatorParagraph, settings?.endnoteSeparator);
-  const endnoteContinuationSeparator = resolve(settings?.endnoteContinuationSeparatorParagraph, settings?.endnoteContinuationSeparator);
+  const endnoteSeparator = resolve(settings?.endnoteSeparatorStory, settings?.endnoteSeparator);
+  const endnoteContinuationSeparator = resolve(settings?.endnoteContinuationSeparatorStory, settings?.endnoteContinuationSeparator);
   return {
     ...(endnoteSeparator || endnoteContinuationSeparator ? { endnoteSeparatorParagraphs: {
       ...(endnoteSeparator ? { separator: endnoteSeparator } : {}),
@@ -2189,10 +2187,9 @@ export function selectedNoteSeparatorParagraphAcquisitionInput(
   // rule; a continuation marker owns its whole line
   // (WORD_NOTE_SEPARATOR_GEOMETRY).
   const authored = (paragraph.runs ?? []) as readonly DocRun[];
-  const markerIndex = isNoteSeparatorMarkerRuns(authored)
-    ? authored.findIndex((run) => run.type === 'text' && run.text === NOTE_SEPARATOR_MARKER_TEXT) : -1;
+  const markerIndex = authored.findIndex(isNoteSeparatorMarkerRun);
   const lineBreak = { type: 'break', breakType: 'line' } as DocRun;
-  const runs = markerIndex < 0 ? [] : authored.flatMap((run, index) => {
+  const runs = markerIndex < 0 ? authored : authored.flatMap((run, index) => {
     if (index !== markerIndex) return [run];
     const fillsLine = mark === 'full';
     return [

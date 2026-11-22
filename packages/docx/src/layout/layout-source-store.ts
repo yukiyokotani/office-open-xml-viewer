@@ -21,7 +21,7 @@ import {
   reservedNoteSeparatorRole,
 } from './reserved-note-separators.js';
 import {
-  isAcquiredNoteSeparatorMarkerRuns,
+  isAcquiredNoteSeparatorStoryRuns,
   isSelectedNoteSeparatorInstance,
   selectedNoteSeparatorSource,
 } from './selected-note-separators.js';
@@ -213,16 +213,21 @@ function validateReservedNoteSeparatorRoles(
         ? role === 'separator' ? settings?.endnoteSeparator : settings?.endnoteContinuationSeparator
         : role === 'separator' ? settings?.footnoteSeparator : settings?.footnoteContinuationSeparator;
       const root = selectedNoteSeparatorSource(role, [], kind);
+      const count = definition?.paragraphCount;
+      const markerIndex = definition?.paragraph.path[0];
       if (!definition || definition.role !== role || sourceKey(definition.root) !== sourceKey(root)
-        || sourceKey(definition.paragraph) !== sourceKey({ ...root, path: [0] })
+        || !Number.isSafeInteger(count) || count! < 1 || definition.paragraph.path.length !== 1
+        || !Number.isSafeInteger(markerIndex) || markerIndex! < 0 || markerIndex! >= count!
+        || sourceKey(definition.paragraph) !== sourceKey({ ...root, path: [markerIndex!] })
         || (mode !== 'short' && mode !== 'full' && mode !== 'none')) {
         throw new TypeError(`Invalid note separator story definition: ${kind}:${role}`);
       }
       defined.add(sourceKey(root));
       const story = blocks.storyRoot(root);
       const paragraph = blocks.resolve(definition.paragraph);
-      if (story.length !== 1 || story[0] !== paragraph || paragraph.type !== 'paragraph'
-        || !(paragraph.runs.length === 0 || isAcquiredNoteSeparatorMarkerRuns(paragraph.runs))) {
+      if (story.length !== count || story[markerIndex!] !== paragraph
+        || story.some((block) => block.type !== 'paragraph' || !isAcquiredNoteSeparatorStoryRuns(block.runs))
+        || story.filter((block) => block.type === 'paragraph' && block.runs.some((run) => run.type === 'shape')).length > 1) {
         throw new TypeError(`Note separator story paragraph mismatch: ${sourceKey(root)}`);
       }
     }

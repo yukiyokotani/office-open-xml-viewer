@@ -125,6 +125,14 @@ describe('section-aware note numbering', () => {
     expect(formatCustomNoteNumber(12, 'x')).toBe('12');
   });
 
+  it('starts the Katakana sequence of a custom format token (§17.11.18 example)', () => {
+    const katakana = (start: number) => `<w:numFmt w:val="custom" w:format="&#x30A2;"/><w:numStart w:val="${start}"/>`
+      + '<w:numRestart w:val="eachSect"/>';
+    expect(render({ kind: 'footnote', sectionPr: [katakana(3), katakana(1)] })).toEqual(['ウ', 'エ', 'ア', 'イ']);
+    expect(formatCustomNoteNumber(2, '①')).toBe('②');
+    expect(formatCustomNoteNumber(3, 'Ω')).toBe('3');
+  });
+
   it('numbers an automatic note 0 from numStart 0, never as a custom mark', () => {
     const zero = '<w:numStart w:val="0"/>';
     expect(render({ kind: 'footnote', sectionPr: [zero, zero] })).toEqual(['0', '1', '2', '3']);

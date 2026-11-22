@@ -11,7 +11,8 @@ import type { DocParagraph } from '../types.js';
 /**
  * Ordinary DOCX selected separator stories: document-listed (ECMA-376
  * §17.11.3/.9) footnote separator/continuation stories and endnote separators.
- * One paragraph holds a §17.11.23/§17.11.1 mark run or is bare and empty.
+ * Their paragraphs hold text around at most one §17.11.23/§17.11.1 marker
+ * run, or a bare empty paragraph.
  *
  * Identity: one canonical `selected:*` root per role and note kind. These are library identities, distinct from producer-supplied
  * `reserved:*` stories and never DOCX note ids. A root is shared by every
@@ -76,7 +77,7 @@ function reject(reason: string): never {
   throw new Error(`Unsupported selected note separator story: ${reason}`);
 }
 
-/** Validate and normalize the parser-boundary paragraphs once, before the
+/** Validate and normalize the parser-boundary stories once, before the
  * layout source is sealed. Returns at most two definitions. */
 export function normalizeSelectedNoteSeparators(
   raw: SelectedNoteSeparatorParagraphsInput | undefined,
@@ -91,45 +92,57 @@ export function normalizeSelectedNoteSeparators(
     if (!(ROLES as readonly string[]).includes(key)) reject(`unknown role ${key}`);
   }
   for (const role of ROLES) {
-    const paragraph = raw[role];
-    if (paragraph === undefined) continue;
+    const paragraphs = raw[role];
+    if (paragraphs === undefined) continue;
     const mark = marks[role];
     if (mark !== 'short' && mark !== 'full' && mark !== 'none') reject(`${role} paragraph has no selected mark`);
-    // The closed shape the parser admits: no runs besides the omitted mark,
-    // or text runs around the marker sentinel, and no paragraph ink,
+    if (!Array.isArray(paragraphs) || paragraphs.length === 0) reject(`${role} story has no paragraph`);
+    // The closed shape the parser admits: text runs and line breaks with at
+    // most one marker run in the whole story, and no paragraph ink,
     // numbering, frame or hidden mark.
-    if ((paragraph.runs ?? []).length !== 0 && !isNoteSeparatorMarkerRuns(paragraph.runs)) {
-      reject(`${role} paragraph carries runs`);
-    }
-    if (paragraph.numbering != null || paragraph.framePr != null || paragraph.borders != null
-      || paragraph.shading != null || paragraph.markVanish === true) {
-      reject(`${role} paragraph carries unrepresented properties`);
-    }
+    let markerParagraph = -1;
+    paragraphs.forEach((paragraph, index) => {
+      if (!isNoteSeparatorStoryRuns(paragraph.runs ?? [])) reject(`${role} paragraph carries unrepresented runs`);
+      if ((paragraph.runs ?? []).some(isNoteSeparatorMarkerRun)) {
+        if (markerParagraph >= 0) reject(`${role} story holds two markers`);
+        markerParagraph = index;
+      }
+      if (paragraph.numbering != null || paragraph.framePr != null || paragraph.borders != null
+        || paragraph.shading != null || paragraph.markVanish === true) {
+        reject(`${role} paragraph carries unrepresented properties`);
+      }
+    });
     const root = selectedNoteSeparatorSource(role, [], kind);
-    const paragraphSource = selectedNoteSeparatorSource(role, [0], kind);
-    definitions[role] = Object.freeze({ role, root, paragraph: paragraphSource });
-    stories.push(Object.freeze({ source: root, body: Object.freeze([acquire(paragraph, paragraphSource, mark)]) }));
+    const paragraphSource = selectedNoteSeparatorSource(role, [Math.max(0, markerParagraph)], kind);
+    definitions[role] = Object.freeze({ role, root, paragraph: paragraphSource, paragraphCount: paragraphs.length });
+    stories.push(Object.freeze({
+      source: root,
+      body: Object.freeze(paragraphs.map((paragraph, index) =>
+        acquire(paragraph, selectedNoteSeparatorSource(role, [index], kind), mark))),
+    }));
   }
   return Object.freeze({ definitions: Object.freeze(definitions), stories: Object.freeze(stories) });
 }
 
-/** The parser's marker sentinel of a separator story with text or with a
- * marker run formatted unlike its paragraph mark (one U+FFFC text run). */
-export const NOTE_SEPARATOR_MARKER_TEXT = '\ufffc';
-
-/** Parser wire of a separator story paragraph holding its marker in place:
- * text runs and line breaks only, exactly one text run the marker sentinel. */
-export function isNoteSeparatorMarkerRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
-  return runs.length > 0
-    && runs.every((run) => run.type === 'text'
-      || (run.type === 'break' && (run as Readonly<{ breakType?: string }>).breakType === 'line'))
-    && runs.filter((run) => (run as Readonly<{ text?: string }>).text === NOTE_SEPARATOR_MARKER_TEXT).length === 1;
+/** The parser's marker run of a separator story: an empty text run flagged
+ * `__noteSeparatorMarker` that carries the marker's run properties. Authored
+ * text is never mistaken for it. */
+export function isNoteSeparatorMarkerRun(run: Readonly<{ type: string }>): boolean {
+  return run.type === 'text' && (run as Readonly<{ __noteSeparatorMarker?: boolean }>).__noteSeparatorMarker === true;
 }
 
-/** Acquired separator story paragraph: text runs around the one inline
- * object that lays the marker out. */
-export function isAcquiredNoteSeparatorMarkerRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
-  return runs.length > 0 && runs.filter((run) => run.type === 'shape').length === 1
+/** Parser wire of one separator story paragraph: text runs and line breaks
+ * only, at most one of them the marker run. */
+export function isNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
+  return runs.every((run) => run.type === 'text'
+      || (run.type === 'break' && (run as Readonly<{ breakType?: string }>).breakType === 'line'))
+    && runs.filter(isNoteSeparatorMarkerRun).length <= 1;
+}
+
+/** Acquired separator story paragraph: text runs and line breaks, around at
+ * most one inline object that lays the marker out. */
+export function isAcquiredNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
+  return runs.filter((run) => run.type === 'shape').length <= 1
     && runs.every((run) => run.type === 'text' || run.type === 'shape' || run.type === 'break');
 }
 

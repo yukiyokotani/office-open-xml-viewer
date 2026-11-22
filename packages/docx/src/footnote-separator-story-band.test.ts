@@ -70,8 +70,8 @@ function model(
     __noteLayoutSettings: {
       footnoteSeparator: 'short',
       footnoteContinuationSeparator: 'full',
-      ...(stories.separator ? { footnoteSeparatorParagraph: stories.separator } : {}),
-      ...(stories.continuationSeparator ? { footnoteContinuationSeparatorParagraph: stories.continuationSeparator } : {}),
+      ...(stories.separator ? { footnoteSeparatorStory: [stories.separator] } : {}),
+      ...(stories.continuationSeparator ? { footnoteContinuationSeparatorStory: [stories.continuationSeparator] } : {}),
     },
   } as unknown as DocxDocumentModel;
 }
@@ -208,20 +208,23 @@ it('loads the story paragraph mark family with the document fonts', () => {
 it('loads the fonts of separator text and of its marker run', () => {
   const separator = {
     ...story(10),
-    runs: [textRun('SEPA', { fontFamily: 'Separator Text Face' }), textRun('\ufffc', { fontFamily: 'Marker Run Face' })],
+    runs: [textRun('SEPA', { fontFamily: 'Separator Text Face' }), textRun('', { fontFamily: 'Marker Run Face', __noteSeparatorMarker: true })],
   } as unknown as DocParagraph;
   const families = docxRenderedFontFamilies(model(324, controlBody(), paragraph(lines('N1L', 4)), { separator }));
   expect(families).toEqual(expect.arrayContaining(['Separator Text Face', 'Marker Run Face']));
 });
 
 it.each([
-  { name: 'a story paragraph without its Short/Full mark', settings: { footnoteSeparatorParagraph: story(24) } },
-  { name: 'a story paragraph with runs', settings: {
-    footnoteSeparator: 'short', footnoteSeparatorParagraph: paragraph(['x'], [], 24),
+  { name: 'a story paragraph without its Short/Full mark', settings: { footnoteSeparatorStory: [story(24)] } },
+  { name: 'a story with two markers', settings: {
+    footnoteSeparator: 'short', footnoteSeparatorStory: [
+      { ...story(24), runs: [textRun('', { __noteSeparatorMarker: true })] },
+      { ...story(24), runs: [textRun('', { __noteSeparatorMarker: true })] },
+    ],
   } },
   { name: 'a story paragraph with borders', settings: {
     footnoteSeparator: 'short',
-    footnoteSeparatorParagraph: { ...story(24), borders: { top: { style: 'single', width: 0.5, color: '000000', space: 0 } } },
+    footnoteSeparatorStory: [{ ...story(24), borders: { top: { style: 'single', width: 0.5, color: '000000', space: 0 } } }],
   } },
 ])('rejects $name instead of approximating it', ({ settings }) => {
   const document = {
@@ -243,7 +246,7 @@ it.each(['footnote', 'endnote'] as const)('measures bare selected %s stories wit
       [kind === 'footnote' ? 'footnotes' : 'endnotes']: [{ id: '1', content: [paragraph(['N01'])] }],
       __noteLayoutSettings: {
         [kind === 'footnote' ? 'footnoteSeparator' : 'endnoteSeparator']: mark,
-        [kind === 'footnote' ? 'footnoteSeparatorParagraph' : 'endnoteSeparatorParagraph']: story(12),
+        [kind === 'footnote' ? 'footnoteSeparatorStory' : 'endnoteSeparatorStory']: [story(12)],
       },
     } as unknown as DocxDocumentModel;
     const [note] = notesOnPage(render(document).pages[0]!);
@@ -263,7 +266,7 @@ it.each([false, true])('uses the continued endnote area story even at a new-note
       ? [{ id: '1', content: [paragraph(lines('E', 14))] }, { id: '2', content: [paragraph(lines('E', 30).slice(14))] }]
       : [{ id: '1', content: [paragraph(lines('E', 30))] }],
     __noteLayoutSettings: { endnoteSeparator: 'short', endnoteContinuationSeparator: 'full',
-      endnoteSeparatorParagraph: story(24), endnoteContinuationSeparatorParagraph: story(12) },
+      endnoteSeparatorStory: [story(24)], endnoteContinuationSeparatorStory: [story(12)] },
   } as unknown as DocxDocumentModel;
   const layout = render(document);
   expect(pages(layout).map(page => page.notes.join(''))).toEqual([
@@ -279,7 +282,7 @@ it('admits a listed endnote continuation story when the ordinary separator is ab
   body.runs.push(textRun('e', { noteRef: { kind: 'endnote', id: '1' } }) as DocParagraph['runs'][number]);
   const document = { ...base, body: [body], footnotes: [],
     endnotes: [{ id: '1', content: [paragraph(lines('E', 30))] }],
-    __noteLayoutSettings: { endnoteContinuationSeparator: 'full', endnoteContinuationSeparatorParagraph: story(12) },
+    __noteLayoutSettings: { endnoteContinuationSeparator: 'full', endnoteContinuationSeparatorStory: [story(12)] },
   } as unknown as DocxDocumentModel;
   const layout = render(document);
   expect(pages(layout).map(page => page.notes.join(''))).toEqual([
@@ -296,7 +299,7 @@ function markerStory(before: string, after: string, extra: Record<string, unknow
     ...extra,
     runs: [
       ...(before ? [textRun(before)] : []),
-      textRun('￼'),
+      textRun('', { __noteSeparatorMarker: true }),
       ...(after ? [textRun(after)] : []),
     ] as DocParagraph['runs'],
   } as DocParagraph;
@@ -343,7 +346,7 @@ it('keeps a mark-only marker run on one line in an area narrower than 144pt', ()
   // A 20pt marker run in a 10pt paragraph: one 20pt line at any area width.
   const narrow = (pageWidth: number) => {
     const document = model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), {
-      separator: { ...markerStory('', ''), runs: [textRun('￼', { fontSize: 20 })] } as DocParagraph,
+      separator: { ...markerStory('', ''), runs: [textRun('', { fontSize: 20, __noteSeparatorMarker: true })] } as DocParagraph,
     });
     document.section.pageWidth = pageWidth;
     const note = leadingOf(render(document, false), 0);
