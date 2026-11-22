@@ -79,7 +79,8 @@ there.
 6. Run `cargo check -p ooxml-mcp-server` after bumping the MCP server so
    `Cargo.lock` follows.
 7. Open PR `chore(release): 0.x.0`.
-8. Merge with `gh pr merge <number> --merge` or another non-squash strategy.
+8. Merge through the merge gate in [Git, PRs and issues](git-and-prs.md): a
+   merge commit with `gh pr merge <number> --merge --match-head-commit <sha>`.
 9. Pull the release's base branch, create and push the annotated tag:
    `git tag -a v0.x.0 -m "v0.x.0"` and `git push origin v0.x.0`.
 10. Create the GitHub Release with notes based on the changelog and a full

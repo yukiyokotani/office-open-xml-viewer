@@ -5,10 +5,13 @@
  * owns the deliberately plain, themeable card list. Applications that need a
  * different structure use the format packages' comment and geometry APIs.
  *
- * The public styling contract is the `.ooxml-comment-*` classes, the
- * `data-active`/`data-focused` card states, and the CSS custom properties.
- * Other `data-ooxml-comment-*` attributes exist for Viewer behaviour and tests
- * and are not a styling or DOM-structure contract. There is deliberately no
+ * The public styling contract is the `.ooxml-comment-card` (with its
+ * `__author`, `__date`, `__body` and `__reply` elements) and
+ * `.ooxml-comment-marker` classes, the `data-active`/`data-focused` card
+ * states, and the theme custom properties named in the site's review UI
+ * guide (`site/src/pages/review-ui.astro`). The
+ * `data-ooxml-comment-*` attributes exist for Viewer behaviour and tests and
+ * are not a styling or DOM-structure contract. There is deliberately no
  * card-mount callback or framework adapter: such a hook would still constrain
  * component ownership and duplicate framework lifecycle rules.
  */

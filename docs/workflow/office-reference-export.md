@@ -59,9 +59,13 @@ without leaving it in a changed state.
   (`~/Library/Containers/com.microsoft.<App>/Data/tmp/`) and open it with
   `open -a "Microsoft <App>" <path>`; Office cannot open arbitrary paths
   without permission prompts.
-- Never change Office's global settings (automation security, display alerts)
-  through AppleScript; a killed script leaves them changed. Drive the GUI
-  through computer use instead.
+- Do not change Office's global settings (automation security, display alerts)
+  from an ad-hoc AppleScript; a killed script leaves them changed. Drive the
+  GUI through computer use instead. The one script that sets them is
+  `packages/legacy-office/tools/legacy-office-export.applescript`: it must
+  disable macros before it opens a legacy binary file, and it restores the
+  previous values when the export finishes or fails. If that script is
+  killed, restore the settings by hand.
 - Keep an unsaved blank document open in each app during a GUI phase, so
   closing the last control does not leave the app windowless.
 - Computer use cannot attach while the Mac screen is locked

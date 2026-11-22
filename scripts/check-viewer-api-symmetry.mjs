@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // Checks the DOCX/PPTX/XLSX public declaration baselines against one role
-// matrix: owned engine, Canvas-mounted Viewer, container-mounted Viewer,
-// borrowed-engine factory, and the engine's direct/bitmap render methods.
+// matrix (owned engine, Canvas-mounted Viewer, container-mounted Viewer,
+// borrowed-engine factory, and the engine's direct/bitmap render methods),
+// plus the comment APIs and the ownership section of the site's production
+// guide.
 //
 // The matrix aligns host integration and lifecycle only. A DOCX page, PPTX
 // slide, and XLSX worksheet viewport are different units, so there is
 // deliberately no generic public `OfficeViewer<T>` and no shared unit-source,
-// coordinator, or projector interface. Only mechanics that are identical
-// across formats are shared in core; a helper that needs page/slide/sheet
-// branching belongs in the format package.
+// coordinator, or projector interface. Put a mechanism in core only when it is
+// identical across formats; a helper that needs page/slide/sheet branching
+// belongs in the format package.
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';

@@ -28,10 +28,10 @@ legacy input continues to reject with
 `OoxmlError.code === 'legacy-binary-format'`, so no migration is required for
 applications that do not opt in.
 
-These readers are experimental and deliberately narrow. Most structures they
-cannot map yet reject the whole document. A few details without a model
+These readers are experimental and deliberately narrow. Many structures they
+cannot map still reject the whole document. Some details without a model
 equivalent are left out of an otherwise complete document instead; the
-sections below name them. None of the readers executes macros, fields,
+sections below give examples. None of the readers executes macros, fields,
 formulas, actions or embedded objects.
 
 ## Enabling a source
@@ -158,7 +158,7 @@ modes and Node. Background failures use the same error through `onError`.
 
 The two optional reader packages currently follow different policies. The
 legacy readers reject the whole document with `unsupported-content` when they
-meet most structures they cannot map. The OpenDocument readers
+meet many structures they cannot map. The OpenDocument readers
 (`@silurus/ooxml-opendocument`, see [opendocument.md](./opendocument.md))
 render every feature they read and reject only corrupt, encrypted or unsafe
 input, or input over a resource limit. Keep a conversion fallback for legacy
@@ -223,50 +223,45 @@ reject the entire document.
 
 When a DOC prints its revision markup (MS-DOC `DopBase.fRMPrint`) and carries
 revision marks, the reader reports `showTrackedChanges: true` as its view
-default. An explicit `showTrackedChanges` option, including `false`, always
-wins.
+default. An explicit `showTrackedChanges` option, including `false`, takes
+precedence.
 
 Missing header and footer distances use the MS-DOC 2.6.4 defaults for the
 stored producer installation language when the specification lists that
-language. Explicit values, including zero, win. The host locale and the
-document's text language are not used to guess them. A missing distance for
-an unlisted language rejects the document.
+language; explicit values, including zero, take priority. The host locale and
+the document's text language are not used. A missing distance that no listed
+language resolves rejects the document.
 
-Fields are checked against each story's own field table and map onto the
-fields the DOCX reader supports. Fields are never executed:
+Fields are never executed. Visible fields map onto the fields the DOCX reader
+supports:
 
-- PAGE, NUMPAGES, DATE and TIME are computed when the document is laid out,
-  as for DOCX. Word does the same when it prints: a DOC header DATE field
-  shows the export date in Word's PDF. A switch the renderer does not
-  interpret leaves the value in its default format, as for a DOCX. A locked
-  field shows its stored result.
-- Form check boxes show their stored state and size.
-- EQ fields become phonetic guides or inline equations, and a SYMBOL field
-  without a stored result becomes its one character.
-- Every other field shows its stored result. HYPERLINK fields and REF or
-  PAGEREF fields with `\h` become links; nested hyperlinks link to the
-  innermost target. Stored results are not recomputed, so a PAGEREF number
-  can differ from a PDF that Word produced after updating it.
-- A private field result is not shown, except an INCLUDEPICTURE picture.
-- MACROBUTTON, GOTOBUTTON, ADVANCE and FORMDROPDOWN fields reject the
-  document.
+- PAGE and NUMPAGES are computed when the document is laid out.
+- DATE and TIME show the current date or time when the field has a date-time
+  picture the renderer can format; otherwise they show the result stored in
+  the file.
+- A locked field shows its stored result.
+- EQ fields become phonetic guides or inline equations.
+- HYPERLINK fields whose instruction the reader can parse, and REF or PAGEREF
+  fields with a bookmark and `\h`, become links. Stored results are not
+  recomputed, so a PAGEREF number can differ from a PDF that Word produced
+  after updating it.
+- A visible MACROBUTTON, GOTOBUTTON, ADVANCE or FORMDROPDOWN field rejects the
+  document. A field nested inside another field's instruction is hidden and
+  is not checked against this list.
 
-Footnotes and endnotes become DOCX notes, with their placement and number
-format. Word numbers notes per section; where that differs from the
-document-wide numbering the reader computes each mark itself. A per-page
-numbering restart counts continuously across pages, because pages exist only
-after layout. Number formats the reader does not format itself are shown as
-Arabic numbers. A custom reference mark shows its own text and uses no number.
-A separator story with content of its own is replaced by the layout's default
-separator.
+Footnotes and endnotes become DOCX notes. Word numbers notes per section;
+when that numbering is not what the document-wide model produces, the reader
+writes each automatic mark as text, and in those marks number formats other
+than Arabic, Roman, letters and Chicago symbols are written as Arabic
+numbers. A per-page restart counts continuously across pages. A custom
+reference mark shows its own text and uses no number.
 
-Section text flow is shown per section, horizontal or vertical, following the
-basic MS-DOC/MS-ODRAW rules; no producer version is guessed. Horizontal-in-
-vertical runs are rendered only in sections with upright East Asian vertical
-text; elsewhere they reject the document. Word's placement of headers,
-footers, notes, anchored drawings and upright tables in upward-flowing
-sections is not established; the library's general vertical placement is
-used, without a claim of matching Word.
+Section text flow is read per section. Horizontal-in-vertical runs are
+rendered only in sections with upright East Asian vertical text (`tbRl`);
+elsewhere they reject the document. For upward-flowing sections, the
+placement of headers, footers, notes, anchored drawings and upright tables
+follows the library's general vertical placement, without a claim of
+matching Word.
 
 ## Experimental direct PPT source
 
@@ -315,21 +310,15 @@ A slide's own `SlideShowSlideInfoAtom.fHidden` marks it hidden; hidden slides
 and their content remain in the presentation. Display follows the existing
 `PptxViewer` `hiddenSlideMode` option, whose default remains `'show'`.
 
-An embedded or linked OLE object (for example an Excel or Graph chart) is
-drawn from the presentation picture the file stores for it; the object itself
-is never read or activated. Supported shade, pattern and texture fills and
-picture colour settings are projected as the DrawingML PowerPoint writes for them
-when it saves the deck as PPTX. Mouse-over and slide-jump hyperlinks on text
-are kept as the DrawingML run properties PowerPoint writes for them.
+An embedded or linked OLE object is drawn from the presentation picture the
+file stores for it; the object itself is never read or activated. Some OLE
+structures, for example an OLE group shape, reject the document.
 
-A modern Office-saved PPT can also store DrawingML for a shape in an
-alternative shape XML part. The reader adopts it when it agrees with the
-binary shape on every compared attribute, and keeps the binary projection
-when there is no alternative, when the two verifiably disagree, or when
-verifying the alternative exceeds its resource budget. An alternative it
-cannot read or whose differences it cannot equate rejects the load. An
-adopted alternative keeps its formatting, while characters, identifiers and
-transforms come from the binary.
+Some modern Office-saved PPT files also store DrawingML for a shape in an
+alternative shape XML part. Depending on how it compares with the binary
+shape, the reader draws the alternative or the binary projection, and some
+disagreements reject the load. The comparison rules are documented in the
+reader source (`packages/legacy-office/parser/src/ppt/metro.rs`).
 
 ## Experimental direct XLS source
 
@@ -349,40 +338,36 @@ accept the same source.
 The direct XLS source is experimental and bounded. It projects a BIFF8
 workbook into the shared worksheet model: sheet names and visibility, cell
 values with their cached formula results, merged ranges, cell styles,
-rich-text runs and phonetic guides, row and column geometry, sheet views,
-conditional formatting, tables, hyperlinks, AutoFilter ranges, data
-validations, defined names, cell comments (shown as comment indicators),
-PivotTable layout, embedded charts, chart sheets, pictures and shapes. A
-macro sheet is shown as the grid Excel shows for it. Formulas, external links
-and macros are never evaluated.
+shared-string character formatting and phonetic guides, row and column
+geometry, sheet views, conditional formatting, tables, hyperlinks, filters,
+data validations, defined names, cell comments (shown as comment indicators),
+PivotTable layout, charts, chart sheets, pictures and shapes. Formula token
+programs, external links and macros are never evaluated.
 
 Some content without a model equivalent is left out while the workbook still
-loads: AutoFilter criteria (the filter range and its buttons remain), list
-validations whose drop-down is suppressed, the comment box Excel keeps
-visible on the sheet (the comment remains as its indicator), drawing shadows
-and some drawing-shape properties. Structures the model cannot state yet
-reject the workbook, for example inactive conditional-formatting rules and
-PivotTable style elements the renderer cannot draw. Print areas and titles
-travel as defined names; page setup, print options, headers, footers and page
-breaks are not part of the model.
+loads, for example AutoFilter criteria, list validations whose drop-down is
+suppressed, the comment box Excel keeps visible on the sheet, and drawing
+shadows. Other structures the model cannot state reject the workbook, for
+example inactive conditional-formatting rules. Page setup, headers, footers
+and page breaks are not part of the model; print areas and titles are
+defined names.
 
 Worksheet visibility, including very hidden sheets, is kept as model
 metadata; display follows the existing `XlsxViewer` `hiddenSheetMode` option,
-whose default remains `'show'`. Only the sheet view's display flags and
-frozen panes are projected; pane selections, scrolling, zoom and window
-placement are not reconstructed.
+whose default remains `'show'`. Of the sheet views, only display flags and
+frozen panes are projected.
 
-Column widths and drawing anchors depend on the Normal font's maximum digit
-width (ECMA-376 §18.3.1.13). The XLS source asks the host for it through a
-generic host-layout capability, and the XLSX renderer answers with its own
-`computeMdw`, the same measurement that sizes the painted grid. It measures
-in the rendering realm: the render Worker in `mode: 'worker'`, the page in
-main mode, and the session canvas `factory` in Node. There is no measurement
+Cell-anchored drawings are expressed in the Normal font's maximum digit width
+(ECMA-376 §18.3.1.13). The XLS source asks the host for it through a generic
+host-layout capability, and the XLSX renderer answers with its own
+`computeMdw`, the same measurement that sizes the painted grid, in the
+rendering realm: the render Worker in `mode: 'worker'`, the page in main
+mode, and the session canvas `factory` in Node. There is no measurement
 callback option. Without a measured width (for example in Node without a
-`factory`), charts, pictures and shapes are omitted.
+`factory`), drawings that need the worksheet grid to resolve their anchors
+are omitted; a chart sheet's charts use absolute anchors and remain.
 
-XLS worksheets are not materialized incrementally, so XLS viewers wait for the
-complete worksheet before the first viewport render.
+XLS worksheets are delivered complete, without an early row preview.
 
 ## Current implementation boundary
 
@@ -393,9 +378,7 @@ per feature: `direct-doc`, `direct-xls` and `direct-ppt`. Building it for
 feature adds native-only development examples, and `fuzzing` exposes the fuzz
 entry points.
 
-Neither whole-corpus Office equality nor Canvas display equality has been
-reached. Treat the rendered model as a derived view of the original binary,
-keep the binary as the authoritative source, and gate production use on a
-corpus representative of the documents being ingested. Internal budgets bound
-input, records, decoded themes, text, model storage and emitted JSON; they are
-library resource policy, not Office format restrictions.
+Treat the rendered model as a derived view of the original binary, keep the
+binary as the authoritative source, and gate production use on a corpus
+representative of the documents being ingested. The readers' internal budgets
+are library resource policy, not Office format restrictions.

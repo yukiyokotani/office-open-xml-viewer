@@ -26,6 +26,7 @@ issues.
   that govern them. A page exists only for a procedure that is repeated.
 - `docs/design-docs/core-beliefs.md` — the policy every change is reviewed
   against. It is the only file in that directory.
+- `docs/images/` — the screenshots and icon the READMEs and the site use.
 - `docs/*.md` — guides for library users that a consumer-facing surface links
   to: the root or a package `README.md`, the site, or a message printed by
   shipped code. A guide that repeats a site page is merged into the site page
@@ -44,7 +45,9 @@ one script belongs in that script's header.
 - A migration guide is deleted once nothing on `main` links to it and no
   supported release prints a URL that resolves to its path on `main`. Until
   then it keeps its path. A relative link inside a release branch resolves
-  within that branch and does not keep the file on `main`.
+  within that branch and does not keep the file on `main`. A guide kept only
+  for a supported release is listed, with the reason, in
+  `RELEASE_RETAINED_GUIDES` in `scripts/check-agent-instructions.test.mjs`.
 - Do not cite an issue as open work unless it is open. When the issue closes,
   remove the sentence or state the outcome.
 - Do not record dated status, checklists, case counts or one-time measurements
@@ -55,9 +58,10 @@ can be checked mechanically:
 
 - every `AGENTS.md` chain fits Codex's 32 KiB limit and stays a short map;
 - every page under `docs/` is indexed and every relative link resolves;
-- `docs/` holds Markdown only, and a top-level `docs/*.md` guide is a link
-  destination in a consumer-facing surface, so a guide nothing links to any
-  more fails the check and is deleted;
+- `docs/` holds only the pages above and the PNG images under
+  `docs/images/`, and a top-level `docs/*.md` guide is a link destination in
+  a consumer-facing surface or is retained for a supported release, so a
+  guide nothing links to any more fails the check and is deleted;
 - no Markdown file exists outside the names listed above;
 - repository paths and `pnpm` scripts named in `AGENTS.md`, `docs/workflow/`,
   `docs/design-docs/` and the skills exist;

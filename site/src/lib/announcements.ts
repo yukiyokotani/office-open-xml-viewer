@@ -1102,6 +1102,7 @@ viewer.setSelection('B2:D6');`,
         rationale: 'Selection details differ for text, cells and elements, so code must first check which kind it received.',
         paragraphs: [
           'The DocxSelectionContext and XlsxSelectionContext types can now contain selected text, XLSX cells, or an element such as a chart or picture. Check context.kind first so TypeScript knows which details are available.',
+          'Code that stores one branch can import its type directly: DocxTextSelectionContext for DOCX text and XlsxRangeSelectionContext for an XLSX cell range. The getter and callback keep the union type so a later kind can be handled without a second context API.',
           'The native DOCX helper readDocxSelectionContext() is renamed to readDocxTextSelectionContext() because it reads only a DOM text selection. Use DocxViewer.getSelectionContext() for the text-or-element union.',
           'PptxElementSelectionContext is renamed to PptxElementContext. The data shape is unchanged, and the new name also fits direct point queries where no Viewer selection exists.',
         ],
@@ -1157,7 +1158,7 @@ if (context?.kind === 'text') {
         bullets: [
           'Replace xlsx_get_sheet_names with xlsx_parse.',
           'Replace docx_get_paragraph with docx_get_body_element.',
-          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element. Rename the shape_index argument to element_index; for the old text-only tool, read textBody from the element result.',
+          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element. Rename the shape_index argument to element_index; for the old text-only tool, read textBody from the element result when the element has text.',
           'docx_get_body_element keeps the path and index arguments of docx_get_paragraph; the indexed body item can be a paragraph or a table.',
           'Replace ooxml_get_active_selection with ooxml_get_active_context.',
         ],

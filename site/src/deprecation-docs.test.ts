@@ -40,6 +40,10 @@ describe('public migration documentation', () => {
     expect(text).toContain('PptxElementContext');
     expect(text).toContain('DocxSelectionContext');
     expect(text).toContain('XlsxSelectionContext');
+    expect(text).toContain("context?.kind === 'text'");
+    expect(text).toContain("context?.kind === 'range'");
+    expect(text).toContain('DocxTextSelectionContext');
+    expect(text).toContain('XlsxRangeSelectionContext');
   });
 
   it('documents maxZipEntryBytes directly without linking API details to a release note', () => {

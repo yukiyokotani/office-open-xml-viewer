@@ -1544,8 +1544,8 @@ export class XlsxWorkbook {
    * There is deliberately no `renderSheet()`: a worksheet can span 1,048,576
    * rows by 16,384 columns, far beyond Canvas dimension and memory limits, so
    * it is not one finite paint unit like a DOCX page or PPTX slide. Callers
-   * always pass an explicit `ViewportRange`; `XlsxSheetViewer` owns the scroll
-   * offset and visible range for the "one sheet" experience. A full-sheet
+   * always pass an explicit `ViewportRange`; `XlsxSheetViewer` and
+   * `XlsxViewer` own the scroll offset and visible range. A full-sheet
    * export would need explicit bounds plus tiling or pagination. */
   async renderViewport(
     target: HTMLCanvasElement | OffscreenCanvas,

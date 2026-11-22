@@ -200,8 +200,8 @@ const DOCX_CURRENT_DATE: ApiOption = {
 };
 const DOCX_FOOTNOTE_CONTINUATION: ApiOption = {
   name: 'allowFootnoteContinuation', type: 'boolean', def: 'true',
-  desc: 'Paragraph footnotes continue across physical pages by default, including for ordinary DOCX input. This can change page placement. Column placement and separators follow the document settings. Pass false to retain the previous whole-note pagination. With continuation, tables in notes continue at row and cell boundaries, except tables whose content depends on the page (such as a PAGE field), which stay whole. Field reflow that changes the source cut can reject layout. Full-note acquisition has library source and page budgets.',
-  emphasis: 'Pass false to retain the previous whole-note pagination.',
+  desc: 'Footnotes continue across physical pages by default, including for ordinary DOCX input. This can change page placement. Column placement and separators follow the document settings. Pass false to select whole-note pagination for ordinary note admission; a note too large to place whole can still be fragmented by oversized-note recovery. With continuation, tables in notes can continue across pages, but a table whose layout depends on its page (for example through a PAGE field) is not split by continuation. Field reflow that changes a note\'s source cut can reject layout. Full-note acquisition has library source and page budgets.',
+  emphasis: 'Pass false to select whole-note pagination for ordinary note admission',
 };
 const DOCX_LAYOUT_VIEW_OPTIONS: readonly ApiOption[] = [
   DOCX_SHOW_TRACKED_CHANGES,

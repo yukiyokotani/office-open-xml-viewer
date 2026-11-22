@@ -473,10 +473,11 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
       }),
     });
   });
-  // The trust and immutability boundary of the body input: one traversal
-  // validates, freezes and detaches it. It stays in TypeScript because public
-  // models may be hand-built or mutated by the caller after load; parser-side
-  // (serde) defaults cannot guarantee that retained layout input is detached.
+  // The trust and immutability boundary of the body input: snapshotPlainData
+  // returns frozen plain data (reusing blocks it already snapshotted) or
+  // throws a TypeError for non-plain input. It stays
+  // in TypeScript because public models can be hand-built in JavaScript;
+  // parser-side (serde) defaults cannot make such input plain or detached.
   return snapshotPlainData({
     source: { story: 'body', storyInstance: 'body', path: [] },
     compat: acquired.compat,

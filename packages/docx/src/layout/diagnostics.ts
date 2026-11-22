@@ -1,16 +1,21 @@
 /**
  * Layout diagnostics and the failure-containment policy (library policy).
  *
- * Recoverable cases never invent geometry:
+ * These recoverable cases omit content or keep its authored geometry:
  * - a drawing whose authored extent is missing or invalid is omitted by the
  *   parser and reported through PARSER_DIAGNOSTIC_CONTRACT below;
  * - an unavailable inline image or chart keeps its authored extent as an
- *   `unavailable-resource` line segment with a `MISSING_RESOURCE` warning;
- * - an unavailable anchored image keeps its flow bounds and wrap exclusion and
- *   paints a `noop` drawing command that owns the `MISSING_RESOURCE` warning.
- * Invalid retained geometry (non-finite values, non-plain data), invalid
- * ownership, non-convergence and other invariant violations throw
- * `LayoutInvariantError` and stay fatal.
+ *   `unavailable-resource` line segment, painted as a `noop` drawing that owns
+ *   a `MISSING_RESOURCE` warning;
+ * - an unavailable anchored drawing keeps its flow bounds and wrap exclusion
+ *   and paints a `noop` drawing command that owns the `MISSING_RESOURCE`
+ *   warning.
+ * Invalid retained geometry, invalid ownership, non-convergence and broken
+ * invariants are fatal. The retained-layout invariant suite (invariants.ts)
+ * throws `LayoutInvariantError`, and exact-state convergence reports cycles
+ * and exhausted limits as `ExactConvergenceError`, a subclass; other fatal
+ * layout and plain-data checks may throw other classes (for example a plain
+ * `Error` or a `TypeError`).
  */
 import type {
   LayoutDiagnostic,

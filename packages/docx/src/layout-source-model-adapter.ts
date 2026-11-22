@@ -47,9 +47,10 @@ import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capabi
 import { defaultSectionGeometry } from './layout/context.js';
 
 /** The public compatibility model and the sealed layout source are separate
- * ownership graphs, so mutating the public model can never change retained
- * layout. Caller-owned input is detached one top-level block at a time, not
- * by a whole-document clone; exclusively owned input is consumed in place. */
+ * ownership graphs that must not alias, so mutating the public model does not
+ * reach the sealed source. Caller-owned input is canonicalized block by block
+ * (each table is cloned on its own) rather than by one whole-document clone;
+ * exclusively owned input is consumed in place. */
 export interface LayoutSourceModelAdapter {
   /** Stable public compatibility model, intentionally outside the source graph. */
   readonly document: DocxDocumentModel;

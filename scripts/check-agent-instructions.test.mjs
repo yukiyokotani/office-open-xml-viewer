@@ -134,8 +134,9 @@ test('every repository skill is a linked pointer into docs/', () => {
     if (body.trim().split('\n').length > SKILL_BODY_MAX_LINES) {
       problems.push(`${name}: keep the procedure in docs/workflow/ and only point to it from the skill`);
     }
-    if (!relativeLinks(skill).some((target) => isInside(join(ROOT, 'docs'), resolve(dirname(skill), target)))) {
-      problems.push(`${name}: SKILL.md must link the docs/ page it loads`);
+    const workflow = join(ROOT, 'docs', 'workflow');
+    if (!relativeLinks(skill).some((target) => target.endsWith('.md') && isInside(workflow, resolve(dirname(skill), target)))) {
+      problems.push(`${name}: SKILL.md must link the docs/workflow/ page it loads`);
     }
     const link = join(links, name);
     const target = `../../.agents/skills/${name}`;
@@ -172,21 +173,41 @@ test('Markdown exists only under the allowed names and places', () => {
   assert.deepEqual(stray, [], 'record the knowledge in source, a script header or docs/ (docs/workflow/documentation.md)');
 });
 
-// Repository paths of the docs/ pages a consumer-facing file links to. A
-// Markdown file counts its link destinations; site and package source count
-// string content outside comments, where a GitHub URL or a path names the page.
-function linkedDocs(path, text) {
+// The URL prefix under which a page on `main` is published on GitHub, taken
+// from the root manifest so a fork or rename needs no edit here.
+const MAIN_BLOB_URL = `${JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  .repository.url.replace(/^git\+/, '')
+  .replace(/\.git$/, '')}/blob/main/`;
+
+// Guides a supported release still sends users to, by a URL its shipped code
+// prints. Such a guide stays even when nothing on `main` links to it any more.
+// Remove the entry, and then the guide, when the release leaves support.
+const RELEASE_RETAINED_GUIDES = new Map([
+  ['docs/migration-0.90.md', '0.90.x prints this URL in the useGoogleFonts deprecation warning'],
+]);
+
+// Repository paths of the docs/ pages a consumer-facing file links to.
+// Markdown: inline and reference link destinations, relative or the page's
+// GitHub URL on `main`. Site and package source: that GitHub URL outside
+// comments. Prose that merely names a path is not a link.
+function linkedDocs(path, text, blobUrl) {
   const found = new Set();
   const add = (target) => {
     const clean = target.split(/[?#]/)[0];
-    if (/\.md$/.test(clean) && clean.startsWith('docs/')) found.add(clean);
+    if (/^docs\/.+\.md$/.test(clean)) found.add(clean);
+  };
+  const absolute = (target) => {
+    if (target.startsWith(blobUrl)) add(posix.normalize(target.slice(blobUrl.length)));
   };
   if (path.endsWith('.md')) {
     const body = text.replace(/^```[\s\S]*?^```/gm, '');
-    for (const [, target] of body.matchAll(/\]\(<?([^)\s>]+)>?\)/g)) {
-      const github = /^https:\/\/github\.com\/[^/]+\/[^/]+\/blob\/[^/]+\/(.+)$/.exec(target);
-      if (github) add(github[1]);
-      else if (!/^[a-z][a-z0-9+.-]*:/i.test(target)) add(posix.normalize(posix.join(posix.dirname(path), target)));
+    const targets = [
+      ...[...body.matchAll(/\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
+      ...[...body.matchAll(/^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s|$)/gm)].map((match) => match[1]),
+    ];
+    for (const target of targets) {
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target)) absolute(target);
+      else add(posix.normalize(posix.join(posix.dirname(path), target)));
     }
     return found;
   }
@@ -194,44 +215,59 @@ function linkedDocs(path, text) {
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/(^|\s)\/\/.*$/gm, '$1');
-  for (const [, target] of code.matchAll(/(?:^|[\s"'`(/])(docs\/(?:[\w.-]+\/)*[\w-]+\.md)(?![\w-]|\.\w)/g)) {
-    add(posix.normalize(target));
-  }
+  for (const [url] of code.matchAll(/https:\/\/github\.com\/[^\s"'`<>)]+?\.md(?![\w-]|\.\w)/g)) absolute(url);
   return found;
 }
 
+// Guides that no consumer surface links to and no supported release retains.
+const guidesToDelete = (guides, linked, retained) =>
+  guides.filter((guide) => !linked.has(guide) && !retained.has(guide));
+
 test('a consumer link to a guide is a real link destination, not incidental text', () => {
-  const links = (path, text) => [...linkedDocs(path, text)];
-  // Markdown: a relative or GitHub link destination counts, wherever it is written from.
+  const blob = 'https://github.com/o/r/blob/main/';
+  const links = (path, text) => [...linkedDocs(path, text, blob)];
+  // Markdown: inline and reference destinations, relative or this repository's URL on main.
   assert.deepEqual(links('README.md', 'See the [guide](docs/./example.md#part).'), ['docs/example.md']);
   assert.deepEqual(links('packages/x/README.md', '[guide](../../docs/example.md)'), ['docs/example.md']);
-  assert.deepEqual(
-    links('README.md', '[guide](https://github.com/o/r/blob/main/docs/example.md)'),
-    ['docs/example.md'],
-  );
+  assert.deepEqual(links('README.md', '[guide](https://github.com/o/r/blob/main/docs/example.md)'), ['docs/example.md']);
+  assert.deepEqual(links('README.md', 'Read the [guide][g].\n\n[g]: docs/example.md\n'), ['docs/example.md']);
   assert.deepEqual(links('README.md', 'The file `docs/example.md` is mentioned, [old](docs/example.md.old).'), []);
-  // Site and source: a string naming the page counts; a comment or a longer name does not.
+  assert.deepEqual(links('README.md', '[other](https://github.com/unrelated/project/blob/old/docs/example.md)'), []);
+  assert.deepEqual(links('README.md', '[tag](https://github.com/o/r/blob/v1.0.0/docs/example.md)'), []);
+  // Site and source: only the page's URL on main, outside comments.
   assert.deepEqual(
     links('site/src/pages/a.astro', '<a href="https://github.com/o/r/blob/main/docs/example.md">guide</a>'),
     ['docs/example.md'],
   );
-  assert.deepEqual(links('site/src/pages/a.astro', '<!-- docs/example.md --> <p>docs/example.md.old</p>'), []);
+  assert.deepEqual(links('site/src/pages/a.astro', '<p>See docs/example.md for details</p>'), []);
+  assert.deepEqual(links('site/src/pages/a.astro', '<!-- https://github.com/o/r/blob/main/docs/example.md -->'), []);
   assert.deepEqual(
     links('packages/core/src/a.ts', "export const MESSAGE = 'See https://github.com/o/r/blob/main/docs/example.md.';"),
     ['docs/example.md'],
   );
-  assert.deepEqual(links('packages/core/src/a.ts', '// see docs/example.md\n/* docs/example.md */\nexport {};'), []);
+  assert.deepEqual(
+    links('packages/core/src/a.ts', '// https://github.com/o/r/blob/main/docs/example.md\nexport {};'),
+    [],
+  );
 });
 
-test('docs/ holds only procedures, the core beliefs and linked user guides', () => {
-  const files = tracked().filter((path) => path.startsWith('docs/') && /\.mdx?$/.test(path));
+test('a guide is deleted only when nothing links to it and no supported release retains it', () => {
+  const guides = ['docs/linked.md', 'docs/retained.md', 'docs/orphan.md'];
+  assert.deepEqual(
+    guidesToDelete(guides, new Set(['docs/linked.md']), new Map([['docs/retained.md', 'printed by 1.x']])),
+    ['docs/orphan.md'],
+  );
+});
+
+test('docs/ holds only procedures, the core beliefs, linked user guides and their images', () => {
+  const files = tracked().filter((path) => path.startsWith('docs/'));
   const misplaced = files.filter(
     (path) =>
-      path.endsWith('.mdx') ||
-      (path !== 'docs/README.md' &&
-        path !== 'docs/design-docs/core-beliefs.md' &&
-        !/^docs\/workflow\/[^/]+\.md$/.test(path) &&
-        !/^docs\/[^/]+\.md$/.test(path)),
+      path !== 'docs/README.md' &&
+      path !== 'docs/design-docs/core-beliefs.md' &&
+      !/^docs\/workflow\/[^/]+\.md$/.test(path) &&
+      !/^docs\/[^/]+\.md$/.test(path) &&
+      !/^docs\/images\/[^/]+\.png$/.test(path),
   );
   assert.deepEqual(misplaced, [], 'docs/ has no other directories or formats; design rationale belongs beside the source');
 
@@ -248,13 +284,18 @@ test('docs/ holds only procedures, the core beliefs and linked user guides', () 
   for (const surface of surfaces) {
     const text = read(join(ROOT, surface));
     if (!text.includes('docs/')) continue;
-    for (const target of linkedDocs(surface, text)) linked.add(target);
+    for (const target of linkedDocs(surface, text, MAIN_BLOB_URL)) linked.add(target);
   }
   const guides = files.filter((path) => /^docs\/[^/]+\.md$/.test(path) && path !== 'docs/README.md');
   assert.deepEqual(
-    guides.filter((guide) => !linked.has(guide)),
+    guidesToDelete(guides, linked, RELEASE_RETAINED_GUIDES),
     [],
     'no README, site page or shipped source links this guide: delete it, or move design rationale beside the source',
+  );
+  assert.deepEqual(
+    [...RELEASE_RETAINED_GUIDES.keys()].filter((guide) => !guides.includes(guide)),
+    [],
+    'remove the entry of a guide that no longer exists',
   );
 });
 
@@ -269,8 +310,9 @@ test('docs/ carries no task lists', () => {
 
 // What a page names that the repository does not have: a backticked repository
 // path, or a pnpm script. `scriptsOf(filter)` returns the script names a
-// command can run: those of the package a `--filter` names, otherwise of any
-// package.
+// command can run: those of the package a `--filter` names, otherwise those
+// of the page's own working directory (the repository root, plus the package
+// a package-level page belongs to).
 function missingReferences(file, text, { exists, scriptsOf }) {
   const pnpmBuiltins = new Set(['install', 'exec', 'add', 'run', 'dlx', 'why', 'pack', 'publish']);
   // Generated, git-ignored or local-only locations a page may legitimately name.
@@ -329,22 +371,30 @@ test('paths and pnpm scripts named in agent knowledge exist', () => {
     ...walk(join(ROOT, 'docs', 'design-docs'), (name) => name.endsWith('.md')),
     ...walk(join(ROOT, '.agents'), (name) => name === 'SKILL.md'),
   ];
+  // Every workspace manifest, by package name and by `./path` filter.
   const byName = new Map();
-  const all = new Set();
-  const manifests = [ROOT, ...readdirSync(join(ROOT, 'packages')).map((name) => join(ROOT, 'packages', name))];
-  for (const dir of manifests) {
-    const manifest = join(dir, 'package.json');
-    if (!existsSync(manifest)) continue;
-    const { name, scripts = {} } = JSON.parse(read(manifest));
+  const byDir = new Map();
+  for (const manifest of tracked().filter((path) => /(^|\/)package\.json$/.test(path))) {
+    const { name, scripts = {} } = JSON.parse(read(join(ROOT, manifest)));
     const names = new Set(Object.keys(scripts));
-    byName.set(name, names);
-    byName.set(`./${rel(dir)}`, names);
-    for (const script of names) all.add(script);
+    const dir = posix.dirname(manifest);
+    byDir.set(dir, names);
+    byName.set(`./${dir}`, names);
+    if (name) byName.set(name, names);
   }
-  const context = {
-    exists: (path) => existsSync(join(ROOT, path)),
-    scriptsOf: (filter) => (filter ? (byName.get(filter) ?? new Set()) : all),
+  const scriptsAt = (file) => {
+    const names = new Set(byDir.get('.'));
+    for (let dir = posix.dirname(file); dir !== '.'; dir = posix.dirname(dir)) {
+      for (const name of byDir.get(dir) ?? []) names.add(name);
+    }
+    return names;
   };
-  const missing = sources.flatMap((file) => missingReferences(rel(file), read(file), context));
+  const missing = sources.flatMap((source) => {
+    const file = rel(source);
+    return missingReferences(file, read(source), {
+      exists: (path) => existsSync(join(ROOT, path)),
+      scriptsOf: (filter) => (filter ? (byName.get(filter) ?? new Set()) : scriptsAt(file)),
+    });
+  });
   assert.deepEqual(missing, [], 'the page names something that no longer exists: update or delete the statement');
 });
