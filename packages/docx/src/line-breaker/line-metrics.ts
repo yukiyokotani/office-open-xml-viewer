@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontFormatOf, referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, gridCellsExtent, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS, wordVerticalSingleLineExtraPx } from '../layout/line-compatibility.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, gridCellsExtent, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS, wordVerticalSingleLinePx } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -491,24 +491,23 @@ export function paragraphMarkLineMetrics(
       : resolvedLocalFont?.lineHeightRatio;
   // WORD_VERTICAL_LINE_CENTRED_BOX: a vertical mark line is centred and one
   // vertical single line high; its design height counts grid cells too.
-  const verticalExtraPx = verticalLine
-    ? wordVerticalSingleLineExtraPx(fs * scale,
-      (referenceMarkMetric?.farEastCodePage ?? resolvedLocalFont?.farEastCodePage) === true
-        || (designSides == null && resourceRatio == null && markUsesEastAsianFace))
-    : 0;
+  const markFarEast = (referenceMarkMetric?.farEastCodePage ?? resolvedLocalFont?.farEastCodePage) === true
+    || (designSides == null && resourceRatio == null && markUsesEastAsianFace);
+  const verticalSingle = (horizontalPx: number) => verticalLine
+    ? wordVerticalSingleLinePx(horizontalPx, fs * scale, markFarEast, scale) : horizontalPx;
   const horizontalDesignSingle = referenceMarkMetric
     ? referenceMarkMetric.lineHeightRatio * fs * scale
     : resourceRatio != null
       ? resourceRatio * fs * scale
       : 0;
-  const designIntendedSingle = horizontalDesignSingle > 0 ? horizontalDesignSingle + verticalExtraPx : 0;
+  const designIntendedSingle = horizontalDesignSingle > 0 ? verticalSingle(horizontalDesignSingle) : 0;
   // A native Canvas box may set the ordinary automatic-line floor, but it
   // cannot establish the Word Far-East design height used to count grid cells.
   // Keep an untabled mark on the same 1.3em grid fallback as visible text.
   const intendedSingle = Math.max(designIntendedSingle,
-    nativeMarkRatio == null ? 0 : nativeMarkRatio * fs * scale + verticalExtraPx);
+    nativeMarkRatio == null ? 0 : verticalSingle(nativeMarkRatio * fs * scale));
   if (verticalLine) {
-    const half = (asc + desc + verticalExtraPx) / 2;
+    const half = verticalSingle(asc + desc) / 2;
     asc = half;
     desc = half;
   }

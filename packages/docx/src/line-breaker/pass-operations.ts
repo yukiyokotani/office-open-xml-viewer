@@ -21,7 +21,7 @@ import {
   wordJustifiedCompressionExceedsCap,
   wordIsOverflowPunctuation,
   WORD_RUBY_LINE_ASCENT,
-  wordVerticalSingleLineExtraPx,
+  wordVerticalSingleLinePx,
 } from '../layout/line-compatibility.js';
 import {
   type LayoutImageSeg,
@@ -1582,10 +1582,11 @@ export function performAddToLine(
           );
     // WORD_VERTICAL_LINE_CENTRED_BOX: a vertical run's single line adds its
     // measured fraction of the em to the horizontal design single line.
-    const verticalExtra = ts.verticalRun || ts.tateChuYoko || ts.verticalFrameRun
-      ? wordVerticalSingleLineExtraPx(intendedEm, verticalFarEastClass(ts)) : 0;
+    const verticalLine = Boolean(ts.verticalRun || ts.tateChuYoko || ts.verticalFrameRun);
+    const verticalSingle = (horizontalPx: number) => verticalLine
+      ? wordVerticalSingleLinePx(horizontalPx, intendedEm, verticalFarEastClass(ts), scale) : horizontalPx;
     const designIntended = horizontalDesignIntended > 0
-      ? horizontalDesignIntended + verticalExtra : 0;
+      ? verticalSingle(horizontalDesignIntended) : 0;
     // WORD_VERTICAL_LINE_CENTRED_BOX: on a line grid a vertical line of text
     // without East Asian characters takes whole cells from its design single
     // line in either code-page class.
@@ -1594,7 +1595,7 @@ export function performAddToLine(
       breakerState.lineLatinGridCountSingle = Math.max(breakerState.lineLatinGridCountSingle, designIntended);
     }
     const intended = Math.max(designIntended,
-      nativeRatio == null ? 0 : nativeRatio * intendedEm + verticalExtra);
+      nativeRatio == null ? 0 : verticalSingle(nativeRatio * intendedEm));
     if (intended > breakerState.lineIntendedSingle) breakerState.lineIntendedSingle = intended;
     if (paintsInlineInk && intended > breakerState.lineVisibleIntendedSingle) {
       breakerState.lineVisibleIntendedSingle = intended;
@@ -2459,7 +2460,7 @@ export function performTextSegmentBox(
     ? (s.resolvedDesignAscentRatio + s.resolvedDesignDescentRatio) * metricEmPx
     : ascent + descent;
   const verticalSingle = verticalLineRun
-    ? verticalDesignBox + wordVerticalSingleLineExtraPx(metricEmPx, verticalFarEastClass(s))
+    ? wordVerticalSingleLinePx(verticalDesignBox, metricEmPx, verticalFarEastClass(s), scale)
     : 0;
   if (verticalLineRun) {
     ascent = verticalSingle / 2;
@@ -2475,7 +2476,8 @@ export function performTextSegmentBox(
       // WORD_VERTICAL_LINE_CENTRED_BOX: a quarter-turned frame keeps the
       // horizontal partition and adds the vertical single-line addition
       // equally to both sides.
-      const extraPx = wordVerticalSingleLineExtraPx(metricEmPx, verticalFarEastClass(s));
+      const extraPx = wordVerticalSingleLinePx(ascent + descent, metricEmPx, verticalFarEastClass(s), scale)
+        - (ascent + descent);
       ascent += extraPx / 2;
       descent += extraPx / 2;
     }
@@ -2505,8 +2507,7 @@ export function performTextSegmentBox(
     const rubyPx = s.ruby.fontSizePt * scale;
     const farEast = verticalFarEastClass(s);
     const guideHeadPx = verticalLineRun
-      ? ((verticalSingle - wordVerticalSingleLineExtraPx(metricEmPx, farEast)) / metricEmPx * rubyPx
-        + wordVerticalSingleLineExtraPx(rubyPx, farEast)) / 2
+      ? wordVerticalSingleLinePx(verticalDesignBox / metricEmPx * rubyPx, rubyPx, farEast, scale) / 2
         // The rightVertical guide stands half its size nearer the base.
         - (s.ruby.align === 'rightVertical' ? rubyPx / 2 : 0)
       : rubyPx;

@@ -6,6 +6,7 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from 
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService } from './layout/text.js';
 import { paragraphMarkLineMetrics } from './line-layout.js';
+import { wordVerticalSingleLinePx } from './layout/line-compatibility.js';
 
 // WORD_VERTICAL_LINE_CENTRED_BOX, WORD_VERTICAL_RUBY_UPRIGHT_GUIDE and
 // WORD_RUBY_ALIGN_PLACEMENT over a stub face (0.8/0.2 em box, one em per
@@ -97,11 +98,24 @@ function layoutParagraph(
   return { node, lines: node.lines };
 }
 
+// Word holds vertical single lines in whole twips (wordVerticalSingleLinePx).
+const twips = (pt: number): number => Math.round(pt * 20) / 20;
+
 function textPlacements(line: LineLayout): TextPlacement[] {
   return line.placements.filter((entry): entry is TextPlacement => entry.kind === 'text');
 }
 
 describe('vertical line box (WORD_VERTICAL_LINE_CENTRED_BOX)', () => {
+  it('holds the vertical single line in whole twips at any device scale', () => {
+    // 36pt Far East class: 36 + 1.56 = 37.56pt (751.2 twips) holds 37.55pt.
+    expect(wordVerticalSingleLinePx(36, 36, true)).toBeCloseTo(37.55, 9);
+    // 10pt Latin: 10.3333pt rounds to 10.35pt; at 2x the device value doubles.
+    expect(wordVerticalSingleLinePx(10, 10, false)).toBeCloseTo(10.35, 9);
+    expect(wordVerticalSingleLinePx(20, 20, false, 2)).toBeCloseTo(20.7, 9);
+    // 10.5pt Far East: 10.5 + 0.455 = 10.955pt rounds to 10.95pt.
+    expect(wordVerticalSingleLinePx(10.5, 10.5, true)).toBeCloseTo(10.95, 9);
+  });
+
   it.each([
     // The stub face has no admitted metrics: East Asian text takes the Far
     // East single-line class, Latin text its own box.
@@ -111,7 +125,7 @@ describe('vertical line box (WORD_VERTICAL_LINE_CENTRED_BOX)', () => {
     const horizontal = layoutParagraph([{ text }]).lines[0]!;
     for (const direction of ['tbRl', 'tbLrV']) {
       const vertical = layoutParagraph([{ text }], direction).lines[0]!;
-      expect(vertical.advancePt).toBeCloseTo(horizontal.advancePt + extra, 6);
+      expect(vertical.advancePt).toBeCloseTo(twips(horizontal.advancePt + extra), 6);
       // The axis the glyphs paint on lies halfway across the line.
       expect(vertical.baselinePt - vertical.bounds.yPt).toBeCloseTo(vertical.advancePt / 2, 6);
     }
@@ -162,7 +176,7 @@ describe('w:position and empty marks in vertical lines (WORD_VERTICAL_LINE_CENTR
   it('gives an empty paragraph the vertical single line of its mark', () => {
     const horizontal = layoutParagraph([]).node;
     const vertical = layoutParagraph([], 'tbRl').node;
-    expect(vertical.advancePt - horizontal.advancePt).toBeCloseTo(10 / 30, 6);
+    expect(vertical.advancePt).toBeCloseTo(twips(horizontal.advancePt + 10 / 30), 6);
   });
 });
 
@@ -179,7 +193,7 @@ describe('vertical ruby guide (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE)', () => {
     expect(ops[0]!.origin.xPt - placement.origin.xPt).toBeCloseTo((20 - 20) / 2 + 2.5, 6);
     // The guide reserves half of its own vertical single line (the stub box
     // at 5pt plus its Far East addition) beyond its axis.
-    expect(line.baselinePt - line.bounds.yPt).toBeCloseTo(9 + (5 + 5 / 30 * 1.3) / 2, 6);
+    expect(line.baselinePt - line.bounds.yPt).toBeCloseTo(9 + twips(5 + 5 / 30 * 1.3) / 2, 6);
   });
 
   it('stands a rightVertical guide half its size nearer the base', () => {

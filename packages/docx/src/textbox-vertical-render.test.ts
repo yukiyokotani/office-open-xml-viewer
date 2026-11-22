@@ -691,7 +691,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     // box (WORD_VERTICAL_LINE_CENTRED_BOX), so the next column follows the
     // ruby line's head extent: the 15pt raise plus half the guide's vertical
     // single line against half the base's plus the 13.5pt fallback.
-    const vertical = (sizePt: number) => sizePt + sizePt / 30 * 1.3;
+    const vertical = (sizePt: number) => Math.round((sizePt + sizePt / 30 * 1.3) * 20) / 20;
     expect(
       raised.columnAdvance - fallback.columnAdvance,
       'the authored 15pt raise and guide replace the ink-touching fallback',
@@ -879,8 +879,8 @@ describe('public textBlocks frames (WORD_VERTICAL_LINE_CENTRED_BOX)', () => {
       acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
       const a = glyphs.find((g) => g.text.includes('A'))!;
       const b = glyphs.find((g) => g.text.includes('B'))!;
-      // The stub's 10pt box plus one thirtieth of the em.
-      expect(Math.abs(b.devX - a.devX)).toBeCloseTo(10 + 10 / 30, 5);
+      // The stub's 10pt box plus one thirtieth of the em, in whole twips.
+      expect(Math.abs(b.devX - a.devX)).toBeCloseTo(Math.round((10 + 10 / 30) * 20) / 20, 5);
     },
   );
 });
