@@ -36,6 +36,11 @@ export interface UprightBlockPageIndex {
   readonly tableBuckets: Map<number, UprightTableBox[]>;
   /** Number of boxes in `tableBuckets`. */
   tableCount: number;
+  /** The boxes of `tableBuckets` written out in registration order: equal
+   * for two pages (or two layouts of one page) exactly when they hold the
+   * same boxes for the same tables, so a result that depends on them can be
+   * keyed by it across layouts. */
+  tableBoxesKey: string;
   /** Text exclusions by `${block bucket}:${inline bucket}`. */
   readonly exclusionCells: Map<string, UprightBlockExclusionEntry[]>;
   /** Exclusions covering more cells than MAX_EXCLUSION_CELLS; every query reads them. */
@@ -108,6 +113,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     tail: null,
     tableBuckets: new Map(),
     tableCount: 0,
+    tableBoxesKey: '',
     exclusionCells: new Map(),
     wideExclusions: [],
     lastExclusionBucket: Number.NEGATIVE_INFINITY,
@@ -257,6 +263,7 @@ export function addUprightTableBox(index: UprightBlockPageIndex, sourceIndex: nu
     else index.tableBuckets.set(bucket, [entry]);
   }
   index.tableCount += 1;
+  index.tableBoxesKey += `${sourceIndex}:${box.xPt},${box.yPt},${box.widthPt},${box.heightPt};`;
 }
 
 /**

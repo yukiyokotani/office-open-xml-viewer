@@ -6746,11 +6746,11 @@ function paragraphAcquisitionKey(
     ],
     lineOnly ? null : JSON.stringify(options.exclusions),
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
-    // The page's index is one object per layout of a page and only grows.
-    ...(lineOnly || !hasAnchoredPayload || !options.uprightTables ? [null, null, null] : [
-      cache.objectIdentity(options.uprightTables.index),
+    // By the content of the page's table boxes, not the index object: a
+    // later pass that places the same tables reuses the acquisition.
+    ...(lineOnly || !hasAnchoredPayload || !options.uprightTables ? [null, null] : [
+      options.uprightTables.index.tableBoxesKey,
       options.uprightTables.beforeSourceIndex,
-      options.uprightTables.index.tableCount,
     ]),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
     lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size

@@ -177,6 +177,78 @@ function nestedPagePlacement(
   });
 }
 
+/**
+ * A top-level block table of a vertical section (ECMA-376 §17.6.20), laid
+ * out upright: a single table, or the tables of one logical table (§17.4.37)
+ * acquired as that table (`retained`), ending at body index
+ * `lastSourceIndex`. A table projected into owner segments is placed segment
+ * by segment; any other is an upright block table
+ * (`word-vertical-section-upright-block-table`) or, in a counter-clockwise
+ * section flow, an atomic block.
+ */
+function measureUprightTable(
+  context: BodyTableMeasurementContext,
+  request: BodyTableRequest,
+  operations: BodyTableMeasurementOperations,
+  retained: RetainedTableAcquisition,
+  cursor: ReturnType<typeof startTableFragmentCursor>,
+  acquisitionState: BodyAcquisitionState,
+  physical: PhysicalAnchorFrame,
+  lastSourceIndex: number,
+): TableMeasureResult {
+  const segments = tableOwnerSegments(retained.input);
+  if (segments) {
+    return measureUprightOwnerSegment(context, request, operations, {
+      retained,
+      segments,
+      cursor,
+      continuation: (tableCursor, entry) => Object.freeze({
+        kind: 'table' as const,
+        cursor: tableCursor,
+        ...entry,
+      }),
+    }, acquisitionState);
+  }
+  if (uprightBlockPaginates(physical)) {
+    return measureUprightBlockTable(
+      context, request, operations, uprightRunMember(physical, request.input.source, retained, lastSourceIndex),
+      cursor, acquisitionState, physical,
+    );
+  }
+  // A counter-clockwise section flow (library policy): an atomic block at
+  // the column bottom that advances the flow by its physical width.
+  if (request.cursor) {
+    throw new Error('An upright physical table must remain atomic');
+  }
+  const tableWidthPt = retained.layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+  if (
+    tableWidthPt > request.availableBlockExtentPt &&
+    request.availableBlockExtentPt < request.freshPageBlockExtentPt
+  ) {
+    return Object.freeze({
+      layout: retained.layout,
+      blockExtentPt: 0,
+      nextCursor: Object.freeze({ kind: 'table' as const, cursor }),
+      requiresFreshFlowRegion: true,
+    });
+  }
+  const origin = uprightBlockPhysicalOrigin(
+    physical, request.location.cursorPt, tableWidthPt, retained.layout.advancePt,
+  );
+  const upright = takeUprightTableFragment(context, request, operations, retained, origin, acquisitionState);
+  return Object.freeze({
+    layout: upright,
+    blockExtentPt: tableWidthPt,
+    nextCursor: null,
+    placement: Object.freeze({
+      coordinateSpace: 'upright-physical' as const,
+      xPt: origin.xPt + upright.flowBounds.xPt,
+      yPt: origin.yPt + upright.flowBounds.yPt,
+      sectionFlowOwnership: 'host-flow' as const,
+    }),
+  });
+}
+
 export function measureBodyTableEntry(
   context: BodyTableMeasurementContext,
   request: Parameters<NonNullable<BodyLayoutSession['measureTable']>>[0],
@@ -185,18 +257,21 @@ export function measureBodyTableEntry(
   const { dependencies, services, state, sessionState, effectiveTablePositioning } = context;
   operations.setBodyAcquisitionLocation(services, state, sessionState, request.location);
   if (request.input.kind === 'adjacent-table-group') {
-    // `word-vertical-section-upright-block-table`: the tables of a logical
-    // table (ECMA-376 §17.4.37) are one upright block table of a vertical
-    // section, acquired as that one table and placed like any other.
-    const upright = uprightBlockLeader(context, request, operations);
-    if (upright) {
+    // The tables of a logical table (ECMA-376 §17.4.37) are one block table
+    // of a vertical section and upright like any other: acquired as that one
+    // table and placed by the same path, owner segments included.
+    const physical = state.verticalPhys;
+    const logical = physical
+      ? uprightTableAcquisitionAt(context, request, operations, request.input.source.path[0]!, request.input)
+      : null;
+    if (physical && logical && logical.retained.input.rows.length > 0) {
       if (request.cursor && request.cursor.kind !== 'table') {
         throw new Error('An upright logical table continues by a table cursor');
       }
-      return measureUprightBlockTable(
-        context, request, operations, upright.leader,
+      return measureUprightTable(
+        context, request, operations, logical.retained,
         request.cursor?.cursor ?? startTableFragmentCursor(),
-        { ...state, uprightPhysicalTable: true }, upright.physical,
+        { ...state, uprightPhysicalTable: true }, physical, logical.lastSourceIndex,
       );
     }
     return measureAdjacentTableGroup(context, request as AdjacentBodyTableRequest, operations);
@@ -234,57 +309,9 @@ export function measureBodyTableEntry(
   }
   const segments = tableOwnerSegments(retained.input);
   if (uprightPhysical && state.verticalPhys) {
-    if (segments) {
-      return measureUprightOwnerSegment(context, request, operations, {
-        retained,
-        segments,
-        cursor,
-        continuation: (tableCursor, entry) => Object.freeze({
-          kind: 'table' as const,
-          cursor: tableCursor,
-          ...entry,
-        }),
-      }, acquisitionState);
-    }
-    const physical = state.verticalPhys;
-    if (uprightBlockPaginates(physical)) {
-      return measureUprightBlockTable(
-        context, request, operations, uprightRunMember(physical, request.input.source, retained),
-        cursor, acquisitionState, physical,
-      );
-    }
-    // A counter-clockwise section flow (library policy): an atomic block at
-    // the column bottom that advances the flow by its physical width.
-    if (request.cursor) {
-      throw new Error('An upright physical table must remain atomic');
-    }
-    const tableWidthPt = retained.layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
-    if (
-      tableWidthPt > request.availableBlockExtentPt &&
-      request.availableBlockExtentPt < request.freshPageBlockExtentPt
-    ) {
-      return Object.freeze({
-        layout: retained.layout,
-        blockExtentPt: 0,
-        nextCursor: Object.freeze({ kind: 'table' as const, cursor }),
-        requiresFreshFlowRegion: true,
-      });
-    }
-    const origin = uprightBlockPhysicalOrigin(
-      physical, request.location.cursorPt, tableWidthPt, retained.layout.advancePt,
+    return measureUprightTable(
+      context, request, operations, retained, cursor, acquisitionState, state.verticalPhys, sourceIndex,
     );
-    const upright = takeUprightTableFragment(context, request, operations, retained, origin, acquisitionState);
-    return Object.freeze({
-      layout: upright,
-      blockExtentPt: tableWidthPt,
-      nextCursor: null,
-      placement: Object.freeze({
-        coordinateSpace: 'upright-physical' as const,
-        xPt: origin.xPt + upright.flowBounds.xPt,
-        yPt: origin.yPt + upright.flowBounds.yPt,
-        sectionFlowOwnership: 'host-flow' as const,
-      }),
-    });
   }
   if (segments) {
     return measureOwnerSegmentedTable(context, request, operations, {
@@ -644,21 +671,19 @@ type UprightRunPlan =
 const uprightGroupInputsBySession = new WeakMap<object, Map<number, AdjacentBodyTableRequest['input']>>();
 
 /**
- * The upright block table that starts at body index `index`, as one member
- * of a run: a single table, or the tables the parser grouped into one
- * logical table (ECMA-376 §17.4.37), acquired as that one table. Null when
- * no upright block table starts there (not a table, positioned, without
- * rows, or projected into owner segments). `input` is the paginator's input
- * for it, when the flow has reached it.
+ * The upright table that starts at body index `index` in a vertical section:
+ * a single table, or the tables the parser grouped into one logical table
+ * (ECMA-376 §17.4.37), acquired as that one table. Null when no upright
+ * table starts there (not a table, or positioned). `input` is the
+ * paginator's input for it, when the flow has reached it.
  */
-function uprightUnitAt(
+function uprightTableAcquisitionAt(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   operations: BodyTableMeasurementOperations,
-  physical: PhysicalAnchorFrame,
   index: number,
   input?: BodyTableRequest['input'],
-): UprightRunMember | null {
+): Readonly<{ source: SourceRef; retained: RetainedTableAcquisition; lastSourceIndex: number }> | null {
   const { dependencies, state, effectiveTablePositioning } = context;
   const body = dependencies.source.blocks.body;
   const element = body[index];
@@ -679,9 +704,7 @@ function uprightUnitAt(
   }
   if (lastIndex === index) {
     operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, index);
-    const retained = retainedTableRecord(state, index).acquisition;
-    if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) return null;
-    return uprightRunMember(physical, source, retained);
+    return { source, retained: retainedTableRecord(state, index).acquisition, lastSourceIndex: index };
   }
   const members: Array<Readonly<{ table: typeof element; sourceIndex: number }>> = [];
   for (let at = index; at <= lastIndex; at += 1) {
@@ -709,11 +732,30 @@ function uprightUnitAt(
     }
   }
   const records = operations.computeAdjacentTablePtLayouts(memberState, members, request.availableInlineExtentPt);
-  const combined = combinedAdjacentGroupAcquisition(
+  const retained = combinedAdjacentGroupAcquisition(
     context, { ...request, input: groupInput } as AdjacentBodyTableRequest, operations, records,
   );
-  if (combined.input.rows.length === 0 || tableOwnerSegments(combined.input)) return null;
-  return uprightRunMember(physical, source, combined, lastIndex);
+  return { source, retained, lastSourceIndex: lastIndex };
+}
+
+/**
+ * The upright block table that starts at body index `index`, as one member
+ * of a run (`word-vertical-section-upright-block-table`). Null when none
+ * starts there: no upright table, one without rows, or one projected into
+ * owner segments, which is placed segment by segment instead.
+ */
+function uprightUnitAt(
+  context: BodyTableMeasurementContext,
+  request: BodyTableRequest,
+  operations: BodyTableMeasurementOperations,
+  physical: PhysicalAnchorFrame,
+  index: number,
+  input?: BodyTableRequest['input'],
+): UprightRunMember | null {
+  const acquired = uprightTableAcquisitionAt(context, request, operations, index, input);
+  if (!acquired || acquired.retained.input.rows.length === 0
+    || tableOwnerSegments(acquired.retained.input)) return null;
+  return uprightRunMember(physical, acquired.source, acquired.retained, acquired.lastSourceIndex);
 }
 
 /** A run of upright block tables that directly follow one another in the

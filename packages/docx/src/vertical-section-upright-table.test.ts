@@ -783,6 +783,27 @@ describe('upright block table of a vertical section', () => {
         for (const [line] of pages[0]!.strips) expect(line!.inlineStart).toBeCloseTo(placed!.bottom, 6);
       });
 
+      it('places the segments of a logical table with a cell-owned frame row upright', () => {
+        // The second table's first cell starts with a framed paragraph, so
+        // the logical table is projected into owner segments (a host for
+        // that row, ordinary segments around it). They are upright blocks
+        // that add no flow advance, like those of a single such table.
+        const framed = T.replace('<w:p><w:pPr>', '<w:p><w:pPr><w:framePr w:w="2000" w:hSpace="141"'
+          + ' w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="4000" w:y="6000"/>');
+        const [page] = layOutStyled('tbRl', [P, T, framed, P, P]);
+        const [before, host, after] = page!.tables as [
+          Page['tables'][number], Page['tables'][number], Page['tables'][number],
+        ];
+        expect(page!.tables).toHaveLength(3);
+        expect(before.top).toBeCloseTo(MARGIN.top, 6);
+        expect(before.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+        expect(host.top).toBeCloseTo(300, 6);
+        expect(after.top).toBeCloseTo(before.bottom, 6);
+        expect(after.left).toBeCloseTo(before.left, 6);
+        expect(page!.strips.map(([line]) => line!.block)).toEqual([0, PITCH, 2 * PITCH]);
+        for (const [line] of page!.strips.slice(1)) expect(line!.inlineStart).toBeCloseTo(after.bottom, 6);
+      });
+
       it('runs a logical table on from a table of another style', () => {
         const other = T.replace('<w:tblPr>', '<w:tblPr><w:tblStyle w:val="Other"/>');
         const [page] = layOutStyled('tbRl', [P, other, T, T, P]);

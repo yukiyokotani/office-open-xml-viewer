@@ -2254,7 +2254,10 @@ function measureFollowingBodyBlock(
     }
   }
   if (request.input.kind === 'adjacent-table-group') {
-    const records = computeAdjacentTablePtLayouts(candidate, request.input.tables.map((tableInput) => {
+    // A logical table of a vertical section is upright, as when it is
+    // measured (body-table-measurement.ts measureUprightTable).
+    const groupState = candidate.verticalPhys ? { ...candidate, uprightPhysicalTable: true } : candidate;
+    const records = computeAdjacentTablePtLayouts(groupState, request.input.tables.map((tableInput) => {
       const table = sourceElement(dependencies.source, tableInput.source);
       if (table.type !== 'table') throw new Error('Following table source kind mismatch');
       return { table, sourceIndex: tableInput.source.path[0]! };
