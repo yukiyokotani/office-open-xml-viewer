@@ -168,6 +168,19 @@ describe('section-aware note numbering', () => {
     expect(noteTop(beneath, '<w:pos w:val="pageBottom"/>')).toEqual({ beneath: false, unsupported: false });
   });
 
+  it('diagnoses the footnote position of the section that places each page of footnotes', () => {
+    const unsupported = (sectionPr: readonly [string, string]) => {
+      const model = control({ kind: 'footnote', sectionPr });
+      return layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 })
+        .diagnostics.filter((diagnostic) => diagnostic.message.includes('footnote position')).map((diagnostic) => diagnostic.message);
+    };
+    // Each section's references put its footnotes on its own page.
+    const message = (position: string) => `Unsupported footnote position "${position}"; retained layout uses the pageBottom fallback`;
+    expect(unsupported(['<w:pos w:val="beneathText"/>', '<w:pos w:val="sectEnd"/>'])).toEqual([message('sectEnd')]);
+    expect(unsupported(['<w:pos w:val="sectEnd"/>', '<w:pos w:val="docEnd"/>'])).toEqual([message('sectEnd'), message('docEnd')]);
+    expect(unsupported(['<w:pos w:val="beneathText"/>', ''])).toEqual([]);
+  });
+
   it('gives a final section without its own sectPr the default numbering', () => {
     expect(render({ kind: 'footnote', sectionPr: ['<w:numFmt w:val="upperLetter"/>', ''], omitFinalSectPr: true }))
       .toEqual(['A', 'B', '3', '4']);

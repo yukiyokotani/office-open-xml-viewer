@@ -741,7 +741,7 @@ function acquireBodyStoryLayout(
   }
   // A reserved or DOCX selected separator root is a shared source
   // definition, not a numbered (continued) note: it has no number and no note
-  // cursor. Its closed run-free shape has no page-dependent content, so one
+  // cursor. Without fields it has no page-dependent content, so one
   // acquisition per width/section/font context serves every page occurrence.
   const reservedRole = reservedNoteSeparatorRole(request.source)
     ?? selectedNoteSeparatorRole(request.source);
@@ -823,7 +823,10 @@ function acquireBodyStoryLayout(
   // cannot change their acquisition. Recovery field blocks are destination-
   // acquired before fit, not painted from this shared template. All other
   // stories keep their page and placement facts in the cache key.
-  const sharedAcquisition = reusableNote || reservedRole !== undefined;
+  // A separator story holding a field (PAGE, §17.16.5.44) reads its
+  // destination page, so each page acquires its own occurrence.
+  const sharedAcquisition = reusableNote || (reservedRole !== undefined && !root.some((block) =>
+    block.type === 'paragraph' && block.runs.some((run) => run.type === 'field')));
   const occurrence = JSON.stringify(overflowingNote
     ? [request.source, sharedAcquisition ? null : request.pageIndex, 'overflow']
     : [request.source, sharedAcquisition ? null : request.pageIndex]);
@@ -1847,12 +1850,6 @@ function measureBodyParagraphEntry(
         }),
     ...(measured.markOnly
       ? {
-          // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT gives a LibreOffice
-          // producer's empty line the allowance of a text line instead of
-          // Word's below-baseline empty-mark allowance (an empty 13.79 pt
-          // Liberation Serif line needs 13.78 pt at 100% and 200%).
-          markBelowBaselinePt: services.text?.libreOfficeLineBoxes === true && !markOnLineGrid
-            ? 0 : measured.lastLineBelowBaselinePt,
           markOnLineGrid,
           // A wrapped mark keeps its complete cell, as plain text does
           // (a float elsewhere on the page does not wrap it), and so does
@@ -1861,6 +1858,7 @@ function measureBodyParagraphEntry(
           markGridAfterLeadingPt: !markLineWrapped(layout, measured)
             && services.text?.plainLineBoxes !== true
             ? measured.markGridAfterLeadingPt ?? 0 : 0,
+          ...(measured.markMultipleLeadingPt ? { markMultipleLeadingPt: measured.markMultipleLeadingPt } : {}),
         }
       : {}),
     ...(measured.uniformRubyAdvancePt == null
@@ -2195,9 +2193,8 @@ function acquireReservedNoteSeparator(
  *   and after (§17.3.1.33 places that spacing outside the paragraph's lines).
  * - `ruleOffsetPt`: the midpoint of the acquired mark line box, measured from
  *   the story's own top in its acquisition frame, so it applies at whatever
- *   band y it is placed. §17.11.23 places the separator mark in its run; the
- *   parser admits only a mark run formatted exactly like the paragraph mark,
- *   so that run's line is this mark-only line box. The midpoint is the
+ *   band y it is placed. §17.11.23 places the separator mark in its run; a
+ *   run-free paragraph (no marker) uses its mark-only line box. The midpoint is the
  *   library's existing rule placement, not an Office glyph-baseline
  *   observation.
  * No paragraph layout is retained: the closed run-free shape has neither text
@@ -2288,8 +2285,12 @@ function acquireSelectedNoteSeparatorBand(
   }
   const markFontSizePt = (markerRun as Readonly<{ fontSize?: number }>).fontSize ?? 10;
   const box = marker.line.bounds;
-  const hasText = paragraphs.length > 1 || source.runs.some((run) => run.type === 'text'
-    && !isNoteSeparatorMarkerRun(run) && ((run as Readonly<{ text?: string }>).text ?? '').length > 0);
+  // Content beside the marker paints with the story: text (symbols
+  // included) or a field, its result or computed value. Line breaks, empty
+  // text and the marker's own inline object only shape the lines.
+  const hasText = paragraphs.length > 1 || source.runs.some((run) => run.type === 'field'
+    || (run.type === 'text' && !isNoteSeparatorMarkerRun(run)
+      && ((run as Readonly<{ text?: string }>).text ?? '').length > 0));
   return Object.freeze({
     advancePt: story.advancePt,
     ruleOffsetPt: box.yPt + box.heightPt / 2 - story.flowBounds.yPt

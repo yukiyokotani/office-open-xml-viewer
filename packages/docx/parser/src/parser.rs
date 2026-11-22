@@ -2610,9 +2610,9 @@ thread_local! {
 /// cascade, §17.3.1.33 spacing, line rule) are kept so layout measures the band
 /// from them instead of a mark-only scalar. A story without a marker draws no
 /// rule (mark None).
-/// A one-paragraph story whose only run is a marker formatted like its
-/// paragraph mark (rPr equal child for child) shares the mark's line
-/// (§17.3.1.29) and keeps the run-free shape. Paragraph ink, numbering, frames,
+/// The marker run stays in place even when it is the paragraph's only run, so
+/// the paragraph's indents, alignment and direction position it like any
+/// other inline content. Paragraph ink, numbering, frames,
 /// a hidden mark, tables and other run content are not represented; those
 /// stories stay unsupported (absent).
 #[allow(clippy::too_many_arguments)]
@@ -2729,10 +2729,17 @@ fn selected_note_separator_story(
     if !supported {
         return None;
     }
+    // The story shows its final content (§17.13.5): a marker in a deleted or
+    // moved-away run is no marker of it, so a tracked replacement of the
+    // marker keeps exactly the surviving one.
     let markers: Vec<_> = note
         .descendants()
         .filter(|node| {
-            is_w(*node, "separator") || is_w(*node, "continuationSeparator")
+            (is_w(*node, "separator") || is_w(*node, "continuationSeparator"))
+                && !node
+                    .ancestors()
+                    .take_while(|ancestor| *ancestor != note)
+                    .any(|ancestor| is_w(ancestor, "del") || is_w(ancestor, "moveFrom"))
         })
         .collect();
     if markers.len() > 1 {
@@ -2807,45 +2814,7 @@ fn selected_note_separator_story(
         Some(_) => NoteSeparatorMark::Full,
         None => NoteSeparatorMark::None,
     };
-    if let ([paragraph], [marker]) = (paragraphs.as_mut_slice(), markers.as_slice()) {
-        let mark_properties = child_w(blocks[0], "pPr").and_then(|node| child_w(node, "rPr"));
-        let marker_properties = marker.parent_element().and_then(|run| child_w(run, "rPr"));
-        if paragraph.runs.len() == 1 && same_xml_element(mark_properties, marker_properties) {
-            paragraph.runs.clear();
-        }
-    }
     Some((mark, paragraphs))
-}
-
-/// Element equality by expanded names, attributes and child elements.
-fn same_xml_element(
-    a: Option<roxmltree::Node<'_, '_>>,
-    b: Option<roxmltree::Node<'_, '_>>,
-) -> bool {
-    let (a, b) = match (a, b) {
-        (None, None) => return true,
-        (Some(a), Some(b)) => (a, b),
-        _ => return false,
-    };
-    fn attributes<'a>(node: roxmltree::Node<'a, '_>) -> Vec<(Option<&'a str>, &'a str, &'a str)> {
-        let mut values: Vec<_> = node
-            .attributes()
-            .map(|attribute| (attribute.namespace(), attribute.name(), attribute.value()))
-            .collect();
-        values.sort_unstable();
-        values
-    }
-    let mut left = a.children().filter(|child| child.is_element());
-    let mut right = b.children().filter(|child| child.is_element());
-    a.tag_name() == b.tag_name()
-        && attributes(a) == attributes(b)
-        && loop {
-            match (left.next(), right.next()) {
-                (None, None) => break true,
-                (Some(x), Some(y)) if same_xml_element(Some(x), Some(y)) => {}
-                _ => break false,
-            }
-        }
 }
 
 fn is_empty_note_separator(note: roxmltree::Node<'_, '_>) -> bool {
@@ -3112,7 +3081,12 @@ mod note_separator_tests {
             .expect("authored exact line");
         assert_eq!((line.value, line.rule.as_str()), (24.0, "exact"));
         assert_eq!((separator.space_before, separator.space_after), (0.0, 0.0));
-        assert!(separator.runs.is_empty(), "the marker is not text");
+        // The marker stays one empty marker run, laid out in place.
+        assert!(
+            matches!(separator.runs.as_slice(), [DocRun::Text(marker)]
+                if marker.note_separator_marker && marker.text.is_empty()),
+            "the marker is one empty marker run"
+        );
         assert_eq!(separator.default_font_size, Some(10.0));
         let continuation = settings
             .footnote_continuation_separator_story
@@ -3168,7 +3142,7 @@ mod note_separator_tests {
             let paragraph =
                 story.expect("bare selected story retains inherited paragraph metrics").remove(0);
             assert_eq!(paragraph.line_spacing.as_ref().unwrap().value, 12.0);
-            assert!(paragraph.runs.is_empty());
+            assert!(matches!(paragraph.runs.as_slice(), [DocRun::Text(marker)] if marker.note_separator_marker));
         }
         let empty = selected_note_package(
             Some(r#"<w:footnotePr><w:footnote w:id="42"/></w:footnotePr><w:endnotePr><w:endnote w:id="42"/></w:endnotePr>"#),
@@ -7180,6 +7154,7 @@ fn parse_paragraph_cond_at_depth_with_diagnostics(
         &mut complex_field_boundaries,
         &mut comment_marks,
         None,
+        None,
         field,
         depth,
         diagnostics,
@@ -7508,6 +7483,13 @@ impl FieldState {
     }
 }
 
+/// §17.16.22 hyperlink target threaded to the runs inside the link:
+/// `href` is the resolved external URL, `anchor` the §17.16.23 bookmark.
+struct HyperlinkTarget {
+    href: Option<String>,
+    anchor: Option<String>,
+}
+
 // Threads the immutable parse context (style/media/rel maps, theme) plus the
 // running output buffer and revision state through the paragraph walk; grouping
 // these into a context struct would only relocate the same fields.
@@ -7526,6 +7508,8 @@ fn parse_para_content(
     complex_field_boundaries: &mut Vec<ComplexFieldBoundaryWire>,
     comment_marks: &mut Vec<crate::types::DocxCommentMark>,
     revision: Option<&RunRevision>,
+    // The enclosing §17.16.22 hyperlink, when this content is inside one.
+    link: Option<&HyperlinkTarget>,
     // Complex-field state threaded across paragraphs. A field is delimited by
     // its fldChar begin/end (§17.16.18), NOT by paragraph boundaries — a TOC
     // field's result spans one paragraph per entry. The caller owns this so the
@@ -7553,8 +7537,8 @@ fn parse_para_content(
                     comment_marks,
                     complex_field_boundaries,
                     field,
-                    None,
-                    None,
+                    link.map(|link| link.href.clone()),
+                    link.and_then(|link| link.anchor.clone()),
                     preserve_comment_boundary,
                     revision,
                     depth,
@@ -7588,49 +7572,29 @@ fn parse_para_content(
                 // but the anchor is threaded through so an anchor-only link (no
                 // r:id) is captured as an internal target.
                 let anchor = attr_w(child, "anchor");
-                for inner in child.children().filter(|n| n.is_element()) {
-                    match inner.tag_name().name() {
-                        "r" if is_w_ns(inner.tag_name().namespace()) => {
-                            let preserve_comment_boundary = comment_marks
-                                .last()
-                                .is_some_and(|mark| mark.run_index as usize == runs.len());
-                            handle_run_in_para(
-                                inner,
-                                base_run,
-                                style_map,
-                                num_map,
-                                media_map,
-                                chart_map,
-                                rel_map,
-                                theme,
-                                runs,
-                                comment_marks,
-                                complex_field_boundaries,
-                                field,
-                                Some(href.clone()),
-                                anchor.clone(),
-                                preserve_comment_boundary,
-                                revision,
-                                depth,
-                                diagnostics,
-                            );
-                        }
-                        // §17.13.4 range boundaries are legal inside hyperlink
-                        // content (EG_PContent); record them at the same run
-                        // boundary they occupy in document order.
-                        "commentRangeStart" | "commentRangeEnd"
-                            if is_w_ns(inner.tag_name().namespace()) =>
-                        {
-                            let kind = if inner.tag_name().name() == "commentRangeStart" {
-                                "rangeStart"
-                            } else {
-                                "rangeEnd"
-                            };
-                            push_comment_mark(comment_marks, kind, attr_w(inner, "id"), runs);
-                        }
-                        _ => {}
-                    }
-                }
+                // EG_PContent: the link holds runs, revisions, fields, smart
+                // tags and range markup alike, so its content walks the same
+                // paragraph-content grammar with the link target attached.
+                let target = HyperlinkTarget { href, anchor };
+                parse_para_content(
+                    child,
+                    base_run,
+                    style_map,
+                    num_map,
+                    media_map,
+                    chart_map,
+                    rel_map,
+                    theme,
+                    runs,
+                    run_revisions,
+                    complex_field_boundaries,
+                    comment_marks,
+                    revision,
+                    Some(&target),
+                    field,
+                    depth,
+                    diagnostics,
+                );
             }
             "ins" | "del" | "moveFrom" | "moveTo" if is_w_ns(child.tag_name().namespace()) => {
                 // ECMA-376 §17.13.5 — build a RunRevision context covering
@@ -7678,12 +7642,15 @@ fn parse_para_content(
                     complex_field_boundaries,
                     comment_marks,
                     Some(&inner),
+                    link,
                     field,
                     depth,
                     diagnostics,
                 );
             }
-            "smartTag" => {
+            // §17.5.1.9 smartTag / §17.5.1.3 inline customXml: transparent
+            // wrappers of paragraph content (their *Pr children hold no runs).
+            "smartTag" | "customXml" if is_w_ns(child.tag_name().namespace()) => {
                 parse_para_content(
                     child,
                     base_run,
@@ -7698,6 +7665,7 @@ fn parse_para_content(
                     complex_field_boundaries,
                     comment_marks,
                     revision,
+                    link,
                     field,
                     depth,
                     diagnostics,
@@ -19122,6 +19090,7 @@ mod tests {
             &mut run_revisions,
             &mut complex_field_boundaries,
             &mut comment_marks,
+            None,
             None,
             &mut field,
             DepthGuard::root(),
@@ -37995,5 +37964,91 @@ mod nested_story_payload_tests {
             assert_eq!((outer.width_pt, outer.height_pt), (300.0, 100.0));
             assert!(diagnostics.is_empty(), "{payload:?}: {diagnostics:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod hyperlink_content_tests {
+    use super::*;
+    use crate::xml_util::W_NS;
+
+    fn parse_p(inner: &str) -> DocParagraph {
+        let xml = format!(r#"<w:p xmlns:w="{W_NS}">{inner}</w:p>"#);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let style_map = StyleMap::parse("");
+        let mut num_map = NumberingMap::default();
+        let media: HashMap<String, String> = HashMap::new();
+        let rels: HashMap<String, String> = HashMap::new();
+        let theme = ThemeColors::default();
+        let mut field = FieldState::default();
+        parse_paragraph(
+            doc.root_element(),
+            &style_map,
+            &mut num_map,
+            &media,
+            &ChartMap::default(),
+            &rels,
+            &theme,
+            None,
+            &mut field,
+        )
+    }
+
+    fn texts(paragraph: &DocParagraph) -> Vec<(String, bool, Option<String>, Option<String>)> {
+        paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, run)| match run {
+                DocRun::Text(text) => Some((
+                    text.text.clone(),
+                    text.is_link,
+                    text.hyperlink_anchor.clone(),
+                    paragraph
+                        .run_revisions
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .map(|revision| revision.kind),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // EG_PContent inside §17.16.22: tracked changes, smart tags and fields in
+    // a hyperlink keep their runs, their revisions and the link target.
+    #[test]
+    fn hyperlink_keeps_nested_revisions_and_wrappers() {
+        let paragraph = parse_p(
+            r#"<w:hyperlink w:anchor="target"><w:ins w:id="1" w:author="A"><w:r><w:t>INSERTED</w:t></w:r></w:ins><w:r><w:t>KEPT</w:t></w:r><w:del w:id="2" w:author="A"><w:r><w:delText>GONE</w:delText></w:r></w:del><w:smartTag w:uri="u" w:element="e"><w:r><w:t>TAG</w:t></w:r></w:smartTag></w:hyperlink><w:r><w:t>PLAIN</w:t></w:r>"#,
+        );
+        let link = Some("target".to_string());
+        assert_eq!(
+            texts(&paragraph),
+            vec![
+                ("INSERTED".into(), true, link.clone(), Some("insertion".into())),
+                ("KEPT".into(), true, link.clone(), None),
+                ("GONE".into(), true, link.clone(), Some("deletion".into())),
+                ("TAG".into(), true, link.clone(), None),
+                ("PLAIN".into(), false, None, None),
+            ]
+        );
+    }
+
+    // §17.5.1.3 inline customXml wraps paragraph content transparently.
+    #[test]
+    fn inline_custom_xml_keeps_its_runs() {
+        let paragraph = parse_p(
+            r#"<w:customXml w:element="e"><w:customXmlPr/><w:r><w:t>INNER</w:t></w:r><w:ins w:id="1" w:author="A"><w:r><w:t>NEW</w:t></w:r></w:ins></w:customXml><w:r><w:t>AFTER</w:t></w:r>"#,
+        );
+        assert_eq!(
+            texts(&paragraph),
+            vec![
+                ("INNER".into(), false, None, None),
+                ("NEW".into(), false, None, Some("insertion".into())),
+                ("AFTER".into(), false, None, None),
+            ]
+        );
     }
 }

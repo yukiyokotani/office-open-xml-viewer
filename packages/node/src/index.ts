@@ -1,3 +1,7 @@
+// Node entry: the document entry points are the asynchronous owned sessions
+// (`open*`) and the asynchronous `materialize*` functions. There is
+// deliberately no synchronous wrapper; Worker threads and `Atomics.wait` must
+// not be used to imitate one.
 export {
   materializePptxPresentation,
   openPptxPresentation,

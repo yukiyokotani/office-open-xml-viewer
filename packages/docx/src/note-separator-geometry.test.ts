@@ -43,6 +43,8 @@ interface Control {
   readonly markerRunHalfPoints?: number;
   /** The listed separator story's paragraph, replacing the mark-only one. */
   readonly separatorParagraph?: string;
+  /** The listed continuation separator story's paragraph. */
+  readonly continuationParagraph?: string;
   /** Extra sectPr children (columns, bidi). */
   readonly sectExtra?: string;
   /** Paragraph properties of the Normal style. */
@@ -53,11 +55,12 @@ const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const encode = (xml: string) => new TextEncoder().encode(xml);
 
-function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints, separatorParagraph, sectExtra = '', normalPPr }: Control): DocxDocumentModel {
+function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints, separatorParagraph, continuationParagraph, sectExtra = '', normalPPr }: Control): DocxDocumentModel {
   const rPr = markHalfPoints ? `<w:rPr><w:sz w:val="${markHalfPoints}"/></w:rPr>` : '';
   const runRPr = markerRunHalfPoints ? `<w:rPr><w:sz w:val="${markerRunHalfPoints}"/></w:rPr>` : rPr;
   const special = (role: string, id: number, mark: string) => `<w:${kind} w:type="${role}" w:id="${id}">`
     + (role === 'separator' && separatorParagraph ? separatorParagraph
+      : role === 'continuationSeparator' && continuationParagraph ? continuationParagraph
       : `<w:p><w:pPr>${rPr}</w:pPr><w:r>${runRPr}<w:${mark}/></w:r></w:p>`) + `</w:${kind}>`;
   const stories = noSeparatorStories ? ''
     : special('separator', -1, 'separator') + special('continuationSeparator', 0, 'continuationSeparator');
@@ -280,5 +283,60 @@ describe('word-note-separator-geometry', () => {
     const texts = textRunGeometryForPage(layout, 0).map((run) => run.placement.text).join('');
     expect(texts).toContain('Sources');
     expect(texts).not.toContain('\u200b');
+  });
+
+  const separatorOf = (separatorParagraph: string) => leadingOf(render(control({ kind: 'footnote', listed: true, separatorParagraph })));
+  const ruleOf = (note: NoteLayout) => note.leading?.rule?.segment ?? note.separator[0];
+  const clean = (texts: readonly string[]) => texts.map((text) => text.replace(/​/gu, ''));
+
+  it('keeps a story whose marker is replaced with tracked changes', () => {
+    // §17.13.5: the deleted marker leaves the story; the inserted one is its marker.
+    const replaced = separatorOf('<w:p><w:del w:id="9" w:author="A"><w:r><w:separator/></w:r></w:del>'
+      + '<w:ins w:id="10" w:author="A"><w:r><w:separator/></w:r></w:ins><w:r><w:t>LABEL</w:t></w:r></w:p>');
+    expect(clean(paragraphTexts(replaced))).toEqual(['LABEL']);
+    expect(replaced.leading?.rule).toBeDefined();
+    // A deleted marker alone: the story keeps its text and draws no rule.
+    const deleted = separatorOf('<w:p><w:del w:id="9" w:author="A"><w:r><w:separator/></w:r></w:del><w:r><w:t>LABEL</w:t></w:r></w:p>');
+    expect(paragraphTexts(deleted)).toEqual(['LABEL']);
+    expect(ruleOf(deleted)).toBeUndefined();
+  });
+
+  it('keeps tracked insertions inside a separator hyperlink', () => {
+    const note = separatorOf('<w:p><w:hyperlink w:anchor="x"><w:ins w:id="11" w:author="A"><w:r><w:t>INSERTED</w:t></w:r></w:ins>'
+      + '<w:r><w:t>KEPT</w:t></w:r></w:hyperlink><w:r><w:separator/></w:r></w:p>');
+    expect(clean(paragraphTexts(note))).toEqual(['INSERTEDKEPT']);
+    expect(note.leading?.rule).toBeDefined();
+  });
+
+  it('paints a field beside the marker', () => {
+    const note = separatorOf('<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:r><w:separator/></w:r></w:p>');
+    expect(note.leading?.paragraph).toBeDefined();
+    expect(clean(paragraphTexts(note))).toEqual(['1']);
+    const marker = ruleOf(note)!;
+    expect(marker.from.xPt).toBeGreaterThan(72);
+    // PAGE reads each destination page: a continued endnote's continuation
+    // separator shows 2, 3, ...
+    const continued = render(control({ kind: 'endnote', listed: true, noteLines: 240,
+      continuationParagraph: '<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:r><w:continuationSeparator/></w:r></w:p>' }));
+    const pageTexts = continued.pages.slice(1).map((page) => {
+      const leading = page.layers.notes.find((node): node is NoteLayout => node.kind === 'note')?.leading;
+      return leading ? clean(paragraphTexts({ leading } as NoteLayout)).join('') : '';
+    });
+    expect(pageTexts.length).toBeGreaterThan(1);
+    // The full marker owns the line after the number.
+    expect(pageTexts).toEqual(pageTexts.map((_, index) => `${index + 2}|`));
+  });
+
+  it('positions a marker-only separator by its paragraph indent', () => {
+    // w:ind/@w:left 600 twips: the rule starts 30pt into the 72pt note area,
+    // as it does when the marker run has its own (empty) properties.
+    const bare = ruleOf(separatorOf('<w:p><w:pPr><w:ind w:left="600"/></w:pPr><w:r><w:separator/></w:r></w:p>'))!;
+    const formatted = ruleOf(separatorOf('<w:p><w:pPr><w:ind w:left="600"/></w:pPr><w:r><w:rPr/><w:separator/></w:r></w:p>'))!;
+    expect(bare.from.xPt).toBeCloseTo(102, 6);
+    expect(bare).toEqual(formatted);
+    // Without an indent the bare marker keeps the default band and rule.
+    const plain = render(control({ kind: 'footnote', listed: true }));
+    expect(bands(plain)[0]).toEqual(bands(render(control({ kind: 'footnote' })))[0]);
+    expect(ruleOf(leadingOf(plain))!.from.xPt).toBeCloseTo(72, 6);
   });
 });

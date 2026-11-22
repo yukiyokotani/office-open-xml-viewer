@@ -22,6 +22,8 @@ function isStaticPropertyName(node) {
     || (ts.isBindingElement(parent) && (parent.propertyName ?? parent.name) === node);
 }
 
+const isTypeScriptSource = (path) => /\.tsx?$/.test(path) && !path.endsWith('.d.ts') && !path.includes('/wasm/');
+
 /** Every resurrected tombstone under `root`, as sorted `kind: detail` lines. */
 export function tombstoneViolations(root) {
   const violations = new Set();
@@ -38,11 +40,12 @@ export function tombstoneViolations(root) {
     const names = new Set(entry.names);
     const exceptions = new Set(entry.patternExceptions);
     const propertyNames = new Set(entry.propertyNames);
-    for (const path of listFiles(resolve(root, entry.root)).filter(isProductionTypeScript)) {
+    const inScope = entry.includeTests ? isTypeScriptSource : isProductionTypeScript;
+    for (const path of listFiles(resolve(root, entry.root)).filter(inScope)) {
       const file = posixPath(relative(root, path));
       const visit = (node) => {
         if (ts.isIdentifier(node)
-          && (names.has(node.text) || (entry.pattern.test(node.text) && !exceptions.has(node.text)))) {
+          && (names.has(node.text) || (entry.pattern?.test(node.text) && !exceptions.has(node.text)))) {
           violations.add(`DELETED_IDENTIFIER: ${file}#${node.text}`);
         }
         if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node))

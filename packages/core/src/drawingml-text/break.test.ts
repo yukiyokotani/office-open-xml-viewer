@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { breakDrawingMlText, type DrawingMlInputRun } from './index.js';
 
-// Synthetic advances keep the test independent of the host Canvas fonts. The
-// assertions are the line choices in the matched Office wrap controls (C00–C11).
+// Synthetic advances keep the test independent of the host Canvas fonts. Cases
+// C00–C11 come from matched Office wrap controls: identical `a:txBody` runs,
+// explicit insets, `wrap="square"` and `noAutofit` in a PowerPoint shape and an
+// Excel `xdr:oneCellAnchor` shape of the same size, exported to PDF by Office
+// for Mac 16.113.2; both hosts produced the same lines.
+// - C00–C08, C10 and C11 assert the observed Office line partition. `lines()`
+//   trims trailing spaces, so C05–C07 do not test terminal-space advance (PDF
+//   extraction cannot show it either). C08 records one run-seam result; it is
+//   not a general kinsoku override.
+// - C10: Office's PDF text extracts NBSP as a space (`abc d / ef`); keeping the
+//   U+00A0 itself in the line is a library assertion.
+// - C11: Office showed `abc / d / ef`; the tab segment is asserted at the
+//   start of the second line.
+// - C09: Office broke `supercal / ifragilisti / c`. The expected
+//   `supercal / ifragili / stic` comes from the synthetic 10-unit advances and
+//   checks grapheme breaking of an overwide word, not Office's break points.
 const measure = (value: string): number =>
   [...value].reduce((width, ch) => width + (/\p{Script=Han}/u.test(ch) || ch === '、' ? 20 : 10), 0);
 

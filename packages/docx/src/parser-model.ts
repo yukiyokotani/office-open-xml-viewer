@@ -2186,9 +2186,9 @@ export function reservedNoteSeparatorParagraphAcquisitionInput(
 }
 
 /** Immutable acquisition input of an ordinary DOCX formatted separator
- * paragraph. Its single mark run carries the paragraph mark's own rPr (the
- * parser admits nothing else), so the run-free paragraph reserves exactly the
- * shared paragraph-mark line box with the paragraph's spacing and line rule. */
+ * paragraph. A run-free paragraph (no marker) reserves the paragraph-mark line
+ * box with the paragraph's spacing and line rule; a marker run is laid out in
+ * place, so the paragraph's indents and alignment position its rule. */
 export function selectedNoteSeparatorParagraphAcquisitionInput(
   paragraph: DeepReadonly<DocParagraph>,
   source: SourceRef,

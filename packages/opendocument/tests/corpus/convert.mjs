@@ -20,6 +20,14 @@
 // Headless LibreOffice on macOS enumerates fonts through fontconfig; without a
 // config it sees no system CJK fonts and paints CJK as blank glyphs. The
 // Homebrew fontconfig configuration scans the system font folders.
+//
+// Requires LibreOffice (SOFFICE, the `soffice` executable; default
+// /Applications/LibreOffice.app/Contents/MacOS/soffice) and
+// Homebrew `fontconfig` (FONTCONFIG_FILE, default
+// /opt/homebrew/etc/fonts/fonts.conf). The harnesses that read this corpus
+// (run.mjs, run-odp.mjs) also need Poppler (`pdftoppm`, `pdfinfo`), Chrome
+// and Rust with `wasm-pack`. Package aliases: `pnpm --filter
+// @silurus/ooxml-opendocument corpus:convert | corpus:odt | corpus:odp`.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, appendFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';

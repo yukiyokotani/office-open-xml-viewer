@@ -21,9 +21,9 @@ import type { DocParagraph } from '../types.js';
  * Geometry: the story paragraph's acquired advance replaces only the scalar
  * band height of its role, including inherited §17.3.1.33 line/spacing facts
  * when no pPr is authored. None suppresses rule ink while retaining its line
- * box. Missing stories keep the fallback. The parser admits only a mark run
- * whose rPr equals its paragraph
- * mark's, so the run-free paragraph line box is the mark's line box.
+ * box. Missing stories keep the fallback. A marker run is laid out in place,
+ * so the paragraph's indents and alignment position it; a run-free paragraph
+ * (no marker) keeps its mark's line box.
  */
 
 const SELECTED_INSTANCES: Readonly<Record<SelectedNoteSeparatorRole, string>> = Object.freeze({

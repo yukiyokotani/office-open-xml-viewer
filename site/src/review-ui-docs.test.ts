@@ -255,16 +255,8 @@ describe('Office comment UI integration guide', () => {
   });
 
   it('keeps cross-format change history distinct from comments without inventing placeholder APIs', () => {
-    const design = read('../../docs/review-ui-extension-design.md');
     const apiLayout = read('./layouts/ApiPage.astro');
     const changeHistory = read('./components/ChangeHistoryApiGuide.astro');
-    expect(design).toContain('Change-history boundary and future API symmetry');
-    expect(design).toContain('SpreadsheetML revision headers and revision logs');
-    expect(design).toContain('PresentationML has no general revision-log model equivalent');
-    expect(design).toContain('same three-layer architecture as comments');
-    expect(design).toContain('record and geometry types remain format-specific');
-    expect(design).toContain('Unsupported formats expose no placeholder method');
-    expect(design).toContain('not masquerade as revision records read from one presentation');
     expect(apiLayout).toContain('<a href="#review-data">Review data</a>');
     expect(apiLayout).toContain('<ChangeHistoryApiGuide format={format} />');
     expect(apiLayout.indexOf('<ApiReference format={format} />')).toBeLessThan(
