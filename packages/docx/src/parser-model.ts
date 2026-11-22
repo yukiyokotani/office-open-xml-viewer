@@ -407,6 +407,7 @@ interface InternalNoteNumberingWire {
 
 export interface DocumentNoteLayoutSettingsInput {
   readonly footnotePosition: string;
+  readonly sectionFootnotePositions?: readonly string[];
   readonly endnotePosition: string;
   readonly footnoteNumbering: NoteNumberingInput;
   readonly endnoteNumbering: NoteNumberingInput;
@@ -589,13 +590,15 @@ function documentNoteLayoutSettingsInput(
     : undefined;
   return snapshotPlainData({
     // §17.11.21/.22 defaults when w:pos is absent. A section's own footnotePr
-    // position (§17.11.11) overrides the document-wide one; the document
+    // position (§17.11.11) places its footnotes; a document-wide position in
+    // settings.xml does not (WORD_FOOTNOTE_BENEATH_TEXT). The document
     // reports the first section position other than pageBottom.
-    footnotePosition: settings?.sectionNoteNumbering?.length
-      ? settings.sectionNoteNumbering
-        .map((section) => section.footnotePosition ?? settings.footnotePosition ?? 'pageBottom')
-        .find((position) => position !== 'pageBottom') ?? 'pageBottom'
-      : settings?.footnotePosition ?? 'pageBottom',
+    footnotePosition: (settings?.sectionNoteNumbering ?? [])
+      .map((section) => section.footnotePosition ?? 'pageBottom')
+      .find((position) => position !== 'pageBottom') ?? 'pageBottom',
+    ...(settings?.sectionNoteNumbering?.some((section) => section.footnotePosition !== undefined) ? {
+      sectionFootnotePositions: settings.sectionNoteNumbering.map((section) => section.footnotePosition ?? 'pageBottom'),
+    } : {}),
     endnotePosition: settings?.endnotePosition ?? 'docEnd',
     footnoteNumbering: noteNumberingInput('footnote', footnoteWire, word),
     endnoteNumbering: noteNumberingInput('endnote', endnoteWire, word),

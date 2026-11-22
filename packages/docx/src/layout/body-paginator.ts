@@ -1314,6 +1314,14 @@ function* paginateBodyPassSteps(
     }
   };
   if (notePolicy) sessionNotePolicies.set(session, notePolicy);
+  // WORD_FOOTNOTE_BENEATH_TEXT: the sections whose footnotes follow the text.
+  const sectionFootnotePositions = input.noteLayoutSettings?.sectionFootnotePositions;
+  if (sectionFootnotePositions) {
+    const sections = [input.initialSection, ...input.sequence.flatMap((entry) =>
+      entry.kind === 'begin-section' ? [entry.section] : [])];
+    sessionBeneathTextSections.set(session, new Set(sections.flatMap((section, index) =>
+      sectionFootnotePositions[index] === 'beneathText' ? [section.sectionOccurrenceId] : [])));
+  }
   reserveSession = session;
   const recoveredFreshReserves = new Map<string, HeaderFooterReserve>();
   const freshPageExtent = (target: BodyPaginationState): number => {
@@ -3860,11 +3868,20 @@ function layoutBandStory(
  * order. `topsPt` is each note's page-final flow top.
  */
 const sessionNotePolicies = new WeakMap<BodyLayoutSession, NoteOverflowPolicy>();
+const sessionBeneathTextSections = new WeakMap<BodyLayoutSession, ReadonlySet<string>>();
+
+/** WORD_FOOTNOTE_BENEATH_TEXT: whether the page's footnotes follow its text
+ * (the section of the page's last region places them). */
+function footnotesBeneathText(page: LayoutPage, session: BodyLayoutSession): boolean {
+  const region = page.sectionRegions.at(-1);
+  return region !== undefined && sessionBeneathTextSections.get(session)?.has(region.sectionOccurrenceId) === true;
+}
 
 function footnoteStack(
   page: LayoutPage,
   notes: readonly NoteLayout[],
   policy?: NoteOverflowPolicy,
+  beneathText = false,
 ): Readonly<{ advancePt: number; targetTopPt: number; topsPt: readonly number[] }> {
   // ECMA-376 §17.11.21 defaults footnotes to the current page's bottom.
   const blockEndPt = page.sectionRegions.at(-1)?.blockEndPt
@@ -3884,13 +3901,22 @@ function footnoteStack(
       .map(node => Math.max(node.flowBounds.yPt + node.flowBounds.heightPt,
         node.flowBounds.heightPt === 0 ? node.inkBounds.yPt + node.inkBounds.heightPt : 0)),
   );
+  // WORD_FOOTNOTE_BENEATH_TEXT: beneath the deepest body content of the
+  // page, across its columns.
+  const bodyBottomPt = (): number => Math.max(
+    page.sectionRegions.at(-1)?.blockStartPt ?? Math.abs(page.section.geometry.marginTop),
+    ...page.layers.body.filter(node => node.ordinaryFlow)
+      .map(node => Math.max(node.flowBounds.yPt + node.flowBounds.heightPt,
+        node.flowBounds.heightPt === 0 ? node.inkBounds.yPt + node.inkBounds.heightPt : 0)),
+  );
   if (notes.some(note => note.pageArea !== undefined)) {
     const heightPt = notes[0]!.pageArea!.heightPt;
     if (!notes.every(note => note.pageArea?.heightPt === heightPt)) {
       throw new Error('A page-wide note area must own one common reserve');
     }
-    const targetTopPt = canOverflow(notes)
-      ? Math.max(contentTopPt(notes), blockEndPt - heightPt) : blockEndPt - heightPt;
+    const targetTopPt = beneathText ? bodyBottomPt()
+      : canOverflow(notes)
+        ? Math.max(contentTopPt(notes), blockEndPt - heightPt) : blockEndPt - heightPt;
     return { advancePt: heightPt, targetTopPt,
       topsPt: Object.freeze(notes.map(note => targetTopPt + note.pageArea!.offsetPt)),
     };
@@ -3907,9 +3933,10 @@ function footnoteStack(
   const pageStack = new NoteStack();
   (pageBand === undefined ? [] : bands.get(pageBand)!).forEach((index) => (
     pageStack.append(notes[index]!.advancePt)));
-  const pageTopPt = canOverflow(pageBand === undefined ? [] : bands.get(pageBand)!.map(i => notes[i]!))
-    ? Math.max(contentTopPt(pageBand === undefined ? [] : bands.get(pageBand)!.map(i => notes[i]!)),
-      blockEndPt - pageStack.advancePt) : blockEndPt - pageStack.advancePt;
+  const pageTopPt = beneathText && pageBand !== undefined ? bodyBottomPt()
+    : canOverflow(pageBand === undefined ? [] : bands.get(pageBand)!.map(i => notes[i]!))
+      ? Math.max(contentTopPt(pageBand === undefined ? [] : bands.get(pageBand)!.map(i => notes[i]!)),
+        blockEndPt - pageStack.advancePt) : blockEndPt - pageStack.advancePt;
   const topsPt = new Array<number>(notes.length);
   let targetTopPt = pageTopPt;
   for (const [band, members] of bands) {
@@ -3917,8 +3944,9 @@ function footnoteStack(
     const stack = isPageBand ? pageStack : new NoteStack();
     if (!isPageBand) members.forEach((index) => stack.append(notes[index]!.advancePt));
     const bottomPt = isPageBand ? blockEndPt : pageTopPt;
-    const topPt = canOverflow(members.map(i => notes[i]!))
-      ? Math.max(contentTopPt(members.map(i => notes[i]!)), bottomPt - stack.advancePt) : bottomPt - stack.advancePt;
+    const topPt = isPageBand && beneathText ? pageTopPt
+      : canOverflow(members.map(i => notes[i]!))
+        ? Math.max(contentTopPt(members.map(i => notes[i]!)), bottomPt - stack.advancePt) : bottomPt - stack.advancePt;
     targetTopPt = Math.min(targetTopPt, topPt);
     members.forEach((index, order) => { topsPt[index] = stack.topAt(topPt, order); });
   }
@@ -3958,9 +3986,10 @@ function footnoteBandPlan(
   notes: readonly NoteLayout[],
   hostShifts: ReadonlyMap<string, number> | undefined,
   policy?: NoteOverflowPolicy,
+  beneathText = false,
 ): Readonly<Record<string, number>> | undefined {
   if (!notes.some((note) => note.story.bandDependent)) return undefined;
-  const { topsPt } = footnoteStack(page, notes, policy);
+  const { topsPt } = footnoteStack(page, notes, policy, beneathText);
   // ast-grep-ignore: no-plain-object-string-map -- keys are library-generated note band keys.
   const plan: Record<string, number> = {};
   notes.forEach((note, index) => {
@@ -4051,6 +4080,7 @@ function headerFooterReserves(
       pass.footnoteLayoutsByPage.get(page.pageIndex) ?? [],
       pass.footnoteHostShiftsByPage.get(page.pageIndex),
       sessionNotePolicies.get(pass.session),
+      footnotesBeneathText(page, pass.session),
     );
     const context = pass.pageStoryContexts[pageIndex]!;
     return Object.freeze({
@@ -4261,7 +4291,8 @@ function composePageStories(
     });
     const retainedNotes = footnotesByPage.get(page.pageIndex) ?? [];
     const noteRegion = page.sectionRegions.at(-1);
-    const noteStack = footnoteStack(page, retainedNotes, sessionNotePolicies.get(session));
+    const noteStack = footnoteStack(page, retainedNotes, sessionNotePolicies.get(session),
+      footnotesBeneathText(page, session));
     const noteAdvancePt = noteStack.advancePt;
     const noteTargetTopPt = noteStack.targetTopPt;
     const notes = [
@@ -5968,7 +5999,9 @@ function composeBodyPaginationResult(
   );
   const hasRetainedFootnotes = pageStories.pages.some((page) =>
     page.layers.notes.some((note) => note.source.story === 'footnote'));
+  // pageBottom and beneathText (WORD_FOOTNOTE_BENEATH_TEXT) are laid out.
   const composed = hasRetainedFootnotes && noteLayoutSettings.footnotePosition !== 'pageBottom'
+    && noteLayoutSettings.footnotePosition !== 'beneathText'
     ? appendUnsupportedNotePositionDiagnostic(
         pageStories,
         'footnote',
