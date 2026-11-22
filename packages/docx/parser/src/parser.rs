@@ -2056,7 +2056,8 @@ fn finish_document(
     note_shapes.append(&mut endnote_stories.note_shapes);
     if !note_shapes.is_empty() {
         // word-note-vml-host-paragraph: one empty Normal paragraph at the end
-        // of the main story hosts the shapes.
+        // of the main story hosts the shapes of the referenced notes, which
+        // normalization selects once the whole body is known.
         if let Ok(doc) = parse_guarded(&format!(
             r#"<w:p xmlns:w="{}"/>"#,
             ooxml_common::ns::wordprocessingml::TRANSITIONAL
@@ -2073,11 +2074,12 @@ fn finish_document(
                 &mut FieldState::default(),
                 &mut Vec::new(),
             );
-            host.runs = note_shapes;
-            environment
+            host.runs = Vec::new();
+            let settings = environment
                 .note_layout_settings
-                .get_or_insert_with(Default::default)
-                .note_shape_host_paragraph = Some(Box::new(host));
+                .get_or_insert_with(Default::default);
+            settings.note_shape_host_paragraph = Some(Box::new(host));
+            settings.note_shapes = note_shapes;
         }
     }
     // A retained paragraph always has its mark, so marks decide presence.
@@ -2511,7 +2513,17 @@ fn parse_notes(
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
         let mut content = content;
-        take_note_vml_shapes(&mut content, &mut selected_stories.note_shapes);
+        let mut runs = Vec::new();
+        take_note_vml_shapes(&mut content, element_name, &mut runs);
+        if !runs.is_empty() {
+            selected_stories
+                .note_shapes
+                .push(crate::types::NoteShapeGroupWire {
+                    kind: element_name.to_string(),
+                    id: id.clone(),
+                    runs,
+                });
+        }
         out.push(crate::types::DocxNote { id, content });
     }
     (out, selected_stories)
@@ -2530,9 +2542,37 @@ fn is_absolute_vml_drawing(run: &DocRun) -> bool {
 
 /// word-note-vml-host-paragraph: move every absolutely positioned VML
 /// drawing of a note (with the anchor host character emitted before it) out
-/// of the note's paragraphs, table cells included.
-fn take_note_vml_shapes(content: &mut [BodyElement], taken: &mut Vec<DocRun>) {
-    fn take_runs(runs: &mut Vec<DocRun>, taken: &mut Vec<DocRun>) {
+/// of the note's paragraphs, table cells included. The moved occurrence ids
+/// name the note part, so shapes at the same offset of the footnote and
+/// endnote parts stay distinct in their one host paragraph.
+fn take_note_vml_shapes(content: &mut [BodyElement], part: &str, taken: &mut Vec<DocRun>) {
+    fn part_id(id: &str, part: &str) -> String {
+        match id.strip_prefix("vml-anchor-") {
+            Some(rest) => format!("vml-anchor-{part}-{rest}"),
+            None => id.to_string(),
+        }
+    }
+    fn rename(run: &mut DocRun, part: &str) {
+        match run {
+            DocRun::Shape(shape) => {
+                if let Some(acquisition) = shape.anchor_acquisition.as_mut() {
+                    acquisition.occurrence_id = part_id(&acquisition.occurrence_id, part);
+                }
+            }
+            DocRun::Image(image) => {
+                if let Some(acquisition) = image.anchor_acquisition.as_mut() {
+                    acquisition.occurrence_id = part_id(&acquisition.occurrence_id, part);
+                }
+            }
+            DocRun::AnchorHost(host) => {
+                if let Some(id) = host.anchor_occurrence_id.as_mut() {
+                    *id = part_id(id, part);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn take_runs(runs: &mut Vec<DocRun>, part: &str, taken: &mut Vec<DocRun>) {
         if !runs.iter().any(is_absolute_vml_drawing) {
             return;
         }
@@ -2550,8 +2590,12 @@ fn take_note_vml_shapes(content: &mut [BodyElement], taken: &mut Vec<DocRun>) {
                 // anchor character keeps no East Asian face of the note run.
                 if let Some(DocRun::AnchorHost(mut host)) = pending_host.take() {
                     host.font_family_east_asia = None;
-                    taken.push(DocRun::AnchorHost(host));
+                    let mut host = DocRun::AnchorHost(host);
+                    rename(&mut host, part);
+                    taken.push(host);
                 }
+                let mut run = run;
+                rename(&mut run, part);
                 taken.push(run);
                 continue;
             }
@@ -2565,13 +2609,15 @@ fn take_note_vml_shapes(content: &mut [BodyElement], taken: &mut Vec<DocRun>) {
         }
         *runs = kept;
     }
-    fn take_cells(table: &mut DocTable, taken: &mut Vec<DocRun>) {
+    fn take_cells(table: &mut DocTable, part: &str, taken: &mut Vec<DocRun>) {
         for row in &mut table.rows {
             for cell in &mut row.cells {
                 for element in &mut cell.content {
                     match element {
-                        CellElement::Paragraph(paragraph) => take_runs(&mut paragraph.runs, taken),
-                        CellElement::Table(table) => take_cells(table, taken),
+                        CellElement::Paragraph(paragraph) => {
+                            take_runs(&mut paragraph.runs, part, taken)
+                        }
+                        CellElement::Table(table) => take_cells(table, part, taken),
                     }
                 }
             }
@@ -2579,8 +2625,8 @@ fn take_note_vml_shapes(content: &mut [BodyElement], taken: &mut Vec<DocRun>) {
     }
     for element in content {
         match element {
-            BodyElement::Paragraph(paragraph) => take_runs(&mut paragraph.runs, taken),
-            BodyElement::Table(table) => take_cells(table, taken),
+            BodyElement::Paragraph(paragraph) => take_runs(&mut paragraph.runs, part, taken),
+            BodyElement::Table(table) => take_cells(table, part, taken),
             _ => {}
         }
     }
@@ -2592,7 +2638,7 @@ fn take_note_vml_shapes(content: &mut [BodyElement], taken: &mut Vec<DocRun>) {
 struct SelectedNoteSeparators {
     /// word-note-vml-host-paragraph: absolutely positioned VML shapes taken
     /// out of the part's notes, with their anchor host characters.
-    note_shapes: Vec<DocRun>,
+    note_shapes: Vec<crate::types::NoteShapeGroupWire>,
     separator: Option<crate::types::NoteSeparatorMark>,
     continuation_separator: Option<crate::types::NoteSeparatorMark>,
     separator_paragraph: Option<Box<DocParagraph>>,
@@ -3516,6 +3562,7 @@ fn parse_note_layout_settings(
         endnote_continuation_separator: None,
         footnote_continuation_separator: None,
         note_shape_host_paragraph: None,
+        note_shapes: Vec::new(),
         footnote_separator_paragraph: None,
         footnote_continuation_separator_paragraph: None,
         endnote_separator_paragraph: None,
@@ -5027,8 +5074,8 @@ fn drawing_extent(container: roxmltree::Node) -> DrawingExtent {
 
 /// Pre-order descendants of `root` (including `root`) that belong to the same
 /// DrawingML object rather than to a text box story inside it. A
-/// `w:txbxContent` (ECMA-376 §17.17.1.1, reached through `wps:txbx` or a
-/// group child's `wps:txbx`) is a separate WordprocessingML story whose runs
+/// `w:txbxContent` (ECMA-376 Part 4 §14.9.1.1; reached through `wps:txbx` or a
+/// group child's `wps:txbx`, [MS-ODRAWXML]) is a separate WordprocessingML story whose runs
 /// may hold their own `w:drawing`s; its subtree is skipped so lookups for the
 /// enclosing drawing's payload (`wpg:wgp`, `wps:wsp`, `c:chart`, `a:blip`, …)
 /// never resolve to a nested drawing's payload. The story element itself is
@@ -9811,11 +9858,10 @@ fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
 
 /// Whether a `wp:inline` / `wp:anchor` drawing container lays out as an
 /// inline object (ECMA-376 §20.4.2.8). A `wp:anchor` (§20.4.2.3) inside a text
-/// box story (`w:txbxContent`, §17.17.1.1, reached through `wps:txbx` or
+/// box story (`w:txbxContent`, Part 4 §14.9.1.1, reached through `wps:txbx` or
 /// `v:textbox`) or a footnote/endnote story (`w:footnote` / `w:endnote`,
-/// §17.11.10 / §17.11.2) is laid out inline too: Word ignores its position,
-/// wrap and layer there and places the object at its run like a `wp:inline`
-/// of the same `wp:extent` (word-story-anchor-inline).
+/// §17.11.10 / §17.11.2) is laid out inline as well, as a `wp:inline` of the
+/// same `wp:extent` (word-story-anchor-inline).
 fn drawing_container_flows_inline(container: roxmltree::Node) -> bool {
     match container.tag_name().name() {
         "inline" => true,
@@ -14733,7 +14779,7 @@ fn vml_word_z_order(style: &str) -> (bool, Option<u32>, AnchorValueStatusWire) {
 }
 
 /// The story kind hosting a VML drawing, when it is not the main, header or
-/// footer story: the nearest `w:txbxContent` (§17.17.1.1) or `w:footnote` /
+/// footer story: the nearest `w:txbxContent` (Part 4 §14.9.1.1) or `w:footnote` /
 /// `w:endnote` (§17.11.10 / §17.11.2) ancestor.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VmlHostingStory {
@@ -14754,11 +14800,16 @@ fn vml_hosting_story(node: roxmltree::Node) -> Option<VmlHostingStory> {
     })
 }
 
-/// word-story-vml-page-position: Word places an absolutely positioned VML
-/// shape of a text box or note story by its offsets from the page origin,
-/// whatever its `mso-position-*-relative` frames. In a text box story a text-
-/// or line-relative shape that wraps text stays at or below the top margin.
-fn apply_vml_story_page_position(shape: roxmltree::Node, acquisition: &mut AnchorAcquisitionWire) {
+/// word-story-vml-page-position: an absolutely positioned VML shape of a
+/// text box or note story is placed by its numeric offsets from the page
+/// origin; its `mso-position-*-relative` frames, alignment and percentage
+/// positions do not apply. In a text box story a text- or line-relative
+/// shape that wraps text is held at the top margin.
+fn apply_vml_story_page_position(
+    shape: roxmltree::Node,
+    style: &str,
+    acquisition: &mut AnchorAcquisitionWire,
+) {
     let Some(story) = vml_hosting_story(shape) else {
         return;
     };
@@ -14773,23 +14824,27 @@ fn apply_vml_story_page_position(shape: roxmltree::Node, acquisition: &mut Ancho
             Some("paragraph" | "line")
         )
         && !matches!(acquisition.wrap.kind, AnchorWrapKindWire::None);
-    let horizontal_choice = std::mem::take(&mut acquisition.horizontal.choice);
-    let vertical_choice = std::mem::take(&mut acquisition.vertical.choice);
     acquisition.horizontal = AnchorAxisWire {
-        choice: horizontal_choice,
+        choice: AnchorAxisChoiceWire::Offset {
+            value_pt: vml_numeric_offset_pt(style, "left", "margin-left"),
+        },
         ..page()
     };
     acquisition.vertical = AnchorAxisWire {
-        choice: vertical_choice,
+        choice: AnchorAxisChoiceWire::Offset {
+            value_pt: vml_numeric_offset_pt(style, "top", "margin-top"),
+        },
         ..page()
     };
     acquisition.story_top_margin_floor = floor;
+    // The page origin is the frame, so a table cell of the story does not
+    // stand in for it.
+    acquisition.behavior.layout_in_cell = Some(false);
     if story == VmlHostingStory::Note {
         // Library policy: a note story is laid out before its page-final
-        // position is known, so a page-positioned shape cannot exclude note
-        // lines consistently. Word's note controls never move a note line
-        // for these shapes (square, tight, topAndBottom, none); overlapping
-        // placements were not measured.
+        // position is known, so a page-positioned shape does not exclude
+        // note lines (word-story-vml-page-position records the measured
+        // wrap types; overlapping placements are outside it).
         acquisition.wrap.kind = AnchorWrapKindWire::None;
         acquisition.wrap.side = None;
         acquisition.wrap.polygon = None;
@@ -14805,7 +14860,7 @@ fn vml_word_anchor_acquisition(
 ) -> AnchorAcquisitionWire {
     let mut acquisition =
         vml_word_anchor_acquisition_in_frames(shape, definition, style, width_pt, height_pt);
-    apply_vml_story_page_position(shape, &mut acquisition);
+    apply_vml_story_page_position(shape, style, &mut acquisition);
     acquisition
 }
 
@@ -31508,6 +31563,21 @@ mod inline_wps_shape_tests {
             ("footnote", text, "square", false, true),
             ("endnote", text, "topAndBottom", false, true),
             ("body", text, "square", false, false),
+            // Alignment and percentage positions take the numeric offsets.
+            (
+                "txbx",
+                "mso-position-horizontal:center;mso-position-vertical:bottom;mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin",
+                "none",
+                false,
+                false,
+            ),
+            (
+                "footnote",
+                "mso-left-percent:500;mso-top-percent:200;mso-position-horizontal-relative:page;mso-position-vertical-relative:page",
+                "none",
+                false,
+                true,
+            ),
         ] {
             let run = rect(frames, wrap);
             let xml = match host {
@@ -31552,6 +31622,15 @@ mod inline_wps_shape_tests {
                 ),
                 "{case}"
             );
+            if host != "body" {
+                assert!(
+                    matches!(
+                        acquisition.vertical.choice,
+                        AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 0.0
+                    ),
+                    "{case}"
+                );
+            }
             assert_eq!(acquisition.story_top_margin_floor, floor, "{case}");
             assert_eq!(
                 matches!(acquisition.wrap.kind, AnchorWrapKindWire::None),

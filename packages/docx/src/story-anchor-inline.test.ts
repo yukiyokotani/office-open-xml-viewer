@@ -8,6 +8,7 @@ import { normalizeInternalDocumentModel } from './parser-model.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { storeZip } from './conformance/generate.js';
+import { paintTextBoxLayout } from './paint/canvas-text.js';
 
 // word-story-anchor-inline: Windows Word 16.0.20625 lays a wp:anchor inside a
 // text box, footnote or endnote story out exactly like a wp:inline of the same
@@ -34,7 +35,10 @@ const PNG = Uint8Array.from([
 
 type Story = 'body' | 'drawingml-textbox' | 'vml-textbox' | 'footnote' | 'endnote';
 type Placement = 'inline' | 'wrapNone' | 'wrapSquare' | 'wrapTopAndBottom' | 'behindDoc' | 'page'
-  | 'vml-text-square' | 'vml-text-square-mt50' | 'vml-margin' | 'vml-text-none';
+  | 'vml-text-square' | 'vml-text-square-mt50' | 'vml-margin' | 'vml-text-none' | 'vml-aligned';
+
+/** Story variants: the content in a table of the story, or a rotated box. */
+let variant: Readonly<{ table?: boolean; rotationDeg?: number }> = {};
 
 const encoder = new TextEncoder();
 const xml = (body: string) => encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${body}`);
@@ -46,7 +50,8 @@ function vmlRect(placement: Placement): string {
   const frames = placement === 'vml-margin' ? 'margin' : 'text';
   const top = placement === 'vml-text-square-mt50' ? 50 : 0;
   const wrap = placement === 'vml-text-none' ? 'none' : 'square';
-  return `<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:${top}pt;width:40pt;height:20pt;`
+  const aligned = placement === 'vml-aligned' ? 'mso-position-horizontal:center;mso-position-vertical:bottom;' : '';
+  return `<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:${top}pt;width:40pt;height:20pt;${aligned}`
     + `mso-position-horizontal-relative:${frames};mso-position-vertical-relative:${frames === 'text' ? 'text' : 'margin'}" `
     + `fillcolor="black" stroked="f"><w10:wrap type="${wrap}"/></v:rect></w:pict></w:r>`;
 }
@@ -74,7 +79,11 @@ function picture(placement: Placement): string {
 }
 
 function docx(story: Story, placement: Placement): Uint8Array {
-  const content = text('M01') + `<w:p>${picture(placement)}<w:r><w:t>Ab</w:t></w:r></w:p>` + text('MEND');
+  const paragraphs = text('M01') + `<w:p>${picture(placement)}<w:r><w:t>Ab</w:t></w:r></w:p>` + text('MEND');
+  const content = variant.table
+    ? '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>'
+      + `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${paragraphs}</w:tc></w:tr></w:tbl>${text('END')}`
+    : paragraphs;
   let body = text('BODY');
   const notes = story === 'footnote' || story === 'endnote';
   if (notes) {
@@ -88,14 +97,14 @@ function docx(story: Story, placement: Placement): Uint8Array {
       + `<wp:positionV relativeFrom="margin"><wp:posOffset>${30 * EMU}</wp:posOffset></wp:positionV>`
       + `<wp:extent cx="${468 * EMU}" cy="${200 * EMU}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>`
       + `<wp:docPr id="1" name="tb"/><a:graphic><a:graphicData uri="${WPS}"><wps:wsp><wps:cNvSpPr txBox="1"/>`
-      + `<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${468 * EMU}" cy="${200 * EMU}"/></a:xfrm>`
+      + `<wps:spPr><a:xfrm${variant.rotationDeg ? ` rot="${variant.rotationDeg * 60000}"` : ''}><a:off x="0" y="0"/><a:ext cx="${468 * EMU}" cy="${200 * EMU}"/></a:xfrm>`
       + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>'
       + `<wps:txbx><w:txbxContent>${content}</w:txbxContent></wps:txbx>`
       + '<wps:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t"><a:noAutofit/></wps:bodyPr>'
       + '</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>';
   } else {
     body += '<w:p><w:r><w:pict><v:shape id="tb" style="position:absolute;margin-left:0;margin-top:30pt;'
-      + 'width:468pt;height:200pt;mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin" '
+      + `width:468pt;height:200pt;${variant.rotationDeg ? `rotation:${variant.rotationDeg};` : ''}mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin" `
       + `filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent>${content}</w:txbxContent></v:textbox>`
       + '</v:shape></w:pict></w:r></w:p>';
   }
@@ -267,5 +276,155 @@ describe('word-story-vml-page-position', () => {
     expect(JSON.stringify(page.layers.notes)).toContain('MEND');
     // An inline picture stays in its note: no host paragraph.
     expect(layOut(story, 'inline').layers.body.filter((node) => node.kind === 'paragraph')).toHaveLength(1);
+  });
+});
+
+/** Device boxes of the filled paths a text box paints (identity base frame). */
+function paintedFills(story: Story, placement: Placement): Array<{ xPt: number; yPt: number; clipped: boolean }> {
+  type M = { a: number; b: number; c: number; d: number; e: number; f: number };
+  let m: M = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  let clipped = false;
+  const stack: Array<[M, boolean]> = [];
+  let path: Array<[number, number]> = [];
+  const fills: Array<{ xPt: number; yPt: number; clipped: boolean }> = [];
+  const point = (x: number, y: number): [number, number] => [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f];
+  const multiply = (n: M) => {
+    m = { a: m.a * n.a + m.c * n.b, b: m.b * n.a + m.d * n.b, c: m.a * n.c + m.c * n.d,
+      d: m.b * n.c + m.d * n.d, e: m.a * n.e + m.c * n.f + m.e, f: m.b * n.e + m.d * n.f + m.f };
+  };
+  const methods: Record<string, (...args: number[]) => unknown> = {
+    save: () => { stack.push([{ ...m }, clipped]); },
+    restore: () => { [m, clipped] = stack.pop() ?? [m, clipped]; },
+    clip: () => { clipped = true; },
+    translate: (x, y) => multiply({ a: 1, b: 0, c: 0, d: 1, e: x!, f: y! }),
+    scale: (x, y) => multiply({ a: x!, b: 0, c: 0, d: y!, e: 0, f: 0 }),
+    rotate: (t) => multiply({ a: Math.cos(t!), b: Math.sin(t!), c: -Math.sin(t!), d: Math.cos(t!), e: 0, f: 0 }),
+    transform: (a, b, c, d, e, f) => multiply({ a: a!, b: b!, c: c!, d: d!, e: e!, f: f! }),
+    setTransform: (a, b, c, d, e, f) => { m = { a: a ?? 1, b: b ?? 0, c: c ?? 0, d: d ?? 1, e: e ?? 0, f: f ?? 0 }; },
+    beginPath: () => { path = []; },
+    moveTo: (x, y) => { path.push(point(x!, y!)); },
+    lineTo: (x, y) => { path.push(point(x!, y!)); },
+    rect: (x, y, w, h) => { path.push(point(x!, y!), point(x! + w!, y!), point(x! + w!, y! + h!), point(x!, y! + h!)); },
+    fill: () => {
+      if (path.length === 0) return;
+      const xs = path.map(([x]) => x);
+      const ys = path.map(([, y]) => y);
+      const width = Math.max(...xs) - Math.min(...xs);
+      if (Math.abs(width - 40) < 0.5) {
+        fills.push({ xPt: Math.round(Math.min(...xs) * 100) / 100, yPt: Math.round(Math.min(...ys) * 100) / 100, clipped });
+      }
+    },
+    fillRect: (x, y, w, h) => {
+      if (Math.abs(w! - 40) < 0.5) {
+        const [px, py] = point(x!, y!);
+        fills.push({ xPt: Math.round(px * 100) / 100, yPt: Math.round(py * 100) / 100, clipped });
+      }
+    },
+    measureText: () => ({ width: 0, actualBoundingBoxAscent: 0, actualBoundingBoxDescent: 0,
+      fontBoundingBoxAscent: 0, fontBoundingBoxDescent: 0 }),
+    getTransform: () => ({ ...m }),
+  };
+  const ctx = new Proxy({} as Record<string, unknown>, {
+    get: (target, key: string) => methods[key] ?? target[key] ?? (() => undefined),
+    set: (target, key: string, value) => { target[key] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const page = layOut(story, placement);
+  for (const node of page.layers.body) {
+    if (node.kind !== 'paragraph') continue;
+    for (const textBox of node.textBoxes) paintTextBoxLayout(textBox, { ctx, scale: 1, dpr: 1, resources: { paint: () => {} } });
+  }
+  return fills;
+}
+
+describe('word-story-vml-page-position in tables, rotated boxes and aligned shapes', () => {
+  const expected = [{ xPt: 300, yPt: 36, clipped: false }];
+  it.each([
+    ['a table of the story', { table: true }],
+    ['a box rotated by 30 degrees', { rotationDeg: 30 }],
+    ['a box rotated by 90 degrees', { rotationDeg: 90 }],
+  ] as const)('places and paints the shape at its page offsets in %s', (_name, storyVariant) => {
+    variant = storyVariant;
+    try {
+      for (const story of ['drawingml-textbox', 'vml-textbox'] as const) {
+        expect(storyDrawingBoxes(story, 'vml-text-square')).toEqual([{ xPt: 300, yPt: 36 }]);
+        expect(paintedFills(story, 'vml-text-square')).toEqual(expected);
+      }
+    } finally {
+      variant = {};
+    }
+  });
+
+  it.each(['drawingml-textbox', 'vml-textbox'] as const)('takes the numeric offsets of an aligned %s shape', (story) => {
+    expect(storyDrawingBoxes(story, 'vml-aligned')).toEqual([{ xPt: 300, yPt: 36 }]);
+    expect(paintedFills(story, 'vml-aligned')).toEqual(expected);
+  });
+
+  it('paints a direct story shape once, outside the text clip', () => {
+    expect(paintedFills('drawingml-textbox', 'vml-text-square')).toEqual(expected);
+  });
+});
+
+/** A package with an optional footnote and endnote, each holding one VML
+ * rect at `margin-left`, and body references to the listed kinds. The two
+ * note parts are padded so both rects start at the same part offset. */
+function twoNotePackage(notes: Readonly<{ footnote?: number; endnote?: number }>, references: readonly ('footnote' | 'endnote')[]) {
+  const rect = (left: number) => `<w:p><w:r><w:pict><v:rect style="position:absolute;margin-left:${left}pt;margin-top:0;`
+    + 'width:40pt;height:20pt;mso-position-horizontal-relative:text;mso-position-vertical-relative:text" '
+    + `fillcolor="black" stroked="f"><w10:wrap type="none"/></v:rect></w:pict></w:r></w:p>`;
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const namespaces = `xmlns:w="${W}" xmlns:r="${R}" xmlns:v="${V}" xmlns:w10="${W10}"`;
+  const part = (kind: 'footnote' | 'endnote', pad: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`
+    + `<w:${kind}s ${namespaces}${pad}><w:${kind} w:id="1">${rect(notes[kind]!)}</w:${kind}></w:${kind}s>`;
+  const kinds = (['footnote', 'endnote'] as const).filter((kind) => notes[kind] !== undefined);
+  // "footnote" is one character longer than "endnote", twice before the rect.
+  const pads = { footnote: '', endnote: '  ' };
+  const body = `<w:p><w:r><w:t>BODY</w:t></w:r>${references.map((kind) => `<w:r><w:${kind}Reference w:id="1"/></w:r>`).join('')}</w:p>`;
+  const document = `<w:document ${namespaces}><w:body>${body}`
+    + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="1440" w:bottom="720" '
+    + 'w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr></w:body></w:document>';
+  const parts = new Map<string, Uint8Array>([
+    ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + kinds.map((kind) => `<Override PartName="/word/${kind}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}s+xml"/>`).join('')
+      + '</Types>')],
+    ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`)],
+    ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + kinds.map((kind) => `<Relationship Id="rId${kind}" Type="${rel}/${kind}s" Target="${kind}s.xml"/>`).join('')
+      + '</Relationships>')],
+    ['word/document.xml', xml(document)],
+    ...kinds.map((kind) => [`word/${kind}s.xml`, encoder.encode(part(kind, pads[kind]))] as [string, Uint8Array]),
+  ]);
+  const offsets = kinds.map((kind) => part(kind, pads[kind]).indexOf('<v:rect'));
+  const archive = new DocxArchive(storeZip(parts));
+  let model: DocxDocumentModel;
+  try {
+    model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+  const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), { currentDateMs: 0 });
+  const hosted = layout.pages.flatMap((page) => page.layers.body).flatMap((node) => node.kind === 'paragraph'
+    ? node.drawings.filter((drawing) => drawing.anchorLayer && drawing.flowBounds.widthPt === 40)
+      .map((drawing) => drawing.flowBounds.xPt)
+    : []);
+  return { offsets, hosted: [...new Set(hosted)].sort((a, b) => a - b), pages: layout.pages.length,
+    bodyParagraphs: layout.pages.flatMap((page) => page.layers.body).filter((node) => node.kind === 'paragraph').length };
+}
+
+describe('word-note-vml-host-paragraph ownership', () => {
+  it('keeps a footnote shape and an endnote shape at the same part offset apart', () => {
+    const result = twoNotePackage({ footnote: 300, endnote: 400 }, ['footnote', 'endnote']);
+    expect(result.offsets[0]).toBe(result.offsets[1]);
+    expect(result.hosted).toEqual([300, 400]);
+  });
+
+  it('hosts no shape of an unreferenced note', () => {
+    const result = twoNotePackage({ footnote: 300, endnote: 400 }, ['footnote']);
+    expect(result.hosted).toEqual([300]);
+    const none = twoNotePackage({ endnote: 400 }, []);
+    expect(none).toMatchObject({ hosted: [], pages: 1, bodyParagraphs: 1 });
   });
 });

@@ -92,7 +92,7 @@ import {
   type PageSheetOrientation,
 } from './layout/context.js';
 import { normalizeAdjacentTables, type AdjacentTableSequenceInput } from './layout/adjacent-tables.js';
-import { repeatedFootnoteLastReferenceIndexes } from './layout/note-reference-ownership.js';
+import { noteReferenceIdsInDocumentOrder, repeatedFootnoteLastReferenceIndexes } from './layout/note-reference-ownership.js';
 import { isWrapFloat } from './float-layout.js';
 import type {
   BodyLayoutAcquisitionInput,
@@ -336,6 +336,8 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     /** word-note-vml-host-paragraph: the empty Normal paragraph appended to
      * the main story with the VML shapes taken out of the notes. */
     noteShapeHostParagraph?: DocParagraph;
+    /** The shapes each note gives up to that paragraph, by note. */
+    noteShapes?: readonly Readonly<{ kind: 'footnote' | 'endnote'; id: string; runs: readonly DocRun[] }>[];
     footnoteSeparatorParagraph?: DocParagraph;
     footnoteContinuationSeparatorParagraph?: DocParagraph;
     endnoteSeparatorParagraph?: DocParagraph;
@@ -2210,14 +2212,24 @@ function cellFlowAutoSpacingNeighbourhoods(
 /** word-note-vml-host-paragraph: append the parser's host paragraph of the
  * notes' absolutely positioned VML shapes to the end of the main story, once
  * (the settings no longer carry it afterwards). */
+/** word-note-vml-host-paragraph: the absolutely positioned VML shapes of the
+ * notes the main story references move to one empty Normal paragraph appended
+ * to the body. An unreferenced note is not laid out, so it gives none. */
 function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
   const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
   const host = settings?.noteShapeHostParagraph;
-  if (!settings || !host) return doc;
-  const { noteShapeHostParagraph: _host, ...retained } = settings;
+  if (!settings || (!host && settings.noteShapes === undefined)) return doc;
+  const { noteShapeHostParagraph: _host, noteShapes, ...retained } = settings;
+  const referenced = {
+    footnote: new Set(noteReferenceIdsInDocumentOrder(doc.body, 'footnote')),
+    endnote: new Set(noteReferenceIdsInDocumentOrder(doc.body, 'endnote')),
+  };
+  const runs = (noteShapes ?? []).filter((group) => referenced[group.kind]?.has(group.id))
+    .flatMap((group) => group.runs);
   return {
     ...doc,
-    body: [...doc.body, { ...host, type: 'paragraph' } as BodyElement],
+    body: host && runs.length > 0
+      ? [...doc.body, { ...host, type: 'paragraph', runs } as BodyElement] : doc.body,
     __noteLayoutSettings: retained,
   } as DocxDocumentModel;
 }

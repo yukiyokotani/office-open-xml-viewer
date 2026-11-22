@@ -372,6 +372,19 @@ pub struct PageLayoutSettingsWire {
     pub print_two_on_one: Option<bool>,
 }
 
+/// word-note-vml-host-paragraph: the shapes one note gives up, with their
+/// anchor host characters.
+#[derive(Serialize, Debug, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteShapeGroupWire {
+    /// "footnote" | "endnote".
+    pub kind: String,
+    /// The note's `@w:id`.
+    pub id: String,
+    pub runs: Vec<DocRun>,
+}
+
 #[derive(Serialize, Debug, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -415,11 +428,16 @@ pub struct NoteLayoutSettingsWire {
     /// matching Short/Full/None mark above. Layout measures inherited and
     /// authored spacing and line facts (§17.3.1.33); no pPr does not mean zero
     /// or a fixed gap. Missing and unsupported stories retain the fallback.
-    /// word-note-vml-host-paragraph: an empty Normal paragraph Word appends
+    /// word-note-vml-host-paragraph: the empty Normal paragraph Word appends
     /// to the end of the main story to hold the absolutely positioned VML
-    /// shapes of every footnote and endnote, which leave their notes.
+    /// shapes of the referenced footnotes and endnotes (its runs are empty;
+    /// `note_shapes` holds the shapes by note).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_shape_host_paragraph: Option<Box<DocParagraph>>,
+    /// The absolutely positioned VML shapes each note gives up, in part and
+    /// note order. Only notes referenced from the main story contribute.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub note_shapes: Vec<NoteShapeGroupWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footnote_separator_paragraph: Option<Box<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
