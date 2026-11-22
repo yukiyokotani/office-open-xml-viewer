@@ -103,9 +103,10 @@ describe('canonical body layout input', () => {
     expect(acquired.noteLayoutSettings).toEqual({
       footnotePosition: 'pageBottom',
       endnotePosition: 'docEnd',
-      // §17.11.17/.18/.20 defaults for both note kinds.
+      // §17.11.18/.20 defaults; endnotes take Word's lowerRoman default
+      // (WORD_NOTE_NUMBER_FORMAT_DEFAULTS, [MS-OI29500] §2.1.306).
       footnoteNumbering: { format: 'decimal', start: 1 },
-      endnoteNumbering: { format: 'decimal', start: 1 },
+      endnoteNumbering: { format: 'lowerRoman', start: 1 },
       footnoteSeparator: 'default',
       endnoteSeparator: 'default',
       endnoteContinuationSeparator: 'default',

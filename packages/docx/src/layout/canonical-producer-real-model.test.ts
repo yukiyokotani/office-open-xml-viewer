@@ -765,7 +765,8 @@ describe('canonical producer with a real document model', () => {
     if (storyParagraph?.kind !== 'paragraph') throw new Error('Expected retained endnote paragraph');
     expect(storyParagraph.lines.flatMap((line) => line.placements)
       .find((placement) => placement.kind === 'text' && placement.noteReference))
-      .toMatchObject({ kind: 'text', text: '1' });
+      // Word's default endnote format (WORD_NOTE_NUMBER_FORMAT_DEFAULTS).
+      .toMatchObject({ kind: 'text', text: 'i' });
   });
 
   it('retains the entire document-end note when it needs additional pages', () => {

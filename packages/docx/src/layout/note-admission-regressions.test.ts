@@ -833,6 +833,11 @@ describe('reviewed note admission regressions', () => {
       reference.runs = model.endnotes.map(note => ({ ...run, noteRef: { kind, id: note.id } })) as DocParagraph['runs'];
       expected = '';
     }
+    // These digests pin v0.89 admission bytes; keep the decimal endnote labels
+    // they were recorded with (Word's default is lowerRoman).
+    if (kind === 'endnote') {
+      (model as unknown as Record<string, unknown>).__noteLayoutSettings = { endnoteNumberFormat: 'decimal' };
+    }
     const layout = render(model, continuation);
     expectConserved(layout, shape === 'three-heads'
       ? { '7': 'head-7;tail-7;', '8': 'head-8;tail-8;', '9': 'head-9;tail-9;' } : { '7': expected }, kind);

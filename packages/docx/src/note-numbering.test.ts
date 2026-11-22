@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatNoteNumber } from './line-layout.js';
+import { wordNoteNumberFormat } from './layout/line-compatibility.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type {
   BodyElement, DocNote, DocParagraph, DocxDocumentModel, SectionProps,
@@ -137,8 +138,10 @@ describe('note numbering format and start (ECMA-376 §17.11.17/.18/.20)', () => 
     const doc = docWith(body, kind === 'footnote' ? notes : []);
     if (kind === 'endnote') doc.endnotes = notes;
     const texts = (await renderPage0(doc)).map(call => call.text);
-    expect(texts.filter(text => text === '1')).toHaveLength(2);
-    expect(texts).not.toContain('2');
+    // Word's default endnote format is lowerRoman (WORD_NOTE_NUMBER_FORMAT_DEFAULTS).
+    const [first, second] = kind === 'footnote' ? ['1', '2'] : ['i', 'ii'];
+    expect(texts.filter(text => text === first)).toHaveLength(2);
+    expect(texts).not.toContain(second);
     expect(texts).not.toContain('custom');
     expect(texts.join('')).toContain('CUSTOMNOTE');
     expect(texts.join('')).toContain('AUTONOTE');
@@ -152,5 +155,42 @@ describe('note numbering format and start (ECMA-376 §17.11.17/.18/.20)', () => 
     expect(texts.filter((text) => text === 'iii')).toHaveLength(2);
     expect(texts.filter((text) => text === 'iv')).toHaveLength(2);
     expect(texts).not.toContain('1');
+  });
+
+  it('uses Word note format defaults: lowerRoman endnotes, decimal for bullet', async () => {
+    expect(wordNoteNumberFormat('endnote', undefined)).toBe('lowerRoman');
+    expect(wordNoteNumberFormat('footnote', undefined)).toBe('decimal');
+    expect(wordNoteNumberFormat('endnote', 'bullet')).toBe('decimal');
+    expect(wordNoteNumberFormat('footnote', 'bullet')).toBe('decimal');
+    expect(wordNoteNumberFormat('endnote', 'upperLetter')).toBe('upperLetter');
+
+    const endnotes: DocNote[] = ['1', '2'].map((id) => ({ id, content: [para([
+      textRun('', { noteRef: { kind: 'endnote', id: '' }, vertAlign: 'super' }),
+      textRun(` ENDNOTE${id}`),
+    ]) as unknown as BodyElement] }));
+    const body = [para([
+      textRun('BODY'),
+      textRun('1', { noteRef: { kind: 'endnote', id: '1' }, vertAlign: 'super' }),
+      textRun(' MORE'),
+      textRun('2', { noteRef: { kind: 'endnote', id: '2' }, vertAlign: 'super' }),
+    ]) as unknown as BodyElement];
+    const byDefault = docWith(body, []);
+    byDefault.endnotes = endnotes;
+    const defaultTexts = (await renderPage0(byDefault)).map((call) => call.text);
+    expect(defaultTexts.filter((text) => text === 'i')).toHaveLength(2);
+    expect(defaultTexts.filter((text) => text === 'ii')).toHaveLength(2);
+    expect(defaultTexts).not.toContain('1');
+
+    const bullet = docWith(body, [], { endnoteNumberFormat: 'bullet' });
+    bullet.endnotes = endnotes;
+    const bulletTexts = (await renderPage0(bullet)).map((call) => call.text);
+    expect(bulletTexts.filter((text) => text === '1')).toHaveLength(2);
+    expect(bulletTexts.filter((text) => text === '2')).toHaveLength(2);
+  });
+
+  it('numbers bullet-formatted footnotes with decimal', async () => {
+    const texts = (await renderPage0(notesDoc({ footnoteNumberFormat: 'bullet' }))).map((call) => call.text);
+    expect(texts.filter((text) => text === '1')).toHaveLength(2);
+    expect(texts.filter((text) => text === '2')).toHaveLength(2);
   });
 });

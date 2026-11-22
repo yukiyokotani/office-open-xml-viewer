@@ -1,6 +1,7 @@
 import { noteOverflowAllowed, noteOverflowPolicyOf, NoteOverflowRecoveryRequired,
   attachNoteRecoveryOwner, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
+import { wordNoteNumberFormat } from './line-compatibility.js';
 import { registerFootnoteTable, registerFootnoteTableDestination } from './footnote-table-fragmentation.js';
 import { registerNoteBlockAcquisition, registerNoteBlockDestination } from './note-block-acquisition.js';
 import { acquireNoteParagraphWindow, projectNoteParagraphWindow, type NoteParagraphWindow } from './note-paragraph-window.js';
@@ -3119,8 +3120,8 @@ function openConcreteBodyLayoutSession(
   const sourceEndnotes = source.blocks.endnotes;
   const noteSettings = source.bodyLayoutInput.noteLayoutSettings;
   state.noteNumbering = {
-    footnote: noteSettings?.footnoteNumbering ?? { format: 'decimal', start: 1 },
-    endnote: noteSettings?.endnoteNumbering ?? { format: 'decimal', start: 1 },
+    footnote: noteSettings?.footnoteNumbering ?? { format: wordNoteNumberFormat('footnote', undefined), start: 1 },
+    endnote: noteSettings?.endnoteNumbering ?? { format: wordNoteNumberFormat('endnote', undefined), start: 1 },
   };
   const footnotesById = indexNotes(sourceFootnotes);
   state.noteNumbers = new Map([

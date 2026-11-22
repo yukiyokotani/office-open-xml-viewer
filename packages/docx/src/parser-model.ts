@@ -12,7 +12,7 @@ import type {
   NoteSeparatorInput,
   SelectedNoteSeparatorParagraphsInput,
 } from './layout/body-layout-input.js';
-import { wordKerningApplies } from './layout/line-compatibility.js';
+import { wordKerningApplies, wordNoteNumberFormat } from './layout/line-compatibility.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -498,14 +498,15 @@ function selectedNoteSeparatorParagraphsInput(
   };
 }
 
-/** §17.11.17/.18 numFmt defaults to decimal and §17.11.20 numStart to 1 for
- * both note kinds when the document-wide element is absent. */
+/** Effective note numbering: the §17.11.17/.18 numFmt under Word's defaults
+ * (WORD_NOTE_NUMBER_FORMAT_DEFAULTS) and the §17.11.20 numStart, 1 when absent. */
 function noteNumberingInput(
+  kind: 'footnote' | 'endnote',
   format: string | undefined,
   start: number | undefined,
 ): Readonly<{ format: string; start: number }> {
   return {
-    format: typeof format === 'string' && format.length > 0 ? format : 'decimal',
+    format: wordNoteNumberFormat(kind, format),
     start: typeof start === 'number' && Number.isSafeInteger(start) ? start : 1,
   };
 }
@@ -519,10 +520,12 @@ function documentNoteLayoutSettingsInput(
     footnotePosition: settings?.footnotePosition ?? 'pageBottom',
     endnotePosition: settings?.endnotePosition ?? 'docEnd',
     footnoteNumbering: noteNumberingInput(
+      'footnote',
       settings?.footnoteNumberFormat,
       settings?.footnoteNumberStart,
     ),
     endnoteNumbering: noteNumberingInput(
+      'endnote',
       settings?.endnoteNumberFormat,
       settings?.endnoteNumberStart,
     ),

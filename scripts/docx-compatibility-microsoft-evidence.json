@@ -100,6 +100,14 @@
           "title": "Part 1 Section 17.4.80, trHeight (Table Row Height)"
         },
         {
+          "id": "2.1.306",
+          "title": "Part 1 Section 17.11.17, numFmt (Endnote Numbering Format)"
+        },
+        {
+          "id": "2.1.307",
+          "title": "Part 1 Section 17.11.18, numFmt (Footnote Numbering Format)"
+        },
+        {
           "id": "2.1.389",
           "title": "Part 1 Section 17.15.1.11, bookFoldPrinting (Book Fold Printing)"
         },
