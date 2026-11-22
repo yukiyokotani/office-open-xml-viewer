@@ -313,9 +313,25 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     expect(tableOf(twoColumns(AUTO + spacing(2)), null, 2).table).toBeCloseTo(192, 6);
     const held = tableOf(twoColumns(AUTO + spacing(2), [4400, 4800]), null, 2);
     expect(held.table).toBeCloseTo(222.65 - 0.5, 6);
-    // With an indent the table keeps the geometry it has without this rule.
-    const indented = tableOf(twoColumns(AUTO + '<w:tblInd w:w="800" w:type="dxa"/>' + spacing(2), [4400, 4800]), null, 2);
-    expect(indented.table).toBeCloseTo(222.65, 6);
+  });
+
+  it.each([
+    // [columns, tblInd, cells, tblW, table width]
+    [2, 40, [1440, 2160], AUTO, 222.65 - 40 - 0.5],
+    [2, 20, [1440, 2160], AUTO, 192],
+    [2, 20, [4400, 4800], AUTO, 222.65 - 20 - 0.5],
+    [2, 40, [1440, 2160], DXA_180, 180],
+    [2, 40, [1440, 2160], '<w:tblW w:w="5000" w:type="pct"/>', 222.65 - 0.5],
+    [1, 40, [1440, 2160], AUTO, 192],
+    [1, 40, [4400, 4800], AUTO, 465.3 - 40 - 0.5],
+    [1, 40, [1440, 2160], DXA_180, 180],
+    [1, 40, [1440, 2160], '<w:tblW w:w="5000" w:type="pct"/>', 465.3 - 0.5],
+  ] as const)('holds an indented automatic table to what the indent leaves of its column (%d columns, %d pt, %j)', (columnCount, indentPt, widths, tableWidth, expected) => {
+    // An automatic table ends with its column; a preferred width is kept
+    // and moves with the indent.
+    const indented = tableOf(twoColumns(`${tableWidth}<w:tblInd w:w="${indentPt * 20}" w:type="dxa"/>${spacing(2)}`,
+      widths as unknown as [number, number]), null, columnCount);
+    expect(indented.table).toBeCloseTo(expected, 6);
   });
 
   it('applies both forms to the upright block table of a tbRl section', () => {

@@ -269,7 +269,13 @@ function memberContext(
         // origin translation is acquired separately under WORD_TABLE_ORIGIN_COMPATIBILITY.
         return leading || outerCellMarginsHangOutsideBand ? contentWPt - indentPt : contentWPt;
       })))
-    : contentWPt;
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: an automatic spaced table ends with
+    // its column wherever the leading-indent band is not established.
+    : spacingGeometry && effectiveLayout !== 'fixed' && !hasPreferredTableWidth
+      ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) =>
+          (justification == null || justification === 'left' || justification === 'start'
+            ? contentWPt - Math.max(0, indentPt) : contentWPt))))
+      : contentWPt;
   // WORD_AUTOFIT_OUTER_CELL_MARGIN_BAND (table-compatibility.ts): an AutoFit
   // grid can include outer §17.4.42 cell margins beyond the text band. For a
   // preferred-width table, only the margin overhang already represented by
@@ -422,9 +428,9 @@ export function decideLogicalTable(
   let spacingGeometry: SpacingGeometry | null = spacingPt > 0 && uniformBorderPt !== null
     && singleTable && commonFrame && commonGrid
     // The preferred-sized form is also in scope nested in a body table cell
-    // and, unindented, in a multi-column section.
+    // and in a multi-column section.
     && (topLevelBody || (preferredSized && environment.story === 'body' && environment.tableCellDepth === 1))
-    && (environment.singleColumn || (preferredSized && origin.tableIndentPt === 0))
+    && (environment.singleColumn || preferredSized)
     // The upright block table of a vertical section is measured for fixed
     // and preferred-sized tables only.
     && (!environment.inTableCell || preferredSized) && (!vertical || (environment.uprightTable === true && !contentSized))
