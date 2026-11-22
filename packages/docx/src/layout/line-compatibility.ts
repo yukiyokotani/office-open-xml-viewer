@@ -1819,8 +1819,10 @@ export function wordLatinDesignGridSingleHeight(natural: number, pitch: number, 
   // The admitted face controls only its own whole-cell reserve. Other fonts,
   // inline objects and baseline displacements still own their natural extent
   // (§17.3.1.33); admission of one run must not shrink any peer's line box.
-  return Math.max(natural, admittedDesign > 0
-    ? wholeGridCells(admittedDesign, pitch) * pitch : pitch);
+  const cellsPt = admittedDesign > 0 ? wholeGridCells(admittedDesign, pitch) * pitch : pitch;
+  // A natural extent within the cell tolerance of the whole cells is that
+  // allocation (the design height itself carries the same binary rounding).
+  return natural > cellsPt && wholeGridCells(natural, pitch) * pitch > cellsPt ? natural : cellsPt;
 }
 
 export const WORD_SPECIFIED_TEXT_LINE_BOX = defineCompatibilityRule({

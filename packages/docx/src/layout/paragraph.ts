@@ -4070,10 +4070,11 @@ function planMeasuredLines(
     // (`__lineExtraAbove` below, else the centred box); only their
     // inline-picture lines retain WORD_INLINE_OBJECT_EXACT_LINE.
     // Inline charts and math keep their established placement in the line
-    // (WORD_INLINE_OBJECT_EXACT_LINE library scope).
+    // (WORD_INLINE_OBJECT_EXACT_LINE library scope) unless the line also holds
+    // a picture or shape of that rule, which then owns its baseline.
     const establishedObjectLine = raw.segments.some((segment) => 'math' in segment
       || ('imagePath' in segment && !segment.anchor && segment.chart != null));
-    const exactBaselinePt = (exactWordLineBoxes || exactObjectClass) && !establishedObjectLine
+    const exactBaselinePt = exactObjectClass || (exactWordLineBoxes && !establishedObjectLine)
       ? wordExactLineBaselineOffsetPt(context.lineSpacing) : undefined;
     // In a vertical section the upright object hangs from the exact line's
     // top instead of standing on its baseline.

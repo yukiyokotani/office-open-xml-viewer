@@ -939,6 +939,13 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt - 3, 6);
     });
 
+    it('keeps the picture rule for an exact line that also holds a chart', () => {
+      const chart = { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } } as unknown as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([picture(30, -5, 'drawingml'), chart], 1, { exactPt: 24 });
+      const line = node.lines[0]!;
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 19.2, 10);
+    });
+
     it('hangs an upright picture from the exact line top in a vertical section (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
       for (const [heightPt, positionPt] of [[30, -5], [16, 5], [30, 0]] as const) {
         const node = measureInlineParagraph([picture(heightPt, positionPt, 'drawingml')], 1,

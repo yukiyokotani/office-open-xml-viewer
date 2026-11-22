@@ -546,8 +546,10 @@ describe('native reference font vertical layout', () => {
     };
     // A single line exactly one pitch high takes one cell despite binary
     // rounding (25pt x 1.362 = 34.050000000000004), on both grid paths.
-    expect(height('Noto Sans', 25, 34.05)).toBeCloseTo(34.05, 9);
-    expect(height('Noto Sans', 25, 34.05, true, undefined, true)).toBeCloseTo(34.05, 9);
+    // Exactly one pitch: the unrounded design height must not survive, or a
+    // page of such marks overflows by a rounding residue.
+    expect(height('Noto Sans', 25, 34.05)).toBe(34.05);
+    expect(height('Noto Sans', 25, 34.05, true, undefined, true)).toBe(34.05);
     // Only automatic single spacing counts design cells: an inherited atLeast
     // minimum keeps the natural line (24pt Calibri, 1.2207 em, 18pt pitch).
     expect(height('Calibri', 24, 18, true, { rule: 'atLeast', value: 10, explicit: false }))
