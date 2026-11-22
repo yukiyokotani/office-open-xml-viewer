@@ -67,9 +67,14 @@ export function buildSectionedNoteNumbers(
   const formats = new Map<string, string>();
   if (!notes) return { values, formats };
   const available = new Set(notes.map((note) => note.id));
-  let previous: number | undefined;
+  // WORD_EACH_PAGE_NOTE_NUMBERING: one running count advances for every
+  // automatic note and numbers notes of continuous sections; it restarts at
+  // numStart at the first note and where an eachSect section begins. A note
+  // of an eachPage section is numbered by its place among the eachPage notes
+  // on its page (1, 2, …), whatever their sections and numStart.
+  let counter: number | undefined;
   let previousSection = -1;
-  let previousPage: number | undefined;
+  const pageCounts = new Map<number, number>();
   let sectionIndex = 0;
   const visitRuns = (runs: Extract<NoteReferenceSourceBlock, { runs: unknown }>['runs']) => {
     for (const run of runs) {
@@ -80,19 +85,17 @@ export function buildSectionedNoteNumbers(
         continue;
       }
       const rule = ruleFor(sectionIndex);
-      const page = referencePage?.(ref.id);
-      const restart = previous === undefined
-        || (rule.restart === 'eachSect' && sectionIndex !== previousSection)
-        // An eachPage section also restarts where it begins, even on a page
-        // it shares with the previous section (word-section-note-numbering).
-        || (rule.restart === 'eachPage' && (sectionIndex !== previousSection
-          || (page !== undefined && page !== previousPage)));
-      const value = restart ? rule.start : previous! + 1;
+      counter = counter === undefined || (rule.restart === 'eachSect' && sectionIndex !== previousSection)
+        ? rule.start : counter + 1;
+      const page = rule.restart === 'eachPage' ? referencePage?.(ref.id) : undefined;
+      let value = counter;
+      if (page !== undefined) {
+        value = (pageCounts.get(page) ?? 0) + 1;
+        pageCounts.set(page, value);
+      }
       values.set(ref.id, value);
       formats.set(ref.id, rule.format);
-      previous = value;
       previousSection = sectionIndex;
-      previousPage = page;
     }
   };
   const visit = (blocks: readonly NoteReferenceSourceBlock[], topLevel: boolean) => {

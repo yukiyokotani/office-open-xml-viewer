@@ -243,9 +243,26 @@ describe('numRestart eachPage (pagination fixed point)', () => {
     ]);
   });
 
-  it('restarts at numStart in the section format', () => {
+  it('numbers each page from 1 in the section format, whatever numStart (word-each-page-note-numbering)', () => {
     expect(pagedLabels(pagedControl('', `<w:numFmt w:val="lowerRoman"/><w:numStart w:val="3"/>${eachPage}`))
-      .map((page) => page.body)).toEqual([['iii', 'iv'], ['iii', 'iv'], ['iii', 'iv']]);
+      .map((page) => page.body)).toEqual([['i', 'ii'], ['i', 'ii'], ['i', 'ii']]);
+    expect(pagedLabels(pagedControl('', `<w:numFmt w:val="upperLetter"/><w:numStart w:val="0"/>${eachPage}`))
+      .map((page) => page.body)).toEqual([['A', 'B'], ['A', 'B'], ['A', 'B']]);
+  });
+
+  it.each([
+    // Two eachPage sections share page 2: their page count goes on.
+    ['eachPage then eachPage', eachPage, eachPage, [['1', '2'], ['1', '2', '3'], ['1']]],
+    // numStart does not number eachPage notes.
+    ['eachPage (numStart 5) then eachPage', `<w:numStart w:val="5"/>${eachPage}`, eachPage, [['1', '2'], ['1', '2', '3'], ['1']]],
+    // A continuous section goes on with the count of all earlier notes.
+    ['eachPage then continuous', eachPage, '', [['1', '2'], ['1', '4', '5'], ['6']]],
+  ] as const)('numbers %s sections sharing a page', (_name, first, second, expected) => {
+    const body = referenceParagraph(1) + referenceParagraph(2, true) + referenceParagraph(3)
+      + `<w:p><w:pPr>${sectPr(first)}</w:pPr></w:p>`
+      + referenceParagraph(4) + referenceParagraph(5, true) + referenceParagraph(6)
+      + sectPr(second, 'continuous');
+    expect(pagedLabels(footnotePackage(body)).map((page) => page.body)).toEqual(expected);
   });
 
   it('ignores a document-wide eachPage in settings.xml (word-section-note-numbering)', () => {

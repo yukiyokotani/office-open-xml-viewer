@@ -18,6 +18,18 @@ export const WORD_SECTION_NOTE_NUMBERING = defineCompatibilityRule({
   description: 'ECMA-376 §17.11.4/§17.11.12 make settings.xml footnotePr/endnotePr the document-wide note properties that a section without its own §17.11.5/§17.11.11 properties uses. Word numbers notes from the section properties alone: a document-wide numFmt, numStart or numRestart in settings.xml changes no note number, and a section without its own properties takes the defaults (decimal footnotes, lowerRoman endnotes, start 1, continuous). Evidence: Windows Word 16.0.20625 PDF exports with settings.xml footnotePr upperLetter + numStart 0 + numRestart eachPage (footnotes numbered 1-6 continuously), settings.xml numRestart eachPage alone (1-6), settings.xml endnotePr numFmt bullet (i, ii, iii), while the same numRestart eachPage on the sectPr restarts footnotes on every page.',
 });
 
+export const WORD_EACH_PAGE_NOTE_NUMBERING = defineCompatibilityRule({
+  id: 'word-each-page-note-numbering',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'each-page-note-numbering',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.11.19 restarts eachPage numbering at numStart on every page without saying how pages shared by sections, numStart and continuous neighbours combine. Word numbers a footnote of an eachPage section by its place among the eachPage footnotes on its page (1, 2, …) in the section format: numStart is not used (numStart 0 with upperLetter gives A, B; numStart 5 gives 1, 2), and two eachPage sections sharing a page count on across the section break (1, 2, 3). A running count advances for every automatic footnote and numbers the footnotes of continuous sections, so a continuous section after an eachPage one goes on with the count of all earlier footnotes (1, 2 | 1, 4, 5 | 6), and an eachPage section after a continuous one on a shared page starts at 1 (1, 2 | 3, 1, 2 | 1). eachSect restarts the count at its section start. Continued notes and custom marks take no place. Evidence: Windows Word 16.0.20625 PDF exports, 10 controls (two references per page over three pages, numStart 0 with upperLetter, a note continued onto the next page, references moved to the next page by their notes, a custom mark, eachPage/eachPage, eachPage/continuous, continuous/eachPage and numStart 5/1 sections sharing a page, eachSect sharing a page).',
+});
+
 export const WORD_NOTE_NUMBER_FORMAT_DEFAULTS = defineCompatibilityRule({
   id: 'word-note-number-format-defaults',
   evidence: {
