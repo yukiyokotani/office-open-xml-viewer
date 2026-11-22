@@ -102,6 +102,12 @@ The exporting machine must have the corpus fonts installed (Noto Sans, Noto
 Sans JP, Noto Sans Arabic, Noto Sans Hebrew), except for the Office font
 specimen, which tests substitution by design.
 
+Word for Windows does not embed Noto Sans JP in its PDFs: the East Asian text
+of every `.win.pdf` is embedded as a substitute font named "Calibri", so its
+glyph widths and positions are not Word's. Its line positions and Latin text
+are. Compare East Asian glyph positions against the `.mac.pdf`, which embeds
+Noto Sans JP.
+
 ## Authoring
 
 The rules every specimen follows (grid, type, font, colour, text, minimal
