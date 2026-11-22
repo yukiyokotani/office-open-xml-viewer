@@ -73,6 +73,11 @@ export interface InternalRunTypographyWire {
       italic: boolean;
       color: string | null;
       language: string | null;
+      /** The run's own script controls (absent from older wires):
+       * §17.3.2.26 rFonts@hint, §17.3.2.30 rtl, §17.3.2.7 cs. */
+      fontHint?: string | null;
+      rtl?: boolean;
+      cs?: boolean;
     }>[];
   }>;
   readonly revision?: Readonly<{

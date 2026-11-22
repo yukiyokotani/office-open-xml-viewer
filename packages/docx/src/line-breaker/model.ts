@@ -58,6 +58,10 @@ export interface RubyGuideRunFace {
   }>;
   readonly bold: boolean;
   readonly italic: boolean;
+  /** The run's own script controls, which select among its slots: complex
+   * script (§17.3.2.30 rtl or §17.3.2.7 cs) and §17.3.2.26 rFonts@hint. */
+  readonly complexScript: boolean;
+  readonly fontHint?: 'default' | 'eastAsia' | 'cs';
 }
 
 /** One placed unit of a ruby guide (WORD_RUBY_ALIGN_PLACEMENT): a grapheme,
@@ -109,6 +113,11 @@ export interface RubyCellGeometry {
   readonly headPx: number;
   /** The guide units are planned as a vertical run. */
   readonly vertical: boolean;
+}
+
+/** Consecutive segments placed on one line as one unit. */
+export interface PlacedUnit {
+  readonly members: readonly LayoutTextSeg[];
 }
 
 /** A ruby-annotated source run: every emitted piece shares this object. */
@@ -344,6 +353,12 @@ export interface LayoutTextSeg extends LayoutSegSource {
   rubyGroup?: RubyGroup;
   /** This piece's index in {@link rubyGroup}'s pieces. */
   rubyPieceIndex?: number;
+  /** The unit this segment is placed with whole (ruby-cell.ts placedUnitOf):
+   * its ruby cell together with every fitText region (§17.3.2.14) that
+   * shares a segment with it. Formed per pass by prepareBreakQueue. */
+  placedUnit?: PlacedUnit;
+  /** This segment's index in {@link placedUnit}'s members. */
+  placedUnitIndex?: number;
   /** Track-changes revision attached to this run (insertion / deletion /
    *  moveFrom / moveTo). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };

@@ -1,8 +1,8 @@
 import { candidateUnitIsSingleton } from './line-gaps.js';
 import { advanceLineBoundary } from './source-cursor.js';
 import { isInklessLineItem } from './break-queue.js';
-import { rubyCellOf } from './ruby-cell.js';
-import { queueRetraction } from './kinsoku.js';
+import { placedUnitOf } from './ruby-cell.js';
+import { completesLineCluster, queueRetraction } from './kinsoku.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix, rtlLineEndSpaceInside } from './optional-hyphens.js';
 import {
@@ -291,15 +291,25 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const h = segmentBox.height;
   const asc = segmentBox.ascent;
   const desc = segmentBox.descent;
+  // UAX #29: marks in a run of their own complete the cluster of the line's
+  // last character. They are placed with it, before any unit after them is
+  // judged, and never start a line.
+  if (placedUnitOf(s) === undefined && s.fitTextRegionIndex === undefined
+    && completesLineCluster(breakerState.currentLine, s)) {
+    s.measuredWidth = w;
+    addToLine(s, w, h, asc, desc);
+    return;
+  }
   const paragraphFinalIdeographicSpaceTail = s.paragraphFinalIdeographicSpaceTail === true;
   const paragraphFinalIdeographicSpaceCount = s.paragraphFinalIdeographicSpaceCount ?? 0;
   const paragraphFinalIdeographicSpaceLocalCount = s.paragraphFinalIdeographicSpaceLocalCount ?? 0;
   const visibleBeforeParagraphFinalTail = paragraphFinalIdeographicSpaceTail
     ? s.text.slice(0, Math.max(0, s.text.length - paragraphFinalIdeographicSpaceLocalCount))
     : s.text;
-  // A ruby cell (WORD_RUBY_ALIGN_PLACEMENT) is never cut: every path below
-  // that splits, hangs or admits a segment by itself defers to placeRubyCell.
-  const rubyCell = s.rubyGroup !== undefined;
+  // A ruby cell's unit (WORD_RUBY_ALIGN_PLACEMENT, placedUnitOf) is never
+  // cut: every path below that splits, hangs or admits a segment by itself
+  // defers to placeRubyCell.
+  const rubyCell = placedUnitOf(s) !== undefined;
   if (
     !rubyCell &&
     paragraphFinalIdeographicSpaceTail &&
@@ -1395,7 +1405,7 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     wForFit,
     admitsTrailingOverflowPunctuation,
   } = frame;
-  if (rubyCellOf(s)) {
+  if (placedUnitOf(s)) {
     placeRubyCell(context, frame);
     return;
   }
@@ -1614,7 +1624,8 @@ function endLineBefore(context: BreakOpportunityIteratorContext, s: LayoutTextSe
 }
 
 /** WORD_RUBY_ALIGN_PLACEMENT: a ruby cell (every piece of one ruby run, its
- * widening included) is one indivisible unit, admitted by its whole advance,
+ * widening included, with any fitText region it shares a segment with:
+ * placedUnitOf) is one indivisible unit, admitted by its whole advance,
  * so none of the CJK, SEA, hanging-punctuation or emergency split paths may
  * cut its base or charge less than its advance. A cell that does not fit
  * after content moves whole to a fresh line; on a line it would start, or
@@ -1622,13 +1633,13 @@ function endLineBefore(context: BreakOpportunityIteratorContext, s: LayoutTextSe
 function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitFrame): void {
   const { breakerState, flush, addToLine, availW, fitsMeasuredWidth } = context;
   const { s, w, h, asc, desc, wForFit } = frame;
-  const group = rubyCellOf(s)!;
+  const unit = placedUnitOf(s)!;
   const admit = () => {
     s.measuredWidth = w;
     addToLine(s, w, h, asc, desc);
   };
-  if ((s.rubyPieceIndex ?? 0) > 0) {
-    // A later piece never starts a line: its cell's first piece is placed.
+  if ((s.placedUnitIndex ?? 0) > 0) {
+    // A later member never starts a line: its unit's first member is placed.
     if (!fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW())) {
       const unitStart = joinedUnitStart(breakerState.currentLine);
       context.forcedPlacement(lineAdvanceFrom(breakerState.currentLine, unitStart) + wForFit, unitStart);
@@ -1636,11 +1647,11 @@ function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitF
     admit();
     return;
   }
-  // The first piece is admitted by the whole cell, its later pieces with
+  // The first member is admitted by the whole unit, its later members with
   // it, each allocated as placement will allocate it (prospectiveCellAdvance).
   const followers: LayoutTextSeg[] = [];
   for (const follower of breakerState.queue) {
-    if (!('text' in follower) || rubyCellOf(follower) !== group) break;
+    if (!('text' in follower) || placedUnitOf(follower) !== unit) break;
     followers.push(follower);
   }
   const unitWidth = context.prospectiveCellAdvance([
@@ -1724,7 +1735,7 @@ function prepareAtomicTextFit(
   if (
     !s.joinPrev &&
     // A ruby cell is admitted whole by placeRubyCell.
-    s.rubyGroup === undefined &&
+    placedUnitOf(s) === undefined &&
     !listLabelOnlyLine &&
     breakerState.currentLine.length > 0 &&
     (follower?.joinPrev || preferWholeWord && follower?.explicitBreakBefore) &&

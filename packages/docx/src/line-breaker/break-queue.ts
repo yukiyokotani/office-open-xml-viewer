@@ -185,6 +185,49 @@ export function prepareBreakQueue(
     });
   }
 
+  // The units placed whole (placedUnitOf): consecutive text segments chained
+  // by a shared ruby cell or a shared fitText region, when the chain holds a
+  // ruby cell.
+  let chain: LayoutTextSeg[] = [];
+  let cells = new Set<RubyGroup>();
+  let regions = new Set<number>();
+  const close = () => {
+    const members = chain;
+    if (cells.size > 0) {
+      const unit = { members };
+      members.forEach((member, index) => {
+        member.placedUnit = unit;
+        member.placedUnitIndex = index;
+      });
+    } else {
+      for (const member of members) {
+        member.placedUnit = undefined;
+        member.placedUnitIndex = undefined;
+      }
+    }
+    chain = [];
+    cells = new Set();
+    regions = new Set();
+  };
+  for (const segment of queue) {
+    if (!('text' in segment)) {
+      close();
+      continue;
+    }
+    const cell = rubyCellOf(segment);
+    const region = segment.fitTextRegionIndex;
+    if (chain.length > 0 && !((cell && cells.has(cell)) || (region !== undefined && regions.has(region)))) close();
+    if (!cell && region === undefined) {
+      segment.placedUnit = undefined;
+      segment.placedUnitIndex = undefined;
+      continue;
+    }
+    chain.push(segment);
+    if (cell) cells.add(cell);
+    if (region !== undefined) regions.add(region);
+  }
+  close();
+
   return queue;
 }
 

@@ -7,12 +7,21 @@ import {
   wordRubyBaseOffset,
   wordRubyGuideSpacing,
 } from '../layout/line-compatibility.js';
-import type { LayoutTextSeg, RubyCellGeometry, RubyGroup, RubyGuideRunFace, RubyGuideUnit } from './model.js';
+import type { LayoutTextSeg, PlacedUnit, RubyCellGeometry, RubyGroup, RubyGuideRunFace, RubyGuideUnit } from './model.js';
 
 /** WORD_RUBY_ALIGN_PLACEMENT: the ruby cell a segment is a piece of. Every
  * piece of a ruby run carries its cell, and this is the one test of it. */
 export function rubyCellOf(segment: Pick<LayoutTextSeg, 'rubyGroup'>): RubyGroup | undefined {
   return segment.rubyGroup;
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT, §17.3.2.14: the unit a segment is admitted,
+ * kept and taken back with. A ruby cell and a fitText region are each
+ * indivisible, so where they share a segment neither can leave the other:
+ * the unit is their union. Undefined for a segment outside any ruby cell's
+ * unit (a fitText region without ruby keeps its own admission). */
+export function placedUnitOf(segment: Pick<LayoutTextSeg, 'placedUnit'>): PlacedUnit | undefined {
+  return segment.placedUnit;
 }
 
 /** Scripts whose letters join cursively: a guide run of them is one unit,
@@ -189,7 +198,6 @@ type GuideShape = NonNullable<ReturnType<NonNullable<LayoutTextSeg['textLayoutSe
 
 const FONT_SLOTS = ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const;
 type FontSlot = typeof FONT_SLOTS[number];
-type SlotFonts = Readonly<Record<FontSlot, string | null | undefined>>;
 
 /** Guide runs shaped as one text: the font each rFonts slot takes among the
  * runs whose characters use that slot, and the one face they all select. */
@@ -200,6 +208,8 @@ interface GuideSpan {
   readonly face: string | undefined;
   readonly bold: boolean;
   readonly italic: boolean;
+  readonly complexScript: boolean;
+  readonly fontHint: RubyGuideRunFace['fontHint'];
   readonly fonts: Record<FontSlot, string | null | undefined>;
   readonly used: Set<FontSlot>;
 }
@@ -224,13 +234,15 @@ function guideShapes(
   const service = first.textLayoutService;
   const request = first.textShapeRequest;
   if (!service || !request) return undefined;
-  const shapeText = (text: string, face?: Readonly<{ fonts: SlotFonts; bold: boolean; italic: boolean }>): GuideShape =>
+  const shapeText = (text: string, face?: Pick<GuideSpan, 'fonts' | 'bold' | 'italic' | 'complexScript' | 'fontHint'>): GuideShape =>
     service.shape({
       ...independentTextShapeRequest(request, text),
-      // The guide run's faces are resolved, theme references included.
+      // The guide run's faces are resolved, theme references included, and
+      // its slots are selected by its own script controls, not the base's.
       ...(face ? {
         fonts: face.fonts, themeFonts: undefined, themeFontPresence: undefined,
         weight: face.bold ? 700 : 400, style: face.italic ? 'italic' as const : 'normal' as const,
+        complexScript: face.complexScript, fontHint: face.fontHint,
       } : {}),
       fontSizePt: sizePx,
       measure: true,
@@ -249,12 +261,14 @@ function guideShapes(
   let start = 0;
   for (const run of ruby.guideRuns) {
     const fonts = Object.fromEntries(FONT_SLOTS.map((slot) => [slot, run.fonts[slot] ?? request.fonts[slot]])) as GuideSpan['fonts'];
-    const shape = shapeText(run.text, { fonts, bold: run.bold, italic: run.italic });
+    const controls = { bold: run.bold, italic: run.italic, complexScript: run.complexScript, fontHint: run.fontHint };
+    const shape = shapeText(run.text, { fonts, ...controls });
     const face = faceOf(shape);
     const used = slotsOf(shape);
     const previous = spans.at(-1);
     if (previous && face !== undefined && previous.face === face
       && previous.bold === run.bold && previous.italic === run.italic
+      && previous.complexScript === run.complexScript && previous.fontHint === run.fontHint
       && [...used].every((slot) => !previous.used.has(slot) || previous.fonts[slot] === fonts[slot])) {
       previous.texts.push(run.text);
       previous.shapes.push(shape);
@@ -263,7 +277,7 @@ function guideShapes(
         previous.used.add(slot);
       }
     } else {
-      spans.push({ start, texts: [run.text], shapes: [shape], face, bold: run.bold, italic: run.italic, fonts, used });
+      spans.push({ start, texts: [run.text], shapes: [shape], face, ...controls, fonts, used });
     }
     start += run.text.length;
   }
@@ -282,6 +296,17 @@ function guideShapes(
       return entry;
     });
   });
+}
+
+/** Nonspacing and enclosing marks (variation selectors among them), which a
+ * vertical guide paints with their base. */
+const CLUSTER_MARK_RE = /[\p{Mn}\p{Me}]/u;
+
+/** `text` without the marks that follow a base. */
+function withoutClusterMarks(text: string): string {
+  let out = '';
+  for (const char of text) if (out === '' || !CLUSTER_MARK_RE.test(char)) out += char;
+  return out;
 }
 
 /** A vertical guide is planned, and so painted, without kerning. */
@@ -307,9 +332,14 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   }
   // Each font span (its rFonts slot) is planned in its own face.
   let spanPenPx = 0;
+  // A combining mark or variation selector takes no cell of its own: the
+  // guide is planned by its cluster bases, and each mark is painted with the
+  // cell of its base, in the base's face, whichever font span or run holds it.
+  const clusterStarts = vertical ? new Set([0, ...graphemeClusterOffsets(ruby.text)]) : undefined;
+  let lastCell: { cell: { range: { start: number; end: number }; text: string } } | undefined;
   const cells = vertical && shapes ? shapes.flatMap(({ shape, start }) => shape.spans.flatMap((span): SpanGuideCell[] => {
     const plan = (part: string) => service!.planRun({
-      text: part,
+      text: withoutClusterMarks(part),
       font: canvasFontString(span.fontRoute, sizePx, span.font.weight, span.font.style),
       fontKerning: GUIDE_PLAN_KERNING,
       fontSizePt: sizePx,
@@ -322,15 +352,43 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     const face = { fontRoute: span.fontRoute, fontWeight: span.font.weight, fontStyle: span.font.style };
     const originPx = spanPenPx;
     const spanStart = start + span.start;
-    const planned = plan(span.text).map((cell): SpanGuideCell => ({
-      cell: {
-        ...cell,
-        range: { start: spanStart + cell.range.start, end: spanStart + cell.range.end },
-        originPt: originPx + cell.originPt,
-      },
-      face,
-      advanceOf,
-    }));
+    // The span's cluster bases, and where each UTF-16 unit of them lies in
+    // the guide.
+    let bases = '';
+    const offsets: number[] = [];
+    for (let offset = 0; offset < span.text.length;) {
+      const char = String.fromCodePoint(span.text.codePointAt(offset)!);
+      if (clusterStarts!.has(spanStart + offset) || !CLUSTER_MARK_RE.test(char) || (bases === '' && !lastCell)) {
+        for (let unit = 0; unit < char.length; unit += 1) offsets.push(spanStart + offset + unit);
+        bases += char;
+      }
+      offset += char.length;
+    }
+    const spanEnd = spanStart + span.text.length;
+    // Marks that open the span belong to the cell before it.
+    const firstBase = offsets[0] ?? spanEnd;
+    if (lastCell && firstBase > spanStart) {
+      lastCell.cell.range.end = firstBase;
+      lastCell.cell.text = ruby.text.slice(lastCell.cell.range.start, firstBase);
+    }
+    const planned = (bases === '' ? [] : service!.planRun({
+      text: bases,
+      font: canvasFontString(span.fontRoute, sizePx, span.font.weight, span.font.style),
+      fontKerning: GUIDE_PLAN_KERNING,
+      fontSizePt: sizePx,
+      letterSpacingPt: 0,
+      charScale: 1,
+      growTrRotateInk: false,
+      writingMode: 'vertical-rl',
+    })).map((cell): SpanGuideCell => {
+      const range = { start: offsets[cell.range.start]!, end: offsets[cell.range.end] ?? spanEnd };
+      return {
+        cell: { ...cell, range, text: ruby.text.slice(range.start, range.end), originPt: originPx + cell.originPt },
+        face,
+        advanceOf,
+      };
+    });
+    lastCell = planned.at(-1) ?? lastCell;
     spanPenPx += planned.reduce((sum, { cell }) => sum + cell.advancePt, 0);
     return planned;
   })) : undefined;
@@ -386,16 +444,25 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   return cell;
 }
 
+/** The pieces of the cell that stand first and last on the line. A base of
+ * right-to-left runs places its later pieces before its earlier ones, so
+ * its last piece in source order leads the cell. */
+function edgePieces(group: RubyGroup): Readonly<{ leading: number; trailing: number }> {
+  const last = group.pieces.length - 1;
+  return last > 0 && group.pieces.every((piece) => piece.rtl === true)
+    ? { leading: last, trailing: 0 } : { leading: 0, trailing: last };
+}
+
 /** The share of the cell's widening this piece advances by: the base offset
- * before the first piece, the rest after the last. */
+ * before the piece that leads the cell on the line, the rest after the piece
+ * that ends it, so the widening lies around the base and never inside it. */
 export function rubyPieceWideningPx(s: LayoutTextSeg, cell: RubyCellGeometry | undefined): number {
   const group = s.rubyGroup;
   if (!group || !cell) return 0;
   const index = s.rubyPieceIndex ?? 0;
-  const isFirst = index === 0;
-  const isLast = index === group.pieces.length - 1;
-  return (isFirst ? cell.baseOffsetPx : 0)
-    + (isLast ? cell.advancePx - cell.basePx - cell.baseOffsetPx : 0);
+  const { leading, trailing } = edgePieces(group);
+  return (index === leading ? cell.baseOffsetPx : 0)
+    + (index === trailing ? cell.advancePx - cell.basePx - cell.baseOffsetPx : 0);
 }
 
 /** WORD_RUBY_ALIGN_PLACEMENT: the paint origins of the guide units of the
@@ -420,7 +487,9 @@ export function rubyGuideOriginsPx(pieces: readonly LayoutTextSeg[], cell: RubyC
   return cell.units.map((unit, index) => startPx + spacing.leadPt + unit.penPx + index * spacing.gapPt);
 }
 
-/** The base's offset inside its cell, applied to the first piece's glyphs. */
+/** The base's offset inside its cell, applied to the glyphs of the piece
+ * that leads the cell on the line. */
 export function rubyBaseOffsetPx(s: LayoutTextSeg): number {
-  return s.ruby !== undefined ? s.rubyGroup?.cell?.baseOffsetPx ?? 0 : 0;
+  const group = s.rubyGroup;
+  return group && (s.rubyPieceIndex ?? 0) === edgePieces(group).leading ? group.cell?.baseOffsetPx ?? 0 : 0;
 }

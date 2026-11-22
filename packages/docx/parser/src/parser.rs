@@ -637,6 +637,36 @@ mod private_typography_wire_tests {
         assert_eq!(ruby["guideRuns"][0]["bold"], true);
         assert_eq!(ruby["guideRuns"][0]["italic"], true);
         assert_eq!(ruby["guideRuns"][0]["color"], "112233");
+        assert_eq!(ruby["guideRuns"][0]["rtl"], false);
+        assert_eq!(ruby["guideRuns"][0]["cs"], false);
+        assert!(ruby["guideRuns"][0]["fontHint"].is_null());
+    }
+
+    #[test]
+    fn ruby_guide_runs_keep_their_own_script_controls() {
+        // The run holding the ruby is right-to-left; each w:rt run has its own
+        // rtl, cs and rFonts hint.
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:rPr><w:rtl/></w:rPr><w:ruby>
+              <w:rubyPr><w:hps w:val="12"/></w:rubyPr>
+              <w:rt>
+                <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>か</w:t></w:r>
+                <w:r><w:rPr><w:rtl/></w:rPr><w:t>س</w:t></w:r>
+                <w:r><w:rPr><w:cs/></w:rPr><w:t>ل</w:t></w:r>
+              </w:rt>
+              <w:rubyBase><w:r><w:rPr><w:rtl/></w:rPr><w:t>אב</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r>"#,
+            &styles,
+        );
+        let runs = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["ruby"]["guideRuns"];
+        assert_eq!(runs[0]["rtl"], false);
+        assert_eq!(runs[0]["cs"], false);
+        assert_eq!(runs[0]["fontHint"], "eastAsia");
+        assert_eq!(runs[1]["rtl"], true);
+        assert_eq!(runs[1]["cs"], false);
+        assert_eq!(runs[2]["rtl"], false);
+        assert_eq!(runs[2]["cs"], true);
     }
 
     #[test]
@@ -7903,15 +7933,24 @@ fn ruby_typography_wire(
                 return None;
             }
             let mut fmt = base_fmt.clone();
+            // The script controls that select among the guide run's rFonts
+            // slots (§17.3.2.26 hint, §17.3.2.30 rtl, §17.3.2.7 cs) are the
+            // guide run's own: a w:rt run is not text of the run that holds
+            // the ruby, whose direction and script belong to the base.
+            let mut own = RunFmt::default();
             let rpr = child_w(run, "rPr");
             if let Some(style_id) = rpr
                 .and_then(|properties| child_w(properties, "rStyle"))
                 .and_then(|style| attr_w(style, "val"))
             {
-                apply_direct_run(&mut fmt, &style_map.resolve_run_style(&style_id));
+                let style = style_map.resolve_run_style(&style_id);
+                apply_direct_run(&mut fmt, &style);
+                apply_direct_run(&mut own, &style);
             }
             if let Some(properties) = rpr {
-                apply_direct_run(&mut fmt, &parse_run_fmt(properties));
+                let direct = parse_run_fmt(properties);
+                apply_direct_run(&mut fmt, &direct);
+                apply_direct_run(&mut own, &direct);
             }
             let language = rpr
                 .and_then(|properties| child_w(properties, "lang"))
@@ -7934,6 +7973,9 @@ fn ruby_typography_wire(
                 italic: fmt.italic.unwrap_or(false),
                 color: fmt.color.clone(),
                 language,
+                font_hint: own.font_hint.clone(),
+                rtl: own.rtl.unwrap_or(false),
+                cs: own.cs_toggle.unwrap_or(false),
             })
         })
         .collect();

@@ -2967,6 +2967,11 @@ pub struct RubyGuideRunTypographyWire {
     pub italic: bool,
     pub color: Option<String>,
     pub language: Option<String>,
+    /// The guide run's own script controls, which select among its rFonts
+    /// slots: §17.3.2.26 rFonts@hint, §17.3.2.30 rtl and §17.3.2.7 cs.
+    pub font_hint: Option<String>,
+    pub rtl: bool,
+    pub cs: bool,
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]

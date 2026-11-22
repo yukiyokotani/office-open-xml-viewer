@@ -533,6 +533,11 @@ impl Total {
             self.option_string(&run.font_family)?;
             self.option_string(&run.color)?;
             self.option_string(&run.language)?;
+            self.option_string(&run.fonts.ascii)?;
+            self.option_string(&run.fonts.high_ansi)?;
+            self.option_string(&run.fonts.east_asia)?;
+            self.option_string(&run.fonts.complex_script)?;
+            self.option_string(&run.font_hint)?;
         }
         Ok(())
     }

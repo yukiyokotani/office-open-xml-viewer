@@ -1,6 +1,6 @@
 import { advanceLineBoundary } from './source-cursor.js';
 import { retractLineItems } from './line-admission.js';
-import { rubyCellOf } from './ruby-cell.js';
+import { placedUnitOf } from './ruby-cell.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import { type LayoutImageSeg, type LayoutMathSeg, type LayoutTabSeg, type LayoutTextSeg } from './model.js';
@@ -90,16 +90,17 @@ function clusterStartBefore(item: LayoutTextSeg, offset: number): number {
 }
 
 /** Items the breaker never divides are one unit of the search each: a ruby
- * cell (WORD_RUBY_ALIGN_PLACEMENT), a fitText region (§17.3.2.14) and a
- * tate-chu-yoko cell (§17.3.2.10). */
+ * cell with the fitText regions it shares a segment with (placedUnitOf), a
+ * fitText region without ruby (§17.3.2.14) and a tate-chu-yoko cell
+ * (§17.3.2.10). */
 function sameUnit(left: LayoutTextSeg, right: LayoutTextSeg): boolean {
-  const cell = rubyCellOf(left);
-  if (cell || rubyCellOf(right)) return cell === rubyCellOf(right);
+  const unit = placedUnitOf(left);
+  if (unit || placedUnitOf(right)) return unit === placedUnitOf(right);
   return left.fitTextRegionIndex !== undefined && left.fitTextRegionIndex === right.fitTextRegionIndex;
 }
 
 function indivisible(item: LayoutTextSeg): boolean {
-  return rubyCellOf(item) !== undefined || item.fitTextRegionIndex !== undefined || item.tateChuYoko === true;
+  return placedUnitOf(item) !== undefined || item.fitTextRegionIndex !== undefined || item.tateChuYoko === true;
 }
 
 /** The boundary one unit before `point`: a grapheme cluster of ordinary
@@ -135,15 +136,50 @@ function codePointEndingAt(line: readonly LineItem[], point: LinePoint): number 
   return undefined;
 }
 
-/** The code point that would lead the next line broken at `point`, `next`
- * being the first code point after the line. */
-function codePointLeadingAt(line: readonly LineItem[], point: LinePoint, next: number | undefined): number | undefined {
+/** The grapheme cluster that would lead the next line broken at `point`,
+ * `next` being the text after the line. */
+function clusterLeadingAt(line: readonly LineItem[], point: LinePoint, next: string): string | undefined {
   for (let index = point.index, offset = point.offset; index < line.length; index += 1, offset = 0) {
     const item = line[index];
     if (!isText(item)) return undefined;
-    if (offset < item.text.length) return item.text.codePointAt(offset);
+    if (offset < item.text.length) {
+      const end = boundariesOf(item).find((bound) => bound > offset) ?? item.text.length;
+      return item.text.slice(offset, end);
+    }
   }
-  return next;
+  const end = graphemeClusterOffsets(next).find((bound) => bound > 0) ?? next.length;
+  return next.slice(0, end);
+}
+
+/** `segment` is nothing but the rest of the grapheme cluster that ends the
+ * line: marks or a variation selector in a run of their own (UAX #29). It
+ * belongs to the line's last character, not to the word after it. */
+export function completesLineCluster(line: readonly LineItem[], segment: LayoutTextSeg): boolean {
+  if (segment.text === '' || !/^\p{M}/u.test(segment.text)) return false;
+  for (let index = line.length - 1; index >= 0; index -= 1) {
+    const item = line[index];
+    if (!isText(item)) return false;
+    if (item.text.length === 0) continue;
+    const before = item.text.slice(clusterStartBefore(item, item.text.length));
+    return graphemeClusterOffsets(before + segment.text).length === 0;
+  }
+  return false;
+}
+
+/** A boundary between two items lies inside a grapheme cluster when the
+ * text after it continues the cluster before it: a variation selector or a
+ * combining mark in a run of its own stays with its base. Boundaries inside
+ * an item are that item's cluster boundaries already. */
+function splitsCluster(line: readonly LineItem[], point: LinePoint, lead: string | undefined): boolean {
+  if (point.offset > 0 || lead === undefined || lead === '') return false;
+  for (let index = point.index - 1; index >= 0; index -= 1) {
+    const item = line[index];
+    if (!isText(item)) return false;
+    if (item.text.length === 0) continue;
+    const before = item.text.slice(clusterStartBefore(item, item.text.length));
+    return !graphemeClusterOffsets(before + lead).includes(before.length);
+  }
+  return false;
 }
 
 const WHITESPACE_RE = /\s/u;
@@ -175,19 +211,25 @@ function contentBefore(line: readonly LineItem[], index: number): boolean {
 function lineRetractionPoint(
   breakerState: BreakerState,
   kinsoku: KinsokuRules,
-  next: number | undefined,
+  next: string,
   mustMove: boolean,
 ): RetractionPoint {
   const line = breakerState.currentLine;
   let point: LinePoint | undefined = { index: line.length, offset: 0 };
   if (mustMove) point = previousPoint(line, point);
   else {
+    // The line may end where it does unless that leaves a line-end-forbidden
+    // character there or cuts a grapheme cluster (the text after the line
+    // opens with a mark of the line's last character).
     const end = codePointEndingAt(line, point);
-    if (end === undefined || !kinsoku.lineEndForbidden.has(end)) return 'none';
+    if ((end === undefined || !kinsoku.lineEndForbidden.has(end))
+      && !splitsCluster(line, point, clusterLeadingAt(line, point, next))) return 'none';
   }
   for (; point && point.index >= breakerState.kinsokuBlockedLength; point = previousPoint(line, point)) {
-    const lead = codePointLeadingAt(line, point, next);
+    const leadCluster = clusterLeadingAt(line, point, next);
+    const lead = leadCluster?.codePointAt(0);
     const end = codePointEndingAt(line, point);
+    if (splitsCluster(line, point, leadCluster)) continue;
     if (lead !== undefined
       && (WHITESPACE_RE.test(String.fromCodePoint(lead)) || kinsoku.lineStartForbidden.has(lead))) continue;
     if (end !== undefined && kinsoku.lineEndForbidden.has(end)) continue;
@@ -205,8 +247,9 @@ function requeued(
   start: number,
   leadsLine: boolean,
 ): LayoutTextSeg {
-  // A ruby cell's pieces keep their identity: they are their cell's pieces.
-  if (rubyCellOf(item)) return item;
+  // A placed unit's members keep their identity: they are their unit's
+  // members and their cell's pieces.
+  if (placedUnitOf(item)) return item;
   const text = item.text.slice(start);
   const slice: LayoutTextSeg = {
     ...item,
@@ -296,26 +339,32 @@ export function retractLeadingKinsoku(context: KinsokuLine, next: LayoutTextSeg)
   if (firstCp === undefined || !kinsoku.lineStartForbidden.has(firstCp) || !isText(last)) {
     return { kind: 'none' };
   }
-  const point = kinsoku.enabled ? lineRetractionPoint(context.breakerState, kinsoku, firstCp, true) : 'none';
+  const point = kinsoku.enabled ? lineRetractionPoint(context.breakerState, kinsoku, next.text, true) : 'none';
   return retractAt(context, point);
 }
 
 /** §17.3.1.16: a line must not end with a line-end-forbidden character (an
- * opening bracket). When `next` moves to the next line, the line's forbidden
- * end (every consecutive opener, whichever runs they are of, or a ruby cell
- * ending in one) moves with it, provided `admits` the moved advance beside
- * the unit `next` leads on a line; otherwise the opener cannot be kept from
- * a line edge and stays. */
+ * opening bracket), and UAX #29: nor inside a grapheme cluster. When `next`
+ * moves to the next line, the line's forbidden end (every consecutive
+ * opener, whichever runs they are of, a ruby cell ending in one, or the
+ * character whose mark opens `next`) moves with it, provided `admits` the
+ * moved advance beside the unit `next` leads on a line; otherwise it cannot
+ * be kept from a line edge and stays. */
 export function retractLineEndForbidden(
   context: KinsokuLine,
   next: LayoutTextSeg,
   admits: (retractedAdvancePx: number) => boolean,
 ): CrossRunKinsokuRetraction {
   const { kinsoku } = context;
-  if (!kinsoku.enabled) return { kind: 'none' };
-  const point = lineRetractionPoint(context.breakerState, kinsoku, next.text.codePointAt(0), false);
+  const line = context.breakerState.currentLine;
+  const end = { index: line.length, offset: 0 };
+  // A mark is never parted from its base, whatever fits and whether or not
+  // kinsoku applies; an opener stays when the move does not fit.
+  const cutsCluster = splitsCluster(line, end, clusterLeadingAt(line, end, next.text));
+  if (!kinsoku.enabled && !cutsCluster) return { kind: 'none' };
+  const point = lineRetractionPoint(context.breakerState, kinsoku, next.text, false);
   if (typeof point === 'string') return { kind: 'none' };
-  if (!admits(retractedAdvance(context, point))) return { kind: 'none' };
+  if (!cutsCluster && !admits(retractedAdvance(context, point))) return { kind: 'none' };
   const retraction = retractLineFrom(context, point);
   return retraction.kind === 'retracted' ? retraction : { kind: 'none' };
 }

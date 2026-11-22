@@ -299,6 +299,11 @@ export function appendTextPiece(
         fonts: guideRun.fonts ?? {},
         bold: guideRun.bold,
         italic: guideRun.italic,
+        // §17.3.2.30 / §17.3.2.7: either makes the run complex script, as
+        // for a base run.
+        complexScript: guideRun.rtl === true || guideRun.cs === true,
+        ...(guideRun.fontHint === 'eastAsia' || guideRun.fontHint === 'cs' || guideRun.fontHint === 'default'
+          ? { fontHint: guideRun.fontHint as 'eastAsia' | 'cs' | 'default' } : {}),
       }))
     : undefined;
   const ruby = baseRuby
