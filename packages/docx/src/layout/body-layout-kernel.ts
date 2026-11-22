@@ -113,7 +113,6 @@ export interface AcquiredParagraphBlock {
   readonly blockExtentPt: number;
   readonly fragmentation: ParagraphFragmentation;
   readonly uniformRubyAdvancePt?: number;
-  readonly markBelowBaselinePt?: number;
   /** True when this mark's line box occupies a §17.6.5 document-grid cell. */
   readonly markOnLineGrid?: boolean;
   /** Grid-only leading below a mark's own natural/authored box. */

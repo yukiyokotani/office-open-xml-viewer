@@ -3156,7 +3156,6 @@ function* paginateBodyPassSteps(
             hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
             followsNextPageSectionBoundary,
             markExtentPt: acquired.blockExtentPt,
-            markBelowBaselinePt: acquired.markBelowBaselinePt ?? 0,
             markOnLineGrid: acquired.markOnLineGrid === true,
             markGridAfterLeadingPt: acquired.markGridAfterLeadingPt,
           });

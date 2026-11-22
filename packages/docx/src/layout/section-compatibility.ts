@@ -30,7 +30,7 @@ export const WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION = defineCompatibilityRu
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'At the unreserved physical body edge, Word admits an undecorated non-terminal empty paragraph mark by its baseline when later ink follows in the same flow and the mark does not occupy a document-grid line cell. Windows Word 16.0.20430 trr3 family D (272 controls: modes 14/15, lines/linesAndChars, 16.4pt pitch, 11pt MS Mincho, zero/one preceding empty mark) instead admits grid marks by their centered natural/authored content box: 15pt remaining moves, 15.5–16.35pt stays, and 16.4pt fully fits. The single-character counterexamples follow the existing plain-text content-box rule too. Grid-only trailing leading may overhang; the complete advance remains retained. Other fonts/pitches use the same resolved metrics, not a measured per-font allowance. Next-page section marks retain their separate blank-page suppression. Evidence: issue #981 / PR #989 and trr3 family D.',
+  description: 'At the unreserved physical body edge, an undecorated non-terminal empty paragraph mark off the document grid is admitted only when its whole line fits: Windows Word 16.0.20527 controls (compatibility mode 14 with useFELayout, Times New Roman 11pt marks with a 12.65pt single line, an ink paragraph following, with and without keepNext) keep the mark with 13.15pt left and move it to the next page with 12.15pt and 9.65pt left, although its baseline fits in both; the earlier baseline admission (issue #981, inferred from a private document) is withdrawn. On a document grid the mark keeps its centered natural/authored content box inside the body (Windows Word 16.0.20430 trr3 family D, 272 controls: modes 14/15, lines/linesAndChars, 16.4pt pitch, 11pt MS Mincho, zero/one preceding empty mark: 15pt remaining moves, 15.5–16.35pt stays, 16.4pt fully fits; Windows Word 16.0.20527, 20pt pitch, Times New Roman/MS Mincho 11pt marks: 16.0pt moves, 16.25pt moves, 16.5pt stays), so grid-only trailing leading may overhang; the complete advance remains retained. Other fonts/pitches use the same resolved metrics. Next-page section marks retain their separate blank-page suppression.',
 });
 
 export const WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION = defineCompatibilityRule({
@@ -91,7 +91,6 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   hasFollowingInk: boolean;
   followsNextPageSectionBoundary: boolean;
   markExtentPt: number;
-  markBelowBaselinePt: number;
   markOnLineGrid: boolean;
   markGridAfterLeadingPt?: number;
 }>): number {
@@ -112,7 +111,8 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   if (input.markOnLineGrid) {
     return input.hasFollowingInk ? input.markGridAfterLeadingPt ?? 0 : 0;
   }
-  return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
+  // Off the grid the whole mark line must fit (no baseline allowance).
+  return 0;
 }
 
 export const WORD_SECTION_TBLRV_LEFT_PAGE_FRAME = defineCompatibilityRule({
