@@ -222,9 +222,9 @@ it.each([
       { ...story(24), runs: [textRun('', { __noteSeparatorMarker: true })] },
     ],
   } },
-  { name: 'a story paragraph with borders', settings: {
+  { name: 'a numbered story paragraph', settings: {
     footnoteSeparator: 'short',
-    footnoteSeparatorStory: [{ ...story(24), borders: { top: { style: 'single', width: 0.5, color: '000000', space: 0 } } }],
+    footnoteSeparatorStory: [{ ...story(24), numbering: { numId: '1', level: 0 } }],
   } },
 ])('rejects $name instead of approximating it', ({ settings }) => {
   const document = {
@@ -340,6 +340,17 @@ it('gives a continuation marker its own line, with text after it on the next lin
   expect(leading.advancePt).toBe(20);
   expect([leading.rule!.segment.from.xPt, leading.rule!.segment.to.xPt]).toEqual([72, 252]);
   expect(leading.rule!.segment.from.yPt - note.flowBounds.yPt).toBeCloseTo(6.25, 6);
+});
+
+it('keeps the mark line for a marker run raised like the rest of the document', () => {
+  // A w:position raise on the marker run does not lift its line: the band is
+  // the run-free paragraph's mark line.
+  const single = { lineSpacing: { value: 1, rule: 'auto', explicit: true } };
+  const raised = { ...markerStory('', ''), ...single,
+    runs: [textRun('', { __noteSeparatorMarker: true, position: 3 })] } as unknown as DocParagraph;
+  const bandOf = (separator: DocParagraph) =>
+    band(render(model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), { separator }), false), 0);
+  expect(bandOf(raised)).toEqual(bandOf({ ...story(10), ...single } as unknown as DocParagraph));
 });
 
 it('keeps a mark-only marker run on one line in an area narrower than 144pt', () => {

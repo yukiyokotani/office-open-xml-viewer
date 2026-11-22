@@ -2185,6 +2185,19 @@ export function reservedNoteSeparatorParagraphAcquisitionInput(
   }) as unknown as ParagraphAcquisitionInput;
 }
 
+/** The zero-width metrics run of a separator marker: the marker's font and
+ * size, unraised (§17.3.2.24 w:position does not lift the rule's line). */
+function separatorMarkerMetricsRun(run: DocRun): DocRun {
+  const typography = (run as Readonly<{ __typographyAcquisition?: Record<string, unknown> }>).__typographyAcquisition;
+  return {
+    ...run,
+    text: '\u200b',
+    noBreakBefore: true,
+    position: undefined,
+    ...(typography ? { __typographyAcquisition: { ...typography, positionPt: { status: 'valid', raw: '0', value: 0 } } } : {}),
+  } as unknown as DocRun;
+}
+
 /** Immutable acquisition input of an ordinary DOCX formatted separator
  * paragraph. A run-free paragraph (no marker) reserves the paragraph-mark line
  * box with the paragraph's spacing and line rule; a marker run is laid out in
@@ -2211,8 +2224,10 @@ export function selectedNoteSeparatorParagraphAcquisitionInput(
         type: 'shape', inline: true, widthPt: noteSeparatorMarkerAdvancePt(mark), heightPt: 0,
         subpaths: [], fill: null, stroke: null, wrapMode: null,
       } as unknown as DocRun,
-      // Glued to the marker object so it shares the object's line.
-      { ...run, text: '\u200b', noBreakBefore: true } as unknown as DocRun,
+      // Glued to the marker object so it shares the object's line. It lends
+      // the line its font metrics, not a w:position raise: a marker formatted
+      // like its paragraph mark keeps the mark's line.
+      separatorMarkerMetricsRun(run),
       ...(fillsLine && index < authored.length - 1 && authored[index + 1]?.type !== 'break' ? [lineBreak] : []),
     ];
   });

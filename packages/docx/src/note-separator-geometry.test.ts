@@ -327,6 +327,36 @@ describe('word-note-separator-geometry', () => {
     expect(pageTexts).toEqual(pageTexts.map((_, index) => `${index + 2}|`));
   });
 
+  it('resolves pagination fields in a separator story', () => {
+    const fieldText = (instr: string, extra: Partial<Control> = {}) => {
+      const layout = render(control({ kind: 'footnote', listed: true, noteLines: 120, ...extra,
+        separatorParagraph: `<w:p><w:fldSimple w:instr=" ${instr} "><w:r><w:t>9</w:t></w:r></w:fldSimple><w:r><w:separator/></w:r></w:p>` }));
+      return { pages: layout.pages.length, text: clean(paragraphTexts(leadingOf(layout))).join('') };
+    };
+    // NUMPAGES as the document's only pagination field.
+    const total = fieldText('NUMPAGES');
+    expect(total.pages).toBeGreaterThan(1);
+    expect(total.text).toBe(String(total.pages));
+    // PAGE alone, numbered from the section's start.
+    expect(fieldText('PAGE', { sectExtra: '<w:pgNumType w:start="12"/>' }).text).toBe('12');
+  });
+
+  it('keeps separator text beside a symbol and under a paragraph border', () => {
+    const symbol = separatorOf('<w:p><w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r>'
+      + '<w:r><w:sym w:font="Wingdings" w:char="F0A7"/></w:r></w:p>');
+    expect(clean(paragraphTexts(symbol))[0]).toMatch(/^Sources./u);
+    expect(symbol.leading?.rule).toBeDefined();
+    const bordered = separatorOf('<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="4" w:space="1" w:color="000000"/></w:pBdr></w:pPr>'
+      + '<w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r></w:p>');
+    expect(clean(paragraphTexts(bordered))).toEqual(['Sources']);
+    expect(bordered.leading?.paragraph?.kind === 'paragraph' && bordered.leading.paragraph.borders.length).toBeGreaterThan(0);
+    // A marker-only bordered paragraph paints its border too.
+    const bare = separatorOf('<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="4" w:space="1" w:color="000000"/></w:pBdr></w:pPr>'
+      + '<w:r><w:separator/></w:r></w:p>');
+    expect(bare.leading?.paragraph?.kind === 'paragraph' && bare.leading.paragraph.borders.length).toBeGreaterThan(0);
+    expect(bare.leading?.rule).toBeDefined();
+  });
+
   it('positions a marker-only separator by its paragraph indent', () => {
     // w:ind/@w:left 600 twips: the rule starts 30pt into the 72pt note area,
     // as it does when the marker run has its own (empty) properties.

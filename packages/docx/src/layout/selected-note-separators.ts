@@ -97,9 +97,9 @@ export function normalizeSelectedNoteSeparators(
     const mark = marks[role];
     if (mark !== 'short' && mark !== 'full' && mark !== 'none') reject(`${role} paragraph has no selected mark`);
     if (!Array.isArray(paragraphs) || paragraphs.length === 0) reject(`${role} story has no paragraph`);
-    // The closed shape the parser admits: text runs and line breaks with at
-    // most one marker run in the whole story, and no paragraph ink,
-    // numbering, frame or hidden mark.
+    // The closed shape the parser admits: text and field runs and line
+    // breaks with at most one marker run in the whole story, and no
+    // numbering, frame or hidden mark (borders and shading paint).
     let markerParagraph = -1;
     paragraphs.forEach((paragraph, index) => {
       if (!isNoteSeparatorStoryRuns(paragraph.runs ?? [])) reject(`${role} paragraph carries unrepresented runs`);
@@ -107,8 +107,7 @@ export function normalizeSelectedNoteSeparators(
         if (markerParagraph >= 0) reject(`${role} story holds two markers`);
         markerParagraph = index;
       }
-      if (paragraph.numbering != null || paragraph.framePr != null || paragraph.borders != null
-        || paragraph.shading != null || paragraph.markVanish === true) {
+      if (paragraph.numbering != null || paragraph.framePr != null || paragraph.markVanish === true) {
         reject(`${role} paragraph carries unrepresented properties`);
       }
     });
