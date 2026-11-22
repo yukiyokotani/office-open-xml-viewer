@@ -178,6 +178,7 @@ import type { BodyElement, DocxDocumentModel } from './types.js';
 import { attachAnchorPlacements } from './line-breaker/model.js';
 import { planLine } from './layout/paragraph.js';
 import { buildSegments } from './line-layout.js';
+import { textRunsForPage } from './text-run-projection.js';
 
 function documentContext(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -541,4 +542,104 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating anchor changes no break op
       }
     }
   });
+});
+
+// A floating drawing keeps its one unit of the paragraph's occurrence domain
+// wherever it is anchored, so no text range after it moves; the text around
+// an anchor inside one text sequence is still laid out as unbroken text.
+describe('text ranges around a floating anchor', () => {
+  const bold = { bold: true };
+  const layOut = (runs: readonly Run[]) => {
+    const model = documentModel([bodyParagraph(runs)], null, { compatibilityMode: 15 });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+      { currentDateMs: 0 });
+    const paragraph = layout.pages[0]!.layers.body.find((node) => node.kind === 'paragraph');
+    if (paragraph?.kind !== 'paragraph') throw new Error('Expected a paragraph');
+    const placements = paragraph.lines.flatMap((line) => line.placements);
+    return {
+      layout,
+      texts: placements.flatMap((placement) => placement.kind === 'text' ? [placement] : []),
+      hosts: placements.flatMap((placement) => placement.kind === 'anchor-host' ? [placement] : []),
+    };
+  };
+  const ranges = (runs: readonly Run[]) => layOut(runs).texts.map((placement) =>
+    [placement.text, placement.range.start, placement.range.end] as const);
+  const glyphs = (runs: readonly Run[]) => layOut(runs).texts.flatMap((placement) =>
+    placement.clusters.map((cluster) => round(placement.origin.xPt + cluster.offset.xPt)));
+  const shapes: readonly (readonly [string, () => Run[], number])[] = [
+    // [name, runs, index of the text run after the anchor]
+    ['parser host and payload', documentAnchorShapes[0]![1], 3],
+    ['public anchored picture', documentAnchorShapes[2]![1], 2],
+  ];
+
+  it('justifies a line divided at an anchor like the undivided line', () => {
+    const lay = (runs: readonly Run[], compatibilityMode: number) => {
+      const model = documentModel([bodyParagraph(runs, { alignment: 'both' })], null, { compatibilityMode });
+      return documentGeometry(model, false).geometry;
+    };
+    const cases: readonly (readonly [string, string])[] = [
+      ['Latin words fill the band and wr', 'ap onto later lines of the paragraph here'],
+      ['\u6f22\u5b57\u304b\u306a\u4ea4\u3058\u308a\u306e\u6587\u7ae0\u3092\u4e21\u7aef', '\u63c3\u3048\u3067\u7d44\u3080\u3068\u304d\u306e\u5b57\u9593\u306e\u914d\u5206\u3092\u78ba\u304b\u3081\u308b'],
+    ];
+    for (const [head, tail] of cases) {
+      for (const compatibilityMode of [14, 15]) {
+        const expected = lay([word(head), word(tail)], compatibilityMode);
+        for (const [name, anchor] of shapes) {
+          expect(lay([word(head), ...anchor(), word(tail)], compatibilityMode), `${name}, mode ${compatibilityMode}`)
+            .toEqual(expected);
+        }
+      }
+    }
+  });
+
+  for (const [name, anchor, runAfter] of shapes) {
+    it(`keeps the unit of a ${name} inside one text sequence`, () => {
+      const inside = layOut([word('ab'), ...anchor(), word('cd ef')]);
+      // 'ab' is [0, 2), the drawing owns [2, 3), the text after it starts at 3.
+      expect(inside.texts.map((placement) => placement.range.start)).toEqual(
+        [...inside.texts.map((placement) => placement.range.start)].sort((a, b) => a - b));
+      expect(inside.texts[0]!.range).toEqual({ start: 0, end: 2 });
+      expect(inside.texts[1]!.range.start).toBe(3);
+      let cursor = 0;
+      for (const placement of inside.texts) {
+        // Non-overlapping, contiguous apart from the drawing's own unit.
+        expect(placement.range.start).toBe(cursor === 2 ? 3 : cursor);
+        expect(placement.range.end - placement.range.start).toBe(placement.text.length);
+        let cluster = placement.range.start;
+        for (const { range } of placement.clusters) {
+          expect(range.start).toBe(cluster);
+          cluster = range.end;
+        }
+        expect(cluster).toBe(placement.range.end);
+        cursor = placement.range.end;
+      }
+      expect(cursor).toBe('abcd ef'.length + 1);
+      expect(inside.texts.map((placement) => placement.text).join('')).toBe('abcd ef');
+      for (const host of inside.hosts) expect(host.range).toEqual({ start: 2, end: 2 });
+      // The ranges of an anchor between two sequences (differently formatted
+      // runs), which this change does not touch.
+      const between = ranges([word('ab'), ...anchor(), word('cd ef', 12, bold)]);
+      expect(ranges([word('ab'), ...anchor(), word('cd ef')]).map(([, start, end]) => [start, end]))
+        .toEqual(between.map(([, start, end]) => [start, end]));
+      expect(between[0]).toEqual(['ab', 0, 2]);
+      expect(between[1]![1]).toBe(3);
+      // The glyphs stand where the unanchored text puts them.
+      expect(glyphs([word('ab'), ...anchor(), word('cd ef')])).toEqual(glyphs([word('ab'), word('cd ef')]));
+    });
+
+    it(`projects the text after a ${name} to its own run for selection`, () => {
+      const plain = layOut([word('ab'), word('cd ef')]);
+      const plainRuns = textRunsForPage(plain.layout, 0, { scale: 1 });
+      const anchored = layOut([word('ab'), ...anchor(), word('cd ef')]);
+      const runs = textRunsForPage(anchored.layout, 0, { scale: 1 });
+      expect(runs.map((run) => run.text).join('')).toBe('abcd ef');
+      const after = runs.find((run) => run.text.startsWith('cd'))!;
+      expect(after.sourceRunIndex).toBe(runAfter);
+      expect(runs.find((run) => run.text.startsWith('ab'))!.sourceRunIndex).toBe(0);
+      // Hit geometry: 'c' starts where it does without the anchor.
+      const plainAfter = plainRuns.find((run) => run.text.includes('cd'))!;
+      expect(after.x).toBeCloseTo(plainAfter.x + plainAfter.w * plainAfter.text.indexOf('cd') / plainAfter.text.length, 6);
+      expect(after.y).toBe(plainAfter.y);
+    });
+  }
 });
