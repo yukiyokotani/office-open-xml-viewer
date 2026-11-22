@@ -2981,6 +2981,7 @@ function* paginateBodyPassSteps(
           let terminalWholeParagraphHasPlacements = true;
           let terminalLeadExtentPt = 0;
           let hasTerminalBlock = false;
+          let terminalStartsFreshRegion = false;
           let keepSetBlockedByDeferral = false;
           let bridgeSuccessor = wordEmptyKeepNextBridgesSuccessor({
             keepNext: block.keepNext,
@@ -3025,6 +3026,7 @@ function* paginateBodyPassSteps(
               terminalGridParagraph = following.leadGridParagraph;
               terminalWholeParagraphHasPlacements = following.wholeParagraphHasPlacements ?? true;
               terminalLeadExtentPt = following.leadContentExtentPt;
+              terminalStartsFreshRegion = following.startsFreshRegion === true;
             }
             if (!continues || keepSetBlockedByDeferral) {
               hasTerminalBlock = true;
@@ -3052,7 +3054,10 @@ function* paginateBodyPassSteps(
             - (terminalLeadExtentPt - terminalAdmissionPt) + keepSetReservePt;
           if (
             hasTerminalBlock
-            && (keepSetAdmissionPt > location.availableBounds.heightPt || keepSetBlockedByDeferral)
+            && (keepSetAdmissionPt > location.availableBounds.heightPt || keepSetBlockedByDeferral
+              // `word-vertical-section-upright-block-table`: the table the
+              // keep set ends with starts a fresh region from here.
+              || terminalStartsFreshRegion)
             && keepSetAdmissionPt <= freshPageExtent(state)
           ) {
             yield* commitTransition(

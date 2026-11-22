@@ -213,6 +213,32 @@ describe('upright block table of a vertical section', () => {
     expect(pages[1]!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
   });
 
+  it('moves a keepNext paragraph first in the flow with a table that clearing moves to the next page', () => {
+    // The page starts with a table, which adds no flow advance, so the kept
+    // strip has the whole block extent of a fresh page before it. The second
+    // table still starts the next page to clear the first, and takes none of
+    // that page's block extent: the strip fits there with it.
+    const first = table(1, 400).replaceAll('"1440"', '"2400"').replaceAll('"2160"', '"3600"');
+    const keepNext = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+    const pages = layOutPages('tbRl', [first, keepNext, table(1, 400), P]);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]!.strips).toHaveLength(0);
+    expect(pages[1]!.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+    expect(pages[1]!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
+  });
+
+  it('wraps a line that a negative indent takes into the first column around a table there', () => {
+    // A 350 pt table of column 1 reaches past the column's end. The second
+    // column's paragraph starts 30 pt before its band, inside the table's
+    // inline extent, and wraps at the table's bottom edge.
+    const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+    const outdented = P.replace('<w:pPr>', '<w:pPr><w:ind w:left="-600"/>');
+    const pages = layOutPages('tbRl', [table(1, 350), columnBreak, outdented], 2);
+    const placed = pages[0]!.tables[0]!;
+    const line = pages[0]!.strips.at(-1)![0]!;
+    expect(line.inlineStart).toBeCloseTo(placed.bottom, 6);
+  });
+
   it.each(['tbRl', 'tbLrV'] as const)('wraps the strip before a %s table on a line grid of a fractional pitch', (direction) => {
     // A 15.15 pt pitch: the strip's end and the table's start are the same
     // block position computed two ways, equal only to within rounding.

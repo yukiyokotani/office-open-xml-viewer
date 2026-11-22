@@ -285,6 +285,11 @@ export interface FollowingBodyBlockMeasurement {
   readonly fullFootnoteReferenceIds?: readonly string[];
   /** References painted by the first indivisible content admitted with keepNext. */
   readonly leadFootnoteReferenceIds?: readonly string[];
+  /** The block does not start in this flow region after the keep set before
+   * it, whatever block extent is left: its extents are those it has in a
+   * fresh region, and a keep set ending with it starts there too
+   * (`word-vertical-section-upright-block-table`). */
+  readonly startsFreshRegion?: true;
   /** Paragraph only: page-owned drawing occurrence keys anchored on each
    * measured line, so keepNext can honour an anchor-line deferral. */
   readonly pageOwnedAnchorKeysByLine?: readonly (readonly string[])[];

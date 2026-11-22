@@ -1803,7 +1803,7 @@ function measureBodyParagraphEntry(
     floats: [...state.floats],
     pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
   };
-  addUprightBlockExclusionFloats(candidate, request.location, request.besideUprightBlocks);
+  addUprightBlockExclusionFloats(candidate, request.location, paragraph, request.besideUprightBlocks);
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
   const publicFloats =
     request.continuation.boundary === null
@@ -2204,7 +2204,6 @@ function measureFollowingBodyBlock(
     floats: [...state.floats],
     retainedTablesBySourceIndex: new Map(state.retainedTablesBySourceIndex),
   };
-  addUprightBlockExclusionFloats(candidate, request.location);
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
   if (request.input.kind === 'adjacent-table-group') {
     const records = computeAdjacentTablePtLayouts(candidate, request.input.tables.map((tableInput) => {
@@ -2257,6 +2256,7 @@ function measureFollowingBodyBlock(
   const element = sourceElement(dependencies.source, request.input.source);
   if (request.input.kind === 'paragraph') {
     if (element.type !== 'paragraph') throw new Error('Following paragraph source kind mismatch');
+    addUprightBlockExclusionFloats(candidate, request.location, element);
     const { layout } = acquireBodyParagraphAtLocation(
       candidate,
       element,
@@ -2327,11 +2327,12 @@ function measureFollowingBodyBlock(
     && !ownerExtents) {
     // `word-vertical-section-upright-block-table`: what the table needs of
     // the block axis to start after the keep set before it. The table adds
-    // no flow advance, so it needs nothing where its placement leaves it on
-    // this page, and more than is left where its placement starts a fresh
-    // region: too wide for the block extent left, too tall for the inline
-    // extent below its start, or moved past the page to clear an earlier
-    // table. The placement itself decides (bodyUprightBlockStartsHere).
+    // no flow advance, so it needs none of the block extent, here or on a
+    // fresh page; but its placement can start a fresh region (too wide for
+    // the block extent left, too tall for the inline extent below its start,
+    // or moved past the page to clear an earlier table), and the keep set
+    // then has to start there with it. The placement itself decides
+    // (bodyUprightBlockStartsHere).
     const precedingPt = request.precedingBlockExtentPt ?? 0;
     const reachedYPt = request.location.cursorPt.yPt + precedingPt;
     const leftPt = Math.max(0, request.location.availableBounds.heightPt - precedingPt);
@@ -2347,10 +2348,10 @@ function measureFollowingBodyBlock(
       freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
       pageHasContent: true,
     }, tableOperations);
-    const neededPt = startsHere === false ? request.location.availableBounds.heightPt : 0;
     return Object.freeze({
-      fullExtentPt: neededPt,
-      leadContentExtentPt: neededPt,
+      fullExtentPt: 0,
+      leadContentExtentPt: 0,
+      ...(startsHere === false ? { startsFreshRegion: true as const } : {}),
       fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
       leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
         ...layout,
@@ -2908,17 +2909,27 @@ function commitBodyUprightBlocks(
  * planned after a fragment exclude its text as registered ones do). The
  * page's exclusions are not part of `state.floats`, so a paragraph neither
  * copies nor scans the exclusions of blocks it cannot reach.
+ *
+ * The inline band searched is the column's, widened on both sides by the
+ * paragraph's largest negative indent (§17.3.1.12: start, first line or
+ * hanging, end): such a line leaves the column band and can reach a block of
+ * the neighbouring column.
  */
 function addUprightBlockExclusionFloats(
   candidate: BodyAcquisitionState,
   location: BodyAcquisitionLocation,
+  paragraph: Readonly<{ indentLeft?: number; indentRight?: number; indentFirst?: number }>,
   planned?: UprightBlockRegistration,
 ): void {
   const index = candidate.uprightBlockIndex;
   if (index && index.exclusionCount > 0) {
     const band = location.availableBounds;
+    const startPt = paragraph.indentLeft ?? 0;
+    const outdentPt = Math.max(
+      0, -startPt, -(startPt + (paragraph.indentFirst ?? 0)), -(paragraph.indentRight ?? 0),
+    );
     for (const entry of uprightBlockExclusionsAhead(
-      index, location.cursorPt.yPt, band.xPt, band.xPt + band.widthPt,
+      index, location.cursorPt.yPt, band.xPt - outdentPt, band.xPt + band.widthPt + outdentPt,
     )) candidate.floats.push(uprightBlockExclusionFloat(entry.exclusion, entry.ordinal));
   }
   const ordinal = index?.exclusionCount ?? 0;
