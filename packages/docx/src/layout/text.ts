@@ -391,8 +391,8 @@ export interface TextShapeRequest {
    * language is admitted only when named families draw those forms too. */
   readonly verticalForms?: true;
   /** Canvas language of East Asian text when it differs from the regional
-   * font-selection input {@link eastAsiaLanguage} (a ruby guide's own
-   * language); null names none. */
+   * font-selection input {@link eastAsiaLanguage}; null names none (a ruby
+   * guide, which never takes its base run's language). */
   readonly canvasEastAsiaLanguage?: string | null;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
@@ -537,24 +537,24 @@ export function independentTextShapeRequest(
     registeredLatinPieceText: undefined, substituteContext: { text, offset: 0 } };
 }
 
-/** The shape request of a ruby guide over `base`: independent text shaped in
- * the guide's own languages (RubyGuideLanguages), its Canvas language proved
- * for the guide itself. Regional font selection keeps the base's
- * w:eastAsia input: the guide's East Asian language reaches Canvas only
- * (canvasEastAsiaLanguage). Line metrics and paint both use this request. */
+/** The shape request of a ruby guide over `base`: independent text, shaped
+ * without a Canvas language. The guide's own languages (its runs' w:lang,
+ * w:rubyPr/w:lid) are not carried to shaping yet, and the base run's are not
+ * the guide's, so no language reaches Canvas for it; regional font selection
+ * keeps the base's w:eastAsia input, as before languages. Line metrics and
+ * paint both use this request. */
 export function rubyGuideShapeRequest(
   base: Readonly<TextShapeRequest>,
   text: string,
-  languages: Readonly<{ latin?: string | null; eastAsia?: string | null; complexScript?: string | null }> | undefined,
 ): TextShapeRequest {
-  const request: TextShapeRequest = { ...independentTextShapeRequest(base, text), canvasLanguagePin: undefined };
-  if (!languages) return request;
-  const { latin, eastAsia, complexScript } = languages;
   return {
-    ...request,
-    ...(latin !== undefined ? { language: latin ?? undefined } : {}),
-    ...(complexScript !== undefined ? { complexScriptLanguage: complexScript ?? undefined } : {}),
-    ...(eastAsia !== undefined ? { canvasEastAsiaLanguage: eastAsia } : {}),
+    ...independentTextShapeRequest(base, text),
+    canvasLanguagePin: undefined,
+    language: undefined,
+    complexScriptLanguage: undefined,
+    // Only a base w:eastAsia needs withholding; an untagged guide's request
+    // (and its keys) stay as before languages.
+    ...(base.eastAsiaLanguage !== undefined ? { canvasEastAsiaLanguage: null } : {}),
   };
 }
 
@@ -614,9 +614,7 @@ const GRANDFATHERED_TAGS = new Set([
 ]);
 /** RFC 5646 §2.1 privateuse: "x" 1*("-" (1*8alphanum)). */
 const PRIVATE_USE_TAG = /^x(?:-[a-z0-9]{1,8})+$/u;
-/** RFC 5646 §2.2.2 extlang (one is permitted; two more are reserved): a
- * primary language followed by a 3-letter extended language subtag. */
-const EXTLANG_TAG = /^([a-z]{2,3})-([a-z]{3})(-.+)?$/u;
+
 
 /** `tag` as a lower-case BCP 47 tag, or undefined when it names no language:
  * Word's `x-none`, the Canvas keyword `inherit`, or an ill-formed (RFC 5646
@@ -639,18 +637,9 @@ export function canvasLanguageTag(tag: string | undefined): string | undefined {
       }
     };
     canonical = canonicalize(lower);
-    // ECMA-402's grammar has no extlang. RFC 5646 §4.5 makes the extlang
-    // form equivalent to the extended language as primary subtag
-    // (zh-cmn-Hans-CN ≡ cmn-Hans-CN) when the registry pairs that extlang
-    // with that prefix. The pair is admitted only where ECMA-402's
-    // macrolanguage aliasing confirms it (cmn → zh); any other extlang tag
-    // names no language (an unconfirmed valid pair shapes as untagged).
-    const extlang = canonical === null ? EXTLANG_TAG.exec(lower) : null;
-    if (extlang) {
-      const candidate = canonicalize(`${extlang[2]}${extlang[3] ?? ''}`);
-      canonical = candidate !== null && candidate.split('-')[0] === canonicalize(extlang[1]!)?.split('-')[0]
-        ? candidate : null;
-    }
+    // ECMA-402's grammar has no extlang (RFC 5646 §2.2.2): confirming one
+    // needs the IANA registry's prefix pairs, so such a tag names no language
+    // here and shapes as untagged text.
     if (canonicalTags.size >= 256) canonicalTags.clear();
     canonicalTags.set(lower, canonical);
   }

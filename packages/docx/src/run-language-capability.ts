@@ -1,9 +1,8 @@
 import type { DocxDocumentModel } from './types.js';
 
-// Run languages (lang, langEastAsia, langBidi) and ruby guide languages
-// (w:rubyPr/w:lid and guide-run w:val as `language`; guide-run w:eastAsia
-// and w:bidi as `eastAsiaLanguage` and `bidiLanguage`).
-const LANGUAGE_KEYS = new Set(['lang', 'langEastAsia', 'langBidi', 'language', 'eastAsiaLanguage', 'bidiLanguage']);
+// Run languages. Ruby guides are shaped without a Canvas language
+// (rubyGuideShapeRequest), so their own tags are not consulted.
+const LANGUAGE_KEYS = new Set(['lang', 'langEastAsia', 'langBidi']);
 
 /**
  * Whether the document names any §17.3.2.20 run language (other than Word's

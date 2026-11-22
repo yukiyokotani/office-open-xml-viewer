@@ -276,6 +276,8 @@ function rasterChanged(
     || changed(offFirst.metrics, offSecond.metrics, onFirst.metrics, onSecond.metrics);
 }
 
+const VERT_PROBE_CACHE_LIMIT = 4096;
+
 /**
  * Whether this main-thread canvas/font demonstrably paints a different glyph or
  * placement for `cp` after composing the OpenType `vert` feature. Results are
@@ -331,6 +333,9 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
       if (!wasAttached) state.canvas.remove();
     }
   }
+  // Bounded: keys include the font shorthand and the language in effect,
+  // both authored per document, and the cache outlives a viewer session.
+  if (state.cache.size >= VERT_PROBE_CACHE_LIMIT) state.cache.delete(state.cache.keys().next().value!);
   state.cache.set(key, supported);
   return supported;
 }

@@ -287,33 +287,11 @@ export function appendTextPiece(
   // Splitting on word boundaries would lose the association, so attach
   // the annotation only to the first emitted segment.
   const baseRuby = r.ruby;
-  const rubyLanguages = (() => {
-    const input = acquiredTypography?.ruby;
-    if (!input) return undefined;
-    const lid = input.language.status === 'valid' && input.language.value ? input.language.value.toLowerCase() : undefined;
-    // Per axis: the guide runs' language when they agree; else the guide's
-    // declared w:lid; guide runs that disagree without one give an explicit
-    // null (no language, never the base run's).
-    const axis = (pick: (guideRun: NonNullable<typeof input>['guideRuns'][number]) => string | null) => {
-      const values = new Set(input.guideRuns.map(pick));
-      if (values.size > 1) return lid ?? null;
-      return [...values][0] ?? lid;
-    };
-    const latin = axis((guideRun) => guideRun.language);
-    const eastAsia = axis((guideRun) => guideRun.eastAsiaLanguage);
-    const complexScript = axis((guideRun) => guideRun.bidiLanguage);
-    return latin === undefined && eastAsia === undefined && complexScript === undefined ? undefined : {
-      ...(latin !== undefined ? { latin } : {}),
-      ...(eastAsia !== undefined ? { eastAsia } : {}),
-      ...(complexScript !== undefined ? { complexScript } : {}),
-    };
-  })();
   const ruby = baseRuby
     ? {
         text: baseRuby.text,
         fontSizePt: baseRuby.fontSizePt,
         ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
-        ...(rubyLanguages ? { languages: rubyLanguages } : {}),
       }
     : undefined;
   const revision = r.revision;
@@ -1212,8 +1190,7 @@ interface SegmentEmissionState {
   readonly effectiveCharacterScale: number | undefined;
   readonly effectiveKerningThreshold: number | undefined;
   readonly effectiveSnapToGrid: boolean | undefined;
-  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number;
-    languages?: import('./model.js').RubyGuideLanguages } | undefined;
+  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number } | undefined;
   readonly revision:
     | {
         readonly kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;

@@ -2756,7 +2756,7 @@ function textPlacement(
     : undefined;
   const rubyShape = segment.ruby && segment.textLayoutService && segment.textShapeRequest
     ? segment.textLayoutService.shape({
-        ...rubyGuideShapeRequest(segment.textShapeRequest, segment.ruby.text, segment.ruby.languages),
+        ...rubyGuideShapeRequest(segment.textShapeRequest, segment.ruby.text),
         fontSizePt: segment.ruby.fontSizePt,
         measure: true,
       })

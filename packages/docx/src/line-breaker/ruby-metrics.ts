@@ -26,7 +26,7 @@ export function rubyAscentReservePx(
       clusterGeometry: false,
     });
     const guide = segment.textLayoutService.shape({
-      ...rubyGuideShapeRequest(segment.textShapeRequest, segment.ruby.text, segment.ruby.languages),
+      ...rubyGuideShapeRequest(segment.textShapeRequest, segment.ruby.text),
       fontSizePt: segment.ruby.fontSizePt * scale,
       measure: true,
       clusterGeometry: false,

@@ -151,9 +151,10 @@ fn fields_and_paragraph_marks_carry_the_run_language() {
             _ => None,
         })
         .expect("page-number field");
+    // The page number is Latin-class text: its class's language on every axis.
     assert_eq!(
         (field.lang.as_deref(), field.lang_east_asia.as_deref()),
-        (Some("sr-RS"), Some("ja-JP"))
+        (Some("sr-RS"), Some("sr-RS"))
     );
     let mark = paragraphs[1]
         .paragraph_mark_font_facts
@@ -161,7 +162,36 @@ fn fields_and_paragraph_marks_carry_the_run_language() {
         .expect("paragraph mark facts");
     assert_eq!(
         (mark.lang.as_deref(), mark.lang_bidi.as_deref()),
-        (Some("sr-RS"), Some("ar-SA"))
+        (Some("sr-RS"), Some("sr-RS"))
+    );
+}
+
+#[test]
+fn every_language_axis_carries_the_script_class_language() {
+    let automatic = r#"<style:style style:name="T" style:family="text"><style:text-properties fo:language="fr" fo:country="FR" style:language-asian="ja" style:country-asian="JP" style:language-complex="ar" style:country-complex="SA"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p><text:span text:style-name=\"T\">a\u{31C0}\u{5B57}\u{0627}</text:span></text:p>",
+        ..Fixture::default()
+    });
+    let axes: Vec<(String, [Option<&str>; 3])> = text_runs(paragraphs(&document.body)[0])
+        .iter()
+        .map(|run| {
+            (
+                run.text.clone(),
+                [run.lang.as_deref(), run.lang_east_asia.as_deref(), run.lang_bidi.as_deref()],
+            )
+        })
+        .collect();
+    // ODF Table 22: U+31C0 is Asian like U+5B57, whatever slot the renderer's
+    // §17.3.2.26 table gives it; every axis of a run has its class's language.
+    assert_eq!(
+        axes,
+        [
+            ("a".to_string(), [Some("fr-FR"); 3]),
+            ("\u{31C0}\u{5B57}".to_string(), [Some("ja-JP"); 3]),
+            ("\u{0627}".to_string(), [Some("ar-SA"); 3]),
+        ]
     );
 }
 

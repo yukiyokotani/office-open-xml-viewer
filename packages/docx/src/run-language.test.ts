@@ -128,24 +128,17 @@ describe('text service: §17.3.2.20 language per font slot', () => {
       .toEqual(['ja-jp']);
   });
 
-  it('shapes a ruby guide in its own languages', () => {
+  it('shapes a ruby guide without a Canvas language, keeping the base regional font input', () => {
     const base = { text: '漢', fontSizePt: 10, fonts, language: 'en-us', eastAsiaLanguage: 'zh-cn',
-      canvasLanguagePin: { group: 'eastAsia' as const, lang: null } };
-    const guide = rubyGuideShapeRequest(base, 'かん', { latin: 'en-gb', eastAsia: 'ja-jp', complexScript: 'ar-eg' });
-    // The guide's East Asian language reaches Canvas only: regional font
-    // selection keeps the base's w:eastAsia.
-    expect([guide.language, guide.eastAsiaLanguage, guide.canvasEastAsiaLanguage, guide.complexScriptLanguage,
-      guide.canvasLanguagePin]).toEqual(['en-gb', 'zh-cn', 'ja-jp', 'ar-eg', undefined]);
-    expect(service.shape({ ...guide, clusterGeometry: false }).spans[0]!.fontRoute.lang).toBe('ja-jp');
-    const inherited = rubyGuideShapeRequest(base, 'かん', undefined);
-    expect([inherited.language, inherited.eastAsiaLanguage, inherited.canvasLanguagePin])
-      .toEqual(['en-us', 'zh-cn', undefined]);
-    const conflict = rubyGuideShapeRequest(base, 'ab', { latin: null });
-    expect('language' in conflict).toBe(true);
-    expect([conflict.language, conflict.eastAsiaLanguage]).toEqual([undefined, 'zh-cn']);
-    expect(service.shape({ ...conflict, clusterGeometry: false }).spans[0]!.fontRoute.lang).toBeUndefined();
-    expect(service.shape({ ...rubyGuideShapeRequest(base, 'ab', undefined), clusterGeometry: false }).spans[0]!.fontRoute.lang)
-      .toBe('en-us');
+      complexScriptLanguage: 'ar-sa', canvasLanguagePin: { group: 'eastAsia' as const, lang: 'zh-cn' } };
+    const guide = rubyGuideShapeRequest(base, 'かんab');
+    expect([guide.language, guide.complexScriptLanguage, guide.eastAsiaLanguage, guide.canvasEastAsiaLanguage,
+      guide.canvasLanguagePin]).toEqual([undefined, undefined, 'zh-cn', null, undefined]);
+    expect(service.shape({ ...guide, clusterGeometry: false }).spans.map(span => span.fontRoute.lang))
+      .toEqual([undefined, undefined]);
+    // An untagged base gives an untagged guide request, as before languages.
+    const untagged = rubyGuideShapeRequest({ text: '漢', fontSizePt: 10, fonts }, 'かん');
+    expect('canvasEastAsiaLanguage' in untagged).toBe(false);
   });
 
   it('keeps independent languages when scoped Arabic shares a physical face across slots', () => {
@@ -349,10 +342,10 @@ describe('Canvas lang at measure and paint', () => {
   });
 
   it('admits only well-formed BCP 47 tags', () => {
-    expect(['sr-Latn-RS', 'i-klingon', 'zh-min-nan', 'x-private', 'iw', 'zh-cmn-Hans-CN', 'ar-arb'].map(canvasLanguageTag))
-      .toEqual(['sr-latn-rs', 'i-klingon', 'zh-min-nan', 'x-private', 'he', 'zh-hans-cn', 'ar']);
-    // An extlang under another prefix is not admitted.
-    expect(['en-cmn-Hans-CN', 'en-yue-HK'].map(canvasLanguageTag)).toEqual([undefined, undefined]);
+    expect(['sr-Latn-RS', 'i-klingon', 'zh-min-nan', 'x-private', 'iw'].map(canvasLanguageTag))
+      .toEqual(['sr-latn-rs', 'i-klingon', 'zh-min-nan', 'x-private', 'he']);
+    // Extlang tags need the registry's prefix pairs: none is admitted.
+    expect(['zh-cmn-Hans-CN', 'en-cmn-Hans-CN', 'en-eng'].map(canvasLanguageTag)).toEqual([undefined, undefined, undefined]);
     expect(['en-a', 'en-us-gb', 'x-none', 'inherit', '', `en-${'a'.repeat(70)}`].map(canvasLanguageTag))
       .toEqual([undefined, undefined, undefined, undefined, undefined, undefined]);
   });
@@ -499,31 +492,14 @@ describe('Canvas lang at measure and paint', () => {
     expect(new Set(kept)).toEqual(new Set(['ar-sa']));
   });
 
-  it('keeps a mixed-language ruby guide out of the base run language', async () => {
-    const guideLanguages = async (lid: string | null, guideRunLanguages: (string | null)[]) => {
-      const { canvas, draws } = recordingCanvas();
-      const value = <T,>(v: T | null) => ({ status: v === null ? 'absent' : 'valid', raw: null, value: v });
-      await renderDocumentToCanvas(documentOf([run('ab', {
-        lang: 'sr-rs',
-        ruby: { text: 'гд', fontSizePt: FONT_PX / 2 },
-        typographyInput: { ruby: {
-          align: value(null), baseFontSizePt: value(null), raisePt: value(null), language: value(lid),
-          guideRuns: guideRunLanguages.map((language, index) => ({
-            text: 'гд'[index]!, fontFamily: null, fontSizePt: null, bold: false, italic: false, color: null, language,
-            eastAsiaLanguage: null, bidiLanguage: null,
-          })),
-        } },
-      })]), canvas, 0, { dpr: 1, width: 600 });
-      expect(draws.filter(draw => draw.text === 'ab').map(draw => draw.lang)).toEqual(['sr-rs']);
-      return [...new Set(draws.filter(draw => /[гд]/u.test(draw.text)).map(draw => draw.lang))];
-    };
-    // Agreeing guide runs keep their language; no guide language at all
-    // leaves the base run's.
-    expect(await guideLanguages(null, ['ru-ru', 'ru-ru'])).toEqual(['ru-ru']);
-    expect(await guideLanguages(null, [null, null])).toEqual(['sr-rs']);
-    // Disagreeing guide runs: no run language, so w:lid when authored, else none.
-    expect(await guideLanguages(null, ['ru-ru', 'bg-bg'])).toEqual(['inherit']);
-    expect(await guideLanguages('mk-mk', ['ru-ru', 'bg-bg'])).toEqual(['mk-mk']);
+  it('draws a ruby guide without a language over a tagged base', async () => {
+    const { canvas, draws } = recordingCanvas();
+    await renderDocumentToCanvas(documentOf([run('ab', {
+      lang: 'sr-rs',
+      ruby: { text: 'гд', fontSizePt: FONT_PX / 2 },
+    })]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.filter(draw => draw.text === 'ab').map(draw => draw.lang)).toEqual(['sr-rs']);
+    expect([...new Set(draws.filter(draw => /[гд]/u.test(draw.text)).map(draw => draw.lang))]).toEqual(['inherit']);
   });
   it('probes punctuation compression and width balance in the acquired language state', async () => {
     const settings = { characterSpacingControl: 'compressPunctuation', balanceSingleByteDoubleByteWidth: true };

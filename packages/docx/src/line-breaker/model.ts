@@ -247,7 +247,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box) around the text. */
   border?: DocxRunBorder | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
-  ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number; languages?: RubyGuideLanguages };
+  ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number };
   /** Every piece of a ruby-annotated run (only the first carries `ruby`):
    * none takes a WORD_KERNED_SPACE_PAIRS seam pair. */
   rubyPiece?: true;
@@ -819,12 +819,3 @@ export interface LineLayoutEnvironment {
   readonly positionExtendsLineBox?: boolean;
 }
 
-/** §17.3.2.20 languages of a ruby guide, independent text whose languages
- * are not the base's, per axis: the guide runs' own (style and direct
- * formatting resolved) when they agree, else w:rubyPr/w:lid; null when the
- * guide runs disagree and no w:lid names one; absent to keep the base's. */
-export interface RubyGuideLanguages {
-  readonly latin?: string | null;
-  readonly eastAsia?: string | null;
-  readonly complexScript?: string | null;
-}

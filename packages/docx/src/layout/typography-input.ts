@@ -65,10 +65,7 @@ export interface InternalRunTypographyWire {
       bold: boolean;
       italic: boolean;
       color: string | null;
-      /** §17.3.2.20 w:val, w:eastAsia and w:bidi of the guide run. */
       language: string | null;
-      eastAsiaLanguage: string | null;
-      bidiLanguage: string | null;
     }>[];
   }>;
   readonly revision?: Readonly<{

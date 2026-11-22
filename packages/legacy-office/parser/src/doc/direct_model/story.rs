@@ -993,7 +993,7 @@ fn push_ruby(
         },
         |part, run| {
             // Hidden guide characters are not displayed.
-            let Some((run, languages)) = run.flatten() else {
+            let Some((run, language)) = run.flatten() else {
                 return Ok(());
             };
             budget.charge(std::mem::size_of::<RubyGuideRunTypographyWire>() + part.len())?;
@@ -1004,9 +1004,7 @@ fn push_ruby(
                 bold: run.bold,
                 italic: run.italic,
                 color: run.color,
-                language: languages.default.map(str::to_ascii_lowercase),
-                east_asia_language: languages.east_asia.map(str::to_ascii_lowercase),
-                bidi_language: languages.bidi.map(str::to_ascii_lowercase),
+                language: language.map(str::to_ascii_lowercase),
             });
             Ok(())
         },

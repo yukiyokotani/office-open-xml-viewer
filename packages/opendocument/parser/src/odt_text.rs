@@ -1665,6 +1665,11 @@ impl RunProperties {
         if size < 0.5 {
             size = 0.5;
         }
+        let class_language = match class {
+            ScriptClass::Latin => language(NS_FO, "language", "country"),
+            ScriptClass::Asian => language(NS_STYLE, "language-asian", "country-asian"),
+            ScriptClass::Complex => language(NS_STYLE, "language-complex", "country-complex"),
+        };
         (
             Self {
                 family,
@@ -1690,9 +1695,17 @@ impl RunProperties {
                 combine,
                 vertical,
                 border,
-                lang: language(NS_FO, "language", "country"),
-                lang_east_asia: language(NS_STYLE, "language-asian", "country-asian"),
-                lang_bidi: language(NS_STYLE, "language-complex", "country-complex"),
+                // ODF 1.3 Part 3 Table 22 classes the run's characters, and the
+                // class selects which language applies to all of them
+                // (fo:language, style:language-asian, style:language-complex),
+                // as it selects the one face set on every font slot above. The
+                // renderer's ECMA-376 §17.3.2.26 slot table may place a
+                // character of this class in another slot (U+31C0 is Asian
+                // here, highAnsi there), so every axis carries the class's
+                // language.
+                lang: class_language.clone(),
+                lang_east_asia: class_language.clone(),
+                lang_bidi: class_language,
                 complex: class == ScriptClass::Complex,
             },
             face,
