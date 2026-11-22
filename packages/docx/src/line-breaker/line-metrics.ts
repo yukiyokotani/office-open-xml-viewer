@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontFormatOf, referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS } from '../layout/line-compatibility.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, gridCellsExtent, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -145,7 +145,7 @@ export function lineBoxHeight(
     // dropping the admitted design minimum: ruby may add cells, never remove
     // cells that the same line without its annotation would occupy.
     const requiredHeight = hasRuby ? Math.max(glyphNatural, cellCountHeight) : cellCountHeight;
-    return docGridLineCells(requiredHeight, pitchPx) * pitchPx;
+    return gridCellsExtent(docGridLineCells(requiredHeight, pitchPx), pitchPx);
   };
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {

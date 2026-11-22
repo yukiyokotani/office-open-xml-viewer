@@ -628,6 +628,9 @@ export interface LayoutLine {
   marginExtension?: number;
   /** When wrap context is active, the absolute canvas Y where this line begins. */
   topY?: number;
+  /** A float narrowed, offset or moved this line (not merely an active wrap
+   * context): the float-conditioned class of the exact-line rules. */
+  wrapAffected?: true;
   /** Confirmed fixed-point allocation that owns topY, in the same units as
    * the wrap context. Never infer ownership from a numeric top alone. */
   wrapAllocation?: Readonly<{ physicalLineIndex: number; topYPt: number; advancePt: number }>;

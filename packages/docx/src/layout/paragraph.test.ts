@@ -1080,6 +1080,14 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       }
     });
 
+    it('keeps the ruby partition of an exact ruby line beside an inline chart', () => {
+      const rubyText = { ...paragraph.runs[0]!, ruby: { text: 'r', fontSizePt: 5, hpsRaisePt: 8 } } as DocParagraph['runs'][number];
+      const chart = { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } } as unknown as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([rubyText, chart], 1, { exactPt: 24 });
+      const line = node.lines[0]!;
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 19.2, 10);
+    });
+
     it('clips a DrawingML picture in an exact line whose baseline the ruby rule selects', () => {
       const rubyText = { ...paragraph.runs[0]!, ruby: { text: 'r', fontSizePt: 5, hpsRaisePt: 8 } } as DocParagraph['runs'][number];
       const node = measureInlineParagraph([rubyText, picture(30, -5, 'drawingml')], 1, { exactPt: 24 });

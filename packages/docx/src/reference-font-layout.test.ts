@@ -550,6 +550,8 @@ describe('native reference font vertical layout', () => {
     // page of such marks overflows by a rounding residue.
     expect(height('Noto Sans', 25, 34.05)).toBe(34.05);
     expect(height('Noto Sans', 25, 34.05, true, undefined, true)).toBe(34.05);
+    // Three 18.35pt cells are exactly 55.05pt (3 x 18.35 alone is 55.050000000000004).
+    expect(height('Noto Sans', 34, 18.35)).toBe(55.05);
     // Only automatic single spacing counts design cells: an inherited atLeast
     // minimum keeps the natural line (24pt Calibri, 1.2207 em, 18pt pitch).
     expect(height('Calibri', 24, 18, true, { rule: 'atLeast', value: 10, explicit: false }))

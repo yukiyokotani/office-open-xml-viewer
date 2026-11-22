@@ -4058,7 +4058,7 @@ function planMeasuredLines(
     // line class, whichever rule (ruby, text or object) selected the baseline.
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
-      wrapOrigin: raw.topY !== undefined,
+      wrapOrigin: raw.wrapAffected === true,
       hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
         && segment.inlinePicture === true),
     });
@@ -4069,12 +4069,19 @@ function planMeasuredLines(
     // a LibreOffice producer (`libreOfficeLineBoxes`) take their own placement
     // (`__lineExtraAbove` below, else the centred box); only their
     // inline-picture lines retain WORD_INLINE_OBJECT_EXACT_LINE.
-    // Inline charts and math keep their established placement in the line
-    // (WORD_INLINE_OBJECT_EXACT_LINE library scope) unless the line also holds
-    // a picture or shape of that rule, which then owns its baseline.
-    const establishedObjectLine = raw.segments.some((segment) => 'math' in segment
+    // A line holding an inline chart or math (outside WORD_INLINE_OBJECT_EXACT_LINE's
+    // measured class) keeps the rules it had: the picture/shape rule when the
+    // line also holds such an object, the four-fifths ruby partition of the
+    // measured ruby class (WORD_RUBY_LINE_ASCENT, exact 12-30pt, mode 15, no
+    // grid, no float), and otherwise the centred box.
+    const chartOrMathLine = raw.segments.some((segment) => 'math' in segment
       || ('imagePath' in segment && !segment.anchor && segment.chart != null));
-    const exactBaselinePt = exactObjectClass || (exactWordLineBoxes && !establishedObjectLine)
+    const measuredExactRubyLine = measuredRubyLine(raw)
+      && context.lineSpacing?.rule === 'exact' && context.lineSpacing.value >= 12
+      && context.lineSpacing.value <= 30 && compat.specifiedTextLineBoxMode15
+      && !context.lineGrid.active && raw.wrapAffected !== true;
+    const exactBaselinePt = exactObjectClass
+      || (exactWordLineBoxes && (!chartOrMathLine || measuredExactRubyLine))
       ? wordExactLineBaselineOffsetPt(context.lineSpacing) : undefined;
     // In a vertical section the upright object hangs from the exact line's
     // top instead of standing on its baseline.

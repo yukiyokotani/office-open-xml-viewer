@@ -1623,7 +1623,7 @@ export const WORD_EXACT_LINE_BASELINE = defineCompatibilityRule({
     version: '16.0.20625',
     platform: 'Windows',
   },
-  description: 'Word puts the baseline of every line of a paragraph with exact spacing four fifths of the authored height below the line top, whatever the line holds. Windows Word 16.0.20625 controls (line1 set L1a, nine documents: Noto Sans/Noto Sans JP, Times New Roman/MS Mincho and Arial/Yu Gothic; no grid and a 20pt lines grid in compatibility mode 15, no grid in mode 14) measure exact 6, 8, 10, 12, 18, 24, 36, 48, 72 and 96pt lines holding 9pt plain text, 24pt text, bold, italic, underline, highlight, a run border, a superscript run, a run raised 3pt, 9pt and 18pt runs together, 9pt text over an 18pt paragraph mark, East Asian text alone and after Latin text, a numbered item, a tab with a PAGE field and every line of a wrapped paragraph: every baseline lies 0.8 x height below the line top (within the 0.1pt PDF precision), including text far taller than the line, which overhangs it unclipped. A paragraph border pushes the line down by its top border and spacing only (4/5 below the line top that follows the border). Corpus Windows exports agree for 12/8, 24/9, 24/24 bold, 63.5/9 and 96/9pt Noto Sans lines and for lines beside square-wrapped floats. Earlier controls: WORD_SPECIFIED_TEXT_LINE_BOX (#1674, six Latin faces, exact 12-30pt), #1884 numbered items, #1885 ruby lines (exact 18pt; the guide overhangs the line top) and WORD_INLINE_OBJECT_EXACT_LINE (objects of any height, every story, vertical sections). The exact advance itself is the authored height (§17.3.1.33); this rule places only the baseline. Library scope: Word line boxes (DOCX and binary DOC); lines holding an inline chart or math keep their established placement, as in WORD_INLINE_OBJECT_EXACT_LINE, and another producer\'s fixed lines (LibreOffice line boxes) keep their own.',
+  description: 'Word puts the baseline of every line of a paragraph with exact spacing four fifths of the authored height below the line top, whatever the line holds. Windows Word 16.0.20625 controls (line1 set L1a, nine documents: Noto Sans/Noto Sans JP, Times New Roman/MS Mincho and Arial/Yu Gothic; no grid and a 20pt lines grid in compatibility mode 15, no grid in mode 14) measure exact 6, 8, 10, 12, 18, 24, 36, 48, 72 and 96pt lines holding 9pt plain text, 24pt text, bold, italic, underline, highlight, a run border, a superscript run, a run raised 3pt, 9pt and 18pt runs together, 9pt text over an 18pt paragraph mark, East Asian text alone and after Latin text, a numbered item, a tab with a PAGE field and every line of a wrapped paragraph: every baseline lies 0.8 x height below the line top (within the 0.1pt PDF precision), including text far taller than the line, which overhangs it unclipped. A paragraph border pushes the line down by its top border and spacing only (4/5 below the line top that follows the border). Corpus Windows exports agree for 12/8, 24/9, 24/24 bold, 63.5/9 and 96/9pt Noto Sans lines and for lines beside square-wrapped floats. Earlier controls: WORD_SPECIFIED_TEXT_LINE_BOX (#1674, six Latin faces, exact 12-30pt), #1884 numbered items, #1885 ruby lines (exact 18pt; the guide overhangs the line top) and WORD_INLINE_OBJECT_EXACT_LINE (objects of any height, every story, vertical sections). The exact advance itself is the authored height (§17.3.1.33); this rule places only the baseline. Library scope: Word line boxes (DOCX and binary DOC); lines holding an inline chart or math, which WORD_INLINE_OBJECT_EXACT_LINE does not measure, keep the rules they had (that rule when the line also holds a picture or shape, the four-fifths partition of a measured exact ruby line, otherwise the centred box), and another producer\'s fixed lines (LibreOffice line boxes) keep their own.',
 });
 
 /** Baseline offset below the line top under WORD_EXACT_LINE_BASELINE, or
@@ -1767,6 +1767,21 @@ export function wholeGridCells(heightPx: number, pitchPx: number): number {
   return pitchPx > 0 ? Math.max(1, Math.ceil(heightPx / pitchPx - GRID_CELL_TOLERANCE)) : 1;
 }
 
+/** The extent of {@link wholeGridCells} cells, rounded once to a millionth of
+ * a point (far below a twip) so that every pagination comparison sees the
+ * same exact multiple: 3 x 18.35 is 55.050000000000004 in binary arithmetic,
+ * against 55.05pt of available body. */
+export function wholeGridExtent(heightPx: number, pitchPx: number): number {
+  return gridCellsExtent(wholeGridCells(heightPx, pitchPx), pitchPx);
+}
+
+/** `cells` pitches, rounded as in {@link wholeGridExtent}. */
+export function gridCellsExtent(cells: number, pitchPx: number): number {
+  return Math.round(cells * pitchPx * GRID_EXTENT_RESOLUTION) / GRID_EXTENT_RESOLUTION;
+}
+
+const GRID_EXTENT_RESOLUTION = 1e6;
+
 export function wordEastAsianGridLineCells(
   naturalHeightPx: number,
   pitchPx: number,
@@ -1819,10 +1834,10 @@ export function wordLatinDesignGridSingleHeight(natural: number, pitch: number, 
   // The admitted face controls only its own whole-cell reserve. Other fonts,
   // inline objects and baseline displacements still own their natural extent
   // (§17.3.1.33); admission of one run must not shrink any peer's line box.
-  const cellsPt = admittedDesign > 0 ? wholeGridCells(admittedDesign, pitch) * pitch : pitch;
+  const cellsPt = admittedDesign > 0 ? wholeGridExtent(admittedDesign, pitch) : pitch;
   // A natural extent within the cell tolerance of the whole cells is that
   // allocation (the design height itself carries the same binary rounding).
-  return natural > cellsPt && wholeGridCells(natural, pitch) * pitch > cellsPt ? natural : cellsPt;
+  return natural > cellsPt && wholeGridExtent(natural, pitch) > cellsPt ? natural : cellsPt;
 }
 
 export const WORD_SPECIFIED_TEXT_LINE_BOX = defineCompatibilityRule({
@@ -1851,7 +1866,7 @@ export function wordSpecifiedTextLineMetrics(input: Readonly<{
 }>): Readonly<{ advancePt: number; baselineOffsetPt: number }> {
   void WORD_SPECIFIED_TEXT_LINE_BOX;
   const normalPt = input.pitchPt !== null && input.pitchPt > 0
-    ? wholeGridCells(input.singlePt, input.pitchPt) * input.pitchPt
+    ? wholeGridExtent(input.singlePt, input.pitchPt)
     : input.singlePt;
   const advancePt = input.rule === 'atLeast' ? Math.max(input.value, normalPt) : normalPt;
   return {

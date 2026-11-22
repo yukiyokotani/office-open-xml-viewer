@@ -267,6 +267,8 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineVisibleDescent: 0,
     lineVisibleIntendedSingle: 0,
     lineHasVisibleMetrics: false,
+    /** A float narrowed, offset or moved down the current physical line. */
+    lineWrapAffected: false,
     /** Picture-bullet marker metric admitted to the current line (pt, px). */
     lineMarkerHeight: 0,
     lineMarkerAscent: 0,

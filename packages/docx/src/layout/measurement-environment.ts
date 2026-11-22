@@ -1,6 +1,6 @@
 import type { DocParagraph, DocxDocumentModel } from '../types.js';
 import { segmentsHaveRtl } from '../bidi-line.js';
-import { wholeGridCells } from './line-compatibility.js';
+import { wholeGridExtent } from './line-compatibility.js';
 import type { KashidaLevel } from '../kashida-justify.js';
 import {
   isGridLineRule,
@@ -120,7 +120,7 @@ export function snapParaLineToGrid(
   if (!isGridLineRule(grid)) return heightPx;
   const pitchPx = grid!.linePitchPt! * scale;
   if (pitchPx <= 0) return heightPx;
-  return wholeGridCells(heightPx, pitchPx) * pitchPx;
+  return wholeGridExtent(heightPx, pitchPx);
 }
 
 /** Project normalized section/paragraph grid participation into line-layout's

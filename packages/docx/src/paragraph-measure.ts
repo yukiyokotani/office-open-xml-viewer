@@ -36,7 +36,7 @@ import {
   wordInlineDrawingRunLeadingApplies,
   isInlineDrawingRun,
   wordExactLineBaselineOffsetPt,
-  wholeGridCells,
+  wholeGridExtent,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -163,7 +163,7 @@ function snapParagraphLineToGrid(heightPt: number, grid: DocGridCtx): number {
   if (!isGridLineRule(grid)) return heightPt;
   const pitchPt = grid.linePitchPt!;
   if (pitchPt <= 0) return heightPt;
-  return wholeGridCells(heightPt, pitchPt) * pitchPt;
+  return wholeGridExtent(heightPt, pitchPt);
 }
 
 export function measureParagraph(
