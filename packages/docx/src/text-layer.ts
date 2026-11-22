@@ -1,4 +1,4 @@
-import { clippedBoxVisible, OverlayClipFrames, runPartVisible } from './run-clip.js';
+import { OverlayClipFrames, runPartVisible } from './run-clip.js';
 import { countSpacingCharacters } from './character-spacing.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
@@ -224,20 +224,18 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
     ...(paintedEnd > 0 ? { width: paintedEnd, first: 0, last: boxes!.length - 1 } : {}),
   }];
   if (!run.clips) return whole(false);
-  // A run without cluster boxes is judged by its box.
-  if (!boxes || boxes.length === 0) {
-    return whole(!clippedBoxVisible(
-      { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
-      run.clips,
-    ));
-  }
-  // Otherwise by where its clusters are painted, not by its layout box: a
-  // condensed run can paint glyphs well past its advances.
+  // A run without cluster boxes is judged by its painted (font) box.
+  if (!boxes || boxes.length === 0) return whole(!runPartVisible(run, 0, run.w));
+  // Otherwise by where its glyphs are painted (glyph boxes, across the run
+  // its font box), not by its advances or line box: tracking after a glyph
+  // paints nothing, and a condensed run can paint glyphs past its advances.
   const groups: Array<{ first: number; last: number; hidden: boolean }> = [];
   for (const [index, box] of boxes.entries()) {
     const previous = groups.at(-1);
-    // A cluster without width goes with the one before it.
-    const hidden = box.width > 0 ? !runPartVisible(run, box.x, box.width) : previous?.hidden ?? false;
+    const glyphX = box.glyphX ?? box.x;
+    const glyphWidth = box.glyphWidth ?? box.width;
+    // A cluster that paints nothing goes with the one before it.
+    const hidden = glyphWidth > 0 ? !runPartVisible(run, glyphX, glyphWidth) : previous?.hidden ?? false;
     if (previous && previous.hidden === hidden) previous.last = index;
     else groups.push({ first: index, last: index, hidden });
   }

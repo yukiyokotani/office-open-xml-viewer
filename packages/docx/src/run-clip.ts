@@ -189,14 +189,30 @@ export function runHighlightRect(run: Readonly<DocxTextRunInfo>): Readonly<{
   return run.clips ? { ...rect, clips: run.clips } : rect;
 }
 
-/** Whether the part of `run` from `offset` along its own axis, `length`
- * long and as high as the run, survives its clips. */
-export function runPartVisible(run: Readonly<DocxTextRunInfo>, offset: number, length: number): boolean {
-  const [a, b] = orientation(run.transform);
-  return clippedBoxVisible({
-    x: run.x + a * offset, y: run.y + b * offset, width: length, height: run.h,
+/** The painted box of the part of `run` from `offset` along its own axis
+ * (from the run's origin), `length` long: across the run it spans the run's
+ * font box (highlightBounds), where its glyphs are painted, not the line
+ * height that additional line spacing adds. */
+export function runPaintedPart(
+  run: Readonly<DocxTextRunInfo>,
+  offset: number,
+  length: number,
+): Readonly<{ x: number; y: number; width: number; height: number; transform?: string }> {
+  const [a, b, c, d] = orientation(run.transform);
+  const font = run.highlightBounds;
+  // The font box's position across the run, from the run's origin.
+  const across = font ? c * (font.x - run.x) + d * (font.y - run.y) : 0;
+  return {
+    x: run.x + a * offset + c * across, y: run.y + b * offset + d * across, width: length,
+    height: font?.height ?? run.h,
     ...(run.transform ? { transform: run.transform } : {}),
-  }, run.clips);
+  };
+}
+
+/** Whether anything painted in the part of `run` from `offset` along its own
+ * axis, `length` long, survives its clips (runPaintedPart). */
+export function runPartVisible(run: Readonly<DocxTextRunInfo>, offset: number, length: number): boolean {
+  return clippedBoxVisible(runPaintedPart(run, offset, length), run.clips);
 }
 
 /** Two highlight boxes (placed like DocxTextRunInfo.highlightBounds) of one

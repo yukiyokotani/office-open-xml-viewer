@@ -197,24 +197,38 @@ export function visuallyContiguousGroups(placement: ClusteredText, from: number,
   return groups;
 }
 
-/** Where one cluster is painted, for readers that address text by offset. */
+/** Where one cluster is painted, for readers that address text by offset.
+ * A cluster has two intervals along the run, both from the listing's
+ * origin: its advance box, from its pen to the next pen (its tracking
+ * included), and its glyph box, where paint draws its glyph: from its pen
+ * over its natural advance (for a glyph whose advance floors to nothing as
+ * well). Readers that ask what is painted (find highlights, clip visibility)
+ * use the glyph box; readers that place the caret or size a selection use
+ * the advance box. */
 export interface ClusterBox {
   /** UTF-16 offsets of the cluster in the text the boxes are listed for. */
   readonly start: number;
   readonly end: number;
-  /** Left edge from the listing's origin, and painted advance. */
+  /** Left edge and width of the advance box. */
   readonly xPt: number;
   readonly widthPt: number;
-  /** The cluster reads right to left: it starts at its right edge. */
+  /** Left edge and width of the glyph box. */
+  readonly glyphXPt: number;
+  readonly glyphWidthPt: number;
+  /** The cluster reads right to left: it starts at its right edge, and its
+   * tracking lies on its left. */
   readonly rtl: boolean;
   /** The run's final cluster, set to end at the run's box: the tracking
    * after it is already outside its width (a fitted run). */
   readonly trackingExcluded?: true;
   /** A tate-chu-yoko cluster stands upright across the run: `xPt`/`widthPt`
-   * span the run's cell along it, and these place the character across it,
-   * from the top of the listing's box. */
+   * (and its glyph box along the run) span the run's cell along it; these
+   * place its advance box across the run, from the top of the listing's
+   * box, and `glyphCrossPt`/`glyphCrossWidthPt` its glyph. */
   readonly crossPt?: number;
   readonly crossWidthPt?: number;
+  readonly glyphCrossPt?: number;
+  readonly glyphCrossWidthPt?: number;
 }
 
 /** The painted boxes of `clusters[first, last)`, with text offsets from
@@ -232,45 +246,66 @@ export function clusterBoxes(
   // §17.3.2.10 tate-chu-yoko: the characters stand upright side by side
   // across the run, centred on the paint origin, each over the run's cell.
   const upright = tateChuYokoRow(placement);
-  const drawn = flooredDrawnAdvancesPt(placement);
+  const operations = paintOperationFacts(placement);
   for (let index = first; index < last; index += 1) {
     const cluster = placement.clusters[index]!;
+    const glyph = operations?.at(cluster.range.start);
     if (upright) {
       const fromPt = cluster.offset.xPt - upright.originPt;
+      // The row reads toward the run's top edge (it is turned back upright):
+      // a character's glyph lies at the far end of its advance.
+      const crossPt = upright.endPt - fromPt - cluster.advancePt - placement.bounds.yPt;
+      const naturalPt = naturalAdvancePt(cluster.advancePt, glyph);
       boxes.push({
         start: Math.max(cluster.range.start, textStart) - textStart,
         end: Math.min(cluster.range.end, textEnd) - textStart,
         xPt: placement.bounds.xPt - originXPt,
         widthPt: placement.bounds.widthPt,
+        glyphXPt: placement.bounds.xPt - originXPt,
+        glyphWidthPt: placement.bounds.widthPt,
         rtl: false,
-        // The row reads toward the run's top edge (it is turned back upright).
-        crossPt: upright.endPt - fromPt - cluster.advancePt - placement.bounds.yPt,
+        crossPt,
         crossWidthPt: cluster.advancePt,
+        glyphCrossPt: crossPt + cluster.advancePt - naturalPt,
+        glyphCrossWidthPt: naturalPt,
       });
       continue;
     }
     const startPt = visualClusterStartXPt(placement, index);
     const final = index === placement.clusters.length - 1;
-    // A floored cluster (condensed past its glyph) still paints its glyph:
-    // its box is the drawn glyph, from its pen on the side its text starts.
-    const drawnPt = drawn?.get(cluster.range.start);
     const advancePt = visual ? visual.advancesPt[index]!
       : final
         ? Math.max(0, placement.bounds.xPt + placement.bounds.widthPt - startPt)
         : cluster.advancePt;
-    const widthPt = drawnPt !== undefined ? Math.max(advancePt, drawnPt) : advancePt;
     const odd = visual?.odd[index] === true;
     const cut = final && (visual ? visual.lastCut : Math.abs(advancePt - cluster.advancePt) > 1e-9);
+    // A final cluster set to the run's box already leaves its tracking out
+    // (or paints a compressed glyph to the box edge): its glyph fills it.
+    const naturalPt = cut ? advancePt : naturalAdvancePt(advancePt, glyph);
+    const xPt = startPt - originXPt;
     boxes.push({
       start: Math.max(cluster.range.start, textStart) - textStart,
       end: Math.min(cluster.range.end, textEnd) - textStart,
-      xPt: startPt - originXPt - (odd ? widthPt - advancePt : 0),
-      widthPt,
+      xPt,
+      widthPt: advancePt,
+      // From the pen: the left edge, or the right edge of a right-to-left
+      // cluster, whose tracking lies on its left.
+      glyphXPt: odd ? xPt + advancePt - naturalPt : xPt,
+      glyphWidthPt: naturalPt,
       rtl: odd,
       ...(cut ? { trackingExcluded: true as const } : {}),
     });
   }
   return boxes;
+}
+
+/** The natural advance a cluster's glyph is drawn at: its advance without
+ * the tracking of the operation that paints it, or the drawn advance of a
+ * floored cluster (condensed past its glyph, painted by its own operation at
+ * its natural advance). Never negative. */
+function naturalAdvancePt(advancePt: number, glyph: OperationFact | undefined): number {
+  if (glyph?.naturalAdvancePt !== undefined) return Math.max(0, glyph.naturalAdvancePt);
+  return Math.max(0, advancePt - (glyph?.letterSpacingPt ?? 0));
 }
 
 /** A tate-chu-yoko run paints its characters upright in one row across the
@@ -289,22 +324,39 @@ function tateChuYokoRow(placement: ClusteredText): Readonly<{ endPt: number; ori
   return { endPt: centrePt + (end - start) / 2, originPt: start };
 }
 
-/** The drawn glyph advance of each floored cluster, by its start: condensed
- * spacing floors its pen advance, while its own paint operation draws the
- * glyph at its natural advance. Null when no operation is floored. Built
- * once per piece's operations, however many owners list its boxes. */
-const flooredDrawnByOperations = new WeakMap<object, ReadonlyMap<number, number> | null>();
-function flooredDrawnAdvancesPt(placement: ClusteredText): ReadonlyMap<number, number> | null {
+type OperationFact = Readonly<{ letterSpacingPt: number; naturalAdvancePt?: number }>;
+type OperationFacts = Readonly<{ at(start: number): OperationFact | undefined }>;
+/** The tracking and floored natural advance of the operation that paints
+ * each cluster, looked up by the cluster's start. Built once per piece's
+ * operations, however many owners list its boxes, so the work is linear. */
+const factsByOperations = new WeakMap<object, OperationFacts>();
+function paintOperationFacts(placement: ClusteredText): OperationFacts | null {
   const operations = placement.paintOps;
-  if (!operations) return null;
-  const cached = flooredDrawnByOperations.get(operations);
-  if (cached !== undefined) return cached;
-  let drawn: Map<number, number> | null = null;
-  for (const operation of operations) {
-    if (operation.naturalAdvancePt === undefined) continue;
-    drawn ??= new Map();
-    drawn.set(operation.range.start, operation.naturalAdvancePt);
-  }
-  flooredDrawnByOperations.set(operations, drawn);
-  return drawn;
+  if (!operations || operations.length === 0) return null;
+  const cached = factsByOperations.get(operations);
+  if (cached) return cached;
+  const ordered = operations.map((operation) => ({
+    start: operation.range.start,
+    end: operation.range.end,
+    fact: {
+      letterSpacingPt: operation.letterSpacingPt ?? 0,
+      ...(operation.naturalAdvancePt === undefined ? {} : { naturalAdvancePt: operation.naturalAdvancePt }),
+    },
+  })).sort((left, right) => left.start - right.start);
+  const facts: OperationFacts = {
+    at(start) {
+      // The last operation that starts at or before `start`.
+      let low = 0;
+      let high = ordered.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (ordered[middle]!.start <= start) low = middle + 1;
+        else high = middle;
+      }
+      const found = ordered[low - 1];
+      return found && start < Math.max(found.end, found.start + 1) ? found.fact : undefined;
+    },
+  };
+  factsByOperations.set(operations, facts);
+  return facts;
 }

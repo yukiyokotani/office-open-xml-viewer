@@ -1652,8 +1652,12 @@ export interface DocxTextRunInfo {
         width: number;
         rtl: boolean;
         trackingExcluded?: true;
+        glyphX?: number;
+        glyphWidth?: number;
         y?: number;
         height?: number;
+        glyphY?: number;
+        glyphHeight?: number;
     }>[];
     transform?: string;
     hyperlink?: HyperlinkTarget;

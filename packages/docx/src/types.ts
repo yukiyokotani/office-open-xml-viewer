@@ -1902,18 +1902,26 @@ export interface DocxTextRunInfo {
   referenceFont?: Readonly<{ font: string; scale: number }>;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;
-  /** Where each glyph cluster of `text` is painted, from the layout's
-   * retained geometry: UTF-16 offsets `[start, end)` in `text`, the left
-   * edge from `x` and the painted width in CSS px along the run, and whether
-   * the cluster reads right to left. Overlays that address part of the run
-   * (find highlights) use these instead of measuring text. The run's final
-   * cluster carries `trackingExcluded` when its box already leaves out the
-   * tracking after it (a fitted run). A tate-chu-yoko character stands
-   * upright across the run: `x`/`width` span the run's cell and `y`/`height`
-   * place it across the run from the run's top, in CSS px. */
+  /** Where each glyph cluster of `text` lies, from the layout's retained
+   * geometry: UTF-16 offsets `[start, end)` in `text` and whether the cluster
+   * reads right to left. Each cluster has two intervals along the run, in
+   * CSS px from `x`: its advance box `x`/`width`, from its pen to the next
+   * pen (tracking included), for the caret, hit testing and selection; and
+   * its glyph box `glyphX`/`glyphWidth`, where its glyph is painted (its
+   * natural advance from the pen, a floored condensed glyph included), for
+   * find highlights and clip visibility. The glyph box is listed only where
+   * it differs from the advance box. The run's final cluster carries
+   * `trackingExcluded` when its box already leaves out the tracking after it
+   * (a fitted run). A tate-chu-yoko character stands upright across the run:
+   * both boxes span the run's cell along it, and `y`/`height` (advance) and
+   * `glyphY`/`glyphHeight` (glyph, where it differs) place it across the run
+   * from the run's top, in CSS px. Overlays use these instead of measuring
+   * text. */
   clusterBoxes?: readonly Readonly<{
     start: number; end: number; x: number; width: number; rtl: boolean; trackingExcluded?: true;
+    glyphX?: number; glyphWidth?: number;
     y?: number; height?: number;
+    glyphY?: number; glyphHeight?: number;
   }>[];
   /** CSS transform used by the overlay for vertical-page text. */
   transform?: string;

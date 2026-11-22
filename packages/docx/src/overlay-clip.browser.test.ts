@@ -234,13 +234,48 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     const run = runs.find((item) => item.text === 'iii')!;
     expect(run.clips).toHaveLength(1);
     expect(run.w).toBeLessThan(1e-6);
-    expect(run.clusterBoxes!.every((box) => box.width > 0)).toBe(true);
+    expect(run.clusterBoxes!.every((box) => box.width === 0 && box.glyphWidth! > 0)).toBe(true);
     const result = await selectAll(runs);
     expect(result.text).toContain('iii');
     expect(result.native).toContain('iii');
     const clippedAway = await page.evaluate(() => [...document.querySelectorAll('#layer span')]
       .filter((span) => span.textContent === 'iii' && (span as HTMLElement).dataset.clippedAway !== undefined).length);
     expect(clippedAway).toBe(0);
+  });
+
+  const fixedCell = (paragraph: string, rowProperties = '') => '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/>'
+    + '<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>'
+    + `<w:tr>${rowProperties ? `<w:trPr>${rowProperties}</w:trPr>` : ''}<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>`
+    + `${paragraph}</w:tc></w:tr></w:tbl><w:p/>`;
+
+  it('leaves a letter out whose glyph is clipped although its tracking is not', async () => {
+    // 'IABC' at 16pt expanded by 16pt, indented 20pt out of its cell: the
+    // clip hides the glyph of I (5pt from its pen) but not the tracking after it.
+    const runs = await runsOf(fixedCell('<w:p><w:pPr><w:ind w:left="-400"/></w:pPr>'
+      + '<w:r><w:rPr><w:spacing w:val="320"/><w:sz w:val="32"/></w:rPr><w:t>IABC</w:t></w:r></w:p>'));
+    const run = runs.find((item) => item.text === 'IABC')!;
+    const [first] = run.clusterBoxes!;
+    const clip = run.clips![0]!;
+    // The glyph box ends left of the clip; the advance box reaches into it.
+    expect(run.x + first!.glyphX! + first!.glyphWidth!).toBeLessThan(clip.x);
+    expect(run.x + first!.x + first!.width).toBeGreaterThan(clip.x);
+    const result = await selectAll(runs);
+    expect(result.text).toBe('ABC');
+    expect(result.native).not.toContain('I');
+  });
+
+  it('leaves text out whose font box lies below an exact-height row', async () => {
+    // 12pt text in a 12pt exact row, its line exactly 40pt: the glyphs paint
+    // at the bottom of the line box, below the row's clip.
+    const runs = await runsOf(fixedCell('<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="800" w:lineRule="exact"/></w:pPr>'
+      + '<w:r><w:t>Gone</w:t></w:r></w:p>', '<w:trHeight w:val="240" w:hRule="exact"/>'));
+    const run = runs.find((item) => item.text === 'Gone')!;
+    const clip = run.clips!.at(-1)!;
+    expect(run.highlightBounds!.y).toBeGreaterThanOrEqual(clip.y + clip.height);
+    expect(run.y).toBeLessThan(clip.y + clip.height);
+    const result = await selectAll(runs);
+    expect(result.text).not.toContain('Gone');
+    expect(result.native).not.toContain('Gone');
   });
 
   it('splits a right-to-left run by where its clusters are painted', async () => {

@@ -174,13 +174,20 @@ describe('reference-em text advances on a grid-fitting host', () => {
     } finally {
       (globalThis as { document?: unknown }).document = previousDocument;
     }
-    // Two linear 11pt cells after one, each cluster box carrying the grid pitch
-    // as tracking (as percentages of a 1px box); the boxes are final.
+    // Two linear 11pt glyphs after one, each from its pen, one grid pitch
+    // (carried as tracking) apart: the glyph boxes leave the pitch between
+    // them uncovered (as percentages of a 1px box).
     const pitch = run.letterSpacingPx!;
     expect(pitch).toBeCloseTo(CHAR_SPACE / 4096, 12);
-    const left = Number(/left:([\d.]+)%/.exec(boxes[0]!.style.cssText)![1]) / 100;
-    const width = Number(/width:([\d.]+)%/.exec(boxes[0]!.style.cssText)![1]) / 100;
-    expect(left).toBeCloseTo(run.x + 11 + pitch, 9);
-    expect(width).toBeCloseTo(22 + 2 * pitch, 9);
+    expect(boxes).toHaveLength(2);
+    const extent = (box: { style: { cssText: string } }) => [
+      Number(/left:([\d.]+)%/.exec(box.style.cssText)![1]) / 100,
+      Number(/width:([\d.]+)%/.exec(box.style.cssText)![1]) / 100,
+    ];
+    const [[left1, width1], [left2, width2]] = boxes.map(extent) as [number[], number[]];
+    expect(left1).toBeCloseTo(run.x + 11 + pitch, 9);
+    expect(width1).toBeCloseTo(11, 9);
+    expect(left2).toBeCloseTo(run.x + 2 * (11 + pitch), 9);
+    expect(width2).toBeCloseTo(11, 9);
   });
 });

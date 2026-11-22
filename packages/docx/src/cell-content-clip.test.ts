@@ -479,7 +479,9 @@ describe('overlay clip containers', () => {
       const { run, width } = findIn('<w:p><w:r><w:rPr><w:spacing w:val="-120"/><w:sz w:val="32"/></w:rPr>'
         + '<w:t>WiM</w:t></w:r></w:p>', 'WiM', { start: 1, end: 2 });
       expect(run.letterSpacingPx).toBeCloseTo(-6, 9);
-      expect(run.clusterBoxes![1]!.width).toBeCloseTo(4.5, 9);
+      // Its advance box has no width; its glyph box is the drawn glyph.
+      expect(run.clusterBoxes![1]!.width).toBeCloseTo(0, 9);
+      expect(run.clusterBoxes![1]!.glyphWidth).toBeCloseTo(4.5, 9);
       expect(width).toBeCloseTo(4.5, 6);
     } finally {
       vi.unstubAllGlobals();
@@ -496,10 +498,12 @@ describe('overlay clip containers', () => {
         + '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" '
         + 'w:left="1440" w:header="0" w:footer="0" w:gutter="0"/><w:textDirection w:val="tbRl"/></w:sectPr></w:pPr></w:p>';
       const { run, width, height } = findIn('', '29', { start: 0, end: 1 }, body);
+      // The glyph (8pt across) without the 3pt tracking its advance carries.
       const box = run.clusterBoxes![0]!;
-      expect(box.height).toBeDefined();
+      expect(box.height).toBeCloseTo(11, 6);
+      expect(box.glyphHeight).toBeCloseTo(8, 6);
       expect(width).toBeCloseTo(box.width, 6);
-      expect(height).toBeCloseTo(box.height!, 6);
+      expect(height).toBeCloseTo(8, 6);
       expect(Math.max(width, height)).toBeLessThanOrEqual(16 + 1e-6);
     } finally {
       vi.unstubAllGlobals();
@@ -699,7 +703,7 @@ describe('tate-chu-yoko cluster boxes', () => {
     expect(boxes.map((box) => [box.xPt, box.widthPt, box.crossPt, box.crossWidthPt])).toEqual([[0, 8, 8, 6], [0, 8, 2, 6]]);
   });
 
-  it('give a floored, condensed glyph the box it is drawn in', () => {
+  it('give a floored, condensed glyph the glyph box it is drawn in', () => {
     // 'abc' condensed so that 'b' floors to no advance; its own operation
     // draws it at its 6pt natural advance.
     const placement = {
@@ -717,7 +721,9 @@ describe('tate-chu-yoko cluster boxes', () => {
       ],
     };
     const boxes = clusterBoxes(placement as never, 0, 3, 0, 3, 0);
-    expect(boxes.map((box) => [box.xPt, box.widthPt])).toEqual([[0, 4], [4, 6], [4, 4]]);
+    // Advance boxes from pen to pen; b's glyph box is the drawn glyph.
+    expect(boxes.map((box) => [box.xPt, box.widthPt])).toEqual([[0, 4], [4, 0], [4, 4]]);
+    expect(boxes.map((box) => [box.glyphXPt, box.glyphWidthPt])).toEqual([[0, 4], [4, 6], [4, 4]]);
   });
 
   it('end a compressed right-to-left fitted run at its box\'s right edge', () => {
