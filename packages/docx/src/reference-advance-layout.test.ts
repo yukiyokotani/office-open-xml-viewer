@@ -174,13 +174,13 @@ describe('reference-em text advances on a grid-fitting host', () => {
     } finally {
       (globalThis as { document?: unknown }).document = previousDocument;
     }
-    // Two linear 11pt cells after one, plus the grid pitch carried as tracking
-    // (as percentages of a 1px box).
+    // Two linear 11pt cells after one, each cluster box carrying the grid pitch
+    // as tracking (as percentages of a 1px box); the boxes are final.
     const pitch = run.letterSpacingPx!;
     expect(pitch).toBeCloseTo(CHAR_SPACE / 4096, 12);
     const left = Number(/left:([\d.]+)%/.exec(boxes[0]!.style.cssText)![1]) / 100;
     const width = Number(/width:([\d.]+)%/.exec(boxes[0]!.style.cssText)![1]) / 100;
     expect(left).toBeCloseTo(run.x + 11 + pitch, 9);
-    expect(width).toBeCloseTo(22 + pitch, 9);
+    expect(width).toBeCloseTo(22 + 2 * pitch, 9);
   });
 });

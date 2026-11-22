@@ -162,8 +162,11 @@ export function visualBoundaryXPt(placement: ClusteredText, index: number): numb
   const trailing = index >= clusters.length;
   if (leadingIsRight === trailing) return startPt;
   const endPt = startPt + (visual?.advancesPt[at] ?? clusters[at]!.advancePt);
-  // A piece in logical order ends at its box as well.
-  return visual || !trailing ? endPt : Math.min(endPt, Math.max(startPt, placement.bounds.xPt + placement.bounds.widthPt));
+  // A piece in logical order ends at its box as well, as its final cluster
+  // box does (clusterBoxes): cut where its trailing tracking or compressed
+  // space lies outside, extended where a compressed fitted run's final glyph
+  // paints past its pitch.
+  return visual || !trailing ? endPt : Math.max(startPt, placement.bounds.xPt + placement.bounds.widthPt);
 }
 
 /** Visual x of the start (left edge) of cluster `index`. */
@@ -288,13 +291,20 @@ function tateChuYokoRow(placement: ClusteredText): Readonly<{ endPt: number; ori
 
 /** The drawn glyph advance of each floored cluster, by its start: condensed
  * spacing floors its pen advance, while its own paint operation draws the
- * glyph at its natural advance. Null when no operation is floored. */
+ * glyph at its natural advance. Null when no operation is floored. Built
+ * once per piece's operations, however many owners list its boxes. */
+const flooredDrawnByOperations = new WeakMap<object, ReadonlyMap<number, number> | null>();
 function flooredDrawnAdvancesPt(placement: ClusteredText): ReadonlyMap<number, number> | null {
+  const operations = placement.paintOps;
+  if (!operations) return null;
+  const cached = flooredDrawnByOperations.get(operations);
+  if (cached !== undefined) return cached;
   let drawn: Map<number, number> | null = null;
-  for (const operation of placement.paintOps ?? []) {
+  for (const operation of operations) {
     if (operation.naturalAdvancePt === undefined) continue;
     drawn ??= new Map();
     drawn.set(operation.range.start, operation.naturalAdvancePt);
   }
+  flooredDrawnByOperations.set(operations, drawn);
   return drawn;
 }

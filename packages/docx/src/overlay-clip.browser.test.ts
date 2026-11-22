@@ -223,6 +223,26 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(result.native).not.toContain('HIDDEN');
   });
 
+  it('keeps condensed text that still paints inside its cell in the selection', async () => {
+    // 'iii' at 16pt in a 100pt fixed-width cell, condensed by 6pt: every
+    // advance floors to zero while each glyph still paints at its natural
+    // 5pt advance inside the cell.
+    const cell = '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>'
+      + '<w:p><w:r><w:rPr><w:spacing w:val="-120"/><w:sz w:val="32"/></w:rPr><w:t>iii</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>';
+    const runs = await runsOf(cell);
+    const run = runs.find((item) => item.text === 'iii')!;
+    expect(run.clips).toHaveLength(1);
+    expect(run.w).toBeLessThan(1e-6);
+    expect(run.clusterBoxes!.every((box) => box.width > 0)).toBe(true);
+    const result = await selectAll(runs);
+    expect(result.text).toContain('iii');
+    expect(result.native).toContain('iii');
+    const clippedAway = await page.evaluate(() => [...document.querySelectorAll('#layer span')]
+      .filter((span) => span.textContent === 'iii' && (span as HTMLElement).dataset.clippedAway !== undefined).length);
+    expect(clippedAway).toBe(0);
+  });
+
   it('splits a right-to-left run by where its clusters are painted', async () => {
     // Logical 0 is painted rightmost; the clip shows the leftmost two glyphs.
     const result = await selectAll([cellRun('אבגד', 100, 10, [{ x: 100, y: 90, width: 20, height: 40 }], true)]);

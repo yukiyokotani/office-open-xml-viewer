@@ -1,4 +1,4 @@
-import { clippedBoxVisible, OverlayClipFrames, runPartVisible, runStraddlesClip } from './run-clip.js';
+import { clippedBoxVisible, OverlayClipFrames, runPartVisible } from './run-clip.js';
 import { countSpacingCharacters } from './character-spacing.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
@@ -224,14 +224,15 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
     ...(paintedEnd > 0 ? { width: paintedEnd, first: 0, last: boxes!.length - 1 } : {}),
   }];
   if (!run.clips) return whole(false);
-  if (!clippedBoxVisible(
-    { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
-    run.clips,
-  )) return whole(true);
-  if (!boxes || boxes.length === 0) return whole(false);
-  // Without a union, a run its clips do not cut has nothing to split; a union
-  // can hide a gap inside the run's extent.
-  if (!run.clips.some((clip) => clip.rects) && !runStraddlesClip(run)) return whole(false);
+  // A run without cluster boxes is judged by its box.
+  if (!boxes || boxes.length === 0) {
+    return whole(!clippedBoxVisible(
+      { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
+      run.clips,
+    ));
+  }
+  // Otherwise by where its clusters are painted, not by its layout box: a
+  // condensed run can paint glyphs well past its advances.
   const groups: Array<{ first: number; last: number; hidden: boolean }> = [];
   for (const [index, box] of boxes.entries()) {
     const previous = groups.at(-1);

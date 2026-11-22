@@ -49,14 +49,16 @@ const rule = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w
 
 /** One 216pt cell with 0.5pt rules, 5.4pt side margins and 10pt top/bottom
  * margins, holding the given paragraphs. */
-function docx(paragraphs: string, body?: string, rowProperties = '', verticalMarginTwips = 200, rules = true): Uint8Array {
+function docx(
+  paragraphs: string, body?: string, rowProperties = '', verticalMarginTwips = 200, rules = true, cellProperties = '',
+): Uint8Array {
   const table = '<w:tbl><w:tblPr><w:tblW w:w="4320" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/>'
     + (rules ? `<w:tblBorders>${['top', 'left', 'bottom', 'right'].map(rule).join('')}</w:tblBorders>` : '')
     + '<w:tblLayout w:type="fixed"/>'
     + `<w:tblCellMar><w:top w:w="${verticalMarginTwips}" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>`
     + `<w:bottom w:w="${verticalMarginTwips}" w:type="dxa"/>`
     + '<w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid>'
-    + `<w:tr>${rowProperties ? `<w:trPr>${rowProperties}</w:trPr>` : ''}<w:tc><w:tcPr><w:tcW w:w="4320" w:type="dxa"/></w:tcPr>${paragraphs}</w:tc></w:tr></w:tbl>`;
+    + `<w:tr>${rowProperties ? `<w:trPr>${rowProperties}</w:trPr>` : ''}<w:tc><w:tcPr><w:tcW w:w="4320" w:type="dxa"/>${cellProperties}</w:tcPr>${paragraphs}</w:tc></w:tr></w:tbl>`;
   const document = `<w:document ${NS}><w:body>${body ?? `<w:p/>${table}<w:p/>`}`
     + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
     + 'w:header="0" w:footer="0" w:gutter="0"/></w:sectPr></w:body></w:document>';
@@ -74,14 +76,14 @@ function docx(paragraphs: string, body?: string, rowProperties = '', verticalMar
   ]));
 }
 
-function layoutDocx(bytes: Uint8Array) {
+function layoutDocx(bytes: Uint8Array, context = measureContext(5)) {
   const archive = new DocxArchive(bytes);
   let parsed;
   try {
     parsed = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse())));
   } finally { archive.free(); }
   const model = parsed.document;
-  return layoutDocument(model, createLayoutServices(model, { measureContext: measureContext(5) }), { currentDateMs: 0 });
+  return layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
 }
 
 function layoutPage(bytes: Uint8Array) {
@@ -419,11 +421,11 @@ describe('overlay clip containers', () => {
     }
   });
 
-  it('does not take the tracking off a fitted run\'s final cluster twice', () => {
+  it('takes the cluster boxes as final, with no tracking added or taken off', () => {
     vi.stubGlobal('document', { createElement: () => element() });
     try {
       const layer = element();
-      // Tracking of 2px; the final cluster's box already leaves it out.
+      // Tracking of 2px: inner boxes already carry it, the final one leaves it out.
       const run = { text: 'ABCD', x: 0, y: 0, w: 26, h: 10, fontSize: 10, font: '10px serif', letterSpacingPx: 2,
         clusterBoxes: [
           { start: 0, end: 1, x: 0, width: 7, rtl: false }, { start: 1, end: 2, x: 7, width: 7, rtl: false },
@@ -434,8 +436,71 @@ describe('overlay clip containers', () => {
         [{ slices: [{ runIndex: 0, start: 3, end: 4 }, { runIndex: 0, start: 1, end: 2 }], active: false }],
         100, 100, () => () => 0);
       const [last, inner] = layer.children;
-      expect(last!.style.width).toBe('5%');
-      expect(inner!.style.width).toBe('5%');
+      expect(Number.parseFloat(last!.style.width!)).toBeCloseTo(5, 9);
+      expect(Number.parseFloat(inner!.style.width!)).toBeCloseTo(7, 9);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  /** Natural advances of 16pt glyphs: 'W' and 'M' wide, 'i' narrow. */
+  const glyphContext = () => ({
+    ...measureContext(),
+    measureText: (text: string) => ({
+      width: [...text].reduce((sum, character) => sum + ({ W: 15, M: 13, i: 4.5 }[character] ?? 8), 0),
+      actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
+    }),
+  }) as unknown as CanvasRenderingContext2D;
+
+  /** Lays out `paragraphs` in the cell (or `body` as the body), finds `slice`
+   * of the run whose text is `text`, and returns that run with the one
+   * highlight's box in px at scale 1 (the run's clips left out, so the box is
+   * in page units). */
+  const findIn = (paragraphs: string, text: string, slice: Readonly<{ start: number; end: number }>, body?: string) => {
+    const layout = layoutDocx(docx(paragraphs, body), glyphContext());
+    const runs = textRunsForPage(layout, 0, { scale: 1 });
+    const runIndex = runs.findIndex((run) => run.text === text);
+    const run = { ...runs[runIndex]!, clips: undefined };
+    const width = 1000;
+    const height = 1000;
+    const layer = element();
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, [run],
+      [{ slices: [{ runIndex: 0, ...slice }], active: false }], width, height, () => (value: string) => value.length * 5);
+    const [box] = layer.children;
+    const percent = (value: string, of: number) => (Number.parseFloat(value) / 100) * of;
+    return { run, width: percent(box!.style.width!, width), height: percent(box!.style.height!, height) };
+  };
+
+  it('highlights a condensed, floored glyph over the box it is painted in', () => {
+    vi.stubGlobal('document', { createElement: () => element() });
+    try {
+      // 'WiM' at 16pt condensed by 6pt: 'i' floors to no advance and paints at
+      // its 4.5pt natural advance.
+      const { run, width } = findIn('<w:p><w:r><w:rPr><w:spacing w:val="-120"/><w:sz w:val="32"/></w:rPr>'
+        + '<w:t>WiM</w:t></w:r></w:p>', 'WiM', { start: 1, end: 2 });
+      expect(run.letterSpacingPx).toBeCloseTo(-6, 9);
+      expect(run.clusterBoxes![1]!.width).toBeCloseTo(4.5, 9);
+      expect(width).toBeCloseTo(4.5, 6);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('highlights an expanded tate-chu-yoko character within its cell', () => {
+    vi.stubGlobal('document', { createElement: () => element() });
+    try {
+      // '29' at 16pt expanded by 3pt in a tbRl section, set upright as one
+      // 16pt cell: each character's box is final, so the highlight keeps to it.
+      const body = '<w:p><w:r><w:rPr><w:spacing w:val="60"/><w:sz w:val="32"/>'
+        + '<w:eastAsianLayout w:id="1" w:vert="1"/></w:rPr><w:t>29</w:t></w:r></w:p>'
+        + '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" '
+        + 'w:left="1440" w:header="0" w:footer="0" w:gutter="0"/><w:textDirection w:val="tbRl"/></w:sectPr></w:pPr></w:p>';
+      const { run, width, height } = findIn('', '29', { start: 0, end: 1 }, body);
+      const box = run.clusterBoxes![0]!;
+      expect(box.height).toBeDefined();
+      expect(width).toBeCloseTo(box.width, 6);
+      expect(height).toBeCloseTo(box.height!, 6);
+      expect(Math.max(width, height)).toBeLessThanOrEqual(16 + 1e-6);
     } finally {
       vi.unstubAllGlobals();
     }
