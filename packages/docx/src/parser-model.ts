@@ -1251,6 +1251,10 @@ function bodyLayoutSequenceInput(
         reason: 'hidden-paragraph' as const,
         ...(element.pageBreakBefore === true ? { pageBreakBefore: true as const } : {}),
         ...paragraphFrameFact(element),
+        // WORD_ANCHOR_HOST_NO_LINE_METRIC: the floating drawings it anchors
+        // are still acquired, without flow (body-paginator).
+        ...(element.runs && anchorFreeRuns(element.runs) !== element.runs
+          ? { anchors: acquiredBodyParagraph(element, source) } : {}),
       });
     }
     if (element.type === 'table') {

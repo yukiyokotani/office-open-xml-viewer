@@ -2447,6 +2447,37 @@ function* paginateBodyPassSteps(
     noteProgress.retain(args[1]);
     return accepted;
   };
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC: acquire the floating drawings of a
+   * paragraph that takes no flow (a collapsed or hidden mark holding only
+   * them): no flow extent, spacing or page content, and nothing painted of
+   * its own (no border, shading or line number), as its empty counterpart. */
+  const acquireAnchorsWithoutFlow = (block: BodyParagraphSourceInput): void => {
+    const location = acquisitionLocation(state);
+    const acquired = session.measureParagraph({
+      input: block,
+      location,
+      availableInlineExtentPt: location.availableBounds.widthPt,
+      suppressSpaceBefore: true,
+      continuation: Object.freeze({ boundary: null }),
+    });
+    const pageHadContent = state.flow.pageHasContent;
+    // Its mark takes no flow and paints nothing of its own (no
+    // border, shading or line number, as its empty counterpart): the
+    // node holds only the drawings.
+    const { shading: _shading, lineNumbers: _lineNumbers, ...markless } = acquired.layout;
+    const accepted = acceptPageNode(
+      state,
+      Object.freeze({ ...markless, borders: Object.freeze([]), ordinaryFlow: false }),
+      block.source,
+      0,
+      paragraphFragmentStartKey(Object.freeze({ boundary: null })),
+      acceptedOccurrenceIds,
+      allocations,
+    );
+    state = Object.freeze({ ...accepted, flow: Object.freeze({ ...accepted.flow, pageHasContent: pageHadContent }) });
+    if (acquired.flowRegistryDelta) session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
+    session.moveAcquisitionCursor(acquisitionLocation(state));
+  };
   capturePageCheckpoint = (nextEntryIndex) => {
     if (!canRecoverOnPage) return;
     const current = currentEntryResume();
@@ -2695,6 +2726,9 @@ function* paginateBodyPassSteps(
     }
     const entry = input.sequence[entryIndex]!;
     if (entry.kind === 'consume-source') {
+      // WORD_ANCHOR_HOST_NO_LINE_METRIC: a hidden paragraph that anchors
+      // floating drawings joins the next as its empty counterpart does.
+      if (entry.anchors) acquireAnchorsWithoutFlow(entry.anchors);
       continue;
     }
     if (entry.kind === 'authored-break') {
@@ -2797,35 +2831,8 @@ function* paginateBodyPassSteps(
     if (block.kind === 'paragraph') {
       if (block.continuousSectionRole === 'collapse-mark') {
         // WORD_ANCHOR_HOST_NO_LINE_METRIC: a collapsed mark that anchors
-        // floating drawings collapses as its empty counterpart does (no flow
-        // extent, spacing or page content) while its drawings are acquired.
-        if (block.inkless !== true && resumed?.kind !== 'paragraph') {
-          const location = acquisitionLocation(state);
-          const acquired = session.measureParagraph({
-            input: block,
-            location,
-            availableInlineExtentPt: location.availableBounds.widthPt,
-            suppressSpaceBefore: true,
-            continuation: Object.freeze({ boundary: null }),
-          });
-          const pageHadContent = state.flow.pageHasContent;
-          // Its mark takes no flow and paints nothing of its own (no
-          // border, shading or line number, as its empty counterpart): the
-          // node holds only the drawings.
-          const { shading: _shading, lineNumbers: _lineNumbers, ...markless } = acquired.layout;
-          const accepted = acceptPageNode(
-            state,
-            Object.freeze({ ...markless, borders: Object.freeze([]), ordinaryFlow: false }),
-            block.source,
-            0,
-            paragraphFragmentStartKey(Object.freeze({ boundary: null })),
-            acceptedOccurrenceIds,
-            allocations,
-          );
-          state = Object.freeze({ ...accepted, flow: Object.freeze({ ...accepted.flow, pageHasContent: pageHadContent }) });
-          if (acquired.flowRegistryDelta) session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
-          session.moveAcquisitionCursor(acquisitionLocation(state));
-        }
+        // floating drawings collapses as its empty counterpart does.
+        if (block.inkless !== true && resumed?.kind !== 'paragraph') acquireAnchorsWithoutFlow(block);
         continue;
       }
       if (block.pageBreakBefore && resumed?.kind !== 'paragraph') {

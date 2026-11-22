@@ -339,17 +339,23 @@ function findHighlights(runs: DocxTextRunInfo[]): string[] {
   }
 }
 
-/** Each character's highlight that does not start where a cluster showing
- * that character is painted. */
+/** Each character's highlight that is not the glyph box of a cluster showing
+ * that character: where paint draws the glyph, from its pen (the left edge,
+ * or the leading right edge of a right-to-left cluster), at its own drawn
+ * advance (the retained glyph advance, or a floored glyph's drawn one). */
 function misplacedHighlights(runs: DocxTextRunInfo[], laidOut: readonly ParagraphLayout[]): string[] {
-  const painted = new Map<string, number[]>();
+  const painted = new Map<string, Array<readonly [number, number]>>();
   for (const subject of laidOut) {
     for (const line of subject.lines) {
       for (const placement of line.placements) {
         if (placement.kind !== 'text') continue;
         placement.clusters.forEach((cluster, index) => {
           const shown = placement.text.slice(cluster.range.start - placement.range.start, cluster.range.end - placement.range.start);
-          painted.set(shown, [...(painted.get(shown) ?? []), visualClusterStartXPt(placement, index)]);
+          const floored = placement.paintOps.find((operation) => operation.range.start === cluster.range.start
+            && operation.naturalAdvancePt !== undefined)?.naturalAdvancePt;
+          const glyph = cluster.glyphAdvancePt ?? floored ?? cluster.advancePt;
+          painted.set(shown, [...(painted.get(shown) ?? []),
+            [visualClusterStartXPt(placement, index), glyph], [visualBoundaryXPt(placement, index) - glyph, glyph]]);
         });
       }
     }
@@ -364,10 +370,13 @@ function misplacedHighlights(runs: DocxTextRunInfo[], laidOut: readonly Paragrap
         const layer = fakeElement();
         buildDocxHighlightLayer(layer as never, runs, [{ active: false, slices: [{ runIndex, start, end: start + 1 }] }],
           100, 100, measureForFont);
-        const left = /left:([-\d.e]+)%/.exec(layer.children[0]?.style.cssText ?? '')?.[1];
-        if (left === undefined) continue;
-        if (!(painted.get(run.text[start]!) ?? []).some((xPt) => Math.abs(xPt - Number(left)) < 1e-6)) {
-          misplaced.push(`${JSON.stringify(run.text)}[${start}] at ${left}`);
+        const css = layer.children[0]?.style.cssText ?? '';
+        const left = /left:([-\d.e]+)%/.exec(css)?.[1];
+        const width = /width:([-\d.e]+)%/.exec(css)?.[1];
+        if (left === undefined || width === undefined) continue;
+        if (!(painted.get(run.text[start]!) ?? []).some(([xPt, widthPt]) =>
+          Math.abs(xPt - Number(left)) < 1e-6 && Math.abs(widthPt - Number(width)) < 1e-6)) {
+          misplaced.push(`${JSON.stringify(run.text)}[${start}] at ${left} width ${width}`);
         }
       }
     });
@@ -751,8 +760,8 @@ describe('find highlights and hosts in pieces whose paint differs from their sou
   it('highlights letters of kashida-justified text where the elongated text paints them', () => {
     // A 90pt band, a float after the first two letters. Each highlight of
     // beh is checked against the painted text (6pt per painted character,
-    // inserted tatweels included, from the piece's right edge): it starts at
-    // the letter's right edge and covers the letter with its elongation.
+    // inserted tatweels included, from the piece's right edge): it ends at
+    // the letter's right edge, its pen, and covers the letter's glyph.
     const rtlRun = (value: string) => textRun(value, { rtl: true });
     const { layout, subject } = lay([rtlRun(kashidaText.slice(0, 2)), ...anchorRuns('page'), rtlRun(kashidaText.slice(2))],
       { bidi: true, alignment: 'highKashida' }, 130);
@@ -777,8 +786,9 @@ describe('find highlights and hosts in pieces whose paint differs from their sou
     expect(elongated).toBeGreaterThan(0);
     const found = highlights(layout, '\u0628');
     expect(found.map(([, x, width]) => round(x + width)).sort((a, b) => a - b)).toEqual(expected.sort((a, b) => a - b));
-    // An elongated letter's highlight is wider than the letter.
-    expect(found.some(([, , width]) => width > 6)).toBe(true);
+    // The highlight is the letter's glyph only: the elongation added after
+    // it belongs to its advance, not its glyph.
+    expect(found.every(([, , width]) => width === 6)).toBe(true);
   });
 
   it('measures no text to highlight the last letter of a long right-to-left run', () => {
@@ -837,6 +847,38 @@ describe('a float-only mark that ends a section before a continuous break', () =
     const empty = observe([], 0, decorated);
     expect(empty.borders).toBe(0);
     expect(observe(anchorRuns('page'), 0, decorated)).toEqual({ ...empty, drawings: 1 });
+  });
+});
+
+describe('a hidden mark that anchors only floating drawings', () => {
+  /** The top of the following text and the drawings painted. */
+  const observe = (mark: readonly Run[], pageBreakBefore = false) => {
+    const built = model({ ...cases(1)[0]!, container: 'body', vertical: false, options: {},
+      settings: { compatibilityMode: 15 }, section: { pageWidth: 200, pageHeight: 400 } }, []).model;
+    const body = [
+      paragraph([textRun('A')]),
+      paragraph(mark, { markVanish: true, ...(pageBreakBefore ? { pageBreakBefore: true } : {}) }),
+      paragraph([textRun('B')]),
+    ];
+    const document = { ...built, body } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(document, createLayoutServices(document, { measureContext: measureContext() }), { currentDateMs: 0 });
+    const runs = layout.pages.flatMap((_, index) => textRunsForPage(layout, index, { scale: 1 }).map((run) => ({ run, index })));
+    const b = runs.find(({ run }) => run.text === 'B')!;
+    return {
+      page: b.index,
+      top: round(b.run.y),
+      drawings: layout.pages.flatMap((page) => page.layers.paintOrder.filter((entry) => entry.kind === 'drawing')).length,
+    };
+  };
+
+  it('joins the next paragraph as its empty counterpart does and still paints its drawing', () => {
+    const empty = observe([]);
+    expect(observe(anchorRuns('page'))).toEqual({ ...empty, drawings: 1 });
+  });
+
+  it('keeps its drawing when its page break applies', () => {
+    const empty = observe([], true);
+    expect(observe(anchorRuns('page'), true)).toEqual({ ...empty, drawings: 1 });
   });
 });
 

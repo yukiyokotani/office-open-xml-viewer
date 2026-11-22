@@ -1,16 +1,20 @@
 import type { DocParagraph } from '../types.js';
-import { hasVisibleAnchoringRun, metricVisibleRuns } from './metric-visible-runs.js';
+import { anchorFreeRuns, hasVisibleAnchoringRun, metricVisibleRuns } from './metric-visible-runs.js';
 
 /**
  * A paragraph whose mark is vanished (ECMA-376 §17.3.2.41 on the paragraph
  * mark run properties) and which has no ink joins the following paragraph, so
- * a flow that continues past it lays out no block for it. Retained layout
- * sources carry unavailable drawings as runs, which count as ink here.
+ * a flow that continues past it lays out no block for it. Floating drawings
+ * and their anchoring characters are no flow content
+ * (WORD_ANCHOR_HOST_NO_LINE_METRIC): such a paragraph joins as its empty
+ * counterpart does, its drawings still acquired (hasVisibleAnchoringRun).
+ * Retained layout sources carry unavailable drawings as runs, which count as
+ * ink here.
  */
 export function isSwallowedHiddenParagraph(
-  paragraph: Readonly<{ markVanish?: boolean; runs?: readonly Readonly<{ type: string; text?: string }>[] }>,
+  paragraph: Readonly<{ markVanish?: boolean; runs?: readonly Readonly<{ type: string; text?: string; anchor?: boolean }>[] }>,
 ): boolean {
-  return paragraph.markVanish === true && !(paragraph.runs ?? []).some((candidate) => (
+  return paragraph.markVanish === true && !anchorFreeRuns(paragraph.runs ?? []).some((candidate) => (
     candidate.type !== 'text' || (candidate.text?.length ?? 0) > 0));
 }
 

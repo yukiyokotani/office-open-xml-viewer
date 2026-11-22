@@ -3526,7 +3526,7 @@ function textPlanSegment(
   }
   let precedingScalars = 0;
   let precedingPitchBearing = 0;
-  let clusters = (shapedClusters ?? []).map((cluster, index) => {
+  let clusters: TextClusterLayout[] = (shapedClusters ?? []).map((cluster, index): TextClusterLayout => {
     const prefix = segment.text.slice(0, cluster.range.start);
     const text = segment.text.slice(cluster.range.start, cluster.range.end);
     const counts = countSpacingCharacters(text);
@@ -3570,6 +3570,9 @@ function textPlanSegment(
           + precedingPunctuationCompression,
         yPt: baselineOffsetPt,
       },
+      // The glyph as paint draws it: its font advance, scaled, without the
+      // spacing, justification or padding added between glyphs.
+      glyphAdvancePt: cluster.advancePt * scaleX,
       advancePt:
         cluster.advancePt * scaleX
         + clusterSpacingPt
@@ -3610,7 +3613,9 @@ function textPlanSegment(
         unitStart = range.end;
         const advancePt = advances[index]! > 0 ? advances[index]! : 0;
         if (advances[index]! < 0) flooredClusterNaturalPt.set(range.start, unit.advancePx * scaleX);
-        const placed = { range, offset: { xPt: penPt, yPt: baselineOffsetPt }, advancePt };
+        const placed = {
+          range, offset: { xPt: penPt, yPt: baselineOffsetPt }, advancePt, glyphAdvancePt: unit.advancePx * scaleX,
+        };
         penPt += advancePt;
         return placed;
       });
