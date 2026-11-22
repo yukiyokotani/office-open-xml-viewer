@@ -2796,6 +2796,33 @@ function* paginateBodyPassSteps(
     const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
     if (block.kind === 'paragraph') {
       if (block.continuousSectionRole === 'collapse-mark') {
+        // WORD_ANCHOR_HOST_NO_LINE_METRIC: a collapsed mark that anchors
+        // floating drawings collapses as its empty counterpart does (no flow
+        // extent, spacing or page content) while its drawings are acquired.
+        if (block.inkless !== true && resumed?.kind !== 'paragraph') {
+          const location = acquisitionLocation(state);
+          const acquired = session.measureParagraph({
+            input: block,
+            location,
+            availableInlineExtentPt: location.availableBounds.widthPt,
+            suppressSpaceBefore: true,
+            continuation: Object.freeze({ boundary: null }),
+          });
+          const pageHadContent = state.flow.pageHasContent;
+          // Its mark takes no flow: the node holds only the drawings.
+          const accepted = acceptPageNode(
+            state,
+            Object.freeze({ ...acquired.layout, ordinaryFlow: false }),
+            block.source,
+            0,
+            paragraphFragmentStartKey(Object.freeze({ boundary: null })),
+            acceptedOccurrenceIds,
+            allocations,
+          );
+          state = Object.freeze({ ...accepted, flow: Object.freeze({ ...accepted.flow, pageHasContent: pageHadContent }) });
+          if (acquired.flowRegistryDelta) session.commitFlowRegistryDelta(acquired.flowRegistryDelta);
+          session.moveAcquisitionCursor(acquisitionLocation(state));
+        }
         continue;
       }
       if (block.pageBreakBefore && resumed?.kind !== 'paragraph') {

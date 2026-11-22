@@ -1025,8 +1025,17 @@ export function buildSegments(
   // (eligibleNativeSourceText) and is withdrawn for every body band that
   // holds a floating source; its cursor never spans an anchor.
   const sourceIndex: number[] = [];
-  runs.forEach((run, runIndex) => { if (!isAnchoringRun(run)) sourceIndex.push(runIndex); });
-  const segs = buildContentSegments(content, { ...environment, nativeUnitMinimumBandPt: undefined });
+  // §17.3.2.14 groups only source-adjacent runs into one fitText region: a
+  // content run that follows a removed anchoring run starts a new region.
+  const fitTextSeams = new Set<number>();
+  let anchorSkipped = false;
+  runs.forEach((run, runIndex) => {
+    if (isAnchoringRun(run)) { anchorSkipped = true; return; }
+    if (anchorSkipped && sourceIndex.length > 0) fitTextSeams.add(sourceIndex.length);
+    anchorSkipped = false;
+    sourceIndex.push(runIndex);
+  });
+  const segs = buildContentSegments(content, { ...environment, nativeUnitMinimumBandPt: undefined }, fitTextSeams);
   restoreSourceRunIndices(segs, sourceIndex);
   return withAnchorPlacementSegments(segs, runs, environment);
 }
@@ -1176,6 +1185,7 @@ export function withAnchorPlacementSegments(
 function buildContentSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
+  fitTextSeams: ReadonlySet<number> = new Set(),
 ): LayoutSeg[] {
   if (environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.wordLineBoxes === undefined
     && keepsWordLineBoxes(runs)) {
@@ -1232,6 +1242,8 @@ function buildContentSegments(
   const fitTextFragmentEntryByKey = new Map<string, number>();
   const fitTextRuns: FitTextRun[] = [];
   for (const [runIndex, run] of runs.entries()) {
+    // A removed anchoring run separates its neighbours as any non-text run does.
+    if (fitTextSeams.has(runIndex)) fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });
     if (run.type !== 'text') {
       fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });
       continue;

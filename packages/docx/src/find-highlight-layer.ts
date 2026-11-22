@@ -91,7 +91,7 @@ export function buildDocxHighlightLayer(
       // A projected run carries where its clusters are painted: the slice
       // covers one box per painted interval, and nothing is measured.
       const intervals: { x: number; width: number; y?: number; height?: number }[] = run.clusterBoxes
-        ? clusterSliceIntervals(run.clusterBoxes, start, end, pitch)
+        ? clusterSliceIntervals(run.clusterBoxes, start, end)
         : [measuredSliceInterval(run, start, end, pitch, measureForFont)];
       for (const { x, width, y, height } of intervals) {
       if (width <= 0) continue;
@@ -125,16 +125,14 @@ export function buildDocxHighlightLayer(
 type ClusterBoxes = NonNullable<DocxTextRunInfo['clusterBoxes']>;
 
 /** Where the characters `[start, end)` of a run are painted, from the run's
- * retained cluster boxes: adjacent boxes merged into one interval. A slice
- * that covers part of a cluster takes that share of its box. The tracking
- * that follows the slice's final rendered cluster is left out, on the side
- * that cluster ends on, unless its box already leaves it out
- * (`trackingExcluded`, a fitted run's final cluster). */
+ * retained cluster boxes: adjacent or overlapping boxes merged into one
+ * interval. A slice that covers part of a cluster takes that share of its
+ * box. The boxes are final (painted glyphs with their tracking, fitted and
+ * floored glyphs as drawn), so no tracking is added or taken off. */
 function clusterSliceIntervals(
   clusters: ClusterBoxes,
   start: number,
   end: number,
-  pitch: number,
 ): { x: number; width: number; y?: number; height?: number }[] {
   // Clusters are listed in source order: the first one that ends after `start`.
   let low = 0;
@@ -144,7 +142,7 @@ function clusterSliceIntervals(
     if (clusters[middle]!.end <= start) low = middle + 1;
     else high = middle;
   }
-  const boxes: { x: number; width: number; rtl: boolean; trackingExcluded: boolean; y?: number; height?: number }[] = [];
+  const boxes: { x: number; width: number; y?: number; height?: number }[] = [];
   for (let index = low; index < clusters.length && clusters[index]!.start < end; index += 1) {
     const cluster = clusters[index]!;
     const length = Math.max(1, cluster.end - cluster.start);
@@ -153,20 +151,8 @@ function clusterSliceIntervals(
     boxes.push({
       x: cluster.x + cluster.width * (cluster.rtl ? 1 - to : from),
       width: cluster.width * (to - from),
-      rtl: cluster.rtl,
-      trackingExcluded: cluster.trackingExcluded === true,
       ...(cluster.y !== undefined && cluster.height !== undefined ? { y: cluster.y, height: cluster.height } : {}),
     });
-  }
-  let final = boxes.length - 1;
-  while (final >= 0 && !(boxes[final]!.width > 0)) final -= 1;
-  // A fitted run's final cluster box already leaves out the tracking after
-  // its last character.
-  if (final >= 0 && pitch !== 0 && !boxes[final]!.trackingExcluded) {
-    const box = boxes[final]!;
-    const trimmed = Math.min(pitch, box.width);
-    box.width -= trimmed;
-    if (box.rtl) box.x += trimmed;
   }
   const merged: { x: number; width: number; y?: number; height?: number }[] = [];
   for (const box of boxes.filter((candidate) => candidate.width > 0).sort((left, right) => left.x - right.x)) {
@@ -176,8 +162,11 @@ function clusterSliceIntervals(
       continue;
     }
     const last = merged.at(-1);
-    if (last && last.y === undefined && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
-    else merged.push({ x: box.x, width: box.width });
+    // Adjacent or overlapping boxes (a floored glyph drawn over its
+    // neighbour) form one interval.
+    if (last && last.y === undefined && box.x <= last.x + last.width + 1e-6) {
+      last.width = Math.max(last.width, box.x + box.width - last.x);
+    } else merged.push({ x: box.x, width: box.width });
   }
   return merged;
 }

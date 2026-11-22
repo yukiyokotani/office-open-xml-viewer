@@ -601,8 +601,15 @@ function followingInkAt(
   return wordBlockHasInk(block, showTrackedChanges) || after;
 }
 
-function continuousRoleMark(block: Readonly<{ inkless?: boolean; visibleNumbering?: true }>): boolean {
-  return block.inkless === true && block.visibleNumbering !== true;
+/** A mark that takes a continuous-section role: one that displays nothing
+ * but itself in every revision view, either source-empty or holding only
+ * floating drawings (WORD_ANCHOR_HOST_NO_LINE_METRIC: the drawings change
+ * nothing), and whose list marker is not painted. */
+function continuousRoleMark(block: InklessMarkBlockFacts & Readonly<{ visibleNumbering?: true }>): boolean {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  const markOnly = block.inkless === true
+    || (block.markOnlyView?.final === true && block.markOnlyView.markup === true);
+  return markOnly && block.visibleNumbering !== true;
 }
 
 /** Compatibility projection governed by {@link WORD_CONTINUOUS_SECTION_MARK_SPACING}. */
@@ -614,10 +621,11 @@ export function wordContinuousSectionRole(
   if (entry?.kind !== 'body-block' || entry.block.kind !== 'paragraph') return undefined;
   const next = sequence[index + 1];
   const afterNext = sequence[index + 2];
-  // These roles are projected once for every revision view and the first
-  // one omits the paragraph, so they take only source-empty paragraphs
-  // (block.inkless): never an anchor-only paragraph (its drawings must still
-  // be acquired), and never one whose painted list marker would be lost.
+  // These roles are projected once for every revision view, so they take
+  // only marks that display nothing in any view (continuousRoleMark). A
+  // collapsed mark that anchors floating drawings is still acquired for
+  // them, without flow extent (body-paginator), and a painted list marker
+  // keeps its paragraph out of every role.
   const suppressBefore = continuousRoleMark(entry.block)
     && next?.kind === 'begin-section'
     && next.section.startType === 'continuous';

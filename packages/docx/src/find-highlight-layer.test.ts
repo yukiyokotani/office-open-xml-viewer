@@ -242,29 +242,29 @@ describe('highlights in right-to-left runs', () => {
     });
   };
 
-  it('leaves out the tracking after the final matched glyph, as in left-to-right runs', () => {
+  it('covers the painted cluster boxes, which carry their tracking', () => {
     // 7px glyphs tracked by 2px. Painted left to right: gimel, bet, alef,
-    // each with its tracking on its left (after it in reading order).
+    // each box with its tracking on its left (after it in reading order).
+    // The boxes are final: no tracking is added or taken off.
     const rtl = run({ text: hebrew, direction: 'rtl', letterSpacingPx: 2, w: 27,
       clusterBoxes: [0, 1, 2].map((index) => ({ start: index, end: index + 1, x: (2 - index) * 9, width: 9, rtl: true })) });
     const hit = (start: number, end: number) => boxes([rtl], [{ slices: [{ runIndex: 0, start, end }], active: false }]);
-    expect(hit(1, 2)).toEqual([[11, 7]]);
-    expect(hit(0, 1)).toEqual([[20, 7]]);
-    // Two glyphs keep the tracking between them only.
-    expect(hit(0, 2)).toEqual([[11, 16]]);
-    // The same slices in a left-to-right run.
+    expect(hit(1, 2)).toEqual([[9, 9]]);
+    expect(hit(0, 1)).toEqual([[18, 9]]);
+    expect(hit(0, 2)).toEqual([[9, 18]]);
+    // A run without boxes measures its text, leaving out the final tracking.
     const ltr = run({ text: 'abc', letterSpacingPx: 2, w: 27 });
     expect(boxes([ltr], [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }])).toEqual([[9, 7]]);
   });
 
-  it('subtracts no tracking from a final cluster whose box already leaves it out', () => {
+  it('takes a fitted run\'s final cluster box as it is', () => {
     // A fitted run: its final cluster box is cut to the fitted width.
     const boxesOf = (trackingExcluded: boolean) => boxes([run({ text: 'ab', letterSpacingPx: 2, w: 16,
       clusterBoxes: [{ start: 0, end: 1, x: 0, width: 9, rtl: false },
         { start: 1, end: 2, x: 9, width: 7, rtl: false, ...(trackingExcluded ? { trackingExcluded: true as const } : {}) }] })],
     [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }]);
     expect(boxesOf(true)).toEqual([[9, 7]]);
-    expect(boxesOf(false)).toEqual([[9, 5]]);
+    expect(boxesOf(false)).toEqual([[9, 7]]);
   });
 
   it('measures nothing for a run that carries its cluster boxes', () => {

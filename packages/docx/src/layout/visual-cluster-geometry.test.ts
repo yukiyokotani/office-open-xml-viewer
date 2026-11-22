@@ -64,4 +64,35 @@ describe('cluster boxes', () => {
     const boxes = clusterBoxes(placement as never, 0, 4, 0, 4, 0);
     expect(boxes.at(-1)).toMatchObject({ xPt: 6, widthPt: 6, trackingExcluded: true });
   });
+
+  it('read a placement\'s paint operations once for all of its source owners', () => {
+    // n one-letter owners of one condensed placement, one of them floored:
+    // each owner's boxes look up the floored glyphs; reads stay linear in n.
+    const reads = (count: number): number => {
+      let read = 0;
+      const operations = Array.from({ length: count }, (_, index) => ({
+        range: { start: index, end: index + 1 }, offset: { xPt: 4 * index, yPt: 0 },
+        ...(index === 1 ? { naturalAdvancePt: 6 } : {}),
+      }));
+      const paintOps = new Proxy(operations, {
+        get(target, key, receiver) {
+          if (typeof key === 'string' && /^\d+$/u.test(key)) read += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const placement = {
+        text: 'a'.repeat(count), range: { start: 0, end: count }, direction: 'ltr' as const,
+        origin: { xPt: 0, yPt: 10 }, bounds: { xPt: 0, yPt: 0, widthPt: 4 * count, heightPt: 12 },
+        clusters: Array.from({ length: count }, (_, index) => ({
+          range: { start: index, end: index + 1 }, offset: { xPt: 4 * index, yPt: 0 }, advancePt: 4 })),
+        paintOps,
+      };
+      for (let index = 0; index < count; index += 1) {
+        expect(clusterBoxes(placement as never, index, index + 1, index, index + 1, 0)).toHaveLength(1);
+      }
+      return read;
+    };
+    expect(reads(32)).toBeLessThanOrEqual(32);
+    expect(reads(128)).toBeLessThanOrEqual(128);
+  });
 });

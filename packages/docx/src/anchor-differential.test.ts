@@ -27,14 +27,15 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRunInfo } fr
 type Run = DocParagraph['runs'][number];
 type RunSpec = readonly [text: string, extra?: object];
 
-function measureContext(): CanvasRenderingContext2D {
+/** Half-em advances, or `ems` of the em for the characters it lists. */
+function measureContext(ems: Readonly<Record<string, number>> = {}): CanvasRenderingContext2D {
   let font = '10px serif';
   const size = (): number => Number.parseFloat(/([\d.]+)px/.exec(font)?.[1] ?? '10');
   return {
     get font() { return font; },
     set font(value: string) { font = value; },
     measureText: (value: string) => ({
-      width: [...value].length * size() * 0.5,
+      width: [...value].reduce((sum, character) => sum + (ems[character] ?? 0.5), 0) * size(),
       fontBoundingBoxAscent: size() * 0.8, fontBoundingBoxDescent: size() * 0.2,
       actualBoundingBoxAscent: size() * 0.8, actualBoundingBoxDescent: size() * 0.2,
     } as TextMetrics),
@@ -220,7 +221,11 @@ function subjectRuns(specs: readonly RunSpec[], offset: number, kind: AnchorKind
     if (local > 0 && local < value.length) {
       runs.push(textRun(value.slice(0, local), extra));
       anchor();
-      runs.push(textRun(value.slice(local), extra));
+      // §17.3.2.14 groups source-adjacent runs only, so a float splits a
+      // fitText region; the plain counterpart splits it with a new id.
+      const fit = extra as { fitTextVal?: number; fitTextId?: number } | undefined;
+      runs.push(textRun(value.slice(local), fit?.fitTextVal === undefined ? extra
+        : { ...fit, fitTextId: (fit.fitTextId ?? 0) + 1000 }));
     } else {
       runs.push(textRun(value, extra));
     }
@@ -634,10 +639,10 @@ describe('a character-relative anchor in kashida-justified text', () => {
 });
 
 describe('find highlights and hosts in pieces whose paint differs from their source order', () => {
-  const lay = (runs: readonly Run[], options: object, pageWidth = 200) => {
+  const lay = (runs: readonly Run[], options: object, pageWidth = 200, ems: Readonly<Record<string, number>> = {}) => {
     const built = model({ ...cases(1)[0]!, container: 'body', vertical: false, options,
       settings: { compatibilityMode: 15 }, section: { pageWidth, pageHeight: 200 } }, runs);
-    const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
+    const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext(ems) }),
       { currentDateMs: 0 });
     const subject = paragraphs(layout.pages.map((page) => page.layers))[0]!;
     return { layout, subject, placements: subject.lines.flatMap((line) => line.placements) };
@@ -699,6 +704,36 @@ describe('find highlights and hosts in pieces whose paint differs from their sou
     expect(found[0]![2]).toBeGreaterThan(0);
   });
 
+  it('highlights a floored condensed letter over its painted glyph only', () => {
+    // 'mim' at 12pt (6/3/6pt natural) condensed by 4pt: i floors to no
+    // advance and is drawn at its 3pt natural advance; its box is final.
+    const { layout } = lay([textRun('mim', { charSpacing: -4 })], {}, 200, { i: 0.25 });
+    const found = highlights(layout, 'i');
+    expect(found).toHaveLength(1);
+    expect(found[0]![2]).toBe(3);
+  });
+
+  it('keeps fitText regions on either side of a float independent', () => {
+    // ab and cd share fitText id 1 and 24pt, with a float in its own run
+    // between them: they are not source-adjacent, so each fills 24pt.
+    const fit = { fitTextVal: 480, fitTextId: 1 };
+    const { placements } = lay([textRun('ab', fit), ...anchorRuns('page'), textRun('cd', fit)], {});
+    const texts = placements.filter((placement) => placement.kind === 'text');
+    expect(texts.map((placement) => [placement.kind === 'text' ? placement.text : '', placement.bounds!.widthPt]))
+      .toEqual([['ab', 24], ['cd', 24]]);
+  });
+
+  it('places a character-relative float after a compressed fitted run at the run\'s end', () => {
+    // abcd (6pt letters) fitted to 12pt: each advances 3pt and the final glyph
+    // paints to the run's end, where the float's anchoring character stands.
+    const fitted = textRun('abcd', { fitTextVal: 240, fitTextId: 1 });
+    const { placements } = lay([fitted, ...anchorRuns('character')], {});
+    const piece = placements.find((placement) => placement.kind === 'text')!;
+    const host = placements.find((placement) => placement.kind === 'anchor-host')!;
+    expect(piece.bounds!.widthPt).toBe(12);
+    expect(round(host.bounds!.xPt)).toBe(round(piece.bounds!.xPt + 12));
+  });
+
   it('highlights a Latin letter inside one mixed-direction piece where it is painted', () => {
     // alef a - b bet, two same-format runs around a float. Painted left to
     // right: bet, a, hyphen, b, alef (6pt each); "b" is the fourth.
@@ -754,6 +789,43 @@ describe('find highlights and hosts in pieces whose paint differs from their sou
       return measuredUnits - before;
     };
     expect([measured(50), measured(200)]).toEqual([0, 0]);
+  });
+});
+
+describe('a float-only mark that ends a section before a continuous break', () => {
+  /** The top of the next section's text and the drawings painted, for a
+   * section-ending mark holding `mark` with `spaceBeforePt` before it. */
+  const observe = (mark: readonly Run[], spaceBeforePt: number) => {
+    const section = { pageWidth: 200, pageHeight: 400, marginTop: 40, marginRight: 20, marginBottom: 20, marginLeft: 20,
+      headerDistance: 5, footerDistance: 0, titlePage: false, evenAndOddHeaders: false, columns: null };
+    const built = {
+      section: { ...section, sectionStart: 'continuous' },
+      body: [
+        paragraph([textRun('A')]),
+        paragraph(mark, { spaceBefore: spaceBeforePt }),
+        { type: 'sectionBreak', kind: 'continuous', geom: { ...section, sectionStart: 'nextPage' } },
+        paragraph([textRun('B')], { spaceBefore: 10 }),
+      ],
+      settings: { compatibilityMode: 15 },
+      headers: { default: null, first: null, even: null }, footers: { default: null, first: null, even: null },
+      footnotes: [], endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(built, createLayoutServices(built, { measureContext: measureContext() }), { currentDateMs: 0 });
+    const runs = textRunsForPage(layout, 0, { scale: 1 });
+    return {
+      top: round(runs.find((run) => run.text === 'B')!.y),
+      drawings: layout.pages.flatMap((page) => page.layers.paintOrder.filter((entry) => entry.kind === 'drawing')).length,
+    };
+  };
+
+  it('keeps its space before suppressed, as its empty counterpart does', () => {
+    const empty = observe([], 20);
+    expect(observe(anchorRuns('page'), 20)).toEqual({ ...empty, drawings: 1 });
+  });
+
+  it('collapses, as its empty counterpart does, and still paints its drawing', () => {
+    const empty = observe([], 0);
+    expect(observe(anchorRuns('page'), 0)).toEqual({ ...empty, drawings: 1 });
   });
 });
 
