@@ -110,6 +110,7 @@ import { decideLogicalTable, type LogicalTableDecision, type TableMemberDecision
 import {
   bodyTableAcquisitionState,
   uprightBlockPaginates,
+  uprightDrawingLimits,
   bodyUprightBlockLookAhead,
   measureBodyTableEntry,
   ownerSegmentedFlowExtents,
@@ -160,7 +161,7 @@ import {
   addUprightBlockExclusion,
   addUprightTableBox,
   emptyUprightBlockPageIndex,
-  inlineShiftBelowUprightTablesPt,
+  uprightDrawingMovePt,
   moveUprightPageDrawingsBelowTableBox,
   uprightRegistrationTableBox,
   uprightPrecedingDrawings,
@@ -2562,11 +2563,14 @@ function prescanBodyPageAnchors(
       // `word-vertical-section-upright-block-table`: from that frame the
       // drawing lies below the upright tables in place, as its paragraph's
       // own acquisition places it (paragraph.ts).
-      const shiftPt = anchor.paragraphSource.path.length === 1
-        ? inlineShiftBelowUprightTablesPt(state.uprightBlockIndex, Number.POSITIVE_INFINITY, carry.bounds)
-        : 0;
-      const shifted = <Rect extends { xPt: number }>(rect: Rect): Rect =>
-        shiftPt === 0 ? rect : Object.freeze({ ...rect, xPt: rect.xPt + shiftPt });
+      const move = anchor.paragraphSource.path.length === 1
+        ? uprightDrawingMovePt(
+            state.uprightBlockIndex, Number.POSITIVE_INFINITY, carry.bounds, uprightDrawingLimits(state),
+          )
+        : null;
+      const shifted = <Rect extends { xPt: number; yPt: number }>(rect: Rect): Rect =>
+        !move || (move.xPt === 0 && move.yPt === 0) ? rect
+          : Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });
       return [
         Object.freeze({
           kind: 'shape' as const,
@@ -2749,13 +2753,15 @@ function prescanBodyPageAnchors(
     // `word-vertical-section-upright-block-table`: the drawing lies below
     // the upright tables in place (the page's pins), as its paragraph's own
     // acquisition places it (paragraph.ts).
-    const shiftPt = anchor.paragraphSource.path.length === 1
-      ? inlineShiftBelowUprightTablesPt(
+    const move = anchor.paragraphSource.path.length === 1
+      ? uprightDrawingMovePt(
           state.uprightBlockIndex, Number.POSITIVE_INFINITY, retainedResult.geometry.objectFrame,
+          uprightDrawingLimits(state),
         )
-      : 0;
-    const shifted = <Rect extends { xPt: number }>(rect: Rect): Rect =>
-      shiftPt === 0 ? rect : Object.freeze({ ...rect, xPt: rect.xPt + shiftPt });
+      : null;
+    const shifted = <Rect extends { xPt: number; yPt: number }>(rect: Rect): Rect =>
+      !move || (move.xPt === 0 && move.yPt === 0) ? rect
+        : Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });
     const wrapBounds = shifted(resolvedWrapBounds);
     const polygon =
       retainedResult.geometry.wrap.polygon?.points.map(shifted) ??
@@ -3012,7 +3018,7 @@ const uprightTableBoxVersionsByServices = new WeakMap<object, UprightTableBoxVer
  * history of placed tables, each in constant time however many blocks the
  * page already holds. Every line laid out afterwards wraps around them
  * (addUprightBlockExclusionFloats), and a wrapped drawing anchored after a
- * table lies below it (inlineShiftBelowUprightTablesPt). Positioned tables
+ * table does not cover it (uprightDrawingMovePt). Positioned tables
  * read the float registry and do not avoid upright block tables.
  */
 function commitBodyUprightBlocks(
@@ -3036,7 +3042,7 @@ function commitBodyUprightBlocks(
     let versions = uprightTableBoxVersionsByServices.get(context.services);
     if (!versions) uprightTableBoxVersionsByServices.set(context.services, versions = new Map());
     addUprightTableBox(index, tableBox.sourceIndex, tableBox.box, versions);
-    moveUprightPageDrawingsBelowTableBox(index, tableBox);
+    moveUprightPageDrawingsBelowTableBox(index, tableBox, uprightDrawingLimits(state));
   }
 }
 

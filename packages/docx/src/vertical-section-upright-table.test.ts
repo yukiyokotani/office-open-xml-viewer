@@ -1201,14 +1201,27 @@ describe('upright block table of a vertical section', () => {
     const covers = (drawing: Drawing, placed: Placed) =>
       shared(drawing.left, drawing.left + drawing.width, placed.paintedLeft, placed.paintedRight)
       && shared(drawing.top, drawing.top + drawing.height, placed.top, placed.bottom);
-    /** Every table box sharing an area with another table or a drawing of its page. */
-    const collisions = (pages: readonly Page[]) => pages.flatMap((page, pageIndex) => [
+    /** Physical page height. */
+    const PAGE_H = COLUMN_END + 80;
+    /** Whether the page has no place for `drawing` clear of its tables: some
+     * table leaves it no room below itself before the page's bottom edge,
+     * and some table none past its far edge before the page's side edge. A
+     * drawing keeps its place over a table only then. */
+    const hasNoPlace = (direction: Direction, page: Page, drawing: Drawing) =>
+      page.tables.some((placed) => placed.bottom + drawing.height > PAGE_H + 1e-6)
+      && page.tables.some((placed) => direction === 'tbRl'
+        ? placed.paintedLeft - drawing.width < -1e-6 : placed.paintedRight + drawing.width > PAGE_W + 1e-6);
+    /** Every table box sharing an area with another table or a drawing of
+     * its page; with `direction`, not with a drawing the page has no place
+     * for. */
+    const collisions = (pages: readonly Page[], direction?: Direction) => pages.flatMap((page, pageIndex) => [
       ...page.tables.flatMap((first, at) => page.tables.slice(at + 1).flatMap((second) =>
         shared(first.paintedLeft, first.paintedRight, second.paintedLeft, second.paintedRight)
           && shared(first.top, first.bottom, second.top, second.bottom)
           ? [{ pageIndex, first, second }] : [])),
       ...page.drawings.flatMap((drawing) => page.tables.flatMap((placed) =>
-        covers(drawing, placed) ? [{ pageIndex, drawing, placed }] : [])),
+        covers(drawing, placed) && !(direction && hasNoPlace(direction, page, drawing))
+          ? [{ pageIndex, drawing, placed }] : [])),
     ]);
 
     it('lays out a table before a long one whose rows a later drawing lies below', () => {
@@ -1356,6 +1369,56 @@ describe('upright block table of a vertical section', () => {
       expect(collisions(pages)).toEqual([]);
     });
 
+    it.each([
+      ['tbRl', 2, 360], ['tbLrV', 2, 100], ['tbRl', 1, 360], ['tbLrV', 1, 100],
+    ] as const)('moves a drawing with no room below its table past the table\'s far edge (%s, %i column(s))', (direction, columns, x) => {
+      // The table leaves the rectangle anchored after it no place below it
+      // on the page: raised to the page's bottom edge in two columns (an
+      // 80 x 60 pt rectangle), and ending 91 pt before it in one (80 x 100
+      // pt). The rectangle keeps its position down the page and lies
+      // directly past the table's far edge.
+      const pages = layOutPages(direction, [
+        table(1, columns === 2 ? 800 : 690),
+        anchoring(5, anchoredRectangle(x, 300, 80, columns === 2 ? 60 : 100)), P,
+      ], columns);
+      const [placed] = pages[0]!.tables;
+      const [drawing] = pages[0]!.drawings;
+      expect(placed!.bottom + drawing!.height).toBeGreaterThan(PAGE_H);
+      expect(drawing!.top).toBeCloseTo(300, 6);
+      if (direction === 'tbRl') expect(drawing!.left + drawing!.width).toBeCloseTo(placed!.paintedLeft, 6);
+      else expect(drawing!.left).toBeCloseTo(placed!.paintedRight, 6);
+      expect(collisions(pages)).toEqual([]);
+    });
+
+    it('keeps a drawing where it is when the page has no place for it clear of its table', () => {
+      // Twenty strips in, the 800 pt table of a two-column section runs
+      // past the page's side edge and reaches its bottom edge: neither
+      // below it nor past its far edge is there a place on the page, and
+      // the rectangle stays where it was anchored, on the page.
+      const pages = layOutPages('tbRl', [
+        ...Array.from({ length: 20 }, () => P), table(1, 800), anchoring(5, anchoredRectangle(60, 300, 80, 60)), P,
+      ], 2);
+      expect(pages[0]!.tables[0]!.paintedLeft).toBeLessThan(0);
+      expect(pages[0]!.drawings).toEqual([{ left: 60, top: 300, width: 80, height: 60 }]);
+    });
+
+    it('keeps drawings that may not overlap apart when a table moves one of them', () => {
+      // Both rectangles may not overlap (ECMA-376 §20.4.2.3) and are
+      // anchored 200 pt apart down the page. The second lies over the table
+      // and moves below it, where it would meet the first: it lies directly
+      // below the first instead, clear of both.
+      const pages = layOutPages('tbRl', [
+        table(1, 200),
+        anchoring(5, anchoredRectangle(360, 300, 80, 60, 'page', 'page', false)),
+        anchoring(5, anchoredRectangle(360, 100, 80, 60, 'page', 'page', false)),
+      ]);
+      const [first, second] = pages[0]!.drawings;
+      expect(first).toEqual({ left: 360, top: 300, width: 80, height: 60 });
+      expect(second!.left).toBeCloseTo(360, 6);
+      expect(second!.top).toBeCloseTo(first!.top + first!.height, 6);
+      expect(collisions(pages)).toEqual([]);
+    });
+
     it('lays out generated sequences of tables, continued tables and drawings without overlap', () => {
       // Fixed pseudo-random streams (mulberry32) of paragraphs, some
       // anchoring square-wrapped rectangles, column breaks, runs of directly
@@ -1376,7 +1439,7 @@ describe('upright block table of a vertical section', () => {
       const check = (direction: Direction, columns: number, body: readonly string[], context: string) => {
         let pages: Page[] = [];
         expect(() => { pages = layOutPages(direction, body, columns); }, context).not.toThrow();
-        expect(collisions(pages), context).toEqual([]);
+        expect(collisions(pages, direction), context).toEqual([]);
       };
 
       // One-strip paragraphs with rectangles at page positions or at

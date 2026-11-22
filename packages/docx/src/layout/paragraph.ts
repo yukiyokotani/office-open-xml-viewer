@@ -213,7 +213,7 @@ export {
 export type { BodyFrameGroup } from './frame.js';
 import type { ParagraphAcquisitionInput, ParagraphImageRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
-import { inlineShiftBelowUprightTablesPt, type UprightBlockPageIndex } from './upright-block-index.js';
+import { uprightDrawingMovePt, type UprightBlockPageIndex } from './upright-block-index.js';
 import type {
   DrawingLayout,
   DrawingPaintCommand,
@@ -2549,7 +2549,7 @@ export interface ParagraphAcquisitionOptions {
    * tables, and the boxes of tables planned after this paragraph that its
    * drawings have to clear as well. A wrapped drawing the paragraph anchors
    * is moved along the inline axis to lie below every such box it would
-   * cover (inlineShiftBelowUprightTablesPt); how that move and the
+   * cover (uprightDrawingMovePt); how that move and the
    * paragraph's own anchor reflow are resolved together is stated at
    * AnchorReflowMoves. */
   readonly uprightTables?: Readonly<{
@@ -5246,8 +5246,16 @@ function acquireAnchorOccurrence(
       const delta = { xPt: frozenFrame.xPt - placedRect.xPt, yPt: frozenFrame.yPt - placedRect.yPt };
       if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
     }
-    const effectiveWrapBounds = placedResult.geometry.wrapBounds;
     const normativeCollision = !allowOverlap;
+    // The drawings this one may not cover, and the inline end of its page or cell.
+    let collisionBlockers: FloatPlacementParticipant[] = [];
+    const page = options.anchorFrames?.page;
+    const rightBoundary = layoutInCell
+      && options.anchorCellBounds
+      ? options.anchorCellBounds.xPt + options.anchorCellBounds.widthPt
+      : page
+        ? page.xPt + page.widthPt
+        : Number.POSITIVE_INFINITY;
     if (normativeCollision) {
       // §20.4.2.3 object collision is independent of text wrapping. An
       // allowOverlap=true object keeps its resolved position: Word controls
@@ -5270,7 +5278,7 @@ function acquireAnchorOccurrence(
           behavior.relativeHeight!,
           entry.relativeHeight,
         ));
-      const blockers: FloatPlacementParticipant[] = [...externalCollisions, ...sameParagraphBlockers]
+      collisionBlockers = [...externalCollisions, ...sameParagraphBlockers]
         .filter((entry) => entry.occurrenceId !== occurrenceId)
         .map((entry) => ({
           occurrenceId: entry.occurrenceId,
@@ -5279,57 +5287,63 @@ function acquireAnchorOccurrence(
           bounds: entry.bounds,
           exclusionBounds: entry.bounds,
         }));
-      const page = options.anchorFrames?.page;
-      const rightBoundary = layoutInCell
-        && options.anchorCellBounds
-        ? options.anchorCellBounds.xPt + options.anchorCellBounds.widthPt
-        : page
-          ? page.xPt + page.widthPt
-          : Number.POSITIVE_INFINITY;
+    }
+    // ECMA-376 §20.4.2.3 collision resolution among the drawings alone.
+    const resolveCollisions = (): void => {
+      if (collisionBlockers.length === 0) return;
       const displaced = resolveFloatPlacement({
         moving: {
           occurrenceId,
           kind: 'drawingml',
           paragraphId: 1,
           bounds: placedRect,
-          exclusionBounds: effectiveWrapBounds ?? placedRect,
+          exclusionBounds: placedResult.geometry.wrapBounds ?? placedRect,
         },
-        blockers,
+        blockers: collisionBlockers,
         avoidance: { kind: 'drawingml-normative' },
         rightBoundaryPt: rightBoundary,
       });
       const delta = displaced.displacement;
       if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
-    }
-    if (placedResult.geometry.wrapBounds && placedResult.geometry.wrap.kind !== 'none') {
-      const moves = options.anchorReflowMoves;
-      const held = moves?.held.get(occurrenceId);
-      if (held && moves!.exact) {
-        // The hold pass: the drawing lies where the last pass left it.
-        translateAnchor({ xPt: held.xPt - placedRect.xPt, yPt: held.yPt - placedRect.yPt });
-      } else {
-        let moved = false;
-        // `word-vertical-section-upright-block-table`: a wrapped drawing does
-        // not cover an upright block table in place when its paragraph is
-        // laid out; it lies directly below it, a carried drawing from the
-        // frame it keeps.
-        if (options.uprightTables) {
-          // A drawing that a table has moved does not move back, along
-          // either axis, when its own text wraps differently in a later pass.
-          if (held && (held.xPt > placedRect.xPt || held.yPt > placedRect.yPt)) {
-            translateAnchor({
-              xPt: Math.max(0, held.xPt - placedRect.xPt),
-              yPt: Math.max(0, held.yPt - placedRect.yPt),
-            });
-          }
-          const shiftPt = inlineShiftBelowUprightTablesPt(
-            options.uprightTables.index, Number.POSITIVE_INFINITY, placedRect, options.uprightTables.planned,
-          );
-          if (shiftPt !== 0) translateAnchor({ xPt: shiftPt, yPt: 0 });
-          moved = held !== undefined || shiftPt !== 0;
-        }
-        moves?.placed.set(occurrenceId, Object.freeze({ xPt: placedRect.xPt, yPt: placedRect.yPt, moved }));
+    };
+    const wrapped = placedResult.geometry.wrapBounds !== null && placedResult.geometry.wrap.kind !== 'none';
+    const moves = wrapped ? options.anchorReflowMoves : undefined;
+    const held = moves?.held.get(occurrenceId);
+    if (held && moves!.exact) {
+      // The hold pass: the drawing lies where the last pass left it.
+      translateAnchor({ xPt: held.xPt - placedRect.xPt, yPt: held.yPt - placedRect.yPt });
+    } else if (wrapped && options.uprightTables) {
+      // `word-vertical-section-upright-block-table`: a wrapped drawing does
+      // not cover an upright block table in place when its paragraph is laid
+      // out; it lies directly below it, or past it where the page ends, a
+      // carried drawing from the frame it keeps. The tables and the
+      // drawings it may not cover are cleared in one search
+      // (uprightDrawingMovePt), so clearing one never leaves it over the
+      // other.
+      // A drawing that a table has moved does not move back, along either
+      // axis, when its own text wraps differently in a later pass.
+      if (held && (held.xPt > placedRect.xPt || held.yPt > placedRect.yPt)) {
+        translateAnchor({
+          xPt: Math.max(0, held.xPt - placedRect.xPt),
+          yPt: Math.max(0, held.yPt - placedRect.yPt),
+        });
       }
+      const move = uprightDrawingMovePt(
+        options.uprightTables.index, Number.POSITIVE_INFINITY, placedRect,
+        { inlineEndPt: rightBoundary, blockEndPt: page ? page.yPt + page.heightPt : Number.POSITIVE_INFINITY },
+        options.uprightTables.planned, collisionBlockers.map((blocker) => blocker.bounds),
+      );
+      // No place on the page clear of the tables: the drawing keeps its
+      // place among the drawings, as where no table is.
+      if (!move) resolveCollisions();
+      else if (move.xPt !== 0 || move.yPt !== 0) translateAnchor(move);
+      moves?.placed.set(occurrenceId, Object.freeze({
+        xPt: placedRect.xPt, yPt: placedRect.yPt,
+        moved: held !== undefined || (move !== null && (move.xPt !== 0 || move.yPt !== 0)),
+      }));
+    } else {
+      resolveCollisions();
+      moves?.placed.set(occurrenceId, Object.freeze({ xPt: placedRect.xPt, yPt: placedRect.yPt, moved: false }));
     }
     return Object.freeze({
       acquiredShapeTextBoxes,
@@ -6237,8 +6251,9 @@ export function acquireShapeTextBoxLayout(
  * Table moves. A drawing that a table has moved never moves back. From the
  * pass in which a table first moves it, it takes, along each axis, the
  * farther of the position its text gives it and the position it had after
- * the pass before (`held`), and is then moved below the tables it covers
- * there. The set of drawings a table has moved only grows, and their
+ * the pass before (`held`), and is then moved clear of the tables it covers
+ * there, and of the drawings it may not overlap, in one search that moves
+ * it forward along either axis only (uprightDrawingMovePt). The set of drawings a table has moved only grows, and their
  * positions only grow along both axes, so no pass returns such a drawing
  * to an earlier position: a table move cannot make the passes repeat.
  *

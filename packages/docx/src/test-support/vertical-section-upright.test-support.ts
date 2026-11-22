@@ -42,13 +42,16 @@ export const T = table(2);
 /** A paragraph run anchoring a square-wrapped rectangle at page position
  * (x, y), `width` x `height` pt; `verticalFrom` 'paragraph' or 'line' makes
  * y relative to the anchoring paragraph or the anchor's line instead, and
- * `horizontalFrom` 'character' makes x relative to the anchor's character. */
+ * `horizontalFrom` 'character' makes x relative to the anchor's character.
+ * `allowOverlap` false makes it avoid the drawings before it (§20.4.2.3). */
 export const anchoredRectangle = (
   x: number, y: number, width: number, height: number, verticalFrom: 'page' | 'paragraph' | 'line' = 'page',
   horizontalFrom: 'page' | 'character' = 'page',
+  allowOverlap = true,
 ) =>
   '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
-  + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+  + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1"'
+  + ` allowOverlap="${allowOverlap ? 1 : 0}">`
   + '<wp:simplePos x="0" y="0"/>'
   + `<wp:positionH relativeFrom="${horizontalFrom}"><wp:posOffset>${Math.round(x * 12700)}</wp:posOffset></wp:positionH>`
   + `<wp:positionV relativeFrom="${verticalFrom}"><wp:posOffset>${Math.round(y * 12700)}</wp:posOffset></wp:positionV>`

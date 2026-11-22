@@ -31,7 +31,7 @@ import type { FloatRegistryEntryPt, LayoutRect, ParagraphLayout } from './types.
  *   table is placed against them.
  * - Drawings move past tables. A wrapped drawing laid out while a table
  *   box is in place never covers it: it moves along the inline axis to lie
- *   below it (inlineShiftBelowUprightTablesPt), whichever of the two comes
+ *   below it, or past it where the page ends (uprightDrawingMovePt), whichever of the two comes
  *   first in the body. That is a drawing anchored after the table; one
  *   anchored before a table placed ahead of the flow (a pin, or the tables
  *   planned with the paragraph fragment before them, whose plan is accepted
@@ -373,52 +373,76 @@ export function addUprightTableBox(
   index.tableBoxesVersion = version;
 }
 
+/** The page's ends along the inline and the block axis, in section-logical
+ * page points: a drawing moved for a table stays before them. */
+export type UprightDrawingLimits = Readonly<{ inlineEndPt: number; blockEndPt: number }>;
+
 /**
- * `word-vertical-section-upright-block-table`: how far along the inline axis
- * (x) a wrapped drawing with frame `rect` moves to lie below the upright
- * block tables it would cover: past the inline end of each such box, taken
- * in inline order so that a box reached by the move is cleared too. Zero
- * when it covers none. Only the boxes in the drawing's block range are read.
+ * `word-vertical-section-upright-block-table`: how far a wrapped drawing
+ * with frame `rect` moves so that it covers no upright block table: along
+ * the inline axis (x) to lie directly below the tables it covers, or, where
+ * that would take it past the page's inline end, along the block axis (y)
+ * past their far edge. Zero when it covers none. Null when no such place
+ * lies on the page: the drawing then keeps its place, over the table, and
+ * stays visible. Library policy where no control exists (the measured case
+ * is a drawing with room below its table).
  *
- * The boxes are those placed for tables before body index
+ * The tables are those placed for tables before body index
  * `beforeSourceIndex`, and `planned`. A paragraph's own acquisition passes
  * no limit (Number.POSITIVE_INFINITY): every box on the page when the
  * paragraph is laid out is in place for good, also one of a later table
  * placed ahead of the flow, and the drawing moves past it
  * (UprightBlockPageIndex, "Drawings move past tables").
+ *
+ * `blockers` are rectangles the drawing may not cover either: the drawings
+ * it collides with (ECMA-376 §20.4.2.3, allowOverlap false). They are
+ * cleared in the same search, in the direction that collision resolution
+ * takes on its own (axis-aligned-overlap.ts), so the place found is clear
+ * of the tables and of the blockers at once.
+ *
+ * The search ends: each step moves the drawing past every rectangle it
+ * covers, along one axis, and it never moves back along either, so a
+ * rectangle left behind is not met again and there are at most as many
+ * steps as rectangles. Only the table boxes in the drawing's current block
+ * range are read.
  */
-export function inlineShiftBelowUprightTablesPt(
+export function uprightDrawingMovePt(
   index: UprightBlockPageIndex | undefined,
   beforeSourceIndex: number,
   rect: LayoutRect,
+  limits: UprightDrawingLimits,
   planned?: readonly LayoutRect[],
-): number {
-  const blockEndPt = rect.yPt + rect.heightPt;
-  const inRange = (box: LayoutRect) => box.yPt < blockEndPt && rect.yPt < box.yPt + box.heightPt;
-  let met: LayoutRect[] | null = null;
-  if (planned) for (const box of planned) if (inRange(box)) (met ??= []).push(box);
-  if (index && index.tableCount > 0) {
-    const first = bucketOf(rect.yPt);
-    const last = bucketOf(blockEndPt);
-    for (let bucket = first; bucket <= last; bucket += 1) {
-      const entries = index.tableBuckets.get(bucket);
-      if (!entries) continue;
-      for (const entry of entries) {
-        const { box } = entry;
-        // A box registered in several buckets is taken from the first of them
-        // that this query reads.
-        if (entry.sourceIndex < beforeSourceIndex
-          && bucket === Math.max(first, bucketOf(box.yPt)) && inRange(box)) (met ??= []).push(box);
+  blockers?: readonly LayoutRect[],
+): Readonly<{ xPt: number; yPt: number }> | null {
+  let xPt = rect.xPt;
+  let yPt = rect.yPt;
+  for (;;) {
+    const endXPt = xPt + rect.widthPt;
+    const endYPt = yPt + rect.heightPt;
+    let nextXPt = Number.NEGATIVE_INFINITY;
+    let nextYPt = Number.NEGATIVE_INFINITY;
+    const meet = (box: LayoutRect) => {
+      if (box.xPt < endXPt && xPt < box.xPt + box.widthPt && box.yPt < endYPt && yPt < box.yPt + box.heightPt) {
+        nextXPt = Math.max(nextXPt, box.xPt + box.widthPt);
+        nextYPt = Math.max(nextYPt, box.yPt + box.heightPt);
+      }
+    };
+    if (planned) for (const box of planned) meet(box);
+    if (blockers) for (const box of blockers) meet(box);
+    if (index && index.tableCount > 0) {
+      const first = bucketOf(yPt);
+      const last = bucketOf(endYPt);
+      for (let bucket = first; bucket <= last; bucket += 1) {
+        const entries = index.tableBuckets.get(bucket);
+        if (!entries) continue;
+        for (const entry of entries) if (entry.sourceIndex < beforeSourceIndex) meet(entry.box);
       }
     }
+    if (nextXPt === Number.NEGATIVE_INFINITY) return { xPt: xPt - rect.xPt, yPt: yPt - rect.yPt };
+    if (nextXPt + rect.widthPt <= limits.inlineEndPt) xPt = nextXPt;
+    else if (nextYPt + rect.heightPt <= limits.blockEndPt) yPt = nextYPt;
+    else return null;
   }
-  if (!met) return 0;
-  met.sort((left, right) => left.xPt - right.xPt);
-  let startPt = rect.xPt;
-  for (const box of met) {
-    if (box.xPt < startPt + rect.widthPt && startPt < box.xPt + box.widthPt) startPt = box.xPt + box.widthPt;
-  }
-  return startPt - rect.xPt;
 }
 
 /** The box a registration adds to the history of placed tables
@@ -561,45 +585,54 @@ function removeDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing
   }
 }
 
-/** Records a wrapped anchored drawing of the page, moved first to lie below
- * the upright tables already placed for tables before its paragraph
- * (inlineShiftBelowUprightTablesPt). */
-export function addUprightPageDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
-  shiftDrawing(drawing, inlineShiftBelowUprightTablesPt(index, drawing.anchorIndex, drawing.frame));
+/** Records a wrapped anchored drawing of the page, moved first so that it
+ * covers none of the upright tables already placed for tables before its
+ * paragraph (uprightDrawingMovePt). */
+export function addUprightPageDrawing(
+  index: UprightBlockPageIndex,
+  drawing: UprightPageDrawing,
+  limits: UprightDrawingLimits,
+): void {
+  shiftDrawing(drawing, uprightDrawingMovePt(index, drawing.anchorIndex, drawing.frame, limits));
   insertDrawing(index, drawing);
 }
 
-/** Moves a drawing's exclusion and frame `shiftPt` along the inline axis. */
-function shiftDrawing(drawing: UprightPageDrawing, shiftPt: number): void {
-  if (shiftPt === 0) return;
-  drawing.exclusion = Object.freeze({ ...drawing.exclusion, xPt: drawing.exclusion.xPt + shiftPt });
-  drawing.frame = Object.freeze({ ...drawing.frame, xPt: drawing.frame.xPt + shiftPt });
+/** Moves a drawing's exclusion and frame by `move`. */
+function shiftDrawing(drawing: UprightPageDrawing, move: Readonly<{ xPt: number; yPt: number }> | null): void {
+  if (!move || (move.xPt === 0 && move.yPt === 0)) return;
+  const moved = (rect: LayoutRect) => Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });
+  drawing.exclusion = moved(drawing.exclusion);
+  drawing.frame = moved(drawing.frame);
 }
 
 /**
  * `word-vertical-section-upright-block-table`: a wrapped drawing anchored
- * after a table lies below it. When the box of tables ending at body index
- * `sourceIndex` is placed, the recorded drawings of paragraphs after them
- * that it covers move below it here, before any later table is placed
- * against them, as their paragraphs' own acquisition places them. Each move
- * takes the drawing out of its cells and puts it into its new ones, in
- * O(log n) per cell.
+ * after a table does not cover it. When the box of tables ending at body
+ * index `sourceIndex` is placed, the recorded drawings of paragraphs after
+ * them that it covers move clear of it here (uprightDrawingMovePt), before
+ * any later table is placed against them, as their paragraphs' own
+ * acquisition places them. Each move takes the drawing out of its cells and
+ * puts it into its new ones, in O(log n) per cell.
  */
-export function moveUprightPageDrawingsBelowTableBox(index: UprightBlockPageIndex, table: UprightTableBox): void {
+export function moveUprightPageDrawingsBelowTableBox(
+  index: UprightBlockPageIndex,
+  table: UprightTableBox,
+  limits: UprightDrawingLimits,
+): void {
   const { box } = table;
-  const moves: Array<Readonly<{ drawing: UprightPageDrawing; shiftPt: number }>> = [];
+  const moves: Array<Readonly<{ drawing: UprightPageDrawing; move: Readonly<{ xPt: number; yPt: number }> }>> = [];
   for (const drawing of uprightPageDrawingsNear(index, box.yPt, box.yPt + box.heightPt, box.xPt, box.xPt + box.widthPt)) {
     const { frame } = drawing;
     if (drawing.anchorIndex > table.sourceIndex
       && frame.xPt < box.xPt + box.widthPt && box.xPt < frame.xPt + frame.widthPt
       && frame.yPt < box.yPt + box.heightPt && box.yPt < frame.yPt + frame.heightPt) {
-      const shiftPt = inlineShiftBelowUprightTablesPt(index, drawing.anchorIndex, frame);
-      if (shiftPt !== 0) moves.push({ drawing, shiftPt });
+      const move = uprightDrawingMovePt(index, drawing.anchorIndex, frame, limits);
+      if (move && (move.xPt !== 0 || move.yPt !== 0)) moves.push({ drawing, move });
     }
   }
-  for (const { drawing, shiftPt } of moves) {
+  for (const { drawing, move } of moves) {
     removeDrawing(index, drawing);
-    shiftDrawing(drawing, shiftPt);
+    shiftDrawing(drawing, move);
     insertDrawing(index, drawing);
   }
 }

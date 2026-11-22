@@ -63,6 +63,7 @@ import {
 } from './source-key.js';
 import {
   addUprightPageDrawing,
+  type UprightDrawingLimits,
   emptyUprightBlockPageIndex,
   uprightBlockBoxesMet,
   uprightPageDrawingsNear,
@@ -436,6 +437,12 @@ function uprightBlockEdgeOverhangsPt(
     ? { nearPt: sides.leftPt, farPt: sides.rightPt } : { nearPt: sides.rightPt, farPt: sides.leftPt };
 }
 
+/** The ends of the page a drawing moved for an upright table stays before
+ * (uprightDrawingMovePt), in the section-logical page frame. */
+export function uprightDrawingLimits(state: Pick<BodyAcquisitionState, 'pageWidth' | 'pageH'>): UprightDrawingLimits {
+  return { inlineEndPt: state.pageWidth, blockEndPt: state.pageH };
+}
+
 function uprightBlockIndexOf(state: BodyAcquisitionState): UprightBlockPageIndex {
   return state.uprightBlockIndex ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
 }
@@ -534,7 +541,7 @@ function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): Upr
       }),
       frame: registeredFrame,
       registeredFrame,
-    });
+    }, uprightDrawingLimits(state));
   }
   index.drawingsSeen = floats.length;
   return index;
