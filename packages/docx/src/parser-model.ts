@@ -2251,20 +2251,38 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
   // deletion, so the final view omits them as it omits the note; a host
   // paragraph is appended only for a note that some reference keeps.
   const visible = groups.some((group) => references.get(`${group.kind}:${group.id}`)!.some((revision) => !omitted(revision)));
-  const runs = visible ? groups.flatMap((group) => group.runs) : [];
+  const runs = groups.flatMap((group) => group.runs);
   const revisions = groups.flatMap((group) => {
     const own = references.get(`${group.kind}:${group.id}`)!;
     const deletion = own.every(omitted) ? own[0] : null;
     return group.runs.map((_, index) => group.__runRevisions?.[index] ?? deletion ?? null);
   });
+  const withRevisions = (paragraph: BodyElement, before: number, existing: readonly unknown[] = []) =>
+    revisions.some((revision) => revision !== null)
+      ? { __runRevisions: [...Array.from({ length: before }, (_, index) => existing[index] ?? null), ...revisions] }
+      : existing.length > 0 ? { __runRevisions: existing } : {};
+  if (!host || runs.length === 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
+  if (!visible) {
+    // Only deleted references keep these notes: the markup view shows their
+    // shapes (marked deleted) and the final view omits them. They ride the
+    // last body paragraph, so the final view gains no empty host line.
+    const lastIndex = doc.body.map((element) => element.type).lastIndexOf('paragraph');
+    if (lastIndex >= 0) {
+      const last = doc.body[lastIndex] as DocParagraph;
+      const body = [...doc.body];
+      body[lastIndex] = {
+        ...last,
+        runs: [...last.runs, ...runs],
+        ...withRevisions(body[lastIndex]!, last.runs.length, (last as InternalDocParagraph).__runRevisions ?? []),
+      } as unknown as BodyElement;
+      return { ...doc, body, __noteLayoutSettings: retained } as DocxDocumentModel;
+    }
+  }
   return {
     ...doc,
-    body: host && runs.length > 0
-      ? [...doc.body, {
-          ...host, type: 'paragraph', runs,
-          ...(revisions.some((revision) => revision !== null) ? { __runRevisions: revisions } : {}),
-        } as BodyElement]
-      : doc.body,
+    body: [...doc.body, {
+      ...host, type: 'paragraph', runs, ...withRevisions(host as unknown as BodyElement, 0),
+    } as BodyElement],
     __noteLayoutSettings: retained,
   } as DocxDocumentModel;
 }

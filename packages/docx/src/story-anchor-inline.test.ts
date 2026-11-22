@@ -49,6 +49,8 @@ let variant: Readonly<{
   storyRuns?: string;
   /** The whole body, replacing the story-specific one. */
   body?: string;
+  /** Lay the document out with tracked changes shown. */
+  markup?: boolean;
 }> = {};
 
 const encoder = new TextEncoder();
@@ -208,7 +210,7 @@ function layOutDocument(story: Story, placement: Placement) {
   return layoutDocument(
     model,
     createLayoutServices(model, { measureContext: measureContext() }),
-    { currentDateMs: 0 },
+    { currentDateMs: 0, ...(variant.markup ? { showTrackedChanges: true } : {}) },
   );
 }
 
@@ -631,6 +633,12 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
       expect(document.pages).toHaveLength(1);
       expect(document.pages[0]!.layers.body.filter((node) => node.kind === 'paragraph')).toHaveLength(1);
       expect(bodyHostDrawingBoxes('footnote', 'vml-text-square')).toEqual([]);
+      // The markup view shows the deleted note's shape, on the body's last
+      // paragraph, without a host line.
+      variant = { body, markup: true };
+      const markup = layOutDocument('footnote', 'vml-text-square');
+      expect(markup.pages[0]!.layers.body.filter((node) => node.kind === 'paragraph')).toHaveLength(1);
+      expect(bodyHostDrawingBoxes('footnote', 'vml-text-square')).toEqual([{ xPt: 300, yPt: 0 }]);
     } finally {
       variant = {};
     }
