@@ -2,12 +2,15 @@
 -- The caller must provide a disposable copy and a fresh output path.
 --
 --   osascript packages/legacy-office/tools/legacy-office-export.applescript \
---     doc|xls|ppt disposable-copy.doc fresh-output.pdf
+--     doc disposable-copy.doc fresh-output.pdf
+--
+-- The first argument is the format: doc, xls or ppt.
 --
 -- Opens the copy in installed Microsoft Office for macOS and exports a PDF,
 -- the visual reference for the legacy survey. Requires macOS automation
 -- permission for each Office application. Run one export at a time; on an
--- Office error the script closes the document it opened and stops.
+-- Office error the script stops after trying to close the document it has
+-- verified as the one it opened.
 -- Each application must report its automation security and confirm that
 -- macros are disabled before a document is opened; Word and Excel link
 -- updates are disabled too. A build that cannot report the setting is

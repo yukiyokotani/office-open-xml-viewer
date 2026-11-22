@@ -39,9 +39,10 @@ acceptance checks). Specs that need a private sample load it from
 
 ## Choosing the baseline
 
-- Work that is not merged yet: the latest `origin/main`. Record its full SHA.
-  Differences between the last release and `main` were adjudicated when `main`
-  moved, so they are not this work's concern.
+- Work that is not merged yet: the head of the PR's base branch. That is the
+  latest `origin/main`, or the release branch (`origin/v0.x`) for a backport.
+  Record its full SHA. Differences between the last release and `main` were
+  adjudicated when `main` moved, so they are not this work's concern.
 - Stacked PRs: compare adjacent heads (main → PR1, PR1 → PR2), so every diff
   maps to exactly one PR.
 - A release: the previous release tag (see [release](release.md)).
@@ -57,7 +58,7 @@ reads the images from the baseline worktree named by `VRT_BASELINE_CHECKOUT`.
 Use distinct ports so a candidate server can never satisfy the baseline run:
 
 ```bash
-base=$(git rev-parse origin/main)
+base=$(git rev-parse origin/main)   # the PR's base branch; origin/v0.x for a backport
 git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
 cd /tmp/ooxml-vrt-baseline
 pnpm install --frozen-lockfile && pnpm build:wasm

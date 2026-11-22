@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Public API compatibility is proved by comparing the declaration surface
-// generated from the build with the committed baseline, not by reading a
-// subset of source files.
+// Compares the declaration surface generated from the build with the
+// committed baseline. A pass means the two agree; it does not cover runtime
+// behaviour, and a signature change committed together with a matching
+// baseline edit also passes, so the baseline diff is what a reviewer reads.
 
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';

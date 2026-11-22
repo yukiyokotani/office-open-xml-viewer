@@ -269,7 +269,7 @@ const RELEASE_RETAINED_GUIDES = new Map([
 // Markdown: inline and reference link destinations, relative or the page's
 // GitHub URL on `main`. Site and package source: that GitHub URL outside
 // comments. Prose that merely names a path is not a link.
-function linkedDocs(path, text, blobUrl) {
+function linkedDocs(path, text, blobUrl, renderedProperties = new Set()) {
   const found = new Set();
   const add = (target) => {
     const clean = target.split(/[?#]/)[0];
@@ -292,10 +292,14 @@ function linkedDocs(path, text, blobUrl) {
   const url = String.raw`(https:\/\/github\.com\/[^\s"'\`<>)]+?\.md)(?![\w-]|\.\w)`;
   if (path.startsWith('site/')) {
     // A site file links a page where the URL is rendered as a link: an `href`
-    // attribute, or a constant an `href={name}` of the same file uses. A URL in
-    // prose, in an unused constant or in a data object is not counted, because
-    // nothing here shows that a page renders it.
+    // attribute, a constant an `href={name}` of the same file uses, or a data
+    // property that some site component renders as `href={item.property}`
+    // (`renderedProperties`). A URL in prose or in an unused constant is not
+    // counted.
     for (const [, target] of code.matchAll(new RegExp(String.raw`href=["']` + url, 'g'))) absolute(target);
+    for (const [, name, target] of code.matchAll(new RegExp(String.raw`\b(\w+)\s*:\s*["'\`]` + url, 'g'))) {
+      if (renderedProperties.has(name)) absolute(target);
+    }
     for (const [, name, target] of code.matchAll(new RegExp(String.raw`\bconst\s+(\w+)\s*=\s*["'\`]` + url, 'g'))) {
       if (new RegExp(String.raw`href=\{\s*${name}\s*\}`).test(code)) absolute(target);
     }
@@ -306,13 +310,18 @@ function linkedDocs(path, text, blobUrl) {
   return found;
 }
 
+// Names of the data properties a site component renders as a link target:
+// `href={item.property}`.
+const renderedLinkProperties = (text) =>
+  new Set([...text.matchAll(/href=\{\s*[\w$]+(?:\?)?\.([\w$]+)\s*\}/g)].map((match) => match[1]));
+
 // Guides that no consumer surface links to and no supported release retains.
 const guidesToDelete = (guides, linked, retained) =>
   guides.filter((guide) => !linked.has(guide) && !retained.has(guide));
 
 test('a consumer link to a guide is a real link destination, not incidental text', () => {
   const blob = 'https://github.com/o/r/blob/main/';
-  const links = (path, text) => [...linkedDocs(path, text, blob)];
+  const links = (path, text, rendered) => [...linkedDocs(path, text, blob, rendered)];
   // Markdown: inline and reference destinations, relative or this repository's URL on main.
   assert.deepEqual(links('README.md', 'See the [guide](docs/./example.md#part).'), ['docs/example.md']);
   assert.deepEqual(links('packages/x/README.md', '[guide](../../docs/example.md)'), ['docs/example.md']);
@@ -331,9 +340,12 @@ test('a consumer link to a guide is a real link destination, not incidental text
   const constant = "const guide = 'https://github.com/o/r/blob/main/docs/example.md';\n";
   assert.deepEqual(links('site/src/pages/a.astro', `${constant}<a href={guide}>guide</a>`), ['docs/example.md']);
   assert.deepEqual(links('site/src/pages/a.astro', `${constant}<p>no link</p>`), []);
+  const entry = "export const entry = { detailsHref: 'https://github.com/o/r/blob/main/docs/example.md' };";
+  assert.deepEqual(links('site/src/lib/a.ts', entry), []);
+  assert.deepEqual(links('site/src/lib/a.ts', entry, new Set(['detailsHref'])), ['docs/example.md']);
   assert.deepEqual(
-    links('site/src/lib/a.ts', "export const entry = { detailsHref: 'https://github.com/o/r/blob/main/docs/example.md' };"),
-    [],
+    [...renderedLinkProperties('<a class="x" href={o.detailsHref}>d</a> <a href={guide}>g</a> <a href={item?.url}>u</a>')],
+    ['detailsHref', 'url'],
   );
   assert.deepEqual(links('README.md', 'See <https://github.com/o/r/blob/main/docs/example.md>.'), ['docs/example.md']);
   assert.deepEqual(links('site/src/pages/a.astro', '<!-- https://github.com/o/r/blob/main/docs/example.md -->'), []);
@@ -383,11 +395,14 @@ test('docs/ holds only procedures, the core beliefs, linked user guides and thei
       (/^site\/src\//.test(path) && !/\.test\.[cm]?[jt]s$/.test(path)) ||
       (/^packages\/[^/]+\/src\/.*\.[cm]?[jt]s$/.test(path) && !/\.test\.[cm]?[jt]s$/.test(path)),
   );
+  const texts = new Map(surfaces.map((surface) => [surface, read(join(ROOT, surface))]));
+  const rendered = new Set(
+    [...texts].filter(([surface]) => surface.startsWith('site/')).flatMap(([, text]) => [...renderedLinkProperties(text)]),
+  );
   const linked = new Set();
-  for (const surface of surfaces) {
-    const text = read(join(ROOT, surface));
+  for (const [surface, text] of texts) {
     if (!text.includes('docs/')) continue;
-    for (const target of linkedDocs(surface, text, MAIN_BLOB_URL)) linked.add(target);
+    for (const target of linkedDocs(surface, text, MAIN_BLOB_URL, rendered)) linked.add(target);
   }
   const guides = files.filter((path) => /^docs\/[^/]+\.md$/.test(path) && path !== 'docs/README.md');
   assert.deepEqual(
@@ -427,7 +442,7 @@ function missingReferences(file, text, { exists, hasFileNamed, scriptsOf }) {
   const localOnly = [/^(\.\.\/)*spec(\/|$)/, /(^|\/)src\/wasm(\/|$)/, /(^|\/)public\/private(\/|$)/, /^node_modules\//, /(^|\/)dist(\/|$)/, /^\/?tmp\//];
   // Part names inside an OOXML or ODF package, not repository paths.
   const packageParts = /^(word|xl|ppt|docProps|_rels|customXml|META-INF)\//;
-  const sourceFile = /\.(md|mjs|cjs|js|ts|tsx|json|ya?ml|rs|py|sh|ps1|toml|html|astro|applescript)$/;
+  const sourceFile = /\.(md|mjs|cjs|js|ts|tsx|json|ya?ml|rs|py|sh|ps1|toml|lock|html|astro|applescript)$/;
   const missing = [];
   // Words of inline code and of fenced examples: a command names its script as
   // one of its words (`node scripts/x.mjs`).
@@ -464,16 +479,27 @@ function missingReferences(file, text, { exists, hasFileNamed, scriptsOf }) {
   }
   for (const [, filter, name] of text.matchAll(/\bpnpm (?:--filter (\S+) )?(?:run )?([a-z][\w:.-]*)/g)) {
     if (pnpmBuiltins.has(name)) continue;
-    // A placeholder filter (`@silurus/ooxml-<fmt>`) names no single package.
-    const scoped = filter && !/[<*{]/.test(filter) ? filter : undefined;
-    if (!scriptsOf(scoped).has(name)) missing.push(`${file}: pnpm ${filter ? `--filter ${filter} ` : ''}${name}`);
+    // `<fmt>` stands for each format package; any other placeholder names no
+    // single package.
+    const filters = !filter
+      ? [undefined]
+      : filter.includes('<fmt>')
+        ? ['docx', 'xlsx', 'pptx'].map((format) => filter.replace('<fmt>', format))
+        : [/[<*{]/.test(filter) ? undefined : filter];
+    for (const scoped of filters) {
+      if (!scriptsOf(scoped).has(name)) missing.push(`${file}: pnpm ${scoped ? `--filter ${scoped} ` : ''}${name}`);
+    }
   }
   return missing;
 }
 
 test('a removed path or a script of another package is reported', () => {
   const present = new Set(['scripts', 'scripts/a.mjs', 'packages', 'packages/docx']);
-  const scripts = { '@scope/docx': new Set(['conformance', 'vrt']), '@scope/pptx': new Set(['vrt']) };
+  const scripts = {
+    '@scope/docx': new Set(['conformance', 'vrt']),
+    '@scope/xlsx': new Set(['vrt']),
+    '@scope/pptx': new Set(['vrt']),
+  };
   const all = new Set(Object.values(scripts).flatMap((names) => [...names]));
   const context = {
     exists: (path) => present.has(path.replace(/\/$/, '')),
@@ -490,6 +516,7 @@ test('a removed path or a script of another package is reported', () => {
     'AGENTS.md: scripts/removed.mjs',
   ]);
   assert.deepEqual(check('`a.mjs`, `notes.local.md`, `packages/{docx}/x`, `Array.isArray`'), []);
+  assert.deepEqual(check('`Cargo.lock`'), ['AGENTS.md: Cargo.lock']);
   assert.deepEqual(check('`sgconfig.yml` and `packages/{docx,xlsx}/package.json`'), [
     'AGENTS.md: sgconfig.yml',
     'AGENTS.md: packages/docx/package.json',
@@ -499,7 +526,11 @@ test('a removed path or a script of another package is reported', () => {
     'AGENTS.md: scripts/gone.mjs',
     'AGENTS.md: rules/example.yml',
   ]);
-  assert.deepEqual(check('`pnpm vrt`, `pnpm --filter @scope/docx conformance`, `pnpm --filter @scope/<fmt> conformance`, `pnpm install`'), []);
+  assert.deepEqual(check('`pnpm vrt`, `pnpm --filter @scope/docx conformance`, `pnpm --filter @scope/<fmt> vrt`, `pnpm --filter @scope/<any> conformance`, `pnpm install`'), []);
+  assert.deepEqual(check('`pnpm --filter @scope/<fmt> conformance`'), [
+    'AGENTS.md: pnpm --filter @scope/xlsx conformance',
+    'AGENTS.md: pnpm --filter @scope/pptx conformance',
+  ]);
   assert.deepEqual(check('`pnpm --filter @scope/pptx conformance` and `pnpm nope`'), [
     'AGENTS.md: pnpm --filter @scope/pptx conformance',
     'AGENTS.md: pnpm nope',

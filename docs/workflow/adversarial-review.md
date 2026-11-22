@@ -10,8 +10,8 @@ description; do not silently waive an unresolved item.
 
 ## Scope
 
-Review the complete change against `main`, not only
-the latest commit, and read the owning modules and tests, not only the diff.
+Review the complete change against the PR's base branch (`main`, or the
+release branch for a backport), not only the latest commit, and read the owning modules and tests, not only the diff.
 Report only evidence-backed findings, each with an exact code reference or a
 reproducible command.
 
