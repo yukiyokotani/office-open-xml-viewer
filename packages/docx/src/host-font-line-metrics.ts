@@ -171,9 +171,6 @@ export async function prepareDocxHostFontMetrics(
 export async function loadDocxOfficeFontFallbacks(
   ...args: Parameters<typeof loadOfficeFontFallbacks>
 ): ReturnType<typeof loadOfficeFontFallbacks> {
-  const [requests, ...rest] = args;
-  // DOCX requests see the catalog profiles admitted with Word evidence.
-  const loaded = await loadOfficeFontFallbacks(
-    requests.map((request) => ({ ...request, format: 'docx' as const })), ...rest);
+  const loaded = await loadOfficeFontFallbacks(...args);
   return prepareDocxHostFontMetrics(loaded, args[1] === undefined ? activeFontSet() : args[1]);
 }

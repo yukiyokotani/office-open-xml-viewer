@@ -142,7 +142,9 @@ export function specifiedTextLineMetrics(
   // homogeneous native/local gate above excludes unrelated caller resources.
   const profile = first.resolvedLineHeightRatio != null && first.resolvedDesignDescentRatio != null
     ? { lineHeightRatio: first.resolvedLineHeightRatio, designDescentRatio: first.resolvedDesignDescentRatio }
-    : referenceFontLineMetrics(authoredFamily, 400, 'normal');
+    // Word line boxes only: compatibility modes 14/15 gate this class above,
+    // and another producer's documents carry neither.
+    : referenceFontLineMetrics(authoredFamily, 400, 'normal', 'word', 'docx');
   if (!profile) return null;
   return wordSpecifiedTextLineMetrics({
     rule: spacing.rule,

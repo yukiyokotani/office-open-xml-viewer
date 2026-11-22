@@ -23,7 +23,7 @@ describe('docx rendered text inventory', () => {
     expect([...docxRenderedTextUsages(doc, 'font-demand')]
       .flatMap((usage) => usage.fontFamilies)).toContain('Courier New');
     expect(docxOfficeFontFallbackRequests(doc, {}))
-      .toContainEqual({ family: 'Courier New', weight: 700, style: 'normal' });
+      .toContainEqual({ family: 'Courier New', weight: 700, style: 'normal', format: 'docx' });
   });
 
   it.each(['rtl', 'cs'] as const)('collects the independent CS tuple of a compatibility %s run', (flag) => {
@@ -42,10 +42,10 @@ describe('docx rendered text inventory', () => {
     for (const options of [{}, { fontDemand: true }]) {
       const requests = docxOfficeFontFallbackRequests(shapeDoc, options);
       expect(requests.filter((request) => request.family === 'Cambria')).toEqual([
-        { family: 'Cambria', weight: 400, style: 'normal' },
+        { family: 'Cambria', weight: 400, style: 'normal', format: 'docx' },
         { family: 'Cambria', presenceOnly: true },
       ]);
-      expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'italic' });
+      expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'italic', format: 'docx' });
       expect(requests).toEqual(docxOfficeFontFallbackRequests(bodyDoc, options));
     }
   });
@@ -86,7 +86,7 @@ describe('docx rendered text inventory', () => {
     for (const options of [{}, { fontDemand: true }]) {
       const requests = docxOfficeFontFallbackRequests(doc, options);
       expect(requests.some((request) => request.family === 'Cambria')).toBe(false);
-      expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'italic' });
+      expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'italic', format: 'docx' });
     }
   });
 
@@ -115,7 +115,7 @@ describe('docx rendered text inventory', () => {
       }),
     ]);
     expect(docxOfficeFontFallbackRequests(doc)).toContainEqual({
-      family: 'CS Face', weight: 400, style: 'italic',
+      family: 'CS Face', weight: 400, style: 'italic', format: 'docx',
     });
   });
 
@@ -151,7 +151,7 @@ describe('docx rendered text inventory', () => {
         expect.objectContaining({ fontFamilies: ['CS Face'], bold: true, italic: false }),
       ]);
     expect(docxOfficeFontFallbackRequests(doc)).toContainEqual({
-      family: 'CS Face', weight: 700, style: 'normal',
+      family: 'CS Face', weight: 700, style: 'normal', format: 'docx',
     });
   });
 });

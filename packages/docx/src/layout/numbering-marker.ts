@@ -1,3 +1,4 @@
+import { referenceFontFormatOf } from '../reference-font-line-metrics.js';
 import { DEFAULT_DOCX_COMPAT_PROFILE, type DocxCompatProfile } from './compat-profile.js';
 import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
@@ -134,7 +135,7 @@ export function shapeNumberingMarkerText(
     const { resourceMetric, referenceMetric, lineMetric } = selectedFontLineMetric(
       span.font, selectResourceMetric(metrics, span.font, span.text), true,
       allowsReferenceFontMetric(metrics, span.font),
-      { text: service, probe: span.text },
+      { text: service, probe: span.text }, 'word', referenceFontFormatOf(service),
     );
     const design = resourceMetric?.lineHeightRatio != null ? resourceMetric : referenceMetric;
     // Body text admits these same selected-face sides. Using raw Canvas boxes

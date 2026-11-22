@@ -171,7 +171,8 @@ export function servedFontLineMetrics(
           };
         }
         const ownership = prepared.faceLines.get(index);
-        const measured = ownership && measuredMetric(display, ownership.lines[tupleKey(weight, style)], ownership);
+        const measured = ownership && measuredMetric(display, ownership.lines[tupleKey(weight, style)], ownership,
+          libreOfficeLineBoxes);
         return measured && { ...measured, unicodeRanges: frozenDeclared(declared) };
       });
       if (projected.length === 0 || projected.some((entry) => entry === undefined)) continue;

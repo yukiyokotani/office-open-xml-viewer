@@ -12,6 +12,8 @@ import { docxRenderedTextUsages } from './document-content.js';
 import { nativeRouteMetricKey, type NativeRouteLineMetric } from './layout/font-service.js';
 import type { TextLayoutService } from './layout/text.js';
 import type { DocxDocumentModel } from './types.js';
+import { documentReferenceFontFormat } from './reference-font-line-metrics.js';
+import { producerDocumentSettings } from './parser-model.js';
 
 /**
  * Line geometry of an absent authored face (LIBRARY_ABSENT_FACE_FALLBACK_LINE_BOX).
@@ -56,12 +58,17 @@ export function docxNativeRouteRequests(
 ): NativeRouteLineRequest[] {
   const requests = new Map<string, NativeRouteLineRequest>();
   const visited = new Set<string>();
+  const format = documentReferenceFontFormat(producerDocumentSettings(doc));
   const visit = (
     family: string | null | undefined, bold: boolean, italic: boolean,
     eastAsiaLanguage: string | undefined,
   ) => {
     const name = family?.trim();
     if (!name) return;
+    // A face catalogued only for Word documents is not admitted for another
+    // producer's lines (ReferenceFontMetricProfile.evidencedFormats).
+    if (!format && findReferenceFontMetrics(name).length === 0
+      && findReferenceFontMetrics(name, { format: 'docx' }).length > 0) return;
     const weight = bold ? 700 : 400;
     const style = italic ? 'italic' as const : 'normal' as const;
     const key = JSON.stringify([name, weight, style, eastAsiaLanguage ?? null]);

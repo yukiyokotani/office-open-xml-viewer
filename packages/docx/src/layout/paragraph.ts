@@ -28,7 +28,7 @@ import {
   authoredReferenceVerticalMetric,
   mayUseAuthoredReferenceVerticalMetric,
 } from '../line-breaker/font-metrics.js';
-import { referenceFontDecorationMetrics } from '../reference-font-line-metrics.js';
+import { referenceFontDecorationMetrics, referenceFontFormatOf } from '../reference-font-line-metrics.js';
 import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
@@ -4034,6 +4034,12 @@ function planMeasuredLines(
     && !keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
   const specifiedParagraph = specifiedTextParagraphIsHomogeneous(paragraph,
     context.lineGrid.active || !compat.specifiedTextLineBoxMode15);
+  // WORD_EXACT_LINE_BASELINE covers Word line boxes; a LibreOffice producer's
+  // paragraph keeps them only where keepsWordLineBoxes says so. Decided once
+  // per paragraph, outside the line loop.
+  const exactWordLineBoxes = context.lineSpacing?.rule !== 'exact'
+    || textService?.libreOfficeLineBoxes !== true
+    || keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
   return retainPhysicalLines(measured.lines.map((measuredLine, lineIndex) => {
     const raw = measuredLine.layout;
     // The measured allocation's first-line marker union (paragraph-measure.ts):
@@ -4059,13 +4065,15 @@ function planMeasuredLines(
     // Table cells and text boxes leave a DrawingML picture unclipped.
     const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
     // WORD_EXACT_LINE_BASELINE: an exact line's baseline sits four fifths down
-    // the line, whatever its text, ruby, objects or position. Fixed lines of a
-    // LibreOffice producer (`libreOfficeLineBoxes`) take their own placement
+    // the line, whatever its text, ruby, pictures or position. Fixed lines of
+    // a LibreOffice producer (`libreOfficeLineBoxes`) take their own placement
     // (`__lineExtraAbove` below, else the centred box); only their
-    // inline-object lines retain WORD_INLINE_OBJECT_EXACT_LINE.
-    const wordLineBoxes = textService?.libreOfficeLineBoxes !== true
-      || keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
-    const exactBaselinePt = wordLineBoxes || exactObjectClass
+    // inline-picture lines retain WORD_INLINE_OBJECT_EXACT_LINE.
+    // Inline charts and math keep their established placement in the line
+    // (WORD_INLINE_OBJECT_EXACT_LINE library scope).
+    const establishedObjectLine = raw.segments.some((segment) => 'math' in segment
+      || ('imagePath' in segment && !segment.anchor && segment.chart != null));
+    const exactBaselinePt = (exactWordLineBoxes || exactObjectClass) && !establishedObjectLine
       ? wordExactLineBaselineOffsetPt(context.lineSpacing) : undefined;
     // In a vertical section the upright object hangs from the exact line's
     // top instead of standing on its baseline.
@@ -4180,8 +4188,10 @@ function planMeasuredLines(
           const ruleGeometry = ruleFont && ((ruleFont.source === 'local'
               && ruleFont.resourceIdentity?.startsWith('office-local:') === true)
             || (ruleFont.source === 'native' && ruleFont.installedFamily === true)
-            || (mayUseAuthoredReferenceVerticalMetric(ruleFont) && authoredReferenceVerticalMetric(ruleFont)))
-            ? referenceFontDecorationMetrics(ruleFont.requestedFamily, ruleFont.weight, ruleFont.style)
+            || (mayUseAuthoredReferenceVerticalMetric(ruleFont)
+              && authoredReferenceVerticalMetric(ruleFont, undefined, 'word', referenceFontFormatOf(textService))))
+            ? referenceFontDecorationMetrics(ruleFont.requestedFamily, ruleFont.weight, ruleFont.style,
+              referenceFontFormatOf(textService))
             : undefined;
           underline = {
             base: selectedMetric('M'),

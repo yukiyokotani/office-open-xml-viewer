@@ -523,6 +523,14 @@ describe('native reference font vertical layout', () => {
     expect(line('Noto Sans JP', '確認します。').intendedSingle).toBeCloseTo(9 * 1.3 * 1.448, 8);
   });
 
+  it('keeps DOCX-evidenced profiles out of another producer\'s lookups', () => {
+    expect(referenceFontLineMetrics('Noto Sans JP', 400, 'normal', 'word', 'docx')).toBeDefined();
+    expect(referenceFontLineMetrics('Noto Sans JP', 400, 'normal', 'libreoffice', null)).toBeUndefined();
+    expect(referenceFontLineMetrics('Noto Sans', 400, 'normal', 'plain', null)).toBeUndefined();
+    // Unrestricted profiles answer both.
+    expect(referenceFontLineMetrics('Times New Roman', 400, 'normal', 'libreoffice', null)).toBeDefined();
+  });
+
   it('counts whole grid cells for an empty mark from its design single line (WORD_EMPTY_MARK_DESIGN_GRID_CELLS)', () => {
     const height = (family: string, sizePt: number, pitchPt: number, emptyMark = true,
       lineSpacing: unknown = { rule: 'auto', value: 1, explicit: true }, eastAsian = false) => {
@@ -559,6 +567,17 @@ describe('native reference font vertical layout', () => {
       ['MS Mincho', 12, 1], ['MS Mincho', 14, 2], ['MS Mincho', 24, 2],
       ['Calibri', 14, 1], ['Calibri', 16, 2], ['Calibri', 24, 2],
     ] as const) expect([family, sizePt, height(family, sizePt, 18)]).toEqual([family, sizePt, cells * 18]);
+    // Another producer's line boxes keep their own grid allocation.
+    const libreOffice = { ...verifiedReferenceServices([{ family: 'Noto Sans' }]).text, libreOfficeLineBoxes: true };
+    const markParagraph = {
+      type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: { rule: 'auto', value: 1, explicit: true },
+      numbering: null, tabStops: [], runs: [], widowControl: false,
+      defaultFontSize: 18, defaultFontFamily: 'Noto Sans',
+    } as unknown as DocParagraph;
+    expect(paragraphMarkLineMetrics(markParagraph, 1, { type: 'lines', linePitchPt: 20 }, false, false,
+      context, {}, markParagraph.lineSpacing, {}, libreOffice, undefined, false, 0, true).advancePx)
+      .not.toBe(40);
     // A non-empty stand-in keeps its natural height above the one-cell floor.
     expect(height('Noto Sans', 18, 20, false)).toBeCloseTo(18 * 1.362, 8);
     // A face without an admitted design line keeps the floor.

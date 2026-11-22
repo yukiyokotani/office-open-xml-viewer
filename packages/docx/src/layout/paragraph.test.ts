@@ -927,6 +927,18 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       }
     });
 
+    it('keeps an inline chart line on its established placement in an exact line', () => {
+      // WORD_INLINE_OBJECT_EXACT_LINE library scope: charts keep their placement.
+      const chart = { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } } as unknown as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([chart], 1, { exactPt: 24 });
+      const line = node.lines[0]!;
+      expect(line.advancePt).toBeCloseTo(24, 10);
+      // Centred box, not four fifths: the 30pt chart rises 3pt above the line top.
+      expect(line.baselinePt).not.toBeCloseTo(line.bounds.yPt + 19.2, 6);
+      const placement = node.lines[0]!.placements.find((candidate) => candidate.kind === 'resource')!;
+      expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt - 3, 6);
+    });
+
     it('hangs an upright picture from the exact line top in a vertical section (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
       for (const [heightPt, positionPt] of [[30, -5], [16, 5], [30, 0]] as const) {
         const node = measureInlineParagraph([picture(heightPt, positionPt, 'drawingml')], 1,

@@ -4,7 +4,7 @@ import { measureResolvedCanvasFontBoxRatio, SYNTHETIC_ASCENT_EM, SYNTHETIC_DESCE
 import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
-import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
+import { referenceFontFormatOf, referenceFontLineMetrics } from '../reference-font-line-metrics.js';
 import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
@@ -422,7 +422,7 @@ export function paragraphMarkLineMetrics(
         textLayoutService.fontMetrics ?? textLayoutService.localMetrics ?? {},
       ), selectedFont)
       ? authoredReferenceVerticalMetric(selectedFont, { text: textLayoutService, probe: markProbe },
-        projection)
+        projection, referenceFontFormatOf(textLayoutService))
       : undefined;
     if (naturalMetricAllowed && !resolvedLocalFont && !referenceMarkMetric
       && selectedFont?.source === 'native' && ctx) {
@@ -510,8 +510,10 @@ export function paragraphMarkLineMetrics(
   const singleSpacing = effectiveLineSpacing == null
     || (effectiveLineSpacing.rule === 'auto' && effectiveLineSpacing.value === 1)
     || wordDegenerateLineSpacingIsSingle(effectiveLineSpacing.rule, effectiveLineSpacing.value);
-  const markGridCountSingle = emptyMark && singleSpacing && !eastAsian && minimumAscentPx <= 0
-    ? designIntendedSingle : 0;
+  // Word line boxes only: another producer's grid lines keep their own boxes.
+  const wordLineBoxes = referenceFontFormatOf(textLayoutService) === 'docx';
+  const markGridCountSingle = emptyMark && wordLineBoxes && singleSpacing && !eastAsian
+    && minimumAscentPx <= 0 ? designIntendedSingle : 0;
   const ordinaryAdvancePx = lineBoxHeight(
     effectiveLineSpacing,
     asc,
