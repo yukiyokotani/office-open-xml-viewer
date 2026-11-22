@@ -658,6 +658,11 @@ function spacedAutoFitPreferredBoxesPt(
   if (!preferred) return null;
   const cellInput = { ...input, separatedCellSpacingPt: undefined, separatedBorderPt: undefined };
   const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
+  // Every box holds at least its own two rules (and, nested, the inset of
+  // its host's rules, which the same input carries); less is outside the rule.
+  const rulesPt = 2 * finiteNonNegative(input.separatedBorderPt);
+  const holdsRules = (boxes: readonly number[]): readonly number[] | null =>
+    (boxes.every((width) => width > rulesPt + EPSILON_PT) ? boxes : null);
   // The table's border box, half a rule past the grid on either side, is
   // held to the ceiling.
   const ceilingPt = input.availableWidthPt === null
@@ -665,19 +670,19 @@ function spacedAutoFitPreferredBoxesPt(
   if (input.tablePreferredWidthPt === null) {
     const resolved = solveTableColumnWidths(cellInput);
     const totalPt = resolved.reduce((sum, width) => sum + width, 0);
-    if (ceilingPt === null || totalPt + gapBudgetPt <= ceilingPt + EPSILON_PT) return resolved;
+    if (ceilingPt === null || totalPt + gapBudgetPt <= ceilingPt + EPSILON_PT) return holdsRules(resolved);
   }
   const targetPt = Math.min(input.tablePreferredWidthPt ?? Number.POSITIVE_INFINITY,
     ceilingPt ?? Number.POSITIVE_INFINITY) - gapBudgetPt;
   if (!Number.isFinite(targetPt) || targetPt <= EPSILON_PT) return null;
-  return solveTableColumnWidths({
+  return holdsRules(solveTableColumnWidths({
     ...cellInput,
     // A held automatic table stays automatic in the band the gaps leave.
     tablePreferredWidthPt: input.tablePreferredWidthPt === null ? null : targetPt,
     availableWidthPt: targetPt,
     ...(input.contentBandPt === undefined
       ? {} : { contentBandPt: Math.max(0, input.contentBandPt - gapBudgetPt) }),
-  });
+  }));
 }
 
 /** WORD_TABLE_CELL_SPACING_GEOMETRY establishes only nonbinding content fits.

@@ -438,8 +438,9 @@ describe('retained table pagination', () => {
         mergedRow(4, [mergedCell(4, 0, 'none'), mergedCell(4, 1, 'none')]),
       ];
       expect(completedPartialRowWindowEnd(rows[0]!, rows, 0, 1)).toBe(2);
-      // Without the projection fact the same continuations open nothing.
-      expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(0);
+      // Any window that opens with a continuation does: a page fragment
+      // below a merge's restart is one, with or without the segment fact.
+      expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(2);
     });
   });
 

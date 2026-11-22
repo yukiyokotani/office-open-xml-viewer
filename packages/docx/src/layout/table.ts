@@ -289,17 +289,15 @@ export function continuesMergeFromAbove(
 /**
  * The vertical-merge role `cell` of `row` (input row `rowIndex`) plays in
  * this input's grid. ECMA-376 §17.4.84 relates a continuation to the merged
- * cell above it in the same grid, so every cell keeps its authored role,
- * except in a cell-owner segment projection
- * (`segmentOpeningLogicalRowIndex`, table-owner-runs.ts): there a
- * continuation of the segment's first own row with no merged cell above it in
- * this grid lost its restart to another segment, and opens its region as an
- * empty owner with its own borders, shading (materializeTableRow) and margins
- * (resolveRowTrack) (library projected-segment contract). Its content stays
- * suppressed, since its authored role is unchanged. The row is matched by its
- * logical index, so every occurrence of it — each fragment of a row cut
- * across pages included, whose id is its own — is projected alike: a fragment
- * that opens its own grid has no merged cell above it either.
+ * cell above it in the same grid (continuesMergeFromAbove), so every cell
+ * keeps its authored role except a continuation with no cell of its merge
+ * above it in this grid: the first own row of a cell-owner segment
+ * (table-owner-runs.ts), or the first row of a page fragment below the
+ * merge's restart, also when repeated header rows stand above it. Its restart
+ * is elsewhere, and it opens its region here as an empty owner with its own
+ * borders, shading (materializeTableRow) and margins (resolveRowTrack)
+ * (library projected-region contract). Its content stays suppressed, since
+ * its authored role is unchanged.
  */
 function gridMergeRole(
   input: TableLayoutInput,
@@ -321,9 +319,11 @@ export function projectedMergeRole(
   row: TableRowLayoutInput,
   cell: TableCellLayoutInput,
 ): TableCellLayoutInput['verticalMerge'] {
-  if (cell.verticalMerge !== 'continue' || row.logicalRowIndex !== segmentOpeningLogicalRowIndex) {
-    return cell.verticalMerge;
-  }
+  void segmentOpeningLogicalRowIndex;
+  if (cell.verticalMerge !== 'continue') return cell.verticalMerge;
+  // A continuation with no cell of its merge above it in this grid opens
+  // its region here: the first row of a segment or of a page fragment, also
+  // below repeated header rows, which are not rows of its merge.
   return continuesMergeFromAbove(above, row, cell.columnStart, cell.columnSpan) ? 'continue' : 'restart';
 }
 
@@ -424,7 +424,7 @@ function resolveRowTrack(
   }
   const stillOpen: OpenMergeTrack[] = [];
   for (const merge of owners) {
-    if (next?.cells.some((cell) => continuesMerge(cell, merge.cell))) {
+    if (next && continuesMergeFromAbove(row, next, merge.cell.columnStart, merge.cell.columnSpan)) {
       stillOpen.push(merge);
       continue;
     }
@@ -1944,7 +1944,8 @@ function rowCoverage(
   const covered = new Set<TableCellLayoutInput>();
   for (const merge of open) {
     claim(merge.cell);
-    const continuation = row.cells.find((cell) => continuesMerge(cell, merge.cell));
+    const continuation = continuesMergeFromAbove(above, row, merge.cell.columnStart, merge.cell.columnSpan)
+      ? row.cells.find((cell) => continuesMerge(cell, merge.cell)) : undefined;
     if (continuation) covered.add(continuation);
   }
   for (const cell of row.cells) {

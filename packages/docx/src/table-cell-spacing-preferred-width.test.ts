@@ -409,11 +409,17 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     }
     // On a later page the body merge has no restart of its own: its first
     // row there paints it, not the header's restart.
-    const continued = pages[1]!.rows[2]!.cells[0]! as { verticalMerge: string; visualMergeOwnership?: string };
-    expect(continued.verticalMerge).toBe('continue');
-    expect(continued.visualMergeOwnership).toBe('continuation');
-    const repeated = pages[1]!.rows[1]!.cells[0]! as { verticalMerge: string; visualMergeOwnership?: string };
-    expect(repeated.visualMergeOwnership).toBeUndefined();
+    const column = pages[1]!.rows.map((row) => row.cells[0]! as {
+      verticalMerge: string; visualMergeOwnership?: string; flowBounds: { yPt: number; heightPt: number } });
+    expect(column[2]!.verticalMerge).toBe('continue');
+    expect(column[2]!.visualMergeOwnership).toBe('continuation');
+    // It paints the whole piece, gaps between its rows included; no other
+    // cell of the column paints.
+    const last = pages[1]!.rows.at(-1)!;
+    expect(column[2]!.flowBounds.yPt + column[2]!.flowBounds.heightPt)
+      .toBeGreaterThan(last.flowBounds.yPt + last.flowBounds.heightPt - 6);
+    expect(column.slice(3).every((continuation) => continuation.visualMergeOwnership === undefined)).toBe(true);
+    expect(column[1]!.visualMergeOwnership).toBeUndefined();
   });
 
   it('keeps a nested table inside the rule a vertical merge beside it starts with', () => {
@@ -490,6 +496,86 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       .find((block) => block.kind === 'table');
     if (inner?.kind !== 'table') throw new Error('expected a nested table');
     expect(inner.rows[0]!.cells[0]!.flowBounds.xPt).toBeCloseTo(3 + 0.25 + 4, 6);
+  });
+
+  describe('a merge continuing below repeated header rows', () => {
+    const headerText = Array.from({ length: 12 }, () => 'hhhhhh').join(' ');
+    const paged = (spacingPt: number, headerContent: string) => {
+      const header = (row: number) => '<w:tr><w:trPr><w:tblHeader/></w:trPr>'
+        + cell(1440, row === 0 ? headerContent : '', `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>`) + cell(2160, `H${row}`) + '</w:tr>';
+      const body = Array.from({ length: 70 }, (_unused, row) => '<w:tr>'
+        + cell(1440, row === 0 ? 'A' : '', `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>`) + cell(2160, `B${row}`) + '</w:tr>').join('');
+      return tablePages(`<w:tbl><w:tblPr>${AUTO}${spacing(spacingPt)}${BORDERS}</w:tblPr><w:tblGrid>`
+        + `<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>${header(0)}${header(1)}${body}</w:tbl>`);
+    };
+
+    it.each([0, 2])('sizes the repeated header rows for the header merge alone (%d pt spacing)', (spacingPt) => {
+      // The merged header cell holds text of several lines; its two rows
+      // grow to hold it on every page, apart from the body merge below.
+      const pages = paged(spacingPt, headerText);
+      expect(pages.length).toBeGreaterThan(1);
+      const heights = pages.map((page) => page.rows[0]!.cells[0]!.flowBounds.heightPt);
+      expect(heights[0]).toBeGreaterThan(40);
+      expect(heights[1]).toBeCloseTo(heights[0]!, 6);
+      for (const page of pages) {
+        const headerCell = page.rows[0]!.cells[0]!;
+        expect(headerCell.flowBounds.heightPt)
+          .toBeLessThanOrEqual(page.rows[0]!.advancePt + page.rows[1]!.advancePt + 1e-6);
+      }
+    });
+
+    it('draws the collapsed rules of the body merge on the later page', () => {
+      const page = paged(0, 'H')[1]!;
+      const bottom = page.flowBounds.yPt + page.flowBounds.heightPt;
+      // The left rule runs the height of the piece.
+      const left = page.borders.filter((border) => border.from.xPt === border.to.xPt
+        && Math.abs(border.from.xPt - page.flowBounds.xPt) < 0.5);
+      const covered = left.reduce((sum, border) => sum + Math.abs(border.to.yPt - border.from.yPt), 0);
+      expect(covered).toBeGreaterThan(page.flowBounds.heightPt - 2);
+      // The bottom rule runs the width of both columns.
+      const bottomRule = page.borders.filter((border) => border.from.yPt === border.to.yPt
+        && Math.abs(border.from.yPt - bottom) < 1);
+      const width = bottomRule.reduce((sum, border) => sum + Math.abs(border.to.xPt - border.from.xPt), 0);
+      expect(width).toBeGreaterThan(180 - 1);
+    });
+  });
+
+  it('paints a continued merge as one box on the later page', () => {
+    // No header: the first row of the second page opens the merge there.
+    const rows = Array.from({ length: 60 }, (_unused, row) =>
+      cell(1440, row === 0 ? 'A' : '', `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/><w:shd w:val="clear" w:fill="FF0000"/>`) + cell(2160, `B${row}`));
+    const page = tablePages(tableXml(AUTO + spacing(2), [1440, 2160], rows))[1]!;
+    const column = page.rows.map((row) => row.cells[0]! as {
+      visualMergeOwnership?: string; flowBounds: { yPt: number; heightPt: number } });
+    expect(column[0]!.visualMergeOwnership).toBe('continuation');
+    expect(column.slice(1).every((continuation) => continuation.visualMergeOwnership === undefined)).toBe(true);
+    // Its bounds are the border box drawn for it.
+    const rules = page.borders.filter((border) => border.from.yPt === border.to.yPt
+      && Math.abs(border.from.xPt - page.flowBounds.xPt - 4) < 0.01).map((border) => border.from.yPt).sort((a, b) => a - b);
+    expect(rules.length).toBe(2);
+    expect(column[0]!.flowBounds.yPt).toBeCloseTo(rules[0]! - 0.25, 6);
+    expect(column[0]!.flowBounds.yPt + column[0]!.flowBounds.heightPt).toBeCloseTo(rules[1]! + 0.25, 6);
+  });
+
+  it('leaves spacing that would empty the cells outside the rule', () => {
+    // Mode 14, 76.5 pt spacing, 10 pt indent: the gaps take the band.
+    const margins = '<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>';
+    const wide = `<w:tbl><w:tblPr>${AUTO}<w:tblCellSpacing w:w="1530" w:type="dxa"/><w:tblInd w:w="200" w:type="dxa"/>${BORDERS}${margins}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid><w:tr>${cell(1440, 'A1')}${cell(2160, 'B1')}</w:tr></w:tbl>`;
+    const page = tablePages(wide, 14)[0]!;
+    for (const box of page.rows[0]!.cells) expect(box.flowBounds.widthPt).toBeGreaterThan(1);
+    for (const border of page.borders) {
+      expect(border.to.xPt).toBeGreaterThanOrEqual(border.from.xPt);
+    }
+  });
+
+  it('does not let a negative indent raise the ceiling in the older modes', () => {
+    const indented = `<w:tbl><w:tblPr>${AUTO}${spacing(2)}<w:tblInd w:w="-400" w:type="dxa"/>${BORDERS}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="4400"/><w:gridCol w:w="4800"/></w:tblGrid><w:tr>${cell(4400, 'A1')}${cell(4800, 'B1')}</w:tr></w:tbl>`;
+    for (const mode of [12, 14, 15]) {
+      const page = tablePages(indented, mode)[0]!;
+      expect(page.columnWidthsPt.reduce((sum, width) => sum + width, 0)).toBeCloseTo(465.3 - 0.5, 6);
+    }
   });
 
   it('applies both forms to the upright block table of a tbRl section', () => {

@@ -77,6 +77,8 @@ interface MemberScopeExtensions {
   readonly nestedNegativeIndentIgnored: boolean;
   /** WORD_AUTOFIT_CONTENT_COLUMN_GROWTH for a content-sized table. */
   readonly contentFitted: boolean;
+  /** The spaced table is the AutoFit form with preferred widths. */
+  readonly spacedPreferredSized?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY, absent outside measured structures. */
   readonly spacingGeometry: SpacingGeometry | null;
 }
@@ -101,6 +103,7 @@ function memberContext(
   extensions: MemberScopeExtensions = NO_SCOPE_EXTENSIONS,
 ) {
   const { marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry } = extensions;
+  const spacedPreferredSized = spacingGeometry !== null && extensions.spacedPreferredSized === true;
   const format = source.format;
   const firstRowException = format.firstRowException;
   // MS-OI29500 §2.1.156/158: first-logical-row indent/layout authority
@@ -294,7 +297,7 @@ function memberContext(
     || isVerticalTextDirection(state.textDirection)
     || state.inTableCell
     // WORD_TABLE_CELL_SPACING_GEOMETRY: the preferred-width form ends with its column.
-    || (spacingGeometry !== null && !contentFitted)
+    || spacedPreferredSized
     || format.rows.length === 0
     ? 0
     : format.rows.reduce((minimumPt, row, rowIndex) => {
@@ -324,6 +327,8 @@ function memberContext(
   // page ceiling (its authored width may reach the page edge); the auto-width
   // band above supersedes it for tables without a preferred width.
   const containerMaximumPt = (isLeadingMarginPageStoryTable && !usesLeadingIndentBand
+    // An automatic spaced table keeps the band clamped above in every mode.
+    && !(spacedPreferredSized && !hasPreferredTableWidth)
     ? Math.max(contentWPt, pageFitCeilingPt)
     : textBandPt) + outerCellMarginsPt;
   // Windows Word 16.0 #1881 controls: an AutoFit table whose effective tblW is
@@ -472,7 +477,7 @@ export function decideLogicalTable(
     // row geometry change. A width-only fallback cannot restore the base path.
     const candidate = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
       usesLogicalProperties, omittedMarginEndOrigin, false,
-      { ...NO_SCOPE_EXTENSIONS, contentFitted: true, spacingGeometry });
+      { ...NO_SCOPE_EXTENSIONS, contentFitted: contentSized, spacingGeometry, spacedPreferredSized: preferredSized });
     if (spacedAutoFitContentFits?.(candidate) !== true) spacingGeometry = null;
   }
   // WORD_AUTOFIT_CONTENT_COLUMN_GROWTH: the measured content-sized class.
@@ -526,7 +531,8 @@ export function decideLogicalTable(
     rowOverrides,
     gridSkips,
   });
-  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry });
+  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry,
+    spacedPreferredSized: preferredSized });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
     usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);
   return Object.freeze({ measuredOrigin, usesLogicalProperties, dropsUnusedLeadingGrid, logical,

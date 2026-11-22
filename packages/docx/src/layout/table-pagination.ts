@@ -22,7 +22,6 @@ import { adjustForWidowOrphan } from '../line-fit-policy.js';
 import type { StoryPageFrames } from './story-page-frames.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import {
-  continuesMergeFromAbove,
   laidOutTableTracks,
   layoutTable,
   measureTableCellBlockFlowHeightPt,
@@ -2150,26 +2149,11 @@ function materializeFragment(
       physicalPageIndex: context.page.physicalPageIndex,
       displayPageNumber: context.page.displayPageNumber,
       cells: Object.freeze(row.cells.map((cell, cellIndex): TableCellFragmentLayout => {
-        const verticalMerge = selection.input.cells[cellIndex]?.verticalMerge ?? 'none';
-        const sourceCell = selection.input.cells[cellIndex];
-        // The restart of this cell's own merge: reached through rows that
-        // follow each other in the source, not through a repeated header.
-        let mergeStart = rowIndex;
-        while (verticalMerge === 'continue' && sourceCell && continuesMergeFromAbove(
-          selected[mergeStart - 1]?.input, selected[mergeStart]!.input, sourceCell.columnStart, sourceCell.columnSpan,
-        )) mergeStart -= 1;
-        const ownsRestartInFragment = verticalMerge === 'continue' && mergeStart < rowIndex
-          && selected[mergeStart]!.input.cells.some((candidate) => (
-            candidate.verticalMerge === 'restart'
-            && candidate.columnStart === sourceCell?.columnStart
-            && candidate.columnSpan === sourceCell?.columnSpan
-          ));
+        // The fragment's own layout names the cell that paints a merge
+        // whose restart is on an earlier page (table.ts gridMergeRole).
         return Object.freeze({
           ...cell,
           contentRanges: Object.freeze([...(selection.ranges[cellIndex] ?? [])]),
-          ...(verticalMerge === 'continue' && !ownsRestartInFragment
-            ? { visualMergeOwnership: 'continuation' as const }
-            : {}),
         });
       })),
     });
