@@ -90,6 +90,8 @@ describe('a tbRlV section is laid out as tbLrV', () => {
     ['a gutter', '', ''],
     ['mirrored margins and a gutter', '', '<w:mirrorMargins/>'],
     ['two columns', '<w:cols w:num="2" w:space="720"/>', ''],
+    ['two pages per sheet', '', '<w:printTwoOnOne/>'],
+    ['book fold', '', '<w:bookFoldPrinting/>'],
   ])('with %s', (_name, sectionExtras, settings) => {
     expect(pagesOf('tbRlV', sectionExtras, settings)).toBe(pagesOf('tbLrV', sectionExtras, settings));
   });
