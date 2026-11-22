@@ -12,7 +12,8 @@ import { hitTestDocxElementContext } from './element-context.js';
 import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
-import { runIsClippedAway } from './run-clip.js';
+import { clippedBoxVisible } from './run-clip.js';
+import { resolveDocxCommentThreads } from './comments.js';
 import type { LayoutRect, ParagraphLayout, TableLayout } from './layout/types.js';
 import type { CanvasPaintContext, PaintCanvas2D } from './paint/types.js';
 
@@ -271,18 +272,15 @@ describe('word-cell-content-clip', () => {
 
     const runs = textRunsForPage(layout, 0, { scale: 1 });
     const hidden = runs.find((run) => run.text.includes('Hidden'));
-    // The run lies wholly before the cell: its clip is empty, not the cell.
+    // The run lies wholly before the cell: its clips hide it.
     expect(hidden!.x + hidden!.w).toBeLessThanOrEqual(clip.xPt);
-    expect(hidden?.clipBounds).toBeDefined();
-    expect(hidden!.clipBounds!.width).toBe(0);
-    expect(runIsClippedAway(hidden!)).toBe(true);
-    // A visible run reports the exact intersection with the cell clip.
-    const visible = runs.find((run) => run.text.startsWith('Xg'))!;
-    expect(visible.clipBounds).toEqual({
-      x: expect.closeTo(Math.max(visible.x, clip.xPt), 9), y: expect.closeTo(Math.max(visible.y, clip.yPt), 9),
-      width: expect.any(Number), height: expect.any(Number),
+    expect(hidden?.clips?.at(-1)).toEqual({
+      x: expect.closeTo(clip.xPt, 9), y: expect.closeTo(clip.yPt, 9),
+      width: expect.closeTo(clip.widthPt, 9), height: expect.closeTo(clip.heightPt, 9),
     });
-    expect(visible.clipBounds!.width).toBeGreaterThan(0);
+    expect(clippedBoxVisible({ x: hidden!.x, y: hidden!.y, width: hidden!.w, height: hidden!.h }, hidden!.clips)).toBe(false);
+    const visible = runs.find((run) => run.text.startsWith('Xg'))!;
+    expect(clippedBoxVisible({ x: visible.x, y: visible.y, width: visible.w, height: visible.h }, visible.clips)).toBe(true);
   });
 });
 
@@ -316,19 +314,21 @@ const turnedBox = (text: string) => '<w:r><w:drawing><wp:inline><wp:extent cx="1
   + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
 
 describe('clipped text runs in a turned text box', () => {
-  it('report the cell clip box itself for a turned run', () => {
+  it('carry the cell clip unturned for a turned run', () => {
     const layout = layoutDocx(docx(`<w:p>${turnedBox('<w:p><w:r><w:t>Turned</w:t></w:r></w:p>')}</w:p>`));
     const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
     const clip = table.rows[0]!.cells[0]!.contentClipBounds!;
     const run = textRunsForPage(layout, 0, { scale: 2 }).find((item) => item.text.includes('Turned'));
     expect(run?.transform).toBeDefined();
-    expect(run?.clipBounds).toEqual({
+    // The cell clip is unturned; the text box's own clip follows it, turned.
+    expect(run?.clips?.at(-1)?.transform).toBeDefined();
+    expect(run?.clips?.find((item) => !item.transform)).toEqual({
       x: expect.closeTo(2 * clip.xPt, 9), y: expect.closeTo(2 * clip.yPt, 9),
       width: expect.closeTo(2 * clip.widthPt, 9), height: expect.closeTo(2 * clip.heightPt, 9),
     });
   });
 
-  it('report an empty clip box for turned text in a zero-height cell', () => {
+  it('report turned text in a zero-height cell as hidden', () => {
     // The single row is exact and zero high.
     const layout = layoutDocx(docx(`<w:p>${turnedBox('<w:p><w:r><w:t>Unseen</w:t></w:r></w:p>')}</w:p>`,
       undefined, '<w:trHeight w:val="0" w:hRule="exact"/>', 0, false));
@@ -336,7 +336,30 @@ describe('clipped text runs in a turned text box', () => {
     const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
     expect(table.rows[0]!.cells[0]!.contentClipBounds!.heightPt).toBe(0);
     expect(run?.transform).toBeDefined();
-    expect(runIsClippedAway(run!)).toBe(true);
+    expect(clippedBoxVisible({ x: run!.x, y: run!.y, width: run!.w, height: run!.h, transform: run!.transform }, run!.clips)).toBe(false);
+  });
+
+  it('give no comment highlight for turned text wholly outside its text box', () => {
+    // A 45-degree text box, not in a table, and a run indented out of it.
+    const box = turnedBox('<w:p><w:pPr><w:ind w:left="-1400"/></w:pPr><w:r><w:t>Turned</w:t></w:r></w:p>'
+      + '<w:p><w:r><w:t>Inside</w:t></w:r></w:p>');
+    const layout = layoutDocx(docx('', `<w:p>${box}</w:p>`));
+    const runs = textRunsForPage(layout, 0, { scale: 1 });
+    const turned = runs.find((run) => run.text.includes('Turned'))!;
+    const inside = runs.find((run) => run.text.includes('Inside'))!;
+    expect(turned.clips?.at(-1)?.transform).toBeDefined();
+    const threads = (source: typeof turned.source, runIndex: number) => resolveDocxCommentThreads(
+      [{ id: 'c', author: 'A', text: 'x' }] as never,
+      [{
+        commentId: 'c', source: source!, startRunIndex: runIndex, endRunIndex: runIndex + 1,
+        reference: { source: source!, runIndex: runIndex + 1, affinity: 'preceding' },
+      }] as never,
+      runs,
+    );
+    expect(JSON.stringify(threads(turned.source, turned.sourceRunIndex!))).not.toContain('"width"');
+    const shown = JSON.stringify(threads(inside.source, inside.sourceRunIndex!));
+    expect(shown).toContain('"width"');
+    expect(shown).toContain('"clips"');
   });
 });
 
@@ -373,7 +396,7 @@ describe('overlay clip containers', () => {
       const clip = { x: 20, y: 10, width: 40, height: 20 };
       const run = {
         text: 'abc', x: 30, y: 20, w: 30, h: 10, fontSize: 10, font: '10px serif',
-        transform: 'rotate(90deg)', clipBounds: clip, clips: [clip],
+        transform: 'rotate(90deg)', clips: [clip],
       };
       buildDocxHighlightLayer(layer as unknown as HTMLDivElement, [run, { ...run }],
         [{ slices: [{ runIndex: 0, start: 0, end: 3 }, { runIndex: 1, start: 1, end: 2 }], active: false }],

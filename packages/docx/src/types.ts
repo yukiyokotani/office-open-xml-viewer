@@ -1846,6 +1846,16 @@ export interface DocxStorySource {
 }
 
 /** Information about a rendered text segment for overlays and read-only integrations. */
+/** A clip region in canvas CSS px; see {@link DocxTextRunInfo.clips}. */
+export interface DocxClipRegion {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly transform?: string;
+  readonly rects?: readonly Readonly<{ x: number; y: number; width: number; height: number }>[];
+}
+
 export interface DocxTextRunInfo {
   /** Canonical structural source of the owning paragraph. */
   source?: Readonly<DocxStorySource>;
@@ -1898,30 +1908,20 @@ export interface DocxTextRunInfo {
   hyperlink?: HyperlinkTarget;
   /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
   eastAsianVert?: boolean;
-  /** The page region, in canvas CSS px, outside which the run's glyphs are
-   *  clipped: the intersection of the clips it is painted under that are
-   *  axis-aligned on the page (a table cell, an exact-height row, an unturned
-   *  text box). It is the logical clip; the Canvas widens its edges to whole
-   *  device pixels, so painted ink can reach up to one device pixel beyond.
-   *  - Unturned run (no {@link transform}, so no rotation, quarter turn or
-   *    reflection): further cut to the run box
-   *    (`x`/`y`/`w`/`h`); an empty rectangle (zero width or height) means the
-   *    run is wholly clipped away.
-   *  - Run with any {@link transform}: the clip box itself, not cut to the
-   *    run.
-   *  Clips turned on the page (inside a rotated text box) are not included;
-   *  {@link clips} lists every clip, which the viewer's text, find and
-   *  comment layers enforce with nested `overflow:hidden` containers.
-   *  Absent for an unclipped run. */
-  clipBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
-  /** Every clip the run is painted under, outermost first, turned clips
-   *  included. Each is placed like {@link highlightBounds}: `x`/`y` is the
-   *  canvas CSS px position of its top-left corner, `width`/`height` lie
-   *  along its own axes and `transform` (about that corner) orients it. An
-   *  overlay that nests one `overflow:hidden` container per clip has the
-   *  browser clip the run exactly as the Canvas does, for any transform or
-   *  responsive resize. Absent for an unclipped run. */
-  clips?: readonly Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>[];
+  /** Every clip the run is painted under (a table cell, an exact-height
+   *  row, a text box), outermost first, turned clips included; the run is
+   *  visible only where all of them overlap. Each is placed like
+   *  {@link highlightBounds}: `x`/`y` is the canvas CSS px position of its
+   *  top-left corner, `width`/`height` lie along its own axes, and
+   *  `transform` (about that corner) orients it. A clip with `rects` is
+   *  their union instead of its whole box (a VML text box's text
+   *  rectangles); each is given as offsets along the clip's axes from its
+   *  corner. These are the logical clips; the Canvas widens a cell's clip
+   *  to whole device pixels. An overlay that nests one `overflow:hidden`
+   *  container per clip (cut to `rects` where present), as the viewer's
+   *  text, find and comment layers do, has the browser clip the run exactly
+   *  for any transform or responsive resize. Absent for an unclipped run. */
+  clips?: readonly Readonly<DocxClipRegion>[];
 }
 
 export interface RenderPageOptions {

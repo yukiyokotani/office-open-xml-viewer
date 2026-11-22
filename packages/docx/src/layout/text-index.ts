@@ -29,13 +29,6 @@ import type {
 export interface TextRunGeometry {
   readonly placement: SourceOwnedTextGeometry;
   readonly pointToPage: Matrix2DData;
-  /** WORD_CELL_CONTENT_CLIP: in page points, the intersection of the run's
-   * ancestor paint clips that are axis-aligned on the page, further cut to
-   * the run's box when the run itself is unturned (no rotation, quarter turn
-   * or reflection); empty (zero width or height) when nothing of an unturned
-   * run is visible. Clips turned on the page are not represented. Absent for
-   * an unclipped run. */
-  readonly pageClipBounds?: LayoutRect;
   /** Every ancestor paint clip of the run, outermost first, in its retained
    * local space (turned clips included): overlays clip with them. */
   readonly clips: readonly ElementClipGeometry[];
@@ -49,6 +42,9 @@ export interface TextRunGeometry {
 export interface ElementClipGeometry {
   readonly bounds: LayoutRect;
   readonly pointToPage: Matrix2DData;
+  /** A clip that is a union of rectangles (a VML text box's textboxrect
+   * regions), in the space of `bounds`, which is their bounding box. */
+  readonly rects?: readonly LayoutRect[];
 }
 
 /** Retained DrawingML occurrence projected into physical page points. */
@@ -284,7 +280,25 @@ function projectionForEntry(
 function withClip(
   projection: NodeProjection,
   bounds: LayoutRect | undefined,
+  rects?: readonly LayoutRect[],
 ): NodeProjection {
+  if (rects && rects.length > 0) {
+    const left = Math.min(...rects.map((rect) => rect.xPt));
+    const top = Math.min(...rects.map((rect) => rect.yPt));
+    const right = Math.max(...rects.map((rect) => rect.xPt + rect.widthPt));
+    const bottom = Math.max(...rects.map((rect) => rect.yPt + rect.heightPt));
+    return {
+      ...projection,
+      clips: Object.freeze([
+        ...projection.clips,
+        Object.freeze({
+          bounds: Object.freeze({ xPt: left, yPt: top, widthPt: right - left, heightPt: bottom - top }),
+          pointToPage: projection.pointToPage,
+          rects: Object.freeze([...rects]),
+        }),
+      ]),
+    };
+  }
   if (!bounds) return projection;
   return {
     ...projection,
@@ -343,7 +357,9 @@ function visitTextBox(
     layoutTranslationPt: { xPt: 0, yPt: 0 },
     textBoxVerticalMode: textBox.verticalMode ?? projection.textBoxVerticalMode,
   };
-  const textBoxProjection = withClip(transformedProjection, textBox.clipBounds);
+  // As paint clips the story: to the authored text rectangles when the box
+  // has them, otherwise to its clip bounds.
+  const textBoxProjection = withClip(transformedProjection, textBox.clipBounds, textBox.clipRects);
   for (const block of textBox.story.blocks) {
     visitNode(block, textBoxProjection, context);
   }
@@ -424,44 +440,6 @@ function lineProjectionPointToPage(
   return lineFrame ? composeAffine(projection.pointToPage, lineFrame) : projection.pointToPage;
 }
 
-/** TextRunGeometry.pageClipBounds of a run box under `clips`. */
-function pageClipBoundsEntry(
-  bounds: LayoutRect,
-  runPointToPage: Matrix2DData,
-  clips: readonly ElementClipGeometry[],
-): Readonly<{ pageClipBounds?: LayoutRect }> {
-  const pageRect = (rect: LayoutRect, matrix: Matrix2DData) => {
-    const a = mapAffinePoint(matrix, rect);
-    const b = mapAffinePoint(matrix, { xPt: rect.xPt + rect.widthPt, yPt: rect.yPt + rect.heightPt });
-    return { left: Math.min(a.xPt, b.xPt), top: Math.min(a.yPt, b.yPt), right: Math.max(a.xPt, b.xPt), bottom: Math.max(a.yPt, b.yPt) };
-  };
-  const pageAligned = (matrix: Matrix2DData) => (matrix.b === 0 && matrix.c === 0) || (matrix.a === 0 && matrix.d === 0);
-  let region: { left: number; top: number; right: number; bottom: number } | undefined;
-  for (const clip of clips) {
-    if (!pageAligned(clip.pointToPage)) continue;
-    const next = pageRect(clip.bounds, clip.pointToPage);
-    region = region ? {
-      left: Math.max(region.left, next.left), top: Math.max(region.top, next.top),
-      right: Math.min(region.right, next.right), bottom: Math.min(region.bottom, next.bottom),
-    } : next;
-  }
-  if (!region) return {};
-  // Only an unturned run is cut to its box; any rotation, quarter turn or
-  // reflection keeps the clip box itself.
-  if (runPointToPage.b === 0 && runPointToPage.c === 0 && runPointToPage.a > 0 && runPointToPage.d > 0) {
-    const run = pageRect(bounds, runPointToPage);
-    region = {
-      left: Math.max(region.left, run.left), top: Math.max(region.top, run.top),
-      right: Math.min(region.right, run.right), bottom: Math.min(region.bottom, run.bottom),
-    };
-  }
-  const xPt = Math.min(region.left, region.right);
-  const yPt = Math.min(region.top, region.bottom);
-  return { pageClipBounds: Object.freeze({
-    xPt, yPt, widthPt: Math.max(0, region.right - xPt), heightPt: Math.max(0, region.bottom - yPt),
-  }) };
-}
-
 function visitParagraph(
   paragraph: ParagraphLayout,
   projection: NodeProjection,
@@ -526,7 +504,6 @@ function visitParagraph(
             context.runs.push(Object.freeze({
               placement,
               pointToPage: linePointToPage,
-              ...pageClipBoundsEntry(placement.bounds, linePointToPage, clippedProjection.clips),
               clips: clippedProjection.clips,
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined

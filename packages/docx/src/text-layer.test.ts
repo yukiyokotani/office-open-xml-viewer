@@ -189,7 +189,7 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
     const [container] = layerWith([run({
       text: 'linklinklink', x: 10, w: 60,
       hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
-      clips: [cell], clipBounds: cell,
+      clips: [cell],
     })], () => {});
     expect(container!.style.overflow).toBe('hidden');
     expect([container!.style.left, container!.style.width]).toEqual(['40%', '30%']);
@@ -198,14 +198,13 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
     expect(span!.style.cursor).toBe('pointer');
   });
 
-  it('makes a wholly clipped run inert and leaves an unclipped run on the layer', () => {
+  it('puts a wholly clipped run in an empty container and leaves an unclipped run on the layer', () => {
     const empty = { x: 20, y: 0, width: 0, height: 12 };
     const [hidden, open] = layerWith([
-      run({ x: 0, w: 10, clips: [empty], clipBounds: empty }),
+      run({ x: 0, w: 10, clips: [empty] }),
       run({ x: 0, w: 10 }),
     ]);
     expect(hidden!.style.width).toBe('0%');
-    expect(hidden!.children[0]!.style['pointer-events']).toBe('none');
     expect(open!.style['pointer-events']).toBe('all');
   });
 

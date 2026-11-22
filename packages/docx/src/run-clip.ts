@@ -1,33 +1,92 @@
 import { overlayPercent } from '@silurus/ooxml-core';
-import type { DocxTextRunInfo } from './types.js';
+import type { DocxClipRegion, DocxTextRunInfo } from './types.js';
 
-type CssRect = Readonly<{ x: number; y: number; width: number; height: number }>;
 type RunClip = NonNullable<DocxTextRunInfo['clips']>[number];
 /** [a, b, c, d, e, f]: a CSS-px affine map (x' = a x + c y + e). */
 type Affine = readonly [number, number, number, number, number, number];
 
 const IDENTITY: Affine = [1, 0, 0, 1, 0, 0];
 
-/** True when DocxTextRunInfo.clipBounds reports nothing of the run visible. */
-export function runIsClippedAway(run: Readonly<DocxTextRunInfo>): boolean {
-  const clip = run.clipBounds;
-  return clip !== undefined && !(clip.width > 0 && clip.height > 0);
+type Point = Readonly<{ x: number; y: number }>;
+
+/** The page polygon of a box placed like DocxTextRunInfo.highlightBounds. */
+function placedPolygon(x: number, y: number, width: number, height: number, transform: string | undefined): Point[] {
+  const [a, b, c, d] = orientation(transform);
+  return [[0, 0], [width, 0], [width, height], [0, height]].map(([u, v]) => ({
+    x: x + a * u! + c * v!, y: y + b * u! + d * v!,
+  }));
 }
 
-/** A highlight rectangle of an unturned `run`, cut to its clip; null when
- * nothing of it is visible. A turned run keeps its rectangle (its clips are
- * enforced by the overlay containers, see OverlayClipFrames). */
-export function clipRunRect(run: Readonly<DocxTextRunInfo>, rect: CssRect): CssRect | null {
-  const clip = run.clipBounds;
-  if (!clip) return rect;
-  if (runIsClippedAway(run)) return null;
-  if (run.transform) return rect;
-  const left = Math.max(rect.x, clip.x);
-  const top = Math.max(rect.y, clip.y);
-  const right = Math.min(rect.x + rect.width, clip.x + clip.width);
-  const bottom = Math.min(rect.y + rect.height, clip.y + clip.height);
-  if (right <= left || bottom <= top) return null;
-  return { x: left, y: top, width: right - left, height: bottom - top };
+function area(polygon: readonly Point[]): number {
+  return polygon.reduce((sum, point, index) => {
+    const next = polygon[(index + 1) % polygon.length]!;
+    return sum + point.x * next.y - next.x * point.y;
+  }, 0) / 2;
+}
+
+/** `subject` cut by the convex polygon `clip` (Sutherland-Hodgman). */
+function cutPolygon(subject: readonly Point[], clip: readonly Point[]): Point[] {
+  const sign = area(clip) >= 0 ? 1 : -1;
+  let points = [...subject];
+  for (let index = 0; index < clip.length && points.length > 0; index++) {
+    const p = clip[index]!;
+    const q = clip[(index + 1) % clip.length]!;
+    const side = (point: Point) => sign * ((q.x - p.x) * (point.y - p.y) - (q.y - p.y) * (point.x - p.x));
+    const next: Point[] = [];
+    for (let i = 0; i < points.length; i++) {
+      const current = points[i]!;
+      const following = points[(i + 1) % points.length]!;
+      const sc = side(current);
+      const sf = side(following);
+      if (sc >= 0) next.push(current);
+      if ((sc >= 0) !== (sf >= 0)) {
+        const t = sc / (sc - sf);
+        next.push({ x: current.x + t * (following.x - current.x), y: current.y + t * (following.y - current.y) });
+      }
+    }
+    points = next;
+  }
+  return points;
+}
+
+/** WORD_CELL_CONTENT_CLIP: whether any of a box placed like
+ * DocxTextRunInfo.highlightBounds survives `clips` (each a union of its
+ * rectangles); empty overlaps (zero area) count as hidden. */
+export function clippedBoxVisible(
+  box: Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>,
+  clips: readonly Readonly<DocxClipRegion>[] | undefined,
+): boolean {
+  let pieces: Point[][] = [placedPolygon(box.x, box.y, box.width, box.height, box.transform)];
+  for (const clip of clips ?? []) {
+    const regions = (clip.rects ?? [{ x: 0, y: 0, width: clip.width, height: clip.height }]).map((rect) => {
+      const [a, b, c, d] = orientation(clip.transform);
+      return placedPolygon(clip.x + a * rect.x + c * rect.y, clip.y + b * rect.x + d * rect.y, rect.width, rect.height, clip.transform);
+    });
+    pieces = pieces.flatMap((piece) => regions.map((region) => cutPolygon(piece, region)))
+      .filter((piece) => piece.length >= 3 && Math.abs(area(piece)) > 1e-9);
+    if (pieces.length === 0) return false;
+  }
+  return pieces.length > 0;
+}
+
+/** The comment highlight of a run, shared by the comment API and the
+ * viewer's tint: the run's font box (highlightBounds, else its box) with its
+ * orientation and clips; null when the clips leave none of it visible. */
+export function runHighlightRect(run: Readonly<DocxTextRunInfo>): Readonly<{
+  x: number; y: number; width: number; height: number;
+  transform?: string; clips?: readonly Readonly<DocxClipRegion>[];
+}> | null {
+  const bounds = run.highlightBounds;
+  const rect = {
+    x: bounds?.x ?? run.x,
+    y: bounds?.y ?? run.y,
+    width: bounds?.width ?? run.w,
+    height: bounds?.height ?? run.h,
+    ...(run.transform ? { transform: run.transform } : {}),
+  };
+  if (!(rect.width > 0 && rect.height > 0)) return null;
+  if (run.clips && !clippedBoxVisible(rect, run.clips)) return null;
+  return run.clips ? { ...rect, clips: run.clips } : rect;
 }
 
 /** The linear part of an orientation transform as text-run-projection emits
@@ -149,6 +208,7 @@ export class OverlayClipFrames {
       `left:${overlayPercent(clipToParent[4], parentWidth)};top:${overlayPercent(clipToParent[5], parentHeight)};` +
       `width:${overlayPercent(width, parentWidth)};height:${overlayPercent(height, parentHeight)};` +
       (turn ? `transform:${turn};transform-origin:top left;` : '') +
+      unionClipPath(clip, width, height) +
       'overflow:hidden;pointer-events:none;';
     parent.appendChild(element);
     this.open.push({ key: clipKey(clip), element, fromPage: invert(clipToPage), width, height });
@@ -156,5 +216,21 @@ export class OverlayClipFrames {
 }
 
 function clipKey(clip: RunClip): string {
-  return `${clip.x},${clip.y},${clip.width},${clip.height},${clip.transform ?? ''}`;
+  return JSON.stringify(clip);
+}
+
+/** A union clip's rectangles as one clip-path polygon in percentages of the
+ * container: each rectangle is traced from a common start point and joined
+ * by zero-width bridges, so only the rectangles are inside. */
+function unionClipPath(clip: RunClip, width: number, height: number): string {
+  if (!clip.rects || clip.rects.length === 0) return '';
+  const point = (x: number, y: number) => `${overlayPercent(x, width)} ${overlayPercent(y, height)}`;
+  const parts: string[] = [point(0, 0)];
+  for (const rect of clip.rects) {
+    const right = rect.x + rect.width;
+    const bottom = rect.y + rect.height;
+    parts.push(point(rect.x, rect.y), point(right, rect.y), point(right, bottom), point(rect.x, bottom),
+      point(rect.x, rect.y), point(0, 0));
+  }
+  return `clip-path:polygon(${parts.join(',')});`;
 }

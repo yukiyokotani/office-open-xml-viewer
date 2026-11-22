@@ -2,7 +2,44 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from '@playwright/test';
 import { createServer, type ViteDevServer } from 'vite';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import init, { DocxArchive } from './wasm/docx_parser.js';
+import { storeZip } from './conformance/generate.js';
+import { measureContext } from './test-support/tab-fitting.test-support.js';
+import { normalizeInternalDocumentModel } from './parser-model.js';
+import { layoutDocument } from './document-layout.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { textRunsForPage } from './text-run-projection.js';
 import type { DocxTextRunInfo } from './types.js';
+
+const encode = (text: string) => new TextEncoder().encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${text}`);
+
+/** Lays out a one-page document whose body is `body` and returns its runs at
+ * scale 1 (page CSS px = points). */
+async function runsOf(body: string): Promise<DocxTextRunInfo[]> {
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    + 'xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"';
+  const pkg = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const bytes = storeZip(new Map([
+    ['[Content_Types].xml', encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', encode(`<Relationships xmlns="${pkg}"><Relationship Id="rId1" `
+      + 'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/document.xml', encode(`<w:document ${ns}><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>`
+      + '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr></w:body></w:document>')],
+  ]));
+  await init({ module_or_path: await readFile(new URL('./wasm/docx_parser_bg.wasm', import.meta.url)) });
+  const archive = new DocxArchive(bytes);
+  let parsed;
+  try {
+    parsed = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse())));
+  } finally { archive.free(); }
+  const model = parsed.document;
+  const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext(5) }), { currentDateMs: 0 });
+  return textRunsForPage(layout, 0, { scale: 1 });
+}
 
 type Api = typeof import('./text-layer') & typeof import('./find-highlight-layer');
 
@@ -66,11 +103,27 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
 
   it('clips a partly clipped link at its cell edge before and after a responsive resize', async () => {
     const cell = { x: 160, y: 90, width: 300, height: 40 };
-    const runs = [link({ clips: [cell], clipBounds: { x: 160, y: 100, width: 140, height: 20 } })];
+    const runs = [link({ clips: [cell] })];
     // At 800px: hidden left of x=160, live right of it.
     expect(await hits(runs, 800, [[150, 110], [170, 110]])).toEqual(['', 'MMMMMMMMMM']);
     // At 400px everything halves: the edge is at x=80.
     expect(await hits(runs, 400, [[75, 55], [85, 55]])).toEqual(['', 'MMMMMMMMMM']);
+  });
+
+  it('keeps a VML text box run reachable where its authored text rectangle paints it', async () => {
+    // A 100 x 60pt VML text box whose text rectangle is the whole shape, with
+    // a 30pt left inset and the paragraph indented 20pt back into it: the run
+    // paints between the inset and the shape edge.
+    const box = '<w:p><w:r><w:pict><v:group style="width:120pt;height:80pt" coordsize="120,80">'
+      + '<v:shapetype id="box" coordsize="1000,1000"/><v:shape type="#box" style="width:100;height:60" filled="f" stroked="f">'
+      + '<v:path textboxrect="0,0,1000,1000"/><v:textbox inset="30pt,0,0,0"><w:txbxContent>'
+      + '<w:p><w:pPr><w:ind w:left="-400"/></w:pPr><w:r><w:t>Link</w:t></w:r></w:p>'
+      + '</w:txbxContent></v:textbox></v:shape></v:group></w:pict></w:r></w:p>';
+    const runs = await runsOf(box);
+    const run = runs.find((item) => item.text === 'Link');
+    expect(run?.clips?.at(-1)?.rects).toBeDefined();
+    const point: [number, number] = [run!.x + run!.w / 2, run!.y + run!.h / 2];
+    expect(await hits(runs, 800, [point])).toEqual(['Link']);
   });
 
   it('keeps a link out of reach when a turned clip hides it', async () => {

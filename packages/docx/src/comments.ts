@@ -1,9 +1,9 @@
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import { sourceKey } from './layout/source-key.js';
-import { clipRunRect } from './run-clip.js';
+import { runHighlightRect } from './run-clip.js';
 import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
-import type { DocComment, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
+import type { DocComment, DocxClipRegion, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
 import type { ReviewAnchorProjectionOptions } from './review-projection.js';
 
 export interface CommentAnchorRange {
@@ -45,11 +45,11 @@ export interface DocxCommentHighlightRect {
   readonly width: number;
   readonly height: number;
   readonly transform?: string;
-  /** The clip of the highlighted text (DocxTextRunInfo.clipBounds), present
-   *  for a turned run: a rectangle with a `transform` is not cut to it, so a
-   *  host clips the drawn highlight to this page region (for example with an
-   *  `overflow:hidden` container). An unturned highlight is already cut. */
-  readonly clipBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
+  /** The clips of the highlighted text (DocxTextRunInfo.clips). The
+   *  rectangle is the text's font box, not cut to them: a host clips the
+   *  drawn highlight to them, for example with nested `overflow:hidden`
+   *  containers. Text that the clips hide wholly yields no rectangle. */
+  readonly clips?: readonly Readonly<DocxClipRegion>[];
 }
 
 /** One authored anchor resolved against the text geometry supplied for a page. */
@@ -459,19 +459,9 @@ function highlightRects(
 ): readonly Readonly<DocxCommentHighlightRect>[] {
   const rects = runs
     .flatMap((run): DocxCommentHighlightRect[] => {
-      const bounds = run.highlightBounds;
-      // A run's highlight is cut to its paint clip, like its glyphs.
-      const visible = clipRunRect(run, {
-        x: bounds?.x ?? run.x,
-        y: bounds?.y ?? run.y,
-        width: bounds?.width ?? run.w,
-        height: bounds?.height ?? run.h,
-      });
-      return visible ? [{
-        ...visible,
-        ...(run.transform ? { transform: run.transform } : {}),
-        ...(run.transform && run.clipBounds ? { clipBounds: run.clipBounds } : {}),
-      }] : [];
+      // The same font box and clips as the viewer's tint.
+      const rect = runHighlightRect(run);
+      return rect ? [rect] : [];
     })
     .filter(({ width, height }) => width > 0 && height > 0)
     .sort((left, right) => left.y - right.y || left.x - right.x);
@@ -483,7 +473,7 @@ function highlightRects(
       && previous.y === rect.y
       && previous.height === rect.height
       && previous.transform === rect.transform
-      && JSON.stringify(previous.clipBounds) === JSON.stringify(rect.clipBounds)
+      && JSON.stringify(previous.clips) === JSON.stringify(rect.clips)
     ) {
       const left = Math.min(previous.x, rect.x);
       const right = Math.max(previous.x + previous.width, rect.x + rect.width);

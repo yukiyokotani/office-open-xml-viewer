@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CommentAnchorRange } from './comments.js';
 import { buildDocxCommentMargin, resolvePageCommentAnchors } from './comment-margin.js';
+import { resolveDocxCommentThreads } from './comments.js';
 import { installDom, makeEl } from './scroll-viewer-test-dom.js';
 import type { DocxStorySource, DocxTextRunInfo } from './types.js';
 
@@ -97,11 +98,10 @@ describe('resolvePageCommentAnchors', () => {
     installDom();
     const comments = [{ id: 'cell', author: 'Ada', text: 'In a cell' }];
     const clips = [{ x: 0, y: 0, width: 300, height: 100 }];
-    // Two runs of one comment either side of a tab, in the same cell clip but
-    // with different run-box clipBounds.
+    // Two runs of one comment either side of a tab, in the same cell clip.
     const runs: DocxTextRunInfo[] = [
-      { ...run([1]), x: 10, w: 40, clips, clipBounds: { x: 10, y: 20, width: 40, height: 14 } },
-      { ...run([1]), x: 90, w: 40, clips, clipBounds: { x: 90, y: 20, width: 40, height: 14 } },
+      { ...run([1]), x: 10, w: 40, clips },
+      { ...run([1]), x: 90, w: 40, clips },
     ];
     const tint = makeEl('div');
     buildDocxCommentMargin(tint as unknown as HTMLDivElement, null, runs,
@@ -109,5 +109,31 @@ describe('resolvePageCommentAnchors', () => {
     expect(tint.children).toHaveLength(1);
     const [container] = tint.children;
     expect(container!.children).toHaveLength(1);
+  });
+
+  it('uses the same font box and clips for the tint as the comment API', () => {
+    installDom();
+    const comments = [{ id: 'font', author: 'Ada', text: 'Font box' }];
+    const clips = [{ x: 0, y: 0, width: 300, height: 100 }];
+    // A 4px exact line whose font box is 7px high.
+    const runs: DocxTextRunInfo[] = [{
+      ...run([1]), y: 20, h: 4, clips, highlightBounds: { x: 10, y: 18, width: 80, height: 7 },
+    }];
+    const anchors = [anchor('font', [1])];
+    const [thread] = resolveDocxCommentThreads(comments as never, anchors, runs) as unknown as Array<{
+      anchors: Array<{ rects: Array<{ x: number; y: number; width: number; height: number; clips?: unknown }> }>;
+    }>;
+    const rect = thread!.anchors[0]!.rects[0]!;
+    expect([rect.x, rect.y, rect.width, rect.height]).toEqual([10, 18, 80, 7]);
+    expect(rect.clips).toEqual(clips);
+    const tint = makeEl('div');
+    buildDocxCommentMargin(tint as unknown as HTMLDivElement, null, runs,
+      { comments, anchors }, 600, 800, null, () => undefined, 1, 260, false);
+    const [container] = tint.children;
+    const [shade] = container!.children;
+    // In percentages of the 300 x 100 clip container: the same 7px font box.
+    const percent = (name: string) => Number(new RegExp(`${name}:([^%;]+)%`).exec(shade!.style.cssText)?.[1]);
+    expect(percent('top')).toBeCloseTo(18, 9);
+    expect(percent('height')).toBeCloseTo(7, 9);
   });
 });

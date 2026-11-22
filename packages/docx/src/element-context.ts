@@ -187,7 +187,7 @@ function containsElement(
 ): boolean {
   for (const clip of geometry.clips) {
     const clipPoint = inverseMapAffinePoint(clip.pointToPage, pagePoint);
-    if (!clipPoint || !contains(clip.bounds, clipPoint)) return false;
+    if (!clipPoint || !(clip.rects ?? [clip.bounds]).some((rect) => contains(rect, clipPoint))) return false;
   }
   if ('drawing' in geometry) return containsDrawing(geometry.drawing, local);
   const outline = resourcePlacementOutline(geometry.placement);

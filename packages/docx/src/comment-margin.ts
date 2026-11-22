@@ -1,4 +1,4 @@
-import { OverlayClipFrames, runIsClippedAway } from './run-clip.js';
+import { OverlayClipFrames, runHighlightRect } from './run-clip.js';
 import {
   overlayPercent,
   type ViewerCommentsOptions,
@@ -142,16 +142,10 @@ function createTint(
 }
 
 function wordHighlightRun(run: Readonly<DocxTextRunInfo>): DocxTextRunInfo[] {
-  // A wholly clipped run has no tint; any other is cut by its clip containers.
-  if (runIsClippedAway(run)) return [];
-  const bounds = run.highlightBounds;
-  return [{
-    ...run,
-    x: bounds?.x ?? run.x,
-    y: bounds?.y ?? run.y,
-    w: bounds?.width ?? run.w,
-    h: bounds?.height ?? run.h,
-  }];
+  // The same font box and clips as the comment API (comments.ts); the tint is
+  // cut by its clip containers.
+  const rect = runHighlightRect(run);
+  return rect ? [{ ...run, x: rect.x, y: rect.y, w: rect.width, h: rect.height }] : [];
 }
 
 /** Runs share clip containers when their clips are the same. */
