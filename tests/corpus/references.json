@@ -511,6 +511,14 @@
     "source": "cd36d1c1cc1c64a3434f8e8abd6efdf23adc152c50a3a4481ca7700dc7c07b72",
     "pdf": "f7aafffbefbf67db72f43c7c2e5da1a54b7637d57f37234c4e2e4eef56120d36"
   },
+  "docx-065-cell-spacing.mac.pdf": {
+    "source": "84a90bf601a55f01dad8d30aaf67c71d5427e167fc77bffb13e18dfd83c9d845",
+    "pdf": "2e6f73bcaa775122a6d84ee2e1ba204c4778cb1d00652119af74717569cf0adc"
+  },
+  "docx-065-cell-spacing.win.pdf": {
+    "source": "84a90bf601a55f01dad8d30aaf67c71d5427e167fc77bffb13e18dfd83c9d845",
+    "pdf": "43d2f3e6c2154cfbfd22836d0069afff007da9b8d71929a98daff183e6dd7ee8"
+  },
   "pptx-001-paragraph-levels.mac.pdf": {
     "source": "9a98a374282cfc4e5c9246e36287f9f8974ade19652f0e33a066c0786c77df7d",
     "pdf": "683ae01f7021c4caf144b2bccbe1da518ee113d848aa307092ecc2eec3fe6126"
