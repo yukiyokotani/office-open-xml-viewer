@@ -510,12 +510,27 @@ export function wordAnchorOnlyBlock(block: InklessMarkBlockFacts, showTrackedCha
   return anchorOnly !== undefined && (showTrackedChanges === true ? anchorOnly.markup : anchorOnly.final);
 }
 
-/** The one classification every pagination decision about a paragraph's mark
- * uses: an empty paragraph, or one displaying only floating drawings, which
- * Windows Word paginates as its empty mark (spacing suppression, keepNext
- * bridging, following-ink look-ahead, trailing-mark admission). */
+/** The one classification of a paragraph's mark for page admission and
+ * spacing: an empty paragraph, or one displaying only floating drawings,
+ * which Windows Word paginates as its empty mark (page-top spacing
+ * suppression, keepNext bridging, trailing-mark admission). It decides how
+ * the paragraph is placed, never whether its content (anchors, numbering,
+ * revision-visible text) is kept: no path may omit content through it. */
 export function wordInklessMarkBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
   return block.inkless === true || wordAnchorOnlyBlock(block, showTrackedChanges);
+}
+
+/** Whether a later paragraph puts ink on the page (look-ahead): anything but
+ * an inkless mark, and any paragraph whose list marker is painted. */
+export function wordBlockHasInk(
+  block: InklessMarkBlockFacts & Readonly<{ visibleNumbering?: true }>,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  return !wordInklessMarkBlock(block, showTrackedChanges) || block.visibleNumbering === true;
+}
+
+function continuousRoleMark(block: Readonly<{ inkless?: boolean; visibleNumbering?: true }>): boolean {
+  return block.inkless === true && block.visibleNumbering !== true;
 }
 
 /** Compatibility projection governed by {@link WORD_CONTINUOUS_SECTION_MARK_SPACING}. */
@@ -527,15 +542,19 @@ export function wordContinuousSectionRole(
   if (entry?.kind !== 'body-block' || entry.block.kind !== 'paragraph') return undefined;
   const next = sequence[index + 1];
   const afterNext = sequence[index + 2];
-  const suppressBefore = wordInklessMarkBlock(entry.block, false)
+  // These roles are projected once for every revision view and the first
+  // one omits the paragraph, so they take only source-empty paragraphs
+  // (block.inkless): never an anchor-only paragraph (its drawings must still
+  // be acquired), and never one whose painted list marker would be lost.
+  const suppressBefore = continuousRoleMark(entry.block)
     && next?.kind === 'begin-section'
     && next.section.startType === 'continuous';
   if (suppressBefore && entry.block.spaceBeforePt === 0) return 'collapse-mark';
   if (suppressBefore) return 'suppress-before';
-  return wordInklessMarkBlock(entry.block, false)
+  return continuousRoleMark(entry.block)
     && next?.kind === 'body-block'
     && next.block.kind === 'paragraph'
-    && wordInklessMarkBlock(next.block, false)
+    && continuousRoleMark(next.block)
     && next.block.spaceBeforePt === 0
     && afterNext?.kind === 'begin-section'
     && afterNext.section.startType === 'continuous'

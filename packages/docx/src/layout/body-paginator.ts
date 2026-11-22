@@ -134,6 +134,7 @@ import {
   wordContinuousSectionMayShareFootnotePage,
   wordAnchorOnlyBlock,
   wordInklessMarkBlock,
+  wordBlockHasInk,
 } from './body-pagination-compatibility.js';
 import {
   wordContinuousSectionRestartDisplayNumber,
@@ -824,7 +825,7 @@ function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number, show
     const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
     if (block.kind !== 'paragraph') return true;
     if (block.pageBreakBefore) return false;
-    if (!wordInklessMarkBlock(block, showTrackedChanges)) return true;
+    if (wordBlockHasInk(block, showTrackedChanges)) return true;
   }
   return false;
 }

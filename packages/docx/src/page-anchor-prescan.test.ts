@@ -3,6 +3,7 @@ import { __test_preRegisterPageFloats } from './test-support/renderer-internals.
 import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { isPageLevelAnchorY } from './layout/anchor-classification.js';
+import { wordBlockHasInk, wordInklessMarkBlock } from './layout/body-pagination-compatibility.js';
 import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
 import type { AnchorAcquisitionInput, AnchorEdgesInput } from './layout/anchor-input.js';
 import type { ParagraphLayout } from './layout/types.js';
@@ -1084,5 +1085,69 @@ describe('anchor-only paragraph beside a float (WORD_ANCHOR_HOST_NO_LINE_METRIC)
     expect(anchorOnly!.lines[0]!.bounds.xPt).toBe(120);
     expect(host.bounds.xPt).toBe(120);
     expect(anchorOnly!.drawings.map((drawing) => drawing.inkBounds.xPt)).toEqual([125]);
+  });
+});
+
+describe('anchor-only paragraphs keep their content before a continuous section (WORD_ANCHOR_HOST_NO_LINE_METRIC)', () => {
+  const continuous = (): BodyElement => ({ type: 'sectionBreak', kind: 'continuous', columns: null,
+    geom: section({ sectionStart: 'continuous', columns: null }) } as unknown as BodyElement);
+  const glyph = (): AnchorAcquisitionInput => ({
+    ...parserAnchor('glyph', { xPt: 5, yPt: 0, widthPt: 10, heightPt: 10, wrap: 'none' }),
+    vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } },
+  } as AnchorAcquisitionInput);
+  const numbered = (runs: DocRun[]): BodyElement => ({
+    ...paraWith(runs),
+    numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 36, tab: 36, suff: 'tab',
+      fontFamily: 'NotInMetrics', fontFacts: { fontSize: 20, fontFamily: 'NotInMetrics' } },
+    indentLeft: 36, indentFirst: -36,
+  } as unknown as BodyElement);
+  const layout = (body: BodyElement[], showTrackedChanges = false) => {
+    // The section after the break starts continuously (the final sectPr).
+    const model = { ...canonicalModel(body), section: section({ sectionStart: 'continuous', columns: null }) };
+    return layoutDocument(model, createLayoutServices(model, { measureContext: makeCtx() }),
+      { currentDateMs: 0, showTrackedChanges });
+  };
+  const paragraphAt = (result: ReturnType<typeof layout>, index: number) => result.pages
+    .flatMap((page) => page.layers.body)
+    .filter((node): node is ParagraphLayout => node.kind === 'paragraph' && node.source.path[0] === index);
+  const texts = (paragraphs: readonly ParagraphLayout[]) => paragraphs.flatMap((paragraph) => paragraph.lines)
+    .flatMap((line) => line.placements).filter((placement) => placement.kind === 'text')
+    .map((placement) => placement.text).join('');
+
+  it('acquires the drawings of an anchor-only paragraph a continuous section follows', () => {
+    const result = layout([paraWith(parserAnchoredImage(glyph())), continuous(), para({ text: 'After' })]);
+    expect(paragraphAt(result, 0).flatMap((paragraph) => paragraph.drawings)).toHaveLength(1);
+  });
+
+  it('keeps revision-visible text in the markup view', () => {
+    const deleted = { ...textRun('Gone', 20), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+    const body = [paraWith([...parserAnchoredImage(glyph()), deleted]), continuous(), para({ text: 'After' })];
+    expect(texts(paragraphAt(layout(body, true), 0))).toContain('Gone');
+    // The final view hides the deletion; the drawing is still acquired.
+    expect(paragraphAt(layout(body, false), 0).flatMap((paragraph) => paragraph.drawings)).toHaveLength(1);
+  });
+
+  it('classifies the mark per active revision view, and painted numbering as ink', () => {
+    // Anchor beside deleted text: anchor-only in the final view only.
+    const tracked = { inkless: false, anchorOnly: { final: true, markup: false } };
+    expect(wordInklessMarkBlock(tracked, false)).toBe(true);
+    expect(wordInklessMarkBlock(tracked, true)).toBe(false);
+    expect(wordBlockHasInk(tracked, false)).toBe(false);
+    expect(wordBlockHasInk(tracked, true)).toBe(true);
+    // A numbered empty or anchor-only paragraph places as its mark but its
+    // painted marker is ink for the look-ahead.
+    for (const numbered of [{ inkless: true, visibleNumbering: true as const },
+      { inkless: false, anchorOnly: { final: true, markup: true }, visibleNumbering: true as const }]) {
+      expect(wordInklessMarkBlock(numbered, false)).toBe(true);
+      expect(wordBlockHasInk(numbered, false)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['anchor-only', () => parserAnchoredImage(glyph())],
+    ['empty', () => []],
+  ] as const)('keeps the painted list marker of a numbered %s paragraph', (_, runs) => {
+    const result = layout([numbered(runs()), continuous(), para({ text: 'After' })]);
+    expect(texts(paragraphAt(result, 0))).toContain('1.');
   });
 });

@@ -159,6 +159,9 @@ export interface BodyParagraphSourceInput {
    * displays only floating drawings, in the final view and in the markup
    * view; pagination treats it as its empty mark (inklessMarkBlock). */
   readonly anchorOnly?: Readonly<{ final: boolean; markup: boolean }>;
+  /** A list marker (text or picture bullet) is painted: visible ink that no
+   * spacing or collapsing role may remove. */
+  readonly visibleNumbering?: true;
   /** Mutually exclusive Word/LibreOffice section-mark spacing interop role. */
   readonly continuousSectionRole?:
     | 'suppress-before'

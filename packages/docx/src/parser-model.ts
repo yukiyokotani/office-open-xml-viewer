@@ -1145,6 +1145,8 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
       && paragraph.runs.every((run) => run.type === 'text'
         || (run.type === 'break' && run.breakType === 'line')),
     ...anchorOnlyFact(paragraphRunsWithUnavailableDrawings(paragraph)),
+    ...(paragraph.numbering && (paragraph.numbering.text !== '' || paragraph.numbering.picBulletImagePath)
+      ? { visibleNumbering: true as const } : {}),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
   });
 }
