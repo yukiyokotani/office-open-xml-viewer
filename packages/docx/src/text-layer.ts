@@ -85,6 +85,9 @@ export function buildDocxTextLayer(
     /(\d+(?:\.\d+)?)px/u, (_match, size: string) => pageLength(Number(size)),
   );
   for (const [runIndex, run] of runs.entries()) {
+    // A tab or inline object (inlineContent) has no text to select: it gets
+    // no span, and the runs around it keep their indices.
+    if (run.inlineContent !== undefined) continue;
     // WORD_CELL_CONTENT_CLIP: text its clips hide is not selectable. A run
     // hidden wholly becomes one unselectable span that
     // readDocxTextSelectionContext skips; a run straddling a clip edge is

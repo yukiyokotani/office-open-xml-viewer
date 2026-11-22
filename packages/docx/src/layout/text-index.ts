@@ -435,7 +435,10 @@ function lineProjectionPointToPage(
 
 /** The box a tab or inline object is painted in on its line: its bounds,
  * or for a picture or drawing the part its line clip leaves (the bounding
- * box of a turned picture's visible outline). Null when nothing is left. */
+ * box of a turned picture's visible outline). An object its line clip hides
+ * whole keeps its place with a box without height: it still owns its source
+ * run, so a reader that marks that run finds it, with nothing to mark. Null
+ * for a tab without a box. */
 function inlineContentBounds(
   placement: Extract<ParagraphLayout['lines'][number]['placements'][number], { kind: 'tab' | 'resource' | 'drawing' }>,
 ): LayoutRect | null {
@@ -443,7 +446,7 @@ function inlineContentBounds(
   if (placement.kind === 'resource') {
     if (!placement.lineClip && !placement.rotationDeg) return placement.bounds;
     const outline = resourcePlacementOutline(placement);
-    if (outline.length === 0) return null;
+    if (outline.length === 0) return { ...placement.bounds, heightPt: 0 };
     let left = Infinity;
     let top = Infinity;
     let right = -Infinity;
@@ -460,7 +463,7 @@ function inlineContentBounds(
   if (!clip) return placement.bounds;
   const top = Math.max(placement.bounds.yPt, placement.bounds.yPt + clip.topPt);
   const bottom = Math.min(placement.bounds.yPt + placement.bounds.heightPt, placement.bounds.yPt + clip.bottomPt);
-  return bottom > top ? { ...placement.bounds, yPt: top, heightPt: bottom - top } : null;
+  return bottom > top ? { ...placement.bounds, yPt: top, heightPt: bottom - top } : { ...placement.bounds, heightPt: 0 };
 }
 
 function visitParagraph(

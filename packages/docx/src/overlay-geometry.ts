@@ -272,20 +272,27 @@ function withoutOverlap<Rect extends RunRect & { readonly order?: number }>(rect
   const overlaps = (left: RunRect, right: RunRect): boolean => (
     Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x) > TOUCH
     && Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y) > TOUCH);
-  // Groups of rects connected by overlap.
+  // Groups of rects connected by overlap, found by a sweep across the run:
+  // a rect is compared only with the rects still open where it starts, so
+  // rects of other lines are never looked at.
   const group = rects.map((_, index) => index);
   const find = (index: number): number => {
     while (group[index] !== index) index = group[index] = group[group[index]!]!;
     return index;
   };
   let any = false;
-  for (let left = 0; left < rects.length; left += 1) {
-    for (let right = left + 1; right < rects.length; right += 1) {
-      if (overlaps(rects[left]!, rects[right]!)) {
-        group[find(right)] = find(left);
+  const byStart = rects.map((_, index) => index).sort((left, right) => rects[left]!.y - rects[right]!.y);
+  let open: number[] = [];
+  for (const index of byStart) {
+    const rect = rects[index]!;
+    open = open.filter((other) => rects[other]!.y + rects[other]!.height - rect.y > TOUCH);
+    for (const other of open) {
+      if (overlaps(rects[other]!, rect)) {
+        group[find(index)] = find(other);
         any = true;
       }
     }
+    open.push(index);
   }
   if (!any) return [...rects];
   const members = new Map<number, Rect[]>();
@@ -340,6 +347,13 @@ export function runOverlayRects(run: Run, start = 0, end = run.text.length): Run
   return mergeRunRects(runGlyphRects(run, start, end).flatMap((rect) => clipRunRect(run, rect)));
 }
 
+/** How many rects the tab lookup of overlayBoxes has examined so far: a
+ * measure of its work for tests, which compare it across input sizes. */
+let rectsExamined = 0;
+export function overlayRectsExamined(): number {
+  return rectsExamined;
+}
+
 /** Rects of one frame by the edges they start and end at along the run,
  * each edge's rects ordered across it. */
 class EdgeIndex<Rect extends RunRect & { readonly order: number }> {
@@ -386,6 +400,7 @@ class EdgeIndex<Rect extends RunRect & { readonly order: number }> {
         }
         for (let index = low; index < list.length && list[index]!.y <= bottom + TOUCH; index += 1) {
           const rect = list[index]!;
+          rectsExamined += 1;
           if (rect.y + rect.height > bottom + TOUCH || Math.abs(at(rect) - edge) > TOUCH) continue;
           if (!best || Math.abs(rect.order - order) < Math.abs(best.order - order)
             || (Math.abs(rect.order - order) === Math.abs(best.order - order) && rect.order < best.order)) best = rect;
@@ -404,7 +419,13 @@ class EdgeIndex<Rect extends RunRect & { readonly order: number }> {
  * then along it. */
 export function overlayBoxes(runs: readonly Run[]): OverlayBox[] {
   type Ordered = RunRect & { readonly order: number };
-  const groups = new Map<string, { frame: Run; rects: Ordered[]; tabs: { run: Run; order: number }[] }>();
+  const groups = new Map<string, {
+    frame: Run;
+    rects: Ordered[];
+    /** The rects of `rects` that mark text. */
+    text: Ordered[];
+    tabs: { run: Run; order: number }[];
+  }>();
   const frameOf = (run: Run) => {
     const [a, b, c, d] = orientation(run.transform);
     return { along: a * run.x + b * run.y, across: c * run.x + d * run.y };
@@ -414,7 +435,7 @@ export function overlayBoxes(runs: readonly Run[]): OverlayBox[] {
     let group = groups.get(key);
     if (!group) {
       // The group's frame: its runs' orientation about the page origin.
-      group = { frame: { ...run, x: 0, y: 0 }, rects: [], tabs: [] };
+      group = { frame: { ...run, x: 0, y: 0 }, rects: [], text: [], tabs: [] };
       groups.set(key, group);
     }
     if (run.inlineContent === 'tab') {
@@ -425,20 +446,23 @@ export function overlayBoxes(runs: readonly Run[]): OverlayBox[] {
     const rects = run.inlineContent === 'object'
       ? [{ x: 0, y: 0, width: run.w, height: run.h }] : runRangeRects(run);
     for (const rect of rects.flatMap((candidate) => clipRunRect(run, candidate))) {
-      group.rects.push({ x: along + rect.x, y: across + rect.y, width: rect.width, height: rect.height, order });
+      const placed = { x: along + rect.x, y: across + rect.y, width: rect.width, height: rect.height, order };
+      group.rects.push(placed);
+      if (run.inlineContent === undefined) group.text.push(placed);
     }
   });
   const boxes: { box: OverlayBox; order: number; index: number }[] = [];
   for (const group of groups.values()) {
     // A tab is marked over the extent across the run of the marked text it
-    // touches, within its own line box; a tab that touches none keeps its
-    // line box. Rects are found by the edge they end or start at along the
+    // touches, within its own line box; a tab that touches none (one beside
+    // an inline object only, whose box is not a line of text) keeps its line
+    // box. Rects are found by the edge they end or start at along the
     // run and by their place across it, so each tab looks at the rects of
     // its own line only. Tabs are taken in order, then the unplaced ones in
     // reverse, so a row of tabs takes its extent from the text at either
     // end in two passes.
     const edges = new EdgeIndex<Ordered>();
-    for (const rect of group.rects) edges.add(rect);
+    for (const rect of group.text) edges.add(rect);
     const place = (tab: { run: Run; order: number }, required: boolean): boolean => {
       const { along, across } = frameOf(tab.run);
       const neighbour = edges.touching(along, along + tab.run.w, across, across + tab.run.h, tab.order);
