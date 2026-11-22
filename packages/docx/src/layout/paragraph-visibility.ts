@@ -1,5 +1,6 @@
 import type { DocParagraph } from '../types.js';
 import { runIsOmitted } from './revision-visibility.js';
+import { isFloatingPayloadRun } from './anchor-classification.js';
 
 /**
  * A paragraph whose mark is vanished (ECMA-376 §17.3.2.41 on the paragraph
@@ -52,10 +53,12 @@ export function isAnchorOnlyParagraph(
       anchored = true;
       continue;
     }
-    if ((run.type === 'image' || run.type === 'chart') && run.anchor === true) continue;
-    if (run.type === 'shape' && run.inline !== true) continue;
-    if (run.type === 'unavailableDrawing'
-      && (run.anchorAcquisitionInput !== undefined || run.__anchorAcquisition !== undefined)) continue;
+    // A floating payload is an anchor whether or not a separate anchor-host
+    // run precedes it (public models carry none).
+    if (isFloatingPayloadRun(run)) {
+      anchored = true;
+      continue;
+    }
     if (run.type === 'text' && (run.text ?? '').replace(/\u00AD/g, '') === '') continue;
     return false;
   }

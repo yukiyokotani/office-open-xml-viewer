@@ -1160,3 +1160,75 @@ describe('anchor-only paragraphs keep their content before a continuous section 
     expect(texts(paragraphAt(result, 0))).toContain('1.');
   });
 });
+
+// WORD_ANCHOR_HOST_NO_LINE_METRIC: every way a floating drawing reaches
+// classification (isFloatingPayloadRun), with and without deleted text, in
+// the final and the markup view, measures and paginates as its empty
+// equivalent exactly when the view shows nothing else.
+describe('anchor-only classification over every floating payload shape', () => {
+  const acquisition = (id: string) => ({
+    ...parserAnchor(id, { xPt: 5, yPt: 0, widthPt: 10, heightPt: 10, wrap: 'none' }),
+    vertical: { relativeFrom: 'paragraph', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } },
+  } as AnchorAcquisitionInput);
+  const publicPicture = (extra: object = {}): DocRun => ({
+    type: 'image', imagePath: 'word/media/p.png', mimeType: 'image/png', widthPt: 10, heightPt: 10,
+    anchor: true, anchorXPt: 300, anchorYPt: 0, anchorXFromMargin: true, anchorYFromPara: true,
+    anchorXRelativeFrom: 'margin', anchorYRelativeFrom: 'paragraph', wrapMode: 'none', ...extra,
+  } as unknown as DocRun);
+  const publicShape = (offsetPt = 300): DocRun => ({
+    type: 'shape', widthPt: 10, heightPt: 10, anchorXPt: offsetPt, anchorYPt: 0, anchorXFromMargin: true,
+    anchorYFromPara: true, presetGeometry: 'rect', subpaths: [], fill: null, stroke: null, rotation: 0,
+    flipH: false, flipV: false, wrapMode: 'none',
+  } as unknown as DocRun);
+  const shapes: readonly [string, () => DocRun[]][] = [
+    ['parser anchor host + picture payload', () => parserAnchoredImage(acquisition('a'))],
+    ['parser anchored unavailable placeholder', () => [
+      { type: 'anchorHost', fontSize: 12, __anchorOccurrenceId: 'u' } as unknown as DocRun,
+      { type: 'unavailableDrawing', resourceKind: 'image', widthPt: 10, heightPt: 10,
+        __anchorAcquisition: acquisition('u') } as unknown as DocRun,
+    ]],
+    // Public models, and the legacy DOC and ODT readers that produce them,
+    // carry no anchor-host run.
+    ['public picture, anchor true (also VML, legacy DOC and ODT floating pictures)', () => [publicPicture()]],
+    ['public chart, anchor true', () => [{ ...publicPicture(), type: 'chart', chart: { plotArea: {} } } as unknown as DocRun]],
+    ['public floating shape (also VML shapes)', () => [publicShape()]],
+    ['public floating group (flattened shapes)', () => [publicShape(300), publicShape(320)]],
+  ];
+  const numberedNo = (runs: DocRun[], markSize = 12): BodyElement => paraWith(runs, { fontSize: markSize });
+  const filler = (heightPt: number): BodyElement => ({
+    ...paraWith([textRun('x', 12)], { fontSize: 12 }),
+    lineSpacing: { rule: 'exact', value: heightPt, explicit: true },
+  } as unknown as BodyElement);
+  const layoutWith = (body: BodyElement[], showTrackedChanges: boolean) => {
+    const model = canonicalModel(body);
+    return layoutDocument(model, createLayoutServices(model, { measureContext: makeCtx() }),
+      { currentDateMs: 0, showTrackedChanges });
+  };
+  const probe = (result: ReturnType<typeof layoutWith>, index: number) => result.pages
+    .map((page, pageIndex) => [pageIndex, page.layers.body.find((node): node is ParagraphLayout =>
+      node.kind === 'paragraph' && node.source.path[0] === index)] as const)
+    .find(([, node]) => node !== undefined)!;
+  const deletedText = { ...textRun('Big', 40), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+  for (const [name, make] of shapes) {
+    for (const deleted of [false, true]) {
+      for (const markup of [false, true]) {
+        it(`${name}, deleted text ${deleted}, ${markup ? 'markup' : 'final'} view`, () => {
+          const runs = [...make(), ...(deleted ? [deletedText] : [])];
+          const anchorOnly = !deleted || !markup;
+          // Measurement: the paragraph's height against its empty equivalent.
+          const measure = (paragraphRuns: DocRun[]) =>
+            probe(layoutWith([numberedNo(paragraphRuns), para({ text: 'After' })], markup), 0)[1]!.flowBounds.heightPt;
+          if (anchorOnly) expect(measure(runs)).toBe(measure([]));
+          else expect(measure(runs)).toBeGreaterThan(measure([]));
+          // Pagination at the page bottom (12pt mark; 12.5 and 11.5pt left).
+          if (!anchorOnly) return;
+          for (const room of [12.5, 11.5]) {
+            const pageOf = (paragraphRuns: DocRun[]) =>
+              probe(layoutWith([filler(160 - room), numberedNo(paragraphRuns), para({ text: 'After' })], markup), 1)[0];
+            expect(pageOf(runs), `room ${room}`).toBe(pageOf([]));
+          }
+        });
+      }
+    }
+  }
+});

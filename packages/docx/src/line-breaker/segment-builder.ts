@@ -3,6 +3,7 @@ import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
 import { runIsOmitted } from '../layout/revision-visibility.js';
+import { isFloatingPayloadRun } from '../layout/anchor-classification.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
 import { acquireTextSequences } from './text-sequence.js';
@@ -2136,10 +2137,10 @@ function appendRunsToSegments(
         }
       }
     } else if (run.type === 'image') {
-      segs.push({ ...imageSegment(run, environment), ...listLabelOf(run) });
+      segs.push({ ...imageSegment({ ...run, anchor: isFloatingPayloadRun(run) }, environment), ...listLabelOf(run) });
     } else if (run.type === 'chart') {
-      segs.push(chartSegment(run, environment));
-    } else if (run.type === 'shape' && run.inline === true) {
+      segs.push(chartSegment({ ...run, anchor: isFloatingPayloadRun(run) }, environment));
+    } else if (run.type === 'shape' && !isFloatingPayloadRun(run)) {
       // `wp:inline` hosts arbitrary DrawingML, including WPS shapes (§20.4.2.8).
       // Reserve its extent in the same line-breaking path as an inline picture;
       // paragraph acquisition replaces the sentinel with a retained drawing
@@ -2172,7 +2173,7 @@ function appendRunsToSegments(
       // A placeholder is built as the picture or chart it stands for (same
       // segment kind, box, position and leading metadata); availability only
       // changes what is painted.
-      const anchored = 'anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined;
+      const anchored = isFloatingPayloadRun(run);
       segs.push({
         ...(run.resourceKind === 'chart'
           ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)

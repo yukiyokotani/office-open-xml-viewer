@@ -1,4 +1,5 @@
 import { isCjkBreakChar } from '@silurus/ooxml-core';
+import { isFloatingPayloadRun } from './anchor-classification.js';
 import { defineCompatibilityRule } from './compatibility.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import { OFFICE_FAR_EAST_SINGLE_LINE_FACTOR, officeOpenTypeAutoLineRatios } from '@silurus/ooxml-core/internal/office-auto-line';
@@ -1701,9 +1702,9 @@ type InlineObjectRunFacts = Readonly<{
 /** An inline picture or drawing shape run; the placeholder of an unavailable
  * inline picture is its picture. */
 export function isInlineDrawingRun(run: InlineObjectRunFacts): boolean {
-  return (run.type === 'image' && run.anchor !== true)
-    || (run.type === 'unavailableDrawing' && run.resourceKind === 'image' && run.anchorAcquisitionInput === undefined)
-    || (run.type === 'shape' && run.inline === true);
+  return (run.type === 'image' || run.type === 'shape'
+    || (run.type === 'unavailableDrawing' && run.resourceKind === 'image'))
+    && !isFloatingPayloadRun(run);
 }
 
 /** Word-observed inline-picture projection of ECMA-376 §17.3.1.33. */

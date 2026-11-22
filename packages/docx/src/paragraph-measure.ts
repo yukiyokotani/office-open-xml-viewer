@@ -385,12 +385,16 @@ export function measureParagraph(
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
   });
-  if (segments.length === 0) return measureMarkOnly(true);
   // WORD_ANCHOR_HOST_NO_LINE_METRIC: a paragraph displaying only floating
   // drawings is its empty paragraph mark (isAnchorOnlyParagraph, the same
   // classification pagination uses); its anchors stay on the mark's line.
   const anchorOnlyLine = wordAnchorHostLineMetricApplies()
     && isAnchorOnlyParagraph(paragraph.runs, environment.showTrackedChanges);
+  const emptyEquivalentMark = () => {
+    const empty = emptyParagraphEquivalent(paragraph, context);
+    return measureParagraph(empty.paragraph, empty.context, placement, measurer, environment, continuation);
+  };
+  if (segments.length === 0) return anchorOnlyLine ? emptyEquivalentMark() : measureMarkOnly(true);
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in
@@ -741,7 +745,6 @@ export function measureParagraph(
     },
     context.lineEdgeRules,
   );
-  if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
   // WORD_ANCHOR_HOST_NO_LINE_METRIC: a paragraph holding only anchors is its
   // empty paragraph mark, measured and placed by the empty-mark path in full
   // (line box, baseline, numbering marker, page-edge facts); only its anchors
@@ -750,21 +753,23 @@ export function measureParagraph(
     // Measure exactly what the empty paragraph would be: its mark formatting
     // and properties, no runs, and the run-decided context facts recomputed
     // (no deleted ruby or text of this paragraph takes part).
-    const empty = emptyParagraphEquivalent(paragraph, context);
-    const mark = measureParagraph(empty.paragraph, empty.context, placement, measurer, environment, continuation);
+    const mark = emptyEquivalentMark();
     return {
       ...mark,
       // The mark's own wrap window places the line horizontally too: its
       // leading edge and width, as the empty mark resolves them.
-      markAnchorLine: {
+      // Public anchors without an anchor host form no line; they are placed
+      // on their own as for any empty paragraph.
+      ...(lines.length === 0 ? {} : { markAnchorLine: {
         ...lines[0]!,
         segments: lines.flatMap((line) => line.segments),
         xOffset: mark.markWrapBounds ? mark.markWrapBounds.xPt - paragraphXPt : 0,
         availWidth: mark.markWrapBounds?.widthPt ?? paragraphWidthPt,
         ...(mark.markWrapBounds ? { topY: mark.contentStartYPt } : {}),
-      },
+      } }),
     };
   }
+  if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
   const measuredLines: MeasuredLine[] = [];
