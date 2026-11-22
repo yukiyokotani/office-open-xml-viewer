@@ -1,4 +1,5 @@
 import { remapSourceBoundary } from './source-cursor.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { createMixedSpaceState } from './mixed-space-fit.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
@@ -9,6 +10,7 @@ import { rebaseSeaBreaks } from './text-runs.js';
 import { resolveFitTextSegments } from './segment-builder.js';
 import type { LineGapModel } from './line-gaps.js';
 import { SegmentQueue, type SegmentQueueCursor } from './segment-queue.js';
+import type { LineAdmission } from './line-admission.js';
 
 /** Prepare source-anchored break opportunities and the resumable queue.
  * SEA dictionary boundaries, protected ranges, paragraph-final hanging spaces,
@@ -79,6 +81,16 @@ export function prepareBreakQueue(
     }
   }
 
+  // WORD_RUBY_ALIGN_PLACEMENT: every ruby piece has its cell. buildSegments
+  // forms the cells; a ruby segment given to the breaker without one is a
+  // cell of its own.
+  for (const segment of queue) {
+    if ('text' in segment && segment.ruby && !segment.rubyGroup) {
+      segment.rubyGroup = { ruby: segment.ruby, pieces: [segment] };
+      segment.rubyPieceIndex = 0;
+    }
+  }
+
   // Mark the paragraph-final U+3000 suffix once. A backwards pass avoids the
   // O(N²) suffix rescans that would result from queue.every/reduce per segment.
   let paragraphFinalIdeographicSpaceCount = 0;
@@ -98,8 +110,7 @@ export function prepareBreakQueue(
     if (
       candidate.fitTextRegionIndex !== undefined ||
       candidate.tateChuYoko === true ||
-      candidate.ruby !== undefined ||
-      candidate.rubyPiece === true
+      rubyCellOf(candidate) !== undefined
     ) {
       // buildSegments can split an atomic source run before its U+3000 tail
       // (ruby is retained only on the first emitted segment). Undo any markers
@@ -160,10 +171,11 @@ export function prepareBreakQueue(
   // cell is computed once per pass at this scale.
   const rubyPieces = new Map<RubyGroup, LayoutTextSeg[]>();
   for (const segment of queue) {
-    if (!('text' in segment) || !segment.rubyGroup) continue;
-    const pieces = rubyPieces.get(segment.rubyGroup) ?? [];
-    pieces.push(segment);
-    rubyPieces.set(segment.rubyGroup, pieces);
+    const cell = 'text' in segment ? rubyCellOf(segment) : undefined;
+    if (!cell) continue;
+    const pieces = rubyPieces.get(cell) ?? [];
+    pieces.push(segment as LayoutTextSeg);
+    rubyPieces.set(cell, pieces);
   }
   for (const [source, pieces] of rubyPieces) {
     const group: RubyGroup = { ruby: source.ruby, pieces };
@@ -309,20 +321,12 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineEastAsian: false,
     queue: new SegmentQueue(),
     trailingBreakFontSize: null as number | null,
-    /** The line as it was before the last ruby cell was admitted, restored
-     * when kinsoku retracts that cell (WORD_RUBY_ALIGN_PLACEMENT). */
-    rubyCellStart: null as RubyCellStart | null,
+    /** One record per item of `currentLine` (line-admission.ts): what each
+     * admission changed, so that any suffix of the line can be taken back
+     * with the line's extents recomputed. */
+    admissions: [] as LineAdmission[],
+    /** §17.3.1.16: the length of `currentLine` when a retraction search last
+     * found no legal boundary in it; later searches stop there. */
+    kinsokuBlockedLength: 0,
   };
-}
-
-/** See `rubyCellStart`: the line's scalar state, its snapToChars block and
- * its Latin gap count when a ruby cell's first piece was admitted at
- * `lineLength` of `line`. */
-export interface RubyCellStart {
-  readonly group: object;
-  readonly line: readonly unknown[];
-  readonly lineLength: number;
-  readonly scalars: Readonly<Record<string, unknown>>;
-  readonly snapBlock: SnapBlockState | null;
-  readonly latinLineGapCount: number;
 }

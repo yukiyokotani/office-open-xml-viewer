@@ -66,6 +66,7 @@ import {
   performExplicitTextSplit,
   performQueueEmergencyTail,
   performRetractCurrentLineForLeadingKinsoku,
+  performRetractLineEndForbidden,
   performProspectiveCellAdvance,
   performKeepLeadingKinsokuWithCurrentLine,
 } from './pass-operations.js';
@@ -391,7 +392,8 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
   /**
    * Move a legal suffix of the current line ahead of a segment whose first
    * glyph is forbidden at line start. This is the single cross-run 追い出し
-   * authority for both the CJK and SEA overflow paths.
+   * authority for the CJK and SEA overflow paths and for ruby cells; the
+   * suffix may span segments and whole ruby cells (kinsoku.ts).
    *
    * A source seam marked by `hardJoinPrev` is indivisible: moving the complete
    * following segment would strand its owner on the previous line. Likewise,
@@ -401,6 +403,10 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
    */
   const retractCurrentLineForLeadingKinsoku = (next: LayoutTextSeg): CrossRunKinsokuRetraction =>
     performRetractCurrentLineForLeadingKinsoku(operationState, next);
+  const retractLineEndForbidden = (
+    next: LayoutTextSeg,
+    admits: (retractedAdvancePx: number) => boolean,
+  ): CrossRunKinsokuRetraction => performRetractLineEndForbidden(operationState, next, admits);
 
   /** Keep one otherwise-forbidden line-start grapheme with the current line.
    * This is the only legal fallback when cross-run retraction would split an
@@ -463,6 +469,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     explicitTextSplit,
     queueEmergencyTail,
     retractCurrentLineForLeadingKinsoku,
+    retractLineEndForbidden,
     keepLeadingKinsokuWithCurrentLine,
   };
   // The first numbered line's body indent may be resolved against its float

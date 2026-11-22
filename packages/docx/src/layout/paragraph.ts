@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { rubyBaseOffsetPx, rubyGuideOriginsPx, rubyPieceWideningPx } from '../line-breaker/ruby-cell.js';
+import { rubyBaseOffsetPx, rubyCellOf, rubyGuideOriginsPx, rubyPieceWideningPx } from '../line-breaker/ruby-cell.js';
 import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
@@ -2739,7 +2739,7 @@ function textPlacement(
   // WORD_RUBY_ALIGN_PLACEMENT: the guide paints from the ruby run's one cell
   // geometry, the same units and raise its line measured.
   const rubyCell = segment.ruby && segment.textLayoutService && segment.textShapeRequest
-    ? segment.rubyGroup?.cell : undefined;
+    ? rubyCellOf(segment)?.cell : undefined;
   const rubyScale = rubyCell?.scale ?? 1;
   const rubyOriginsPx = rubyCell ? rubyGuideOriginsPx(rubyPieces ?? [segment], rubyCell) : [];
   const rubyPaintOps: RetainedGlyphPaintOperation[] = rubyCell
@@ -2888,8 +2888,10 @@ function textPlacement(
 /** WORD_RUBY_LINE_ASCENT's measured class: a ruby line whose every guide has
  * an authored hpsRaise (the absent-raise reserve is unmeasured). */
 function measuredRubyLine(raw: MeasuredParagraph['lines'][number]['layout']): boolean {
-  return raw.hasRuby === true && raw.segments.every((segment) =>
-    !('ruby' in segment) || !segment.ruby || segment.ruby.hpsRaisePt != null);
+  return raw.hasRuby === true && raw.segments.every((segment) => {
+    const cell = 'text' in segment ? rubyCellOf(segment) : undefined;
+    return !cell || cell.ruby.hpsRaisePt != null;
+  });
 }
 
 function plannedBaselinePt(
@@ -3731,7 +3733,7 @@ function textPlanSegment(
             // Centred on its own base: the ruby cell's widening is outside
             // it, and the base offset applies once below.
             xPt: operation.offset.xPt
-              + (segment.measuredWidth - rubyPieceWideningPx(segment, segment.rubyGroup?.cell)) / 2,
+              + (segment.measuredWidth - rubyPieceWideningPx(segment, rubyCellOf(segment)?.cell)) / 2,
             yPt: operation.offset.yPt,
           },
           glyphOrientation: 'upright' as const,
@@ -4370,9 +4372,10 @@ function planMeasuredLines(
         }
         const textSegment = segment as LayoutTextSeg;
         // WORD_RUBY_ALIGN_PLACEMENT: the guide aligns on its pieces as placed.
-        const rubyPieces = textSegment.ruby && textSegment.rubyGroup
+        const rubyCell = textSegment.ruby ? rubyCellOf(textSegment) : undefined;
+        const rubyPieces = rubyCell
           ? raw.segments.filter((candidate): candidate is LayoutTextSeg =>
-            'text' in candidate && candidate.rubyGroup === textSegment.rubyGroup)
+            'text' in candidate && rubyCellOf(candidate) === rubyCell)
           : undefined;
         segments.push(textPlanSegment(
           textSegment, paragraph, segmentOffset,

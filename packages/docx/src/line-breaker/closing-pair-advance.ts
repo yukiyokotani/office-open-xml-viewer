@@ -1,4 +1,5 @@
 import { compatOf } from '../layout/compat-profile.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { checkedMetadataUtf16Work, checkedPrefixWorkTotal } from './prefix-work-budget.js';
 import { segmentsHaveRtl } from '../bidi-line.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
@@ -43,7 +44,7 @@ export function closingPairScopeApplies(paragraph: ParagraphLayoutSource, contex
 
 function ordinary(segment: LayoutSeg | undefined, runs: readonly ParagraphLayoutSource['runs'][number][]): segment is LayoutTextSeg {
   if (!segment || !('text' in segment) || !segment.text || !segment.textShapeRequest || !segment.textLayoutService
-    || segment.metricOnly || segment.verticalRun || segment.ruby || segment.rubyPiece || segment.tateChuYoko
+    || segment.metricOnly || segment.verticalRun || rubyCellOf(segment) || segment.tateChuYoko
     || segment.optionalHyphen || segment.optionalHyphenGlyph || segment.optionalHyphenWord
     || segment.optionalHyphenBreaks?.length || segment.noBreakRanges?.length
     || segment.fitTextRegionIndex !== undefined || segment.fitTextPerGapPx !== undefined

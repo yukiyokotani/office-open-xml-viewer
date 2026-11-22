@@ -33,7 +33,7 @@ import {
   type RubyCellGeometry,
   type WrapLayoutCtx,
 } from './model.js';
-import { createLineBreakerState, isInklessLineItem, type GapTransaction, type GapWindow } from './break-queue.js';
+import { createLineBreakerState, isInklessLineItem, type GapTransaction, type GapWindow, type SnapBlockState } from './break-queue.js';
 import {
   commitMixedLineItem,
   createMixedSpaceState,
@@ -72,13 +72,16 @@ import {
   segmentIntendedSingleLinePx,
 } from './font-routes.js';
 import { rubyAscentReservePx } from './ruby-metrics.js';
-import { rubyBaseOffsetPx, rubyCellGeometry, rubyPieceWideningPx } from './ruby-cell.js';
+import { rubyBaseOffsetPx, rubyCellGeometry, rubyCellOf, rubyPieceWideningPx } from './ruby-cell.js';
+import { captureLineAdmission, recordLineAdmission } from './line-admission.js';
 import { fitCJKPrefix, fitsLineWidth, hasEastAsianVisiblePredecessor } from './fit-search.js';
 import { rebaseSeaBreaks, hasCJKBreakOpportunity } from './text-runs.js';
 import {
   keepLeadingKinsoku,
   retractLeadingKinsoku,
+  retractLineEndForbidden,
   type CrossRunKinsokuRetraction,
+  type KinsokuLine,
 } from './kinsoku.js';
 
 import type { LineBreakerPassInput } from './pass-driver.js';
@@ -163,6 +166,10 @@ export interface PassOperationState extends LineBreakerPassInput {
   readonly explicitTextSplit: (segment: LayoutTextSeg, available: number) => number;
   readonly queueEmergencyTail: (segment: LayoutTextSeg, split: number) => void;
   readonly retractCurrentLineForLeadingKinsoku: (next: LayoutTextSeg) => CrossRunKinsokuRetraction;
+  readonly retractLineEndForbidden: (
+    next: LayoutTextSeg,
+    admits: (retractedAdvancePx: number) => boolean,
+  ) => CrossRunKinsokuRetraction;
   readonly keepLeadingKinsokuWithCurrentLine: (
     segment: LayoutTextSeg,
     h: number,
@@ -284,7 +291,7 @@ function minimalLegalTextPrefix(operationState: PassOperationState, segment: Lay
   const { lineEdgeRules: kinsoku } = operationState;
   const text = segment.text;
   let end = text.length;
-  if (segment.fitTextRegionIndex === undefined && !segment.ruby && !segment.rubyGroup && !segment.tateChuYoko) {
+  if (segment.fitTextRegionIndex === undefined && !rubyCellOf(segment) && !segment.tateChuYoko) {
     const protectedOffsets = protectedNoBreakOffsets(segment);
     if (segment.hardJoinPrev === true) {
       end = hardJoinPrefixEnd(segment) ?? text.length;
@@ -794,8 +801,8 @@ export function performCaptureGapSnapshot(
   const transaction = breakerState.gapTransaction;
   if (!transaction?.narrowed) return;
   const {
-    lines, queue, currentLine: _line, latinLineGaps: _gaps, gapTransaction: _transaction,
-    inHand, snapBlock, ...scalars
+    lines, queue, currentLine: _line, admissions: _admissions, latinLineGaps: _gaps,
+    gapTransaction: _transaction, inHand, snapBlock, ...scalars
   } = breakerState;
   transaction.snapshot = {
     scalars: { ...scalars },
@@ -854,6 +861,8 @@ export function performRejectGap(
   breakerState.lines.length = snapshot.linesLength;
   breakerState.queue.restore(snapshot.queue);
   breakerState.currentLine = [];
+  breakerState.admissions = [];
+  breakerState.kinsokuBlockedLength = 0;
   breakerState.latinLineGaps = [];
   breakerState.mixedSpace = createMixedSpaceState();
   breakerState.inHand = undefined;
@@ -1112,7 +1121,7 @@ export function performFlush(
     breakerState.firstPositioned ??= segment;
     const first = breakerState.firstPositioned;
     breakerState.uniformPositionEligible &&= segment.text.length > 0
-      && !segment.metricOnly && !segment.ruby && !segment.vertAlign
+      && !segment.metricOnly && !rubyCellOf(segment) && !segment.vertAlign
       && segment.positionExtendsLineBox !== false
       && segment.position === first.position
       && segment.fontFamily === first.fontFamily
@@ -1315,6 +1324,8 @@ export function performFlush(
     );
   }
   breakerState.currentLine = [];
+  breakerState.admissions = [];
+  breakerState.kinsokuBlockedLength = 0;
   breakerState.currentWidth = 0;
   breakerState.justifiedGapModel = undefined;
   breakerState.justifiedCompressionPx = 0;
@@ -1337,37 +1348,91 @@ function rubyCellWidened(operationState: PassOperationState, s: LayoutTextSeg): 
   return cell !== undefined && cell.advancePx > cell.basePx;
 }
 
-/** WORD_RUBY_ALIGN_PLACEMENT: the advance the pieces of an unwidened ruby
- * cell commit together, each placed in the snapToChars script block it
- * joins, exactly as performAddToLine allocates them; without a character
- * grid, their natural advances. */
+type SnapBlockSummary = Pick<SnapBlockState, 'kind' | 'naturalWidthPx' | 'allocatedWidthPx'>;
+
+/** One text piece's allocation on the snapToChars character grid. */
+interface SnapPlacement {
+  readonly kind: SnapBlockState['kind'] | 'eastAsia';
+  /** The advance the piece adds to its line. */
+  readonly advancePx: number;
+  /** The piece's own width and pads. */
+  readonly measuredPx: number;
+  readonly leadingPadPx: number;
+  readonly trailingPadPx: number;
+  /** The open script block after the piece. */
+  readonly block: SnapBlockSummary | null;
+  /** The piece joins the open block: the block's slack is re-divided, its
+   * first member takes this leading pad and its last gives up its trailing
+   * pad to the piece. */
+  readonly joinedLeadingPadPx?: number;
+}
+
+/** `word-snap-to-chars-script-block-allocation`: the allocation of the text
+ * piece `s` placed after the open script block `block`, or undefined off the
+ * grid. This one function is both the admission width (read prospectively)
+ * and the placement performAddToLine commits, so the two cannot differ.
+ * WORD_RUBY_ALIGN_PLACEMENT: only a ruby cell its guide widens leaves the
+ * script blocks; an unwidened ruby base is ordinary text of its script. */
+function snapPlacement(
+  operationState: PassOperationState,
+  block: SnapBlockSummary | null,
+  s: LayoutTextSeg,
+  naturalWidth: number,
+): SnapPlacement | undefined {
+  const { snapPitchPx, eastAsianSnapCellCount, characterGrid } = operationState;
+  const kind = snapPitchPx == null ? null : snapToCharsClass(s, characterGrid);
+  if (!kind || snapPitchPx == null) return undefined;
+  if (rubyCellWidened(operationState, s)) {
+    // A widened ruby piece takes its own allocation plus its share of the
+    // cell's widening, which is whole cells. A widened Latin base keeps its
+    // natural box, the one its guide was compared with.
+    const share = rubyPieceWideningPx(s, performRubyCell(operationState, s));
+    const baseNatural = naturalWidth - share;
+    const allocated = kind === 'latin' ? baseNatural
+      : snapToCharsAllocatedWidthPx(baseNatural, kind, snapPitchPx, eastAsianSnapCellCount(s));
+    const advancePx = allocated + share;
+    return {
+      kind, advancePx, measuredPx: advancePx, leadingPadPx: 0,
+      trailingPadPx: advancePx - baseNatural - rubyBaseOffsetPx(s), block: null,
+    };
+  }
+  if (kind === 'eastAsia') {
+    const advancePx = snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx, eastAsianSnapCellCount(s));
+    return {
+      kind, advancePx, measuredPx: advancePx, leadingPadPx: 0,
+      trailingPadPx: advancePx - naturalWidth, block: null,
+    };
+  }
+  const joins = block?.kind === kind;
+  const combinedNatural = (joins ? block.naturalWidthPx : 0) + naturalWidth;
+  const combinedAllocated = snapToCharsAllocatedWidthPx(combinedNatural, kind, snapPitchPx);
+  const slack = combinedAllocated - combinedNatural;
+  const leading = kind === 'latin' ? slack / 2 : 0;
+  const trailing = slack - leading;
+  const next = { kind, naturalWidthPx: combinedNatural, allocatedWidthPx: combinedAllocated };
+  return joins
+    ? {
+      kind, advancePx: combinedAllocated - block.allocatedWidthPx, measuredPx: naturalWidth + trailing,
+      leadingPadPx: 0, trailingPadPx: trailing, block: next, joinedLeadingPadPx: leading,
+    }
+    : {
+      kind, advancePx: combinedAllocated, measuredPx: combinedAllocated,
+      leadingPadPx: leading, trailingPadPx: trailing, block: next,
+    };
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT: the advance the pieces of a ruby cell commit
+ * together, placed one after another from the line's open script block. */
 export function performProspectiveCellAdvance(
   operationState: PassOperationState,
   pieces: readonly Readonly<{ segment: LayoutTextSeg; naturalPx: number }>[],
 ): number {
-  const { breakerState, snapPitchPx, eastAsianSnapCellCount, characterGrid } = operationState;
-  let block = breakerState.snapBlock
-    ? { kind: breakerState.snapBlock.kind, naturalPx: breakerState.snapBlock.naturalWidthPx,
-      allocatedPx: breakerState.snapBlock.allocatedWidthPx }
-    : null;
+  let block: SnapBlockSummary | null = operationState.breakerState.snapBlock;
   let total = 0;
   for (const { segment, naturalPx } of pieces) {
-    const kind = snapPitchPx == null ? null : snapToCharsClass(segment, characterGrid);
-    if (!kind || snapPitchPx == null) {
-      total += naturalPx;
-      block = null;
-    } else if (kind === 'eastAsia') {
-      total += snapToCharsAllocatedWidthPx(naturalPx, kind, snapPitchPx, eastAsianSnapCellCount(segment));
-      block = null;
-    } else if (block?.kind === kind) {
-      const allocatedPx = snapToCharsAllocatedWidthPx(block.naturalPx + naturalPx, kind, snapPitchPx);
-      total += allocatedPx - block.allocatedPx;
-      block = { kind, naturalPx: block.naturalPx + naturalPx, allocatedPx };
-    } else {
-      const allocatedPx = snapToCharsAllocatedWidthPx(naturalPx, kind, snapPitchPx);
-      total += allocatedPx;
-      block = { kind, naturalPx, allocatedPx };
-    }
+    const placement = snapPlacement(operationState, block, segment, naturalPx);
+    total += placement?.advancePx ?? naturalPx;
+    block = placement?.block ?? null;
   }
   return total;
 }
@@ -1377,26 +1442,8 @@ export function performProspectiveSnapAdvance(
   s: LayoutTextSeg,
   naturalWidth: number,
 ): number {
-  const { breakerState, snapPitchPx, eastAsianSnapCellCount, characterGrid } = operationState;
-
-  const kind = snapToCharsClass(s, characterGrid);
-  if (!kind || snapPitchPx == null) return naturalWidth;
-  // A widened ruby cell is its own allocation (WORD_RUBY_ALIGN_PLACEMENT).
-  if (rubyCellWidened(operationState, s)) return performStandaloneSnapAdvance(operationState, s, naturalWidth);
-  if (kind === 'eastAsia') {
-    const cells = eastAsianSnapCellCount(s);
-    return snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx, cells);
-  }
-  if (breakerState.snapBlock?.kind === kind) {
-    return (
-      snapToCharsAllocatedWidthPx(
-        breakerState.snapBlock.naturalWidthPx + naturalWidth,
-        kind,
-        snapPitchPx,
-      ) - breakerState.snapBlock.allocatedWidthPx
-    );
-  }
-  return snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx);
+  return snapPlacement(operationState, operationState.breakerState.snapBlock, s, naturalWidth)?.advancePx
+    ?? naturalWidth;
 }
 
 export function performAddToLine(
@@ -1423,6 +1470,8 @@ export function performAddToLine(
   // A refused WORD_JUSTIFIED_INTERWORD_COMPRESSION unit ends with its last
   // member, however that member reaches the line (a space after an ideograph
   // bypasses the compression path), so later units stay eligible.
+  const before = captureLineAdmission(breakerState);
+  const penBeforePx = breakerState.currentWidth;
   if (breakerState.justifiedUnitEnd === s) breakerState.justifiedUnitEnd = undefined;
   let committedWidth = w;
   if ('text' in s && s.autoSpaceBeforePt !== undefined) {
@@ -1446,77 +1495,26 @@ export function performAddToLine(
     }
   }
   if ('text' in s) {
-    const kind = snapToCharsClass(s, characterGrid);
-    // `word-snap-to-chars-script-block-allocation`
     const naturalWidth = s.snapGridNaturalWidthPx ?? w;
-    if (kind && snapPitchPx != null) {
-      s.snapGridClass = kind;
-      s.snapGridNaturalWidthPx = naturalWidth;
-      s.snapGridCellPitchPx = snapPitchPx;
-      if (rubyCellWidened(operationState, s)) {
-        // WORD_RUBY_ALIGN_PLACEMENT: a widened ruby piece takes its own allocation
-        // plus its share of the cell's widening, which is whole cells.
-        // A widened Latin base keeps its natural box, the one its guide was
-        // compared with: the cell's whole cells come from the widening.
-        const share = rubyPieceWideningPx(s, performRubyCell(operationState, s));
-        const baseNatural = naturalWidth - share;
-        const allocated = kind === 'latin' ? baseNatural : snapToCharsAllocatedWidthPx(baseNatural, kind, snapPitchPx,
-          eastAsianSnapCellCount(s));
-        const leading = 0;
-        committedWidth = allocated + share;
-        s.snapGridLeadingPadPx = leading;
-        s.snapGridTrailingPadPx = committedWidth - baseNatural - leading - rubyBaseOffsetPx(s);
-        s.measuredWidth = committedWidth;
-        breakerState.snapBlock = null;
-      } else if (kind === 'eastAsia') {
-        const cellCount = eastAsianSnapCellCount(s);
-        committedWidth = snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx, cellCount);
-        s.snapGridLeadingPadPx = 0;
-        s.snapGridTrailingPadPx = committedWidth - naturalWidth;
-        s.measuredWidth = committedWidth;
-        breakerState.snapBlock = null;
-      } else if (breakerState.snapBlock?.kind === kind) {
-        const previousLeading = breakerState.snapBlock.first.snapGridLeadingPadPx ?? 0;
-        const previousTrailing = breakerState.snapBlock.last.snapGridTrailingPadPx ?? 0;
-        const combinedNatural = breakerState.snapBlock.naturalWidthPx + naturalWidth;
-        const combinedAllocated = snapToCharsAllocatedWidthPx(combinedNatural, kind, snapPitchPx);
-        const slack = combinedAllocated - combinedNatural;
-        const leading = kind === 'latin' ? slack / 2 : 0;
-        const trailing = slack - leading;
-        breakerState.snapBlock.first.measuredWidth -= previousLeading;
-        breakerState.snapBlock.first.snapGridLeadingPadPx = leading;
-        breakerState.snapBlock.first.measuredWidth += leading;
-        breakerState.snapBlock.last.measuredWidth -= previousTrailing;
-        // The block's trailing pad moves to its new last member.
-        breakerState.snapBlock.last.snapGridTrailingPadPx = 0;
-        s.snapGridLeadingPadPx = 0;
-        s.snapGridTrailingPadPx = trailing;
-        s.measuredWidth = naturalWidth + trailing;
-        committedWidth = combinedAllocated - breakerState.snapBlock.allocatedWidthPx;
-        breakerState.snapBlock = {
-          kind,
-          first: breakerState.snapBlock.first,
-          last: s,
-          naturalWidthPx: combinedNatural,
-          allocatedWidthPx: combinedAllocated,
-        };
-      } else {
-        const allocated = snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx);
-        const slack = allocated - naturalWidth;
-        const leading = kind === 'latin' ? slack / 2 : 0;
-        const trailing = slack - leading;
-        s.snapGridLeadingPadPx = leading;
-        s.snapGridTrailingPadPx = trailing;
-        s.measuredWidth = allocated;
-        committedWidth = allocated;
-        breakerState.snapBlock = {
-          kind,
-          first: s,
-          last: s,
-          naturalWidthPx: naturalWidth,
-          allocatedWidthPx: allocated,
-        };
+    const placement = snapPlacement(operationState, breakerState.snapBlock, s, naturalWidth);
+    if (placement) {
+      const open = breakerState.snapBlock;
+      if (placement.joinedLeadingPadPx !== undefined && open) {
+        open.first.measuredWidth += placement.joinedLeadingPadPx - (open.first.snapGridLeadingPadPx ?? 0);
+        open.first.snapGridLeadingPadPx = placement.joinedLeadingPadPx;
+        open.last.measuredWidth -= open.last.snapGridTrailingPadPx ?? 0;
+        open.last.snapGridTrailingPadPx = 0;
       }
+      s.snapGridClass = placement.kind;
+      s.snapGridNaturalWidthPx = naturalWidth;
+      s.snapGridCellPitchPx = snapPitchPx!;
+      s.snapGridLeadingPadPx = placement.leadingPadPx;
+      s.snapGridTrailingPadPx = placement.trailingPadPx;
+      s.measuredWidth = placement.measuredPx;
+      committedWidth = placement.advancePx;
+      breakerState.snapBlock = placement.block
+        ? { ...placement.block, first: placement.joinedLeadingPadPx !== undefined && open ? open.first : s, last: s }
+        : null;
     } else {
       s.snapGridClass = undefined;
       s.snapGridLeadingPadPx = undefined;
@@ -1613,7 +1611,7 @@ export function performAddToLine(
   let segGridCount = 0;
   if (!('isTab' in s) && !('imagePath' in s) && !('math' in s)) {
     const ts = s as LayoutTextSeg;
-    if (ts.ruby) breakerState.lineHasRuby = true;
+    if (rubyCellOf(ts)) breakerState.lineHasRuby = true;
     const metricEastAsian = ts.metricEastAsian === true || EAST_ASIAN_RE.test(ts.text);
     if (!breakerState.lineEastAsian && metricEastAsian) breakerState.lineEastAsian = true;
     // Prefer the selected resource's single-line height. Without admitted
@@ -1624,7 +1622,7 @@ export function performAddToLine(
     // The OpenType code-page class selects the general line ratio even for
     // Latin text. This script hint selects an optional East-Asian-specific
     // floor and grid-cell counting; ruby keeps its measured annotation box.
-    const segScriptHint = metricEastAsian && !ts.ruby;
+    const segScriptHint = metricEastAsian && !rubyCellOf(ts);
     const nativeRatio =
       ts.resolvedLineHeightRatio == null
         ? nativeCanvasLineRatio(
@@ -1638,7 +1636,7 @@ export function performAddToLine(
           )
         : null;
     const horizontalDesignIntended =
-      ts.textBoxLineFloor && ts.ruby
+      ts.textBoxLineFloor && rubyCellOf(ts)
         ? 0
         : Math.max(
             segmentIntendedSingleLinePx(ts, intendedEm, segScriptHint),
@@ -1656,7 +1654,7 @@ export function performAddToLine(
     // WORD_VERTICAL_LINE_CENTRED_BOX: on a line grid a vertical line of text
     // without East Asian characters takes whole cells from its design single
     // line in either code-page class.
-    if (paintsInlineInk && !metricEastAsian && !ts.ruby
+    if (paintsInlineInk && !metricEastAsian && !rubyCellOf(ts)
       && (ts.resolvedLatinGridCellAllocation === true || Boolean(ts.verticalRun || ts.tateChuYoko))) {
       breakerState.lineLatinGridCountSingle = Math.max(breakerState.lineLatinGridCountSingle, designIntended);
     }
@@ -1678,6 +1676,7 @@ export function performAddToLine(
   }
   if (segGridCount > breakerState.lineGridCountSingle)
     breakerState.lineGridCountSingle = segGridCount;
+  recordLineAdmission(breakerState, before, penBeforePx, h, asc, desc);
 }
 
 /** Admit a metric-only picture-bullet marker that takes no width or segment
@@ -1781,13 +1780,21 @@ export function performRubyCell(
   });
 }
 
+/** A ruby base with an authored hpsRaise keeps its face's design box, the
+ * guide only raising the ascent (WORD_RUBY_LINE_ASCENT); without hpsRaise
+ * every piece of the cell keeps measured sides. */
+function rubyKeepsDesignBox(s: LayoutTextSeg): boolean {
+  const cell = rubyCellOf(s);
+  return !cell || cell.ruby.hpsRaisePt != null;
+}
+
 /** WORD_VERTICAL_LINE_CENTRED_BOX: the base box (per em) a vertical line run
  * is centred on: its admitted design box, else its measured box. */
 function verticalDesignBoxPerEm(operationState: PassOperationState, s: LayoutTextSeg): number {
   const emPx = operationState.effectiveFontPx(s);
   if ((s.resolvedResourceVerticalMetric || s.referenceFontVerticalMetric)
     && s.resolvedDesignAscentRatio != null && s.resolvedDesignDescentRatio != null
-    && (!s.ruby || s.ruby.hpsRaisePt != null)) {
+    && rubyKeepsDesignBox(s)) {
     return s.resolvedDesignAscentRatio + s.resolvedDesignDescentRatio;
   }
   const corrected = measuredLineMetrics(operationState.measureText(s), s.fontSize * operationState.scale);
@@ -1831,25 +1838,14 @@ function resolveAutoSpaceAtPlacement(
   return desired - applied;
 }
 
+/** The piece's allocation on a line it starts (no open script block). */
 export function performStandaloneSnapAdvance(
   operationState: PassOperationState,
   s: LayoutTextSeg,
   naturalWidth: number,
 ): number {
-  const { snapPitchPx, eastAsianSnapCellCount, characterGrid } = operationState;
-
-  const kind = snapToCharsClass(s, characterGrid);
-  if (!kind || snapPitchPx == null || s.text.length === 0) return naturalWidth;
-  // A ruby piece's share of its cell's widening is already whole cells; a
-  // widened Latin base keeps its natural box (performRubyCell).
-  const rubyShare = rubyPieceWideningPx(s, performRubyCell(operationState, s));
-  if (kind === 'latin' && rubyCellWidened(operationState, s)) return naturalWidth;
-  return snapToCharsAllocatedWidthPx(
-    naturalWidth - rubyShare,
-    kind,
-    snapPitchPx,
-    kind === 'eastAsia' ? eastAsianSnapCellCount(s) : 1,
-  ) + rubyShare;
+  if (s.text.length === 0) return naturalWidth;
+  return snapPlacement(operationState, null, s, naturalWidth)?.advancePx ?? naturalWidth;
 }
 
 export function performSegAdvance(operationState: PassOperationState, s: LayoutTextSeg): number {
@@ -2074,7 +2070,7 @@ function withoutLatinIdeographicSpaceGaps(line: readonly LayoutSeg[]): LineGap[]
   const cells: number[] = [];
   const cellAt = new Map<string, number>();
   projected.forEach(({ text }, si) => {
-    if (text === undefined || ('text' in line[si]! && (line[si]!.ruby || line[si]!.rubyPiece))) {
+    if (text === undefined || ('text' in line[si]! && rubyCellOf(line[si] as LayoutTextSeg))) {
       cells.push(OPAQUE);
       return;
     }
@@ -2145,7 +2141,7 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     const start = segment.text.indexOf(' ');
     const singleSpace = start >= 0 && segment.text.indexOf(' ', start + 1) < 0;
     const spaceClusters = segment.shapedSpaceClusters ?? segment.shapedClusters;
-    if (spaceClusters && !segment.ruby && !segment.rubyPiece) {
+    if (spaceClusters && !rubyCellOf(segment)) {
       // One contextual space has no index-dependent width: use the existing
       // scalar representation without allocating three temporary Maps. The
       // retained offset is UTF-16, not a codepoint index. No isolated-space
@@ -2175,7 +2171,7 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
     }
     // U+3000 is a text cell for gaps; only the advances of those in the
     // trailing U+0020/U+3000 run are needed, where a line-end U+3000 hangs.
-    if (state.lineEndIdeographicSpaceHangs === true && segment.text.includes('\u3000') && !segment.ruby && !segment.rubyPiece) {
+    if (state.lineEndIdeographicSpaceHangs === true && segment.text.includes('\u3000') && !rubyCellOf(segment)) {
       const characters = [...segment.text];
       let start = segment.text.length;
       for (let off = characters.length - 1; off >= 0 && (characters[off] === ' ' || characters[off] === '\u3000'); off--) {
@@ -2185,12 +2181,12 @@ function gapSegment(state: Pick<PassOperationState, 'strAdvance' | 'scale' | 'ch
           { ...segment, text: '\u3000', ...slicedTextMetadata(segment, start, start + 1) }, '\u3000'));
       }
     }
-    const spacePx = scalarSpacePx ?? spaceWidths?.values().next().value ?? (start >= 0 && !segment.ruby && !segment.rubyPiece
+    const spacePx = scalarSpacePx ?? spaceWidths?.values().next().value ?? (start >= 0 && !rubyCellOf(segment)
       ? state.strAdvance({ ...segment, text: ' ', ...slicedTextMetadata(segment, start, start + 1) }, ' ')
       : 0);
     const leadingGapPx = leadingAutoSpacePx(state, segment);
     return {
-      text: segment.metricOnly ? '' : segment.ruby || segment.rubyPiece ? undefined : segment.text,
+      text: segment.metricOnly ? '' : rubyCellOf(segment) ? undefined : segment.text,
       widthPx: segment.measuredWidth, spacePx,
       ...(spaceWidths ? { spaceWidths } : {}),
       ...(ideographicSpaceWidths ? { ideographicSpaceWidths } : {}),
@@ -2256,7 +2252,7 @@ function certifiedCapRefusalOverflow(state: Pick<PassOperationState,
     // Width-mutating legacy compression/condensation keeps its original
     // model path; this receipt omission is only for ordinary stable advances.
     if (!('text' in segment) || segment.text.length === 0 || segment.text === ' '
-      || segment.metricOnly || segment.ruby || segment.rubyPiece || segment.verticalRun || segment.tateChuYoko
+      || segment.metricOnly || rubyCellOf(segment) || segment.verticalRun || segment.tateChuYoko
       || segment.fitTextRegionIndex !== undefined || segment.fitTextPerGapPx !== undefined
       || segment.snapGridClass !== undefined || segment.autoSpaceBeforePt !== undefined
       || segment.autoSpaceLeadingPx !== undefined || segment.autoSpaceCompressible
@@ -2348,7 +2344,7 @@ export function fitJustifiedCompression(state: Pick<PassOperationState,
   if (state.justifiedCompressionAdmissionOnly === true) {
     for (const group of [breaker.currentLine, members]) {
       for (const segment of group) {
-        if ('text' in segment && segment.text.includes(' ') && !segment.ruby && !segment.rubyPiece && !segment.metricOnly
+        if ('text' in segment && segment.text.includes(' ') && !rubyCellOf(segment) && !segment.metricOnly
           && segment.textLayoutService && segment.textShapeRequest) {
           segment.shapedSpaceClusters = state.measurement.acquireCompressionSpaceClusters(segment);
         }
@@ -2482,7 +2478,7 @@ export function performTextSegmentBox(
   s.leadingWordBoundaryPx = undefined;
   // Fitting needs the spaces' contextual advances, not every prefix of a
   // possibly overlong word. Full cluster acquisition belongs to final slices.
-  const measured = justifiedCompressionApplies(operationState) && s.text.includes(' ') && !s.ruby && !s.rubyPiece
+  const measured = justifiedCompressionApplies(operationState) && s.text.includes(' ') && !rubyCellOf(s)
     && (!operationState.justifiedCompressionAdmissionOnly || s.metricOnly)
     ? measurement.measureSegment(s, 'spaces')
     : measureText(s, snapToCharsClass(s, characterGrid) === 'eastAsia');
@@ -2567,7 +2563,7 @@ export function performTextSegmentBox(
   // guide only raises the ascent (WORD_RUBY_LINE_ASCENT below). Ruby without
   // hpsRaise is outside that measured class and keeps measured sides.
   const designOwnsSides =
-    (!s.ruby || s.ruby.hpsRaisePt != null) &&
+    rubyKeepsDesignBox(s) &&
     (s.resolvedResourceVerticalMetric || s.referenceFontVerticalMetric) &&
     // A quarter-turned frame's positioned run keeps its design box and moves
     // it (WORD_VERTICAL_LINE_CENTRED_BOX).
@@ -2585,7 +2581,7 @@ export function performTextSegmentBox(
   const verticalDesignBox = verticalLineRun
     && (s.resolvedResourceVerticalMetric || s.referenceFontVerticalMetric)
     && s.resolvedDesignAscentRatio != null && s.resolvedDesignDescentRatio != null
-    && (!s.ruby || s.ruby.hpsRaisePt != null)
+    && rubyKeepsDesignBox(s)
     ? (s.resolvedDesignAscentRatio + s.resolvedDesignDescentRatio) * metricEmPx
     : ascent + descent;
   const verticalSingle = verticalLineRun
@@ -2651,7 +2647,7 @@ export function performAppendQueuedIdeographicSpaceSegment(
 
   if (
     /\s$/u.test(source.text) ||
-    source.ruby !== undefined ||
+    rubyCellOf(source) !== undefined ||
     source.tateChuYoko === true ||
     source.fitTextRegionIndex !== undefined
   )
@@ -3008,19 +3004,24 @@ export function performQueueEmergencyTail(
   });
 }
 
+function kinsokuLine(operationState: PassOperationState): KinsokuLine {
+  const { breakerState, materializeLatinSpaceCompression, strAdvance, addToLine, lineEdgeRules: kinsoku } = operationState;
+  return { breakerState, kinsoku, materializeLatinSpaceCompression, strAdvance, addToLine };
+}
+
 export function performRetractCurrentLineForLeadingKinsoku(
   operationState: PassOperationState,
   next: LayoutTextSeg,
 ): CrossRunKinsokuRetraction {
-  const { breakerState, materializeLatinSpaceCompression, strAdvance, lineEdgeRules: kinsoku } = operationState;
-  return retractLeadingKinsoku(
-    breakerState,
-    kinsoku,
-    materializeLatinSpaceCompression,
-    strAdvance,
-    next,
-    operationState.scale,
-  );
+  return retractLeadingKinsoku(kinsokuLine(operationState), next);
+}
+
+export function performRetractLineEndForbidden(
+  operationState: PassOperationState,
+  next: LayoutTextSeg,
+  admits: (retractedAdvancePx: number) => boolean,
+): CrossRunKinsokuRetraction {
+  return retractLineEndForbidden(kinsokuLine(operationState), next, admits);
 }
 
 export function performKeepLeadingKinsokuWithCurrentLine(

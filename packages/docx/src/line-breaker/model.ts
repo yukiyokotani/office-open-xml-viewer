@@ -326,8 +326,6 @@ export interface LayoutTextSeg extends LayoutSegSource {
     hpsRaisePt?: number;
     /** Valid authored §17.3.3.1 w:rubyAlign (ST_RubyAlign). */
     align?: string;
-    /** The run's complete base text, of which this is the first piece. */
-    baseText?: string;
     /** The w:rt runs (§17.3.3.24) in order, whose texts make up `text`,
      * each with its own faces. */
     guideRuns?: readonly RubyGuideRunFace[];
@@ -338,9 +336,6 @@ export interface LayoutTextSeg extends LayoutSegSource {
   rubyGroup?: RubyGroup;
   /** This piece's index in {@link rubyGroup}'s pieces. */
   rubyPieceIndex?: number;
-  /** Every piece of a ruby-annotated run (only the first carries `ruby`):
-   * none takes a WORD_KERNED_SPACE_PAIRS seam pair. */
-  rubyPiece?: true;
   /** Track-changes revision attached to this run (insertion / deletion /
    *  moveFrom / moveTo). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };

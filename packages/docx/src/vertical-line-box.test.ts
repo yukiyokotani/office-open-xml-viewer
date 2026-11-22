@@ -884,10 +884,146 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 7)', () =>
   });
 });
 
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 8)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+  const column = (pt: number) => ({ pageHeight: 60 + 80 + pt });
+  const guide = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+  const axis = (line: LineLayout) => line.baselinePt - line.bounds.yPt;
+  const paragraphLines = (paragraph: DocParagraph & BodyElement, lengthPt: number) =>
+    layoutBody([paragraph], 'tbRl', column(lengthPt)).layers.body
+      .find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!.lines;
+  const withBreakAfter = (runs: readonly Run[], index: number) => {
+    const same = paragraphOf(runs);
+    return { ...same, runs: [...same.runs.slice(0, index), { type: 'break', breakType: 'line' }, ...same.runs.slice(index)] } as unknown as DocParagraph & BodyElement;
+  };
+
+  it('keeps each merged guide run in the face its own slots select', () => {
+    const ruby = {
+      text: 'Aか', fontSizePt: 5, hpsRaisePt: 9,
+      guideRuns: [
+        { text: 'A', fonts: { ascii: 'Same', highAnsi: 'Same', eastAsia: 'TallFace' } },
+        { text: 'か', fonts: { ascii: 'Other', highAnsi: 'Other', eastAsia: 'Same' } },
+      ],
+    };
+    for (const direction of ['tbRl', undefined]) {
+      const line = layoutParagraph([{ text: '漢字', ruby }], direction).lines[0]!;
+      const ops = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps;
+      expect(ops.map((op) => op.text).join(''), direction).toBe('Aか');
+      for (const op of ops) {
+        expect(JSON.stringify(op.fontRoute), `${direction} ${op.text}`).toContain('Same');
+        expect(JSON.stringify(op.fontRoute), `${direction} ${op.text}`).not.toContain('TallFace');
+      }
+    }
+  });
+
+  it('keeps a forbidden ruby leader on the column when nothing before it can move', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前' }, { text: 'ゃ東京', ruby: guide }], 'tbRl', null, column(35),
+    );
+    expect(lineTexts(lines)).toEqual(['前ゃ東京']);
+  });
+
+  it('moves consecutive openers of different runs with the ruby cell after them', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前前「' }, { text: '『', fontFamily: 'OtherFace' }, { text: '東京', ruby: guide }],
+      'tbRl', null, column(40),
+    );
+    expect(lineTexts(lines)).toEqual(['前前', '「『東京']);
+  });
+
+  it('moves earlier openers with an opener of another run that does not fit', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前前前「' }, { text: '『', fontFamily: 'OtherFace' }, { text: '東京', ruby: guide }],
+      'tbRl', null, column(40),
+    );
+    expect(lineTexts(lines)).toEqual(['前前前', '「『東京']);
+  });
+
+  it('moves an opener with ordinary text of another run that does not fit', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前前前「' }, { text: '東京', fontFamily: 'OtherFace' }], 'tbRl', null, column(40),
+    );
+    expect(lineTexts(lines)).toEqual(['前前前', '「東京']);
+  });
+
+  it('pulls an opener of another run down with the character a forbidden leader takes', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前前「' }, { text: '東', fontFamily: 'OtherFace' }, { text: 'ー後' }], 'tbRl', null, column(40),
+    );
+    expect(lineTexts(lines)).toEqual(['前前', '「東ー後']);
+  });
+
+  it('restores the column extents a retracted opener had added', () => {
+    const runs: Run[] = [
+      { text: '前前' }, { text: '「', fontSize: 20, position: 18 }, { text: '東京', ruby: guide },
+    ];
+    const wrapped = layoutParagraph(runs, 'tbRl', null, column(45)).lines;
+    expect(lineTexts(wrapped)).toEqual(['前前', '「東京']);
+    const explicit = paragraphLines(withBreakAfter(runs, 1), 45);
+    expect(lineTexts(explicit)).toEqual(['前前', '「東京']);
+    expect(axis(wrapped[0]!)).toBeCloseTo(axis(explicit[0]!), 6);
+    expect(wrapped[0]!.advancePt).toBeCloseTo(explicit[0]!.advancePt, 6);
+  });
+
+  it('restores the column extents a retracted suffix of ordinary text had added', () => {
+    // A raised 後 leaves the column ahead of a forbidden leader that does
+    // not fit: the column keeps only the extents of 前前.
+    const runs: Run[] = [
+      { text: '前前' }, { text: '後', fontSize: 20, position: 18 }, { text: 'ゃ東京', ruby: guide },
+    ];
+    const wrapped = layoutParagraph(runs, 'tbRl', null, column(50)).lines;
+    expect(lineTexts(wrapped)).toEqual(['前前', '後ゃ東京']);
+    const explicit = paragraphLines(withBreakAfter(runs, 1), 50);
+    expect(axis(wrapped[0]!)).toBeCloseTo(axis(explicit[0]!), 6);
+    expect(wrapped[0]!.advancePt).toBeCloseTo(explicit[0]!.advancePt, 6);
+  });
+
+  it('shapes a guide of many formatted runs once, not once per run seam', () => {
+    const count = 400;
+    const work = (runs: number) => {
+      const fonts = (index: number) => ({ ascii: 'Same', highAnsi: 'Same', eastAsia: `Unused${index}` });
+      const ruby = {
+        text: 'a'.repeat(count), fontSizePt: 5, hpsRaisePt: 9,
+        guideRuns: Array.from({ length: runs }, (_, index) => ({ text: 'a'.repeat(count / runs), fonts: fonts(index) })),
+      };
+      const before = measuredCharacters;
+      const line = layoutParagraph([{ text: '漢字', ruby }]).lines[0]!;
+      expect(textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps).toHaveLength(count);
+      return measuredCharacters - before;
+    };
+    // The same letters in one run and in one run per letter.
+    expect(work(count)).toBeLessThan(work(1) * 3);
+  });
+});
+
 describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () => {
-  // Deterministic generator: ruby cells with split base runs, fitText pieces,
-  // kinsoku leaders and openers, in lrTb, tbRl and tbLrV columns of varied
-  // length.
+  // Deterministic generator. Every seed lays out one paragraph of ordinary
+  // runs and ruby cells (split base runs, fitText pieces, kinsoku leaders and
+  // openers) in an lrTb, tbRl or tbLrV column of varied length, and belongs
+  // to one family that adds a feature to that base.
+  const FAMILIES = [
+    'base',
+    // Guide runs with their own rFonts slots, some no character uses.
+    'guideFaces',
+    // A guide of many one-letter formatted runs.
+    'guideRuns',
+    // Cells led by a line-start-forbidden character, after little content.
+    'leaderCell',
+    // Consecutive openers of different runs before a cell.
+    'openers',
+    // Larger and raised runs and openers, which lengthen a line's extents.
+    'raised',
+    'justified',
+    'tateChuYoko',
+    'tabs',
+    'list',
+    'bidi',
+    'float',
+  ] as const;
+  type Family = typeof FAMILIES[number];
+  const SEEDS_PER_FAMILY = 100;
+
   const random = (seed: number) => () => {
     seed = (seed + 0x6d2b79f5) | 0;
     let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
@@ -896,116 +1032,253 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
   };
   const KANJI = [...'一二三四五六七八九十百千万東京都庁前後中左右上下山川田林森村町市区円年月日火水木金土'];
   const LEADERS = [...'ゃょー」'];
+  const OPENERS = [...'「『'];
   const LINE_START_FORBIDDEN = new Set(LEADERS);
-  const LINE_END_FORBIDDEN = new Set(['「']);
+  const LINE_END_FORBIDDEN = new Set(OPENERS);
   const ALIGNS = ['center', 'left', 'right', 'distributeLetter', undefined];
-  type Cell = { id: number; base: string; guide: string };
+  const GUIDE_FACES = ['FaceA', 'FaceB', 'TallFace'];
+  /** One source run of the paragraph, as the document model holds it. */
+  type Source = Readonly<{ run: Record<string, unknown>; text: string; sizePt: number }>;
+  type Cell = Readonly<{ runs: readonly number[]; guide: string; guideRuns?: readonly GuideRun[] }>;
 
   function generate(seed: number) {
+    const family: Family = FAMILIES[seed % FAMILIES.length]!;
     const next = random(seed);
     const pick = <T,>(items: readonly T[]) => items[Math.floor(next() * items.length)]!;
     const pool = [...KANJI];
     const take = () => pool.splice(Math.floor(next() * pool.length), 1)[0]!;
-    const runs: Run[] = [];
+    const direction = family === 'tateChuYoko' ? 'tbRl'
+      : family === 'float' || family === 'bidi' ? undefined : pick([undefined, 'tbRl', 'tbLrV']);
+    const grid = family !== 'raised' && family !== 'float' && next() < 0.3
+      ? { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 } as Partial<SectionProps> : {};
+    const template = paragraphOf([{ text: '' }]).runs[0] as unknown as Record<string, unknown>;
+    const sources: Source[] = [];
     const cells: Cell[] = [];
+    const text = (value: string, extra: Record<string, unknown> = {}) => {
+      sources.push({ run: { ...template, text: value, ...extra }, text: value, sizePt: (extra.fontSize as number | undefined) ?? 10 });
+      return sources.length - 1;
+    };
+    const raised = () => family === 'raised' && next() < 0.5
+      ? pick([{ fontSize: 20 }, { position: 18 }, { fontSize: 20, position: 18 }]) : {};
     let fitId = 100;
-    const items = 3 + Math.floor(next() * 6);
+    // Whether an ordinary run may open with a leader: after a ruby cell, or
+    // after two or more ordinary characters of its own format, so that the
+    // leader, the character before it and an opener before that are never
+    // one unbreakable unit longer than the shortest column.
+    let leaderAllowed = false;
+    if (family === 'float') {
+      sources.push({
+        run: {
+          type: 'image', imagePath: 'word/media/image1.png', mimeType: 'image/png',
+          widthPt: 15 + Math.floor(next() * 20), heightPt: 20 + Math.floor(next() * 30),
+          anchor: true, anchorYFromPara: true, anchorYRelativeFrom: 'paragraph', anchorYPt: 0,
+          anchorXPt: 0, anchorXFromMargin: true, anchorXRelativeFrom: 'margin',
+          wrapMode: 'square', wrapSide: 'bothSides',
+        },
+        text: '￼', sizePt: 0,
+      });
+    }
+    const items = family === 'leaderCell' ? 2 + Math.floor(next() * 3) : 3 + Math.floor(next() * 6);
     for (let index = 0; index < items; index++) {
-      if (next() < 0.5) {
-        let text = Array.from({ length: 1 + Math.floor(next() * 3) }, take).join('');
-        if (next() < 0.3) text = pick(LEADERS) + text;
-        if (next() < 0.25) text += '「';
-        runs.push({ text });
+      const cellItem = family === 'leaderCell' ? index > 0 : next() >= 0.5;
+      if (!cellItem) {
+        if (family === 'tabs' && index > 0 && next() < 0.4) {
+          sources.push({ run: { type: 'tab' }, text: '\t', sizePt: 0 });
+          leaderAllowed = false;
+        }
+        if (family === 'bidi' && next() < 0.4) {
+          text(pick(['שלום', 'עברית', 'אב']), { rtl: true });
+          leaderAllowed = false;
+          continue;
+        }
+        const style = raised();
+        const styled = Object.keys(style).length > 0;
+        let value = Array.from({ length: family === 'leaderCell' ? 1 : 1 + Math.floor(next() * 3) }, take).join('');
+        if (!styled && leaderAllowed && next() < 0.3) value = pick(LEADERS) + value;
+        const opener = !styled && next() < 0.25;
+        if (opener) value += '「';
+        text(value, style);
+        leaderAllowed = !styled && !opener && [...value].length > 1;
         continue;
       }
-      const pieces = [take() + (next() < 0.3 ? 'A' : ''), ...(next() < 0.5 ? [take()] : [])];
-      const guide = 'あいうえおかきくけこ'.slice(0, 1 + Math.floor(next() * 6));
-      const ruby = { text: guide, fontSizePt: 5, hpsRaisePt: next() < 0.5 ? 9 : 4, align: pick(ALIGNS) };
-      const fitPiece = next() < 0.3 ? Math.floor(next() * pieces.length) : -1;
-      pieces.forEach((text, piece) => runs.push({
-        text,
-        ...(piece === 0 ? { ruby } : {}),
-        extra: {
-          ...(piece > 0 ? { rubyBaseContinuation: true } : {}),
-          ...(piece === fitPiece ? { fitTextVal: 200 + Math.floor(next() * 400), fitTextId: fitId++ } : {}),
-        },
+      if ((family === 'openers' || family === 'raised') && next() < 0.7) {
+        // §17.3.1.16 openers before the cell, each its own run.
+        const count = family === 'openers' ? 1 + Math.floor(next() * 3) : 1;
+        for (let opener = 0; opener < count; opener++) {
+          text(pick(OPENERS), { ...raised(), ...(opener % 2 === 1 ? { fontFamily: 'OtherFace' } : {}) });
+        }
+      }
+      const leader = (family === 'leaderCell' ? next() < 0.7 : next() < 0.1) ? pick(LEADERS) : '';
+      const tateChuYoko = family === 'tateChuYoko' && next() < 0.7;
+      const pieces = tateChuYoko
+        ? [...(next() < 0.5 ? [leader + take()] : []), pick(['12', '34', '56'])]
+        : [leader + take() + (next() < 0.3 ? 'A' : ''), ...(next() < 0.5 ? [take()] : [])];
+      const length = family === 'guideRuns' ? 12 + Math.floor(next() * 30) : 1 + Math.floor(next() * 6);
+      const letters = family === 'guideFaces'
+        ? Array.from({ length }, () => (next() < 0.4 ? pick([...'ABC']) : pick([...'あいうえお']))).join('')
+        : family === 'guideRuns' ? 'a'.repeat(length) : 'あいうえおかきくけこ'.slice(0, length);
+      const guideRuns: GuideRun[] | undefined = family === 'guideFaces'
+        ? [...letters].reduce<GuideRun[]>((runs, letter) => {
+          // One to three letters per run, each run with its own slots.
+          if (runs.length === 0 || next() < 0.6) {
+            const ascii = pick(GUIDE_FACES);
+            runs.push({ text: letter, fonts: { ascii, highAnsi: ascii, eastAsia: pick(GUIDE_FACES) } });
+          } else {
+            runs[runs.length - 1] = { ...runs.at(-1)!, text: runs.at(-1)!.text + letter };
+          }
+          return runs;
+        }, [])
+        : family === 'guideRuns'
+          ? [...letters].map((letter, at) => ({ text: letter, fonts: { ascii: 'FaceA', highAnsi: 'FaceA', eastAsia: `Unused${at}` } }))
+          : undefined;
+      const ruby: Ruby = {
+        text: letters, fontSizePt: 5, hpsRaisePt: next() < 0.5 ? 9 : 4, align: pick(ALIGNS),
+        ...(guideRuns ? { guideRuns } : {}),
+      };
+      const fitPiece = !tateChuYoko && next() < 0.3 ? Math.floor(next() * pieces.length) : -1;
+      const runs = pieces.map((value, piece) => text(value, {
+        ...(piece === 0 ? {
+          ruby: { text: ruby.text, fontSizePt: ruby.fontSizePt, hpsRaisePt: ruby.hpsRaisePt },
+          typographyInput: typographyInput(ruby),
+        } : { rubyBaseContinuation: true }),
+        ...(tateChuYoko && /^\d+$/.test(value) ? { eastAsianVert: true } : {}),
+        ...(piece === fitPiece ? { fitTextVal: 200 + Math.floor(next() * 400), fitTextId: fitId++ } : {}),
       }));
-      cells.push({ id: cells.length, base: pieces.join(''), guide });
+      cells.push({ runs, guide: letters, ...(guideRuns ? { guideRuns } : {}) });
+      leaderAllowed = true;
     }
-    const direction = pick([undefined, 'tbRl', 'tbLrV']);
-    const lengthPt = 25 + Math.floor(next() * 60);
-    const grid = next() < 0.3
-      ? { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 } as Partial<SectionProps> : {};
-    return { runs, cells, direction, lengthPt, grid };
+    const indentPt = family === 'list' ? 20 : 0;
+    const paragraph = {
+      ...paragraphOf([]),
+      ...(family === 'justified' ? { alignment: pick(['both', 'distribute']) } : {}),
+      ...(family === 'list' ? {
+        numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: indentPt, tab: indentPt, suff: 'tab' },
+      } : {}),
+      ...(family === 'tabs' ? { tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }] } : {}),
+    };
+    const lengthPt = (family === 'leaderCell' ? 20 : 25) + Math.floor(next() * 60)
+      + indentPt + (family === 'float' ? 40 : 0);
+    return { family, sources, cells, direction, lengthPt, indentPt, grid, paragraph };
   }
 
-  const lineText = (line: LineLayout) => textPlacements(line).map((entry) => entry.text).join('');
-  const sectionFor = (direction: string | undefined, lengthPt: number, grid: Partial<SectionProps>) =>
+  type Generated = ReturnType<typeof generate>;
+  const sectionOf = ({ direction, lengthPt, grid }: Generated) =>
     ({ ...grid, ...(direction ? { pageHeight: 60 + 80 + lengthPt } : { pageWidth: 40 + 90 + lengthPt }) });
+  const layoutRuns = (generated: Generated, runs: readonly unknown[]) =>
+    layoutBody([{ ...generated.paragraph, runs } as unknown as DocParagraph & BodyElement],
+      generated.direction, sectionOf(generated)).layers.body
+      .find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!.lines;
+  /** A line's content in source order (a bidi line places it in visual order). */
+  const content = (line: LineLayout) => textPlacements(line)
+    .filter((entry) => entry.role !== 'numbering-marker')
+    .sort((left, right) => left.range.start - right.range.start);
+  const lineText = (line: LineLayout) => content(line).map((entry) => entry.text).join('');
 
   /** The same runs with an explicit break wherever the layout broke. */
-  function explicitlyBroken(runs: readonly Run[], lines: readonly LineLayout[]): DocParagraph & BodyElement {
-    const ends = new Set<number>();
-    let offset = 0;
-    for (const line of lines.slice(0, -1)) ends.add(offset += [...lineText(line)].length);
+  function explicitlyBroken({ sources }: Generated, lines: readonly LineLayout[]): unknown[] {
+    const ends = new Set(lines.slice(0, -1).map((line) => Math.max(...content(line).map((entry) => entry.range.end))));
     const out: unknown[] = [];
-    const base = paragraphOf(runs);
-    let position = 0;
-    runs.forEach((run, index) => {
-      const source = base.runs[index] as unknown as { text: string };
-      const chars = [...run.text];
+    let offset = 0;
+    for (const { run, text } of sources) {
       let start = 0;
-      for (let at = 1; at <= chars.length; at++) {
-        if (!ends.has(position + at)) continue;
-        out.push({ ...source, text: chars.slice(start, at).join('') });
+      for (let at = 1; at <= text.length; at++) {
+        if (!ends.has(offset + at)) continue;
+        out.push(run.type === 'text' ? { ...run, text: text.slice(start, at) } : run);
         out.push({ type: 'break', breakType: 'line' });
         start = at;
       }
-      if (start < chars.length) out.push({ ...source, text: chars.slice(start).join('') });
-      position += chars.length;
-    });
-    return { ...base, runs: out } as unknown as DocParagraph & BodyElement;
+      if (start < text.length) out.push(run.type === 'text' ? { ...run, text: text.slice(start) } : run);
+      offset += text.length;
+    }
+    return out;
   }
 
-  it.each(Array.from({ length: 200 }, (_, seed) => seed + 1))('keeps every ruby cell whole and every line edge legal (seed %i)', (seed) => {
-    const { runs, cells, direction, lengthPt, grid } = generate(seed);
-    const section = sectionFor(direction, lengthPt, grid);
-    const { lines } = layoutParagraph(runs, direction, null, section);
+  /** The characters measured to lay `generated` out with `runs`. */
+  function work(generated: Generated, runs: readonly unknown[]): number {
+    const before = measuredCharacters;
+    layoutRuns(generated, runs);
+    return measuredCharacters - before;
+  }
+
+  it.each(Array.from({ length: FAMILIES.length * SEEDS_PER_FAMILY }, (_, seed) => seed + 1))(
+    'keeps every ruby cell whole and every line edge legal (seed %i)', (seed) => {
+    const generated = generate(seed);
+    const { family, sources, cells, lengthPt, indentPt } = generated;
+    const runs = sources.map((source) => source.run);
+    const lines = layoutRuns(generated, runs);
     const texts = lines.map(lineText);
-    expect(texts.join('')).toBe(runs.map((run) => run.text).join(''));
+    const context = `${family} ${generated.direction ?? 'lrTb'} ${lengthPt}pt ${generated.grid.docGridType ?? ''} ${JSON.stringify(texts)}`;
+    expect(texts.join(''), context).toBe(sources.filter((source) => source.run.type === 'text').map((source) => source.text).join(''));
+
     for (const cell of cells) {
-      // One line holds the whole base, and its guide is painted once.
-      // Each cell's kanji are unique in the paragraph ('A' may repeat).
-      const own = [...cell.base].filter((char) => char !== 'A');
-      expect(texts.filter((text) => own.some((char) => text.includes(char))), cell.base).toHaveLength(1);
-      expect(texts.some((text) => text.includes(cell.base)), cell.base).toBe(true);
-      const guides = lines.flatMap((line) => textPlacements(line))
-        .filter((entry) => entry.ruby && cell.base.startsWith(entry.text))
-        .map((entry) => entry.ruby!.paintOps.map((op) => op.text).join(''));
-      expect(guides, cell.base).toEqual([cell.guide]);
-    }
-    const context = `${direction ?? "lrTb"} ${lengthPt}pt ${grid.docGridType ?? ''} ${JSON.stringify(texts)} ${JSON.stringify(runs.map((run) => [run.text, run.ruby?.text ?? "", run.extra ?? {}]))}`;
-    texts.forEach((text, index) => {
-      if (index > 0) expect(LINE_START_FORBIDDEN.has([...text][0]!), `${index} of ${context}`).toBe(false);
-      if (index < texts.length - 1 && LINE_END_FORBIDDEN.has([...text].at(-1)!)) {
-        // Unavoidable only when the opener and the cell after it exceed a
-        // whole line.
-        const following = textPlacements(lines[index + 1]!);
-        const cell = cells.find((candidate) => following[0]?.ruby && candidate.base.startsWith(following[0].text));
-        const cellAdvance = cell ? following.filter((entry) => cell.base.includes(entry.text))
-          .reduce((sum, entry) => sum + entry.advancePt, 0) : 0;
-        expect(cell !== undefined && cellAdvance + 10 > lengthPt, `${index} of ${context}`).toBe(true);
+      // One line holds every piece of the cell, and its guide is painted once.
+      const holding = lines.filter((line) => content(line).some((entry) => cell.runs.includes(entry.sourceRunIndex!)));
+      expect(holding, context).toHaveLength(1);
+      const guides = content(holding[0]!).filter((entry) => entry.ruby && cell.runs.includes(entry.sourceRunIndex!));
+      expect(guides.map((entry) => entry.ruby!.paintOps.map((op) => op.text).join('')), context).toEqual([cell.guide]);
+      if (!cell.guideRuns) continue;
+      // §17.3.3.24: every guide letter is painted in the font its own run
+      // names for the letter's slot.
+      const fontAt = cell.guideRuns.flatMap((run) => [...run.text].map((letter) =>
+        /[A-Z]/.test(letter) ? run.fonts.ascii! : /[a-z]/.test(letter) ? run.fonts.ascii! : run.fonts.eastAsia!));
+      let at = 0;
+      for (const op of guides[0]!.ruby!.paintOps) {
+        for (const _letter of op.text) {
+          expect(JSON.stringify(op.fontRoute), `${cell.guide} ${at} of ${context}`).toContain(`\\"${fontAt[at]}\\"`);
+          at += 1;
+        }
       }
+    }
+
+    const sizeAt = sources.flatMap((source) => source.run.type === 'text'
+      ? [...source.text].map(() => source.sizePt) : []);
+    const characters = [...texts.join('')];
+    let consumed = 0;
+    texts.forEach((text, index) => {
+      const chars = [...text];
+      consumed += chars.length;
+      // §17.3.1.16: no line starts with a line-start-forbidden character.
+      if (index > 0) expect(LINE_START_FORBIDDEN.has(chars[0]!), `${index} of ${context}`).toBe(false);
+      if (index === texts.length - 1 || !LINE_END_FORBIDDEN.has(chars.at(-1)!) || family === 'float') return;
+      // A line ends with openers only when they and the unit after them (a
+      // whole ruby cell, a whole Hebrew word, or one character) exceed a
+      // whole line.
+      let openersPt = 0;
+      for (let back = 1; back <= chars.length && LINE_END_FORBIDDEN.has(chars[chars.length - back]!); back++) {
+        openersPt += sizeAt[consumed - back]!;
+      }
+      const following = content(lines[index + 1]!);
+      const cell = cells.find((candidate) => candidate.runs[0] === following[0]?.sourceRunIndex);
+      const unitPt = cell ? following.filter((entry) => cell.runs.includes(entry.sourceRunIndex!))
+        .reduce((sum, entry) => sum + entry.advancePt, 0)
+        : sizeAt[consumed]! * Math.max(1, /^\p{Script=Hebrew}*/u.exec(characters.slice(consumed).join(''))![0].length);
+      expect(unitPt + openersPt > lengthPt - indentPt, `${index} of ${context}`).toBe(true);
     });
+
+    if (family === 'guideRuns') {
+      // Shaping a guide is linear in its runs: one run per letter costs a
+      // bounded multiple of the same letters in one run per guide.
+      const merged = sources.map((source) => {
+        const input = source.run.typographyInput as ReturnType<typeof typographyInput> | undefined;
+        return input ? {
+          ...source.run,
+          typographyInput: { ruby: { ...input.ruby, guideRuns: [{ ...input.ruby.guideRuns[0]!, text: (source.run.ruby as Ruby).text }] } },
+        } : source.run;
+      });
+      expect(work(generated, runs), context).toBeLessThan(work(generated, merged) * 3);
+    }
+
+    // A float's exclusion depends on where each line falls, so only the
+    // invariants above hold there.
+    if (family === 'float') return;
     // Each line's extents are those of its own content: breaking the same
     // runs explicitly at the same places gives the same lines.
-    const explicit = layoutBody([explicitlyBroken(runs, lines)], direction, section).layers.body
-      .find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!.lines;
-    expect(explicit.map(lineText)).toEqual(texts);
+    const explicit = layoutRuns(generated, explicitlyBroken(generated, lines));
+    expect(explicit.map(lineText), context).toEqual(texts);
     explicit.forEach((line, index) => {
       const laid = lines[index]!;
-      expect(laid.advancePt, `${index}`).toBeCloseTo(line.advancePt, 6);
-      expect(laid.baselinePt - laid.bounds.yPt, `${index}`).toBeCloseTo(line.baselinePt - line.bounds.yPt, 6);
+      expect(laid.advancePt, `${index} of ${context}`).toBeCloseTo(line.advancePt, 6);
+      expect(laid.baselinePt - laid.bounds.yPt, `${index} of ${context}`).toBeCloseTo(line.baselinePt - line.bounds.yPt, 6);
     });
   });
 });

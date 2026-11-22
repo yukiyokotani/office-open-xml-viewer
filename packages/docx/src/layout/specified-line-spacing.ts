@@ -1,4 +1,5 @@
 import type { DocxCompatProfile } from './compat-profile.js';
+import { rubyCellOf } from '../line-breaker/ruby-cell.js';
 import type { LayoutLine, LayoutTextSeg } from '../line-layout.js';
 import type { NumberingMarkerShapeInput } from './types.js';
 import type { ParagraphLayoutSource, ParagraphTextBearingRun } from './text.js';
@@ -100,7 +101,7 @@ export function specifiedTextLineMetrics(
     if (!segment.text) continue;
     if (!/^[\x20-\x7e]+$/u.test(segment.text) || segment.bold || segment.italic
       || segment.underline || segment.strikethrough || segment.hyperlink
-      || segment.ruby || segment.vertAlign || segment.position || segment.smallCaps
+      || rubyCellOf(segment) || segment.vertAlign || segment.position || segment.smallCaps
       || segment.verticalRun || segment.textBoxLineFloor
       || !referenceSourceAdmitted(segment)) return null;
     first ??= segment;

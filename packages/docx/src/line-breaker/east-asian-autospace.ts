@@ -1,4 +1,5 @@
 import { compatOf } from '../layout/compat-profile.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import { wordCompressedSpaceLineFitApplies, wordEastAsianAutoSpacePt } from '../layout/line-compatibility.js';
 import { RESET_SLICED_TEXT_MEASUREMENT, slicedTextMetadata } from './advance.js';
@@ -49,11 +50,6 @@ function participates(segment: LayoutTextSeg): boolean {
   return segment.fitTextRegionIndex === undefined && !segment.tateChuYoko
     && segment.script !== 'complexScript' && segment.optionalHyphen === undefined
     && !segment.optionalHyphenGlyph;
-}
-
-/** A piece of a ruby base: its first piece carries `ruby`. */
-function rubyCell(segment: LayoutTextSeg): boolean {
-  return segment.ruby !== undefined || segment.rubyPiece === true;
 }
 
 function firstScalar(text: string): string | undefined {
@@ -127,7 +123,7 @@ export function assignEastAsianAutoSpace(
   for (let index = 0; index < segs.length; index += 1) {
     const segment = segs[index]!;
     const splits: number[] = [];
-    if (!('text' in segment) || !participates(segment) || rubyCell(segment)) {
+    if (!('text' in segment) || !participates(segment) || rubyCellOf(segment)) {
       // A ruby base's pieces are spaced at their seams below, never split.
       before = undefined;
     } else if (segment.text.length > 0) {
@@ -162,7 +158,7 @@ export function assignEastAsianAutoSpace(
     }
     // WORD_EAST_ASIAN_AUTO_SPACE: a ruby cell's edges interrupt adjacency;
     // its base pieces are spaced among themselves.
-    if (segment.ruby || (previous && rubyCell(previous) && !segment.rubyPiece)) previous = undefined;
+    if (previous && rubyCellOf(previous) !== rubyCellOf(segment)) previous = undefined;
     segment.autoSpaceBeforePt = undefined;
     segment.autoSpaceCompressible = undefined;
     // An empty metric host (an anchor character) has no glyph and no

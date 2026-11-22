@@ -7,7 +7,13 @@ import {
   wordRubyBaseOffset,
   wordRubyGuideSpacing,
 } from '../layout/line-compatibility.js';
-import type { LayoutTextSeg, RubyCellGeometry, RubyGuideRunFace, RubyGuideUnit } from './model.js';
+import type { LayoutTextSeg, RubyCellGeometry, RubyGroup, RubyGuideRunFace, RubyGuideUnit } from './model.js';
+
+/** WORD_RUBY_ALIGN_PLACEMENT: the ruby cell a segment is a piece of. Every
+ * piece of a ruby run carries its cell, and this is the one test of it. */
+export function rubyCellOf(segment: Pick<LayoutTextSeg, 'rubyGroup'>): RubyGroup | undefined {
+  return segment.rubyGroup;
+}
 
 /** Scripts whose letters join cursively: a guide run of them is one unit,
  * shaped and painted whole, or its joining forms would be lost. */
@@ -167,17 +173,36 @@ function verticalUnits(cells: readonly SpanGuideCell[], spaced: boolean): GuideU
   });
 }
 
-/** The guide's w:rt runs (§17.3.3.24) shaped at the guide size, each with
- * its own faces over the base run's request: the authored runs when they
- * spell the guide, else the whole guide in the base run's faces. */
 type GuideShape = NonNullable<ReturnType<NonNullable<LayoutTextSeg['textLayoutService']>['shape']>>;
+
+const FONT_SLOTS = ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const;
+type FontSlot = typeof FONT_SLOTS[number];
+type SlotFonts = Readonly<Record<FontSlot, string | null | undefined>>;
+
+/** Guide runs shaped as one text: the font each rFonts slot takes among the
+ * runs whose characters use that slot, and the one face they all select. */
+interface GuideSpan {
+  readonly start: number;
+  readonly texts: string[];
+  readonly shapes: GuideShape[];
+  readonly face: string | undefined;
+  readonly bold: boolean;
+  readonly italic: boolean;
+  readonly fonts: Record<FontSlot, string | null | undefined>;
+  readonly used: Set<FontSlot>;
+}
 
 /** The guide's w:rt runs (§17.3.3.24) shaped at the guide size, each with
  * its own faces over the base run's request: the authored runs when they
- * spell the guide, else the whole guide in the base run's faces. Adjacent
- * runs whose characters select the same face are shaped as one text, so a
- * run seam inside a word keeps its contextual (joining, kerned) forms; an
- * rFonts slot no character uses does not separate them. */
+ * spell the guide, else the whole guide in the base run's faces.
+ *
+ * Adjacent runs whose characters select the same face are shaped as one
+ * text, so a run seam inside a word keeps its contextual (joining, kerned)
+ * forms. Each character keeps the font of its own run's slot: runs join only
+ * when, for every slot the characters of either use, they name the same
+ * font, so the joined text is shaped with one font per slot. A slot no
+ * character uses does not separate runs. Each run is shaped once to learn
+ * its face and slots, and each joined text once: linear in the guide. */
 function guideShapes(
   first: LayoutTextSeg,
   ruby: NonNullable<LayoutTextSeg['ruby']>,
@@ -187,46 +212,64 @@ function guideShapes(
   const service = first.textLayoutService;
   const request = first.textShapeRequest;
   if (!service || !request) return undefined;
-  const runs: readonly (RubyGuideRunFace | { readonly text: string })[] = ruby.guideRuns ?? [{ text: ruby.text }];
-  const shapeRun = (run: RubyGuideRunFace | { readonly text: string }, text: string): GuideShape => {
-    const own = 'fonts' in run ? run : undefined;
-    const fonts = own ? {
-      ascii: own.fonts.ascii ?? request.fonts.ascii,
-      highAnsi: own.fonts.highAnsi ?? request.fonts.highAnsi,
-      eastAsia: own.fonts.eastAsia ?? request.fonts.eastAsia,
-      complexScript: own.fonts.complexScript ?? request.fonts.complexScript,
-    } : undefined;
-    return service.shape({
+  const shapeText = (text: string, face?: Readonly<{ fonts: SlotFonts; bold: boolean; italic: boolean }>): GuideShape =>
+    service.shape({
       ...independentTextShapeRequest(request, text),
       // The guide run's faces are resolved, theme references included.
-      ...(fonts ? { fonts, themeFonts: undefined, themeFontPresence: undefined } : {}),
-      ...(own ? { weight: own.bold ? 700 : 400, style: own.italic ? 'italic' as const : 'normal' as const } : {}),
+      ...(face ? {
+        fonts: face.fonts, themeFonts: undefined, themeFontPresence: undefined,
+        weight: face.bold ? 700 : 400, style: face.italic ? 'italic' as const : 'normal' as const,
+      } : {}),
       fontSizePt: sizePx,
       measure: true,
       // A vertical guide takes its geometry from its planned cells; only
       // its faces are read from the shape.
       ...(vertical ? { clusterGeometry: false } : {}),
     });
-  };
+  if (!ruby.guideRuns) return [{ start: 0, text: ruby.text, shape: shapeText(ruby.text) }];
   const faceOf = (shape: GuideShape): string | undefined => {
     const keys = new Set(shape.spans.map((span) => `${span.fontRoute.fingerprint}|${span.font.weight}|${span.font.style}`));
     return keys.size === 1 ? [...keys][0] : undefined;
   };
-  const entries: { start: number; text: string; shape: GuideShape; run: RubyGuideRunFace | { readonly text: string } }[] = [];
+  const slotsOf = (shape: GuideShape): Set<FontSlot> => new Set(shape.spans.flatMap((span) =>
+    [span.script, ...(span.semanticSlotSpans ?? []).map((slot) => slot.script)]));
+  const spans: GuideSpan[] = [];
   let start = 0;
-  for (const run of runs) {
-    const shape = shapeRun(run, run.text);
-    const previous = entries.at(-1);
+  for (const run of ruby.guideRuns) {
+    const fonts = Object.fromEntries(FONT_SLOTS.map((slot) => [slot, run.fonts[slot] ?? request.fonts[slot]])) as GuideSpan['fonts'];
+    const shape = shapeText(run.text, { fonts, bold: run.bold, italic: run.italic });
     const face = faceOf(shape);
-    if (previous && face !== undefined && faceOf(previous.shape) === face) {
-      const text = previous.text + run.text;
-      entries[entries.length - 1] = { ...previous, text, shape: shapeRun(previous.run, text) };
+    const used = slotsOf(shape);
+    const previous = spans.at(-1);
+    if (previous && face !== undefined && previous.face === face
+      && previous.bold === run.bold && previous.italic === run.italic
+      && [...used].every((slot) => !previous.used.has(slot) || previous.fonts[slot] === fonts[slot])) {
+      previous.texts.push(run.text);
+      previous.shapes.push(shape);
+      for (const slot of used) {
+        previous.fonts[slot] = fonts[slot];
+        previous.used.add(slot);
+      }
     } else {
-      entries.push({ start, text: run.text, shape, run });
+      spans.push({ start, texts: [run.text], shapes: [shape], face, bold: run.bold, italic: run.italic, fonts, used });
     }
     start += run.text.length;
   }
-  return entries.map(({ start: entryStart, text, shape }) => ({ start: entryStart, text, shape }));
+  return spans.flatMap((span) => {
+    if (span.shapes.length > 1) {
+      const text = span.texts.join('');
+      const joined = shapeText(text, span);
+      // Characters are classified in context: joined runs that no longer
+      // select their one face stay apart.
+      if (faceOf(joined) === span.face) return [{ start: span.start, text, shape: joined }];
+    }
+    let runStart = span.start;
+    return span.shapes.map((shape, index) => {
+      const entry = { start: runStart, text: span.texts[index]!, shape };
+      runStart += entry.text.length;
+      return entry;
+    });
+  });
 }
 
 /** A vertical guide is planned, and so painted, without kerning. */

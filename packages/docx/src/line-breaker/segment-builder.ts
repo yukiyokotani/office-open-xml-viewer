@@ -1,4 +1,5 @@
 import { compatOf } from '../layout/compat-profile.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
@@ -309,6 +310,15 @@ export function appendTextPiece(
         ...(guideRuns ? { guideRuns } : {}),
       }
     : undefined;
+  // WORD_RUBY_ALIGN_PLACEMENT: every piece emitted from a ruby base shares
+  // one cell, created with the base's first run. §17.3.3.25: a later
+  // w:rubyBase run (rubyBaseContinuation) joins the cell the run before it
+  // belongs to.
+  const previousSegment = segs.at(-1);
+  const rubyGroup: RubyGroup | undefined = ruby
+    ? { ruby, pieces: [] }
+    : 'rubyBaseContinuation' in r && r.rubyBaseContinuation && previousSegment && 'text' in previousSegment
+      ? rubyCellOf(previousSegment) : undefined;
   const revision = r.revision;
   const rtl = r.rtl === true ? true : undefined;
   const fitTextFragmentEntryIndex =
@@ -380,6 +390,7 @@ export function appendTextPiece(
     effectiveKerningThreshold,
     effectiveSnapToGrid,
     ruby,
+    rubyGroup,
     revision,
     fitTextFragmentEntryIndex,
     fitTextRegionIndex,
@@ -556,35 +567,12 @@ export function finalizeBuiltSegments(
   // boundaries use the complete displayed text, irrespective of font/run seams.
   // This acquires opportunities, without splitting or merging shaped segments.
   // Atomic cells and external-link syntax have their own owners below.
-  const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && segment.rubyPiece)
+  const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && rubyCellOf(segment))
     .map(segment => segment.sourceRunIndex));
-  // WORD_RUBY_ALIGN_PLACEMENT: the pieces of a ruby base, split by authored
-  // runs, script slot or case, share one group, and so one cell; they are one
-  // indivisible unit for wrapping.
-  for (let index = 0; index < segs.length; index++) {
-    const first = segs[index]!;
-    if (!('text' in first) || !first.ruby) continue;
-    const pieces: LayoutTextSeg[] = [first];
-    while (index + 1 < segs.length) {
-      const next = segs[index + 1]!;
-      // §17.3.3.25: every w:rubyBase run (rubyBaseContinuation) and every
-      // piece emitted from them belong to the cell the first one opens.
-      if (!('text' in next) || !next.rubyPiece || next.ruby) break;
-      next.joinPrev = true;
-      next.hardJoinPrev = true;
-      pieces.push(next);
-      index++;
-    }
-    const group: RubyGroup = { ruby: first.ruby, pieces };
-    pieces.forEach((piece, pieceIndex) => {
-      piece.rubyGroup = group;
-      piece.rubyPieceIndex = pieceIndex;
-    });
-  }
   for (let start = 0; start < segs.length;) {
     const ordinary = (s: LayoutSeg): s is LayoutTextSeg => 'text' in s
       && s.hyperlink?.kind !== 'external' && s.fitTextRegionIndex === undefined
-      && !s.ruby && !s.tateChuYoko && !rubyOwnedRuns.has(s.sourceRunIndex);
+      && !rubyCellOf(s) && !s.tateChuYoko && !rubyOwnedRuns.has(s.sourceRunIndex);
     if (!ordinary(segs[start]!)) { start++; continue; }
     let end = start;
     const group: LayoutTextSeg[] = [];
@@ -827,7 +815,7 @@ export function finalizeBuiltSegments(
   // REPLACES the default East-Asian table for a language and so must NOT be able
   // to drop the ASCII non-starters and re-orphan a Latin comma). The document's
   // kinsoku settings still govern the separate per-character CJK retract paths
-  // (kinsokuAdjustedSplit / crossRunKinsokuRetract), which read the layout kinsoku argument.
+  // (kinsokuAdjustedSplit / retractLeadingKinsoku), which read the layout kinsoku argument.
   // The ASCII non-starters (!),.:;?]}) live in that default table (core
   // rules.ts), so one membership test covers Latin and (incidentally) CJK forms.
   for (let i = 1; i < segs.length; i++) {
@@ -1221,6 +1209,7 @@ interface SegmentEmissionState {
   readonly effectiveSnapToGrid: boolean | undefined;
   readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number; align?: string;
     guideRuns?: readonly import('./model.js').RubyGuideRunFace[] } | undefined;
+  readonly rubyGroup: RubyGroup | undefined;
   readonly revision:
     | {
         readonly kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
@@ -1508,6 +1497,7 @@ function emitResolvedTextSegment(
     effectiveKerningThreshold,
     effectiveSnapToGrid,
     ruby,
+    rubyGroup,
     revision,
     fitTextFragmentEntryIndex,
     fitTextRegionIndex,
@@ -1548,7 +1538,7 @@ function emitResolvedTextSegment(
     && textShapeRequest.kerning === true && registeredLatinSlotRunCandidate(text);
   const uniformAllocation = environment.characterGridActive === false && environment.verticalCJK !== true
     && environment.paragraphRtl === false
-    && !rtl && !ruby && fitTextRegionIndex === undefined
+    && !rtl && !rubyGroup && fitTextRegionIndex === undefined
     && !base.smallCaps && !base.allCaps && !effectiveVertAlign
     && (effectiveCharacterSpacing == null || effectiveCharacterSpacing === 0)
     && (effectiveCharacterScale == null || effectiveCharacterScale === 1)
@@ -1818,10 +1808,13 @@ function emitResolvedTextSegment(
     background: base.background ?? null,
     colorAuto: r.colorAuto ?? false,
     border: r.border ?? null,
-    ruby: emissionState.firstSeg && ruby
-      ? { ...ruby, baseText: 'text' in r ? r.text : text }
-      : undefined,
-    ...(ruby || ('rubyBaseContinuation' in r && r.rubyBaseContinuation) ? { rubyPiece: true as const } : {}),
+    ruby: emissionState.firstSeg && ruby ? ruby : undefined,
+    ...(rubyGroup ? {
+      rubyGroup,
+      rubyPieceIndex: rubyGroup.pieces.length,
+      // A cell's later pieces never leave its first.
+      ...(rubyGroup.pieces.length > 0 ? { joinPrev: true as const, hardJoinPrev: true as const } : {}),
+    } : {}),
     revision,
     ...(revision && environment.showTrackedChanges === true
       ? {
@@ -1878,6 +1871,7 @@ function emitResolvedTextSegment(
     // rotate-fallback ink-extent advance correction in the measure passes.
     verticalRun: environment.verticalCJK && r.eastAsianVert !== true ? true : undefined,
   });
+  if (rubyGroup) (rubyGroup.pieces as LayoutTextSeg[]).push(segs.at(-1) as LayoutTextSeg);
   emissionState.firstSeg = false;
   emissionState.gluePending = false;
 }
