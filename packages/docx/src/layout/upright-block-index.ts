@@ -404,9 +404,10 @@ export type UprightDrawingLimits = Readonly<{ inlineEndPt: number; blockEndPt: n
  * (UprightBlockPageIndex, "Drawings move past tables").
  *
  * `blockers` are rectangles the drawing may not cover either: the drawings
- * it collides with (ECMA-376 §20.4.2.3, allowOverlap false). They are
- * cleared in the same search, so the place found is clear of the tables and
- * of the blockers at once.
+ * it collides with (ECMA-376 §20.4.2.3, allowOverlap false), as a list or
+ * as a query for those near the drawing's current place. They are cleared
+ * in the same search, so the place found is clear of the tables and of the
+ * blockers at once.
  *
  * Each route ends: a step moves the drawing past every rectangle it
  * covers, along one axis, and it never moves back along either, so a
@@ -420,7 +421,7 @@ export function uprightDrawingMovePt(
   rect: LayoutRect,
   limits: UprightDrawingLimits,
   planned?: readonly LayoutRect[],
-  blockers?: readonly LayoutRect[],
+  blockers?: readonly LayoutRect[] | ((current: LayoutRect) => readonly LayoutRect[]),
 ): Readonly<{ xPt: number; yPt: number }> | null {
   const route = (inlineFirst: boolean): Readonly<{ xPt: number; yPt: number }> | null => {
     let xPt = rect.xPt;
@@ -437,7 +438,11 @@ export function uprightDrawingMovePt(
         }
       };
       if (planned) for (const box of planned) meet(box);
-      if (blockers) for (const box of blockers) meet(box);
+      if (blockers) {
+        const near = typeof blockers === 'function'
+          ? blockers({ xPt, yPt, widthPt: rect.widthPt, heightPt: rect.heightPt }) : blockers;
+        for (let at = 0; at < near.length; at += 1) meet(near[at]!);
+      }
       if (index && index.tableCount > 0) {
         const first = bucketOf(yPt);
         const last = bucketOf(endYPt);

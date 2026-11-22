@@ -1448,6 +1448,51 @@ describe('upright block table of a vertical section', () => {
       ]);
     });
 
+    it('keeps a page-positioned drawing where the further layout of its page registered it', () => {
+      // The first rectangle follows its line; the second, positioned on
+      // the page, may not overlap and is placed below it. Laid out again
+      // with the second registered there, the first paragraph's text and
+      // rectangle move. The second stays where it is registered, so the
+      // table after them meets it where it is painted.
+      const pages = layOutPages('tbRl', [
+        anchoring(5, anchoredRectangle(435, -30, 60, 60, 'line')),
+        anchoring(5, anchoredRectangle(435, 90, 60, 60, 'page', 'page', false)),
+        P, T, P,
+      ]);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.drawings).toHaveLength(2);
+      expect(collisions(pages)).toEqual([]);
+      const [first, second] = pages[0]!.drawings;
+      expect(shared(first!.top, first!.top + first!.height, second!.top, second!.top + second!.height)).toBe(false);
+    });
+
+    it('places a table below a text box that grows to fit its text', () => {
+      // A 100 x 20 pt text box positioned on the page, fitted to twelve
+      // paragraphs (a:spAutoFit): its exclusion is registered when the page
+      // starts with the authored height, and its paragraph gives it the
+      // fitted one. The page is laid out again with the fitted exclusion,
+      // and the table that meets the box stacks below it.
+      const box = '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+        + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+        + '<wp:simplePos x="0" y="0"/>'
+        + '<wp:positionH relativeFrom="page"><wp:posOffset>1270000</wp:posOffset></wp:positionH>'
+        + '<wp:positionV relativeFrom="page"><wp:posOffset>762000</wp:posOffset></wp:positionV>'
+        + '<wp:extent cx="1270000" cy="254000"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="9" name="Box"/>'
+        + '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        + '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/><wps:spPr>'
+        + '<a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="254000"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>'
+        + `<wps:txbx><w:txbxContent>${paragraph('ab').repeat(12)}</w:txbxContent></wps:txbx>`
+        + '<wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:spAutoFit/></wps:bodyPr>'
+        + '</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+      const pages = layOutPages('tbLrV', [anchoring(5, box), P, T, P]);
+      const [fitted] = pages[0]!.drawings;
+      expect(fitted!.top).toBeCloseTo(60, 6);
+      expect(fitted!.height).toBeGreaterThan(20);
+      expect(pages[0]!.tables[0]!.top).toBeCloseTo(fitted!.top + fitted!.height, 6);
+      expect(collisions(pages)).toEqual([]);
+    });
+
     it.each(['tbRl', 'tbLrV'] as const)(
       'lays the page out again when a page-positioned drawing is placed past a text-positioned one (%s)',
       (direction) => {

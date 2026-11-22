@@ -137,11 +137,13 @@ export interface AcquiredParagraphBlock {
   readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
   /** `word-vertical-section-upright-block-table`: the wrapped drawings of
    * this acquisition whose text exclusion was registered when the page
-   * started somewhere else than where the acquisition places them (a
-   * drawing of an earlier paragraph, positioned from its text, was not
-   * known then), with the frame they are placed at. The paginator lays the
-   * page out again with each registered there (body-paginator.ts). */
-  readonly uprightDrawingPins?: readonly Readonly<{ occurrenceId: string; frame: LayoutRect }>[];
+   * started, with the geometry the acquisition gives them, and whether that
+   * differs from what was registered (a drawing of an earlier paragraph,
+   * positioned from its text, was not known then, or the drawing's own size
+   * was fitted to its text). The paginator pins them (body-paginator.ts). */
+  readonly uprightDrawingPins?: readonly Readonly<{
+    occurrenceId: string; pin: UprightDrawingPin; differs: boolean;
+  }>[];
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body';
     xPt: number;
@@ -370,12 +372,22 @@ export interface PageAnchorPrescanInput {
   )[];
   readonly location: BodyAcquisitionLocation;
   readonly availableInlineExtentPt: number;
-  /** `word-vertical-section-upright-block-table`: the frames at which
-   * drawings of this page are registered instead of being placed here: where
-   * an earlier layout of the page placed them
-   * (AcquiredParagraphBlock.uprightDrawingPins). */
-  readonly drawingPins?: ReadonlyMap<string, LayoutRect>;
+  /** `word-vertical-section-upright-block-table`: the drawings of this page
+   * that are registered with the geometry an earlier layout of the page
+   * acquired for them, instead of being placed here
+   * (AcquiredParagraphBlock.uprightDrawingPins); their paragraphs place them
+   * exactly there. */
+  readonly drawingPins?: ReadonlyMap<string, UprightDrawingPin>;
 }
+
+/** `word-vertical-section-upright-block-table`: the frame, text exclusion
+ * and wrap polygon a paragraph's acquisition gave a drawing whose exclusion
+ * is registered when its page starts, in section-logical page points. */
+export type UprightDrawingPin = Readonly<{
+  bounds: LayoutRect;
+  exclusionBounds: LayoutRect;
+  wrapPolygon?: readonly PointPt[];
+}>;
 
 export interface LineNumberGlyphMetrics {
   readonly widthPt: number;

@@ -18,6 +18,7 @@ import type {
   BodyParagraphAcquisitionInput,
   BodyTableContinuationCursor,
   CarriedHostAnchor,
+  UprightDrawingPin,
   FrameCarryObservation,
   PageAnchorPrescanInput,
 } from './body-layout-kernel.js';
@@ -1595,17 +1596,36 @@ function* paginateBodyPassSteps(
   const uprightPinKey = (tableKey: string, fragmentStartKey: string): string => `${tableKey}|${fragmentStartKey}`;
   let uprightPinPage = -1;
   let uprightPins = new Map<string, UprightPagePin>();
-  // Drawing pins of the live page, by acquisition occurrence: a wrapped
-  // drawing whose text exclusion was registered when the page started
-  // somewhere else than where its paragraph's acquisition then placed it
-  // (AcquiredParagraphBlock.uprightDrawingPins) is registered at that frame
-  // when the page is laid out again, so the text and the tables of the page
-  // meet it where it is painted. The page is laid out again as soon as
-  // the paragraph finds it, with the table pins found so far. Each drawing
-  // is pinned at most once per page, so this adds at most one layout of the
-  // page per drawing registered at its start; a pinned drawing whose
-  // acquisition places it elsewhere again keeps its pin.
-  let uprightDrawingPins = new Map<string, LayoutRect>();
+  // Drawing pins of the live page, by acquisition occurrence.
+  //
+  // The text exclusion of a wrapped drawing positioned on the page is
+  // registered when the page starts, before its paragraph is laid out. The
+  // paragraph can then give it another geometry: it places the drawing
+  // clear of a drawing of an earlier paragraph that is positioned from its
+  // text and was not known at the start, or it fits the drawing's size to
+  // its text. Text and tables laid out in between met the exclusion where
+  // the drawing is not painted.
+  //
+  // Every layout of a page collects, for the drawings registered at its
+  // start whose paragraphs it accepts, the geometry those paragraphs gave
+  // them (AcquiredParagraphBlock.uprightDrawingPins). When any differs
+  // from what was registered, the page is laid out once more when it
+  // closes, for all of them together: each is registered at the start with
+  // the geometry collected, and its paragraph places it exactly there
+  // (pinnedAnchorFrames), so the registered and the painted geometry of a
+  // pinned drawing cannot differ again. The tables that layout placed met
+  // the stale exclusions, so its table pins are dropped and found again.
+  //
+  // Termination: a layout asks for this only when a drawing that is not
+  // pinned yet differs, and that drawing is pinned afterwards for good, so
+  // a page is laid out again at most once per drawing registered at its
+  // start (once in all, unless the further layout brings a drawing to the
+  // page that the earlier one did not accept there); after each, the table
+  // pins are bounded as above.
+  let uprightDrawingPins = new Map<string, UprightDrawingPin>();
+  /** Collected by this layout of the live page; whether any differs. */
+  let foundDrawingPins = new Map<string, UprightDrawingPin>();
+  let drawingReplayPending = false;
   /** This layout of the live page found pins that are not registered yet. */
   let uprightReplayPending = false;
   /** Pins asked for, by page and pin key: each is asked for once per page. */
@@ -1627,6 +1647,8 @@ function* paginateBodyPassSteps(
       || uprightPinsDroppedHere()) return false;
     uprightPins = new Map();
     uprightDrawingPins = new Map();
+    foundDrawingPins = new Map();
+    drawingReplayPending = false;
     uprightReplayPending = false;
     uprightPinsDroppedPage = state.flow.pageIndex;
     return true;
@@ -1636,6 +1658,8 @@ function* paginateBodyPassSteps(
       uprightPinPage = pageIndex;
       uprightPins = new Map();
       uprightDrawingPins = new Map();
+      foundDrawingPins = new Map();
+      drawingReplayPending = false;
       uprightReplayPending = false;
     }
     return uprightPins;
@@ -1669,6 +1693,16 @@ function* paginateBodyPassSteps(
    * table gives way first). The other pins stay. */
   const settleUprightPinsBeforePageClose = (): void => {
     if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex) return;
+    if (drawingReplayPending) {
+      // Pin every drawing this layout collected, and drop its table pins
+      // with what was asked for them: they are found again against the
+      // drawings where they lie.
+      for (const [occurrenceId, pin] of foundDrawingPins) uprightDrawingPins.set(occurrenceId, pin);
+      uprightPins = new Map();
+      const asked = `${state.flow.pageIndex}|`;
+      for (const key of uprightPinnedOnce) if (key.startsWith(asked)) uprightPinnedOnce.delete(key);
+      throw new UprightBlockPageReplay();
+    }
     let replay = uprightReplayPending;
     let released: UprightPagePin | null = null;
     for (const pin of uprightPins.values()) {
@@ -3508,26 +3542,19 @@ function* paginateBodyPassSteps(
         }
         if (!selected.fragment) throw new Error('Paragraph acquisition made no progress');
         if (acquired.uprightDrawingPins && canRecoverOnPage && !uprightPinsDroppedHere()) {
-          // `word-vertical-section-upright-block-table`: a drawing of this
-          // fragment was registered when the page started somewhere else
-          // than where the fragment places it. The page is laid out again
-          // from its start right away, before the fragment is accepted and
-          // before any table after it is placed against the stale
-          // exclusion.
+          // `word-vertical-section-upright-block-table`: the drawings of
+          // this fragment that were registered when the page started, with
+          // the geometry the fragment gives them (uprightDrawingPins above).
           const accepted = new Set(selected.fragment.drawings.flatMap((drawing) => {
             const occurrenceId = drawing.anchorLayer?.acquisitionOccurrenceId ?? drawing.anchorLayer?.occurrenceId;
             return occurrenceId === undefined ? [] : [occurrenceId];
           }));
-          let pinned = false;
-          for (const pin of acquired.uprightDrawingPins) {
-            const askedKey = `${state.flow.pageIndex}|drawing:${pin.occurrenceId}`;
-            if (!accepted.has(pin.occurrenceId) || uprightPinnedOnce.has(askedKey)) continue;
-            uprightPinnedOnce.add(askedKey);
-            uprightPinsOf(state.flow.pageIndex);
-            uprightDrawingPins.set(pin.occurrenceId, pin.frame);
-            pinned = true;
+          uprightPinsOf(state.flow.pageIndex);
+          for (const found of acquired.uprightDrawingPins) {
+            if (!accepted.has(found.occurrenceId) || uprightDrawingPins.has(found.occurrenceId)) continue;
+            foundDrawingPins.set(found.occurrenceId, found.pin);
+            if (found.differs) drawingReplayPending = true;
           }
-          if (pinned) throw new UprightBlockPageReplay();
         }
         // Commit exactly the plan objects charged during selection, taken
         // against the pre-acceptance page state; plans of rejected later
@@ -3943,6 +3970,8 @@ function* paginateBodyPassSteps(
       // registered first: a drawing placed when the page's layout starts
       // lies below the pinned tables.
       uprightReplayPending = false;
+      foundDrawingPins = new Map();
+      drawingReplayPending = false;
       for (const pin of uprightPinsOf(state.flow.pageIndex).values()) {
         pin.consumed = false;
         session.commitUprightBlocks?.(pin.registration);

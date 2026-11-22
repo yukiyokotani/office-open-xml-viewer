@@ -83,6 +83,10 @@ export interface AnchorFloatRegistrationState extends FloatRegistrationState {
    * drawings carried to this page, keyed by anchor occurrence. The anchor
    * paragraph keeps the carried frame instead of re-resolving it. */
   frozenAnchorFrames?: Map<string, LayoutRect>;
+  /** `word-vertical-section-upright-block-table`: frames of the drawings
+   * pinned for this layout of the page, keyed by anchor occurrence; the
+   * anchor paragraph places each exactly there. */
+  pinnedAnchorFrames?: Map<string, LayoutRect>;
   verticalCJK?: boolean;
   verticalAllRotated?: boolean;
   verticalPhys?: PhysicalAnchorFrame;

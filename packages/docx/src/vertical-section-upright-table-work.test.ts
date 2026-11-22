@@ -31,12 +31,18 @@ import {
 
 const work = vi.hoisted(() => ({
   boxes: new WeakSet<object>(), registered: 0, recordReads: 0, failPinnedLayouts: false, failures: 0,
+  pageIndexes: 0,
 }));
 
 vi.mock('./layout/upright-block-index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./layout/upright-block-index.js')>();
   return {
     ...actual,
+    // One per layout of a page, and one per prescan that indexes drawings.
+    emptyUprightBlockPageIndex: () => {
+      work.pageIndexes += 1;
+      return actual.emptyUprightBlockPageIndex();
+    },
     addUprightBlockBox: (...args: Parameters<typeof actual.addUprightBlockBox>) => {
       work.boxes.add(args[1]);
       work.registered += 1;
@@ -297,6 +303,38 @@ describe('upright block table placement work', () => {
     const small = measure(8);
     const large = measure(16);
     expect(large).toBeLessThanOrEqual(3 * small);
+  }, 300_000);
+
+  it('lays a page out again once for all the drawings their paragraphs place elsewhere', () => {
+    // Pairs of paragraphs after a table: the first anchors a rectangle
+    // positioned down its paragraph, the second one positioned on the page
+    // that may not overlap and lies over the first. Each second rectangle
+    // is registered when the page starts, before the first is known, and
+    // its paragraph then places it below the first. The page is laid out
+    // again once for all pairs, and each rectangle is placed against the
+    // rectangles near it: neither the layouts of the page nor the drawing
+    // records read per pair grow with the number of pairs.
+    const measure = (pairs: number) => {
+      const body = [table(2), ...Array.from({ length: pairs }, (_, at) => [
+        P.replace('</w:p>', `${anchoredRectangle(70 + 30 * at, 310, 10, 20, 'paragraph')}</w:p>`),
+        P.replace('</w:p>', `${anchoredRectangle(70 + 30 * at, 380, 10, 20, 'page', 'page', false)}</w:p>`),
+      ]).flat()];
+      const before = work.pageIndexes;
+      const { result, counts } = counting(() => layOutPages('tbLrV', body, 1, 240));
+      expect(result).toHaveLength(1);
+      expect(result[0]!.drawings).toHaveLength(2 * pairs);
+      // Every second rectangle lies directly below the first of its pair.
+      for (let at = 0; at < pairs; at += 1) {
+        const [first, second] = [result[0]!.drawings[2 * at]!, result[0]!.drawings[2 * at + 1]!];
+        expect(second.left).toBeCloseTo(first.left, 6);
+        expect(second.top).toBeCloseTo(first.top + first.height, 6);
+      }
+      return { layouts: work.pageIndexes - before, drawings: counts.drawings };
+    };
+    const small = measure(4);
+    const large = measure(8);
+    expect(large.layouts).toBe(small.layouts);
+    expect(large.drawings).toBeLessThanOrEqual(2 * small.drawings + 16);
   }, 300_000);
 
   it('reads no placed table for a drawing that lies clear of the tables', () => {

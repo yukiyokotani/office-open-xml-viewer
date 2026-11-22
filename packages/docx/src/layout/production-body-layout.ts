@@ -151,20 +151,24 @@ import {
 } from './table-pagination.js';
 import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, anchorAxisOwnership, anchorObstacleMove, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, anchorAxisOwnership, anchorCollisionBlockers, anchorObstacleMove, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import { WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
+import type { UprightDrawingPin } from './body-layout-kernel.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
 import {
   addUprightBlockBox,
   addUprightBlockExclusion,
+  addUprightPageDrawing,
   addUprightTableBox,
   emptyUprightBlockPageIndex,
   moveUprightPageDrawingsBelowTableBox,
   uprightRegistrationTableBox,
   uprightPrecedingDrawings,
   uprightBlockExclusionsAhead,
+  uprightPageDrawingsNear,
+  type UprightBlockPageIndex,
   type UprightBlockExclusion,
   type UprightBlockRegistration,
   type UprightTableBoxVersions,
@@ -686,6 +690,9 @@ function acquireBodyParagraphAtLocation(
       hostFlowPageTranslationPt: BODY_HOST_FLOW_PAGE_TRANSLATION,
       ...(state.frozenAnchorFrames && state.frozenAnchorFrames.size > 0
         ? { frozenAnchorFrames: state.frozenAnchorFrames }
+        : {}),
+      ...(source.path.length === 1 && state.pinnedAnchorFrames && state.pinnedAnchorFrames.size > 0
+        ? { pinnedAnchorFrames: state.pinnedAnchorFrames }
         : {}),
     },
     continuation.boundary === null
@@ -1864,18 +1871,12 @@ function measureBodyParagraphEntry(
   // public wrapNone run therefore has no collision entry) until the Series
   // B/C bridge removal migrates those runs to the retained OOXML contract.
   const collisionEntries = ownedParagraphAnchorCollisions(layout);
-  // `word-vertical-section-upright-block-table`: a drawing whose exclusion
-  // was registered when the page started (the registry already holds it)
-  // elsewhere than where this acquisition places it.
+  // `word-vertical-section-upright-block-table`: the drawings whose
+  // exclusion was registered when the page started (the registry already
+  // holds them), with the geometry this acquisition gives them.
   const uprightDrawingPins = request.continuation.boundary !== null || collisionEntries.length === 0
-    || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys) ? []
-    : collisionEntries.flatMap((entry) => {
-        const registered = sessionState.floatRegistry.entries.find((float) =>
-          float.kind === 'shape' && float.occurrenceId === entry.occurrenceId);
-        return registered && (Math.abs(registered.bounds.xPt - entry.bounds.xPt) > 1e-6
-          || Math.abs(registered.bounds.yPt - entry.bounds.yPt) > 1e-6)
-          ? [Object.freeze({ occurrenceId: entry.occurrenceId, frame: entry.bounds })] : [];
-      });
+    || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)
+    ? [] : registeredDrawingPins(sessionState, layout, collisionEntries);
   return Object.freeze({
     layout,
     ...(uprightDrawingPins.length > 0 ? { uprightDrawingPins: Object.freeze(uprightDrawingPins) } : {}),
@@ -2558,8 +2559,46 @@ function prescanBodyPageAnchors(
   // drawings are the ones accepted on the page so far and the ones this
   // prescan placed before it for the same or an earlier paragraph; a drawing
   // of an earlier paragraph that is positioned from its text is not known
-  // yet. Null outside such a section.
-  const placedHere: Array<Readonly<{ paragraphIndex: number; collision: DrawingMLCollisionEntryPt }>> = [];
+  // yet. A drawing pinned by an earlier layout of the page is registered
+  // with the geometry that layout acquired, and its paragraph places it
+  // exactly there (request.drawingPins). Null outside such a section.
+  //
+  // The drawings placed so far are kept in a two-axis index of their own
+  // (the page index's drawing cells), so a search reads the drawings near
+  // its current place, not every drawing of the page.
+  type Placed = { anchorIndex: number; exclusion: LayoutRect; frame: LayoutRect; registeredFrame: LayoutRect };
+  const placed: Placed[] = [];
+  const placedCollisions = new WeakMap<object, DrawingMLCollisionEntryPt>();
+  // Built for the first search that asks: the drawings accepted on the page
+  // so far (of earlier paragraphs), then those placed here.
+  let placedIndex: UprightBlockPageIndex | null = null;
+  let acceptedRecorded = false;
+  const recordPlaced = (paragraphIndex: number, collision: DrawingMLCollisionEntryPt): void => {
+    const drawing: Placed = {
+      anchorIndex: paragraphIndex, exclusion: collision.bounds, frame: collision.bounds, registeredFrame: collision.bounds,
+    };
+    placedCollisions.set(drawing, collision);
+    placed.push(drawing);
+    if (placedIndex) addUprightPageDrawing(placedIndex, drawing, uprightDrawingLimits(state));
+  };
+  const recordAccepted = (): void => {
+    if (acceptedRecorded) return;
+    acceptedRecorded = true;
+    const accepted = sessionState.drawingCollisionRegistry.entries;
+    for (let at = 0; at < accepted.length; at += 1) recordPlaced(-1, accepted[at]!);
+  };
+  const placedNear = (rect: LayoutRect) => {
+    recordAccepted();
+    if (!placedIndex) {
+      placedIndex = emptyUprightBlockPageIndex();
+      for (let at = 0; at < placed.length; at += 1) {
+        addUprightPageDrawing(placedIndex, placed[at]!, uprightDrawingLimits(state));
+      }
+    }
+    return uprightPageDrawingsNear(
+      placedIndex, rect.yPt, rect.yPt + rect.heightPt, rect.xPt, rect.xPt + rect.widthPt,
+    );
+  };
   const placeAmongObstacles = (
     anchor: Readonly<{ occurrenceId: string; paragraphSource: SourceRef }>,
     drawing: Readonly<{
@@ -2570,45 +2609,50 @@ function prescanBodyPageAnchors(
       wrapped: boolean;
       behavior: Readonly<{ allowOverlap: boolean | null; relativeHeight: number | null }>;
     }>,
-  ): Readonly<{ xPt: number; yPt: number }> | null => {
+  ): Readonly<{ move: Readonly<{ xPt: number; yPt: number }> | null; pin?: UprightDrawingPin }> => {
     if (anchor.paragraphSource.path.length !== 1 || isPageObjectSource(anchor.paragraphSource)
-      || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return null;
+      || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return { move: null };
     const paragraphIndex = anchor.paragraphSource.path[0]!;
     const { allowOverlap, relativeHeight } = drawing.behavior;
-    // Pinned by an earlier layout of the page, where its acquisition placed
-    // it past a drawing that is not known here (body-paginator.ts).
-    const pinned = request.drawingPins?.get(anchor.occurrenceId);
-    const move = pinned
-      ? { xPt: pinned.xPt - drawing.rect.xPt, yPt: pinned.yPt - drawing.rect.yPt }
-      : allowOverlap === null || relativeHeight === null ? null : anchorObstacleMove({
+    const pin = request.drawingPins?.get(anchor.occurrenceId);
+    if (pin) {
+      if (!state.pinnedAnchorFrames) state.pinnedAnchorFrames = new Map();
+      state.pinnedAnchorFrames.set(anchor.occurrenceId, pin.bounds);
+    }
+    const blockersAmong = (candidates: readonly Readonly<{ anchorIndex: number }>[]) => anchorCollisionBlockers({
+      occurrenceId: anchor.occurrenceId,
+      allowOverlap: allowOverlap!,
+      relativeHeight: relativeHeight!,
+      verticalOwnership: drawing.verticalOwnership,
+      externalCollisions: candidates.flatMap((placed) =>
+        placed.anchorIndex < paragraphIndex ? [placedCollisions.get(placed)!] : []),
+      sameParagraphCollisions: candidates.flatMap((placed) =>
+        placed.anchorIndex === paragraphIndex ? [placedCollisions.get(placed)!] : []),
+    });
+    const move = pin || allowOverlap === null || relativeHeight === null ? null : anchorObstacleMove({
       occurrenceId: anchor.occurrenceId,
       rect: drawing.rect,
       exclusionBounds: drawing.exclusionBounds,
-      verticalOwnership: drawing.verticalOwnership,
-      allowOverlap,
-      relativeHeight,
-      externalCollisions: [
-        ...sessionState.drawingCollisionRegistry.entries,
-        ...placedHere.flatMap((placed) => placed.paragraphIndex < paragraphIndex ? [placed.collision] : []),
-      ],
-      sameParagraphCollisions: placedHere.flatMap((placed) =>
-        placed.paragraphIndex === paragraphIndex ? [placed.collision] : []),
+      blockers: () => {
+        if (allowOverlap) return [];
+        recordAccepted();
+        return blockersAmong(placed);
+      },
+      near: (current) => allowOverlap ? [] : blockersAmong(placedNear(current)).map((blocker) => blocker.bounds),
       ...uprightDrawingLimits(state),
       ...(drawing.wrapped ? { uprightTables: { index: state.uprightBlockIndex } } : {}),
     });
-    placedHere.push({
-      paragraphIndex,
-      collision: Object.freeze({
-        occurrenceId: anchor.occurrenceId,
-        bounds: move && (move.xPt !== 0 || move.yPt !== 0)
-          ? Object.freeze({ ...drawing.rect, xPt: drawing.rect.xPt + move.xPt, yPt: drawing.rect.yPt + move.yPt })
-          : drawing.rect,
-        horizontalOwnership: drawing.horizontalOwnership,
-        verticalOwnership: drawing.verticalOwnership,
-        ...(relativeHeight === null ? {} : { relativeHeight }),
-      }),
+    const collision = Object.freeze({
+      occurrenceId: anchor.occurrenceId,
+      bounds: pin ? pin.bounds : move && (move.xPt !== 0 || move.yPt !== 0)
+        ? Object.freeze({ ...drawing.rect, xPt: drawing.rect.xPt + move.xPt, yPt: drawing.rect.yPt + move.yPt })
+        : drawing.rect,
+      horizontalOwnership: drawing.horizontalOwnership,
+      verticalOwnership: drawing.verticalOwnership,
+      ...(relativeHeight === null ? {} : { relativeHeight }),
     });
-    return move;
+    recordPlaced(paragraphIndex, collision);
+    return pin ? { move: null, pin } : { move };
   };
   const entries = request.anchors.flatMap((anchor): readonly FloatRegistryEntryPt[] => {
     if (anchor.kind === 'frame') {
@@ -2643,7 +2687,7 @@ function prescanBodyPageAnchors(
       const behavior = carrier.type !== 'paragraph' ? undefined : carrier.runs.flatMap((run) =>
         'anchorAcquisitionInput' in run && run.anchorAcquisitionInput?.occurrenceId === anchor.occurrenceId
           ? [run.anchorAcquisitionInput.behavior] : [])[0];
-      const move = !behavior ? null : placeAmongObstacles(anchor, {
+      const { move, pin } = !behavior ? { move: null } : placeAmongObstacles(anchor, {
         rect: carry.bounds,
         exclusionBounds: carry.exclusionBounds,
         horizontalOwnership: carry.horizontalOwnership ?? 'host',
@@ -2660,14 +2704,15 @@ function prescanBodyPageAnchors(
           occurrenceId: anchor.occurrenceId,
           exclusionId: anchor.occurrenceId,
           paragraphId: paragraphIdFor(anchor.paragraphSource),
-          bounds: shifted(carry.bounds),
-          exclusionBounds: shifted(carry.exclusionBounds),
+          bounds: pin ? pin.bounds : shifted(carry.bounds),
+          exclusionBounds: pin ? pin.exclusionBounds : shifted(carry.exclusionBounds),
           ...(carry.horizontalOwnership ? { horizontalOwnership: carry.horizontalOwnership } : {}),
           ...(carry.verticalOwnership ? { verticalOwnership: carry.verticalOwnership } : {}),
           wrap: carry.wrap,
           wrapSide: carry.wrapSide ?? null,
           ...(carry.wrapDistances ? { wrapDistances: carry.wrapDistances } : {}),
-          ...(carry.wrapPolygon ? { wrapPolygon: Object.freeze(carry.wrapPolygon.map(shifted)) } : {}),
+          ...(pin?.wrapPolygon ? { wrapPolygon: pin.wrapPolygon }
+            : carry.wrapPolygon && !pin ? { wrapPolygon: Object.freeze(carry.wrapPolygon.map(shifted)) } : {}),
           ...(carry.topEdgeInclusiveFromYPt === undefined
             ? {} : { topEdgeInclusiveFromYPt: carry.topEdgeInclusiveFromYPt }),
           ...(carry.anchorLineExemptTopPt === undefined
@@ -2831,7 +2876,7 @@ function prescanBodyPageAnchors(
       : result;
     const resolvedWrapBounds = retainedResult.geometry.wrapBounds;
     const wrapped = resolvedWrapBounds !== null && retainedResult.geometry.wrap.kind !== 'none';
-    const move = verticalSpace === undefined ? null : placeAmongObstacles(anchor, {
+    const { move, pin } = verticalSpace === undefined ? { move: null } : placeAmongObstacles(anchor, {
       rect: retainedResult.geometry.objectFrame,
       exclusionBounds: resolvedWrapBounds ?? retainedResult.geometry.objectFrame,
       horizontalOwnership: anchorAxisOwnership(retainedResult, 'horizontal'),
@@ -2845,9 +2890,9 @@ function prescanBodyPageAnchors(
     const shifted = <Rect extends { xPt: number; yPt: number }>(rect: Rect): Rect =>
       !move || (move.xPt === 0 && move.yPt === 0) ? rect
         : Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });
-    const wrapBounds = shifted(resolvedWrapBounds);
+    const wrapBounds = pin ? pin.exclusionBounds : shifted(resolvedWrapBounds);
     const polygon =
-      retainedResult.geometry.wrap.polygon?.points.map(shifted) ??
+      (pin ? pin.wrapPolygon : retainedResult.geometry.wrap.polygon?.points.map(shifted)) ??
       Object.freeze([
         Object.freeze({ xPt: wrapBounds.xPt, yPt: wrapBounds.yPt }),
         Object.freeze({ xPt: wrapBounds.xPt + wrapBounds.widthPt, yPt: wrapBounds.yPt }),
@@ -2862,7 +2907,7 @@ function prescanBodyPageAnchors(
         kind: 'shape' as const,
         occurrenceId: anchor.occurrenceId,
         paragraphId: paragraphIdFor(anchor.paragraphSource),
-        bounds: shifted(retainedResult.geometry.objectFrame),
+        bounds: pin ? pin.bounds : shifted(retainedResult.geometry.objectFrame),
         exclusionBounds: wrapBounds,
         wrap: retainedResult.geometry.wrap.kind,
         wrapSide: retainedResult.geometry.wrap.side,
@@ -2929,6 +2974,7 @@ function resetBodyPageAcquisition(
   state.floatParaSeq = 0;
   state.pageAnchorPrescanned = new Set();
   state.frozenAnchorFrames = new Map();
+  state.pinnedAnchorFrames = new Map();
   state.uprightBlockIndex = emptyUprightBlockPageIndex();
   sessionState.floatRegistry = Object.freeze({
     coordinateSpace: 'logical-page-points' as const,
@@ -3241,6 +3287,46 @@ function acquirePublicParagraphFloats(
       });
     }),
   );
+}
+
+/** The wrapped drawings of `layout` that the float registry already holds
+ * (registered when the page started), with the frame, text exclusion and
+ * wrap polygon the acquisition gave them, and whether the registered frame
+ * or exclusion differs from those (AcquiredParagraphBlock.uprightDrawingPins). */
+function registeredDrawingPins(
+  sessionState: BodySessionDependencies['sessionState'],
+  layout: ParagraphLayout,
+  collisions: readonly DrawingMLCollisionEntryPt[],
+): ReadonlyArray<Readonly<{ occurrenceId: string; pin: UprightDrawingPin; differs: boolean }>> {
+  const owned = new Set<string>();
+  for (let at = 0; at < collisions.length; at += 1) owned.add(collisions[at]!.occurrenceId);
+  const registered = new Map<string, FloatRegistryEntryPt>();
+  const entries = sessionState.floatRegistry.entries;
+  for (let at = 0; at < entries.length; at += 1) {
+    const entry = entries[at]!;
+    if (entry.kind === 'shape' && owned.has(entry.occurrenceId)) registered.set(entry.occurrenceId, entry);
+  }
+  if (registered.size === 0) return [];
+  const differ = (first: LayoutRect, second: LayoutRect) =>
+    Math.abs(first.xPt - second.xPt) > 1e-6 || Math.abs(first.yPt - second.yPt) > 1e-6
+    || Math.abs(first.widthPt - second.widthPt) > 1e-6 || Math.abs(first.heightPt - second.heightPt) > 1e-6;
+  const frames = new Map((layout.anchorFrames ?? []).flatMap((frame) =>
+    frame.status === 'resolved' ? [[frame.occurrenceId, frame] as const] : []));
+  return collisions.flatMap((collision) => {
+    const entry = registered.get(collision.occurrenceId);
+    const frame = frames.get(collision.occurrenceId);
+    if (!entry || !frame || !frame.geometry.wrapBounds || frame.geometry.wrap.kind === 'none') return [];
+    const exclusionBounds = frame.geometry.wrapBounds;
+    return [Object.freeze({
+      occurrenceId: collision.occurrenceId,
+      pin: Object.freeze({
+        bounds: collision.bounds,
+        exclusionBounds,
+        ...(frame.geometry.wrap.polygon ? { wrapPolygon: frame.geometry.wrap.polygon.points } : {}),
+      }),
+      differs: differ(entry.bounds, collision.bounds) || differ(entry.exclusionBounds, exclusionBounds),
+    })];
+  });
 }
 
 function retainedBodyParagraphFloatEntries(
