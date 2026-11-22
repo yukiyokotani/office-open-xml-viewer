@@ -1551,8 +1551,11 @@ export function performAddToLine(
       ? wordVerticalSingleLineExtraPx(intendedEm, verticalFarEastClass(ts)) : 0;
     const designIntended = horizontalDesignIntended > 0
       ? horizontalDesignIntended + verticalExtra : 0;
+    // WORD_VERTICAL_LINE_CENTRED_BOX: on a line grid a vertical line of text
+    // without East Asian characters takes whole cells from its design single
+    // line in either code-page class.
     if (paintsInlineInk && !metricEastAsian && !ts.ruby
-      && ts.resolvedLatinGridCellAllocation === true) {
+      && (ts.resolvedLatinGridCellAllocation === true || Boolean(ts.verticalRun || ts.tateChuYoko))) {
       breakerState.lineLatinGridCountSingle = Math.max(breakerState.lineLatinGridCountSingle, designIntended);
     }
     const intended = Math.max(designIntended,
