@@ -473,6 +473,14 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
       }),
     });
   });
+  // Immutability boundary for this engine-acquired body input, not a trust
+  // boundary: snapshotPlainData returns a frozen copy and reuses roots and
+  // block layouts it has already processed. In production its explicit checks
+  // reject functions, symbols, non-finite numbers and non-array objects whose
+  // prototype is not Object.prototype or null with a TypeError; it reads
+  // enumerable getters (a getter that throws also surfaces as a TypeError)
+  // and preserves cycles. Rejecting accessors, cycles and proxies needs the
+  // strict pre-pass, which validation-policy.ts disables in production.
   return snapshotPlainData({
     source: { story: 'body', storyInstance: 'body', path: [] },
     compat: acquired.compat,
