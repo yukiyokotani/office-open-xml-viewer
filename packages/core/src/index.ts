@@ -863,6 +863,7 @@ export {
 export { loadNativeRouteSentinels } from './fonts/route-sentinels';
 export {
   measureNativeRouteNormalLines,
+  namedFamiliesDrawText,
   verifyNativeRouteNormalLines,
   type NativeRouteLineRequest,
   type NativeRouteNormalLine,

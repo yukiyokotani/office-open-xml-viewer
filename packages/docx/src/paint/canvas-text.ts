@@ -3,7 +3,7 @@ import {
   canvasFontString,
   withVertFeature,
 } from '@silurus/ooxml-core';
-import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
+import { restoreCanvasLanguage, saveCanvasState, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { fillRetainedText } from './canvas-text-fill.js';
 import type { Matrix2DData, ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
@@ -116,7 +116,7 @@ function paintRetainedGlyph(
   if (operation.kerning) ctx.fontKerning = operation.kerning;
   const previousLang = selectCanvasLanguage(ctx, operation.lang);
   if (upright) {
-    ctx.save();
+    saveCanvasState(ctx);
     ctx.translate(operation.origin.xPt, operation.origin.yPt);
     ctx.rotate(-Math.PI / 2);
     fillRetainedText(context, font, operation.text, 0, 0);
@@ -336,7 +336,7 @@ function paintLineContents(
       const glyphOffsetXPt = op.glyphOffsetPt?.xPt ?? 0;
       const glyphOffsetYPt = op.glyphOffsetPt?.yPt ?? 0;
       if (op.glyphOrientation === 'upright') {
-        ctx.save();
+        saveCanvasState(ctx);
         ctx.translate(originXPt, originYPt);
         ctx.rotate(-Math.PI / 2);
         // The enclosing vertical page transform maps the run's advance axis
@@ -356,7 +356,7 @@ function paintLineContents(
         else draw();
         ctx.restore();
       } else if (op.glyphOrientation === 'rotate') {
-        ctx.save();
+        saveCanvasState(ctx);
         ctx.translate(originXPt, originYPt);
         if (op.scaleX !== 1) ctx.scale(op.scaleX, 1);
         ctx.textAlign = 'center';
@@ -365,7 +365,7 @@ function paintLineContents(
         fillRetainedText(context, font, text, glyphOffsetXPt, glyphOffsetYPt);
         ctx.restore();
       } else if (op.scaleX !== 1) {
-        ctx.save();
+        saveCanvasState(ctx);
         ctx.translate(originXPt + glyphOffsetXPt, originYPt + glyphOffsetYPt);
         ctx.scale(op.scaleX, 1);
         ctx.letterSpacing = `${op.letterSpacingPt / op.scaleX}px`;

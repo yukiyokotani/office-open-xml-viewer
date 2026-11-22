@@ -38,6 +38,8 @@
  * in the decision; it is a probe of the measuring context itself.
  */
 
+import { saveCanvasState } from '../internal/canvas-language.js';
+
 /**
  * Reference em in CSS px. Embedded bitmap strikes are indexed by a uint8 ppem
  * (OpenType `EBLC`/`CBLC` BitmapSize.ppemX/ppemY) and `hdmx` device records by
@@ -394,7 +396,7 @@ export function fillTextAtReference(
   y: number,
 ): void {
   const spacing = ctx.letterSpacing;
-  ctx.save();
+  saveCanvasState(ctx);
   try {
     ctx.translate(x, y);
     ctx.scale(reference.scale, reference.scale);

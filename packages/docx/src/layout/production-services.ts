@@ -10,6 +10,7 @@ import {
   canvasFontString,
   createSymbolFaceOracle,
   fontFaceWeightCovers,
+  namedFamiliesDrawText,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { FontSubstituteScript, OfficeFontFallbackRoute } from '@silurus/ooxml-core';
@@ -507,7 +508,15 @@ export function createProductionTextLayoutService(
       // at the reference em (core reference-advances.ts).
       fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v6'
         : context ? 'canvas-text-metrics-v3' : 'deterministic-text-metrics-v1',
-      ...(context ? { sameGlyphRaster, ownsGlyphs } : {}),
+      ...(context ? {
+        sameGlyphRaster,
+        ownsGlyphs,
+        // Results per cluster live as long as this service's font snapshot.
+        namedFamiliesDraw: ((cache: Map<string, boolean>) =>
+          (request: Readonly<import('./text.js').NamedFamilyDrawRequest>) => namedFamiliesDrawText(
+            request.fontRoute.familyList, request.weight, request.style, request.text, cache,
+          ))(new Map()),
+      } : {}),
       measure,
       ...(supportsDirectedContext ? { measureDirected: measure, supportsDirectedAuxiliaries: true as const } : {}),
     },

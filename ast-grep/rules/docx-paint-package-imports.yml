@@ -163,6 +163,8 @@ utils:
     any:
       - regex: "^selectCanvasLanguage$"
       - regex: "^restoreCanvasLanguage$"
+      # save() that keeps that language on the active state (Chrome resets it).
+      - regex: "^saveCanvasState$"
   from-core:
     has: { field: source, regex: "^['\"]@silurus/ooxml-core['\"]$" }
   from-chart-font-sources:

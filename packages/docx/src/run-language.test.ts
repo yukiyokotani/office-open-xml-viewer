@@ -1,4 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// Node has no Canvas realm to run the route sentinels in; production judges
+// named-family ownership there (core namedFamiliesDrawText). Rendering tests
+// below use faces their recording canvas draws itself.
+vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
+  namedFamiliesDrawText: () => true,
+}));
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService, type GlyphMeasureRequest } from './layout/text.js';
 import { renderDocumentToCanvas } from './renderer.js';
@@ -7,7 +15,9 @@ import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, Numberi
 // ECMA-376 §17.3.2.20 w:lang — w:val governs text that is neither East Asian
 // nor complex script, w:eastAsia and w:bidi the other two §17.3.2.26 slots.
 // The run language reaches Canvas `lang`, which selects language-specific
-// OpenType forms (locl), e.g. Serbian italic Cyrillic (#2001).
+// OpenType forms (locl), e.g. Serbian italic Cyrillic (#2001). It reaches
+// Canvas only for text a named face of the route draws: generic and
+// last-resort fallback faces are chosen per language (CSS Fonts 4 §5.1/§5.4).
 
 describe('text service: §17.3.2.20 language per font slot', () => {
   const measured: GlyphMeasureRequest[] = [];
@@ -17,6 +27,8 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     ]),
     measurer: {
       fingerprint: 'run-language',
+      // '中' stands for text no named family draws (generic fallback).
+      namedFamiliesDraw: (request) => !request.text.includes('中'),
       measure: (request) => {
         measured.push(request);
         // A language-sensitive face: Serbian forms are narrower.
@@ -35,12 +47,15 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     const cs = service.shape({
       text: 'بa', fontSizePt: 10, fonts, clusterGeometry: false, complexScript: true, ...languages,
     });
-    expect([...mixed.spans, ...cs.spans].map((span) => [span.script, span.lang])).toEqual([
-      ['highAnsi', 'sr-latn-rs'], ['eastAsia', 'ja-jp'], ['complexScript', 'ar-sa'],
+    const kana = service.shape({ text: 'か', fontSizePt: 10, fonts, clusterGeometry: false, ...languages });
+    expect([...mixed.spans, ...cs.spans, ...kana.spans].map((span) => [span.script, span.lang])).toEqual([
+      // Generic fallback draws '中': its language would choose the face.
+      ['highAnsi', 'sr-latn-rs'], ['eastAsia', undefined], ['complexScript', 'ar-sa'], ['eastAsia', 'ja-jp'],
     ]);
     expect(measured.map((request) => [request.text, request.lang])).toEqual([
-      ['ж', 'sr-latn-rs'], ['中', 'ja-jp'], ['بa', 'ar-sa'],
+      ['ж', 'sr-latn-rs'], ['中', undefined], ['بa', 'ar-sa'], ['か', 'ja-jp'],
     ]);
+    expect('lang' in mixed.spans[1]!).toBe(false);
   });
 
   it('keys measurement by language only when one is set', () => {
@@ -54,12 +69,24 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     expect('lang' in plain.spans[0]!).toBe(false);
   });
 
+  it('sets no language without named-family ownership evidence', () => {
+    const unjudged = createTextLayoutService({
+      fonts: createFontResolver([{ requestedFamily: 'Face', resolvedFamily: 'Face', source: 'local' }]),
+      measurer: { fingerprint: 'unjudged', measure: request => {
+        expect('lang' in request).toBe(false);
+        return { advancePt: 5, ascentPt: 8, descentPt: 2 };
+      } },
+    });
+    const shaped = unjudged.shape({ text: 'б', fontSizePt: 10, fonts, language: 'sr-rs', clusterGeometry: false });
+    expect('lang' in shaped.spans[0]!).toBe(false);
+  });
+
   it('keeps independent languages when scoped Arabic shares a physical face across slots', () => {
     const scoped = createTextLayoutService({
       fonts: createFontResolver([
         { requestedFamily: 'Scoped Face', resolvedFamily: 'Arabic Substitute', source: 'substitute', script: 'arabic' },
       ], { scriptScopedFamilies: { 'scoped face': { script: 'arabic', substituteFamilies: ['Arabic Substitute'] } } }),
-      measurer: { fingerprint: 'scoped-language', measure: request => ({
+      measurer: { fingerprint: 'scoped-language', namedFamiliesDraw: () => true, measure: request => ({
         advancePt: [...request.text].length * (request.lang === 'ar' ? 4 : 5), ascentPt: 8, descentPt: 2,
       }) },
     });
@@ -174,6 +201,36 @@ describe('Canvas lang at measure and paint', () => {
     expect(glyphs[1]!.x - glyphs[0]!.x).toBeCloseTo(3 * 0.4 * FONT_PX, 6);
     const textMeasures = measures.filter((measure) => measure.text === 'где');
     expect(new Set(textMeasures.map((measure) => measure.lang))).toEqual(new Set(['sr-rs', 'inherit']));
+    expect(ctx.lang).toBe('inherit');
+  });
+
+  it('keeps a grapheme cluster whole across a language-only run seam', async () => {
+    const { canvas, draws } = recordingCanvas();
+    // A base and its variation selector authored in runs that differ only in
+    // language: the selector continues the base's cluster and its language.
+    await renderDocumentToCanvas(documentOf([
+      run('\u25fc', { lang: 'fr-ch' }),
+      run('\ufe0e', { lang: 'en-us' }),
+      run('ab', { lang: 'en-us' }),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.filter(draw => draw.text.includes('\u25fc')).map(draw => [draw.text, draw.lang]))
+      .toEqual([['\u25fc\ufe0e', 'fr-ch']]);
+    expect(draws.filter(draw => draw.text.includes('ab')).map(draw => [draw.text, draw.lang]))
+      .toEqual([['ab', 'en-us']]);
+  });
+
+  it('keeps the measured language on text drawn inside a save/restore pair', async () => {
+    const { canvas, ctx, draws } = recordingCanvas();
+    // Chrome resets the active state's lang on save(); restore() brings back
+    // the saved one (core saveCanvasState).
+    const stack: string[] = [];
+    ctx.save = function (this: { lang: string }) { stack.push(this.lang); this.lang = 'inherit'; };
+    ctx.restore = function (this: { lang: string }) { this.lang = stack.pop() ?? this.lang; };
+    await renderDocumentToCanvas(documentOf([
+      run('где', { lang: 'sr-rs', charScale: 150 }),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    // Scaled glyphs are drawn one by one, each inside its own save/restore.
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['г', 'sr-rs'], ['д', 'sr-rs'], ['е', 'sr-rs']]);
     expect(ctx.lang).toBe('inherit');
   });
 });

@@ -5,7 +5,7 @@ valid:
   - "import type { HyperlinkTarget } from '@silurus/ooxml-core';"
   - "import { type HyperlinkTarget, type MathRenderer } from '@silurus/ooxml-core';"
   - "import { withChartFontSubstitutions } from '@silurus/ooxml-core/internal/chart-font-sources';"
-  - "import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';"
+  - "import { restoreCanvasLanguage, saveCanvasState, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';"
   - "import { paintLayoutPage } from './canvas-page.js';"
 invalid:
   # Unreviewed bindings and packages.

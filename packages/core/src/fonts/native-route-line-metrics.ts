@@ -1,5 +1,6 @@
 import type { CanvasFontBoxProbeContext } from './canvas-font-box.js';
 import { quoteCssFontFamily } from '../internal/css-font-family.js';
+import { getGraphemeSegmenter } from '../text/sea-break.js';
 import {
   PROBE_EM, SENTINELS, SENTINEL_FAMILIES, SENTINEL_UPM, parseFamilyList, sentinelsWork, type FamilyEntry,
 } from './route-sentinels.js';
@@ -375,6 +376,54 @@ export function nativeRouteClusterOwned(
   // (stacked marks) may contain it, so such a cluster is not owned.
   const [, , , ascent, descent] = measured[0]!;
   return sameGeometry(measured[0]!, measured[1]!) && ascent! + descent! < SENTINEL_A_INK_PX;
+}
+
+/** Whether a NAMED family of `familyList` draws every grapheme cluster of
+ * `text` (route sentinels, {@link nativeRouteClusterOwned}); false when the
+ * realm cannot judge.
+ *
+ * The family list is cut at its first generic keyword: a generic always
+ * resolves to a face, so nothing after it is reached, and the face it and
+ * the engine's last-resort fallback select depend on the content language
+ * (CSS Fonts 4 §5.1, §5.4). Named families are matched in list order
+ * whatever the language. Text drawn entirely by named families therefore
+ * keeps its faces, advances and available weights under any Canvas `lang`,
+ * and a language can only select forms inside those faces.
+ *
+ * `cache` holds per-cluster results for one font snapshot; its owner discards
+ * it with that snapshot (faces registered or released change the answer). */
+export function namedFamiliesDrawText(
+  familyList: string, weight: number, style: 'normal' | 'italic', text: string,
+  cache?: Map<string, boolean>,
+): boolean {
+  if (text.length === 0) return false;
+  const entries = parseFamilyList(familyList);
+  if (!entries) return false;
+  const firstGeneric = entries.findIndex((entry) => entry.generic);
+  const named = (firstGeneric < 0 ? entries : entries.slice(0, firstGeneric)).map((entry) => entry.text);
+  if (named.length === 0) return false;
+  const fonts = nativeRouteOwnershipFonts(named.join(', '), weight, style);
+  const segmenter = getGraphemeSegmenter();
+  const clusters = segmenter ? Array.from(segmenter.segment(text), (part) => part.segment) : Array.from(text);
+  // Sentinels are refcounted per realm; an unloaded sentinel would let a
+  // fallback face pass as owned, so they are verified before new evidence.
+  let sentinelsVerified = false;
+  for (const cluster of clusters) {
+    const key = `${fonts[0]}\u0000${cluster}`;
+    let owned = cache?.get(key);
+    if (owned === undefined) {
+      if (!sentinelsVerified) {
+        if (!nativeRouteSentinelsWork()) return false;
+        sentinelsVerified = true;
+      }
+      const judged = nativeRouteClusterOwned(fonts, cluster);
+      if (judged === undefined) return false;
+      owned = judged;
+      cache?.set(key, owned);
+    }
+    if (!owned) return false;
+  }
+  return true;
 }
 
 /** The sentinels are registered and applied in this realm (once per prepared

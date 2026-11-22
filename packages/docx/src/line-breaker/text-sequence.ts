@@ -42,7 +42,7 @@ type SequenceRun = Extract<ParagraphTextBearingRun, { type: 'text' }> & Readonly
   typographyInput?: RunTypographyAcquisitionInput;
 }>;
 
-function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment): string {
+function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, languages = true): string {
   const input = run.typographyInput;
   const effective = <T>(value: TypographyValueInput<T> | undefined, fallback: T | undefined) =>
     value?.status === 'valid' && value.value !== null ? value.value : fallback;
@@ -57,7 +57,7 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment): st
     fontFamilyCs: run.fontFamilyCs, fontSlots: run.fontSlots, fontHint: run.fontHint,
     fontSizeCs: run.fontSizeCs, bold: run.bold, italic: run.italic,
     boldCs: run.boldCs, italicCs: run.italicCs, rtl: run.rtl, cs: run.cs,
-    langBidi: run.langBidi, langEastAsia: run.langEastAsia, lang: run.lang,
+    ...(languages ? { langBidi: run.langBidi, langEastAsia: run.langEastAsia, lang: run.lang } : {}),
     vertAlign: effective(input?.verticalAlign, run.vertAlign ?? undefined),
     position: effective(input?.positionPt, run.position),
     charSpacing: input?.characterSpacingPt ?? run.charSpacing,
@@ -96,6 +96,24 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment): st
       : value);
 }
 
+let graphemeSegmenter: Intl.Segmenter | null | undefined;
+
+/** Whether `next` only continues the last grapheme cluster of `previous`
+ * (UAX #29), e.g. a variation selector or combining mark authored in a
+ * separate run. */
+function continuesGrapheme(previous: string, next: string): boolean {
+  if (previous.length === 0 || next.length === 0) return false;
+  graphemeSegmenter ??= typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+  if (!graphemeSegmenter) return false;
+  // A cluster is bounded in practice; a tail of the previous text is enough
+  // context to place the seam (a longer cluster only declines the join).
+  const tail = previous.slice(-32);
+  let lastStart = 0;
+  for (const part of graphemeSegmenter.segment(tail + next)) lastStart = part.index;
+  return lastStart < tail.length;
+}
+
 /**
  * Library invariant: formatting-only source seams never enter the glyph/token
  * stream. ECMA-376 §§17.3.2.25/.19 separate the content container from its
@@ -117,6 +135,8 @@ export function acquireTextSequences(
   const sequences = new Map<number, TextSequence>();
   let start = -1;
   let key: string | undefined;
+  let languageFreeKey: string | undefined;
+  let lastDisplay = '';
   let first: SequenceRun | undefined;
   let texts: string[] = [];
   let sources: TextSequenceSource[] = [];
@@ -169,15 +189,26 @@ export function acquireTextSequences(
       complexScript: visible.rtl === true || visible.cs === true,
       fontHint: visible.fontHint, eastAsiaLanguage: visible.langEastAsia,
     }) : undefined;
-    const nextKey = visible ? JSON.stringify([
-      formattingKey(visible, environment), scopeKey === 'mixed' ? runIndex : scopeKey ?? null,
-    ]) : undefined;
-    if (!visible || nextKey !== key) finish();
-    key = nextKey;
+    const scope = scopeKey === 'mixed' ? runIndex : scopeKey ?? null;
+    const nextKey = visible ? JSON.stringify([formattingKey(visible, environment), scope]) : undefined;
+    const display = visible ? displayText(visible.text, visible) : '';
+    // §17.3.2.20 languages delimit sequences, except inside one grapheme
+    // cluster: a run that only continues the previous cluster belongs to it
+    // and takes its language. Splitting there would separate a base from its
+    // variation selector or combining mark and change the cluster's glyph.
+    const clusterContinuation = visible !== undefined && first !== undefined && nextKey !== key
+      && languageFreeKey === JSON.stringify([formattingKey(visible, environment, false), scope])
+      && continuesGrapheme(lastDisplay, display);
+    if (!clusterContinuation) {
+      if (!visible || nextKey !== key) finish();
+      key = nextKey;
+      languageFreeKey = visible
+        ? JSON.stringify([formattingKey(visible, environment, false), scope]) : undefined;
+    }
     if (!visible) continue;
     if (!first) { start = runIndex; first = visible; }
     texts.push(visible.text);
-    const display = displayText(visible.text, visible);
+    lastDisplay = display;
     sources.push(Object.freeze({ runIndex, start: offset, end: offset + display.length }));
     offset += display.length;
   }

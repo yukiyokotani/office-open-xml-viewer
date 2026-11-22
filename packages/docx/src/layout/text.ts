@@ -623,6 +623,18 @@ export interface GlyphMeasurer {
   /** True only when every grapheme of `text` shapes with zero advance
    * through the size-adjust:0% family, i.e. that exact source owns it. */
   ownsGlyphs?(request: Readonly<GlyphOwnershipRequest>): boolean;
+  /** True only when NAMED families of the route (before any generic) draw
+   * every grapheme of `text` (core namedFamiliesDrawText). Absent or unable
+   * to judge → false. */
+  namedFamiliesDraw?(request: Readonly<NamedFamilyDrawRequest>): boolean;
+}
+
+/** Text drawn by one Canvas route in one weight/style tuple. */
+export interface NamedFamilyDrawRequest {
+  readonly text: string;
+  readonly fontRoute: CanvasFontRoute;
+  readonly weight: number;
+  readonly style: FontStyle;
 }
 
 /** Glyph ownership through one source's size-adjust:0% registration. */
@@ -1862,7 +1874,15 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     }
 
     const spans = merged.map(({ substituteScript, font, ...group }): TextShapeSpan => {
-      const lang = scriptSlotLanguage(request, group.script);
+      // §17.3.2.20 gives the language of the slot's text; it reaches Canvas
+      // only where a named face of the route draws all of it. A generic or
+      // last-resort fallback face is chosen per content language (CSS Fonts 4
+      // §5.1/§5.4), so a language there would change the face, its advances
+      // and weights rather than select forms (locl) within the face.
+      const slotLang = scriptSlotLanguage(request, group.script);
+      const lang = slotLang !== undefined && input.measurer.namedFamiliesDraw?.({
+        text: group.text, fontRoute: font.route, weight: font.weight, style: font.style,
+      }) === true ? slotLang : undefined;
       const measurement = request.measure === false ? {
         advancePt: 0,
         ascentPt: 0,
