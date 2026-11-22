@@ -11,10 +11,16 @@ export interface LayoutTranslation { readonly xPt: number; readonly yPt: number 
  * so importing general geometry helpers here would reopen a runtime cycle seam. */
 function unionTranslatedRects(rects: readonly LayoutRect[]): LayoutRect | null {
   if (rects.length === 0) return null;
-  const left = Math.min(...rects.map((rect) => rect.xPt));
-  const top = Math.min(...rects.map((rect) => rect.yPt));
-  const right = Math.max(...rects.map((rect) => rect.xPt + rect.widthPt));
-  const bottom = Math.max(...rects.map((rect) => rect.yPt + rect.heightPt));
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const rect of rects) {
+    left = Math.min(left, rect.xPt);
+    top = Math.min(top, rect.yPt);
+    right = Math.max(right, rect.xPt + rect.widthPt);
+    bottom = Math.max(bottom, rect.yPt + rect.heightPt);
+  }
   return {
     xPt: left,
     yPt: top,

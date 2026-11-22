@@ -97,8 +97,10 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(a.style.position).toBe('absolute');
     expect(a.style.left).toBe(`${(12 / 700) * 100}%`);
     expect(a.style.top).toBe(`${(34 / 900) * 100}%`);
-    expect(a.style.font).toBe('bold 14px Arial');
-    expect(a.style['line-height']).toBe('16px');
+    // Glyph metrics in units of the layer width (cqw), so the span scales with
+    // the page: 14px and 16px of a 700px page.
+    expect(a.style.font).toBe(`bold ${(14 / 700) * 100}cqw Arial`);
+    expect(a.style['line-height']).toBe(`${(16 / 700) * 100}cqw`);
     expect(a.style['letter-spacing']).toBe('0');
     expect(a.style['white-space']).toBe('pre');
     expect(a.style.color).toBe('transparent');

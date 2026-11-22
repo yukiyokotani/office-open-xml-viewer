@@ -2484,8 +2484,9 @@ pub struct ShapeRun {
     /// normalized to the shared core vocabulary (core `src/types/common.ts`
     /// `autoFit`): "none" (`<a:noAutofit/>`, fixed box — overflowing text is
     /// clipped except Word's stacked WordArt overflow), "sp" (`<a:spAutoFit/>`, box grows to text), or
-    /// "norm" (`<a:normAutofit/>`, text shrinks to fit). Absent ⇒ None (renderer
-    /// treats as the spec default: overflow visible / no clip).
+    /// "norm" (`<a:normAutofit/>`, text shrinks to fit). A bodyPr without an
+    /// auto-fit child is "none" (§21.1.2.1.2 implies noAutofit); None only
+    /// without a bodyPr.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_autofit: Option<String>,
     /// ECMA-376 §21.1.2.1.1 bodyPr@wrap: preserve the authored wrapping policy.

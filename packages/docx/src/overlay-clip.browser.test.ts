@@ -60,7 +60,7 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     const address = server.httpServer?.address();
     const port = typeof address === 'object' && address ? address.port : 0;
     browser = await chromium.launch();
-    page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+    page = await browser.newPage({ viewport: { width: 1800, height: 1400 } });
     await page.route('**/overlay-clip.html', (route) => route.fulfill({
       contentType: 'text/html',
       body: '<!doctype html><body style="margin:0"><div id="layer" style="position:relative;width:800px;height:600px"></div></body>',
@@ -125,6 +125,15 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(run?.clips?.at(-1)?.rects).toBeDefined();
     const point: [number, number] = [run!.x + run!.w / 2, run!.y + run!.h / 2];
     expect(await hits(runs, 800, [point])).toEqual(['Link']);
+  });
+
+  it('keeps the visible part of a clipped link reachable after a uniform enlargement', async () => {
+    // A 20px monospace link at (100, 100) clipped from x=170.
+    const cell = { x: 170, y: 90, width: 300, height: 40 };
+    const runs = [link({ text: 'MMMMMMMMMM', w: 120, clips: [cell] })];
+    expect(await hits(runs, 800, [[190, 110]])).toEqual(['MMMMMMMMMM']);
+    // At 1600px the clip starts at x=340 and the span has grown with the page.
+    expect(await hits(runs, 1600, [[380, 220]])).toEqual(['MMMMMMMMMM']);
   });
 
   it('keeps a link out of reach under an empty clip union', async () => {

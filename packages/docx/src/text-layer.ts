@@ -65,6 +65,15 @@ export function buildDocxTextLayer(
 
   const ownerDocument = layer.ownerDocument ?? document;
   const clipFrames = new OverlayClipFrames(layer, cssWidth, cssHeight);
+  // Span metrics (font size, line height, tracking) are written in container
+  // query units of the layer, so a span keeps its size relative to the page
+  // when the page is resized uniformly, as its position and any clip
+  // container do. At the intended size they equal the px values.
+  layer.style.containerType = 'inline-size';
+  const pageLength = (px: number): string => (cssWidth > 0 ? `${(px / cssWidth) * 100}cqw` : `${px}px`);
+  const pageFont = (font: string): string => font.replace(
+    /(\d+(?:\.\d+)?)px/u, (_match, size: string) => pageLength(Number(size)),
+  );
   for (const [runIndex, run] of runs.entries()) {
     const span = ownerDocument.createElement('span');
     setSelectionData(span, 'ooxmlSelectionRun', 'docx');
@@ -121,7 +130,7 @@ export function buildDocxTextLayer(
     const link = onHyperlinkClick ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
     const letterSpacing = run.letterSpacingPx !== undefined
-      ? `${run.letterSpacingPx / k}px`
+      ? pageLength(run.letterSpacingPx / k)
       : '0';
     // A Word-fitted terminal space shortens the retained run, but the browser
     // still lays out the transparent U+0020 at its natural advance. Clip only
@@ -130,16 +139,15 @@ export function buildDocxTextLayer(
     const compressedHitBox = run.trailingSpaceCompressionPx !== undefined
       ? `width:${frame.width(run.w / k)};overflow:hidden;`
       : '';
-    // Position the span as a % of the page's intended CSS box so it tracks the
-    // canvas's actual rendered size under external CSS scaling. `font` /
-    // `line-height` stay px (the glyph metrics of the transparent hit text laid
-    // out inside the box); the box position is what must track the canvas. A
+    // Position the span as a % of the page's intended CSS box, and size its
+    // glyph metrics in units of the layer width, so it tracks the canvas's
+    // actual rendered size under external CSS scaling. A
     // vertical (tbRl) run's rotate is about `top left`, so the %-placed origin
     // rotates into the column exactly as before at 1× scale.
     span.style.cssText =
       `position:absolute;` +
       frame.position(0, 0) +
-      `font:${k !== 1 && reference ? reference.font : run.font};line-height:${run.h / k}px;letter-spacing:${letterSpacing};` +
+      `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
       compressedHitBox +
       transform +
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;

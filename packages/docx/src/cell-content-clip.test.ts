@@ -13,6 +13,7 @@ import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
 import { clippedBoxBounds, clippedBoxVisible } from './run-clip.js';
+import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import { resolveDocxCommentThreads } from './comments.js';
 import type { LayoutRect, ParagraphLayout, TableLayout } from './layout/types.js';
 import type { CanvasPaintContext, PaintCanvas2D } from './paint/types.js';
@@ -513,5 +514,54 @@ describe('rotated exact-height cells', () => {
     expect(run?.clips?.at(-1)).toMatchObject({
       x: expect.closeTo(cell.flowBounds.xPt, 9), width: expect.closeTo(cell.flowBounds.widthPt, 9),
     });
+  });
+});
+
+describe('huge VML text rectangle lists', () => {
+  it('walk the model for vertical capability without spreading arrays onto the stack', () => {
+    const model = { body: [{ type: 'paragraph', runs: [{ type: 'shape',
+      vmlTextRects: Array.from({ length: 150_000 }, () => [0, 0, 1, 1]) }] }] };
+    expect(() => documentRequiresDomVerticalGlyphLayout(model as never)).not.toThrow();
+  });
+});
+
+describe('a DrawingML text box without an auto-fit element', () => {
+  it('is a fixed box (§21.1.2.1.2 implies noAutofit) and clips its text', () => {
+    const box = (autofit: string) => '<w:p><w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="T"/>'
+      + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
+      + '<wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/></a:xfrm>'
+      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>'
+      + '<w:p><w:pPr><w:ind w:left="-1400"/></w:pPr><w:r><w:t>Out</w:t></w:r></w:p>'
+      + `</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0">${autofit}</wps:bodyPr>`
+      + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>';
+    const clipsOf = (autofit: string) => textRunsForPage(layoutDocx(docx('', box(autofit))), 0, { scale: 1 })
+      .find((run) => run.text === 'Out')?.clips;
+    const explicit = clipsOf('<a:noAutofit/>');
+    expect(explicit).toHaveLength(1);
+    expect(clipsOf('')).toEqual(explicit);
+  });
+});
+
+describe('hit testing a zero-width cell', () => {
+  it('finds no picture on the edge of a clip without area', () => {
+    const table = '<w:tbl><w:tblPr><w:tblW w:w="4320" w:type="dxa"/><w:tblLayout w:type="fixed"/>'
+      + '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="0"/><w:gridCol w:w="4320"/></w:tblGrid><w:tr>'
+      + `<w:tc><w:tcPr><w:tcW w:w="0" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:ind w:left="-400"/></w:pPr>${drawingml(0)}</w:p></w:tc>`
+      + '<w:tc><w:tcPr><w:tcW w:w="4320" w:type="dxa"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p/>';
+    const layout = layoutDocx(docx('', table));
+    const laid = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
+    const cell = laid.rows[0]!.cells[0]!;
+    const clip = cell.contentClipBounds!;
+    expect(clip.widthPt).toBe(0);
+    const paragraph = cell.blocks[0]!.layout as ParagraphLayout;
+    const picture = paragraph.lines[0]!.placements.find((item) => item.kind === 'resource');
+    if (picture?.kind !== 'resource') throw new Error('expected the picture');
+    const registry = createPaintResourceRegistry([{
+      kind: 'image', resourceKey: picture.resourceKey, partPath: 'word/media/p.png',
+      mimeType: 'image/png', intrinsicSize: { widthPt: 40, heightPt: 30 },
+    }]);
+    const middle = clip.yPt + clip.heightPt / 2;
+    expect(hitTestDocxElementContext(layout, 0, { xPt: clip.xPt, yPt: middle }, registry)).toBeNull();
   });
 });
