@@ -3,6 +3,7 @@ import { segmentsHaveRtl } from './bidi-line.js';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './layout/specified-line-spacing.js';
 import { uprightResourceOrientation } from './layout/coordinate-space.js';
 import {
+  emptyParagraphEquivalent,
   paragraphGridRightAdjustmentPt,
   type ParagraphLayoutContext,
 } from './layout-context.js';
@@ -746,7 +747,11 @@ export function measureParagraph(
   // (line box, baseline, numbering marker, page-edge facts); only its anchors
   // ride on that mark line.
   if (anchorOnlyLine) {
-    const mark = measureMarkOnly(true);
+    // Measure exactly what the empty paragraph would be: its mark formatting
+    // and properties, no runs, and the run-decided context facts recomputed
+    // (no deleted ruby or text of this paragraph takes part).
+    const empty = emptyParagraphEquivalent(paragraph, context);
+    const mark = measureParagraph(empty.paragraph, empty.context, placement, measurer, environment, continuation);
     return {
       ...mark,
       // The mark's own wrap window places the line horizontally too: its

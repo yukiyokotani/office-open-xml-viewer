@@ -1127,6 +1127,15 @@ describe('anchor-only paragraphs keep their content before a continuous section 
     expect(paragraphAt(layout(body, false), 0).flatMap((paragraph) => paragraph.drawings)).toHaveLength(1);
   });
 
+  it('measures an anchor beside deleted larger text as the empty paragraph (public model, final view)', () => {
+    const deleted = { ...textRun('Big', 40), revision: { kind: 'deletion', author: 'A' } } as DocRun;
+    const height = (runs: DocRun[]) => {
+      const paragraph = paragraphAt(layout([paraWith(runs, { fontSize: 11 }), para({ text: 'After' })]), 0)[0]!;
+      return paragraph.flowBounds.heightPt;
+    };
+    expect(height([...parserAnchoredImage(glyph()), deleted])).toBe(height([]));
+  });
+
   it('classifies the mark per active revision view, and painted numbering as ink', () => {
     // Anchor beside deleted text: anchor-only in the final view only.
     const tracked = { inkless: false, anchorOnly: { final: true, markup: false } };

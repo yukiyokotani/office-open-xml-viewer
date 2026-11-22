@@ -214,6 +214,26 @@ export interface RunLayoutContext {
   readonly characterGrid: CharacterGridPolicy;
 }
 
+/** The context facts a paragraph's runs (rather than its properties)
+ * decide; every other ParagraphLayoutContext field comes from paragraph,
+ * section, story and document properties. */
+export function paragraphContentFacts(
+  paragraph: ParagraphLayoutSource,
+): Readonly<Pick<ParagraphLayoutContext, 'hasRuby' | 'hasEastAsianText'>> {
+  return { hasRuby: paragraphHasRuby(paragraph), hasEastAsianText: paragraphHasEastAsianText(paragraph) };
+}
+
+/** An empty paragraph with this paragraph's mark and properties: no runs,
+ * the context facts runs decide recomputed for that. Measuring it measures
+ * exactly what the empty paragraph would be. */
+export function emptyParagraphEquivalent<P extends ParagraphLayoutSource>(
+  paragraph: P,
+  context: ParagraphLayoutContext,
+): Readonly<{ paragraph: P; context: ParagraphLayoutContext }> {
+  const empty = { ...paragraph, runs: [] } as P;
+  return { paragraph: empty, context: { ...context, ...paragraphContentFacts(empty) } };
+}
+
 function paragraphHasRuby(paragraph: ParagraphLayoutSource): boolean {
   return paragraph.runs.some(
     (run) => run.type === 'text' && Boolean((run as DocxTextRun).ruby),
@@ -456,8 +476,7 @@ export function resolveParagraphLayoutContext(
     isJustified: jcIsFullyJustified(paragraph.alignment),
     stretchLastLine: jcStretchesLastLine(paragraph.alignment),
     tabStops: effectiveParagraphTabStops(paragraph),
-    hasRuby: paragraphHasRuby(paragraph),
-    hasEastAsianText: paragraphHasEastAsianText(paragraph),
+    ...paragraphContentFacts(paragraph),
     kinsoku: paragraphOffAdmitted ? paragraphKinsokuDisabled(settings.kinsoku) : settings.kinsoku,
     ...(paragraphOffAdmitted ? { documentKinsoku: settings.kinsoku } : {}),
     ...withParagraphOffLineEdges(paragraphOffLineEdges(settings, paragraph, paragraphOffAdmitted)),

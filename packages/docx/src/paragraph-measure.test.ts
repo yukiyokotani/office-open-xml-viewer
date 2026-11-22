@@ -1913,3 +1913,36 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC host-only paragraphs share the empty-m
     expect(markAdvance([host])).toBe(markAdvance([]));
   });
 });
+
+describe('WORD_ANCHOR_HOST_NO_LINE_METRIC empty equivalent ignores hidden content', () => {
+  const host = { type: 'anchorHost', fontSize: 11, fontFamily: null, fontFamilyEastAsia: null,
+    bold: false, italic: false } as unknown as DocParagraph['runs'][number];
+  const deleted = (text: string, fontSize: number, extra: object = {}) => ({
+    type: 'text', ...textRun(text, { fontSize }), revision: { kind: 'deletion', author: 'A' }, ...extra,
+  }) as unknown as DocParagraph['runs'][number];
+  const advance = (runs: DocParagraph['runs'], markSize: number, contextOverrides: Partial<ParagraphLayoutContext> = {},
+    textMeasurer: TextMeasurer = measurer, env: Partial<ParagraphMeasurementEnvironment> & DocxCompatSettingsInput = {}) => {
+    const measured = measureParagraph(
+      paragraph({ spaceBefore: 0, spaceAfter: 0, runs, defaultFontSize: markSize }),
+      layoutContext({ spaceBeforePt: 0, spaceAfterPt: 0, ...contextOverrides }),
+      placement({ startYPt: 0 }), textMeasurer, environment({ showTrackedChanges: false, ...env }),
+    );
+    return measured.contentEndYPt - measured.contentStartYPt;
+  };
+  it('measures an anchor beside deleted larger text as the empty mark in the final view', () => {
+    expect(advance([host, deleted('Big', 40)], 11)).toBe(advance([], 11));
+  });
+  it('measures an anchor beside a deleted ruby as the empty mark on a grid', () => {
+    const ruby = deleted('漢', 13.5, { ruby: { text: 'かん', fontSizePt: 6.75, hpsRaisePt: 12 } });
+    // The resolver derives hasRuby from the runs, deleted ones included.
+    const grid = { lineGrid: { active: true, pitchPt: 20 } };
+    // A 1.5em mark box: 20.25pt at 13.5pt.
+    const tall: TextMeasurer = { context: makeContext(1.2, 0.3), fontFamilyClasses: {} };
+    const fe = { useFeLayout: true, documentHasEastAsianText: true };
+    const empty = advance([], 13.5, grid, tall, fe);
+    expect(empty).toBe(20);
+    // A ruby the context still counts would take two cells (40pt).
+    expect(advance([], 13.5, { ...grid, hasRuby: true }, tall, fe)).toBe(40);
+    expect(advance([host, ruby], 13.5, { ...grid, hasRuby: true, hasEastAsianText: true }, tall, fe)).toBe(empty);
+  });
+});
