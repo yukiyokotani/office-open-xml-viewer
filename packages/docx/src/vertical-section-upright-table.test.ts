@@ -759,6 +759,44 @@ describe('upright block table of a vertical section', () => {
       }
     });
 
+    describe('that the parser groups into one logical table', () => {
+      // A default table style gives directly following tables one style
+      // identity, so they reach layout as one logical table (§17.4.37).
+      const styles = '<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/></w:style>'
+        + '<w:style w:type="table" w:styleId="Other"><w:name w:val="Other"/></w:style>';
+      const layOutStyled = (direction: Direction, body: readonly string[]) =>
+        layOutPages(direction, body, 1, 360, undefined, styles);
+
+      it.each(['tbRl', 'tbLrV'] as const)('places a %s logical table upright, without a flow advance', (direction) => {
+        const single = layOutStyled(direction, [P, T, P]);
+        const pages = layOutStyled(direction, [P, T, T, P, P]);
+        expect(pages).toHaveLength(1);
+        // One table of four rows.
+        const [placed] = pages[0]!.tables;
+        expect(pages[0]!.tables).toHaveLength(1);
+        const oneTable = single[0]!.tables[0]!;
+        expect(placed!.top).toBeCloseTo(MARGIN.top, 6);
+        expect(placed!.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
+        expect(placed!.bottom - placed!.top).toBeGreaterThan(1.9 * (oneTable.bottom - oneTable.top));
+        expect(pages[0]!.strips.map((lines) => lines.map((line) => line.block)))
+          .toEqual([[0], [PITCH], [2 * PITCH]]);
+        for (const [line] of pages[0]!.strips) expect(line!.inlineStart).toBeCloseTo(placed!.bottom, 6);
+      });
+
+      it('runs a logical table on from a table of another style', () => {
+        const other = T.replace('<w:tblPr>', '<w:tblPr><w:tblStyle w:val="Other"/>');
+        const [page] = layOutStyled('tbRl', [P, other, T, T, P]);
+        const [first, grouped] = page!.tables as [Page['tables'][number], Page['tables'][number]];
+        expect(page!.tables).toHaveLength(2);
+        expect(first.top).toBeCloseTo(MARGIN.top, 6);
+        expect(grouped.top).toBeCloseTo(first.bottom, 6);
+        expect(grouped.left).toBeCloseTo(first.left, 6);
+        // Text flows around the box the tables are painted in.
+        for (const [line] of page!.strips) expect(line!.inlineStart).toBeCloseTo(grouped.bottom, 6);
+        expect(page!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
+      });
+    });
+
     it('continues below the last rows of the table before it', () => {
       // Measured: 40, 25 and 2 rows. The third follows the second's last
       // rows on the page they end on.

@@ -213,7 +213,7 @@ export {
 export type { BodyFrameGroup } from './frame.js';
 import type { ParagraphAcquisitionInput, ParagraphImageRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
-import { inlineShiftPastBoxesPt } from './upright-block-index.js';
+import { inlineShiftBelowUprightTablesPt, type UprightBlockPageIndex } from './upright-block-index.js';
 import type {
   DrawingLayout,
   DrawingPaintCommand,
@@ -2545,11 +2545,12 @@ export interface ParagraphAcquisitionOptions {
   readonly exclusions: readonly WrapExclusion[];
   /** Effective prior DrawingML objects in this flow domain. */
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
-  /** `word-vertical-section-upright-block-table`: the boxes of the upright
-   * block tables placed for tables before this paragraph, in section-logical
-   * page points. A wrapped drawing the paragraph anchors is moved along the
-   * inline axis to lie below those it would cover. */
-  readonly uprightTableBoxes?: readonly LayoutRect[];
+  /** `word-vertical-section-upright-block-table`: the page's upright block
+   * tables and this paragraph's body index. A wrapped drawing the paragraph
+   * anchors is moved along the inline axis to lie below the tables placed
+   * for tables before it that it would cover
+   * (inlineShiftBelowUprightTablesPt). */
+  readonly uprightTables?: Readonly<{ index: UprightBlockPageIndex; beforeSourceIndex: number }>;
   /** Present only while acquiring a paragraph hosted by a table cell. */
   readonly anchorCellBounds?: LayoutRect;
   /** Effective enclosing fill, retained only for automatic text-color resolution. */
@@ -5296,9 +5297,11 @@ function acquireAnchorOccurrence(
     // `word-vertical-section-upright-block-table`: a wrapped drawing does not
     // cover an upright block table placed for a table before its paragraph;
     // it lies directly below it. A carried drawing keeps its frame.
-    if (!frozenFrame && options.uprightTableBoxes?.length
+    if (!frozenFrame && options.uprightTables
       && placedResult.geometry.wrapBounds && placedResult.geometry.wrap.kind !== 'none') {
-      const shiftPt = inlineShiftPastBoxesPt(placedRect, options.uprightTableBoxes);
+      const shiftPt = inlineShiftBelowUprightTablesPt(
+        options.uprightTables.index, options.uprightTables.beforeSourceIndex, placedRect,
+      );
       if (shiftPt !== 0) translateAnchor({ xPt: shiftPt, yPt: 0 });
     }
     return Object.freeze({
@@ -6743,8 +6746,12 @@ function paragraphAcquisitionKey(
     ],
     lineOnly ? null : JSON.stringify(options.exclusions),
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
-    lineOnly || !hasAnchoredPayload || !options.uprightTableBoxes?.length
-      ? null : JSON.stringify(options.uprightTableBoxes),
+    // The page's index is one object per layout of a page and only grows.
+    ...(lineOnly || !hasAnchoredPayload || !options.uprightTables ? [null, null, null] : [
+      cache.objectIdentity(options.uprightTables.index),
+      options.uprightTables.beforeSourceIndex,
+      options.uprightTables.index.tableCount,
+    ]),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
     lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
       ? null

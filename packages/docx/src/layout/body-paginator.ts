@@ -1550,9 +1550,12 @@ function* paginateBodyPassSteps(
   // table over. A wrapped drawing anchored after the table and registered
   // when the page's layout started has to lie below the table, too. For
   // these the table's measurement returns a page pin
-  // (uprightPagePin); the page is then laid out once more from its start with
-  // the pin registered, and the table takes the pinned position in whichever
-  // column the flow now reaches it.
+  // (uprightPagePin). The pins one layout of the page finds are registered
+  // together: when the page closes it is laid out once more from its start
+  // with them, and each table takes its pinned position in whichever column
+  // the flow now reaches it. Library policy: a table pinned in the same
+  // layout as an earlier one keeps the position it had before the earlier
+  // pin moved text (no control has two such tables on a page).
   //
   // A table placed ahead of the flow that the flow then reaches on a later
   // page (its own exclusion, or a note reserve, moved what precedes it off
@@ -1561,17 +1564,21 @@ function* paginateBodyPassSteps(
   // reaches it and only the text after it flows around it.
   //
   // Termination: a table is pinned at most once and released at most once
-  // per pass, and each replay does one of the two, so a page is laid out at
-  // most twice per table on it, plus once.
+  // per pass, and each further layout of a page does at least one of the
+  // two, so a page is laid out at most twice per table on it, plus once;
+  // tables whose pins one layout finds share the next.
   type UprightPagePin = { registration: UprightBlockRegistration; consumed: boolean };
   let uprightPinPage = -1;
   let uprightPins = new Map<string, UprightPagePin>();
+  /** This layout of the live page found pins that are not registered yet. */
+  let uprightReplayPending = false;
   const uprightPinnedOnce = new Set<string>();
   const uprightForwardOnly = new Set<string>();
   const uprightPinsOf = (pageIndex: number): Map<string, UprightPagePin> => {
     if (uprightPinPage !== pageIndex) {
       uprightPinPage = pageIndex;
       uprightPins = new Map();
+      uprightReplayPending = false;
     }
     return uprightPins;
   };
@@ -1589,17 +1596,20 @@ function* paginateBodyPassSteps(
     });
   };
   /** Before the live page closes: releases the tables placed ahead of the
-   * flow that it never reached there, and lays the page out again. */
-  const releaseUnreachedUprightPins = (): void => {
+   * flow that it never reached there, and lays the page out again when that
+   * released one or this layout of the page found new pins. All pins found
+   * in one layout of a page are registered together by one further layout. */
+  const settleUprightPinsBeforePageClose = (): void => {
     if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex) return;
-    let released = false;
+    let replay = uprightReplayPending;
     for (const [tableKey, pin] of uprightPins) {
       if (pin.consumed) continue;
       uprightPins.delete(tableKey);
       uprightForwardOnly.add(tableKey);
-      released = true;
+      replay = true;
     }
-    if (released) throw new UprightBlockPageReplay();
+    uprightReplayPending = false;
+    if (replay) throw new UprightBlockPageReplay();
   };
   const commitTransition = function* (
     transition: ReturnType<typeof applyAuthoredBreak>,
@@ -1613,7 +1623,7 @@ function* paginateBodyPassSteps(
     }
     const previousPageIndex = state.flow.pageIndex;
     if (transition.state.pageIndex !== previousPageIndex) {
-      releaseUnreachedUprightPins();
+      settleUprightPinsBeforePageClose();
       beforeNotePageClose();
       flushAnchorInputs();
     }
@@ -3320,13 +3330,15 @@ function* paginateBodyPassSteps(
         // moves.
         let uprightBlocks: UprightBlockRegistration | null = null;
         let uprightBlocksFor = '';
-        const tableAfter = input.sequence[entryIndex + 1];
+        const entryAfter = input.sequence[entryIndex + 1];
+        const tableAfter = entryAfter?.kind === 'adjacent-table-group' ? entryAfter
+          : entryAfter?.kind === 'body-block' && entryAfter.block.kind === 'table' ? entryAfter.block : null;
         if (
           session.planUprightBlocks
           && selected.fragment && selected.nextCursor === null && !selected.requiresFreshFlowRegion
-          && tableAfter?.kind === 'body-block' && tableAfter.block.kind === 'table'
+          && tableAfter !== null
           && activeRegion(state).writingMode !== 'horizontal-tb'
-          && !uprightForwardOnly.has(sourceKey(tableAfter.block.source))
+          && !uprightForwardOnly.has(sourceKey(tableAfter.source))
         ) {
           const unwrappedChargePt = Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt);
           const unwrappedReservePt = notePlans
@@ -3342,7 +3354,7 @@ function* paginateBodyPassSteps(
             }),
           });
           const planned = session.planUprightBlocks({
-            input: tableAfter.block,
+            input: tableAfter,
             location: tableLocation,
             availableInlineExtentPt: tableLocation.availableBounds.widthPt,
             availableBlockExtentPt: tableLocation.availableBounds.heightPt,
@@ -3358,7 +3370,7 @@ function* paginateBodyPassSteps(
               acquired = wrapped;
               ({ selected, notePlans } = wrappedChoice);
               uprightBlocks = planned;
-              uprightBlocksFor = sourceKey(tableAfter.block.source);
+              uprightBlocksFor = sourceKey(tableAfter.source);
             } else if (canRecoverOnPage) {
               // The paragraph no longer ends here beside the tables: it is
               // paginated again as any paragraph beside an exclusion (its
@@ -3367,7 +3379,7 @@ function* paginateBodyPassSteps(
               // The flow can reach them in another column. They are not
               // page pins yet: a table raised over an earlier column still
               // asks for one when the flow reaches it.
-              retainUprightPlan(sourceKey(tableAfter.block.source), planned);
+              retainUprightPlan(sourceKey(tableAfter.source), planned);
               session.commitUprightBlocks?.(Object.freeze({
                 ...planned,
                 slots: Object.freeze(planned.slots.map((slot) => Object.freeze({ ...slot, anyColumn: true }))),
@@ -3510,17 +3522,18 @@ function* paginateBodyPassSteps(
           });
         let availableBlockExtentPt = location.availableBounds.heightPt;
         let acquired = requestAt(availableBlockExtentPt);
-        if (acquired.uprightPagePin && canRecoverOnPage && block.kind === 'table') {
+        if (acquired.uprightPagePin && canRecoverOnPage) {
           // `word-vertical-section-upright-block-table`: the table lies over
-          // a column laid out before its own. Pin it and lay the page out
-          // again, so that column's text flows around it.
+          // a column laid out before its own, or over a drawing registered
+          // when the page's layout started. Pin it; the page is laid out
+          // again when it closes, with every pin this layout of it found.
           const tableKey = sourceKey(block.source);
           if (!uprightPinnedOnce.has(tableKey) && !uprightForwardOnly.has(tableKey)) {
             uprightPinnedOnce.add(tableKey);
             uprightPinsOf(state.flow.pageIndex).set(tableKey, {
               registration: acquired.uprightPagePin, consumed: false,
             });
-            throw new UprightBlockPageReplay();
+            uprightReplayPending = true;
           }
         }
         const reservedNotes = footnoteLayoutsByPage.get(state.flow.pageIndex) ?? [];
@@ -3710,7 +3723,7 @@ function* paginateBodyPassSteps(
         }
         // `word-vertical-section-upright-block-table`
         if (acquired.uprightBlocks) session.commitUprightBlocks?.(acquired.uprightBlocks);
-        if (block.kind === 'table' && uprightPinPage === state.flow.pageIndex) {
+        if (uprightPinPage === state.flow.pageIndex) {
           const pin = uprightPins.get(sourceKey(block.source));
           if (pin) pin.consumed = true;
         }
@@ -3772,6 +3785,8 @@ function* paginateBodyPassSteps(
     }
     session.moveAcquisitionCursor(acquisitionLocation(state));
   }
+      // The last page closes here: its pins are settled like any page's.
+      settleUprightPinsBeforePageClose();
       if (terminalDiagnostic === null) beforeNotePageClose();
       break;
     } catch (error) {
@@ -3786,6 +3801,7 @@ function* paginateBodyPassSteps(
       // The page's upright block pins hold for every layout of it, and are
       // registered first: a drawing placed when the page's layout starts
       // lies below the pinned tables before it.
+      uprightReplayPending = false;
       for (const pin of uprightPinsOf(state.flow.pageIndex).values()) {
         pin.consumed = false;
         session.commitUprightBlocks?.(pin.registration);

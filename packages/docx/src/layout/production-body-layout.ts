@@ -109,7 +109,7 @@ import { decideLogicalTable, type LogicalTableDecision, type TableMemberDecision
 import {
   bodyTableAcquisitionState,
   uprightBlockPaginates,
-  bodyUprightBlockStartsHere,
+  bodyUprightBlockLookAhead,
   measureBodyTableEntry,
   ownerSegmentedFlowExtents,
   planBodyUprightBlocks,
@@ -159,9 +159,8 @@ import {
   addUprightBlockExclusion,
   addUprightTableBox,
   emptyUprightBlockPageIndex,
-  inlineShiftPastBoxesPt,
+  inlineShiftBelowUprightTablesPt,
   uprightBlockExclusionsAhead,
-  uprightTableBoxesBefore,
   type UprightBlockExclusion,
   type UprightBlockRegistration,
 } from './upright-block-index.js';
@@ -648,9 +647,9 @@ function acquireBodyParagraphAtLocation(
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       // `word-vertical-section-upright-block-table`: a wrapped drawing lies
       // below the upright tables before its paragraph.
-      ...(source.path.length === 1 && state.uprightBlockIndex && state.uprightBlockIndex.tables.length > 0
+      ...(source.path.length === 1 && state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0
         && paragraph.runs.some((run) => run.type === 'anchorHost')
-        ? { uprightTableBoxes: uprightTableBoxesBefore(state.uprightBlockIndex, source.path[0]!) }
+        ? { uprightTables: { index: state.uprightBlockIndex, beforeSourceIndex: source.path[0]! } }
         : {}),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,
@@ -2214,6 +2213,46 @@ function measureFollowingBodyBlock(
     retainedTablesBySourceIndex: new Map(state.retainedTablesBySourceIndex),
   };
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
+  if (request.input.kind !== 'paragraph' && candidate.verticalPhys
+    && uprightBlockPaginates(candidate.verticalPhys)) {
+    // `word-vertical-section-upright-block-table`: what an upright block
+    // table (a table, or the tables of one logical table) needs of the block
+    // axis to start after the keep set before it. It adds no flow advance,
+    // so it needs none of the block extent, here or on a fresh page; but its
+    // placement can start a fresh region (too wide for the block extent
+    // left, too tall for the inline extent below its start, or moved past
+    // the page to clear an earlier table), and the keep set then has to
+    // start there with it. The placement itself decides
+    // (bodyUprightBlockLookAhead).
+    const precedingPt = request.precedingBlockExtentPt ?? 0;
+    const reachedYPt = request.location.cursorPt.yPt + precedingPt;
+    const leftPt = Math.max(0, request.location.availableBounds.heightPt - precedingPt);
+    const upright = bodyUprightBlockLookAhead(context, {
+      input: request.input,
+      location: Object.freeze({
+        ...request.location,
+        cursorPt: Object.freeze({ ...request.location.cursorPt, yPt: reachedYPt }),
+        availableBounds: Object.freeze({ ...request.location.availableBounds, yPt: reachedYPt, heightPt: leftPt }),
+      }),
+      availableInlineExtentPt: request.availableInlineExtentPt,
+      availableBlockExtentPt: leftPt,
+      freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
+      pageHasContent: true,
+      ...(request.lastColumnOfPage === undefined ? {} : { lastColumnOfPage: request.lastColumnOfPage }),
+    }, tableOperations);
+    if (upright) {
+      return Object.freeze({
+        fullExtentPt: 0,
+        leadContentExtentPt: 0,
+        ...(upright.startsHere ? {} : { startsFreshRegion: true as const }),
+        fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(upright.layout),
+        leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
+          ...upright.layout,
+          rows: upright.layout.rows.slice(0, 1),
+        }),
+      });
+    }
+  }
   if (request.input.kind === 'adjacent-table-group') {
     const records = computeAdjacentTablePtLayouts(candidate, request.input.tables.map((tableInput) => {
       const table = sourceElement(dependencies.source, tableInput.source);
@@ -2331,44 +2370,6 @@ function measureFollowingBodyBlock(
     request.availableInlineExtentPt,
     services,
   );
-  const physical = candidate.verticalPhys;
-  if (tableState.uprightPhysicalTable === true && physical && uprightBlockPaginates(physical)
-    && !ownerExtents) {
-    // `word-vertical-section-upright-block-table`: what the table needs of
-    // the block axis to start after the keep set before it. The table adds
-    // no flow advance, so it needs none of the block extent, here or on a
-    // fresh page; but its placement can start a fresh region (too wide for
-    // the block extent left, too tall for the inline extent below its start,
-    // or moved past the page to clear an earlier table), and the keep set
-    // then has to start there with it. The placement itself decides
-    // (bodyUprightBlockStartsHere).
-    const precedingPt = request.precedingBlockExtentPt ?? 0;
-    const reachedYPt = request.location.cursorPt.yPt + precedingPt;
-    const leftPt = Math.max(0, request.location.availableBounds.heightPt - precedingPt);
-    const startsHere = bodyUprightBlockStartsHere(context, {
-      input: request.input,
-      location: Object.freeze({
-        ...request.location,
-        cursorPt: Object.freeze({ ...request.location.cursorPt, yPt: reachedYPt }),
-        availableBounds: Object.freeze({ ...request.location.availableBounds, yPt: reachedYPt, heightPt: leftPt }),
-      }),
-      availableInlineExtentPt: request.availableInlineExtentPt,
-      availableBlockExtentPt: leftPt,
-      freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
-      pageHasContent: true,
-      ...(request.lastColumnOfPage === undefined ? {} : { lastColumnOfPage: request.lastColumnOfPage }),
-    }, tableOperations);
-    return Object.freeze({
-      fullExtentPt: 0,
-      leadContentExtentPt: 0,
-      ...(startsHere === false ? { startsFreshRegion: true as const } : {}),
-      fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
-      leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
-        ...layout,
-        rows: layout.rows.slice(0, 1),
-      }),
-    });
-  }
   return Object.freeze({
     fullExtentPt: ownerExtents?.fullExtentPt ?? layout.advancePt,
     leadContentExtentPt: ownerExtents?.leadContentExtentPt
@@ -2651,9 +2652,8 @@ function prescanBodyPageAnchors(
     // the upright tables pinned for tables before its paragraph, as its
     // paragraph's own acquisition places it (paragraph.ts).
     const shiftPt = anchor.paragraphSource.path.length === 1
-      ? inlineShiftPastBoxesPt(
-          retainedResult.geometry.objectFrame,
-          uprightTableBoxesBefore(state.uprightBlockIndex, anchor.paragraphSource.path[0]!),
+      ? inlineShiftBelowUprightTablesPt(
+          state.uprightBlockIndex, anchor.paragraphSource.path[0]!, retainedResult.geometry.objectFrame,
         )
       : 0;
     const shifted = <Rect extends { xPt: number }>(rect: Rect): Rect =>

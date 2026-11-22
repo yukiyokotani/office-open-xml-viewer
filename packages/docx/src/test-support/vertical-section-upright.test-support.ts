@@ -39,6 +39,36 @@ export const table = (rows: number, rowHeightPt?: number) => '<w:tbl><w:tblPr><w
   + '</w:tbl>';
 export const T = table(2);
 
+/** A paragraph run anchoring a square-wrapped rectangle at page position
+ * (x, y), `width` x `height` pt. */
+export const anchoredRectangle = (x: number, y: number, width: number, height: number) =>
+  '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+  + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+  + '<wp:simplePos x="0" y="0"/>'
+  + `<wp:positionH relativeFrom="page"><wp:posOffset>${Math.round(x * 12700)}</wp:posOffset></wp:positionH>`
+  + `<wp:positionV relativeFrom="page"><wp:posOffset>${Math.round(y * 12700)}</wp:posOffset></wp:positionV>`
+  + `<wp:extent cx="${width * 12700}" cy="${height * 12700}"/><wp:wrapSquare wrapText="bothSides"/>`
+  + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+  + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+  + '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr>'
+  + `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${width * 12700}" cy="${height * 12700}"/></a:xfrm>`
+  + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>'
+  + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+
+/** A one-row table, one 12 pt wide column, whose cell holds `paragraphs`
+ * paragraphs of a PAGE field in roman numerals: one character to a line, so
+ * the cell's text is as many lines long as the page number has characters.
+ * `rowPt` is the row's minimum height. */
+export const romanPageTable = (paragraphs: number, rowPt: number) => {
+  const field = `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>`
+    + '<w:fldSimple w:instr=" PAGE \\* Roman "><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>I</w:t></w:r></w:fldSimple></w:p>';
+  return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+    + '<w:tblGrid><w:gridCol w:w="240"/></w:tblGrid>'
+    + `<w:tr><w:trPr><w:trHeight w:val="${rowPt * 20}" w:hRule="atLeast"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="240" w:type="dxa"/>`
+    + '<w:tcMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar></w:tcPr>'
+    + `${field.repeat(paragraphs)}</w:tc></w:tr></w:tbl>`;
+};
+
 export type Direction = 'tbRl' | 'tbLrV';
 
 function docx(
@@ -47,6 +77,7 @@ function docx(
   columns = 1,
   linePitch = 360,
   numberingLevel?: string,
+  styles?: string,
 ): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${body.join('')}`
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
@@ -61,15 +92,24 @@ function docx(
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
       + (numberingLevel === undefined ? ''
         : '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>')
+      + (styles === undefined ? ''
+        : '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>')
       + '</Types>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
-    ...(numberingLevel === undefined ? [] : [
+    ...(numberingLevel === undefined && styles === undefined ? [] : [
       ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        + `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/></Relationships>`)],
+        + (numberingLevel === undefined ? '' : `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/>`)
+        + (styles === undefined ? '' : `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>`)
+        + '</Relationships>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(numberingLevel === undefined ? [] : [
       ['word/numbering.xml', xml(`<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0">${numberingLevel}</w:abstractNum>`
         + '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(styles === undefined ? [] : [
+      ['word/styles.xml', xml(`<w:styles xmlns:w="${W}">${styles}</w:styles>`)],
     ] as Array<[string, Uint8Array]>),
   ]));
 }
@@ -113,15 +153,17 @@ export interface Page {
 }
 
 /** `linePitch`: the section's line grid pitch in twentieths of a point.
- * `numberingLevel`: the `w:lvl` of level 0 of the list `w:numId` 1. */
+ * `numberingLevel`: the `w:lvl` of level 0 of the list `w:numId` 1.
+ * `styles`: the `w:style` elements of the styles part. */
 export function layOutPages(
   direction: Direction,
   body: readonly string[],
   columns = 1,
   linePitch = 360,
   numberingLevel?: string,
+  styles?: string,
 ): Page[] {
-  const archive = new DocxArchive(docx(direction, body, columns, linePitch, numberingLevel));
+  const archive = new DocxArchive(docx(direction, body, columns, linePitch, numberingLevel, styles));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;

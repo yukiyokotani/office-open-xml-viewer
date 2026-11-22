@@ -185,6 +185,20 @@ export function measureBodyTableEntry(
   const { dependencies, services, state, sessionState, effectiveTablePositioning } = context;
   operations.setBodyAcquisitionLocation(services, state, sessionState, request.location);
   if (request.input.kind === 'adjacent-table-group') {
+    // `word-vertical-section-upright-block-table`: the tables of a logical
+    // table (ECMA-376 §17.4.37) are one upright block table of a vertical
+    // section, acquired as that one table and placed like any other.
+    const upright = uprightBlockLeader(context, request, operations);
+    if (upright) {
+      if (request.cursor && request.cursor.kind !== 'table') {
+        throw new Error('An upright logical table continues by a table cursor');
+      }
+      return measureUprightBlockTable(
+        context, request, operations, upright.leader,
+        request.cursor?.cursor ?? startTableFragmentCursor(),
+        { ...state, uprightPhysicalTable: true }, upright.physical,
+      );
+    }
     return measureAdjacentTableGroup(context, request as AdjacentBodyTableRequest, operations);
   }
   const table = operations.sourceElement(dependencies.source, request.input.source);
@@ -235,7 +249,8 @@ export function measureBodyTableEntry(
     const physical = state.verticalPhys;
     if (uprightBlockPaginates(physical)) {
       return measureUprightBlockTable(
-        context, request, operations, retained, cursor, acquisitionState, physical, sourceIndex,
+        context, request, operations, uprightRunMember(physical, request.input.source, retained),
+        cursor, acquisitionState, physical,
       );
     }
     // A counter-clockwise section flow (library policy): an atomic block at
@@ -567,7 +582,10 @@ function searchUprightBlock(
 
 /** One table of a run of upright block tables. */
 type UprightRunMember = Readonly<{
+  /** Body index of the table, or of the first table of a logical table. */
   sourceIndex: number;
+  /** Body index of its last table. */
+  lastSourceIndex: number;
   source: SourceRef;
   retained: RetainedTableAcquisition;
   gridExtentPt: number;
@@ -580,11 +598,13 @@ function uprightRunMember(
   physical: PhysicalAnchorFrame,
   source: SourceRef,
   retained: RetainedTableAcquisition,
+  lastSourceIndex = source.path[0]!,
 ): UprightRunMember {
   const gridExtentPt = retained.layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
   const edges = uprightBlockEdgeOverhangsPt(retained.layout, gridExtentPt, physical);
   return Object.freeze({
     sourceIndex: source.path[0]!,
+    lastSourceIndex,
     source,
     retained,
     gridExtentPt,
@@ -618,81 +638,155 @@ type UprightRunPlan =
    * (the last slot can be one that splits by rows and is not in it). */
   | Readonly<{ kind: 'placed'; slots: readonly UprightBlockSlot[]; box: LayoutRect; lastSourceIndex: number }>;
 
-/** A run of upright block tables that directly follow one another in the
- * body: its tables in order, the inline extent of each table and all after
- * it, and the box extent of the widest. */
-type UprightRun = Readonly<{
-  availableInlineExtentPt: number;
-  writingMode: PhysicalAnchorFrame['writingMode'];
-  startIndex: number;
-  members: readonly UprightRunMember[];
-  /** `suffixInlinePt[i]`: inline extent of members `i` and later. */
-  suffixInlinePt: Float64Array;
-  boxBlockExtentPt: number;
-}>;
-
-/** By layout session: a later session can measure the same tables differently. */
-const uprightRunsBySession = new WeakMap<object, Map<number, UprightRun>>();
+/** The synthetic inputs of the logical tables a run was taken with, by layout
+ * session and first body index: one object per logical table, so its
+ * combined acquisition is made once (combinedAdjacentGroupAcquisition). */
+const uprightGroupInputsBySession = new WeakMap<object, Map<number, AdjacentBodyTableRequest['input']>>();
 
 /**
- * The run of directly following upright block tables that holds the table at
- * body index `sourceIndex`, and the table's place in it. A run is laid out
- * as one table over however many pages it takes, so its dimensions are taken
- * once, when the flow first reaches one of its tables, and every later page
- * reads them instead of walking the rest of the run again.
+ * The upright block table that starts at body index `index`, as one member
+ * of a run: a single table, or the tables the parser grouped into one
+ * logical table (ECMA-376 §17.4.37), acquired as that one table. Null when
+ * no upright block table starts there (not a table, positioned, without
+ * rows, or projected into owner segments). `input` is the paginator's input
+ * for it, when the flow has reached it.
+ */
+function uprightUnitAt(
+  context: BodyTableMeasurementContext,
+  request: BodyTableRequest,
+  operations: BodyTableMeasurementOperations,
+  physical: PhysicalAnchorFrame,
+  index: number,
+  input?: BodyTableRequest['input'],
+): UprightRunMember | null {
+  const { dependencies, state, effectiveTablePositioning } = context;
+  const body = dependencies.source.blocks.body;
+  const element = body[index];
+  if (element?.type !== 'table') return null;
+  const memberState = bodyTableAcquisitionState(state, element, effectiveTablePositioning);
+  if (memberState.uprightPhysicalTable !== true) return null;
+  const source = input?.source ?? Object.freeze({ ...request.input.source, path: Object.freeze([index]) });
+  const sequenceId = state.acquisitionInputs.tableFormatInput(element).logicalSequenceId ?? null;
+  let lastIndex = index;
+  if (input?.kind === 'adjacent-table-group') lastIndex = index + input.tables.length - 1;
+  else if (!input && sequenceId !== null) {
+    for (let next = index + 1; ; next += 1) {
+      const following = body[next];
+      if (following?.type !== 'table'
+        || state.acquisitionInputs.tableFormatInput(following).logicalSequenceId !== sequenceId) break;
+      lastIndex = next;
+    }
+  }
+  if (lastIndex === index) {
+    operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, index);
+    const retained = retainedTableRecord(state, index).acquisition;
+    if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) return null;
+    return uprightRunMember(physical, source, retained);
+  }
+  const members: Array<Readonly<{ table: typeof element; sourceIndex: number }>> = [];
+  for (let at = index; at <= lastIndex; at += 1) {
+    const table = body[at];
+    if (table?.type !== 'table') throw new Error('Logical table member is not a table');
+    members.push({ table, sourceIndex: at });
+  }
+  let groupInput = input?.kind === 'adjacent-table-group' ? input : undefined;
+  if (!groupInput) {
+    let inputs = uprightGroupInputsBySession.get(context.sessionState);
+    if (!inputs) uprightGroupInputsBySession.set(context.sessionState, inputs = new Map());
+    groupInput = inputs.get(index);
+    if (!groupInput) {
+      groupInput = Object.freeze({
+        kind: 'adjacent-table-group' as const,
+        logicalSequenceId: sequenceId!,
+        source,
+        tables: Object.freeze(members.map((member) => Object.freeze({
+          kind: 'table' as const,
+          source: Object.freeze({ ...source, path: Object.freeze([member.sourceIndex]) }),
+          rowCount: member.table.rows.length,
+        }))),
+      });
+      inputs.set(index, groupInput);
+    }
+  }
+  const records = operations.computeAdjacentTablePtLayouts(memberState, members, request.availableInlineExtentPt);
+  const combined = combinedAdjacentGroupAcquisition(
+    context, { ...request, input: groupInput } as AdjacentBodyTableRequest, operations, records,
+  );
+  if (combined.input.rows.length === 0 || tableOwnerSegments(combined.input)) return null;
+  return uprightRunMember(physical, source, combined, lastIndex);
+}
+
+/** A run of upright block tables that directly follow one another in the
+ * body, from the table the flow reached first: its tables in order, the
+ * inline extent of each table and all after it, and the box extent of the
+ * widest. Updated in place when a table measures differently on its page. */
+type UprightRun = {
+  readonly availableInlineExtentPt: number;
+  readonly writingMode: PhysicalAnchorFrame['writingMode'];
+  readonly members: UprightRunMember[];
+  /** `suffixInlinePt[i]`: inline extent of members `i` and later. */
+  readonly suffixInlinePt: Float64Array;
+  boxBlockExtentPt: number;
+};
+
+/** By layout session: a later session can measure the same tables differently. */
+const uprightRunsBySession = new WeakMap<object, Map<number, Readonly<{ run: UprightRun; at: number }>>>();
+
+/** Whether a table now measures as the run recorded it. */
+function uprightRunMemberHolds(recorded: UprightRunMember, current: UprightRunMember): boolean {
+  return recorded.inlineExtentPt === current.inlineExtentPt
+    && recorded.boxBlockExtentPt === current.boxBlockExtentPt;
+}
+
+/** Records how the run's table `at` measures now. The inline extents from
+ * `fromAt` (a table at or before it, the first the current page still
+ * reads) are brought up to date; nothing is measured, and tables placed on
+ * earlier pages keep what was recorded for them. */
+function refreshUprightRunMember(run: UprightRun, at: number, current: UprightRunMember, fromAt: number): void {
+  run.members[at] = current;
+  for (let index = at; index >= fromAt; index -= 1) {
+    run.suffixInlinePt[index] = run.suffixInlinePt[index + 1]! + run.members[index]!.inlineExtentPt;
+  }
+  run.boxBlockExtentPt = Math.max(run.boxBlockExtentPt, current.boxBlockExtentPt);
+}
+
+/**
+ * The run of directly following upright block tables that holds `leader`,
+ * the table the flow reached, and its place in it. A run is laid out as one
+ * table over however many pages it takes, so its tables are acquired once,
+ * when the flow first reaches one of them, and every later page reads their
+ * dimensions instead of walking the rest of the run again.
  *
  * A table whose cells hold page-dependent content (a PAGE field, say) can
  * measure differently on the page it is placed on than when the run was
- * taken. `stale` is asked about the cached run before it is used; a stale
- * run is dropped for all its tables and taken again from the current page.
+ * taken. `leader` is how it measures now: where that differs, only its own
+ * record is replaced. Nothing else is measured again; the tables of earlier
+ * pages are placed and stay as they are, and each later table is checked on
+ * the page that places it (planUprightRun).
  */
 function uprightRunAt(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   operations: BodyTableMeasurementOperations,
   physical: PhysicalAnchorFrame,
-  sourceIndex: number,
-  /** Whether the cached run no longer holds for the tables being placed. */
-  stale?: (run: UprightRun, at: number) => boolean,
+  leader: UprightRunMember,
 ): Readonly<{ run: UprightRun; at: number }> {
-  const { dependencies, state, effectiveTablePositioning } = context;
   let runs = uprightRunsBySession.get(context.sessionState);
   if (!runs) uprightRunsBySession.set(context.sessionState, runs = new Map());
-  const cached = runs.get(sourceIndex);
-  if (cached && cached.availableInlineExtentPt === request.availableInlineExtentPt
-    && cached.writingMode === physical.writingMode
-    && !stale?.(cached, sourceIndex - cached.startIndex)) {
-    return { run: cached, at: sourceIndex - cached.startIndex };
+  const cached = runs.get(leader.sourceIndex);
+  if (cached && cached.run.availableInlineExtentPt === request.availableInlineExtentPt
+    && cached.run.writingMode === physical.writingMode) {
+    if (!uprightRunMemberHolds(cached.run.members[cached.at]!, leader)) {
+      refreshUprightRunMember(cached.run, cached.at, leader, cached.at);
+    }
+    return cached;
   }
-  // A run measured differently now is taken again from this page's tables.
-  if (cached) for (const member of cached.members) runs.delete(member.sourceIndex);
-  const memberAt = (index: number): UprightRunMember | null => {
-    const element = dependencies.source.blocks.body[index];
-    if (element?.type !== 'table') return null;
-    const memberState = bodyTableAcquisitionState(state, element, effectiveTablePositioning);
-    if (memberState.uprightPhysicalTable !== true) return null;
-    operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, index);
-    const retained = retainedTableRecord(state, index).acquisition;
-    if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) return null;
-    return uprightRunMember(
-      physical, Object.freeze({ ...request.input.source, path: Object.freeze([index]) }), retained,
-    );
-  };
-  const before: UprightRunMember[] = [];
-  for (let index = sourceIndex - 1; index >= 0; index -= 1) {
-    const member = memberAt(index);
-    if (!member) break;
-    before.push(member);
-  }
-  const precedingCount = before.length;
-  const members = before.reverse();
-  for (let index = sourceIndex; ; index += 1) {
-    const member = memberAt(index);
+  const members = [leader];
+  for (let index = leader.lastSourceIndex + 1; ;) {
+    const member = uprightUnitAt(context, request, operations, physical, index);
     if (!member) break;
     members.push(member);
-  }
-  if (members.length === precedingCount) {
-    throw new Error('An upright block table run must hold its own table');
+    index = member.lastSourceIndex + 1;
   }
   const suffixInlinePt = new Float64Array(members.length + 1);
   let boxBlockExtentPt = 0;
@@ -700,22 +794,15 @@ function uprightRunAt(
     suffixInlinePt[index] = suffixInlinePt[index + 1]! + members[index]!.inlineExtentPt;
     boxBlockExtentPt = Math.max(boxBlockExtentPt, members[index]!.boxBlockExtentPt);
   }
-  const run: UprightRun = Object.freeze({
+  const run: UprightRun = {
     availableInlineExtentPt: request.availableInlineExtentPt,
     writingMode: physical.writingMode,
-    startIndex: members[0]!.sourceIndex,
     members,
     suffixInlinePt,
     boxBlockExtentPt,
-  });
-  for (const member of members) runs.set(member.sourceIndex, run);
-  return { run, at: sourceIndex - run.startIndex };
-}
-
-/** Whether a table now measures as the run recorded it. */
-function uprightRunMemberHolds(recorded: UprightRunMember, current: UprightRunMember): boolean {
-  return recorded.inlineExtentPt === current.inlineExtentPt
-    && recorded.boxBlockExtentPt === current.boxBlockExtentPt;
+  };
+  members.forEach((member, at) => runs.set(member.sourceIndex, Object.freeze({ run, at })));
+  return runs.get(leader.sourceIndex)!;
 }
 
 /** Block start of a table's box inside its run's box, which starts at
@@ -762,7 +849,7 @@ function planUprightRun(
   physical: PhysicalAnchorFrame,
   leader: UprightRunMember,
   reserving: boolean,
-  /** The run was just taken again for this plan. */
+  /** The plan is made again after tables of the run measured differently. */
   retried = false,
 ): UprightRunPlan {
   const { state } = context;
@@ -771,35 +858,26 @@ function planUprightRun(
   const flowDomainId = request.location.flowDomainId;
   const multiColumn = request.location.section.columns.length > 1;
   const pageHasContent = request.pageHasContent === true;
-  const { run, at } = uprightRunAt(
-    context, request, operations, physical, leader.sourceIndex,
-    (recorded, index) => !uprightRunMemberHolds(recorded.members[index]!, leader),
-  );
-  const { members, boxBlockExtentPt } = run;
+  const { run, at } = uprightRunAt(context, request, operations, physical, leader);
+  const { members } = run;
+  const boxBlockExtentPt = run.boxBlockExtentPt;
   const totalInlinePt = run.suffixInlinePt[at]!;
-  /** The table of the run at `memberIndex` as it measures on this page. */
-  const measuredNow = (memberIndex: number): UprightRunMember => {
-    const member = members[memberIndex]!;
-    if (memberIndex === at) return leader;
-    const element = context.dependencies.source.blocks.body[member.sourceIndex];
-    if (element?.type !== 'table') throw new Error('Upright block table run member is not a table');
-    operations.computeTablePtLayout(
-      bodyTableAcquisitionState(state, element, context.effectiveTablePositioning),
-      element, request.availableInlineExtentPt, member.sourceIndex,
-    );
-    return uprightRunMember(physical, member.source, retainedTableRecord(state, member.sourceIndex).acquisition);
-  };
-  // The tables placed on this page have to measure here as the run recorded
-  // them; otherwise the run is taken again and the plan made anew. One check
-  // per table placed, so the checks grow with the tables, not their square.
+  // The tables a plan places on this page have to measure here as the run
+  // recorded them. Each is measured once on its page, so the checks grow with
+  // the tables, not with their square. Where one differs its record is
+  // replaced and the plan made anew, once.
   const replanIfStale = (plan: UprightRunPlan): UprightRunPlan => {
     if (plan.kind !== 'placed' || retried) return plan;
+    let changed = false;
     for (let offset = 1; offset < plan.slots.length; offset += 1) {
-      if (uprightRunMemberHolds(members[at + offset]!, measuredNow(at + offset))) continue;
-      uprightRunAt(context, request, operations, physical, leader.sourceIndex, () => true);
-      return planUprightRun(context, request, operations, physical, leader, reserving, true);
+      const recorded = members[at + offset]!;
+      const current = uprightUnitAt(context, request, operations, physical, recorded.sourceIndex);
+      if (!current) throw new Error('Upright block table run member is no longer an upright table');
+      if (uprightRunMemberHolds(recorded, current)) continue;
+      refreshUprightRunMember(run, at + offset, current, at);
+      changed = true;
     }
-    return plan;
+    return changed ? planUprightRun(context, request, operations, physical, leader, reserving, true) : plan;
   };
   // `wholeCount` tables from this one placed whole from `inlineStartPt`,
   // then at most one cut by rows.
@@ -808,6 +886,8 @@ function planUprightRun(
     let inlineEndPt = inlineStartPt;
     const slotOf = (member: UprightRunMember, splitRows: boolean): UprightBlockSlot => Object.freeze({
       sourceIndex: member.sourceIndex,
+      lastSourceIndex: member.lastSourceIndex,
+      first: member === members[at],
       flowDomainId,
       bounds: Object.freeze({
         xPt: inlineEndPt,
@@ -830,7 +910,7 @@ function planUprightRun(
     });
     if (at + wholeCount < members.length) slots.push(slotOf(members[at + wholeCount]!, true));
     return Object.freeze({
-      kind: 'placed' as const, slots, box, lastSourceIndex: members[at + wholeCount - 1]!.sourceIndex,
+      kind: 'placed' as const, slots, box, lastSourceIndex: members[at + wholeCount - 1]!.lastSourceIndex,
     });
   };
   // Rows that continue the upright table placed just before this one in the
@@ -864,25 +944,19 @@ function planUprightRun(
 }
 
 /** `word-vertical-section-upright-block-table`: the top-level upright block
- * table of `request`, or null when its table is none or is projected into
- * owner segments. */
+ * table of `request` (a table, or the tables of one logical table), or null
+ * when it is none or is projected into owner segments. */
 function uprightBlockLeader(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   operations: BodyTableMeasurementOperations,
 ): Readonly<{ leader: UprightRunMember; physical: PhysicalAnchorFrame }> | null {
-  const { dependencies, state, effectiveTablePositioning } = context;
-  if (request.input.kind !== 'table') return null;
-  const table = operations.sourceElement(dependencies.source, request.input.source);
-  if (table.type !== 'table') return null;
-  const acquisitionState = bodyTableAcquisitionState(state, table, effectiveTablePositioning);
-  const physical = state.verticalPhys;
-  if (acquisitionState.uprightPhysicalTable !== true || !physical || !uprightBlockPaginates(physical)) return null;
-  const sourceIndex = request.input.source.path[0]!;
-  operations.computeTablePtLayout(acquisitionState, table, request.availableInlineExtentPt, sourceIndex);
-  const retained = retainedTableRecord(state, sourceIndex).acquisition;
-  if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) return null;
-  return { leader: uprightRunMember(physical, request.input.source, retained), physical };
+  const physical = context.state.verticalPhys;
+  if (!physical || !uprightBlockPaginates(physical)) return null;
+  const leader = uprightUnitAt(
+    context, request, operations, physical, request.input.source.path[0]!, request.input,
+  );
+  return leader ? { leader, physical } : null;
 }
 
 /** The exclusion of the tables placed whole by a plan: one rectangle over
@@ -948,23 +1022,30 @@ function uprightPagePin(
  * location, decided by the placement itself (planUprightRun) against the
  * blocks already on the page, so a table that placement moves to a fresh
  * page to clear an earlier one is not promised to the paragraph kept with
- * it. Null when the table is not such a block. Changes nothing.
+ * it; with the table's retained layout. Null when the table is not such a
+ * block. Changes nothing.
  */
-export function bodyUprightBlockStartsHere(
+export function bodyUprightBlockLookAhead(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   operations: BodyTableMeasurementOperations,
-): boolean | null {
+): Readonly<{ startsHere: boolean; layout: TableLayout }> | null {
   const { services, state, sessionState } = context;
   const restore = sessionState.location;
   operations.setBodyAcquisitionLocation(services, state, sessionState, request.location);
   try {
     const found = uprightBlockLeader(context, request, operations);
     if (!found) return null;
+    const layout = found.leader.retained.layout;
     const slot = uprightBlockIndexOf(state).slots.get(found.leader.sourceIndex);
-    if (slot && (slot.anyColumn || slot.flowDomainId === request.location.flowDomainId)) return true;
-    return planUprightRun(context, request, operations, found.physical, found.leader, false).kind
-      !== 'fresh-region';
+    if (slot && (slot.anyColumn || slot.flowDomainId === request.location.flowDomainId)) {
+      return { startsHere: true, layout };
+    }
+    return {
+      startsHere: planUprightRun(context, request, operations, found.physical, found.leader, false).kind
+        !== 'fresh-region',
+      layout,
+    };
   } finally {
     operations.setBodyAcquisitionLocation(services, state, sessionState, restore);
   }
@@ -1034,15 +1115,14 @@ function measureUprightBlockTable(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   operations: BodyTableMeasurementOperations,
-  retained: RetainedTableAcquisition,
+  leader: UprightRunMember,
   cursor: ReturnType<typeof startTableFragmentCursor>,
   acquisitionState: BodyAcquisitionState,
   physical: PhysicalAnchorFrame,
-  sourceIndex: number,
 ): TableMeasureResult {
   const index = uprightBlockIndexOf(context.state);
   const flowDomainId = request.location.flowDomainId;
-  const leader = uprightRunMember(physical, request.input.source, retained);
+  const { retained, sourceIndex } = leader;
   const freshRegion = (freshPage: boolean) => Object.freeze({
     layout: retained.layout,
     blockExtentPt: 0,
@@ -1079,10 +1159,7 @@ function measureUprightBlockTable(
     ),
     acquisitionState,
   ) as TableLayout;
-  const { run } = uprightRunAt(
-    context, request, operations, physical, sourceIndex,
-    (recorded, at) => !uprightRunMemberHolds(recorded.members[at]!, leader),
-  );
+  const { run } = uprightRunAt(context, request, operations, physical, leader);
   /** Whole rows from `cursor` that fit the band below `at`, the position of
    * the run's box; a row taller than the band takes a page of its own. Every
    * fragment keeps the box edges of the whole table (rows continued on a
@@ -1122,7 +1199,7 @@ function measureUprightBlockTable(
       taken.nextCursor ? Object.freeze({ kind: 'table' as const, cursor: taken.nextCursor }) : null,
       uprightBlockRegistrationOf(
         box, [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), box)],
-        { sourceIndex, flowDomainId, bounds: box },
+        { sourceIndex: leader.lastSourceIndex, flowDomainId, bounds: box },
       ),
     );
   };
@@ -1146,13 +1223,13 @@ function measureUprightBlockTable(
       // Placed with the paragraph before it and raised over an earlier
       // column: the tables of its plan become a page pin.
       let pin: UprightBlockRegistration | null = null;
-      if (slot.reserved && !slot.pinned && (uprightBlockReachesEarlierColumn(request, slot.bounds)
-        || uprightBlockCoversLaterDrawing(context.state, request.input.source, slot.bounds))) {
+      if (slot.first && slot.reserved && !slot.pinned) {
+        // The tables placed with this one, and the box of them all.
         const slots = [slot];
         let box = slot.bounds;
-        for (let next = sourceIndex + 1; ; next += 1) {
+        for (let next = slot.lastSourceIndex + 1; ;) {
           const follower = index.slots.get(next);
-          if (!follower || !follower.reserved || follower.pinned
+          if (!follower || follower.first || !follower.reserved
             || follower.flowDomainId !== slot.flowDomainId) break;
           slots.push(follower);
           const startPt = Math.min(box.yPt, follower.bounds.yPt);
@@ -1163,8 +1240,12 @@ function measureUprightBlockTable(
             widthPt: follower.bounds.xPt + follower.bounds.widthPt - box.xPt,
             heightPt: endPt - startPt,
           };
+          next = follower.lastSourceIndex + 1;
         }
-        pin = uprightPagePin(request, Object.freeze(box), slots, slots.at(-1)!.sourceIndex);
+        if (uprightBlockReachesEarlierColumn(request, box)
+          || uprightBlockCoversLaterDrawing(context.state, request.input.source, box)) {
+          pin = uprightPagePin(request, Object.freeze(box), slots, slots.at(-1)!.lastSourceIndex);
+        }
       }
       return placed(wholeAt(slot.bounds), slot.bounds, null, null, pin);
     }

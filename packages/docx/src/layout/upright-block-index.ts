@@ -32,8 +32,10 @@ export interface UprightBlockPageIndex {
   /** The table placed last (UprightBlockTail). */
   tail: UprightBlockTail | null;
   /** The boxes of the placed top-level tables with the body index of the
-   * last table in each, in body order (addUprightTableBox). */
-  readonly tables: Array<Readonly<{ sourceIndex: number; box: LayoutRect }>>;
+   * last table in each, bucketed along the block axis (addUprightTableBox). */
+  readonly tableBuckets: Map<number, UprightTableBox[]>;
+  /** Number of boxes in `tableBuckets`. */
+  tableCount: number;
   /** Text exclusions by `${block bucket}:${inline bucket}`. */
   readonly exclusionCells: Map<string, UprightBlockExclusionEntry[]>;
   /** Exclusions covering more cells than MAX_EXCLUSION_CELLS; every query reads them. */
@@ -54,7 +56,10 @@ export type UprightBlockExclusionEntry = Readonly<{ exclusion: UprightBlockExclu
 
 /** A table placed ahead of the flow reaching it. */
 export interface UprightBlockSlot {
+  /** Body index of the table, or of the first table of a logical table. */
   readonly sourceIndex: number;
+  /** Body index of its last table. */
+  readonly lastSourceIndex: number;
   /** The column the table was placed for. A table the flow reaches in
    * another column has no slot, unless the slot is `anyColumn`. */
   readonly flowDomainId: string;
@@ -69,6 +74,9 @@ export interface UprightBlockSlot {
   /** Registered when the page's layout started (a page pin): all text of the
    * page already flows around the table, so it asks for no further pin. */
   readonly pinned: boolean;
+  /** The first table of the plan that placed it. It speaks for the tables
+   * placed with it: only it asks for a page pin, which holds them all. */
+  readonly first: boolean;
   /** The table does not fit the band from `bounds` and is cut between rows
    * there; the rest continues on the next page. */
   readonly splitRows: boolean;
@@ -98,7 +106,8 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     wide: [],
     slots: new Map(),
     tail: null,
-    tables: [],
+    tableBuckets: new Map(),
+    tableCount: 0,
     exclusionCells: new Map(),
     wideExclusions: [],
     lastExclusionBucket: Number.NEGATIVE_INFINITY,
@@ -232,58 +241,60 @@ export function uprightBlockBoxesMet(
   return met.sort((left, right) => left.xPt - right.xPt);
 }
 
-/** Records the box of placed tables ending at body index `sourceIndex`.
- * The history is kept in body order: tables are placed in that order except
- * those pinned when a page's layout starts. */
+/** The box of placed tables that end at body index `sourceIndex`. */
+export type UprightTableBox = Readonly<{ sourceIndex: number; box: LayoutRect }>;
+
+/** Records the box of placed tables ending at body index `sourceIndex`. */
 export function addUprightTableBox(index: UprightBlockPageIndex, sourceIndex: number, box: LayoutRect): void {
-  const { tables } = index;
-  let at = tables.length;
-  while (at > 0 && tables[at - 1]!.sourceIndex > sourceIndex) at -= 1;
-  tables.splice(at, 0, { sourceIndex, box });
+  const entry: UprightTableBox = Object.freeze({ sourceIndex, box });
+  // Registered in at most MAX_BUCKET_SPAN + 1 buckets from its block start:
+  // no page is wide enough for a query past that range to meet the box.
+  const first = bucketOf(box.yPt);
+  const last = Math.min(bucketOf(box.yPt + box.heightPt), first + MAX_BUCKET_SPAN);
+  for (let bucket = first; bucket <= last; bucket += 1) {
+    const entries = index.tableBuckets.get(bucket);
+    if (entries) entries.push(entry);
+    else index.tableBuckets.set(bucket, [entry]);
+  }
+  index.tableCount += 1;
 }
 
 /**
- * `word-vertical-section-upright-block-table`: the boxes of the upright block
- * tables placed so far for tables before body index `beforeSourceIndex`: the
- * ones a wrapped drawing anchored by the paragraph at that index is moved
- * below. Asked only for a paragraph that anchors a drawing.
+ * `word-vertical-section-upright-block-table`: how far along the inline axis
+ * (x) a wrapped drawing with frame `rect`, anchored by the paragraph at body
+ * index `beforeSourceIndex`, moves to lie below the upright block tables
+ * placed for tables before that paragraph: past the inline end of each such
+ * box it would cover, taken in inline order so that a box reached by the
+ * move is cleared too. Zero when it covers none. Only the boxes in the
+ * drawing's block range are read.
  */
-export function uprightTableBoxesBefore(
+export function inlineShiftBelowUprightTablesPt(
   index: UprightBlockPageIndex | undefined,
   beforeSourceIndex: number,
-): readonly LayoutRect[] {
-  if (!index || index.tables.length === 0) return NO_BOXES;
-  const { tables } = index;
-  // First entry at or past the paragraph, by bisection of the ordered history.
-  let low = 0;
-  let high = tables.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (tables[middle]!.sourceIndex < beforeSourceIndex) low = middle + 1;
-    else high = middle;
-  }
-  if (low === 0) return NO_BOXES;
-  const boxes: LayoutRect[] = [];
-  for (let at = 0; at < low; at += 1) boxes.push(tables[at]!.box);
-  return boxes;
-}
-
-const NO_BOXES: readonly LayoutRect[] = Object.freeze([]);
-
-/**
- * How far along the inline axis (x) a drawing with frame `rect` moves to lie
- * below every one of `boxes` it would cover: past the inline end of each box
- * it overlaps, taken in inline order so that a box reached by the move is
- * cleared too. Zero when it overlaps none.
- */
-export function inlineShiftPastBoxesPt(rect: LayoutRect, boxes: readonly LayoutRect[]): number {
-  if (boxes.length === 0) return 0;
-  let startPt = rect.xPt;
-  for (const box of [...boxes].sort((left, right) => left.xPt - right.xPt)) {
-    if (box.yPt < rect.yPt + rect.heightPt && rect.yPt < box.yPt + box.heightPt
-      && box.xPt < startPt + rect.widthPt && startPt < box.xPt + box.widthPt) {
-      startPt = box.xPt + box.widthPt;
+  rect: LayoutRect,
+): number {
+  if (!index || index.tableCount === 0) return 0;
+  const blockEndPt = rect.yPt + rect.heightPt;
+  const first = bucketOf(rect.yPt);
+  const last = bucketOf(blockEndPt);
+  let met: UprightTableBox[] | null = null;
+  for (let bucket = first; bucket <= last; bucket += 1) {
+    const entries = index.tableBuckets.get(bucket);
+    if (!entries) continue;
+    for (const entry of entries) {
+      const { box } = entry;
+      // A box registered in several buckets is taken from the first of them
+      // that this query reads.
+      if (entry.sourceIndex < beforeSourceIndex
+        && bucket === Math.max(first, bucketOf(box.yPt))
+        && box.yPt < blockEndPt && rect.yPt < box.yPt + box.heightPt) (met ??= []).push(entry);
     }
+  }
+  if (!met) return 0;
+  met.sort((left, right) => left.box.xPt - right.box.xPt);
+  let startPt = rect.xPt;
+  for (const { box } of met) {
+    if (box.xPt < startPt + rect.widthPt && startPt < box.xPt + box.widthPt) startPt = box.xPt + box.widthPt;
   }
   return startPt - rect.xPt;
 }

@@ -2,9 +2,11 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   P,
   T,
+  anchoredRectangle,
   layOutPages,
   loadParser,
   paragraph,
+  romanPageTable,
   table,
 } from './test-support/vertical-section-upright.test-support.js';
 
@@ -229,4 +231,55 @@ describe('upright block table placement work', () => {
     const large = measure(80);
     expect(large).toBeLessThanOrEqual(5 * small);
   }, 120_000);
+
+  it('lays out a run whose tables measure differently on every page in proportion to its tables', () => {
+    // One table a page (a 400 pt row), each holding 37 roman PAGE fields: its
+    // text grows with the page number, so every table measures differently
+    // on the page it lands on than when the run was taken. Only the table
+    // placed is measured again, never the run.
+    const measure = (count: number) => {
+      const before = work.recordReads;
+      const pages = layOutPages('tbRl', Array.from({ length: count }, () => romanPageTable(37, 400)));
+      expect(pages.flatMap((page) => page.tables).length).toBeGreaterThanOrEqual(count);
+      return work.recordReads - before;
+    };
+    const small = measure(10);
+    const large = measure(20);
+    expect(large).toBeLessThanOrEqual(2.6 * small);
+  }, 300_000);
+
+  it('registers the pins one layout of a page finds together', () => {
+    // Tables one strip apart, each followed by a paragraph anchoring a small
+    // wrapped drawing over it: every table has to be pinned for its drawing
+    // to lie below it. The page is laid out again once for all of them, not
+    // once per table.
+    const measure = (count: number) => {
+      const body = Array.from({ length: count }, (_, at) => [
+        table(1), P.replace('</w:p>', `${anchoredRectangle(60 + 18 * at, 62 + 11.25 * at, 6, 5)}</w:p>`),
+      ]).flat();
+      const before = work.registered;
+      const pages = layOutPages('tbLrV', body);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.tables).toHaveLength(count);
+      expect(pages[0]!.drawings).toHaveLength(count);
+      return work.registered - before;
+    };
+    const small = measure(8);
+    const large = measure(16);
+    expect(large).toBeLessThanOrEqual(3 * small);
+  }, 300_000);
+
+  it('reads no placed table for a drawing that lies clear of the tables', () => {
+    // Paragraphs anchoring a drawing at the far block edge of the page,
+    // alternating with tables near its start: the drawing's block range
+    // holds no table box, so placing it reads none.
+    for (const count of [4, 8]) {
+      const body = Array.from({ length: count }, () => [
+        table(1), P.replace('</w:p>', `${anchoredRectangle(0, 66, 80, 40)}</w:p>`),
+      ]).flat();
+      const { result, counts } = counting(() => layOutPages('tbRl', body, 2, 240));
+      expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
+      expect(counts.history, `${count} pairs`).toBe(0);
+    }
+  }, 300_000);
 });
