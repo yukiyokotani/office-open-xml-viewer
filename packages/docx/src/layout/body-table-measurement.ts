@@ -467,10 +467,23 @@ function uprightBlockExclusion(
   });
 }
 
+/** Body order of the fragment of `request`: its top-level table (for a
+ * logical table, the member it starts in) and its first row. Every upright
+ * box records the order of its first fragment (UprightBlockPageIndex.boxOrders). */
+function uprightFragmentOrder(request: BodyTableRequest): number {
+  const cursor = request.cursor;
+  const tableIndex = request.input.source.path[0]!
+    + (cursor?.kind === 'adjacent-table-group' ? cursor.cursor.tableIndex : 0);
+  const rowIndex = cursor === undefined ? 0
+    : cursor.kind === 'table' ? cursor.cursor.rowIndex : cursor.cursor.sourceRowIndex;
+  return tableIndex * 2 ** 24 + rowIndex;
+}
+
 /** The registration of a placed block of positive size; an empty one
  * registers nothing. */
 function uprightBlockRegistrationOf(
   box: LayoutRect | null,
+  boxOrder: number,
   slots: UprightBlockRegistration['slots'],
   exclusions: UprightBlockRegistration['exclusions'],
   tail?: NonNullable<UprightBlockRegistration['tail']>,
@@ -481,6 +494,7 @@ function uprightBlockRegistrationOf(
   if (!keptBox && slots.length === 0 && kept.length === 0) return null;
   return Object.freeze({
     box: keptBox,
+    boxOrder,
     slots: Object.freeze([...slots]),
     exclusions: Object.freeze(kept),
     ...(tail ? { tail: Object.freeze(tail) } : {}),
@@ -501,7 +515,8 @@ function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): Upr
   const floats = state.floats;
   if (index.drawingsSeen > floats.length) {
     // The rectangles were replaced, not extended: start over.
-    index.drawingBuckets.clear();
+    index.drawingCells.clear();
+    index.wideDrawings.length = 0;
     index.drawingsSeen = 0;
   }
   for (let at = index.drawingsSeen; at < floats.length; at += 1) {
@@ -526,30 +541,32 @@ function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): Upr
 }
 
 /** The exclusions of the wrapped drawings anchored by a paragraph before the
- * table that a block spanning [`blockStartPt`, `blockEndPt`] meets: their
- * block range overlaps the block's and they reach past `inlineFromPt`, where
- * the search for the block's inline position starts (one ending at or before
- * it can never be in the block's way, such as a drawing in the margin before
- * the column top). An upright block table meets them as it
- * meets a table placed before it, without the table clearance, and stacks
- * below them (`word-vertical-section-upright-block-table`). A drawing
- * anchored after the table is not met: it is the drawing that lies below the
- * table (uprightBlockCoversLaterDrawing). */
+ * table that lie in the way of a block spanning [`blockStartPt`,
+ * `blockEndPt`] along the block axis and (`inlineFromPt`, `inlineToPt`)
+ * along the inline axis: the page's drawings and `pending`, those of the
+ * paragraph fragment the table is planned with, which are not registered
+ * yet (BodyTableAcquisitionInput.precedingDrawings). An upright block table
+ * meets them as it meets a table placed before it, without the table
+ * clearance, and stacks below them
+ * (`word-vertical-section-upright-block-table`). A drawing anchored after the
+ * table is not met: it is the drawing that lies below the table
+ * (uprightBlockCoversLaterDrawing). */
 function uprightBlockObstaclesMet(
   index: UprightBlockPageIndex,
   tableIndex: number,
+  pending: readonly LayoutRect[] | undefined,
   blockStartPt: number,
   blockEndPt: number,
   inlineFromPt: number,
+  inlineToPt: number,
 ): LayoutRect[] {
   const met: LayoutRect[] = [];
-  for (const drawing of uprightPageDrawingsNear(index, blockStartPt, blockEndPt, inlineFromPt)) {
-    const box = drawing.exclusion;
-    if (drawing.anchorIndex < tableIndex && box.xPt + box.widthPt > inlineFromPt
-      && box.yPt < blockEndPt && blockStartPt < box.yPt + box.heightPt) {
-      met.push(box);
-    }
+  const inTheWay = (box: LayoutRect) => box.xPt < inlineToPt && box.xPt + box.widthPt > inlineFromPt
+    && box.yPt < blockEndPt && blockStartPt < box.yPt + box.heightPt;
+  for (const drawing of uprightPageDrawingsNear(index, blockStartPt, blockEndPt, inlineFromPt, inlineToPt)) {
+    if (drawing.anchorIndex < tableIndex && inTheWay(drawing.exclusion)) met.push(drawing.exclusion);
   }
+  if (pending) for (const box of pending) if (inTheWay(box)) met.push(box);
   return met;
 }
 
@@ -564,7 +581,7 @@ function uprightBlockObstaclesMet(
  * boxes it meets (an earlier box is met up to
  * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past its far edge), so overlapping
  * tables stack. Wrapped drawings anchored before the table are met where
- * their block range overlaps the block's (uprightBlockObstaclesMet).
+ * they lie in the block's way (uprightBlockObstaclesMet).
  * A multi-column section never splits or moves a block: one that would pass
  * the page's bottom edge from the column top is first raised to end there,
  * no higher than the page top, and the search starts from that raised
@@ -614,26 +631,38 @@ function searchUprightBlock(
   let inlineStartPt = inlineOriginPt;
   for (;;) {
     const blockEndPt = blockStartPt + boxBlockExtentPt;
-    const met = uprightBlockBoxesMet(index, blockStartPt, blockEndPt, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
+    const met = uprightBlockBoxesMet(
+      index, blockStartPt, blockEndPt, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, uprightFragmentOrder(request),
+    );
     let nearestEndPt = Number.POSITIVE_INFINITY;
     for (const box of met) {
       nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
     }
-    const obstacles = uprightBlockObstaclesMet(
-      index, request.input.source.path[0]!, blockStartPt, blockEndPt, inlineOriginPt,
-    );
-    for (const box of obstacles) {
-      met.push(box);
-      nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt);
-    }
-    if (obstacles.length > 0) met.sort((left, right) => left.xPt - right.xPt);
-    // The met boxes are ordered by inline start, so one pass leaves the
-    // block clear of all of them: a box passed without overlap ends at or
-    // before the block's start, which only grows.
+    // The first inline position from the origin at which the block clears
+    // the met boxes and the drawings in its way. The met boxes are ordered
+    // by inline start and passed once: a box passed without overlap ends at
+    // or before the block's start, which only grows, and one starting past
+    // the block's end is kept for the next round. The drawings are asked for
+    // in the block's current inline window only; any position clear of one
+    // in the window lies past its end, so the block moves there and the
+    // window is asked again. Each round passes at least one box or drawing.
     inlineStartPt = inlineOriginPt;
-    for (const box of met) {
-      const boxEndPt = box.xPt + box.widthPt;
-      if (box.xPt < inlineStartPt + inlineExtentPt && boxEndPt > inlineStartPt) inlineStartPt = boxEndPt;
+    let next = 0;
+    for (;;) {
+      while (next < met.length && met[next]!.xPt < inlineStartPt + inlineExtentPt) {
+        const box = met[next]!;
+        inlineStartPt = Math.max(inlineStartPt, box.xPt + box.widthPt);
+        next += 1;
+      }
+      const obstacles = uprightBlockObstaclesMet(
+        index, request.input.source.path[0]!, request.precedingDrawings,
+        blockStartPt, blockEndPt, inlineStartPt, inlineStartPt + inlineExtentPt,
+      );
+      if (obstacles.length === 0) break;
+      for (const box of obstacles) {
+        nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt);
+        inlineStartPt = Math.max(inlineStartPt, box.xPt + box.widthPt);
+      }
     }
     const fitsBelow = inlineStartPt + inlineExtentPt <= (multiColumn ? physical.pageHeight : bandEndPt);
     if (!first || inlineStartPt === inlineOriginPt || fitsBelow
@@ -1127,7 +1156,7 @@ function uprightBlockCoversLaterDrawing(state: BodyAcquisitionState, table: Sour
   // moved it below this table, the text laid out so far still wraps around
   // it where it was registered.
   for (const { anchorIndex, registeredFrame: frame } of uprightPageDrawingsNear(
-    index, box.yPt, box.yPt + box.heightPt, box.xPt,
+    index, box.yPt, box.yPt + box.heightPt, box.xPt, box.xPt + box.widthPt,
   )) {
     if (anchorIndex > tableIndex
       && frame.xPt < box.xPt + box.widthPt && box.xPt < frame.xPt + frame.widthPt
@@ -1147,6 +1176,7 @@ function uprightPagePin(
 ): UprightBlockRegistration {
   return Object.freeze({
     box,
+    boxOrder: uprightFragmentOrder(request),
     slots: Object.freeze(slots.map((slot) =>
       Object.freeze({ ...slot, reserved: true, anyColumn: true, pinned: true }))),
     exclusions: Object.freeze(uprightRunExclusion(request, box)),
@@ -1217,6 +1247,7 @@ export function planBodyUprightBlocks(
     if (plan.kind !== 'placed') return null;
     return Object.freeze({
       box: plan.box,
+      boxOrder: uprightFragmentOrder(request),
       slots: Object.freeze([...plan.slots]),
       exclusions: Object.freeze(uprightRunExclusion(request, plan.box)),
       tail: Object.freeze({ sourceIndex: plan.lastSourceIndex, flowDomainId: request.location.flowDomainId, bounds: plan.box }),
@@ -1343,7 +1374,7 @@ function measureUprightBlockTable(
       xPt: bounds.xPt, yPt: at.blockStartPt, widthPt: bounds.widthPt, heightPt: run.boxBlockExtentPt,
     });
     const registration = pinned ? null : uprightBlockRegistrationOf(
-      box, [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), box)],
+      box, uprightFragmentOrder(request), [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), box)],
       { sourceIndex: leader.lastSourceIndex, flowDomainId, bounds: box },
     );
     // Rows that cover a wrapped drawing registered when the page's layout
@@ -1414,6 +1445,7 @@ function measureUprightBlockTable(
         wholeAt(bounds), bounds, null,
         Object.freeze({
           box: plan.box,
+          boxOrder: uprightFragmentOrder(request),
           slots: Object.freeze(plan.slots.slice(1)),
           exclusions: Object.freeze(uprightRunExclusion(request, plan.box)),
           tail: Object.freeze({ sourceIndex: plan.lastSourceIndex, flowDomainId, bounds: plan.box }),
@@ -2804,7 +2836,7 @@ function measureUprightOwnerSegment(
     // the page's next layout, in which the drawing and its exclusion lie
     // below it and the segment takes the same place again.
     const tableBox = Object.freeze({ sourceIndex: request.input.source.path[0]!, box: bounds });
-    const registered = pinned ? null : uprightBlockRegistrationOf(bounds, [], [
+    const registered = pinned ? null : uprightBlockRegistrationOf(bounds, uprightFragmentOrder(request), [], [
       uprightBlockExclusion(request.input.source, fragmentStartKey, bounds),
     ]);
     const segmentRegistration = !registered ? {} : {

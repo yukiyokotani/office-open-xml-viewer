@@ -19,15 +19,39 @@ import type { LayoutRect } from './types.js';
  *   laid out against those that can meet its lines only
  *   (uprightBlockExclusionsAhead), not against every block of the page.
  *
- * `boxes` is bucketed along the block axis and `exclusions` along both axes,
- * so a registration touches a bounded number of buckets and a query reads
- * only the rectangles near its range. The bucket size is a performance
+ * Invariants that every placement relies on:
+ * - Drawings before tables. A wrapped drawing anchored by a paragraph is
+ *   in the way of every table after that paragraph where the drawing lies:
+ *   registered on the page (committed with its paragraph, or registered
+ *   when the page's layout started), or, while the paragraph fragment that
+ *   anchors it is planned with the table after it and not committed yet,
+ *   handed to that plan (BodyTableAcquisitionInput.precedingDrawings). A
+ *   drawing anchored after a table lies below it: when a table box is
+ *   placed, the drawings it covers move below it here before any later
+ *   table is placed against them.
+ * - What a box obstructs. A table box obstructs only the fragments after
+ *   it in body order (`boxOrders`). A box of a later fragment is on the
+ *   page early only as a pin, and the layout that pinned it placed the
+ *   earlier fragments without it. A pin's text exclusion holds for all
+ *   text of the page: that is what it is for.
+ * - Termination. Each layout of a page either completes or is laid out
+ *   again for a bounded reason (body-paginator.ts): on each page a fragment
+ *   is pinned at most once and a table released at most once, and a layout
+ *   that holds pins and fails is laid out once more without any pin, after
+ *   which the page asks for none.
+ *
+ * `boxes` is bucketed along the block axis, `exclusions` and the page's
+ * drawings along both axes, so a registration touches a bounded number of
+ * buckets and a query reads only the rectangles near its range. The bucket size is a performance
  * parameter; results do not depend on it.
  */
 export interface UprightBlockPageIndex {
   readonly buckets: Map<number, LayoutRect[]>;
   /** Boxes spanning more buckets than MAX_BUCKET_SPAN; every query reads them. */
   readonly wide: LayoutRect[];
+  /** The body order of each box's first fragment (uprightFragmentOrder): a
+   * box obstructs only the fragments after it in body order. */
+  readonly boxOrders: Map<LayoutRect, number>;
   readonly slots: Map<number, UprightBlockSlot>;
   /** The owner segments pinned when the page's layout started, by segment
    * key (uprightSegmentKey): a pinned segment takes these bounds. */
@@ -39,10 +63,13 @@ export interface UprightBlockPageIndex {
   readonly tableBuckets: Map<number, UprightTableBox[]>;
   /** Number of boxes in `tableBuckets`. */
   tableCount: number;
-  /** The page's wrapped anchored drawings, bucketed along the block axis,
-   * and how many of the page's wrap rectangles have been looked at for them
+  /** The page's wrapped anchored drawings by `${block bucket}:${inline
+   * bucket}`, each cell ordered by inline end, furthest first; those
+   * covering more than MAX_EXCLUSION_CELLS cells; and how many of the
+   * page's wrap rectangles have been looked at for them
    * (syncUprightDrawings). */
-  readonly drawingBuckets: Map<number, UprightPageDrawing[]>;
+  readonly drawingCells: Map<string, UprightPageDrawing[]>;
+  readonly wideDrawings: UprightPageDrawing[];
   drawingsSeen: number;
   /** Identifies the boxes of `tableBuckets` in registration order: equal for
    * two pages (or two layouts of one page) exactly when they hold the same
@@ -119,6 +146,8 @@ export type UprightPageDrawing = {
  * of the blocks placed now, and the new tail. */
 export interface UprightBlockRegistration {
   readonly box: LayoutRect | null;
+  /** Body order of the first fragment `box` holds (uprightFragmentOrder). */
+  readonly boxOrder?: number;
   readonly slots: readonly UprightBlockSlot[];
   readonly exclusions: readonly UprightBlockExclusion[];
   readonly tail?: UprightBlockTail;
@@ -144,13 +173,15 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
   return {
     buckets: new Map(),
     wide: [],
+    boxOrders: new Map(),
     slots: new Map(),
     segmentPins: new Map(),
     tail: null,
     tableBuckets: new Map(),
     tableCount: 0,
     tableBoxesVersion: 0,
-    drawingBuckets: new Map(),
+    drawingCells: new Map(),
+    wideDrawings: [],
     drawingsSeen: 0,
     exclusionCells: new Map(),
     wideExclusions: [],
@@ -229,8 +260,10 @@ export function uprightBlockExclusionsAhead(
   return ahead.sort((left, right) => left.ordinal - right.ordinal);
 }
 
-/** Registers `box`, met along the block axis up to `reachPt` past its far edge. */
-export function addUprightBlockBox(index: UprightBlockPageIndex, box: LayoutRect, reachPt: number): void {
+/** Registers `box`, whose first fragment has body order `order`, met along
+ * the block axis up to `reachPt` past its far edge. */
+export function addUprightBlockBox(index: UprightBlockPageIndex, box: LayoutRect, reachPt: number, order: number): void {
+  index.boxOrders.set(box, order);
   const first = Math.floor(box.yPt / BUCKET_PT);
   const last = Math.floor((box.yPt + box.heightPt + reachPt) / BUCKET_PT);
   if (!(last - first < MAX_BUCKET_SPAN)) {
@@ -245,18 +278,25 @@ export function addUprightBlockBox(index: UprightBlockPageIndex, box: LayoutRect
 }
 
 /**
- * The registered boxes a block spanning [`blockStartPt`, `blockEndPt`] meets:
- * those starting at or before its end whose far edge, extended by `reachPt`,
- * lies past its start. Ordered by inline start.
+ * The registered boxes a block spanning [`blockStartPt`, `blockEndPt`] whose
+ * fragment has body order `order` meets: those of fragments before it in
+ * body order starting at or before its end whose far edge, extended by
+ * `reachPt`, lies past its start. Ordered by inline start.
+ *
+ * A box of a later fragment is on the page before this one only as a pin,
+ * registered when the page's layout started; the layout that pinned it
+ * placed this fragment before it, so it does not obstruct this one.
  */
 export function uprightBlockBoxesMet(
   index: UprightBlockPageIndex,
   blockStartPt: number,
   blockEndPt: number,
   reachPt: number,
+  order: number,
 ): LayoutRect[] {
   const met: LayoutRect[] = [];
-  const meets = (box: LayoutRect) => box.yPt <= blockEndPt && blockStartPt < box.yPt + box.heightPt + reachPt;
+  const meets = (box: LayoutRect) => box.yPt <= blockEndPt && blockStartPt < box.yPt + box.heightPt + reachPt
+    && index.boxOrders.get(box)! < order;
   for (const box of index.wide) if (meets(box)) met.push(box);
   const first = Math.floor(blockStartPt / BUCKET_PT);
   const last = Math.floor(blockEndPt / BUCKET_PT);
@@ -361,23 +401,45 @@ export function inlineShiftBelowUprightTablesPt(
   return startPt - rect.xPt;
 }
 
-/** Inline end of what a recorded drawing places: its exclusion or its frame,
- * whichever reaches further. The drawings of a bucket are ordered by it. */
-const drawingInlineEndPt = (drawing: UprightPageDrawing) => Math.max(
-  drawing.exclusion.xPt + drawing.exclusion.widthPt, drawing.frame.xPt + drawing.frame.widthPt,
-);
+/** The extent of what a recorded drawing places or was registered with: its
+ * exclusion, its frame and its registered frame. It is kept in the cells
+ * this extent covers. */
+function drawingExtent(drawing: UprightPageDrawing): Readonly<{
+  blockStartPt: number; blockEndPt: number; inlineStartPt: number; inlineEndPt: number;
+}> {
+  const rects = [drawing.exclusion, drawing.frame, drawing.registeredFrame];
+  let blockStartPt = Number.POSITIVE_INFINITY;
+  let blockEndPt = Number.NEGATIVE_INFINITY;
+  let inlineStartPt = Number.POSITIVE_INFINITY;
+  let inlineEndPt = Number.NEGATIVE_INFINITY;
+  for (let at = 0; at < rects.length; at += 1) {
+    const rect = rects[at]!;
+    blockStartPt = Math.min(blockStartPt, rect.yPt);
+    blockEndPt = Math.max(blockEndPt, rect.yPt + rect.heightPt);
+    inlineStartPt = Math.min(inlineStartPt, rect.xPt);
+    inlineEndPt = Math.max(inlineEndPt, rect.xPt + rect.widthPt);
+  }
+  return { blockStartPt, blockEndPt, inlineStartPt, inlineEndPt };
+}
 
-/** Block buckets a recorded drawing is kept in: those of its exclusion and
- * frame, at most MAX_BUCKET_SPAN + 1 from its block start (no page is wide
- * enough for a query past that range to meet it). Moving a drawing along the
- * inline axis leaves them unchanged. */
-function drawingBuckets(drawing: UprightPageDrawing): readonly [number, number] {
-  const startPt = Math.min(drawing.exclusion.yPt, drawing.frame.yPt);
-  const endPt = Math.max(
-    drawing.exclusion.yPt + drawing.exclusion.heightPt, drawing.frame.yPt + drawing.frame.heightPt,
-  );
-  const first = bucketOf(startPt);
-  return [first, Math.min(bucketOf(endPt), first + MAX_BUCKET_SPAN)];
+/** Inline end of a recorded drawing's extent: the drawings of a cell are
+ * ordered by it, furthest first. */
+const drawingInlineEndPt = (drawing: UprightPageDrawing) => drawingExtent(drawing).inlineEndPt;
+
+/** The cells a recorded drawing is kept in, by block and inline bucket, or
+ * null when it covers more than MAX_EXCLUSION_CELLS (kept in `wideDrawings`).
+ * Along the block axis at most MAX_BUCKET_SPAN + 1 buckets from its start:
+ * no page is wide enough for a query past that range to meet it. */
+function drawingCells(drawing: UprightPageDrawing): Readonly<{
+  firstBlock: number; lastBlock: number; firstInline: number; lastInline: number;
+}> | null {
+  const extent = drawingExtent(drawing);
+  const firstBlock = bucketOf(extent.blockStartPt);
+  const lastBlock = Math.min(bucketOf(extent.blockEndPt), firstBlock + MAX_BUCKET_SPAN);
+  const firstInline = bucketOf(extent.inlineStartPt);
+  const lastInline = bucketOf(extent.inlineEndPt);
+  if (!((lastBlock - firstBlock + 1) * (lastInline - firstInline + 1) <= MAX_EXCLUSION_CELLS)) return null;
+  return { firstBlock, lastBlock, firstInline, lastInline };
 }
 
 /** Position in `drawings` (ordered by inline end, furthest first) of the
@@ -394,25 +456,38 @@ function firstEndingAtOrBefore(drawings: readonly UprightPageDrawing[], endPt: n
 }
 
 function insertDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
-  const [first, last] = drawingBuckets(drawing);
+  const cells = drawingCells(drawing);
+  if (!cells) {
+    index.wideDrawings.push(drawing);
+    return;
+  }
   const endPt = drawingInlineEndPt(drawing);
-  for (let bucket = first; bucket <= last; bucket += 1) {
-    const drawings = index.drawingBuckets.get(bucket);
-    if (!drawings) index.drawingBuckets.set(bucket, [drawing]);
-    else drawings.splice(firstEndingAtOrBefore(drawings, endPt), 0, drawing);
+  for (let block = cells.firstBlock; block <= cells.lastBlock; block += 1) {
+    for (let inline = cells.firstInline; inline <= cells.lastInline; inline += 1) {
+      const key = `${block}:${inline}`;
+      const drawings = index.drawingCells.get(key);
+      if (!drawings) index.drawingCells.set(key, [drawing]);
+      else drawings.splice(firstEndingAtOrBefore(drawings, endPt), 0, drawing);
+    }
   }
 }
 
 function removeDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
-  const [first, last] = drawingBuckets(drawing);
+  const cells = drawingCells(drawing);
+  if (!cells) {
+    index.wideDrawings.splice(index.wideDrawings.indexOf(drawing), 1);
+    return;
+  }
   const endPt = drawingInlineEndPt(drawing);
-  for (let bucket = first; bucket <= last; bucket += 1) {
-    const drawings = index.drawingBuckets.get(bucket)!;
-    // The drawings ending further come first; it is among those ending at
-    // the same position.
-    let at = firstEndingAtOrBefore(drawings, endPt);
-    while (drawings[at] !== drawing) at += 1;
-    drawings.splice(at, 1);
+  for (let block = cells.firstBlock; block <= cells.lastBlock; block += 1) {
+    for (let inline = cells.firstInline; inline <= cells.lastInline; inline += 1) {
+      const drawings = index.drawingCells.get(`${block}:${inline}`)!;
+      // The drawings ending further come first; it is among those ending at
+      // the same position.
+      let at = firstEndingAtOrBefore(drawings, endPt);
+      while (drawings[at] !== drawing) at += 1;
+      drawings.splice(at, 1);
+    }
   }
 }
 
@@ -445,7 +520,7 @@ function moveUprightPageDrawingBelowTables(index: UprightBlockPageIndex, drawing
 export function moveUprightPageDrawingsBelowTableBox(index: UprightBlockPageIndex, table: UprightTableBox): void {
   const { box } = table;
   const covered: UprightPageDrawing[] = [];
-  for (const drawing of uprightPageDrawingsNear(index, box.yPt, box.yPt + box.heightPt, box.xPt)) {
+  for (const drawing of uprightPageDrawingsNear(index, box.yPt, box.yPt + box.heightPt, box.xPt, box.xPt + box.widthPt)) {
     const { frame } = drawing;
     if (drawing.anchorIndex > table.sourceIndex
       && frame.xPt < box.xPt + box.widthPt && box.xPt < frame.xPt + frame.widthPt
@@ -454,27 +529,44 @@ export function moveUprightPageDrawingsBelowTableBox(index: UprightBlockPageInde
   for (const drawing of covered) moveUprightPageDrawingBelowTables(index, drawing);
 }
 
-/** The recorded drawings whose exclusion or frame can lie in the block range
- * [`blockStartPt`, `blockEndPt`] and reaches past inline position
- * `inlineFromPt`, each once. Each bucket keeps its drawings ordered by inline
- * end, so only the drawings near that range and past that position are read:
- * one ending at or before it is never looked at. */
+/** The recorded drawings whose extent (exclusion, frame or registered
+ * frame) can lie in the block range [`blockStartPt`, `blockEndPt`] and the
+ * inline range (`inlineFromPt`, `inlineToPt`), each once. Only the cells
+ * of that range are read, and in each only the drawings reaching past
+ * `inlineFromPt` (a cell keeps them ordered by inline end): a drawing beside
+ * the range along either axis is looked at only when it shares a cell with
+ * its edge. */
 export function uprightPageDrawingsNear(
   index: UprightBlockPageIndex,
   blockStartPt: number,
   blockEndPt: number,
-  inlineFromPt = Number.NEGATIVE_INFINITY,
+  inlineFromPt: number,
+  inlineToPt: number,
 ): UprightPageDrawing[] {
   const near: UprightPageDrawing[] = [];
-  const first = bucketOf(blockStartPt);
-  const last = bucketOf(blockEndPt);
-  for (let bucket = first; bucket <= last; bucket += 1) {
-    const drawings = index.drawingBuckets.get(bucket);
-    if (!drawings) continue;
-    for (let at = 0; at < drawings.length; at += 1) {
-      const drawing = drawings[at]!;
-      if (!(drawingInlineEndPt(drawing) > inlineFromPt)) break;
-      if (bucket === Math.max(first, drawingBuckets(drawing)[0])) near.push(drawing);
+  for (let at = 0; at < index.wideDrawings.length; at += 1) {
+    const drawing = index.wideDrawings[at]!;
+    const extent = drawingExtent(drawing);
+    if (extent.blockStartPt <= blockEndPt && blockStartPt <= extent.blockEndPt
+      && extent.inlineEndPt > inlineFromPt && extent.inlineStartPt < inlineToPt) near.push(drawing);
+  }
+  const firstBlock = bucketOf(blockStartPt);
+  const lastBlock = bucketOf(blockEndPt);
+  const firstInline = bucketOf(inlineFromPt);
+  const lastInline = bucketOf(inlineToPt);
+  for (let block = firstBlock; block <= lastBlock; block += 1) {
+    for (let inline = firstInline; inline <= lastInline; inline += 1) {
+      const drawings = index.drawingCells.get(`${block}:${inline}`);
+      if (!drawings) continue;
+      for (let at = 0; at < drawings.length; at += 1) {
+        const drawing = drawings[at]!;
+        if (!(drawingInlineEndPt(drawing) > inlineFromPt)) break;
+        // A drawing kept in several cells is taken from the first of them
+        // that this query reads.
+        const cells = drawingCells(drawing)!;
+        if (block === Math.max(firstBlock, cells.firstBlock) && inline === Math.max(firstInline, cells.firstInline)
+          && drawingExtent(drawing).inlineStartPt < inlineToPt) near.push(drawing);
+      }
     }
   }
   return near;

@@ -29,7 +29,9 @@ import {
 // Indexed loops and Map lookups are not counted, and nothing here measures
 // time: the counts bound array traversals only.
 
-const work = vi.hoisted(() => ({ boxes: new WeakSet<object>(), registered: 0, recordReads: 0 }));
+const work = vi.hoisted(() => ({
+  boxes: new WeakSet<object>(), registered: 0, recordReads: 0, failPinnedLayouts: false, failures: 0,
+}));
 
 vi.mock('./layout/upright-block-index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./layout/upright-block-index.js')>();
@@ -39,6 +41,15 @@ vi.mock('./layout/upright-block-index.js', async (importOriginal) => {
       work.boxes.add(args[1]);
       work.registered += 1;
       return actual.addUprightBlockBox(...args);
+    },
+    // Stands for any failure of a layout that holds pins (see the test
+    // that sets it).
+    uprightBlockBoxesMet: (...args: Parameters<typeof actual.uprightBlockBoxesMet>) => {
+      if (work.failPinnedLayouts && args[0].segmentPins.size > 0) {
+        work.failures += 1;
+        throw new Error('pinned layout failure');
+      }
+      return actual.uprightBlockBoxesMet(...args);
     },
   };
 });
@@ -362,4 +373,39 @@ describe('upright block table placement work', () => {
     expect(large).toBeLessThanOrEqual(Math.max(8, 3.5 * small));
     expect(large).toBeLessThanOrEqual(Math.max(8, 1.8 * medium));
   }, 300_000);
+  it('places tables without reading the drawings that lie below them along the column', () => {
+    // The same rules near the column end, far below the one-row tables at
+    // the column top: they share the tables' block range but lie beyond
+    // their inline extent.
+    const measure = (count: number) => {
+      const body = Array.from({ length: count }, (_, at) => [
+        table(1), P.replace('</w:p>', `${anchoredRectangle(41, 695 + 2 * at, 340, 1)}</w:p>`),
+      ]).flat();
+      const { result, counts } = counting(() => layOutPages('tbLrV', body, 2, 240));
+      expect(result.flatMap((page) => page.tables)).toHaveLength(count);
+      expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
+      return counts.drawings;
+    };
+    const small = measure(8);
+    const medium = measure(16);
+    const large = measure(24);
+    expect(large).toBeLessThanOrEqual(Math.max(8, 3.5 * small));
+    expect(large).toBeLessThanOrEqual(Math.max(8, 1.8 * medium));
+  }, 300_000);
+  it('lays a page out without its pins when a layout that holds them fails', () => {
+    // A long table's first fragment covers a rectangle anchored after it and
+    // is pinned; every placement in a layout holding that pin fails here.
+    // The page is laid out once more without pins instead of failing.
+    work.failPinnedLayouts = true;
+    work.failures = 0;
+    try {
+      const pages = layOutPages('tbRl', [
+        table(1), table(70), P.replace('</w:p>', `${anchoredRectangle(440, 480, 80, 10)}</w:p>`), P,
+      ]);
+      expect(work.failures).toBe(1);
+      expect(pages.flatMap((page) => page.tables).length).toBeGreaterThanOrEqual(2);
+    } finally {
+      work.failPinnedLayouts = false;
+    }
+  }, 120_000);
 });

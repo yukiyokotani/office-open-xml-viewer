@@ -113,6 +113,12 @@ export interface BodyTableAcquisitionInput {
   readonly pageHasContent?: boolean;
   /** Whether no further column of the page follows the current one. */
   readonly lastColumnOfPage?: boolean;
+  /** `word-vertical-section-upright-block-table`: the text exclusions of the
+   * wrapped drawings that the paragraph fragment before the table anchors,
+   * in section-logical page points, when the table is planned with that
+   * fragment (BodyLayoutSession.planUprightBlocks) before the fragment and
+   * its drawings are committed. */
+  readonly precedingDrawings?: readonly LayoutRect[];
   readonly cursor?: BodyTableContinuationCursor;
 }
 

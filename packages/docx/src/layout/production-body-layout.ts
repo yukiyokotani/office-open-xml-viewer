@@ -2928,7 +2928,10 @@ function commitBodyUprightBlocks(
 ): void {
   const { state } = context;
   const index = state.uprightBlockIndex ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
-  if (registration.box) addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
+  if (registration.box) {
+    if (registration.boxOrder === undefined) throw new Error('An upright block box requires its body order');
+    addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, registration.boxOrder);
+  }
   for (const slot of registration.slots) index.slots.set(slot.sourceIndex, slot);
   if (registration.segmentPin) index.segmentPins.set(registration.segmentPin.key, registration.segmentPin.bounds);
   for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);

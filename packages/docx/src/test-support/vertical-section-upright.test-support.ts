@@ -40,13 +40,16 @@ export const table = (rows: number, rowHeightPt?: number) => '<w:tbl><w:tblPr><w
 export const T = table(2);
 
 /** A paragraph run anchoring a square-wrapped rectangle at page position
- * (x, y), `width` x `height` pt. */
-export const anchoredRectangle = (x: number, y: number, width: number, height: number) =>
+ * (x, y), `width` x `height` pt; `verticalFrom` 'paragraph' makes y relative
+ * to the anchoring paragraph instead. */
+export const anchoredRectangle = (
+  x: number, y: number, width: number, height: number, verticalFrom: 'page' | 'paragraph' = 'page',
+) =>
   '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
   + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
   + '<wp:simplePos x="0" y="0"/>'
   + `<wp:positionH relativeFrom="page"><wp:posOffset>${Math.round(x * 12700)}</wp:posOffset></wp:positionH>`
-  + `<wp:positionV relativeFrom="page"><wp:posOffset>${Math.round(y * 12700)}</wp:posOffset></wp:positionV>`
+  + `<wp:positionV relativeFrom="${verticalFrom}"><wp:posOffset>${Math.round(y * 12700)}</wp:posOffset></wp:positionV>`
   + `<wp:extent cx="${width * 12700}" cy="${height * 12700}"/><wp:wrapSquare wrapText="bothSides"/>`
   + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
   + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
@@ -149,8 +152,9 @@ export interface Page {
    * from the first strip of the page along the block axis, and the physical
    * y at which its inline flow starts. */
   readonly strips: Array<Array<Readonly<{ block: number; inlineStart: number }>>>;
-  /** Anchored drawings, in source order: the physical left and top of their frame. */
-  readonly drawings: Array<Readonly<{ left: number; top: number }>>;
+  /** Anchored drawings, in source order: the physical left, top, width and
+   * height of their frame. */
+  readonly drawings: Array<Readonly<{ left: number; top: number; width: number; height: number }>>;
 }
 
 /** `linePitch`: the section's line grid pitch in twentieths of a point.
@@ -203,6 +207,8 @@ export function layOutPages(
           left: direction === 'tbRl'
             ? PAGE_W - drawing.flowBounds.yPt - drawing.flowBounds.heightPt : drawing.flowBounds.yPt,
           top: drawing.flowBounds.xPt,
+          width: drawing.flowBounds.heightPt,
+          height: drawing.flowBounds.widthPt,
         });
       }
     }

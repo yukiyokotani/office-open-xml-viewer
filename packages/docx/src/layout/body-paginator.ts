@@ -1569,7 +1569,12 @@ function* paginateBodyPassSteps(
   // once and a table released at most once, a released table asks for no
   // pin there, and each further layout of a page does at least one of the
   // two, so a page is laid out at most twice per table on it, plus once;
-  // tables whose pins one layout finds share the next.
+  // tables whose pins one layout finds share the next. A layout that holds
+  // pins and fails drops every pin of the page and is laid out once more
+  // without them, and the page asks for no pin again
+  // (dropUprightPinsAfterFailure): a pin never makes a page fail that lays
+  // out without it. A pin obstructs no table before it in body order
+  // (upright-block-index.ts).
   // Pins are kept by table source key and fragment start, so each owner
   // segment of a table has its own.
   type UprightPagePin = {
@@ -1590,6 +1595,21 @@ function* paginateBodyPassSteps(
   const uprightReleasedOnPage = new Map<string, number>();
   const uprightReleasedHere = (tableKey: string): boolean =>
     uprightReleasedOnPage.get(tableKey) === state.flow.pageIndex;
+  /** The page whose pins were dropped after its pinned layout failed. */
+  let uprightPinsDroppedPage = -1;
+  const uprightPinsDroppedHere = (): boolean => uprightPinsDroppedPage === state.flow.pageIndex;
+  /** A layout of the live page that holds pins failed: the page is laid out
+   * once more without any pin, and asks for none again, as a page whose
+   * tables needed none. A pin never makes the layout fail where the layout
+   * without it succeeds. */
+  const dropUprightPinsAfterFailure = (): boolean => {
+    if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex || uprightPins.size === 0
+      || uprightPinsDroppedHere()) return false;
+    uprightPins = new Map();
+    uprightReplayPending = false;
+    uprightPinsDroppedPage = state.flow.pageIndex;
+    return true;
+  };
   const uprightPinsOf = (pageIndex: number): Map<string, UprightPagePin> => {
     if (uprightPinPage !== pageIndex) {
       uprightPinPage = pageIndex;
@@ -1605,7 +1625,7 @@ function* paginateBodyPassSteps(
     sourceIndex: number,
     registration: UprightBlockRegistration,
   ): void => {
-    if (!canRecoverOnPage) return;
+    if (!canRecoverOnPage || uprightPinsDroppedHere()) return;
     uprightPinsOf(state.flow.pageIndex).set(uprightPinKey(tableKey, tableFragmentStartKey(undefined)), {
       tableKey,
       sourceIndex,
@@ -3386,9 +3406,17 @@ function* paginateBodyPassSteps(
               heightPt: Math.max(0, reached.availableBounds.heightPt - unwrappedReservePt),
             }),
           });
+          // The wrapped drawings this fragment anchors are committed with it,
+          // after the plan: the plan meets them as they will lie.
+          const fragmentDelta = acquired.flowRegistryDelta
+            ? paragraphFlowRegistryDeltaForAcceptedFragment(acquired.flowRegistryDelta, selected.fragment)
+            : null;
+          const precedingDrawings = (fragmentDelta?.floats?.entries ?? []).flatMap((entry) =>
+            entry.kind === 'shape' && entry.wrap !== undefined ? [entry.exclusionBounds] : []);
           const planned = session.planUprightBlocks({
             input: tableAfter,
             location: tableLocation,
+            ...(precedingDrawings.length > 0 ? { precedingDrawings } : {}),
             availableInlineExtentPt: tableLocation.availableBounds.widthPt,
             availableBlockExtentPt: tableLocation.availableBounds.heightPt,
             freshPageBlockExtentPt: freshPageExtent(state),
@@ -3572,7 +3600,7 @@ function* paginateBodyPassSteps(
           const tableKey = sourceKey(block.source);
           const pinKey = uprightPinKey(tableKey, fragmentStartKey);
           const askedKey = `${state.flow.pageIndex}|${pinKey}`;
-          if (!uprightPinnedOnce.has(askedKey) && !uprightReleasedHere(tableKey)) {
+          if (!uprightPinnedOnce.has(askedKey) && !uprightReleasedHere(tableKey) && !uprightPinsDroppedHere()) {
             uprightPinnedOnce.add(askedKey);
             uprightPinsOf(state.flow.pageIndex).set(pinKey, {
               tableKey, sourceIndex: block.source.path[0]!, registration: acquired.uprightPagePin, consumed: false,
@@ -3837,7 +3865,8 @@ function* paginateBodyPassSteps(
       const capacityRecovery = error instanceof NoteOverflowRecoveryRequired
         && canRecoverOnPage && notePolicy?.recover(error) === true;
       if (error instanceof OpenedPageReserveObservation) throw error;
-      const uprightReplay = error instanceof UprightBlockPageReplay;
+      const uprightReplay = error instanceof UprightBlockPageReplay
+        || (!capacityRecovery && !(error instanceof PageNoteReplay) && dropUprightPinsAfterFailure());
       if (!capacityRecovery && !uprightReplay && !(error instanceof PageNoteReplay)) noteProgress.fail(error);
       resumeEntry = restorePageCheckpoint();
       restartEntryIndex = resumeEntry.entryIndex;

@@ -1193,4 +1193,101 @@ describe('upright block table of a vertical section', () => {
       for (const placed of tables) expect(apart(drawing, placed)).toBe(true);
     });
   });
+  describe('tables and square-wrapped drawings', () => {
+    type Drawing = Page['drawings'][number];
+    type Placed = Page['tables'][number];
+    const shared = (startA: number, endA: number, startB: number, endB: number) =>
+      Math.min(endA, endB) - Math.max(startA, startB) > 1e-6;
+    const covers = (drawing: Drawing, placed: Placed) =>
+      shared(drawing.left, drawing.left + drawing.width, placed.paintedLeft, placed.paintedRight)
+      && shared(drawing.top, drawing.top + drawing.height, placed.top, placed.bottom);
+    /** Every table box sharing an area with another table or a drawing of its page. */
+    const collisions = (pages: readonly Page[]) => pages.flatMap((page, pageIndex) => [
+      ...page.tables.flatMap((first, at) => page.tables.slice(at + 1).flatMap((second) =>
+        shared(first.paintedLeft, first.paintedRight, second.paintedLeft, second.paintedRight)
+          && shared(first.top, first.bottom, second.top, second.bottom)
+          ? [{ pageIndex, first, second }] : [])),
+      ...page.drawings.flatMap((drawing) => page.tables.flatMap((placed) =>
+        covers(drawing, placed) ? [{ pageIndex, drawing, placed }] : [])),
+    ]);
+
+    it('lays out a table before a long one whose rows a later drawing lies below', () => {
+      // The second table's first fragment covers the rectangle anchored
+      // after it and is pinned; the first table, placed before it, is not
+      // obstructed by that pin when the page is laid out again.
+      const pages = layOutPages('tbRl', [
+        table(1), table(70), P.replace('</w:p>', `${anchoredRectangle(440, 480, 80, 10)}</w:p>`), P,
+      ]);
+      expect(pages[0]!.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
+      expect(pages[0]!.tables[1]!.top).toBeCloseTo(pages[0]!.tables[0]!.bottom, 6);
+      expect(collisions(pages)).toEqual([]);
+    });
+
+    it.each(['page', 'paragraph'] as const)(
+      'stacks a table below a drawing positioned relative to the %s of the paragraph before it',
+      (verticalFrom) => {
+        // The drawing of the strip the table is planned with meets the plan
+        // before the strip is committed.
+        const y = verticalFrom === 'page' ? 64 : 4;
+        const [page] = layOutPages('tbRl', [
+          P.replace('</w:p>', `${anchoredRectangle(400, y, 80, 40, verticalFrom)}</w:p>`), T, P,
+        ]);
+        expect(page!.drawings[0]!.top).toBeCloseTo(64, 6);
+        expect(page!.tables[0]!.top).toBeCloseTo(64 + 40, 6);
+      },
+    );
+
+    it('lays out generated sequences of tables, continued tables and drawings without overlap', () => {
+      // A fixed pseudo-random stream (mulberry32) of paragraphs, some
+      // anchoring square-wrapped rectangles at page or paragraph-relative
+      // positions over the band, column breaks, runs of directly following
+      // tables and tables continued over pages, in one and two columns of
+      // both directions. Every sequence has to lay out with no table box
+      // sharing an area with another table or a drawing of its page.
+      let seed = 0x2b12;
+      const random = () => {
+        seed = (seed + 0x6d2b79f5) | 0;
+        let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+      };
+      const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
+      const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+      const tables = [T, T, table(1), table(6), table(30), table(70), table(1, 400), table(1, 800)];
+      const drawing = () => {
+        const width = pick([20, 60, 80, 340]);
+        const height = pick([1, 10, 20, 40]);
+        const paragraphRelative = random() < 0.25;
+        return anchoredRectangle(
+          40 + Math.floor(random() * (PAGE_W - 80 - width)),
+          paragraphRelative ? Math.floor(random() * 40) : 40 + Math.floor(random() * 700),
+          width, height, paragraphRelative ? 'paragraph' : 'page',
+        );
+      };
+      for (const direction of ['tbRl', 'tbLrV'] as const) {
+        for (const columns of [1, 2]) {
+          for (let sample = 0; sample < 12; sample += 1) {
+            const body: string[] = [];
+            const length = 3 + Math.floor(random() * 10);
+            for (let at = 0; at < length; at += 1) {
+              const kind = random();
+              if (kind < 0.4) {
+                for (let run = random() < 0.25 ? 2 : 1; run > 0; run -= 1) body.push(pick(tables));
+              } else if (kind < 0.45 && columns > 1) {
+                body.push(columnBreak);
+              } else {
+                for (let run = 1 + Math.floor(random() * 4); run > 0; run -= 1) {
+                  body.push(random() < 0.5 ? P.replace('</w:p>', `${drawing()}</w:p>`) : P);
+                }
+              }
+            }
+            const context = `${direction} ${columns} column(s) sample ${sample}`;
+            let pages: Page[] = [];
+            expect(() => { pages = layOutPages(direction, body, columns); }, context).not.toThrow();
+            expect(collisions(pages), context).toEqual([]);
+          }
+        }
+      }
+    }, 300_000);
+  });
 });
