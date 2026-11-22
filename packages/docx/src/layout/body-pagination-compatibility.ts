@@ -514,8 +514,8 @@ export function wordMarkOnlyViewBlock(block: InklessMarkBlockFacts, showTrackedC
 /** The one classification of a paragraph's mark for page admission and
  * spacing: an empty paragraph, or one whose metric-visible runs display
  * nothing but the mark (only floating drawings and omitted revisions),
- * which Windows Word paginates as its empty mark (page-top spacing
- * suppression, keepNext bridging, trailing-mark admission). It decides how
+ * which WORD_ANCHOR_HOST_NO_LINE_METRIC paginates as its empty mark (page-top
+ * spacing suppression, keepNext bridging, trailing-mark admission). It decides how
  * the paragraph is placed, never whether its content (anchors, numbering,
  * revision-visible text) is kept: no path may omit content through it. */
 export function wordInklessMarkBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {

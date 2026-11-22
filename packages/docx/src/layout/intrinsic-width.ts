@@ -1,4 +1,5 @@
 import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
+import { metricSegments } from '../line-breaker/model.js';
 import { sameNativeLevelUnit } from '../line-breaker/native-unit-contract.js';
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
 import { uprightResourceOrientation } from './coordinate-space.js';
@@ -712,7 +713,9 @@ export function measureParagraphIntrinsicWidths(
   }
   if (maximumWidthPt === 0) return { minWidthPt: 0, maxWidthPt: 0 };
 
-  const builtSegments = buildSegments(paragraph.runs, {
+  // Floating anchors take no part in intrinsic sizing, as they take none in
+  // line breaking (prepareBreakQueue): the content alone is sized.
+  const builtSegments = [...metricSegments(buildSegments(paragraph.runs, {
     ...environment,
     closingPairAdvanceAdmitted: closingPairScopeApplies(paragraph, context, environment),
     uprightResourceOrientation: uprightResourceOrientation(environment.verticalPageFrame, environment.pageWritingMode),
@@ -722,7 +725,7 @@ export function measureParagraphIntrinsicWidths(
     paragraphRtl: context.baseRtl,
     autoSpaceDE: paragraph.autoSpaceDE,
     autoSpaceDN: paragraph.autoSpaceDN,
-  });
+  }))];
   const segments = mergeCompatibleTextSegments(builtSegments, paragraphCharacterGrid(context));
   const glueWidthsPt = tabGlueWidthsPt(builtSegments, segments, context, measurer);
   const paragraphWidthPt = Math.max(

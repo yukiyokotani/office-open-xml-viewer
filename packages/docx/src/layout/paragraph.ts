@@ -417,8 +417,8 @@ export interface MeasuredAnchorHostPlanSegment {
    * without it and places it at the content that follows it. */
   readonly anchorPlacement?: true;
   /** Where that host stands among the line's content ranges when it is not
-   * its own `range.start`: inside a text piece that could not be divided at
-   * the drawing (planMeasuredLines), whose range the host then follows. */
+   * its own `range.start`: inside the undivided text piece that spans its
+   * drawing (planMeasuredLines), whose range the host then follows. */
   readonly placeAt?: number;
   readonly kind: 'anchor-host';
   readonly measuredWidthPt: 0;
@@ -4010,125 +4010,6 @@ function textPlanSegment(
   };
 }
 
-/**
- * A floating drawing anchored between two runs of one text sequence owns its
- * logical unit of the paragraph's occurrence domain, as it does between two
- * sequences, while the text around it is one shaped, unbroken piece. Split
- * that planned piece at the anchor's cluster boundary into two segments of
- * the same shaped geometry (nothing is remeasured: clusters keep their
- * advances and each paint operation its shaped offset), the second one
- * `shift` units later in the occurrence domain. `undefined` when the piece
- * cannot be divided there: no cluster starts after the position, or its
- * geometry is owned as a whole (right-to-left, fitText, a native prefix).
- */
-function splitTextPlanSegment(
-  parent: MeasuredTextPlanSegment,
-  utf16: number,
-  shift: number,
-): readonly [MeasuredTextPlanSegment, MeasuredTextPlanSegment] | undefined {
-  if (parent.rtl || parent.nativeBaseDirection !== undefined || parent.nativeVisiblePrefix
-    || parent.fitText || parent.fixedPitch) return undefined;
-  const at = parent.range.start + utf16;
-  // The first cluster at or after the position starts the second part.
-  const first = parent.clusters.findIndex((cluster) => cluster.range.start >= at);
-  if (first <= 0) return undefined;
-  const cut = parent.clusters[first]!.range.start;
-  const fromPt = parent.clusters[first]!.offset.xPt;
-  if (!(fromPt >= 0) || fromPt > parent.measuredWidthPt) return undefined;
-  const moved = (range: import('./types.js').TextRange) => ({ start: range.start + shift, end: range.end + shift });
-  const part = (second: boolean): MeasuredTextPlanSegment => {
-    const start = second ? cut : parent.range.start;
-    const end = second ? parent.range.end : cut;
-    const originPt = second ? fromPt : 0;
-    const place = (range: import('./types.js').TextRange) => second ? moved(range) : range;
-    const clusters = parent.clusters.slice(second ? first : 0, second ? undefined : first).map((cluster) =>
-      second ? { ...cluster, range: moved(cluster.range), offset: { ...cluster.offset, xPt: cluster.offset.xPt - originPt } }
-        : cluster);
-    const basePaintOps: MeasuredTextPlanSegment['basePaintOps'][number][] = [];
-    for (const op of parent.basePaintOps) {
-      const a = Math.max(start, op.range.start);
-      const b = Math.min(end, op.range.end);
-      if (b <= a) continue;
-      if (a === op.range.start && b === op.range.end) {
-        basePaintOps.push(second
-          ? { ...op, range: moved(op.range), offset: { ...op.offset, xPt: op.offset.xPt - originPt } } : op);
-        continue;
-      }
-      // A divided operation paints each part from its shaped cluster offset;
-      // its ink bounds described the undivided text.
-      const { inkBounds: _ink, blockAxisInkBounds: _blockInk, ...facts } = op;
-      const lead = parent.clusters.find((cluster) => cluster.range.start === a);
-      basePaintOps.push({
-        ...facts,
-        text: op.text.slice(a - op.range.start, b - op.range.start),
-        range: place({ start: a, end: b }),
-        offset: { ...op.offset, xPt: (a === op.range.start ? op.offset.xPt : lead?.offset.xPt ?? op.offset.xPt) - originPt },
-      });
-    }
-    const sourceRuns = parent.sourceRuns?.flatMap((owner) => {
-      const a = Math.max(start, owner.range.start);
-      const b = Math.min(end, owner.range.end);
-      return b > a || (owner.range.start === owner.range.end && a === b && a >= start && a < end)
-        ? [{ ...owner, range: place({ start: a, end: b }) }] : [];
-    });
-    const relativeStart = start - parent.range.start;
-    const relativeEnd = end - parent.range.start;
-    const semanticSlotSpans = parent.semanticSlotSpans?.flatMap((slot) =>
-      slot.end > relativeStart && slot.start < relativeEnd
-        ? [{ ...slot, start: Math.max(relativeStart, slot.start) - relativeStart,
-          end: Math.min(relativeEnd, slot.end) - relativeStart }] : []);
-    const emphasis = parent.retainedGeometry?.emphasis;
-    const { textShapeRequest: _request, textLayoutService: _service, ...retained } = parent;
-    return {
-      ...retained,
-      // The division is a cluster boundary inside one piece: an interior
-      // position, where the text's own gap rules decide.
-      breakBefore: second ? true : parent.breakBefore,
-      text: parent.text.slice(relativeStart, relativeEnd),
-      range: place({ start, end }),
-      measuredWidthPt: second ? parent.measuredWidthPt - fromPt : fromPt,
-      clusters,
-      basePaintOps,
-      ...(sourceRuns ? { sourceRuns } : {}),
-      ...(semanticSlotSpans ? { semanticSlotSpans } : {}),
-      ...(parent.retainedGeometry && emphasis ? { retainedGeometry: {
-        ...parent.retainedGeometry,
-        emphasis: { ...emphasis, clusterInk: emphasis.clusterInk.flatMap((ink) =>
-          ink.range.start >= start && ink.range.start < end ? [second ? { ...ink, range: moved(ink.range) } : ink] : []) },
-      } } : {}),
-      autoSpace: second ? undefined : parent.autoSpace,
-      leadingSeamPairPt: second ? undefined : parent.leadingSeamPairPt,
-      decorationTerminalAdvancePt: parent.decorationTerminalAdvancePt === undefined ? undefined
-        : Math.max(0, Math.min(second ? parent.measuredWidthPt : fromPt, parent.decorationTerminalAdvancePt) - originPt),
-    };
-  };
-  return [part(false), part(true)];
-}
-
-/** Readdress a line's gap plan after content segments were divided, in line
- * order: `index` is the first part's index among the divided segments and
- * `codePoints` its length. A gap is the opportunity after a code point. */
-function dividedGapPlan(
-  plan: LineGapPlan,
-  splits: readonly Readonly<{ index: number; codePoints: number }>[],
-): LineGapPlan {
-  const readdress = (gaps: readonly LineGap[]): LineGap[] => gaps.map((gap) => {
-    let { segIndex, cpOffset, trailing } = gap;
-    for (const split of splits) {
-      if (segIndex > split.index) segIndex += 1;
-      else if (segIndex === split.index) {
-        if (cpOffset >= split.codePoints) {
-          segIndex += 1;
-          cpOffset -= split.codePoints;
-        } else if (cpOffset === split.codePoints - 1) trailing = true;
-      }
-    }
-    return { ...gap, segIndex, cpOffset, trailing };
-  });
-  return { ...plan, gaps: readdress(plan.gaps), expansionGaps: readdress(plan.expansionGaps),
-    segmentCount: plan.segmentCount + splits.length };
-}
-
 interface LogicalOccurrenceMap {
   readonly runStarts: readonly number[];
   readonly runLengths: readonly number[];
@@ -4339,9 +4220,10 @@ function planMeasuredLines(
     let lineStartOffset = Number.POSITIVE_INFINITY;
     let lineEndOffset = sourceOffset;
     const segments: MeasuredLinePlanSegment[] = [];
-    // Content segments divided at a floating drawing (splitTextPlanSegment):
-    // the breaker's gap plan addresses them before that division.
-    const gapSplits: { index: number; codePoints: number }[] = [];
+    // This line's floating anchor hosts (indices into `segments`), and the
+    // first one not yet known to precede the text piece being planned.
+    const anchorHostIndexes: number[] = [];
+    let pendingHost = 0;
     for (const segment of raw.segments) {
       const runIndex = sourceRunIndex(segment);
       const sourceRun = runIndex === undefined ? undefined : paragraph.runs[runIndex];
@@ -4349,8 +4231,9 @@ function planMeasuredLines(
       let occurrenceShift = 0;
       const sequence = segment.sourceTextSequence;
       // A sequence's text starts where its owning member run starts in the
-      // occurrence domain: a floating drawing between two members keeps its
-      // own unit there (splitTextPlanSegment divides a piece that spans it).
+      // occurrence domain, so the text after a floating drawing between two
+      // members keeps the drawing's unit before it; a piece that spans the
+      // drawing stays whole (below).
       const sequenceStart = sequence ? segment.sourceTextOffset ?? 0 : 0;
       let sequenceOwner = sequence ? sequenceOwners.get(sequence) ?? 0 : 0;
       if (sequence) {
@@ -4568,7 +4451,7 @@ function planMeasuredLines(
           }
           sourceRuns = owners;
         }
-        let plannedText = textPlanSegment(
+        const plannedText = textPlanSegment(
           segment as LayoutTextSeg, paragraph, segmentOffset,
           paragraphCharacterGrid(context),
           sourceRun,
@@ -4576,58 +4459,35 @@ function planMeasuredLines(
           sourceRuns,
         );
         if (sequence && plannedText.kind === 'text') {
-          // Divide the piece at every floating drawing between two members
-          // it spans: the drawing keeps its unit of the occurrence domain.
+          // A floating drawing anchored between two member runs inside this
+          // piece: the piece is never divided (its shaping, bidi resolution
+          // and paint operations are those of the unanchored text) and keeps
+          // one contiguous range. The drawing's unit of the occurrence domain
+          // follows the piece; its host takes that range position and keeps
+          // its place inside the piece for layout (`placeAt`).
           const localEnd = sequenceStart + occurrenceLength;
-          let consumed = 0;
-          // Units of drawings inside a part that could not be divided, and
-          // their positions (in the occurrence domain, and in that part).
-          let undividedShift = 0;
-          const undivided: { from: number; to: number; offset: number }[] = [];
-          // A drawing inside an undivided part follows the part in the
-          // occurrence domain: the part keeps one contiguous range, its
-          // hosts take the range position after it and keep their place
-          // inside it for layout.
-          const closePart = (part: MeasuredTextPlanSegment): void => {
-            for (const { from, to, offset } of undivided) {
-              for (let index = 0; index < segments.length; index += 1) {
-                const host = segments[index]!;
-                if (!isAnchorPlacementPlanSegment(host) || host.range.start < from || host.range.start >= to) continue;
-                segments[index] = { ...host, range: { start: part.range.end, end: part.range.end },
-                  placeAt: part.range.start + offset };
-              }
-            }
-            undivided.length = 0;
-          };
           for (let member = sequenceOwner; member + 1 < sequence.length
             && sequence[member + 1]!.start < localEnd; member += 1) {
             const before = sequence[member]!;
             const after = sequence[member + 1]!;
             const afterStart = occurrences.runStarts[after.runIndex] ?? 0;
             const shift = afterStart - (occurrences.runStarts[before.runIndex] ?? 0) - (after.start - before.start);
-            if (shift <= 0 || after.start <= sequenceStart + consumed) continue;
-            const offset = after.start - sequenceStart - consumed;
-            const parts: ReturnType<typeof splitTextPlanSegment> = splitTextPlanSegment(
-              plannedText, offset, shift + undividedShift);
-            if (!parts) {
-              undivided.push({ from: afterStart - shift, to: afterStart, offset });
-              undividedShift += shift;
-              continue;
+            if (shift <= 0 || after.start <= sequenceStart) continue;
+            // Hosts arrive in source order: one cursor over this line's hosts.
+            while (pendingHost < anchorHostIndexes.length) {
+              const index = anchorHostIndexes[pendingHost]!;
+              const host = segments[index] as MeasuredAnchorHostPlanSegment;
+              if (host.range.start >= afterStart) break;
+              if (host.range.start >= afterStart - shift) {
+                segments[index] = { ...host, range: { start: plannedText.range.end, end: plannedText.range.end },
+                  placeAt: plannedText.range.start + after.start - sequenceStart };
+              }
+              pendingHost += 1;
             }
-            gapSplits.push({
-              index: segments.filter((planned) => !isAnchorPlacementPlanSegment(planned)).length,
-              codePoints: [...parts[0].text].length,
-            });
-            closePart(parts[0]);
-            segments.push(parts[0]);
-            consumed += parts[0].text.length;
-            occurrenceShift += shift + undividedShift;
-            undividedShift = 0;
-            plannedText = parts[1];
+            occurrenceShift += shift;
           }
-          closePart(plannedText);
-          occurrenceShift += undividedShift;
         }
+        if (isAnchorPlacementPlanSegment(plannedText)) anchorHostIndexes.push(segments.length);
         segments.push(plannedText);
         lineEndOffset = Math.max(lineEndOffset, segmentOffset + occurrenceLength + occurrenceShift);
       }
@@ -4678,7 +4538,7 @@ function planMeasuredLines(
         availableWidthPt: raw.availWidth,
         ...(raw.marginExtension ? { marginExtensionPt: raw.marginExtension } : {}),
         justifiedCompressionPt: raw.justifiedCompressionPx,
-        gapPlan: raw.gapPlan && gapSplits.length > 0 ? dividedGapPlan(raw.gapPlan, gapSplits) : raw.gapPlan,
+        gapPlan: raw.gapPlan,
         endsWithBreak: raw.endsWithBreak ?? false,
         segments,
       },

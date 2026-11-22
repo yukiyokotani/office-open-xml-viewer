@@ -2428,7 +2428,7 @@ function appendRunsToSegments(
           style,
         });
         const localFont = selectedMetric(selected, probeText);
-        // The mark hosting a floating anchor participates in the same natural
+        // A picture list label's metric run participates in the same natural
         // atLeast line box as a visible text line.
         const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
         const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null

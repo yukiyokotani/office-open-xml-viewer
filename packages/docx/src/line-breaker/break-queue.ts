@@ -21,17 +21,25 @@ export function prepareBreakQueue(
   measurement: LineMeasurementAdapter,
 ): LayoutSeg[] {
   startBoundary = startBoundary ? remapSourceBoundary(segs, startBoundary) : undefined;
+  // A host directly before the next content segment (not inside its text)
+  // seen since the last content segment.
+  let hostAtHead = false;
   const sourcedSegs = segs.map((seg, segIndex) => {
     seg.src = { segIndex, charOffset: 0,
       ...(seg.sourceCursorStart !== undefined ? { sourceTextStart: seg.sourceCursorStart } : {}) };
-    // A pass resumed after the anchor's own line starts past that anchor.
-    const previous = segIndex > 0 ? segs[segIndex - 1]! : undefined;
-    if (previous && isAnchorPlacementSegment(previous) && !isAnchorPlacementSegment(seg)
-      && !('text' in previous && previous.anchorTextOffset)
-      && !(startBoundary?.afterAnchorLine === true && startBoundary.segIndex === segIndex)) {
-      seg.followsAnchor = true;
-    } else if (seg.followsAnchor) {
-      seg.followsAnchor = undefined;
+    // Only an anchor host standing at the head of the content that follows
+    // it counts: a host inside that text (`anchorTextOffset`) or a floating
+    // payload (which holds no place on a line) does not. A pass resumed
+    // after the anchor's own line starts past that anchor.
+    if (isAnchorPlacementSegment(seg)) {
+      if ('text' in seg && !seg.anchorTextOffset) hostAtHead = true;
+    } else {
+      if (hostAtHead && !(startBoundary?.afterAnchorLine === true && startBoundary.segIndex === segIndex)) {
+        seg.followsAnchor = true;
+      } else if (seg.followsAnchor) {
+        seg.followsAnchor = undefined;
+      }
+      hostAtHead = false;
     }
     // Issue #797 / #960 — attach the SEA (Thai/Lao/Khmer) break offsets ONCE per
     // segment (perf: never per line/char). Only for SEA text; non-SEA segments

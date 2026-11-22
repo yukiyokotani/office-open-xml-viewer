@@ -83,7 +83,7 @@ const bases: readonly (readonly [string, readonly Run[], Partial<DocParagraph>?,
   ['justified text', [text('Latin words fill the band '), text('and wrap onto later lines here')], { alignment: 'both' },
     {}, { isJustified: true }],
   ['text on a character grid', [text('Latin '), text('words 漢字 here')], {}, {}, characterGrid],
-  ['text and a tab', [text('a'), { type: 'tab' } as unknown as Run, text('b')]],
+  ['text and a tab', [text('a'), text('\t'), text('b')]],
   ['math alone', [{ type: 'math', nodes: [{ kind: 'run', text: 'x' }], display: false, fontSize: 10 } as unknown as Run]],
   ['numbered text', [text('item')], { numbering: { text: '1.', numId: 1, level: 0, fontSize: 10 } as never }],
   ['numbered empty item', [], { numbering: { text: '1.', numId: 1, level: 0, fontSize: 10 } as never }],
@@ -179,6 +179,7 @@ import { attachAnchorPlacements } from './line-breaker/model.js';
 import { planLine } from './layout/paragraph.js';
 import { buildSegments } from './line-layout.js';
 import { withAnchorPlacementSegments } from './line-breaker/segment-builder.js';
+import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { textRunsForPage } from './text-run-projection.js';
 
 function documentContext(): CanvasRenderingContext2D {
@@ -530,6 +531,20 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating anchor changes no break op
     });
   }
 
+  it('breaks an overwide dictionary word with an anchor inside it like the word alone', () => {
+    // Two Thai runs of one word, 50pt per character in the 150pt band: the
+    // anchor between them is no head of a line and adds no line of its own.
+    const runs = [text('\u0e20\u0e32', 100), text('\u0e29\u0e32', 100)];
+    for (const compatibilityMode of [12, 14, 15]) {
+      const expected = lineTexts(runs, compatibilityMode);
+      expect(expected).toEqual(['\u0e20\u0e32\u0e29', '\u0e32']);
+      for (const [shapeName, anchor] of anchors) {
+        expect(lineTexts([runs[0]!, ...anchor, runs[1]!], compatibilityMode), `${shapeName}, mode ${compatibilityMode}`)
+          .toEqual(expected);
+      }
+    }
+  });
+
   it('keeps the lines around a soft hyphen in its own run', () => {
     const runs = [text('aa bb', 40), text('\u00AD', 40), text('cc dd', 40)];
     const expected = lineTexts(runs, 15);
@@ -573,7 +588,26 @@ describe('text ranges around a floating anchor', () => {
     ['public anchored picture', documentAnchorShapes[2]![1], 2],
   ];
 
-  it('justifies a line divided at an anchor like the undivided line', () => {
+  it('keeps bidi geometry and paint operations of text that holds an anchor', () => {
+    // Hebrew without w:rtl (direction resolved from the text) and a Latin
+    // pair a face may ligate: the text is one undivided placement, so its
+    // cluster positions and paint operations are those of the control.
+    for (const [head, tail] of [['\u05d0', '\u05d1\u05d2\u05d3 '], ['f', 'i']] as const) {
+      const plain = layOut([word(head), word(tail)]);
+      for (const [name, anchor] of shapes) {
+        const anchored = layOut([word(head), ...anchor(), word(tail)]);
+        const facts = (laid: typeof plain) => laid.texts.map((placement) => ({
+          text: placement.text,
+          clusters: placement.clusters.map((cluster) => round(placement.origin.xPt + cluster.offset.xPt)),
+          paint: placement.paintOps.map((op) => [op.text, round(op.offset.xPt)]),
+        }));
+        expect(facts(anchored), name).toEqual(facts(plain));
+        expect(anchored.texts).toHaveLength(1);
+      }
+    }
+  });
+
+  it('justifies a line with an anchor inside its text like the unanchored line', () => {
     const lay = (runs: readonly Run[], compatibilityMode: number) => {
       const model = documentModel([bodyParagraph(runs, { alignment: 'both' })], null, { compatibilityMode });
       return documentGeometry(model, false).geometry;
@@ -595,16 +629,23 @@ describe('text ranges around a floating anchor', () => {
 
   for (const [name, anchor, runAfter] of shapes) {
     it(`keeps the unit of a ${name} inside one text sequence`, () => {
+      const plain = layOut([word('ab'), word('cd ef')]);
       const inside = layOut([word('ab'), ...anchor(), word('cd ef')]);
-      // 'ab' is [0, 2), the drawing owns [2, 3), the text after it starts at 3.
-      expect(inside.texts.map((placement) => placement.range.start)).toEqual(
-        [...inside.texts.map((placement) => placement.range.start)].sort((a, b) => a - b));
-      expect(inside.texts[0]!.range).toEqual({ start: 0, end: 2 });
-      expect(inside.texts[1]!.range.start).toBe(3);
+      // The text is placed exactly as without the anchor: the same undivided
+      // pieces, clusters and paint operations.
+      expect(inside.texts.map((placement) => placement.text)).toEqual(plain.texts.map((placement) => placement.text));
+      expect(inside.texts.map((placement) => placement.paintOps.map((op) => op.text)))
+        .toEqual(plain.texts.map((placement) => placement.paintOps.map((op) => op.text)));
+      expect(glyphs([word('ab'), ...anchor(), word('cd ef')])).toEqual(glyphs([word('ab'), word('cd ef')]));
+      // Ranges never overlap; the drawing's one unit follows the piece that
+      // spans its anchor, and every piece keeps contiguous clusters.
+      const piece = inside.texts[0]!;
+      expect(piece.range.start).toBe(0);
       let cursor = 0;
+      let holes = 0;
       for (const placement of inside.texts) {
-        // Non-overlapping, contiguous apart from the drawing's own unit.
-        expect(placement.range.start).toBe(cursor === 2 ? 3 : cursor);
+        expect(placement.range.start).toBeGreaterThanOrEqual(cursor);
+        holes += placement.range.start - cursor;
         expect(placement.range.end - placement.range.start).toBe(placement.text.length);
         let cluster = placement.range.start;
         for (const { range } of placement.clusters) {
@@ -614,18 +655,20 @@ describe('text ranges around a floating anchor', () => {
         expect(cluster).toBe(placement.range.end);
         cursor = placement.range.end;
       }
+      expect(holes).toBe(1);
       expect(cursor).toBe('abcd ef'.length + 1);
-      expect(inside.texts.map((placement) => placement.text).join('')).toBe('abcd ef');
-      for (const host of inside.hosts) expect(host.range).toEqual({ start: 2, end: 2 });
-      // The ranges of an anchor between two sequences (differently formatted
-      // runs), which this change does not touch.
+      for (const host of inside.hosts) {
+        expect(host.range).toEqual({ start: piece.range.end, end: piece.range.end });
+        // The host stands at its own character inside the undivided piece.
+        expect(host.bounds.xPt).toBe(plain.texts[0]!.origin.xPt + plain.texts[0]!.clusters[2]!.offset.xPt);
+      }
+      // Text after that piece keeps the ranges it has when the anchor lies
+      // between two sequences (differently formatted runs), a case this
+      // change does not touch.
       const between = ranges([word('ab'), ...anchor(), word('cd ef', 12, bold)]);
-      expect(ranges([word('ab'), ...anchor(), word('cd ef')]).map(([, start, end]) => [start, end]))
-        .toEqual(between.map(([, start, end]) => [start, end]));
       expect(between[0]).toEqual(['ab', 0, 2]);
       expect(between[1]![1]).toBe(3);
-      // The glyphs stand where the unanchored text puts them.
-      expect(glyphs([word('ab'), ...anchor(), word('cd ef')])).toEqual(glyphs([word('ab'), word('cd ef')]));
+      expect(inside.texts.at(-1)!.range).toEqual({ start: between.at(-1)![1], end: between.at(-1)![2] });
     });
 
     it(`projects the text after a ${name} to its own run for selection`, () => {
@@ -664,13 +707,14 @@ describe('several floating anchors inside one text sequence', () => {
     const plain = layOut([word('abcdef')]).texts[0]!;
     const glyphX = (index: number) => plain.origin.xPt + plain.clusters[index]!.offset.xPt;
     const { texts, hosts } = layOut([word('ab'), ...anchor(), word('cd'), ...anchor(), word('ef')]);
+    // One undivided piece; both drawings' units follow it.
     expect(texts.map((placement) => [placement.text, placement.range.start, placement.range.end]))
-      .toEqual([['ab', 0, 2], ['cd', 3, 5], ['ef', 6, 8]]);
-    expect(hosts.map((host) => host.range.start)).toEqual([2, 5]);
+      .toEqual([['abcdef', 0, 6]]);
+    expect(hosts.map((host) => host.range.start)).toEqual([6, 6]);
     expect(hosts.map((host) => host.bounds.xPt)).toEqual([glyphX(2), glyphX(4)]);
   });
 
-  it('keeps consistent ranges around a drawing inside right-to-left text that is not divided', () => {
+  it('keeps consistent ranges around a drawing inside right-to-left text', () => {
     const hebrew = (value: string): Run => word(value, 12, { rtl: true });
     const { texts, hosts } = layOut([hebrew('\u05d0\u05d1'), ...anchor(), hebrew('\u05d2\u05d3')], [word(' xy', 12, { bold: true })]);
     // Every text range and every owner range is contiguous inside its
@@ -727,5 +771,70 @@ describe('several floating anchors inside one text sequence', () => {
     };
     // A search from the first member per anchor reads about n * n / 2 members.
     expect(reads(4000)).toBeLessThan(reads(1000) * 5);
+  });
+});
+
+describe('floating anchors take no part in intrinsic sizing', () => {
+  it('keeps a tab glued to the word after it across an anchor', () => {
+    // A 60pt left tab followed by a 6pt X: the minimum holds the tab and the
+    // word together (66pt), with or without a floating anchor between them.
+    const widths = (runs: readonly Run[]) => measureParagraphIntrinsicWidths(
+      { alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0, spaceBefore: 0, spaceAfter: 0,
+        lineSpacing: null, numbering: null, tabStops: [{ pos: 60, alignment: 'left', leader: 'none' }],
+        defaultFontSize: 12, runs: [...runs] } as never,
+      { lineGrid: { active: false, pitchPt: null }, characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+        rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true }, physicalIndentLeftPt: 0,
+        physicalIndentRightPt: 0, firstIndentPt: 0, lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: false,
+        isJustified: false, stretchLastLine: false, tabStops: [{ pos: 60, alignment: 'left', leader: 'none' }],
+        hasRuby: false, hasEastAsianText: false, kinsoku: DEFAULT_KINSOKU_RULES, defaultTabPt: 36 } as never,
+      500, measurer,
+      { pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: false,
+        ...withCompat({ compatibilityMode: 15 }) } as ParagraphMeasurementEnvironment,
+    );
+    const tab = text('\t', 12);
+    const expected = widths([tab, text('X', 12)]);
+    expect(expected.minWidthPt).toBe(66);
+    for (const [shapeName, anchor] of anchorShapes) {
+      expect(widths([tab, ...anchor, text('X', 12)]), shapeName).toEqual(expected);
+      expect(widths([...anchor, tab, text('X', 12), ...anchor]), shapeName).toEqual(expected);
+    }
+  });
+});
+
+describe('a line with many anchors inside its text is planned in linear work', () => {
+  it('scans its segment arrays a bounded number of times', () => {
+    // Identically formatted one-letter runs alternating with distinct
+    // floating pictures on one wide line. A scan of the growing segment
+    // list per anchor visits about n * n / 2 entries.
+    const visited = (count: number): number => {
+      const runs: Run[] = [];
+      for (let index = 0; index < count; index += 1) {
+        runs.push(word('a', 2));
+        runs.push({ type: 'anchorHost', fontSize: 40, __anchorOccurrenceId: `p${index}` } as unknown as Run);
+        runs.push(picture({ anchor: true, widthPt: 3, heightPt: 5, imagePath: 'word/media/p.png',
+          __anchorAcquisition: pageAnchor(`p${index}`) }));
+      }
+      const model = documentModel([bodyParagraph(runs)], null, { compatibilityMode: 15 });
+      (model.section as { pageWidth: number }).pageWidth = 4000;
+      let entries = 0;
+      const names = ['filter', 'findIndex', 'slice', 'flatMap'] as const;
+      const prototype = Array.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
+      const originals = names.map((name) => prototype[name]!);
+      names.forEach((name, index) => {
+        prototype[name] = function (this: unknown[], ...args: unknown[]) {
+          entries += this.length;
+          return originals[index]!.apply(this, args);
+        };
+      });
+      try {
+        const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+          { currentDateMs: 0 });
+        expect(layout.pages[0]!.layers.paintOrder.filter((entry) => entry.kind === 'drawing')).toHaveLength(count);
+      } finally {
+        names.forEach((name, index) => { prototype[name] = originals[index]!; });
+      }
+      return entries;
+    };
+    expect(visited(200)).toBeLessThan(visited(50) * 6);
   });
 });
