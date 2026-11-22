@@ -948,7 +948,10 @@ function materializeBorders(
     };
     // The table's left and right rules are its start and end ones
     // (§17.4.36, §17.4.13): a visually right-to-left table mirrors them.
-    rectangle(rowXPt[0] ?? 0, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt, rowY(input.rows.length),
+    // Its side rules straddle the edges of the grid, as the column solver
+    // sizes it: the border box is half a rule wider than the grid on either
+    // side, and the first cell is twice the spacing in from the grid edge.
+    rectangle((rowXPt[0] ?? 0) - t / 2, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt + t / 2, rowY(input.rows.length),
       input.bidiVisual ? { ...input.borders, left: input.borders.right, right: input.borders.left } : input.borders);
     input.rows.forEach((row, rowIndex) => {
       const spacing = rowSpacingInsets(input.rows, rowIndex);

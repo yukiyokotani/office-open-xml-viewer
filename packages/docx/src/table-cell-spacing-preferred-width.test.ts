@@ -691,6 +691,35 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     }
   });
 
+  it.each([
+    // [rule width in eighths of a point, cell widths]
+    [4, [1440, 2160]],
+    [48, [1440, 2160]],
+    [48, [4400, 4800]],
+  ] as const)('centres the outer rules of sz %d on the edges of the grid the columns were sized for', (eighths, widths) => {
+    const t = eighths / 8;
+    const borders = BORDERS.replaceAll('w:sz="4"', `w:sz="${eighths}"`);
+    const table = `<w:tbl><w:tblPr>${AUTO}${spacing(2)}${borders}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="${widths[0]}"/><w:gridCol w:w="${widths[1]}"/></w:tblGrid>`
+      + `<w:tr>${cell(widths[0], 'A1')}${cell(widths[1], 'B1')}</w:tr></w:tbl>`;
+    const page = tablePages(table, 15)[0]!;
+    const grid = page.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+    const vertical = page.borders.filter((border) => border.from.xPt === border.to.xPt)
+      .map((border) => border.from.xPt).sort((a, b) => a - b);
+    const [frameLeft, cellLeft] = vertical;
+    const frameRight = vertical.at(-1)!;
+    const cellRight = vertical.at(-2)!;
+    // The frame is the grid; its rules reach half their width beyond it.
+    expect(frameRight - frameLeft!).toBeCloseTo(grid, 6);
+    // The first and last cell boxes are 4 pt (twice the spacing) inside the
+    // grid: their rules never meet the frame's.
+    expect(cellLeft! - t / 2 - frameLeft!).toBeCloseTo(4, 6);
+    expect(frameRight - (cellRight + t / 2)).toBeCloseTo(4, 6);
+    expect(cellLeft! - t / 2).toBeGreaterThanOrEqual(frameLeft! + t / 2 - 1e-6);
+    // Held to the text width, the border box ends with it.
+    if (widths[0] === 4400) expect(grid + t).toBeCloseTo(465.3, 6);
+  });
+
   it('keeps the upright table of a two-column vertical section on its previous geometry', () => {
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 2).table).toBeCloseTo(180, 6);
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 1).table).toBeCloseTo(192, 6);
