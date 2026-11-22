@@ -9672,7 +9672,7 @@ fn parse_inline_drawing_impl(
 /// pictures and shapes alike). Recorded on the container's inline picture and
 /// inline shape runs; anchors keep it in their wrap facts.
 fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
-    if container.tag_name().name() != "inline" {
+    if !drawing_container_flows_inline(container) {
         return;
     }
     let Some(node) = container
@@ -9706,6 +9706,24 @@ fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
     }
 }
 
+/// Whether a `wp:inline` / `wp:anchor` drawing container lays out as an
+/// inline object (ECMA-376 §20.4.2.8). A `wp:anchor` (§20.4.2.3) inside a text
+/// box story (`w:txbxContent`, §17.17.1.1, reached through `wps:txbx` or
+/// `v:textbox`) is laid out inline too: Word ignores its position, wrap and
+/// layer there and places the object at its run like a `wp:inline` of the same
+/// `wp:extent` (word-text-box-anchor-inline).
+fn drawing_container_flows_inline(container: roxmltree::Node) -> bool {
+    match container.tag_name().name() {
+        "inline" => true,
+        "anchor" => container.ancestors().skip(1).any(|node| {
+            node.is_element()
+                && node.tag_name().name() == "txbxContent"
+                && is_w_ns(node.tag_name().namespace())
+        }),
+        _ => false,
+    }
+}
+
 /// One `wp:inline` / `wp:anchor` container of a `w:drawing`.
 #[allow(clippy::too_many_arguments)]
 fn parse_drawing_container(
@@ -9718,7 +9736,7 @@ fn parse_drawing_container(
     theme: &ThemeColors,
     depth: DepthGuard,
 ) -> Vec<DocRun> {
-    let is_anchor = drawing_container.tag_name().name() == "anchor";
+    let is_anchor = !drawing_container_flows_inline(drawing_container);
 
     if !is_anchor {
         let container = drawing_container;
@@ -10335,7 +10353,7 @@ fn collect_drawing_extent_diagnostic(
     });
     // An inline group/shape payload is sized from `wp:extent` exactly like a
     // picture (§20.4.2.7), so a missing/invalid extent omits it too.
-    let inline_extent_shape = container.tag_name().name() == "inline"
+    let inline_extent_shape = drawing_container_flows_inline(container)
         && (inline_group_payload(container).is_some() || inline_wps_payload(container).is_some());
     if !retained_extent_consumer && !inline_extent_shape {
         // The anchored group/shape branches size from `a:xfrm` and never
@@ -14925,7 +14943,9 @@ fn parse_vml_pict_image(
     };
     // The first shape carrying an <v:imagedata r:id>, that is NOT nested in a
     // <v:group> (grouped geometry is in group units, handled elsewhere).
-    let shape = pict.descendants().find(|n| {
+    // A picture inside the pict's own text box story belongs to that story's
+    // run, not to this pict (whose shape is then the text box).
+    let shape = story_bounded_descendants(pict).find(|n| {
         is_shape(n)
             && n.children()
                 .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
@@ -24924,19 +24944,18 @@ mod anchor_image_relative_from_tests {
         assert_eq!(after.text, "After image");
         assert_eq!(image.image_path, "word/media/image1.png");
         assert_eq!((image.width_pt, image.height_pt), (20.0, 10.0));
-        assert_eq!(image.anchor, inner_anchor);
-        if inner_anchor {
-            assert_eq!((image.anchor_x_pt, image.anchor_y_pt), (30.0, 40.0));
-            assert_eq!(image.wrap_mode.as_deref(), Some("none"));
-            assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
-            assert_eq!(image.anchor_y_relative_from.as_deref(), Some("page"));
-        } else {
-            assert!(image.anchor_acquisition.is_none());
-        }
+        // word-text-box-anchor-inline: an anchored picture in the text box
+        // story is the story's inline object, whatever its own container.
+        assert!(!image.anchor);
+        assert!(image.anchor_acquisition.is_none());
+        assert_eq!(
+            image.inline_object_origin,
+            Some(InlineObjectOrigin::DrawingMl)
+        );
     }
 
     #[test]
-    fn inline_textbox_retains_nested_floating_image() {
+    fn inline_textbox_lays_nested_anchor_inline() {
         assert_nested_drawing(false, true);
     }
 
@@ -25276,6 +25295,153 @@ mod anchor_image_relative_from_tests {
                 (container == "inline").then_some(InlineObjectOrigin::DrawingMl)
             );
         }
+    }
+
+    /// word-text-box-anchor-inline: a `wp:anchor` inside a text box story
+    /// (DrawingML or VML text box) is parsed as an inline object of its run;
+    /// the same anchor in the body keeps its floating acquisition.
+    #[test]
+    fn text_box_story_anchors_flow_inline() {
+        const NS: &str = r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:v="urn:schemas-microsoft-com:vml""#;
+        let anchored = |payload: &str, uri: &str| {
+            format!(
+                r#"<w:r><w:rPr><w:sz w:val="30"/></w:rPr><w:drawing><wp:anchor {NS} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1">
+                  <wp:simplePos x="0" y="0"/>
+                  <wp:positionH relativeFrom="page"><wp:posOffset>3810000</wp:posOffset></wp:positionH>
+                  <wp:positionV relativeFrom="page"><wp:posOffset>3810000</wp:posOffset></wp:positionV>
+                  <wp:extent cx="508000" cy="254000"/><wp:effectExtent l="0" t="12700" r="0" b="0"/>
+                  <wp:wrapSquare wrapText="bothSides"/><wp:docPr id="7" name="d"/>
+                  <a:graphic><a:graphicData uri="{uri}">{payload}</a:graphicData></a:graphic>
+                </wp:anchor></w:drawing></w:r>"#
+            )
+        };
+        let picture = anchored(
+            r#"<pic:pic><pic:nvPicPr><pic:cNvPr id="7" name="p"/><pic:cNvPicPr/></pic:nvPicPr>
+               <pic:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+               <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic>"#,
+            "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        );
+        let rectangle = anchored(
+            r#"<wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm>
+               <a:prstGeom prst="rect"/></wps:spPr><wps:bodyPr/></wps:wsp>"#,
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        );
+        let story = format!(r#"<w:p>{picture}{rectangle}<w:r><w:t>Ab</w:t></w:r></w:p>"#);
+        let vml_picture = r#"<w:r><w:pict><v:shape id="vi" style="position:absolute;margin-left:300pt;width:40pt;height:20pt"><v:imagedata r:id="rIdPng"/></v:shape></w:pict></w:r>"#;
+        let drawingml_box = anchored(
+            &format!(
+                r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm>
+                   <a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{story}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"#
+            ),
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        );
+        let vml_box = format!(
+            r#"<w:r><w:pict><v:shape {NS} id="vtb" style="position:absolute;margin-top:30pt;width:468pt;height:200pt">
+               <v:textbox inset="0,0,0,0"><w:txbxContent>{story}<w:p>{vml_picture}<w:r><w:t>V</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"#
+        );
+        let body = format!(r#"{story}<w:p>{drawingml_box}</w:p><w:p {NS}>{vml_box}</w:p>"#)
+            .replace("<w:p>", &format!("<w:p {NS}>"));
+        let doc = parse_from_bytes(&build_docx(&body)).expect("text box anchors parse");
+        let paragraph_runs = |element: &BodyElement| match element {
+            BodyElement::Paragraph(paragraph) => paragraph.runs.clone(),
+            _ => panic!("expected a paragraph"),
+        };
+        // Body control: the same anchors float.
+        let body_runs = paragraph_runs(&doc.body[0]);
+        assert!(matches!(body_runs[0], DocRun::AnchorHost(_)));
+        assert!(body_runs
+            .iter()
+            .any(|run| matches!(run, DocRun::Image(image) if image.anchor)));
+        assert!(body_runs
+            .iter()
+            .any(|run| matches!(run, DocRun::Shape(shape) if !shape.inline)));
+        for (index, label) in [(1, "DrawingML text box"), (2, "VML text box")] {
+            let host = paragraph_runs(&doc.body[index]);
+            let text_box = host
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) if !shape.text_box_content.is_empty() => Some(shape),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: text box shape"));
+            let TextBoxBlockWire::Body(BodyElement::Paragraph(paragraph)) =
+                &text_box.text_box_content[0]
+            else {
+                panic!("{label}: story paragraph");
+            };
+            assert!(
+                !paragraph
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run, DocRun::AnchorHost(_))),
+                "{label}: no floating host character"
+            );
+            let image = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Image(image) => Some(image),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: picture"));
+            assert!(!image.anchor, "{label}: picture flows inline");
+            assert!(image.anchor_acquisition.is_none(), "{label}");
+            assert_eq!(
+                image.inline_object_origin,
+                Some(InlineObjectOrigin::DrawingMl)
+            );
+            assert_eq!(
+                image.inline_effect_extent,
+                Some([0.0, 1.0, 0.0, 0.0]),
+                "{label}"
+            );
+            assert_eq!((image.width_pt, image.height_pt), (40.0, 20.0));
+            assert_eq!(
+                image
+                    .inline_object_font_facts
+                    .as_ref()
+                    .and_then(|facts| facts.font_size),
+                Some(15.0),
+                "{label}: the hosting run sizes the inline object's line"
+            );
+            let shape = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: rectangle"));
+            assert!(shape.inline, "{label}: rectangle flows inline");
+            assert!(shape.anchor_acquisition.is_none(), "{label}");
+            assert_eq!((shape.width_pt, shape.height_pt), (40.0, 20.0));
+        }
+        // A VML picture inside the VML text box belongs to the story: the
+        // text box keeps its text and the picture stays one of its runs.
+        let host = paragraph_runs(&doc.body[2]);
+        let text_box = host
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Shape(shape) if !shape.text_box_content.is_empty() => Some(shape),
+                _ => None,
+            })
+            .expect("VML text box survives its nested picture");
+        assert!(!host.iter().any(|run| matches!(run, DocRun::Image(_))));
+        let TextBoxBlockWire::Body(BodyElement::Paragraph(last)) =
+            text_box.text_box_content.last().unwrap()
+        else {
+            panic!("VML picture paragraph");
+        };
+        assert!(last.runs.iter().any(|run| matches!(run, DocRun::Image(_))));
+        assert!(last
+            .runs
+            .iter()
+            .any(|run| matches!(run, DocRun::Text(text) if text.text == "V")));
     }
 
     #[test]
@@ -31234,15 +31400,10 @@ mod inline_wps_shape_tests {
                 let [inner] = images.as_slice() else {
                     panic!("{case}: nested picture missing")
                 };
-                assert_eq!(inner.anchor, inner_floating, "{case}: inner container");
+                // word-text-box-anchor-inline: a text box story lays either
+                // container out inline.
+                assert!(!inner.anchor, "{case}: inner container");
                 assert_eq!((inner.width_pt, inner.height_pt), (50.0, 25.0), "{case}");
-                if inner_floating {
-                    assert_eq!(
-                        (inner.anchor_x_pt, inner.anchor_y_pt),
-                        (10.0, 20.0),
-                        "{case}"
-                    );
-                }
             }
         }
 
