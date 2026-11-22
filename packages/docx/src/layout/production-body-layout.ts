@@ -148,7 +148,7 @@ import {
 import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
-import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
+import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt, wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt, wordShortNoteSeparatorLengthPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -1993,6 +1993,12 @@ function layoutBodyNotes(
     const separatorMode = request.kind === 'footnote'
       ? request.continuing ? noteSettings?.footnoteContinuationSeparator : noteSettings?.footnoteSeparator
       : request.continuing ? noteSettings?.endnoteContinuationSeparator : noteSettings?.endnoteSeparator;
+    // A page-wide note area (WORD_PAGE_WIDE_FOOTNOTE_AREA) spans the section's
+    // text width although its flow runs in a column.
+    const separatorAreaWidthPt = context.state.layoutSettings.compat.pageWideFootnoteArea
+      ? Math.max(request.container.bounds.widthPt, request.section.geometry.pageWidth
+        - request.section.geometry.marginLeft - request.section.geometry.marginRight)
+      : request.container.bounds.widthPt;
     const separator = first && !reservedDefinitions && separatorMode !== 'none'
       && request.blankLeadingAdvancePt === undefined
       ? Object.freeze([
@@ -2003,27 +2009,20 @@ function layoutBodyNotes(
               yPt: ruleYPt,
             }),
             to: Object.freeze({
-              // ECMA-376 §17.11.1/.23: marker kind wins over story role.
-              // Word 16.113.3 compatibility controls (300pt main width,
-              // 80 plain single-spaced paragraphs, printed Times New Roman
-              // 12pt) retain a selected Short mark in a continuation story.
-              // A missing continuation story prints a full-width rule and
-              // gains a listed Full story on save. Preserve source absence;
-              // this fallback does not synthesize a parser fact or change
-              // the public continuation option's default. These controls
-              // establish neither universal Short dimensions nor gap/leading.
-              // §17.11.1 defines the continuation mark as full main-story width.
-              // §17.11.23 defines a partial ordinary mark; one third is the
-              // existing library policy, not a normative numeric fraction.
-              // It differs from the 144pt Short rule in those Office controls.
-              xPt: request.container.bounds.xPt + request.container.bounds.widthPt
-                * (separatorMode === 'full'
-                  || ((separatorMode === undefined || separatorMode === 'default') && request.continuing)
-                  ? 1 : 1 / 3),
+              // ECMA-376 §17.11.1/.23: marker kind wins over story role. The
+              // continuation mark spans the note area; the short mark length
+              // and the default continuation marks follow
+              // WORD_NOTE_SEPARATOR_GEOMETRY.
+              xPt: request.container.bounds.xPt + (
+                separatorMode === 'full'
+                  || ((separatorMode === undefined || separatorMode === 'default')
+                    && request.continuing && request.kind === 'endnote')
+                  ? request.container.bounds.widthPt
+                  : wordShortNoteSeparatorLengthPt(separatorAreaWidthPt)),
               yPt: ruleYPt,
             }),
             color: '#000000',
-            widthPt: 0.5,
+            widthPt: selectedBand ? wordNoteSeparatorRuleWidthPt(selectedBand.markFontSizePt) : 0.5,
             authoredStyle: 'single',
             style: 'solid' as const,
           }),
@@ -2143,7 +2142,7 @@ function acquireSelectedNoteSeparatorBand(
   request: Parameters<NonNullable<BodyLayoutSession['layoutNotes']>>[0],
   definition: SelectedNoteSeparatorDefinitionInput,
   yPt: number,
-): Readonly<{ advancePt: number; ruleOffsetPt: number }> {
+): Readonly<{ advancePt: number; ruleOffsetPt: number; markFontSizePt: number }> {
   const container = {
     ...request.container,
     id: `${request.container.id}:${sourceKey(definition.root)}`,
@@ -2175,9 +2174,18 @@ function acquireSelectedNoteSeparatorBand(
   if (!mark || mark.hidden) {
     throw new Error('A note separator story must acquire exactly one visible mark-only paragraph');
   }
+  // WORD_NOTE_SEPARATOR_GEOMETRY: the rule sits an eighth of the mark's
+  // font size below the middle of its line box.
+  const source = context.source.blocks.resolve(definition.paragraph);
+  const markFontSizePt = (source.type === 'paragraph'
+    ? context.state.acquisitionInputs.paragraphMarkShapeInput(source)?.fontSizePt
+      ?? source.defaultFontSize
+    : undefined) ?? 10;
   return Object.freeze({
     advancePt: story.advancePt,
-    ruleOffsetPt: mark.bounds.yPt + mark.bounds.heightPt / 2 - story.flowBounds.yPt,
+    ruleOffsetPt: mark.bounds.yPt + mark.bounds.heightPt / 2 - story.flowBounds.yPt
+      + wordNoteSeparatorRuleDropPt(markFontSizePt),
+    markFontSizePt,
   });
 }
 

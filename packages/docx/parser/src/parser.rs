@@ -2407,6 +2407,7 @@ fn parse_notes(
     };
     let mut out = Vec::new();
     let mut selected_stories = SelectedNoteSeparators::default();
+    let (mut listed_separator, mut listed_continuation) = (false, false);
     for n in doc.descendants().filter(|n| {
         n.is_element() && is_w_ns(n.tag_name().namespace()) && n.tag_name().name() == element_name
     }) {
@@ -2451,6 +2452,7 @@ fn parse_notes(
             )
         };
         if selected && note_type.as_deref() == Some("continuationSeparator") {
+            listed_continuation = true;
             (
                 selected_stories.continuation_separator,
                 selected_stories.continuation_separator_paragraph,
@@ -2458,6 +2460,7 @@ fn parse_notes(
         } else if selected
             && (note_type.as_deref() == Some("separator") || (id == "-1" && note_type.is_none()))
         {
+            listed_separator = true;
             (
                 selected_stories.separator,
                 selected_stories.separator_paragraph,
@@ -2483,6 +2486,46 @@ fn parse_notes(
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
         out.push(crate::types::DocxNote { id, content });
+    }
+    // word-note-separator-geometry: Word ignores special stories that
+    // settings.xml does not list (and lists without a matching story) and
+    // lays out its default separator, a bare Normal-style mark paragraph. Its
+    // default footnote continuation mark is the short one; the endnote one
+    // spans the note area. A listed story this class cannot represent keeps
+    // its absent-story fallback.
+    let mut default_story = |mark: &str| {
+        let xml = format!(
+            r#"<w:{element_name} xmlns:w="{}"><w:p><w:r><w:{mark}/></w:r></w:p></w:{element_name}>"#,
+            ooxml_common::ns::wordprocessingml::TRANSITIONAL
+        );
+        parse_guarded(&xml).ok().and_then(|doc| {
+            selected_note_separator_paragraph(
+                doc.root_element(),
+                style_map,
+                num_map,
+                &local_media_map,
+                &local_chart_map,
+                &local_rel_map,
+                theme,
+            )
+        })
+    };
+    if !listed_separator {
+        if let Some((mark, paragraph)) = default_story("separator") {
+            selected_stories.separator = Some(mark);
+            selected_stories.separator_paragraph = Some(Box::new(paragraph));
+        }
+    }
+    if !listed_continuation {
+        let mark = if element_name == "footnote" {
+            "separator"
+        } else {
+            "continuationSeparator"
+        };
+        if let Some((mark, paragraph)) = default_story(mark) {
+            selected_stories.continuation_separator = Some(mark);
+            selected_stories.continuation_separator_paragraph = Some(Box::new(paragraph));
+        }
     }
     (out, selected_stories)
 }
@@ -2723,29 +2766,35 @@ mod note_separator_tests {
     #[test]
     fn projects_only_document_listed_special_stories_without_losing_numbered_notes() {
         use crate::types::NoteSeparatorMark::{Full, Short};
-        for (properties, foot, continuation, end) in [
-            (None, None, None, None),
+        // word-note-separator-geometry: an unlisted role takes Word's default
+        // story (short separator; short footnote and full endnote
+        // continuation), whatever the unlisted story in the part holds.
+        for (properties, foot, continuation, end, end_continuation) in [
+            (None, Short, Short, Short, Full),
             (
                 Some(
                     r#"<w:footnotePr><w:footnote w:id="42"/><w:footnote w:id="0"/></w:footnotePr>"#,
                 ),
-                Some(Short),
-                Some(Full),
-                None,
+                Short,
+                Full,
+                Short,
+                Full,
             ),
             (
                 Some(r#"<w:endnotePr><w:endnote w:id="42"/></w:endnotePr>"#),
-                None,
-                None,
-                Some(Full),
+                Short,
+                Short,
+                Full,
+                Full,
             ),
             (
                 Some(
                     r#"<w:footnotePr><x:footnote w:id="42"/><w:compat><w:footnote w:id="0"/></w:compat></w:footnotePr><w:compat><w:endnotePr><w:endnote w:id="42"/></w:endnotePr></w:compat>"#,
                 ),
-                None,
-                None,
-                None,
+                Short,
+                Short,
+                Short,
+                Full,
             ),
         ] {
             let document = selected_note_package(properties, crate::xml_util::W_NS, "42", None);
@@ -2754,12 +2803,20 @@ mod note_separator_tests {
             assert_eq!(document.footnotes[0].id, "1");
             assert_eq!(document.endnotes[0].id, "1");
             let settings = document.note_layout_settings.unwrap_or_default();
-            assert_eq!(settings.footnote_separator, foot, "{properties:?}");
+            assert_eq!(settings.footnote_separator, Some(foot), "{properties:?}");
             assert_eq!(
-                settings.footnote_continuation_separator, continuation,
+                settings.footnote_continuation_separator,
+                Some(continuation),
                 "{properties:?}"
             );
-            assert_eq!(settings.endnote_separator, end, "{properties:?}");
+            assert_eq!(settings.endnote_separator, Some(end), "{properties:?}");
+            assert_eq!(
+                settings.endnote_continuation_separator,
+                Some(end_continuation),
+                "{properties:?}"
+            );
+            assert!(settings.footnote_separator_paragraph.is_some());
+            assert!(settings.endnote_separator_paragraph.is_some());
         }
     }
 
@@ -2969,12 +3026,17 @@ mod note_separator_tests {
             );
             assert_eq!(document.footnotes.len(), 1);
             assert_eq!(document.footnotes[0].id, "1");
+            // A foreign element is no listed story: Word's default applies.
+            // A listed story with foreign content stays unrepresented.
+            let expected = story
+                .starts_with("<x:footnote")
+                .then_some(crate::types::NoteSeparatorMark::Short);
             assert_eq!(
                 document
                     .note_layout_settings
                     .unwrap_or_default()
                     .footnote_separator,
-                None,
+                expected,
                 "{story}"
             );
         }

@@ -223,7 +223,7 @@ describe('render worker canonical layout parity', () => {
       expect(note.flowDomainId).toBe(`notes:page:${page.pageIndex}`);
       const rule = note.separator[0];
       expect(rule).toBeDefined();
-      expect(rule!.to.xPt - rule!.from.xPt).toBeCloseTo(60);
+      expect(rule!.to.xPt - rule!.from.xPt).toBeCloseTo(144);
       expect(note.advancePt - note.story.advancePt).toBe(6);
       // Selection/comment boxes must move with note text into the destination
       // band, including later fragments acquired in source coordinates.

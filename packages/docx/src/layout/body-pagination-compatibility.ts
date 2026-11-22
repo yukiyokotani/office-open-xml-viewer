@@ -13,6 +13,33 @@ import type {
   WritingMode,
 } from './types.js';
 
+export const WORD_NOTE_SEPARATOR_GEOMETRY = defineCompatibilityRule({
+  id: 'word-note-separator-geometry',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'note-separator-geometry',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §§17.11.1/17.11.23 give the continuation mark the main-story width and the ordinary mark a shorter, unspecified width; §17.11.3/.9 select the special notes listed in settings. Word draws the ordinary (short) rule min(144pt, note-area width) long from the area start (a column in per-column note bands, the page-wide area in compatibility mode 15), the rule is font size / 20 thick, and its centre lies an eighth of the separator mark font size below the middle of the separator line box. Special separator stories that settings.xml does not list are ignored: Word lays out its default separator, one Normal-style mark-only line with a short rule, whatever the unlisted story holds (larger or smaller mark, spacing, exact line, another font, an empty paragraph, or no story). Its default footnote continuation separator is short as well, while its default endnote continuation separator spans the area width. Evidence: Windows Word 16.0.20625 PDF exports. 21 controls vary listed and unlisted stories, the mark size (6/10/20pt), the separator paragraph spacing and line rule, the Normal font (Times New Roman/Arial) and size (10/14pt), an empty story, a missing story and the note number format. 14 controls vary the text width (100, 144, 200 and 468pt), two 120pt columns in modes 14 and 15, and multi-page footnotes and endnotes at 468 and 200pt. A public specimen exports a 144pt rule at a 467.7pt column with a 9pt exact-12pt separator line (Windows and Mac). Measured rule centres lie 7.0pt (10pt mark, 11.5pt line), 14.0pt (20pt mark, 23pt line), 9.8pt (14pt mark, 16.1pt line) and 7.0pt (9pt mark, exact 12pt line) below the band top.',
+});
+
+/** Length of Word's ordinary (short) note separator rule. */
+export function wordShortNoteSeparatorLengthPt(areaWidthPt: number): number {
+  return Math.max(0, Math.min(144, areaWidthPt));
+}
+
+/** Word note separator rule thickness: one twentieth of the mark font size. */
+export function wordNoteSeparatorRuleWidthPt(markFontSizePt: number): number {
+  return markFontSizePt / 20;
+}
+
+/** Distance of Word's separator rule centre below its line box middle. */
+export function wordNoteSeparatorRuleDropPt(markFontSizePt: number): number {
+  return markFontSizePt / 8;
+}
+
 export const WORD_PRE_BREAK_ANCHOR_PARAGRAPH = defineCompatibilityRule({
   id: 'word-pre-break-anchor-paragraph',
   evidence: {

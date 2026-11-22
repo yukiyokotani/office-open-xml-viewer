@@ -14,8 +14,8 @@ beforeAll(async () => {
 
 // Exact authored line heights isolate admission and source ownership. These
 // synthetic glyph metrics are not an Office pagination or font-fidelity oracle.
-// No separator story is authored, so the band is the library's 6pt
-// missing-story policy.
+// Listed exact 6pt separator stories keep the band at 6pt (Word's default
+// separator would be one Normal line; WORD_NOTE_SEPARATOR_GEOMETRY).
 const context = {
   font: '10px Arial', letterSpacing: '0px', fontKerning: 'none',
   measureText: (text: string) => ({
@@ -45,12 +45,16 @@ function control(
       + `<w:r>${rPr}<w:t>${prefix}${String(index + 1).padStart(2, '0')}</w:t></w:r>`
       + (index + 1 < count ? '<w:r><w:br/></w:r>' : '')
     )).join('') + '</w:p>';
+  const separatorPPr = '<w:pPr><w:spacing w:before="0" w:after="0" w:line="120" w:lineRule="exact"/></w:pPr>';
+  const separatorStories = `<w:footnote w:type="separator" w:id="-1"><w:p>${separatorPPr}<w:r><w:separator/></w:r></w:p></w:footnote>`
+    + `<w:footnote w:type="continuationSeparator" w:id="0"><w:p>${separatorPPr}<w:r><w:continuationSeparator/></w:r></w:p></w:footnote>`;
   const files = new Map([
-    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>'],
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>'],
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
-    ['word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="notes" Type="${R}/footnotes" Target="footnotes.xml"/></Relationships>`],
+    ['word/_rels/document.xml.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="notes" Type="${R}/footnotes" Target="footnotes.xml"/><Relationship Id="settings" Type="${R}/settings" Target="settings.xml"/></Relationships>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}"><w:footnotePr><w:footnote w:id="-1"/><w:footnote w:id="0"/></w:footnotePr></w:settings>`],
     ['word/document.xml', `<w:document xmlns:w="${W}"><w:body>${paragraph('P', precedingLines)}${paragraph('B', bodyLines, true)}<w:sectPr><w:pgSz w:w="4000" w:h="${precedingLines * 200 + remainingTwips + 400}"/><w:pgMar w:left="200" w:right="200" w:top="200" w:bottom="200"/></w:sectPr></w:body></w:document>`],
-    ['word/footnotes.xml', `<w:footnotes xmlns:w="${W}">${noteLines.map((count, index) => `<w:footnote w:id="${index + 1}">${paragraph(`N${index + 1}L`, count)}</w:footnote>`).join('')}</w:footnotes>`],
+    ['word/footnotes.xml', `<w:footnotes xmlns:w="${W}">${separatorStories}${noteLines.map((count, index) => `<w:footnote w:id="${index + 1}">${paragraph(`N${index + 1}L`, count)}</w:footnote>`).join('')}</w:footnotes>`],
   ]);
   const archive = new DocxArchive(storeZip(new Map([...files].map(([name, xml]) => [name, new TextEncoder().encode(xml)]))));
   try {

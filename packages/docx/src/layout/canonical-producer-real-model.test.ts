@@ -1161,17 +1161,18 @@ describe('canonical producer with a real document model', () => {
       return edge ? edge.to.xPt - edge.from.xPt : 0;
     };
     expect(width(short[0]!)).toBeCloseTo(width(full[0]!), 5);
-    expect(width(short[1]!)).toBeCloseTo(60, 5);
+    // WORD_NOTE_SEPARATOR_GEOMETRY: the short rule is min(144pt, width).
+    expect(width(short[1]!)).toBeCloseTo(144, 5);
     expect(width(full[1]!)).toBeCloseTo(180, 5);
-    // A missing story retains the full-width continuation fallback; it must
-    // not inherit the ordinary Short rule or become an explicit empty rule.
+    // A missing footnote continuation story takes Word's default, the short
+    // rule (WORD_NOTE_SEPARATOR_GEOMETRY), never an explicit empty rule.
     const absent = render();
-    expect(absent.map(width)).toEqual(full.map(width));
+    expect(absent.map(width)).toEqual(short.map(width));
     const emptyFirst = render('full', 'none');
     expect(width(emptyFirst[0]!)).toBe(0);
     expect(width(emptyFirst[1]!)).toBeCloseTo(180, 5);
     const emptyContinuation = render('none');
-    expect(width(emptyContinuation[0]!)).toBeCloseTo(60, 5);
+    expect(width(emptyContinuation[0]!)).toBeCloseTo(144, 5);
     expect(width(emptyContinuation[1]!)).toBe(0);
     expect(emptyContinuation.map(note => note.advancePt)).toEqual(full.map(note => note.advancePt));
     // A note taller than a physical page must be acquired before partitioning.

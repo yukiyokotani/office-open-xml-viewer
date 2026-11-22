@@ -116,9 +116,10 @@ it('moves the reference line and its whole note past an authored 24pt separator 
     { body: [lines('P', 14).join('')], notes: [] },
     { body: ['1B01B02'], notes: [lines('N1L', 4).join('')] },
   ]);
-  // The band is the story paragraph's exact line; the Short rule (existing
-  // one-third policy of the 180pt main width) stays centred in the band.
-  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
+  // The band is the story paragraph's exact line; the Short rule is
+  // min(144pt, 180pt) long and sits 10pt/8 below the band middle
+  // (WORD_NOTE_SEPARATOR_GEOMETRY).
+  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
 });
 
 it.each([
@@ -134,8 +135,8 @@ it.each([
     { body: [lines('P', 14).join(''), '1B01'], notes: [lines('N1L', 4).slice(0, head).join('')] },
     { body: ['B02'], notes: [lines('N1L', 4).slice(head).join('')] },
   ]);
-  expect(band(layout, 0)).toEqual({ heightPt: 6, ruleOffsetPt: 3, ruleWidthPt: 60 });
-  expect(band(layout, 1)).toEqual({ heightPt: 6, ruleOffsetPt: 3, ruleWidthPt: 180 });
+  expect(band(layout, 0)).toEqual({ heightPt: 6, ruleOffsetPt: 4.25, ruleWidthPt: 144 });
+  expect(band(layout, 1)).toEqual({ heightPt: 6, ruleOffsetPt: 4.25, ruleWidthPt: 180 });
 });
 
 it('charges each role its own story band and keeps scalar bands for an absent role', () => {
@@ -148,8 +149,8 @@ it('charges each role its own story band and keeps scalar bands for an absent ro
     { body: ['1B01'], notes: [lines('N', 14).join('')] },
     { body: [], notes: [lines('N', 30).slice(14).join('')] },
   ]);
-  expect(band(separate, 0)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
-  expect(band(separate, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 6, ruleWidthPt: 180 });
+  expect(band(separate, 0)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
+  expect(band(separate, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 7.25, ruleWidthPt: 180 });
   // An unformatted (absent) continuation role keeps the 6pt scalar band.
   const scalar = render(model(324, [paragraph(['B01'], [['1']])], paragraph(lines('N', 30)), {
     separator: story(24),
@@ -165,7 +166,7 @@ it('charges the story band with continuation off and keeps notes whole', () => {
     { body: [lines('P', 14).join('')], notes: [] },
     { body: ['1B01B02'], notes: [lines('N1L', 4).join('')] },
   ]);
-  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
+  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
 });
 
 /** An exact-line story with authored spacing before/after its mark line. */
@@ -175,9 +176,9 @@ const spaced = (linePt: number, spaceBefore: number, spaceAfter: number): DocPar
 it.each([
   // §17.3.1.33: spacing is allocated before/after the paragraph's lines, so
   // the mark's exact 10pt line box spans 0..10 or 12..22 of the band. The
-  // rule stays at that line box's midpoint, never in the spacing.
-  { name: 'after', separator: spaced(10, 0, 40), expected: { heightPt: 50, ruleOffsetPt: 5, ruleWidthPt: 60 } },
-  { name: 'before', separator: spaced(10, 12, 0), expected: { heightPt: 22, ruleOffsetPt: 17, ruleWidthPt: 60 } },
+  // rule stays 10pt/8 below that line box's midpoint, never in the spacing.
+  { name: 'after', separator: spaced(10, 0, 40), expected: { heightPt: 50, ruleOffsetPt: 6.25, ruleWidthPt: 144 } },
+  { name: 'before', separator: spaced(10, 12, 0), expected: { heightPt: 22, ruleOffsetPt: 18.25, ruleWidthPt: 144 } },
 ])('reserves authored $name spacing but draws the rule within the mark line box', ({ separator, expected }) => {
   const layout = render(model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), { separator }), false);
   expect(band(layout, 0)).toEqual(expected);
@@ -191,9 +192,9 @@ it('places each role\'s rule within its own mark line box at each page\'s band',
   expect(pages(layout).map(page => page.notes)).toEqual([
     [lines('N', 12).join('')], [lines('N', 27).slice(12).join('')], [lines('N', 30).slice(27).join('')],
   ]);
-  expect(band(layout, 0)).toEqual({ heightPt: 50, ruleOffsetPt: 5, ruleWidthPt: 60 });
-  expect(band(layout, 1)).toEqual({ heightPt: 22, ruleOffsetPt: 17, ruleWidthPt: 180 });
-  expect(band(layout, 2)).toEqual({ heightPt: 22, ruleOffsetPt: 17, ruleWidthPt: 180 });
+  expect(band(layout, 0)).toEqual({ heightPt: 50, ruleOffsetPt: 6.25, ruleWidthPt: 144 });
+  expect(band(layout, 1)).toEqual({ heightPt: 22, ruleOffsetPt: 18.25, ruleWidthPt: 180 });
+  expect(band(layout, 2)).toEqual({ heightPt: 22, ruleOffsetPt: 18.25, ruleWidthPt: 180 });
 });
 
 it('loads the story paragraph mark family with the document fonts', () => {
@@ -257,8 +258,8 @@ it.each([false, true])('uses the continued endnote area story even at a new-note
   expect(pages(layout).map(page => page.notes.join(''))).toEqual([
     lines('E', 14).join(''), lines('E', 30).slice(14).join(''),
   ]);
-  expect(band(layout, 0)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
-  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 6, ruleWidthPt: 180 });
+  expect(band(layout, 0)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
+  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 7.25, ruleWidthPt: 180 });
 });
 
 it('admits a listed endnote continuation story when the ordinary separator is absent', () => {
@@ -273,5 +274,5 @@ it('admits a listed endnote continuation story when the ordinary separator is ab
   expect(pages(layout).map(page => page.notes.join(''))).toEqual([
     lines('E', 16).join(''), lines('E', 30).slice(16).join(''),
   ]);
-  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 6, ruleWidthPt: 180 });
+  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 7.25, ruleWidthPt: 180 });
 });
