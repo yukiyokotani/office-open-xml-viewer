@@ -2448,9 +2448,8 @@ fn parse_notes(
             && (is_special || (id == "-1" && note_type.is_none()))
             && note_id_value(&id).is_some_and(|value| special_references.contains(&value));
         // ECMA-376 §17.11.1/.23: selected stories define their marker kind.
-        // Observed Word behavior: an explicitly empty story prints without the
-        // default rule; a missing reserved story still uses it. Limit the
-        // empty case to a single bare paragraph, as observed in Word controls.
+        // word-note-separator-geometry decides how an empty or missing story
+        // is drawn; only a single bare paragraph counts as an empty story.
         // Every supported selected story keeps its effective paragraph for
         // line measurement, including bare stories with inherited properties.
         // §17.11.3/.9 selected separators are paragraph stories even when
@@ -2465,6 +2464,7 @@ fn parse_notes(
                 &local_chart_map,
                 &local_rel_map,
                 theme,
+                false,
             )
             .map_or_else(
                 || {
@@ -2529,6 +2529,7 @@ fn parse_notes(
                 &local_chart_map,
                 &local_rel_map,
                 theme,
+                true,
             )
         })
     };
@@ -2563,15 +2564,15 @@ struct SelectedNoteSeparators {
 }
 
 /// The closed single-paragraph class of a listed story (§17.11.3/.9):
-/// a bare empty `w:p`, or a paragraph holding optional `w:pPr` and one run
-/// of optional `w:rPr` plus one
-/// §17.11.23/§17.11.1 mark. Its effective paragraph (style cascade, §17.3.1.33
-/// spacing, line rule) is kept so layout measures the band from these facts
-/// instead of a mark-only scalar.
-/// The shared empty-paragraph line takes its metrics from the paragraph mark
-/// (§17.3.1.29), so the mark run's rPr must equal the mark's rPr child for
-/// child. Paragraph ink, numbering, frames, a hidden mark and authored text are
-/// not represented here either; those stories stay unsupported (absent).
+/// a bare empty `w:p`, or a paragraph holding optional `w:pPr` and runs of
+/// text, tabs and line breaks with exactly one §17.11.23/§17.11.1 mark among
+/// them. Its effective paragraph (style cascade, §17.3.1.33 spacing, line
+/// rule) is kept so layout measures the band from these facts instead of a
+/// mark-only scalar.
+/// A mark-only paragraph whose mark run's rPr equals the mark's rPr child for
+/// child shares the paragraph mark's line (§17.3.1.29) and keeps the run-free
+/// shape. Paragraph ink, numbering, frames, a hidden mark and other run
+/// content are not represented; those stories stay unsupported (absent).
 #[allow(clippy::too_many_arguments)]
 fn selected_note_separator_paragraph(
     note: roxmltree::Node<'_, '_>,
@@ -2581,6 +2582,9 @@ fn selected_note_separator_paragraph(
     chart_map: &ChartMap,
     rel_map: &HashMap<String, String>,
     theme: &ThemeColors,
+    // The default story is the application's own paragraph: Normal's
+    // paragraph ink, numbering and frame do not apply to it.
+    synthesized: bool,
 ) -> Option<(crate::types::NoteSeparatorMark, DocParagraph)> {
     use crate::types::NoteSeparatorMark;
     let is_w = |node: roxmltree::Node<'_, '_>, name: &str| {
@@ -2596,11 +2600,12 @@ fn selected_note_separator_paragraph(
         .filter(|child| child.is_element())
         .peekable();
     let properties = children.next_if(|child| is_w(*child, "pPr"));
-    // The story's runs: plain text runs (rPr, text, tabs) around exactly one
-    // marker run (rPr and one marker). A marker run formatted like the
-    // paragraph mark and alone in the paragraph keeps the run-free shape;
-    // otherwise the marker is retained in place as one U+FFFC run that
-    // layout lays out as the inline rule (word-note-separator-geometry).
+    // The story's runs: plain text runs (rPr, then text, tabs and line
+    // breaks), one of which holds exactly one marker anywhere among its
+    // content. A marker run formatted like the paragraph mark and alone in
+    // the paragraph keeps the run-free shape; otherwise the marker is
+    // retained in place as one U+FFFC run that layout lays out as the inline
+    // rule (word-note-separator-geometry).
     let runs: Vec<_> = children.collect();
     let mut marker_run = None;
     let mut text_runs = 0usize;
@@ -2611,31 +2616,30 @@ fn selected_note_separator_paragraph(
         let mut run_children = run.children().filter(|child| child.is_element()).peekable();
         let run_properties = run_children.next_if(|child| is_w(*child, "rPr"));
         let content: Vec<_> = run_children.collect();
-        let marker = match content.as_slice() {
-            [marker]
-                if is_w_ns(marker.tag_name().namespace())
-                    && matches!(
-                        marker.tag_name().name(),
-                        "separator" | "continuationSeparator"
-                    ) =>
-            {
-                Some(*marker)
-            }
-            _ => None,
+        let is_marker = |node: &roxmltree::Node<'_, '_>| {
+            is_w_ns(node.tag_name().namespace())
+                && matches!(node.tag_name().name(), "separator" | "continuationSeparator")
         };
-        if let Some(marker) = marker {
-            if marker_run.is_some() {
-                return None;
-            }
-            marker_run = Some((*run, marker, run_properties));
-        } else if !content.is_empty()
-            && content
-                .iter()
-                .all(|child| is_w(*child, "t") || is_w(*child, "tab"))
-        {
-            text_runs += 1;
-        } else {
+        let is_text = |node: &roxmltree::Node<'_, '_>| {
+            is_w(*node, "t")
+                || is_w(*node, "tab")
+                || is_w(*node, "cr")
+                || (is_w(*node, "br")
+                    && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
+        };
+        if !content.iter().all(|child| is_marker(child) || is_text(child)) {
             return None;
+        }
+        let markers: Vec<_> = content.iter().filter(|child| is_marker(child)).collect();
+        if content.len() > markers.len() {
+            text_runs += 1;
+        }
+        match markers.as_slice() {
+            [] => {}
+            [marker] if marker_run.is_none() => {
+                marker_run = Some((*run, **marker, run_properties));
+            }
+            _ => return None,
         }
     }
     let mark = match marker_run {
@@ -2678,13 +2682,28 @@ fn selected_note_separator_paragraph(
         &mut Vec::new(),
     );
     let marker_runs = |runs: &[DocRun]| {
-        runs.iter().all(|run| matches!(run, DocRun::Text(_)))
+        runs.iter().all(|run| {
+            matches!(
+                run,
+                DocRun::Text(_)
+                    | DocRun::Break {
+                        break_type: BreakType::Line
+                    }
+            )
+        })
             && runs
                 .iter()
                 .filter(|run| matches!(run, DocRun::Text(text) if text.text == "\u{fffc}"))
                 .count()
                 == 1
     };
+    let mut parsed = parsed;
+    if synthesized {
+        parsed.numbering = None;
+        parsed.frame_pr = None;
+        parsed.borders = None;
+        parsed.shading = None;
+    }
     if !(parsed.runs.is_empty() || (substituted_doc.is_some() && marker_runs(&parsed.runs)))
         || parsed.numbering.is_some()
         || parsed.frame_pr.is_some()
@@ -2721,7 +2740,21 @@ fn marker_space_paragraph_xml(
         .collect();
     let range = paragraph.range();
     let marker_range = marker.range();
-    let space = format!(r#"<{t}>&#65532;</{t}>"#, t = element("t"));
+    // The marker becomes a run of its own with its run's properties, so text
+    // before and after it in the same run stays around it.
+    let run_properties = marker
+        .parent_element()
+        .and_then(|run| {
+            run.children()
+                .find(|child| child.is_element() && child.tag_name().name() == "rPr")
+        })
+        .and_then(|properties| input.get(properties.range()))
+        .unwrap_or("");
+    let space = format!(
+        r#"</{r}><{r}>{run_properties}<{t}>&#65532;</{t}></{r}><{r}>{run_properties}"#,
+        r = element("r"),
+        t = element("t"),
+    );
     Some(format!(
         "<{root}{declarations}>{}{space}{}</{root}>",
         input.get(range.start..marker_range.start)?,
@@ -3157,14 +3190,25 @@ mod note_separator_tests {
                         .iter()
                         .any(|run| matches!(run, DocRun::Text(text) if text.text == "\u{fffc}"))
                 });
-            // A marker run formatted unlike its mark, or beside a text run,
-            // is retained in place; ink, borders, a hidden mark and text
-            // inside the marker run are not represented.
+            // A marker run formatted unlike its mark, beside a text run or
+            // with text inside it, is retained in place; ink, borders and a
+            // hidden mark are not represented.
             let represented = !paragraph.contains("pBdr")
                 && !paragraph.contains("shd")
-                && !paragraph.contains("vanish")
-                && !paragraph.contains("<w:separator/><w:t>");
+                && !paragraph.contains("vanish");
             assert_eq!(marker, represented.then_some(true), "{paragraph}");
+            if paragraph.contains("<w:separator/><w:t>") {
+                // The marker is split from the text of its run.
+                let runs = &settings.footnote_separator_paragraph.as_ref().unwrap().runs;
+                let texts: Vec<_> = runs
+                    .iter()
+                    .filter_map(|run| match run {
+                        DocRun::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(texts, ["\u{fffc}", "x"], "{paragraph}");
+            }
         }
     }
 

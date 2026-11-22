@@ -38,17 +38,20 @@ interface Control {
   readonly documentPr?: string;
   /** Section-wide overrides of the first and second section. */
   readonly sectionPr?: readonly [string, string];
+  /** Omit the optional body-level sectPr of the final section. */
+  readonly omitFinalSectPr?: boolean;
 }
 
 /** Two sections, each with two references; notes 1-4. */
-function control({ kind, documentPr = '', sectionPr = ['', ''] }: Control): DocxDocumentModel {
+function control({ kind, documentPr = '', sectionPr = ['', ''], omitFinalSectPr = false }: Control): DocxDocumentModel {
   const ref = (id: number) => `<w:r><w:${kind}Reference w:id="${id}"/></w:r>`;
   const pr = (children: string) => children ? `<w:${kind}Pr>${children}</w:${kind}Pr>` : '';
   const sect = (children: string, type = '') => `<w:sectPr>${pr(children)}${type}<w:pgSz w:w="12240" w:h="15840"/>`
     + '<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr>';
   const body = `<w:p><w:r><w:t>A</w:t></w:r>${ref(1)}${ref(2)}</w:p>`
     + `<w:p><w:pPr>${sect(sectionPr[0], '<w:type w:val="continuous"/>')}</w:pPr></w:p>`
-    + `<w:p><w:r><w:t>B</w:t></w:r>${ref(3)}${ref(4)}</w:p>${sect(sectionPr[1], '<w:type w:val="continuous"/>')}`;
+    + `<w:p><w:r><w:t>B</w:t></w:r>${ref(3)}${ref(4)}</w:p>`
+    + (omitFinalSectPr ? '' : sect(sectionPr[1], '<w:type w:val="continuous"/>'));
   const notes = [1, 2, 3, 4].map((id) => `<w:${kind} w:id="${id}"><w:p><w:r><w:t>N${id}</w:t></w:r></w:p></w:${kind}>`).join('');
   const parts = new Map<string, string>([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -110,12 +113,26 @@ describe('section-aware note numbering', () => {
     expect(render({ kind: 'endnote', documentPr: '<w:numFmt w:val="decimal"/>' })).toEqual(['i', 'ii', 'iii', 'iv']);
   });
 
-  it('formats a custom numFmt pattern', () => {
+  it('formats a custom numFmt pattern, also inside mc:AlternateContent', () => {
     const custom = '<w:numFmt w:val="custom" w:format="001, 002, 003, ..."/>';
     expect(render({ kind: 'footnote', sectionPr: [custom, custom] })).toEqual(['001', '002', '003', '004']);
+    const alternate = '<mc:AlternateContent><mc:Choice Requires="w14">'
+      + '<w:numFmt w:val="custom" w:format="001, 002, 003, ..."/></mc:Choice>'
+      + '<mc:Fallback><w:numFmt w:val="decimal"/></mc:Fallback></mc:AlternateContent>';
+    expect(render({ kind: 'footnote', sectionPr: [alternate, alternate] })).toEqual(['001', '002', '003', '004']);
     expect(formatCustomNoteNumber(7, '０１, ０２, ...')).toBe('０７');
     expect(formatCustomNoteNumber(4, 'A, B, C, ...')).toBe('D');
     expect(formatCustomNoteNumber(12, 'x')).toBe('12');
+  });
+
+  it('numbers an automatic note 0 from numStart 0, never as a custom mark', () => {
+    const zero = '<w:numStart w:val="0"/>';
+    expect(render({ kind: 'footnote', sectionPr: [zero, zero] })).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('gives a final section without its own sectPr the default numbering', () => {
+    expect(render({ kind: 'footnote', sectionPr: ['<w:numFmt w:val="upperLetter"/>', ''], omitFinalSectPr: true }))
+      .toEqual(['A', 'B', '3', '4']);
   });
 
   it('ignores a numStart beyond the Word unsignedShort range instead of failing', () => {

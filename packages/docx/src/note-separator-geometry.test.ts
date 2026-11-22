@@ -40,17 +40,24 @@ interface Control {
   readonly noteLines?: number;
   /** Size on the marker run alone (its paragraph mark stays 10pt). */
   readonly markerRunHalfPoints?: number;
+  /** The listed separator story's paragraph, replacing the mark-only one. */
+  readonly separatorParagraph?: string;
+  /** Extra sectPr children (columns, bidi). */
+  readonly sectExtra?: string;
+  /** Paragraph properties of the Normal style. */
+  readonly normalPPr?: string;
 }
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const encode = (xml: string) => new TextEncoder().encode(xml);
 
-function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints }: Control): DocxDocumentModel {
+function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints, separatorParagraph, sectExtra = '', normalPPr }: Control): DocxDocumentModel {
   const rPr = markHalfPoints ? `<w:rPr><w:sz w:val="${markHalfPoints}"/></w:rPr>` : '';
   const runRPr = markerRunHalfPoints ? `<w:rPr><w:sz w:val="${markerRunHalfPoints}"/></w:rPr>` : rPr;
   const special = (role: string, id: number, mark: string) => `<w:${kind} w:type="${role}" w:id="${id}">`
-    + `<w:p><w:pPr>${rPr}</w:pPr><w:r>${runRPr}<w:${mark}/></w:r></w:p></w:${kind}>`;
+    + (role === 'separator' && separatorParagraph ? separatorParagraph
+      : `<w:p><w:pPr>${rPr}</w:pPr><w:r>${runRPr}<w:${mark}/></w:r></w:p>`) + `</w:${kind}>`;
   const stories = noSeparatorStories ? ''
     : special('separator', -1, 'separator') + special('continuationSeparator', 0, 'continuationSeparator');
   const lines = Array.from({ length: noteLines }, (_, index) => `<w:p><w:r><w:t>N${index}</w:t></w:r></w:p>`).join('');
@@ -69,12 +76,14 @@ function control({ kind, listed = false, markHalfPoints, noSeparatorStories = fa
       + `<Relationship Id="t" Type="${R}/styles" Target="styles.xml"/></Relationships>`],
     ['word/styles.xml', `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>`
       + '<w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
-      + '</w:pPrDefault></w:docDefaults></w:styles>'],
+      + '</w:pPrDefault></w:docDefaults>'
+      + (normalPPr ? `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr>${normalPPr}</w:pPr></w:style>` : '')
+      + '</w:styles>'],
     ['word/settings.xml', `<w:settings xmlns:w="${W}">`
       + (listed ? `<w:${kind}Pr><w:${kind} w:id="-1"/><w:${kind} w:id="0"/></w:${kind}Pr>` : '')
       + '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>'],
     ['word/document.xml', `<w:document xmlns:w="${W}"><w:body><w:p><w:r><w:t>BODY</w:t></w:r>`
-      + `<w:r><w:${kind}Reference w:id="1"/></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/>`
+      + `<w:r><w:${kind}Reference w:id="1"/></w:r></w:p><w:sectPr>${sectExtra}<w:pgSz w:w="12240" w:h="15840"/>`
       + `<w:pgMar w:top="720" w:right="${right}" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr></w:body></w:document>`],
     [`word/${kind}s.xml`, `<w:${kind}s xmlns:w="${W}">${stories}<w:${kind} w:id="1">${lines}</w:${kind}></w:${kind}s>`],
   ]);
@@ -168,5 +177,46 @@ describe('word-note-separator-geometry', () => {
     expect(marker.ruleWidthPt).toBe(1);
     expect(marker.ruleOffsetPt).toBeCloseTo(marker.heightPt / 2 + 2.5, 5);
     expect(marker.ruleLengthPt).toBe(144);
+  });
+
+  it('lays a listed separator out in a right-to-left mode-15 page-wide area, rule inside it', () => {
+    // Two 120pt columns and a 20pt gap (a 260pt area at 72-332pt).
+    const layout = render(control({
+      kind: 'footnote', listed: true, textWidthPt: 260,
+      sectExtra: '<w:cols w:num="2" w:space="400"/><w:bidi/>',
+      separatorParagraph: '<w:p><w:r><w:t>A</w:t></w:r><w:r><w:separator/></w:r></w:p>',
+    }));
+    const note = layout.pages[0]!.layers.notes.find((node): node is NoteLayout => node.kind === 'note')!;
+    const rule = note.leading!.rule!.segment;
+    expect(rule.from.xPt).toBeGreaterThanOrEqual(72);
+    expect(rule.to.xPt).toBeLessThanOrEqual(332);
+    expect(rule.to.xPt - rule.from.xPt).toBe(144);
+    // The paragraph starts at the area's left edge: its text precedes the rule.
+    expect(rule.from.xPt).toBeCloseTo(72 + 6, 5);
+  });
+
+  it('keeps separator text in the marker run and around line breaks', () => {
+    const text = (separatorParagraph: string) => {
+      const layout = render(control({ kind: 'footnote', listed: true, separatorParagraph }));
+      const note = layout.pages[0]!.layers.notes.find((node): node is NoteLayout => node.kind === 'note')!;
+      const paragraph = note.leading?.paragraph;
+      return {
+        text: paragraph?.kind === 'paragraph' ? paragraph.lines.map((line) => line.placements
+          .flatMap((placement) => placement.kind === 'text' ? [placement.text.replace(/\u200b/gu, '')] : []).join('')) : [],
+        rule: note.leading?.rule !== undefined,
+      };
+    };
+    expect(text('<w:p><w:r><w:t>BEFORE</w:t><w:separator/><w:t>AFTER</w:t></w:r></w:p>'))
+      .toEqual({ text: ['BEFOREAFTER'], rule: true });
+    expect(text('<w:p><w:r><w:t>A</w:t><w:br/><w:t>B</w:t></w:r><w:r><w:separator/></w:r></w:p>'))
+      .toEqual({ text: ['A', 'B'], rule: true });
+  });
+
+  it('keeps the default band when the Normal style has a paragraph border', () => {
+    const plain = bands(render(control({ kind: 'endnote' })))[0]!;
+    const bordered = bands(render(control({
+      kind: 'endnote', normalPPr: '<w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="000000"/></w:pBdr>',
+    })))[0]!;
+    expect(bordered).toEqual(plain);
   });
 });

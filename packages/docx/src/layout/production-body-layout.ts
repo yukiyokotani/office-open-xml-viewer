@@ -148,7 +148,7 @@ import {
 import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
-import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt, noteSeparatorRuleSpan, wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt } from './body-pagination-compatibility.js';
+import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt, noteSeparatorArea, noteSeparatorRuleSpan, wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -1949,8 +1949,17 @@ function layoutBodyNotes(
         separatorRole
       ]
       : undefined;
+    // A page-wide note area (WORD_PAGE_WIDE_FOOTNOTE_AREA /
+    // WORD_PAGE_WIDE_ENDNOTE_AREA) spans every column of the section; the
+    // separator paragraph and its rule lie in that area.
+    const pageWideArea = request.kind === 'footnote'
+      ? context.state.layoutSettings.compat.pageWideFootnoteArea
+      : context.state.layoutSettings.compat.pageWideEndnoteArea;
+    const separatorArea = noteSeparatorArea({
+      word: wordGeometry, pageWide: pageWideArea, container: request.container.bounds, columns: request.section.columns,
+    });
     const selectedBand = selectedDefinition
-      ? acquireSelectedNoteSeparatorBand(context, request, selectedDefinition, noteTopPt)
+      ? acquireSelectedNoteSeparatorBand(context, request, selectedDefinition, noteTopPt, separatorArea)
       : undefined;
     const separatorHeightPt = (first ? request.blankLeadingAdvancePt : undefined) ?? (reservedDefinitions
       ? leading?.advancePt ?? 0
@@ -2017,11 +2026,7 @@ function layoutBodyNotes(
       kind: request.kind,
       mode: separatorMode,
       continuing: separatorRole === 'continuationSeparator',
-      // A page-wide note area (WORD_PAGE_WIDE_FOOTNOTE_AREA /
-      // WORD_PAGE_WIDE_ENDNOTE_AREA) spans every column of the section.
-      pageWide: request.kind === 'footnote'
-        ? context.state.layoutSettings.compat.pageWideFootnoteArea
-        : context.state.layoutSettings.compat.pageWideEndnoteArea,
+      pageWide: pageWideArea,
       // The rule starts at the separator paragraph's own start edge.
       rtl: selectedBand?.bidi === true,
       container: request.container.bounds,
@@ -2030,11 +2035,19 @@ function layoutBodyNotes(
     // A marker laid out in place starts the ordinary rule at its own inline
     // position (after any text before it, from its right edge in a
     // right-to-left paragraph); the continuation rule spans the area.
+    // The rule never leaves the area.
     const marker = selectedBand?.marker;
+    const areaRightPt = separatorArea.xPt + separatorArea.widthPt;
     const ruleSpan = marker && separatorMode === 'short'
       ? selectedBand?.bidi === true
-        ? { fromXPt: marker.xPt + marker.widthPt - (span.toXPt - span.fromXPt), toXPt: marker.xPt + marker.widthPt }
-        : { fromXPt: marker.xPt, toXPt: marker.xPt + (span.toXPt - span.fromXPt) }
+        ? {
+            fromXPt: Math.max(separatorArea.xPt, Math.min(areaRightPt, marker.xPt + marker.widthPt) - (span.toXPt - span.fromXPt)),
+            toXPt: Math.min(areaRightPt, marker.xPt + marker.widthPt),
+          }
+        : {
+            fromXPt: Math.max(separatorArea.xPt, marker.xPt),
+            toXPt: Math.min(areaRightPt, Math.max(separatorArea.xPt, marker.xPt) + (span.toXPt - span.fromXPt)),
+          }
       : span;
     const ruleSegments = first && !reservedDefinitions && separatorMode !== 'none'
       && request.blankLeadingAdvancePt === undefined
@@ -2188,6 +2201,7 @@ function acquireSelectedNoteSeparatorBand(
   request: Parameters<NonNullable<BodyLayoutSession['layoutNotes']>>[0],
   definition: SelectedNoteSeparatorDefinitionInput,
   yPt: number,
+  area: Readonly<{ xPt: number; widthPt: number }>,
 ): Readonly<{
   advancePt: number;
   ruleOffsetPt: number;
@@ -2203,6 +2217,8 @@ function acquireSelectedNoteSeparatorBand(
     id: `${request.container.id}:${sourceKey(definition.root)}`,
     bounds: {
       ...request.container.bounds,
+      xPt: area.xPt,
+      widthPt: area.widthPt,
       yPt,
       heightPt: Math.max(0, request.container.bounds.yPt + request.container.bounds.heightPt - yPt),
     },
@@ -3225,8 +3241,9 @@ function openConcreteBodyLayoutSession(
     notes,
     source.blocks.body,
     kind,
-    (sectionIndex) => sectionNumbering?.[Math.min(sectionIndex, sectionNumbering.length - 1)]?.[kind]
-      ?? documentNumbering[kind],
+    // A section without its own sectPr entry (an omitted final body sectPr)
+    // takes the defaults, never the previous section's numbering.
+    (sectionIndex) => sectionNumbering?.[sectionIndex]?.[kind] ?? documentNumbering[kind],
   );
   const footnoteNumbers = numbered('footnote', sourceFootnotes);
   const endnoteNumbers = numbered('endnote', sourceEndnotes);

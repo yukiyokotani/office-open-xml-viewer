@@ -205,6 +205,15 @@ it('loads the story paragraph mark family with the document fonts', () => {
     .toContain('Story Mark Face');
 });
 
+it('loads the fonts of separator text and of its marker run', () => {
+  const separator = {
+    ...story(10),
+    runs: [textRun('SEPA', { fontFamily: 'Separator Text Face' }), textRun('\ufffc', { fontFamily: 'Marker Run Face' })],
+  } as unknown as DocParagraph;
+  const families = docxRenderedFontFamilies(model(324, controlBody(), paragraph(lines('N1L', 4)), { separator }));
+  expect(families).toEqual(expect.arrayContaining(['Separator Text Face', 'Marker Run Face']));
+});
+
 it.each([
   { name: 'a story paragraph without its Short/Full mark', settings: { footnoteSeparatorParagraph: story(24) } },
   { name: 'a story paragraph with runs', settings: {
@@ -328,4 +337,20 @@ it('gives a continuation marker its own line, with text after it on the next lin
   expect(leading.advancePt).toBe(20);
   expect([leading.rule!.segment.from.xPt, leading.rule!.segment.to.xPt]).toEqual([72, 252]);
   expect(leading.rule!.segment.from.yPt - note.flowBounds.yPt).toBeCloseTo(6.25, 6);
+});
+
+it('keeps a mark-only marker run on one line in an area narrower than 144pt', () => {
+  // A 20pt marker run in a 10pt paragraph: one 20pt line at any area width.
+  const narrow = (pageWidth: number) => {
+    const document = model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), {
+      separator: { ...markerStory('', ''), runs: [textRun('￼', { fontSize: 20 })] } as DocParagraph,
+    });
+    document.section.pageWidth = pageWidth;
+    const note = leadingOf(render(document, false), 0);
+    return { heightPt: note.flowBounds.heightPt - note.story.advancePt, rule: note.separator[0] ?? note.leading?.rule?.segment };
+  };
+  const wide = narrow(324);
+  const tight = narrow(244);
+  expect(wide.heightPt).toBe(tight.heightPt);
+  expect(tight.rule!.to.xPt - tight.rule!.from.xPt).toBe(100);
 });

@@ -42,13 +42,17 @@ export interface SectionNoteNumberingRule {
   readonly restart?: 'continuous' | 'eachSect' | 'eachPage';
 }
 
+/** Number-map value of a note whose reference has a custom mark
+ * (customMarkFollows): no automatic value is ever negative. */
+export const CUSTOM_NOTE_MARK = -1;
+
 /** Display values and formats of automatic notes in first-reference order.
  * Each reference takes the rule of the section that holds it (§17.11.5/.11
  * over §17.11.4/.12): the first automatic note starts at numStart, and a
  * section whose rule restarts each section (§17.11.19 eachSect) restarts
- * its first note there. A custom mark (customMarkFollows) keeps the 0
- * sentinel and consumes no value. Top-level sectionBreak elements end
- * sections. */
+ * its first note there. A custom mark (customMarkFollows) keeps the
+ * CUSTOM_NOTE_MARK sentinel and consumes no value; numStart 0 is an ordinary
+ * automatic value. Top-level sectionBreak elements end sections. */
 export function buildSectionedNoteNumbers(
   notes: readonly Readonly<{ id: string }>[] | undefined,
   elements: readonly NoteReferenceSourceBlock[],
@@ -68,7 +72,7 @@ export function buildSectionedNoteNumbers(
       const ref = run.type === 'text' ? run.noteRef : undefined;
       if (ref?.kind !== kind || ref.id.length === 0 || !available.has(ref.id) || values.has(ref.id)) continue;
       if (customReferenceIds.has(ref.id)) {
-        values.set(ref.id, 0);
+        values.set(ref.id, CUSTOM_NOTE_MARK);
         continue;
       }
       const rule = ruleFor(sectionIndex);
