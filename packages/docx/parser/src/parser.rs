@@ -2655,10 +2655,6 @@ fn selected_note_separator_story(
     let is_w = |node: roxmltree::Node<'_, '_>, name: &str| {
         is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == name
     };
-    let blocks: Vec<_> = note.children().filter(|child| child.is_element()).collect();
-    if blocks.is_empty() || !blocks.iter().all(|block| is_w(*block, "p")) {
-        return None;
-    }
     // Structure only: paragraph properties, zero-width range markup (§17.13
     // bookmarks, comment, permission and move ranges, proofing marks) and
     // runs of run properties, text, tabs, text-wrapping breaks and the marker.
@@ -2689,6 +2685,16 @@ fn selected_note_separator_story(
                     | "customXmlMoveToRangeEnd"
             )
     };
+    // Block-level zero-width range markup (bookmarks, comment, permission
+    // and move ranges, proofing marks) may sit between the story's
+    // paragraphs; it holds no content.
+    let blocks: Vec<_> = note
+        .children()
+        .filter(|child| child.is_element() && !range_markup(child))
+        .collect();
+    if blocks.is_empty() || !blocks.iter().all(|block| is_w(*block, "p")) {
+        return None;
+    }
     let run_content = |node: &roxmltree::Node<'_, '_>| {
         is_w(*node, "rPr")
             || is_w(*node, "lastRenderedPageBreak")

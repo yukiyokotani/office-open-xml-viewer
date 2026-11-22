@@ -388,6 +388,13 @@ describe('word-note-separator-geometry', () => {
     expect(labels.map((label) => label.replace(/\s+/gu, ''))).toEqual(['1.A', '2.B']);
   });
 
+  it('keeps a story with block-level range markup between its paragraphs', () => {
+    const note = separatorOf('<w:bookmarkStart w:id="7" w:name="sep"/><w:p><w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r></w:p>'
+      + '<w:commentRangeStart w:id="3"/><w:p><w:r><w:t>Continued caption</w:t></w:r></w:p><w:commentRangeEnd w:id="3"/><w:bookmarkEnd w:id="7"/>');
+    expect(clean(paragraphTexts(note))).toEqual(['Sources', 'Continued caption']);
+    expect(note.leading?.rule).toBeDefined();
+  });
+
   it('keeps text after the marker in the same run', () => {
     const note = separatorOf('<w:p><w:r><w:separator/><w:noBreakHyphen/><w:t>Sources</w:t></w:r></w:p>');
     expect(clean(paragraphTexts(note))).toEqual(['-Sources']);
