@@ -262,9 +262,10 @@ function singlePageMargins(policy: SectionPageLayoutPolicy, pageIndex: number): 
 /** A §17.6.20 section that binds on the right under
  * `word-two-page-sheet-imposition`: tbRl, whose lines advance right to left,
  * and tbLrV, bound the same way by that rule although its lines advance left
- * to right. */
+ * to right. tbRlV is laid out as tbLrV (`word-section-tbrlv-tblrv-page-frame`). */
 function rightBoundSection(policy: SectionPageLayoutPolicy): boolean {
-  return policy.textDirection === 'tbRl' || policy.textDirection === 'tbLrV';
+  return policy.textDirection === 'tbRl' || policy.textDirection === 'tbLrV'
+    || policy.textDirection === 'tbRlV';
 }
 
 /**
