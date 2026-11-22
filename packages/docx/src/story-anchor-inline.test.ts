@@ -696,6 +696,27 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
     }
   });
 
+  it('keeps an empty final paragraph on its mark line beside a carried deleted shape', () => {
+    // An exact 700pt paragraph holds the live reference; the body ends with
+    // an empty paragraph whose 26pt mark decides whether it fits page 1.
+    const body = '<w:p><w:pPr><w:spacing w:line="14000" w:lineRule="exact"/></w:pPr><w:r><w:t>BODY</w:t></w:r>'
+      + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="1"/></w:r></w:p>'
+      + '<w:p><w:pPr><w:rPr><w:sz w:val="52"/></w:rPr></w:pPr></w:p>';
+    const deleted = `<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:del>`;
+    const lastParagraph = (storyRuns: string) => {
+      variant = { body, storyRuns, markup: true };
+      const pages = layOutDocument('endnote', 'vml-text-square').pages;
+      const located = pages.flatMap((page, pageIndex) => page.layers.body
+        .filter((node) => node.kind === 'paragraph').map((node) => ({ pageIndex, heightPt: node.flowBounds.heightPt })));
+      return located.at(-1);
+    };
+    try {
+      expect(lastParagraph(deleted)).toEqual(lastParagraph(''));
+    } finally {
+      variant = {};
+    }
+  });
+
   it.each([
     '<w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>CAPTION</w:t></w:r>',
     // A complex-script run lays out at its szCs, not its w:sz.

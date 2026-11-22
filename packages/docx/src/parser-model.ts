@@ -2269,7 +2269,8 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
   if (!visible) {
     // Every shape is deleted (or its note's references are): the markup view
     // shows them marked deleted and the final view omits them. They ride the
-    // body's last paragraph, so neither view gains flow for them. A body
+    // body's last paragraph with inline content, so neither view gains flow
+    // for them. A body
     // ending without a paragraph (Word always ends one with a paragraph) has
     // no carrier whose page frame bounds them: they are left out, never
     // placed inside a table cell laid out before its page's note area.
@@ -2277,7 +2278,20 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
     // last line but lend it no metrics: they were sized for a host paragraph.
     const carried = (): DocRun[] => runs.map((run) => (run.type === 'anchorHost'
       ? { ...run, __metricNeutral: true } as unknown as DocRun : run));
-    const lastIndex = doc.body.map((element) => element.type).lastIndexOf('paragraph');
+    // The carrier is the last paragraph with inline content of its own: an
+    // empty paragraph keeps its paragraph-mark line, which a carried anchor
+    // would otherwise turn into an anchor-only line.
+    const holdsInlineContent = (element: BodyElement) => element.type === 'paragraph'
+      && element.runs.some((run) => {
+        if (run.type === 'text') return run.text.length > 0;
+        if (run.type === 'image' || run.type === 'shape' || run.type === 'chart') {
+          return (run as Readonly<{ anchor?: boolean; inline?: boolean }>).anchor !== true
+            && (run.type !== 'shape' || (run as Readonly<{ inline?: boolean }>).inline === true);
+        }
+        return run.type === 'field' || run.type === 'math';
+      });
+    let lastIndex = doc.body.length - 1;
+    while (lastIndex >= 0 && !holdsInlineContent(doc.body[lastIndex]!)) lastIndex -= 1;
     if (lastIndex < 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
     const last = doc.body[lastIndex] as DocParagraph;
     const body = [...doc.body];
