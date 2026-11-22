@@ -707,24 +707,27 @@ describe('upright block table of a vertical section', () => {
     });
   });
 
+  /** A square-wrapped 80 x 40 pt rectangle anchored at page position (x, 66 pt). */
+  const rectangleAt = (x: number) =>
+    '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+    + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
+    + '<wp:simplePos x="0" y="0"/>'
+    + `<wp:positionH relativeFrom="page"><wp:posOffset>${x * 12700}</wp:posOffset></wp:positionH>`
+    + `<wp:positionV relativeFrom="page"><wp:posOffset>${66 * 12700}</wp:posOffset></wp:positionV>`
+    + `<wp:extent cx="${80 * 12700}" cy="${40 * 12700}"/><wp:wrapSquare wrapText="bothSides"/>`
+    + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+    + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+    + '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr>'
+    + `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${80 * 12700}" cy="${40 * 12700}"/></a:xfrm>`
+    + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>'
+    + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+
   it.each(['tbRl', 'tbLrV'] as const)('stacks a %s table below a wrapped drawing anchored before it', (direction) => {
     // Measured: a square-wrapped 80 x 40 pt rectangle at a page position over
     // the place the table would take, anchored by the paragraph before it.
     // The table is placed directly below the rectangle; the strip before the
     // table holds its text above the table.
-    const x = direction === 'tbRl' ? 400 : 150;
-    const drawing = '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
-      + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
-      + '<wp:simplePos x="0" y="0"/>'
-      + `<wp:positionH relativeFrom="page"><wp:posOffset>${x * 12700}</wp:posOffset></wp:positionH>`
-      + `<wp:positionV relativeFrom="page"><wp:posOffset>${66 * 12700}</wp:posOffset></wp:positionV>`
-      + `<wp:extent cx="${80 * 12700}" cy="${40 * 12700}"/><wp:wrapSquare wrapText="bothSides"/>`
-      + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-      + '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
-      + '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr>'
-      + `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${80 * 12700}" cy="${40 * 12700}"/></a:xfrm>`
-      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>'
-      + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
+    const drawing = rectangleAt(direction === 'tbRl' ? 400 : 150);
     const [page] = layOutPages(direction, [P.replace('</w:p>', `${drawing}</w:p>`), T, P]);
     const placed = page!.tables[0]!;
     expect(placed.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
@@ -735,5 +738,24 @@ describe('upright block table of a vertical section', () => {
     // axis and the strip uses the room above the table.
     expect(page!.strips[1]![0]!.inlineStart)
       .toBeCloseTo(direction === 'tbRl' ? placed.bottom : MARGIN.top, 6);
+  });
+
+  it.each(['tbRl', 'tbLrV'] as const)('moves a wrapped drawing anchored after a %s table below the table', (direction) => {
+    // Measured: the same rectangle anchored by the paragraph after the
+    // table. The table keeps the column top and the rectangle lies directly
+    // below it; in tbRl the paragraphs beside the rectangle start below it.
+    const drawing = rectangleAt(direction === 'tbRl' ? 400 : 150);
+    const [page] = layOutPages(direction, [P, T, P.replace('</w:p>', `${drawing}</w:p>`), P]);
+    const placed = page!.tables[0]!;
+    expect(placed.top).toBeCloseTo(MARGIN.top, 6);
+    expect(placed.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
+    expect(page!.drawings).toHaveLength(1);
+    expect(page!.drawings[0]!.top).toBeCloseTo(placed.bottom, 6);
+    expect(page!.drawings[0]!.left).toBeCloseTo(direction === 'tbRl' ? 400 : 150, 6);
+    const starts = page!.strips.map(([line]) => line!.inlineStart);
+    expect(starts[0]).toBeCloseTo(placed.bottom, 6);
+    for (const start of starts.slice(1)) {
+      expect(start).toBeCloseTo(direction === 'tbRl' ? placed.bottom + 40 : placed.bottom, 6);
+    }
   });
 });

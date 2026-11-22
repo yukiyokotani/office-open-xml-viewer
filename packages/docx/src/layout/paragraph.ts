@@ -213,6 +213,7 @@ export {
 export type { BodyFrameGroup } from './frame.js';
 import type { ParagraphAcquisitionInput, ParagraphImageRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
+import { inlineShiftPastBoxesPt } from './upright-block-index.js';
 import type {
   DrawingLayout,
   DrawingPaintCommand,
@@ -2544,6 +2545,11 @@ export interface ParagraphAcquisitionOptions {
   readonly exclusions: readonly WrapExclusion[];
   /** Effective prior DrawingML objects in this flow domain. */
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
+  /** `word-vertical-section-upright-block-table`: the boxes of the upright
+   * block tables placed for tables before this paragraph, in section-logical
+   * page points. A wrapped drawing the paragraph anchors is moved along the
+   * inline axis to lie below those it would cover. */
+  readonly uprightTableBoxes?: readonly LayoutRect[];
   /** Present only while acquiring a paragraph hosted by a table cell. */
   readonly anchorCellBounds?: LayoutRect;
   /** Effective enclosing fill, retained only for automatic text-color resolution. */
@@ -5287,6 +5293,14 @@ function acquireAnchorOccurrence(
       const delta = displaced.displacement;
       if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
     }
+    // `word-vertical-section-upright-block-table`: a wrapped drawing does not
+    // cover an upright block table placed for a table before its paragraph;
+    // it lies directly below it. A carried drawing keeps its frame.
+    if (!frozenFrame && options.uprightTableBoxes?.length
+      && placedResult.geometry.wrapBounds && placedResult.geometry.wrap.kind !== 'none') {
+      const shiftPt = inlineShiftPastBoxesPt(placedRect, options.uprightTableBoxes);
+      if (shiftPt !== 0) translateAnchor({ xPt: shiftPt, yPt: 0 });
+    }
     return Object.freeze({
       acquiredShapeTextBoxes,
       rect: placedRect,
@@ -6729,6 +6743,8 @@ function paragraphAcquisitionKey(
     ],
     lineOnly ? null : JSON.stringify(options.exclusions),
     lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
+    lineOnly || !hasAnchoredPayload || !options.uprightTableBoxes?.length
+      ? null : JSON.stringify(options.uprightTableBoxes),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
     lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
       ? null

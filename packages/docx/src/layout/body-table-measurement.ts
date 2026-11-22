@@ -446,10 +446,11 @@ function uprightBlockRegistrationOf(
  * table anchors, as boxes in the same section-logical page points: an upright
  * block table meets them as it meets a table placed before it, without the
  * table clearance, and stacks below them
- * (`word-vertical-section-upright-block-table`, which also records what is
- * not implemented: a drawing anchored after the table is not met, and
- * floating tables are not met either, their registered exclusion in a
- * vertical section not being stated in this frame). */
+ * (`word-vertical-section-upright-block-table`). A drawing anchored after
+ * the table is not met: it is the drawing that lies below the table
+ * (uprightBlockCoversLaterDrawing). Positioned tables are not met: a vertical
+ * section lays them out in its rotated frame, not upright (the rule records
+ * what is not implemented). */
 function uprightBlockObstacles(state: BodyAcquisitionState, table: SourceRef): LayoutRect[] {
   const obstacles: LayoutRect[] = [];
   const tableIndex = table.path[0]!;
@@ -775,6 +776,23 @@ function uprightBlockReachesEarlierColumn(request: BodyTableRequest, box: Layout
   return request.location.cursorPt.xPt > firstColumnStartPt;
 }
 
+/** Whether a block placed at `box` covers a wrapped drawing of the page that
+ * a paragraph after the table anchors (registered when the page's layout
+ * started, before the table was placed). Such a drawing lies below the table
+ * (`word-vertical-section-upright-block-table`), which its placement can only
+ * honour once the table's box is known when the page's layout starts. */
+function uprightBlockCoversLaterDrawing(state: BodyAcquisitionState, table: SourceRef, box: LayoutRect): boolean {
+  const tableIndex = table.path[0]!;
+  for (const float of state.floats) {
+    if (float.kind !== 'shape' || !float.anchorOccurrenceId || float.authoredWrap === undefined) continue;
+    const anchorIndex = anchorOccurrenceBlockIndex(float.anchorOccurrenceId, table);
+    if (anchorIndex === null || anchorIndex <= tableIndex) continue;
+    if (float.imageX < box.xPt + box.widthPt && box.xPt < float.imageX + float.imageW
+      && float.imageY < box.yPt + box.heightPt && box.yPt < float.imageY + float.imageH) return true;
+  }
+  return false;
+}
+
 /** A plan's blocks as a page pin: every table in its slot for good, with the
  * exclusion, to be registered when the page's layout starts
  * (BodyLayoutSession.commitUprightBlocks). */
@@ -877,8 +895,9 @@ export function planBodyUprightBlocks(
  * (`word-vertical-section-upright-table-rewrapped-strip`).
  *
  * `uprightPagePin`: the block lies over a column laid out before its own,
- * whose text has to flow around it as well. The paginator lays the page out
- * again with the pin registered from its start (body-paginator.ts).
+ * whose text has to flow around it as well, or over a wrapped drawing that a
+ * later paragraph anchors, which has to lie below it. The paginator lays the
+ * page out again with the pin registered from its start (body-paginator.ts).
  */
 function measureUprightBlockTable(
   context: BodyTableMeasurementContext,
@@ -987,7 +1006,8 @@ function measureUprightBlockTable(
       // Placed with the paragraph before it and raised over an earlier
       // column: the tables of its plan become a page pin.
       let pin: UprightBlockRegistration | null = null;
-      if (slot.reserved && uprightBlockReachesEarlierColumn(request, slot.bounds)) {
+      if (slot.reserved && (uprightBlockReachesEarlierColumn(request, slot.bounds)
+        || uprightBlockCoversLaterDrawing(context.state, request.input.source, slot.bounds))) {
         const slots = [slot];
         let box = slot.bounds;
         for (let next = sourceIndex + 1; ; next += 1) {
@@ -1020,6 +1040,7 @@ function measureUprightBlockTable(
           tail: Object.freeze({ sourceIndex: plan.lastSourceIndex, flowDomainId, bounds: plan.box }),
         }),
         uprightBlockReachesEarlierColumn(request, plan.box)
+          || uprightBlockCoversLaterDrawing(context.state, request.input.source, plan.box)
           ? uprightPagePin(request, plan.box, plan.slots, plan.lastSourceIndex) : null,
       );
     }

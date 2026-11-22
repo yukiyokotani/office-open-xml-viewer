@@ -31,6 +31,9 @@ export interface UprightBlockPageIndex {
   readonly slots: Map<number, UprightBlockSlot>;
   /** The table placed last (UprightBlockTail). */
   tail: UprightBlockTail | null;
+  /** The boxes of the placed top-level tables with the body index of the
+   * last table in each, in registration order. */
+  readonly tables: Array<Readonly<{ sourceIndex: number; box: LayoutRect }>>;
   /** Text exclusions by `${block bucket}:${inline bucket}`. */
   readonly exclusionCells: Map<string, UprightBlockExclusionEntry[]>;
   /** Exclusions covering more cells than MAX_EXCLUSION_CELLS; every query reads them. */
@@ -92,6 +95,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     wide: [],
     slots: new Map(),
     tail: null,
+    tables: [],
     exclusionCells: new Map(),
     wideExclusions: [],
     lastExclusionBucket: Number.NEGATIVE_INFINITY,
@@ -223,4 +227,40 @@ export function uprightBlockBoxesMet(
     }
   }
   return met.sort((left, right) => left.xPt - right.xPt);
+}
+
+/**
+ * `word-vertical-section-upright-block-table`: the boxes of the upright block
+ * tables placed so far for tables before body index `beforeSourceIndex`: the
+ * ones a wrapped drawing anchored by the paragraph at that index is moved
+ * below.
+ */
+export function uprightTableBoxesBefore(
+  index: UprightBlockPageIndex | undefined,
+  beforeSourceIndex: number,
+): readonly LayoutRect[] {
+  if (!index || index.tables.length === 0) return NO_BOXES;
+  const boxes: LayoutRect[] = [];
+  for (const table of index.tables) if (table.sourceIndex < beforeSourceIndex) boxes.push(table.box);
+  return boxes.length === 0 ? NO_BOXES : boxes;
+}
+
+const NO_BOXES: readonly LayoutRect[] = Object.freeze([]);
+
+/**
+ * How far along the inline axis (x) a drawing with frame `rect` moves to lie
+ * below every one of `boxes` it would cover: past the inline end of each box
+ * it overlaps, taken in inline order so that a box reached by the move is
+ * cleared too. Zero when it overlaps none.
+ */
+export function inlineShiftPastBoxesPt(rect: LayoutRect, boxes: readonly LayoutRect[]): number {
+  if (boxes.length === 0) return 0;
+  let startPt = rect.xPt;
+  for (const box of [...boxes].sort((left, right) => left.xPt - right.xPt)) {
+    if (box.yPt < rect.yPt + rect.heightPt && rect.yPt < box.yPt + box.heightPt
+      && box.xPt < startPt + rect.widthPt && startPt < box.xPt + box.widthPt) {
+      startPt = box.xPt + box.widthPt;
+    }
+  }
+  return startPt - rect.xPt;
 }

@@ -1547,7 +1547,9 @@ function* paginateBodyPassSteps(
   // out before the table still have to flow around it: the strip that ends
   // where the table starts (planned with that strip's paragraph, below), and
   // the text of an earlier column that a multi-column section raises the
-  // table over. For the latter the table's measurement returns a page pin
+  // table over. A wrapped drawing anchored after the table and registered
+  // when the page's layout started has to lie below the table, too. For
+  // these the table's measurement returns a page pin
   // (uprightPagePin); the page is then laid out once more from its start with
   // the pin registered, and the table takes the pinned position in whichever
   // column the flow now reaches it.
@@ -3775,12 +3777,14 @@ function* paginateBodyPassSteps(
       resumeEntry = restorePageCheckpoint();
       restartEntryIndex = resumeEntry.entryIndex;
       session.resetPageAcquisition(acquisitionLocation(state));
-      yield* prescanPageAnchors(state, restartEntryIndex);
-      // The page's upright block pins hold for every layout of it.
+      // The page's upright block pins hold for every layout of it, and are
+      // registered first: a drawing placed when the page's layout starts
+      // lies below the pinned tables before it.
       for (const pin of uprightPinsOf(state.flow.pageIndex).values()) {
         pin.consumed = false;
         session.commitUprightBlocks?.(pin.registration);
       }
+      yield* prescanPageAnchors(state, restartEntryIndex);
       if (capacityRecovery || uprightReplay) {
         resetNotePage();
         replayIncomingNotes = true;

@@ -158,7 +158,9 @@ import {
   addUprightBlockBox,
   addUprightBlockExclusion,
   emptyUprightBlockPageIndex,
+  inlineShiftPastBoxesPt,
   uprightBlockExclusionsAhead,
+  uprightTableBoxesBefore,
   type UprightBlockExclusion,
   type UprightBlockRegistration,
 } from './upright-block-index.js';
@@ -643,6 +645,11 @@ function acquireBodyParagraphAtLocation(
       environment,
       exclusions,
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
+      // `word-vertical-section-upright-block-table`: a wrapped drawing lies
+      // below the upright tables before its paragraph.
+      ...(source.path.length === 1 && state.uprightBlockIndex
+        ? { uprightTableBoxes: uprightTableBoxesBefore(state.uprightBlockIndex, source.path[0]!) }
+        : {}),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,
       trailingExtentPt: Math.max(
@@ -2634,12 +2641,24 @@ function prescanBodyPageAnchors(
     const retainedResult = verticalSpace
       ? projectPhysicalAnchorResult(result, verticalSpace.physicalToLogical)
       : result;
-    const wrapBounds = retainedResult.geometry.wrapBounds;
-    if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
+    const resolvedWrapBounds = retainedResult.geometry.wrapBounds;
+    if (resolvedWrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
       return [];
     }
+    // `word-vertical-section-upright-block-table`: the drawing lies below
+    // the upright tables pinned for tables before its paragraph, as its
+    // paragraph's own acquisition places it (paragraph.ts).
+    const shiftPt = anchor.paragraphSource.path.length === 1
+      ? inlineShiftPastBoxesPt(
+          retainedResult.geometry.objectFrame,
+          uprightTableBoxesBefore(state.uprightBlockIndex, anchor.paragraphSource.path[0]!),
+        )
+      : 0;
+    const shifted = <Rect extends { xPt: number }>(rect: Rect): Rect =>
+      shiftPt === 0 ? rect : Object.freeze({ ...rect, xPt: rect.xPt + shiftPt });
+    const wrapBounds = shifted(resolvedWrapBounds);
     const polygon =
-      retainedResult.geometry.wrap.polygon?.points ??
+      retainedResult.geometry.wrap.polygon?.points.map(shifted) ??
       Object.freeze([
         Object.freeze({ xPt: wrapBounds.xPt, yPt: wrapBounds.yPt }),
         Object.freeze({ xPt: wrapBounds.xPt + wrapBounds.widthPt, yPt: wrapBounds.yPt }),
@@ -2654,7 +2673,7 @@ function prescanBodyPageAnchors(
         kind: 'shape' as const,
         occurrenceId: anchor.occurrenceId,
         paragraphId: paragraphIdFor(anchor.paragraphSource),
-        bounds: retainedResult.geometry.objectFrame,
+        bounds: shifted(retainedResult.geometry.objectFrame),
         exclusionBounds: wrapBounds,
         wrap: retainedResult.geometry.wrap.kind,
         wrapSide: retainedResult.geometry.wrap.side,
@@ -2900,7 +2919,10 @@ function commitBodyUprightBlocks(
   if (registration.box) addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
   for (const slot of registration.slots) index.slots.set(slot.sourceIndex, slot);
   for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
-  if (registration.tail) index.tail = registration.tail;
+  if (registration.tail) {
+    index.tail = registration.tail;
+    if (registration.box) index.tables.push({ sourceIndex: registration.tail.sourceIndex, box: registration.box });
+  }
 }
 
 /**

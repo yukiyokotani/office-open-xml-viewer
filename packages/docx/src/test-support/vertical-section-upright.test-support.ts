@@ -108,6 +108,8 @@ export interface Page {
    * from the first strip of the page along the block axis, and the physical
    * y at which its inline flow starts. */
   readonly strips: Array<Array<Readonly<{ block: number; inlineStart: number }>>>;
+  /** Anchored drawings, in source order: the physical left and top of their frame. */
+  readonly drawings: Array<Readonly<{ left: number; top: number }>>;
 }
 
 /** `linePitch`: the section's line grid pitch in twentieths of a point.
@@ -136,7 +138,7 @@ export function layOutPages(
   const blockOrigin = direction === 'tbRl' ? MARGIN.right : MARGIN.left;
   // Each column's strips restart at the block origin.
   return layout.pages.map((laidOut) => {
-  const page: Page = { tables: [], strips: [] };
+  const page: Page = { tables: [], strips: [], drawings: [] };
   for (const node of laidOut.layers.body) {
     if (node.kind === 'table') {
       const rules = node.borders.filter((border) => border.from.xPt === border.to.xPt);
@@ -152,6 +154,14 @@ export function layOutPages(
         block: line.bounds.yPt - blockOrigin,
         inlineStart: line.bounds.xPt,
       })));
+      for (const drawing of node.drawings) {
+        // Section-logical frame: x inline (physical y), y block.
+        page.drawings.push({
+          left: direction === 'tbRl'
+            ? PAGE_W - drawing.flowBounds.yPt - drawing.flowBounds.heightPt : drawing.flowBounds.yPt,
+          top: drawing.flowBounds.xPt,
+        });
+      }
     }
   }
   return page;
