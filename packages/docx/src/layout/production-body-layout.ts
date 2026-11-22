@@ -2278,17 +2278,23 @@ function acquireSelectedNoteSeparatorBand(
   // The marker laid out in place: its inline object's line and position
   // carry the rule; the story's text paints around it. A story without a
   // marker draws no rule (its mark is None) and paints its text.
+  // The marker's inline object is the run glued before its metrics run;
+  // inline pictures of the story are drawings too.
+  const markerRunIndex = source.runs.findIndex(isNoteSeparatorMarkerRun);
+  const markerDrawingIds = new Set(paragraph.drawings
+    .filter((drawing) => markerRunIndex > 0 && drawing.source.path.at(-1) === markerRunIndex - 1)
+    .map((drawing) => drawing.id));
   let marker: Readonly<{ line: typeof paragraph.lines[number]; xPt: number; widthPt: number }> | undefined;
   for (const line of paragraph.lines) {
     for (const placement of line.placements) {
-      if (placement.kind === 'drawing') marker = { line, xPt: placement.bounds.xPt, widthPt: placement.bounds.widthPt };
+      if (placement.kind === 'drawing' && markerDrawingIds.has(placement.drawingId)) {
+        marker = { line, xPt: placement.bounds.xPt, widthPt: placement.bounds.widthPt };
+      }
     }
   }
-  const markerRun = source.runs.find(isNoteSeparatorMarkerRun);
+  const markerRun = markerRunIndex < 0 ? undefined : source.runs[markerRunIndex];
   if (!marker || !markerRun) {
-    if (markerRun || source.runs.some((run) => run.type === 'shape')) {
-      throw new Error('A note separator story must lay its marker out');
-    }
+    if (markerRun) throw new Error('A note separator story must lay its marker out');
     return Object.freeze({ advancePt: story.advancePt, ruleOffsetPt: 0, markFontSizePt: 10, bidi, paragraphs });
   }
   // The size its line is laid out with: the complex-script size (§17.3.2.39
@@ -2305,7 +2311,8 @@ function acquireSelectedNoteSeparatorBand(
   // only shape the lines.
   const hasText = paragraphs.length > 1
     || paragraphs.some((laid) => laid.borders.length > 0 || laid.shading !== undefined)
-    || source.runs.some((run) => run.type === 'field' || run.type === 'image'
+    || source.runs.some((run, index) => run.type === 'field' || run.type === 'image'
+      || (run.type === 'shape' && index !== markerRunIndex - 1)
     || (run.type === 'text' && !isNoteSeparatorMarkerRun(run)
       && ((run as Readonly<{ text?: string }>).text ?? '').length > 0));
   return Object.freeze({

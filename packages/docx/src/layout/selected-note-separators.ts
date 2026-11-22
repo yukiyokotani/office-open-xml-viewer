@@ -130,9 +130,12 @@ export function isNoteSeparatorMarkerRun(run: Readonly<{ type: string }>): boole
   return run.type === 'text' && (run as Readonly<{ __noteSeparatorMarker?: boolean }>).__noteSeparatorMarker === true;
 }
 
-/** An inline (not anchored) picture of a separator story. */
+/** An inline (not anchored) picture of a separator story: a DrawingML
+ * picture or an inline VML picture shape. */
 function isInlineImageRun(run: Readonly<{ type: string }>): boolean {
-  return run.type === 'image' && (run as Readonly<{ anchor?: boolean }>).anchor !== true;
+  if (run.type === 'image') return (run as Readonly<{ anchor?: boolean }>).anchor !== true;
+  const shape = run as Readonly<{ inline?: boolean; vmlPicture?: unknown; textBoxContent?: unknown }>;
+  return run.type === 'shape' && shape.inline === true && shape.vmlPicture != null && shape.textBoxContent == null;
 }
 
 /** Parser wire of one separator story paragraph: text and field runs, inline
@@ -146,7 +149,7 @@ export function isNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string 
 /** Acquired separator story paragraph: text runs, inline pictures and line
  * breaks, around at most one inline object that lays the marker out. */
 export function isAcquiredNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
-  return runs.filter((run) => run.type === 'shape').length <= 1
+  return runs.filter((run) => run.type === 'shape' && !isInlineImageRun(run)).length <= 1
     && runs.every((run) => run.type === 'text' || run.type === 'field' || run.type === 'shape'
       || run.type === 'break' || isInlineImageRun(run));
 }

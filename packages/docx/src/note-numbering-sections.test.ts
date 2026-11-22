@@ -193,6 +193,12 @@ describe('section-aware note numbering', () => {
   it('numbers notes with Chicago symbols and cycles Korean jamo', () => {
     const chicago = '<w:numFmt w:val="chicago"/>';
     expect(render({ kind: 'footnote', sectionPr: [chicago, chicago] })).toEqual(['*', '\u2020', '\u2021', '\u00A7']);
+    // Past 116 chicago writes no label; the notes stay attached.
+    const late = '<w:numFmt w:val="chicago"/><w:numStart w:val="115"/>';
+    expect(render({ kind: 'footnote', sectionPr: [late, late] })).toEqual(['\u2021'.repeat(29), '\u00A7'.repeat(29)]);
+    const model = control({ kind: 'footnote', sectionPr: [late, late] });
+    expect(layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 })
+      .pages.flatMap((page) => page.layers.notes).filter((node) => node.kind === 'note')).toHaveLength(4);
     const chosung = '<w:numFmt w:val="chosung"/><w:numStart w:val="14"/>';
     expect(render({ kind: 'footnote', sectionPr: [chosung, chosung] })).toEqual(['\u314E', '\u3131', '\u3134', '\u3137']);
   });

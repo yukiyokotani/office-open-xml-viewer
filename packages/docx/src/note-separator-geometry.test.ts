@@ -411,6 +411,19 @@ describe('word-note-separator-geometry', () => {
       + `<pic:blipFill><a:blip xmlns:r="${R}" r:embed="img"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>`
       + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${12 * EMU}" cy="${8 * EMU}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`
       + '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    const vml = '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">'
+      + '<v:shape id="p1" type="#_x0000_t75" style="width:12pt;height:8pt">'
+      + `<v:imagedata xmlns:r="${R}" r:id="img" o:title=""/></v:shape></w:pict></w:r>`;
+    const alternate = picture.replace('<w:drawing>', '<w:drawing><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+      + '<mc:Choice Requires="wp14" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing">')
+      .replace('</w:drawing>', '</mc:Choice></mc:AlternateContent></w:drawing>');
+    // Every inline picture form keeps the story and its text.
+    for (const form of [vml, alternate]) {
+      const other = leadingOf(render(control({ kind: 'footnote', listed: true, noteImage: true,
+        separatorParagraph: `<w:p>${form}<w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r></w:p>` })));
+      expect(clean(paragraphTexts(other))).toEqual(['Sources']);
+      expect(other.leading?.rule).toBeDefined();
+    }
     const model = control({ kind: 'footnote', listed: true, noteImage: true,
       separatorParagraph: `<w:p>${picture}<w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r></w:p>` });
     const note = leadingOf(render(model));

@@ -73,6 +73,7 @@ export type NumberFormat =
   | 'hindiConsonants'
   // Enclosed decimals + katakana a-i-u-e-o sequences (§17.18.59).
   | 'decimalEnclosedCircle'
+  | 'decimalEnclosedCircleChinese'
   | 'aiueoFullWidth'
   | 'aiueo'
   // Hebrew (positional gematria / alphabet-with-ת-suffix — NOT the repeat scheme).
@@ -216,9 +217,31 @@ const THAI_LETTERS: readonly string[] = [
   ...rangeChars(0x0E27, 0x0E2E),
 ];
 
+/** [MS-OI29500] §2.1.548 (o): no format displays a value above this. */
+const OFFICE_NUMBER_MAXIMUM = 2147483647;
+
+/** [MS-OI29500] §2.1.548 (j), (k), (l), (m), (n): the largest value each of
+ * these formats displays; a larger value has no label. */
+const OFFICE_NUMBER_FORMAT_MAXIMUM: Readonly<Partial<Record<string, number>>> = {
+  cardinalText: 999999,
+  chineseCountingThousand: 999999,
+  chineseLegalSimplified: 999999,
+  ideographLegalTraditional: 999999,
+  japaneseCounting: 999999,
+  koreanCounting: 999999,
+  koreanDigital2: 999999,
+  ordinalText: 999999,
+  taiwaneseCountingThousand: 999999,
+  chicago: 116,
+  hex: 65535,
+  japaneseDigitalTenThousand: 9999,
+  koreanLegal: 9999999,
+};
+
 /** Cycle a fixed ordered set: past its size the sequence starts over with
- * the first glyph, one glyph per value (Word's Korean chosung and ganada
- * numbering: …, ㅍ, ㅎ, ㄱ, ㄴ, …). Caller guarantees n ≥ 1. */
+ * the first glyph, one glyph per value ([MS-OI29500] §2.1.548 (c), (r), (u):
+ * aiueo, chosung and ganada start at 1 again; …, ㅍ, ㅎ, ㄱ, ㄴ, …).
+ * Caller guarantees n ≥ 1. */
 function cycleAlphabet(n: number, glyphs: readonly string[]): string {
   return glyphs[(n - 1) % glyphs.length]!;
 }
@@ -287,8 +310,9 @@ const KATAKANA_FULLWIDTH: readonly string[] = [
 
 // §17.18.59 aiueo "AIUEO Order Half-Width Katakana" — positions 1–46 =
 // U+FF71–U+FF9C (ｱ..ﾜ), then U+FF66 (ｦ wo), then U+FF9D (ﾝ n). No archaic ヰ/ヱ
-// (they have no half-width forms). Same repeat scheme; spec example ｱ, ｲ, …, ｦ,
-// ﾝ, ｱｱ confirms wo/n at 45/46 and the wrap at 47. Katakana per [MS-OE376]
+// (they have no half-width forms). The spec example ｱ, ｲ, …, ｦ, ﾝ, ｱｱ confirms
+// wo/n at 45/46; past 46 Office starts at ｱ again ([MS-OI29500] §2.1.548 (c),
+// see cycleAlphabet). Katakana per [MS-OE376]
 // §2.1.580 note (b) — see KATAKANA_FULLWIDTH above.
 const KATAKANA_HALFWIDTH: readonly string[] = [
   ...rangeChars(0xff71, 0xff9c),
@@ -387,6 +411,9 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
   // decimal recovery convention without entering loops on Infinity or indexing
   // an alphabet with a fraction/unsafe integer.
   if (!Number.isSafeInteger(n)) return String(n);
+  // [MS-OI29500] §2.1.548 (j)-(o): above a format's largest displayed value
+  // Office writes no label at all.
+  if (n > (OFFICE_NUMBER_FORMAT_MAXIMUM[fmt ?? 'decimal'] ?? OFFICE_NUMBER_MAXIMUM)) return '';
   switch (fmt) {
     // Roman.
     case 'upperRoman':
@@ -423,10 +450,14 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
     case 'aiueoFullWidth':
       return n >= 1 ? repeatAlphabet(n, KATAKANA_FULLWIDTH) : String(n);
     case 'aiueo':
-      return n >= 1 ? repeatAlphabet(n, KATAKANA_HALFWIDTH) : String(n);
+      return n >= 1 ? cycleAlphabet(n, KATAKANA_HALFWIDTH) : String(n);
     // Enclosed decimals (bounded set → decimal fallback past the range).
     case 'decimalEnclosedCircle':
       return n >= 1 ? toEnclosedCircle(n) : String(n);
+    case 'decimalEnclosedCircleChinese':
+      // [MS-OI29500] §2.1.548 (s): only the first ten enclosed numbers, then
+      // decimal.
+      return n >= 1 && n <= 10 ? toEnclosedCircle(n) : String(n);
     // Hebrew.
     case 'hebrew1':
       return n >= 1 ? toHebrewGematria(n) : String(n);
