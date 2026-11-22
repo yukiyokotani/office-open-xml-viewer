@@ -22,6 +22,7 @@ import { adjustForWidowOrphan } from '../line-fit-policy.js';
 import type { StoryPageFrames } from './story-page-frames.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import {
+  continuesMergeFromAbove,
   laidOutTableTracks,
   layoutTable,
   measureTableCellBlockFlowHeightPt,
@@ -2151,13 +2152,18 @@ function materializeFragment(
       cells: Object.freeze(row.cells.map((cell, cellIndex): TableCellFragmentLayout => {
         const verticalMerge = selection.input.cells[cellIndex]?.verticalMerge ?? 'none';
         const sourceCell = selection.input.cells[cellIndex];
-        const ownsRestartInFragment = verticalMerge === 'continue' && selected
-          .slice(0, rowIndex)
-          .some((earlier) => earlier.input.cells.some((candidate) => (
+        // The restart of this cell's own merge: reached through rows that
+        // follow each other in the source, not through a repeated header.
+        let mergeStart = rowIndex;
+        while (verticalMerge === 'continue' && sourceCell && continuesMergeFromAbove(
+          selected[mergeStart - 1]?.input, selected[mergeStart]!.input, sourceCell.columnStart, sourceCell.columnSpan,
+        )) mergeStart -= 1;
+        const ownsRestartInFragment = verticalMerge === 'continue' && mergeStart < rowIndex
+          && selected[mergeStart]!.input.cells.some((candidate) => (
             candidate.verticalMerge === 'restart'
             && candidate.columnStart === sourceCell?.columnStart
             && candidate.columnSpan === sourceCell?.columnSpan
-          )));
+          ));
         return Object.freeze({
           ...cell,
           contentRanges: Object.freeze([...(selection.ranges[cellIndex] ?? [])]),

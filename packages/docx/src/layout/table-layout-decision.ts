@@ -293,6 +293,8 @@ function memberContext(
     || (isLeadingMarginPageStoryTable && !usesLeadingIndentBand)
     || isVerticalTextDirection(state.textDirection)
     || state.inTableCell
+    // WORD_TABLE_CELL_SPACING_GEOMETRY: the preferred-width form ends with its column.
+    || (spacingGeometry !== null && !contentFitted)
     || format.rows.length === 0
     ? 0
     : format.rows.reduce((minimumPt, row, rowIndex) => {

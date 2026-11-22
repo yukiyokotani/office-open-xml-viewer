@@ -641,7 +641,7 @@ export function acquireRetainedTable<State>(
   const nestedById: Record<string, RetainedTableAcquisition> = {};
   const floatingTables: NestedFloatingTableOccurrence[] = [];
   const rotatedCells: RotatedCellAcquisition[] = [];
-  const mergeOpeners = new Map<number, TableLayoutSource['rows'][number]['cells'][number]>();
+  const mergeOpeners = new Map<number, Readonly<{ cell: TableLayoutSource['rows'][number]['cells'][number]; rowIndex: number }>>();
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
@@ -649,7 +649,7 @@ export function acquireRetainedTable<State>(
     // The cell opening the vertical merge each column is in, carried from row to row.
     let openerColumnStart = columnStart;
     for (const cell of row.cells) {
-      if (cell.vMerge === true) mergeOpeners.set(openerColumnStart, cell);
+      if (cell.vMerge === true) mergeOpeners.set(openerColumnStart, { cell, rowIndex });
       else if (cell.vMerge !== false) mergeOpeners.delete(openerColumnStart);
       openerColumnStart += Math.max(1, cell.colSpan);
     }
@@ -663,8 +663,11 @@ export function acquireRetainedTable<State>(
         const span = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - start));
         ruleColumnStart += span;
         // The cell that opens a vertical merge owns the side rules of all its rows.
-        const owner = cell.vMerge === false ? rowMergeOpeners.get(start) ?? cell : cell;
-        return { borders: retainedEdges(owner.borders), columnStart: start, columnSpan: span };
+        const opener = cell.vMerge === false ? rowMergeOpeners.get(start) : undefined;
+        if (!opener) return { borders: retainedEdges(cell.borders), columnStart: start, columnSpan: span };
+        const openerException = format.rows[opener.rowIndex]?.exception?.borders;
+        return { borders: retainedEdges(opener.cell.borders), columnStart: start, columnSpan: span,
+          ownerException: openerException ? retainedEdges(openerException) : null };
       }),
       retainedEdges(table.borders),
       rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,

@@ -371,6 +371,22 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     expect(rules.length).toBe(2);
     // Between the inner edges of the two 6 pt rules.
     expect(rules[1]! - rules[0]! - 6).toBeGreaterThanOrEqual(10.5);
+    // The cell's own bounds, which its fill uses, end with its bottom rule.
+    const box = laidOut.rows[0]!.cells[0]!.flowBounds;
+    expect(box.yPt).toBeCloseTo(rules[0]! - 3, 6);
+    expect(box.yPt + box.heightPt).toBeCloseTo(rules[1]! + 3, 6);
+  });
+
+  it('holds the preferred-width form to its column in mode 14 as well', () => {
+    // 5.4 pt cell margins: the legacy outer-margin allowance is no part of
+    // this ceiling.
+    const margins = '<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar>';
+    const wide = `<w:tbl><w:tblPr>${AUTO}${spacing(2)}${BORDERS}${margins}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="4400"/><w:gridCol w:w="4800"/></w:tblGrid><w:tr>${cell(4400, 'A1')}${cell(4800, 'B1')}</w:tr></w:tbl>`;
+    for (const mode of [14, 15]) {
+      const page = tablePages(wide, mode)[0]!;
+      expect(page.columnWidthsPt.reduce((sum, width) => sum + width, 0)).toBeCloseTo(465.3 - 0.5, 6);
+    }
   });
 
   it('keeps a repeated header merge apart from a body merge continuing below it', () => {
@@ -391,6 +407,13 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       const headerRows = page.rows[0]!.advancePt + page.rows[1]!.advancePt;
       expect(headerCell.flowBounds.heightPt).toBeLessThanOrEqual(headerRows);
     }
+    // On a later page the body merge has no restart of its own: its first
+    // row there paints it, not the header's restart.
+    const continued = pages[1]!.rows[2]!.cells[0]! as { verticalMerge: string; visualMergeOwnership?: string };
+    expect(continued.verticalMerge).toBe('continue');
+    expect(continued.visualMergeOwnership).toBe('continuation');
+    const repeated = pages[1]!.rows[1]!.cells[0]! as { verticalMerge: string; visualMergeOwnership?: string };
+    expect(repeated.visualMergeOwnership).toBeUndefined();
   });
 
   it('keeps a nested table inside the rule a vertical merge beside it starts with', () => {
@@ -449,6 +472,21 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
       + `<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>${rows}</w:tbl>`;
     const inner = tablePages(outer, 15)[0]!.rows[3]!.cells.at(-1)!.blocks.map((block) => block.layout)
+      .find((block) => block.kind === 'table');
+    if (inner?.kind !== 'table') throw new Error('expected a nested table');
+    expect(inner.rows[0]!.cells[0]!.flowBounds.xPt).toBeCloseTo(3 + 0.25 + 4, 6);
+  });
+
+  it('reads the row exception of the row that opens the merge', () => {
+    // The opening row's tblPrEx gives a 6 pt insideV; the next row has none.
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const nested = tableXml('<w:tblW w:w="5000" w:type="pct"/>' + spacing(2), [600, 600], [cell(600, 'n1') + cell(600, 'n2')]);
+    const exception = '<w:tblPrEx><w:tblBorders><w:insideV w:val="single" w:sz="48"/></w:tblBorders></w:tblPrEx>';
+    const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+      + '<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>'
+      + `<w:tr>${exception}${cell(1440, 'A', '<w:vMerge w:val="restart"/>')}${cell(2880, 'B1')}</w:tr>`
+      + `<w:tr>${cell(1440, '', '<w:vMerge/>')}<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${nested}${paragraph('B2')}</w:tc></w:tr></w:tbl>`;
+    const inner = tablePages(outer, 15)[0]!.rows[1]!.cells.at(-1)!.blocks.map((block) => block.layout)
       .find((block) => block.kind === 'table');
     if (inner?.kind !== 'table') throw new Error('expected a nested table');
     expect(inner.rows[0]!.cells[0]!.flowBounds.xPt).toBeCloseTo(3 + 0.25 + 4, 6);

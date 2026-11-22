@@ -576,7 +576,9 @@ function physicalCellEdges(
  * candidate.
  */
 export function collapsedRowSideRuleWidthsPt(
-  cells: readonly Pick<TableCellLayoutInput, 'borders' | 'columnStart' | 'columnSpan'>[],
+  cells: readonly (Pick<TableCellLayoutInput, 'borders' | 'columnStart' | 'columnSpan'>
+    /** The row exception of the row that opens the cell's vertical merge. */
+    & { readonly ownerException?: TableEdgeInputs | null })[],
   table: TableEdgeInputs,
   exception: TableEdgeInputs | null,
   rowIndex: number,
@@ -585,7 +587,8 @@ export function collapsedRowSideRuleWidthsPt(
   bidiVisual: boolean,
 ): readonly Readonly<{ leftPt: number; rightPt: number }>[] {
   const edges = cells.map((cell) =>
-    physicalCellEdges(cell, table, exception, rowIndex, rowIndex, rowCount, columnCount, bidiVisual));
+    physicalCellEdges(cell, table, cell.ownerException === undefined ? exception : cell.ownerException,
+      rowIndex, rowIndex, rowCount, columnCount, bidiVisual));
   const widthPt = (first: BorderCandidate | null, second: BorderCandidate | null): number =>
     visibleBorder(resolveBorderConflict(first, second))?.widthPt ?? 0;
   return cells.map((cell, index) => {
@@ -1636,7 +1639,9 @@ function materializeTableRow(
     const lastRowSpacing = rowSpacingInsets(input.rows, lastRowIndex);
     const cellBottomPt = yPt
       + (rowOffsets[lastRowIndex + 1] ?? rowOffsets[rowIndex + 1] ?? 0)
-      - lastRowSpacing.bottomPt;
+      - lastRowSpacing.bottomPt
+      // A spaced box ends above the table's own bottom rule.
+      - (row.spacingGeometry ? ruleInsetsPt.bottom[lastRowIndex] ?? 0 : 0);
     const logicalStartX = columnX(cell.columnStart);
     const logicalEndX = columnX(
       Math.min(input.columnWidthsPt.length, cell.columnStart + cell.columnSpan),
