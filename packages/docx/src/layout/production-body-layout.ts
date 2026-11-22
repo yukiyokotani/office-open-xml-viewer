@@ -592,6 +592,7 @@ function acquireBodyParagraphAtLocation(
   }),
   retainedAnchorCollisions?: readonly DrawingMLCollisionEntryPt[],
   deferredAnchorOccurrenceIds?: readonly string[],
+  hostAnchorLiftsPt?: readonly (readonly [string, number])[],
 ) {
   const edges = bodyParagraphBorderEdgesFor(paragraph) ?? {
     top: 'top' as const,
@@ -654,6 +655,9 @@ function acquireBodyParagraphAtLocation(
         : {}),
       ...(deferredAnchorOccurrenceIds && deferredAnchorOccurrenceIds.length > 0
         ? { deferredAnchorOccurrenceIds: new Set(deferredAnchorOccurrenceIds) }
+        : {}),
+      ...(hostAnchorLiftsPt && hostAnchorLiftsPt.length > 0
+        ? { hostAnchorLiftsPt: new Map(hostAnchorLiftsPt) }
         : {}),
     },
     continuation.boundary === null
@@ -1817,10 +1821,11 @@ function measureBodyParagraphEntry(
     request.continuation,
     sessionState.drawingCollisionRegistry.entries,
     request.deferredHostAnchorKeys,
+    request.hostAnchorLiftsPt,
   );
   const { measured, layout } = acquired;
-  const onLineGrid = resolveBodyParagraphLayoutContext(candidate, paragraph).lineGrid.active;
-  const markOnLineGrid = measured.markOnly && onLineGrid;
+  const markOnLineGrid =
+    measured.markOnly && resolveBodyParagraphLayoutContext(candidate, paragraph).lineGrid.active;
   const allBoundaries = paragraphSourceBoundaries(measured);
   const retainedFloats = retainedBodyParagraphFloatEntries(sessionState, layout, request.deferredHostAnchorKeys);
   const floatEntries = Object.freeze([...publicFloats, ...retainedFloats]);
@@ -1855,7 +1860,7 @@ function measureBodyParagraphEntry(
     ...(measured.uniformRubyAdvancePt == null
       ? {}
       : { uniformRubyAdvancePt: measured.uniformRubyAdvancePt }),
-    ...hostFloatDeferralFacts(state.layoutSettings.compat, onLineGrid, layout),
+    ...hostFloatDeferralFacts(state.layoutSettings.compat, layout),
     ...(floatEntries.length === 0 && collisionEntries.length === 0
       ? {}
       : {
@@ -2182,14 +2187,13 @@ function acquireSelectedNoteSeparatorBand(
   });
 }
 
-/** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL applies to lines on a document
- * line grid (§17.6.5) in compatibility mode 15; elsewhere it is unmeasured. */
+/** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL applies in compatibility mode 15,
+ * with or without a document line grid (§17.6.5). */
 function hostFloatDeferralFacts(
   compat: Readonly<{ hostFloatBottomMarginDeferral: boolean }>,
-  onLineGrid: boolean,
   layout: ParagraphLayout,
 ): Readonly<{ hostFloatsByLine?: readonly (readonly HostFloatAnchor[])[] }> {
-  if (!compat.hostFloatBottomMarginDeferral || !onLineGrid) return {};
+  if (!compat.hostFloatBottomMarginDeferral) return {};
   const byLine = hostWrappingFloatsByLine(layout);
   return byLine.some((floats) => floats.length > 0) ? { hostFloatsByLine: byLine } : {};
 }
@@ -2311,8 +2315,7 @@ function measureFollowingBodyBlock(
       fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(layout),
       leadFootnoteReferenceIds: firstLine ? footnoteIdsInRetainedLines([firstLine]) : [],
       pageOwnedAnchorKeysByLine: pageOwnedAnchorKeysByLine(layout),
-      ...hostFloatDeferralFacts(candidate.layoutSettings.compat,
-        resolveBodyParagraphLayoutContext(candidate, element).lineGrid.active, layout),
+      ...hostFloatDeferralFacts(candidate.layoutSettings.compat, layout),
     });
   }
   if (element.type !== 'table') throw new Error('Following table source kind mismatch');

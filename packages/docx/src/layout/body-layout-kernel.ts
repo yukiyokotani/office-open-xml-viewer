@@ -66,6 +66,9 @@ export interface BodyParagraphAcquisitionInput {
   /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: host-float keys (HostFloatAnchor)
    * whose anchor line moves on; acquired without their text wrap. */
   readonly deferredHostAnchorKeys?: readonly string[];
+  /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: host-float keys and the points
+   * by which those floats rise to end at the body bottom. */
+  readonly hostAnchorLiftsPt?: readonly (readonly [string, number])[];
 }
 
 export interface AdjacentTableGroupCursor {

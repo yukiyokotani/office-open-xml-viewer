@@ -2593,6 +2593,9 @@ export interface ParagraphAcquisitionOptions {
    * moves to a later region. Their objects take no part in this acquisition's
    * text wrap, so the lines left behind do not wrap around them. */
   readonly deferredAnchorOccurrenceIds?: ReadonlySet<string>;
+  /** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: anchor occurrences raised by
+   * this many points so that they end at the body bottom. */
+  readonly hostAnchorLiftsPt?: ReadonlyMap<string, number>;
 }
 
 function runSource(source: SourceRef, runIndex: number): SourceRef {
@@ -5236,6 +5239,8 @@ function acquireAnchorOccurrence(
       const delta = { xPt: frozenFrame.xPt - placedRect.xPt, yPt: frozenFrame.yPt - placedRect.yPt };
       if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
     }
+    const liftPt = options.hostAnchorLiftsPt?.get(occurrenceId);
+    if (liftPt !== undefined && liftPt !== 0) translateAnchor({ xPt: 0, yPt: -liftPt });
     const effectiveWrapBounds = placedResult.geometry.wrapBounds;
     const normativeCollision = !allowOverlap;
     if (normativeCollision) {
@@ -6734,6 +6739,8 @@ function paragraphAcquisitionKey(
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
     lineOnly || !hasAnchoredPayload || !options.deferredAnchorOccurrenceIds?.size
       ? null : [...options.deferredAnchorOccurrenceIds].sort(),
+    lineOnly || !hasAnchoredPayload || !options.hostAnchorLiftsPt?.size
+      ? null : JSON.stringify([...options.hostAnchorLiftsPt].sort(([left], [right]) => left.localeCompare(right))),
     lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
       ? null
       : JSON.stringify([...options.frozenAnchorFrames].sort(([left], [right]) => left.localeCompare(right))),

@@ -147,7 +147,8 @@ export interface DocxCompatProfile {
   readonly gridLineWrapBandExcludesTrailingLeading: boolean;
   /**
    * Compatibility mode 15: a paragraph- or line-relative wrapping float that
-   * would cross the body bottom moves its anchor line to the next page.
+   * would cross the body bottom rises to end there or moves its anchor line
+   * to the next column or page.
    * @compatRule word-host-float-bottom-margin-deferral
    */
   readonly hostFloatBottomMarginDeferral: boolean;
