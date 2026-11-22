@@ -160,6 +160,7 @@ import {
   addUprightTableBox,
   emptyUprightBlockPageIndex,
   inlineShiftBelowUprightTablesPt,
+  moveUprightPageDrawingsBelowTableBox,
   uprightBlockExclusionsAhead,
   type UprightBlockExclusion,
   type UprightBlockRegistration,
@@ -2941,6 +2942,7 @@ function commitBodyUprightBlocks(
     let versions = uprightTableBoxVersionsByServices.get(context.services);
     if (!versions) uprightTableBoxVersionsByServices.set(context.services, versions = new Map());
     addUprightTableBox(index, tableBox.sourceIndex, tableBox.box, versions);
+    moveUprightPageDrawingsBelowTableBox(index, tableBox);
   }
 }
 

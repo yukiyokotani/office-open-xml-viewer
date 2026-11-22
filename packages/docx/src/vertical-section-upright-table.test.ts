@@ -631,6 +631,114 @@ describe('upright block table of a vertical section', () => {
       expect(page!.strips.at(-1)![0]!.block).toBeCloseTo(past(PITCH) + PITCH, 6);
     });
 
+    /** Block position of the far edge of a table whose box starts at `block`. */
+    const blockStartOf = (direction: Direction, placed: Page['tables'][number]) => direction === 'tbRl'
+      ? PAGE_W - MARGIN.right - placed.paintedRight : placed.paintedLeft - MARGIN.left;
+
+    it.each(['tbRl', 'tbLrV'] as const)(
+      'moves to the next page a second %s table whose rise would move the text of column 1 off the page',
+      (direction) => {
+        // Twelve paragraphs, a column break, an 800 pt table X, two
+        // paragraphs and an 800 pt table Y. X is raised over column 1,
+        // whose strips resume past it; Y, raised there too, would leave
+        // column 1 no room for them. Y gives way: it starts page 2, and
+        // page 1 keeps X and its text.
+        const pages = layOutPages(direction, [
+          ...strips(12), columnBreak, table(1, 800), P, P, table(1, 800), P,
+        ], 2);
+        expect(pages).toHaveLength(2);
+        const [first, second] = pages as [Page, Page];
+        expect(first.tables).toHaveLength(1);
+        expect(first.tables[0]!.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
+        first.strips.slice(0, 12).forEach(([line], at) => {
+          expect(line!.block).toBeCloseTo(past(PITCH) + at * PITCH, 6);
+          expect(line!.inlineStart).toBe(MARGIN.top);
+        });
+        // The two paragraphs of column 2, past X after the empty strip.
+        const columnTwo = first.strips.slice(-2).map(([line]) => line!);
+        expect(columnTwo.map((line) => line.block)).toEqual([past(PITCH) + PITCH, past(PITCH) + 2 * PITCH]
+          .map((block) => expect.closeTo(block, 6)));
+        for (const line of columnTwo) expect(line.inlineStart).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
+        expect(second.tables).toHaveLength(1);
+        expect(second.tables[0]!.left).toBeCloseTo(tableLeft(direction, 0), 6);
+        expect(second.strips.map(([line]) => line!.block)).toEqual([expect.closeTo(past(0), 6)]);
+      },
+    );
+
+    it.each([['tbRl', 800], ['tbLrV', 800], ['tbRl', 500]] as const)(
+      'lays the page out without a %s table whose rise moves the text before it off the page (second table %i pt)',
+      (direction, secondPt) => {
+        // Thirty paragraphs (25 fill column 1), an 800 pt table X, three
+        // paragraphs and a table Y. Laid out without X the flow reaches
+        // it five strips into column 2; raised from there it would move the
+        // text of column 1 past it, off the page. Page 1 holds the thirty
+        // paragraphs without X, which starts page 2, where the paragraphs
+        // after it resume past it and Y follows the third of them.
+        const pages = layOutPages(direction, [
+          ...strips(30), table(1, 800), P, P, P, table(1, secondPt), P,
+        ], 2);
+        expect(pages).toHaveLength(2);
+        const [first, second] = pages as [Page, Page];
+        expect(first.tables).toHaveLength(0);
+        expect(first.strips).toHaveLength(30);
+        for (const [line] of first.strips) {
+          expect([MARGIN.top, first.strips[25]![0]!.inlineStart]).toContain(line!.inlineStart);
+        }
+        const [x, y] = second.tables as [Page['tables'][number], Page['tables'][number]];
+        expect(x.left).toBeCloseTo(tableLeft(direction, 0), 6);
+        expect(blockStartOf(direction, y)).toBeCloseTo(past(0) + 3 * PITCH, 6);
+        // An 800 pt table is raised to end at the bottom page edge; a 500 pt
+        // one stays at the column top.
+        if (secondPt === 800) expect(y.bottom).toBeCloseTo(16838 / 20, 6);
+        else expect(y.top).toBeCloseTo(MARGIN.top, 6);
+        // The third paragraph ends where Y starts and resumes past it.
+        expect(second.strips.map(([line]) => line!.block)).toEqual([
+          past(0), past(0) + PITCH, past(past(0) + 3 * PITCH), past(past(0) + 3 * PITCH) + PITCH,
+        ].map((block) => expect.closeTo(block, 6)));
+      },
+    );
+
+    it('keeps a table raised clear of the text of column 1 and moves a later one too wide for the page', () => {
+      // The same with X of a 500 pt row, raised over the room of
+      // column 1 below its short strips, and Y of an 800 pt row: X stays five
+      // strips into column 2 and Y, wider than the block extent left after
+      // the paragraphs past X, starts page 2.
+      const pages = layOutPages('tbRl', [...strips(30), table(1, 500), P, P, P, table(1, 800), P], 2);
+      expect(pages).toHaveLength(2);
+      const [first, second] = pages as [Page, Page];
+      expect(first.tables).toHaveLength(1);
+      expect(blockStartOf('tbRl', first.tables[0]!)).toBeCloseTo(5 * PITCH, 6);
+      for (const [line] of first.strips.slice(0, 25)) expect(line!.inlineStart).toBe(MARGIN.top);
+      expect(first.strips.slice(29).map(([line]) => line!.block)).toEqual([0, 1, 2, 3]
+        .map((at) => expect.closeTo(past(5 * PITCH) + at * PITCH, 6)));
+      expect(second.tables).toHaveLength(1);
+      expect(second.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+    });
+
+    it('pins a table raised over column 1 and a table with a drawing over it on one page', () => {
+      // Twelve paragraphs, a column break, a 2-row table X at the
+      // top of column 2, a paragraph anchoring a rectangle over X, two
+      // paragraphs and an 800 pt table Y. The rectangle lies below X. Y,
+      // which meets X, is placed 14.28 pt past it and raised; the strip of
+      // column 1 that ends inside Y resumes past it, the others keep the
+      // column top.
+      const over = P.replace('</w:p>', `${anchoredRectangle(400, 430, 80, 40)}</w:p>`);
+      const pages = layOutPages('tbRl', [...strips(12), columnBreak, T, over, P, P, table(1, 800), P], 2);
+      expect(pages).toHaveLength(1);
+      const [page] = pages;
+      const [x, y] = page!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(blockStartOf('tbRl', x)).toBeCloseTo(PITCH, 6);
+      expect(page!.drawings[0]!.top).toBeCloseTo(x.bottom, 6);
+      expect(blockStartOf('tbRl', y)).toBeCloseTo(PITCH + TABLE_W + RULE + 14.28, 6);
+      expect(y.bottom).toBeCloseTo(16838 / 20, 6);
+      const columnOne = page!.strips.slice(0, 12).map(([line]) => line!);
+      columnOne.slice(0, 11).forEach((line, at) => {
+        expect(line.block).toBeCloseTo(at * PITCH, 6);
+        expect(line.inlineStart).toBe(MARGIN.top);
+      });
+      expect(columnOne[11]!.block).toBeCloseTo(past(PITCH + TABLE_W + RULE + 14.28), 6);
+    });
+
     it('keeps the table where the flow reaches it when the text before it is laid out without it', () => {
       // Measured: 27 strips fill column 1 (25) and start column 2, so the
       // table lies two strips into column 2. Raised, it takes the room of
@@ -1015,5 +1123,74 @@ describe('upright block table of a vertical section', () => {
     for (const start of starts.slice(1)) {
       expect(start).toBeCloseTo(direction === 'tbRl' ? placed.bottom + 40 : placed.bottom, 6);
     }
+  });
+  it.each(['tbRl', 'tbLrV'] as const)('moves two drawings that one paragraph after two %s tables anchors below them', (direction) => {
+    // A paragraph, table X, eleven paragraphs, table Y, then one
+    // paragraph anchoring a rectangle over Y and one over X. Each rectangle
+    // lies directly below the table it covers, and the strips beside it
+    // start below it.
+    const [overX, overY] = direction === 'tbRl' ? [400, 150] : [150, 350];
+    const anchoring = P.replace('</w:p>', `${anchoredRectangle(overY, 66, 80, 40)}${anchoredRectangle(overX, 66, 80, 40)}</w:p>`);
+    const [page] = layOutPages(direction, [P, T, ...Array.from({ length: 11 }, () => P), T, anchoring, P]);
+    const [x, y] = page!.tables as [Page['tables'][number], Page['tables'][number]];
+    expect(x.top).toBeCloseTo(MARGIN.top, 6);
+    expect(y.top).toBeCloseTo(MARGIN.top, 6);
+    const lying = [...page!.drawings].sort((left, right) => left.left - right.left);
+    for (const drawing of lying) expect(drawing.top).toBeCloseTo(x.bottom, 6);
+    expect(lying.map((drawing) => drawing.left)).toEqual([Math.min(overX, overY), Math.max(overX, overY)]
+      .map((left) => expect.closeTo(left, 6)));
+    // The strips across the page from the rectangle over X start below it.
+    const physicalLeft = (block: number) => direction === 'tbRl' ? PAGE_W - MARGIN.right - block - PITCH : MARGIN.left + block;
+    for (const [line] of page!.strips) {
+      const left = physicalLeft(line!.block);
+      const besideX = left < overX + 80 && left + PITCH > overX;
+      expect(line!.inlineStart).toBeCloseTo(besideX ? x.bottom + 40 : x.bottom, 6);
+    }
+  });
+
+  describe('a table after a drawing moved below an earlier table', () => {
+    /** A paragraph anchoring a 60 x 20 pt square-wrapped rectangle at page
+     * (400, 64), over the place of the table before it. */
+    const shifted = P.replace('</w:p>', `${anchoredRectangle(400, 64, 60, 20)}</w:p>`);
+    /** Whether the rectangle drawn at `drawing` and the table box are apart. */
+    const apart = (drawing: Page['drawings'][number], placed: Page['tables'][number]) =>
+      drawing.top >= placed.bottom - 1e-6 || drawing.top + 20 <= placed.top + 1e-6
+      || drawing.left >= placed.paintedRight - 1e-6 || drawing.left + 60 <= placed.paintedLeft + 1e-6;
+
+    it('stacks below the drawing where it lies, not where it was anchored', () => {
+      const [page] = layOutPages('tbRl', [P, T, shifted, T, P]);
+      const [first, second] = page!.tables as [Page['tables'][number], Page['tables'][number]];
+      const drawing = page!.drawings[0]!;
+      expect(drawing.top).toBeCloseTo(first.bottom, 6);
+      expect(second.top).toBeCloseTo(drawing.top + 20, 6);
+      for (const placed of page!.tables) expect(apart(drawing, placed)).toBe(true);
+      // The strip after the second table meets both tables and the drawing
+      // between them: it starts below all three.
+      expect(page!.strips[2]![0]!.inlineStart).toBeCloseTo(second.bottom, 6);
+    });
+
+    it('stacks below the drawing moved below the rows a table continues with', () => {
+      // The rows continued on page 2 cover the rectangle, which moves below
+      // them; so does the text beside it.
+      const pages = layOutPages('tbRl', [table(80), P, shifted, T, P, P]);
+      expect(pages).toHaveLength(2);
+      const [rest, later] = pages[1]!.tables as [Page['tables'][number], Page['tables'][number]];
+      const drawing = pages[1]!.drawings[0]!;
+      expect(drawing.top).toBeCloseTo(rest.bottom, 6);
+      expect(later.top).toBeCloseTo(drawing.top + 20, 6);
+      for (const placed of pages[1]!.tables) expect(apart(drawing, placed)).toBe(true);
+      // The strips beside the rectangle start below the later table, which
+      // lies past it.
+      for (const lines of pages[1]!.strips.slice(2)) expect(lines[0]!.inlineStart).toBeCloseTo(later.bottom, 6);
+    });
+
+    it('stacks below the drawing moved below a run that continues a table', () => {
+      const pages = layOutPages('tbRl', [table(80), T, shifted, T, P]);
+      const tables = pages[1]!.tables;
+      const drawing = pages[1]!.drawings[0]!;
+      expect(drawing.top).toBeCloseTo(tables[1]!.bottom, 6);
+      expect(tables[2]!.top).toBeCloseTo(drawing.top + 20, 6);
+      for (const placed of tables) expect(apart(drawing, placed)).toBe(true);
+    });
   });
 });

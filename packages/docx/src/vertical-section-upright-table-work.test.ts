@@ -324,4 +324,42 @@ describe('upright block table placement work', () => {
     const large = measure(8);
     expect(large).toBeLessThanOrEqual(Math.max(8, 2.6 * small));
   }, 300_000);
+  it('continues a page-dependent logical table over pages acquiring only the members each page takes', () => {
+    // As above, but every member's cell holds a PAGE field: its members are
+    // page-dependent. A continuation page reads the rows it takes only, not
+    // every member of the table again.
+    const styles = '<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/></w:style>';
+    const measure = (count: number) => {
+      const body = Array.from({ length: count }, () => romanPageTable(1, 400, 'Arabic'));
+      const { result, counts } = counting(() => layOutPages('tbRl', body, 1, 360, undefined, styles));
+      expect(result).toHaveLength(count);
+      return counts.members;
+    };
+    const small = measure(8);
+    const medium = measure(16);
+    const large = measure(32);
+    expect(small).toBeGreaterThan(0);
+    expect(large).toBeLessThanOrEqual(4.5 * small);
+    expect(large).toBeLessThanOrEqual(2.5 * medium);
+  }, 300_000);
+
+  it('places tables without reading the drawings that lie before the column top', () => {
+    // Paragraphs anchoring 340 x 1 pt rules in the top margin alternate with
+    // one-row tables: the rules share the tables' block range but end before
+    // the column top, so no table placement reads them.
+    const measure = (count: number) => {
+      const body = Array.from({ length: count }, (_, at) => [
+        table(1), P.replace('</w:p>', `${anchoredRectangle(41, 4 + 2 * at, 340, 1)}</w:p>`),
+      ]).flat();
+      const { result, counts } = counting(() => layOutPages('tbLrV', body, 2, 240));
+      expect(result.flatMap((page) => page.tables)).toHaveLength(count);
+      expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
+      return counts.drawings;
+    };
+    const small = measure(8);
+    const medium = measure(16);
+    const large = measure(24);
+    expect(large).toBeLessThanOrEqual(Math.max(8, 3.5 * small));
+    expect(large).toBeLessThanOrEqual(Math.max(8, 1.8 * medium));
+  }, 300_000);
 });

@@ -491,7 +491,11 @@ function uprightBlockRegistrationOf(
  * wrap rectangles, which only grow while a page is laid out: each is looked
  * at once. A wrapNone drawing excludes no text and is not recorded
  * (paragraphWrapExclusions); neither is a positioned table, which a vertical
- * section lays out in its rotated frame, not upright. */
+ * section lays out in its rotated frame, not upright. A drawing registered
+ * when the page's layout started is recorded below the tables placed since
+ * for tables before its paragraph, as a table placed later moves the
+ * drawings it covers (moveUprightPageDrawingsBelowTableBox): every table is
+ * placed against the drawings where they lie. */
 function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): UprightBlockPageIndex {
   const index = uprightBlockIndexOf(state);
   const floats = state.floats;
@@ -505,13 +509,17 @@ function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): Upr
     if (float.kind !== 'shape' || !float.anchorOccurrenceId || float.authoredWrap === undefined) continue;
     const anchorIndex = anchorOccurrenceBlockIndex(float.anchorOccurrenceId, story);
     if (anchorIndex === null) continue;
-    addUprightPageDrawing(index, Object.freeze({
+    const registeredFrame = Object.freeze({
+      xPt: float.imageX, yPt: float.imageY, widthPt: float.imageW, heightPt: float.imageH,
+    });
+    addUprightPageDrawing(index, {
       anchorIndex,
       exclusion: Object.freeze({
         xPt: float.xLeft, yPt: float.yTop, widthPt: float.xRight - float.xLeft, heightPt: float.yBottom - float.yTop,
       }),
-      frame: Object.freeze({ xPt: float.imageX, yPt: float.imageY, widthPt: float.imageW, heightPt: float.imageH }),
-    }));
+      frame: registeredFrame,
+      registeredFrame,
+    });
   }
   index.drawingsSeen = floats.length;
   return index;
@@ -519,7 +527,10 @@ function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): Upr
 
 /** The exclusions of the wrapped drawings anchored by a paragraph before the
  * table that a block spanning [`blockStartPt`, `blockEndPt`] meets: their
- * block range overlaps the block's. An upright block table meets them as it
+ * block range overlaps the block's and they reach past `inlineFromPt`, where
+ * the search for the block's inline position starts (one ending at or before
+ * it can never be in the block's way, such as a drawing in the margin before
+ * the column top). An upright block table meets them as it
  * meets a table placed before it, without the table clearance, and stacks
  * below them (`word-vertical-section-upright-block-table`). A drawing
  * anchored after the table is not met: it is the drawing that lies below the
@@ -529,11 +540,13 @@ function uprightBlockObstaclesMet(
   tableIndex: number,
   blockStartPt: number,
   blockEndPt: number,
+  inlineFromPt: number,
 ): LayoutRect[] {
   const met: LayoutRect[] = [];
-  for (const drawing of uprightPageDrawingsNear(index, blockStartPt, blockEndPt)) {
+  for (const drawing of uprightPageDrawingsNear(index, blockStartPt, blockEndPt, inlineFromPt)) {
     const box = drawing.exclusion;
-    if (drawing.anchorIndex < tableIndex && box.yPt < blockEndPt && blockStartPt < box.yPt + box.heightPt) {
+    if (drawing.anchorIndex < tableIndex && box.xPt + box.widthPt > inlineFromPt
+      && box.yPt < blockEndPt && blockStartPt < box.yPt + box.heightPt) {
       met.push(box);
     }
   }
@@ -606,7 +619,9 @@ function searchUprightBlock(
     for (const box of met) {
       nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
     }
-    const obstacles = uprightBlockObstaclesMet(index, request.input.source.path[0]!, blockStartPt, blockEndPt);
+    const obstacles = uprightBlockObstaclesMet(
+      index, request.input.source.path[0]!, blockStartPt, blockEndPt, inlineOriginPt,
+    );
     for (const box of obstacles) {
       met.push(box);
       nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt);
@@ -699,12 +714,13 @@ type UprightRunPlan =
  * combined acquisition is made once (combinedAdjacentGroupAcquisition). */
 const uprightGroupInputsBySession = new WeakMap<object, Map<number, AdjacentBodyTableRequest['input']>>();
 
-/** The logical tables acquired upright whose members are reusable across
- * pages, by layout session and first body index, with the extents they were
- * acquired for. */
+/** The logical tables acquired upright, by layout session and first body
+ * index, with the extents they were acquired for and whether their members
+ * are reusable across pages. */
 const uprightLogicalTablesBySession = new WeakMap<object, Map<number, Readonly<{
   retained: RetainedTableAcquisition;
   lastSourceIndex: number;
+  reusableAcrossPages: boolean;
   availableInlineExtentPt: number;
   freshPageBlockExtentPt: number;
 }>>>();
@@ -745,12 +761,18 @@ function uprightTableAcquisitionAt(
     operations.computeTablePtLayout(memberState, element, request.availableInlineExtentPt, index);
     return { source, retained: retainedTableRecord(state, index).acquisition, lastSourceIndex: index };
   }
-  // A logical table continued over pages is asked for on each of them: one
-  // whose members hold nothing page-dependent is acquired once.
+  // A logical table continued over pages is asked for on each of them. One
+  // whose members hold nothing page-dependent is acquired once. One whose
+  // members do is acquired again only where its first fragment is placed:
+  // a continued fragment takes its rows from that acquisition, and the
+  // page-dependent blocks of the rows it takes are acquired again on the
+  // page that takes them (takeUprightTableRows), so each continuation page
+  // reacquires the content of the members that land on it and nothing else.
   let logicalTables = uprightLogicalTablesBySession.get(context.sessionState);
   if (!logicalTables) uprightLogicalTablesBySession.set(context.sessionState, logicalTables = new Map());
   const reusable = logicalTables.get(index);
   if (reusable && reusable.lastSourceIndex === lastIndex
+    && (reusable.reusableAcrossPages || request.cursor !== undefined)
     && reusable.availableInlineExtentPt === request.availableInlineExtentPt
     && reusable.freshPageBlockExtentPt === request.freshPageBlockExtentPt) {
     return { source, retained: reusable.retained, lastSourceIndex: lastIndex };
@@ -791,14 +813,13 @@ function uprightTableAcquisitionAt(
       break;
     }
   }
-  if (reusableAcrossPages) {
-    logicalTables.set(index, {
-      retained,
-      lastSourceIndex: lastIndex,
-      availableInlineExtentPt: request.availableInlineExtentPt,
-      freshPageBlockExtentPt: request.freshPageBlockExtentPt,
-    });
-  } else logicalTables.delete(index);
+  logicalTables.set(index, {
+    retained,
+    lastSourceIndex: lastIndex,
+    reusableAcrossPages,
+    availableInlineExtentPt: request.availableInlineExtentPt,
+    freshPageBlockExtentPt: request.freshPageBlockExtentPt,
+  });
   return { source, retained, lastSourceIndex: lastIndex };
 }
 
@@ -1102,7 +1123,12 @@ function uprightBlockReachesEarlierColumn(request: BodyTableRequest, box: Layout
 function uprightBlockCoversLaterDrawing(state: BodyAcquisitionState, table: SourceRef, box: LayoutRect): boolean {
   const tableIndex = table.path[0]!;
   const index = syncUprightDrawings(state, table);
-  for (const { anchorIndex, frame } of uprightPageDrawingsNear(index, box.yPt, box.yPt + box.heightPt)) {
+  // The drawing as the page's wrap rectangles hold it: once the index has
+  // moved it below this table, the text laid out so far still wraps around
+  // it where it was registered.
+  for (const { anchorIndex, registeredFrame: frame } of uprightPageDrawingsNear(
+    index, box.yPt, box.yPt + box.heightPt, box.xPt,
+  )) {
     if (anchorIndex > tableIndex
       && frame.xPt < box.xPt + box.widthPt && box.xPt < frame.xPt + frame.widthPt
       && frame.yPt < box.yPt + box.heightPt && box.yPt < frame.yPt + frame.heightPt) return true;
@@ -1278,9 +1304,19 @@ function measureUprightBlockTable(
    * fragment keeps the box edges of the whole table (rows continued on a
    * later page stay offset by a rule only earlier rows carry) and its place
    * in the box of its run, whose extent it registers. */
-  const rowsAt = (at: Readonly<{
+  const rowsAt = (found: Readonly<{
     blockStartPt: number; inlineStartPt: number; inlineRoomPt: number; inlineBandPt: number;
   }>): TableMeasureResult => {
+    // Rows pinned when the page's layout started (below) take the pinned
+    // place, which is registered already.
+    const segmentKey = uprightSegmentKey(sourceIndex, tableFragmentStartKey(request.cursor));
+    const pinned = index.segmentPins.get(segmentKey);
+    const at = pinned ? {
+      ...found,
+      blockStartPt: pinned.yPt,
+      inlineStartPt: pinned.xPt,
+      inlineRoomPt: physical.pageHeight - physical.marginBottom - pinned.xPt,
+    } : found;
     const searched: LayoutRect = {
       xPt: at.inlineStartPt,
       yPt: uprightRunMemberBlockStartPt(physical, run, at.blockStartPt, leader.boxBlockExtentPt),
@@ -1306,14 +1342,22 @@ function measureUprightBlockTable(
     const box: LayoutRect = Object.freeze({
       xPt: bounds.xPt, yPt: at.blockStartPt, widthPt: bounds.widthPt, heightPt: run.boxBlockExtentPt,
     });
+    const registration = pinned ? null : uprightBlockRegistrationOf(
+      box, [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), box)],
+      { sourceIndex: leader.lastSourceIndex, flowDomainId, bounds: box },
+    );
+    // Rows that cover a wrapped drawing registered when the page's layout
+    // started, which a paragraph after the table anchors, are pinned like
+    // a whole table: the drawing and its exclusion lie below them in the
+    // page's next layout, where they take this place again.
     return placed(
       taken.fragment as TableLayout,
       bounds,
       taken.nextCursor ? Object.freeze({ kind: 'table' as const, cursor: taken.nextCursor }) : null,
-      uprightBlockRegistrationOf(
-        box, [], [uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), box)],
-        { sourceIndex: leader.lastSourceIndex, flowDomainId, bounds: box },
-      ),
+      registration,
+      registration && uprightBlockCoversLaterDrawing(context.state, request.input.source, box)
+        ? Object.freeze({ ...registration, segmentPin: Object.freeze({ key: segmentKey, bounds: box }) })
+        : null,
     );
   };
 

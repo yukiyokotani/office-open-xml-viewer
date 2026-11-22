@@ -1557,26 +1557,39 @@ function* paginateBodyPassSteps(
   // layout as an earlier one keeps the position it had before the earlier
   // pin moved text.
   //
-  // A table placed ahead of the flow that the flow then reaches on a later
-  // page (its own exclusion, or a note reserve, moved what precedes it off
-  // the page) cannot keep that position. Library policy, not measured: the
-  // page is laid out again without it, the table is placed where the flow
-  // reaches it and only the text after it flows around it.
+  // A table placed ahead of the flow that the flow then does not reach on
+  // its page (its own exclusion, raised over an earlier column, or a note
+  // reserve moved what precedes it off the page) cannot keep that position.
+  // Then the last such table in body order is released: the page is laid
+  // out again without its pin, and when the flow reaches it on that page it
+  // starts the next one (`word-vertical-section-upright-block-table`; the
+  // other pins stay, so of two raised tables the later gives way).
   //
-  // Termination: a table (or owner segment) is pinned at most once and a
-  // table released at most once per pass, and each further layout of a page does at least one of the
+  // Termination: on each page a table (or owner segment) is pinned at most
+  // once and a table released at most once, a released table asks for no
+  // pin there, and each further layout of a page does at least one of the
   // two, so a page is laid out at most twice per table on it, plus once;
   // tables whose pins one layout finds share the next.
   // Pins are kept by table source key and fragment start, so each owner
   // segment of a table has its own.
-  type UprightPagePin = { tableKey: string; registration: UprightBlockRegistration; consumed: boolean };
+  type UprightPagePin = {
+    tableKey: string;
+    /** Top-level body index of the table. */
+    sourceIndex: number;
+    registration: UprightBlockRegistration;
+    consumed: boolean;
+  };
   const uprightPinKey = (tableKey: string, fragmentStartKey: string): string => `${tableKey}|${fragmentStartKey}`;
   let uprightPinPage = -1;
   let uprightPins = new Map<string, UprightPagePin>();
   /** This layout of the live page found pins that are not registered yet. */
   let uprightReplayPending = false;
+  /** Pins asked for, by page and pin key: each is asked for once per page. */
   const uprightPinnedOnce = new Set<string>();
-  const uprightForwardOnly = new Set<string>();
+  /** The page on which each released table was released, by table key. */
+  const uprightReleasedOnPage = new Map<string, number>();
+  const uprightReleasedHere = (tableKey: string): boolean =>
+    uprightReleasedOnPage.get(tableKey) === state.flow.pageIndex;
   const uprightPinsOf = (pageIndex: number): Map<string, UprightPagePin> => {
     if (uprightPinPage !== pageIndex) {
       uprightPinPage = pageIndex;
@@ -1587,10 +1600,15 @@ function* paginateBodyPassSteps(
   };
   /** Keeps a plan for replays of the page, where it is registered from the
    * page's start as a pin: every table in its slot for good. */
-  const retainUprightPlan = (tableKey: string, registration: UprightBlockRegistration): void => {
+  const retainUprightPlan = (
+    tableKey: string,
+    sourceIndex: number,
+    registration: UprightBlockRegistration,
+  ): void => {
     if (!canRecoverOnPage) return;
     uprightPinsOf(state.flow.pageIndex).set(uprightPinKey(tableKey, tableFragmentStartKey(undefined)), {
       tableKey,
+      sourceIndex,
       registration: Object.freeze({
         ...registration,
         slots: Object.freeze(registration.slots.map((slot) =>
@@ -1599,17 +1617,26 @@ function* paginateBodyPassSteps(
       consumed: false,
     });
   };
-  /** Before the live page closes: releases the tables placed ahead of the
-   * flow that it never reached there, and lays the page out again when that
-   * released one or this layout of the page found new pins. All pins found
-   * in one layout of a page are registered together by one further layout. */
+  /** Before the live page closes: lays the page out again when this layout
+   * of it found new pins, which are registered together, or when the flow
+   * did not reach a table pinned for the page there. Then the last such
+   * table in body order is released: the page is laid out without its pin,
+   * and the table starts the next page when the flow reaches it on this one
+   * (`word-vertical-section-upright-block-table`: a table whose place moves
+   * the text before it off the page is placed on the next page, and a later
+   * table gives way first). The other pins stay. */
   const settleUprightPinsBeforePageClose = (): void => {
     if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex) return;
     let replay = uprightReplayPending;
-    for (const [pinKey, pin] of uprightPins) {
-      if (pin.consumed) continue;
-      uprightPins.delete(pinKey);
-      uprightForwardOnly.add(pin.tableKey);
+    let released: UprightPagePin | null = null;
+    for (const pin of uprightPins.values()) {
+      if (!pin.consumed && (!released || pin.sourceIndex > released.sourceIndex)) released = pin;
+    }
+    if (released) {
+      for (const [pinKey, pin] of uprightPins) {
+        if (pin.tableKey === released.tableKey) uprightPins.delete(pinKey);
+      }
+      uprightReleasedOnPage.set(released.tableKey, state.flow.pageIndex);
       replay = true;
     }
     uprightReplayPending = false;
@@ -3122,7 +3149,8 @@ function* paginateBodyPassSteps(
               terminalGridParagraph = following.leadGridParagraph;
               terminalWholeParagraphHasPlacements = following.wholeParagraphHasPlacements ?? true;
               terminalLeadExtentPt = following.leadContentExtentPt;
-              terminalStartsFreshRegion = following.startsFreshRegion === true;
+              terminalStartsFreshRegion = following.startsFreshRegion === true
+                || (nextBlock.kind !== 'paragraph' && uprightReleasedHere(sourceKey(nextBlock.source)));
             }
             if (!continues || keepSetBlockedByDeferral) {
               hasTerminalBlock = true;
@@ -3334,6 +3362,7 @@ function* paginateBodyPassSteps(
         // moves.
         let uprightBlocks: UprightBlockRegistration | null = null;
         let uprightBlocksFor = '';
+        let uprightBlocksIndex = -1;
         const entryAfter = input.sequence[entryIndex + 1];
         const tableAfter = entryAfter?.kind === 'adjacent-table-group' ? entryAfter
           : entryAfter?.kind === 'body-block' && entryAfter.block.kind === 'table' ? entryAfter.block : null;
@@ -3342,7 +3371,7 @@ function* paginateBodyPassSteps(
           && selected.fragment && selected.nextCursor === null && !selected.requiresFreshFlowRegion
           && tableAfter !== null
           && activeRegion(state).writingMode !== 'horizontal-tb'
-          && !uprightForwardOnly.has(sourceKey(tableAfter.source))
+          && !uprightReleasedHere(sourceKey(tableAfter.source))
         ) {
           const unwrappedChargePt = Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt);
           const unwrappedReservePt = notePlans
@@ -3375,6 +3404,7 @@ function* paginateBodyPassSteps(
               ({ selected, notePlans } = wrappedChoice);
               uprightBlocks = planned;
               uprightBlocksFor = sourceKey(tableAfter.source);
+              uprightBlocksIndex = tableAfter.source.path[0]!;
             } else if (canRecoverOnPage) {
               // The paragraph no longer ends here beside the tables: it is
               // paginated again as any paragraph beside an exclusion (its
@@ -3383,7 +3413,7 @@ function* paginateBodyPassSteps(
               // The flow can reach them in another column. They are not
               // page pins yet: a table raised over an earlier column still
               // asks for one when the flow reaches it.
-              retainUprightPlan(sourceKey(tableAfter.source), planned);
+              retainUprightPlan(sourceKey(tableAfter.source), tableAfter.source.path[0]!, planned);
               session.commitUprightBlocks?.(Object.freeze({
                 ...planned,
                 slots: Object.freeze(planned.slots.map((slot) => Object.freeze({ ...slot, anyColumn: true }))),
@@ -3443,7 +3473,7 @@ function* paginateBodyPassSteps(
         }
         if (uprightBlocks) {
           session.commitUprightBlocks?.(uprightBlocks);
-          retainUprightPlan(uprightBlocksFor, uprightBlocks);
+          retainUprightPlan(uprightBlocksFor, uprightBlocksIndex, uprightBlocks);
         }
         cursor = selected.nextCursor;
         if (cursor) {
@@ -3491,6 +3521,14 @@ function* paginateBodyPassSteps(
           }
         }
       }
+      // `word-vertical-section-upright-block-table`: a table released on this
+      // page starts the next one (settleUprightPinsBeforePageClose).
+      if (resumed?.kind !== 'table' && state.flow.pageHasContent && uprightReleasedHere(sourceKey(block.source))) {
+        yield* commitTransition(
+          advanceToPage(state.flow, state.flow.section, 'overflow'),
+          entryIndex,
+        );
+      }
       let cursor: BodyTableContinuationCursor | undefined = resumed?.kind === 'table' ? resumed.cursor : undefined;
       const tableResume = (): PageEntryResume => ({ kind: 'table', entryIndex, cursor });
       currentEntryResume = tableResume;
@@ -3533,10 +3571,11 @@ function* paginateBodyPassSteps(
           // again when it closes, with every pin this layout of it found.
           const tableKey = sourceKey(block.source);
           const pinKey = uprightPinKey(tableKey, fragmentStartKey);
-          if (!uprightPinnedOnce.has(pinKey) && !uprightForwardOnly.has(tableKey)) {
-            uprightPinnedOnce.add(pinKey);
+          const askedKey = `${state.flow.pageIndex}|${pinKey}`;
+          if (!uprightPinnedOnce.has(askedKey) && !uprightReleasedHere(tableKey)) {
+            uprightPinnedOnce.add(askedKey);
             uprightPinsOf(state.flow.pageIndex).set(pinKey, {
-              tableKey, registration: acquired.uprightPagePin, consumed: false,
+              tableKey, sourceIndex: block.source.path[0]!, registration: acquired.uprightPagePin, consumed: false,
             });
             uprightReplayPending = true;
           }

@@ -102,7 +102,17 @@ export type UprightBlockTail = Readonly<{ sourceIndex: number; flowDomainId: str
 /** A wrapped anchored drawing of the page: the body index of the paragraph
  * that anchors it, its text exclusion and its frame, in section-logical page
  * points. */
-export type UprightPageDrawing = Readonly<{ anchorIndex: number; exclusion: LayoutRect; frame: LayoutRect }>;
+export type UprightPageDrawing = {
+  readonly anchorIndex: number;
+  /** Where the drawing lies, below every table placed for a table before its
+   * paragraph that it would cover (moveUprightPageDrawingsBelowTableBox).
+   * Replaced, never mutated, when it moves. */
+  exclusion: LayoutRect;
+  frame: LayoutRect;
+  /** The frame as the page's wrap rectangles hold it, which the text laid
+   * out so far wraps around. */
+  readonly registeredFrame: LayoutRect;
+};
 
 /** What accepting upright blocks adds to the page: at most one box for the
  * index, the slots of tables placed ahead of the flow, the text exclusions
@@ -351,28 +361,109 @@ export function inlineShiftBelowUprightTablesPt(
   return startPt - rect.xPt;
 }
 
-/** Records a wrapped anchored drawing of the page. */
-export function addUprightPageDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
+/** Inline end of what a recorded drawing places: its exclusion or its frame,
+ * whichever reaches further. The drawings of a bucket are ordered by it. */
+const drawingInlineEndPt = (drawing: UprightPageDrawing) => Math.max(
+  drawing.exclusion.xPt + drawing.exclusion.widthPt, drawing.frame.xPt + drawing.frame.widthPt,
+);
+
+/** Block buckets a recorded drawing is kept in: those of its exclusion and
+ * frame, at most MAX_BUCKET_SPAN + 1 from its block start (no page is wide
+ * enough for a query past that range to meet it). Moving a drawing along the
+ * inline axis leaves them unchanged. */
+function drawingBuckets(drawing: UprightPageDrawing): readonly [number, number] {
   const startPt = Math.min(drawing.exclusion.yPt, drawing.frame.yPt);
   const endPt = Math.max(
     drawing.exclusion.yPt + drawing.exclusion.heightPt, drawing.frame.yPt + drawing.frame.heightPt,
   );
   const first = bucketOf(startPt);
-  const last = Math.min(bucketOf(endPt), first + MAX_BUCKET_SPAN);
+  return [first, Math.min(bucketOf(endPt), first + MAX_BUCKET_SPAN)];
+}
+
+/** Position in `drawings` (ordered by inline end, furthest first) of the
+ * first drawing whose inline end is at or before `endPt`. */
+function firstEndingAtOrBefore(drawings: readonly UprightPageDrawing[], endPt: number): number {
+  let low = 0;
+  let high = drawings.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (drawingInlineEndPt(drawings[middle]!) > endPt) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function insertDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
+  const [first, last] = drawingBuckets(drawing);
+  const endPt = drawingInlineEndPt(drawing);
   for (let bucket = first; bucket <= last; bucket += 1) {
     const drawings = index.drawingBuckets.get(bucket);
-    if (drawings) drawings.push(drawing);
-    else index.drawingBuckets.set(bucket, [drawing]);
+    if (!drawings) index.drawingBuckets.set(bucket, [drawing]);
+    else drawings.splice(firstEndingAtOrBefore(drawings, endPt), 0, drawing);
   }
 }
 
+function removeDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
+  const [first, last] = drawingBuckets(drawing);
+  const endPt = drawingInlineEndPt(drawing);
+  for (let bucket = first; bucket <= last; bucket += 1) {
+    const drawings = index.drawingBuckets.get(bucket)!;
+    // The drawings ending further come first; it is among those ending at
+    // the same position.
+    let at = firstEndingAtOrBefore(drawings, endPt);
+    while (drawings[at] !== drawing) at += 1;
+    drawings.splice(at, 1);
+  }
+}
+
+/** Records a wrapped anchored drawing of the page, moved first to lie below
+ * the upright tables already placed for tables before its paragraph
+ * (inlineShiftBelowUprightTablesPt). */
+export function addUprightPageDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
+  insertDrawing(index, drawing);
+  moveUprightPageDrawingBelowTables(index, drawing);
+}
+
+/** Moves a recorded drawing along the inline axis below the tables placed for
+ * tables before its paragraph that it would cover. */
+function moveUprightPageDrawingBelowTables(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
+  const shiftPt = inlineShiftBelowUprightTablesPt(index, drawing.anchorIndex, drawing.frame);
+  if (shiftPt === 0) return;
+  removeDrawing(index, drawing);
+  drawing.exclusion = Object.freeze({ ...drawing.exclusion, xPt: drawing.exclusion.xPt + shiftPt });
+  drawing.frame = Object.freeze({ ...drawing.frame, xPt: drawing.frame.xPt + shiftPt });
+  insertDrawing(index, drawing);
+}
+
+/**
+ * `word-vertical-section-upright-block-table`: a wrapped drawing anchored
+ * after a table lies below it. When the box of tables ending at body index
+ * `sourceIndex` is placed, the recorded drawings of paragraphs after them
+ * that it covers move below it here, before any later table is placed
+ * against them, as their paragraphs' own acquisition places them.
+ */
+export function moveUprightPageDrawingsBelowTableBox(index: UprightBlockPageIndex, table: UprightTableBox): void {
+  const { box } = table;
+  const covered: UprightPageDrawing[] = [];
+  for (const drawing of uprightPageDrawingsNear(index, box.yPt, box.yPt + box.heightPt, box.xPt)) {
+    const { frame } = drawing;
+    if (drawing.anchorIndex > table.sourceIndex
+      && frame.xPt < box.xPt + box.widthPt && box.xPt < frame.xPt + frame.widthPt
+      && frame.yPt < box.yPt + box.heightPt && box.yPt < frame.yPt + frame.heightPt) covered.push(drawing);
+  }
+  for (const drawing of covered) moveUprightPageDrawingBelowTables(index, drawing);
+}
+
 /** The recorded drawings whose exclusion or frame can lie in the block range
- * [`blockStartPt`, `blockEndPt`], each once: only the drawings near that
- * range are read. */
+ * [`blockStartPt`, `blockEndPt`] and reaches past inline position
+ * `inlineFromPt`, each once. Each bucket keeps its drawings ordered by inline
+ * end, so only the drawings near that range and past that position are read:
+ * one ending at or before it is never looked at. */
 export function uprightPageDrawingsNear(
   index: UprightBlockPageIndex,
   blockStartPt: number,
   blockEndPt: number,
+  inlineFromPt = Number.NEGATIVE_INFINITY,
 ): UprightPageDrawing[] {
   const near: UprightPageDrawing[] = [];
   const first = bucketOf(blockStartPt);
@@ -380,9 +471,10 @@ export function uprightPageDrawingsNear(
   for (let bucket = first; bucket <= last; bucket += 1) {
     const drawings = index.drawingBuckets.get(bucket);
     if (!drawings) continue;
-    for (const drawing of drawings) {
-      const startPt = Math.min(drawing.exclusion.yPt, drawing.frame.yPt);
-      if (bucket === Math.max(first, bucketOf(startPt))) near.push(drawing);
+    for (let at = 0; at < drawings.length; at += 1) {
+      const drawing = drawings[at]!;
+      if (!(drawingInlineEndPt(drawing) > inlineFromPt)) break;
+      if (bucket === Math.max(first, drawingBuckets(drawing)[0])) near.push(drawing);
     }
   }
   return near;
