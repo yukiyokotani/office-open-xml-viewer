@@ -114,32 +114,8 @@ export function wireErrorPlaceholder(resolved: ResolvedErrorPlaceholder | null):
     : Object.freeze({ state: 'resolved', title: resolved.title, detail: resolved.detail });
 }
 
-/** Read a wire field back into resolved text (`builtin`/absent → `null`).
- *  `resolve-on-main` must be handled by the caller first. @internal */
-export function resolvedFromWire(wire: WireErrorPlaceholder | undefined): ResolvedErrorPlaceholder | null {
-  if (wire === undefined || wire.state === 'builtin') return null;
-  if (wire.state !== 'resolved') throw new Error('errorPlaceholder was not resolved on the main thread');
-  const title = typeof wire.title === 'string' ? wire.title : null;
-  const detail = wire.detail === null || typeof wire.detail === 'string' ? wire.detail : undefined;
-  return Object.freeze({ title, detail: detail === '' ? null : detail });
-}
-
-/** The painted title for a failed part. */
-export function errorPlaceholderTitle(resolved: ResolvedErrorPlaceholder | null, builtin: string): string {
-  return resolved?.title ?? builtin;
-}
-
-/** The painted detail for a failed part; `null` paints no detail line. */
-export function errorPlaceholderDetail(
-  resolved: ResolvedErrorPlaceholder | null,
-  builtin: string,
-): string | null {
-  if (resolved === null || resolved.detail === undefined) return builtin;
-  return resolved.detail;
-}
-
-/** Bytes kept for one failure record's `message` (the painted default detail
- *  keeps the full parser string). */
+/** Bytes kept for one failure record's `message`, and painted for one
+ *  placeholder title or detail. */
 export const PART_FAILURE_MESSAGE_MAX_UTF8 = 1024;
 /** Aggregate `message` bytes kept per engine; later records get `''`. */
 export const PART_FAILURE_MESSAGES_MAX_UTF8 = 1024 * 1024;
@@ -285,6 +261,45 @@ export function partFailureLogOf<F extends { readonly message: string }>(
     partFailureLogs.set(owner, log as unknown as PartFailureLog<{ readonly message: string }>);
   }
   return log;
+}
+
+/**
+ * What the lazily loaded placeholder text (`error-placeholder-text.ts`) takes
+ * from the static graph. It is handed over as a value, not imported there: see
+ * that module. @internal
+ */
+export const ERROR_PLACEHOLDER_TEXT_HOST = /* @__PURE__ */ Object.freeze({
+  clampPartFailureMessage: clampPartFailureMessage as (message: string) => string,
+  graphemeClusterOffsets,
+});
+
+/** A module loaded on first use and kept for the realm. @internal */
+export interface OnDemandModule<T> {
+  /** The module once loaded, else `undefined`. */
+  readonly loaded: T | undefined;
+  /** Load it. A rejected load is not cached: the next call tries again. */
+  load(): Promise<T>;
+}
+
+/**
+ * The placeholder a failed part shows is code no healthy file needs, so each
+ * format loads it with the first part that failed (#2248). A self-contained
+ * worker bundle inlines it.
+ * @internal
+ */
+export function onDemandModule<T>(importModule: () => Promise<T>): OnDemandModule<T> {
+  let loaded: T | undefined;
+  let loading: Promise<T> | undefined;
+  return {
+    get loaded() { return loaded; },
+    load: () => loading ??= importModule().then(
+      (imported) => loaded = imported,
+      (error: unknown) => {
+        loading = undefined;
+        throw error;
+      },
+    ),
+  };
 }
 
 interface QueuedPartFailure<F> {

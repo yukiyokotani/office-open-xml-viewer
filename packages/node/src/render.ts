@@ -294,6 +294,8 @@ export async function renderSlideNode(
         // inject another source; text/shape-only rendering uses an empty Blob.
         fetchImage,
         skipMediaControls: true,
+        // Symbol colour probes draw on the caller's own canvas backend.
+        ...(opts.factory ? { createCanvas: (w: number, h: number) => opts.factory!.createCanvas(w, h) } : {}),
         ...(isParsedPptxSlide(slide) ? { parsedTextChain: true } : {}),
       },
     );

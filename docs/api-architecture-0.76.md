@@ -590,6 +590,8 @@ export interface XlsxWorkbookSession {
   readonly sheetNames: readonly string[];
   readonly resourceUsage: OoxmlResourceUsageSnapshot | undefined;
   worksheetRows(sheetIndex: number): AsyncGenerator<XlsxWorksheetRowChunk>;
+  /** Added in 0.90, as on the DOCX and PPTX sessions. */
+  getImage(path: string, mimeType?: string): Promise<Blob>;
   close(): Promise<void>;
 }
 

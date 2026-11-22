@@ -261,7 +261,7 @@ export function containsHanScript(text: string): boolean {
  * later proves needed simply loads lazily via the FontFaceSet on its first use.
  *
  * Detection is by objective Unicode block membership (no name/heuristic guessing
- * — see root CLAUDE.md). Ranges scanned per codepoint:
+ * — see root AGENTS.md). Ranges scanned per codepoint:
  *   - Hangul     U+1100–11FF (Jamo), U+3130–318F (Compat Jamo), U+AC00–D7AF
  *                (Syllables)                                   → CJK, lang 'kr'
  *   - Hira/Kana  U+3040–30FF                                   → CJK, lang 'jp'

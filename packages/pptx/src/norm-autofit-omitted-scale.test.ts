@@ -53,9 +53,9 @@ function body(overrides: Partial<TextBody> = {}): TextBody {
   } as TextBody;
 }
 
-function paintedSizes(text: TextBody, boxHeight: number): number[] {
+function paintedSizes(text: TextBody, boxHeight: number, boxWidth = 400): number[] {
   const { ctx, fonts } = context();
-  renderTextBody(ctx, text, 0, 0, 400, boxHeight, SCALE);
+  renderTextBody(ctx, text, 0, 0, boxWidth, boxHeight, SCALE);
   return fonts.map((font) => Number(/([\d.]+)px/.exec(font)?.[1]));
 }
 
@@ -72,6 +72,44 @@ describe('normAutofit without stored fontScale (PowerPoint PDF controls)', () =>
     text.paragraphs[2]!.spaceAfterPct = 50000;
     text.spcFirstLastPara = true;
     expect(paintedSizes(text, 44)).toEqual([24, 24, 24]);
+  });
+
+  it('model sources with shrinkOnOverflow take the first LibreOffice level that fits', () => {
+    // Three 24 pt lines (28.8 pt each, 86.4 pt): 80 pt fits at spacing 0.9
+    // alone; 60 pt needs a font level (0.85); ample room keeps 24 pt.
+    expect(paintedSizes(body({ shrinkOnOverflow: true }), 140)).toEqual([24, 24, 24]);
+    expect(paintedSizes(body({ shrinkOnOverflow: true }), 80)).toEqual([24, 24, 24]);
+    expect(paintedSizes(body({ shrinkOnOverflow: true }), 60)).toEqual([20.4, 20.4, 20.4]);
+  });
+
+  it('shrink-to-fit fits the text columns, not one column', () => {
+    // 86.4 pt in one column overflows 60 pt; two columns hold two lines
+    // (57.6 pt) and one, so nothing shrinks.
+    const text = body({ shrinkOnOverflow: true, numCol: 2, spcCol: 0 });
+    expect(paintedSizes(text, 60)).toEqual([24, 24, 24]);
+  });
+
+  it('anchors a columned shrink-to-fit body by its tallest column', () => {
+    // Two columns of 57.6 pt (two lines) and 28.8 pt in a 60 pt frame,
+    // bottom-anchored: the first baseline sits in the frame, not above it.
+    const text = body({ shrinkOnOverflow: true, numCol: 2, spcCol: 0, verticalAnchor: 'b' });
+    const { ctx } = context();
+    const baselines: number[] = [];
+    (ctx as unknown as { fillText: (t: string, x: number, y: number) => void }).fillText =
+      (_t, _x, y) => baselines.push(y);
+    renderTextBody(ctx, text, 0, 0, 400, 60, SCALE);
+    expect(baselines.length).toBe(3);
+    expect(Math.min(...baselines)).toBeGreaterThan(0);
+    expect(Math.max(...baselines)).toBeLessThanOrEqual(60);
+  });
+
+  it('shrink-to-fit shrinks wrapped text wider than its box', () => {
+    // A 9.6 pt wide box: no single 24 pt glyph (13.2 pt) fits, however the
+    // line breaks; at the 0.7 level (16.8 pt, 9.24 pt) it does.
+    const text = body({ shrinkOnOverflow: true, wrap: 'square' });
+    const sizes = paintedSizes(text, 2000, 9.6);
+    expect(sizes.length).toBeGreaterThan(0);
+    expect(new Set(sizes.map((s) => Math.round(s * 10) / 10))).toEqual(new Set([16.8]));
   });
 
   it('uses a stored scale even when it does not match the content', () => {

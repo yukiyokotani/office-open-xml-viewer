@@ -1784,6 +1784,7 @@ pub(crate) fn parse_text_body(
         anchor_ctr,
         compat_ln_spc,
         text_warp,
+        shrink_on_overflow: false,
     }
 }
 

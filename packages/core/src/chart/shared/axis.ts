@@ -369,6 +369,7 @@ export function formatPrimaryValueAxisTick(
     (percentStacked ? value / 100 : value) / displayUnitDivisor(chart.valAxisDisplayUnits),
     percentStacked ? (chart.valAxisFormatCode ?? '0%') : chart.valAxisFormatCode,
     chart.date1904,
+    chart.valAxisFormatDivisors,
   );
 }
 
@@ -384,8 +385,10 @@ export function formatAxisTickWithUnits(
   formatCode: string | null | undefined,
   date1904: boolean | undefined,
   units: ChartDisplayUnits | null | undefined,
+  /** Section divisors of `formatCode` ({@link formatChartValWithCode}). */
+  formatDivisors?: readonly number[] | null,
 ): string {
-  return formatChartValWithCode(value / displayUnitDivisor(units), formatCode, date1904);
+  return formatChartValWithCode(value / displayUnitDivisor(units), formatCode, date1904, formatDivisors);
 }
 
 

@@ -1,4 +1,4 @@
-import { loadFontDemandCollector } from './font-demand-collector.js';
+import { importFontDemandCollector } from './font-demand-collector.js';
 import { decodeDataUrl, WasmParserHost } from '@silurus/ooxml-core';
 import {
   decodeOoxmlResourceUsage,
@@ -110,6 +110,11 @@ self.onmessage = async (
 
       if (request.kind === 'parse') {
         preflightBuilder = null;
+        // Fetch the optional collector chunk while the archive opens, off
+        // the critical path (observed so an open failure leaves no rejection).
+        const collectorLoad = typeof request.collectFontDemand === 'string' && !request.progressiveLayout
+          ? importFontDemandCollector(request.collectFontDemand) : undefined;
+        void collectorLoad?.catch(() => undefined);
         const [maxEntry, maxTotal, maxEntries] = resourcePolicyForWasm(request.resourcePolicy);
         const bootstrap = host.run(() => {
           const archive = new PptxArchive(
@@ -129,7 +134,7 @@ self.onmessage = async (
         // keeping a second builder here would duplicate the bounded projection.
         preflightBuilder = request.progressiveLayout
           ? null
-          : new PresentationPreflightBuilder(bootstrap, { cjkFallback: request.cjkFallback, collectFontDemand: request.collectFontDemand === true ? await loadFontDemandCollector(true) : undefined });
+          : new PresentationPreflightBuilder(bootstrap, { cjkFallback: request.cjkFallback, collectFontDemand: await collectorLoad });
         post({ kind: 'presentationOpened', id, bootstrap });
         presentationState = 'ready';
         return;

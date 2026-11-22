@@ -46,6 +46,9 @@ export function hostFontLineMetric(
     designAscentRatio: ascent,
     designDescentRatio: descent,
     lineGapRatio: measured.lineGapRatio,
+    normalAscentRatio: measured.ascentRatio,
+    normalDescentRatio: measured.descentRatio,
+    normalLineGapRatio: measured.lineGapRatio,
     ...(profiles.length > 0 && route.source === 'local' ? { farEastCodePage: false } : {}),
   });
 }

@@ -10,13 +10,16 @@ export const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relation
 const REL = 'http://schemas.openxmlformats.org/package/2006/relationships';
 const OFFICE_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
-/** A one-slide deck whose slide tree is `shapes` (p:sp / p:graphicFrame XML). */
-export function deck(shapes: string): Uint8Array {
+/** A one-slide deck whose slide tree is `shapes` (p:sp / p:graphicFrame XML),
+ * with `media` parts (`ppt/media/<name>`) related to the slide as `rIdM<n>`. */
+export function deck(shapes: string, media: ReadonlyMap<string, Uint8Array> = new Map()): Uint8Array {
   const xml = (body: string) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${body}`;
-  const files: Array<[string, string]> = [
+  const files: Array<[string, string | Uint8Array]> = [
     ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Default Extension="wmf" ContentType="image/x-wmf"/><Default Extension="emf" ContentType="image/x-emf"/>'
+      + '<Default Extension="png" ContentType="image/png"/>'
       + '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
       + '<Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
       + '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
@@ -35,7 +38,9 @@ export function deck(shapes: string): Uint8Array {
     ['ppt/slides/slide1.xml', xml(`<p:sld xmlns:p="${P}" xmlns:a="${A}" xmlns:r="${R}"><p:cSld><p:spTree>`
       + '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>'
       + `${shapes}</p:spTree></p:cSld></p:sld>`)],
-    ['ppt/slides/_rels/slide1.xml.rels', xml(`<Relationships xmlns="${REL}"><Relationship Id="rId1" Type="${OFFICE_REL}/slideLayout" Target="../slideLayouts/slideLayout1.xml"/></Relationships>`)],
+    ['ppt/slides/_rels/slide1.xml.rels', xml(`<Relationships xmlns="${REL}"><Relationship Id="rId1" Type="${OFFICE_REL}/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>`
+      + [...media.keys()].map((name, index) => `<Relationship Id="rIdM${index}" Type="${OFFICE_REL}/image" Target="../media/${name}"/>`).join('')
+      + '</Relationships>')],
     ['ppt/slideLayouts/slideLayout1.xml', xml(`<p:sldLayout xmlns:p="${P}" xmlns:a="${A}"><p:cSld><p:spTree>`
       + '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sldLayout>')],
     ['ppt/slideLayouts/_rels/slideLayout1.xml.rels', xml(`<Relationships xmlns="${REL}"><Relationship Id="rId1" Type="${OFFICE_REL}/slideMaster" Target="../slideMasters/slideMaster1.xml"/></Relationships>`)],
@@ -61,7 +66,7 @@ export function deck(shapes: string): Uint8Array {
       + '<a:bgFillStyleLst><a:noFill/><a:noFill/><a:noFill/></a:bgFillStyleLst></a:fmtScheme>'
       + '</a:themeElements></a:theme>')],
   ];
-  return storedZip(files);
+  return storedZip([...files, ...[...media].map(([name, bytes]) => [`ppt/media/${name}`, bytes] as [string, Uint8Array])]);
 }
 
 let shapeId = 2;
@@ -73,3 +78,8 @@ export const textBox = (paragraphs: string, bodyPr = '<a:bodyPr wrap="square"><a
 export const para = (runs: string, pPr = '<a:pPr><a:buNone/></a:pPr>') => `<a:p>${pPr}${runs}</a:p>`;
 export const run = (text: string, rPr = '') => `<a:r><a:rPr lang="en-US" sz="2400"${rPr}/><a:t>${text}</a:t></a:r>`;
 
+
+/** A picture of the `index`th `deck` media part (§19.3.1.37 pic). */
+export const picture = (index: number) => `<p:pic><p:nvPicPr><p:cNvPr id="${shapeId++}" name="P"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>`
+  + `<p:blipFill><a:blip r:embed="rIdM${index}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>`
+  + '<p:spPr><a:xfrm><a:off x="457200" y="3657600"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>';

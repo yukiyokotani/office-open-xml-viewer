@@ -29,12 +29,12 @@ import {
   fontResolverFailureKey,
   type FontResolverFailures,
 } from './resolver-failures.js';
-import { admitFontResolverResult, isBridgedFontSourceLimitError } from './resolver-admission.js';
+import { admitFontResolverResult } from './resolver-admission.js';
 import { SharedTask, type FamilyResolution, type SourceCache } from './source-cache.js';
 import {
   fontResolverFunction,
   type FontDemand,
-  type FontResolveContext,
+  type FontResolverContext,
   type FontResolverSource,
 } from './source.js';
 import { FONT_SUBSTITUTE_SCRIPTS, type FontSubstituteScript } from './substitute-script.js';
@@ -76,7 +76,7 @@ export interface ResolverCallInfo {
 export type FontResolverRunner = (
   source: FontResolverSource,
   demand: FontDemand,
-  context: FontResolveContext,
+  context: FontResolverContext,
   call: ResolverCallInfo,
 ) => readonly unknown[] | BridgedFamilyResolutions | Promise<readonly unknown[] | BridgedFamilyResolutions>;
 
@@ -124,9 +124,9 @@ export type { FontResolverFailures };
 export function resolverCandidates(
   index: ReturnType<typeof indexFontDeclarations>,
   family: string,
-  substitutes: readonly FontSubstitution[] | undefined,
+  substitutions: readonly FontSubstitution[] | undefined,
 ): FamilyResolution {
-  const keys = [fontFamilyKey(family), ...substitutionsFor(substitutes, family).map(({ use }) => fontFamilyKey(use))];
+  const keys = [fontFamilyKey(family), ...substitutionsFor(substitutions, family).map(({ use }) => fontFamilyKey(use))];
   const declarations = [...new Set(keys)].flatMap((key) => index.get(key) ?? []);
   return declarations.length
     ? { kind: 'claimed', served: declarations[0].family, declarations: Object.freeze(declarations) }
@@ -138,11 +138,11 @@ export function resolverCandidates(
 export function claimResolverCandidates(
   answer: FamilyResolution,
   family: string,
-  substitutes: readonly FontSubstitution[] | undefined,
+  substitutions: readonly FontSubstitution[] | undefined,
   scripts: FontSubstituteScripts,
 ): FamilyResolution {
   if (answer.kind !== 'claimed') return answer;
-  return claimFromIndex(indexFontDeclarations(answer.declarations), family, substitutes, scripts);
+  return claimFromIndex(indexFontDeclarations(answer.declarations), family, substitutions, scripts);
 }
 
 /**
@@ -183,7 +183,7 @@ export async function resolveFamiliesThroughCache(options: {
   let call: SharedTask<Map<string, FamilyResolution>> | undefined;
   if (needed.length) {
     const demand: FontDemand = Object.freeze({
-      families: Object.freeze(needed.filter((entry) => !entry.fallback).map(({ name }) => name)),
+      authoredFamilies: Object.freeze(needed.filter((entry) => !entry.fallback).map(({ name }) => name)),
       fallbackFamilies: Object.freeze(needed.filter((entry) => entry.fallback).map(({ name }) => name)),
     });
     call = new SharedTask((callSignal) => callResolver(runner, source, demand, callSignal, { sourceIndex, remainingMs: remainingMs() }), () => undefined);
@@ -197,7 +197,7 @@ export async function resolveFamiliesThroughCache(options: {
       batch.delete(key);
       return own;
     }, signal, holder);
-    // A rejection (abort, timeout, ceiling breach) concludes the whole batch
+    // A rejection (abort, timeout) concludes the whole batch
     // at the requester, which knows why (`concludeFamilies`, per family).
     // A failed answer, or a failure another requester of this document
     // recorded while this answer was in flight, concludes this family.
@@ -222,7 +222,7 @@ async function callResolver(
   signal: AbortSignal,
   info: ResolverCallInfo,
 ): Promise<Map<string, FamilyResolution>> {
-  const names = [...demand.families, ...demand.fallbackFamilies];
+  const names = [...demand.authoredFamilies, ...demand.fallbackFamilies];
   const failAll = (reason: string) => new Map(
     names.map((name) => [fontFamilyKey(name), { kind: 'failed', reason } satisfies FamilyResolution]));
   // The requester's deadline by wall clock as well as by timer: a resolver
@@ -237,16 +237,14 @@ async function callResolver(
   try {
     raw = await runResolver(source, demand, Object.freeze({ signal }), info);
   } catch (error) {
-    // A bridged call reports the main-side admission's ceiling breach, which
-    // rejects the load exactly as this realm's own admission would.
-    if (signal.aborted || isBridgedFontSourceLimitError(error)) throw error;
+    if (signal.aborted) throw error;
     if (late()) return failAll('timed out');
     return failAll(error instanceof Error ? error.message : String(error));
   }
   if (signal.aborted) throw createAbortError('Font resolver abandoned');
   if (late()) return failAll('timed out');
   const candidates = (index: ReturnType<typeof indexFontDeclarations>, name: string) =>
-    resolverCandidates(index, name, source.substitutes);
+    resolverCandidates(index, name, source.substitutions);
   if (raw instanceof BridgedFamilyResolutions) {
     const bridged = raw.families;
     return new Map(names.map((name): [string, FamilyResolution] => {

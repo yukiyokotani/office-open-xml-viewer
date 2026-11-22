@@ -1,6 +1,7 @@
-import { symbolFontToUnicode } from '@silurus/ooxml-core';
+import { DEFAULT_DOCX_COMPAT_PROFILE, type DocxCompatProfile } from './compat-profile.js';
+import { isSymbolFontFamily, symbolTextToUnicodeSegments } from '@silurus/ooxml-core';
 import type { NumberingInfo, TabStop } from '../types.js';
-import { wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
+import { wordNumberingSpaceSuffixUsesArial, wordNumberingSuffixAcceptsCoincidentListTab } from './line-compatibility.js';
 import { nextTabStop, type TextLayoutService, type TextShapeResult } from './text.js';
 import type { DeepReadonly, NumberingMarkerShapeInput } from './types.js';
 import { allowsReferenceFontMetric, indexedFontMetrics, selectResourceMetric, selectedFontLineMetric } from '../line-breaker/font-metrics.js';
@@ -69,6 +70,7 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     authoredFirstIndentPt: number;
     tabStops: readonly TabStop[];
     defaultTabPt?: number;
+    compat?: DocxCompatProfile;
     service?: TextLayoutService;
     clusterGeometry?: boolean;
   }>,
@@ -85,6 +87,8 @@ export function applyNumberingBodyOffset<Context extends Readonly<{
     physicalIndentLeftPt: context.physicalIndentLeftPt,
     tabStops: input.tabStops,
     defaultTabPt: input.defaultTabPt ?? context.defaultTabPt,
+    ...(input.compat ? { compat: input.compat } : {}),
+    baseRtl: context.baseRtl,
   }, service, input.clusterGeometry ?? true);
   return {
     ...context,
@@ -178,18 +182,92 @@ export function resolveNumberingMarkerGeometry(
   input: Readonly<{
     authoredFirstIndentPt: number;
     physicalIndentLeftPt: number;
+    /** Observed legacy false-flag numbering window. Ordinary custom/grid
+     * coordinates follow this origin; the implicit indent stop does not. */
+    suffixFrameOriginPt?: number;
     tabStops: readonly TabStop[];
     defaultTabPt: number;
+    /** Document profile; absent means DEFAULT_DOCX_COMPAT_PROFILE. */
+    compat?: DocxCompatProfile;
+    /** Paragraph direction; WORD_NUMBERING_SPACE_SUFFIX_ARIAL is measured for
+     * left-to-right paragraphs only, so an absent value keeps the marker face. */
+    baseRtl?: boolean;
   }>,
   service: TextLayoutService,
   clusterGeometry = true,
 ): NumberingMarkerGeometry {
-  const markerText = numbering.picBulletImagePath
-    ? ''
-    : symbolFontToUnicode(numbering.text, numbering.fontFamily ?? null);
+  // A symbol-font marker (§17.9.x w:lvlText in Symbol/Wingdings...) is judged
+  // against the font the text service selects for it, exactly as run text
+  // (core symbol-font.ts), and is then shaped as ONE run, as every marker is:
+  //   - no code converts: the authored codes, in the marker's symbol slots;
+  //   - codes convert and the face draws none of the marker's codes (the font
+  //     is missing or Unicode-encoded, like Apple's Symbol): the converted
+  //     text. It keeps the authored slots, as in 0.89, only when every
+  //     character of it lies above U+00FF, where no symbol cmap reads a
+  //     character as a code; otherwise every slot is cleared (a
+  //     Unicode-capable generic route), because a symbol cmap would re-read
+  //     e.g. a converted U+00A9 as its own code 0xA9 (a heart in Symbol), and
+  //     whether a face reads a Latin-1 character as itself cannot be
+  //     established. The colour proof of the conversion was made in the
+  //     cleared route, so the authored slots are also given up where they
+  //     would paint the text in its own colours, and for a target written
+  //     with VS15;
+  //   - codes convert while the face draws another code of the same marker
+  //     (a face with only part of its encoding): one run cannot take both
+  //     routes, so the marker stays as authored, as before this conversion.
+  const markerFamily = numbering.fontFamily ?? markerInput.fonts.ascii ?? null;
+  const slots = [markerInput.fonts, markerInput.themeFonts].flatMap((fonts) => fonts
+    ? [fonts.ascii, fonts.highAnsi, fonts.eastAsia, fonts.complexScript] : []);
+  const markerSlots = {
+    fonts: markerInput.fonts, themeFonts: markerInput.themeFonts, themeFontPresence: markerInput.themeFontPresence,
+    weight: markerInput.weight, style: markerInput.style, complexScript: markerInput.complexScript,
+    fontHint: markerInput.fontHint, eastAsiaLanguage: markerInput.eastAsiaLanguage,
+  };
+  // Slots carry the effective level rPr. Where a slot that shaping selects
+  // does not name a symbol font (an older/public model, or a complex-script
+  // marker whose cs slot names a text face), the lvlText codes still belong
+  // to the marker's symbol font (§17.9.x): the marker is judged, and its kept
+  // codes shaped, in that family alone.
+  const slotted = service.scalarFamily
+    ? [...numbering.text].every((character) => isSymbolFontFamily(service.scalarFamily!(markerSlots, character)))
+    : slots.some(isSymbolFontFamily);
+  const symbolMarker = !numbering.picBulletImagePath && [markerFamily, ...slots].some(isSymbolFontFamily);
+  const keptInput: NumberingMarkerShapeInput = slotted || !symbolMarker || !isSymbolFontFamily(markerFamily) ? markerInput : {
+    ...markerInput,
+    fonts: { ascii: markerFamily, highAnsi: markerFamily, eastAsia: markerFamily, complexScript: markerFamily },
+    themeFonts: undefined,
+    themeFontPresence: undefined,
+  };
+  const keptSlots = { ...markerSlots, fonts: keptInput.fonts, themeFonts: keptInput.themeFonts, themeFontPresence: keptInput.themeFontPresence };
+  const judged = !symbolMarker ? [{ text: numbering.text, mapped: false }]
+    : service.symbolText?.({ ...keptSlots, text: numbering.text })
+      ?? symbolTextToUnicodeSegments(numbering.text, markerFamily);
+  const judgedText = judged.map((part) => part.text).join('');
+  const drawnAsSymbol = (slotsOf: typeof markerSlots, text: string) =>
+    [...text].some((character) => service.symbolDraws?.(slotsOf, character) === true);
+  const anyConverted = judged.some((part) => part.mapped);
+  // "Draws another code": a code the judgement kept. (A native code that
+  // was nevertheless converted, see SymbolTextOptions.keepsShifted, is not.)
+  const converted = anyConverted
+    && !judged.some((part) => !part.mapped && drawnAsSymbol(keptSlots, part.text));
+  // A kept code takes its judged form: a bare code that bidi mirroring would
+  // replace is written F0-shifted there (core symbol-font.ts). So a wholly
+  // kept marker is the judged text, and a partly native one is the authored
+  // text with each kept code in that form (judged code by code; the codes
+  // that would have converted stay as authored).
+  const authoredKept = () => [...numbering.text].map((character) => {
+    const parts = service.symbolText?.({ ...keptSlots, text: character });
+    return parts?.length === 1 && !parts[0]!.mapped ? parts[0]!.text : character;
+  }).join('');
+  const markerText = numbering.picBulletImagePath ? ''
+    : converted || !anyConverted ? judgedText : authoredKept();
   const markerLayout = markerText
     ? shapeNumberingMarkerText(
-        markerInput,
+        !converted ? keptInput
+          : [...markerText].every((character) => character.codePointAt(0)! > 0xff && character !== '\uFE0E')
+            && service.symbolMonochrome?.(markerSlots, markerText) !== false ? markerInput
+            : { ...markerInput, fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null },
+              themeFonts: undefined, themeFontPresence: undefined },
         markerText,
         1,
         service,
@@ -207,8 +285,29 @@ export function resolveNumberingMarkerGeometry(
   const suffix = numbering.suff || 'tab';
   let bodyOffsetPt = markerEndPt;
   if (suffix === 'space') {
+    // `word-numbering-space-suffix-arial`: §17.9.28 specifies the space,
+    // while this compatibility face is independent of every marker slot
+    // and theme. Keep the marker size and measure through the same authority,
+    // including its resource resolution / metric-compatible fallback.
+    const spaceInput = wordNumberingSpaceSuffixUsesArial({
+      compat: input.compat ?? DEFAULT_DOCX_COMPAT_PROFILE,
+      leftToRight: input.baseRtl === false,
+      markerWeight: markerInput.weight,
+      markerStyle: markerInput.style,
+      complexScriptMarker: markerInput.complexScript,
+      // A symbol-encoded marker (Private Use Area code points, or text the
+      // shared symbol-font table remaps) is not measured.
+      symbolMarker: markerText !== numbering.text || /[\uE000-\uF8FF]/u.test(numbering.text),
+    })
+      ? {
+          ...markerInput,
+          fonts: { ascii: 'Arial', highAnsi: 'Arial', eastAsia: 'Arial', complexScript: 'Arial' },
+          themeFonts: undefined,
+          themeFontPresence: undefined,
+        }
+      : markerInput;
     bodyOffsetPt += shapeNumberingMarkerText(
-      markerInput,
+      spaceInput,
       ' ',
       1,
       service,
@@ -218,12 +317,13 @@ export function resolveNumberingMarkerGeometry(
     bodyOffsetPt = 0;
     // `word-numbering-marker-overflow-tab-advance`
     if (markerEndPt > 0) {
-      const stop = numberingSuffixTabStop(
-        input.physicalIndentLeftPt + markerEndPt,
-        input.tabStops,
-        input.defaultTabPt,
-      );
-      bodyOffsetPt = stop ? stop.pos - input.physicalIndentLeftPt : markerEndPt;
+      const origin = input.suffixFrameOriginPt;
+      const stop = origin === undefined
+        ? numberingSuffixTabStop(input.physicalIndentLeftPt + markerEndPt, input.tabStops, input.defaultTabPt)
+        : numberingSuffixTabStop(input.physicalIndentLeftPt + markerEndPt - origin,
+          [...input.tabStops, { pos: Math.max(input.physicalIndentLeftPt, origin) - origin, alignment: 'num', leader: 'none' }],
+          input.defaultTabPt);
+      bodyOffsetPt = stop ? stop.pos + (origin ?? 0) - input.physicalIndentLeftPt : markerEndPt;
     }
   }
   // ECMA-376 §17.3.1.12 keeps paragraph content at the authored start indent.

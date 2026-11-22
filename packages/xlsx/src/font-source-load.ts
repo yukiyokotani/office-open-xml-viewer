@@ -19,18 +19,22 @@
  */
 import {
   classifyCjkFont,
-  isMetafileMime,
+  isSymbolFontFamily,
   substituteEntryCoversText,
   type CjkLang,
   type FontSubstituteScript,
 } from '@silurus/ooxml-core';
-import { FontDemandScalarCollector } from '@silurus/ooxml-core/internal/font-scalar-demand';
+import {
+  FontDemandScalarCollector,
+  VERTICAL_PRESENTATION_FORMS,
+  chartPaintTexts,
+} from '@silurus/ooxml-core/internal/font-scalar-demand';
 import { ScriptPreloadAccumulator } from '@silurus/ooxml-core/internal/script-preload-accumulator';
 import {
   chartFontFamilies,
   fontFamilyKey,
   type FontSessionDemand,
-  type FontSource,
+  type FontSourceDescriptor,
   type FontSubstitution,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { usesJapaneseCellFonts } from './internal/cell-font-language.js';
@@ -45,8 +49,8 @@ export {
 } from '@silurus/ooxml-core/internal/font-sources';
 
 /** The substitutions every configured source declares, in option order. */
-export function declaredFontSubstitutions(sources: readonly FontSource[]): readonly FontSubstitution[] {
-  return Object.freeze(sources.flatMap((source) => source.substitutes ?? []));
+export function declaredFontSubstitutions(sources: readonly FontSourceDescriptor[]): readonly FontSubstitution[] {
+  return Object.freeze(sources.flatMap((source) => source.substitutions ?? []));
 }
 
 /**
@@ -58,16 +62,25 @@ export function declaredFontSubstitutions(sources: readonly FontSource[]): reado
  */
 const RENDERER_SENTINEL_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…`;
 
-/** DrawingML vertical text modes other than horizontal (§20.1.10.83). */
-const HORIZONTAL_SHAPE_TEXT: ReadonlySet<string> = new Set(['horz']);
+/** §20.1.10.83 ST_TextVerticalType. `vert` / `vert270` rotate the
+ * horizontal layout and `mongolianVert` paints horizontally;
+ * {@link VERTICAL_FORM_SHAPE_TEXT} may also substitute vertical forms. */
+const SHAPE_TEXT_VERTS: ReadonlySet<string> = new Set(['horz', 'vert', 'vert270', 'mongolianVert', 'eaVert', 'wordArtVert', 'wordArtVertRtl']);
+/** Vertical-type values whose painter may substitute vertical presentation
+ * forms (eaVert, stacked WordArt). */
+const VERTICAL_FORM_SHAPE_TEXT: ReadonlySet<string> = new Set(['eaVert', 'wordArtVert', 'wordArtVertRtl']);
 
-const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
+/** Text of printable ASCII only. {@link RENDERER_SENTINEL_TEXT} demands each
+ * of these scalars for every style font (a symbol-encoded one's conversions
+ * included), and none is script evidence: collecting such a text again in a
+ * style font, or in no named face, adds nothing. */
+const SENTINEL_COVERED_TEXT = /^[\x20-\x7e]*$/;
 
-/** Stacked text (`textRotation="255"`, §18.8.1) substitutes vertical forms;
- * RTL reading order (`readingOrder="2"`) mirrors neutral text (UAX #9). Either
- * paints scalars the text does not spell. */
-function stylesNeedAllScalars(workbook: ParsedWorkbook): boolean {
-  return (workbook.styles?.cellXfs ?? []).some((xf) => xf.textRotation === 255 || xf.readingOrder === 2);
+/** Stacked text (`textRotation="255"`, §18.8.1) substitutes vertical forms
+ * (vertical-text.ts). RTL reading order (`readingOrder="2"`) mirrors neutral
+ * text (UAX #9), whose partners the core collector demands for every text. */
+function stylesStackText(workbook: ParsedWorkbook): boolean {
+  return (workbook.styles?.cellXfs ?? []).some((xf) => xf.textRotation === 255);
 }
 
 /**
@@ -89,13 +102,16 @@ export class XlsxFontDemand {
   private freshFamilies = new Map<string, string>();
   private readonly scannedRows = new WeakMap<Row[], number>();
   private readonly scannedParts = new WeakSet<Worksheet>();
+  /** The symbol-encoded style fonts (Symbol, Wingdings 1-3, Webdings): text
+   *  whose cell face is not known here may paint in any of them. */
+  private readonly symbolStyleFamilies: readonly string[];
 
   constructor(
     private readonly workbook: ParsedWorkbook,
     cjkFallback: CjkLang,
-    substitutes: readonly FontSubstitution[],
+    substitutions: readonly FontSubstitution[],
   ) {
-    for (const substitution of substitutes) {
+    for (const substitution of substitutions) {
       if (!substitution.script) continue;
       const key = fontFamilyKey(substitution.for);
       this.scopedScripts.set(key, (this.scopedScripts.get(key) ?? new Set()).add(substitution.script));
@@ -107,20 +123,31 @@ export class XlsxFontDemand {
     this.cjkLang = cjkLang ?? cjkFallback;
     this.scripts = new ScriptPreloadAccumulator(this.cjkLang);
     this.collector = this.newCollector();
-    if (stylesNeedAllScalars(workbook)) this.collector.decline();
-    this.collector.add(RENDERER_SENTINEL_TEXT);
+    this.symbolStyleFamilies = [...new Set((workbook.styles?.fonts ?? [])
+      .map((font) => font.name?.trim() ?? '').filter(isSymbolFontFamily))];
+    if (stylesStackText(workbook)) this.collector.add(VERTICAL_PRESENTATION_FORMS);
+    // The sentinel text paints in every style font, a symbol-encoded one
+    // included (core addSymbolText demands each code's conversions).
+    this.collector.addSymbolText(RENDERER_SENTINEL_TEXT, this.symbolStyleFamilies);
     // §18.8.22: every style font, including ones no cell uses yet (a later
     // sheet may), and the shared-string table's rich-run fonts.
     for (const font of workbook.styles?.fonts ?? []) this.addCellFont(font);
     for (const shared of workbook.sharedStrings ?? []) {
-      this.addText(shared.text);
+      // Its cell face is charged when the rows are scanned; a symbol code
+      // (F0-shifted) is collected for the symbol style faces here, so it is
+      // not declined before then. A rich string is collected through its
+      // runs, each with the face that paints it.
+      if (!shared.runs?.length) {
+        this.addText(shared.text, undefined, /[\uF020-\uF0FF]/u.test(shared.text) ? this.symbolStyleFamilies : undefined);
+      }
       // A run's own face paints it wherever the string is used; plain shared
       // text is charged to its cell's face when the sheet's rows are scanned.
       for (const run of shared.runs ?? []) {
         if (run.font?.name) this.addFamily(run.font.name);
-        this.addText(run.text, run.font?.name);
+        this.addText(run.text, run.font?.name,
+          /[\uF020-\uF0FF]/u.test(run.text) ? this.symbolStyleFamilies : undefined);
       }
-      for (const phonetic of shared.phoneticRuns ?? []) this.addText(phonetic.text);
+      for (const phonetic of shared.phoneticRuns ?? []) this.addText(phonetic.text, this.phoneticFamily(shared.phoneticPr));
     }
     // Number-format output is painted text like any cell text, in the font of
     // the style that formats it: its scalars, its script fallback evidence (a
@@ -147,7 +174,7 @@ export class XlsxFontDemand {
     });
     const families = [...new Set((workbook.styles?.fonts ?? []).map((font) => font.name?.trim() || 'Calibri'))];
     for (const text of formats.dxfs) {
-      this.addText(text);
+      this.addText(text, undefined, this.symbolStyleFamilies);
       for (const family of families) this.prove(family, text);
     }
   }
@@ -158,11 +185,24 @@ export class XlsxFontDemand {
     return new FontDemandScalarCollector({ budget: Number.POSITIVE_INFINITY, committed: this.committed });
   }
 
-  /** A painted text: its scalars and its script fallback evidence. */
-  private addText(text: string | null | undefined, family?: string | null): void {
+  /** A painted text: its scalars and its script fallback evidence. Text in a
+   *  symbol-encoded face (`family` or one of `symbolFamilies`) demands every
+   *  scalar its conversion may paint (core addSymbolText; the renderer's
+   *  symbol-paint.ts converts the codes its face does not draw).
+   *  `styleFont`: `family` is one of the workbook's style fonts (or the
+   *  default face) and no other face may paint the text. */
+  private addText(
+    text: string | null | undefined,
+    family?: string | null,
+    symbolFamilies: readonly (string | null | undefined)[] = [],
+    styleFont = false,
+  ): void {
     if (!text) return;
-    this.collector.add(text);
-    this.scripts.addText([text]);
+    const covered = (styleFont || !family) && symbolFamilies.length === 0 && SENTINEL_COVERED_TEXT.test(text);
+    if (!covered) {
+      this.collector.addSymbolText(text, [family, ...symbolFamilies]);
+      this.scripts.addText([text]);
+    }
     if (family) this.prove(family, text);
   }
 
@@ -203,6 +243,14 @@ export class XlsxFontDemand {
     if (regular?.[1]?.trim()) this.addFamily(regular[1].trim());
   }
 
+  /** The face the phonetic band paints readings with, as the renderer
+   *  (drawPhoneticBand): `phoneticPr@fontId`, else (or out of range) font 0
+   *  (§18.4.3). */
+  private phoneticFamily(pr: { fontId?: number } | undefined): string {
+    const fonts = this.workbook.styles?.fonts ?? [];
+    return (fonts[pr?.fontId ?? 0] ?? fonts[0])?.name?.trim() || 'Calibri';
+  }
+
   /** The font a cell paints with, through the renderer's effective-style rule
    * (internal/cell-style.ts: cell style, else its column's style, else Normal). */
   private fontOfCell(worksheet: Worksheet | undefined, cell: Cell): CellFont | undefined {
@@ -218,24 +266,24 @@ export class XlsxFontDemand {
     const japanese = worksheet ? usesJapaneseCellFonts(worksheet) : false;
     for (const row of rows) for (const cell of row.cells) {
       const value = cell.value;
-      if (value.type === 'error') { this.collector.add(value.error); continue; }
-      if (value.type !== 'text') continue;
+      if (value.type !== 'text' && value.type !== 'error') continue;
       const font = this.fontOfCell(worksheet, cell);
       const family = font?.name?.trim() || 'Calibri';
+      // An error value paints in the cell face like any value.
+      if (value.type === 'error') { this.collector.addSymbolText(value.error, [family]); continue; }
       if (value.runs?.length) {
         for (const run of value.runs) {
           if (run.font?.name) this.addFamily(run.font.name);
           this.addText(run.text, run.font?.name?.trim() || family);
         }
       } else {
-        this.addText(value.text, family);
+        this.addText(value.text, family, [], true);
       }
       if (japanese && font?.scheme) {
         const theme = font.scheme === 'major' ? worksheet?.themeJapaneseMajorFont : worksheet?.themeJapaneseMinorFont;
         if (theme) this.prove(theme, value.text);
       }
-      const phoneticFont = value.phoneticPr ? this.workbook.styles.fonts?.[value.phoneticPr.fontId] : undefined;
-      for (const phonetic of value.phoneticRuns ?? []) this.addText(phonetic.text, phoneticFont?.name ?? family);
+      for (const phonetic of value.phoneticRuns ?? []) this.addText(phonetic.text, this.phoneticFamily(value.phoneticPr));
     }
   }
 
@@ -259,16 +307,18 @@ export class XlsxFontDemand {
       this.addFamily(worksheet.themeJapaneseMinorFont);
     }
     // Charts paint their own text and number formatting (axis labels, data
-    // labels, legends): the scalars cannot be proven from the model text.
-    // Chart sheets carry their chart in `charts` as well.
-    if ((worksheet.charts ?? []).length > 0) this.collector.decline();
+    // labels, legends): every scalar their labels can contain (core
+    // chartPaintTexts), or 'all' when that set is not provable. Chart sheets
+    // carry their chart in `charts` as well.
     for (const anchor of worksheet.charts ?? []) {
       for (const family of chartFontFamilies(anchor.chart)) this.addFamily(family);
+      const texts = chartPaintTexts(anchor.chart);
+      if (texts === 'all') this.collector.decline();
+      else for (const text of texts) this.collector.add(text);
     }
-    for (const image of worksheet.images ?? []) {
-      // Metafile text records paint with document faces (core wmf-text.ts).
-      if (isMetafileMime(image.mimeType) || METAFILE_PATH.test(image.imagePath ?? '')) this.collector.decline();
-    }
+    // Pictures (raster, SVG, WMF/EMF) need no load-time demand: a metafile's
+    // text records demand their own scalars when it plays (core
+    // `bindMetafileFontDemand`).
     for (const anchor of worksheet.shapeGroups ?? []) for (const shape of anchor.shapes) this.shape(shape);
     for (const slicer of worksheet.slicers ?? []) {
       // The caption paints with the header face, items with the item-state
@@ -281,37 +331,37 @@ export class XlsxFontDemand {
       }
       this.addText(slicer.caption, header?.fontFamily);
       for (const item of slicer.items) {
-        this.addText(item.name);
+        this.addText(item.name, undefined, itemStyles.map((style) => style?.fontFamily));
         for (const style of itemStyles) if (style?.fontFamily) this.prove(style.fontFamily, item.name);
       }
     }
   }
 
   private shape(shape: ShapeInfo): void {
-    if (shape.geom.type === 'image') {
-      const geom = shape.geom as { mimeType?: string; imagePath?: string };
-      if (isMetafileMime(geom.mimeType) || METAFILE_PATH.test(geom.imagePath ?? '')) this.collector.decline();
-    }
     const text = shape.text;
     if (!text) return;
     // Vertical and WordArt-vertical text rotate or substitute vertical forms;
-    // RTL paragraphs mirror neutral text (UAX #9).
-    if (text.vert !== undefined && !HORIZONTAL_SHAPE_TEXT.has(text.vert)) this.collector.decline();
+    // RTL paragraphs mirror neutral text (UAX #9; core demands the partners).
+    if (text.vert !== undefined && !SHAPE_TEXT_VERTS.has(text.vert)) this.collector.decline();
+    if (text.vert !== undefined && VERTICAL_FORM_SHAPE_TEXT.has(text.vert)) this.collector.add(VERTICAL_PRESENTATION_FORMS);
     for (const paragraph of text.paragraphs) {
-      if (paragraph.rtl) this.collector.decline();
       for (const run of paragraph.runs) {
-        // OMML equations paint their own operator and layout glyphs.
-        if (run.type === 'math') { this.collector.decline(); continue; }
+        // An OMML equation paints a converted raster, whose glyphs reach no
+        // document font, or nothing (renderer drawShapeText).
+        if (run.type === 'math') continue;
         if (run.type !== 'text') continue;
         // Every slot the shape painter can select: the Latin face, and the
         // East Asian face that stacked (WordArt-vertical) text paints CJK
         // characters with (renderer drawShapeStackedText). The complex-script
         // slot is not painted by the XLSX shape renderer.
+        // §21.1.2.3.10 `a:sym` paints the run's F0-shifted symbol codes.
         const family = run.fontFace?.trim() || 'Calibri';
         const eastAsian = run.fontFaceEa?.trim();
+        const symbol = run.fontFaceSym?.trim();
         this.addFamily(family);
         if (eastAsian) this.addFamily(eastAsian);
-        this.addText(run.text, family);
+        if (symbol) this.addFamily(symbol);
+        this.addText(run.text, family, [symbol]);
         if (eastAsian) this.prove(eastAsian, run.text);
       }
     }
@@ -345,3 +395,7 @@ export class XlsxFontDemand {
     return demand;
   }
 }
+
+/** Metafile pictures demand their text's scalars when they play (core
+ * `bindMetafileFontDemand`). */
+export { metafileFontDemand } from '@silurus/ooxml-core/internal/metafile-font-demand';

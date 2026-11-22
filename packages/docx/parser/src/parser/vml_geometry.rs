@@ -1216,15 +1216,11 @@ pub(super) fn incomplete_leaf(shape: roxmltree::Node, definition: Option<roxmltr
             return true;
         }
     }
-    if effective("shadow").is_some()
+    effective("shadow").is_some()
         && vml_decoration_attr(shape, definition, "shadow", "on").and_then(parse_vml_true_false)
             != Some(false)
         && path_attr(shape, definition, "shadowok").and_then(parse_vml_true_false) != Some(false)
         && shadow(shape, definition).is_none()
-    {
-        return true;
-    }
-    false
 }
 
 #[cfg(test)]

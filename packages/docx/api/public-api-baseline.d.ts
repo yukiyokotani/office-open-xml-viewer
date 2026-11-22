@@ -275,7 +275,7 @@ export interface ChartDataTable {
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fillColor?: string | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     fillPaintAuthored?: boolean | null;
     lineColor?: string | null;
@@ -592,6 +592,7 @@ export interface ChartModel {
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
+    valAxisFormatDivisors?: number[] | null;
     valAxisNumberFormat?: ChartAxisNumberFormat | null;
     valAxisDisplayUnits?: ChartDisplayUnits | null;
     catAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -682,6 +683,7 @@ export interface ChartModel {
     valAxisLineDash?: string | null;
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
+    catAxisFormatDivisors?: number[] | null;
     catAxisNumberFormat?: ChartAxisNumberFormat | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
@@ -839,6 +841,12 @@ export interface ChartRegionMapRenderer {
     render(ctx: CanvasRenderingContext2D, chart: ChartModel, rect: ChartRect, ptToPx: number, shapeRotationDeg?: number): boolean;
 }
 export interface ChartRun {
+    inlineEffectExtent?: [
+        number,
+        number,
+        number,
+        number
+    ];
     chart: ChartModel;
     widthPt: number;
     heightPt: number;
@@ -866,7 +874,7 @@ export interface ChartSeries {
     fillPattern?: PatternFill | null;
     invertIfNegative?: boolean | null;
     automaticNegativeStyle?: boolean | null;
-    invertedFill?: SolidFill | GradientFill | PatternFill | null;
+    invertedFill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     invertedFillHidden?: boolean | null;
     invertedFillAuthored?: boolean | null;
     invertedLineColor?: string | null;
@@ -933,6 +941,9 @@ export interface ChartSeriesDataLabels {
     fontPaintAuthored?: boolean;
     fontHidden?: boolean;
     formatCode?: string;
+    formatDivisors?: number[] | null;
+    percentFormatCode?: string | null;
+    percentFormatDivisors?: number[] | null;
     separator?: string;
     fontBold?: boolean;
     fontItalic?: boolean;
@@ -982,7 +993,7 @@ type ChartStyleRole = 'axisTitle' | 'categoryAxis' | 'chartArea' | 'dataLabel' |
 export interface ChartSurfaceBandFormat {
     idx: number;
     style?: ChartExElementStyle | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
@@ -1019,7 +1030,7 @@ export interface ChartTextRun {
     paragraphAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
 }
 export interface ChartThreeD {
-    view3DPresent?: boolean | null;
+    view3dPresent?: boolean | null;
     rotationX?: number | null;
     rotationXAuthored?: boolean | null;
     rotationY?: number | null;
@@ -1188,6 +1199,7 @@ export interface DocNote {
     content: BodyElement[];
 }
 export interface DocParagraph {
+    outlineLevel?: number;
     paragraphId?: string;
     alignment: 'left' | 'start' | 'center' | 'right' | 'end' | 'justify' | 'both' | 'distribute' | 'lowKashida' | 'mediumKashida' | 'highKashida' | 'thaiDistribute' | string;
     indentLeft: number;
@@ -1212,6 +1224,7 @@ export interface DocParagraph {
     widowControl?: boolean;
     overflowPunct?: boolean;
     wordWrap?: boolean;
+    kinsoku?: boolean;
     endsAtHardBreak?: boolean;
     autoSpaceDE?: boolean;
     autoSpaceDN?: boolean;
@@ -1261,6 +1274,10 @@ type DocRunContent = ({
     type: 'ptab';
 } & PTabRun);
 export interface DocSettings {
+    doNotSuppressIndentation?: boolean;
+    ww11IndentRules?: boolean;
+    doNotUseIndentAsNumberingTabStop?: boolean;
+    noTabHangInd?: boolean;
     footnoteLayoutLikeWW8?: boolean;
     doNotUseHtmlParagraphAutoSpacing?: boolean;
     kinsoku?: boolean;
@@ -1609,6 +1626,10 @@ export interface DocxTextRunInfo {
     }>;
     fontSize: number;
     font: string;
+    referenceFont?: Readonly<{
+        font: string;
+        scale: number;
+    }>;
     letterSpacingPx?: number;
     transform?: string;
     hyperlink?: HyperlinkTarget;
@@ -1731,35 +1752,22 @@ export interface FindMatch<Loc = unknown> {
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
-const FONT_SOURCE_PROTOCOL = 'ooxml-font-source/v1';
-export function fontCss(options: FontCssOptions): FontCssSource;
-export function fontCssApi(options: FontCssApiOptions): FontCssApiSource;
+export function fontCss(options: FontCssOptions): FontSource;
+export function fontCssApi(options: FontCssApiOptions): FontSource;
 export interface FontCssApiOptions {
     readonly urlTemplate: string;
     readonly query?: string;
     readonly families?: Readonly<Record<string, string | true>>;
-    readonly substitutes?: readonly FontSubstitution[];
-    readonly credentials?: FontSourceCredentials;
-}
-export interface FontCssApiSource extends FontSourceBase {
-    readonly kind: 'font-css-api';
-    readonly urlTemplate: string;
-    readonly query?: string;
-    readonly families?: Readonly<Record<string, string | true>>;
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
 export interface FontCssOptions {
     readonly url: string;
-    readonly substitutes?: readonly FontSubstitution[];
-    readonly credentials?: FontSourceCredentials;
-}
-export interface FontCssSource extends FontSourceBase {
-    readonly kind: 'font-css';
-    readonly url: string;
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
 export interface FontDemand {
-    readonly families: readonly string[];
+    readonly authoredFamilies: readonly string[];
     readonly fallbackFamilies: readonly string[];
 }
 export interface FontFaceDeclaration {
@@ -1771,34 +1779,26 @@ export interface FontFaceDeclaration {
     readonly stretch?: string;
     readonly unicodeRange?: string;
 }
-export function fontFiles(options: FontFilesOptions): FontFilesSource;
+export function fontFiles(options: FontFilesOptions): FontSource;
 export interface FontFilesOptions {
     readonly faces: readonly FontFaceDeclaration[];
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
-export interface FontFilesSource extends FontSourceBase {
-    readonly kind: 'font-files';
-    readonly faces: readonly FontFaceDeclaration[];
-    readonly credentials?: FontSourceCredentials;
-}
-export interface FontResolveContext {
+export function fontResolver(resolve: FontResolver, options?: FontResolverOptions): FontSource;
+export type FontResolver = (demand: FontDemand, context: FontResolverContext) => readonly (Omit<FontFaceDeclaration, 'weight'> & {
+    readonly weight?: string | number;
+})[] | Promise<readonly (Omit<FontFaceDeclaration, 'weight'> & {
+    readonly weight?: string | number;
+})[]>;
+export interface FontResolverContext {
     readonly signal: AbortSignal;
 }
-export type FontResolveFn = (demand: FontDemand, context: FontResolveContext) => readonly FontFaceDeclaration[] | Promise<readonly FontFaceDeclaration[]>;
-export function fontResolver(resolve: FontResolveFn, options?: FontResolverOptions): FontResolverSource;
 export interface FontResolverOptions {
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
 }
-export interface FontResolverSource extends FontSourceBase {
-    readonly kind: 'font-resolver';
-    readonly id: string;
-}
-export type FontSource = FontCssApiSource | FontCssSource | FontFilesSource | FontResolverSource;
-interface FontSourceBase {
-    readonly protocol: typeof FONT_SOURCE_PROTOCOL;
-    readonly kind: string;
-    readonly substitutes?: readonly FontSubstitution[];
+export interface FontSource {
+    readonly __ooxmlFontSource: 'opaque';
 }
 export type FontSourceCredentials = 'omit' | 'same-origin';
 export type FontSubstituteScript = 'arabic';
@@ -1828,10 +1828,11 @@ export interface Glow {
     alpha: number;
     radius: number;
 }
-export function googleFonts(options?: GoogleFontsOptions): FontCssApiSource;
+export function googleFonts(options?: GoogleFontsOptions): FontSource;
 export interface GoogleFontsOptions {
-    readonly cssOrigin?: string;
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly baseUrl?: string;
+    readonly substitutions?: readonly FontSubstitution[];
+    readonly additionalFamilies?: Readonly<Record<string, string>>;
 }
 export const googleFontsSubstitutions: readonly FontSubstitution[];
 export interface GradientFill {
@@ -1891,6 +1892,12 @@ export interface ImageResourceOptions {
     resolution?: 'native-if-fit' | 'display';
 }
 export interface ImageRun {
+    inlineEffectExtent?: [
+        number,
+        number,
+        number,
+        number
+    ];
     imagePath: string;
     mimeType: string;
     svgImagePath?: string;
@@ -1910,7 +1917,7 @@ export interface ImageRun {
     anchorYPt?: number;
     anchorXFromMargin?: boolean;
     anchorYFromPara?: boolean;
-    colorReplaceFrom?: string;
+    colorReplaceFrom?: string | null;
     duotone?: Duotone;
     blipEffects?: BlipEffect[];
     alpha?: number;
@@ -2183,7 +2190,7 @@ export class OoxmlDecodedImageLimitError extends RangeError {
     readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work' | 'tiff-lzw-work' | 'metafile-path-commands' | 'metafile-record-points' | 'metafile-record-polygons' | 'metafile-record-rectangles' | 'metafile-record-text-units';
+export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work' | 'tiff-lzw-work' | 'tiff-packbits-work' | 'metafile-path-commands' | 'metafile-record-points' | 'metafile-record-polygons' | 'metafile-record-rectangles' | 'metafile-record-text-units';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     readonly details?: OoxmlUnsupportedContentDetails;
@@ -2192,11 +2199,11 @@ export class OoxmlError extends Error {
 }
 export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml' | 'unsupported-image-effect' | 'invalid-numbering' | 'unsupported-content' | 'font-source-limit';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
-export type OoxmlFontSourceQuota = 'stylesheet' | 'declarations' | 'families' | 'face' | 'retained' | 'url';
+export type OoxmlFontSourceQuota = ExtensibleLiteral<'stylesheet' | 'declarations' | 'families' | 'face' | 'retained' | 'url'>;
 export interface OoxmlFontSourceViolation {
     readonly resource: 'font-source';
     readonly quota: OoxmlFontSourceQuota;
-    readonly metric: 'bytes' | 'entry-count' | 'length';
+    readonly metric: 'bytes' | 'entry-count' | 'length' | (string & Record<never, never>);
     readonly limit: number;
     readonly observed: number;
 }
@@ -2307,11 +2314,11 @@ export interface ParaBorderEdge {
     space: number;
 }
 export interface ParagraphBorders {
-    top: ParaBorderEdge | null;
-    bottom: ParaBorderEdge | null;
-    left: ParaBorderEdge | null;
-    right: ParaBorderEdge | null;
-    between: ParaBorderEdge | null;
+    top?: ParaBorderEdge | null;
+    bottom?: ParaBorderEdge | null;
+    left?: ParaBorderEdge | null;
+    right?: ParaBorderEdge | null;
+    between?: ParaBorderEdge | null;
 }
 export type PathCmd = {
     cmd: 'moveTo';
@@ -2437,6 +2444,7 @@ export interface SecondaryValueAxis {
     title: string | null;
     hidden: boolean;
     formatCode?: string | null;
+    formatDivisors?: number[] | null;
     numberFormat?: ChartAxisNumberFormat | null;
     displayUnits?: ChartDisplayUnits | null;
     fontColor?: string | null;
@@ -2591,6 +2599,12 @@ export type ShapeFill = {
     blipEffects?: BlipEffect[];
 };
 export interface ShapeRun {
+    inlineEffectExtent?: [
+        number,
+        number,
+        number,
+        number
+    ];
     inline?: boolean;
     inlineOffsetXPt?: number;
     inlineOffsetYPt?: number;
@@ -2654,8 +2668,8 @@ export interface ShapeRun {
     }>;
     presetGeometry?: string | null;
     adjValues?: Array<number | null>;
-    vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone'>;
-    fill: ShapeFill | null;
+    vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone' | 'blipEffects'>;
+    fill?: ShapeFill | null;
     stroke: string | null;
     strokeWidth?: number;
     strokeFill?: ShapeStrokeFill | null;

@@ -157,6 +157,7 @@ describe('worker error wire', () => {
     'image-dimension',
     'image-pixels',
     'tiff-lzw-work',
+    'tiff-packbits-work',
     'active-decoded-bytes',
     'metafile-record-points',
     'metafile-record-polygons',

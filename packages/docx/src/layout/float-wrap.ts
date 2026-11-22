@@ -376,6 +376,8 @@ export interface LineFloatReference {
   readonly xLeftPt: number;
   readonly xRightPt: number;
   readonly readingDirection: 'ltr' | 'rtl';
+  /** Compatibility policy projected by paragraph layout; generic geometry preserves continuous through-wrap search. */
+  readonly stepThroughPolygons?: boolean;
 }
 
 function effectiveWrapSide(
@@ -569,6 +571,7 @@ function firstUsableFreeGap(
   polygonRequiredWidth: number,
   squareRequiredWidth: number,
   readingDirection: 'ltr' | 'rtl',
+  admitsGap?: (gap: Readonly<{ l: ExactRational; r: ExactRational }>) => boolean,
 ): Readonly<{
   l: ExactRational;
   r: ExactRational;
@@ -633,7 +636,8 @@ function firstUsableFreeGap(
       MIN_LINE_GAP,
       gap.squareConstrained ? squareRequiredWidth : polygonRequiredWidth,
     );
-    if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0) {
+    if (compareExactRational(width, unreducedExactFromNumber(requirement)) >= 0
+      && (admitsGap === undefined || admitsGap(gap))) {
       return {
         l: gap.l,
         r: gap.r,
@@ -722,35 +726,44 @@ export function createFloatLineBandPredicate(
   };
 }
 
-/** Whether the line band [topY, topY + probeH] lies in a tight polygon's
- * line-step region: it meets the polygon, including the touched edges of
- * `tightEdgeTouch`. An exempt anchor line (`exemptLineTopPt`) is still in the
- * region; the exemption only changes that line's own window. */
+/** Whether the line band [topY, topY + probeH] lies in a polygon's
+ * line-step region (WORD_TIGHT_WRAP_LINE_STEP_ADVANCE and
+ * WORD_THROUGH_WRAP_LINE_STEP_ADVANCE): it meets a tight polygon, or a through polygon when enabled,
+ * including the touched tight edges of `tightEdgeTouch`. An exempt anchor line
+ * (`exemptLineTopPt`) is still in the region; the exemption only changes that
+ * line's own window. */
 function bandMeetsTightPolygon(
   prepared: PreparedFloatWrap,
   topY: number,
   probeH: number,
   paraXLeft: number,
   paraXRight: number,
+  stepThroughPolygons: boolean,
 ): boolean {
-  return lowestMetTightBottom(prepared, topY, probeH, paraXLeft, paraXRight) !== null;
+  return lowestMetTightBottom(prepared, topY, probeH, paraXLeft, paraXRight, stepThroughPolygons) !== null;
 }
 
-/** The lowest bottom of the tight polygons whose line-step region contains
- * the band [topY, topY + probeH] (see bandMeetsTightPolygon), or null. */
+/** The lowest bottom of the tight and through polygons whose line-step
+ * region contains the band [topY, topY + probeH] (see bandMeetsTightPolygon),
+ * or null. */
 function lowestMetTightBottom(
   prepared: PreparedFloatWrap,
   topY: number,
   probeH: number,
   paraXLeft: number,
   paraXRight: number,
+  stepThroughPolygons: boolean,
 ): number | null {
   const exactTop = unreducedExactFromNumber(topY);
   const exactBottom = addUnreducedExact(exactTop, unreducedExactFromNumber(probeH));
   let lowest: number | null = null;
   for (const float of prepared.floats) {
     const { rect } = float;
-    if (float.polygon?.kind !== 'tight' || rect.mode !== 'square') continue;
+    // WORD_THROUGH_WRAP_LINE_STEP_ADVANCE: a through polygon steps like a
+    // tight one only within the projected policy; only tight polygons have
+    // touched edges (tightEdgeTouch).
+    if (!float.polygon || rect.mode !== 'square'
+      || (float.polygon.kind !== 'tight' && !stepThroughPolygons)) continue;
     if (!floatOverlapsColumnX(rect as FloatRect, paraXLeft, paraXRight)) continue;
     const meets = tightEdgeTouch(float, exactTop, exactBottom) !== null
       || (compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop)) > 0
@@ -772,6 +785,7 @@ function lineWindowAtY(
   reference: LineFloatReference,
   polygonRequiredWidth: number,
   squareRequiredWidth: number,
+  admitsWindow?: LineWindowAdmission,
 ): { topY: number; xOffset: number; maxWidth: number } | null {
   const exactTop = unreducedExactFromNumber(topY);
   const exactBottom = addUnreducedExact(
@@ -808,8 +822,30 @@ function lineWindowAtY(
     polygonRequiredWidth,
     squareRequiredWidth,
     reference.readingDirection,
+    admitsWindow === undefined
+      ? undefined
+      : (gap) => admitsWindow(gapLineWindow(gap, topY, paraXLeft, paraXRight)),
   );
   if (!best) return null;
+  return gapLineWindow(best, topY, paraXLeft, paraXRight);
+}
+
+/** Caller test of a candidate window beyond its width requirement (the
+ * window as `lineWindowAtY` would return it). Used for a numbered first line,
+ * whose body start depends on the window (WORD_NUMBERED_FIRST_LINE_GAP_FIT). */
+export type LineWindowAdmission = (
+  window: Readonly<{ topY: number; xOffset: number; maxWidth: number }>,
+) => boolean;
+
+/** The line window a free gap yields: the binary64 start rounded up into the
+ * gap and the width rounded down, both contained in the exact gap clipped to
+ * the paragraph band. */
+function gapLineWindow(
+  best: Readonly<{ l: ExactRational; r: ExactRational }>,
+  topY: number,
+  paraXLeft: number,
+  paraXRight: number,
+): { topY: number; xOffset: number; maxWidth: number } {
   const zero: ExactRational = { numerator: 0n, denominator: 1n };
   const xOffsetCandidate = subtractUnreducedExact(
     best.l,
@@ -1370,6 +1406,7 @@ function computePreparedLineFloatWindowCore(
   },
   squareRequiredWidth: number = polygonRequiredWidth,
   diagnostics: MutableLineFloatSweepDiagnostics | null = null,
+  admitsWindow?: LineWindowAdmission,
 ): { topY: number; xOffset: number; maxWidth: number } {
   const paraXLeft = paraX;
   const paraXRight = paraX + maxWidth;
@@ -1389,12 +1426,14 @@ function computePreparedLineFloatWindowCore(
     return lineWindowAtY(
       candidateY, probeH, paraXLeft, paraXRight, maxWidth, prepared,
       columnXLeftPt, columnXRightPt, reference,
-      polygonRequiredWidth, squareRequiredWidth,
+      polygonRequiredWidth, squareRequiredWidth, admitsWindow,
     );
   };
   const current = evaluate(topY);
   if (current) return current;
-  // One candidate walk, WORD_TIGHT_WRAP_LINE_STEP_ADVANCE included. Every
+  // One candidate walk, WORD_TIGHT_WRAP_LINE_STEP_ADVANCE and
+  // WORD_THROUGH_WRAP_LINE_STEP_ADVANCE included ("tight" below covers both
+  // polygon kinds when enabled; tightEdgeTouch stays tight-only). Every
   // candidate is tested with the same predicate (`evaluate`, i.e.
   // `lineWindowAtY`); the first one that fits is the answer, so no returned
   // line collides with a wrap region. Candidates come from two sources:
@@ -1434,7 +1473,7 @@ function computePreparedLineFloatWindowCore(
   const pitch = Math.abs(topY) <= LINE_SEARCH_Y_LIMIT_PT ? lineSearchPitch(probeH) : null;
   const tightAt = (y: number): boolean =>
     pitch !== null && Math.abs(y) <= LINE_SEARCH_Y_LIMIT_PT
-    && bandMeetsTightPolygon(prepared, y, probeH, paraXLeft, paraXRight);
+    && bandMeetsTightPolygon(prepared, y, probeH, paraXLeft, paraXRight, reference.stepThroughPolygons === true);
   const gridAfter = (y: number): number =>
     lineGridAfter(topY, pitch!, Math.min(y, LINE_SEARCH_Y_LIMIT_PT));
   let stepBudget = TIGHT_LINE_STEP_LIMIT;
@@ -1443,7 +1482,7 @@ function computePreparedLineFloatWindowCore(
       stepBudget -= 1;
       return gridAfter(y);
     }
-    const bottom = lowestMetTightBottom(prepared, y, probeH, paraXLeft, paraXRight);
+    const bottom = lowestMetTightBottom(prepared, y, probeH, paraXLeft, paraXRight, reference.stepThroughPolygons === true);
     return gridAfter(bottom === null ? y : Math.max(bottom, y));
   };
   let cursor = topY;
@@ -1511,10 +1550,11 @@ export function computePreparedLineFloatWindow(
     readingDirection: 'ltr',
   },
   squareRequiredWidth: number = polygonRequiredWidth,
+  admitsWindow?: LineWindowAdmission,
 ): { topY: number; xOffset: number; maxWidth: number } {
   return computePreparedLineFloatWindowCore(
     topY, polygonRequiredWidth, probeH, paraX, maxWidth, prepared,
-    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth,
+    columnXLeftPt, columnXRightPt, reference, squareRequiredWidth, null, admitsWindow,
   );
 }
 

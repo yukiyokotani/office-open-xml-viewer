@@ -12,6 +12,15 @@ import {
 
 export { UNICODE_VERSION } from './char-data.generated.js';
 
+const PUNCTUATION_OR_SYMBOL = /[\p{P}\p{S}]/u;
+
+/** Stateless ECMAScript Unicode General_Category predicate. This preserves
+ * host regex semantics; it is not a claim about the pinned UCD table version.
+ * No global/sticky flag or caller-owned state participates in classification. */
+export function unicodePunctuationOrSymbol(character: string): boolean {
+  return PUNCTUATION_OR_SYMBOL.test(character);
+}
+
 /** Bidi_Class index (into BIDI_CLASS_NAMES) for a code point. */
 function bidiClassIndex(cp: number): number {
   // Binary search for the greatest range start <= cp. Ranges are gap-free and
@@ -26,9 +35,20 @@ function bidiClassIndex(cp: number): number {
   return BIDI_RANGE_CLASS[lo];
 }
 
+// ASCII is a fixed Unicode code-point domain, not a text-dependent cache.
+// Derive its 128 class indices from the same pinned UCD ranges once.
+const asciiClassIndices = (() => {
+  const indices = new Uint8Array(128);
+  for (let cp = 0; cp < indices.length; cp++) indices[cp] = bidiClassIndex(cp);
+  return indices;
+})();
+
 /** Bidi_Class for a code point (UAX#9 / UCD DerivedBidiClass). */
 export function bidiClass(cp: number): BidiClass {
-  return BIDI_CLASS_NAMES[bidiClassIndex(cp)] as BidiClass;
+  // Preserve the existing numeric fallback, including non-integer inputs.
+  const index = Number.isInteger(cp) && cp >= 0 && cp < 128
+    ? asciiClassIndices[cp] : bidiClassIndex(cp);
+  return BIDI_CLASS_NAMES[index] as BidiClass;
 }
 
 const mirrorMap: Map<number, number> = (() => {

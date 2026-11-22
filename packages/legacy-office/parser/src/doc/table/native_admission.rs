@@ -255,7 +255,8 @@ pub(in crate::doc) fn cell_text_flow(flags: u16) -> u16 {
 /// Ordinary leading, top-level main-story RTL tables use this same bounded
 /// reader policy through tblInd+bidiVisual. The logical transformation is
 /// specified; P/O precedence is not claimed as a normative or independently
-/// observed RTL rule. Other RTL placement classes retain equality gating.
+/// observed RTL rule. Other RTL placement classes keep acquired O as the
+/// nearest placement as well, without bidiVisual-specific evidence.
 /// Scalar units, lengths and ranges are checked here; the final row-width
 /// bound is checked during grid planning after the complete property cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

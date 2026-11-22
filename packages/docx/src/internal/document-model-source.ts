@@ -18,11 +18,13 @@ import { documentHasMath, prepareMathRuns } from '../renderer';
 import { createLayoutServices, prepareMainThreadNativeRouteMetrics } from '../layout-runtime.js';
 import { mainThreadFallbackWarning } from '../main-thread-fallback.js';
 import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from '../font-plan.js';
+import { optionFontSources } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from '../embedded-fonts';
 import {
   documentLayoutRuntimeOf,
 } from '../layout/runtime-state.js';
 import type { DeepReadonly, DocumentLayout } from '../layout/types.js';
+import { errorPageLayoutReady } from '../layout/document-layout-variants.js';
 import { retainRenderWorkerDocumentLayout } from '../render-worker-layout.js';
 import { layoutDocumentInputAsync } from '../layout/document.js';
 import { layoutDocumentProgressively } from '../layout/progressive.js';
@@ -83,6 +85,8 @@ export async function loadDocxModelSource(
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
+    // As DocxDocument.load: the font-source module loads while the source parses.
+    if (mode === 'main' && opts.fonts) void import('../font-source-load.js').catch(() => undefined);
     const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'docx',
@@ -264,7 +268,7 @@ export async function loadDocxModelSource(
         const serviceOptions = {
           allowFootnoteContinuation: doc._allowFootnoteContinuation,
           fontMetrics: embeddedMetrics,
-          fontSubstitutes: declaredFontSubstitutions(opts.fonts),
+          fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)),
           cjkFallback,
           embeddedRoutes,
           officeRoutes: Object.values(officeFonts.routes),
@@ -276,7 +280,7 @@ export async function loadDocxModelSource(
         };
         // Absent authored faces: see native-route-line-metrics.ts.
         const nativeRoutes = await prepareMainThreadNativeRouteMetrics(
-          doc._source, doc._document, { fontSubstitutes: declaredFontSubstitutions(opts.fonts), cjkFallback },
+          doc._source, doc._document, { fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)), cjkFallback },
         );
         // destroy() may have drained this document's faces while the
         // sentinels loaded: release a late acquisition before aborting.
@@ -290,6 +294,9 @@ export async function loadDocxModelSource(
           nativeRouteMetrics: nativeRoutes.nativeRouteMetrics,
         });
         const services = runtime.services;
+        // A fatally unparseable document loads its error page here (#2248).
+        const errorPage = errorPageLayoutReady(doc._source, signal);
+        if (errorPage) await errorPage;
         const retained = retainRenderWorkerDocumentLayout(
           doc._source,
           services,

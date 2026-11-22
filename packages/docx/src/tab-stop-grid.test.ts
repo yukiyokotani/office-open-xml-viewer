@@ -217,3 +217,55 @@ describe('tab-stop grid (§17.15.1.25 automatic stops, margin-relative)', () => 
     });
   });
 });
+
+// #2056: a tab-stop interval or position that is positive but cannot index a
+// floating-point stop grid (tiny intervals overflow the stop index; huge ones
+// overflow the stop position) must not reach layout as a non-finite stop.
+describe('degenerate tab-stop geometry (#2056)', () => {
+  function docWith(defaultTabStop: number, paras: DocParagraph[]): DocxDocumentModel {
+    return { ...doc(paras), settings: { defaultTabStop } } as DocxDocumentModel;
+  }
+  function numbered(text: string): DocParagraph {
+    return {
+      ...rowPara(text, { tabStops: [] }),
+      indentLeft: 36, indentFirst: -18,
+      numbering: {
+        numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 36,
+        tab: null, suff: 'tab', jc: 'left', fontFamily: 'Times New Roman', fontFamilyEastAsia: 'Times New Roman',
+      },
+    } as unknown as DocParagraph;
+  }
+
+  it.each([1e-307, 1e-300, 1e-200, 1e300, Number.MAX_VALUE])(
+    'lays out plain and numbered tabs with defaultTabStop %s pt', async (value) => {
+      const { canvas, fills } = makeRecordingCanvas();
+      // Pens past 180 pt: 180 / 1e-307 overflows the stop index.
+      const lead = 'a'.repeat(20);
+      await renderDocumentToCanvas(docWith(value, [
+        rowPara('a\tb', { tabStops: [] }), rowPara(`${lead}\tb`, { tabStops: [] }),
+        { ...numbered('c\td'), indentLeft: 230, indentFirst: -18 } as DocParagraph,
+      ]),
+        canvas, 0, { dpr: 1, width: 300 });
+      for (const text of ['b', 'c', 'd']) {
+        const fill = fills.find((f) => f.text.includes(text));
+        expect(fill, text).toBeDefined();
+        expect(Number.isFinite(fill!.x)).toBe(true);
+      }
+      // A huge interval's first stop lies past the line, so the text after
+      // the tab wraps; a tiny one must not move it back over earlier text.
+      if (value > 1) return;
+      const [a, b, leadFill, b2, , c, d] = fills;
+      expect(b!.x).toBeGreaterThanOrEqual(a!.x + 9 - 1e-6);
+      expect(b2!.x).toBeGreaterThanOrEqual(leadFill!.x + 180 - 1e-6);
+      expect(d!.x).toBeGreaterThanOrEqual(c!.x + 9 - 1e-6);
+    });
+
+  it.each([1e300, Number.MAX_VALUE])('lays out a custom tab stop at %s pt', async (pos) => {
+    const { canvas, fills } = makeRecordingCanvas();
+    await renderDocumentToCanvas(docWith(18, [
+      rowPara('a\tb', { tabStops: [{ pos, alignment: 'left', leader: 'none' }] }),
+      rowPara('a\tb', { tabStops: [{ pos, alignment: 'right', leader: 'none' }] }),
+    ]), canvas, 0, { dpr: 1, width: 300 });
+    for (const fill of fills) expect(Number.isFinite(fill.x)).toBe(true);
+  });
+});

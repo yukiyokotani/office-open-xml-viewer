@@ -7,7 +7,7 @@ import { inheritCellFontLanguage, usesJapaneseCellFonts } from './internal/cell-
 import { drawShapeStackedText } from './shape-stacked-text.js';
 import { cellXfAt, effectiveCellStyleIndex } from './internal/cell-style.js';
 import type { CjkLang } from '@silurus/ooxml-core';
-import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
+import { quoteCssFontFamily, scopeServedFontFamilies } from '@silurus/ooxml-core/internal/css-font-family';
 import { arabicFallbackFamilies, containsArabicFallbackText } from '@silurus/ooxml-core/internal/font-stack';
 import {
   breakDrawingMlText, drawingMlTextRect, drawingMlLineHeight,
@@ -24,7 +24,7 @@ import type {
   Worksheet, Styles, Cell, CellValue, CellFont, CellFill, Border, BorderEdge, CellXf,
   ViewportRange, RenderViewportOptions, XlsxTextRunInfo,
   Dxf,
-  Run, GradientFillSpec, ShapeInfo, ShapeAnchor, ImageAnchor, ChartAnchor,
+  Run, GradientFillSpec, ShapeInfo, ShapeHatchFill, ShapeImageFill, ShapeAnchor, ImageAnchor, ChartAnchor,
   SlicerItem, SlicerStyle, SlicerElementStyle,
   PhoneticRun, PhoneticProperties, PhoneticAlignment, Duotone, PathInfo,
   XlsxLoadedFontSources,
@@ -38,12 +38,14 @@ import type {
 import { blipEffectsMayExtendCoverage, blipPixelEffectsKey, imageEffectFrame, stretchedSourceFrame, type BlipEffect, type BlipPixelEffects } from '@silurus/ooxml-core';
 import { usesPathShade, trackPaintPath, currentStrokeBounds, chartImageFillStoreLookup, paintOptionalImagePlaceholder, pathFillModeOverlay, withDrawingMLShapeTransform, buildPresetGeometryFillPath } from '@silurus/ooxml-core';
 import { placePhoneticRuns } from './phonetic.js';
-import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, cachedTintedMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, isCjkBreakChar, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
+import { crispOffset, renderChart, renderSparkline, renderPresetShape, createAuxCanvas, PT_TO_PX, EMU_PER_PX, mathToMathML, rasterizeMathSvg, cachedTintedMathRaster, classifyCjkFont, classifyFontGeneric, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, isCjkBreakChar, xlsxBorderDashArray, drawImageCropped, hexToRgba, verticalTrLongMark, verticalVertGlyphReachable, applyStroke, resolveFill, getConnectorAnchors, getCustGeomEndpoints, lineEndRetract, traceTrimmedPath, planPresetLeader, tracePlannedPresetLeader, drawPresetLineEndArrows, EMU_PER_PT, type LineEndAnchors, type PathCmd as CorePathCmd, type SparklineModel, type MathNode, type MathRenderer, type RasterizedMathSvg } from '@silurus/ooxml-core';
 import {
   canvasShapeFontBoxProbe, excelShapeSpacing, officeRequestKey, shapeOfficeRouteKey, shapeRunLineRatios,
   type ShapeRunLineRatios,
 } from './shape-office-line.js';
-import { formatCellValueWithColor } from './number-format.js';
+import { fitGeneralNumber, formatCellValueWithColor, indexStyleNumFmts, type FormattedCell, type StyleNumFmtIndex } from './number-format.js';
+import { symbolPaint, type SymbolPaint } from './symbol-paint.js';
+import { createSymbolFaceOracle, isSymbolFontFamily, type SymbolFaceOracle, type SymbolFaceOracleCache } from '@silurus/ooxml-core';
 import { type CfContext, type CfResult, compileCf, evaluateCf } from './conditional-format.js';
 import { computeLineVisualOrder, cellBaseRtl, resolveCellBidi } from './bidi-line.js';
 import { formatA1, parseA1 } from './a1.js';
@@ -260,6 +262,7 @@ function fontSourceFingerprint(sources: XlsxLoadedFontSources | undefined): stri
     key = JSON.stringify([
       [...sources.substitutions].map(([family, sub]) => [family, sub.family, sub.script ?? '']).sort(),
       [...sources.regularAliases].sort(),
+      [...sources.families].sort(),
     ]);
     fontSourceFingerprints.set(sources, key);
   }
@@ -322,7 +325,7 @@ function bindNormalFontState(
     ? computeMdw(worksheet.defaultFontFamily, worksheet.defaultFontSize, route,
       sources?.substitutions, worksheet.defaultFontBold ? 700 : 400,
       worksheet.defaultFontItalic ? 'italic' : 'normal', measureCtx,
-      regularAliasOf(sources, worksheet.defaultFontFamily))
+      regularAliasOf(sources, worksheet.defaultFontFamily), sources?.families)
     : undefined;
   const next = { tupleKey, route, hasDeclaredFace, canvasMdw };
   const old = normalFontBindingByWorksheet.get(worksheet);
@@ -342,8 +345,13 @@ export function bindXlsxOfficeFontRoutes(
   worksheet: Worksheet,
   routes?: OfficeRoutes,
   fontSources?: XlsxLoadedFontSources,
+  symbolFaces?: SymbolFaceOracleCache,
 ): void {
   bindThemeCellFontState(ctx, worksheet);
+  // Symbol-font codes are judged in this context's realm: by the workbook's
+  // oracle, kept while the realm's faces are unchanged, or by one of this
+  // bind alone (core symbol-face.ts, symbol-face-cache.ts).
+  symbolFacesByContext.set(ctx, symbolFaces ? symbolFaces.oracleFor(ctx) : createSymbolFaceOracle(ctx));
   const sourcesChanged = bindFontSources(worksheet, fontSources);
   if (officeRoutesByWorksheet.get(worksheet) !== routes || sourcesChanged) GridGeometry.invalidate(worksheet);
   if (fontSources) fontSourcesByContext.set(ctx, fontSources);
@@ -360,12 +368,33 @@ export function bindXlsxOfficeFontRoutes(
   }
 }
 
+const symbolFacesByContext = new WeakMap<object, SymbolFaceOracle>();
+
+/** The symbol oracle bound to `ctx` (bindXlsxOfficeFontRoutes), or one of
+ *  this context alone when it was never bound. */
+function symbolOracle(ctx: CanvasRenderingContext2D): SymbolFaceOracle {
+  let oracle = symbolFacesByContext.get(ctx);
+  if (!oracle) {
+    oracle = createSymbolFaceOracle(ctx);
+    symbolFacesByContext.set(ctx, oracle);
+  }
+  return oracle;
+}
+
 function contextRegularAlias(ctx: CanvasRenderingContext2D, name: string | null | undefined): string | undefined {
   return regularAliasOf(fontSourcesByContext.get(ctx), name);
 }
 
 function contextSubstitutions(ctx: CanvasRenderingContext2D): LoadedSubstitutions | undefined {
   return fontSourcesByContext.get(ctx)?.substitutions;
+}
+
+/** A font-family list bound to `ctx` with this realm's served families
+ *  scoped: font sources register their faces under the workbook session's
+ *  private families (core source-session.ts), never under the real names,
+ *  so another open document's faces are never selected for this one. */
+function contextScoped(ctx: CanvasRenderingContext2D, families: string): string {
+  return scopeServedFontFamilies(families, fontSourcesByContext.get(ctx)?.families);
 }
 
 export function bindXlsxWorksheetOfficeFontRoutes(
@@ -571,6 +600,7 @@ export function computeMdw(
   style: 'normal' | 'italic' = 'normal',
   ownerCtx?: CanvasRenderingContext2D,
   regularAlias?: string,
+  servedFamilies?: ReadonlyMap<string, string>,
 ): number {
   const sizePx = sizePt * PT_TO_PX;
   // A viewer-owned context resolves CSS faces in its own Document (which may
@@ -584,7 +614,8 @@ export function computeMdw(
   const stylePrefix = weight !== 400 || style !== 'normal' ? `${style} ${weight} ` : '';
   if (ownerCtx) ctx.save();
   try {
-    ctx.font = `${stylePrefix}${sizePx}px ${fontStackFor(family, undefined, '', route, substitutions, undefined, regularAlias)}`;
+    ctx.font = `${stylePrefix}${sizePx}px ${scopeServedFontFamilies(
+      fontStackFor(family, undefined, '', route, substitutions, undefined, regularAlias), servedFamilies)}`;
     let mdw = 0;
     for (const d of '0123456789') {
       const w = ctx.measureText(d).width;
@@ -634,6 +665,7 @@ export function getMdwForWorksheet(ws: Pick<Worksheet,
     style,
     undefined,
     regularAliasOf(fontSourcesByWorksheet.get(ws as Worksheet), ws.defaultFontFamily),
+    fontSourcesByWorksheet.get(ws as Worksheet)?.families,
   );
 }
 
@@ -1154,13 +1186,196 @@ function buildFont(ctx: CanvasRenderingContext2D, font: CellFont, cs = 1, cjkFal
   const sizePx = Math.max(1, Math.round(font.size * PT_TO_PX * cs));
   const selected = cachedThemeCellFont(font, themeCellFontByContext.get(ctx));
   const weight = selected.weight === 400 ? '' : `${selected.weight} `;
-  return `${style}${weight}${sizePx}px ${fontStackFor(
+  if ((font as SymbolCellFont).symbolUnicode) return `${style}${weight}${sizePx}px ${contextScoped(ctx, SYMBOL_UNICODE_FAMILIES)}`;
+  return `${style}${weight}${sizePx}px ${contextScoped(ctx, fontStackFor(
     selected.family, cjkFallback, text,
     officeRoute(ctx, selected.family, font.bold, font.italic),
     contextSubstitutions(ctx),
     selected.fallbackAlias,
     contextRegularAlias(ctx, selected.family),
-  )}`;
+  ))}`;
+}
+
+/** A cell or run font whose text converted from a symbol encoding
+ *  (symbol-paint.ts): it keeps the authored face's size and line metrics but
+ *  paints in {@link SYMBOL_UNICODE_FAMILIES}. Renderer-internal. */
+type SymbolCellFont = CellFont & { readonly symbolUnicode?: true };
+/** A rich run whose text is already in its painted form, flagged when that
+ *  form paints in the Unicode fallback face. Renderer-internal. */
+type SymbolRun = Run & {
+  readonly symbolUnicode?: true;
+  /** The painted form of each authored code point of the run, in order (a
+   *  conversion may add VS15; an authored VS15 is its own code point). */
+  readonly slots?: readonly string[];
+};
+
+/** The Unicode fallback face of converted symbol text: the sans class tail
+ *  without the authored symbol family or its substitute (a symbol cmap would
+ *  re-read a converted U+0020..U+00FF target as its own code). */
+const SYMBOL_UNICODE_FAMILIES = NAMED_SANS_TAIL;
+
+/** A cell value (or any text authored in one cell font) as it paints
+ *  (symbol-paint.ts). In one face: `text` in `font`, and `paint` gives the
+ *  painted form of any substring. In two faces (a partial symbol face):
+ *  `runs` are its stretches in painted form, each inheriting `font` and
+ *  flagged where it paints in the Unicode face; `text`/`font` then describe
+ *  the joined text only for logic that does not measure (hard breaks, bidi). */
+interface CellPaint {
+  readonly text: string;
+  readonly font: CellFont;
+  readonly paint: SymbolPaint['paint'];
+  readonly runs?: Run[];
+}
+
+function cellSymbolPaint(
+  ctx: CanvasRenderingContext2D, font: CellFont, text: string, cs = 1, cjkFallback?: CjkLang,
+): CellPaint {
+  // Only a symbol-encoded face (never an already converted font) is judged;
+  // every other cell pays one family test.
+  const family = cachedThemeCellFont(font, themeCellFontByContext.get(ctx)).family;
+  if (!text || (font as SymbolCellFont).symbolUnicode || !isSymbolFontFamily(family)) {
+    return { text, font, paint: (value) => value };
+  }
+  const painted = symbolPaint(symbolOracle(ctx), text, family, buildFont(ctx, font, cs, cjkFallback, text),
+    () => buildFont(ctx, { ...font, size: 24, symbolUnicode: true } as SymbolCellFont, 1));
+  const { segments, paint } = painted;
+  if (segments.length === 1) {
+    return {
+      text: paint(text),
+      font: segments[0]!.unicode ? { ...font, symbolUnicode: true } as SymbolCellFont : font,
+      paint,
+    };
+  }
+  return {
+    text: paint(text), font, paint,
+    runs: segments.map((segment): SymbolRun => {
+      const slots = [...segment.authored].map(paint);
+      return segment.unicode ? { text: slots.join(''), symbolUnicode: true, slots } : { text: slots.join(''), slots };
+    }),
+  };
+}
+
+/** Rich runs in their painted form (cellSymbolPaint per run, in the run's
+ *  resolved font; a run needing two faces splits); the input array itself
+ *  when no run changes. */
+function symbolPaintRuns(
+  ctx: CanvasRenderingContext2D, runs: Run[], baseFont: CellFont, cs = 1, cjkFallback?: CjkLang,
+): Run[] {
+  let out: Run[] | undefined;
+  runs.forEach((run, index) => {
+    const font = applyRunFont(baseFont, run);
+    const painted = cellSymbolPaint(ctx, font, run.text, cs, cjkFallback);
+    if (!painted.runs && painted.text === run.text && painted.font === font) {
+      out?.push(run);
+      return;
+    }
+    out ??= runs.slice(0, index);
+    if (painted.runs) {
+      for (const piece of painted.runs as SymbolRun[]) {
+        out.push({ ...run, text: piece.text, slots: piece.slots,
+          ...(piece.symbolUnicode ? { symbolUnicode: true } : {}) } as SymbolRun);
+      }
+      return;
+    }
+    const slots = [...run.text].map(painted.paint);
+    const next: SymbolRun = painted.font === font
+      ? { ...run, text: painted.text, slots }
+      : { ...run, text: painted.text, symbolUnicode: true, slots };
+    out.push(next);
+  });
+  return out ?? runs;
+}
+
+/**
+ * A cell value that paints in more than one face because of a symbol-encoded
+ * face, as painted runs; undefined for any other value. That is a rich value
+ * with a run in a symbol-encoded face (its codes are judged against its own
+ * face), or a plain value in a partial symbol face (`plain.runs`). Such a
+ * value is measured and painted run by run on every path: overflow,
+ * shrink-to-fit, fill and distributed alignment, rotated and stacked text,
+ * wrapping, the automatic row height, the virtualized overflow pre-pass and
+ * the phonetic band. Other rich values keep the established measurement of
+ * their joined text in the cell font (library simplification).
+ */
+function symbolRichRuns(
+  ctx: CanvasRenderingContext2D, runs: Run[] | undefined, baseFont: CellFont, cs = 1, cjkFallback?: CjkLang,
+  plain?: CellPaint,
+): Run[] | undefined {
+  if (!runs?.length) return plain?.runs;
+  const state = themeCellFontByContext.get(ctx);
+  const symbolic = runs.some((run) => isSymbolFontFamily(cachedThemeCellFont(applyRunFont(baseFont, run), state).family));
+  return symbolic ? symbolPaintRuns(ctx, runs, baseFont, cs, cjkFallback) : undefined;
+}
+
+/** Painted runs as measured segments of one line (line breaks read as spaces). */
+function richRunSegments(
+  ctx: CanvasRenderingContext2D, runs: readonly Run[], baseFont: CellFont, cs: number, cjkFallback?: CjkLang,
+): RichSeg[] {
+  const previous = ctx.font;
+  const segs = runs.map((run) => {
+    const font = applyRunFont(baseFont, run);
+    const text = run.text.replace(/\n/gu, ' ');
+    ctx.font = buildFont(ctx, vertAlignDrawFont(font), cs, cjkFallback, text);
+    return { text, font, width: ctx.measureText(text).width };
+  });
+  ctx.font = previous;
+  return segs;
+}
+
+/** The painted slots of runs, one per authored code point (as recorded
+ *  when the run was painted; an unchanged run is its own code points), with
+ *  their fonts. */
+function paintedSlots(runs: readonly Run[], baseFont: CellFont): { text: string; font: CellFont }[] {
+  return runs.flatMap((run) => {
+    const font = applyRunFont(baseFont, run);
+    return ((run as SymbolRun).slots ?? [...run.text]).map((text) => ({ text, font }));
+  });
+}
+
+/** Width of the authored code points `start .. start + [...text].length` of
+ *  a value painted as `runs`, each stretch in its own font. */
+function slotRangeWidth(
+  ctx: CanvasRenderingContext2D, slots: readonly { text: string; font: CellFont }[],
+  start: number, count: number, cs: number, cjkFallback?: CjkLang,
+): number {
+  const previous = ctx.font;
+  let width = 0;
+  let index = start;
+  const end = Math.min(slots.length, start + count);
+  while (index < end) {
+    const font = slots[index]!.font;
+    let text = '';
+    while (index < end && slots[index]!.font === font) text += slots[index++]!.text;
+    ctx.font = buildFont(ctx, vertAlignDrawFont(font), cs, cjkFallback, text);
+    width += ctx.measureText(text).width;
+  }
+  ctx.font = previous;
+  return width;
+}
+
+/** The phonetic base-span measure of a value painted as runs: a span of
+ *  authored code points measured slot by slot in their own fonts. */
+function phoneticSlotMeasure(
+  ctx: CanvasRenderingContext2D, runs: readonly Run[], baseFont: CellFont, cs: number, cjkFallback?: CjkLang,
+): (text: string, start: number) => number {
+  const slots = paintedSlots(runs, baseFont);
+  return (text, start) => slotRangeWidth(ctx, slots, start, [...text].length, cs, cjkFallback);
+}
+
+/** Width of `text` painted in `font` (in its painted form, in one or more
+ *  faces), restoring the context font. */
+function measureCellText(
+  ctx: CanvasRenderingContext2D, font: CellFont, text: string, cs: number, cjkFallback?: CjkLang,
+): number {
+  const painted = cellSymbolPaint(ctx, font, text, cs, cjkFallback);
+  if (painted.runs) {
+    return richRunSegments(ctx, painted.runs, font, cs, cjkFallback).reduce((sum, seg) => sum + seg.width, 0);
+  }
+  const previous = ctx.font;
+  ctx.font = buildFont(ctx, painted.font, cs, cjkFallback, painted.text);
+  const width = ctx.measureText(painted.text).width;
+  ctx.font = previous;
+  return width;
 }
 
 /**
@@ -1192,6 +1407,9 @@ export function drawPhoneticBand(
   cs: number,
   color: string,
   cjkFallback?: CjkLang,
+  /** Width of a base-text span (its code-point offset `start`) as it
+   *  paints (symbol-paint.ts); default: the span in `baseFontStr`. */
+  baseMeasure?: (text: string, start: number) => number,
 ): void {
   if (runs.length === 0) return;
   // §18.4.3: fontId selects the reading font; out of bounds → font 0.
@@ -1201,10 +1419,32 @@ export function drawPhoneticBand(
   const alignment: PhoneticAlignment = pr?.alignment ?? 'left';
 
   ctx.save();
-  ctx.font = buildFont(ctx, phFont, cs, cjkFallback, runs.map((run) => run.text).join(''));
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
   ctx.fillStyle = color;
+  // Each reading paints in the reading font like any cell text, in its
+  // painted form and, in a partial symbol face, stretch by stretch
+  // (symbol-paint.ts): measured and painted piece by piece.
+  const pieces = (text: string): { text: string; font: CellFont }[] => {
+    const painted = cellSymbolPaint(ctx, phFont, text, cs, cjkFallback);
+    return painted.runs
+      ? painted.runs.map((run) => ({ text: run.text, font: applyRunFont(painted.font, run) }))
+      : [{ text: painted.text, font: painted.font }];
+  };
+  const widthOf = (parts: readonly { text: string; font: CellFont }[]) => parts.reduce((sum, part) => {
+    ctx.font = buildFont(ctx, part.font, cs, cjkFallback, part.text);
+    return sum + ctx.measureText(part.text).width;
+  }, 0);
+  /** Paints the pieces from `x`, returning the pen after them. */
+  const paintPieces = (parts: readonly { text: string; font: CellFont }[], x: number, yy: number): number => {
+    let pen = x;
+    for (const part of parts) {
+      ctx.font = buildFont(ctx, part.font, cs, cjkFallback, part.text);
+      paintCellText(ctx, part.text, pen, yy, part.font, cs);
+      pen += ctx.measureText(part.text).width;
+    }
+    return pen;
+  };
 
   // Sit the reading just below the cell's top padding.
   const y = cellTopY + Math.round(2 * cs);
@@ -1212,12 +1452,9 @@ export function drawPhoneticBand(
   if (alignment === 'noControl') {
     // §18.18.56 noControl: NOT per word — lay the readings out left-to-right
     // from the base text's left edge, each at its own natural (reading-font)
-    // width, in run order. Measured with the reading font already active.
+    // width, in run order.
     let cursor = baseLeftX;
-    for (const run of runs) {
-      paintCellText(ctx, run.text, cursor, y, phFont, cs);
-      cursor += ctx.measureText(run.text).width;
-    }
+    for (const run of runs) cursor = paintPieces(pieces(run.text), cursor, y);
     ctx.restore();
     return;
   }
@@ -1225,26 +1462,28 @@ export function drawPhoneticBand(
   // Per-word (left / center / distributed): position each hint over its base
   // span using BASE-font advances (so the band lines up with the glyphs it
   // annotates). `baseFontStr` is the font string the base text was drawn with.
-  const placed = placePhoneticRuns(runs, baseText, baseLeftX, alignment, (s) =>
-    measureInFont(ctx, s, baseFontStr),
+  const placed = placePhoneticRuns(runs, baseText, baseLeftX, alignment, (s, start) =>
+    baseMeasure ? baseMeasure(s, start) : measureInFont(ctx, s, baseFontStr),
   );
 
   for (const p of placed) {
-    const naturalW = ctx.measureText(p.text).width;
+    // Gaps per authored reading character; widths of the painted form.
     const cps = [...p.text];
+    const parts = pieces(p.text);
+    const naturalW = widthOf(parts);
     if (p.spread === 'distribute' && cps.length > 1 && naturalW < p.width) {
       // §18.18.56 distributed: spread the reading glyphs so the first hugs the
       // left edge and the last the right edge of the base span.
       const extra = (p.width - naturalW) / (cps.length - 1);
       try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${extra}px`; } catch { /* ignore */ }
-      paintCellText(ctx, p.text, p.x, y, phFont, cs);
+      paintPieces(parts, p.x, y);
       try { (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = '0px'; } catch { /* ignore */ }
     } else if (p.spread === 'center') {
       // §18.18.56 center: centre the natural reading width over the base span.
-      paintCellText(ctx, p.text, p.x + (p.width - naturalW) / 2, y, phFont, cs);
+      paintPieces(parts, p.x + (p.width - naturalW) / 2, y);
     } else {
       // §18.18.56 left: left-justified at the base span's left edge.
-      paintCellText(ctx, p.text, p.x, y, phFont, cs);
+      paintPieces(parts, p.x, y);
     }
   }
   ctx.restore();
@@ -1301,6 +1540,11 @@ function drawTextDecoLine(
  * such a run black even in a red cell.
  */
 function applyRunFont(base: CellFont, run: Run): CellFont {
+  const font = authoredRunFont(base, run);
+  return (run as SymbolRun).symbolUnicode ? { ...font, symbolUnicode: true } as SymbolCellFont : font;
+}
+
+function authoredRunFont(base: CellFont, run: Run): CellFont {
   const rf = run.font;
   if (!rf) return base;
   return {
@@ -1615,6 +1859,41 @@ function drawMultiLineRichText(
   }
 }
 
+/** ECMA-376 §18.3.1.13 col@width: a column's pixel width is its text area plus
+ *  "4 pixels of margin padding (two on each side), plus 1 pixel padding for
+ *  the gridlines". */
+const COLUMN_TEXT_PADDING_PX = 5;
+
+/** Shortens a General number to the column's text area (§18.3.1.13, less
+ *  `reservedW` for indent or an icon-set icon), measured in the cell's current
+ *  `ctx.font` (§18.8.30, issue #2179; see {@link fitGeneralNumber}). Every other
+ *  number format keeps its text. Shrink-to-fit cells scale instead, rotated or
+ *  stacked text has no horizontal width to fit, and wrapped cells keep the text
+ *  their automatic row height was measured with, so those keep their text. */
+function fitNumberToCell(
+  ctx: CanvasRenderingContext2D,
+  cell: Cell,
+  formatted: FormattedCell,
+  xf: CellXf,
+  cellW: number,
+  reservedW: number,
+  measure: (text: string) => number = (text) => ctx.measureText(text).width,
+): FormattedCell {
+  if (xf.shrinkToFit || xf.textRotation || xf.wrapText) return formatted;
+  const availableW = cellW - reservedW - COLUMN_TEXT_PADDING_PX;
+  return fitGeneralNumber(cell, formatted, (text) => measure(text) <= availableW);
+}
+
+/** How a candidate cell text (a General number shortening) is measured: in
+ *  the context's current font, or, for a symbol-encoded face, in its painted
+ *  form and font (symbol-paint.ts). */
+function cellTextMeasure(
+  ctx: CanvasRenderingContext2D, font: CellFont, cs: number, cjkFallback?: CjkLang,
+): ((text: string) => number) | undefined {
+  return isSymbolFontFamily(cachedThemeCellFont(font, themeCellFontByContext.get(ctx)).family)
+    ? (text) => measureCellText(ctx, font, text, cs, cjkFallback) : undefined;
+}
+
 /** Invalid date/time display follows Excel's hash fill (issue #1710).
  * Formatting APIs expose only '#'; painting repeats it in the visible cell
  * width. Bound the allocation by the target canvas, including huge/offscreen
@@ -1623,13 +1902,16 @@ function drawMultiLineRichText(
 function drawHashFill(
   ctx: CanvasRenderingContext2D,
   cx: number, cy: number, cellW: number, cellH: number,
-  alignV: string, font: CellFont, cs: number,
+  alignV: string, font: CellFont, cs: number, cjkFallback?: CjkLang,
 ): void {
   const padding = 3;
   const left = Math.max(0, cx) + padding;
   const available = Math.min(cx + cellW, ctx.canvas.width) - padding - left;
   if (available <= 0) return;
-  const hashWidth = ctx.measureText('#').width;
+  // The marker is text in the cell font like any value (symbol-paint.ts).
+  const painted = cellSymbolPaint(ctx, font, '#', cs, cjkFallback);
+  if (painted.font !== font) ctx.font = buildFont(ctx, painted.font, cs, cjkFallback, painted.text);
+  const hashWidth = ctx.measureText(painted.text).width;
   const count = hashWidth > 0 ? Math.max(1, Math.floor(available / hashWidth)) : 1;
   ctx.textAlign = 'left';
   const { baseline, textY } = singleLineVerticalAnchor({
@@ -1637,7 +1919,7 @@ function drawHashFill(
     leftPad: padding, paddingX: padding, paddingY: 2,
   });
   ctx.textBaseline = baseline;
-  paintCellText(ctx, '#'.repeat(count), left, textY, font, cs);
+  paintCellText(ctx, painted.paint('#'.repeat(count)), left, textY, painted.font, cs);
 }
 
 /**
@@ -1766,6 +2048,47 @@ export function drawWrappedRichText(
     drawResolvedRichLine(ctx, line.segments, xx, yy, 'top', cs, dpr, { fontColor: opts.fontColor, needBidi, baseRtl }, cjkFallback);
     yy += vMetricPx(line.maxFontSize, cs, 1.2);
   }
+}
+
+/**
+ * Stacked text (`textRotation="255"`, §18.8.1) of a value painted as runs
+ * (symbolRichRuns): one slot per authored code point, each painted in its
+ * run's font and colour, its height the compact 1.1 em slot of that font
+ * (as the plain stacked path and stackedRunsHeight), with the same UAX #50
+ * orientation as the plain stacked path.
+ */
+function drawStackedRichRuns(
+  ctx: CanvasRenderingContext2D, runs: readonly Run[], baseFont: CellFont,
+  centerX: number, cy: number, cellH: number, alignV: string, paddingY: number,
+  cs: number, fontColor: string | null | undefined, cjkFallback?: CjkLang,
+): void {
+  const slots = paintedSlots(runs, baseFont);
+  const totalH = stackedRunsHeight(slots, cs);
+  let charY = alignV === 'top' ? cy + paddingY
+    : alignV === 'center' ? cy + (cellH - totalH) / 2
+    : cy + cellH - totalH - paddingY;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  let current: CellFont | undefined;
+  for (const { text: ch, font } of slots) {
+    if (font !== current) {
+      current = font;
+      ctx.font = buildFont(ctx, font, cs, cjkFallback, ch);
+      const color = fontColor ?? font.color;
+      ctx.fillStyle = color ? hexToRgba(color) : '#000000';
+    }
+    const charH = vMetricPx(font.size, cs, 1.1);
+    const cp = ch.codePointAt(0) ?? 0;
+    const vertCapable = verticalTrLongMark(cp) && verticalVertGlyphReachable(ctx, cp);
+    drawStackedVerticalChar(ctx, ch, centerX, charY, charH, vertCapable,
+      (value, x, y) => paintCellText(ctx, value, x, y, font, cs));
+    charY += charH;
+  }
+}
+
+/** Total height of stacked slots, each the 1.1 em slot of its own font. */
+function stackedRunsHeight(slots: readonly { font: CellFont }[], cs: number): number {
+  return slots.reduce((sum, slot) => sum + vMetricPx(slot.font.size, cs, 1.1), 0);
 }
 
 function colToLetter(col: number): string {
@@ -2011,6 +2334,9 @@ function renderQuadrant(
   if (clipW <= 0 || clipH <= 0) return;
 
   const { styles, cellMap, mergeAnchorMap, mergeSkipSet, cfContext, cs, dpr } = rc;
+  // One numFmt index, built at the first formatted cell, for the rest of
+  // this pass (`styles` is library-owned parsed data; see indexStyleNumFmts).
+  let numFmtIndex: StyleNumFmtIndex | undefined;
   const numCols = colWidths.length;
   const numRows = rowHeights.length;
   const visibleRows = new Set(rowIndices);
@@ -2140,12 +2466,11 @@ function renderQuadrant(
     mergeBorderTasks.push(() => renderBorder(ctx, preBorder, aCx, aCy, cW, cH, dpr));
 
     if (!cell) continue;
-    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
-    const text = formatted.text;
-    if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
+    const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
+    if (!unfitted.text || (unfitted.text === '0' && rc.worksheet.showZeros === false)) continue;
 
     const fontForDraw = layeredCellFont(font, cf, styleFormat);
-    ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, text);
+    ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, unfitted.text);
     const hyperlinkUrl = rc.hyperlinkMap.get(key);
     // Colour precedence (as the main path): hyperlink theme colour >
     // conditional-formatting font colour > number-format section colour
@@ -2155,7 +2480,7 @@ function renderQuadrant(
     const tableFontColor = styleFontColor(styleFormat, xf);
     const textColor = hyperlinkUrl
       ? '#0563C1'
-      : (cf.fontColor ?? formatted.color ?? tableFontColor ?? font.color);
+      : (cf.fontColor ?? unfitted.color ?? tableFontColor ?? font.color);
     ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
     const paddingX = 3, paddingY = 2;
@@ -2165,6 +2490,16 @@ function renderQuadrant(
     // character widths (MDW) of the workbook's normal-style font.
     const indentPx = xf.indent ? Math.round(xf.indent * 3 * rc.mdw) : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0);
+    // A General number shortens to the merged width (issue #2179) exactly as
+    // in the main loop, icon-set reservation included, so the value does not
+    // change when the anchor scrolls out of view.
+    const iconReserve = cf.iconSet ? Math.max(8, Math.round(Math.min(cW, cH) * 0.55)) + 4 : 0;
+    const formatted = fitNumberToCell(ctx, cell, unfitted, xf, cW, leftPad - paddingX + iconReserve,
+      cellTextMeasure(ctx, fontForDraw, cs, cjkFallback));
+    const text = formatted.text;
+    // The value as it paints (symbol-encoded faces, symbol-paint.ts).
+    const painted = cellSymbolPaint(ctx, fontForDraw, text, cs, cjkFallback);
+    if (painted.font !== fontForDraw) ctx.font = buildFont(ctx, painted.font, cs, cjkFallback, painted.text);
 
     ctx.save();
     ctx.beginPath();
@@ -2172,7 +2507,7 @@ function renderQuadrant(
     ctx.clip();
 
     if (formatted.fill) {
-      drawHashFill(ctx, aCx, aCy, cW, cH, alignV, fontForDraw, cs);
+      drawHashFill(ctx, aCx, aCy, cW, cH, alignV, fontForDraw, cs, cjkFallback);
       ctx.restore();
       continue;
     }
@@ -2192,8 +2527,14 @@ function renderQuadrant(
     // (richRunsWithTableColor); runs without <rPr> through the base font.
     const tableRunColor = tableRunFontColor(styleFormat, xf);
     const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
-    const runs = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
     const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
+    const colouredRuns = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
+    // A plain value in two faces paints as runs (symbolRichRuns), as in the
+    // main loop.
+    const symbolRuns = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback, painted);
+    const runBase = symbolRuns && !colouredRuns?.length
+      ? { ...fontForDraw, color: textColor, underline: fontForDraw.underline || !!hyperlinkUrl } : richBaseFont;
+    const runs = symbolRuns ?? colouredRuns;
     const hasRichText = runs && runs.length > 0;
 
     if (xf.wrapText && hasRichText) {
@@ -2202,16 +2543,16 @@ function renderQuadrant(
       // underline/strike, and bidi (previously this pre-pass drew only plain
       // per-segment fonts).
       drawWrappedRichText(
-        ctx, runs, richBaseFont,
+        ctx, runs, runBase,
         { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
         cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
       );
     } else if (xf.wrapText) {
       drawWrappedPlainText(
         ctx,
-        text,
+        painted.text,
         textX,
-        fontForDraw,
+        painted.font,
         { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
         cs,
       );
@@ -2220,7 +2561,7 @@ function renderQuadrant(
       // off-screen-anchored merge renders identical per-run text (single line, or
       // multiple lines on a hard break) instead of joined base-font text.
       drawNonWrapRichText(
-        ctx, runs, richBaseFont,
+        ctx, runs, runBase,
         { alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY },
         cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
       );
@@ -2229,7 +2570,7 @@ function renderQuadrant(
         alignH, alignV, cx: aCx, cy: aCy, cellW: cW, cellH: cH, leftPad, paddingX, paddingY,
       });
       ctx.textBaseline = baseline;
-      paintCellText(ctx, text, textX, textY, fontForDraw, cs);
+      paintCellText(ctx, painted.text, textX, textY, painted.font, cs);
     }
     ctx.restore();
   }
@@ -2511,15 +2852,14 @@ function renderQuadrant(
       }
 
       if (!cell) continue;
-      const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904);
-      const text = formatted.text;
-      if (!text || (text === '0' && rc.worksheet.showZeros === false)) continue;
+      const unfitted = formatCellValueWithColor(cell, styles, cf.numFmt, rc.worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
+      if (!unfitted.text || (unfitted.text === '0' && rc.worksheet.showZeros === false)) continue;
 
       textTasks.push(() => {
       // CF is the top layer: a matched rule's toggle, on or off, overrides
       // the cell, table and PivotTable formatting beneath it (CfResult).
       const fontForDraw = layeredCellFont(font, cf, styleFormat);
-      ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, text);
+      ctx.font = buildFont(ctx, fontForDraw, cs, cjkFallback, unfitted.text);
       const hyperlinkUrl = rc.hyperlinkMap.get(key);
       // Colour precedence: hyperlink > conditional-formatting font colour >
       // number-format section colour ([Red] etc., §18.8.30) > Table /
@@ -2528,7 +2868,7 @@ function renderQuadrant(
       const tableFontColor = styleFontColor(styleFormat, xf);
       const textColor = hyperlinkUrl
         ? '#0563C1'
-        : (cf.fontColor ?? formatted.color ?? tableFontColor ?? font.color);
+        : (cf.fontColor ?? unfitted.color ?? tableFontColor ?? font.color);
       ctx.fillStyle = textColor ? hexToRgba(textColor) : '#000000';
 
       const paddingX = 3;
@@ -2571,6 +2911,40 @@ function renderQuadrant(
         ? cx - (centerContinuousW - cellW)
         : cx;
 
+      // A General number shortens to the width its alignment gives the text
+      // (merged cells use the merged width, centerContinuous its range) rather
+      // than being clipped (issue #2179).
+      const formatted = fitNumberToCell(
+        ctx, cell, unfitted, xf,
+        alignH === 'centerContinuous' ? centerContinuousW : cellW, leftPad - paddingX,
+        cellTextMeasure(ctx, fontForDraw, cs, cjkFallback),
+      );
+      const text = formatted.text;
+      // The value as it paints: every measurement below and every paint use
+      // this one form and font (symbol-encoded faces, symbol-paint.ts).
+      const painted = cellSymbolPaint(ctx, fontForDraw, text, cs, cjkFallback);
+      const paintFont = painted.font;
+      const paintText = painted.text;
+      if (paintFont !== fontForDraw) ctx.font = buildFont(ctx, paintFont, cs, cjkFallback, paintText);
+      // Rich runs take the table style's font color by the measured run rule
+      // (richRunsWithTableColor), in their painted form; runs in a
+      // symbol-encoded face are measured run by run (symbolRichRuns).
+      const tableRunColor = tableRunFontColor(styleFormat, xf);
+      const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
+      const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
+      const colouredRuns = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
+      // A plain value in two faces paints as runs of the cell font, in the
+      // value's colour, a hyperlink underlined as the plain path draws it.
+      const plainRunBase: CellFont = { ...fontForDraw, color: textColor,
+        underline: fontForDraw.underline || !!hyperlinkUrl };
+      const symbolRuns = symbolRichRuns(ctx, colouredRuns, richBaseFont, cs, cjkFallback, painted);
+      const runBase = symbolRuns && !colouredRuns?.length ? plainRunBase : richBaseFont;
+      let runs = symbolRuns ?? colouredRuns;
+      const symbolSegments = symbolRuns && richRunSegments(ctx, symbolRuns, runBase, cs, cjkFallback);
+      const valueWidth = () => symbolSegments
+        ? symbolSegments.reduce((sum, seg) => sum + seg.width, 0)
+        : ctx.measureText(paintText).width;
+
       // Text overflow into adjacent empty cells is observed Excel display
       // behavior when `wrapText=false`; OOXML persists the cell's alignment
       // and wrapping state but does not specify this paint-time spill rule.
@@ -2589,7 +2963,7 @@ function renderQuadrant(
       // clip rect extends into adjacent empty cells when the text is wider.
       const hasHardBreak = text.includes('\n');
       if (!mergeInfo && !xf.wrapText && !xf.textRotation && !isNumeric && !hasHardBreak) {
-        const textW = ctx.measureText(text).width;
+        const textW = valueWidth();
         const isCenterCont = alignH === 'centerContinuous';
         const textPx = isCenterCont ? textW + paddingX * 2 : textW + leftPad + paddingX;
         const containerW = isCenterCont ? centerContinuousW : cellW;
@@ -2663,15 +3037,17 @@ function renderQuadrant(
       let letterSpacingPx = 0;
       if (alignH === 'fill' && !isNumeric && text.length > 0) {
         const innerW = Math.max(1, cellW - paddingX * 2);
-        const oneW = ctx.measureText(text).width;
+        const oneW = valueWidth();
         if (oneW > 0 && oneW < innerW) {
           const reps = Math.max(1, Math.floor(innerW / oneW));
           drawText = text.repeat(reps);
+          if (symbolRuns) runs = Array.from({ length: reps }, () => symbolRuns).flat();
         }
       }
       if (alignH === 'distributed' || (alignH === 'justify' && !xf.wrapText && !hasHardBreak)) {
         const innerW = Math.max(1, cellW - paddingX * 2);
-        const naturalW = ctx.measureText(drawText).width;
+        const naturalW = symbolSegments ? valueWidth() : ctx.measureText(painted.paint(drawText)).width;
+        // One gap per authored character: a converted symbol may carry VS15.
         const gaps = Math.max(1, [...drawText].length - 1);
         if (naturalW < innerW) {
           letterSpacingPx = Math.max(0, (innerW - naturalW) / gaps);
@@ -2720,7 +3096,7 @@ function renderQuadrant(
       ctx.clip();
 
       if (formatted.fill) {
-        drawHashFill(ctx, cx, cy, cellW, cellH, alignV, fontForDraw, cs);
+        drawHashFill(ctx, cx, cy, cellW, cellH, alignV, fontForDraw, cs, cjkFallback);
         ctx.restore();
         return;
       }
@@ -2732,6 +3108,12 @@ function renderQuadrant(
         // an astral character reserves one slot, keeping center/bottom anchoring
         // correct (issue #790 codex review, finding 3).
         const stackedCount = [...text].length;
+        if (symbolRuns) {
+          drawStackedRichRuns(ctx, symbolRuns, runBase, cx + cellW / 2, cy, cellH, alignV,
+            paddingY, cs, cf.fontColor, cjkFallback);
+          ctx.restore();
+          return;
+        }
         const totalH = stackedCount * charH;
         let charY = alignV === 'top' ? cy + paddingY
           : alignV === 'center' ? cy + (cellH - totalH) / 2
@@ -2739,11 +3121,13 @@ function renderQuadrant(
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         const paintStacked = (value: string, x: number, y: number) =>
-          paintCellText(ctx, value, x, y, fontForDraw, cs);
-        for (const ch of text) {
+          paintCellText(ctx, value, x, y, paintFont, cs);
+        for (const authored of text) {
           // UAX#50 per-glyph orientation (issue #790): CJK/Latin stay upright,
           // 、。 substitute their vertical form, fullwidth brackets substitute
-          // their U+FE3x form, and ー rotates 90° to a vertical bar.
+          // their U+FE3x form, and ー rotates 90° to a vertical bar. One slot
+          // per authored code point, painted in its painted form.
+          const ch = painted.paint(authored);
           const cp = ch.codePointAt(0) ?? 0;
           const vertCapable =
             verticalTrLongMark(cp) && verticalVertGlyphReachable(ctx, cp);
@@ -2761,16 +3145,24 @@ function renderQuadrant(
           : ((rotation - 90) * Math.PI / 180);
         ctx.translate(cx + cellW / 2, cy + cellH / 2);
         ctx.rotate(angleRad);
+        if (symbolSegments) {
+          const total = symbolSegments.reduce((sum, seg) => sum + seg.width, 0);
+          const { needBidi, baseRtl } = resolveCellBidi(xf.readingOrder, symbolSegments.map((seg) => seg.text).join(''));
+          drawResolvedRichLine(ctx, symbolSegments, -total / 2, 0, 'middle', cs, dpr,
+            { fontColor: cf.fontColor, needBidi, baseRtl }, cjkFallback);
+          ctx.restore();
+          return;
+        }
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        paintCellText(ctx, text, 0, 0, fontForDraw, cs);
+        paintCellText(ctx, paintText, 0, 0, paintFont, cs);
         ctx.restore();
         return;
       }
 
       // shrinkToFit: scale context horizontally if text is wider than cell
       if (xf.shrinkToFit) {
-        const textW = ctx.measureText(text).width;
+        const textW = valueWidth();
         const availW = cellW - leftPad - paddingX;
         if (textW > availW && textW > 0) {
           const scale = availW / textW;
@@ -2795,42 +3187,42 @@ function renderQuadrant(
       // Context cells.
       try {
         (ctx as CanvasRenderingContext2D & { direction: 'ltr' | 'rtl' }).direction =
-          cellBaseRtl(xf.readingOrder, text) ? 'rtl' : 'ltr';
+          cellBaseRtl(xf.readingOrder, paintText) ? 'rtl' : 'ltr';
       } catch { /* ignore */ }
 
-      // Rich text: draw each run with its own font. Rich runs take the table
-      // style's font color by the measured run rule (richRunsWithTableColor).
-      const tableRunColor = tableRunFontColor(styleFormat, xf);
-      const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
-      const runs = rawRuns && richRunsWithTableColor(rawRuns, tableRunColor);
-      const richBaseFont = tableRunColor != null ? { ...fontForDraw, color: tableRunColor } : fontForDraw;
-      const hasRichText = runs && runs.length > 0;
+      // Rich text: draw each run with its own font.
+      const richRuns = runs?.length ? runs : undefined;
+      // A value painted as runs because of a symbol face keeps the plain
+      // path's centerContinuous geometry: centred across its selection range.
+      const runGeom = symbolRuns && alignH === 'centerContinuous'
+        ? { alignH: 'center', alignV, cx: centerContinuousX, cy, cellW: centerContinuousW, cellH, leftPad, paddingX, paddingY }
+        : { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY };
 
-      if (xf.wrapText && hasRichText) {
+      if (xf.wrapText && richRuns) {
         // Rich text with wrapping — shared with the off-screen pre-pass.
         drawWrappedRichText(
-          ctx, runs, richBaseFont,
-          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          ctx, richRuns, runBase,
+          runGeom,
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
         );
       } else if (xf.wrapText) {
         drawWrappedPlainText(
           ctx,
-          text,
+          paintText,
           textX,
-          fontForDraw,
+          paintFont,
           { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
           cs,
         );
-      } else if (hasRichText) {
+      } else if (richRuns) {
         // Non-wrap rich text: per-run fonts, honoring hard breaks (Alt+Enter LF;
         // ECMA-376 §18.8.1 — Excel renders breaks even with wrapText off). The
         // shared helper draws a break-free value as a single alignV-anchored line
         // and a value with breaks as multiple lines, keeping this in-viewport
         // path and the off-screen-anchor pre-pass identical.
         drawNonWrapRichText(
-          ctx, runs, richBaseFont,
-          { alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY },
+          ctx, richRuns, runBase,
+          runGeom,
           cs, dpr, { fontColor: cf.fontColor, readingOrder: xf.readingOrder }, cjkFallback
         );
       } else {
@@ -2839,21 +3231,21 @@ function renderQuadrant(
         // off the baseline so the cell still reads at the right vertical band.
         // §18.4.14 mandates the size reduction; the exact ratio/offset is
         // implementation-defined (ratios match Office's visual output).
-        const cellVertAlign = fontForDraw.vertAlign;
+        const cellVertAlign = paintFont.vertAlign;
         const baseSizePxOrig = vMetricPx(font.size, cs);
         let vaYShift = 0;
         if (cellVertAlign === 'superscript') vaYShift = -Math.round(baseSizePxOrig * 0.35);
         else if (cellVertAlign === 'subscript') vaYShift = Math.round(baseSizePxOrig * 0.10);
         const drawFont: CellFont = cellVertAlign
-          ? { ...fontForDraw, size: fontForDraw.size * 0.65 }
-          : fontForDraw;
+          ? { ...paintFont, size: paintFont.size * 0.65 }
+          : paintFont;
         if (cellVertAlign) {
-          ctx.font = buildFont(ctx, drawFont, cs, cjkFallback, text);
+          ctx.font = buildFont(ctx, drawFont, cs, cjkFallback, paintText);
         }
 
         // Measure once for both underline and strike
         let overlayMetrics: TextMetrics | null = null;
-        const measureOverlay = () => overlayMetrics ??= ctx.measureText(text);
+        const measureOverlay = () => overlayMetrics ??= ctx.measureText(paintText);
         const overlayX = () => {
           const tW = Math.min(measureOverlay().width, drawW - leftPad - paddingX);
           return {
@@ -2893,8 +3285,8 @@ function renderQuadrant(
         }
         // Hard line breaks (\n from Alt+Enter) render as multiple lines even
         // when wrapText is false — this matches Excel's behavior.
-        if (text.includes('\n')) {
-          const lines = text.split('\n');
+        if (paintText.includes('\n')) {
+          const lines = paintText.split('\n');
           const lineH = vMetricPx(font.size, cs, 1.2);
           const totalTextH = lines.length * lineH;
           let startY: number;
@@ -2909,7 +3301,7 @@ function renderQuadrant(
             alignH, alignV, cx, cy, cellW, cellH, leftPad, paddingX, paddingY,
           });
           ctx.textBaseline = baseline;
-          paintCellText(ctx, drawText, textX, textY + vaYShift, drawFont, cs);
+          paintCellText(ctx, painted.paint(drawText), textX, textY + vaYShift, drawFont, cs);
         }
       }
 
@@ -2924,8 +3316,8 @@ function renderQuadrant(
       // measured base width.
       const phRuns = cell.value.type === 'text' ? cell.value.phoneticRuns : undefined;
       if (cell.showPhonetic && phRuns && phRuns.length > 0 && !text.includes('\n')) {
-        const baseFontStr = buildFont(ctx, fontForDraw, cs, cjkFallback, text);
-        const baseTextW = measureInFont(ctx, text, baseFontStr);
+        const baseFontStr = buildFont(ctx, paintFont, cs, cjkFallback, paintText);
+        const baseTextW = symbolSegments ? valueWidth() : measureInFont(ctx, paintText, baseFontStr);
         let baseLeftX: number;
         if (alignH === 'right') baseLeftX = cx + cellW - paddingX - baseTextW;
         else if (alignH === 'center') baseLeftX = cx + cellW / 2 - baseTextW / 2;
@@ -2941,7 +3333,9 @@ function renderQuadrant(
           baseLeftX,
           cy,
           cs,
-          phColor, cjkFallback
+          phColor, cjkFallback,
+          symbolRuns ? phoneticSlotMeasure(ctx, symbolRuns, runBase, cs, cjkFallback)
+            : (value) => measureInFont(ctx, painted.paint(value), baseFontStr),
         );
       }
 
@@ -3010,11 +3404,15 @@ interface SheetRenderCache {
   sparklineMap: Map<string, SparklineModel>;
 }
 const sheetRenderCache = new WeakMap<Worksheet, SheetRenderCache>();
+/** Worksheets whose current entry was shared from a source by
+ * {@link inheritSheetRenderCache} rather than built from their own fields. */
+const inheritedRenderCache = new WeakSet<Worksheet>();
 
 /** @internal A provisional row graph grows between renders; its coordinate
  * indexes must be rebuilt after every accepted chunk. */
 export function invalidateSheetRenderCache(worksheet: Worksheet): void {
   sheetRenderCache.delete(worksheet);
+  inheritedRenderCache.delete(worksheet);
 }
 
 function coordinateIndexIdentity(
@@ -3041,6 +3439,7 @@ export function getSheetRenderCache(worksheet: Worksheet, styles?: Styles): Shee
     return cached;
   }
   if (cached) sheetRenderCache.delete(worksheet);
+  inheritedRenderCache.delete(worksheet);
 
   const cellIdentity = coordinateIndexIdentity(
     worksheet,
@@ -3265,36 +3664,49 @@ function requiredAutoCellHeightPx(
   const iconPad = iconSize > 0 ? iconSize + 4 : 0;
   const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
   const availableWidth = Math.max(1, cellWidthPx - leftPad - paddingX);
-  const runs = cell.value.type === 'text' ? cell.value.runs : undefined;
-  const hasRichText = !!runs?.length;
+  const rawRuns = cell.value.type === 'text' ? cell.value.runs : undefined;
   const rotation = xf.textRotation ?? 0;
+  // Measured exactly as paint measures: the painted form and font of the
+  // value and of each rich run (symbol-paint.ts).
+  const painted = cellSymbolPaint(ctx, font, text, 1, cjkFallback);
+  const symbolRuns = symbolRichRuns(ctx, rawRuns, font, 1, cjkFallback, painted);
+  const runs = symbolRuns ?? rawRuns;
 
-  ctx.font = buildFont(ctx, font, 1, cjkFallback, text);
+  ctx.font = buildFont(ctx, painted.font, 1, cjkFallback, painted.text);
   if (rotation === 255) {
     // Paint deliberately uses the compact 1.1 slot without a document-family
-    // design-line floor for stacked glyphs; auto-fit must use the same metric.
+    // design-line floor for stacked glyphs; auto-fit must use the same metric
+    // (per run for a value painted as runs, drawStackedRichRuns).
+    if (symbolRuns) return stackedRunsHeight(paintedSlots(symbolRuns, font), 1) + paddingY * 2;
     return [...text].length * vMetricPx(font.size, 1, 1.1) + paddingY * 2;
   }
   if (rotation > 0) {
     const angle = rotation <= 90
       ? rotation * Math.PI / 180
       : (rotation - 90) * Math.PI / 180;
-    const lineHeight = vMetricPx(font.size, 1, 1.2);
-    const textWidth = ctx.measureText(text.replace(/\n/g, ' ')).width;
+    // A value painted as runs is one line of its runs (the rotated rich
+    // paint), as tall as its largest run.
+    const segments = symbolRuns && richRunSegments(ctx, symbolRuns, font, 1, cjkFallback);
+    const lineHeight = segments
+      ? Math.max(...segments.map((seg) => vMetricPx(seg.font.size, 1, 1.2)))
+      : vMetricPx(font.size, 1, 1.2);
+    const textWidth = segments
+      ? segments.reduce((sum, seg) => sum + seg.width, 0)
+      : ctx.measureText(painted.text.replace(/\n/g, ' ')).width;
     return Math.abs(Math.sin(angle)) * textWidth
       + Math.abs(Math.cos(angle)) * lineHeight
       + paddingY * 2;
   }
 
   let lineHeights: number[];
-  if (xf.wrapText && hasRichText) {
+  if (xf.wrapText && runs?.length) {
     lineHeights = layoutRichTextLines(ctx, runs, font, 1, availableWidth, cjkFallback)
       .map((line) => vMetricPx(line.maxFontSize, 1, 1.2));
   } else if (xf.wrapText) {
-    ctx.font = buildFont(ctx, font, 1, cjkFallback, text);
+    ctx.font = buildFont(ctx, painted.font, 1, cjkFallback, painted.text);
     const lineHeight = vMetricPx(font.size, 1, 1.2);
-    lineHeights = wrapTextLines(ctx, text, availableWidth).map(() => lineHeight);
-  } else if (hasRichText) {
+    lineHeights = wrapTextLines(ctx, painted.text, availableWidth).map(() => lineHeight);
+  } else if (runs?.length) {
     lineHeights = richHardBreakLineMetrics(runs, font, 1).map((line) => line.heightPx);
   } else {
     const lineCount = Math.max(1, text.split('\n').length);
@@ -3358,6 +3770,9 @@ export function applyAutoRowHeights(
     autoRowHeightState.set(worksheet, { derived: new Map() });
     return false;
   }
+  // One numFmt index, built at the first formatted cell, for the rest of
+  // this pass (`styles` is library-owned parsed data; see indexStyleNumFmts).
+  let numFmtIndex: StyleNumFmtIndex | undefined;
 
   const geometry = getGridGeometryForWorksheet(worksheet);
   const defaultHeightPx = rowHeightToPx(worksheet.defaultRowHeight);
@@ -3409,7 +3824,7 @@ export function applyAutoRowHeights(
         if (!cellCanGrowAutomaticRow(cell, font, xf, defaultFontLineHeightPx)) continue;
         const cf = evaluateCf(cell, row.index, cell.col, cfContext, styles.dxfs ?? []);
         const measuredFont = layeredCellFont(font, cf, structuredStyleMap.get(key));
-        const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
+        const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
         const text = formatted.text;
         if (!text || (text === '0' && worksheet.showZeros === false)) continue;
         const cellWidthPx = geometry.col.sizeOf(cell.col);
@@ -3666,6 +4081,9 @@ function virtualizedTextOverflowOverscan(
 ): OverflowColumnOverscan {
   let startCol = visibleStartCol;
   let endCol = visibleEndCol;
+  // One numFmt index, built at the first formatted cell, for the rest of
+  // this pass (`styles` is library-owned parsed data; see indexStyleNumFmts).
+  let numFmtIndex: StyleNumFmtIndex | undefined;
   const anchorKeys = new Set<string>();
 
   const reaches = (
@@ -3682,7 +4100,7 @@ function virtualizedTextOverflowOverscan(
     // inherits the column style, §18.3.1.13).
     const { font, xf } = resolveXf(styles, effectiveCellStyleIndex(worksheet, cell, col));
     const cf = evaluateCf(cell, row, col, cfContext, styles.dxfs ?? []);
-    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904);
+    const formatted = formatCellValueWithColor(cell, styles, cf.numFmt, worksheet.date1904, numFmtIndex ??= indexStyleNumFmts(styles.numFmts));
     const text = formatted.text;
     if (
       !text ||
@@ -3699,7 +4117,8 @@ function virtualizedTextOverflowOverscan(
     const effectiveFont = (effectiveBold !== font.bold || effectiveItalic !== font.italic)
       ? { ...font, bold: effectiveBold, italic: effectiveItalic }
       : font;
-    ctx.font = buildFont(ctx, effectiveFont, cs, cjkFallback, text);
+    const painted = cellSymbolPaint(ctx, effectiveFont, text, cs, cjkFallback);
+    ctx.font = buildFont(ctx, painted.font, cs, cjkFallback, painted.text);
 
     const alignH = xf.alignH ?? generalHorizontalAlignment(cell.value.type);
     const paddingX = 3;
@@ -3709,7 +4128,11 @@ function virtualizedTextOverflowOverscan(
     const iconSize = cf.iconSet ? Math.max(8, Math.round(Math.min(cellW, cellH) * 0.55)) : 0;
     const iconPad = iconSize > 0 ? iconSize + 4 : 0;
     const leftPad = paddingX + (alignH === 'left' || !xf.alignH ? indentPx : 0) + iconPad;
-    const textPx = ctx.measureText(text).width + leftPad + paddingX;
+    const symbolRuns = symbolRichRuns(ctx, cell.value.type === 'text' ? cell.value.runs : undefined,
+      effectiveFont, cs, cjkFallback, painted);
+    const textPx = (symbolRuns
+      ? richRunSegments(ctx, symbolRuns, effectiveFont, cs, cjkFallback).reduce((sum, seg) => sum + seg.width, 0)
+      : ctx.measureText(painted.text).width) + leftPad + paddingX;
     const overflow = Math.max(0, textPx - cellW);
     if (overflow <= 0) return false;
 
@@ -3767,13 +4190,45 @@ function virtualizedTextOverflowOverscan(
   return { startCol, endCol, anchorKeys };
 }
 
+/** Worksheet fields a render-local size projection replaces
+ * (createSizeOverriddenWorksheet, worksheetWithAutoRowHeights). None of them is
+ * an input of {@link getSheetRenderCache}. */
+const PROJECTION_SIZE_FIELDS: ReadonlySet<string> = new Set(['rowHeights', 'colWidths', 'colCollapsed']);
+
+/** Whether `projection` holds exactly the source's render-index inputs: every
+ * own field other than the size maps is the same value. A viewer-owned view
+ * (copied rows, filtered comments) is not such a projection. */
+function sharesRenderIndexInputs(source: Worksheet, projection: Worksheet): boolean {
+  const a = source as unknown as Record<string, unknown>;
+  const b = projection as unknown as Record<string, unknown>;
+  for (const key of Object.keys(a)) {
+    if (!PROJECTION_SIZE_FIELDS.has(key) && a[key] !== b[key]) return false;
+  }
+  for (const key of Object.keys(b)) {
+    if (!PROJECTION_SIZE_FIELDS.has(key) && !Object.hasOwn(a, key)) return false;
+  }
+  return true;
+}
+
 /** Reuse viewport-independent indexes for a render-local worksheet projection.
- * The projection may differ only in row/column sizing and outline flags; cells,
- * merges, formatting, tables, links, comments, and sparklines remain source-owned. */
-export function inheritSheetRenderCache(source: Worksheet, projection: Worksheet): void {
+ * Only a projection that differs from `source` in its size maps alone shares
+ * the source index; any other worksheet keeps (or builds once) its own, which
+ * then persists across frames like any other worksheet's.
+ *
+ * `styles` must be the workbook styles the projection is painted with: the
+ * source entry is validated (and, when absent, built) against their `dxfs`,
+ * exactly as {@link renderViewport} validates it. Without them the inherited
+ * entry would carry no dxfs, fail that check and be rebuilt (a full-sheet
+ * cell index) on every frame that re-inherits it. */
+export function inheritSheetRenderCache(source: Worksheet, projection: Worksheet, styles: Styles): void {
   inheritCellFontLanguage(source, projection);
   inheritWorksheetPolicy(source, projection);
-  sheetRenderCache.set(projection, getSheetRenderCache(source));
+  if (sharesRenderIndexInputs(source, projection)) {
+    sheetRenderCache.set(projection, getSheetRenderCache(source, styles));
+    inheritedRenderCache.add(projection);
+  } else if (inheritedRenderCache.delete(projection)) {
+    sheetRenderCache.delete(projection);
+  }
 }
 
 export function renderViewport(
@@ -3784,7 +4239,7 @@ export function renderViewport(
   opts: RenderViewportOptions = {},
   cjkFallback?: CjkLang,
 ): void {
-  bindXlsxOfficeFontRoutes(ctx, worksheet, opts.officeFontRoutes, opts.fontSources);
+  bindXlsxOfficeFontRoutes(ctx, worksheet, opts.officeFontRoutes, opts.fontSources, opts.symbolFaces);
   pinXlsxGridGeometry(worksheet, opts.authoritativeMdw);
   const dpr = opts.dpr ?? 1;
   const cs = opts.cellScale ?? 1;
@@ -4179,7 +4634,7 @@ function renderHeaders(
     return selectedRowRange.strong ? HEADER_BORDER_STRONG : HEADER_BORDER;
   };
   const headerFontSize = Math.max(1, Math.round(11 * cs));
-  const HEADER_FONT = `${headerFontSize}px ${DEFAULT_FONT_FAMILY}`;
+  const HEADER_FONT = `${headerFontSize}px ${contextScoped(ctx, DEFAULT_FONT_FAMILY)}`;
   const scrollAreaX = hw + frozenW;
   const scrollAreaY = hh + frozenH;
   const hp = 0.5 / dpr;  // half device-pixel offset for 1dp crisp lines
@@ -4590,7 +5045,10 @@ function renderShapeGroups(
     const { x: x1, y: y1, width: w, height: h } = resolveWorksheetAnchorRect(
       ws, anchor, colAxis, rowAxis, cs,
     );
-    if (w <= 0 || h <= 0) continue;
+    // A box without area along one edge is a horizontal or vertical line
+    // (its stroke is all there is to draw); one without any extent, or with
+    // a negative one, is nothing.
+    if (!(w >= 0 && h >= 0 && (w > 0 || h > 0))) continue;
 
     const logicalCanvasX = scrollAreaX + (x1 - scrollOriginSheetX) - scrollOffsetX;
     const canvasX = sheetAnchoredRectX(logicalCanvasX, w, canvasW, rtl);
@@ -4608,7 +5066,10 @@ function renderShapeGroups(
       const sy = canvasY + shape.y * h;
       const sw = shape.w * w;
       const sh = shape.h * h;
-      if (sw <= 0 || sh <= 0) continue;
+      if (!(sw >= 0 && sh >= 0 && (sw > 0 || sh > 0))) continue;
+      // Only a stroked line (preset or custom geometry) is drawn without area.
+      if ((sw === 0 || sh === 0)
+        && !((shape.geom?.type === 'preset' || shape.geom?.type === 'custom') && shape.strokeColor && shape.strokeWidth > 0)) continue;
       drawShape(ctx, shape, sx, sy, sw, sh, cs, loadedImages, cjkFallback, anchor);
     }
   }
@@ -4619,7 +5080,7 @@ function renderShapeGroups(
 // XLSX custom coordinates remain path-local until this format boundary.
 // Both ordinary painting and gradient outlines use the same arc/Bezier rules.
 function appendSpreadsheetCustomPath(
-  ctx: CanvasRenderingContext2D, path: PathInfo,
+  ctx: PathSink, path: PathInfo,
   x: number, y: number, w: number, h: number,
 ): void {
   if (path.w <= 0 || path.h <= 0) return;
@@ -4696,6 +5157,45 @@ function appendSpreadsheetShapeOutline(
   }
 }
 
+type PathSink = Parameters<typeof traceTrimmedPath>[0];
+
+/** Split a command list into subpaths, each starting at its `moveTo`. */
+function splitSubpaths(commands: CorePathCmd[]): CorePathCmd[][] {
+  const out: CorePathCmd[][] = [];
+  for (const cmd of commands) {
+    if (cmd.cmd === 'moveTo' || out.length === 0) out.push([]);
+    out[out.length - 1].push(cmd);
+  }
+  return out;
+}
+
+const decoratedEnd = (end: Stroke['headEnd']): boolean => !!end && end.type !== 'none';
+
+/** Head / tail anchors of custom-geometry paths drawn into (0,0)-(w,h): the
+ *  shared core endpoint rule, fed with the subpaths of every path (split at
+ *  each `moveTo`, so a closed subpath does not hide an open one's end),
+ *  normalized to their path's own coordinate box (arc angles in degrees). */
+function customLineEndAnchors(paths: readonly PathInfo[], w: number, h: number): LineEndAnchors | null {
+  if (paths.length === 0) return null;
+  const normalized = paths.flatMap(path => splitSubpaths(path.commands.map((cmd): CorePathCmd => {
+    const nx = (v: number) => v / path.w, ny = (v: number) => v / path.h;
+    switch (cmd.op) {
+      case 'moveTo': case 'lineTo': return { cmd: cmd.op, x: nx(cmd.x), y: ny(cmd.y) };
+      case 'cubicBezTo': return { cmd: 'cubicBezTo', x1: nx(cmd.x1), y1: ny(cmd.y1), x2: nx(cmd.x2), y2: ny(cmd.y2), x: nx(cmd.x3), y: ny(cmd.y3) };
+      case 'quadBezTo': return { cmd: 'quadBezTo', x1: nx(cmd.x1), y1: ny(cmd.y1), x: nx(cmd.x2), y: ny(cmd.y2) };
+      case 'arcTo': return { cmd: 'arcTo', wr: nx(cmd.wr), hr: ny(cmd.hr), stAng: cmd.stAng / 60000, swAng: cmd.swAng / 60000 };
+      case 'close': return { cmd: 'close' };
+    }
+  })));
+  const ends = getCustGeomEndpoints(normalized);
+  // A decoration belongs to its line: a path with `stroke="0"` (§20.1.9.15)
+  // draws no line, so its end takes no decoration either.
+  const start = paths[0].stroke === false ? null : ends.start;
+  const end = paths[paths.length - 1].stroke === false ? null : ends.end;
+  const anchor = (p: typeof start) => p && { x: p.x * w, y: p.y * h, angle: Math.atan2(p.dy * h, p.dx * w) };
+  return start || end ? { start: anchor(start), end: anchor(end) } : null;
+}
+
 function drawShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapeInfo,
@@ -4706,6 +5206,9 @@ function drawShape(
   group?: { readonly nativeExtCx: number; readonly nativeExtCy: number },
 ): void {
   if (usesPathShade(shape.strokeFill)) ctx = trackPaintPath(ctx);
+  // Line width and line-end sizes use the same zoomed scale as the geometry
+  // (see shapeStrokeScale), so the body stroke and its decorations agree.
+  const strokeScale = shapeStrokeScale(cs);
   ctx.save();
   if (shape.rot !== 0 || shape.flipH || shape.flipV) {
     ctx.translate(sx + sw / 2, sy + sh / 2);
@@ -4717,9 +5220,19 @@ function drawShape(
   }
 
   if (shape.geom.type === 'custom') {
-    const fill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs);
-    for (const path of shape.geom.paths) {
-      if (path.w <= 0 || path.h <= 0) continue;
+    const fill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs, loadedImages);
+    const paths = shape.geom.paths.filter(path => path.w > 0 && path.h > 0);
+    // ECMA-376 §20.1.8.38 / §20.1.8.57: a custom-geometry line (an
+    // `xdr:cxnSp` / `xdr:sp` with `a:custGeom`, or an OpenDocument connector
+    // path) takes its head on the first path's open start and its tail on
+    // the last path's open end; those paths stop where the decoration
+    // starts, as for the preset leaders.
+    const stroke = shapeStroke(shape);
+    const lineEnds = stroke && (decoratedEnd(stroke.headEnd) || decoratedEnd(stroke.tailEnd))
+      ? customLineEndAnchors(paths, sw, sh) : null;
+    const headTrim = lineEnds?.start && stroke?.headEnd ? lineEndRetract(stroke.headEnd, stroke, strokeScale, EMU_PER_PT) : 0;
+    const tailTrim = lineEnds?.end && stroke?.tailEnd ? lineEndRetract(stroke.tailEnd, stroke, strokeScale, EMU_PER_PT) : 0;
+    paths.forEach((path, index) => {
       ctx.beginPath();
       appendSpreadsheetCustomPath(ctx, path, 0, 0, sw, sh);
       // ECMA-376 §20.1.9.15: each custom path carries its own fill mode and
@@ -4733,7 +5246,19 @@ function drawShape(
           ctx.fill();
         }
       }
-      if (path.stroke !== false) strokeShapePath(ctx, shape, sw, sh, cs);
+      if (path.stroke === false) return;
+      const head = index === 0 ? headTrim : 0;
+      const tail = index === paths.length - 1 ? tailTrim : 0;
+      if (head > 0 || tail > 0) {
+        ctx.beginPath();
+        traceTrimmedPath(ctx, sink => appendSpreadsheetCustomPath(sink, path, 0, 0, sw, sh), head, tail);
+      }
+      strokeShapePath(ctx, shape, sw, sh, cs);
+    });
+    if (lineEnds && stroke) {
+      drawPresetLineEndArrows(ctx, lineEnds, stroke, strokeScale, EMU_PER_PT,
+        { x: 0, y: 0, w: sw, h: sh }, shape.rot, PT_TO_PX * cs,
+        { hostFrame: true, patternCoordinateTransform: axisAlignedPatternTransform(shape, sw, sh) });
     }
   } else if (shape.geom.type === 'preset') {
     // Drive the shape off the ECMA-376 §20.1.9 spec-driven preset engine
@@ -4742,10 +5267,28 @@ function drawShape(
     // renders with its true outline instead of the old rect fallback. The
     // engine returns false for presets it doesn't carry; only then do we fall
     // back to a plain rectangle.
-    const baseFill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs);
+    const baseFill = resolveSpreadsheetShapeFill(ctx, shape, sw, sh, cs, loadedImages);
     const applyAndStroke = shape.strokeColor && shape.strokeWidth > 0
       ? () => strokeShapePath(ctx, shape, sw, sh, cs)
       : null;
+    // ECMA-376 §20.1.8.38 / §20.1.8.57 `a:headEnd` / `a:tailEnd` on a
+    // connector or callout leader (an `xdr:cxnSp`, a line `xdr:sp`, or an
+    // OpenDocument line/connector): the shared core policy decides whether the
+    // leader is re-stroked trimmed at the decorated ends, in which case the
+    // preset engine must not stroke the full-length leader underneath.
+    const stroke = shapeStroke(shape);
+    const geomName = shape.geom.name.toLowerCase();
+    const leader = planPresetLeader(geomName, stroke, strokeScale, EMU_PER_PT);
+    const lineEnds = leader?.decorated ? leader : null;
+    const skipTrailingStroke = lineEnds?.restroke != null;
+    // Hatches, staggered picture tiles and translucent pictures are painted,
+    // not set as a fill style: the preset engine hands its path to the same
+    // painter.
+    const paintFill = shape.fill?.fillType === 'hatch'
+      || (shape.fill?.fillType === 'image' && (shape.fill.shift || shape.fill.alpha !== undefined))
+      ? (target: CanvasRenderingContext2D) => fillShape(target, shape, sw, sh, cs, baseFill)
+      : undefined;
+    const adj = shape.geom.adj ?? [];
     const drawn = renderPresetShape(
       ctx,
       shape.geom.name,
@@ -4753,17 +5296,37 @@ function drawShape(
       0,
       sw,
       sh,
-      shape.geom.adj ?? [],
+      adj,
       baseFill,
       applyAndStroke,
       // xlsx shapes carry no drop shadow on the body, so there's nothing to
       // clear between the engine's fill and stroke passes.
       () => {},
+      skipTrailingStroke || paintFill
+        ? { ...(skipTrailingStroke ? { skipTrailingStroke: true } : {}), ...(paintFill ? { paintFill } : {}) }
+        : undefined,
     );
+    if (drawn && lineEnds && stroke) {
+      const anchors = getConnectorAnchors(geomName, 0, 0, sw, sh, adj);
+      if (anchors) {
+        // The trimmed leader goes through the body's stroke host, so a
+        // gradient / pattern `a:ln` resolves against the leader's own coverage.
+        ctx.beginPath();
+        if (tracePlannedPresetLeader(ctx, lineEnds, geomName, anchors, 0, 0, sw, sh, adj)) {
+          strokeShapePath(ctx, shape, sw, sh, cs);
+        }
+        // Gradient / pattern decorations continue the leader's brush: the
+        // same shade frame, pattern transform and host CTM as strokeShapePath.
+        drawPresetLineEndArrows(ctx, anchors, stroke, strokeScale, EMU_PER_PT,
+          { x: 0, y: 0, w: sw, h: sh }, shape.rot, PT_TO_PX * cs,
+          { hostFrame: true, patternCoordinateTransform: axisAlignedPatternTransform(shape, sw, sh) });
+      }
+    }
     if (!drawn) {
       ctx.beginPath();
       ctx.rect(0, 0, sw, sh);
-      fillAndStroke(ctx, shape, sw, sh, cs);
+      fillShape(ctx, shape, sw, sh, cs, baseFill);
+      strokeShapePath(ctx, shape, sw, sh, cs);
     }
   } else if (shape.geom.type === 'image') {
     // Image leaf inside a group (e.g. a sun-emoji clip-art nested in the
@@ -4910,6 +5473,86 @@ export async function prepareWorksheetMath(ws: Worksheet, math: MathRenderer): P
   }
 }
 
+type ShapeTextRunPiece = Extract<import('./types.js').ShapeTextRun, { type: 'text' }> & {
+  /** The piece converted from a symbol encoding: it paints in
+   *  {@link SYMBOL_UNICODE_FAMILIES} (symbol-paint.ts). Renderer-internal. */
+  readonly symbolUnicode?: true;
+  /** The authored run a symbol piece was split from: it owns the piece's line
+   *  box. Renderer-internal. */
+  readonly symbolSource?: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>;
+};
+
+/**
+ * Shape text runs in their painted form. ECMA-376 §21.1.2.3.10: `a:sym` is
+ * the face of the run's F0-shifted symbol codes, so a run splits where its
+ * codes change face: F0-shifted codes paint in the `a:sym` face (else in a
+ * symbol-encoded `a:latin` face), the rest in `a:latin` (§21.1.2.3.7). A piece
+ * in a symbol-encoded face is judged by symbol-paint.ts with the Canvas font
+ * `fontOf` builds for it. The body itself is returned when nothing changes.
+ */
+function symbolPaintShapeText(
+  ctx: CanvasRenderingContext2D,
+  body: import('./types.js').ShapeText,
+  fontOf: (run: ShapeTextRunPiece) => string,
+): import('./types.js').ShapeText {
+  let changed = false;
+  const paragraphs = body.paragraphs.map((paragraph) => {
+    let runs: import('./types.js').ShapeTextRun[] | undefined;
+    paragraph.runs.forEach((run, index) => {
+      const pieces = run.type === 'text' ? symbolShapeRunPieces(ctx, run, fontOf) : undefined;
+      if (!pieces) {
+        runs?.push(run);
+        return;
+      }
+      runs ??= paragraph.runs.slice(0, index);
+      runs.push(...pieces);
+    });
+    if (!runs) return paragraph;
+    changed = true;
+    return { ...paragraph, runs };
+  });
+  return changed ? { ...body, paragraphs } : body;
+}
+
+function symbolShapeRunPieces(
+  ctx: CanvasRenderingContext2D,
+  run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>,
+  fontOf: (run: ShapeTextRunPiece) => string,
+): ShapeTextRunPiece[] | undefined {
+  if (!run.text) return undefined;
+  const latinSymbol = isSymbolFontFamily(run.fontFace);
+  const sym = run.fontFaceSym?.trim() || undefined;
+  if (!latinSymbol && !(sym && /[\uF020-\uF0FF]/u.test(run.text))) return undefined;
+  const slotOf = (ch: string) => {
+    const cp = ch.codePointAt(0) ?? 0;
+    return cp >= 0xf020 && cp <= 0xf0ff && sym ? sym : run.fontFace;
+  };
+  const pieces: ShapeTextRunPiece[] = [];
+  let text = '';
+  let face: string | undefined;
+  const flush = () => {
+    if (!text) return;
+    const piece: ShapeTextRunPiece = { ...run, text, fontFace: face, symbolSource: run };
+    const painted = symbolPaint(symbolOracle(ctx), text, face, fontOf(piece),
+      () => fontOf({ ...piece, size: 24, symbolUnicode: true }));
+    for (const segment of painted.segments) {
+      const value = painted.paint(segment.authored);
+      pieces.push(segment.unicode ? { ...piece, text: value, symbolUnicode: true } : { ...piece, text: value });
+    }
+  };
+  for (const ch of run.text) {
+    // A combining mark, variation selector or joiner keeps its base's face.
+    const next = text && /^[\p{M}\u200C\u200D]$/u.test(ch) ? face : slotOf(ch);
+    if (text && next !== face) { flush(); text = ''; }
+    face = next;
+    text += ch;
+  }
+  flush();
+  const unchanged = pieces.length === 1 && pieces[0].text === run.text && !pieces[0].symbolUnicode
+    && pieces[0].fontFace === run.fontFace;
+  return unchanged ? undefined : pieces;
+}
+
 export function drawShapeText(
   ctx: CanvasRenderingContext2D,
   txt: import('./types.js').ShapeText,
@@ -4938,15 +5581,19 @@ export function drawShapeText(
   if (innerW <= 0 || innerH <= 0) return;
 
   // Font string + px size for a text run (math runs have no run-level font).
-  const textFont = (run: Extract<import('./types.js').ShapeTextRun, { type: 'text' }>, fontScale = 1): { font: string; px: number } => {
+  const textFont = (run: ShapeTextRunPiece, fontScale = 1): { font: string; px: number } => {
     const size = run.size > 0 ? run.size : DEFAULT_FONT_SIZE;
     const px = size * PT_TO_PX * cs * fontScale;
-    const family = fontStackFor(run.fontFace, cjkFallback, run.text,
-      officeRoute(ctx, run.fontFace, run.bold, run.italic),
-      contextSubstitutions(ctx),
-      undefined, contextRegularAlias(ctx, run.fontFace));
+    const family = run.symbolUnicode ? contextScoped(ctx, SYMBOL_UNICODE_FAMILIES)
+      : contextScoped(ctx, fontStackFor(run.fontFace, cjkFallback, run.text,
+        officeRoute(ctx, run.fontFace, run.bold, run.italic),
+        contextSubstitutions(ctx),
+        undefined, contextRegularAlias(ctx, run.fontFace)));
     return { font: `${run.italic ? 'italic ' : ''}${run.bold ? 'bold ' : ''}${px}px ${family}`, px };
   };
+  // Every text run in its painted form (symbol-encoded faces): measured,
+  // broken and painted, horizontal and stacked alike.
+  txt = symbolPaintShapeText(ctx, txt, (run) => textFont(run).font);
 
   if (txt.vert === 'wordArtVert' || txt.vert === 'wordArtVertRtl') {
     // ECMA-376 §21.1.2.1.3: scale each run's original font size before
@@ -4986,8 +5633,11 @@ export function drawShapeText(
   for (const paragraph of txt.paragraphs) for (const run of paragraph.runs) {
     if (!metricBody) break;
     if (run.type !== 'text') continue;
-    const ratios = run.fontFace
-      ? shapeRunLineRatios(run, routes ? ownValue(routes, shapeOfficeRouteKey(run)) : undefined, fontBoxProbe)
+    // A symbol piece keeps the line box of its authored run, as converted
+    // cell text keeps its cell font's line metrics (symbolPaintShapeText).
+    const owner = (run as ShapeTextRunPiece).symbolSource ?? run;
+    const ratios = owner.fontFace
+      ? shapeRunLineRatios(owner, routes ? ownValue(routes, shapeOfficeRouteKey(owner)) : undefined, fontBoxProbe)
       : undefined;
     if (!ratios) metricBody = false;
     else runLineRatios.set(run, ratios);
@@ -5134,9 +5784,9 @@ export function drawShapeText(
       }
       return {
         height: pxSize * 1.2,
-        ascent: measuredAscent(`${pxSize}px ${fontStackFor(face, undefined, '',
+        ascent: measuredAscent(`${pxSize}px ${contextScoped(ctx, fontStackFor(face, undefined, '',
           officeRoute(ctx, face), contextSubstitutions(ctx),
-          undefined, contextRegularAlias(ctx, face))}`, pxSize),
+          undefined, contextRegularAlias(ctx, face)))}`, pxSize),
       };
     };
     const reduction = txt.autoFit === 'norm' ? txt.lnSpcReduction ?? 0 : 0;
@@ -5356,16 +6006,6 @@ export function drawShapeText(
   }
 }
 
-function fillAndStroke(
-  ctx: CanvasRenderingContext2D,
-  shape: ShapeInfo,
-  width: number,
-  height: number,
-  cs: number,
-): void {
-  fillShape(ctx, shape, width, height, cs);
-  strokeShapePath(ctx, shape, width, height, cs);
-}
 
 /** Excel's printed DrawingML pattern stays on the page axes through shape
  * rotation, reflection and a rotated group. The fill itself is phased from
@@ -5401,7 +6041,13 @@ function resolveSpreadsheetShapeFill(
   width: number,
   height: number,
   cs: number,
+  loadedImages?: Map<string, CanvasImageSource | null>,
 ): ReturnType<typeof resolveFill> {
+  // A hatch has no fill style: `fillShape` strokes its lines in the path.
+  if (shape.fill?.fillType === 'hatch') return null;
+  if (shape.fill?.fillType === 'image') {
+    return resolveImageShapeFill(ctx, shape.fill, width, height, cs, loadedImages);
+  }
   const fill = shape.fill ?? (shape.fillColor
     ? { fillType: 'solid' as const, color: shape.fillColor }
     : null);
@@ -5418,13 +6064,297 @@ function resolveSpreadsheetShapeFill(
   );
 }
 
+/** Hatch lines closer than this many device pixels merge into one tone. */
+const HATCH_MIN_DEVICE_SPACING = 2;
+/** Guard on the lines of one hatch family where the context cannot report
+ *  its transform (then the shape box, not the visible canvas, is covered). */
+const MAX_HATCH_LINES = 16_384;
+
+/** The part of the local box `[0, width] × [0, height]` on the canvas, in
+ *  local coordinates, and the context's device pixels per local unit. */
+function visibleLocalBox(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+): { box: [number, number, number, number]; unit: number } {
+  const box: [number, number, number, number] = [Math.min(0, width), Math.min(0, height), Math.max(0, width), Math.max(0, height)];
+  const transform = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  const canvas = ctx.canvas as { width?: number; height?: number } | undefined;
+  if (!transform || !canvas?.width || !canvas.height) return { box, unit: 1 };
+  const { a, b, c, d, e, f } = transform;
+  const det = a * d - b * c;
+  const unit = Math.sqrt(Math.abs(det));
+  if (!Number.isFinite(unit) || unit === 0) return { box, unit: 1 };
+  // Device corners mapped back through the inverse 2D affine transform.
+  const corners = [[0, 0], [canvas.width, 0], [0, canvas.height], [canvas.width, canvas.height]]
+    .map(([x, y]) => ({
+      x: (d * (x - e) - c * (y - f)) / det,
+      y: (a * (y - f) - b * (x - e)) / det,
+    }));
+  const xs = corners.map(p => p.x);
+  const ys = corners.map(p => p.y);
+  return {
+    box: [
+      Math.max(box[0], Math.min(...xs)), Math.max(box[1], Math.min(...ys)),
+      Math.min(box[2], Math.max(...xs)), Math.min(box[3], Math.max(...ys)),
+    ],
+    unit,
+  };
+}
+
+/**
+ * Paint an OpenDocument hatch (ODF 1.3 Part 3 §16.42 `draw:hatch`) into
+ * the current path: the optional background, then line families
+ * `distancePt` apart, the first rotated `angle` degrees counter-clockwise
+ * from the horizontal, a `double` hatch adding the perpendicular family
+ * and a `triple` hatch also the family 45° further counter-clockwise: the
+ * geometry LibreOffice draws (the reader records how it differs from the
+ * wording of §19.209 / §19.218.3). The lines are stroked directly inside the path's clip, over
+ * the visible part of the shape only, and never closer than
+ * {@link HATCH_MIN_DEVICE_SPACING} device pixels: the work and memory are
+ * bounded by the canvas size, whatever the authored spacing and zoom. The
+ * current path is left intact for the stroke that follows.
+ */
+function paintHatchFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeHatchFill,
+  width: number,
+  height: number,
+  cs: number,
+): boolean {
+  if (fill.background) {
+    ctx.fillStyle = fill.background;
+    ctx.fill();
+  }
+  const { box: [x0, y0, x1, y1], unit } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const authored = fill.distancePt * PT_TO_PX * cs;
+  const extent = Math.hypot(x1 - x0, y1 - y0);
+  const period = Math.max(
+    Number.isFinite(authored) && authored > 0 ? authored : 0,
+    HATCH_MIN_DEVICE_SPACING / unit,
+    extent / MAX_HATCH_LINES,
+  );
+  const axis = (-fill.angle * Math.PI) / 180;
+  const families = [axis];
+  if (fill.lines >= 2) families.push(axis + Math.PI / 2);
+  if (fill.lines >= 3) families.push(axis - Math.PI / 4);
+  const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]];
+  const lineWidth = Math.max(1, cs);
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = fill.color;
+  for (const angle of families) {
+    const dx = Math.cos(angle);
+    const dy = Math.sin(angle);
+    // In the family's frame (x along the lines), line k lies at y = k ·
+    // period; x spans the visible box. Each line is a thin filled rect:
+    // `fillRect` leaves the current path intact for the stroke after.
+    const along = corners.map(([x, y]) => x * dx + y * dy);
+    const across = corners.map(([x, y]) => -x * dy + y * dx);
+    const tMin = Math.min(...along);
+    const tMax = Math.max(...along);
+    const first = Math.ceil(Math.min(...across) / period);
+    const last = Math.floor(Math.max(...across) / period);
+    ctx.save();
+    ctx.rotate(angle);
+    for (let k = first; k <= last; k++) {
+      ctx.fillRect(tMin, k * period - lineWidth / 2, tMax - tMin, lineWidth);
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+  return true;
+}
+
+/**
+ * Paint a hatch at `alpha` into the current path. The opacity is of the
+ * whole fill (ODF §20.152), not of each line: crossings and the background
+ * under the lines must not show through twice, so the hatch is painted
+ * opaque on a layer the size of the shape's visible part and the layer is
+ * drawn once at `alpha`. Returns false where no layer can be made (the
+ * caller then paints the lines at `alpha` directly); the current path is
+ * left intact.
+ */
+function paintTranslucentHatchFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeHatchFill,
+  width: number,
+  height: number,
+  cs: number,
+  alpha: number,
+): boolean {
+  const transform = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  if (!transform || typeof ctx.drawImage !== 'function') return false;
+  const { box: [x0, y0, x1, y1] } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const { a, b, c, d, e, f } = transform;
+  const corners = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]
+    .map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+  const left = Math.floor(Math.min(...corners.map(p => p[0])));
+  const top = Math.floor(Math.min(...corners.map(p => p[1])));
+  const layerWidth = Math.ceil(Math.max(...corners.map(p => p[0]))) - left;
+  const layerHeight = Math.ceil(Math.max(...corners.map(p => p[1]))) - top;
+  if (![left, top, layerWidth, layerHeight].every(Number.isFinite)) return false;
+  if (!(layerWidth > 0 && layerHeight > 0)) return true;
+  const layer = createAuxCanvas(layerWidth, layerHeight);
+  const layerCtx = layer?.getContext('2d') as CanvasRenderingContext2D | null | undefined;
+  if (!layer || !layerCtx) return false;
+  layerCtx.setTransform(a, b, c, d, e - left, f - top);
+  layerCtx.beginPath();
+  layerCtx.rect(x0, y0, x1 - x0, y1 - y0);
+  paintHatchFill(layerCtx, fill, width, height, cs);
+  ctx.save();
+  ctx.clip();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha *= alpha;
+  ctx.drawImage(layer, left, top);
+  ctx.restore();
+  return true;
+}
+
+/** The natural size of the image behind each picture-fill pattern, for the
+ *  staggered painter (a pattern does not expose its image). */
+const imageFillNaturalSize = new WeakMap<CanvasPattern, { iw: number; ih: number }>();
+
+/** The placement of a picture fill in a `width` × `height` box: the size
+ *  of the picture (one tile) and the origin of the tile `align` and
+ *  `offset` place. */
+function imageFillGeometry(
+  fill: ShapeImageFill, iw: number, ih: number, width: number, height: number, cs: number,
+): { tileW: number; tileH: number; x: number; y: number } {
+  if (fill.layout === 'stretch') return { tileW: width, tileH: height, x: 0, y: 0 };
+  const edge = (size: ShapeImageFill['width'], natural: number, box: number): number =>
+    size === undefined ? natural * cs : 'pt' in size ? size.pt * PT_TO_PX * cs : size.fraction * box;
+  const tileW = edge(fill.width, iw, width);
+  const tileH = edge(fill.height, ih, height);
+  const tiled = fill.layout === 'tile';
+  return {
+    tileW, tileH,
+    x: (width - tileW) * fill.align[0] + (tiled ? fill.offset[0] * tileW : 0),
+    y: (height - tileH) * fill.align[1] + (tiled ? fill.offset[1] * tileH : 0),
+  };
+}
+
+/**
+ * A picture fill (OpenDocument `draw:fill-image`, §16.41): stretched over
+ * the shape box, or at its own size (the image's natural size at 96 DPI
+ * where an edge is not authored) repeated or drawn once, placed in the box
+ * by `align` and, when repeated, moved by `offset`. The image is
+ * pre-decoded by the render orchestrator under its package path. A
+ * staggered repetition is painted by {@link paintStaggeredImageFill}.
+ */
+function resolveImageShapeFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeImageFill,
+  width: number,
+  height: number,
+  cs: number,
+  loadedImages?: Map<string, CanvasImageSource | null>,
+): CanvasPattern | null {
+  const image = loadedImages?.get(fill.imagePath);
+  if (!image) return null;
+  const natural = image as { width?: number; height?: number };
+  const iw = Number(natural.width) || 0;
+  const ih = Number(natural.height) || 0;
+  if (iw <= 0 || ih <= 0) return null;
+  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
+  // A picture without a finite, positive size or place paints nothing.
+  if (!(tileW > 0 && tileH > 0) || ![tileW, tileH, x, y].every(Number.isFinite)) return null;
+  const pattern = ctx.createPattern(image, fill.layout === 'tile' ? 'repeat' : 'no-repeat');
+  if (!pattern) return null;
+  if (typeof pattern.setTransform === 'function') {
+    pattern.setTransform({ a: tileW / iw, b: 0, c: 0, d: tileH / ih, e: x, f: y });
+  }
+  imageFillNaturalSize.set(pattern, { iw, ih });
+  return pattern;
+}
+
+/**
+ * Paint a repeated picture whose every second row or column of tiles is
+ * moved (`shift`, ODF §20.175 `draw:tile-repeat-offset`) into the current
+ * path: one band per visible row (or column) of tiles, each filled with the
+ * pattern at that band's position. A canvas pattern cannot stagger itself.
+ * The bands cover the visible part of the shape only, and tiles under one
+ * device pixel are not staggered (the stagger could not be seen), so the
+ * work is bounded by the canvas size. Returns false when there is nothing
+ * to stagger; the current path is left intact.
+ */
+function paintStaggeredImageFill(
+  ctx: CanvasRenderingContext2D,
+  fill: ShapeImageFill,
+  pattern: CanvasPattern,
+  width: number,
+  height: number,
+  cs: number,
+): boolean {
+  const shift = fill.shift;
+  const natural = imageFillNaturalSize.get(pattern);
+  if (!shift || fill.layout !== 'tile' || !natural || typeof pattern.setTransform !== 'function') return false;
+  const { iw, ih } = natural;
+  const { tileW, tileH, x, y } = imageFillGeometry(fill, iw, ih, width, height, cs);
+  const { box: [x0, y0, x1, y1], unit } = visibleLocalBox(ctx, width, height);
+  if (!(x1 > x0 && y1 > y0)) return true;
+  const rows = 'rows' in shift;
+  const across = rows ? tileH : tileW;
+  if (!(across * unit >= 1) || !Number.isFinite(tileW) || !Number.isFinite(tileH)) return false;
+  const start = rows ? y : x;
+  const [from, to] = rows ? [y0, y1] : [x0, x1];
+  const amount = (rows ? shift.rows * tileW : shift.columns * tileH);
+  // The bands over the visible extent, counted: an origin so far away that
+  // band numbers lose integer precision has no parity to stagger by, and
+  // the count (the visible extent in tiles) bounds the loop by itself.
+  const first = Math.floor((from - start) / across);
+  const count = Math.ceil((to - start) / across) - first;
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || !Number.isFinite(amount)) return false;
+  ctx.save();
+  ctx.clip();
+  ctx.fillStyle = pattern;
+  for (let k = 0; k < count; k++) {
+    const band = first + k;
+    const moved = band % 2 === 0 ? 0 : amount;
+    pattern.setTransform({
+      a: tileW / iw, b: 0, c: 0, d: tileH / ih,
+      e: x + (rows ? moved : 0), f: y + (rows ? 0 : moved),
+    });
+    // `fillRect` leaves the current path intact for the stroke after.
+    if (rows) ctx.fillRect(x0, start + band * across, x1 - x0, across);
+    else ctx.fillRect(start + band * across, y0, across, y1 - y0);
+  }
+  ctx.restore();
+  return true;
+}
+
 /** Fill the current path; reuse one raster across a custom shape's subpaths. */
 function fillShape(
   ctx: CanvasRenderingContext2D, shape: ShapeInfo,
   width: number, height: number, cs: number,
   paint = resolveSpreadsheetShapeFill(ctx, shape, width, height, cs),
 ): boolean {
+  // The opacity of a hatch or picture fill (colours carry their own alpha).
+  const fill = shape.fill;
+  const alpha = (fill?.fillType === 'hatch' || fill?.fillType === 'image') && fill.alpha !== undefined
+    && Number.isFinite(fill.alpha) ? Math.min(1, Math.max(0, fill.alpha)) : 1;
+  if (alpha >= 1) return fillShapeOpaque(ctx, shape, width, height, cs, paint);
+  if (fill?.fillType === 'hatch' && paintTranslucentHatchFill(ctx, fill, width, height, cs, alpha)) return true;
+  const previous = ctx.globalAlpha;
+  ctx.globalAlpha = previous * alpha;
+  try {
+    return fillShapeOpaque(ctx, shape, width, height, cs, paint);
+  } finally {
+    ctx.globalAlpha = previous;
+  }
+}
+
+function fillShapeOpaque(
+  ctx: CanvasRenderingContext2D, shape: ShapeInfo,
+  width: number, height: number, cs: number,
+  paint: ReturnType<typeof resolveSpreadsheetShapeFill>,
+): boolean {
+  if (shape.fill?.fillType === 'hatch') return paintHatchFill(ctx, shape.fill, width, height, cs);
   if (!paint) return false;
+  if (shape.fill?.fillType === 'image' && shape.fill.shift && typeof paint === 'object' && 'setTransform' in paint
+      && paintStaggeredImageFill(ctx, shape.fill, paint, width, height, cs)) return true;
   ctx.fillStyle = paint;
   ctx.fill();
   return true;
@@ -5448,6 +6378,25 @@ function shapeStroke(shape: ShapeInfo): Stroke | null {
   };
 }
 
+/**
+ * EMU → canvas-unit factor for a drawing's outline (`a:ln@w`, ECMA-376
+ * §20.1.2.2.24, an EMU length) and the line-end sizes derived from it
+ * (§20.1.8.38 / §20.1.8.57 `a:headEnd` / `a:tailEnd`, multiples of the line
+ * width). Shape geometry is laid out in zoomed CSS px (anchor EMU × `cs` /
+ * EMU_PER_PX), so the outline takes the same factor and scales with the sheet
+ * zoom like the shape it outlines; dash patterns are multiples of the
+ * resolved width and follow it. Device pixel ratio stays in the canvas
+ * transform and is not folded in here. Hairline policy (shared with PPTX, which
+ * passes its render scale the same way): core's stroke resolver floors the
+ * painted width at 0.5 canvas units, independent of zoom, so a thin line stays
+ * visible when zoomed out. Line-end sizes keep core's absolute 2 pt base,
+ * which scales with zoom through this factor. Cell borders and grid lines
+ * follow their own zoom-independent policy and do not use this.
+ */
+function shapeStrokeScale(cs: number): number {
+  return cs / EMU_PER_PX;
+}
+
 function strokeShapePath(
   ctx: CanvasRenderingContext2D,
   shape: ShapeInfo,
@@ -5457,7 +6406,7 @@ function strokeShapePath(
 ): void {
   const stroke = shapeStroke(shape);
   if (!stroke) return;
-  applyStroke(ctx, stroke, 1 / EMU_PER_PX);
+  applyStroke(ctx, stroke, shapeStrokeScale(cs));
   // Match DOCX/PPTX stroke hosts: use the authored box, not the fill-bearing
   // silhouette (which excludes decorative paths that may still be stroked).
   // Shade coordinates use that host box; raster coverage comes from the
@@ -5824,7 +6773,7 @@ function renderCharts(
     // loaded (ChartModel.fontSubstitutions), as cell text does.
     renderChart(
       ctx,
-      withChartFontSubstitutions(anchor.chart, chartFontSubstitutions(contextSubstitutions(ctx))),
+      withChartFontSubstitutions(anchor.chart, chartFontSubstitutions(fontSourcesByContext.get(ctx))),
       cs === 1
         ? { x: cx, y: cy, w: cw, h: ch }
         : { x: cx / cs, y: cy / cs, w: cw / cs, h: ch / cs },
@@ -5957,11 +6906,12 @@ export function drawSlicerFrame(
     ctx.fillRect(x + 1, y + 1, w - 2, headerH);
   }
   ctx.fillStyle = style?.header?.fontColor ?? SLICER_HEADER_FG;
-  ctx.font = slicerFont(style?.header, SLICER_HEADER_FONT, cs, contextSubstitutions(ctx), caption);
+  ctx.font = slicerFont(style?.header, SLICER_HEADER_FONT, cs, fontSourcesByContext.get(ctx), caption);
+  const captionPaint = slicerSymbolPaint(ctx, style?.header, cs, caption);
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
   const headerPad = 6 * cs;
-  drawClippedText(ctx, caption, x + headerPad, y + headerH / 2 + 1, w - 2 * headerPad);
+  drawClippedText(ctx, caption, x + headerPad, y + headerH / 2 + 1, w - 2 * headerPad, captionPaint);
 
   // Item buttons. Items expand to fill the available height (up to a
   // minimum button size) and are clipped by the slicer rect. We don't
@@ -5983,7 +6933,7 @@ export function drawSlicerFrame(
   const itemH = Math.min(preferredItemH, (listH - gap * (visible - 1)) / visible);
   if (itemH <= 0) return;
 
-  ctx.font = scaleFont(SLICER_ITEM_FONT, cs);
+  ctx.font = scaleFont(SLICER_ITEM_FONT, cs, fontSourcesByContext.get(ctx)?.families);
   const itemPad = 8 * cs;
   for (let i = 0; i < visible; i++) {
     const item = items[i];
@@ -6014,10 +6964,11 @@ export function drawSlicerFrame(
         ctx.strokeRect(listX + 0.5, iy + 0.5, listW - 1, itemH - 1);
       }
     }
-    ctx.font = slicerFont(itemStyle, SLICER_ITEM_FONT, cs, contextSubstitutions(ctx), item.name);
+    ctx.font = slicerFont(itemStyle, SLICER_ITEM_FONT, cs, fontSourcesByContext.get(ctx), item.name);
+    const itemPaint = slicerSymbolPaint(ctx, itemStyle, cs, item.name);
     ctx.fillStyle = itemStyle?.fontColor ??
       (selected ? SLICER_ITEM_SEL_FG : SLICER_ITEM_OFF_FG);
-    drawClippedText(ctx, item.name, listX + itemPad, iy + itemH / 2 + 1, listW - 2 * itemPad);
+    drawClippedText(ctx, item.name, listX + itemPad, iy + itemH / 2 + 1, listW - 2 * itemPad, itemPaint);
   }
 }
 
@@ -6043,28 +6994,58 @@ function roundedRectPath(
   ctx.closePath();
 }
 
+/** A slicer label in an authored symbol-encoded face (§18.8.22 font names in
+ *  the slicer style's dxfs) as it paints (symbol-paint.ts): its stretches,
+ *  each with the Canvas font it paints in (the context's current font, from
+ *  slicerFont, or the Unicode fallback face). */
+interface SlicerPaint {
+  readonly paint: SymbolPaint['paint'];
+  readonly segments: readonly { readonly authored: string; readonly font: string }[];
+}
+
+function slicerSymbolPaint(
+  ctx: CanvasRenderingContext2D, style: SlicerElementStyle | undefined, cs: number, text: string,
+): SlicerPaint {
+  const kept = ctx.font;
+  if (!style?.fontFamily || !isSymbolFontFamily(style.fontFamily)) {
+    return { paint: (value) => value, segments: [{ authored: text, font: kept }] };
+  }
+  const sources = fontSourcesByContext.get(ctx);
+  const painted = symbolPaint(symbolOracle(ctx), text, style.fontFamily, kept,
+    () => slicerFont({ ...style, fontSize: 24 }, '', 1, sources, '', true));
+  const unicode = slicerFont(style, '', cs, sources, text, true);
+  return {
+    paint: painted.paint,
+    segments: painted.segments.map((segment) => ({ authored: segment.authored, font: segment.unicode ? unicode : kept })),
+  };
+}
+
 function slicerFont(
   style: SlicerElementStyle | undefined,
   fallback: string,
   cs: number,
-  substitutions: LoadedSubstitutions | undefined,
+  sources: XlsxLoadedFontSources | undefined,
   text: string,
+  symbolUnicode = false,
 ): string {
-  if (!style) return scaleFont(fallback, cs);
+  if (!style) return scaleFont(fallback, cs, sources?.families);
   const size = Math.round((style.fontSize ?? 11) * cs);
   const weight = style.fontBold ? 'bold ' : '';
+  if (symbolUnicode) return `${weight}${size}px ${scopeServedFontFamilies(SYMBOL_UNICODE_FAMILIES, sources?.families)}`;
   // An authored slicer face takes the substitute a font source loaded for
   // it, exactly as cell and shape text do (script-gated by the painted text).
   const family = style.fontFamily
-    ? `${quoteCssFontFamily(style.fontFamily)}, ${loadedSubstitutePart(substitutions, style.fontFamily, text)}"Segoe UI", sans-serif`
+    ? `${quoteCssFontFamily(style.fontFamily)}, ${loadedSubstitutePart(sources?.substitutions, style.fontFamily, text)}"Segoe UI", sans-serif`
     : '"Meiryo UI", "Segoe UI", sans-serif';
-  return `${weight}${size}px ${family}`;
+  return `${weight}${size}px ${scopeServedFontFamilies(family, sources?.families)}`;
 }
 
-function scaleFont(css: string, cs: number): string {
-  // Re-scale the leading `<size>px` token by `cs`. Safe fallback: leave the
-  // string as-is so the slicer remains readable when parsing fails.
-  return css.replace(/(\d+(?:\.\d+)?)px/, (_, n) => `${Math.round(Number(n) * cs)}px`);
+function scaleFont(css: string, cs: number, families?: ReadonlyMap<string, string>): string {
+  // Re-scale the leading `<size>px` token by `cs`, and scope the family list
+  // after it to the served families. Safe fallback: leave the string as-is so
+  // the slicer remains readable when parsing fails.
+  return css.replace(/(\d+(?:\.\d+)?)px (.*)$/, (_, n, list: string) =>
+    `${Math.round(Number(n) * cs)}px ${scopeServedFontFamilies(list, families)}`);
 }
 
 function drawClippedText(
@@ -6073,15 +7054,65 @@ function drawClippedText(
   x: number,
   y: number,
   maxWidth: number,
+  painted: SlicerPaint = { paint: (value) => value, segments: [{ authored: text, font: ctx.font }] },
 ): void {
   if (maxWidth <= 0) return;
-  let s = text;
-  if (ctx.measureText(s).width > maxWidth) {
-    const ellipsis = '…';
-    while (s.length > 0 && ctx.measureText(s + ellipsis).width > maxWidth) {
-      s = s.slice(0, -1);
+  // Clipped on the authored code points; measured and painted stretch by
+  // stretch in their painted form and font, the ellipsis in the font of the
+  // stretch it follows. Full stretches are painted and measured once, and a
+  // candidate prefix measures only its last, partial stretch.
+  const stretches = painted.segments.map((segment) => ({ chars: [...segment.authored], font: segment.font }));
+  const measure = (value: string, font: string) => {
+    ctx.font = font;
+    return ctx.measureText(value).width;
+  };
+  const fullText = stretches.map((stretch) => painted.paint(stretch.chars.join('')));
+  /** Widths of the full stretches before each stretch, filled on demand. */
+  const before: number[] = [0];
+  const widthBefore = (index: number) => {
+    for (let i = before.length; i <= index; i++) before[i] = before[i - 1]! + measure(fullText[i - 1]!, stretches[i - 1]!.font);
+    return before[index]!;
+  };
+  /** The stretch holding authored code point `count - 1`, and how many of
+   *  its code points the first `count` take. */
+  const starts: number[] = [];
+  stretches.reduce((sum, stretch) => { starts.push(sum); return sum + stretch.chars.length; }, 0);
+  const locate = (count: number): { index: number; take: number } => {
+    // The last stretch starting before code point `count` (binary search).
+    let low = 0;
+    let high = stretches.length - 1;
+    while (low < high) {
+      const mid = (low + high + 1) >> 1;
+      if (starts[mid]! < count) low = mid;
+      else high = mid - 1;
     }
-    s = s.length > 0 ? s + ellipsis : '';
+    return { index: low, take: count - starts[low]! };
+  };
+  const tailOf = (index: number, take: number, ellipsis: string) => (take === stretches[index]!.chars.length
+    ? fullText[index]! : painted.paint(stretches[index]!.chars.slice(0, take).join(''))) + ellipsis;
+  /** Width of the first `count` code points plus `ellipsis`: one partial
+   *  stretch measured, the full ones before it from the cache. */
+  const widthOf = (count: number, ellipsis: string) => {
+    const { index, take } = locate(count);
+    return widthBefore(index) + measure(tailOf(index, take, ellipsis), stretches[index]!.font);
+  };
+  const partsOf = (count: number, ellipsis: string) => {
+    const { index, take } = locate(count);
+    return [...stretches.slice(0, index).map((full, i) => ({ text: fullText[i]!, font: full.font })),
+      { text: tailOf(index, take, ellipsis), font: stretches[index]!.font }];
+  };
+  const chars = stretches.reduce((sum, stretch) => sum + stretch.chars.length, 0);
+  if (stretches.length === 0 || chars === 0) return;
+  let parts = partsOf(chars, '');
+  if (widthOf(chars, '') > maxWidth) {
+    let count = chars;
+    while (count > 0 && widthOf(count, '…') > maxWidth) count--;
+    parts = count > 0 ? partsOf(count, '…') : [];
   }
-  ctx.fillText(s, x, y);
+  let pen = x;
+  for (const part of parts) {
+    ctx.font = part.font;
+    ctx.fillText(part.text, pen, y);
+    pen += ctx.measureText(part.text).width;
+  }
 }

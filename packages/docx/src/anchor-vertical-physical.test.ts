@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { __test_resolveAnchorBox } from './test-support/renderer-internals.test-support.js';
 import type { AnchorFloatRegistrationState } from './layout/acquisition-context.js';
-import { physicalToLogicalAnchorBox } from './vertical-text.js';
 import type { ImageRun } from './types.js';
 
 // ECMA-376 §17.6.20 (tbRl) + §20.4.3.x — a DrawingML anchor on a VERTICAL page is
 // resolved against the PHYSICAL (un-rotated) page, then projected into the swapped
 // logical layout frame. This pins the CRITICAL fix (PR #770 review): the raw
 // positionH/positionV offsets must NOT be fed unrotated into the logical frame;
-// they resolve physically and map through `physicalToLogicalAnchorBox`, so after
-// the +90° page paint the image lands at the recorded physical centroid. The
+// they resolve physically and map through the inverse of the section frame's
+// paint matrix, so after the +90° page paint the image lands at the recorded
+// physical centroid. The
 // fixture below contains only the minimal redistributable geometry needed to
 // preserve that behavior.
 
@@ -33,6 +33,8 @@ const verticalState = {
   marginTop: PHYS_MR, // logical top = physical right
   marginBottom: PHYS_ML, // logical bottom = physical left
   pageH: PHYS_W, // logical height in points = physical width
+  contentX: PHYS_MT, // column band start (logical x) = physical top margin
+  contentW: PHYS_H - PHYS_MT - PHYS_MB,
   verticalCJK: true,
   verticalPhys: {
     pageWidth: PHYS_W,
@@ -41,7 +43,7 @@ const verticalState = {
     marginRight: PHYS_MR,
     marginTop: PHYS_MT,
     marginBottom: PHYS_MB,
-    physicalPageWidthPt: PHYS_W,
+    writingMode: 'vertical-rl',
   },
 } as unknown as AnchorFloatRegistrationState;
 
@@ -65,9 +67,8 @@ const recordedAnchor: ImageRun = {
 };
 
 /** Reconstruct the physical centroid from a resolved LOGICAL anchor box by
- *  applying the page transform `physical = (cssW − logical.y, logical.x)` to the
- *  logical box centre. The logical box was produced by physicalToLogicalAnchorBox,
- *  so this inverts it back to physical space. */
+ *  applying the vertical-rl page transform `physical = (cssW − logical.y,
+ *  logical.x)` to the logical box centre. */
 function physicalCentroid(
   box: { x: number; y: number; w: number; h: number },
   cssW: number,
@@ -88,18 +89,12 @@ describe('resolveAnchorBox — vertical (tbRl) physical anchor mapping (§20.4.3
 
   it('returns the logical-projected box (w↔h swap) so the flow wraps correctly', () => {
     const box = __test_resolveAnchorBox(recordedAnchor, verticalState, 0);
-    // Physical TL is (ML+posH, MT+posV) = (444.3, 397.9); project to logical.
-    const expected = physicalToLogicalAnchorBox(
-      PHYS_ML + 387.6,
-      PHYS_MT + 327.0,
-      96.2,
-      123.0,
-      PHYS_W,
-    );
-    expect(box.x).toBeCloseTo(expected.x, 4);
-    expect(box.y).toBeCloseTo(expected.y, 4);
-    expect(box.w).toBeCloseTo(expected.w, 4); // = physical height 123.0
-    expect(box.h).toBeCloseTo(expected.h, 4); // = physical width 96.2
+    // Physical TL is (ML+posH, MT+posV) = (444.3, 397.9): logical x = physical
+    // y, logical y = page width − (physical x + width), width and height swap.
+    expect(box.x).toBeCloseTo(PHYS_MT + 327.0, 4);
+    expect(box.y).toBeCloseTo(PHYS_W - (PHYS_ML + 387.6 + 96.2), 4);
+    expect(box.w).toBeCloseTo(123.0, 4);
+    expect(box.h).toBeCloseTo(96.2, 4);
   });
 
   it('rotates dist* padding one quarter-turn (physical T/B ↦ logical L/R)', () => {
@@ -110,5 +105,31 @@ describe('resolveAnchorBox — vertical (tbRl) physical anchor mapping (§20.4.3
     expect(box.dr).toBe(0);
     expect(box.dt).toBe(9);
     expect(box.db).toBe(9);
+  });
+
+  it('projects a vertical-lr (tbLrV) anchor through that frame\'s own paint inverse', () => {
+    // tbLrV paints its logical frame through the vertical-lr reflection
+    // (physical x = logical y, physical y = logical x). The physically resolved
+    // box must come back to the same physical rectangle through that paint,
+    // and its dist* padding must follow the same edges.
+    const lrState = {
+      ...verticalState,
+      marginTop: PHYS_ML, // logical top = physical left
+      marginBottom: PHYS_MR, // logical bottom = physical right
+      verticalPhys: { ...verticalState.verticalPhys!, writingMode: 'vertical-lr' },
+    } as unknown as AnchorFloatRegistrationState;
+    const box = __test_resolveAnchorBox(
+      { ...recordedAnchor, distLeft: 3, distRight: 9, distTop: 1, distBottom: 2 },
+      lrState,
+      0,
+    );
+    expect({ x: box.y, y: box.x, w: box.h, h: box.w }).toEqual({
+      x: expect.closeTo(PHYS_ML + 387.6, 4),
+      y: expect.closeTo(PHYS_MT + 327.0, 4),
+      w: expect.closeTo(96.2, 4),
+      h: expect.closeTo(123.0, 4),
+    });
+    // Logical left/right/top/bottom = physical top/bottom/left/right.
+    expect([box.dl, box.dr, box.dt, box.db]).toEqual([1, 2, 3, 9]);
   });
 });

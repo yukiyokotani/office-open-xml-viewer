@@ -1,16 +1,17 @@
 import {
   excelDateTimeSectionNameTexts,
   formatExcelDateTime,
+  generalSectionAffixes,
   formatLocalizedExcelShortDate,
   localizedExcelShortDateTexts,
   isDateFormatSection,
   isExcelDisplayDateSerial,
   roundDecimalHalfUp,
+  selectFormatSection,
   splitFormatSections,
   textSectionIndex,
 } from '@silurus/ooxml-core';
-import { hasOwnKey } from '@silurus/ooxml-core/internal/own-key';
-import type { Cell, CellValue, Styles } from './types.js';
+import type { Cell, CellValue, NumFmt, Styles } from './types.js';
 
 function cellValueText(value: CellValue): string {
   switch (value.type) {
@@ -36,6 +37,53 @@ export interface FormattedCell {
   color?: string;
   /** Paint '#' across the available cell width, rather than a literal hash. */
   fill?: boolean;
+  /** The text is a number in the General format, which shortens to the
+   *  available width (§18.8.30). */
+  general?: boolean;
+}
+
+/** A conditional-format number format: a dxf's id and code, with the
+ *  section divisors of an OpenDocument display factor. */
+type CfNumFmt = { numFmtId: number; formatCode: string | null; sectionDivisors?: number[] };
+
+/** A `numFmtId` → `<numFmt>` lookup of one `styles.numFmts`, built once by a
+ *  caller that formats many cells in one synchronous pass (the renderer)
+ *  instead of a linear `numFmts` search per cell. */
+export interface StyleNumFmtIndex {
+  get(numFmtId: number): NumFmt | undefined;
+}
+
+/** Build a {@link StyleNumFmtIndex} that answers as
+ *  `numFmts?.find(f => f.numFmtId === id)` does: a repeated id keeps its
+ *  FIRST entry, and `NaN` is never indexed (`===` never matches it, whereas
+ *  `Map` keys compare by SameValueZero). A collection that is not an array of
+ *  objects keeps the linear search, so it succeeds or fails as before.
+ *
+ *  Contract: `numFmts` is library-owned plain data — parser output decoded
+ *  by `JSON.parse` or a structured clone, or the delimited-text loader's own
+ *  literal (data properties only, no getters), which no public API hands to
+ *  callers for mutation (Node exposes its copy
+ *  recursively frozen). The index reflects `numFmts` as it is now; build it
+ *  per pass, never cache it across passes. Callers formatting caller-supplied
+ *  styles (find, validation lists, the OpenDocument facade) keep the linear
+ *  search by not passing an index. */
+export function indexStyleNumFmts(numFmts: readonly NumFmt[] | undefined): StyleNumFmtIndex {
+  if (Array.isArray(numFmts)) {
+    let wellFormed = true;
+    for (let i = 0; i < numFmts.length; i++) {
+      const format: unknown = numFmts[i];
+      if (typeof format !== 'object' || format === null) { wellFormed = false; break; }
+    }
+    if (wellFormed) {
+      const index = new Map<number, NumFmt>();
+      for (const format of numFmts) {
+        if (Number.isNaN(format.numFmtId) || index.has(format.numFmtId)) continue;
+        index.set(format.numFmtId, format);
+      }
+      return index;
+    }
+  }
+  return { get: (numFmtId) => numFmts?.find(f => f.numFmtId === numFmtId) };
 }
 
 /**
@@ -47,7 +95,7 @@ export interface FormattedCell {
 export function formatCellValue(
   cell: Cell,
   styles: Styles,
-  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  cfNumFmt?: CfNumFmt | null,
   date1904 = false,
 ): string {
   return formatCellValueWithColor(cell, styles, cfNumFmt, date1904).text;
@@ -56,21 +104,28 @@ export function formatCellValue(
 export function formatCellValueWithColor(
   cell: Cell,
   styles: Styles,
-  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  cfNumFmt?: CfNumFmt | null,
   /** Workbook date system (`<workbookPr date1904>`, §18.2.28). `true` resolves
    *  serial dates against the 1904 epoch (§18.17.4.1). Defaults to false (1900
    *  date system) so callers that don't thread the flag are unaffected. */
   date1904 = false,
+  /** {@link indexStyleNumFmts} of `styles.numFmts`, built in the caller's
+   *  current pass; absent → a linear search. */
+  numFmtIndex?: StyleNumFmtIndex,
 ): FormattedCell {
   // Resolve the effective format once so both the numeric and text paths
   // honour the same precedence: CF dxf numFmt > style numFmt (§18.8.15).
   const xf = styles.cellXfs[cell.styleIndex ?? 0];
   const styleNumFmtId = xf?.numFmtId ?? 0;
-  const styleFmt = styles.numFmts?.find(f => f.numFmtId === styleNumFmtId)?.formatCode ?? null;
+  const styleNumFmt = numFmtIndex
+    ? numFmtIndex.get(styleNumFmtId)
+    : styles.numFmts?.find(f => f.numFmtId === styleNumFmtId);
+  const styleFmt = styleNumFmt?.formatCode ?? null;
   const effectiveFmtId = cfNumFmt?.numFmtId ?? styleNumFmtId;
   // A matched differential format replaces the id/code pair. An absent CF
   // code implies its built-in format, rather than inheriting the base code.
   const effectiveFmt = cfNumFmt ? cfNumFmt.formatCode : styleFmt;
+  const divisors = cfNumFmt ? cfNumFmt.sectionDivisors : styleNumFmt?.sectionDivisors;
 
   // Non-numeric cells still need to honour the 4th format section (text).
   // §18.8.30: format sections are positive;negative;zero;text. An empty text
@@ -90,7 +145,13 @@ export function formatCellValueWithColor(
   // cached values the producing application saved together are authoritative.
   // A formula cell without a cached value is rendered like any other empty
   // cell, regardless of which function it calls.
-  return applyFormat(cell.value.number, effectiveFmtId, effectiveFmt, date1904);
+  return applyFormat(cell.value.number, effectiveFmtId, effectiveFmt, date1904, divisors);
+}
+
+/** The divisor of numeric section `index`: a finite positive factor, else 1. */
+function sectionDivisor(divisors: readonly number[] | undefined, index: number): number {
+  const divisor = divisors?.[index];
+  return divisor !== undefined && Number.isFinite(divisor) && divisor > 0 ? divisor : 1;
 }
 
 /**
@@ -197,88 +258,219 @@ const BUILTIN_NUMERIC_FMT: Record<number, string> = {
   48: '##0.0E+0',
 };
 
-// Excel's General format does not round-trip the raw IEEE-754 double: the
-// display engine rounds to 11 significant digits (of the 15-17 significant
-// digits a double can carry), which is what keeps binary floating point
-// noise from arithmetic (e.g. 0.1 + 0.2 === 0.30000000000000004) from ever
-// reaching the screen. See "Floating-point arithmetic may give inaccurate
-// results in Excel" (Microsoft KB78113) for the 15-digit internal precision
-// this display rounding sits on top of.
-const GENERAL_SIGNIFICANT_DIGITS = 11;
-// Once General has committed to scientific notation (see thresholds below),
-// Excel caps the mantissa at 6 significant digits (1 integer + 5 decimal),
-// e.g. 123456789012 -> "1.23457E+11", independent of the 11-digit budget
-// used for fixed-point display.
-const GENERAL_EXPONENTIAL_MANTISSA_DIGITS = 6;
+// ECMA-376 Part 1 §18.8.30 ("General" format, Numbers) specifies the General
+// display of a number:
+// - "display the full number up to 11 digits (inc. decimal point)"; its
+//   "Floating point rule" makes that a cap of 11 characters, "not including
+//   negative sign, but includes leading zeros and decimal separator".
+// - A number too large switches to exponential format; too many significant
+//   digits truncate (round) the display. "The optimal method of display is based
+//   on the available cell width", and when no form fits that width the cell
+//   shows "#" across its width.
+// - Exponential format needs room for at least five characters (`xE-xx`). It
+//   is used when the integer part does not fit, when not even one non-zero
+//   digit fits in fixed-point form (negative exponent), and when a lossy
+//   fixed-point form of a negative-exponent value would show fewer digits than
+//   the exponential form (§18.8.30 conditions 2-4).
+// The display works on Excel's 15-significant-digit value (Microsoft KB78113),
+// which also keeps binary noise (0.1 + 0.2 = 0.30000000000000004) off screen.
+// An exponential mantissa carries at most 6 significant digits
+// (`1.23457E+11`), as Excel and the SheetJS SSF / Apache POI General
+// emulations show.
+const GENERAL_MAX_CHARS = 11;
+const GENERAL_EXPONENTIAL_MAX_DECIMALS = 5;
+const GENERAL_SOURCE_DIGITS = 15;
 
-/** Strips trailing fractional zeros (and a dangling ".") from a fixed-point
- *  digit string. No-op for strings without a decimal point. */
-function trimTrailingZeros(digits: string): string {
-  if (!digits.includes('.')) return digits;
-  return digits.replace(/0+$/, '').replace(/\.$/, '');
+/** A positive finite value as 15 significant decimal digits `d0.d1d2… × 10^exp`. */
+interface DecimalDigits { digits: number[]; exp: number }
+
+function decimalDigits(abs: number): DecimalDigits {
+  const [mantissa, exponent] = abs.toExponential(GENERAL_SOURCE_DIGITS - 1).split('e');
+  return {
+    digits: mantissa.replace('.', '').split('').map(Number),
+    exp: Number(exponent),
+  };
 }
 
-/** Formats `exponent` the way Excel's General exponential notation does:
- *  always signed, at least two digits (E+05, E+11, E-09, ...). */
+/** Rounds `value` half-up to `count` significant digits. `count === 0` rounds
+ *  to the decade above the leading digit: one unit there, or zero (no digits);
+ *  a negative count is zero. */
+function roundSignificant(value: DecimalDigits, count: number): DecimalDigits {
+  if (count < 0) return { digits: [], exp: value.exp };
+  const kept = value.digits.slice(0, count);
+  if ((value.digits[count] ?? 0) < 5) return { digits: kept, exp: value.exp };
+  let i = kept.length - 1;
+  for (; i >= 0; i--) {
+    if (kept[i] === 9) kept[i] = 0;
+    else { kept[i] += 1; break; }
+  }
+  // Carry out of the leading digit (or count === 0 rounding up): 10^(exp+1).
+  if (i < 0) return { digits: [1], exp: value.exp + 1 };
+  return { digits: kept, exp: value.exp };
+}
+
+/** Fixed-point text of `value` rounded to `decimals` places, trailing
+ *  fractional zeros dropped; `null` when the rounded value is zero. */
+function fixedText(value: DecimalDigits, decimals: number): string | null {
+  const { digits, exp } = roundSignificant(value, value.exp + 1 + decimals);
+  if (!digits.some(d => d !== 0)) return null;
+  const digitAt = (power: number): number => {
+    const index = exp - power;
+    return index >= 0 && index < digits.length ? digits[index] : 0;
+  };
+  let intPart = '';
+  for (let power = Math.max(exp, 0); power >= 0; power--) intPart += digitAt(power);
+  let frac = '';
+  for (let power = -1; power >= -decimals; power--) frac += digitAt(power);
+  frac = frac.replace(/0+$/, '');
+  return frac ? `${intPart}.${frac}` : intPart;
+}
+
+/** Excel's General exponent: uppercase E, always signed, at least two digits. */
 function formatExcelExponent(exponent: number): string {
   const sign = exponent >= 0 ? '+' : '-';
-  const digits = Math.abs(exponent).toString().padStart(2, '0');
-  return `${sign}${digits}`;
+  return `E${sign}${Math.abs(exponent).toString().padStart(2, '0')}`;
 }
 
-/** Renders a finite, non-zero, non-negative number in Excel's General
- *  exponential style: mantissa trimmed to `GENERAL_EXPONENTIAL_MANTISSA_DIGITS`
- *  significant digits with trailing zeros dropped, uppercase `E`, signed
- *  2+-digit exponent (e.g. 123456789012 -> "1.23457E+11"). */
-function formatGeneralExponential(abs: number): string {
-  const [mantissa, exponent] = abs.toExponential(GENERAL_EXPONENTIAL_MANTISSA_DIGITS - 1).split('e');
-  return `${trimTrailingZeros(mantissa)}E${formatExcelExponent(Number(exponent))}`;
+/** The fixed-point General form within `budget` characters, or `null` when the
+ *  integer part does not fit or no non-zero digit would remain. */
+function generalFixed(value: DecimalDigits, budget: number): string | null {
+  if (value.exp >= 0) {
+    const intDigits = value.exp + 1;
+    if (intDigits > budget) return null;
+    // A rounding carry (9999.6 -> 10000) can add an integer digit; drop one
+    // more decimal and retry until the text fits the budget.
+    for (let decimals = Math.max(0, budget - intDigits - 1); decimals >= 0; decimals--) {
+      const text = fixedText(value, decimals);
+      if (text !== null && text.length <= budget) return text;
+    }
+    return null;
+  }
+  // "0." plus the decimals left in the budget; a one-character budget can only
+  // show a value that rounds to 1.
+  const text = fixedText(value, Math.max(0, budget - 2));
+  return text !== null && text.length <= budget ? text : null;
+}
+
+/** The exponential General form within `budget` characters (mantissa up to 6
+ *  significant digits, trailing zeros dropped), or `null` when even `dE+xx`
+ *  does not fit. */
+function generalExponential(value: DecimalDigits, budget: number): string | null {
+  for (let decimals = GENERAL_EXPONENTIAL_MAX_DECIMALS; decimals >= 0; decimals--) {
+    const { digits, exp } = roundSignificant(value, decimals + 1);
+    const frac = digits.slice(1).join('').replace(/0+$/, '');
+    const text = `${digits[0]}${frac ? `.${frac}` : ''}${formatExcelExponent(exp)}`;
+    if (text.length <= budget) return text;
+  }
+  return null;
+}
+
+/** Number of significant digits a General form shows. */
+function shownDigits(text: string): number {
+  return text.split('E')[0].replace('.', '').replace(/^0+/, '').length;
+}
+
+/** The General form of a positive value within a `budget`-character cap
+ *  (§18.8.30 conditions for switching to exponential format). */
+function generalForBudget(value: DecimalDigits, budget: number): string | null {
+  const fixed = generalFixed(value, budget);
+  const exponential = generalExponential(value, budget);
+  if (fixed === null || exponential === null) return fixed ?? exponential;
+  if (value.exp >= 0) return fixed;
+  // Negative exponent: keep fixed point while it shows every significant
+  // digit, or while exponential form would not show more of them.
+  const significant = value.digits.join('').replace(/0+$/, '').length;
+  const fixedDigits = shownDigits(fixed);
+  if (fixedDigits >= significant) return fixed;
+  return shownDigits(exponential) > fixedDigits ? exponential : fixed;
 }
 
 /**
- * Formats a number the way Excel's "General" cell format does: round to 11
- * significant digits (hiding binary floating-point round-trip noise like
- * 0.1 + 0.2), trim trailing fractional zeros, and switch to Excel-style
- * exponential notation ("1.23457E+11") once the value's decimal exponent
- * falls outside the fixed-point display budget.
- *
- * Thresholds:
- * - Integer part >= 12 digits (decimal exponent >= 11): Excel General is
- *   documented to switch 12+ digit numbers to scientific notation.
- * - Decimal exponent < -5 (value would need 6+ leading fractional zeros
- *   before the first significant digit): mirrors the same "11 significant
- *   digits must fit in the fixed-point budget" rule on the small-number
- *   side — not a numerically-documented Microsoft threshold, but the
- *   consistent extrapolation of the documented large-number rule.
- *
- * Column-width narrowing is not modeled: Excel shrinks a General value's
- * displayed precision further to fit a narrow column, but this function always
- * emits the full 11-significant-digit form regardless of the destination
- * column width, matching how the rest of this renderer treats layout as
- * independent of formatting.
+ * Formats a number the way Excel's General format does (ECMA-376 §18.8.30).
+ * Each character budget from the 11-character cap (sign excluded) down to one
+ * has a single General form; the first that `fits` accepts is the display.
+ * Narrower budgets first drop rounded decimal places, then switch to
+ * exponential form as the §18.8.30 conditions require. Without `fits`, only
+ * the cap applies (the text of a wide enough column). Returns `null` when no
+ * form fits (§18.8.30 then shows "#"; {@link fitGeneralNumber} keeps the shortest form).
  */
-function formatGeneralNumber(num: number): string {
+export function formatGeneralNumber(num: number, fits?: (text: string) => boolean): string | null {
   if (!Number.isFinite(num)) return String(num);
-  if (num === 0) return '0'; // canonicalizes -0 to "0"
-
-  const negative = num < 0;
-  const abs = Math.abs(num);
-
-  // Decimal exponent of the value once rounded to the target significant
-  // digits, derived from the (already-rounded) exponential form so a
-  // rounding carry that bumps the digit count (e.g. 99999999999.6 -> 1E+11)
-  // is reflected before the fixed-vs-exponential branch is chosen.
-  const exponent = Number(abs.toExponential(GENERAL_SIGNIFICANT_DIGITS - 1).split('e')[1]);
-  const useExponential = exponent >= GENERAL_SIGNIFICANT_DIGITS || exponent < -5;
-
-  const body = useExponential
-    ? formatGeneralExponential(abs)
-    : trimTrailingZeros(abs.toPrecision(GENERAL_SIGNIFICANT_DIGITS));
-
-  return negative ? `-${body}` : body;
+  if (num === 0) return !fits || fits('0') ? '0' : null; // canonicalizes -0 to "0"
+  const sign = num < 0 ? '-' : '';
+  const value = decimalDigits(Math.abs(num));
+  let previous: string | null = null;
+  for (let budget = GENERAL_MAX_CHARS; budget >= 1; budget--) {
+    const body = generalForBudget(value, budget);
+    if (body === null || body === previous) continue;
+    previous = body;
+    const text = sign + body;
+    if (!fits || fits(text)) return text;
+  }
+  return null;
 }
 
-function applyFormat(num: number, numFmtId: number, formatCode: string | null, date1904 = false): FormattedCell {
+/** The General text without a width: the 11-character cap alone. */
+function formatGeneralText(num: number): string {
+  return formatGeneralNumber(num) ?? '';
+}
+
+/**
+ * Shortens a General number to its available width, as
+ * {@link formatGeneralNumber} specifies (§18.8.30). When even the shortest
+ * form does not fit, that shortest form is kept (and clipped by paint) rather
+ * than replaced by Excel's "#" fill, so a value is never hidden. Every other
+ * number format, non-numeric cells and texts that fit are returned unchanged.
+ */
+export function fitGeneralNumber(
+  cell: Cell,
+  formatted: FormattedCell,
+  fits: (text: string) => boolean,
+): FormattedCell {
+  if (cell.value.type !== 'number' || !formatted.general || fits(formatted.text)) return formatted;
+  let shortest: string | null = null;
+  const text = formatGeneralNumber(cell.value.number, (candidate) => {
+    shortest = candidate;
+    return fits(candidate);
+  });
+  const shown = text ?? shortest;
+  if (shown === null) return formatted;
+  return formatted.color === undefined
+    ? { text: shown, general: true }
+    : { text: shown, color: formatted.color, general: true };
+}
+
+/**
+ * Every text a cell can display under its effective number format (the
+ * conditional-formatting override included): one entry, or, for a General
+ * number, each distinct form {@link fitGeneralNumber} can shorten it to,
+ * widest first with the unconstrained text leading. Find indexes these,
+ * because the shown form depends on the column width and font, which only
+ * paint knows.
+ */
+export function cellDisplayTexts(
+  cell: Cell,
+  styles: Styles,
+  cfNumFmt?: { numFmtId: number; formatCode: string | null } | null,
+  date1904 = false,
+): string[] {
+  const formatted = formatCellValueWithColor(cell, styles, cfNumFmt, date1904);
+  if (cell.value.type !== 'number' || !formatted.general) return [formatted.text];
+  const forms: string[] = [];
+  formatGeneralNumber(cell.value.number, (candidate) => {
+    forms.push(candidate);
+    return false;
+  });
+  return forms.length > 0 ? forms : [formatted.text];
+}
+
+function applyFormat(
+  num: number,
+  numFmtId: number,
+  formatCode: string | null,
+  date1904 = false,
+  divisors?: readonly number[],
+): FormattedCell {
   // Built-in 14 is Excel's locale-sensitive short-date format rather than a
   // file-authored pattern. Use the host application's UI locale, while keeping
   // UTC fields so the Excel serial cannot cross a calendar-day boundary in a
@@ -290,11 +482,18 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
   // of numFmtId. LibreOffice writes a custom numFmt (id ≥ 164) with
   // formatCode="General"; tokenizing it as a literal pattern would render the
   // word "General" instead of the value (issue #358).
-  if (formatCode && formatCode.trim().toLowerCase() === 'general') return { text: formatGeneralNumber(num) };
+  if (formatCode && formatCode.trim().toLowerCase() === 'general') {
+    const divisor = sectionDivisor(divisors, 0);
+    // Width fitting re-derives the General forms from the cell's own value,
+    // so only an undivided General stays fittable.
+    return divisor === 1
+      ? { text: formatGeneralText(num), general: true }
+      : { text: formatGeneralText(num / divisor) };
+  }
   // §18.8.30 implies a built-in code when no numFmt is authored. An explicit
   // code (including a differential format layered by §18.8.15) takes precedence
   // over that fallback, even when its numFmtId also names a built-in format.
-  if (formatCode) return applyFormatCode(num, formatCode, date1904);
+  if (formatCode) return applyFormatCode(num, formatCode, date1904, divisors);
   const builtinFmt = BUILTIN_DATE_FMT[numFmtId];
   if (builtinFmt) return dateFormattedCell(formatExcelDateTime(num, builtinFmt, date1904), num, date1904);
   // Built-in numeric numFmtIds without an explicit formatCode. Route the ones
@@ -305,7 +504,7 @@ function applyFormat(num: number, numFmtId: number, formatCode: string | null, d
   if (builtinNumeric) return applyFormatCode(num, builtinNumeric);
   if (numFmtId === 49) return { text: String(num) };
   // 0 (General) and every unknown id.
-  return { text: formatGeneralNumber(num) };
+  return { text: formatGeneralText(num), general: true };
 }
 
 /** Number-format paint texts of a workbook's styles (see
@@ -416,96 +615,8 @@ function dateFormattedCell(text: string, serial: number, date1904: boolean): For
 // conditional/coloured sections all follow the spec exactly.
 // ════════════════════════════════════════════════════════════════════════════
 
-/** §18.8.30 "Specify colors": the eight named section colours (p.1787). */
-const NAMED_COLORS: Record<string, string> = {
-  black: '#000000', blue: '#0000FF', cyan: '#00FFFF', green: '#008000',
-  magenta: '#FF00FF', red: '#FF0000', white: '#FFFFFF', yellow: '#FFFF00',
-};
-
-// Legacy indexed colour palette (§18.8.27, indices 0-63). `[ColorN]` maps N→
-// indexed=(N+7): the spec note says "[Color1] refers to indexed=8 ... [Color3]
-// for Red". Kept in sync with the Rust parser's INDEXED_COLORS.
-const INDEXED_COLORS: readonly string[] = [
-  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 0-7
-  '#000000', '#FFFFFF', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', // 8-15
-  '#800000', '#008000', '#000080', '#808000', '#800080', '#008080', '#C0C0C0', '#808080', // 16-23
-  '#9999FF', '#993366', '#FFFFCC', '#CCFFFF', '#660066', '#FF8080', '#0066CC', '#CCCCFF', // 24-31
-  '#000080', '#FF00FF', '#FFFF00', '#00FFFF', '#800080', '#800000', '#008080', '#0000FF', // 32-39
-  '#00CCFF', '#CCFFFF', '#CCFFCC', '#FFFF99', '#99CCFF', '#FF99CC', '#CC99FF', '#FFCC99', // 40-47
-  '#3366FF', '#33CCCC', '#99CC00', '#FFCC00', '#FF9900', '#FF6600', '#666699', '#969696', // 48-55
-  '#003366', '#339966', '#003300', '#333300', '#993300', '#993366', '#333399', '#333333', // 56-63
-];
-
-interface SectionCondition {
-  op: '<' | '<=' | '>' | '>=' | '=' | '<>';
-  value: number;
-}
-
-interface ParsedSection {
-  /** Raw section body with `[...]` modifiers stripped out. */
-  body: string;
-  color?: string;
-  condition?: SectionCondition;
-}
-
-/** Parse a section's leading `[...]` modifiers (colour, condition, currency).
- *  Currency `[$sym-LCID]` is left *in* the body (its `$sym` is emitted as a
- *  literal by the tokenizer); only colour and condition brackets are consumed
- *  here. */
-function parseSection(section: string): ParsedSection {
-  let body = '';
-  let color: string | undefined;
-  let condition: SectionCondition | undefined;
-  let i = 0;
-  while (i < section.length) {
-    const ch = section[i];
-    if (ch === '"') { // pass a quoted literal straight through
-      body += ch; i++;
-      while (i < section.length && section[i] !== '"') body += section[i++];
-      if (i < section.length) body += section[i++];
-    } else if (ch === '\\' || ch === '_' || ch === '*') {
-      // An escape or a pad / fill pair: its operand is never a delimiter.
-      body += ch;
-      if (i + 1 < section.length) body += section[i + 1];
-      i += 2;
-    } else if (ch === '[') {
-      const end = section.indexOf(']', i);
-      if (end < 0) { body += ch; i++; continue; }
-      const inner = section.slice(i + 1, end);
-      const lower = inner.toLowerCase();
-      const idxMatch = lower.match(/^color(\d{1,2})$/);
-      const condMatch = inner.match(/^(<=|>=|<>|<|>|=)\s*(-?[0-9.]+(?:[eE][-+]?\d+)?)$/);
-      if (hasOwnKey(NAMED_COLORS, lower)) {
-        color = NAMED_COLORS[lower];
-      } else if (idxMatch) {
-        const n = parseInt(idxMatch[1], 10);
-        // §18.8.30: [ColorN] → indexed=(N+7); valid N is 1..56.
-        if (n >= 1 && n <= 56) color = INDEXED_COLORS[n + 7] ?? color;
-      } else if (condMatch) {
-        condition = { op: condMatch[1] as SectionCondition['op'], value: Number(condMatch[2]) };
-      } else {
-        // Currency / locale / elapsed brackets stay in the body for the
-        // tokenizer to interpret (`[$sym-LCID]`), so re-emit them verbatim.
-        body += section.slice(i, end + 1);
-      }
-      i = end + 1;
-    } else {
-      body += ch; i++;
-    }
-  }
-  return { body, color, condition };
-}
-
-function testCondition(cond: SectionCondition, num: number): boolean {
-  switch (cond.op) {
-    case '<': return num < cond.value;
-    case '<=': return num <= cond.value;
-    case '>': return num > cond.value;
-    case '>=': return num >= cond.value;
-    case '=': return num === cond.value;
-    case '<>': return num !== cond.value;
-  }
-}
+// Section modifiers (colour, condition) and section selection are shared
+// with chart labels: `parseFormatSection` / `selectFormatSection` in core.
 
 /**
  * The lexed pieces of one numeric section. Literal text and placeholder runs
@@ -547,7 +658,7 @@ type SecPart =
 /**
  * Lex one numeric section body (already stripped of `[...]` colour/condition
  * modifiers) into a `LexedSection`. Currency `[$sym-LCID]` brackets that
- * survived `parseSection` are expanded here to their literal symbol.
+ * survived `parseFormatSection` are expanded here to their literal symbol.
  */
 function lexSection(body: string): LexedSection {
   const parts: SecPart[] = [];
@@ -735,7 +846,10 @@ function fillFractionText(fracDigits: string, fracSpec: string): string {
 function approximateFraction(frac: number, maxDenDigits: number, fixedDen: number | null): [number, number] {
   if (fixedDen !== null) return [Math.round(frac * fixedDen), fixedDen];
   const maxDen = Math.pow(10, Math.max(maxDenDigits, 1)) - 1;
+  // The ends of the search, 0/1 and 1/1, are candidates too: 0.999 with
+  // one-digit denominators is 1/1 (the caller carries it), not 8/9.
   let bestN = 0, bestD = 1, bestErr = Math.abs(frac);
+  if (Math.abs(1 - frac) < bestErr) { bestN = 1; bestD = 1; bestErr = Math.abs(1 - frac); }
   let lo: [number, number] = [0, 1];
   let hi: [number, number] = [1, 1];
   for (let iter = 0; iter < 100; iter++) {
@@ -769,11 +883,13 @@ function renderNumericSection(num: number, body: string, useMagnitude: boolean):
 
   // ── Fraction section (`# ?/?`, `?/8`, …) ──────────────────────────────────
   if (lex.fraction) {
-    const whole = Math.floor(abs);
+    let whole = Math.floor(abs);
     const frac = abs - whole;
     const { wholeSpec, numSpec, denSpec, fixedDen } = lex.fraction;
     const hasWholePart = wholeSpec.length > 0; // e.g. `# ?/?` has a `#` whole part
-    const [numr, den] = approximateFraction(frac, denSpec.length, fixedDen);
+    let [numr, den] = approximateFraction(frac, denSpec.length, fixedDen);
+    // A fraction that rounds to a whole carries into the whole part.
+    if (hasWholePart && numr === den) { whole += 1; numr = 0; }
 
     // §18.8.30: `?` pads insignificant positions with spaces so fractions align
     // on the slash — the numerator right-aligns (pad left), the denominator
@@ -917,63 +1033,37 @@ function assembleFixed(lex: LexedSection, intText: string, fracText: string, exp
  * per-section colour, and the numeric grammar. Returns the display string and
  * any section colour.
  */
-function applyFormatCode(num: number, formatCode: string, date1904 = false): FormattedCell {
-  const rawSections = splitFormatSections(formatCode);
-  // The text section never formats a number (§18.8.30): leave it out of the
-  // positional and conditional selection below.
-  const textIndex = textSectionIndex(rawSections);
-  const parsed = rawSections.filter((_, i) => i !== textIndex).map(parseSection);
-  if (parsed.length === 0) return { text: formatGeneralNumber(num) };
+function applyFormatCode(
+  value: number,
+  formatCode: string,
+  date1904 = false,
+  divisors?: readonly number[],
+): FormattedCell {
+  let num = value;
+  // Positional (positive;negative;zero) or condition-driven selection, the
+  // text section left out (§18.8.30); shared with chart labels.
+  const selected = selectFormatSection(num, formatCode);
+  if (selected === null) return { text: formatGeneralText(num), general: true };
+  // No criterion met and no else → Excel shows "#" across the cell.
+  if (selected === 'none') return { text: '#' };
+  const { section: chosen, useMagnitude } = selected;
 
-  // Conditional sections (§18.8.30 "Specify conditions"): if any section
-  // carries a `[cond]`, section selection is condition-driven — the first
-  // section whose condition matches wins; a trailing section without a
-  // condition is the "else". This overrides the positional pos/neg/zero rule.
-  const hasConditions = parsed.some(s => s.condition);
-  let chosen: ParsedSection | undefined;
-  let useMagnitude = false;
-
-  if (hasConditions) {
-    let matchedByCondition = false;
-    for (const sec of parsed) {
-      if (sec.condition) {
-        if (testCondition(sec.condition, num)) { chosen = sec; matchedByCondition = true; break; }
-      } else {
-        // Unconditional section acts as the default/else clause.
-        chosen = chosen ?? sec;
-        if (chosen === sec) break;
-      }
-    }
-    if (!chosen) {
-      // No criterion met and no else → Excel shows "#" across the cell.
-      return { text: '#' };
-    }
-    // Sign semantics (§18.8.30 / §18.8.31): a section selected by its own
-    // matching condition formats the value's *magnitude* — the section's
-    // literals carry the sign presentation, exactly like the positional
-    // negative section (the spec's `$0.00" Surplus";$-0.00" Shortage"` example
-    // on p.1785 shows -125.74 as "$-125.74 Shortage": magnitude plus the
-    // section's own literal `-`; built-ins 37-40 use parentheses the same way).
-    // Prepending the sign on top would double it: `[<0]\-0.0` @ -5 would print
-    // "--5.0". The unconditional "else" section, by contrast, mirrors the
-    // positional fallback rule (a negative formatted by the only/positive
-    // section keeps its sign, e.g. `0.0` @ -5 → "-5.0"), so a value that no
-    // condition claimed keeps its sign there.
-    useMagnitude = matchedByCondition && num < 0;
-  } else {
-    // Positional selection: positive;negative;zero (§18.8.31 p.1783).
-    if (num > 0) chosen = parsed[0];
-    else if (num < 0) {
-      if (parsed.length > 1) { chosen = parsed[1]; useMagnitude = true; }
-      else chosen = parsed[0];
-    } else {
-      chosen = parsed.length > 2 ? parsed[2] : parsed[0];
-    }
-  }
-
+  // An OpenDocument display factor (ODF 1.3 Part 3 §19.346) divides the
+  // value once its section is chosen on the undivided value.
+  num /= sectionDivisor(divisors, selected.index);
   // Date/time is a property of the selected section (§18.8.30): `0.00;h:mm`
   // formats a positive value as a number and only a negative one as a time.
   const serial = useMagnitude ? Math.abs(num) : num;
+  // A section whose number token is the General keyword (`[Red]General`,
+  // `General;General`, `"$"General`) formats its (magnitude) value as
+  // General between the section's literals (§18.8.30).
+  const general = generalSectionAffixes(chosen.body);
+  if (general) {
+    const scaled = general.percent ? serial * 100 : serial;
+    // A lone section carries no sign of its own: the minus leads it.
+    const text = (scaled < 0 ? '-' : '') + general.prefix + formatGeneralText(Math.abs(scaled)) + general.suffix;
+    return chosen.color ? { text, color: chosen.color } : { text };
+  }
   const formatted = isDateFormatSection(chosen.body)
     ? dateFormattedCell(formatExcelDateTime(serial, chosen.body, date1904), serial, date1904)
     : { text: renderNumericSection(num, chosen.body, useMagnitude) };

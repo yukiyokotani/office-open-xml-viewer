@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { docxRenderedTextUsages } from './document-content.js';
-import { docxFontDemandCandidates, docxOfficeFontFallbackRequests } from './font-plan.js';
+import { docxFontDemandCandidates } from './font-demand-plan.js';
+import { docxOfficeFontFallbackRequests } from './font-plan.js';
 import type { InternalFieldRun } from './parser-model.js';
 import type { DocxDocumentModel } from './types.js';
 
@@ -15,6 +16,15 @@ describe('docx rendered text inventory', () => {
     headers: { default: null, first: null, even: null },
     footers: { default: null, first: null, even: null },
   }) as unknown as DocxDocumentModel;
+
+  it('preloads an inline drawing run face even when its text box has no text', () => {
+    const doc = documentWithRun({ type: 'shape', inline: true, textBlocks: [],
+      __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Courier New', bold: true } });
+    expect([...docxRenderedTextUsages(doc, 'font-demand')]
+      .flatMap((usage) => usage.fontFamilies)).toContain('Courier New');
+    expect(docxOfficeFontFallbackRequests(doc, {}))
+      .toContainEqual({ family: 'Courier New', weight: 700, style: 'normal' });
+  });
 
   it.each(['rtl', 'cs'] as const)('collects the independent CS tuple of a compatibility %s run', (flag) => {
     const facts = {

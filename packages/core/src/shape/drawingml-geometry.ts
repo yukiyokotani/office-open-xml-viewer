@@ -8,6 +8,7 @@ import { buildCustomPath } from './custGeom';
 import { getCustGeomEndpoints } from './custgeom-endpoints';
 import { resolvePresetGeometryPaths, buildPresetGeometryFillPath, getConnectorAnchors } from './preset-geometry/geometry';
 import { geometryPathBounds, type GeometryMatrix, type GeometryBox } from './path-enclosure';
+import { hasPresetLineEnds, isRetractableLeaderPreset } from './preset-line-ends';
 
 export interface ResolvedDrawingMLPath {
   readonly path: GeometryPath;
@@ -28,11 +29,6 @@ export interface ResolvedDrawingMLGeometry {
   readonly fillSilhouette: GeometryPath;
   readonly arrows: readonly ResolvedDrawingMLArrow[];
   readonly workUnits: number;
-}
-const CONNECTORS = new Set(['line', 'straightconnector1', 'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5', 'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5']);
-const CALLOUTS = new Set(['callout1', 'callout2', 'callout3', 'bordercallout1', 'bordercallout2', 'bordercallout3', 'accentcallout1', 'accentcallout2', 'accentcallout3', 'accentbordercallout1', 'accentbordercallout2', 'accentbordercallout3']);
-function retractable(name: string): boolean {
-  return CALLOUTS.has(name) || name === 'line' || name === 'straightconnector1' || name.startsWith('bentconnector');
 }
 function sourceKey(plan: DrawingMLShapePaintPlan): string {
   return JSON.stringify({ geometry: plan.geometry, stroke: plan.stroke, fill: plan.fill });
@@ -86,7 +82,7 @@ export function resolveDrawingMLGeometry(plan: DrawingMLShapePaintPlan, scale: n
   if (plan.geometry.kind === 'preset') {
     charge(plan.geometry.adjustments.length);
     const name = plan.geometry.name.toLowerCase(), adjustments = [...plan.geometry.adjustments];
-    const decorated = retractable(name) && !!(strokeSource?.headEnd || strokeSource?.tailEnd);
+    const decorated = isRetractableLeaderPreset(name) && !!(strokeSource?.headEnd || strokeSource?.tailEnd);
     const trimsCurve = name.startsWith('curvedconnector');
     const presetPaths = resolvePresetGeometryPaths(name, w, h, adjustments, charge, x, y);
     if (presetPaths) {
@@ -106,7 +102,7 @@ export function resolveDrawingMLGeometry(plan: DrawingMLShapePaintPlan, scale: n
     if (!buildPresetGeometryFillPath(silhouette.sink, plan.geometry.name, x, y, w, h, adjustments)) {
       buildShapePath(silhouette.sink, plan.geometry.name, x, y, w, h, adjustments[0], adjustments[1], adjustments[2], adjustments[3]);
     }
-    if (strokeSource && (CONNECTORS.has(name) || CALLOUTS.has(name))) {
+    if (strokeSource && hasPresetLineEnds(name)) {
       const anchors = getConnectorAnchors(name, x, y, w, h, adjustments);
       if (anchors) {
         if (decorated && anchors.vertices.length >= 2) {

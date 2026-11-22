@@ -14,6 +14,7 @@ import {
   layoutSourceStoreFromOwnedModel,
   type LayoutSourceModelAdapter,
 } from './layout-source-model-adapter.js';
+import { errorPageLayoutReady } from './layout/document-layout-variants.js';
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 
 const DOCX_INITIAL_BODY_PULL_BYTES = 1024 * 1024;
@@ -29,12 +30,22 @@ type DocumentUnit =
 export interface MaterializeDocumentPullOptions {
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /**
+   * The owner's lifetime, for the wait that follows the pull of a document
+   * that failed to parse (its error page's code, #2248): ending the transport
+   * settles a pull, but not that wait. Read only for such a document.
+   * Defaults to `signal`.
+   */
+  readonly lifetime?: () => AbortSignal | undefined;
   readonly onUsage?: (usage: OoxmlResourceUsageSnapshot) => void;
 }
 
 interface DocumentPullAccumulator<TResult> {
   acceptBody(body: BodyElement[]): void;
   complete(document: DocxDocumentModel): TResult;
+  /** Code the result needs before it is handed out; `undefined` when there is
+   * nothing to wait for (always, for a document that parsed). */
+  ready?(result: TResult): Promise<unknown> | undefined;
 }
 
 /** Drain one sequential DOCX operation into the backward-compatible public
@@ -71,6 +82,8 @@ export async function materializeDocumentPullLayoutSession(
       document.body = ownedBody;
       return layoutSourceStoreFromOwnedModel(document);
     },
+    // A fatally unparseable document loads its error page here (#2248).
+    ready: (source: LayoutSourceStore) => errorPageLayoutReady(source, options.lifetime?.() ?? options.signal),
   });
 }
 
@@ -84,7 +97,11 @@ export async function materializeDocumentPullAdapterSession(
   options: MaterializeDocumentPullOptions = {},
 ): Promise<LayoutSourceModelAdapter> {
   const models = await materializeDocumentPullOwnedModelsSession(transport, identity, options);
-  return layoutSourceModelAdapterFromOwnedModel(models.document, models.ownedLayoutDocument);
+  const adapter = layoutSourceModelAdapterFromOwnedModel(models.document, models.ownedLayoutDocument);
+  // A fatally unparseable document loads its error page here (#2248).
+  const errorPage = errorPageLayoutReady(adapter.source, options.lifetime?.() ?? options.signal);
+  if (errorPage) await errorPage;
+  return adapter;
 }
 
 export interface MaterializedDocumentPullOwnedModels {
@@ -163,6 +180,8 @@ async function drainDocumentPullSession<TResult>(
           throw new TypeError('DOCX terminal document must not duplicate streamed body blocks');
         }
         const result = accumulator.complete(unit.document);
+        const ready = accumulator.ready?.(result);
+        if (ready) await ready;
         await chunk.ack({ signal: options.signal });
         return result;
       } finally {

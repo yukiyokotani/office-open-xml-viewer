@@ -4,7 +4,8 @@ import {
   HARD_MAX_FONT_SOURCE_DECLARATIONS,
   HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES,
 } from '../worker/resource-policy.generated.js';
-import { fetchFontStylesheet, parseFontFaceCss, parseUnicodeRange, tokenizeCss } from './css-source.js';
+import { fetchFontStylesheet, parseFontFaceCss, tokenizeCss } from './css-source.js';
+import { parseUnicodeRange } from './unicode-range.js';
 
 const SHEET = 'https://cdn.internal.example/styles/office.css';
 
@@ -20,7 +21,76 @@ function limitQuota(run: () => unknown): string | undefined {
   return undefined;
 }
 
+/** The same stylesheet parsed by the full tokenizer: a trailing at-rule
+ * statement (skipped by CSS) takes it out of the plain form. */
+const fullParse = (css: string) => parseFontFaceCss(`${css}\n@x;`, SHEET);
+
+/** Declaration fragments for the plain-form equivalence check: ordinary
+ * Google CSS2 output and plain spellings at its edges, then spellings that
+ * leave the plain form. */
+const PLAIN_FRAGMENTS = [
+  "font-family: 'Noto Sans JP'", 'font-family: Roboto Flex', "font-family: ''", 'font-family: serif',
+  'font-style: normal', 'font-style: italic', 'font-style: oblique 10deg', 'font-style: slanted',
+  'font-weight: 400', 'font-weight: 100 900', 'font-weight: bold', 'font-weight: calc(700)', 'font-weight: 1001',
+  'font-stretch: 75% 125%', 'font-display: swap', 'FONT-WEIGHT: 700', 'font-weight : 300', 'x: -->',
+  "src: url(https://fonts.gstatic.example/s/a/v1/x.0.woff2) format('woff2')",
+  "src: url(https://fonts.gstatic.example/s/a,b.woff2) format('woff2')",
+  "src: url(rel/x.woff) format('woff')", "src: url(x.ttf) format('truetype')", "src: url(x.otf)  format('opentype')",
+  "src: url('quoted.woff2') format('woff2')", "src: url(a.woff2) format('svg')", "src: url(a.woff2) format(woff2)",
+  "src: url(a.woff2) format('woff2'), url(b.woff)", "src: url(a b.woff2) format('woff2')", "src: url(a'b.woff2)",
+  "src: local(X), url(c.woff2) format('woff2')", 'src: url(x.woff2) tech(variations)', "src: url() format('woff2')",
+  "src: url(data:font/woff2;base64,AAAA) format('woff2')", "src: URL(a.woff2) format('woff2')",
+  'unicode-range: U+0000-00FF, U+0131, U+02??', 'unicode-range: U+25ee8, U+26ff6-26ff8', 'unicode-range: U+30-20',
+  'unicode-range: bogus', 'unicode-range: u+0-7f', '', '  ',
+];
+const EDGE_FRAGMENTS = [
+  "font-family: 'A;B'", "font-family: 'A}B'", 'font-family: A\;B', 'font-family: "Q"', 'font-family: a[;b]',
+  'font-weight: 400 !important', "src: url(a(b).woff2) format('woff2')", 'src: url(a;b.woff2)', 'src: url(a.woff2) /* c */',
+  'src: url(a[.woff2)', 'unicode-range: U+0-FF /*x*/', '--x: #a(})', 'x: <!--', 'font-family: (a', "font-family: 'a",
+];
+
+/** A deterministic pseudo-random sequence (mulberry32). */
+function sequence(seed: number): () => number {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 describe('parseFontFaceCss', () => {
+  it('parses a plain stylesheet exactly as the full tokenizer does', () => {
+    const random = sequence(2107);
+    const pick = <T>(list: readonly T[]) => list[Math.floor(random() * list.length)]!;
+    for (let sheet = 0; sheet < 400; sheet++) {
+      const rules: string[] = [];
+      const count = 1 + Math.floor(random() * 4);
+      for (let rule = 0; rule < count; rule++) {
+        const body = Array.from({ length: 2 + Math.floor(random() * 6) },
+          () => pick(random() < 0.03 ? EDGE_FRAGMENTS : PLAIN_FRAGMENTS));
+        if (random() < 0.7) body.unshift("font-family: 'F'", "src: url(https://fonts.example/f.woff2) format('woff2')");
+        const separator = pick([';', ';\n  ', '; ', ' ;']);
+        rules.push(`${pick(['', '/* latin */\n', '/* [1] */ '])}@font-face ${pick(['', '\n'])}{\n  ${body.join(separator)}${pick(['', ';'])}\n}`);
+      }
+      const css = rules.join(pick(['\n', '', '\n\n']));
+      expect(parseFontFaceCss(css, SHEET), css).toEqual(fullParse(css));
+    }
+  });
+
+  it('keeps the plain form to stylesheets whose structure the scan reads exactly', () => {
+    for (const css of [
+      "@font-face { font-family: 'A}B'; src: url(a.woff2) }",
+      '@font-face { font-family: A; src: url(a.woff2) /* } */ }',
+      '@font-face { font-family: A; src: url(a{b.woff2) }',
+      '@FONT-FACE { font-family: A; src: url(a.woff2) }',
+      '@font-face /**/ { font-family: A; src: url(a.woff2) }',
+      '@font-face { font-family: A; src: url(a.woff2)',
+      '@font-face { font-family: A; src: url(a.woff2) } } @font-face { font-family: B; src: url(b.woff2) }',
+      '<!-- @font-face { font-family: A; src: url(a.woff2) } -->',
+    ]) expect(parseFontFaceCss(css, SHEET), css).toEqual(fullParse(css));
+  });
+
   it('reads machine-generated per-family CSS with every descriptor', () => {
     const css = `/* latin */
 @font-face {
@@ -441,14 +511,15 @@ describe('fetchFontStylesheet', () => {
       expect.objectContaining({ credentials: 'same-origin' }));
   });
 
-  it('stops reading once the byte ceiling is exceeded', async () => {
+  it('stops reading once the byte ceiling is exceeded, failing the stylesheet', async () => {
     const chunk = new Uint8Array(256 * 1024).fill(0x20);
     const stream = streamed([chunk, chunk, chunk, chunk, chunk, chunk, chunk, chunk]);
     let requestSignal: AbortSignal | undefined;
     G.fetch = async (_url: string, init: RequestInit) => { requestSignal = init.signal ?? undefined; return stream.response; };
     const caller = new AbortController();
-    await expect(fetchFontStylesheet('https://fonts.example/a.css', 'omit', caller.signal))
-      .rejects.toMatchObject({ code: 'font-source-limit', violation: { quota: 'stylesheet' } });
+    expect(await fetchFontStylesheet('https://fonts.example/a.css', 'omit', caller.signal)).toEqual({
+      ok: false, reason: `Font source limit exceeded (stylesheet): bytes ${5 * 256 * 1024} > ${HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES}`,
+    });
     expect(stream.reads()).toBe(5);
     expect(stream.cancelled()).toBe(true);
     // The request is aborted although the caller's signal stays live.
@@ -456,12 +527,12 @@ describe('fetchFontStylesheet', () => {
     expect(caller.signal.aborted).toBe(false);
   });
 
-  it('rejects a declared Content-Length beyond the ceiling before reading', async () => {
+  it('fails a declared Content-Length beyond the ceiling before reading', async () => {
     const stream = streamed([], { contentLength: HARD_MAX_FONT_SOURCE_STYLESHEET_BYTES + 1 });
     let requestSignal: AbortSignal | undefined;
     G.fetch = async (_url: string, init: RequestInit) => { requestSignal = init.signal ?? undefined; return stream.response; };
-    await expect(fetchFontStylesheet('https://fonts.example/a.css', undefined, new AbortController().signal))
-      .rejects.toMatchObject({ code: 'font-source-limit' });
+    expect(await fetchFontStylesheet('https://fonts.example/a.css', undefined, new AbortController().signal))
+      .toMatchObject({ ok: false, reason: expect.stringContaining('Font source limit exceeded (stylesheet)') });
     expect(stream.reads()).toBe(0);
     expect(stream.bodyCancelled()).toBe(true);
     expect(requestSignal?.aborted).toBe(true);

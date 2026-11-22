@@ -143,7 +143,7 @@ const bodyOwner = () => ({
   pageBordersAuthored: false, pageBorders: null,
   pageLayout: {
     physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb' as const,
-    gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+    gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
     bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
   },
 });
@@ -468,7 +468,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -662,7 +662,7 @@ describe('canonical body producer', () => {
       context: verticalSection,
       pageLayout: {
         ...bodyOwner().pageLayout,
-        physicalGeometry: physicalSectionGeometry(verticalSection.geometry),
+        physicalGeometry: physicalSectionGeometry(verticalSection.geometry, 'vertical-rl'),
         textDirection: 'tbRl' as const,
       },
     };
@@ -766,6 +766,7 @@ describe('canonical body producer', () => {
         textDirection: 'lrTb',
         gutterPt: 0,
         rtlGutter: false,
+        sheetOrientation: 'portrait' as const,
         mirrorMargins: false,
         gutterAtTop: false,
         bookFoldPrinting: false,
@@ -883,6 +884,7 @@ describe('canonical body producer', () => {
           textDirection: 'lrTb',
           gutterPt: 0,
           rtlGutter: false,
+          sheetOrientation: 'portrait' as const,
           mirrorMargins: false,
           gutterAtTop: false,
           bookFoldPrinting: false,
@@ -1131,7 +1133,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -1208,7 +1210,145 @@ describe('canonical body producer', () => {
     expect(layout.pages[1]!.layers.body[0]!.id).toContain('tail-slice');
   });
 
-  it('still reports non-convergence for table overshoot beyond floating-point precision', () => {
+  it('admits a table fragment the measurer fits against a region reconstructed from page coordinates', () => {
+    // A table that ends a page exactly: 54.4 pt + 25.6 pt fill the 80 pt body.
+    // The second table's region extent is 90 - (10 + 54.4), which rounds to
+    // 2 ULPs of 25.6 below 25.6: the rounding scales with the page
+    // coordinates, not with their small difference, and the table's bottom
+    // edge agrees with the region end at page-coordinate precision. With no
+    // footnote reserve a retry would repeat the identical request, so the
+    // fit test must admit this drift rather than trip the revisit guard.
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const requestedExtentsPt: number[] = [];
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          const extentPt = request.input.source.path[0] === 0 ? 54.4 : 25.6;
+          if (request.input.source.path[0] === 1) requestedExtentsPt.push(request.availableBlockExtentPt);
+          if (extentPt > request.availableBlockExtentPt + 0.0001) {
+            return {
+              layout: table('deferred', request.input.source, 0),
+              blockExtentPt: 0,
+              requiresFreshFlowRegion: true,
+            };
+          }
+          return {
+            layout: table(`table-${request.input.source.path[0]}`, request.input.source, extentPt),
+            blockExtentPt: extentPt,
+          };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: bodyOwner(),
+      sequence: [0, 1].map((index) => ({
+        kind: 'body-block',
+        block: { kind: 'table', source: source(index) },
+      })),
+    } as unknown as BodyLayoutInput;
+
+    const layout = paginateBody(input, services, { currentDateMs: 0 });
+
+    // The region really was reconstructed below the authored extent.
+    expect(requestedExtentsPt[0]).toBeLessThan(25.6);
+    expect(25.6 - requestedExtentsPt[0]!)
+      .toBeGreaterThan(Number.EPSILON * 25.6);
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.pages[0]!.layers.body.map((node) => node.id))
+      .toEqual([expect.stringContaining('table-0'), expect.stringContaining('table-1')]);
+  });
+
+  it.each([
+    ['ordinary', undefined],
+    ['upright', {
+      coordinateSpace: 'upright-physical' as const, xPt: 10, yPt: 10,
+      sectionFlowOwnership: 'host-flow' as const,
+    }],
+  ])('does not admit an %s table whose retained end crosses the region end beyond floating-point precision', (_kind, placement) => {
+    // Region 36.1..100.1: the extent rounds to 63.99999999999999 and the
+    // fragment charges 64.00000000000001. The charge exceeds the extent by
+    // less than a ULP of the page coordinates, but the retained end
+    // 36.1 + 64.00000000000001 = 100.10000000000002 is two ULPs past the
+    // region end, which page containment rejects. Admission must decide on
+    // that retained end, and must do so for upright placements, which
+    // containment does not re-check.
+    const services = Object.freeze({
+      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
+    }) as LayoutServices;
+    const requestedExtentsPt: number[] = [];
+    attachBodyLayoutKernel(services, {
+      openBodyLayoutSession: () => ({
+        hasPaginationFields: false,
+        measureParagraph: () => { throw new Error('unused'); },
+        measureTable: (request) => {
+          if (request.input.source.path[0] === 0) {
+            return { layout: table('lead', request.input.source, 26.1), blockExtentPt: 26.1 };
+          }
+          requestedExtentsPt.push(request.availableBlockExtentPt);
+          const extentPt = 64.00000000000001;
+          return {
+            layout: table('boundary', request.input.source, extentPt),
+            blockExtentPt: extentPt,
+            ...(placement ? { placement } : {}),
+          };
+        },
+        measureStoryExtent: () => 0,
+        measureFootnoteReserve: () => 0,
+        measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
+        measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
+        resetPageAcquisition: () => undefined,
+        moveAcquisitionCursor: () => undefined,
+        flowRegistrySnapshot: emptyFlowRegistrySnapshot,
+        commitFlowRegistryDelta: () => undefined,
+      }),
+    });
+    const tallSection: SectionLayoutContext = {
+      ...section,
+      geometry: { ...section.geometry, pageHeight: 110.1 },
+    };
+    const input = {
+      source: { story: 'body', storyInstance: 'body', path: [] },
+      initialSection: {
+        ...bodyOwner(),
+        context: tallSection,
+        pageLayout: { ...bodyOwner().pageLayout, physicalGeometry: tallSection.geometry },
+      },
+      sequence: [0, 1].map((index) => ({
+        kind: 'body-block',
+        block: { kind: 'table', source: source(index) },
+      })),
+    } as unknown as BodyLayoutInput;
+
+    expect(() => paginateBody(input, services, { currentDateMs: 0 }))
+      .toThrow('Table footnote admission did not converge');
+    expect(requestedExtentsPt[0]).toBe(63.99999999999999);
+  });
+
+  it.each([
+    ['horizontal', undefined],
+    ['upright', {
+      coordinateSpace: 'upright-physical' as const, xPt: 10, yPt: 10,
+      sectionFlowOwnership: 'host-flow' as const,
+    }],
+  ])('still reports non-convergence for %s table overshoot beyond floating-point precision', (_kind, placement) => {
+    // A fresh-band allocation larger than the band (for example an upright
+    // table whose grid is wider than the vertical body band) is genuine
+    // overshoot, not rounding drift. Upright placements are not ordinary
+    // flow, so page containment does not re-check them; admission must not
+    // accept the repeated identical request.
     const services = Object.freeze({
       text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
     }) as LayoutServices;
@@ -1221,6 +1361,7 @@ describe('canonical body producer', () => {
           return {
             layout: table('oversized-slice', request.input.source, extentPt),
             blockExtentPt: extentPt,
+            ...(placement ? { placement } : {}),
             nextCursor: {
               kind: 'table' as const,
               cursor: { rowIndex: 1, rowFragmentIndex: 0, cells: [] },
@@ -2638,6 +2779,7 @@ describe('canonical body producer', () => {
         textDirection: 'lrTb',
         gutterPt: 0,
         rtlGutter: false,
+        sheetOrientation: 'portrait' as const,
         mirrorMargins: false,
         gutterAtTop: false,
         bookFoldPrinting: false,
@@ -2710,7 +2852,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     });
@@ -2771,7 +2913,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -2849,7 +2991,7 @@ describe('canonical body producer', () => {
         pageLayout: {
           physicalGeometry: twoColumnSection.geometry,
           columns: { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] },
-          textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, mirrorMargins: false,
+          textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false,
           gutterAtTop: false, bookFoldPrinting: false, bookFoldRevPrinting: false,
           printTwoOnOne: false,
         },
@@ -2909,7 +3051,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: centeredSection.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -2961,7 +3103,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -3023,7 +3165,7 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb',
-        gutterPt: 0, rtlGutter: false, mirrorMargins: false, gutterAtTop: false,
+        gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false, gutterAtTop: false,
         bookFoldPrinting: false, bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -3091,7 +3233,7 @@ describe('canonical body producer', () => {
         physicalGeometry: context.geometry, columns: context === balancedSection
           ? { count: 2, spacePt: 20, equalWidth: true, sep: false, cols: [] }
           : null,
-        textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, mirrorMargins: false,
+        textDirection: 'lrTb', gutterPt: 0, rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false,
         gutterAtTop: false, bookFoldPrinting: false, bookFoldRevPrinting: false,
         printTwoOnOne: false,
       },
@@ -3187,6 +3329,7 @@ describe('canonical body producer', () => {
           textDirection: 'lrTb' as const,
           gutterPt: 0,
           rtlGutter: false,
+          sheetOrientation: 'portrait' as const,
           mirrorMargins: false,
           gutterAtTop: false,
           bookFoldPrinting: false,
@@ -3283,7 +3426,8 @@ describe('canonical body producer', () => {
       pageBordersAuthored: false, pageBorders: null,
       pageLayout: {
         physicalGeometry: section.geometry, columns: null, textDirection: 'lrTb', gutterPt: 0,
-        rtlGutter: false, mirrorMargins: false, gutterAtTop: false, bookFoldPrinting: false,
+        rtlGutter: false, sheetOrientation: 'portrait' as const, mirrorMargins: false,
+        gutterAtTop: false, bookFoldPrinting: false,
         bookFoldRevPrinting: false, printTwoOnOne: false,
       },
     };
@@ -3419,6 +3563,7 @@ describe('canonical body producer', () => {
         textDirection: 'lrTb',
         gutterPt: 0,
         rtlGutter: false,
+        sheetOrientation: 'portrait' as const,
         mirrorMargins: false,
         gutterAtTop: false,
         bookFoldPrinting: false,

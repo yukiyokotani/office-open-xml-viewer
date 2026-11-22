@@ -28,6 +28,7 @@ import {
 } from '@silurus/ooxml-pptx/internal/session';
 import { InProcessPullTransport } from '@silurus/ooxml-core/internal/in-process-pull-transport';
 import type { OoxmlNodeSessionOptions } from './session-options.ts';
+import { toUint8 } from './input-normalization.ts';
 import type { NodeCanvasFactory, NodeCanvasLike } from './render.ts';
 import { createLazyWasmModule, resolveWasm } from './wasm-loader.ts';
 import { markParsedPptxSlide } from './pptx-parsed-slides.ts';
@@ -154,6 +155,10 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
     private readonly metrics: OoxmlResourceMetricsSession,
     private readonly signal?: AbortSignal,
     private readonly cjkFallback?: CjkLang,
+    /** Slides come from this package's own parser, so their text colour
+     * chains are fully resolved (issue #1989). A model source passes false
+     * and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
+    private readonly parsedTextChain = true,
   ) {
     this.slideCount = bootstrap.slideCount;
     this.slideWidth = bootstrap.slideWidth;
@@ -201,13 +206,13 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
   async getImage(path: string, mimeType: string): Promise<Blob> {
     this.assertOpen();
     return this.getPartInternal(path, mimeType, (archive) => archive.extract_image(path))
-      .catch((error: unknown) => this.failOperation(error));
+      .catch((error: unknown) => this.failPartRead(error));
   }
 
   async getMedia(path: string, mimeType = 'application/octet-stream'): Promise<Blob> {
     this.assertOpen();
     return this.getPartInternal(path, mimeType, (archive) => archive.extract_media(path))
-      .catch((error: unknown) => this.failOperation(error));
+      .catch((error: unknown) => this.failPartRead(error));
   }
 
   async renderSlide(
@@ -258,7 +263,7 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
         ));
         this.metrics.observeUsage(this.usage);
         this.consumedSlides = index + 1;
-        markParsedPptxSlide(slide);
+        if (this.parsedTextChain) markParsedPptxSlide(slide);
         yield slide;
       }
     } catch (error) {
@@ -341,6 +346,14 @@ export class PptxPresentationSessionImpl implements PptxPresentationSession {
     if (this.resourceFailure) throw this.resourceFailure;
   }
 
+  /** A missing part rejects that read alone; only a resource-limit overrun
+   * fails the session. */
+  private failPartRead(error: unknown): never {
+    const normalized = parseResourceLimitError(error) ?? error;
+    if (normalized instanceof OoxmlResourceLimitError) this.failOperation(normalized);
+    throw normalized;
+  }
+
   private failOperation(error: unknown): never {
     const normalized = parseResourceLimitError(error) ?? error;
     if (normalized instanceof OoxmlResourceLimitError) {
@@ -365,10 +378,6 @@ export async function materializePptxPresentation(
       return session.materialize(slides);
     },
   );
-}
-
-function toUint8(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer as ArrayBuffer);
 }
 
 declare const __OOXML_MODEL_SOURCES__: boolean;

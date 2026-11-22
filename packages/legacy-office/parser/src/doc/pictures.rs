@@ -22,7 +22,8 @@ pub(super) struct Store<'a> {
     budget: usize,
     remaining_bytes: usize,
     occurrences: u32,
-    pub omitted: bool,
+    /// Inline picture frames that produced no picture.
+    pub omitted: crate::rejection::Deferred,
     /// The hidden `_PictureBullets` document, when the source has one.
     bullet_document: Option<super::picture_bullets::Document<'a>>,
     /// Acquired picture-bullet frames by PICF offset. Retained as source
@@ -41,7 +42,7 @@ impl<'a> Store<'a> {
             budget: 1_000_000,
             remaining_bytes: 128 * 1024 * 1024,
             occurrences: 0,
-            omitted: false,
+            omitted: Default::default(),
             bullet_document: None,
             bullets: BTreeMap::new(),
         }
@@ -72,6 +73,12 @@ impl<'a> Store<'a> {
         document: Option<super::picture_bullets::Document<'a>>,
     ) {
         self.bullet_document = document;
+    }
+
+    /// Whether the document has a Bullet Pictures document (the
+    /// `_PictureBullets` bookmark).
+    pub(in crate::doc) fn has_bullet_document(&self) -> bool {
+        self.bullet_document.is_some()
     }
 
     /// Acquire the picture of an enabled picture bullet ([MS-DOC] 2.6.1):
@@ -399,6 +406,9 @@ pub(super) struct Options {
     flip: [bool; 2],
     pub rotation: i64,
     pseudo_inline: bool,
+    /// MS-ODRAW 2.3.4.7 pWrapPolygonVertices (0x0383) is present: the
+    /// authored tight/through contour, which the direct model does not read.
+    pub authored_wrap_contour: bool,
 }
 impl Options {
     fn apply(&mut self, record: Record<'_>, budget: &mut usize) -> Result<(), String> {
@@ -445,6 +455,9 @@ impl Options {
             if !inline && key == 0x4104 {
                 self.pib = (value as usize).checked_sub(1);
                 continue;
+            }
+            if id == 0x383 {
+                self.authored_wrap_contour = true;
             }
             if key & 0x8000 != 0 {
                 complex_end = complex_end
@@ -725,7 +738,7 @@ mod tests {
             .direct_inline(0, &mut usize::MAX.clone())
             .unwrap()
             .is_none());
-        assert!(!store.omitted);
+        assert!(!store.omitted.is_pending());
         // An explicit false, or a BLIP-referencing frame, is not a placeholder.
         for properties in [
             &[(0x53fu16, 0x0001_0000u32)][..],
@@ -734,7 +747,10 @@ mod tests {
             let data = fixture(properties, &[]);
             let mut store = Store::new(&data);
             let result = store.direct_inline(0, &mut usize::MAX.clone());
-            assert!(result.is_err() || store.omitted, "{properties:x?}");
+            assert!(
+                result.is_err() || store.omitted.is_pending(),
+                "{properties:x?}"
+            );
             assert!(store.placeholders.is_empty());
         }
     }
@@ -873,7 +889,10 @@ mod tests {
             .direct_inline(0, &mut usize::MAX.clone())
             .unwrap()
             .is_none());
-        assert!(store.omitted);
+        assert_eq!(
+            store.omitted.reason(),
+            Some("Word inline picture frame without a picture")
+        );
         assert!(store
             .finish_direct_resources(&mut usize::MAX.clone())
             .unwrap()

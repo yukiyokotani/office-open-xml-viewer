@@ -7,7 +7,7 @@
 //   node packages/opendocument/tests/corpus/convert.mjs [--formats odt,ods,odp]
 //     [--jobs 4] [--timeout 120] [--retry-failed] [--limit N]
 //
-// Inputs:  <repo>/packages/{docx,xlsx,pptx}/public/private/**/*.{docx,xlsx,pptx}
+// Inputs:  <repo>/packages/{docx,xlsx,pptx,legacy-office}/public/private/**/*.{docx,xlsx,pptx}
 // Outputs: <repo>/packages/opendocument/public/private/<odt|ods|odp>/<relative
 //          path>.<ext> plus <relative path>.pdf next to it (git-ignored).
 // <repo> is the main checkout (the private corpus lives there, not in
@@ -31,9 +31,11 @@ const SOFFICE = process.env.SOFFICE ?? '/Applications/LibreOffice.app/Contents/M
 const FONTCONFIG_FILE = process.env.FONTCONFIG_FILE ?? '/opt/homebrew/etc/fonts/fonts.conf';
 
 const FORMATS = {
-  odt: { source: 'docx', ext: 'docx' },
-  ods: { source: 'xlsx', ext: 'xlsx' },
-  odp: { source: 'pptx', ext: 'pptx' },
+  // The legacy reader's private corpus also holds the paired OOXML controls
+  // of its DOC and PPT controls (doc/*.docx, ppt/*.pptx).
+  odt: { sources: ['docx', 'legacy-office'], ext: 'docx' },
+  ods: { sources: ['xlsx', 'legacy-office'], ext: 'xlsx' },
+  odp: { sources: ['pptx', 'legacy-office'], ext: 'pptx' },
 };
 
 const { values: args } = parseArgs({
@@ -133,12 +135,15 @@ const skippedFailures = knownFailures();
 for (const format of args.formats.split(',').map((f) => f.trim()).filter(Boolean)) {
   const spec = FORMATS[format];
   if (!spec) throw new Error(`Unknown format ${format}`);
-  const sourceRoot = join(repo, `packages/${spec.source}/public/private`);
-  for (const input of walk(sourceRoot, spec.ext).sort()) {
-    const rel = relative(sourceRoot, input).replace(/\.[^.]+$/u, '');
-    const odf = join(outRoot, format, `${rel}.${format}`);
-    const pdf = join(outRoot, format, `${rel}.pdf`);
-    tasks.push({ format, input, odf, pdf });
+  for (const source of spec.sources) {
+    const sourceRoot = join(repo, `packages/${source}/public/private`);
+    if (!existsSync(sourceRoot)) continue;
+    for (const input of walk(sourceRoot, spec.ext).sort()) {
+      const rel = relative(sourceRoot, input).replace(/\.[^.]+$/u, '');
+      const odf = join(outRoot, format, `${rel}.${format}`);
+      const pdf = join(outRoot, format, `${rel}.pdf`);
+      tasks.push({ format, input, odf, pdf });
+    }
   }
 }
 const limited = args.limit ? tasks.slice(0, Number(args.limit)) : tasks;

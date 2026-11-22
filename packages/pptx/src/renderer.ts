@@ -1,6 +1,6 @@
 import { clipCanvasHorizontally } from '@silurus/ooxml-core/internal/canvas-clip';
 import { ownValue } from '@silurus/ooxml-core/internal/own-key';
-import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
+import { quoteCssFontFamily, scopeServedFontFamilies } from '@silurus/ooxml-core/internal/css-font-family';
 import {
   arabicFallbackFamilies,
   containsArabicFallbackText,
@@ -16,14 +16,12 @@ import { chartFontSubstitutions, withChartFontSubstitutions } from '@silurus/oox
 import type { CjkLang } from '@silurus/ooxml-core';
 import {
   clampPartFailureMessage,
-  errorPlaceholderDetail,
-  errorPlaceholderTitle,
+  ERROR_PLACEHOLDER_TEXT_HOST,
+  onDemandModule,
   prepareErrorPlaceholder,
-  resolvedFromWire,
   resolveErrorPlaceholderFor,
   wireErrorPlaceholder,
   type ErrorPlaceholderOption,
-  type ResolvedErrorPlaceholder,
   type WireErrorPlaceholder,
 } from '@silurus/ooxml-core/internal/part-failures';
 import type { PptxPartFailure } from './part-failures.js';
@@ -90,8 +88,11 @@ import {
   lineEndPaintExtent,
   lineEndRetract,
   traceTrimmedPath,
-  tracePresetLeader,
   trimGeometryPathEnds,
+  hasPresetLineEnds,
+  planPresetLeader,
+  tracePlannedPresetLeader,
+  drawPresetLineEndArrows,
   computeScene3dQuad,
   isScene3dNonIdentity,
   drawProjected,
@@ -157,8 +158,11 @@ import {
   OoxmlError,
   isTiffDecodeError,
   highlightBox,
-  symbolFontToUnicode,
+  symbolTextToUnicodeSegments,
   isSymbolFontFamily,
+  createSymbolFaceOracle,
+  type SymbolFaceOracle,
+  type SymbolTextSegment,
   drawUnderline,
   DECORATION_LINE_WIDTH_EM,
   STRIKE_RISE_EM,
@@ -236,9 +240,10 @@ export interface RenderContext {
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
   officeInstalledFamilies?: readonly string[];
-  /** Substitutions whose served face this presentation's font sources
-   *  (`LoadOptions.fonts`) actually loaded. Absent without sources. */
-  fontSubstitutions?: LoadedFontSubstitutions;
+  /** What this presentation's font sources (`LoadOptions.fonts`) loaded:
+   *  the substitutions whose served face loaded, and the private families
+   *  its faces are registered under. Absent without sources. */
+  fontSources?: PptxLoadedFontSources;
   themeMajorFont: string | null;
   themeMinorFont: string | null;
   /** Lower-cased authored family → this presentation's isolated FontFace alias. */
@@ -246,6 +251,9 @@ export interface RenderContext {
   /** Isolated FontFace alias → lower-cased authored family for fallback policy. */
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
+  /** Symbol-font faces of this render (core symbol-face.ts), judged in the
+   *  painting context. Absent: the 0.89 conversion subset. */
+  symbolFaces?: SymbolFaceOracle;
   /** Theme hyperlink colour as a 6-char hex (no leading #), or null. */
   themeHlinkColor?: string | null;
   /**
@@ -1169,6 +1177,14 @@ function isArabicScriptFace(family: string): boolean {
  *  (`LoadedFontSources.substitutions`: only substitutions with a loaded face). */
 export type LoadedFontSubstitutions = ReadonlyMap<string, { readonly family: string; readonly script?: FontSubstituteScript }>;
 
+/** The parts of a font-source snapshot (core `LoadedFontSources`) PPTX
+ *  stacks read: substitutions, and served family → its private family
+ *  (core `scopeServedFontFamilies`). */
+export interface PptxLoadedFontSources {
+  readonly substitutions: LoadedFontSubstitutions;
+  readonly families: ReadonlyMap<string, string>;
+}
+
 /**
  * Build the CSS font-family LIST for a (already-normalized, non-generic) face:
  * named face + loaded substitute + script Noto fallbacks +
@@ -1182,6 +1198,18 @@ export type LoadedFontSubstitutions = ReadonlyMap<string, { readonly family: str
  *
  * Exported for unit testing the fallback ordering.
  */
+/** The family a font source served for `authoredFamily` that joins the stack
+ * of `text` (cssFontStack), when its face loaded and its script scope covers
+ * the text. */
+function loadedSubstitute(
+  authoredFamily: string,
+  text: string,
+  substitutions: LoadedFontSubstitutions | undefined,
+): string | undefined {
+  const loaded = substitutions?.get(fontFamilyKey(authoredFamily));
+  return loaded && substituteEntryCoversText(loaded, text, 'any') ? loaded.family : undefined;
+}
+
 export function cssFontStack(
   normalized: string,
   authoredFamily = normalized,
@@ -1198,8 +1226,7 @@ export function cssFontStack(
   // face still wins. Script-scoped visual substitutes (core
   // substitute-script.ts) join only a run that contains their script: a CSS
   // stack cannot split a run.
-  const loaded = substitutions?.get(fontFamilyKey(authoredFamily));
-  const sub = loaded && substituteEntryCoversText(loaded, text, 'any') ? loaded.family : undefined;
+  const sub = loadedSubstitute(authoredFamily, text, substitutions);
   const subPart = sub ? `${quoteCssFontFamily(sub)}, ` : '';
   // Arabic faces lead with script fallbacks only for Arabic runs.
   const arabicFamilies = arabicFallbackFamilies(generic === 'serif');
@@ -1405,19 +1432,25 @@ export function buildFont(
     const latin = normalized === 'monospace' ? ['Courier New', 'Liberation Mono']
       : normalized === 'serif' ? [...NON_CJK_SERIF_FALLBACKS, 'Times New Roman', 'Liberation Serif']
       : [...NON_CJK_SANS_FALLBACKS, 'Arial', 'Helvetica', 'Liberation Sans'];
-    return `${style}${weight}${sizePx}px ${families.length ? `${quoteAll([...latin, ...families])}, ` : ''}${normalized}`;
+    return `${style}${weight}${sizePx}px ${scopeServedFontFamilies(
+      `${families.length ? `${quoteAll([...latin, ...families])}, ` : ''}${normalized}`, rc.fontSources?.families)}`;
   }
   const stack = cssFontStack(
     officeRoute?.family ?? normalized, authoredFamily, fallback, text,
-    rc.fontSubstitutions,
+    rc.fontSources?.substitutions,
   );
   // Application-default faces follow the primary face in their fallback
   // order (issue #1627), ahead of the generic web fallbacks.
   const extras = extraFamilies.filter((name) => name !== normalized);
   // Match the complete escaped primary string. A callback keeps $&/$' in
   // authored family names literal instead of treating them as replace tokens.
-  return `${style}${weight}${sizePx}px ${extras.length
-    ? stack.replace(/^("(?:[^"\\]|\\.)*"), /u, (_match, first: string) => `${first}, ${quoteAll(extras)}, `) : stack}`;
+  const families = extras.length
+    ? stack.replace(/^("(?:[^"\\]|\\.)*"), /u, (_match, first: string) => `${first}, ${quoteAll(extras)}, `) : stack;
+  // Served faces are registered under this presentation's private families
+  // (core source-session.ts): every family of the stack a source served is
+  // preceded by its private family, so measurement and painting select this
+  // presentation's faces and never another document's.
+  return `${style}${weight}${sizePx}px ${scopeServedFontFamilies(families, rc.fontSources?.families)}`;
 }
 
 /**
@@ -1471,6 +1504,38 @@ function selectOfficeFace(normalized: string, bold: boolean, italic: boolean, rc
       ? ownValue(rc.officeFontRoutes, officeRouteKey(authoredFamily, officeFaceWeight(authoredFamily, bold, italic), italic))
       : undefined;
   return { authoredFamily, embedded: embeddedAuthored !== undefined, officeRoute };
+}
+
+/**
+ * Symbol-encoded text (core symbol-font.ts; ECMA-376 §21.1.2.3.10 `a:sym`,
+ * §21.1.2.3.7 `a:latin`, §21.1.2.4.3 `a:buFont`) as this render paints it
+ * when kept: `keptFont` is the Canvas font the kept text is drawn with, and
+ * the core oracle asks this render's painting context which codes that very
+ * font draws itself (core symbol-face.ts). `bare`: `text` is one bare code
+ * 0x20..0xFF of a Latin symbol face; it is left alone when the font could
+ * not be judged, as in 0.89.
+ */
+function symbolFaceSegments(
+  text: string,
+  family: string,
+  bold: boolean,
+  italic: boolean,
+  rc: RenderContext,
+  keptFont: string,
+  bare = false,
+): SymbolTextSegment[] {
+  const { authoredFamily } = selectOfficeFace(family, bold, italic, rc);
+  if (!rc.symbolFaces) return bare ? [{ text, mapped: false }] : symbolTextToUnicodeSegments(text, authoredFamily);
+  if (bare && rc.symbolFaces.draws(text, keptFont) === undefined) return [{ text, mapped: false }];
+  // Converted text paints in the generic sans-serif stack (paragraphInputRuns,
+  // paragraphBullet); its colour proof is made in that stack.
+  return rc.symbolFaces.segments(text, authoredFamily, keptFont,
+    (converted) => buildFont(bold, italic, 32, 'sans-serif', rc, converted));
+}
+
+/** The authored family behind a normalized one (an embedded alias). */
+function authoredFamilyOf(family: string, rc: RenderContext): string {
+  return rc.embeddedFontAuthoredFamilies?.get(family) ?? family;
 }
 
 /** Whether an installed face of the family paints the authored name (see
@@ -1546,6 +1611,33 @@ function firstLineIndentPxFor(hasBullet: boolean, indentPx: number): number {
 // The core predicate covers the RTL cs axis. DrawingML also routes Indic and
 // Southeast Asian shaping scripts through a:cs when that font slot is present.
 const INDIC_CS_GLYPH_RE = /[\p{Script=Devanagari}\p{Script=Thai}\p{Script=Bengali}\p{Script=Tamil}\p{Script=Telugu}\p{Script=Kannada}\p{Script=Malayalam}\p{Script=Gujarati}\p{Script=Gurmukhi}\p{Script=Oriya}\p{Script=Sinhala}\p{Script=Khmer}\p{Script=Lao}\p{Script=Myanmar}\p{Script=Tibetan}]/u;
+/** LibreOffice editeng `constScaleLevels` (font scale, Y spacing scale). */
+const LIBREOFFICE_SHRINK_LEVELS: readonly (readonly [number, number])[] = [
+  [1.0, 0.9], [0.925, 0.9], [0.85, 0.9], [0.85, 0.8], [0.775, 0.8], [0.7, 0.8],
+  [0.625, 0.8], [0.55, 0.8], [0.475, 0.8], [0.4, 0.8], [0.325, 0.8], [0.25, 0.8],
+];
+
+/** Whether a laid-out line's advance exceeds its text width (a non-wrapping
+ * body's line; the first-line indent shift included). */
+function lineOverflowsWidth(
+  ctx: CanvasRenderingContext2D,
+  entry: { line: LayoutLine; textMaxW: number; textXOffset: number },
+): boolean {
+  let width = entry.textXOffset;
+  for (const seg of entry.line.segments) {
+    if (seg.isTab) {
+      width += seg.tabWidthPx ?? 0;
+    } else if (seg.math) {
+      width += seg.math.width;
+    } else if (seg.text) {
+      ctx.font = seg.font;
+      width += (seg.leadingLetterSpacingPx ?? 0)
+        + measureTextAdvance(ctx, seg.text, seg.letterSpacingPx ?? 0);
+    }
+  }
+  return width > entry.textMaxW + 0.5;
+}
+
 /** PowerPoint paints non-zero DrawingML baseline runs at about 65% of their
  * authored size. The authored size still owns line height and baseline offset;
  * this helper is only for the glyph font used by measure and paint. */
@@ -1933,6 +2025,8 @@ export function paragraphInputRuns(
     // base's font segment and a cluster never straddles two segments (one
     // stacked cell, one shaped horizontal glyph). An empty ea/cs slot draws
     // in PowerPoint's application default (issue #1627).
+    // Whether the run's Latin face is symbol-encoded: one answer per run.
+    const runLatinSymbol = isSymbolFontFamily(authoredFamilyOf(family, rc));
     let clusterStart = 0;
     let emitted = false;
     let lastCluster = '';
@@ -1957,14 +2051,30 @@ export function paragraphInputRuns(
         );
       let face = eaGlyph ? familyEa : csFace;
       let share = lineMetricFor(face, bold, italic, rc);
-      if (/[\uf020-\uf0ff]/u.test(ch) && (familySym != null || isSymbolFontFamily(family))) {
-        const symbolFamily = familySym ?? family;
-        const mapped = symbolFontToUnicode(ch, symbolFamily);
-        glyph = mapped + cluster.slice(ch.length);
-        font = buildFont(bold, italic, drawSizePx,
-          mapped === ch ? symbolFamily : 'sans-serif', rc, glyph);
-        share = undefined;
-        face = mapped === ch ? symbolFamily : 'sans-serif';
+      // ECMA-376 §21.1.2.3.10: a:sym draws the F0-shifted symbol codes; a
+      // symbol Latin face (§21.1.2.3.7) draws them and its bare codes. Each
+      // is judged against the face this render selects (symbolFaceSegments).
+      const puaCode = cp >= 0xf020 && cp <= 0xf0ff;
+      const latinSymbol = !eaGlyph && !csGlyph && runLatinSymbol;
+      const symbolFamily = puaCode ? familySym ?? (latinSymbol ? family : null)
+        : latinSymbol && cp > 0x20 && cp <= 0xff ? family : null;
+      if (symbolFamily) {
+        // Kept, a PUA code paints in the symbol family's own stack and a bare
+        // code in the run's.
+        const keptFont = puaCode ? buildFont(bold, italic, drawSizePx, symbolFamily, rc, ch) : font;
+        const segments = symbolFaceSegments(ch, symbolFamily, bold, italic, rc, keptFont, !puaCode);
+        const converted = segments.some((part) => part.mapped);
+        if (converted || puaCode) {
+          glyph = segments.map((part) => part.text).join('') + cluster.slice(ch.length);
+          font = buildFont(bold, italic, drawSizePx,
+            converted ? 'sans-serif' : symbolFamily, rc, glyph);
+          share = undefined;
+          face = converted ? 'sans-serif' : symbolFamily;
+        } else if (segments[0]!.text !== ch) {
+          // A kept bare code written F0-shifted (core symbol-font.ts): the
+          // same glyph in this very font, which no direction mirrors.
+          glyph = segments[0]!.text + cluster.slice(ch.length);
+        }
       }
       // A Latin-slot curly quote next to an ideograph is a slot seam even when
       // both slots resolve to this font, in the measured en-US/ja-JP runs only
@@ -4162,40 +4272,16 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   // applying native shadow state here makes each path cast a separate shadow.
   if (!el.shadow) applyGlow(ctx, el.glow ?? null, scale);
 
-  const CONNECTOR_GEOMS = new Set([
-    'line', 'straightconnector1',
-    'bentconnector2', 'bentconnector3', 'bentconnector4', 'bentconnector5',
-    'curvedconnector2', 'curvedconnector3', 'curvedconnector4', 'curvedconnector5',
-  ]);
-
-  // callout family — `<a:ln><a:headEnd|tailEnd>` decorate the LEADER line
-  // (the geometry's last `<path>` in presets.json), not the text rectangle
-  // (path 0) or the accent bar. callout1 = 2-point leader, callout2/3 =
-  // 3-/4-point polylines; getConnectorAnchors resolves the leader's two ends
-  // for every variant, so all twelve share the connector decoration path.
-  const CALLOUT_GEOMS = new Set([
-    'callout1', 'callout2', 'callout3',
-    'bordercallout1', 'bordercallout2', 'bordercallout3',
-    'accentcallout1', 'accentcallout2', 'accentcallout3',
-    'accentbordercallout1', 'accentbordercallout2', 'accentbordercallout3',
-  ]);
-
-  // A leader line we re-stroke from its vertices, trimmed at its decorated
-  // ends: every callout plus the straight / bent (polyline) connectors.
-  // Curved connectors are excluded here, because their leader is a Bézier and
-  // getConnectorAnchors.vertices only captures segment endpoints, so
-  // re-stroking from vertices would straighten the curve. When an end
-  // retracts, their preset leader is trimmed along the curve instead
-  // (`trimsCurvedLeader` below).
-  const isRetractableLeader = (g: string): boolean =>
-    CALLOUT_GEOMS.has(g) || g === 'line' || g === 'straightconnector1' || g.startsWith('bentconnector');
-  // How far each decorated end pulls its line back (observed Office rule in
-  // core arrow-geometry.ts). Paths that cannot be re-stroked from straight
+  // Connector / callout leaders and their head/tail decorations follow the
+  // shared core policy (preset-line-ends.ts): a retractable (straight / bent /
+  // callout) leader is always re-stroked from its vertices, trimmed at its
+  // decorated ends; a curved connector's leader is trimmed along the curve
+  // when an end retracts. Paths that cannot be re-stroked from straight
   // vertices — curved connectors, custom geometry, compound lines — are
   // trimmed along the path instead, so every line kind stops at the same place.
+  const leaderPlan = planPresetLeader(geom, el.stroke, scale, PT_TO_EMU, true);
   const headTrim = el.stroke?.headEnd ? lineEndRetract(el.stroke.headEnd, el.stroke, scale, PT_TO_EMU) : 0;
   const tailTrim = el.stroke?.tailEnd ? lineEndRetract(el.stroke.tailEnd, el.stroke, scale, PT_TO_EMU) : 0;
-  const trimsCurvedLeader = geom.startsWith('curvedconnector') && (headTrim > 0 || tailTrim > 0);
   const custEnds = el.custGeom && el.custGeom.length > 0 && (headTrim > 0 || tailTrim > 0)
     ? getCustGeomEndpoints(el.custGeom) : null;
   const custHeadTrim = custEnds?.start ? headTrim : 0;
@@ -4243,20 +4329,22 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
         : null;
     const tClearShadow = () => clearShadow(target);
     const evenOddFill = geom === 'donut' || geom === 'smileyface' || geom === 'frame';
+    // `evenOdd`: a custom path's own fill rule (model sources), which the
+    // picture clip follows like a solid fill does.
     const paintImageFill = imageFill && !silhouette
-      ? (paintCtx: CanvasRenderingContext2D) => paintPreparedShapeImageFill(
+      ? (paintCtx: CanvasRenderingContext2D, evenOdd = evenOddFill) => paintPreparedShapeImageFill(
           paintCtx,
           imageFill,
           preparedImageFill,
           { x: bx, y: by, w: bw, h: bh },
           scale,
-          evenOddFill,
+          evenOdd,
           el,
         )
       : undefined;
 
     if (usePresetEngine && !silhouette) {
-      const skipTrailingStroke = isRetractableLeader(geom) || trimsCurvedLeader;
+      const skipTrailingStroke = leaderPlan?.restroke != null;
       renderPresetShape(
         target, geom, bx, by, bw, bh,
         [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
@@ -4284,6 +4372,8 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
       el.custGeom.forEach((cmds, index) => {
         const paint = pathPaint[index];
         const filled = paint.fill !== 'none';
+        // Model sources may fill a path's subpaths even-odd (OpenDocument).
+        const fillRule: CanvasFillRule = paint.fillRule === 'evenodd' ? 'evenodd' : 'nonzero';
         if (silhouette && !filled) return;
         target.beginPath();
         buildCustomPath(target, [cmds], bx, by, bw, bh);
@@ -4291,17 +4381,19 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           let painted = false;
           if (paintImageFill) {
             target.save();
-            try { painted = paintImageFill(target); } finally { target.restore(); }
+            try {
+              painted = paintImageFill(target, evenOddFill || fillRule === 'evenodd');
+            } finally { target.restore(); }
           } else if (tFill) {
             target.fillStyle = tFill;
-            target.fill();
+            target.fill(fillRule);
             painted = true;
           }
           const overlay = painted && !silhouette ? pathFillModeOverlay(paint.fill) : null;
           if (overlay) {
             target.save();
             target.fillStyle = overlay;
-            target.fill();
+            target.fill(fillRule);
             target.restore();
           }
           if (painted && !silhouette && !shadowCleared) {
@@ -4427,37 +4519,18 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
   const flatBevelEdgePadCss = (el.stroke ? (el.stroke.width * scale) / 2 : 0) + 2;
   const paintLineDecorations = (target: CanvasRenderingContext2D): void => {
     if (usesPathShade(el.stroke?.fill)) target = trackPaintPath(target);
-    if (el.stroke && (CONNECTOR_GEOMS.has(geom) || CALLOUT_GEOMS.has(geom))) {
+    if (el.stroke && hasPresetLineEnds(geom)) {
       // The preset body deliberately suppresses retractable leader strokes. Paint
       // the shortened leader and its line ends into the same target as the body
       // so outer shadows, reflections and soft edges see one composed object.
-      const anchors = getConnectorAnchors(
-        geom,
-        x,
-        y,
-        w,
-        h,
-        [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8],
-      );
+      const adj = [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8];
+      const anchors = getConnectorAnchors(geom, x, y, w, h, adj);
       if (!anchors) return;
       const cmpd = el.stroke.cmpd;
       const isStraight = geom === 'line' || geom === 'straightconnector1';
-      if (isRetractableLeader(geom) && anchors.vertices.length >= 2 && !(cmpd && isStraight)) {
-        // Trim across the whole leader, so a short terminal leg cannot stop
-        // the retraction early; a leader consumed by both ends paints nothing.
-        const pts = anchors.vertices;
+      if (leaderPlan?.restroke && !(cmpd && isStraight)) {
         target.beginPath();
-        traceTrimmedPath(target, (sink) => {
-          sink.moveTo(pts[0].x, pts[0].y);
-          for (let i = 1; i < pts.length; i++) sink.lineTo(pts[i].x, pts[i].y);
-        }, headTrim, tailTrim);
-        applyStroke(target, el.stroke, scale, { x, y, w, h }, el.rotation);
-        target.stroke();
-      }
-      if (trimsCurvedLeader) {
-        target.beginPath();
-        if (tracePresetLeader(target, geom, x, y, w, h,
-          [el.adj, el.adj2, el.adj3, el.adj4, el.adj5, el.adj6, el.adj7, el.adj8], headTrim, tailTrim)) {
+        if (tracePlannedPresetLeader(target, leaderPlan, geom, anchors, x, y, w, h, adj)) {
           applyStroke(target, el.stroke, scale, { x, y, w, h }, el.rotation);
           target.stroke();
         }
@@ -4481,34 +4554,7 @@ function renderShape(ctx: CanvasRenderingContext2D, el: ShapeElement, scale: num
           );
         }
       }
-      if (el.stroke.tailEnd) {
-        drawArrowHead(
-          target,
-          anchors.end.x,
-          anchors.end.y,
-          anchors.end.angle,
-          el.stroke.tailEnd,
-          el.stroke,
-          scale,
-          PT_TO_EMU,
-          resolveArrowPaint(target, el.stroke, scale, PT_TO_EMU, anchors.end.x, anchors.end.y, anchors.end.angle,
-            el.stroke.tailEnd, { x, y, w, h }, el.rotation, scale * PT_TO_EMU),
-        );
-      }
-      if (el.stroke.headEnd) {
-        drawArrowHead(
-          target,
-          anchors.start.x,
-          anchors.start.y,
-          anchors.start.angle,
-          el.stroke.headEnd,
-          el.stroke,
-          scale,
-          PT_TO_EMU,
-          resolveArrowPaint(target, el.stroke, scale, PT_TO_EMU, anchors.start.x, anchors.start.y, anchors.start.angle,
-            el.stroke.headEnd, { x, y, w, h }, el.rotation, scale * PT_TO_EMU),
-        );
-      }
+      drawPresetLineEndArrows(target, anchors, el.stroke, scale, PT_TO_EMU, { x, y, w, h }, el.rotation, scale * PT_TO_EMU);
       return;
     }
 
@@ -4701,7 +4747,9 @@ export function resolveBulletLabel(
   if (para.bullet.type === 'char') {
     // Reset counters when switching to char bullets.
     autoNumCounters.clear();
-    return hasContent ? symbolFontToUnicode(para.bullet.char, para.bullet.fontFamily ?? null) : '';
+    // The authored code; paragraphBullet converts it against the selected
+    // face (symbolFaceSegments), which needs the render context.
+    return hasContent ? para.bullet.char : '';
   }
   if (para.bullet.type === 'autoNum') {
     if (!hasContent) return '';
@@ -4790,9 +4838,31 @@ function paragraphBullet(body: TextBody, para: Paragraph, paraDefaultColor: stri
       : b.sizePct != null
         ? bulletBaseSizePx * (b.sizePct / 100)
         : bulletBaseSizePx;
-    // If the char was mapped to a Unicode symbol, use sans-serif for reliable rendering.
-    // Otherwise use the specified font (e.g. Wingdings on systems that have it).
-    const convertedFamily = bulletLabel !== b.char ? 'sans-serif' : normalizeFontFamily(b.fontFamily ?? null, rc);
+    // §21.1.2.4.3 a:buFont names the face of the marker code. A symbol face
+    // keeps every code it draws (Wingdings or Symbol where installed); a code
+    // it lacks converts to Unicode, drawn in sans-serif: the symbol face's
+    // cmap would re-read the converted character as its own code.
+    const markerFamily = normalizeFontFamily(b.fontFamily ?? null, rc);
+    // The marker is one run in one font: where the face draws one of its
+    // codes and lacks another (a face with part of its encoding), it stays
+    // as authored.
+    const keptFont = buildFont(false, false, bSizePx, markerFamily, rc, bulletLabel, hasNamedFontFamily(b.fontFamily));
+    const segments = bulletLabel && isSymbolFontFamily(authoredFamilyOf(markerFamily, rc))
+      ? symbolFaceSegments(bulletLabel, markerFamily, false, false, rc, keptFont) : null;
+    const converted = segments?.some((part) => part.mapped) === true
+      && ![...bulletLabel].some((code) => rc.symbolFaces?.draws(code, keptFont) === true);
+    // (A wholly kept marker takes the judged text too: a kept bare code may
+    // be written F0-shifted there.)
+    if (segments && (converted || !segments.some((part) => part.mapped))) {
+      bulletLabel = segments.map((part) => part.text).join('');
+    } else if (segments) {
+      // Partly native: as authored, each kept code in its judged form.
+      bulletLabel = [...bulletLabel].map((code) => {
+        const parts = symbolFaceSegments(code, markerFamily, false, false, rc, keptFont);
+        return parts.length === 1 && !parts[0]!.mapped ? parts[0]!.text : code;
+      }).join('');
+    }
+    const convertedFamily = converted ? 'sans-serif' : markerFamily;
     bulletSizePx = bSizePx;
     bulletFamily = convertedFamily;
     bulletFont  = buildFont(false, false, bSizePx, convertedFamily, rc, bulletLabel,
@@ -4891,7 +4961,7 @@ function renderStackedTextBody(
     // §21.1.2.2.2: the insertion position has its own run properties. In
     // particular an explicit noStrike must stop inherited final-mark strokes.
     const endRun = para.endRunProperties;
-    const endInput = endRun ? paragraphInputRuns({ ...para, runs: [{ ...endRun, text: ' ' }] },
+    const endInput = endRun ? paragraphInputRuns({ ...para, runs: [{ ...endRun, type: 'text', text: ' ' }] },
       sizePx, color, scale, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, false, ctx)
       .input.find(item => item.type === 'text') : undefined;
     const spacing = (pts: number | null, pct: number | undefined): DrawingMlLineSpacing =>
@@ -5183,13 +5253,19 @@ export function renderTextBody(
   }
 
   // buildLayout runs Pass 1 at a given font scale (1.0 = normal; <1 = normAutoFit shrink)
-  const buildLayout = (fontScale: number, metric: boolean): {
+  // `spacingScale` (model sources with shrinkOnOverflow): LibreOffice's
+  // spacing factor, which scales proportional/single line heights and
+  // paragraph spacing instead of PowerPoint's lnSpcReduction/fontScale.
+  const buildLayout = (fontScale: number, metric: boolean, spacingScale?: number): {
     allLines: LineEntry[];
     totalHeight: number;
     requiredHeight: number;
     metricOk: boolean;
   } => {
   const bodyDefaultFontSizePx = (body.defaultFontSize ?? 18) * PT_TO_EMU * scale * fontScale;
+  const lineSpacingReduction = spacingScale != null
+    ? 1 - spacingScale
+    : body.autoFit === 'norm' && body.lnSpcReduction != null ? body.lnSpcReduction : null;
   const allLines: LineEntry[] = [];
   let totalHeight = 0;
   // Visual bounds may be taller than the baseline advance. This is especially
@@ -5256,8 +5332,9 @@ export function renderTextBody(
     // spaceBefore/After are in hundredths of a point → convert to canvas px.
     // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
     // below, against the text size of the line the spacing is attached to.
-    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * fontScale : 0;
-    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * fontScale : 0;
+    const paraSpacingScale = spacingScale ?? fontScale;
+    const spaceBeforePx = para.spaceBefore != null ? (para.spaceBefore / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
+    const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -5383,8 +5460,11 @@ export function renderTextBody(
       // attribute applies only to paragraphs with percentage line spacing." pct
       // and the implicit single (= 100 % percentage) qualify; an absolute
       // spcPts height does not.
-      if (body.autoFit === 'norm' && body.lnSpcReduction != null && para.spaceLine?.type !== 'pts') {
-        lineHeight *= 1 - body.lnSpcReduction;
+      // LibreOffice's spacing factor (editeng CreateLines) scales single and
+      // proportional lines alike: its ODF import reads a 100% line height as
+      // single spacing (the Off rule), which the factor scales too.
+      if (lineSpacingReduction != null && para.spaceLine?.type !== 'pts') {
+        lineHeight *= 1 - lineSpacingReduction;
       }
       // PowerPoint's metric line (#1610, powerpoint-line-metrics.ts): the
       // same 1.2 × size box, split at the baseline by the runs' faces and
@@ -5440,7 +5520,7 @@ export function renderTextBody(
           ? { type: 'pts' as const, val: powerPointExactLinePoints(para.spaceLine.val) }
           : para.spaceLine;
         const box = drawingMlSpacedLineBox(natural, spacing, PT_TO_EMU * scale,
-          body.autoFit === 'norm' && body.lnSpcReduction != null ? body.lnSpcReduction : 0);
+          lineSpacingReduction ?? 0);
         lineHeight = box.ascent + box.descent;
         metricAscent = box.ascent;
         metricNaturalDescent = natural.descent;
@@ -5522,11 +5602,11 @@ export function renderTextBody(
   // Try PowerPoint's metric line model first; a body with any face outside
   // it is laid out again with the ordinary model.
   let useMetricLines = true;
-  const layoutAt = (fontScale: number) => {
-    let layout = buildLayout(fontScale, useMetricLines);
+  const layoutAt = (fontScale: number, spacingScale?: number) => {
+    let layout = buildLayout(fontScale, useMetricLines, spacingScale);
     if (useMetricLines && !layout.metricOk) {
       useMetricLines = false;
-      layout = buildLayout(fontScale, false);
+      layout = buildLayout(fontScale, false, spacingScale);
     }
     return layout;
   };
@@ -5545,6 +5625,38 @@ export function renderTextBody(
   if (body.autoFit === 'norm') {
     if (body.fontScale != null && body.fontScale > 0) {
       if (body.fontScale < 1.0) ({ allLines, requiredHeight } = layoutAt(body.fontScale));
+    } else if (body.shrinkOnOverflow && !measureOnly) {
+      // ODF style:shrink-to-fit (model sources): LibreOffice stores no scale
+      // and derives it while formatting (editeng ImpEditEngine::
+      // ScaleContentToFitWindow). When the text overflows the frame's
+      // content height it tries these (font, spacing) levels in order and
+      // keeps the first that fits, else the last. The spacing factor scales
+      // single/proportional line heights and paragraph spacing.
+      // The content must fit the frame both ways (ODF §20.360): a line may
+      // overflow the width (no-wrap text, or an unbreakable piece wider
+      // than the column), and with several text columns the height that
+      // must fit is each column's share as the lines are distributed below.
+      const available = Math.max(0, bh - tPad - bPad);
+      const heightOverflows = (lines: LineEntry[], height: number): boolean => {
+        if (numCol <= 1 || height <= available) return height > available;
+        const perColumn = Math.ceil(lines.length / numCol);
+        for (let start = 0; start < lines.length; start += perColumn) {
+          let columnHeight = 0;
+          for (const entry of lines.slice(start, start + perColumn)) {
+            columnHeight += entry.topGapPx + entry.linePx;
+          }
+          if (columnHeight > available + 0.5) return true;
+        }
+        return false;
+      };
+      const overflows = (lines: LineEntry[], height: number) =>
+        heightOverflows(lines, height) || lines.some((entry) => lineOverflowsWidth(ctx, entry));
+      if (overflows(allLines, requiredHeight)) {
+        for (const [font, spacing] of LIBREOFFICE_SHRINK_LEVELS) {
+          ({ allLines, requiredHeight } = layoutAt(font, spacing));
+          if (!overflows(allLines, requiredHeight)) break;
+        }
+      }
     }
   }
 
@@ -5582,10 +5694,26 @@ export function renderTextBody(
   // at 80/90/150 % and 100/140 pt, ctr and b, Arial and Meiryo; normAutofit
   // lnSpcReduction likewise).
   const lastMetric = allLines[allLines.length - 1];
-  const anchorHeight = lastMetric?.metricAscent !== undefined
+  // Model sources with shrink-to-fit fitted the text per column: when the
+  // lines are distributed over columns (below), the block anchored is the
+  // tallest column, not all lines stacked.
+  const columnedHeight = (() => {
+    if (!body.shrinkOnOverflow || numCol <= 1 || bh === 0 || allLines.length === 0) return null;
+    const trailing = Math.max(0, lastMetric.linePx - lastMetric.lineHeight);
+    if (requiredHeight - trailing <= Math.max(0, bh - tPad - bPad) + 0.5) return null;
+    const perColumn = Math.ceil(allLines.length / numCol);
+    let tallest = 0;
+    for (let start = 0; start < allLines.length; start += perColumn) {
+      let height = 0;
+      for (const entry of allLines.slice(start, start + perColumn)) height += entry.topGapPx + entry.linePx;
+      tallest = Math.max(tallest, height);
+    }
+    return tallest;
+  })();
+  const anchorHeight = columnedHeight ?? (lastMetric?.metricAscent !== undefined
     && lastMetric.metricNaturalDescent !== undefined
     ? requiredHeight - (lastMetric.lineHeight - lastMetric.metricAscent) + lastMetric.metricNaturalDescent
-    : requiredHeight;
+    : requiredHeight);
   let cursorY: number;
   const contentH = Math.max(0, effectiveBh - tPad - bPad);
   if (anchor === 'ctr') {
@@ -7650,6 +7778,9 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       if ((cell.rowSpan || 1) > 1) continue;
       if (!cell.textBody) continue;
+      // Shrink-to-fit text (model sources, ODF §20.360) fits the cell as
+      // authored: it shrinks instead of growing the row.
+      if (cell.textBody.shrinkOnOverflow) continue;
       if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
@@ -7670,6 +7801,7 @@ export function renderTable(
       if (cell.hMerge || cell.vMerge) continue;
       const span = cell.rowSpan || 1;
       if (span <= 1 || !cell.textBody) continue;
+      if (cell.textBody.shrinkOnOverflow) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const hasAutoHeightRow = el.rows
         .slice(ri, Math.min(el.rows.length, ri + span))
@@ -8073,8 +8205,8 @@ export function renderTable(
     // Diagonal borders: top-left→bottom-right and bottom-left→top-right. These
     // are never shared between cells, so they are always drawn per-cell (and are
     // not pixel-aligned).
-    if (cell.diagonalTL) {
-      applyStroke(ctx, cell.diagonalTL, scale, {
+    if (cell.diagonalTl) {
+      applyStroke(ctx, cell.diagonalTl, scale, {
         x: colX, y: rowY, w: cellW, h: cellH,
       }, el.rotation);
       ctx.beginPath();
@@ -8082,8 +8214,8 @@ export function renderTable(
       ctx.lineTo(colX + cellW, rowY + cellH);
       ctx.stroke();
     }
-    if (cell.diagonalTR) {
-      applyStroke(ctx, cell.diagonalTR, scale, {
+    if (cell.diagonalTr) {
+      applyStroke(ctx, cell.diagonalTr, scale, {
         x: colX, y: rowY, w: cellW, h: cellH,
       }, el.rotation);
       ctx.beginPath();
@@ -8146,12 +8278,19 @@ export type SlideRenderOptions = RenderOptions & {
  * render options. They are an implementation detail of embedded-font lifetime
  * isolation, not a caller-configurable rendering policy. */
 type InternalSlideRenderOptions = SlideRenderOptions & {
+  /** The factory that made the render canvas, when the caller owns one (a
+   * Node session): symbol colour probes allocate their scratch canvas
+   * through it, on the backend that paints (core symbol-face.ts). */
+  createCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
+  /** The presentation's symbol oracle across its renders (presentation and
+   * render worker); absent, each render judges symbol codes afresh. */
+  symbolFaces?: import('@silurus/ooxml-core').SymbolFaceOracleCache;
   cjkFallback?: CjkLang;
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
   officeInstalledFamilies?: readonly string[];
-  /** See {@link RenderContext.fontSubstitutions}. */
-  fontSubstitutions?: LoadedFontSubstitutions;
+  /** See {@link RenderContext.fontSources}. */
+  fontSources?: PptxLoadedFontSources;
   embeddedFontAliases?: ReadonlyMap<string, string>;
   embeddedFontAuthoredFamilies?: ReadonlyMap<string, string>;
   embeddedFontTuples?: ReadonlySet<string>;
@@ -8182,84 +8321,10 @@ export function invalidatePptxRenderTarget(
   renderTokens.set(target, (renderTokens.get(target) ?? 0) + 1);
 }
 
-/**
- * RB7: paint a placeholder for a slide whose part failed to parse. A neutral
- * card with a warning glyph, a heading, and the part-tagged error — so a viewer
- * shows "this one slide is broken" in place, and the rest of the deck renders
- * normally. Widths are in CSS px (the ctx is already dpr-scaled). Only ever
- * called for a slide carrying `parseError`, so healthy slides never touch it.
- */
-function drawParseErrorPlaceholder(
-  ctx: CanvasRenderingContext2D,
-  widthPx: number,
-  heightPx: number,
-  slideNumber: number,
-  message: string,
-  placeholder: ResolvedErrorPlaceholder | null,
-): void {
-  ctx.save();
-  // Neutral card fill + dashed border, inset from the slide edge.
-  ctx.fillStyle = '#f7f7f8';
-  ctx.fillRect(0, 0, widthPx, heightPx);
-  const pad = Math.max(12, Math.min(widthPx, heightPx) * 0.04);
-  ctx.strokeStyle = '#c8ccd2';
-  ctx.lineWidth = Math.max(1, Math.min(widthPx, heightPx) * 0.004);
-  ctx.setLineDash([ctx.lineWidth * 6, ctx.lineWidth * 5]);
-  ctx.strokeRect(pad, pad, widthPx - pad * 2, heightPx - pad * 2);
-  ctx.setLineDash([]);
-
-  const cx = widthPx / 2;
-  // Warning glyph, scaled to the card.
-  const glyph = Math.max(18, Math.min(widthPx, heightPx) * 0.14);
-  ctx.fillStyle = '#b23b3b';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.34);
-
-  // Heading.
-  const headSize = Math.max(11, Math.min(widthPx, heightPx) * 0.045);
-  ctx.fillStyle = '#333333';
-  ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText(
-    errorPlaceholderTitle(placeholder, `Slide ${slideNumber} could not be displayed`),
-    cx,
-    heightPx * 0.52,
-  );
-  const detail = errorPlaceholderDetail(placeholder, message);
-  if (detail === null) {
-    ctx.restore();
-    return;
-  }
-
-  // Error detail (part path + reason), wrapped to the card width and clipped to
-  // a few lines so a long message never overflows the frame.
-  const detailSize = Math.max(9, Math.min(widthPx, heightPx) * 0.028);
-  ctx.fillStyle = '#666666';
-  ctx.font = `${detailSize}px sans-serif`;
-  const maxLineWidth = widthPx - pad * 4;
-  const words = detail.split(/\s+/);
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (ctx.measureText(candidate).width > maxLineWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-    if (lines.length >= 4) break; // cap so it never overruns the card
-  }
-  if (line && lines.length < 4) lines.push(line);
-  const lineHeight = detailSize * 1.35;
-  let y = heightPx * 0.6 + lineHeight;
-  for (const l of lines.slice(0, 4)) {
-    ctx.fillText(l, cx, y);
-    y += lineHeight;
-  }
-  ctx.restore();
-}
+/** The broken-slide placeholder card, loaded with the first slide that needs
+ * it (#2248). A self-contained worker bundle inlines it. */
+const parseErrorPlaceholder = /* @__PURE__ */ onDemandModule(async () =>
+  (await import('./parse-error-placeholder.js')).parseErrorPlaceholder(ERROR_PLACEHOLDER_TEXT_HOST));
 
 /**
  * Render a single slide onto a <canvas> element.
@@ -8475,13 +8540,20 @@ async function renderSlideLeased(
   // placeholder — correctly sized so navigation geometry is unchanged — instead
   // of a blank frame, and stop. Healthy slides (no parseError) are unaffected.
   if (slide.parseError) {
+    // The card's code is another asynchronous input: load it before the paint
+    // begins, and give way to a render that superseded this one meanwhile.
+    let drawParseErrorPlaceholder = parseErrorPlaceholder.loaded;
+    if (!drawParseErrorPlaceholder) {
+      drawParseErrorPlaceholder = await parseErrorPlaceholder.load();
+      if (superseded()) return canvas;
+    }
     drawParseErrorPlaceholder(
       beginPaint(),
       canvasW,
       canvasH,
       slide.slideNumber,
       slide.parseError,
-      resolvedFromWire(opts.errorPlaceholderText),
+      opts.errorPlaceholderText,
     );
     return canvas;
   }
@@ -8514,7 +8586,16 @@ async function renderSlideLeased(
     embeddedFontTuples: opts.embeddedFontTuples,
     officeFontRoutes: opts.officeFontRoutes,
     officeInstalledFamilies: opts.officeInstalledFamilies,
-    fontSubstitutions: opts.fontSubstitutions,
+    fontSources: opts.fontSources,
+    // Symbol-font codes are judged in the realm of this render's painting
+    // context: by the presentation's oracle, kept while the realm's faces are
+    // unchanged, or by one of this render alone (core symbol-face.ts).
+    symbolFaces: opts.symbolFaces
+      ? opts.symbolFaces.oracleFor(canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null)
+      : createSymbolFaceOracle(
+        canvas.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null,
+        opts.createCanvas ? { createCanvas: opts.createCanvas } : {},
+      ),
     // The backing store may have been clamped below `canvasSize × dpr`; downstream
     // crisp-offset math must use the SAME effective dpr the ctx was scaled by.
     dpr: effectiveDpr,
@@ -8764,8 +8845,9 @@ async function renderSlideLeased(
       const added: string[] = [];
       for (const { element } of chartDescriptors) {
         const host = { rotation: element.rotation, flipH: element.flipH, flipV: element.flipV };
+        // Prepared exactly as it paints: with the document's served families.
         for (const { fill, occurrence } of collectChartFillRenderedSizes(
-          element.chart,
+          withChartFontSubstitutions(element.chart, chartFontSubstitutions(rc.fontSources)),
           {
             x: emuToPx(element.x, scale), y: emuToPx(element.y, scale),
             w: emuToPx(element.width, scale), h: emuToPx(element.height, scale),
@@ -9066,7 +9148,7 @@ async function renderSlideLeased(
         applyFrameTransform(ctx, el, scale);
         renderChart(
           ctx,
-          withChartFontSubstitutions(el.chart, chartFontSubstitutions(rc.fontSubstitutions)),
+          withChartFontSubstitutions(el.chart, chartFontSubstitutions(rc.fontSources)),
           {
             x: emuToPx(el.x, scale),
             y: emuToPx(el.y, scale),

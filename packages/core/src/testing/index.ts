@@ -5,3 +5,4 @@ export { findMissingExportsFromUrl, formatMissing } from './export-completeness'
 export { buildCfbFixture, buildCfbWithStreams, type CfbStream } from './cfb-fixture';
 export { ENCRYPTED_DOCX_SPIN0_BASE64, encryptedDocxSpin0 } from './encrypted-fixture';
 export { nonOoxmlInputs, storedZip, type NonOoxmlFormat } from './non-ooxml-fixture';
+export { symbolFixtureFontBytes } from './symbol-font-fixture';

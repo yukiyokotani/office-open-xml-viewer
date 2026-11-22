@@ -155,6 +155,10 @@ pub(crate) struct DocumentBodyProjector<R: BufRead> {
     body_closed: bool,
     sdts: Vec<SdtFrame>,
     capture: Option<Capture>,
+    /// ECMA-376 Part 1 §17.2.1 `w:background`, the CT_DocumentBase child
+    /// preceding `w:body`. Captured through the same MCE projection as body
+    /// blocks, but it is no body block: it takes no ordinal.
+    background: Option<Vec<u8>>,
     cover_break_after: Vec<bool>,
     discarded_provisional_choices: usize,
     finished: bool,
@@ -177,6 +181,7 @@ impl<R: BufRead> DocumentBodyProjector<R> {
             body_closed: false,
             sdts: Vec::new(),
             capture: None,
+            background: None,
             cover_break_after: Vec::new(),
             discarded_provisional_choices: 0,
             finished: false,
@@ -304,7 +309,9 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                                     self.append_retained_element(
                                         &empty, &context, &mce_scope, opaque, true,
                                     )?;
-                                    return self.finish_capture().map(Some);
+                                    if let Some(block) = self.finish_capture()? {
+                                        return Ok(Some(block));
+                                    }
                                 }
                             }
                             ProcessedElementKind::AlternateContent {
@@ -335,7 +342,9 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                         self.depth = self.depth.saturating_sub(1);
                         self.frames.pop();
                         if closes_capture {
-                            return self.finish_capture().map(Some);
+                            if let Some(block) = self.finish_capture()? {
+                                return Ok(Some(block));
+                            }
                         }
                     } else {
                         self.handle_end(namespace, end.local_name().as_ref())?;
@@ -1060,6 +1069,15 @@ impl<R: BufRead> DocumentBodyProjector<R> {
             return Ok(false);
         }
 
+        if self.is_document_background(is_word, &local_name) {
+            self.capture = Some(Capture {
+                root_depth: next_depth,
+                source_offset,
+                local_name,
+                xml: Vec::new(),
+            });
+            return Ok(true);
+        }
         self.observe_sdt_metadata(is_word, &local_name, start, next_depth)?;
         if self.at_logical_level() && is_word && local_name == "sdt" {
             self.sdts.push(SdtFrame {
@@ -1089,7 +1107,9 @@ impl<R: BufRead> DocumentBodyProjector<R> {
         let local_name = local_name(empty)?;
         let is_word = is_w_ns(namespace);
         self.observe_sdt_metadata(is_word, &local_name, empty, self.depth)?;
-        if !(self.at_logical_level() && is_word && is_body_block(&local_name)) {
+        if !(self.is_document_background(is_word, &local_name)
+            || self.at_logical_level() && is_word && is_body_block(&local_name))
+        {
             return Ok(false);
         }
         self.capture = Some(Capture {
@@ -1182,6 +1202,22 @@ impl<R: BufRead> DocumentBodyProjector<R> {
         Ok(())
     }
 
+    /// The first `w:background` child of the document element (§17.2.1;
+    /// CT_DocumentBase permits one, before the body).
+    fn is_document_background(&self, is_word: bool, local_name: &str) -> bool {
+        is_word
+            && local_name == "background"
+            && self.background.is_none()
+            && !self.body_seen
+            && self.processed_parent_is_word("document")
+    }
+
+    /// The captured §17.2.1 background element, once the projection has
+    /// passed it.
+    pub(crate) fn background_xml(&self) -> Option<&[u8]> {
+        self.background.as_deref()
+    }
+
     fn at_logical_level(&self) -> bool {
         self.processed_parent_is_word("body") || self.processed_parent_is_word("sdtContent")
     }
@@ -1261,11 +1297,23 @@ impl<R: BufRead> DocumentBodyProjector<R> {
         })
     }
 
-    fn finish_capture(&mut self) -> Result<ProjectedBodyBlock, String> {
+    /// The captured block, or `None` for a `<w:tbl>` with no row. CT_Tbl
+    /// allows none (EG_ContentRowContent is minOccurs="0"); such a table has
+    /// nothing to lay out, so it is no body block: it takes no ordinal, cannot
+    /// end a Cover Pages building block, and is not seen by the §17.4.37
+    /// sequence or REF passes, exactly as if it were absent.
+    fn finish_capture(&mut self) -> Result<Option<ProjectedBodyBlock>, String> {
         let capture = self
             .capture
             .take()
             .ok_or_else(|| "document body capture is not active".to_string())?;
+        if capture.local_name == "background" && self.body_content_depth.is_none() {
+            self.background = Some(capture.xml);
+            return Ok(None);
+        }
+        if capture.local_name == "tbl" && !captured_table_has_rows(&capture.xml)? {
+            return Ok(None);
+        }
         let ordinal = self.cover_break_after.len();
         self.cover_break_after.push(false);
         for sdt in &mut self.sdts {
@@ -1276,12 +1324,12 @@ impl<R: BufRead> DocumentBodyProjector<R> {
                 sdt.last_block_ordinal = Some(ordinal);
             }
         }
-        Ok(ProjectedBodyBlock {
+        Ok(Some(ProjectedBodyBlock {
             ordinal,
             source_offset: capture.source_offset,
             local_name: capture.local_name,
             xml: capture.xml,
-        })
+        }))
     }
 
     fn map_read_error(&self, error: BoundedXmlReadError) -> String {
@@ -1350,6 +1398,57 @@ fn local_name(element: &BytesStart<'_>) -> Result<String, String> {
 
 fn is_body_block(local_name: &str) -> bool {
     matches!(local_name, "p" | "tbl" | "sectPr")
+}
+
+/// Whether a captured `<w:tbl>` has a `<w:tr>` child, looking through
+/// `<w:sdt>`/`<w:sdtContent>` row wrappers exactly as the parser's
+/// `children_w_flat` does. Rows follow tblPr/tblGrid, so the scan stops at the
+/// first row; only a row-less table is read to its end.
+fn captured_table_has_rows(xml: &[u8]) -> Result<bool, String> {
+    use quick_xml::name::ResolveResult;
+    #[derive(Clone, Copy)]
+    enum Frame {
+        /// The table, or an sdtContent inside a row wrapper: a row here counts.
+        Rows,
+        /// A w:sdt row wrapper: only its sdtContent continues the row level.
+        Sdt,
+        Other,
+    }
+    let word = |namespace: &ResolveResult<'_>| {
+        matches!(namespace, ResolveResult::Bound(uri)
+            if std::str::from_utf8(uri.as_ref()).is_ok_and(|uri| is_w_ns(Some(uri))))
+    };
+    let mut reader = quick_xml::NsReader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut frames: Vec<Frame> = Vec::new();
+    loop {
+        buffer.clear();
+        let (namespace, event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(|error| format!("document body table block: {error}"))?;
+        let (element, empty) = match &event {
+            Event::Start(element) => (element, false),
+            Event::Empty(element) => (element, true),
+            Event::End(_) => {
+                frames.pop();
+                continue;
+            }
+            Event::Eof => return Ok(false),
+            _ => continue,
+        };
+        let name = element.local_name();
+        let name = name.as_ref();
+        let frame = match frames.last() {
+            None => Frame::Rows,
+            Some(Frame::Rows) if word(&namespace) && name == b"tr" => return Ok(true),
+            Some(Frame::Rows) if word(&namespace) && name == b"sdt" => Frame::Sdt,
+            Some(Frame::Sdt) if word(&namespace) && name == b"sdtContent" => Frame::Rows,
+            Some(_) => Frame::Other,
+        };
+        if !empty {
+            frames.push(frame);
+        }
+    }
 }
 
 fn attribute_value<R>(
@@ -1437,11 +1536,42 @@ mod tests {
     }
 
     #[test]
+    fn captures_the_document_background_outside_the_block_sequence() {
+        // §17.2.1 w:background precedes w:body; its Transitional VML child is
+        // projected through Part 3 MCE selection like block content, but the
+        // background takes no block ordinal.
+        let xml = format!(
+            r#"<w:document xmlns:w="{W}" xmlns:mc="{MC}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:u="urn:unsupported"><w:background w:color="22551B"><mc:AlternateContent><mc:Choice Requires="u"><u:fill/></mc:Choice><mc:Fallback><v:background fillcolor="red"/></mc:Fallback></mc:AlternateContent></w:background><w:body><w:p/><w:sectPr/></w:body></w:document>"#,
+        );
+        let mut projector = DocumentBodyProjector::new(
+            BufReader::new(Cursor::new(xml.as_bytes().to_vec())),
+            None,
+            Rc::default(),
+        );
+        let mut blocks = Vec::new();
+        while let Some(block) = projector.next_block().unwrap() {
+            blocks.push(block.local_name);
+        }
+        assert_eq!(blocks, ["p", "sectPr"]);
+        assert_eq!(projector.plan().unwrap().cover_break_after, [false, false]);
+        let background = String::from_utf8(projector.background_xml().unwrap().to_vec()).unwrap();
+        let document = roxmltree::Document::parse(&background).unwrap();
+        let root = document.root_element();
+        assert_eq!(root.tag_name().name(), "background");
+        assert_eq!(
+            root.first_element_child()
+                .map(|child| child.tag_name().name()),
+            Some("background"),
+            "selected VML fallback is unwrapped: {background}"
+        );
+    }
+
+    #[test]
     fn flattens_nested_block_sdts_and_marks_only_the_cover_tail() {
         let xml = format!(
             r#"<w:document xmlns:w="{W}"><w:body>
               <w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
-                <w:sdtContent><w:p/><w:sdt><w:sdtContent><w:p/><w:tbl/></w:sdtContent></w:sdt></w:sdtContent>
+                <w:sdtContent><w:p/><w:sdt><w:sdtContent><w:p/><w:tbl><w:tr/></w:tbl></w:sdtContent></w:sdt></w:sdtContent>
               </w:sdt>
               <w:p/>
             </w:body></w:document>"#,
@@ -1455,6 +1585,36 @@ mod tests {
             ["p", "p", "tbl", "p"]
         );
         assert_eq!(plan.cover_break_after, [false, false, true, false]);
+    }
+
+    #[test]
+    fn row_less_tables_are_not_blocks_and_never_end_a_cover() {
+        // CT_Tbl allows no w:tr; a table with none (directly, or only an empty
+        // sdt row wrapper) is no block. A row reached through sdt wrappers is
+        // a row, and a w:tr inside tblPr-level or other content is not.
+        let xml = format!(
+            r#"<w:document xmlns:w="{W}"><w:body>
+              <w:sdt><w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
+                <w:sdtContent><w:p/><w:tbl/><w:tbl><w:tblPr/><w:sdt><w:sdtContent/></w:sdt></w:tbl></w:sdtContent>
+              </w:sdt>
+              <w:tbl><w:tblPr/><w:sdt><w:sdtContent><w:sdt><w:sdtContent><w:tr/></w:sdtContent></w:sdt></w:sdtContent></w:sdt></w:tbl>
+              <w:tbl><w:tblPr><w:tr/></w:tblPr><w:customXml><w:tr/></w:customXml></w:tbl>
+              <w:p/>
+            </w:body></w:document>"#,
+        );
+        let (blocks, plan) = project(&xml);
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.local_name.as_str())
+                .collect::<Vec<_>>(),
+            ["p", "tbl", "p"]
+        );
+        assert_eq!(
+            blocks.iter().map(|block| block.ordinal).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert_eq!(plan.cover_break_after, [true, false, false]);
     }
 
     #[test]
@@ -1477,7 +1637,7 @@ mod tests {
                 <mc:Fallback><w:p><w:r><w:t>hidden fallback</w:t></w:r></w:p></mc:Fallback>
               </mc:AlternateContent>
               <mc:AlternateContent>
-                <mc:Choice Requires="u"><w:tbl/></mc:Choice>
+                <mc:Choice Requires="u"><w:tbl><w:tr/></w:tbl></mc:Choice>
                 <mc:Fallback><w:sectPr/></mc:Fallback>
               </mc:AlternateContent>
             </w:body></w:document>"#,
@@ -1632,7 +1792,7 @@ mod tests {
                 <mc:Choice Requires="u"><w:p/></mc:Choice>
                 <mc:Fallback><w:sdt>
                   <w:sdtPr><w:docPartObj><w:docPartGallery w:val="Cover Pages"/></w:docPartObj></w:sdtPr>
-                  <w:sdtContent><w:p/><w:tbl/></w:sdtContent>
+                  <w:sdtContent><w:p/><w:tbl><w:tr/></w:tbl></w:sdtContent>
                 </w:sdt></mc:Fallback>
               </mc:AlternateContent>
               <w:p/>
@@ -1654,7 +1814,7 @@ mod tests {
         let xml = format!(
             r#"<w:document xmlns:w="{W}" xmlns:mc="{MC}" xmlns:u="urn:unsupported"><w:body>
               <mc:AlternateContent>
-                <mc:Choice Requires="u" mc:MustUnderstand="u"><w:tbl/></mc:Choice>
+                <mc:Choice Requires="u" mc:MustUnderstand="u"><w:tbl><w:tr/></w:tbl></mc:Choice>
                 <mc:Fallback><w:p/></mc:Fallback>
               </mc:AlternateContent>
             </w:body></w:document>"#,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ChartModel } from '@silurus/ooxml-core';
 import type { DocParagraph, DocxDocumentModel } from '../types.js';
-import { imageResourceKey, mathResourceKey } from './source-key.js';
+import { imageResourceKey, mathResourceKey, vmlPictureResourceKey } from './source-key.js';
 import {
   chartPaintResourceKey,
 } from './production-paint-resources.js';
@@ -105,6 +105,24 @@ describe('production paint resources', () => {
     expect(registry.resolve(key, 'picture-bullet')).toMatchObject({
       srcRect: { l: .25 },
     });
+  });
+
+  it('projects a VML picture luminance correction (gain/blacklevel, #2175)', () => {
+    const lum = { type: 'luminance' as const, bright: .7, contrast: -.7 };
+    const doc = {
+      section, headers: {}, footers: {},
+      body: [paragraph([{
+        type: 'shape', widthPt: 50, heightPt: 30, anchorXPt: 0, anchorYPt: 0,
+        anchorXFromMargin: false, anchorYFromPara: false, zOrder: 0, subpaths: [],
+        fill: null, stroke: null, textBlocks: [],
+        vmlPicture: { imagePath: 'word/media/mark.png', mimeType: 'image/png', blipEffects: [lum] },
+      }])],
+    } as DocxDocumentModel;
+    const registry = layoutSourceStore(doc).paintResources;
+    const key = vmlPictureResourceKey(
+      { story: 'body', storyInstance: 'body', path: [0, 0] }, 'word/media/mark.png',
+    );
+    expect(registry.resolve(key, 'image')).toMatchObject({ blipEffects: [lum] });
   });
 
   it('builds clone-safe descriptors with the same structural keys as retained layout', () => {

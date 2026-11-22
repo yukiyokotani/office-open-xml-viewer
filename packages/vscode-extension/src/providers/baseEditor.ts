@@ -16,7 +16,13 @@ interface OpenView {
   fileType: 'docx' | 'xlsx' | 'pptx';
   selection: SelectionContextHandle;
   selectionSession: number;
-  initializedSession: number | null;
+  /**
+   * The webview document that was sent `ooxml-init`: the HTML session and the
+   * instance id that document generated. VS Code destroys a hidden editor's
+   * document and loads the same HTML again when the tab is shown, so one
+   * session can have several documents, and each needs its own init.
+   */
+  initialized: { session: number; instance: string } | null;
 }
 
 /** Registry of every open OOXML webview across all three editor providers, so a
@@ -48,7 +54,7 @@ export async function showFindInActiveWebview(): Promise<void> {
 /** Set the webview HTML for a panel using the current effective flag. */
 function renderWebview(view: OpenView): void {
   view.selectionSession++;
-  view.initializedSession = null;
+  view.initialized = null;
   view.selection.update(null);
   view.selection.updateView(null);
   view.panel.webview.html = getWebviewHtml(
@@ -102,7 +108,7 @@ export abstract class BaseEditorProvider
       fileType: this.fileType,
       selection,
       selectionSession: 0,
-      initializedSession: null,
+      initialized: null,
     };
     openViews.add(view);
     let disposed = false;
@@ -117,9 +123,14 @@ export abstract class BaseEditorProvider
     webviewPanel.webview.onDidReceiveMessage(async (msg) => {
       if (msg.type === 'webview-ready') {
         if (msg.selectionSession !== view.selectionSession) return;
-        if (view.initializedSession === view.selectionSession) return;
         const session = view.selectionSession;
-        view.initializedSession = session;
+        const instance = typeof msg.instance === 'string' ? msg.instance : '';
+        // One init per webview document: a repeated ready from the document
+        // that already has (or is being sent) its init is ignored. A document
+        // re-created for the same HTML has a new instance id and is served.
+        if (view.initialized?.session === session && view.initialized.instance === instance) return;
+        const target = { session, instance };
+        view.initialized = target;
         let data: Uint8Array | undefined;
         let error: string | undefined;
         try {
@@ -131,8 +142,9 @@ export abstract class BaseEditorProvider
         } catch (err) {
           error = err instanceof Error ? err.message : String(err);
         }
-        // A reload (new session) or close during the read supersedes it.
-        if (disposed || view.selectionSession !== session) return;
+        // A reload (new session), a re-created document (new instance) or a
+        // close during the read supersedes it.
+        if (disposed || view.initialized !== target) return;
         const posted = await webviewPanel.webview.postMessage({
           type: 'ooxml-init',
           fileType: this.fileType,
@@ -140,9 +152,10 @@ export abstract class BaseEditorProvider
           error,
           useGoogleFonts: shouldUseGoogleFonts(),
           selectionSession: session,
+          instance,
         });
-        if (!posted && view.initializedSession === session) {
-          view.initializedSession = null;
+        if (!posted && view.initialized === target) {
+          view.initialized = null;
         }
       } else if (msg.type === 'selection-context') {
         if (

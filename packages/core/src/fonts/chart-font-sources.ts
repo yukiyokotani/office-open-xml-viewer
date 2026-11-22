@@ -5,12 +5,14 @@
  * - Demand: the families a chart paints with, from one generic walk over the
  *   canonical {@link ChartModel}, so a face named only by a chart is demanded
  *   too.
- * - Paint: charts paint the substitutions a font source actually loaded
- *   through {@link ChartModel.fontSubstitutions}. Chart labels are not split
- *   by script, so script-scoped substitutes are left out.
+ * - Paint: charts paint the faces a font source actually registered for the
+ *   document, under its private family names, through
+ *   {@link ChartModel.fontSubstitutions}. Chart labels are not split by
+ *   script, so script-scoped substitutes are left out.
  */
 import type { ChartModel } from '../types/chart.js';
 import type { FontSubstituteScript } from './substitute-script.js';
+import { fontFamilyKey } from './substitutions.js';
 
 /** Keys of a chart model whose string value names a text face: every
  * `…FontFace` / `fontFace` (title, axes, axis titles, data labels, legend,
@@ -47,27 +49,39 @@ export function chartFontFamilies(chart: unknown): string[] {
   return [...families];
 }
 
-/** `LoadedFontSources.substitutions`: lower-cased authored family → served family. */
-export type LoadedChartFontSubstitutions = ReadonlyMap<string, { readonly family: string; readonly script?: FontSubstituteScript }>;
+/** What charts read of a font-source snapshot (`LoadedFontSources`):
+ * lower-cased authored family → served family, and lower-cased served family
+ * → the private family its faces are registered under. */
+export interface LoadedChartFontSources {
+  readonly substitutions: ReadonlyMap<string, { readonly family: string; readonly script?: FontSubstituteScript }>;
+  readonly families: ReadonlyMap<string, string>;
+}
 
-const unscopedBySnapshot = new WeakMap<LoadedChartFontSubstitutions, Readonly<Record<string, string>> | null>();
+const recordBySnapshot = new WeakMap<LoadedChartFontSources, Readonly<Record<string, string>> | null>();
 
-/** The unscoped substitutions of one loaded snapshot as the
- * {@link ChartModel.fontSubstitutions} record, or `undefined` when there are
- * none. The record has a null prototype (keys are document font names, e.g.
- * `__proto__`) and is memoised per snapshot (snapshots are immutable). */
+/** One loaded snapshot as the {@link ChartModel.fontSubstitutions} record:
+ * lower-cased chart face → the registered family a chart stack names after
+ * it. A face a source served directly maps to its own private family; a face
+ * with an unscoped loaded substitution maps to the substitute's private
+ * family. `undefined` when there are none. The record has a null prototype
+ * (keys are document font names, e.g. `__proto__`) and is memoised per
+ * snapshot (snapshots are immutable). */
 export function chartFontSubstitutions(
-  substitutions: LoadedChartFontSubstitutions | undefined,
+  sources: LoadedChartFontSources | undefined,
 ): Readonly<Record<string, string>> | undefined {
-  if (!substitutions?.size) return undefined;
-  let unscoped = unscopedBySnapshot.get(substitutions);
-  if (unscoped === undefined) {
-    const record = Object.create(null) as Record<string, string>;
-    for (const [family, substitution] of substitutions) if (!substitution.script) record[family] = substitution.family;
-    unscoped = Object.keys(record).length ? Object.freeze(record) : null;
-    unscopedBySnapshot.set(substitutions, unscoped);
+  if (!sources?.families.size) return undefined;
+  let record = recordBySnapshot.get(sources);
+  if (record === undefined) {
+    const entries = Object.create(null) as Record<string, string>;
+    for (const [family, alias] of sources.families) entries[family] = alias;
+    for (const [family, substitution] of sources.substitutions) {
+      const alias = substitution.script ? undefined : sources.families.get(fontFamilyKey(substitution.family));
+      if (alias) entries[family] = alias;
+    }
+    record = Object.keys(entries).length ? Object.freeze(entries) : null;
+    recordBySnapshot.set(sources, record);
   }
-  return unscoped ?? undefined;
+  return record ?? undefined;
 }
 
 /** The chart model to paint: `chart` with `fontSubstitutions`, or `chart`

@@ -1,0 +1,77 @@
+id: docx-renderer-legacy-imports
+language: TypeScript
+severity: error
+message: The DOCX renderer adapter must not import a pre-retained-layout measurement or fragment module.
+note: |
+  Banned by module name wherever it lives, so moving one of these modules
+  under `layout/` or `paint/` (which the renderer may otherwise import)
+  cannot bring the edge back.
+rule:
+  any:
+    # `\u0072equire` is `require`; names are read as written.
+    - { kind: identifier, regex: "\\\\" }
+    # These modules are ES modules; CommonJS edges are not read reliably.
+    - { kind: identifier, regex: "^require$" }
+    - kind: import_require_clause
+    - matches: denied-specifier
+utils:
+  denied-specifier:
+    matches: module-specifier
+    any:
+      # Only a plain path can be judged by its text: no escapes anywhere, and
+      # for a relative path no `.` or `..` segment after the leading ones and
+      # no query or hash.
+      - regex: "\\\\"
+      - all:
+          - regex: "^['\"`]\\."
+          - not: { regex: "^['\"`](\\./|(\\.\\./)+)[A-Za-z0-9_@-][A-Za-z0-9_.@-]*(/[A-Za-z0-9_@-][A-Za-z0-9_.@-]*)*['\"`]$" }
+      - regex: "^['\"`](.*/)?(layout-context|layout-fragments|line-layout|paragraph-measure|table-fragments|table-geometry)(\\.(js|mjs|cjs|ts|tsx))?([?#].*)?['\"`]$"
+files:
+  - "packages/docx/src/renderer.ts"
+---
+id: docx-acquisition-no-renderer-import
+language: TypeScript
+severity: error
+message: DOCX layout acquisition modules must not import the renderer, not even for a type.
+note: |
+  Acquisition contexts and their consumers are renderer-free. Every production
+  module under `line-breaker/` is a consumer.
+rule:
+  any:
+    # `\u0072equire` is `require`; names are read as written.
+    - { kind: identifier, regex: "\\\\" }
+    # These modules are ES modules; CommonJS edges are not read reliably.
+    - { kind: identifier, regex: "^require$" }
+    - kind: import_require_clause
+    - matches: denied-specifier
+utils:
+  denied-specifier:
+    matches: module-specifier
+    any:
+      # Only a plain path can be judged by its text: no escapes anywhere, and
+      # for a relative path no `.` or `..` segment after the leading ones and
+      # no query or hash.
+      - regex: "\\\\"
+      - all:
+          - regex: "^['\"`]\\."
+          - not: { regex: "^['\"`](\\./|(\\.\\./)+)[A-Za-z0-9_@-][A-Za-z0-9_.@-]*(/[A-Za-z0-9_@-][A-Za-z0-9_.@-]*)*['\"`]$" }
+      - regex: "^['\"`]\\.{1,2}/(.*/)?renderer(\\.(js|mjs|cjs|ts|tsx))?([?#].*)?['\"`]$"
+files:
+  - "packages/docx/src/layout/acquisition-context.ts"
+  - "packages/docx/src/layout/acquisition-state.ts"
+  - "packages/docx/src/layout/acquisition-input-projections.ts"
+  - "packages/docx/src/layout/anchor-classification.ts"
+  - "packages/docx/src/layout/measurement-environment.ts"
+  - "packages/docx/src/layout/measurement-capabilities.ts"
+  - "packages/docx/src/layout/section-orientation.ts"
+  - "packages/docx/src/layout/body-table-measurement.ts"
+  - "packages/docx/src/anchor-geometry.ts"
+  - "packages/docx/src/float-table-geometry.ts"
+  - "packages/docx/src/frame-geometry.ts"
+  - "packages/docx/src/line-layout.ts"
+  - "packages/docx/src/paragraph-measure.ts"
+  - "packages/docx/src/line-breaker/**/*.ts"
+ignores:
+  - "packages/docx/src/line-breaker/**/*.d.ts"
+  - "packages/docx/src/line-breaker/**/*.{test,spec,stories,test-support,bench}.{ts,tsx}"
+  - "packages/docx/src/line-breaker/**/wasm/**"

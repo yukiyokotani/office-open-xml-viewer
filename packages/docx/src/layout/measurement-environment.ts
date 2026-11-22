@@ -5,15 +5,16 @@ import {
   isGridLineRule,
   type DocGridCtx,
   type LayoutSeg,
-  type LineLayoutEnvironment,
 } from '../line-layout.js';
 import {
   paragraphCharacterGrid,
   type ParagraphMeasurementEnvironment,
 } from '../paragraph-measure.js';
-import type { ParagraphLayoutContext, StoryContext } from '../layout-context.js';
+import type { ParagraphLayoutContext, SectionLayoutContext, StoryContext } from '../layout-context.js';
 import type { BodyMeasurementContext } from './acquisition-context.js';
 import { sectionWritingMode } from './coordinate-space.js';
+import type { LayoutSourceStore } from './layout-source-store.js';
+import type { ParagraphLayoutSource } from './text.js';
 
 function kashidaLevelOf(alignment: string | null | undefined): KashidaLevel | null {
   if (alignment === 'lowKashida') return 'low';
@@ -68,8 +69,15 @@ export function docDefaultFontSizePt(document: DocxDocumentModel): number {
 
 export function paragraphMeasurementEnvironment(
   state: BodyMeasurementContext,
+  // Intrinsic cell measurement retains its parent's page environment. Only
+  // the closing-pair source provenance comes from the actual entered story;
+  // every other policy below continues to use the original state.
+  closingPairSourceStory: StoryContext | undefined = state.storyContext,
 ): ParagraphMeasurementEnvironment {
-  return {
+  // Optional flags are assigned after the literal rather than spread into it:
+  // this runs once per measured paragraph, and conditional spreads cost an
+  // extra object allocation and copy each.
+  const environment: { -readonly [K in keyof ParagraphMeasurementEnvironment]: ParagraphMeasurementEnvironment[K] } = {
     pageIndex: state.pageIndex,
     totalPages: state.totalPages,
     displayPageNumber: state.displayPageNumber,
@@ -85,46 +93,21 @@ export function paragraphMeasurementEnvironment(
     verticalCJK: state.verticalCJK && !state.verticalAllRotated,
     verticalPageFrame: state.verticalCJK === true,
     documentHasEastAsianText: state.docEastAsian,
-    useFeLayout: state.layoutSettings.compat.useFeLayout,
-    balanceSingleByteDoubleByteWidth:
-      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
+    compat: state.layoutSettings.compat,
     characterSpacingControl: state.layoutSettings.characterSpacingControl,
-    lineWrapLikeWord6: state.layoutSettings.compat.lineWrapLikeWord6,
-    enableOpenTypeFeatures: state.layoutSettings.compat.enableOpenTypeFeatures,
-    ...(state.layoutSettings.compat.ulTrailSpace ? { ulTrailSpace: true } : {}),
-    ...(state.layoutSettings.compat.doNotExpandShiftReturn ? { doNotExpandShiftReturn: true } : {}),
-    ...(state.layoutSettings.compat.compatibilityMode === undefined
-      ? {}
-      : { compatibilityMode: state.layoutSettings.compat.compatibilityMode }),
     resolvedLocalFonts: state.resolvedLocalFonts,
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,
   };
-}
-
-/** Build-segment environment for direct acquisition measurement. `btLr` clears
- * upright-vertical grouping because its complete horizontal layout is rotated. */
-export function segmentEnvironmentOf(
-  state: BodyMeasurementContext,
-): LineLayoutEnvironment {
-  if (!state.verticalAllRotated
-    && state.layoutSettings.characterSpacingControl === undefined
-    && state.layoutSettings.compat.compatibilityMode === undefined
-    && !state.layoutSettings.compat.lineWrapLikeWord6
-    && !state.layoutSettings.compat.enableOpenTypeFeatures
-    && !state.layoutSettings.compat.balanceSingleByteDoubleByteWidth) return state;
-  return {
-    ...state,
-    ...(state.verticalAllRotated ? { verticalCJK: false } : {}),
-    characterSpacingControl: state.layoutSettings.characterSpacingControl,
-    lineWrapLikeWord6: state.layoutSettings.compat.lineWrapLikeWord6,
-    enableOpenTypeFeatures: state.layoutSettings.compat.enableOpenTypeFeatures,
-    balanceSingleByteDoubleByteWidth:
-      state.layoutSettings.compat.balanceSingleByteDoubleByteWidth,
-    ...(state.layoutSettings.compat.compatibilityMode === undefined
-      ? {}
-      : { compatibilityMode: state.layoutSettings.compat.compatibilityMode }),
-  };
+  if (closingPairSourceStory?.story === 'body' && closingPairSourceStory.containers.length === 0) {
+    environment.closingPairRootSource = true;
+  }
+  if (state.storyContext?.story === 'body'
+    && state.storyContext.containers.length === 0
+    && state.storyContext.inlineObjectRunLeadingAdmitted === true) {
+    environment.inlineObjectRunLeadingAdmitted = true;
+  }
+  return environment;
 }
 
 /** Snap a uniform paragraph line advance to an integer docGrid pitch. */
@@ -155,4 +138,35 @@ export function gridForParagraphContext(
     characterPitchPt: characterGrid?.characterPitchPt ?? null,
     charSpacePt: characterGrid?.charSpacePt ?? null,
   };
+}
+
+/** Conservative library admission for Unicode 17 / UAX #9 rev.51 §3.5
+ * source-level shaping units. This is not an Office fit rule. A fixed section
+ * band and the ORIGINAL first-line indent are retained across continuations;
+ * current-page empty exclusions alone cannot exclude a later anchor. Frame /
+ * AutoFit intrinsic search ceilings never enter this owner. */
+export function nativeUnitMinimumBodyBand(
+  source: LayoutSourceStore,
+  section: SectionLayoutContext,
+  story: StoryContext,
+  paragraph: ParagraphLayoutSource,
+  context: ParagraphLayoutContext,
+  availableWidthPt: number,
+  hasExclusions: boolean,
+): number | undefined {
+  const column = section.columns[0];
+  if (source.nativeUnitBodyBandHasFloatingSource || hasExclusions
+    || story.story !== 'body' || story.containers.length !== 0
+    || section.columns.length !== 1 || !column || column.wPt !== availableWidthPt
+    || section.textDirection !== 'lrTb' || section.sectionFlow !== undefined
+    || context.runDirectionUnauthored || !context.baseRtl || context.isJustified
+    || context.hasRuby || context.lineGrid.active || context.characterGrid.active
+    || (context.rightIndentGrid.paragraphAllowsAdjustment && context.rightIndentGrid.pitchPt != null)
+    || context.wordWrap === false
+    || context.tabStops.length !== 0 || paragraph.framePr !== undefined
+    || paragraph.numbering != null || (paragraph.alignment !== 'left' && paragraph.alignment !== 'start')
+    || paragraph.runs.length !== 1 || paragraph.runs[0]?.type !== 'text') return undefined;
+  const width = Math.max(1, availableWidthPt - context.physicalIndentLeftPt - context.physicalIndentRightPt);
+  const band = width - Math.max(0, context.firstIndentPt);
+  return Number.isFinite(band) && band > 0 ? band : undefined;
 }

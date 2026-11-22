@@ -13,9 +13,19 @@ import {
   type SectionPageLayoutPolicy,
 } from './context.js';
 import type { SectionStartType, AuthoredBreak } from './paginator.js';
+import type { DocxCompatProfile } from './compat-profile.js';
 import { snapshotPlainData } from './plain-data.js';
+import {
+  projectPageBackgroundLayoutInput,
+  sectionOwnerPhysicalPageExtent,
+  type PageBackgroundAcquisitionInput,
+  type PageBackgroundLayoutInput,
+} from './page-background.js';
 import type { DeepReadonly, LayoutDiagnostic, SourceRef } from './types.js';
-import { wordContinuousSectionRole } from './body-pagination-compatibility.js';
+import {
+  wordContinuousSectionRole,
+  wordHiddenParagraphPageBreakEntries,
+} from './body-pagination-compatibility.js';
 
 /** ECMA-376 §17.11.1/.23 define the mark kind independently of the separator
  * story's ordinary/continuation role. Default is an absent producer fact, not
@@ -135,6 +145,8 @@ export interface BodyParagraphSourceInput {
   readonly widowControl: boolean;
   /** WORD_TEXT_FRAME_PRECEDING_TEXT_PUSH: detached from paragraph-gap flow. */
   readonly textFrameMember?: true;
+  /** §17.3.1.11 framePr presence; 'drop-cap' when dropCap is drop or margin. */
+  readonly framed?: 'frame' | 'drop-cap';
   readonly spaceBeforePt: number;
   readonly spaceAfterPt: number;
   readonly contextualSpacing: boolean;
@@ -199,21 +211,65 @@ export type BodyLayoutSequenceEntryFor<TSection> =
       sameSourceParagraphAsPrevious?: boolean;
     }>
   | Readonly<{ kind: 'begin-section'; source: SourceRef; section: TSection }>
-  | Readonly<{ kind: 'consume-source'; source: SourceRef; reason: 'hidden-paragraph' }>;
+  | Readonly<{
+      kind: 'consume-source';
+      source: SourceRef;
+      reason: 'hidden-paragraph';
+      /** Parse facts of the hidden paragraph (§17.3.1.23, §17.3.1.11). */
+      pageBreakBefore?: true;
+      framed?: 'frame' | 'drop-cap';
+    }>;
 
 export type BodyLayoutSequenceEntry = BodyLayoutSequenceEntryFor<BodySectionLayoutInput>;
 
+
+const PAGE_OBJECT_INSTANCE = 'page-object:';
+
+/** The story source of the producer page object at `ordinal` in the
+ * document's list: a header-class page story (laid out and painted like one)
+ * under its own instance, so no story-kind dispatch needs to know it. Each
+ * object is its own story, so objects never acquire each other's geometry. */
+export function pageObjectStorySource(ordinal: number): SourceRef {
+  return Object.freeze({
+    story: 'header' as const,
+    storyInstance: `${PAGE_OBJECT_INSTANCE}${ordinal}`,
+    path: [],
+  });
+}
+
+/** Whether a source lies in a producer page-object story. */
+export function isPageObjectSource(source: SourceRef): boolean {
+  return source.story === 'header' && source.storyInstance.startsWith(PAGE_OBJECT_INSTANCE);
+}
+
+/** A producer page object (never DOCX): the story of the drawings anchored to
+ * one physical page, and those of its drawings that wrap that page's body,
+ * registered at the page's start like page-owned anchors. */
+export interface PageObjectInput {
+  /** The physical page, 0-based. */
+  readonly pageIndex: number;
+  readonly source: SourceRef;
+  readonly wrapAnchors: readonly Readonly<{ occurrenceId: string; paragraphSource: SourceRef }>[];
+}
+
 export interface BodyLayoutInput {
-  /** `w:compatSetting` compatibilityMode value from settings (§17.15.3.4). */
-  readonly compatibilityMode?: number;
-  readonly footnoteLayoutLikeWW8?: boolean;
+  /** Document compatibility profile; absent means DEFAULT_DOCX_COMPAT_PROFILE. */
+  readonly compat?: DocxCompatProfile;
   readonly source: SourceRef;
   readonly initialSection: BodySectionLayoutInput;
   readonly sequence: readonly BodyLayoutSequenceEntry[];
+  /** Producer page objects, by page; absent for DOCX. */
+  readonly pageObjects?: readonly PageObjectInput[];
   /** Immutable parse facts; attached only after geometry convergence. */
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
+  /** ECMA-376 §17.2.1 background of every page, bound to one retained image
+   * resource per physical page size the sections produce. */
+  readonly pageBackground?: PageBackgroundLayoutInput;
   /** §17.11 document-end note stories, in authored numbering order. */
   readonly endnoteIds?: readonly string[];
+  /** Footnote ids the body references more than once, each with the
+   * `sequence` index of its last reference (progressive publication). */
+  readonly repeatedFootnoteLastEntries?: readonly Readonly<{ id: string; entryIndex: number }>[];
   readonly noteLayoutSettings?: Readonly<{
     footnotePosition: string;
     endnotePosition: string;
@@ -247,12 +303,13 @@ export interface NoteNumberingInput {
 }
 
 export interface BodyLayoutAcquisitionInput {
-  readonly compatibilityMode?: number;
-  readonly footnoteLayoutLikeWW8?: boolean;
+  readonly pageObjects?: readonly PageObjectInput[];
+  readonly compat: DocxCompatProfile;
   readonly sectionIndex: BodySectionIndexInput;
   readonly evenAndOddHeaders: boolean;
   readonly parserDiagnostics?: readonly LayoutDiagnostic[];
   readonly endnoteIds?: readonly string[];
+  readonly repeatedFootnoteLastEntries?: readonly Readonly<{ id: string; entryIndex: number }>[];
   readonly noteLayoutSettings: Readonly<{
     footnotePosition: string;
     endnotePosition: string;
@@ -273,6 +330,8 @@ export interface BodyLayoutAcquisitionInput {
     bookFoldRevPrinting: boolean;
     printTwoOnOne: boolean;
   }>;
+  /** §17.2.1 document background (parser-gated by §17.15.1.26). */
+  readonly pageBackground?: PageBackgroundAcquisitionInput | null;
   readonly sequence: readonly BodyLayoutSequenceEntryFor<Readonly<{
     sectionOccurrenceId: string;
     startType: string;
@@ -367,6 +426,7 @@ function sectionInput(
       textDirection: occurrence.textDirection ?? 'lrTb',
       gutterPt: occurrence.gutterPt,
       rtlGutter: occurrence.rtlGutter,
+      sheetOrientation: occurrence.sheetOrientation,
       ...acquired.pageLayoutSettings,
     }),
   });
@@ -380,6 +440,14 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
   const initialOccurrence = acquired.sectionIndex.occurrences[0];
   if (!initialOccurrence) throw new Error('DOCX body requires a final section owner');
   const initialSection = sections.get(initialOccurrence.sectionOccurrenceId)!;
+  const pageBackground = projectPageBackgroundLayoutInput(
+    acquired.pageBackground,
+    [...sections.values()].map((section) => sectionOwnerPhysicalPageExtent(
+      section.context,
+      section.pageLayout,
+    )),
+  );
+  const hiddenPageBreaks = wordHiddenParagraphPageBreakEntries(acquired.sequence);
   // The spacing role depends only on the authored section start type, already
   // present in the acquisition sequence. Resolve section owners and roles in
   // one pass so no second body-sized sequence is retained transiently.
@@ -388,6 +456,11 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
       const section = sections.get(entry.section.sectionOccurrenceId);
       if (!section) throw new Error(`Missing body section owner: ${entry.section.sectionOccurrenceId}`);
       return Object.freeze({ ...entry, section });
+    }
+    if (entry.kind === 'consume-source') {
+      return hiddenPageBreaks.has(index)
+        ? Object.freeze({ kind: 'authored-break' as const, source: entry.source, break: 'pageBreakBefore' as const })
+        : entry;
     }
     if (entry.kind !== 'body-block' || entry.block.kind !== 'paragraph') return entry;
     const continuousSectionRole = wordContinuousSectionRole(acquired.sequence, index);
@@ -402,12 +475,15 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
   });
   return snapshotPlainData({
     source: { story: 'body', storyInstance: 'body', path: [] },
-    compatibilityMode: acquired.compatibilityMode,
-    footnoteLayoutLikeWW8: acquired.footnoteLayoutLikeWW8,
+    compat: acquired.compat,
     initialSection,
     sequence,
     parserDiagnostics: acquired.parserDiagnostics ?? [],
     endnoteIds: acquired.endnoteIds ?? [],
+    repeatedFootnoteLastEntries: acquired.repeatedFootnoteLastEntries ?? [],
     noteLayoutSettings: acquired.noteLayoutSettings,
+    ...(acquired.pageObjects && acquired.pageObjects.length > 0
+      ? { pageObjects: acquired.pageObjects } : {}),
+    ...(pageBackground === null ? {} : { pageBackground }),
   }, 'DOCX body layout input') as BodyLayoutInput;
 }

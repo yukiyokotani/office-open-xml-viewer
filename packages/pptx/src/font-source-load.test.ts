@@ -51,10 +51,12 @@ const textSlide = (index: number, text: string): Slide => ({ index, slideNumber:
 describe('progressive PPTX font-source loading', () => {
   it('widens a family\'s substitution scope when a later slide proves its script', async () => {
     vi.stubGlobal('FontFace', FakeFontFace);
+    // The face file the library fetches itself.
+    vi.stubGlobal('fetch', async (url: string) => ({ ok: true, status: 200, url, arrayBuffer: async () => new Uint8Array(16).buffer }));
     try {
       const sources = [fontFiles({
         faces: [{ family: 'Served', url: 'https://app.example/served.woff2' }],
-        substitutes: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
+        substitutions: [{ for: 'Authored', use: 'Served', script: 'arabic' }],
       })];
       const ensureAll = async (progressive: boolean) => {
         const { faces, set } = fakeFontSet();
@@ -71,10 +73,13 @@ describe('progressive PPTX font-source loading', () => {
         const loaded = progressive ? session.loaded : await session.ensure(pptxFontDemand(
           full.fontPreloadNames, full.fontPreloadFacts, full.fontPreloadDemand, new Map()));
         session.release();
-        return { families: faces.map((face) => face.family), substitution: loaded.substitutions.get('authored') };
+        // Faces register under the session's private families: name them by
+        // the served family each stands for.
+        const servedOf = new Map([...loaded.families].map(([family, alias]) => [alias, family]));
+        return { families: faces.map((face) => servedOf.get(face.family)), substitution: loaded.substitutions.get('authored') };
       };
       const ordinary = await ensureAll(false);
-      expect(ordinary).toEqual({ families: ['Served'], substitution: { family: 'Served', script: 'arabic' } });
+      expect(ordinary).toEqual({ families: ['served'], substitution: { family: 'Served', script: 'arabic' } });
       expect(await ensureAll(true)).toEqual(ordinary);
     } finally {
       vi.unstubAllGlobals();

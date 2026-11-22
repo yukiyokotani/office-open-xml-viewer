@@ -51,6 +51,13 @@ jobs:
       - name: Model crate opt-in feature clippy
         run: cargo clippy -p docx-model --all-targets --features owned-source-cursor -- -D warnings
 
+      # Dev-only JSON Schema derive used by the model wire drift check.
+      - name: Model schema feature clippy
+        run: |
+          for crate in docx-model xlsx-model pptx-model; do
+            cargo clippy -p "$crate" --all-targets --features schema -- -D warnings
+          done
+
       # The cargo-fuzz harness is an intentionally independent workspace, so
       # the root workspace checks above do not format, lint, or compile it.
       - name: Fuzz target format check
@@ -80,14 +87,20 @@ jobs:
         run: |
           cargo clippy -p opendocument-parser --all-targets --features odt -- -D warnings
           cargo test -p opendocument-parser --features odt
+          cargo clippy -p opendocument-parser --all-targets --features ods -- -D warnings
+          cargo test -p opendocument-parser --features ods
+          cargo clippy -p opendocument-parser --all-targets --features odp -- -D warnings
+          cargo test -p opendocument-parser --features odp
+          cargo clippy -p opendocument-parser --all-targets --all-features -- -D warnings
 
   # RB8 — dependency vulnerability audit. Report-only for now
-  # (continue-on-error): one known advisory already exists at introduction —
-  # RUSTSEC-2026-0190 (anyhow < 1.0.103 unsound `Error::downcast_mut`), pulled
-  # in only by the non-shipped ooxml-mcp-server crate, not the wasm parsers or
-  # the npm package. Starting non-blocking surfaces advisories in the CI log
-  # without gating the whole repo on a transitive dev-tool issue; flip to
-  # blocking (drop continue-on-error) once the backlog is at zero.
+  # (continue-on-error). The workspace lockfile covers the wasm parsers and the
+  # ooxml-mcp-server crate, whose binaries are shipped with every GitHub
+  # Release by release-mcp-server.yml, so advisories against it (for example
+  # in rmcp or tokio) affect a released artifact and must be fixed, not
+  # waived. Starting non-blocking surfaces advisories in the CI log without
+  # gating unrelated PRs on a newly published advisory; flip to blocking (drop
+  # continue-on-error) once the backlog has stayed at zero.
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -109,7 +122,7 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -131,7 +144,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
 
       - uses: actions/setup-node@v5
         with:
@@ -171,6 +184,13 @@ jobs:
           pnpm check:resource-policy
           pnpm lint
 
+      # Rust model (serde wire, via the dev-only `schema` feature) vs the
+      # hand-written TS model types. Needs no WASM build.
+      - name: Model wire drift
+        run: |
+          node --test scripts/check-model-wire-drift.test.mjs
+          pnpm check:model-wire-drift
+
       - name: DOCX layout boundary tests
         run: |
           pnpm test:docx-boundaries
@@ -178,6 +198,7 @@ jobs:
           pnpm test:docx-compatibility-build
           pnpm test:docx-public-api
           node scripts/check-docx-layout-boundaries.mjs --final
+          pnpm check:tombstones
           pnpm check:docx-compatibility
 
       - name: Core legacy boundary
@@ -205,8 +226,8 @@ jobs:
         env:
           OOXML_REQUIRE_SKIA: '1'
 
-      # Python regressions for the legacy-office probe tools and the font
-      # reference-metrics generator. uv supplies their pinned dependencies.
+      # Python regression for the font reference-metrics generator. uv supplies
+      # its pinned dependency.
       - uses: astral-sh/setup-uv@v6
 
       - name: Python tool tests
@@ -233,6 +254,8 @@ jobs:
           pnpm check:model-source-lazy-runtime
           pnpm check:production-render-workers
           pnpm check:optional-chart-ex
+          pnpm check:optional-three-d
+          pnpm check:optional-region-map
           pnpm check:optional-tiff
           pnpm check:font-source-tree-shaking
           pnpm check:optional-legacy-doc
@@ -242,7 +265,7 @@ jobs:
           pnpm check:public-type-exports
           pnpm check:public-api:built
           pnpm check:no-inline-wasm
-          pnpm check:relative-wasm-urls dist packages/legacy-office/dist
+          pnpm check:relative-wasm-urls dist packages/legacy-office/dist packages/opendocument/dist
 
       - name: Install Playwright Chrome (only if missing)
         timeout-minutes: 5
@@ -262,7 +285,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version: '24'

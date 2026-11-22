@@ -46,10 +46,13 @@ it('evaluates passive page fields and shows only the stored result of other fiel
   expect(JSON.stringify(model)).not.toContain('file://secret');
 });
 
-it('direct rejects locked page fields instead of showing their stored result', async () => {
-  // The converter kept a locked field's stored "99"; the direct reader has no
-  // Office control for fLocked evaluated fields yet.
-  await expect(load(buildDocFixture({ text: 'Body\r', headers: ['', '', '', footerFields, '', ''], lockedHeaderFields: true }))).rejects.toMatchObject({ code: 'unsupported-content', details: { format: 'doc', reason: 'source-subset' } });
+it('shows the stored result of locked page fields', async () => {
+  // grffldEnd fLocked: Word does not update the field (Word control: a locked
+  // DATE field prints its stored result).
+  const model = await load(buildDocFixture({ text: 'Body\r', headers: ['', '', '', footerFields, '', ''], lockedHeaderFields: true })) as unknown as { footers: Slots };
+  const runs = storyRuns(model.footers.default)?.[0] ?? [];
+  expect(runs.every(r => r.type === 'text')).toBe(true);
+  expect(runs.map(r => r.text).join('')).toBe('Page 99 of 99; cached');
 });
 
 it.skipIf(!skia).each([false, true])('renders page stories after terminal page breaks (split mark: %s)', async (splitPgBreakAndParaMark) => {

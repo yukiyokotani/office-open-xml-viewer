@@ -47,7 +47,7 @@ async function paintedFonts(target: Slide, substitutions?: ReadonlyMap<string, {
   const canvas = { width: 0, height: 0, style: {}, getContext: () => ctx } as unknown as HTMLCanvasElement;
   await renderSlideWithEmbeddedFonts(canvas, target, 9_144_000, 6_858_000, {
     width: 960, dpr: 1, majorFont: null, minorFont: null, defaultTextColor: null,
-    ...(substitutions ? { fontSubstitutions: substitutions } : {}),
+    ...(substitutions ? { fontSources: { substitutions, families: new Map([['served face', 'ooxml-font-source-1-0']]) } } : {}),
   });
   return calls;
 }
@@ -67,13 +67,13 @@ describe('chart text and font sources', () => {
     expect(plain.names()).not.toContain('Chart Face');
   });
 
-  it('paints chart text through the loaded unscoped substitution map', async () => {
+  it('paints chart text through the private family of the loaded unscoped substitute', async () => {
     const offline = await paintedFonts(slide(chart()));
     const title = (calls: typeof offline) => calls.find((call) => call.text === 'Chart Title')?.font ?? '';
     expect(title(offline)).toContain('"Chart Face"');
-    expect(title(offline)).not.toContain('Served Face');
+    expect(title(offline)).not.toContain('ooxml-font-source');
     const loaded = await paintedFonts(slide(chart()), new Map([['chart face', { family: 'Served Face' }]]));
-    expect(title(loaded)).toContain('"Chart Face", "Served Face"');
+    expect(title(loaded)).toContain('"Chart Face", "ooxml-font-source-1-0"');
     // A script-scoped substitute never reaches chart text.
     const scoped = await paintedFonts(slide(chart()), new Map([['chart face', { family: 'Served Face', script: 'arabic' }]]));
     expect(title(scoped)).toBe(title(offline));

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { XlsxFindController, type FindCell } from './find.js';
-import { formatCellValueWithColor } from './number-format.js';
-import type { Styles } from './types.js';
+import { cellDisplayTexts, formatCellValueWithColor, formatGeneralNumber } from './number-format.js';
+import type { Styles, Worksheet } from './types.js';
+import { XlsxWorkbook, xlsxCellDisplayTexts } from './workbook.js';
 
 /** Minimal Styles carrying a single custom numFmt at style index 0. */
 function makeStyles(formatCode: string): Styles {
@@ -174,6 +175,54 @@ describe('XlsxFindController cursor + highlights', () => {
     expect(hl.find((h) => h.row === 1)?.active).toBe(true);
     expect(hl.find((h) => h.row === 2)?.active).toBe(false);
     expect(c.sheetHighlights(1)).toHaveLength(0);
+  });
+
+  it('finds a General number by the shortened form paint shows (issue #2179)', async () => {
+    const general = makeStyles('General');
+    const pi = { row: 2, col: 3, styleIndex: 0, value: { type: 'number' as const, number: Math.PI } };
+    const [text, ...alternates] = cellDisplayTexts(pi, general);
+    const c = controllerFor([{ name: 'S', cells: [{ row: 2, col: 3, text, alternates }] }]);
+    // The width-fitted text (e.g. an 8-character column) and the full text both match.
+    const shown = formatGeneralNumber(Math.PI, (form) => form.length <= 8);
+    expect(shown).toBe('3.141593');
+    const fitted = await c.find('3.141593');
+    expect(fitted).toHaveLength(1);
+    expect(fitted[0].text).toBe('3.141593');
+    expect(fitted[0].location).toMatchObject({ ref: 'C2', row: 2, col: 3 });
+    // A query every form contains still counts the cell once.
+    expect(await c.find('3.14')).toHaveLength(1);
+    expect(await c.find('3.141592654')).toHaveLength(1);
+    // The highlight is the whole matched cell, independent of which form matched.
+    c.next();
+    expect(c.sheetHighlights(0)).toEqual([{ row: 2, col: 3, active: true }]);
+  });
+
+  it('indexes the forms of a General format chosen by conditional formatting', async () => {
+    // Base 0.00 shows 3.14; a matched rule whose dxf selects General paints a
+    // width-fitted General form such as 3.14159, which find must locate.
+    const styles: Styles = {
+      ...makeStyles('0.00'),
+      dxfs: [{ font: null, fill: null, border: null, numFmt: { numFmtId: 0, formatCode: 'General' } }],
+    };
+    const pi = { row: 1, col: 1, styleIndex: 0, value: { type: 'number' as const, number: Math.PI } };
+    const ws = {
+      name: 'S', rows: [{ index: 1, height: null, cells: [pi] }],
+      colWidths: {}, rowHeights: {}, defaultColWidth: 8.43, defaultRowHeight: 15,
+      mergeCells: [], freezeRows: 0, freezeCols: 0, images: [], charts: [],
+      conditionalFormats: [{
+        sqref: [{ top: 1, left: 1, bottom: 1, right: 1 }],
+        rules: [{ type: 'expression', formula: 'TRUE', dxfId: 0, priority: 1, stopIfTrue: false }],
+      }],
+    } as unknown as Worksheet;
+    const hook = XlsxWorkbook.prototype[xlsxCellDisplayTexts] as
+      (this: unknown, ws: Worksheet) => (cell: typeof pi) => string[];
+    const [text, ...alternates] = hook.call({ parsedWorkbook: { styles } }, ws)(pi);
+    expect(text).toBe('3.141592654');
+    const c = controllerFor([{ name: 'S', cells: [{ row: 1, col: 1, text, alternates }] }]);
+    expect(await c.find('3.14159')).toHaveLength(1);
+    // Without the rule the base format alone applies.
+    const plain = hook.call({ parsedWorkbook: { styles } }, { ...ws, conditionalFormats: [] } as Worksheet)(pi);
+    expect(plain).toEqual(['3.14']);
   });
 
   it('invalidate clears matches + cursor', async () => {

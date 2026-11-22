@@ -160,7 +160,7 @@ writeFileSync(join(runDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}
 
 const md = [];
 md.push(`# ODT corpus harness — ${meta.label ?? basename(runDir)}`, '');
-md.push(`Checkout ${meta.sha ?? '?'}${meta.dirty ? ' (dirty)' : ''}, compatibility rules ${meta.rules ?? '?'}. ${summary.generatedAt}`, '');
+md.push(`Checkout ${meta.sha ?? '?'}${meta.dirty ? ' (dirty)' : ''}. ${summary.generatedAt}`, '');
 if (meta.unmaskSettings) md.push('**DIAGNOSTIC: rendered with the settings.xml layout-flag check disabled; acceptance below is not the shipped reader\'s.**', '');
 md.push(`- Files: ${total}`);
 md.push(`- Opened: ${status.opened} (${pct(status.opened)}%)`);
@@ -180,7 +180,7 @@ if (unmaskedRanking.length) {
   md.push('| Next code | Files | Example |', '| --- | ---: | --- |');
   for (const { key, files: count, examples } of unmaskedRanking) md.push(`| \`${key}\` | ${count} | ${examples[0]} |`);
 } else if (!hasUnmasked && status.rejected) {
-  md.push('', '_The settings-unmasked diagnostic did not run (its patch no longer matches the reader)._');
+  // No settings-unmasked diagnostic: the reader no longer rejects for settings.
 }
 if (flagRanking.length) {
   md.push('', '## `compatibility-setting` items', '', 'settings.xml items whose value differs from the reader\'s `LAYOUT_SETTINGS` table (files carrying each):', '');

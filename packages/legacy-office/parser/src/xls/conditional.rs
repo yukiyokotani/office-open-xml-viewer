@@ -15,20 +15,25 @@
 //! ECMA-376 18.3.1.x elements; the private corpus pairs each .xls with the
 //! .xlsx Excel saved from it, which shows the expected SpreadsheetML.
 //!
-//! Anything this module does not project rejects the workbook: CF rules
-//! without a CFEx (no stated priority), inactive rules, templates whose
-//! meaning the formula alone does not carry (dates, averages, duplicates),
-//! filter CF12 rules, stop-if-true on rule types the model cannot mark,
-//! CFVO formulas, activity formulas and display options the shared renderer
-//! cannot show (icon-only, data-bar value hiding or direction, non-default
-//! data-bar lengths, strict icon thresholds). Conditional formatting is
-//! never dropped silently.
+//! Rules made from a template Excel 2007 added keep the Boolean formula
+//! Excel stores for earlier versions (see `condition`); average rules are
+//! ECMA-376 aboveAverage rules. A CFVO formula is the `val` text of its
+//! `cfvo`. Display options the model's rules cannot state are drawn as the
+//! model draws the rule: a data bar or icon set that hides the cell value
+//! shows it, and a data bar runs from the left over the whole cell width.
+//!
+//! What this module does not project yet rejects the workbook: CF rules
+//! without a CFEx (no stated priority), inactive rules, filter CF12 rules,
+//! stop-if-true on rule types the model cannot mark, activity formulas and
+//! strict icon thresholds.
 
 mod dxf;
 pub(super) mod formula;
 mod ftab;
 
-pub(super) use formula::{decompile, decompile_cell, decompile_name, Externs};
+pub(super) use formula::{
+    decompile, decompile_cell, decompile_name, framed, without_text, Externs,
+};
 
 use super::{f64_at, styles, theme, u16_at, u32_at, unsupported};
 use std::collections::BTreeMap;
@@ -244,6 +249,7 @@ fn cond_fmt(data: &[u8]) -> Result<Group, String> {
         xlsx_model::ConditionalFormat {
             sqref,
             rules: Vec::new(),
+            first_match: false,
         },
         ccf,
         id,
@@ -270,6 +276,7 @@ fn cond_fmt12(data: &[u8]) -> Result<Group, String> {
         xlsx_model::ConditionalFormat {
             sqref,
             rules: Vec::new(),
+            first_match: false,
         },
         ccf,
         id,
@@ -357,9 +364,14 @@ fn condition(
 ) -> Result<xlsx_model::CfRule, String> {
     let dxf_id = Some(dxf_id);
     let formula = |rgce: &[u8]| formula::decompile(rgce, anchor, context.externs);
+    const TEMPLATE: &str = "unsupported XLS conditional formatting rule template";
     match (ct, template) {
-        // Cell value (icfTemplate 0): ECMA-376 cellIs.
-        (1, 0) => {
+        // Cell value: ECMA-376 cellIs. icfTemplate is 0 for it; any other
+        // value does not change what the comparison states.
+        (1, _) => {
+            if template != 0 {
+                crate::rejection::ignored_value(TEMPLATE);
+            }
             let (operator, count) = operator(cp)?;
             if (count == 2) == rgce2.is_empty() || rgce1.is_empty() {
                 return Err(unsupported("invalid XLS cell-value condition"));
@@ -381,17 +393,7 @@ fn condition(
         // which Excel also writes as the `formula` of the SpreadsheetML
         // expression / containsText / *Blanks / *Errors rules; the XLSX
         // parser reads all of them as expression rules.
-        (2, 1 | 8..=12) => {
-            if cp != 0 || rgce1.is_empty() || !rgce2.is_empty() {
-                return Err(unsupported("invalid XLS formula condition"));
-            }
-            Ok(xlsx_model::CfRule::Expression {
-                formula: formula(rgce1)?,
-                dxf_id,
-                priority,
-                stop_if_true,
-            })
-        }
+        (2, 1 | 8..=12) => expression(cp, rgce1, rgce2, &formula, dxf_id, priority, stop_if_true),
         // Filter (5) with CFExFilterParams (2.5.26): ECMA-376 top10. The
         // CF formula is Excel's compatibility rendering for older versions
         // (observed: a bottom-N rule stored with a SMALL formula is saved by
@@ -412,10 +414,78 @@ fn condition(
                 stop_if_true,
             })
         }
-        _ => Err(unsupported(
-            "unsupported XLS conditional formatting rule template",
-        )),
+        // Above or below average (0x19, 0x1A), or equal to it as well (0x1D,
+        // 0x1E), with CFExAveragesTemplateParams (2.5.23): ECMA-376
+        // aboveAverage. As for the filter template the CF formula is Excel's
+        // rendering for earlier versions.
+        (2, 0x19 | 0x1a | 0x1d | 0x1e) => {
+            if cp != 0 || rgce1.is_empty() || !rgce2.is_empty() {
+                return Err(unsupported("invalid XLS formula condition"));
+            }
+            // The compatibility formula is not projected, but it is part
+            // of the rule: one that cannot be read rejects. One the
+            // decompiler merely has no text for does not matter here.
+            if let Err(error) = formula(rgce1) {
+                if !formula::without_text(&error) || !formula::framed(rgce1) {
+                    return Err(error);
+                }
+            }
+            // iParam: the number of standard deviations. 2.5.23 lists 0, 1
+            // and 2; Excel's rule editor also writes 3 (ECMA-376 stdDev).
+            let std_dev = match u16_at(parameters, 0)? {
+                0 => None,
+                count @ 1..=3 => Some(u32::from(count)),
+                _ => crate::rejection::spec_default(TEMPLATE, None),
+            };
+            Ok(xlsx_model::CfRule::AboveAverage {
+                above_average: matches!(template, 0x19 | 0x1d),
+                equal_average: matches!(template, 0x1d | 0x1e),
+                std_dev,
+                dxf_id,
+                priority,
+                stop_if_true,
+            })
+        }
+        // Unique (7) and duplicate (0x1B) values and the date periods
+        // (0x0F..=0x18): SpreadsheetML has uniqueValues, duplicateValues and
+        // timePeriod rules, which the model keeps without evaluating them.
+        // The CF formula is the Boolean formula Excel stores for versions
+        // without the template (COUNTIF over the range, comparisons with
+        // TODAY()), so the rule is projected as that expression.
+        (2, 7 | 0x0f..=0x18 | 0x1b) => crate::rejection::approximated(
+            TEMPLATE,
+            expression(cp, rgce1, rgce2, &formula, dxf_id, priority, stop_if_true),
+        ),
+        // icfTemplate outside the 2.4.43 table, or of another rule type:
+        // the rule is the formula condition its ct states.
+        (2, _) => {
+            crate::rejection::ignored_value(TEMPLATE);
+            expression(cp, rgce1, rgce2, &formula, dxf_id, priority, stop_if_true)
+        }
+        // CF 2.4.42 ct is 1 or 2; `cf12` projects its other types.
+        _ => Err(unsupported("invalid XLS conditional formatting rule type")),
     }
+}
+
+/// A formula condition (ct 2): ECMA-376 expression.
+fn expression(
+    cp: u8,
+    rgce1: &[u8],
+    rgce2: &[u8],
+    formula: &dyn Fn(&[u8]) -> Result<String, String>,
+    dxf_id: Option<u32>,
+    priority: i32,
+    stop_if_true: bool,
+) -> Result<xlsx_model::CfRule, String> {
+    if cp != 0 || rgce1.is_empty() || !rgce2.is_empty() {
+        return Err(unsupported("invalid XLS formula condition"));
+    }
+    Ok(xlsx_model::CfRule::Expression {
+        formula: formula(rgce1)?,
+        dxf_id,
+        priority,
+        stop_if_true,
+    })
 }
 
 fn push_dxf(dxfs: &mut Vec<xlsx_model::Dxf>, dxf: xlsx_model::Dxf) -> Result<u32, String> {
@@ -570,9 +640,9 @@ fn cf12(
         ));
     }
     let (rule, end) = match ct {
-        3 => gradient(body, priority, context)?,
-        4 => databar(body, priority, context)?,
-        _ => multistate(body, priority)?,
+        3 => gradient(body, priority, anchor, context)?,
+        4 => databar(body, priority, anchor, context)?,
+        _ => multistate(body, priority, anchor, context)?,
     };
     if end != body.len() {
         return Err(unsupported("unexpected XLS CF12 tail"));
@@ -590,30 +660,55 @@ fn slice(data: &[u8], offset: usize, length: usize) -> Result<&[u8], String> {
 }
 
 /// MS-XLS 2.5.39 CFVO onto the XLSX `cfvo` types the XLSX parser keeps.
-fn cfvo(data: &[u8], offset: usize) -> Result<(xlsx_model::CfValue, usize), String> {
+/// A CFVOParsedFormula (2.5.198.7: cce, then its rgce) replaces numValue: its
+/// text is the `val` of the SpreadsheetML `cfvo`, which holds a formula for
+/// every type (ECMA-376 18.3.1.11), and cfvoType 7 is `type="formula"`.
+fn cfvo(
+    data: &[u8],
+    offset: usize,
+    anchor: (u16, u16),
+    context: &Context<'_>,
+) -> Result<(xlsx_model::CfValue, usize), String> {
     let kind = *data.get(offset).ok_or_else(truncated)?;
     let cce = usize::from(u16_at(data, offset + 1)?);
-    if cce != 0 {
-        return Err(unsupported(
-            "XLS conditional formatting value formula is not supported",
-        ));
-    }
     let mut end = offset + 3;
-    let (name, value) = match kind {
-        2 => ("min", None),
-        3 => ("max", None),
-        1 | 4 | 5 => {
+    let formula = if cce != 0 {
+        let rgce = slice(data, end, cce)?;
+        end += cce;
+        Some(rgce)
+    } else {
+        None
+    };
+    let (name, value) = match (kind, formula) {
+        // The minimum and maximum take no parameter. A formula stored with
+        // them is not used, but it must be one.
+        (2 | 3, formula) => {
+            if let Some(rgce) = formula {
+                if let Err(error) = formula::decompile(rgce, anchor, context.externs) {
+                    if !formula::without_text(&error) || !formula::framed(rgce) {
+                        return Err(error);
+                    }
+                }
+            }
+            (if kind == 2 { "min" } else { "max" }, None)
+        }
+        (1 | 4 | 5, None) => {
             let value = f64_at(data, end)?;
             end += 8;
             if !value.is_finite() || (kind != 1 && !(0.0..=100.0).contains(&value)) {
                 return Err(unsupported("invalid XLS conditional formatting value"));
             }
-            let name = match kind {
-                1 => "num",
-                4 => "percent",
-                _ => "percentile",
-            };
-            (name, Some(number(value)))
+            (cfvo_type(kind), Some(number(value)))
+        }
+        (1 | 4 | 5 | 7, Some(rgce)) => (
+            cfvo_type(kind),
+            Some(formula::decompile(rgce, anchor, context.externs)?),
+        ),
+        // "If cfvoType is 0x07, then fmla.cce MUST be greater than zero."
+        (7, None) => {
+            return Err(crate::rejection::corrupt(
+                "XLS conditional formatting value lacks its formula",
+            ))
         }
         _ => {
             return Err(unsupported(
@@ -628,6 +723,16 @@ fn cfvo(data: &[u8], offset: usize) -> Result<(xlsx_model::CfValue, usize), Stri
         },
         end,
     ))
+}
+
+/// ECMA-376 18.18.12 ST_CfvoType of a cfvoType with a parameter.
+fn cfvo_type(kind: u8) -> &'static str {
+    match kind {
+        1 => "num",
+        4 => "percent",
+        5 => "percentile",
+        _ => "formula",
+    }
 }
 
 /// The shortest round-trip decimal, as a SpreadsheetML `cfvo@val` string.
@@ -694,6 +799,7 @@ pub(super) fn cf_color(
 fn gradient(
     data: &[u8],
     priority: i32,
+    anchor: (u16, u16),
     context: &Context<'_>,
 ) -> Result<(xlsx_model::CfRule, usize), String> {
     let count = usize::from(*data.get(3).ok_or_else(truncated)?);
@@ -712,7 +818,7 @@ fn gradient(
     let mut offset = 6;
     let mut values = Vec::with_capacity(count);
     for domain in domains {
-        let (value, end) = cfvo(data, offset)?;
+        let (value, end) = cfvo(data, offset, anchor, context)?;
         if f64_at(data, end)? != *domain {
             return Err(unsupported("invalid XLS color scale control point"));
         }
@@ -746,6 +852,7 @@ fn gradient(
 fn databar(
     data: &[u8],
     priority: i32,
+    anchor: (u16, u16),
     context: &Context<'_>,
 ) -> Result<(xlsx_model::CfRule, usize), String> {
     let flags = *data.get(3).ok_or_else(truncated)?;
@@ -753,17 +860,19 @@ fn databar(
         *data.get(4).ok_or_else(truncated)?,
         *data.get(5).ok_or_else(truncated)?,
     );
-    // The shared renderer draws bars from the left across the full cell
+    // The model's data bar is drawn from the left across the full cell
     // width with the value shown. Excel's PDF of a workbook whose CFDatabar
     // stores flags 0 and lengths 0..100 shows left-to-right gradient bars
-    // with the cell values, so only that combination is projected; other
-    // flags and lengths stay rejected until observed.
-    if flags != 0 || minimum != 0 || maximum != 100 {
-        return Err(unsupported("unsupported XLS data bar display"));
+    // with the cell values, and Excel stores flags 2 for a bar whose value
+    // is hidden ("show bar only"; its PDF prints the bars alone). The model
+    // states neither that option, the direction (bit 0) nor other bar
+    // lengths, so such a rule is drawn as the model's bar.
+    if flags & 0x03 != 0 || minimum != 0 || maximum != 100 {
+        crate::rejection::approximated("unsupported XLS data bar display", ());
     }
     let color = color(data, 6, context)?;
-    let (min, end) = cfvo(data, 22)?;
-    let (max, end) = cfvo(data, end)?;
+    let (min, end) = cfvo(data, 22, anchor, context)?;
+    let (max, end) = cfvo(data, end, anchor, context)?;
     Ok((
         xlsx_model::CfRule::DataBar {
             color,
@@ -805,7 +914,12 @@ const ICON_SETS: [&str; 17] = [
 ];
 
 /// MS-XLS 2.5.36 CFMultistate onto ECMA-376 18.3.1.49 iconSet.
-fn multistate(data: &[u8], priority: i32) -> Result<(xlsx_model::CfRule, usize), String> {
+fn multistate(
+    data: &[u8],
+    priority: i32,
+    anchor: (u16, u16),
+    context: &Context<'_>,
+) -> Result<(xlsx_model::CfRule, usize), String> {
     let states = usize::from(*data.get(3).ok_or_else(truncated)?);
     let set = usize::from(*data.get(4).ok_or_else(truncated)?);
     let flags = *data.get(5).ok_or_else(truncated)?;
@@ -815,14 +929,19 @@ fn multistate(data: &[u8], priority: i32) -> Result<(xlsx_model::CfRule, usize),
         13..=16 => 5,
         _ => return Err(unsupported("invalid XLS icon set")),
     };
-    // fIconOnly hides the cell value, which the shared renderer cannot.
-    if states != expected || flags & !0x04 != 0 {
+    if states != expected {
         return Err(unsupported("unsupported XLS icon set display"));
+    }
+    // fIconOnly (bit 0) hides the cell value, which the model's icon set
+    // cannot state: the icon is drawn beside the value. The other bits but
+    // fReverse (bit 2) are reserved and "MUST be ignored".
+    if flags & 0x01 != 0 {
+        crate::rejection::approximated("unsupported XLS icon set display", ());
     }
     let mut offset = 6;
     let mut cfvos = Vec::with_capacity(states);
     for _ in 0..states {
-        let (value, end) = cfvo(data, offset)?;
+        let (value, end) = cfvo(data, offset, anchor, context)?;
         // fEqual = 1 is ECMA-376 cfvo@gte (default true), the only threshold
         // comparison the shared renderer implements.
         if *data.get(end).ok_or_else(truncated)? != 1 {
@@ -1072,15 +1191,412 @@ mod tests {
         .is_err());
     }
 
+    /// CondFmt (2.4.56) `id` on E11:E21 with `ccf` CF rules.
+    fn cond_fmt(id: u16, ccf: u16) -> Vec<u8> {
+        let mut data = ccf.to_le_bytes().to_vec();
+        data.extend((id << 1).to_le_bytes());
+        for value in [10u16, 20, 4, 4, 1, 10, 20, 4, 4] {
+            data.extend(value.to_le_bytes());
+        }
+        data
+    }
+
+    /// CF (2.4.42) with a DXFN that changes nothing.
+    fn cf(ct: u8, cp: u8, rgce1: &[u8]) -> Vec<u8> {
+        let mut data = vec![ct, cp];
+        data.extend((rgce1.len() as u16).to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend(0x003f_ffffu32.to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend(rgce1);
+        data
+    }
+
+    /// CFEx (2.4.44) with a CFExNonCF12 for rule 0 of CondFmt `id`: active,
+    /// priority 3, with `dxf` (a DXFN12 body) when not empty.
+    fn cf_ex(id: u16, cp: u8, template: u8, parameter: u16, dxf: &[u8]) -> Vec<u8> {
+        let mut data = vec![0u8; 12];
+        data[..2].copy_from_slice(&0x087bu16.to_le_bytes());
+        data.extend(0u32.to_le_bytes());
+        data.extend(id.to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend([cp, template]);
+        data.extend(3u16.to_le_bytes());
+        data.extend([0x01, u8::from(!dxf.is_empty())]);
+        if !dxf.is_empty() {
+            data.extend((dxf.len() as u32).to_le_bytes());
+            data.extend(dxf);
+        }
+        data.push(16);
+        data.extend(parameter.to_le_bytes());
+        data.extend([0u8; 14]);
+        data
+    }
+
+    fn classic_rule(
+        ct: u8,
+        cp: u8,
+        rgce1: &[u8],
+        template: u8,
+        parameter: u16,
+    ) -> Result<xlsx_model::CfRule, String> {
+        let mut formats = project_records(&[
+            (0x01b0, cond_fmt(1, 1)),
+            (0x01b1, cf(ct, cp, rgce1)),
+            (0x087b, cf_ex(1, cp, template, parameter, &[])),
+        ])?;
+        assert_eq!(formats.len(), 1);
+        Ok(formats.remove(0).rules.remove(0))
+    }
+
+    use crate::rejection::{take_best_effort, BestEffort};
+    const TEMPLATE: &str = "unsupported XLS conditional formatting rule template";
+
     #[test]
-    fn unrepresentable_or_unprojected_rules_are_rejected() {
+    fn average_templates_are_above_average_rules() {
+        take_best_effort();
+        // PtgBool TRUE stands for Excel's compatibility formula.
+        let formula = [0x1d, 1];
+        for (template, parameter, expected) in [
+            (0x19, 0, (true, false, None)),
+            (0x1a, 0, (false, false, None)),
+            (0x1d, 0, (true, true, None)),
+            (0x1e, 2, (false, true, Some(2))),
+            (0x19, 3, (true, false, Some(3))),
+        ] {
+            let rule = classic_rule(2, 0, &formula, template, parameter).unwrap();
+            let xlsx_model::CfRule::AboveAverage {
+                above_average,
+                equal_average,
+                std_dev,
+                dxf_id,
+                priority,
+                stop_if_true,
+            } = rule
+            else {
+                panic!("aboveAverage for template {template:#x}");
+            };
+            assert_eq!((above_average, equal_average, std_dev), expected);
+            assert_eq!((dxf_id, priority, stop_if_true), (Some(0), 3, false));
+        }
+        assert!(take_best_effort().is_empty());
+        // A standard-deviation count the rule cannot have is no offset.
+        let rule = classic_rule(2, 0, &formula, 0x19, 9).unwrap();
+        assert!(matches!(
+            rule,
+            xlsx_model::CfRule::AboveAverage {
+                above_average: true,
+                std_dev: None,
+                ..
+            }
+        ));
+        assert_eq!(take_best_effort(), [(BestEffort::IgnoredValue, TEMPLATE)]);
+        // The rule still needs its formula slot to be well formed, and the
+        // compatibility formula to be readable (a PtgInt without its value).
+        assert!(classic_rule(2, 0, &[], 0x19, 0).is_err());
+        assert!(classic_rule(2, 0, &[0x1e], 0x19, 0).is_err());
+        // A formula the decompiler merely has no text for does not matter.
+        // (the union of two numbers).
+        assert!(classic_rule(2, 0, &[0x1e, 1, 0, 0x1e, 2, 0, 0x10], 0x19, 0).is_ok());
+        // ... unless it lacks its operands or a later token is truncated.
+        assert!(classic_rule(2, 0, &[0x10], 0x19, 0).is_err());
+        assert!(classic_rule(2, 0, &[0x1e, 1, 0, 0x1e, 2, 0, 0x10, 0x1e], 0x19, 0).is_err());
+        take_best_effort();
+    }
+
+    #[test]
+    fn value_and_date_templates_keep_their_compatibility_formula() {
+        take_best_effort();
+        // COUNTIF-like stand-in: 1+2 (PtgInt, PtgInt, PtgAdd).
+        let formula = [0x1e, 1, 0, 0x1e, 2, 0, 0x03];
+        for template in [0x07, 0x0f, 0x12, 0x18, 0x1b] {
+            let rule = classic_rule(2, 0, &formula, template, 0).unwrap();
+            let xlsx_model::CfRule::Expression {
+                formula,
+                dxf_id,
+                priority,
+                stop_if_true,
+            } = rule
+            else {
+                panic!("expression for template {template:#x}");
+            };
+            assert_eq!(
+                (formula.as_str(), dxf_id, priority, stop_if_true),
+                ("1+2", Some(0), 3, false)
+            );
+            assert_eq!(take_best_effort(), [(BestEffort::Approximated, TEMPLATE)]);
+        }
+        // A template the specification does not list leaves the formula
+        // condition its ct states; the formula templates need no decision.
+        let rule = classic_rule(2, 0, &formula, 0x06, 0).unwrap();
+        assert!(matches!(
+            rule,
+            xlsx_model::CfRule::Expression { ref formula, .. } if formula == "1+2"
+        ));
+        assert_eq!(take_best_effort(), [(BestEffort::IgnoredValue, TEMPLATE)]);
+        classic_rule(2, 0, &formula, 0x08, 0).unwrap();
+        assert!(take_best_effort().is_empty());
+        // A cell-value rule is its comparison whatever template it names.
+        let rule = classic_rule(1, 5, &[0x1e, 5, 0], 0x1b, 0).unwrap();
+        let xlsx_model::CfRule::CellIs {
+            operator, formulas, ..
+        } = rule
+        else {
+            panic!("cellIs");
+        };
+        assert_eq!(
+            (operator.as_str(), formulas),
+            ("greaterThan", vec!["5".to_string()])
+        );
+        assert_eq!(take_best_effort(), [(BestEffort::IgnoredValue, TEMPLATE)]);
+        classic_rule(1, 5, &[0x1e, 5, 0], 0, 0).unwrap();
+        assert!(take_best_effort().is_empty());
+    }
+
+    #[test]
+    fn value_formulas_are_the_cfvo_val_text() {
+        take_best_effort();
+        // Thresholds: percent 0, the formula 1+2 (cfvoType 7) and a number
+        // given by the formula 5.
+        let mut body = vec![0, 0, 0, 3, 5, 0];
+        body.extend(cfvo(4, Some(0.0)));
+        body.extend([1, 0, 0, 0, 0]);
+        body.extend([7, 7, 0, 0x1e, 1, 0, 0x1e, 2, 0, 0x03]);
+        body.extend([1, 0, 0, 0, 0]);
+        body.extend([1, 3, 0, 0x1e, 5, 0]);
+        body.extend([1, 0, 0, 0, 0]);
+        let formats =
+            project_records(&[(0x0879, cond_fmt12(1)), (0x087a, cf12(6, 4, 0, &[], &body))])
+                .unwrap();
+        let xlsx_model::CfRule::IconSet { cfvos, .. } = &formats[0].rules[0] else {
+            panic!("icon set");
+        };
+        let values: Vec<_> = cfvos
+            .iter()
+            .map(|value| (value.kind.as_str(), value.value.as_deref()))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                ("percent", Some("0")),
+                ("formula", Some("1+2")),
+                ("num", Some("5"))
+            ]
+        );
+        // A data bar from a formula minimum to the maximum.
+        let mut bar = vec![0, 0, 0, 0, 0, 100];
+        bar.extend(rgb(0x20, 0xa4, 0x72));
+        bar.extend([7, 3, 0, 0x1e, 5, 0]);
+        bar.extend(cfvo(3, None));
+        let formats =
+            project_records(&[(0x0879, cond_fmt12(1)), (0x087a, cf12(4, 3, 0, &[], &bar))])
+                .unwrap();
+        let xlsx_model::CfRule::DataBar { min, max, .. } = &formats[0].rules[0] else {
+            panic!("data bar");
+        };
+        assert_eq!(
+            (min.kind.as_str(), min.value.as_deref()),
+            ("formula", Some("5"))
+        );
+        assert_eq!((max.kind.as_str(), max.value.as_deref()), ("max", None));
+        // Reading a formula is not a best-effort decision.
+        assert!(take_best_effort().is_empty());
+        // A formula stored with the minimum must still be a formula.
+        let mut bar = vec![0, 0, 0, 0, 0, 100];
+        bar.extend(rgb(0x20, 0xa4, 0x72));
+        bar.extend([2, 1, 0, 0x1e]);
+        bar.extend(cfvo(3, None));
+        assert!(
+            project_records(&[(0x0879, cond_fmt12(1)), (0x087a, cf12(4, 3, 0, &[], &bar))])
+                .is_err()
+        );
+        // cfvoType 7 without a formula is malformed.
+        let mut bar = vec![0, 0, 0, 0, 0, 100];
+        bar.extend(rgb(0x20, 0xa4, 0x72));
+        bar.extend([7, 0, 0]);
+        bar.extend(cfvo(3, None));
+        assert!(
+            project_records(&[(0x0879, cond_fmt12(1)), (0x087a, cf12(4, 3, 0, &[], &bar))])
+                .unwrap_err()
+                .contains("lacks its formula")
+        );
+    }
+
+    #[test]
+    fn display_options_the_model_cannot_state_draw_the_models_rule() {
+        take_best_effort();
+        // fIconOnly: the icons are drawn beside the values.
+        let plain = project_records(&[
+            (0x0879, cond_fmt12(1)),
+            (0x087a, cf12(6, 4, 0, &[], &icon_set(0x04, 1))),
+        ])
+        .unwrap();
+        assert!(take_best_effort().is_empty());
+        let icon_only = project_records(&[
+            (0x0879, cond_fmt12(1)),
+            (0x087a, cf12(6, 4, 0, &[], &icon_set(0x05, 1))),
+        ])
+        .unwrap();
+        assert_eq!(
+            take_best_effort(),
+            [(BestEffort::Approximated, "unsupported XLS icon set display")]
+        );
+        assert_eq!(
+            serde_json::to_value(&icon_only).unwrap(),
+            serde_json::to_value(&plain).unwrap()
+        );
+        assert!(matches!(
+            &icon_only[0].rules[0],
+            xlsx_model::CfRule::IconSet { reverse: true, icon_set, .. } if icon_set == "3Signs"
+        ));
+        // A data bar that hides its value (flags 2), runs from the right
+        // (flags 1) or has other lengths is the model's bar.
+        let bar = |flags: u8, minimum: u8, maximum: u8| {
+            let mut bar = vec![0, 0, 0, flags, minimum, maximum];
+            bar.extend(rgb(1, 2, 3));
+            bar.extend(cfvo(2, None));
+            bar.extend(cfvo(3, None));
+            project_records(&[(0x0879, cond_fmt12(1)), (0x087a, cf12(4, 3, 0, &[], &bar))]).unwrap()
+        };
+        let plain = serde_json::to_value(bar(0, 0, 100)).unwrap();
+        assert!(take_best_effort().is_empty());
+        assert_eq!(plain[0]["rules"][0]["type"], "dataBar");
+        assert_eq!(plain[0]["rules"][0]["color"], "#010203");
+        for (flags, minimum, maximum) in [(2, 0, 100), (1, 0, 100), (0, 10, 90)] {
+            assert_eq!(
+                serde_json::to_value(bar(flags, minimum, maximum)).unwrap(),
+                plain
+            );
+            assert_eq!(
+                take_best_effort(),
+                [(BestEffort::Approximated, "unsupported XLS data bar display")]
+            );
+        }
+    }
+
+    /// DXFN12 body: a DXFN that changes nothing, then an XFExtNoFRT with
+    /// these ExtProp entries (type, value).
+    fn dxfn12(extensions: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut data = 0x003f_ffffu32.to_le_bytes().to_vec();
+        data.extend(0u16.to_le_bytes());
+        data.extend([0, 0, 0xff, 0xff, 0, 0]);
+        data.extend((extensions.len() as u16).to_le_bytes());
+        for (kind, value) in extensions {
+            data.extend(kind.to_le_bytes());
+            data.extend((value.len() as u16 + 4).to_le_bytes());
+            data.extend(value);
+        }
+        data
+    }
+
+    /// XFExtGradient (2.5.279) at `degree` with these stops (color type,
+    /// value, position).
+    fn gradient_extension(degree: f64, stops: &[(u16, u32, f64)]) -> Vec<u8> {
+        let mut value = 0u32.to_le_bytes().to_vec();
+        for number in [degree, 0.0, 0.0, 0.0, 0.0] {
+            value.extend(number.to_le_bytes());
+        }
+        value.extend((stops.len() as u32).to_le_bytes());
+        for (kind, color, position) in stops {
+            value.extend(kind.to_le_bytes());
+            value.extend(color.to_le_bytes());
+            value.extend(position.to_le_bytes());
+            value.extend(0f64.to_le_bytes());
+        }
+        value
+    }
+
+    fn rule_dxf(dxf: &[u8]) -> Result<xlsx_model::Dxf, String> {
+        let styles = styles::Styles::parse(&[]).unwrap();
+        let theme = theme::Colors::default();
+        let mut retained = Records::default();
+        for (kind, data) in [
+            (0x01b0, cond_fmt(1, 1)),
+            (0x01b1, cf(1, 5, &[0x1e, 5, 0])),
+            (0x087b, cf_ex(1, 5, 0, 0, dxf)),
+        ] {
+            retained.push(kind, &data).unwrap();
+        }
+        let mut dxfs = Vec::new();
+        project(
+            &retained,
+            &Context {
+                styles: &styles,
+                theme: &theme,
+                externs: &Externs::default(),
+            },
+            &mut dxfs,
+        )?;
+        assert_eq!(dxfs.len(), 1);
+        Ok(dxfs.remove(0))
+    }
+
+    #[test]
+    fn differential_gradient_fills_and_unknown_extensions() {
+        take_best_effort();
+        // White at 0 to red at 1 (LongRGBA), stored in reverse order.
+        let gradient = gradient_extension(90.0, &[(2, 0xff00_00ff, 1.0), (2, 0xffff_ffff, 0.0)]);
+        let dxf = rule_dxf(&dxfn12(&[(6, gradient.clone())])).unwrap();
+        assert_eq!(
+            serde_json::to_value(&dxf.fill).unwrap(),
+            serde_json::json!({
+                "patternType": "",
+                "fgColor": null,
+                "bgColor": null,
+                "gradient": {
+                    "gradientType": "linear",
+                    "degree": 90.0,
+                    "left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0,
+                    "stops": [
+                        {"position": 0.0, "color": "#FFFFFF"},
+                        {"position": 1.0, "color": "#FF0000"}
+                    ]
+                }
+            })
+        );
+        assert!(take_best_effort().is_empty());
+        // An extension without a property here is passed over; the gradient
+        // beside it is read.
+        let dxf = rule_dxf(&dxfn12(&[(0x000f, vec![2, 0]), (6, gradient.clone())])).unwrap();
+        assert!(dxf.fill.unwrap().gradient.is_some());
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::Skipped,
+                "unsupported XLS differential format extension"
+            )]
+        );
+        // A stop of no specified color type is left out; a gradient
+        // without any stop is no fill.
+        let partial = gradient_extension(0.0, &[(9, 0, 0.0), (2, 0xff00_00ff, 1.0)]);
+        let fill = rule_dxf(&dxfn12(&[(6, partial)])).unwrap().fill.unwrap();
+        assert_eq!(fill.gradient.unwrap().stops.len(), 1);
+        assert_eq!(
+            take_best_effort(),
+            [(
+                BestEffort::IgnoredValue,
+                "unsupported XLS differential color"
+            )]
+        );
+        let none = gradient_extension(0.0, &[(9, 0, 0.0)]);
+        assert!(rule_dxf(&dxfn12(&[(6, none)])).unwrap().fill.is_none());
+        // cGradStops may be zero.
+        let empty = gradient_extension(0.0, &[]);
+        assert!(rule_dxf(&dxfn12(&[(6, empty)])).unwrap().fill.is_none());
+        take_best_effort();
+        // A stop list the extension does not hold is malformed.
+        let mut truncated = gradient;
+        truncated.pop();
+        assert!(rule_dxf(&dxfn12(&[(6, truncated)]))
+            .unwrap_err()
+            .contains("invalid XLS differential gradient fill"));
+    }
+
+    #[test]
+    fn unprojected_rules_are_rejected() {
         let valid = cf12(6, 4, 0, &[], &icon_set(0, 1));
         for records in [
-            // Icon-only display, strict thresholds, activity formula, template mismatch.
-            vec![
-                (0x0879, cond_fmt12(1)),
-                (0x087a, cf12(6, 4, 0, &[], &icon_set(0x01, 1))),
-            ],
+            // Strict thresholds, activity formula, template mismatch.
             vec![
                 (0x0879, cond_fmt12(1)),
                 (0x087a, cf12(6, 4, 0, &[], &icon_set(0, 0))),
@@ -1102,14 +1618,5 @@ mod tests {
         ] {
             assert!(project_records(&records).is_err());
         }
-        let mut hidden_value = vec![0, 0, 0, 0x02, 0, 100];
-        hidden_value.extend(rgb(1, 2, 3));
-        hidden_value.extend(cfvo(2, None));
-        hidden_value.extend(cfvo(3, None));
-        assert!(project_records(&[
-            (0x0879, cond_fmt12(1)),
-            (0x087a, cf12(4, 3, 0, &[], &hidden_value)),
-        ])
-        .is_err());
     }
 }

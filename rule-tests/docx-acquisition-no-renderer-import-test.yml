@@ -1,0 +1,20 @@
+id: docx-acquisition-no-renderer-import
+valid:
+  - "import type { PointPt } from './types.js';"
+  - "import { renderChart } from '@silurus/ooxml-core';"
+  - "import { chartRenderer } from './chart-renderer.js';"
+invalid:
+  - "import type { Hidden } from '../renderer.js';"
+  - "import { render } from './renderer.js';"
+  - "export { render } from '../renderer';"
+  - "const renderer = await import('../renderer.js');"
+  - "const renderer = require('../renderer.js');"
+  - "import type { Hidden } from '../layout/../renderer.ts';"
+  - "const renderer = await import(`../renderer.js`);"
+  - "import type { Options } from '../rend\\u0065rer.js';"
+  - "import type { Options } from '../renderer.js/.';"
+  - "import type { Options } from '..';"
+  - "import type { Options } from '\\u002e./render\\u0065r.js';"
+  - "const renderer = \\u0072equire('../renderer.js');"
+  - "export const renderer = require<typeof import('../types.js')>('../renderer.js');"
+  - "import renderer = require('../renderer.js');"

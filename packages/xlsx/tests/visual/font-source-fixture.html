@@ -22,7 +22,7 @@
       const substitutes = params.get('substitute') === '1'
         ? [{ for: 'Absent Office Face', use: 'Ooxml Fixture' }] : undefined;
       const fonts = mode === 'none' ? undefined
-        : [fontCss({ url: new URL('/generated/fixture-fonts.css', location.href).href, ...(substitutes ? { substitutes } : {}) })];
+        : [fontCss({ url: new URL('/generated/fixture-fonts.css', location.href).href, ...(substitutes ? { substitutions: substitutes } : {}) })];
       const wb = await XlsxWorkbook.load(buf, {
         ...(mode === 'worker' ? { mode: 'worker' } : {}),
         ...(fonts ? { fonts } : {}),

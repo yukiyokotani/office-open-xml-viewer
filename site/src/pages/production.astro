@@ -73,7 +73,7 @@ if (bitmap) {
     <div class="production-content">
       <section id="rendering-mode">
         <p class="section-label">Rendering mode</p>
-        <h2>Choose where layout and paint run.</h2>
+        <h2>Where layout and paint run.</h2>
         <p>
           Parsing always runs in a Worker. Keep the default <code>mode: 'main'</code> for ordinary
           previews. Choose <code>mode: 'worker'</code> when document layout and Canvas paint compete
@@ -103,7 +103,7 @@ if (bitmap) {
 
       <section id="ownership">
         <p class="section-label">Ownership</p>
-        <h2>Let one Viewer own one document, unless views need to share it.</h2>
+        <h2>Viewer-owned and shared documents.</h2>
         <p>
           The usual path is to construct a Viewer, call <code>load(source)</code>, and destroy the
           Viewer when its host unmounts. The Viewer owns the loaded document.
@@ -129,7 +129,7 @@ if (bitmap) {
 
       <section id="optional-renderers">
         <p class="section-label">Optional modules</p>
-        <h2>Add only the rendering modules a product needs.</h2>
+        <h2>Optional rendering modules.</h2>
         <p>
           Equations, ChartEx, 3-D charts, Region Maps, and TIFF images use separate package entries.
           Import a module once and pass it to the Viewer or document engine. The same option works
@@ -170,7 +170,16 @@ if (bitmap) {
           document. The viewer and add-on versions must match exactly.
           <a href="/legacy-office">Install and enable legacy sources →</a>
         </p>
-        <h3>A small TIFF reuse</h3>
+        <h3>Experimental OpenDocument add-on</h3>
+        <p>
+          OpenDocument reading is another experimental opt-in package,
+          <code>@silurus/ooxml-opendocument</code>, installed next to the viewer at the exact same
+          version. Pass its reader as an option: <code>&#123; odp &#125;</code> from
+          <code>@silurus/ooxml-opendocument/odp</code> for the PPTX viewers and loaders,
+          <code>&#123; odt &#125;</code> for DOCX and <code>&#123; ods &#125;</code> for XLSX.
+          <a href="/opendocument">Install and enable OpenDocument sources →</a>
+        </p>
+        <h3>Standalone TIFF preview</h3>
         <p>
           The TIFF module exists to display images embedded in Office files; it is not a
           general-purpose TIFF library. As a small by-product, applications can reuse it for a

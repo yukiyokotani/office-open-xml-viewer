@@ -6,8 +6,9 @@ import { storeZip } from './conformance/generate.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { normalizeInternalDocumentModel, paragraphMarkShapeInput } from './parser-model.js';
 import { renderDocumentToCanvas } from './renderer.js';
-import { fontFiles, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
-import { declaredFontSubstitutions, docxFontDemandCandidates } from './font-plan.js';
+import { fontFiles, fontSourceDescriptors, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
+import { declaredFontSubstitutions } from './font-plan.js';
+import { docxFontDemandCandidates } from './font-demand-plan.js';
 import { sourceFontLayoutOptions } from './testing/font-sources.js';
 import { LineMeasurementAdapter } from './line-breaker/measurement-adapter.js';
 import type { LayoutTextSeg } from './line-breaker/model.js';
@@ -163,7 +164,7 @@ async function paintedFamily(model: DocxDocumentModel, text: string): Promise<st
   return (await paintedFamilies(model, [text]))[0];
 }
 
-const GOOGLE_SUBSTITUTES = declaredFontSubstitutions([googleFonts()]);
+const GOOGLE_SUBSTITUTES = declaredFontSubstitutions(fontSourceDescriptors([googleFonts()]));
 /** Demanded names before the installed check. */
 function docxFontPreloadNames(model: DocxDocumentModel): string[] {
   const candidates = docxFontDemandCandidates(model, GOOGLE_SUBSTITUTES);
@@ -543,14 +544,21 @@ describe('script-scoped Arabic visual substitutes', () => {
 
   it.each([
     ['Sakkal Majalla', '<w:smallCaps/>', 'مرحباßé\u064e\t١٢', 'مرحباSSÉ\u064e\t١٢'],
-    ['Wingdings', '', '\uf024\t\uf04a', '👓\t☺'],
-  ])('projects expanded display scalars and tab pieces into one full %s run', async (family, transform, original, fullText) => {
+    // Wingdings 0x21 is U+1F589 (astral), 0x76 U+2756; neither is emoji-capable.
+    ['Wingdings', '', '\uf021\t\uf076', '\u{1F589}\t\u2756'],
+  ])('projects expanded display scalars and tab pieces into one full %s run', async (family, transform, original, convertedText) => {
     const model = parse(docx('<w:p><w:r><w:rPr>'
       + `<w:rFonts w:ascii="${family}" w:hAnsi="${family}"/>${transform}`
       + `</w:rPr><w:t>${original}</w:t></w:r></w:p>`));
     const { canvas, calls } = recordingCanvas(new Set(WEB_FACES));
     const services = createLayoutServices(model, { ...sourceFontLayoutOptions(model, WEB_FACES.map(loaded)),
       measureContext: canvas.getContext('2d') as CanvasRenderingContext2D });
+    // A symbol run converts only what the measured face lacks; a context that
+    // cannot judge it converts the 0.89 subset (its BMP pencil, with VS15).
+    const fullText = family === 'Wingdings'
+      ? services.text.symbolText!({ text: original, fonts: { ascii: family, highAnsi: family }, weight: 400, style: 'normal' }).map((part) => part.text).join('')
+      : convertedText;
+    expect([convertedText, '\u270F\uFE0E\t\u2756']).toContain(fullText);
     const ranges: string[] = [];
     const view = createLayoutServicesRuntimeView(services, { text: { ...services.text, shape(request) {
       if (request.substituteContext) {
@@ -560,8 +568,8 @@ describe('script-scoped Arabic visual substitutes', () => {
       return services.text.shape(request);
     } } });
     await renderDocumentToCanvas(model, canvas, 0, { dpr: 1, width: 612, layoutServices: view });
-    expect(ranges.some((text) => text.includes(family === 'Wingdings' ? '☺' : '١٢'))).toBe(true);
-    expect(calls.some((call) => call.text.includes(family === 'Wingdings' ? '☺' : 'É'))).toBe(true);
+    expect(ranges.some((text) => text.includes(family === 'Wingdings' ? '\u2756' : '١٢'))).toBe(true);
+    expect(calls.some((call) => call.text.includes(family === 'Wingdings' ? '\u2756' : 'É'))).toBe(true);
     if (family === 'Sakkal Majalla') {
       expect(calls.filter((call) => call.text.includes('١٢') || call.text.includes('\u064e'))
         .every((call) => call.face === 'serif')).toBe(true);
@@ -777,7 +785,7 @@ describe('substitution relationships are keyed per authored family', () => {
     // Being C's target must not scope A out of A's own route.
     const sources = [fontFiles({
       faces: [{ family: 'Alpha Face', url: 'https://app.example/alpha.woff2' }],
-      substitutes: [
+      substitutions: [
         { for: 'Alpha Face', use: 'Beta Face', script: 'arabic' },
         { for: 'Gamma Face', use: 'Alpha Face', script: 'arabic' },
       ],
@@ -795,6 +803,8 @@ describe('substitution relationships are keyed per authored family', () => {
     const painted = calls.filter((call) => call.text.includes('Latin'));
     expect(painted.length).toBeGreaterThan(0);
     expect(painted.map((call) => call.face)).toEqual(painted.map(() => 'Alpha Face'));
-    expect(painted.every((call) => cssFamilies(call.font)[0] === 'Alpha Face')).toBe(true);
+    // Its own served family leads, through the document's private family.
+    expect(painted.every((call) => /^ooxml-font-source-test-\d+$/.test(cssFamilies(call.font)[0] ?? '')
+      && cssFamilies(call.font)[1] === 'Alpha Face')).toBe(true);
   });
 });

@@ -364,9 +364,11 @@ impl DirectSession {
             };
             // Canonical drawing metadata remains neutral. Charge each cursor's
             // owned copies before cloning; no projection is retained after ACK.
-            let pictures = self.native_pictures.sheets.get(&index);
-            let charts = self.native_charts.get(&index);
-            let shapes = self.native_shapes.get(&index);
+            // A dialog sheet has no drawing layer (see `prepare_workbook`).
+            let drawn = !worksheet.is_dialog_sheet;
+            let pictures = self.native_pictures.sheets.get(&index).filter(|_| drawn);
+            let charts = self.native_charts.get(&index).filter(|_| drawn);
+            let shapes = self.native_shapes.get(&index).filter(|_| drawn);
             let copies = (|| {
                 if let Some(values) = pictures {
                     charge_copy(&mut self.model_budget, values)?;
@@ -503,8 +505,8 @@ fn project_sheet(
         // chart-area rectangle.
         worksheet.is_chart_sheet = true;
         worksheet.show_gridlines = false;
-        charge_copy(budget, &chart.model)?;
-        reserve_model(&mut worksheet.charts, 1, budget)?;
+        charge_copy(budget, chart.model.as_ref())?;
+        reserve_model(&mut worksheet.charts, 1 + chart.embedded.len(), budget)?;
         worksheet.charts.push(xlsx_model::ChartAnchor {
             z_order: 0,
             from_col: 0,
@@ -515,13 +517,39 @@ fn project_sheet(
             to_col_off: chart.x_emu + chart.width_emu,
             to_row: 0,
             to_row_off: chart.y_emu + chart.height_emu,
-            chart: chart.model.clone(),
+            chart: chart.model.as_ref().clone(),
         });
+        // Chart objects placed on the chart sheet, drawn over its chart in
+        // document order with the same absolute anchoring.
+        for (order, embedded) in chart.embedded.iter().enumerate() {
+            charge_copy(budget, embedded.model.as_ref())?;
+            worksheet.charts.push(xlsx_model::ChartAnchor {
+                z_order: order as u64 + 1,
+                from_col: 0,
+                from_col_off: embedded.x_emu,
+                from_row: 0,
+                from_row_off: embedded.y_emu,
+                to_col: 0,
+                to_col_off: embedded.x_emu + embedded.width_emu,
+                to_row: 0,
+                to_row_off: embedded.y_emu + embedded.height_emu,
+                chart: embedded.model.as_ref().clone(),
+            });
+        }
         sheet.views.project(&mut worksheet);
         return Ok(worksheet);
     }
+    if sheet.dialog {
+        // A dialog sheet (MS-XLS 2.4.351 WsBool fDialog) defines a custom
+        // dialog box, not a cell grid: the model's dialog sheet, as the XLSX
+        // parser builds it for an `xl/dialogsheets` part.
+        worksheet.is_dialog_sheet = true;
+        return Ok(worksheet);
+    }
     reserve_model(&mut worksheet.rows, sheet.rows.len(), budget)?;
+    let mut phonetic = PhoneticRanges::new(&sheet.phonetic_ranges);
     for (&row_index, cells) in &sheet.rows {
+        phonetic.advance(row_index);
         let mut row = xlsx_model::Row {
             index: u32::from(row_index) + 1,
             height: None,
@@ -548,7 +576,9 @@ fn project_sheet(
                     }
                     None => None,
                 },
-                show_phonetic: false,
+                // ECMA-376 18.3.1.4 `c@ph`: the cell shows the phonetic
+                // string of its text.
+                show_phonetic: phonetic.shows(column),
             });
         }
         worksheet.rows.push(row);
@@ -633,6 +663,28 @@ fn project_sheet(
     worksheet.defined_names = sheet.defined_names.clone();
     charge_copy(budget, &sheet.pivot_tables)?;
     worksheet.pivot_tables = sheet.pivot_tables.clone();
+    // Classic notes: the comment bodies and, per ECMA-376 18.7.3, the cells
+    // the renderer marks with the comment indicator.
+    charge(
+        budget,
+        sheet
+            .comments
+            .iter()
+            .map(|comment| {
+                std::mem::size_of::<xlsx_model::XlsxComment>()
+                    + std::mem::size_of::<String>()
+                    + 2 * comment.cell_ref.len()
+                    + comment.text.len()
+                    + comment.author.as_ref().map_or(0, String::len)
+            })
+            .sum(),
+    )?;
+    worksheet.comment_refs = sheet
+        .comments
+        .iter()
+        .map(|comment| comment.cell_ref.clone())
+        .collect();
+    worksheet.comments = sheet.comments.clone();
     if let Some(color) = &sheet.tab_color {
         charge(budget, color.len())?;
         worksheet.tab_color = Some(color.clone());
@@ -640,6 +692,61 @@ fn project_sheet(
     sheet.geometry.project(&mut worksheet, mdw, budget)?;
     sheet.views.project(&mut worksheet);
     Ok(worksheet)
+}
+
+/// Which columns of the current row lie in a PhoneticInfo range. Rows are
+/// visited in ascending order, so each range enters and leaves once.
+struct PhoneticRanges {
+    /// Ranges by first row, and the (last row, first column, last column)
+    /// of those entered, by last row.
+    pending: Vec<[u16; 4]>,
+    next: usize,
+    active: std::collections::BinaryHeap<std::cmp::Reverse<(u16, u16, u16)>>,
+    /// Entered ranges covering each column.
+    columns: [u32; 256],
+}
+
+impl PhoneticRanges {
+    fn new(ranges: &[[u16; 4]]) -> Self {
+        let mut pending = ranges.to_vec();
+        pending.sort_unstable();
+        Self {
+            pending,
+            next: 0,
+            active: std::collections::BinaryHeap::new(),
+            columns: [0; 256],
+        }
+    }
+
+    fn advance(&mut self, row: u16) {
+        while let Some(&[first, last, left, right]) = self.pending.get(self.next) {
+            if first > row {
+                break;
+            }
+            self.next += 1;
+            if last >= row {
+                for column in left..=right.min(255) {
+                    self.columns[usize::from(column)] += 1;
+                }
+                self.active.push(std::cmp::Reverse((last, left, right)));
+            }
+        }
+        while let Some(&std::cmp::Reverse((last, left, right))) = self.active.peek() {
+            if last >= row {
+                break;
+            }
+            self.active.pop();
+            for column in left..=right.min(255) {
+                self.columns[usize::from(column)] -= 1;
+            }
+        }
+    }
+
+    fn shows(&self, column: u16) -> bool {
+        self.columns
+            .get(usize::from(column))
+            .is_some_and(|count| *count != 0)
+    }
 }
 
 fn cell_value(value: &CellValue, budget: &mut usize) -> Result<xlsx_model::CellValue, String> {
@@ -866,35 +973,249 @@ pub(super) mod tests {
         assert!(session.assert_healthy().is_ok());
     }
 
+    /// MS-XLS 2.4.346 Window2 with these option flags.
+    fn window2(flags: u16) -> Vec<u8> {
+        let mut window = flags.to_le_bytes().to_vec();
+        window.extend([0u8; 16]);
+        record(0x023e, &window)
+    }
+
+    /// Globals with a worksheet tab `S` and a second tab `C` of BoundSheet8
+    /// type `dt`, whose substream is `second`.
+    fn two_tab_workbook(dt: u8, second: Vec<u8>) -> Vec<u8> {
+        let mut stream = record(BOF, &[0, 6, 5, 0]);
+        let first = stream.len() + 4;
+        stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, 0, 1, 0, b'S']));
+        let other = stream.len() + 4;
+        stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, dt, 1, 0, b'C']));
+        stream.extend(record(0x003d, &[0; 18]));
+        stream.extend(record(EOF, &[]));
+        let sheet = stream.len() as u32;
+        stream[first..first + 4].copy_from_slice(&sheet.to_le_bytes());
+        stream.extend(record(BOF, &[0, 6, 0x10, 0]));
+        stream.extend(window2(0x00b6));
+        stream.extend(record(EOF, &[]));
+        let offset = stream.len() as u32;
+        stream[other..other + 4].copy_from_slice(&offset.to_le_bytes());
+        stream.extend(second);
+        scoped_cfb(stream)
+    }
+
     #[test]
-    fn rejects_macro_and_malformed_chart_sheets_and_makes_no_blanket_omission_claim() {
+    fn rejects_malformed_chart_sheets_and_makes_no_blanket_omission_claim() {
         // Drawings and conditional formatting are projected or the workbook
         // is rejected, so no blanket omission is ever reported.
         assert!(!wire_fixture()
             .warnings()
             .iter()
             .any(|warning| warning.contains("drawings-conditional-formatting")));
-        // Chart sheets are projected; one without its Chart record fails closed.
-        for (dt, expected) in [(2u8, "lacks its Chart record"), (1, "macro sheets")] {
-            let mut stream = record(BOF, &[0, 6, 5, 0]);
-            let first = stream.len() + 4;
-            stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, 0, 1, 0, b'S']));
-            let second = stream.len() + 4;
-            stream.extend(record(BOUNDSHEET8, &[0, 0, 0, 0, 0, dt, 1, 0, b'C']));
-            stream.extend(record(EOF, &[]));
-            let sheet = stream.len() as u32;
-            stream[first..first + 4].copy_from_slice(&sheet.to_le_bytes());
-            stream.extend(record(BOF, &[0, 6, 0x10, 0]));
-            stream.extend(record(EOF, &[]));
-            let other = stream.len() as u32;
-            stream[second..second + 4].copy_from_slice(&other.to_le_bytes());
-            stream.extend(record(BOF, &[0, 6, 0x20, 0]));
-            stream.extend(record(EOF, &[]));
-            let bytes = scoped_cfb(stream);
+        // Chart sheets are projected; one without its Chart record fails
+        // closed. BoundSheet8.dt has no other value than 0, 1, 2 and 6.
+        let chart = [record(BOF, &[0, 6, 0x20, 0]), record(EOF, &[])].concat();
+        for (dt, expected) in [
+            (2u8, "lacks its Chart record"),
+            (3, "unknown XLS sheet type"),
+        ] {
+            let bytes = two_tab_workbook(dt, chart.clone());
             let cfb = CompoundFile::open(&bytes).unwrap();
             let error = DirectSession::new(&cfb).err().expect("rejected");
             assert!(error.contains(expected), "{expected}: {error}");
         }
+    }
+
+    /// A macro sheet substream: A1 holds the number 7, A2 the formula
+    /// `=RETURN()` with the cached value FALSE.
+    fn macro_substream(window_flags: u16, rgce: &[u8]) -> Vec<u8> {
+        let mut stream = record(BOF, &[0, 6, 0x40, 0]);
+        let mut number = vec![0, 0, 0, 0, 0, 0];
+        number.extend(7f64.to_le_bytes());
+        stream.extend(record(NUMBER, &number));
+        let mut formula = vec![1, 0, 0, 0, 0, 0];
+        formula.extend([1, 0, 0, 0, 0, 0, 0xff, 0xff]);
+        formula.extend([0u8; 6]);
+        formula.extend((rgce.len() as u16).to_le_bytes());
+        formula.extend(rgce);
+        stream.extend(record(FORMULA, &formula));
+        stream.extend(window2(window_flags));
+        stream.extend(record(EOF, &[]));
+        stream
+    }
+
+    fn sheet_cells(bytes: &[u8]) -> (Vec<String>, serde_json::Value) {
+        let cfb = CompoundFile::open(bytes).unwrap();
+        let mut session = DirectSession::new(&cfb).unwrap();
+        let workbook = session.bootstrap().unwrap();
+        let names = workbook
+            .workbook
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.clone())
+            .collect();
+        let projected = session.projected_sheet(1, "C").unwrap();
+        assert!(!projected.worksheet.is_dialog_sheet);
+        (names, serde_json::to_value(projected.rows).unwrap())
+    }
+
+    #[test]
+    fn a_macro_sheet_keeps_its_tab_and_shows_its_formulas() {
+        // PtgFuncVar RETURN (0x37) without arguments.
+        let rgce = [0x42, 0x00, 0x37, 0x00];
+        crate::rejection::take_best_effort();
+        // Window2 fDspFmlaRt (bit 0): Excel draws the formula text.
+        let (names, rows) = sheet_cells(&two_tab_workbook(1, macro_substream(0x00b7, &rgce)));
+        assert_eq!(names, ["S", "C"]);
+        assert_eq!(
+            rows,
+            serde_json::json!([
+                {"index": 1, "height": null, "cells": [
+                    {"col": 1, "row": 1, "value": {"type": "number", "number": 7.0}, "styleIndex": 0}
+                ]},
+                {"index": 2, "height": null, "cells": [
+                    {"col": 1, "row": 2, "value": {"type": "text", "text": "=RETURN()"},
+                     "styleIndex": 0, "formula": "RETURN()"}
+                ]}
+            ])
+        );
+        // Without the formula view the cached value is shown, as on a
+        // worksheet.
+        let (_, rows) = sheet_cells(&two_tab_workbook(1, macro_substream(0x00b6, &rgce)));
+        assert_eq!(
+            rows[1]["cells"][0]["value"],
+            serde_json::json!({"type": "bool", "bool": false})
+        );
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // A formula the decompiler has no text for leaves the cached values.
+        let (names, rows) = sheet_cells(&two_tab_workbook(
+            1,
+            macro_substream(0x00b7, &[0x42, 0x00, 0xff, 0x7f]),
+        ));
+        assert_eq!(names, ["S", "C"]);
+        assert_eq!(
+            rows[1]["cells"][0],
+            serde_json::json!({"col": 1, "row": 2, "value": {"type": "bool", "bool": false}, "styleIndex": 0})
+        );
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Approximated,
+                "XLS macro sheets are not projected"
+            )]
+        );
+        // An operator without operands is no formula: it rejects.
+        let bytes = two_tab_workbook(1, macro_substream(0x00b7, &[0x03]));
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(DirectSession::new(&cfb)
+            .err()
+            .expect("rejected")
+            .contains("malformed"));
+        crate::rejection::take_best_effort();
+        // A truncated formula on a macro sheet rejects: it cannot be read.
+        let mut truncated = macro_substream(0x00b7, &rgce);
+        let at = truncated
+            .windows(4)
+            .position(|window| window == rgce)
+            .unwrap();
+        truncated[at - 2] = 9;
+        let bytes = two_tab_workbook(1, truncated);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(DirectSession::new(&cfb)
+            .err()
+            .expect("rejected")
+            .contains("truncated"));
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // The same formula on a worksheet still rejects the workbook.
+        let mut worksheet = macro_substream(0x00b7, &[0x42, 0x00, 0xff, 0x7f]);
+        worksheet[6] = 0x10;
+        let bytes = two_tab_workbook(0, worksheet);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(DirectSession::new(&cfb).is_err());
+        // A macro tab must point at a macro sheet substream.
+        let mut worksheet = macro_substream(0x00b7, &rgce);
+        worksheet[6] = 0x10;
+        let bytes = two_tab_workbook(1, worksheet);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        assert!(DirectSession::new(&cfb)
+            .err()
+            .expect("rejected")
+            .contains("does not point to a BIFF8 worksheet"));
+    }
+
+    #[test]
+    fn a_dialog_sheet_is_the_models_dialog_sheet_without_cells_or_drawings() {
+        fn art(kind: u16, options: u16, data: &[u8]) -> Vec<u8> {
+            [
+                options.to_le_bytes().to_vec(),
+                kind.to_le_bytes().to_vec(),
+                (data.len() as u32).to_le_bytes().to_vec(),
+                data.to_vec(),
+            ]
+            .concat()
+        }
+        // WsBool fDialog (0x0010) on a worksheet substream with a cell and,
+        // with `frame`, a dialog frame object (Obj ot 15).
+        let sheet = |frame: bool| {
+            let mut stream = record(BOF, &[0, 6, 0x10, 0]);
+            stream.extend(record(0x0081, &[0xd1, 0x04]));
+            let mut number = vec![0, 0, 0, 0, 0, 0];
+            number.extend(7f64.to_le_bytes());
+            stream.extend(record(NUMBER, &number));
+            if frame {
+                let mut patriarch = art(0xf009, 0x0001, &[0; 16]);
+                patriarch.extend(art(
+                    0xf00a,
+                    0x0002,
+                    &[1024u32.to_le_bytes(), 5u32.to_le_bytes()].concat(),
+                ));
+                let mut shape = art(
+                    0xf00a,
+                    0x0c92,
+                    &[1025u32.to_le_bytes(), 0x0a00u32.to_le_bytes()].concat(),
+                );
+                let mut anchor = vec![0u8; 18];
+                anchor[10] = 2;
+                anchor[14] = 2;
+                shape.extend(art(0xf010, 0, &anchor));
+                shape.extend(art(0xf011, 0, &[]));
+                let mut group = art(0xf004, 0x000f, &patriarch);
+                group.extend(art(0xf004, 0x000f, &shape));
+                let mut root = art(0xf008, 0x0010, &[0; 8]);
+                root.extend(art(0xf003, 0x000f, &group));
+                stream.extend(record(0x00ec, &art(0xf002, 0x000f, &root)));
+                let mut object = Vec::new();
+                for value in [0x15u16, 0x12, 15, 1, 0x6011] {
+                    object.extend(value.to_le_bytes());
+                }
+                object.extend([0u8; 16]);
+                stream.extend(record(0x005d, &object));
+            }
+            stream.extend(window2(0x00b6));
+            stream.extend(record(EOF, &[]));
+            two_tab_workbook(0, stream)
+        };
+        crate::rejection::take_best_effort();
+        let bytes = sheet(true);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut session = DirectSession::new(&cfb).unwrap();
+        // The frame is a form control: it is not drawn.
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [] as [(crate::rejection::BestEffort, &str); 0]
+        );
+        session.bootstrap().unwrap();
+        let projected = session.projected_sheet(1, "C").unwrap();
+        assert!(projected.worksheet.is_dialog_sheet);
+        assert!(projected.rows.is_empty());
+        assert!(projected.worksheet.shape_groups.is_empty());
+        let plain = session.projected_sheet(0, "S").unwrap();
+        assert!(!plain.worksheet.is_dialog_sheet);
+        // The flag alone leaves the worksheet the grid it stores.
+        let bytes = sheet(false);
+        let cfb = CompoundFile::open(&bytes).unwrap();
+        let mut session = DirectSession::new(&cfb).unwrap();
+        session.bootstrap().unwrap();
+        let projected = session.projected_sheet(1, "C").unwrap();
+        assert!(!projected.worksheet.is_dialog_sheet);
+        assert_eq!(projected.rows.len(), 1);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  bindMetafileFontDemand,
+  bindMetafileFontFamilies,
   getCachedBitmapByPath,
   getCachedDerivedBitmap,
   peekCachedBitmapByPath,
@@ -565,6 +567,128 @@ describe('getCachedBitmapByPath', () => {
     await Promise.resolve();
     expect(closes).toHaveLength(2);
     expect(closes.every((close) => close.mock.calls.length === 1)).toBe(true);
+  });
+
+  it('plays a metafile again once its owner binds other served faces', async () => {
+    const { create } = stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    const fetchImage = vi.fn(async () => new Blob([wmf as BlobPart], { type: 'image/wmf' }));
+    const path = 'word/media/served-text.wmf';
+    const draw = () => getCachedBitmapByPath(path, 'image/wmf', fetchImage, { widthPt: 50, heightPt: 25 });
+    const families = new Map([['brand', 'ooxml-font-source-1-0']]);
+    const first = await draw();
+    // Metafile text paints with the document's served faces: a raster played
+    // before they loaded never answers once they have, nor the reverse.
+    bindMetafileFontFamilies(fetchImage, { families, faces: [{}] });
+    const served = await draw();
+    expect(served).not.toBe(first);
+    // A later snapshot with the same faces keeps the raster; one more loaded
+    // face of an already mapped family (another subset) plays it again.
+    bindMetafileFontFamilies(fetchImage, { families: new Map(families), faces: [{}] });
+    await expect(draw()).resolves.toBe(served);
+    bindMetafileFontFamilies(fetchImage, { families, faces: [{}, {}] });
+    await expect(draw()).resolves.not.toBe(served);
+    bindMetafileFontFamilies(fetchImage, undefined);
+    await expect(draw()).resolves.toBe(first);
+    expect(create).toHaveBeenCalledTimes(3);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('runs the bound metafile font demand once per picture, before it plays with the answered faces', async () => {
+    const { create } = stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    // A metafile under a raster part name and type: the decoder sniffs it.
+    const fetchImage = vi.fn(async () => new Blob([wmf as BlobPart], { type: 'image/png' }));
+    const path = 'word/media/labelled-raster.png';
+    const families = new Map([['brand', 'ooxml-font-source-1-0']]);
+    const order: string[] = [];
+    const demand = vi.fn(async (bytes: Uint8Array) => {
+      order.push(`demand ${bytes.length}`);
+      return { families, faces: [{}] };
+    });
+    create.mockImplementation(async (source: { width: number; height: number }) => {
+      order.push('play');
+      return { width: source.width, height: source.height, close() {} } as unknown as ImageBitmap;
+    });
+    bindMetafileFontDemand(fetchImage, demand);
+    const draw = () => getCachedBitmapByPath(path, 'image/png', fetchImage, { widthPt: 50, heightPt: 25 });
+    const [first, second] = await Promise.all([draw(), draw()]);
+    expect(second).toBe(first);
+    expect(demand).toHaveBeenCalledTimes(1);
+    expect(demand.mock.calls[0]![0]).toEqual(wmf);
+    expect(order).toEqual([`demand ${wmf.length}`, 'play']);
+    // The answered snapshot is the owner's: a later draw keeps that raster.
+    bindMetafileFontDemand(fetchImage, undefined);
+    await expect(draw()).resolves.toBe(first);
+    bindMetafileFontFamilies(fetchImage, undefined);
+    await expect(draw()).resolves.not.toBe(first);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('reads metafile bytes for their font demand within the decode concurrency limit', async () => {
+    stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    let active = 0;
+    let peak = 0;
+    class SlowBlob extends Blob {
+      override async arrayBuffer(): Promise<ArrayBuffer> {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        return super.arrayBuffer();
+      }
+    }
+    const fetchImage = vi.fn(async () => new SlowBlob([wmf as BlobPart], { type: 'image/wmf' }));
+    const demand = vi.fn(async () => ({ families: new Map(), faces: [] }));
+    bindMetafileFontDemand(fetchImage, demand);
+    const paths = Array.from({ length: MAX_CONCURRENT_IMAGE_DECODES * 3 }, (_, index) => `word/media/slow${index}.wmf`);
+    await Promise.all(paths.map((path) => getCachedBitmapByPath(path, 'image/wmf', fetchImage, { widthPt: 50, heightPt: 25 })));
+    expect(demand).toHaveBeenCalledTimes(paths.length);
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThanOrEqual(MAX_CONCURRENT_IMAGE_DECODES);
+    bindMetafileFontDemand(fetchImage, undefined);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('runs the metafile font demand again after the owner\'s cache is dropped while it was pending', async () => {
+    stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    const fetchImage = vi.fn(async () => new Blob([wmf as BlobPart], { type: 'image/wmf' }));
+    const families = new Map([['brand', 'ooxml-font-source-1-0']]);
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const demand = vi.fn(async () => {
+      if (demand.mock.calls.length === 1) await pending;
+      return { families, faces: [{}] };
+    });
+    bindMetafileFontDemand(fetchImage, demand);
+    const path = 'word/media/dropped-while-pending.wmf';
+    const draw = () => getCachedBitmapByPath(path, 'image/wmf', fetchImage, { widthPt: 50, heightPt: 25 });
+    const stale = draw();
+    await vi.waitFor(() => expect(demand).toHaveBeenCalledTimes(1));
+    dropBitmapCacheByPath(fetchImage);
+    // The new generation runs its own demand and binds what it answers.
+    const fresh = await draw();
+    expect(demand).toHaveBeenCalledTimes(2);
+    release();
+    await expect(stale).rejects.toThrow();
+    await expect(draw()).resolves.toBe(fresh);
+    bindMetafileFontFamilies(fetchImage, undefined);
+    await expect(draw()).resolves.not.toBe(fresh);
+    bindMetafileFontDemand(fetchImage, undefined);
+    dropBitmapCacheByPath(fetchImage);
+  });
+
+  it('a failed metafile font demand keeps the faces already bound', async () => {
+    stubMetafileSurfaceCreation();
+    const wmf = buildMinimalWmf();
+    const fetchImage = vi.fn(async () => new Blob([wmf as BlobPart], { type: 'image/wmf' }));
+    bindMetafileFontDemand(fetchImage, () => Promise.reject(new Error('session released')));
+    await expect(getCachedBitmapByPath('word/media/failed-demand.wmf', 'image/wmf', fetchImage, { widthPt: 50, heightPt: 25 }))
+      .resolves.not.toBeNull();
+    bindMetafileFontDemand(fetchImage, undefined);
+    dropBitmapCacheByPath(fetchImage);
   });
 
   it('uses ordinary raster variants when PNG bytes are mislabeled as WMF', async () => {

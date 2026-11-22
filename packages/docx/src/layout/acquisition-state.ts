@@ -15,6 +15,16 @@ export const BODY_STORY_CONTEXT: StoryContext = Object.freeze({
   lineNumberingEligible: true,
 });
 
+/** The main body's root story position, which carries
+ * StoryContext.closingMarkHangAdmitted (as do header and footnote story roots,
+ * production-body-layout.ts layoutBodyStory). BODY_STORY_CONTEXT, the
+ * fallback for states without a story, never admits. */
+export const MAIN_BODY_STORY_CONTEXT: StoryContext = Object.freeze({
+  ...BODY_STORY_CONTEXT,
+  closingMarkHangAdmitted: true,
+  inlineObjectRunLeadingAdmitted: true,
+});
+
 type ParagraphContextState = Pick<
   BodyAcquisitionState,
   'layoutSettings' | 'sectionLayout' | 'acquisitionInputs'
@@ -31,7 +41,7 @@ type BodyAnchorFrameState = Pick<
   | 'marginBottom'
   | 'contentX'
   | 'contentW'
->;
+> & Partial<Pick<BodyAcquisitionState, 'sectionLayout'>>;
 
 /** Projects the body page, margin, and column reference frames without
  * crossing out of retained layout's canonical point coordinate space. */
@@ -39,7 +49,7 @@ export function bodyAnchorReferenceFrames(
   state: BodyAnchorFrameState,
 ): Readonly<Pick<
   AnchorReferenceFramesInput,
-  'page' | 'margin' | 'column' | 'pageParity'
+  'page' | 'margin' | 'column' | 'pageParity' | 'pageBandDistances'
 >> {
   const blockExtentPt = Math.max(
     0,
@@ -66,6 +76,10 @@ export function bodyAnchorReferenceFrames(
       heightPt: blockExtentPt,
     },
     pageParity: state.pageIndex % 2 === 0 ? 'odd' : 'even',
+    pageBandDistances: state.sectionLayout ? {
+      headerPt: state.sectionLayout.geometry.headerDistance,
+      footerPt: state.sectionLayout.geometry.footerDistance,
+    } : null,
   };
 }
 
@@ -85,12 +99,31 @@ function applyNumberingContext(
     authoredFirstIndentPt: paragraph.indentFirst,
     tabStops: paragraph.tabStops,
     defaultTabPt: state.defaultTabPt,
+    compat: state.layoutSettings.compat,
     service: state.layoutServices?.text,
   });
 }
 
+/** A body-level paragraph (a top-level or framed paragraph of its story)
+ * keeps the facts that decide its line grid (`word-header-footer-off-line-grid`):
+ * a header or footer story identity, and the header/footer hosting of a
+ * text-box story. Every other story position resolves as the body did
+ * before. */
+function bodyLevelStoryContext(storyContext: StoryContext | undefined): StoryContext {
+  if (storyContext?.story === 'header' || storyContext?.story === 'footer') {
+    return Object.freeze({
+      ...BODY_STORY_CONTEXT,
+      story: storyContext.story,
+      ...(storyContext.headerFooterHosted ? { headerFooterHosted: true as const } : {}),
+    });
+  }
+  return storyContext?.headerFooterHosted
+    ? Object.freeze({ ...BODY_STORY_CONTEXT, headerFooterHosted: true as const })
+    : BODY_STORY_CONTEXT;
+}
+
 export function resolveBodyParagraphLayoutContext(
-  state: ParagraphContextState,
+  state: ParagraphContextState & Partial<Pick<BodyAcquisitionState, 'storyContext'>>,
   paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
   return applyNumberingContext(
@@ -99,7 +132,10 @@ export function resolveBodyParagraphLayoutContext(
     resolveParagraphLayoutContext(
       state.layoutSettings,
       state.sectionLayout,
-      BODY_STORY_CONTEXT,
+      // A top-level paragraph keeps the main body's hang admission only
+      // when the state is the main body root itself (frame paragraphs
+      // reaching here stay outside the class by their framePr).
+      state.storyContext === MAIN_BODY_STORY_CONTEXT ? MAIN_BODY_STORY_CONTEXT : bodyLevelStoryContext(state.storyContext),
       paragraph,
     ),
   );
@@ -121,11 +157,15 @@ export function resolveStateParagraphLayoutContext(
   );
 }
 
-export function withTableCellStory(state: BodyAcquisitionState): BodyAcquisitionState {
+export function withTableCellStory(
+  state: BodyAcquisitionState,
+  cellFlowsHorizontally: boolean,
+): BodyAcquisitionState {
   return {
     ...state,
     storyContext: enterTableCellStoryContext(
       state.storyContext ?? BODY_STORY_CONTEXT,
+      cellFlowsHorizontally,
     ),
   };
 }

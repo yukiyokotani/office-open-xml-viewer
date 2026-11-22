@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   prepareFloatWrap,
   computePreparedLineFloatWindowWithDiagnostics,
+  LINE_SEARCH_Y_LIMIT_PT,
   type FloatRect,
 } from './float-wrap.js';
 import {
@@ -67,6 +68,24 @@ function denseStar(
     distTop: 0,
     distBottom: 0,
     paraId: 1,
+  };
+}
+
+/** Tight and through polygons step a line down by its height inside the
+ * line-search domain (WORD_TIGHT/THROUGH_WRAP_LINE_STEP_ADVANCE); the exact
+ * affine sweep and its threshold roots place lines beyond it. These sweep
+ * tests move their geometry there: T is a power of two past the domain limit,
+ * so every coordinate below 2T is a multiple of ULP_AT_T. */
+const T = 2 * LINE_SEARCH_Y_LIMIT_PT;
+const ULP_AT_T = T * Number.EPSILON;
+
+function translatedY(rect: FloatRect, dy: number): FloatRect {
+  return {
+    ...rect,
+    ...(rect.wrapPolygon ? { wrapPolygon: rect.wrapPolygon.map(({ xPt, yPt }) => ({ xPt, yPt: yPt + dy })) } : {}),
+    imageY: rect.imageY + dy,
+    yTop: rect.yTop + dy,
+    yBottom: rect.yBottom + dy,
   };
 }
 
@@ -623,7 +642,7 @@ describe('polygon line-window active sweep complexity', () => {
   });
 
   it('resumes at the first binary64 value above an exact threshold root', () => {
-    const prepared = prepareFloatWrap([{
+    const prepared = prepareFloatWrap([translatedY({
       kind: 'shape',
       mode: 'square',
       authoredWrap: 'through',
@@ -648,15 +667,18 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-    }]);
+    }, T)]);
 
     const { window } = computePreparedLineFloatWindowWithDiagnostics(
-      0, 6, 0.005, 0, 13, prepared, 0, 13,
+      T, 6, 0.005, 0, 13, prepared, 0, 13,
     );
 
-    expect(window.topY).toBe(2.307692307692308);
+    // The width threshold root is T + 30/13; the result is the first binary64
+    // value above it (offsets from T are exact multiples of ULP_AT_T).
+    expect((window.topY - T) * 13).toBeGreaterThan(30);
+    expect((window.topY - ULP_AT_T - T) * 13).toBeLessThanOrEqual(30);
 
-    const secondPrepared = prepareFloatWrap([{
+    const secondPrepared = prepareFloatWrap([translatedY({
       kind: 'shape',
       mode: 'square',
       authoredWrap: 'through',
@@ -681,16 +703,18 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-    }]);
+    }, T)]);
     const { window: secondWindow } = computePreparedLineFloatWindowWithDiagnostics(
-      0, 5, 0.005, 0, 11, secondPrepared, 0, 11,
+      T, 5, 0.005, 0, 11, secondPrepared, 0, 11,
     );
 
-    expect(secondWindow.topY).toBe(16.81818181818182);
-  });
+    // Root T + 185/11.
+    expect((secondWindow.topY - T) * 11).toBeGreaterThan(185);
+    expect((secondWindow.topY - ULP_AT_T - T) * 11).toBeLessThanOrEqual(185);
+      });
 
   it('rejects a candidate whose exact final gap is still below the threshold', () => {
-    const prepared = prepareFloatWrap([{
+    const prepared = prepareFloatWrap([translatedY({
       kind: 'shape',
       mode: 'square',
       authoredWrap: 'through',
@@ -715,10 +739,13 @@ describe('polygon line-window active sweep complexity', () => {
       distTop: 0,
       distBottom: 0,
       paraId: 1,
-    }]);
+    }, T)]);
 
+    // The start is the binary64 value just below the root T + 4/3, where the
+    // exact final gap is still below the threshold.
+    const below = T + Math.floor((4 / 3) / ULP_AT_T) * ULP_AT_T;
     const { window } = computePreparedLineFloatWindowWithDiagnostics(
-      1.3333333333333333,
+      below,
       1,
       0.0004,
       0,
@@ -728,7 +755,7 @@ describe('polygon line-window active sweep complexity', () => {
       3,
     );
 
-    expect(window.topY).toBe(1.3333333333333335);
+    expect(window.topY).toBe(below + ULP_AT_T);
   });
 
   it('retains a positive probe height that rounds away from the Number bottom', () => {
@@ -861,38 +888,38 @@ describe('polygon line-window active sweep complexity', () => {
       paraId: 1,
     });
     const prepared = prepareFloatWrap([
-      polygonFloat('left-root-boundary', [
+      translatedY(polygonFloat('left-root-boundary', [
         { xPt: 0, yPt: 0 },
         { xPt: 3, yPt: 9 },
         { xPt: 0, yPt: 9 },
-      ], 3),
-      polygonFloat('right-root-boundary', [
+      ], 3), T),
+      translatedY(polygonFloat('right-root-boundary', [
         { xPt: 0, yPt: 0 },
         { xPt: 20, yPt: 0 },
         { xPt: 20, yPt: 9 },
         { xPt: 12, yPt: 9 },
-      ], 20),
+      ], 20), T),
     ]);
 
     const { window } = computePreparedLineFloatWindowWithDiagnostics(
-      0, 1, 3, 0, 20, prepared, 0, 20,
+      T, 1, 3, 0, 20, prepared, 0, 20,
     );
 
-    expect(window.topY).toBe(2);
+    expect(window.topY).toBe(T + 2);
     expect(window.maxWidth).toBeLessThan(1);
   });
 
   it('compiles a dense self-intersecting star incrementally and queries adjacent boundaries', () => {
     const vertexCount = 31;
-    // Through wrap: a tight line advances in line-height steps instead of the
-    // contour sweep (word-tight-wrap-line-step-advance).
-    const prepared = prepareFloatWrap([denseStar(vertexCount, 15, 'through')]);
+    // Place the star outside the line-search domain so this contour sweep
+    // test remains independent of the paragraph-projected line-step policy.
+    const prepared = prepareFloatWrap([translatedY(denseStar(vertexCount, 15, 'through'), T)]);
 
     const { window, diagnostics } = computePreparedLineFloatWindowWithDiagnostics(
-      95, 195, 0.5, 0, 200, prepared,
+      T + 95, 195, 0.5, 0, 200, prepared,
     );
 
-    expect(window.topY).toBeGreaterThan(95);
+    expect(window.topY).toBeGreaterThan(T + 95);
     expect(window.maxWidth).toBeGreaterThanOrEqual(195);
     expect(diagnostics.compiledIntersectionCount)
       .toBeGreaterThanOrEqual(vertexCount * (vertexCount - 3) / 4);

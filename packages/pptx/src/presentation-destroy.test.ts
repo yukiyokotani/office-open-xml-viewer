@@ -1,4 +1,3 @@
-import { fontFiles, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import {
   WorkerBridge,
@@ -11,6 +10,9 @@ let { PptxPresentation } = await import('./presentation');
 let { registerEmbeddedFonts } = await import('@silurus/ooxml-core');
 import type { PptxPresentation as Presentation } from './presentation';
 let { loadEmbeddedFonts } = await import('./embedded-fonts');
+// Font sources must come from the module instance the presentation uses
+// (`fonts` accepts only that instance's factory results).
+let { fontFiles, googleFonts } = await import('@silurus/ooxml-core/internal/font-sources');
 import type { PptxEmbeddedFontRef } from './worker-protocol';
 
 /**
@@ -58,6 +60,7 @@ beforeEach(async () => {
   ({ PptxPresentation } = await import('./presentation'));
   ({ registerEmbeddedFonts } = await import('@silurus/ooxml-core'));
   ({ loadEmbeddedFonts } = await import('./embedded-fonts'));
+  ({ fontFiles, googleFonts } = await import('@silurus/ooxml-core/internal/font-sources'));
 });
 
 afterEach(() => {
@@ -87,7 +90,8 @@ function installFontFaceSet(): { added: FakeFace[] } {
   };
   G.FontFace = FakeFontFace;
   G.document = { fonts: set };
-  G.fetch = async () => ({ ok: true, text: async () => CSS });
+  // The stylesheet, and the face files the library fetches itself.
+  G.fetch = async (url: string) => ({ ok: true, status: 200, url, text: async () => CSS, arrayBuffer: async () => new Uint8Array(16).buffer });
   delete G.self;
   return { added };
 }
@@ -104,6 +108,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     instance._rawParts = new BoundedRawPartCache({ maxEntries: 2, maxBytes: 1024 });
     instance._googleFontFaces = [];
     instance._officeFontLoads = new Map();
+    instance._symbolSentinels = new Map();
     instance._embeddedFontFaces = [];
     instance._layoutWaiters = new Set();
     instance._layoutLifecycle = new ProgressiveLayoutLifecycle();
@@ -117,6 +122,16 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     pres.destroy();
     expect(worker.terminated).toBe(true);
     await expect(inFlight).rejects.toThrow(/terminated/i);
+  });
+
+  it('disposes the symbol oracle cache that render contexts may still hold', () => {
+    const { pres } = makePresentation();
+    const instance = pres as unknown as Record<string, unknown>;
+    const cache = { oracleFor: vi.fn(), dispose: vi.fn() };
+    instance._symbolFaces = cache;
+    pres.destroy();
+    expect(cache.dispose).toHaveBeenCalledTimes(1);
+    expect(instance._symbolFaces).not.toBe(cache);
   });
 
   it('is safe to call destroy() twice', () => {
@@ -278,7 +293,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
     G.Worker = SilentWorker;
     G.location = { href: 'http://localhost/' };
     installFontFaceSet();
-    const fetch = vi.fn(async () => ({ ok: true, text: async () => CSS }));
+    const fetch = vi.fn(async () => ({ ok: true, text: async () => CSS, arrayBuffer: async () => new Uint8Array(16).buffer }));
     G.fetch = fetch;
     vi.spyOn(
       PptxPresentation.prototype as unknown as {
@@ -364,7 +379,7 @@ describe('PptxPresentation.destroy() — rejects in-flight worker requests', () 
       await (pres as unknown as {
         _ensureFontSources(names: string[], facts: undefined, scalars: undefined): Promise<void>;
       })._ensureFontSources(['Arial'], undefined, undefined);
-      expect(added.map((face) => face.family)).toEqual(installed.length ? [] : ['Arial']);
+      expect(added).toHaveLength(installed.length ? 0 : 1);
       pres.destroy();
     }
   });
@@ -415,13 +430,17 @@ it.each(['ordinary', 'selected-source'] as const)('filters ordinary Window prelo
   G.Worker = SilentWorker;
   G.location = { href: 'http://localhost/' };
   const { added } = installFontFaceSet();
-  G.fetch = vi.fn(async () => ({ ok: true, text: async () => `
+  G.fetch = vi.fn(async (url: string) => ({ ok: true, status: 200, url, text: async () => `
     @font-face { font-family: Carlito; src: url(b.woff2); unicode-range: U+0042; }
     @font-face { font-family: Carlito; src: url(a.woff2); unicode-range: U+0041; }
-  ` }));
+  `, arrayBuffer: async () => new TextEncoder().encode(url).buffer }));
   const loads: string[] = [];
   G.FontFace = class {
-    constructor(public family: string, public source: string) {}
+    readonly source: string;
+    // A fetched subset is registered from its bytes (the fake body names it).
+    constructor(public family: string, source: string | ArrayBuffer) {
+      this.source = typeof source === 'string' ? source : new TextDecoder().decode(source);
+    }
     load() { loads.push(this.source); return Promise.resolve(this); }
   };
   vi.spyOn(PptxPresentation.prototype as unknown as {
@@ -441,7 +460,8 @@ it.each(['ordinary', 'selected-source'] as const)('filters ordinary Window prelo
   const presentation = await PptxPresentation.load(new ArrayBuffer(0), { fonts: [googleFonts()],
     ...(variant === 'selected-source' ? { legacyPpt: source } : {}),
   });
-  expect(added).toHaveLength(2);
+  // Only the subset the demanded scalars cover is fetched and registered.
+  expect(added).toHaveLength(1);
   // The family presence probe loads local() sources first; of the source
   // faces only the subset the demanded scalars cover loads.
   expect(loads.filter((source) => !source.startsWith('local('))).toEqual([expect.stringContaining('a.woff2')]);

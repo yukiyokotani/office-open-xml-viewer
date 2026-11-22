@@ -242,3 +242,27 @@ describe('secondary overlay axes', () => {
     expect(labels.some(label => Number(label) >= 30)).toBe(true);
   });
 });
+
+describe('smoothCurveExtent on a logarithmic axis beyond the double range', () => {
+  it('keeps both bounds positive and finite', () => {
+    const extent = smoothCurveExtent([[1e300, 1e-300, 1e-300, 1e300]], 10);
+    expect(extent).not.toBeNull();
+    const [lo, hi] = extent!;
+    expect(lo).toBeGreaterThan(0);
+    expect(lo).toBeLessThanOrEqual(1e-300);
+    expect(Number.isFinite(hi)).toBe(true);
+    expect(hi).toBeGreaterThan(9.99e299);
+  });
+
+  it('keeps an extent that rounds past the largest double finite', () => {
+    const extent = smoothCurveExtent([[Number.MAX_VALUE, Number.MAX_VALUE, Number.MAX_VALUE]], 2);
+    expect(extent).toEqual([Number.MAX_VALUE, Number.MAX_VALUE]);
+  });
+
+  it('keeps an overshooting peak near the largest double finite', () => {
+    const extent = smoothCurveExtent([[1e-300, 1e308, 1e308, 1e-300]], 10);
+    expect(extent).not.toBeNull();
+    expect(Number.isFinite(extent![1])).toBe(true);
+    expect(extent![1]).toBeGreaterThanOrEqual(1e308);
+  });
+});

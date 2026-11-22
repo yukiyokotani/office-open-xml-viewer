@@ -93,14 +93,24 @@ function installFontFaceSet(gate: Promise<void> = Promise.resolve(), missingLoca
   };
   G.FontFace = FakeFontFace;
   G.document = { fonts: set };
-  G.fetch = vi.fn(async () => { throw new Error('no network'); });
+  // Only the face file the library fetches itself is answered.
+  G.fetch = vi.fn(async (url: string) => {
+    if (!/\.woff2$/.test(url)) throw new Error('no network');
+    return { ok: true, status: 200, url, arrayBuffer: async () => new Uint8Array(16).buffer };
+  });
   delete G.self;
   return { added };
+}
+/** The faces other than the route sentinels every retained set registers for
+ * the symbol-font oracle (core route-sentinels.ts); a set's release removes
+ * those too, which the empty-set assertions check on `added` itself. */
+function authoredFaces(added: readonly FakeFace[]): FakeFace[] {
+  return added.filter((face) => !face.family.startsWith('__ooxml_route_sentinel_'));
 }
 /** An application font source serving Carlito for Calibri / Cambria. */
 const FONTS = [fontFiles({
   faces: [{ family: 'Carlito', url: 'https://fonts.example/carlito.woff2' }],
-  substitutes: OFFICE_FONT_SUBSTITUTIONS,
+  substitutions: OFFICE_FONT_SUBSTITUTIONS,
 })];
 const FONT_WORKBOOK = {
   styles: { fonts: [{ name: 'Calibri', bold: false, italic: false }], cellXfs: [], numFmts: [], dxfs: [] },
@@ -245,13 +255,13 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     const workbook = wb as unknown as XlsxWorkbook;
     await (workbook as unknown as FontSourceInternals).prepareFontSources(FONT_WORKBOOK, FONTS);
     await workbook[retainXlsxViewerFonts](G.document as Document);
-    expect(added.map((face) => face.family)).toEqual(['Carlito']);
+    expect(authoredFaces(added)).toHaveLength(1);
     wb.destroy();
     expect(added).toHaveLength(0);
     expect((wb as unknown as { retainedFontSets: Map<unknown, unknown> }).retainedFontSets.size).toBe(0);
   });
 
-  it('an in-flight destroy releases once and preserves another workbook holder', async () => {
+  it('an in-flight destroy releases once and preserves another workbook\'s faces', async () => {
     let open!: () => void;
     const { added } = installFontFaceSet(new Promise<void>((resolve) => { open = resolve; }), true);
     const first = makeWorkbook().wb as unknown as XlsxWorkbook;
@@ -262,21 +272,23 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
 
     const firstRetain = first[retainXlsxViewerFonts](targetDocument);
     const secondRetain = second[retainXlsxViewerFonts](targetDocument);
-    // Destroy while the shared face is still loading.
-    await vi.waitFor(() => expect(added).toHaveLength(1));
+    // Destroy while the faces are still loading. Each workbook registers its
+    // own face (under its private family); the destroyed one's goes.
+    await vi.waitFor(() => expect(authoredFaces(added)).toHaveLength(2));
     first.destroy();
     open();
     const [releaseFirst] = await Promise.all([firstRetain, secondRetain]);
     releaseFirst(); // stale viewer completion after workbook teardown: no-op
 
-    expect(added).toHaveLength(1);
+    expect(authoredFaces(added)).toHaveLength(1);
     second.destroy();
     expect(added).toHaveLength(0);
   });
 
-  it('releases the Office faces it loaded when the parallel font-source load rejects', async () => {
+  it('keeps the Office faces of a load whose font-source demand breaches a ceiling, and releases them', async () => {
     // Local Calibri is installed; 257 other authored families are not, which
-    // breaches the 256-family font-source ceiling.
+    // breaches the 256-family font-source ceiling: the families beyond it
+    // fail with a warning, and the load itself resolves.
     const { added } = installFontFaceSet(Promise.resolve(), (source) => !/calibri/i.test(source));
     const { wb } = makeWorkbook();
     const workbook = wb as unknown as XlsxWorkbook;
@@ -293,7 +305,10 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     };
     internals.officeFontRequests = [{ family: 'Calibri', weight: 400, style: 'normal' }];
     await internals.prepareFontSources(parsed, FONTS);
-    await expect(internals.retainFontsInSet((G.document as Document).fonts)).rejects.toMatchObject({ code: 'font-source-limit' });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const release = await internals.retainFontsInSet((G.document as Document).fonts);
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('families over the limit: 1 [Absent 256] (Font source limit exceeded (families)');
+    release();
     wb.destroy();
     expect(added).toHaveLength(0);
   });
@@ -312,7 +327,7 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
     // the viewer holds a separate reference to that same registry.
     await internals.retainFontsInSet(targetDocument.fonts);
     const releaseViewer = await workbook[retainXlsxViewerFonts](targetDocument);
-    expect(added).toHaveLength(0);
+    expect(authoredFaces(added)).toHaveLength(0);
     await internals.retainWorksheetOfficeFonts({
       rows: [],
       shapeGroups: [{ shapes: [{ text: {
@@ -324,9 +339,9 @@ describe('XlsxWorkbook.destroy() — rejects in-flight worker requests', () => {
 
     const retained = internals.retainedFontSets.get(targetDocument.fonts);
     expect(retained?.loaded.office.routes['meiryo ui:700:normal']).toBeDefined();
-    expect(added).toHaveLength(1);
+    expect(authoredFaces(added)).toHaveLength(1);
     releaseViewer();
-    expect(added).toHaveLength(1);
+    expect(authoredFaces(added)).toHaveLength(1);
     wb.destroy();
     expect(added).toHaveLength(0);
     expect(internals.retainedFontSets.size).toBe(0);

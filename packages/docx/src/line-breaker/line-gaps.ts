@@ -1,5 +1,5 @@
 import { enumerateGaps, type GapScanState, type LineGap, type DistributeOptions } from '@silurus/ooxml-core';
-import type { LayoutSeg } from './model.js';
+import type { LayoutSeg, LayoutTextSeg } from './model.js';
 
 /** Width authority is the breaker's advance or retained layout geometry, never
  * a font-name approximation. Opaque cells include tabs, inline objects and ruby;
@@ -142,6 +142,24 @@ export function lineGapModel(
   };
 }
 
+/** Shared first-follower boundary for collection and natural admission. */
+function candidateUnitStopsBefore(next: LayoutSeg, hasSeparator: boolean): boolean {
+  if (!('text' in next) || next.ruby || next.fitTextRegionIndex !== undefined
+    || (hasSeparator && /[^ ]/u.test(next.text) && !next.joinPrev && !next.hardJoinPrev)
+    // A WORD_EAST_ASIAN_AUTO_SPACE seam is a legal East Asian/Latin break
+    // (UAX #14) unless segmentation glued it.
+    || (next.autoSpaceBeforePt !== undefined && !next.joinPrev && !next.hardJoinPrev)) return true;
+  return false;
+}
+
+/** Natural admission only needs to know whether the first queued piece joins
+ * this unit. An included empty/SPACE piece already makes it non-singleton;
+ * do not skip ahead or allocate the complete unit merely to inspect its size. */
+export function candidateUnitIsSingleton(first: LayoutSeg, next: LayoutSeg | undefined): boolean {
+  if (!('text' in first) || first.ruby || first.fitTextRegionIndex !== undefined) return true;
+  return next === undefined || candidateUnitStopsBefore(next, first.text.endsWith(' '));
+}
+
 /** A complete next text unit, including its separator runs. Opaque cells are
  * indivisible units of their own. No following-word eligibility lookahead. */
 export function candidateUnit(first: LayoutSeg, queue: Iterable<LayoutSeg>): LayoutSeg[] {
@@ -149,13 +167,11 @@ export function candidateUnit(first: LayoutSeg, queue: Iterable<LayoutSeg>): Lay
   if (!('text' in first) || first.ruby || first.fitTextRegionIndex !== undefined) return segments;
   let hasSeparator = first.text.endsWith(' ');
   for (const next of queue) {
-    if (!('text' in next) || next.ruby || next.fitTextRegionIndex !== undefined
-      || (hasSeparator && /[^ ]/u.test(next.text) && !next.joinPrev && !next.hardJoinPrev)
-      // A WORD_EAST_ASIAN_AUTO_SPACE seam is a legal East Asian/Latin break
-      // (UAX #14) unless segmentation glued it.
-      || (next.autoSpaceBeforePt !== undefined && !next.joinPrev && !next.hardJoinPrev)) break;
+    if (candidateUnitStopsBefore(next, hasSeparator)) break;
     segments.push(next);
-    if (next.text.length > 0) hasSeparator = next.text.endsWith(' ');
+    // The shared stop predicate already excluded every non-text follower.
+    const nextText = (next as LayoutTextSeg).text;
+    if (nextText.length > 0) hasSeparator = nextText.endsWith(' ');
   }
   return segments;
 }

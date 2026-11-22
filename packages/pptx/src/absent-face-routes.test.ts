@@ -32,6 +32,7 @@ function owner() {
   value._destroyed = false;
   value._embeddedFontTuples = new Set();
   value._officeFontLoads = new Map();
+  (value as unknown as { _symbolSentinels: Map<unknown, unknown> })._symbolSentinels = new Map();
   return value;
 }
 

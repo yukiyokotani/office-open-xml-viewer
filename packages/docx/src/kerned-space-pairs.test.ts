@@ -1,3 +1,4 @@
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { layoutDocument } from './document-layout.js';
 import { createLayoutServices } from './layout-runtime.js';
@@ -92,6 +93,20 @@ const SPAN_TEXT = 'x A x A x B';
 const lastGlyphX = (line: { text: string; x: number }[]) => line.at(-1)!.x;
 
 describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
+  it('keeps a raw first box separate from its incoming pair during contraction admission', () => {
+    const result = lines(layout([run('x A x A beyond', { kerning: 2 })], 36, 15, 'distribute'));
+    expect(result[0]!.map(piece => piece.text).join('')).toBe('x A x A ');
+    // Natural visible width is 36.75: two incoming -0.75 seams and the
+    // authored A+space pair are charged once. The last A ends at the band.
+    const last = result[0]!.at(-1)!;
+    expect(last.x + SCALAR.A!).toBeCloseTo(36, 6);
+    expect(result[0]![1]!.x).toBeCloseTo(9 - .75 - 3 * (.75 / 8.25), 6);
+    // Refusal with a nonzero incoming seam requeues the same word at a fresh
+    // origin; that line must not keep the previous word's space+A pair.
+    const refused = lines(layout([run('x A x', { kerning: 2 })], 15, 15, 'distribute'));
+    expect(refused.map(line => line.map(piece => piece.text).join(''))).toEqual(['x ', 'A ', 'x']);
+    expect(refused[1]![0]!.x).toBe(0);
+  });
   it.each([undefined, 15])('charges the space+glyph pair across word pieces (mode %s)', (mode) => {
     const [line] = lines(layout([run(SPAN_TEXT, { kerning: 2 })], 400, mode));
     expect(line!.map(p => p.text).join('')).toBe(SPAN_TEXT);
@@ -191,7 +206,7 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     const intrinsic = measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
       { context: measure, fontFamilyClasses: {} }, {
         pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, compatibilityMode: 15,
+        documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
         layoutServices: createLayoutServices(doc, { measureContext: measure }),
       });
     expect(intrinsic.maxWidthPt).toBeCloseTo(6 + 3 + 4 + 3 + 6 - 0.5, 6);
@@ -227,7 +242,7 @@ describe('kerned U+0020 pairs (WORD_KERNED_SPACE_PAIRS)', () => {
     const { maxWidthPt } = measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
       { context: measure, fontFamilyClasses: {} }, {
         pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-        documentHasEastAsianText: false, compatibilityMode: 15,
+        documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
         layoutServices: createLayoutServices(doc, { measureContext: measure }),
       });
     const [bounded] = lines(layout(runs, 400, 15));
@@ -283,7 +298,7 @@ function maxContent(runs: DocxTextRun[]): number {
   return measureParagraphIntrinsicWidths(paragraph, INTRINSIC_CONTEXT, 400,
     { context: measure, fontFamilyClasses: {} }, {
       pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
-      documentHasEastAsianText: false, compatibilityMode: 15,
+      documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
       layoutServices: createLayoutServices(doc, { measureContext: measure }),
     }).maxWidthPt;
 }
@@ -297,3 +312,24 @@ const INTRINSIC_CONTEXT: ParagraphLayoutContext = {
   isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false, hasEastAsianText: false,
   kinsoku: { enabled: true, lineStartForbidden: new Set(), lineEndForbidden: new Set() }, defaultTabPt: 36,
 };
+
+describe('kerned slot-seam pair measurement work', () => {
+  it('measures a repeated slot-seam pair once per line-breaking pass', () => {
+    // Every U+2019 + U+0020 seam below is the same face and clusters, so a
+    // pass measures that pair once and reuses it at each later seam.
+    const seams = 12;
+    const text = Array.from({ length: seams }, () => 'x ’').join(' ') + ' x';
+    const ctx = context();
+    const measure = ctx.measureText.bind(ctx);
+    let pairProbes = 0;
+    ctx.measureText = (value: string) => {
+      if (value === '’ ') pairProbes += 1;
+      return measure(value);
+    };
+    const doc = modelOf(paragraphOf([run(text, { kerning: 2 })]), 2000, 15);
+    const result = lines(layoutDocument(doc, createLayoutServices(doc, { measureContext: ctx })));
+    expect(result).toHaveLength(1);
+    expect(pairProbes).toBeGreaterThan(0);
+    expect(pairProbes).toBeLessThan(seams);
+  });
+});

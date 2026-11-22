@@ -6,7 +6,7 @@ import { hasCJKBreakOpportunity } from './text-runs.js';
 
 export interface AtomicTextMeasurement {
   readonly baseRtl: boolean;
-  /** WORD_RTL_JUSTIFIED_VISIBLE_FIT: right-to-left lines fit their visible prefix. */
+  /** WORD_RTL_LINE_END_SPACE_HANGS: right-to-left lines fit their visible prefix. */
   readonly lineFit?: Readonly<{ rtlVisiblePrefix: boolean }>;
   readonly reservePrefixWork: (utf16Units: number) => void;
   readonly segAdvance: (segment: LayoutTextSeg) => number;
@@ -14,9 +14,25 @@ export interface AtomicTextMeasurement {
 }
 
 /** Whether line fitting charges a line-end U+0020: right-to-left lines do
- * (library containment policy) unless WORD_RTL_JUSTIFIED_VISIBLE_FIT applies. */
+ * (library containment policy) unless WORD_RTL_LINE_END_SPACE_HANGS applies. */
 export function lineEndSpaceCharged(state: Pick<AtomicTextMeasurement, 'baseRtl' | 'lineFit'>): boolean {
   return state.baseRtl && state.lineFit?.rtlVisiblePrefix !== true;
+}
+
+/** WORD_RTL_LINE_END_SPACE_HANGS: on a right-to-left line, the line-end space
+ * of the last item hangs only when that item is drawn at a line extreme on the
+ * side where it draws the space: leftmost when drawn right to left, rightmost
+ * when drawn left to right (after a tab or right-to-left text, a left-to-right
+ * run's space sits inside the line). `order` is the line's visual order with
+ * the item last in logical order, as line planning resolves it
+ * (resolveRtlLineEndSpaces walks the same extremes). */
+export function rtlLineEndSpaceHangsAt(
+  order: Readonly<{ order: readonly number[]; rtl: readonly boolean[] }>,
+  index: number,
+): boolean {
+  const visual = order.order;
+  if (visual.length === 0) return true;
+  return order.rtl[index] === true ? visual[0] === index : visual.at(-1) === index;
 }
 
 /** Advance of the U+0020 suffix that ends `items` across members (a run of

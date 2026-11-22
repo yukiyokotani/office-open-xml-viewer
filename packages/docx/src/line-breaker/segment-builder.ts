@@ -1,3 +1,7 @@
+import { compatOf } from '../layout/compat-profile.js';
+import { retainClosingPairAdvances } from './closing-pair-advance.js';
+import { ownSourceCursor } from './source-cursor.js';
+import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
@@ -11,7 +15,9 @@ import {
   graphemeClusterOffsets,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  type SymbolTextSegment,
 } from '@silurus/ooxml-core';
+import type { SymbolTextRequest } from '../layout/text.js';
 import { groupFitTextRegions, type FitTextRun } from '../fit-text.js';
 import { mathFallbackText } from '../layout/math-fallback-text.js';
 import type { FontResolution } from '../layout/font-service.js';
@@ -39,8 +45,10 @@ import {
   wordBalancedConsecutiveSpaceCellApplies,
   wordBalancedLinesAndCharsGridDeltaFactor,
   wordExternalLinkSyntaxBreakOffsets,
+  wordInlineDrawingTurnsFootprint,
+  wordInlinePictureClipsToLine,
 } from '../layout/line-compatibility.js';
-import { type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
+import { type LayoutImageSeg, type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
 import { assignEastAsianAutoSpace } from './east-asian-autospace.js';
 import {
@@ -64,6 +72,8 @@ import {
   selectResourceMetric,
   allowsReferenceFontMetric,
   selectedFontLineMetric,
+  fontLineBoxProjection,
+  projectedResourceMetric,
   type MetricTupleIndex,
 } from './font-metrics.js';
 
@@ -133,6 +143,51 @@ export interface SegmentBuildContext {
   ) => number | undefined;
 }
 
+/** The §17.3.2.26 slots a run's text is shaped with (as pushSegmentPiece
+ * requests them), for judging its symbol-encoded text. */
+function runSymbolRequest(
+  run: ParagraphTextBearingRun & Readonly<{ fontFamily?: string | null }>,
+  cs: boolean,
+): Omit<SymbolTextRequest, 'text'> {
+  const ascii = run.fontFamily ?? null;
+  return {
+    fonts: run.fontSlots?.direct ?? {
+      ascii,
+      highAnsi: run.fontFamilyHighAnsi ?? ascii,
+      eastAsia: run.fontFamilyEastAsia ?? ascii,
+      complexScript: run.fontFamilyCs ?? ascii,
+    },
+    themeFonts: run.fontSlots?.theme,
+    themeFontPresence: run.fontSlots?.themePresent,
+    weight: (cs ? run.boldCs ?? false : run.bold) ? 700 : 400,
+    style: (cs ? run.italicCs ?? false : run.italic) ? 'italic' : 'normal',
+    complexScript: cs,
+    fontHint: run.fontHint,
+    eastAsiaLanguage: run.langEastAsia,
+  };
+}
+
+/** Whether any slot of the run names a symbol-encoded font. */
+function runHasSymbolSlot(request: Omit<SymbolTextRequest, 'text'>): boolean {
+  return [request.fonts, request.themeFonts].some((slots) => slots
+    && [slots.ascii, slots.highAnsi, slots.eastAsia, slots.complexScript].some(isSymbolFontFamily));
+}
+
+/** Symbol-encoded text (core symbol-font.ts) as the faces this layout's text
+ * service selects for each scalar's slot draw it, judged in its measuring
+ * context: codes a selected symbol face owns stay, the rest convert to
+ * Unicode. Without layout services no face can be judged: `family` converts
+ * through the 0.89 subset. */
+function symbolSegments(
+  environment: LineLayoutEnvironment,
+  text: string,
+  family: string | null | undefined,
+  request: Omit<SymbolTextRequest, 'text'>,
+): readonly SymbolTextSegment[] {
+  return environment.layoutServices?.text.symbolText?.({ ...request, text })
+    ?? symbolTextToUnicodeSegments(text, family);
+}
+
 /** ECMA-376 §17.3.2.5/§17.3.2.33 change displayed case, not run ownership.
  * §17.3.3.30 symbol normalization may also expand a scalar to a surrogate
  * pair. Scope and offsets use the complete display string after both changes;
@@ -146,12 +201,28 @@ function transformedRunText(
 ): string {
   const r: ParagraphTextBearingRun = run;
   const display = run.allCaps || run.smallCaps ? text.toUpperCase() : text;
-  const map = (text: string, family: string | null | undefined) => isSymbolFontFamily(family)
-    ? symbolTextToUnicodeSegments(text, family).map((part) => part.text).join('') : text;
-  if (r.rtl || r.cs) return map(display, r.fontFamilyCs ?? run.fontFamily);
+  const cs = r.rtl === true || r.cs === true;
+  const request = runSymbolRequest(r, cs);
+  const symbolic = environment.layoutServices?.text.symbolText ? runHasSymbolSlot(request) : undefined;
+  const map = (text: string, family: string | null | undefined) => (symbolic ?? isSymbolFontFamily(family))
+    ? symbolSegments(environment, text, family, request).map((part) => part.text).join('') : text;
+  if (cs) return map(display, r.fontFamilyCs ?? run.fontFamily);
   if (environment.layoutServices?.text) return map(display, run.fontFamily);
   return splitByEastAsia(display).map((part) => map(part.text,
     part.ea ? r.fontFamilyEastAsia ?? run.fontFamily : run.fontFamily)).join('');
+}
+
+/** The run context of a piece that is its own complete display run: a metric
+ * probe, an optional-hyphen glyph, a note label or a field result. The piece
+ * is emitted through the run's case and §17.3.3.30 symbol transforms, so its
+ * context must be that same transformed text, never the authored string: a
+ * symbol face that lacks a code (Symbol 'x', '-') converts it (#2192). */
+function ownRunContext(
+  text: string,
+  run: Extract<ParagraphLayoutSource['runs'][number], { type: 'text' | 'field' }>,
+  environment: LineLayoutEnvironment,
+): Readonly<{ text: string; offset: number }> {
+  return { text: transformedRunText(text, run, environment), offset: 0 };
 }
 
 export function appendTextPiece(
@@ -343,24 +414,25 @@ export function appendTextPiece(
       compressCharacterWhitespace,
       mappedSymbolUnicode,
     );
+  // With a text service every slot is judged as the shaper selects it;
+  // without one, only the emitted family (the 0.89 rule).
+  const symbolicRun = (cs: boolean): boolean | undefined => environment.layoutServices?.text.symbolText
+    ? runHasSymbolSlot(runSymbolRequest(r, cs)) : undefined;
   const emit = (word: string, slot: 'cs' | 'ea' | 'latin') => {
     const cs = slot === 'cs';
     const fontFamily =
       slot === 'cs' ? csFontFamily : slot === 'ea' ? eaFontFamily : base.fontFamily;
-    // ECMA-376 §17.3.2.26 + §17.3.3.30: a run whose rFonts axis is Symbol or
-    // Wingdings stores glyphs as the FONT's own (private) code points — Word
-    // commonly in the PUA (U+F020–U+F0FF). Those render as tofu in any
-    // fallback face, so normalize each character to its Unicode equivalent
-    // (core `symbolTextToUnicodeSegments`, the same table the list marker uses
-    // via `symbolFontToUnicode`). The string is split at mapped/unmapped
-    // boundaries: a MAPPED run is drawn in a generic fallback (fontFamily=null
-    // → sans tail with the dingbat glyphs; keeping the symbol family would let
-    // an installed Symbol/Wingdings re-interpret the Unicode code point as the
-    // WRONG glyph), while an UNMAPPED run keeps the symbol family so a host
-    // that ships Symbol/Wingdings still draws its native glyph. Done once at
-    // build time so measure==draw (the seg.text is never transformed later).
-    if (isSymbolFontFamily(fontFamily)) {
-      for (const part of symbolTextToUnicodeSegments(word, fontFamily)) {
+    // ECMA-376 §17.3.2.26 + §17.3.3.30: a run whose rFonts axis is a symbol
+    // font (Symbol, Wingdings, Wingdings 2/3, Webdings) stores the FONT's own
+    // codes, bare or F0-shifted into the PUA. The text service judges the
+    // face that slot selects in this layout's measuring context (core
+    // symbol-face.ts): codes that face draws stay in it; the others become
+    // Unicode and are drawn in a generic fallback (fontFamily=null): keeping
+    // the symbol family would let its symbol cmap re-read the Unicode code
+    // point as the WRONG glyph. Done once at build time so measure==draw (the
+    // seg.text is never transformed later).
+    if (symbolicRun(cs) ?? isSymbolFontFamily(fontFamily)) {
+      for (const part of symbolSegments(environment, word, fontFamily, runSymbolRequest(r, cs))) {
         pushSeg(part.text, cs, part.mapped ? null : fontFamily, undefined, false, part.mapped);
       }
       return;
@@ -379,7 +451,7 @@ export function appendTextPiece(
       // front of the service-backed script splitter as well as the legacy
       // path; otherwise a PUA code point such as Symbol F0B0 reaches Canvas
       // unchanged and renders as tofu.
-      if (isSymbolFontFamily(base.fontFamily)) {
+      if (symbolicRun(false) ?? isSymbolFontFamily(base.fontFamily)) {
         emit(slice, 'latin');
         return;
       }
@@ -599,7 +671,7 @@ export function finalizeBuiltSegments(
     groupStart = groupEnd;
   }
 
-  if (environment.balanceSingleByteDoubleByteWidth) {
+  if (compatOf(environment).balanceSingleByteDoubleByteWidth) {
     // ECMA-376 §17.15.3.3 normatively requests a 1:2 SBCS/DBCS width balance,
     // but does not define how a proportional inter-word separator becomes a
     // fixed-pitch half-width cell. The registered Word observation limits that
@@ -834,12 +906,113 @@ export function finalizeBuiltSegments(
   }
 
   retainHorizontalPunctuationInkClearance(segs);
+  retainClosingPairAdvances(runs, environment, segs);
+}
+
+/** Paragraphs LIBREOFFICE_FONT_LINE_BOX leaves on Word's projection, as
+ * before the rule: text in a vertical text box (only horizontal lines were
+ * measured). */
+export function keepsWordLineBoxes(runs: readonly ParagraphLayoutRun[]): boolean {
+  return runs.some((run) => (run as { textBoxVertical?: boolean }).textBoxVertical === true);
+}
+
+type ImageSegmentSource = Readonly<{
+  imagePath: string;
+  mimeType: string;
+  widthPt: number;
+  heightPt: number;
+  anchor?: boolean;
+  inlineEffectExtent?: readonly number[];
+  inlinePositionPt?: number;
+  inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  anchorXPt?: number;
+  anchorYPt?: number;
+  anchorXFromMargin?: boolean;
+  anchorYFromPara?: boolean;
+  colorReplaceFrom?: string | null;
+  duotone?: unknown;
+  alpha?: number;
+  srcRect?: unknown;
+}>;
+
+/** The line segment of a picture, available or not (§20.4.2.8 inline,
+ * §20.4.2.3 anchor). */
+function imageSegment(img: ImageSegmentSource, environment: LineLayoutEnvironment): LayoutImageSeg {
+  return {
+    imagePath: img.imagePath,
+    mimeType: img.mimeType,
+    ...(img.anchor ? {} : { inlinePicture: true as const }),
+    ...(!img.anchor && img.inlinePositionPt ? { positionPt: img.inlinePositionPt } : {}),
+    ...(img.anchor ? { widthPt: img.widthPt, heightPt: img.heightPt } : inlineEffectExtentBox(
+      img.inlineEffectExtent, img.widthPt, img.heightPt, environment.uprightResourceOrientation,
+      wordInlineDrawingTurnsFootprint(drawingMlInlinePictureTurn(img)),
+    )),
+    ...(!img.anchor && wordInlinePictureClipsToLine(drawingMlInlinePictureTurn(img))
+      ? { clipToLine: true as const } : {}),
+    rotation: img.rotation,
+    flipH: img.flipH,
+    flipV: img.flipV,
+    anchor: img.anchor ?? false,
+    anchorXPt: img.anchorXPt ?? 0,
+    anchorYPt: img.anchorYPt ?? 0,
+    anchorXFromMargin: img.anchorXFromMargin ?? false,
+    anchorYFromPara: img.anchorYFromPara ?? false,
+    colorReplaceFrom: img.colorReplaceFrom ?? undefined,
+    duotone: img.duotone,
+    alpha: img.alpha,
+    srcRect: img.srcRect ?? undefined,
+    measuredWidth: 0,
+  } as LayoutImageSeg;
+}
+
+/** The line segment of a chart, available or not. ECMA-376 §21.2: flowed as a
+ * picture box of the `<wp:extent>` natural size, the same LayoutImageSeg shape
+ * (empty `imagePath`/`mimeType` sentinels so `'imagePath' in seg` routes it
+ * through the image measurement/split path) with only a chart resource marker;
+ * the model payload remains owned by the paint resource registry. A
+ * `<wp:anchor>` chart (§20.4.2.3) carries `anchor: true` and its parsed
+ * page-offset fields, exactly like an anchor ImageRun. */
+function chartSegment(
+  chartRun: Readonly<{
+    widthPt: number; heightPt: number; anchor?: boolean; anchorXPt?: number; anchorYPt?: number;
+    anchorXFromMargin?: boolean; anchorYFromPara?: boolean; resourceKey?: string;
+  }>,
+  environment: LineLayoutEnvironment,
+): LayoutImageSeg {
+  return {
+    imagePath: '',
+    mimeType: '',
+    // Preserve the established wp:extent chart allocation. Office-produced
+    // Pareto controls do not reserve this padding; other chart classes
+    // remain unmeasured, so chart effect-extent reservation is unsupported
+    // rather than inferred from the picture/shape rule.
+    // An inline chart is counter-turned like a picture in a vertical
+    // page frame, so its logical box swaps its extent (inlineEffectExtentBox).
+    ...(!chartRun.anchor && environment.uprightResourceOrientation !== undefined
+      ? { widthPt: chartRun.heightPt, heightPt: chartRun.widthPt }
+      : { widthPt: chartRun.widthPt, heightPt: chartRun.heightPt }),
+    anchor: chartRun.anchor ?? false,
+    anchorXPt: chartRun.anchorXPt ?? 0,
+    anchorYPt: chartRun.anchorYPt ?? 0,
+    anchorXFromMargin: chartRun.anchorXFromMargin ?? false,
+    anchorYFromPara: chartRun.anchorYFromPara ?? false,
+    chart: true,
+    ...(chartRun.resourceKey === undefined ? {} : { chartResourceKey: chartRun.resourceKey }),
+    measuredWidth: 0,
+  };
 }
 
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
 ): LayoutSeg[] {
+  if (environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.wordLineBoxes === undefined
+    && keepsWordLineBoxes(runs)) {
+    environment = { ...environment, wordLineBoxes: true };
+  }
   const segs: LayoutSeg[] = [];
   const selectedFontMetrics =
     environment.layoutServices?.text.fontMetrics ??
@@ -932,7 +1105,9 @@ export function buildSegments(
   assignEastAsianAutoSpace(segs, environment);
   withdrawMixedSpaceEligibilityOutsideScope(segs);
 
-  return segs;
+  const nativeSourceText = environment.nativeUnitMinimumBandPt === undefined
+    ? undefined : eligibleNativeSourceText(runs);
+  return ownSourceCursor(acquireNativeSourceUnits(segs, nativeSourceText, environment), nativeSourceText);
 }
 
 // UAX #29 GB9 extenders and ZWJ can hide a base character's adjacency.
@@ -1071,7 +1246,7 @@ function pushSegmentPiece(
   if (!substituteContext) scopeContext.cursor += text.length;
 
   if (
-    environment.balanceSingleByteDoubleByteWidth &&
+    compatOf(environment).balanceSingleByteDoubleByteWidth &&
     !cs &&
     text.includes('\u3000') &&
     [...text].some((character) => character !== '\u3000')
@@ -1449,12 +1624,17 @@ function emitResolvedTextSegment(
     lineMetric: familyLineMetric } = selectedFontLineMetric(resolvedSpan?.font, localFont, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), resolvedSpan?.font),
-      environment.layoutServices ? { text: environment.layoutServices.text, probe: text } : undefined);
+      environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
+        ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true));
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
-        ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution));
+        ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
+      fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -1463,7 +1643,7 @@ function emitResolvedTextSegment(
   // adjustLineHeightInTable is enabled. An inherited eastAsia font axis
   // alone must not raise a Latin-only non-grid line's normal-line floor.
   const useFeEastAsianMetric =
-    environment.useFeLayout &&
+    compatOf(environment).useFeLayout &&
     environment.lineGridActive &&
     (r.fontHint === 'eastAsia' || Boolean(resolvedEaFloorFamily?.trim()));
   const resolvedScript =
@@ -1476,12 +1656,7 @@ function emitResolvedTextSegment(
   // remain unexplained and do not justify a broader allowance or lower floor.
   const latinSpaceCompressionEligible =
     environment.characterSpacingControl === 'compressPunctuation' &&
-    wordLatinInterwordXavgFloorApplies({
-      compatibilityMode: environment.compatibilityMode,
-      lineWrapLikeWord6: environment.lineWrapLikeWord6,
-      enableOpenTypeFeatures: environment.enableOpenTypeFeatures,
-      hasExplicitKerningThreshold: effectiveKerningThreshold != null,
-    }) &&
+    wordLatinInterwordXavgFloorApplies(compatOf(environment), effectiveKerningThreshold != null) &&
     // The xAvg floor was measured for horizontal Latin words; upright
     // vertical runs and tate-chu-yoko use distinct advance allocation.
     environment.verticalCJK !== true &&
@@ -1499,10 +1674,10 @@ function emitResolvedTextSegment(
   // OpenType features and explicit kerning thresholds do not gate it.
   const mixedSpaceCompressionEligible =
     wordCompressedSpaceLineFitApplies(
-      environment.compatibilityMode,
+      compatOf(environment),
       environment.characterSpacingControl,
     ) &&
-    environment.lineWrapLikeWord6 !== true &&
+    !compatOf(environment).lineWrapLikeWord6 &&
     environment.verticalCJK !== true &&
     documentCharacterCompressionApplies &&
     (resolvedScript === 'ascii' || resolvedScript === 'highAnsi') &&
@@ -1513,7 +1688,7 @@ function emitResolvedTextSegment(
   const mixedSpaceAverageWidthRatio = mixedSpaceCompressionEligible
     ? latinSpaceAverageWidthRatio ?? selectedAverageWidth(resolvedSpan?.font, text)
     : undefined;
-  const widthBalanceGridDeltaFactor = environment.balanceSingleByteDoubleByteWidth
+  const widthBalanceGridDeltaFactor = compatOf(environment).balanceSingleByteDoubleByteWidth
     ? wordBalancedLinesAndCharsGridDeltaFactor(text, resolvedScript)
     : undefined;
   segs.push({
@@ -1661,6 +1836,104 @@ function emitResolvedTextSegment(
   emissionState.gluePending = false;
 }
 
+/** ECMA-376 §20.4.2.6: an inline object's line box is its extent widened by
+ * `wp:effectExtent` on every edge (Word #2063 controls: pictures and shapes;
+ * the advance gains left + right, the line gains top + bottom). The edges are
+ * physical: a picture or chart that a vertical section keeps upright maps
+ * them onto the logical line axes (shapes and placeholders turn with the line) (clockwise: logical left/top/right/bottom = physical
+ * top/right/bottom/left; counter-clockwise: bottom/left/top/right). Signed
+ * values (ST_Coordinate) apply as authored; the box never goes below zero.
+ *
+ * `turnedFootprint` (WORD_INLINE_DRAWING_TURNED_FOOTPRINT) lays the object
+ * out in its quarter-turned base box, height x width, before the
+ * effect edges apply. The object still paints at its authored size, centred
+ * in that footprint so its rotation about the centre fills it; the returned
+ * `effectExtent` is therefore the object's inset in the box, not the authored
+ * edges alone. */
+function inlineEffectExtentBox(
+  extent: readonly number[] | undefined,
+  widthPt: number,
+  heightPt: number,
+  orientation?: import('../layout/types.js').UprightResourceOrientation,
+  turnedFootprint = false,
+): {
+  widthPt: number;
+  heightPt: number;
+  effectExtent?: readonly [number, number, number, number];
+  objectSizePt?: readonly [number, number];
+} {
+  // A counter-turned (upright) object in a vertical page frame keeps its
+  // §20.4.2.7 wp:extent on the physical page: its physical height runs along
+  // the line and its physical width across it, so the logical box swaps the
+  // two (`word-vertical-inline-picture-upright-extent`).
+  if (orientation !== undefined) [widthPt, heightPt] = [heightPt, widthPt];
+  const authored = extent && extent.length === 4 && extent.some((edge) => Number.isFinite(edge) && edge !== 0);
+  if (!authored && !turnedFootprint) return { widthPt, heightPt };
+  const [l, t, r, b] = authored
+    ? extent.map((edge) => (Number.isFinite(edge) ? edge : 0)) as [number, number, number, number]
+    : [0, 0, 0, 0];
+  const logical: [number, number, number, number] = orientation === 'upright-physical'
+    ? [t, r, b, l]
+    : orientation === 'upright-physical-counter-clockwise'
+      ? [b, l, t, r]
+      : [l, t, r, b];
+  // A quarter turn keeps the centre, so the centring is the same in the
+  // physical and the logical frame.
+  const insetX = turnedFootprint ? (heightPt - widthPt) / 2 : 0;
+  const insetY = turnedFootprint ? (widthPt - heightPt) / 2 : 0;
+  const [left, top, right, bottom] = logical;
+  return {
+    widthPt: Math.max(0, widthPt + left + right + 2 * insetX),
+    heightPt: Math.max(0, heightPt + top + bottom + 2 * insetY),
+    effectExtent: [left + insetX, top + insetY, right + insetX, bottom + insetY],
+    objectSizePt: [widthPt, heightPt],
+  };
+}
+
+/** Own clockwise a:xfrm rotation (degrees) of a DrawingML inline picture. A
+ * VML picture (v:imagedata, no DrawingML origin) reports none: the
+ * WORD_INLINE_DRAWING_TURNED_FOOTPRINT and WORD_INLINE_ROTATED_PICTURE_LINE_CLIP
+ * controls are DrawingML only. */
+function drawingMlInlinePictureTurn(
+  run: Partial<Pick<import('../layout/text.js').ParagraphImageRun, 'inlineObjectOrigin' | 'rotation'>>,
+): number | undefined {
+  return run.inlineObjectOrigin === 'drawingml' ? run.rotation : undefined;
+}
+
+/** Own clockwise rotation (degrees) of an inline DrawingML shape or group:
+ * a group's grpSpPr xfrm, else a DrawingML shape's xfrm. A VML inline shape
+ * reports none (WORD_INLINE_DRAWING_TURNED_FOOTPRINT is unmeasured there). */
+function inlineShapeTurn(
+  run: Partial<Pick<import('../layout/text.js').ParagraphShapeRun, 'inlineGroupRotation' | 'inlineObjectOrigin' | 'rotation'>>,
+): number | undefined {
+  return run.inlineGroupRotation ?? (run.inlineObjectOrigin === 'drawingml' ? run.rotation : undefined);
+}
+
+/** LIBREOFFICE_FONT_LINE_BOX sides of a tab's own face (its run's ascii
+ * slot), so a line holding only tabs keeps that face's box. Empty when no
+ * geometry of the face is admitted: the tab then keeps the synthetic box. */
+function tabFaceLineBox(
+  run: DocxTextRun,
+  environment: LineLayoutEnvironment,
+  selectedMetric: SegmentBuildContext['selectedMetric'],
+): Partial<Pick<import('./model.js').LayoutTabSeg, 'textOwnedLineBox' | 'lineBoxAscentRatio' | 'lineBoxDescentRatio'>> {
+  const service = environment.layoutServices?.text;
+  const weight = run.bold ? 700 : 400;
+  const style = run.italic ? 'italic' as const : 'normal' as const;
+  const selected = service?.resolve({
+    text: 'x',
+    fonts: { ascii: run.fontFamily, highAnsi: run.fontFamily, eastAsia: run.fontFamilyEastAsia, complexScript: run.fontFamily },
+    slot: 'ascii', weight, style,
+  });
+  if (!selected) return {};
+  const { lineMetric } = selectedFontLineMetric(selected, selectedMetric(selected, 'x'), true,
+    allowsReferenceFontMetric(indexedFontMetrics(service?.fontMetrics ?? service?.localMetrics ?? {}), selected),
+    undefined, fontLineBoxProjection(service, false));
+  return lineMetric?.designAscentRatio != null && lineMetric.designDescentRatio != null
+    ? { textOwnedLineBox: true, lineBoxAscentRatio: lineMetric.designAscentRatio, lineBoxDescentRatio: lineMetric.designDescentRatio }
+    : {};
+}
+
 function appendRunsToSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
@@ -1704,13 +1977,23 @@ function appendRunsToSegments(
         // either neighbor. Its empty source marker contributes no geometry
         // unless the breaker chooses this authored boundary.
         appendTextPiece(segmentBuildContext, '-', t, t.vertAlign ?? null, runIndex,
-          { text: '-', offset: 0 });
+          ownRunContext('-', t, environment));
         for (let index = emittedStart; index < segs.length; index += 1) {
           const glyph = segs[index];
           if (!('text' in glyph)) throw new Error('An optional hyphen lost its text authority');
+          // The glyph's '-' acquisition belongs to the frozen conditional
+          // glyph only. The empty source marker keeps an empty request of
+          // the same run (as the metric probes below do), so any joined-unit
+          // measurement of the unselected marker acquires zero advance
+          // instead of a request that contradicts its retained text (#2193).
           segs[index] = { ...glyph, text: '', metricOnly: true,
             optionalHyphen: Object.freeze({ ...glyph }), measuredWidth: 0,
-            sourceRunIndex: runIndex };
+            sourceRunIndex: runIndex,
+            ...(glyph.textShapeRequest ? {
+              nativeLevelUnit: undefined,
+              nativeVisiblePrefix: undefined,
+              textShapeRequest: Object.freeze(independentTextShapeRequest(glyph.textShapeRequest, '')),
+            } : {}) };
         }
         continue;
       }
@@ -1724,9 +2007,9 @@ function appendRunsToSegments(
         // points are not East Asian, so an East Asian slot alone is not used.
         // The run context is the transformed display probe (caps/small caps
         // or symbol mapping), exactly as for any other text piece.
-        const probe = transformedRunText('x', t, environment);
-        appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex,
-          { text: probe, offset: 0 });
+        const probeContext = ownRunContext('x', t, environment);
+        const probe = probeContext.text;
+        appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex, probeContext);
         for (let index = emittedStart; index < segs.length; index += 1) {
           const segment = segs[index];
           if (!('text' in segment)) throw new Error('A separator metric probe lost its text authority');
@@ -1737,6 +2020,8 @@ function appendRunsToSegments(
           segment.metricProbeText = probe;
           segment.sourceRunIndex = runIndex;
           if (segment.textShapeRequest) {
+            segment.nativeLevelUnit = undefined;
+            segment.nativeVisiblePrefix = undefined;
             segment.textShapeRequest = Object.freeze(independentTextShapeRequest(segment.textShapeRequest, ''));
           }
         }
@@ -1765,8 +2050,8 @@ function appendRunsToSegments(
           // As for an empty/anchor-only mark, a bounded Latin probe resolves
           // the four font slots and selected-face metrics through the ordinary
           // text service. Discard its ink/text, never its font authority.
-          appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex,
-            { text: 'x', offset: 0 });
+          const probeContext = ownRunContext('x', t, environment);
+          appendTextPiece(segmentBuildContext, 'x', t, t.vertAlign ?? null, runIndex, probeContext);
           for (let index = emittedStart; index < segs.length; index += 1) {
             const segment = segs[index];
             if (!('text' in segment)) throw new Error('A note metric probe lost its text authority');
@@ -1776,9 +2061,13 @@ function appendRunsToSegments(
             // metric, so the host's vertical box comes from its painting face.
             // Every present face (embedded, local, substitute, CSS, font source)
             // keeps its established metric-only behaviour.
-            if (segment.fontSource === 'native' && segment.fontInstalledFamily !== true) segment.metricProbeText = 'x';
+            if (segment.fontSource === 'native' && segment.fontInstalledFamily !== true) {
+              segment.metricProbeText = probeContext.text;
+            }
             segment.sourceRunIndex = runIndex;
             if (segment.textShapeRequest) {
+              segment.nativeLevelUnit = undefined;
+              segment.nativeVisiblePrefix = undefined;
               segment.textShapeRequest = Object.freeze(independentTextShapeRequest(segment.textShapeRequest, ''));
             }
           }
@@ -1802,7 +2091,7 @@ function appendRunsToSegments(
             t,
             t.vertAlign ?? null,
             runIndex,
-            { text: transformedRunText(label, t, environment), offset: 0 },
+            ownRunContext(label, t, environment),
             0,
             joinFromPreviousNoBreakHyphen,
           );
@@ -1836,64 +2125,26 @@ function appendRunsToSegments(
             isTab: true,
             fontSize: t.fontSize,
             measuredWidth: 0,
+            // LIBREOFFICE_FONT_LINE_BOX: a tab portion takes its own face's
+            // box, not the synthetic em box.
+            ...(environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.lineGridActive !== true
+              && environment.verticalCJK !== true && environment.wordLineBoxes !== true
+              ? tabFaceLineBox(t, environment, selectedMetric) : {}),
             bold: t.bold,
             italic: t.italic,
             sourceRunIndex: runIndex,
             ...(sequence ? { sourceTextOffset: displayOffset - 1 } : {}),
             ...(tabListLabel !== undefined ? { listLabel: tabListLabel } : {}),
+            // WORD_TAB_DISPLACED_READING_FRAME
+            ...(compatOf(environment).tabDisplacedReadingFrame
+              ? { displacedFloatTabFrame: true } : {}),
           });
         }
       }
     } else if (run.type === 'image') {
-      const img = run;
-      segs.push({
-        imagePath: img.imagePath,
-        mimeType: img.mimeType,
-        ...(img.anchor ? {} : { inlinePicture: true as const }),
-        widthPt: img.widthPt,
-        heightPt: img.heightPt,
-        rotation: img.rotation,
-        flipH: img.flipH,
-        flipV: img.flipV,
-        anchor: img.anchor ?? false,
-        anchorXPt: img.anchorXPt ?? 0,
-        anchorYPt: img.anchorYPt ?? 0,
-        anchorXFromMargin: img.anchorXFromMargin ?? false,
-        anchorYFromPara: img.anchorYFromPara ?? false,
-        colorReplaceFrom: img.colorReplaceFrom,
-        duotone: img.duotone,
-        alpha: img.alpha,
-        srcRect: img.srcRect ?? undefined,
-        measuredWidth: 0,
-        ...listLabelOf(img),
-      });
+      segs.push({ ...imageSegment(run, environment), ...listLabelOf(run) });
     } else if (run.type === 'chart') {
-      // ECMA-376 §21.2 chart. Flow it as a picture box of the `<wp:extent>`
-      // natural size: the same LayoutImageSeg shape (empty `imagePath`/
-      // `mimeType` sentinels so `'imagePath' in seg` routes it through the image
-      // measurement/split path) with only a chart resource marker; the model
-      // payload remains owned by the paint resource registry.
-      //
-      // A `<wp:anchor>` (floating) chart (§20.4.2.3) carries `anchor: true` and
-      // its parsed page-offset fields, exactly like an anchor ImageRun: the
-      // measure pass zeroes an anchor seg's width (it is not part of the inline
-      // flow) and anchor acquisition retains it at the resolved absolute box.
-      const chartRun = run;
-      segs.push({
-        imagePath: '',
-        mimeType: '',
-        widthPt: chartRun.widthPt,
-        heightPt: chartRun.heightPt,
-        anchor: chartRun.anchor ?? false,
-        anchorXPt: chartRun.anchorXPt ?? 0,
-        anchorYPt: chartRun.anchorYPt ?? 0,
-        anchorXFromMargin: chartRun.anchorXFromMargin ?? false,
-        anchorYFromPara: chartRun.anchorYFromPara ?? false,
-        chart: true,
-        chartResourceKey: (chartRun as Partial<import('../layout/text.js').ParagraphChartRun>)
-          .resourceKey,
-        measuredWidth: 0,
-      });
+      segs.push(chartSegment(run, environment));
     } else if (run.type === 'shape' && run.inline === true) {
       // `wp:inline` hosts arbitrary DrawingML, including WPS shapes (§20.4.2.8).
       // Reserve its extent in the same line-breaking path as an inline picture;
@@ -1902,33 +2153,45 @@ function appendRunsToSegments(
       segs.push({
         imagePath: '',
         mimeType: '',
-        widthPt: run.widthPt,
-        heightPt: run.heightPt,
         anchor: false,
         anchorXPt: 0,
         anchorYPt: 0,
         anchorXFromMargin: false,
         anchorYFromPara: false,
         inlineShape: true,
+        inlinePicture: true,
+        ...((run as Partial<import('../layout/text.js').ParagraphShapeRun>).inlinePositionPt
+          ? { positionPt: (run as Partial<import('../layout/text.js').ParagraphShapeRun>).inlinePositionPt } : {}),
+        // An inline shape is not counter-turned in a vertical section, so its
+        // effect edges stay on the object's own (logical) edges. A DrawingML
+        // shape turns by its own xfrm, a group by its grpSpPr xfrm (its
+        // children carry the composed transform already).
+        ...inlineEffectExtentBox(run.inlineEffectExtent, run.widthPt, run.heightPt, undefined,
+          wordInlineDrawingTurnsFootprint(inlineShapeTurn(
+            run as Partial<import('../layout/text.js').ParagraphShapeRun>,
+          ))),
         ...(run.inlineOffsetXPt ? { inlineOffsetXPt: run.inlineOffsetXPt } : {}),
         ...(run.inlineOffsetYPt ? { inlineOffsetYPt: run.inlineOffsetYPt } : {}),
         measuredWidth: 0,
       });
     } else if (run.type === 'unavailableDrawing') {
-      const acquiredAnchor =
-        'anchorAcquisitionInput' in run ? run.anchorAcquisitionInput : undefined;
+      // A placeholder is built as the picture or chart it stands for (same
+      // segment kind, box, position and leading metadata); availability only
+      // changes what is painted.
+      const anchored = 'anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined;
       segs.push({
-        imagePath: '',
-        mimeType: '',
-        widthPt: run.widthPt,
-        heightPt: run.heightPt,
-        anchor: acquiredAnchor !== undefined,
-        anchorXPt: 0,
-        anchorYPt: 0,
-        anchorXFromMargin: false,
-        anchorYFromPara: false,
+        ...(run.resourceKind === 'chart'
+          ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
+          : imageSegment({
+              imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
+              ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
+              ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
+              ...(run.rotation ? { rotation: run.rotation } : {}),
+              ...(run.flipH ? { flipH: true } : {}),
+              ...(run.flipV ? { flipV: true } : {}),
+              inlineObjectOrigin: 'drawingml',
+            }, environment)),
         unavailableResourceKind: run.resourceKind,
-        measuredWidth: 0,
       });
     } else if (run.type === 'break') {
       if (run.breakType === 'line') {
@@ -1947,7 +2210,7 @@ function appendRunsToSegments(
           f,
           f.vertAlign,
           runIndex,
-          { text: transformedRunText(text, f, environment), offset: 0 },
+          ownRunContext(text, f, environment),
           undefined,
           joinFromPreviousNoBreakHyphen,
         );
@@ -2014,8 +2277,11 @@ function appendRunsToSegments(
       // The mark hosting a floating anchor participates in the same natural
       // atLeast line box as a visible text line.
       const naturalMetricAllowed = environment.lineSpacing?.rule !== 'exact';
-      const resourceMetric =
-        naturalMetricAllowed || localFont?.designAscentRatio == null ? localFont : undefined;
+      const resourceMetric = naturalMetricAllowed || localFont?.designAscentRatio == null
+        ? projectedResourceMetric(localFont,
+          fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true))
+        : undefined;
       const referenceMetric =
         naturalMetricAllowed && !resourceMetric && mayUseAuthoredReferenceVerticalMetric(selected)
           && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
@@ -2023,7 +2289,9 @@ function appendRunsToSegments(
           // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
           // spans and paragraph marks only; an anchor host is outside its
           // evidence, so only an exact catalogued tuple lends its geometry.
-          ? referenceFontLineMetrics(selected.requestedFamily, weight, style)
+          ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
+            fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+        environment.verticalCJK === true || environment.wordLineBoxes === true))
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({
@@ -2090,7 +2358,7 @@ function appendRunsToSegments(
             const marker = sequence.optionalHyphens[markerIndex++]!;
             const glyphs: LayoutSeg[] = [];
             appendTextPiece({ ...segmentBuildContext, segs: glyphs }, '-', marker.run,
-              marker.run.vertAlign ?? null, marker.runIndex, { text: '-', offset: 0 });
+              marker.run.vertAlign ?? null, marker.runIndex, ownRunContext('-', marker.run, environment));
             if (glyphs.length !== 1 || !('text' in glyphs[0]!)) {
               throw new Error('An optional hyphen lost its single conditional glyph');
             }

@@ -2,7 +2,7 @@
 
 use super::{payload, ModelBudget};
 use crate::doc::{
-    table::{cell_text_flow, Color, PreferredIndent, PreferredWidth, Properties},
+    table::{cell_text_flow, PreferredIndent, PreferredWidth, Properties},
     table_structure::{
         self, Assembler, FrameKey, LogicalTable, Payload, PlannedRow, RawEvent, RawTable,
     },
@@ -21,6 +21,8 @@ pub(super) enum Block {
     Table(Box<DocTable>),
     PageBreak {
         same_paragraph_as_previous: Option<bool>,
+        /// §17.3.1.23 pageBreakBefore carried before a leading column break.
+        page_break_before: bool,
     },
     ColumnBreak,
 }
@@ -145,10 +147,10 @@ fn project_table(
     remaining: &std::cell::Cell<usize>,
 ) -> Result<DocTable, String> {
     let first = &plan.rows[0].source;
-    if first.shading.is_some() {
-        return Err(unsupported(
-            "direct DOC model cannot retain table-level shading",
-        ));
+    if plan.rows.iter().any(|row| row.source.shading.is_some()) {
+        // sprmTSetShdTable shades the table itself, which Word paints only
+        // between spaced cells; the model shades cells.
+        crate::rejection::skipped("Word table-level shading");
     }
     let (tblp_pr, overlap) = first.position.direct();
     // [MS-DOC] 2.6.3/2.7.13: nondefault position or wrapping properties make
@@ -196,11 +198,7 @@ fn project_table(
         charge_cell(remaining, n)
     })?;
     for (row_index, planned) in plan.rows.into_iter().enumerate() {
-        if planned.source.shading.is_some() {
-            return Err(unsupported(
-                "direct DOC model cannot retain row table-property shading",
-            ));
-        }
+        let mut grid_column = planned.grid_before;
         check_row_preferences(&planned, leading_ordinary_table || centered_acquired_table)?;
         let mut cells = Vec::new();
         reserve(&mut cells, planned.cells.len(), &mut |n| {
@@ -208,32 +206,19 @@ fn project_table(
         })?;
         for cell in planned.cells {
             let source = &cell.source;
-            let facts = source.shading.as_ref().map(|s| s.direct_facts());
-            let background = match facts {
+            // The one color Word paints (`Shading::direct_fill`). A hatch
+            // pattern has none and stays unsupported.
+            let background = match source.shading.as_ref().map(|s| s.direct_fill()) {
                 None => None,
-                Some(f) if f.pattern == "clear" => {
-                    source.shading.as_ref().and_then(|s| s.direct_background())
-                }
-                Some(f) if f.pattern == "nil" => None,
-                Some(f) if f.pattern == "solid" => match f.foreground {
-                    Color::Rgb([r, g, b]) => Some(format!("{r:02x}{g:02x}{b:02x}")),
-                    Color::Auto => {
-                        return Err(unsupported(
-                            "direct DOC model cannot resolve automatic solid cell shading",
-                        ));
-                    }
-                },
-                Some(_) => {
+                Some(Some(fill)) => fill,
+                Some(None) => {
                     return Err(unsupported(
-                        "direct DOC model cannot retain patterned cell shading",
+                        "direct DOC model cannot retain hatched cell shading",
                     ));
                 }
             };
-            if source.flags & ((1 << 12) | (1 << 14)) != 0 {
-                return Err(unsupported(
-                    "direct DOC model cannot retain cell fit/hide facts",
-                ));
-            }
+            let cell_grid_column = grid_column;
+            grid_column += cell.grid_span;
             // [MS-DOC] 2.9.305 diagonal sides 0x10 (top left to bottom right)
             // and 0x20 (top right to bottom left) are ECMA-376 §17.4.73 tl2br
             // and §17.4.79 tr2bl. A cleared (none/Nil) diagonal is absence.
@@ -305,11 +290,13 @@ fn project_table(
                     .iter()
                     .any(|element| matches!(element, CellElement::Table(_)))
             {
-                // The shared renderer keeps a rotated cell holding a nested
-                // table horizontal; projecting it would misdisplay.
-                return Err(unsupported(
-                    "direct DOC model cannot display rotated cells containing tables",
-                ));
+                // The shared renderer keeps a table nested in a rotated cell
+                // horizontal, as it does for a DOCX; Word rotates it with
+                // the cell's text.
+                crate::rejection::approximated(
+                    "table nested in a rotated Word cell stays horizontal",
+                    (),
+                );
             }
             let fallback = |side: usize| match side {
                 0 => Some(if row_index == 0 { 0 } else { 4 }),
@@ -331,6 +318,34 @@ fn project_table(
             let margins = std::array::from_fn::<_, 4, _>(|s| {
                 source.margins[s].unwrap_or(planned.source.margins[s])
             });
+            if source.flags & (1 << 12) != 0 {
+                // MS-DOC 2.9.317 TCGRF.fFitText (ECMA-376 17.4.68
+                // tcFitText): the text of the cell is spaced to fill its
+                // width. The model fits text per run region (17.3.2.14
+                // fitText): each paragraph of the cell becomes one region
+                // as wide as the cell between its margins (Word control:
+                // the fitted line spans the cell's text area).
+                let width_twips = col_widths
+                    .iter()
+                    .skip(cell_grid_column)
+                    .take(cell.grid_span)
+                    .sum::<f64>()
+                    * 20.0
+                    - f64::from(margins[1])
+                    - f64::from(margins[3]);
+                if width_twips > 0.0 {
+                    crate::rejection::approximated(
+                        "Word cell FitText as one fitted run region per paragraph",
+                        (),
+                    );
+                    fit_cell_text(
+                        &mut content,
+                        width_twips,
+                        (sequence, row_index, cell.source_index),
+                        remaining,
+                    )?;
+                }
+            }
             cells.push(DocTableCell {
                 content,
                 col_span: cell.grid_span as u32,
@@ -372,7 +387,9 @@ fn project_table(
                     margins: Some(margin_wire(margins)),
                 },
                 text_direction: text_direction.map(str::to_owned),
-                hide_mark: source.hide_mark,
+                // TCGRF.fHideMark (TC80) and sprmTFHideMark state the same
+                // fact (ECMA-376 17.4.21).
+                hide_mark: source.hide_mark || source.flags & (1 << 14) != 0,
             });
         }
         let height = planned.source.height;
@@ -391,6 +408,7 @@ fn project_table(
             .into(),
             is_header: planned.is_header,
             cant_split: planned.source.cant_split,
+            cuts_in_place: false,
             table_row_layout: TableRowLayoutAcquisitionWire {
                 height: (height != 0).then(|| TableRowHeightAcquisitionWire {
                     value: Some(height.abs().to_string()),
@@ -550,7 +568,8 @@ fn homogeneous_cell_frame(raw: &RawTable<Blocks>) -> Option<Box<docx_model::Fram
 /// geometry and absent or agreeing absolute width preferences. AutoFit retains its
 /// existing shared solver: cancellation of uniform O holds for its final width
 /// as well. Mixed translations, row parts, competing preferences and discarded
-/// horizontal continuations need a separate ownership proof and stay refused.
+/// horizontal continuations have no such proof; their rows keep their acquired
+/// origin as the nearest placement (`check_row_preferences`).
 fn centered_acquired_geometry(plan: &LogicalTable<Blocks>) -> bool {
     let first = &plan.rows[0].source;
     let Some(position) = first.position.direct().0 else {
@@ -613,14 +632,15 @@ fn check_row_preferences(
     {
         // MS-DOC 2.6.3/2.9.321 specify acquired logical row geometry;
         // 2.9.102 defines a separate preference. Retaining O rather than P is
-        // the bounded direct-projection policy documented on PreferredIndent,
-        // not a normative P/O precedence claim. Only ordinary leading main-
-        // story, depth-one RTL tables and the bounded whole-frame centered
-        // profile above use that policy through bidiVisual. Other placement
-        // classes retain the exact-equality fallback.
-        return Err(unsupported(
+        // the direct-projection policy documented on PreferredIndent, not a
+        // normative P/O precedence claim. Ordinary leading main-story,
+        // depth-one RTL tables and the whole-frame centered profile above
+        // follow it through bidiVisual; every other placement class keeps the
+        // acquired O as the nearest placement.
+        crate::rejection::approximated(
             "direct DOC model cannot place a right-to-left table with a preferred indent",
-        ));
+            (),
+        );
     }
     // [MS-DOC] 2.6.3 sprmTWidthBefore/sprmTWidthAfter are the preferred widths
     // of the same leading/trailing row parts whose physical widths the grid
@@ -675,6 +695,34 @@ fn margin_wire(v: [u16; 4]) -> TableMarginAcquisitionWire {
         end: None,
     }
 }
+/// Make every paragraph directly in the cell one fitText region of `width`
+/// twips. A run with a region of its own keeps it.
+fn fit_cell_text(
+    content: &mut [CellElement],
+    width: f64,
+    (table, row, cell): (usize, usize, usize),
+    remaining: &std::cell::Cell<usize>,
+) -> Result<(), String> {
+    for (index, element) in content.iter_mut().enumerate() {
+        let CellElement::Paragraph(paragraph) = element else {
+            continue;
+        };
+        let id = format!("cell:{table}:{row}:{cell}:{index}");
+        for run in &mut paragraph.runs {
+            let docx_model::DocRun::Text(run) = run else {
+                continue;
+            };
+            if run.fit_text_id.is_some() {
+                continue;
+            }
+            charge_cell(remaining, id.len())?;
+            run.fit_text_val = Some(width);
+            run.fit_text_id = Some(id.clone());
+        }
+    }
+    Ok(())
+}
+
 fn charge_cell(remaining: &std::cell::Cell<usize>, n: usize) -> Result<(), String> {
     remaining.set(remaining.get().checked_sub(n).ok_or("OUTPUT_TOO_LARGE")?);
     Ok(())
@@ -783,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn differing_rtl_preference_requires_main_story_top_level_owner() {
+    fn differing_rtl_preference_outside_the_leading_owner_keeps_the_acquired_origin() {
         let project = |main_story: bool, nested: bool, preferred: i16| -> Result<Blocks, String> {
             let mut sequence = 0;
             let mut writer = Writer::with_positioned_tables(&mut sequence, main_story);
@@ -831,10 +879,24 @@ mod tests {
             writer.finish(&mut budget)
         };
         assert!(project(true, false, 109).is_ok());
+        // Another story or a nested table keeps the acquired origin: a
+        // differing preference projects as the agreeing one does.
         for (main_story, nested) in [(false, false), (true, true)] {
-            assert!(project(main_story, nested, 0).is_ok());
-            let error = project(main_story, nested, 109).err().unwrap();
-            assert!(error.contains("right-to-left"), "{error}");
+            let table = |blocks: Blocks| match blocks.0.into_iter().next() {
+                Some(Block::Table(table)) => serde_json::to_value(table).unwrap(),
+                _ => panic!("table"),
+            };
+            let agreeing = table(project(main_story, nested, 0).unwrap());
+            crate::rejection::take_best_effort();
+            let differing = table(project(main_story, nested, 109).unwrap());
+            assert_eq!(differing, agreeing);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "direct DOC model cannot place a right-to-left table with a preferred indent"
+                )]
+            );
         }
     }
 
@@ -931,12 +993,24 @@ mod tests {
                 );
             }
         }
-        // Different owners, translations, alignment or competing width
-        // preferences have no centered homogeneous admission proof.
         assert!(project(200, 120, true, 7).is_ok());
-        for variant in 1..=6 {
+        // Outside the main story the position itself is refused.
+        assert!(project(200, 120, true, 1)
+            .err()
+            .unwrap()
+            .contains("outside the main story"));
+        // Differing owners, translations, alignment or competing width
+        // preferences have no centered homogeneous proof: each row keeps its
+        // acquired origin as the nearest placement.
+        for variant in 2..=6 {
+            crate::rejection::take_best_effort();
+            let blocks = project(200, 120, true, variant).unwrap();
+            assert!(matches!(&blocks.0[0], Block::Table(table) if table.bidi_visual == Some(true)));
             assert!(
-                project(200, 120, true, variant).is_err(),
+                crate::rejection::take_best_effort().contains(&(
+                    crate::rejection::BestEffort::Approximated,
+                    "direct DOC model cannot place a right-to-left table with a preferred indent"
+                )),
                 "variant {variant}"
             );
         }
@@ -975,7 +1049,7 @@ mod tests {
         assert!(table.table_layout.outer_edge_indent);
     }
     #[test]
-    fn tcgrf_text_flow_projects_and_rotated_cells_with_nested_tables_fail_closed() {
+    fn tcgrf_text_flow_projects_and_rotated_cells_keep_nested_tables() {
         // [MS-DOC] 2.9.317 TCGRF textFlow authored by a TC80 (grpfTFbtlr).
         let mut end = row(1, &[1000]);
         end.row.cells[0].flags |= 3 << 2;
@@ -1028,12 +1102,28 @@ mod tests {
         writer
             .push(cell(1), '\u{7}', paragraph("a"), &mut unframed, &mut budget)
             .unwrap();
-        let error = writer
+        crate::rejection::take_best_effort();
+        writer
             .push(end, '\u{7}', Blocks::default(), &mut unframed, &mut budget)
-            .and_then(|_| writer.finish(&mut budget).map(|_| ()))
-            .err()
             .unwrap();
-        assert!(error.contains("rotated cells containing tables"), "{error}");
+        let blocks = writer.finish(&mut budget).unwrap();
+        // The nested table stays in its rotated cell.
+        let Block::Table(table) = &blocks.0[0] else {
+            panic!()
+        };
+        let cell = &table.rows[0].cells[0];
+        assert!(cell.text_direction.is_some());
+        assert!(cell
+            .content
+            .iter()
+            .any(|element| matches!(element, CellElement::Table(_))));
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Approximated,
+                "table nested in a rotated Word cell stays horizontal"
+            )]
+        );
     }
     #[test]
     fn cell_diagonals_project_and_merged_cell_diagonals_fail_closed() {
@@ -1254,6 +1344,88 @@ mod tests {
             };
             assert_eq!(table.rows[0].cells[0].no_wrap, Some(true));
         }
+    }
+
+    #[test]
+    fn fit_text_cells_fit_each_paragraph_to_the_cell_text_area() {
+        let mut end = row(1, &[2000, 1000]);
+        // MS-DOC 2.6.3 sprmTFitText on the first cell; TCGRF.fHideMark
+        // (bit 14) on the second.
+        end.row.apply(0xf636, &[0, 1, 1]).unwrap();
+        end.row.cells[1].flags |= 1 << 14;
+        for side in [1, 3] {
+            end.row.cells[0].margins[side] = Some(100);
+        }
+        // A table-level shading.
+        end.row
+            .apply(0xd660, &[10, 0, 0, 0, 0xff, 1, 2, 3, 0, 0, 0])
+            .unwrap();
+        let mut sequence = 0;
+        let mut writer = Writer::new(&mut sequence);
+        let mut budget = ModelBudget::new(1_000_000);
+        let mut content = paragraph("fit");
+        content.0.extend(paragraph("this").0);
+        writer
+            .push(cell(1), '\u{7}', content, &mut unframed, &mut budget)
+            .unwrap();
+        writer
+            .push(
+                cell(1),
+                '\u{7}',
+                paragraph("plain"),
+                &mut unframed,
+                &mut budget,
+            )
+            .unwrap();
+        writer
+            .push(end, '\u{7}', Blocks::default(), &mut unframed, &mut budget)
+            .unwrap();
+        crate::rejection::take_best_effort();
+        let body = writer.finish(&mut budget).unwrap();
+        let Block::Table(table) = &body.0[0] else {
+            panic!()
+        };
+        let regions = |cell: &DocTableCell| -> Vec<(Option<f64>, Option<String>)> {
+            cell.content
+                .iter()
+                .map(|element| {
+                    let CellElement::Paragraph(paragraph) = element else {
+                        panic!()
+                    };
+                    let docx_model::DocRun::Text(run) = &paragraph.runs[0] else {
+                        panic!()
+                    };
+                    (run.fit_text_val, run.fit_text_id.clone())
+                })
+                .collect()
+        };
+        let cells = &table.rows[0].cells;
+        // 2000 twips less the 100-twip side margins, one region a paragraph.
+        assert_eq!(
+            regions(&cells[0]),
+            [
+                (Some(1800.0), Some("cell:0:0:0:0".into())),
+                (Some(1800.0), Some("cell:0:0:0:1".into())),
+            ]
+        );
+        assert_eq!(regions(&cells[1]), [(None, None)]);
+        assert!(!cells[0].hide_mark);
+        assert!(cells[1].hide_mark);
+        // The table-level shading shades no cell.
+        assert_eq!(cells[0].background, None);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [
+                (
+                    crate::rejection::BestEffort::Skipped,
+                    "Word table-level shading"
+                ),
+                (
+                    crate::rejection::BestEffort::Approximated,
+                    "Word cell FitText as one fitted run region per paragraph"
+                ),
+            ]
+        );
     }
 
     #[test]

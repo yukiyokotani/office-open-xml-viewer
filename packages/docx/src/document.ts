@@ -1,10 +1,15 @@
 import { measureHostFontLines, loadDocxOfficeFontFallbacks as loadOfficeFontFallbacks } from './host-font-line-metrics.js';
+import { measureServedFaceLines, prepareServedFaceLines } from './served-face-lines.js';
+import { documentRoutedFontFamilies } from './layout/production-services.js';
 import { recordResourceDiagnostics, resourceDiagnosticsOf } from './resource-diagnostics.js';
 import type { DocxDiagnostic } from './types.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/docx_parser_bg.wasm?url';
+import { realmBaseUrl } from '@silurus/ooxml-core/internal/bundled-asset-url';
 import {
+  bindMetafileFontDemand,
+  bindMetafileFontFamilies,
   activeFontSet,
   unloadOfficeFontFallbacks,
   releaseOwnedBitmap,
@@ -49,13 +54,15 @@ import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.
 import { mainThreadFallbackWarning } from './main-thread-fallback.js';
 import { admitDocxNativeRouteLines, measureDocxNativeRouteLines } from './native-route-line-metrics.js';
 import { buildBookmarkPageMap } from './bookmark-nav';
-import { completeDocxFontPresence, declaredFontSubstitutions, docxFontFamilyPlan, docxOfficeFontFallbackRequests, type DocxOfficeFontPresence } from './font-plan.js';
-import { chartFontSubstitutions, FontResolverBridgeHost, normalizeFontOptions, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
+import type { DocxOfficeFontPresence } from './font-demand-plan.js';
+import { chartFontSubstitutions, FontResolverBridge, normalizeFontOptions, optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import {
   attachDocumentLayoutRuntime,
   documentLayoutRuntimeOf,
   layoutVariantStoreOf,
+  textAdvanceLookupOf,
 } from './layout/runtime-state.js';
 import {
   type LayoutSourceStore,
@@ -228,6 +235,14 @@ export interface LoadOptions extends CoreLoadOptions {
    * metadata for whichever one the load chose. In worker mode the pagination
    * stays in the render worker, so the opening pages arrive without a blank
    * wait AND the remaining layout never competes for main-thread frames.
+   *
+   * Pages shown before layout completes are provisional and can differ from the
+   * final layout: page breaks may move, and content can occasionally overlap
+   * (for example body text running into a footer taller than the bottom
+   * margin). `DocxViewer` and `DocxScrollViewer` redraw every page when layout
+   * completes; callers of {@link DocxDocument.renderPage} own their canvases
+   * and must render again after {@link onLayoutComplete} or
+   * {@link DocxDocument.waitUntilLayoutComplete}.
    *
    * Off by default: `load()` resolving before the document is fully laid out is
    * a behaviour change existing callers should opt into.
@@ -482,7 +497,7 @@ export class DocxDocument {
   /** Worker mode: runs this document's `fontResolver` functions for the
    *  worker's font-source session (core `resolver-bridge-host.ts`); disposed
    *  in {@link destroy}, which aborts every in-flight resolver call. */
-  private _fontResolverBridge: FontResolverBridgeHost | null = null;
+  private _fontResolverBridge: FontResolverBridge | null = null;
   /** The unscoped substitutions this document's font sources loaded,
    *  painted by chart text (ChartModel.fontSubstitutions). */
   private _chartFontSubstitutions: Readonly<Record<string, string>> | undefined;
@@ -532,10 +547,11 @@ export class DocxDocument {
         });
       },
     });
-    // Default: the parser WASM emitted next to this bundle, resolved relative to
-    // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
-    // relative override is still resolved against `location.href`.
-    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
+    // Default: the parser WASM emitted next to this bundle. `wasmUrl` overrides
+    // it (CDN / self-hosted copy). A relative URL (a re-bundled asset or an
+    // override) resolves against the page's base URL, `<base href>` included,
+    // before it is posted to the worker, whose own location is not that base.
+    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, realmBaseUrl()).href;
     this._bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
   }
 
@@ -563,6 +579,9 @@ export class DocxDocument {
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const defaultCurrentDateMs = Date.now();
     const mode = opts.mode ?? 'main';
+    // Main mode loads the font-source module once the document is parsed:
+    // import it now, while the container resolves and the worker parses.
+    if (mode === 'main' && opts.fonts) void import('./font-source-load.js').catch(() => undefined);
     const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'docx',
@@ -636,7 +655,7 @@ export class DocxDocument {
       await doc._parse(
         buffer,
         resourceOptions.policy,
-        mode === 'worker' ? opts.fonts : undefined,
+        mode === 'worker' ? optionFontSources(opts.fonts) : undefined,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -701,7 +720,7 @@ export class DocxDocument {
       const measuringDocument = doc;
       const nativeRoutesPending = doc._mode === 'main' && doc._document && doc._source
         ? measureDocxNativeRouteLines(nativeRouteLineRequests(doc._source, doc._document, {
-            fontSubstitutes: declaredFontSubstitutions(opts.fonts), cjkFallback,
+            fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)), cjkFallback,
           }), true).then((measured) => {
             if (measuringDocument._nativeRouteFacesReleased) {
               unloadOfficeFontFallbacks(measured.faces);
@@ -738,7 +757,7 @@ export class DocxDocument {
         throw new PaginationAbortError();
       }
       doc._officeFontFaces = officeFonts.faces;
-      const { installedSubstituteFamilies, sourceFonts } = await doc._loadFontSources(opts.fonts, cjkFallback, officeFonts, signal);
+      const { installedSubstituteFamilies, sourceFonts } = await doc._loadFontSources(optionFontSources(opts.fonts), cjkFallback, officeFonts, signal);
       // Equations are converted + rasterized before pagination (which reads their
       // extents synchronously). Requires the opt-in `math` engine; without it,
       // equations are skipped (and the engine asset is never bundled). Worker
@@ -754,7 +773,7 @@ export class DocxDocument {
         const serviceOptions = {
           allowFootnoteContinuation: doc._allowFootnoteContinuation,
           fontMetrics: embeddedMetrics,
-          fontSubstitutes: declaredFontSubstitutions(opts.fonts),
+          fontSubstitutes: declaredFontSubstitutions(optionFontSources(opts.fonts)),
           cjkFallback,
           embeddedRoutes,
           officeRoutes: Object.values(officeFonts.routes),
@@ -766,8 +785,31 @@ export class DocxDocument {
         };
         const nativeRoutes = await nativeRoutesPending;
         checkAbort();
+        // Served faces without readable tables, and application FontFaces of
+        // authored families, are measured here (served-face-lines.ts).
+        // Bounded and abortable: destroy() or the load's signal ends the wait
+        // and releases every probe registration.
+        const probe = new AbortController();
+        const onLoadAbort = () => probe.abort();
+        signal?.addEventListener('abort', onLoadAbort, { once: true });
+        doc._servedFaceProbe = probe;
+        let servedFaceLines: Awaited<ReturnType<typeof prepareServedFaceLines>>;
+        try {
+          servedFaceLines = await prepareServedFaceLines(
+            sourceFonts?.loaded, activeFontSet(), documentRoutedFontFamilies(doc._source), undefined, probe.signal,
+          );
+        } finally {
+          signal?.removeEventListener('abort', onLoadAbort);
+          if (doc._servedFaceProbe === probe) doc._servedFaceProbe = null;
+        }
+        if (signal?.aborted || doc._nativeRouteFacesReleased) {
+          unloadOfficeFontFallbacks(servedFaceLines.faces);
+          throw new PaginationAbortError();
+        }
+        doc._nativeRouteFaces.push(...servedFaceLines.faces);
         runtime.services = createLayoutServices(doc._source, {
           ...serviceOptions,
+          servedFaceLines,
           nativeRouteMetrics: nativeRoutes && nativeRoutes.faces.length > 0
             ? admitDocxNativeRouteLines(nativeRoutes.lines, activeFontSet())
             : undefined,
@@ -1015,6 +1057,16 @@ export class DocxDocument {
 
   /** Pending main-mode font-source load, aborted by {@link destroy}. */
   private _fontSourceLoad: AbortController | null = null;
+  /** The pending served-face probe wait (served-face-lines.ts). */
+  private _servedFaceProbe: AbortController | null = null;
+  /** Aborted by destroy(): ends worker-mode probe measurements. */
+  private _probeLifetime: AbortController | null = null;
+  /** The signal destroy() aborts (already aborted after it), for a wait that
+   * ending the worker cannot settle: the error page's code of a document that
+   * failed to parse (#2248). Only such a document reads it. */
+  private _lifetimeSignal(): AbortSignal {
+    return (this._probeLifetime ??= new AbortController()).signal;
+  }
 
   /**
    * Main mode: resolve, register and load this document's font sources into
@@ -1023,23 +1075,23 @@ export class DocxDocument {
    * adapters load only when sources are configured.
    */
   private async _loadFontSources(
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     cjkFallback: CjkLang | undefined,
     officeFonts: DocxOfficeFontPresence,
     signal: AbortSignal | undefined,
   ): Promise<{
     installedSubstituteFamilies: readonly string[];
-    sourceFonts?: Readonly<{ names: readonly string[]; loaded: import('@silurus/ooxml-core/internal/font-sources').LoadedFontSources }>;
+    sourceFonts?: import('./source-font-metrics.js').DocxSourceFonts;
   }> {
     if (this._mode !== 'main' || !fonts?.length || !this._document) return { installedSubstituteFamilies: [] };
+    const { completeDocxFontPresence, docxFontFamilyPlan, loadDocxFontSources, metafileFontDemand } = await import('./font-source-load.js');
+    if (signal?.aborted || !this._document) throw new PaginationAbortError();
     // An installed authored face is never displaced by a source face
     // (docxFontFamilyPlan): every authored family is probed first, past the
     // office-fallback probe's cap (completeDocxFontPresence).
     const presence = await completeDocxFontPresence(this._document, fonts, cjkFallback, officeFonts);
     if (signal?.aborted || !this._document) throw new PaginationAbortError();
     const plan = docxFontFamilyPlan(this._document, fonts, cjkFallback, presence);
-    const { loadDocxFontSources } = await import('./font-source-load.js');
-    if (signal?.aborted) throw new PaginationAbortError();
     const controller = new AbortController();
     this._fontSourceLoad = controller;
     let loaded: Awaited<ReturnType<typeof loadDocxFontSources>>;
@@ -1058,19 +1110,24 @@ export class DocxDocument {
       throw new PaginationAbortError();
     }
     this._fontSourceSession = loaded.session;
-    this._chartFontSubstitutions = chartFontSubstitutions(loaded.loaded.substitutions);
+    this._chartFontSubstitutions = chartFontSubstitutions(loaded.loaded);
+    // Metafile pictures paint their text with the served faces too, and
+    // load the scalars it paints before they play.
+    bindMetafileFontFamilies(this._fetchImage, loaded.loaded);
+    bindMetafileFontDemand(this._fetchImage, metafileFontDemand(loaded.session));
     return {
       installedSubstituteFamilies: plan.installedSubstituteFamilies,
-      sourceFonts: { names: loaded.names, loaded: loaded.loaded },
+      sourceFonts: { names: loaded.names, loaded: loaded.loaded, lineMetrics: loaded.lineMetrics },
     };
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   *  document about to be parsed (core `resolver-bridge-host.ts`): resolved
-   *  through this realm's resolution cache and held until destroy. */
-  private _attachFontResolverBridge(fonts: readonly FontSource[] | undefined): void {
+   *  document about to be parsed (core `resolver-bridge-gate.ts`, which loads
+   *  the host only for a document with a resolver): resolved through this
+   *  realm's resolution cache and held until destroy. */
+  private _attachFontResolverBridge(fonts: readonly FontSourceDescriptor[] | undefined): void {
     this._fontResolverBridge?.dispose();
-    this._fontResolverBridge = new FontResolverBridgeHost({
+    this._fontResolverBridge = new FontResolverBridge({
       post: (message, transfer) => (this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer),
       sources: fonts,
     });
@@ -1079,7 +1136,7 @@ export class DocxDocument {
   private async _parse(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined = undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined = undefined,
     timeoutMs?: number,
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
@@ -1120,7 +1177,7 @@ export class DocxDocument {
         const adapted = await materializeDocumentPullAdapterSession(
           this._bridge.transport(isDocumentPullResponse),
           res,
-          { timeoutMs, onUsage },
+          { timeoutMs, onUsage, lifetime: () => this._lifetimeSignal() },
         );
         this._source = adapted.source;
         this._document = adapted.document;
@@ -1135,7 +1192,7 @@ export class DocxDocument {
       const adapted = await materializeDocumentPullAdapterSession(
         this._bridge.transport(isDocumentPullResponse),
         identity,
-        { timeoutMs, onUsage },
+        { timeoutMs, onUsage, lifetime: () => this._lifetimeSignal() },
       );
       this._source = adapted.source;
       this._document = adapted.document;
@@ -1169,6 +1226,13 @@ export class DocxDocument {
       void measureHostFontLines(res.routes).catch(() => []).then(measurements => {
         if (res.forId !== this._parseRequestId) return;
         this._worker.postMessage({ type: 'hostFontLinesMeasured', forId: res.forId, measurements } satisfies RenderWorkerRequest);
+      });
+      return;
+    }
+    if (res.type === 'measureServedFaceLines') {
+      void measureServedFaceLines(res.requests, (this._probeLifetime ??= new AbortController()).signal).catch(() => []).then(measurements => {
+        if (res.forId !== this._parseRequestId) return;
+        this._worker.postMessage({ type: 'servedFaceLinesMeasured', forId: res.forId, measurements } satisfies RenderWorkerRequest);
       });
       return;
     }
@@ -1418,7 +1482,7 @@ export class DocxDocument {
   private async _parseProgressively(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
@@ -1469,7 +1533,7 @@ export class DocxDocument {
           const adapted = await materializeDocumentPullAdapterSession(
             this._bridge.transport(isDocumentPullResponse),
             res,
-            { timeoutMs, onUsage },
+            { timeoutMs, onUsage, lifetime: () => this._lifetimeSignal() },
           );
           this._source = adapted.source;
           this._document = adapted.document;
@@ -1555,6 +1619,11 @@ export class DocxDocument {
     // destroyed too, and nothing leaks into `document.fonts` (SPA memory).
     this._fontSourceLoad?.abort();
     this._fontSourceLoad = null;
+    this._servedFaceProbe?.abort();
+    this._servedFaceProbe = null;
+    // Created here if nothing asked for it yet, so a wait that begins after
+    // destroy() still finds it aborted.
+    (this._probeLifetime ??= new AbortController()).abort();
     this._fontResolverBridge?.dispose();
     this._fontResolverBridge = null;
     const fontSourceSession = this._fontSourceSession;
@@ -1566,6 +1635,8 @@ export class DocxDocument {
     // owner. SVG object URLs are revoked immediately after decode; dropping its
     // lookup releases retained decoded elements and prevents stale reuse.
     dropDecodedBitmapCache(this._fetchImage);
+    bindMetafileFontFamilies(this._fetchImage, undefined);
+    bindMetafileFontDemand(this._fetchImage, undefined);
     dropSvgImageCache(this._fetchImage);
   }
 
@@ -2127,6 +2198,7 @@ export class DocxDocument {
       defaultCurrentDateMs: runtime.defaultCurrentDateMs,
       width: wireOpts.width,
       showTrackedChanges: wireOpts.showTrackedChanges,
+      textAdvances: textAdvanceLookupOf(services),
     });
   }
 

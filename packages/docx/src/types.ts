@@ -111,6 +111,15 @@ export interface EmbeddedFontRef {
 }
 
 export interface DocSettings {
+  /** Part4 §14.8.3.12: retain authored state; true currently keeps the
+   * established layout, outside the observed legacy false-flag frame. */
+  doNotSuppressIndentation?: boolean;
+  /** Independent legacy name (Part1 AnnexL.1.16.2), not a mode default. */
+  ww11IndentRules?: boolean;
+  /** Part4 §14.8.3.16: ignore the implicit numbering-indent tab stop. */
+  doNotUseIndentAsNumberingTabStop?: boolean;
+  /** Part4 §14.8.3.31: suppress the implicit hanging-indent tab stop. */
+  noTabHangInd?: boolean;
   /** ECMA-376 Part 4 §14.8.3.20: allow reference-free text following a
    * continuous section break on a page containing earlier footnotes. */
   footnoteLayoutLikeWW8?: boolean;
@@ -505,6 +514,9 @@ export type BodyElement =
 
 
 export interface DocParagraph {
+  /** ECMA-376 §17.3.1.20 `w:outlineLvl` (direct or style-inherited), 0-based;
+   *  absent for paragraphs outside the document outline. */
+  outlineLevel?: number;
   /**
    * Authored `w14:paraId` for the source paragraph, preserved verbatim and
    * absent when the source paragraph does not carry that identifier.
@@ -578,6 +590,10 @@ export interface DocParagraph {
   /** ECMA-376 §17.3.1.45 `<w:wordWrap>` after the style cascade; present only
    *  when disabled (`false`). Omission means the default, on. */
   wordWrap?: boolean;
+  /** ECMA-376 §17.3.1.16 after the style cascade; retained only when false.
+   * Used to exclude off paragraphs from the observed ON hanging policy.
+   * General paragraph-off line breaking remains unsupported (#2079). */
+  kinsoku?: boolean;
   /** This paragraph piece ends at a page or column break of its source
    *  paragraph (§17.3.3.1), split off into a body-level break; present only
    *  when true. */
@@ -675,12 +691,13 @@ export interface FramePr {
   yAlign?: 'inline' | 'top' | 'center' | 'bottom' | 'inside' | 'outside' | string;
 }
 
+/** Absent edges are omitted from the parser JSON. */
 export interface ParagraphBorders {
-  top: ParaBorderEdge | null;
-  bottom: ParaBorderEdge | null;
-  left: ParaBorderEdge | null;
-  right: ParaBorderEdge | null;
-  between: ParaBorderEdge | null;
+  top?: ParaBorderEdge | null;
+  bottom?: ParaBorderEdge | null;
+  left?: ParaBorderEdge | null;
+  right?: ParaBorderEdge | null;
+  between?: ParaBorderEdge | null;
 }
 
 export interface ParaBorderEdge {
@@ -726,6 +743,10 @@ export interface LineSpacing {
 
 export interface NumberingInfo {
   numId: number;
+  /** @internal ECMA-376 §17.9.15 abstractNumId the numId references: numIds sharing
+   *  one abstract definition form one list (shared counters). Absent when
+   *  the numId has no abstract reference. */
+  abstractNumId?: number;
   level: number;
   format: string;
   text: string;       // resolved bullet text, e.g. "1." or "•"
@@ -807,6 +828,10 @@ export type DocRun = DocRunContent & { revision?: RunRevision };
  *  (§20.4.2.3) at its resolved page box while contributing wrap exclusions
  *  when required — all paint paths use `renderChart`. */
 export interface ChartRun {
+  /** Authored ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline chart,
+   *  [left, top, right, bottom] in pt. Chart line-box reservation currently
+   *  keeps wp:extent; effect-extent reservation is not implemented. */
+  inlineEffectExtent?: [number, number, number, number];
   chart: ChartModel;
   widthPt: number;
   heightPt: number;
@@ -891,6 +916,9 @@ export interface AnchorHostMetrics {
 }
 
 export interface ShapeRun {
+  /** ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline shape, [left, top,
+   *  right, bottom] in pt: extent the line reserves around the shape. */
+  inlineEffectExtent?: [number, number, number, number];
   /** ECMA-376 §20.4.2.8 — true when the shape is hosted by `<wp:inline>` and
    * therefore advances the paragraph pen like an inline drawing object. */
   inline?: boolean;
@@ -974,8 +1002,9 @@ export interface ShapeRun {
    *  geometry's default for that index. */
   adjValues?: Array<number | null>;
   /** Part 4 §§19.1.2.10/.11: image above the backing fill, below the outline. */
-  vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone'>;
-  fill: ShapeFill | null;
+  vmlPicture?: Pick<ImageRun, 'imagePath' | 'mimeType' | 'srcRect' | 'colorReplaceFrom' | 'duotone' | 'blipEffects'>;
+  /** Absent when the shape has no fill. */
+  fill?: ShapeFill | null;
   stroke: string | null;
   strokeWidth?: number;
   strokeFill?: ShapeStrokeFill | null;
@@ -1469,6 +1498,9 @@ export interface RubyAnnotation {
 export type EmphasisMark = 'dot' | 'comma' | 'circle' | 'underDot';
 
 export interface ImageRun {
+  /** ECMA-376 §20.4.2.6 `wp:effectExtent` of an inline picture, [left, top,
+   *  right, bottom] in pt: extent the line reserves around the picture. */
+  inlineEffectExtent?: [number, number, number, number];
   /**
    * Embedded zip path of the raster blip (e.g. `word/media/image1.png`) — the
    * raster fallback (PNG/JPEG), or the SVG part itself when no raster blip is
@@ -1523,7 +1555,7 @@ export interface ImageRun {
    * When set, the renderer replaces all pixels of this hex color (e.g. "FFFFFF") with full
    * transparency. Implements a:clrChange (make-background-transparent).
    */
-  colorReplaceFrom?: string;
+  colorReplaceFrom?: string | null;
   /**
    * ECMA-376 §20.1.8.23 `<a:duotone>` recolour, resolved to its two endpoint
    * colours (through the document theme). Absent ⇒ no duotone. When present the
@@ -1850,6 +1882,14 @@ export interface DocxTextRunInfo {
   fontSize: number;
   /** CSS `font` shorthand used for canvas drawing. */
   font: string;
+  /** Present when the host grid-fits this run's face at its size (Chromium on
+   * Windows rounds faces with embedded bitmaps to whole pixels): the run was
+   * laid out and drawn from the size-proportional advances of {@link font} at
+   * a reference em, so measuring or laying out {@link font} directly would
+   * disagree with the drawn glyphs. `font` is that reference-em shorthand and
+   * `scale` maps its measurements onto this run's CSS px; overlays measure and
+   * lay out the run's text with it. */
+  referenceFont?: Readonly<{ font: string; scale: number }>;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;
   /** CSS transform used by the overlay for vertical-page text. */

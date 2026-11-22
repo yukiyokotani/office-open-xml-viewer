@@ -1,6 +1,7 @@
 import { loadFontDemandCollector } from './font-demand-collector.js';
+import { fontDemandCollectorUrl } from './font-demand-collector-url.js';
 import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
-import type { DimOptions, PptxComment } from './types';
+import type { DimOptions, PptxComment, Slide } from './types';
 import {
   renderSlideWithEmbeddedFonts,
   dropImageBitmapCache,
@@ -15,7 +16,11 @@ import {
 } from './slide-nav';
 import { acquireOfficeRoutes, distinctOfficeRouteLoads, type AcquiredOfficeRoutes } from './office-route-acquisition.js';
 import {
+  bindMetafileFontDemand,
+  bindMetafileFontFamilies,
+  type MetafileFontDemand,
   type FontPreloadDemand,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   releaseOwnedBitmap,
@@ -40,6 +45,7 @@ import {
   type OoxmlResourceMetrics,
   type LoadedOfficeFontFallbacks,
   workerRendererDescriptors,
+  createSymbolFaceOracleCache,
 } from '@silurus/ooxml-core';
 import {
   deserializeWorkerError,
@@ -63,9 +69,10 @@ import { ProgressiveLayoutLifecycle } from '@silurus/ooxml-core/internal/progres
 import { ProgressiveLayoutObserverNotifier } from '@silurus/ooxml-core/internal/progressive-layout-observers';
 import { pptxSlideOfficeFontRequests, type PptxFontDemandFacts } from './font-requests';
 import {
-  FontResolverBridgeHost,
+  FontResolverBridge,
   normalizeFontOptions,
-  type FontSource,
+  optionFontSources,
+  type FontSourceDescriptor,
   type FontSourceSession,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
@@ -91,6 +98,7 @@ import type {
 } from './worker-protocol';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/pptx_parser_bg.wasm?url';
+import { realmBaseUrl } from '@silurus/ooxml-core/internal/bundled-asset-url';
 import {
   findPptxElementBoundsByIds,
   hitTestPptxSlideContext,
@@ -263,7 +271,11 @@ export class PptxPresentation {
   private _cjkFallback: CjkLang = 'jp';
   /** Validated `LoadOptions.fonts` (normalised from the deprecated
    *  `useGoogleFonts`); undefined without sources. */
-  private _fonts: readonly FontSource[] | undefined;
+  private _fonts: readonly FontSourceDescriptor[] | undefined;
+  /** Slides come from this package's own parser, so their text colour chains
+   * are fully resolved (issue #1989). A caller-supplied model source sets this
+   * false and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
+  private _parsedTextChain = true;
   private _metrics: OoxmlResourceMetricsSession | null = null;
   private readonly _worker: Worker;
   private readonly _bridge: WorkerBridge<
@@ -303,13 +315,23 @@ export class PptxPresentation {
    *  the SPA (refcounted in core, so a face shared with another open deck
    *  survives until both go). */
   private _fontSources: FontSourceSession | null = null;
+  /** The metafile text demand of {@link _fontSources} (core
+   * `bindMetafileFontDemand`), bound with its served faces at each render. */
+  private _metafileFontDemand: MetafileFontDemand | undefined;
+  /** Symbol-code verdicts across this deck's main-mode renders, kept while
+   * the realm's faces are unchanged (core createSymbolFaceOracleCache). */
+  private _symbolFaces = createSymbolFaceOracleCache();
   /** Worker mode: runs this deck's `fontResolver` functions for the worker's
    *  font-source session (core `resolver-bridge-host.ts`); disposed in
    *  {@link destroy}, which aborts every in-flight resolver call. */
-  private _fontResolverBridge: FontResolverBridgeHost | null = null;
+  private _fontResolverBridge: FontResolverBridge | null = null;
   /** Presence of the authored families demanded so far (main mode). */
   private _installedFamilies: import('./font-source-load.js').PptxInstalledFamilies | null = null;
   private readonly _officeFontLoads = new Map<FontFaceSet, Map<string, Promise<LoadedOfficeFontFallbacks>>>();
+  /** Route sentinels per FontFaceSet (core route-sentinels.ts):
+   *  the symbol-font oracle of each render asks its painting context through
+   *  them (core symbol-face.ts). Released in {@link destroy}. */
+  private readonly _symbolSentinels = new Map<FontFaceSet, Promise<FontFace[] | null>>();
   /** Embedded Font parts registered into the main-thread FontFaceSet. */
   private _embeddedFontFaces: FontFace[] = [];
   private _embeddedFontAliases: ReadonlyMap<string, string> = new Map();
@@ -354,10 +376,11 @@ export class PptxPresentation {
           : undefined,
       onUnsolicited: (msg) => this._onWorkerLayoutPush(msg),
     });
-    // Default: the parser WASM emitted next to this bundle, resolved relative to
-    // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
-    // relative override is still resolved against `location.href`.
-    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
+    // Default: the parser WASM emitted next to this bundle. `wasmUrl` overrides
+    // it (CDN / self-hosted copy). A relative URL (a re-bundled asset or an
+    // override) resolves against the page's base URL, `<base href>` included,
+    // before it is posted to the worker, whose own location is not that base.
+    const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, realmBaseUrl()).href;
     this._bridge.post({ kind: 'init', wasmUrl } satisfies PptxWorkerRequest);
   }
 
@@ -392,6 +415,9 @@ export class PptxPresentation {
     const cjkFallback = resolveCjkFallback(opts.cjkFallback);
     const resourceOptions = normalizeLoadResourceOptions(opts);
     const mode = opts.mode ?? 'main';
+    // Main mode loads the font-source module after the preflight: import it
+    // now, while the container resolves and the worker parses.
+    if (mode === 'main' && opts.fonts) void import('./font-source-load.js').catch(() => undefined);
     const metrics = new OoxmlResourceMetricsSession({
       enabled: true,
       format: 'pptx',
@@ -473,11 +499,11 @@ export class PptxPresentation {
             settled: false,
           } satisfies ProgressiveLoad
         : undefined;
-      pres._fonts = opts.fonts;
+      pres._fonts = optionFontSources(opts.fonts);
       await pres._parse(
         buffer,
         resourceOptions.policy,
-        opts.fonts,
+        pres._fonts,
         opts.workerTimeoutMs,
         (usage) => metrics.observeUsage(usage),
         rendererDescriptors,
@@ -510,8 +536,8 @@ export class PptxPresentation {
    * covers are published. One owner covers ordinary, progressive and
    * selected-source Window load; the worker runs the same demand and session
    * in its own realm. The session and its CSS adapters load only when sources
-   * are configured. A ceiling breach rejects (`font-source-limit`); a failed
-   * face only warns and keeps its host fallback.
+   * are configured. A failed family or face (including a run-time limit
+   * breach) only warns and keeps its host fallback.
    */
   private async _ensureFontSources(
     names: readonly (string | null)[],
@@ -519,7 +545,7 @@ export class PptxPresentation {
     scalars: FontPreloadDemand | undefined,
   ): Promise<void> {
     if (this._destroyed || !this._fonts?.length) return;
-    const { FontSourceSession, PptxInstalledFamilies, pptxFontDemand } = await import('./font-source-load.js');
+    const { FontSourceSession, PptxInstalledFamilies, metafileFontDemand, pptxFontDemand } = await import('./font-source-load.js');
     if (this._destroyed || !this._fonts) return;
     // Installed authored faces are probed before any source face of this
     // delta registers, and never demanded (PptxInstalledFamilies).
@@ -528,15 +554,17 @@ export class PptxPresentation {
       pptxFontDemand(names, facts, scalars, this._embeddedFontAliases));
     if (this._destroyed || !this._fonts) return;
     this._fontSources ??= new FontSourceSession({ sources: this._fonts });
+    this._metafileFontDemand = metafileFontDemand(this._fontSources);
     await this._fontSources.ensure(demand);
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   *  document about to be parsed (core `resolver-bridge-host.ts`): resolved
-   *  through this realm's resolution cache and held until destroy. */
-  private _attachFontResolverBridge(fonts: readonly FontSource[] | undefined): void {
+   *  document about to be parsed (core `resolver-bridge-gate.ts`, which loads
+   *  the host only for a document with a resolver): resolved through this
+   *  realm's resolution cache and held until destroy. */
+  private _attachFontResolverBridge(fonts: readonly FontSourceDescriptor[] | undefined): void {
     this._fontResolverBridge?.dispose();
-    this._fontResolverBridge = new FontResolverBridgeHost({
+    this._fontResolverBridge = new FontResolverBridge({
       post: (message, transfer) => (this._worker.postMessage as (value: unknown, transfer?: Transferable[]) => void)(message, transfer),
       sources: fonts,
     });
@@ -545,7 +573,7 @@ export class PptxPresentation {
   private async _parse(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined = undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined = undefined,
     timeoutMs?: number,
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     renderers?: WorkerRendererDescriptors,
@@ -571,7 +599,7 @@ export class PptxPresentation {
       (id) =>
         this._mode === 'worker'
           ? ({ kind: 'parse', id, buffer, resourcePolicy, ...(fonts ? { fonts } : {}), cjkFallback: this._cjkFallback, renderers } satisfies RenderWorkerRequest)
-          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, ...(fonts && !renderers ? { collectFontDemand: true } : {}) } satisfies PptxWorkerRequest),
+          : ({ kind: 'parse', id, buffer, resourcePolicy, cjkFallback: this._cjkFallback, ...(fonts && !renderers ? { collectFontDemand: fontDemandCollectorUrl() } : {}) } satisfies PptxWorkerRequest),
       [buffer],
       { timeoutMs },
     );
@@ -630,10 +658,16 @@ export class PptxPresentation {
     // Preflight deliberately drains one transferred unit at a time without
     // decoding it in Window. The worker prepares compact facts from the same
     // unit and publishes them only when this consumer ACKs it.
+    // The opening slide is the exception: its unit is already here, so the
+    // window decodes it and the repository below starts with it. Its first
+    // render then needs no second pull (a parse and a transfer in the worker)
+    // after the fonts are ready.
+    let openingSlide: Slide | undefined;
     let finished: Extract<PptxWorkerResponse, { kind: 'presentationPreflightReady' }>;
     try {
       for (let slideIndex = 0; slideIndex < bootstrap.slideCount; slideIndex += 1) {
-        await this._slidePullClient.load(slideIndex, false, timeoutMs);
+        const slide = await this._slidePullClient.load(slideIndex, slideIndex === 0, timeoutMs);
+        if (slideIndex === 0) openingSlide = slide;
       }
       finished = await this._bridge.request(
         (id) => ({ kind: 'finishPresentationPreflight', id }) satisfies PptxWorkerRequest,
@@ -655,17 +689,26 @@ export class PptxPresentation {
       maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
       maxCachedStructuralBytes: HARD_MAX_PPTX_CACHED_SLIDE_PROJECTION_BYTES,
       loadSlide: async (slideIndex) => {
+        if (slideIndex === 0 && openingSlide) {
+          const slide = openingSlide;
+          openingSlide = undefined;
+          return slide;
+        }
         const slide = await this._slidePullClient?.load(slideIndex, true, timeoutMs);
         if (!slide) throw new Error('PPTX slide pull client is unavailable');
         return slide;
       },
     });
+    // Admitted now, under the repository's own ceilings like any loaded slide
+    // (a slide over them is not retained and is pulled again when rendered),
+    // so the decoded slide is never held outside that bounded cache.
+    if (openingSlide) void this._slides.withSlide(0, () => undefined).catch(() => undefined);
   }
 
   private async _parseMainProgressively(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     progressive: ProgressiveLoad,
@@ -751,7 +794,7 @@ export class PptxPresentation {
   private async _parseWorkerProgressively(
     buffer: ArrayBuffer,
     resourcePolicy: NormalizedOoxmlResourcePolicy,
-    fonts: readonly FontSource[] | undefined,
+    fonts: readonly FontSourceDescriptor[] | undefined,
     timeoutMs: number | undefined,
     onUsage: ((usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void) | undefined,
     renderers: WorkerRendererDescriptors | undefined,
@@ -1185,6 +1228,13 @@ export class PptxPresentation {
   ): Promise<AcquiredOfficeRoutes> {
     if (this._destroyed) throw new Error('Presentation destroyed');
     if (!fontSet) return { routes: {}, installed: [] };
+    let sentinels = this._symbolSentinels.get(fontSet);
+    if (!sentinels) {
+      sentinels = loadNativeRouteSentinels(fontSet).catch(() => null);
+      this._symbolSentinels.set(fontSet, sentinels);
+    }
+    await sentinels;
+    if (this._destroyed) throw new Error('Presentation destroyed');
     const uncovered = uncoveredOfficeFontRequests(requests, this._embeddedFontTuples);
     let loads = this._officeFontLoads.get(fontSet);
     if (!loads) {
@@ -1232,6 +1282,9 @@ export class PptxPresentation {
         // boundary before a cached Slide becomes observable.
         if (this._destroyed) throw new Error('Presentation destroyed');
         this._assertResourceHealthy();
+        // Metafile pictures paint their text with the served faces too.
+        bindMetafileFontFamilies(this._fetchImage, this._fontSources?.loaded);
+        bindMetafileFontDemand(this._fetchImage, this._fontSources ? this._metafileFontDemand : undefined);
         return renderSlideWithEmbeddedFonts(
           canvas,
           slide,
@@ -1241,7 +1294,7 @@ export class PptxPresentation {
             width,
             dpr,
             defaultTextColor: compact.defaultTextColor,
-          parsedTextChain: true,
+            parsedTextChain: this._parsedTextChain,
             cjkFallback: this._cjkFallback,
             majorFont: compact.majorFont,
             minorFont: compact.minorFont,
@@ -1251,7 +1304,8 @@ export class PptxPresentation {
             embeddedFontTuples: this._embeddedFontTuples,
             officeFontRoutes,
             officeInstalledFamilies,
-            fontSubstitutions: this._fontSources?.loaded.substitutions,
+            fontSources: this._fontSources?.loaded,
+            symbolFaces: this._symbolFaces,
             fetchMedia: this._fetchMedia,
             fetchImage: this._fetchImage,
             skipMediaControls: opts.skipMediaControls,
@@ -1651,6 +1705,8 @@ export class PptxPresentation {
     // in-flight ensure (it resolves with an empty snapshot).
     const fontSources = this._fontSources;
     this._fontSources = null;
+    this._metafileFontDemand = undefined;
+    bindMetafileFontDemand(this._fetchImage, undefined);
     fontSources?.release();
     this._fontResolverBridge?.dispose();
     this._fontResolverBridge = null;
@@ -1659,12 +1715,20 @@ export class PptxPresentation {
     // reachable. In worker mode the worker's copy ends with the worker.
     this._fonts = undefined;
     this._installedFamilies = null;
+    // A caller canvas may outlive the presentation: its bound oracle must not
+    // keep the released faces reachable (core symbol-face-cache.ts).
+    this._symbolFaces?.dispose();
+    this._symbolFaces = createSymbolFaceOracleCache();
     for (const loads of this._officeFontLoads.values()) {
       for (const pending of distinctOfficeRouteLoads(loads)) {
         void pending.then((loaded) => unloadOfficeFontFallbacks(loaded.faces));
       }
     }
     this._officeFontLoads.clear();
+    for (const sentinels of this._symbolSentinels.values()) {
+      void sentinels.then((faces) => { if (faces) unloadOfficeFontFallbacks(faces); });
+    }
+    this._symbolSentinels.clear();
     if (this._embeddedFontFaces.length > 0) {
       unregisterEmbeddedFonts(this._embeddedFontFaces);
       this._embeddedFontFaces = [];

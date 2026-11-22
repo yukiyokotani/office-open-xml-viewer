@@ -1,10 +1,11 @@
 import type { FramePr } from '../types.js';
 import { ownValue } from '@silurus/ooxml-core/internal/own-key';
 import { defineCompatibilityRule } from './compatibility.js';
+import type { DocxCompatProfile } from './compat-profile.js';
 import { stableFingerprint } from './fingerprint.js';
 import type { ParagraphLayoutSource, ParagraphAcquisitionInput } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
-import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput, TableCellLayoutInput } from './types.js';
+import type { TableColumnLayoutInput, LayoutRect, SourceRef, FloatingTablePositionInput, TableCellLayoutInput, TableBorderInput } from './types.js';
 
 export const WORD_CELL_OWNED_GRID_FRAME = defineCompatibilityRule({
   id: 'word-cell-owned-grid-frame',
@@ -201,7 +202,7 @@ export const WORD_TABLE_NONLEADING_INDENT_SCOPE = defineCompatibilityRule({
 /** WORD_TABLE_NONLEADING_INDENT_SCOPE: the measured structures where a
  * nonleading table ignores its tblInd outside the origin observation. */
 export function wordNonleadingIndentScope(input: Readonly<{
-  mode: number | undefined;
+  compat: Pick<DocxCompatProfile, 'tableOriginPlacementMode'>;
   story: string | undefined;
   topLevel: boolean;
   tableCellDepth: number;
@@ -221,7 +222,7 @@ export function wordNonleadingIndentScope(input: Readonly<{
   const measuredStory = story === 'body' || story === 'header' || story === 'footer'
     || story === 'footnote' || story === 'textbox';
   const measuredNesting = input.topLevel || (story === 'body' && input.tableCellDepth === 1);
-  return wordMeasuredTableOriginPlacementMode(input.mode) && measuredStory && measuredNesting
+  return input.compat.tableOriginPlacementMode && measuredStory && measuredNesting
     && !input.verticalText && input.commonFrame && input.marginClass && !input.outerEdgeIndent && input.ordinaryFlow
     && !input.positioned && !input.rowOverrides && !input.gridSkips && !input.unfittedContentSizedAutoFit;
 }
@@ -273,14 +274,14 @@ export function wordUniformSpacedTableBorderPt(table: TableLayoutSource): number
  * WORD_TABLE_CELL_SPACING_GEOMETRY keeps border placement and the legacy hang
  * separate, with no half-border shift in the legacy modes. */
 export function wordSpacedTableTranslationPt(input: Readonly<{
-  mode: number | undefined; justification: string | null | undefined; bidi: boolean;
+  compat: Pick<DocxCompatProfile, 'tableMode15Geometry'>; justification: string | null | undefined; bidi: boolean;
   indentPt: number; indentAuthored: boolean; spacingPt: number; borderPt: number;
   leadingMarginPt: number; trailingMarginPt: number;
 }>): number {
   const leading = input.justification == null || input.justification === 'left' || input.justification === 'start';
   const center = input.justification === 'center';
   const indent = leading ? input.indentPt : 0;
-  if (input.mode === 15) {
+  if (input.compat.tableMode15Geometry) {
     const physicalBorderShift = center ? 0 : (leading !== input.bidi ? 1 : -1) * input.borderPt / 2;
     const physicalShift = physicalBorderShift - (input.bidi ? input.borderPt / 2 : 0);
     return indent + (input.bidi ? -physicalShift : physicalShift);
@@ -304,7 +305,7 @@ export type WordTableMarginHangScope = 'none' | 'leading' | 'all';
 /** WORD_TABLE_MARGIN_HANG_SCOPE: which rows of a table outside the origin
  * observation hang the legacy left margin. */
 export function wordTableMarginHangScope(input: Readonly<{
-  mode: number | undefined;
+  compat: Pick<DocxCompatProfile, 'tableOriginPlacementMode'>;
   story: string | undefined;
   topLevel: boolean;
   verticalText: boolean;
@@ -319,24 +320,18 @@ export function wordTableMarginHangScope(input: Readonly<{
   gridSkips: boolean;
 }>): WordTableMarginHangScope {
   const story = input.story;
-  if (!wordMeasuredTableOriginPlacementMode(input.mode) || !input.topLevel || input.verticalText
+  if (!input.compat.tableOriginPlacementMode || !input.topLevel || input.verticalText
     || !input.commonFrame || !input.marginClass || input.spacing || input.outerEdgeIndent
     || !input.ordinaryFlow || input.positioned || input.rowOverrides || input.gridSkips) return 'none';
   if (story === 'body' || story === 'header' || story === 'footer' || story === 'footnote') return 'all';
   return story === 'textbox' ? 'leading' : 'none';
 }
 
-/** The observation is deliberately restricted to the exported mode boundaries. */
-export function wordMeasuredTableOriginMode(mode: number | undefined): boolean {
-  return mode === 11 || mode === 12 || mode === 14 || mode === 15;
-}
-
-/** WORD_TABLE_ORIGIN_COMPATIBILITY origin scope: the explicit measured modes
- * plus an omitted compatibilityMode, which places tables like mode 14.
- * WORD_FIXED_UNUSED_LEADING_GRID keeps {@link wordMeasuredTableOriginMode}. */
-export function wordMeasuredTableOriginPlacementMode(mode: number | undefined): boolean {
-  return mode === undefined || wordMeasuredTableOriginMode(mode);
-}
+// The table-origin observation is deliberately restricted to the exported
+// mode boundaries (DocxCompatProfile.tableOriginMeasuredMode). Its placement
+// scope adds an omitted compatibilityMode, which places tables like mode 14
+// (tableOriginPlacementMode); WORD_FIXED_UNUSED_LEADING_GRID keeps the
+// explicit modes only.
 
 /**
  * ECMA-376 §17.4.34 / §17.4.11 give tables whose style hierarchy never
@@ -366,7 +361,20 @@ export const WORD_OVER_PAGE_CANT_SPLIT_CLIP = defineCompatibilityRule({
     kind: 'microsoft-note',
     reference: '[MS-OI29500] §2.1.120',
   },
-  description: 'Word starts an over-page cantSplit row on a fresh page and clips its overflow instead of synthesizing a row continuation.',
+  description: 'Word starts an over-page cantSplit row on a fresh page and clips its overflow instead of synthesizing a row continuation. The note does not distinguish a nested row; as a library reading without an Office measurement, the page of a nested row is the fresh band of its table: the content band of the enclosing cell on a fresh page, not the page band, which no nested table inside a cell with margins, rules or repeated headers is ever given.',
+});
+
+/** Consumed by table-pagination.ts partialRow (the re-selection, and the
+ * selection every enclosing row keeps: TableFragmentResult.wholeSource),
+ * nestedTableFragmentContext (a nested table's own fresh band) and by the
+ * containment limit of table.ts measureTableCellBlockFlowHeightPt. */
+export const LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP = defineCompatibilityRule({
+  id: 'library-over-page-table-cell-unit-clip',
+  evidence: {
+    kind: 'library-policy',
+    reference: 'packages/docx/src/layout/table-pagination.test.ts#clips an over-page first cell line on a fresh page and continues the cell on the next page',
+  },
+  description: 'Library policy, no Office measurement, applied in every compatibility mode: ECMA-376 §17.4.6 lets a splittable row continue across pages but defines nothing for a cell unit that no page can hold. When a row fragment on a fresh band (nothing but repeated header rows above it, so relocating cannot gain space) would otherwise select nothing, whether because no cell progresses or because word-parallel-paragraph-row-cut rejects a cut that leaves a blocked paragraph cell behind, the row is re-selected once: a layoutInCell containment interval (§20.4.2.3) whose own extent exceeds the fresh content band stops charging admission, so the text around its drawing keeps flowing, and a first line or block still taller than the band is retained alone. The recovered cells are materialized as admitted: a left-out containment interval neither grows the row nor offsets the text below a drawing that starts above it, and the cells are laid out from their top because a centered or bottom vAlign (§17.4.84) would align against the over-band row, so every admitted line is painted inside the band. The fragment is clipped at the band end and its remaining content continues on the next page. The same holds at every nesting depth: the fresh band of a nested table is the content band of its cell on a fresh page (the page band less every enclosing cell margin, row rule, cell spacing and repeated header row), the re-selection governs only the cell units of the row itself, so a table nested in a recovered cell recovers in its own band, and every enclosing row and table materializes a recovered or clipped fragment exactly as selected instead of its source layout, whether or not the row completes; floating-table anchors are resolved against the same placement. Content below the band end (part of an over-band unit, or of a drawing) is not painted. This is a recovery from an otherwise non-converging pagination, not a claim about Word or the specification; the warning channel is reserved for caller opt-outs, so it reports nothing.',
 });
 
 export const WORD_OVER_PAGE_CELL_BREAK_OCCUPANCY = defineCompatibilityRule({
@@ -514,6 +522,18 @@ export const WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE = defineCompatibilityRule({
   description: 'Apply the supported first-row table-property exception facts at table scope. An authored first-row tblPrEx/tblW shadows the body width, including auto/nil/zero clearing it; width ceiling selection and column fitting share this effective preference.',
 });
 
+export const WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT = defineCompatibilityRule({
+  id: 'word-hidden-cell-paragraph-joins-next',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'hidden-cell-paragraph-controls',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'A table-cell paragraph whose paragraph mark is vanished (ECMA-376 §17.3.1.29 mark run properties, §17.3.2.41 vanish) and which holds no ink lays out nothing in the cell: no line, no stored or automatic spacing, and it is no neighbour of the blocks around it, as in body flow. The cell\'s last paragraph carries the end-of-cell mark and is kept as an ordinary line even when vanished. ECMA-376 does not describe the join; this is observed Word behaviour. Evidence: Windows Word 16.0.20527 PDFs of synthetic cells (Arial, exact 12pt lines, stored before/after 3/8pt, compatibility mode 15) with doNotUseHTMLParagraphAutoSpacing off and on, one variant per row between plain reference rows. Dropped: one and three leading vanished empty paragraphs before an automatic paragraph (it then opens the cell: its automatic before is dropped without the setting, its stored 3pt kept with it); a leading one whose own stored before/after is 5/11pt (its spacing is dropped too); one between two automatic paragraphs (gap 14pt without the setting, 8 + 3pt with it) and between two stored 3/8pt paragraphs (8pt, 11pt); one between an automatic paragraph and a nested table (the paragraph keeps its after before the table); and a leading one before a nested table (the table opens the cell). Kept as a 12pt line: a trailing vanished empty paragraph (the paragraph before it keeps its after) and the sole vanished paragraph of a cell; control 052 of the automatic-spacing matrix agrees. Not covered by this rule: a paragraph with visible text and a vanished mark, which Word joins onto the next paragraph\'s line; which paragraph\'s properties govern that joined line is not measured, so it keeps its own line here, as in body flow.',
+});
+
 export const WORD_TRAILING_STRUCTURAL_CELL_MARKER = defineCompatibilityRule({
   id: 'word-trailing-structural-cell-marker',
   evidence: {
@@ -540,6 +560,26 @@ export const WORD_VERTICAL_MERGE_TERMINAL_BORDER = defineCompatibilityRule({
   },
   description: 'Resolve the bottom edge of a vertically merged cell from its terminal continuation cell before applying shared-edge conflict rules. Library policy, no Office measurement: terminal border of a vertical merge (PR #1032); the ECMA-376 §17.4.66 tcBorders note does not address vMerge.',
 });
+
+export const WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT = defineCompatibilityRule({
+  id: 'word-vertical-merge-interior-border-footprint',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vmerge-interior-border-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.4.85 vMerge joins cells into one merged cell, so no horizontal rule is drawn between its rows, and §17.4.66 tcBorders does not say whether a merged constituent\'s own bottom border still takes space. Windows Word 16.0.20527 controls (4-row tables of 20pt atLeast rows, Times New Roman 11pt, vAlign bottom text; two- and three-row merges in the first column, ending on or before the last row; single 0.5pt and 3pt borders; on and off a 20pt line grid; with and without adjustLineHeightInTable; compatibility modes 14 and 15) show that the bottom border of every constituent except the last one is charged to the row below it like an ordinary rule between rows, though it is not drawn: a 0.5pt border on the first merged cell makes the next row 0.5pt taller and moves its text down 0.5pt (3pt: 3pt), a three-row merge charges both interior borders, a taller next row still grows by the border, and a border only on the last constituent charges nothing inside the merge. The table bottom keeps the terminal continuation border (WORD_VERTICAL_MERGE_TERMINAL_BORDER). The controls set the borders on the cells themselves; a table-level insideH reaching a merged cell was not measured and charges nothing.',
+});
+
+/** WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT: the width a merged
+ * constituent's own bottom border charges to the row below inside the merge. */
+export function wordVerticalMergeInteriorBorderPt(bottom: TableBorderInput | null): number {
+  void WORD_VERTICAL_MERGE_INTERIOR_BORDER_FOOTPRINT;
+  if (!bottom || bottom.authoredStyle === 'nil' || bottom.authoredStyle === 'none') return 0;
+  return Number.isFinite(bottom.widthPt) && bottom.widthPt > 0 ? bottom.widthPt : 0;
+}
 
 export const WORD_VERTICAL_SECTION_UPRIGHT_BLOCK_TABLE = defineCompatibilityRule({
   id: 'word-vertical-section-upright-block-table',
@@ -748,7 +788,7 @@ export function wordTableEffectiveIndentPt(input: Readonly<{
 /** WORD_TABLE_ORIGIN_COMPATIBILITY. An unresolved/unmeasured class retains
  * its established translation rather than inventing a margin default. */
 export function wordTableOriginTranslationPt(input: Readonly<{
-  mode: number | undefined;
+  compat: Pick<DocxCompatProfile, 'tableMode15Geometry'>;
   measured: boolean;
   justification: string | null | undefined;
   indentPt: number;
@@ -763,20 +803,20 @@ export function wordTableOriginTranslationPt(input: Readonly<{
   if (!input.measured) return indentPt;
   if (input.justification === 'center') return indentPt;
   if (input.justification === 'right' || input.justification === 'end') {
-    return indentPt + (input.mode === 15 ? 0 : input.rowLeftMarginPt);
+    return indentPt + (input.compat.tableMode15Geometry ? 0 : input.rowLeftMarginPt);
   }
   return indentPt
-    - (input.mode !== 15 && input.indentAuthored ? input.firstLeftMarginPt : 0);
+    - (!input.compat.tableMode15Geometry && input.indentAuthored ? input.firstLeftMarginPt : 0);
 }
 
 /** Preserve grid indexes while dropping only the Office-measured unused track.
  * O(rows + columns + cells), with no parser mutation or extra content walk. */
 export function wordFixedOccupiedGridInput(
   input: TableColumnLayoutInput,
-  mode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'tableOriginMeasuredMode'>,
   measuredScope: boolean,
 ): TableColumnLayoutInput {
-  if (!wordMeasuredTableOriginMode(mode) || !measuredScope
+  if (!compat.tableOriginMeasuredMode || !measuredScope
     || input.layout !== 'fixed' || input.rows.length === 0
     || !input.rows.every((row) => row.cells.length > 0
       && row.cells[0]?.columnStart === 1 && row.after === null

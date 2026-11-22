@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { layoutParseErrorPage } from './error-page.js';
+import { ERROR_PLACEHOLDER_TEXT_HOST } from '@silurus/ooxml-core/internal/part-failures';
+import { parseErrorPageLayout } from './error-page.js';
+import { createPageLayers } from './page-graph.js';
 import { createFontResolver } from './font-service.js';
 import { createTextLayoutService } from './text.js';
 import { paintLayoutPage } from '../paint/canvas-page.js';
 import { canvasFontString } from '@silurus/ooxml-core';
+
+const layoutParseErrorPage = parseErrorPageLayout({ ...ERROR_PLACEHOLDER_TEXT_HOST, createPageLayers });
 
 describe('parse-error page layout', () => {
   it('wraps detail text during layout and never measures text during paint', async () => {
@@ -122,5 +126,24 @@ describe('parse-error page layout', () => {
     expect(values).toHaveLength(4);
     expect(values.at(-1)).toMatch(/…$/u);
     expect(values.every((line) => !line.startsWith('\u0301'))).toBe(true);
+  });
+
+  it('ellipsizes a long caller title to one line inside the frame', () => {
+    const text = createTextLayoutService({
+      fonts: createFontResolver([]),
+      measurer: {
+        fingerprint: 'fixed-title-v1',
+        measure: (request) => ({ advancePt: [...request.text].length * 10, ascentPt: 8, descentPt: 2 }),
+      },
+    });
+    const layout = layoutParseErrorPage('detail', { widthPt: 180, heightPt: 300 }, text, {
+      title: 'Title '.repeat(2_000),
+      detail: undefined,
+    });
+    const title = layout.pages[0]?.layers.body.flatMap((node) =>
+      node.kind === 'drawing' ? node.commands.filter((command) => command.kind === 'text').slice(1, 2) : [],
+    )[0];
+    // Frame text width: 180 - 4 * 18 pt.
+    expect(title?.kind === 'text' && title.text).toBe('Title…');
   });
 });

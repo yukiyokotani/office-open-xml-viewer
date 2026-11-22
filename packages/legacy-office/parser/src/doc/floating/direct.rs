@@ -5,9 +5,10 @@ use super::{shape, unsupported, Content, Part, ResolvedDrawing, Store};
 use crate::doc::pictures::DirectPictureResource;
 use docx_model::{
     AnchorAcquisitionWire, AnchorAxisChoiceWire, AnchorAxisWire, AnchorBehaviorWire,
-    AnchorEdgesWire, AnchorExtentWire, AnchorGroupWire, AnchorResolvedChildFrameWire,
-    AnchorSimplePositionWire, AnchorValueStatusWire, AnchorWrapKindWire, AnchorWrapWire, ImageRun,
-    LineEnd, PathCmd, ShapeFill, ShapeRun,
+    AnchorEdgesWire, AnchorExtentWire, AnchorGroupWire, AnchorPointWire, AnchorPolygonSpaceWire,
+    AnchorPolygonWire, AnchorResolvedChildFrameWire, AnchorSimplePositionWire,
+    AnchorValueStatusWire, AnchorWrapKindWire, AnchorWrapWire, ImageRun, LineEnd, PathCmd,
+    ShapeFill, ShapeRun,
 };
 
 #[cfg(test)]
@@ -56,8 +57,44 @@ fn wrap_mode(wrapping: u8) -> &'static str {
         1 => "topAndBottom",
         2 => "square",
         3 => "none",
-        _ => unreachable!("unsupported wrap modes are rejected during resolution"),
+        4 => "tight",
+        5 => "through",
+        _ => unreachable!("wrap modes are validated during anchor acquisition"),
     }
+}
+
+/// The contour of a tight (wr 4) or through (wr 5) drawing.
+///
+/// MS-ODRAW 2.3.4.7 pWrapPolygonVertices is the authored contour; a drawing
+/// without it has no contour in MS-DOC or MS-ODRAW. Word PDFs of drawings
+/// without vertices print tight and through identically, and differently
+/// from square, with text clearing the whole drawing: the full object
+/// envelope, the DrawingML default `wrapPolygon` of a rectangle in the fixed
+/// 21600 space.
+fn implicit_wrap_polygon() -> AnchorPolygonWire {
+    AnchorPolygonWire {
+        edited: false,
+        coordinate_space: AnchorPolygonSpaceWire {
+            width: 21600,
+            height: 21600,
+        },
+        points: [(0, 0), (0, 21600), (21600, 21600), (21600, 0), (0, 0)]
+            .into_iter()
+            .map(|(x, y)| AnchorPointWire {
+                x: Some(x),
+                y: Some(y),
+                raw_x: None,
+                raw_y: None,
+            })
+            .collect(),
+        invalid_point_count: 0,
+    }
+}
+
+/// wrapText applies to square, tight and through wrapping (ECMA-376
+/// 20.4.2.16-18).
+fn has_wrap_side(wrapping: u8) -> bool {
+    matches!(wrapping, 2 | 4 | 5)
 }
 
 impl Store<'_> {
@@ -81,7 +118,7 @@ impl Store<'_> {
             .ok_or("OUTPUT_TOO_LARGE")?;
         let whole = Placed {
             frame: [0.0, 0.0, facts.extent[0] as f64, facts.extent[1] as f64],
-            rotation: 0.0,
+            rotation: facts.rotation,
             flip: facts.flip,
             group: None,
         };
@@ -190,9 +227,10 @@ impl Store<'_> {
         }))
     }
 
-    /// The shape's paint as a DOCX fill: solid, or the stretched picture of an
-    /// msofillPicture fill, sharing the floating picture resources (ECMA-376
-    /// 20.1.8.14 blipFill with a:stretch/a:fillRect).
+    /// The shape's paint as a DOCX fill: solid, a shade, a preset pattern, or
+    /// the stretched or tiled picture of an msofillPicture or msofillTexture
+    /// fill, sharing the floating picture resources (ECMA-376 20.1.8.14
+    /// blipFill with a:stretch or a:tile).
     fn direct_fill(&mut self, shape: &shape::Facts) -> Result<Option<ShapeFill>, String> {
         if let Some((index, _)) = shape.fill_picture {
             let extension = self.images[&index]
@@ -201,6 +239,7 @@ impl Store<'_> {
                 .extension;
             self.selected_images.insert(index);
             return Ok(Some(ShapeFill::Image {
+                dpi: None,
                 vml: None,
                 image_path: format!("legacy-doc/float/{index}"),
                 mime_type: mime(extension)?.to_string(),
@@ -209,6 +248,54 @@ impl Store<'_> {
                 fill_rect: None,
                 tile: None,
                 alpha: None,
+                duotone: None,
+                blip_effects: Vec::new(),
+            }));
+        }
+        if let Some(tile) = &shape.fill_tile {
+            let image = self.images[&tile.blip].as_ref().expect("loaded tile fill");
+            if let Some([foreground, background]) = &tile.pattern {
+                // ECMA-376 20.1.8.47 pattFill: the preset with the cells of
+                // the stored bitmap. A BLIP that is not a two-colour bitmap
+                // leaves the foreground colour.
+                let cells = (image.extension == "png")
+                    .then(|| crate::officeart::pattern::cells(&image.bytes))
+                    .flatten();
+                return Ok(Some(match cells {
+                    Some(cells) => ShapeFill::Pattern {
+                        fg: foreground.clone(),
+                        bg: background.clone(),
+                        preset: crate::officeart::pattern::preset(cells).into(),
+                    },
+                    None => ShapeFill::Solid {
+                        color: crate::rejection::approximated(
+                            "Word non-solid drawing fills are not supported",
+                            foreground.clone(),
+                        ),
+                    },
+                }));
+            }
+            // ECMA-376 20.1.8.58 a:tile at the picture's own size from the
+            // top-left corner of the shape.
+            let extension = image.extension;
+            self.selected_images.insert(tile.blip);
+            return Ok(Some(ShapeFill::Image {
+                dpi: None,
+                vml: None,
+                image_path: format!("legacy-doc/float/{}", tile.blip),
+                mime_type: mime(extension)?.to_string(),
+                svg_image_path: None,
+                src_rect: None,
+                fill_rect: None,
+                tile: Some(Box::new(ooxml_common::fill::TileInfo {
+                    tx: Some(0),
+                    ty: Some(0),
+                    sx: Some(1.0),
+                    sy: Some(1.0),
+                    flip: Some("none".into()),
+                    algn: Some("tl".into()),
+                })),
+                alpha: (tile.alpha != 65536).then(|| f64::from(tile.alpha) / 65_536.0),
                 duotone: None,
                 blip_effects: Vec::new(),
             }));
@@ -224,10 +311,17 @@ impl Store<'_> {
                     })
                     .collect(),
                 angle: gradient.angle,
-                grad_type: "linear".into(),
+                grad_type: if gradient.radial.is_some() {
+                    "radial"
+                } else {
+                    "linear"
+                }
+                .into(),
                 scaled: Some(gradient.scaled),
-                path: None,
-                fill_to_rect: None,
+                path: gradient.radial.map(|(path, _)| path.into()),
+                fill_to_rect: gradient
+                    .radial
+                    .map(|(_, [l, t, r, b])| ooxml_common::fill::FillRect { l, t, r, b }),
                 tile_rect: None,
                 flip: None,
                 rot_with_shape: Some(gradient.rotate_with_shape),
@@ -249,6 +343,10 @@ impl Store<'_> {
         let acquisition = acquisition(facts, occurrence_id.into(), placed);
         let [top, bottom, left, right] = crop;
         let image = ImageRun {
+            inline_object_font_facts: None,
+            inline_position: None,
+            inline_object_origin: None,
+            inline_effect_extent: None,
             image_path,
             mime_type,
             svg_image_path: None,
@@ -260,14 +358,14 @@ impl Store<'_> {
             }),
             width_pt: placed.frame[2] / 12_700.0,
             height_pt: placed.frame[3] / 12_700.0,
-            rotation: 0.0,
+            rotation: placed.rotation,
             flip_h: placed.flip[0],
             flip_v: placed.flip[1],
             anchor: true,
             anchor_x_pt: (facts.x_emu as f64 + placed.frame[0]) / 12_700.0,
             anchor_y_pt: (facts.y_emu as f64 + placed.frame[1]) / 12_700.0,
-            anchor_x_from_margin: matches!(facts.horizontal, "margin" | "column"),
-            anchor_y_from_para: facts.vertical == "paragraph",
+            anchor_x_from_margin: matches!(facts.horizontal, "margin" | "column" | "character"),
+            anchor_y_from_para: matches!(facts.vertical, "paragraph" | "line"),
             color_replace_from: None,
             duotone: None,
             blip_effects: Vec::new(),
@@ -277,7 +375,7 @@ impl Store<'_> {
             dist_bottom: facts.distances[3] as f64 / 12_700.0,
             dist_left: facts.distances[0] as f64 / 12_700.0,
             dist_right: facts.distances[2] as f64 / 12_700.0,
-            wrap_side: (facts.wrapping == 2).then(|| facts.side.into()),
+            wrap_side: has_wrap_side(facts.wrapping).then(|| facts.side.into()),
             allow_overlap: facts.overlap,
             anchor_x_align: facts.align[0].map(str::to_owned),
             anchor_y_align: facts.align[1].map(str::to_owned),
@@ -479,15 +577,20 @@ fn acquisition(
             kind: match f.wrapping {
                 1 => AnchorWrapKindWire::TopAndBottom,
                 2 => AnchorWrapKindWire::Square,
+                4 => AnchorWrapKindWire::Tight,
+                5 => AnchorWrapKindWire::Through,
                 _ => AnchorWrapKindWire::None,
             },
             authored_kinds: vec![match f.wrapping {
                 1 => "wrapTopAndBottom",
                 2 => "wrapSquare",
+                4 => "wrapTight",
+                5 => "wrapThrough",
                 _ => "wrapNone",
             }
             .into()],
-            side: (f.wrapping == 2).then(|| f.side.into()),
+            side: has_wrap_side(f.wrapping).then(|| f.side.into()),
+            polygon: matches!(f.wrapping, 4 | 5).then(implicit_wrap_polygon),
             ..AnchorWrapWire::default()
         },
         behavior: AnchorBehaviorWire {
@@ -566,6 +669,15 @@ impl Payload {
                 .ok_or("OUTPUT_TOO_LARGE")?,
         )?;
         self.strings(facts.wrap.authored_kinds.iter().map(Some))?;
+        if let Some(polygon) = &facts.wrap.polygon {
+            self.add(
+                polygon
+                    .points
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<AnchorPointWire>())
+                    .ok_or("OUTPUT_TOO_LARGE")?,
+            )?;
+        }
         if let Some(group) = &facts.group {
             self.add(group.child_source_id.capacity())?;
         }
@@ -649,8 +761,8 @@ fn direct_shape(
         anchor_y_pt: (facts.y_emu as f64 + placed.frame[1]) / 12_700.0,
         group_width_pt: placed.group.map(|_| facts.extent[0] as f64 / 12_700.0),
         group_height_pt: placed.group.map(|_| facts.extent[1] as f64 / 12_700.0),
-        anchor_x_from_margin: matches!(facts.horizontal, "margin" | "column"),
-        anchor_y_from_para: facts.vertical == "paragraph",
+        anchor_x_from_margin: matches!(facts.horizontal, "margin" | "column" | "character"),
+        anchor_y_from_para: matches!(facts.vertical, "paragraph" | "line"),
         anchor_x_align: facts.align[0].map(str::to_owned),
         anchor_y_align: facts.align[1].map(str::to_owned),
         anchor_x_relative_from: Some(facts.horizontal.into()),
@@ -674,6 +786,8 @@ fn direct_shape(
         stroke_cap: line.map(|line| line.cap.to_owned()),
         stroke_join: line.map(|line| line.join.to_owned()),
         stroke_miter_limit: line.and_then(|line| line.miter),
+        vml_shadow: shape.shadow.clone(),
+        stroke_compound: line.and_then(|line| line.compound).map(str::to_owned),
         head_end: line.and_then(|line| end(line.ends[0])),
         tail_end: line.and_then(|line| end(line.ends[1])),
         rotation: placed.rotation,
@@ -693,8 +807,26 @@ fn direct_shape(
         dist_bottom: pt(facts.distances[3]),
         dist_left: pt(facts.distances[0]),
         dist_right: pt(facts.distances[2]),
-        wrap_side: (facts.wrapping == 2).then(|| facts.side.into()),
+        wrap_side: has_wrap_side(facts.wrapping).then(|| facts.side.into()),
         anchor_acquisition: Some(acquisition),
+        text_path: shape
+            .geometry_text
+            .as_ref()
+            .map(|text| docx_model::TextPath {
+                string: text.string.clone(),
+                font_family: text.font.clone(),
+                bold: text.bold,
+                italic: text.italic,
+                vml: docx_model::VmlTextPathFacts {
+                    text_path_ok: Some(text.allowed),
+                    on: Some(text.on),
+                    fit_shape: Some(text.fit_shape),
+                    fit_path: Some(text.fit_path),
+                    trim: Some(text.trim),
+                    x_scale: Some(text.x_scale),
+                    font_size_pt: Some(text.size_pt),
+                },
+            }),
         ..ShapeRun::default()
     };
     let mut total = Payload(std::mem::size_of::<ShapeRun>());
@@ -710,8 +842,31 @@ fn direct_shape(
         })
     };
     total.add(ends(&run.head_end) + ends(&run.tail_end))?;
-    if let Some(ShapeFill::Image { mime_type, .. }) = &run.fill {
+    if let Some(ShapeFill::Image {
+        mime_type, tile, ..
+    }) = &run.fill
+    {
         total.add(mime_type.capacity())?;
+        if let Some(tile) = tile {
+            total.add(
+                std::mem::size_of::<ooxml_common::fill::TileInfo>()
+                    + tile.flip.as_ref().map_or(0, String::capacity)
+                    + tile.algn.as_ref().map_or(0, String::capacity),
+            )?;
+        }
+    }
+    if let Some(ShapeFill::Pattern { fg, bg, .. }) = &run.fill {
+        total.add(fg.capacity() + bg.capacity())?;
+    }
+    if let Some(text) = &run.text_path {
+        total
+            .add(text.string.capacity() + text.font_family.as_ref().map_or(0, String::capacity))?;
+    }
+    if let Some(shadow) = &run.vml_shadow {
+        total.add(shadow.kind.capacity() + shadow.color.capacity() + shadow.color2.capacity())?;
+    }
+    if let Some(ShapeFill::Gradient { path, .. }) = &run.fill {
+        total.add(path.as_ref().map_or(0, String::capacity))?;
     }
     if let Some(ShapeFill::Gradient { stops, .. }) = &run.fill {
         total.add(stops.capacity() * std::mem::size_of::<docx_model::GradientStop>())?;
@@ -731,10 +886,11 @@ fn direct_shape(
             ShapeFill::Solid { color } => color,
             ShapeFill::Image { image_path, .. } => image_path,
             ShapeFill::Gradient { grad_type, .. } => grad_type,
-            _ => unreachable!("solid or picture DOC shape fill"),
+            ShapeFill::Pattern { preset, .. } => preset,
         }),
         run.stroke.as_ref(),
         run.stroke_dash.as_ref(),
+        run.stroke_compound.as_ref(),
         run.stroke_cap.as_ref(),
         run.stroke_join.as_ref(),
         run.text_autofit.as_ref(),

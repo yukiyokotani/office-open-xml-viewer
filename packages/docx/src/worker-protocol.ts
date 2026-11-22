@@ -112,6 +112,7 @@ export type WireRenderPageOptions = Omit<RenderPageOptions, 'onTextRun' | 'error
 export type RenderWorkerRequest =
   | { type: 'init'; wasmUrl: string }
   | { type: 'hostFontLinesMeasured'; forId: number; measurements: import('./host-font-line-metrics.js').HostFontLineMeasurement[] }
+  | { type: 'servedFaceLinesMeasured'; forId: number; measurements: import('./served-face-lines.js').ServedFaceLineMeasurement[] }
   | { type: 'nativeRouteLinesMeasured'; forId: number; lines: (import('@silurus/ooxml-core').NativeRouteNormalLine | null)[] }
   // `currentDateMs` / `showTrackedChanges` select the layout VARIANT the worker
   // paginates and reports metadata for. They are acquisition inputs, not paint
@@ -134,7 +135,7 @@ export type RenderWorkerRequest =
        * safe data; `fontFiles` bytes are copied, never transferred). The worker
        * re-validates them and runs the same font-source session as main mode
        * against its own FontFaceSet. Never the deprecated `useGoogleFonts`. */
-      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSource[];
+      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSourceDescriptor[];
       allowFootnoteContinuation?: boolean;
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;
       defaultCurrentDateMs: number;
@@ -174,6 +175,7 @@ export type RenderWorkerWireRequest =
 
 export type RenderWorkerResponse =
   | { type: 'measureHostFontLines'; forId: number; routes: import('@silurus/ooxml-core').OfficeFontFallbackRoute[] }
+  | { type: 'measureServedFaceLines'; forId: number; requests: import('./served-face-lines.js').ServedFaceLineRequest[] }
   | { type: 'measureNativeRouteLines'; forId: number; requests: import('@silurus/ooxml-core').NativeRouteLineRequest[] }
   | Exclude<WorkerResponse, { type: 'documentSessionOpened' }>
   | PullSessionResponse<ArrayBuffer, number>

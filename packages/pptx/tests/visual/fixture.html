@@ -10,9 +10,10 @@
 </head>
 <body>
   <canvas id="canvas"></canvas>
+  <div id="scroll-host"></div>
 
   <script type="module">
-    import { PptxViewer } from '/src/index.ts';
+    import { PptxViewer, PptxScrollViewer } from '/src/index.ts';
     import { threeD } from '@ooxml-test-three-d-renderer';
     import { regionMap } from '@ooxml-test-region-map-renderer';
     import { tiff } from '@ooxml-test-tiff-renderer';
@@ -34,8 +35,12 @@
     // scale-parameterised specs; the default matches the reference images.
     const width    = Math.max(1, parseInt(params.get('width') ?? '1280', 10));
 
+    // ?viewer=scroll renders every slide through PptxScrollViewer (default
+    // options otherwise) so the scroll path has its own pixel self-VRT.
+    const scrollViewer = params.get('viewer') === 'scroll';
     const canvas = document.getElementById('canvas');
-    const viewer = new PptxViewer(canvas, {
+    const scrollHost = document.getElementById('scroll-host');
+    const viewerOptions = {
       width,
       threeD,
       regionMap,
@@ -46,7 +51,25 @@
         document.body.dataset.errorMessage = err.message;
         console.error('[fixture] error:', err);
       },
-    });
+    };
+    let viewer;
+    if (scrollViewer) {
+      canvas.remove();
+      scrollHost.style.cssText = `width:${width}px;height:800px;`;
+      // Every slide is mounted, so load() resolves after each one is painted.
+      viewer = new PptxScrollViewer(scrollHost, {
+        ...viewerOptions,
+        gap: 0,
+        paddingLeft: 0,
+        paddingRight: 0,
+        overscan: 100000,
+        enableZoom: false,
+        refitOnResize: false,
+      });
+    } else {
+      scrollHost.remove();
+      viewer = new PptxViewer(canvas, viewerOptions);
+    }
     let destroyed = false;
     const destroy = () => {
       if (destroyed) return;
@@ -84,12 +107,18 @@
       const buf = await resp.arrayBuffer();
       await viewer.load(buf);
       document.body.dataset.slideCount = String(viewer.slideCount);
-      if (slideIdx !== 0) {
-        await viewer.goToSlide(slideIdx);
+      if (scrollViewer) {
+        // Slot canvases stay mounted; the spec reads each one by slide index.
+        window.pptxVrtSlideDataUrl = (slideIndex) => scrollHost
+          .querySelector(`[data-slide-index="${slideIndex}"] canvas`)?.toDataURL('image/png') ?? null;
+      } else {
+        if (slideIdx !== 0) {
+          await viewer.goToSlide(slideIdx);
+        }
+        window.renderPptxVrtSlide = async (slideIndex) => {
+          await viewer.goToSlide(slideIndex);
+        };
       }
-      window.renderPptxVrtSlide = async (slideIndex) => {
-        await viewer.goToSlide(slideIndex);
-      };
       document.body.dataset.status = 'ready';
     } catch (err) {
       document.body.dataset.status = 'error';

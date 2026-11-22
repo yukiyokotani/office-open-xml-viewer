@@ -228,11 +228,43 @@ fn with_context<R>(
     Ok(result)
 }
 
+/// A chart substream's model on the heap. A chart model is tens of
+/// kilobytes, so the values the projection moves it through stay in this
+/// frame instead of accumulating in a caller that reads several charts.
+#[inline(never)]
+fn drawable(
+    records: &[Record<'_>],
+    palette: &Palette<'_>,
+    references: &project::References<'_>,
+    budget: &std::cell::Cell<usize>,
+) -> Result<Box<ooxml_common::chart::ChartModel>, String> {
+    match parse(records, palette, references, budget)? {
+        Some(model) => Ok(Box::new(model)),
+        None => Err(unsupported(
+            "BIFF chart without drawable series is not projected",
+        )),
+    }
+}
+
 /// A chart sheet's chart (MS-XLS 2.1.7.20.1 chart sheet substream) and the
 /// chart area rectangle from its Chart record (2.4.39: x, y, dx, dy as
 /// FixedPoint points), in EMU.
 pub(crate) struct ChartSheet {
-    pub model: ooxml_common::chart::ChartModel,
+    pub model: Box<ooxml_common::chart::ChartModel>,
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub width_emu: i64,
+    pub height_emu: i64,
+    /// Charts embedded in the chart sheet (chart objects drawn over its
+    /// chart), in document order.
+    pub embedded: Vec<EmbeddedChart>,
+}
+
+/// A chart object of a chart sheet with its rectangle in the sheet's EMU
+/// space (MS-XLS 2.5.191 OfficeArtClientAnchorChart, in 1/4000 of the chart
+/// area the Chart record states).
+pub(crate) struct EmbeddedChart {
+    pub model: Box<ooxml_common::chart::ChartModel>,
     pub x_emu: i64,
     pub y_emu: i64,
     pub width_emu: i64,
@@ -287,22 +319,81 @@ pub(super) fn chart_sheet(
     if width_emu <= 0 || height_emu <= 0 {
         return Err(unsupported("empty XLS chart sheet chart area"));
     }
-    let model = with_context(
+    // A chart object placed on the chart sheet is an Obj followed by its own
+    // chart substream (MS-XLS 2.1.7.20.1: OBJECTS inside the chart sheet
+    // substream). The sheet's own chart is the records outside those
+    // substreams; each embedded chart is drawn over it at its anchor.
+    let substream = &records[start..=end];
+    let objects = drawing_anchors::chart_sheet_charts(substream, start)?;
+    let mut own = Vec::new();
+    let mut depth = 0usize;
+    let mut nested = 0usize;
+    for record in substream {
+        if record.kind == super::BOF {
+            depth += 1;
+            nested += usize::from(depth == 2);
+        }
+        if depth == 1 {
+            own.push(*record);
+        }
+        if record.kind == super::EOF {
+            depth -= 1;
+        }
+    }
+    if nested != objects.len() {
+        return Err(crate::rejection::corrupt(
+            "nested BIFF substream inside a chart",
+        ));
+    }
+    let (model, embedded) = with_context(
         records,
         tabs,
         styles,
         sheets,
         shared,
         budget,
-        |palette, references| parse(&records[start..=end], palette, references, budget),
-    )??
-    .ok_or_else(|| unsupported("BIFF chart without drawable series is not projected"))?;
+        |palette, references| {
+            let model = drawable(&own, palette, references, budget)?;
+            let mut embedded = Vec::with_capacity(objects.len());
+            for &([left, top, right, bottom], (first, last), hidden) in &objects {
+                let chart = records
+                    .get(first..=last)
+                    .ok_or_else(|| unsupported("BIFF chart substream out of range"))?;
+                let model = drawable(chart, palette, references, budget)?;
+                // MS-ODRAW 2.3.4.44 fHidden: the object is read like any
+                // other and not displayed.
+                if hidden {
+                    continue;
+                }
+                if right <= left || bottom <= top {
+                    return Err(crate::rejection::corrupt("empty BIFF chart object anchor"));
+                }
+                // Widened before any arithmetic: the anchor is four i32.
+                let scale = |value: i64, extent: i64| value.saturating_mul(extent) / 4000;
+                let (left, top, right, bottom) = (
+                    i64::from(left),
+                    i64::from(top),
+                    i64::from(right),
+                    i64::from(bottom),
+                );
+                embedded.push(EmbeddedChart {
+                    model,
+                    x_emu: x_emu.saturating_add(scale(left, width_emu)),
+                    y_emu: y_emu.saturating_add(scale(top, height_emu)),
+                    width_emu: scale(right - left, width_emu),
+                    height_emu: scale(bottom - top, height_emu),
+                });
+            }
+            Ok::<_, String>((model, embedded))
+        },
+    )??;
     Ok(ChartSheet {
         model,
         x_emu,
         y_emu,
         width_emu,
         height_emu,
+        embedded,
     })
 }
 

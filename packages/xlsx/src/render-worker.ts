@@ -21,7 +21,12 @@ import { xlsxCjkFallback } from './font-requests.js';
  */
 import init, { XlsxArchive, reinit } from './wasm/xlsx_parser.js';
 import {
+  bindMetafileFontDemand,
+  bindMetafileFontFamilies,
+  activeFontSet,
+  createSymbolFaceOracleCache,
   decodeDataUrl,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   type OfficeFontFallbackRoute,
@@ -52,8 +57,9 @@ import {
   InstalledFamilyExclusion,
   XlsxFontDemand,
   declaredFontSubstitutions,
+  metafileFontDemand,
 } from './font-source-load.js';
-import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { officeRequestKey } from './shape-office-line.js';
 import { resolveSharedStringRows } from './shared-strings.js';
 import {
@@ -119,9 +125,13 @@ let fontSourceTail: Promise<void> = Promise.resolve();
 let officeFontRoutes: Record<string, OfficeFontFallbackRoute> = nullRecord();
 let checkedOfficeTupleSet = new Set<string>();
 let officeSheetLoads = new WeakMap<Worksheet, Promise<void>>();
+/** Symbol-code verdicts across this workbook's renders, kept while the worker
+ * realm's faces are unchanged (core createSymbolFaceOracleCache); replaced
+ * with every parse. */
+let symbolFaces = createSymbolFaceOracleCache();
 let officeSheetLoadQueue: Promise<void> = Promise.resolve();
 
-function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSource[]): void {
+function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSourceDescriptor[]): void {
   // Each load-time resource is owned and awaited by parse. Sequential adoption
   // also lets parse cleanup release earlier faces if the next loader rejects.
   fontsLoaded = (async () => {
@@ -134,6 +144,11 @@ function startFontLoad(parsed: ParsedWorkbook, sources: readonly FontSource[]): 
       if (delta) await fontSources.ensure(await installedFamilies.exclude(delta));
     }
     const office = await loadOfficeFontFallbacks(xlsxOfficeFontRequests(parsed));
+    // The symbol-font oracle of each render asks the worker realm's painting
+    // context through the route sentinels (core symbol-face.ts); released
+    // with the Office faces.
+    const sentinels = await loadNativeRouteSentinels(activeFontSet()).catch(() => null);
+    if (sentinels) office.faces.push(...sentinels);
     officeFontFaces = office.faces;
     officeFontRoutes = office.routes;
     checkedOfficeTupleSet = new Set(office.checked);
@@ -321,7 +336,7 @@ self.onmessage = async (e: MessageEvent<
       japaneseCellFonts = req.japaneseCellFonts === true;
       // Descriptors crossed the realm boundary: validate them as strictly as
       // the factories did (TypeError / font-source-limit reject the parse).
-      const sources: readonly FontSource[] = req.fonts === undefined ? [] : assertFontSourceDescriptors(req.fonts);
+      const sources: readonly FontSourceDescriptor[] = req.fonts === undefined ? [] : assertFontSourceDescriptors(req.fonts);
       await fontsLoaded;
       await officeSheetLoadQueue;
       ownsParseResources = true;
@@ -337,6 +352,8 @@ self.onmessage = async (e: MessageEvent<
       checkedOfficeTupleSet = new Set();
       officeSheetLoads = new WeakMap();
       officeSheetLoadQueue = Promise.resolve();
+      symbolFaces.dispose();
+      symbolFaces = createSymbolFaceOracleCache();
       sheetCache.clear();
       viewProjectionCache.clear();
       sheetCacheUsage.clear();
@@ -490,7 +507,7 @@ self.onmessage = async (e: MessageEvent<
         sizeOverrides,
       );
       const renderWorksheet = projected.worksheet;
-      if (projected.created) inheritSheetRenderCache(ws, renderWorksheet);
+      if (projected.created) inheritSheetRenderCache(ws, renderWorksheet, workbook.styles);
       if (req.viewProjection?.autoRowHeightsPrepared) {
         markAutoRowHeightsPrepared(renderWorksheet);
       }
@@ -504,6 +521,10 @@ self.onmessage = async (e: MessageEvent<
         post({ type: 'errorPlaceholderRequired', id, sheetIndex: req.sheetIndex });
         return;
       }
+      // Metafile pictures paint their text with the served faces too, and
+      // load the scalars it paints before they play.
+      bindMetafileFontFamilies(getImage, fontSources?.loaded);
+      bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
       await renderWorksheetViewport(
         { ...workerRenderDeps(renderWorksheet, workbook.styles, renderers), cjkFallback },
         canvas,
@@ -515,7 +536,7 @@ self.onmessage = async (e: MessageEvent<
         // invalidate it on first use.
         { ...renderOpts, authoritativeMdw: req.layoutMetrics?.maximumDigitWidth
           ?? workbook?.layoutMetrics?.maximumDigitWidth,
-          officeFontRoutes, fontSources: fontSources?.loaded, fetchImage: getImage },
+          officeFontRoutes, fontSources: fontSources?.loaded, symbolFaces, fetchImage: getImage },
         svgDecodeClient.decode,
       );
       const bitmap = canvas.transferToImageBitmap();
@@ -569,6 +590,8 @@ self.onmessage = async (e: MessageEvent<
       try { source?.closeModelSource(); } catch {}
       try { host.run(() => host.disposeArchive()); } catch {}
       try { unloadOfficeFontFallbacks(officeFontFaces); } catch {}
+      symbolFaces.dispose();
+      symbolFaces = createSymbolFaceOracleCache();
       try { fontSources?.release(); } catch {}
       fontSources = null;
       fontResolverClient.reset();

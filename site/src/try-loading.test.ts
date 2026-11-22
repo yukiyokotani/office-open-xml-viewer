@@ -6,7 +6,7 @@ const renderer = readFileSync(new URL('./lib/try.ts', import.meta.url), 'utf8');
 
 describe('Try Yours parsing progress', () => {
   it('uses concise, functional copy for the file workflow', () => {
-    expect(source).toContain('Drop in a file.<br />See how it renders.');
+    expect(source).toContain('Try your own file.');
     expect(source).toContain('Choose another file');
     expect(source).not.toContain('Inspect freely');
     expect(source).not.toContain('Verify in source');
@@ -21,7 +21,7 @@ describe('Try Yours parsing progress', () => {
   });
 
   it('quietly allows CSV and TSV selection without advertising generic text formats', () => {
-    expect(source).toContain('accept=".docx,.xlsx,.pptx,.doc,.xls,.ppt,.csv,.tsv"');
+    expect(source).toContain('accept=".docx,.xlsx,.pptx,.doc,.xls,.ppt,.odt,.ott,.ods,.ots,.odp,.otp,.csv,.tsv"');
     expect(source).toContain('<small>.docx · .xlsx · .pptx</small>');
     expect(source).not.toMatch(/accept="[^"]*\.dat/);
     expect(source).toContain('wasmBadge.hidden = isTryYoursDelimitedTextFile(file.name)');
@@ -50,7 +50,7 @@ describe('Try Yours parsing progress', () => {
   });
 
   it('opens PPTX files progressively in worker mode with a stable final count', () => {
-    const branch = renderer.match(/if \(ext === 'pptx' \|\| ext === 'ppt'\) \{([\s\S]*?)\n  \}\n\n  const host/)?.[1] ?? '';
+    const branch = renderer.match(/if \(ext === 'pptx' \|\| ext === 'ppt' \|\| isOdp\) \{([\s\S]*?)\n  \}\n\n  const host/)?.[1] ?? '';
     expect(branch).toContain("mode: 'worker'");
     expect(branch).toContain('progressiveLayout: true');
     expect(branch).toContain('viewer.waitUntilLayoutComplete().then(mountAllSlides)');

@@ -12,6 +12,7 @@ import {
 import type { NodeCanvasFactory } from './render.ts';
 import { OoxmlError } from '@silurus/ooxml-core';
 import { nonOoxmlInputs } from '@silurus/ooxml-core/testing';
+import { brokenDocx } from '../../core/src/testing/part-failure-packages.ts';
 
 const factory: NodeCanvasFactory = {
   createCanvas: (width, height) =>
@@ -95,6 +96,24 @@ describe('Node bounded DOCX document session', () => {
     // ownership, rather than a machine-dependent five-second performance SLO.
   }, 15_000);
 
+  // #2248: the error page's layout is loaded with the first failed document.
+  it('opens a document whose main part is malformed on its placeholder page', async () => {
+    const session = await openDocxDocument(brokenDocx(), { factory, currentDate: 0 });
+    try {
+      expect(session.pageCount).toBe(1);
+      const canvas = await session.renderPage(0, { width: 612 });
+      const pixels = (canvas as unknown as Canvas).getContext('2d')
+        .getImageData(0, 0, canvas.width, canvas.height).data;
+      let ink = 0;
+      for (let offset = 0; offset < pixels.length; offset += 4) {
+        if (pixels[offset]! < 250 || pixels[offset + 1]! < 250 || pixels[offset + 2]! < 250) ink += 1;
+      }
+      expect(ink).toBeGreaterThan(100);
+    } finally {
+      await session.close();
+    }
+  });
+
   it('does not route the bounded session through the materializing parse export', async () => {
     const parse = vi.spyOn(docxWasm, 'parse_docx');
     try {
@@ -103,6 +122,68 @@ describe('Node bounded DOCX document session', () => {
       expect(parse).not.toHaveBeenCalled();
     } finally {
       parse.mockRestore();
+    }
+  });
+
+  it('extracts model pictures through the session-owned bounded cache and rejects after close', async () => {
+    const extract = vi.spyOn(archivePrototype(), 'extract_image');
+    try {
+      const session = await openDocxDocument(bytes, { factory, currentDate: 0 });
+      const first = await session.getImage('word/media/image1.jpeg', 'image/jpeg');
+      const second = await session.getImage('word/media/image1.jpeg', 'image/jpeg');
+      expect(first).toBe(second);
+      expect(first.type).toBe('image/jpeg');
+      // The demo package stores image1.jpeg as a 202,076-byte JPEG (SOI FF D8).
+      expect(first.size).toBe(202_076);
+      expect([...new Uint8Array(await first.slice(0, 2).arrayBuffer())]).toEqual([0xff, 0xd8]);
+      expect((await session.getImage('word/media/image1.jpeg')).type).toBe('application/octet-stream');
+      expect(extract).toHaveBeenCalledTimes(1);
+      expect(session.resourceUsage?.distinctInflatedBytes).toBeGreaterThanOrEqual(202_076);
+
+      await session.close();
+      await expect(session.getImage('word/media/image1.jpeg', 'image/jpeg')).rejects.toThrow(/closed/);
+      expect(extract).toHaveBeenCalledTimes(1);
+    } finally {
+      extract.mockRestore();
+    }
+  });
+
+  it('rejects a non-picture or missing path without failing the session', async () => {
+    const onResourceMetrics = vi.fn();
+    const session = await openDocxDocument(bytes, { factory, currentDate: 0, onResourceMetrics });
+    onResourceMetrics.mockClear();
+    try {
+      await expect(session.getImage('word/document.xml')).rejects.toThrow(TypeError);
+      await expect(session.getImage('[Content_Types].xml')).rejects.toThrow(TypeError);
+      await expect(session.getImage('word/media/missing.jpeg', 'image/jpeg')).rejects.toBeDefined();
+      expect(onResourceMetrics).not.toHaveBeenCalled();
+      expect((await session.getImage('word/media/image1.jpeg', 'image/jpeg')).size).toBe(202_076);
+      await expect(session.renderPage(0)).resolves.toBeDefined();
+    } finally {
+      await session.close();
+    }
+    expect(onResourceMetrics).toHaveBeenCalledWith(expect.objectContaining({ status: 'ok' }));
+  });
+
+  it('fails the session when a picture read exceeds the archive entry budget', async () => {
+    // document.xml (68,517 bytes) and every other non-media part fit; the
+    // 202,076-byte image1.jpeg does not.
+    const session = await openDocxDocument(bytes, {
+      factory,
+      currentDate: 0,
+      resourceLimits: { maxArchiveEntryBytes: 150_000 },
+    });
+    try {
+      const failure = await session.getImage('word/media/image1.jpeg', 'image/jpeg').then(
+        () => { throw new Error('resolved an over-budget picture'); },
+        (error: unknown) => error,
+      );
+      expect(failure).toMatchObject({ name: 'OoxmlResourceLimitError', code: 'ooxml-resource-limit' });
+      // A resource-limit failure fails the session, as in the PPTX session.
+      await expect(session.getImage('word/media/image3.jpeg', 'image/jpeg')).rejects.toBe(failure);
+      await expect(session.renderPage(0)).rejects.toBe(failure);
+    } finally {
+      await session.close();
     }
   });
 

@@ -148,6 +148,14 @@ describe('#1974 errorPlaceholder on the slide placeholder', () => {
     expect(calls).toBe(0);
   });
 
+  it('keeps a long caller title and detail inside the card', async () => {
+    const texts = await paint({ errorPlaceholder: { title: 'T'.repeat(5_000), detail: 'd '.repeat(50_000) } });
+    // 960 px slide: lines fit widthPx - 4 * pad (pad = 21.6 px), at 6 px per code unit here.
+    for (const text of texts) expect(text.length * 6).toBeLessThanOrEqual(960 - 4 * 21.6);
+    expect(texts.filter((text) => text.startsWith('T'))).toHaveLength(1);
+    expect(texts.filter((text) => text.startsWith('d')).length).toBeLessThanOrEqual(4);
+  });
+
   it('rejects for an invalid result', async () => {
     await expect(paint({ errorPlaceholder: () => ({ title: 1 }) as never })).rejects.toThrow(TypeError);
   });

@@ -75,7 +75,7 @@ export const optionalRenderers: readonly OptionalRendererReference[] = [
     entry: '@silurus/ooxml/tiff',
     exportName: 'tiff',
     contract: 'TiffRenderer',
-    desc: 'Decodes bounded stripped TIFF 6.0 images in DOCX, XLSX and PPTX. Supported classes are bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK, uncompressed or LZW-compressed (8-bit classes optionally with horizontal differencing), plus 1-bit CCITT Group 4. Unsupported or malformed classes make standalone calls and DOCX/PPTX rendering report TiffDecodeError. XLSX rendering, including XlsxViewer, contains the failure at that picture and shows an unavailable-image placeholder.',
+    desc: 'Decodes bounded stripped TIFF 6.0 images in DOCX, XLSX and PPTX. Supported classes are bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK, uncompressed, PackBits-compressed or LZW-compressed (8-bit LZW classes optionally with horizontal differencing), plus 1-bit CCITT Group 4. Unsupported or malformed classes make standalone calls and DOCX/PPTX rendering report TiffDecodeError. XLSX rendering, including XlsxViewer, contains the failure at that picture and shows an unavailable-image placeholder.',
   },
 ];
 
@@ -86,18 +86,18 @@ const RESOURCE_METRICS = { name: 'onResourceMetrics', type: '(metrics: OoxmlReso
 const RESOURCE_METRICS_METHOD = { sig: 'getResourceMetrics(): Promise<OoxmlResourceMetrics>', desc: 'Return a fresh, content-free package-usage snapshot, including lazy archive work observed since load. Collection is always active; debug controls only console output.', emphasis: 'Collection is always active; debug controls only console output.' };
 const DEBUG = { name: 'debug', type: 'boolean', def: 'false', desc: 'Print one content-free, Ratatui-inspired resource report when the measured load or Node session finishes or fails. Browser DevTools use typography-only %c styling to keep Unicode borders and gauges aligned without changing foreground or background colours; Node and Worker consoles receive one plain argument. Use onResourceMetrics instead for production collection.', emphasis: 'Use onResourceMetrics instead for production collection.' };
 const ZIP = { name: 'maxZipEntryBytes', type: 'number', def: 'resource policy default', desc: 'Deprecated compatibility alias for resourceLimits.maxArchiveEntryBytes. It is scheduled for removal in a future breaking release; new code should use resourceLimits. Existing positive values retain their per-entry meaning; zero / negative values fall back to the standard default.', emphasis: 'It is scheduled for removal in a future breaking release; new code should use resourceLimits.' };
-const FONTS = { name: 'fonts', type: 'readonly FontSource[]', def: '[] (offline)', desc: 'Ordered application font sources for authored and script-fallback families the host lacks, built with googleFonts({ cssOrigin?, substitutes? }), fontCssApi({ urlTemplate, … }), fontCss({ url }), fontFiles({ faces }) or fontResolver(fn) from @silurus/ooxml or the docx, xlsx and pptx entries. googleFonts({ cssOrigin }) sends the stylesheet requests to that Google-compatible origin; redirects are followed and the font file URLs in the returned CSS are used as given, so for network isolation the mirror must control both. fontResolver runs on the main thread in both modes, for authenticated or private services that return URLs or bytes; in worker mode the page also fetches the claimed URLs it returns and sends the worker the bytes. Sources are consulted per family in option order: the first source that has a face for a family claims it, and a failed stylesheet, resolver or face keeps the host fallback with a console.warn and never retries another source. Faces register under their real CSS family in the painting realm (main thread or render worker, identically), and only the unicode-range subsets the document paints are loaded, except that font files the library fetches itself (fontResolver URLs in worker mode, sources with credentials: \'omit\') are fetched for every face of a claimed family. An installed authored face is never displaced. Cross-origin fonts need CORS; a CSP needs connect-src for stylesheet origins and for font files the library fetches itself (fontResolver URLs in worker mode, sources with credentials: \'omit\'), and font-src for font file origins. Fixed source limits reject with OoxmlError(\'font-source-limit\'). Off by default: no network request is made without a source.', emphasis: 'Off by default: no network request is made without a source.', detailsHref: 'https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/migration-0.90.md', detailsLabel: 'Font sources guide' };
-const GFONTS_DEPRECATED = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Deprecated alias of fonts: [googleFonts()], warned once per JavaScript realm and removed in 0.91.0. false is a no-op that still warns; combining true with fonts throws a TypeError.', emphasis: 'Deprecated alias of fonts: [googleFonts()]' };
+const FONTS = { name: 'fonts', type: 'readonly FontSource[]', def: '[] (offline)', desc: 'Ordered application font sources for authored and script-fallback families the host lacks, built with googleFonts({ baseUrl?, substitutions?, additionalFamilies? }), fontCssApi({ urlTemplate, … }), fontCss({ url }), fontFiles({ faces }) or fontResolver(fn) from @silurus/ooxml or the docx, xlsx and pptx entries. A FontSource is opaque: only values those factories returned are accepted. googleFonts({ additionalFamilies }) adds Google families outside the preset catalog, family → CSS2 axis query. googleFonts({ baseUrl }) sends the stylesheet requests to that Google-compatible origin (an origin only in 0.90: no path); redirects are followed and the font file URLs in the returned CSS are used as given, so for network isolation the mirror must control both. fontResolver runs on the main thread in both modes, for authenticated or private services that return URLs or bytes; it receives family names (authoredFamilies and fallbackFamilies), never document text, and answers each family with all its faces, like an @font-face stylesheet; in worker mode the page also fetches the URLs it returns and sends the worker the bytes. Sources are consulted per family in option order: the first source that has a face for a family claims it, and a failed stylesheet, resolver or face keeps the host fallback with a console.warn and never retries another source. Faces register under names private to the document in the painting realm (main thread or render worker, identically), so two open documents never paint with each other\'s faces, and for every source only the unicode-range subsets the document paints are fetched and loaded. The library fetches font files itself with fetch() (with the source\'s credentials; fontResolver URLs from the page with same-origin credentials, in both modes), so DOCX can read each face\'s line metrics. An installed authored face is never displaced. Cross-origin fonts need CORS; a CSP needs connect-src for stylesheet origins, and both connect-src and font-src for font file origins (for Google Fonts: connect-src fonts.googleapis.com and fonts.gstatic.com, font-src fonts.gstatic.com). A factory input beyond a fixed limit throws OoxmlError(\'font-source-limit\'); a limit reached while loading fails only the families concerned, with a console.warn. Off by default: no network request is made without a source.', emphasis: 'Off by default: no network request is made without a source.', detailsHref: 'https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/migration-0.90.md', detailsLabel: 'Font sources guide' };
+const GFONTS_DEPRECATED = { name: 'useGoogleFonts', type: 'boolean', def: 'false', desc: 'Deprecated alias of fonts: [googleFonts()], warned once per JavaScript realm. From 0.91.0 it is ignored with the same warning (no web fonts, never an error). false is a no-op that still warns. When fonts is also given, fonts wins and the key adds nothing (still warned, never an error).', emphasis: 'Deprecated alias of fonts: [googleFonts()]' };
 const CJK_FALLBACK = { name: 'cjkFallback', type: "'auto' | 'sc' | 'tc' | 'hk' | 'jp' | 'kr'", def: "'auto'", desc: 'Regional preference used when Han text reaches font fallback and the document has not already identified a region. The requested font remains first; recognized regional CJK font names, an East Asian run language where available, and unambiguous Kana or Hangul take priority. Auto snapshots HTML lang, then navigator.languages and navigator.language; otherwise JP. Hans or Hant selects SC or TC; without an explicit script, HK/MO selects HK, TW selects TC, and bare zh selects SC. An explicit value makes the regional choice independent of the host locale, but does not download fonts or by itself guarantee pixel-identical output across different font environments.' };
 const PASSWORD = { name: 'password', type: 'string', def: 'undefined', desc: 'Password for an Agile-encrypted OOXML file. Available on self-loading Viewer constructors and headless load(); borrowed fromDocument(), fromPresentation(), and fromWorkbook() factories omit load-only options because their engine is already loaded.', emphasis: 'Available on self-loading Viewer constructors and headless load()' };
 const DPR = { name: 'dpr', type: 'number', def: 'devicePixelRatio', desc: 'Device pixel ratio for the backing store (crispness on HiDPI).' };
-const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', desc: 'Override the URL the parser worker fetches the WebAssembly module from. By default each format resolves the `*_parser_bg.wasm` asset that ships next to its bundle (relative to the module URL); set this to serve it from a CDN or a self-hosted path instead (a relative value resolves against the document URL). Pointing it at a mismatched or missing file makes load() reject when the worker instantiates it.', emphasis: 'Override the URL the parser worker fetches the WebAssembly module from.' };
+const WASM_URL = { name: 'wasmUrl', type: 'string | URL', def: 'bundled asset', desc: 'Override the URL the parser worker fetches the WebAssembly module from. By default each format resolves the `*_parser_bg.wasm` asset that ships next to its bundle (relative to the module URL); set this to serve it from a CDN or a self-hosted path instead (a relative value resolves against the document base URL, which honours `<base href>`). Pointing it at a mismatched or missing file makes load() reject when the worker instantiates it.', emphasis: 'Override the URL the parser worker fetches the WebAssembly module from.' };
 const WORKER_TIMEOUT = { name: 'workerTimeoutMs', type: 'number', def: 'unlimited', desc: 'Opt-in worker liveness limit. Ordinary worker requests use it as their response deadline. Worker-mode progressive loads restart this silence interval whenever the worker reports progress. This allows active long-running work to continue. Silence before first paint rejects load(); silence afterward keeps layoutComplete false and rejects waitUntilLayoutComplete(), while configured completion/error callbacks receive the failure. Worker exceptions still reject immediately. Unlimited by default.', emphasis: 'Worker-mode progressive loads restart this silence interval whenever the worker reports progress.' };
 const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~4 MB). Import it from the separate @silurus/ooxml/math entry — `import { math } from "@silurus/ooxml/math"` — and pass it to render equations in either mode. Omit it and equations are skipped; the MathJax asset is not fetched. When passed, that standalone asset is fetched lazily the first time a document contains an equation.', emphasis: 'Opt-in OMML equation engine (MathJax + STIX Two Math, ~4 MB).' };
 const THREE_D = { name: 'threeD', type: 'ChartThreeDRenderer', def: 'undefined', desc: 'Opt-in model-space 3-D chart renderer. Import `threeD` from the separate `@silurus/ooxml/three-d` entry and inject it once. Omit it to use the canonical 2-D fallback and avoid loading or evaluating the mesh/camera implementation in main mode. The self-contained worker asset retains the worker-side implementation. It renders the view angle authored in OOXML in main and worker modes.', emphasis: 'Opt-in model-space 3-D chart renderer.' };
 const REGION_MAP = { name: 'regionMap', type: 'ChartRegionMapRenderer', def: 'undefined', desc: 'Opt-in offline ChartEx Region Map renderer using a pinned, public-domain Natural Earth country asset. Import `regionMap` from `@silurus/ooxml/region-map` and inject it once. Unsupported cached or sub-country views fail closed. The built-in renderer works in main and worker modes.', emphasis: 'Opt-in offline ChartEx Region Map renderer' };
 const CHART_EX = { name: 'chartEx', type: 'ChartExRenderer', def: 'undefined', desc: 'Opt-in renderer for Microsoft ChartEx (`cx:*`) chart families. Import `chartEx` from `@silurus/ooxml/chart-ex` and inject it once. Classic 2-D charts stay in the default format entries; ChartEx is opt-in. The built-in renderer works in main and worker modes.', emphasis: 'Classic 2-D charts stay in the default format entries; ChartEx is opt-in.' };
-const TIFF = { name: 'tiff', type: 'TiffRenderer', def: 'undefined', desc: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX. Import `tiff` from `@silurus/ooxml/tiff` and inject it once. The bounded codec accepts stripped TIFF 6.0 bilevel, grayscale, RGB, RGBA and process-CMYK images, uncompressed or LZW-compressed, plus CCITT Group 4 bilevel images. Omit it to keep the implementation out of ordinary format bundles; recognized TIFF images then use an unavailable-image placeholder while the rest of the document keeps rendering. Unsupported or malformed input makes standalone codec calls and DOCX/PPTX rendering report TiffDecodeError; XLSX rendering, including XlsxViewer, contains it at that picture and shows the placeholder. The built-in codec works in main and worker modes.', emphasis: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX.' };
+const TIFF = { name: 'tiff', type: 'TiffRenderer', def: 'undefined', desc: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX. Import `tiff` from `@silurus/ooxml/tiff` and inject it once. The bounded codec accepts stripped TIFF 6.0 bilevel, grayscale, RGB, RGBA and process-CMYK images, uncompressed, PackBits-compressed or LZW-compressed, plus CCITT Group 4 bilevel images. Omit it to keep the implementation out of ordinary format bundles; recognized TIFF images then use an unavailable-image placeholder while the rest of the document keeps rendering. Unsupported or malformed input makes standalone codec calls and DOCX/PPTX rendering report TiffDecodeError; XLSX rendering, including XlsxViewer, contains it at that picture and shows the placeholder. The built-in codec works in main and worker modes.', emphasis: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX.' };
 const LEGACY_SOURCE = (exportName: 'legacyDoc' | 'legacyXls' | 'legacyPpt', entry: 'doc' | 'xls' | 'ppt', format: 'docx' | 'xlsx' | 'pptx', factory: string): ApiOption => ({
   name: exportName,
   type: `ModelSource<'${format}'>`,
@@ -110,6 +110,18 @@ const LEGACY_SOURCE = (exportName: 'legacyDoc' | 'legacyXls' | 'legacyPpt', entr
 const LEGACY_DOC = LEGACY_SOURCE('legacyDoc', 'doc', 'docx', 'createLegacyDoc');
 const LEGACY_XLS = LEGACY_SOURCE('legacyXls', 'xls', 'xlsx', 'createLegacyXls');
 const LEGACY_PPT = LEGACY_SOURCE('legacyPpt', 'ppt', 'pptx', 'createLegacyPpt');
+const ODF_SOURCE = (exportName: 'odt' | 'odp' | 'ods', format: 'docx' | 'xlsx' | 'pptx', templates: string, factory: string): ApiOption => ({
+  name: exportName,
+  type: `ModelSource<'${format}'>`,
+  def: 'undefined',
+  desc: `Experimental opt-in OpenDocument reader for .${exportName} (and .${templates}) files, from the separate @silurus/ooxml-opendocument add-on (install it at exactly the same version). Import \`${exportName}\` from \`@silurus/ooxml-opendocument/${exportName}\` and pass it as \`{ ${exportName} }\`; use \`${factory}({ wasmUrl, moduleUrl })\` for custom asset URLs. Importing it fetches nothing; its reader loads only when a matching file is opened. Every feature it reads is drawn; only corrupt, encrypted, unsafe or over-limit files reject.`,
+  emphasis: 'Experimental opt-in OpenDocument reader',
+  detailsHref: 'https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/opendocument.md',
+  detailsLabel: 'OpenDocument guide',
+});
+const ODT = ODF_SOURCE('odt', 'docx', 'ott', 'createOdt');
+const ODP = ODF_SOURCE('odp', 'pptx', 'otp', 'createOdp');
+const ODS = ODF_SOURCE('ods', 'xlsx', 'ots', 'createOds');
 const MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for the smallest worker download, the lowest single-frame overhead or custom renderer objects; parsing still runs in a Worker, while Canvas rendering runs on the main thread. Use 'worker' when document layout and paint would compete with application UI responsiveness. It requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Built-in math, ChartEx, 3-D, Region Map and TIFF renderers use the same options in both modes. In worker mode, use the bitmap render methods instead of methods that accept a Canvas.", emphasis: "Use 'worker' when document layout and paint would compete with application UI responsiveness." };
 const VIEWER_MODE = { name: 'mode', type: "'main' | 'worker'", def: "'main'", desc: "Use 'main' for ordinary previews, the smallest worker download or custom renderer objects. Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI. Worker mode requires Worker and OffscreenCanvas, downloads a larger render worker and transfers an ImageBitmap per frame. Viewer navigation, zoom, virtualized scrolling, selection, find, hyperlinks and the built-in math, ChartEx, 3-D, Region Map and TIFF renderers remain available in both modes.", emphasis: "Use 'worker' when rendering larger or more complex documents would compete with scrolling, navigation or other application UI." };
 const ZOOM_MIN_MAX = { name: 'zoomMin / zoomMax', type: 'number', def: '0.1 / 4', desc: 'Zoom factor bounds for setScale / fitWidth / fitPage (10%–400%).' };
@@ -169,7 +181,7 @@ const DOCX_PROGRESSIVE_LAYOUT: ApiOption = {
   name: 'progressiveLayout',
   type: 'boolean',
   def: 'false',
-  desc: 'Resolve load() when the opening pages are paintable and continue the same canonical pagination session in the background. While layoutComplete is false, pageCount is the pages available so far rather than the final total. Works in main and worker modes; worker mode also keeps the remaining pagination off the UI thread.',
+  desc: 'Resolve load() when the opening pages are paintable and continue the same canonical pagination session in the background. While layoutComplete is false, pageCount is the pages available so far rather than the final total. Pages shown before layout completes are provisional: page breaks may move and content can occasionally overlap. DocxViewer and DocxScrollViewer redraw every page once layout completes; direct DocxDocument.renderPage() callers own their canvases and must render again after waitUntilLayoutComplete(). Works in main and worker modes; worker mode also keeps the remaining pagination off the UI thread.',
   emphasis: 'While layoutComplete is false, pageCount is the pages available so far rather than the final total.',
   detailsHref: '/docx#progressive-layout',
   detailsLabel: 'Progressive layout guide',
@@ -307,7 +319,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CONTEXT_MENU('PptxSelectionContext'),
         FIND_HIGHLIGHT_COLORS,
         { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive (the viewer draws its own play chrome).' },
-        { name: 'hiddenSlideMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented. `show` draws them like any other slide; `skip` makes sequential navigation (nextSlide/prevSlide and the initial load) jump over them while keeping absolute indices unchanged (an explicit goToSlide to a hidden slide is still honored); `dim` draws them under a translucent overlay (the PowerPoint thumbnail look).' },
+        { name: 'hiddenSlideMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented. `show` draws them like any other slide; `skip` keeps absolute indices unchanged but never draws a hidden slide while any slide is shown: nextSlide/prevSlide and the initial load jump over them, goToSlide and internal hyperlinks aimed at a hidden slide land on the next shown slide (else the previous one), and findText does not match hidden slides (if every slide is hidden, the deck behaves as in `show`: the requested slide is drawn and findText matches every slide); `dim` draws them under a translucent overlay (the PowerPoint thumbnail look).' },
         { name: 'hiddenSlideDim', type: 'Partial<DimOptions>', def: "{ color: '#ffffff', opacity: 0.6 }", desc: 'Overrides for the `dim` overlay, merged over the default white 60% wash. A partial so it stays in sync if DimOptions gains a field.' },
         ZIP,
         RESOURCE_LIMITS,
@@ -320,6 +332,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_PPT,
+        ODP,
         VIEWER_MODE,
         ...PPTX_PROGRESSIVE_OPTIONS,
         ZOOM_MIN_MAX,
@@ -334,7 +347,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       methods: [
         { sig: 'static fromPresentation(canvas, presentation, options?): Omit<PptxViewer, "load">', desc: 'Synchronously create a Viewer that borrows an already-loaded presentation. Render with goToSlide(); destroy() leaves the presentation open.' },
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a Viewer-owned URL or ArrayBuffer. With progressiveLayout, resolve when the opening slide is paintable.' },
-        { sig: 'goToSlide(index: number): Promise<void>', desc: 'Render a specific slide (0-indexed, clamped).' },
+        { sig: 'goToSlide(index: number): Promise<void>', desc: 'Render a specific slide (0-indexed, clamped). In `skip` mode a hidden target lands on the next shown slide, else the previous one.' },
         { sig: 'nextSlide(): Promise<void>', desc: 'Advance one slide.' },
         { sig: 'prevSlide(): Promise<void>', desc: 'Go back one slide.' },
         ...zoomMethods(true),
@@ -345,7 +358,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get layoutComplete(): boolean', desc: 'True only when every slide is paintable. It remains false if background preparation fails; waitUntilLayoutComplete() reports that failure.' },
         { sig: 'waitUntilLayoutComplete(): Promise<void>', desc: 'Wait until every slide is paintable; rejects if background preflight fails.' },
         { sig: 'get hiddenSlideMode(): "show" | "skip" | "dim"', desc: 'The current hidden-slide mode.' },
-        { sig: 'setHiddenSlideMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-slide mode at runtime and re-render. Entering `skip` while on a hidden slide advances to the nearest visible slide.' },
+        { sig: 'setHiddenSlideMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-slide mode at runtime and re-render. Entering `skip` while on a hidden slide advances to the nearest visible slide. Entering or leaving `skip` clears the current search (matches and highlights); call findText again.' },
         { sig: 'get visibleSlideCount(): number', desc: 'Number of non-hidden slides. During progressive loading this is provisional until layoutComplete; the absolute slideCount remains unchanged.' },
         { sig: 'getNotes(slideIndex: number): string | null', desc: 'Speaker-notes text for a slide (0-based). During progressive loading the answer is authoritative only below availableSlideCount; await waitUntilLayoutComplete() before scanning the whole deck.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas.' },
@@ -359,7 +372,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'PptxPresentation',
       ctor: 'await PptxPresentation.load(source, options?)',
       note: 'Headless engine — parse once, render any slide into any canvas you supply (scroll views, thumbnail grids, master–detail).',
-      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_PPT, MODE, ...PPTX_PROGRESSIVE_OPTIONS],
+      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_PPT, ODP, MODE, ...PPTX_PROGRESSIVE_OPTIONS],
       methods: [
         { sig: 'static load(source, options?): Promise<PptxPresentation>', desc: 'Parse a deck from a URL or ArrayBuffer. With progressiveLayout, resolve when the opening slide is paintable.' },
         { sig: 'get slideCount(): number', desc: 'Total slides.' },
@@ -406,6 +419,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FIND_HIGHLIGHT_COLORS,
         { name: 'enableMediaPlayback', type: 'boolean', def: 'false', desc: 'Make embedded audio/video interactive inside the real viewport plus mediaOverscan. Other mounted slides remain static and selectable without allocating media blobs or RAF loops.' },
         { name: 'mediaOverscan', type: 'number', def: '1', desc: 'Slides beyond the real viewport that may keep interactive media handles. Independent from the general overscan used for mounted canvases/text overlays.' },
+        { name: 'hiddenSlideMode', type: "'show' | 'skip' | 'dim'", def: "'show'", desc: 'How hidden slides (`<p:sld show="0">`, §19.3.1.38) are presented, with the PptxViewer rules. `show` lays them out like any other slide; `skip` leaves them out of the scroll layout: scrollToSlide and internal hyperlinks aimed at a hidden slide land on the next shown slide (else the previous one), findText does not match hidden slides and goToComment on one resolves false. Every reported index stays the absolute deck index (onVisibleSlideChange, topVisibleSlide, find locations); onVisibleSlideChange `total` stays slideCount. If every slide is hidden the deck behaves as in `show`. With progressiveLayout a slide is laid out until its metadata shows it hidden, and the top visible slide keeps its place. `dim` draws hidden slides under a translucent overlay.' },
+        { name: 'hiddenSlideDim', type: 'Partial<DimOptions>', def: "{ color: '#ffffff', opacity: 0.6 }", desc: 'Overrides for the `dim` overlay, merged over the default white 60% wash, as on PptxViewer.' },
         ON_HYPERLINK_CLICK,
         ENABLE_HYPERLINKS,
         FONTS, GFONTS_DEPRECATED,
@@ -422,10 +437,11 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_PPT,
+        ODP,
         DPR,
         MODE,
         ...PPTX_PROGRESSIVE_OPTIONS,
-        { name: 'onVisibleSlideChange', type: '(topIndex: number, total: number, layoutComplete: boolean) => void', desc: 'Fires when the top-most visible slide changes or progressive completion changes while the same slide remains visible.' },
+        { name: 'onVisibleSlideChange', type: '(topIndex: number, total: number, layoutComplete: boolean) => void', desc: 'Fires when the top-most visible slide changes or progressive completion changes while the same slide remains visible. `topIndex` is the absolute deck index and `total` is slideCount, also with hiddenSlideMode `skip`.' },
         VIEWER_ON_ERROR,
         errorPlaceholderOption('pptx'),
         onPartFailureOption('pptx'),
@@ -433,7 +449,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       methods: [
         { sig: 'static fromPresentation(container, presentation, options?): Omit<PptxScrollViewer, "load">', desc: 'Synchronously create a Scroll Viewer that borrows one loaded presentation and lays out its initial virtual window.' },
         { sig: 'load(source: string | ArrayBuffer): Promise<void>', desc: 'Load a Viewer-owned deck. With progressiveLayout, render the opening paintable window while reserving the final scroll extent.' },
-        { sig: 'scrollToSlide(index: number, opts?: { behavior?: "auto" | "smooth" }): void', desc: 'Scroll so slide index’s top edge sits at the viewport top (index clamped).' },
+        { sig: 'scrollToSlide(index: number, opts?: { behavior?: "auto" | "smooth" }): void', desc: 'Scroll so slide index’s top edge sits at the viewport top (index clamped). With hiddenSlideMode `skip`, a hidden target is replaced by the next shown slide, else the previous one.' },
         { sig: 'goToComment(slideIndex: number, commentIndex: number, opts?: { behavior?: "auto" | "smooth" }): Promise<boolean>', desc: 'Reveal and highlight one entry from presentation.getComments(slideIndex). Resolves after modern element bounds or the authored slide point has been selected; returns false for an invalid locator or unresolved target.' },
         ...findMethods('PptxMatchLocation'),
         { sig: 'setScale(scale: number): void', desc: 'Set the absolute zoom scale at runtime (clamped to the effective zoom range, which includes a width fit below zoomMin). Flicker-free. View-only.' },
@@ -442,7 +458,10 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'get availableSlideCount(): number', desc: 'Paintable opening-slide prefix; the full scroll extent already uses slideCount.' },
         { sig: 'get layoutComplete(): boolean', desc: 'True only when every slide is paintable. It remains false if background preparation fails; waitUntilLayoutComplete() reports that failure.' },
         { sig: 'waitUntilLayoutComplete(): Promise<void>', desc: 'Wait until every slide is paintable; rejects if background preflight fails.' },
-        { sig: 'get topVisibleSlide(): number', desc: 'Index of the top-most visible slide.' },
+        { sig: 'get topVisibleSlide(): number', desc: 'Absolute deck index of the top-most visible slide.' },
+        { sig: 'get hiddenSlideMode(): "show" | "skip" | "dim"', desc: 'The current hidden-slide mode.' },
+        { sig: 'setHiddenSlideMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-slide mode at runtime. The scroll is laid out again with the top visible slide kept in place (in `skip`, a hidden top slide gives way to the next shown slide, else the previous one), and hidden slides are redrawn when dimming changes. Resolves once every affected mounted slide has painted; a pending goToComment resolves false. Entering or leaving `skip` clears the current search (matches and highlights); call findText again.' },
+        { sig: 'get visibleSlideCount(): number', desc: 'Number of non-hidden slides. During progressive loading this is provisional until layoutComplete; the absolute slideCount remains unchanged.' },
         { sig: 'getSelectionContext(options?: PptxSelectionContextOptions): PptxSelectionContext | null', desc: 'Return the current mounted text selection, selected comment thread, or clicked-element context.' },
         partFailuresGetter('pptx'),
         RESOURCE_METRICS_METHOD,
@@ -479,6 +498,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_DOC,
+        ODT,
         VIEWER_MODE,
         DOCX_PROGRESSIVE_LAYOUT,
         DOCX_SLICE_LAYOUT,
@@ -518,7 +538,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'DocxDocument',
       ctor: 'await DocxDocument.load(source, options?)',
       note: 'Headless engine — render any page into any canvas you supply.',
-      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_DOC, MODE, ...DOCX_LAYOUT_VIEW_OPTIONS, DOCX_FOOTNOTE_CONTINUATION, DOCX_PROGRESSIVE_LAYOUT, DOCX_SLICE_LAYOUT, DOCX_LAYOUT_PROGRESS, DOCX_LAYOUT_PARTIAL, DOCX_LAYOUT_COMPLETE],
+      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_DOC, ODT, MODE, ...DOCX_LAYOUT_VIEW_OPTIONS, DOCX_FOOTNOTE_CONTINUATION, DOCX_PROGRESSIVE_LAYOUT, DOCX_SLICE_LAYOUT, DOCX_LAYOUT_PROGRESS, DOCX_LAYOUT_PARTIAL, DOCX_LAYOUT_COMPLETE],
       methods: [
         { sig: 'static load(source, options?): Promise<DocxDocument>', desc: 'Parse a document from a URL or ArrayBuffer. With progressiveLayout, resolve when the opening pages are paintable while pagination continues in the background.' },
         { sig: 'get comments(): readonly Readonly<DocComment>[]', desc: 'Immutable detached comments and replies stored in the document.' },
@@ -581,6 +601,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_DOC,
+        ODT,
         DPR,
         MODE,
         DOCX_PROGRESSIVE_LAYOUT,
@@ -647,6 +668,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_XLS,
+        ODS,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -730,6 +752,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         CHART_EX,
         TIFF,
         LEGACY_XLS,
+        ODS,
         VIEWER_MODE,
         ON_SCALE_CHANGE,
         ON_HYPERLINK_CLICK,
@@ -776,7 +799,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
       name: 'XlsxWorkbook',
       ctor: 'await XlsxWorkbook.load(source, options?)',
       note: 'Headless engine — parse once, render any sheet viewport into any canvas you supply.',
-      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, XLSX_WORKSHEET_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_XLS, MODE],
+      options: [FONTS, GFONTS_DEPRECATED, CJK_FALLBACK, PASSWORD, WASM_URL, ZIP, RESOURCE_LIMITS, XLSX_WORKSHEET_LIMITS, RESOURCE_METRICS, DEBUG, WORKER_TIMEOUT, MATH, THREE_D, REGION_MAP, CHART_EX, TIFF, LEGACY_XLS, ODS, MODE],
       methods: [
         { sig: 'static load(source, options?): Promise<XlsxWorkbook>', desc: 'Parse a workbook from a URL or ArrayBuffer.' },
         { sig: 'get sheetNames(): string[]', desc: 'Names of all sheets.' },

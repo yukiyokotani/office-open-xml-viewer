@@ -11,7 +11,7 @@ describe('format API loading-mode documentation', () => {
     expect(productionPage).toContain('id="rendering-mode"');
     expect(productionPage).toContain('Parsing always runs in a Worker');
     expect(productionPage).toContain('id="ownership"');
-    expect(productionPage).toContain('one Viewer own one document');
+    expect(productionPage).toContain('Viewer-owned and shared documents');
     expect(productionPage).toContain('several views must share one parse');
     expect(productionPage.indexOf('id="rendering-mode"'))
       .toBeLessThan(productionPage.indexOf('id="ownership"'));

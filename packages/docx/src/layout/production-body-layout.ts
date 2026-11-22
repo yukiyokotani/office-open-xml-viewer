@@ -30,7 +30,7 @@ import {
 } from '../frame-geometry.js';
 import { resolveFloatingTableBoxPt } from '../float-table-geometry.js';
 import { xContainer, yContainer, resolveAnchorX, resolveAnchorY } from '../anchor-geometry.js';
-import { resolveParagraphLayoutContext, resolveSectionLayoutContext, type DocumentLayoutSettings, type SectionLayoutContext } from '../layout-context.js';
+import { enterTableCellStoryContext, resolveParagraphLayoutContext, resolveSectionLayoutContext, tableCellFlowsHorizontally, withoutClosingMarkHangAdmission, withoutCjkClosingMarkHang, type DocumentLayoutSettings, type SectionLayoutContext, type StoryContext } from '../layout-context.js';
 import type {
   BlockLayoutAlgorithms,
   BlockLayoutResult,
@@ -62,6 +62,7 @@ import type { LayoutOptions } from './options.js';
 import { createStoryLayoutCache, type StoryLayoutCache } from './story-layout-cache.js';
 import {
   createLayoutServicesRuntimeView,
+  layoutSourceStoreOf,
   fieldAcquisitionContextOf,
   footnoteAcquisitionWorkBudgetOf,
   paragraphAcquisitionCacheOf,
@@ -91,14 +92,16 @@ import type {
   ReservedNoteSeparatorDefinitionInput,
   SelectedNoteSeparatorDefinitionInput,
 } from './body-layout-input.js';
+import { isPageObjectSource } from './body-layout-input.js';
 import {
   sectionBodyInsetPt as bodyMarginInsetPt,
   physicalSectionGeometry,
+  uprightPhysicalPageFrames,
 } from './context.js';
 import { isAllRotatedVerticalTextDirection, isVerticalTextDirection, physicalLayoutSection, verticalLayoutSection } from './section-orientation.js';
-import { gridForParagraphContext, paragraphMeasurementEnvironment } from './measurement-environment.js';
+import { gridForParagraphContext, nativeUnitMinimumBodyBand, paragraphMeasurementEnvironment } from './measurement-environment.js';
 import { createRevisionAuthorColorResolver } from './track-changes.js';
-import { BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
+import { BODY_STORY_CONTEXT, MAIN_BODY_STORY_CONTEXT, bodyAnchorReferenceFrames, retainedTableRecord, resolveBodyParagraphLayoutContext, resolveStateParagraphLayoutContext, withTableCellStory } from './acquisition-state.js';
 import { applyNumberingBodyOffset, resolveNumberingMarkerGeometry } from './numbering-marker.js';
 import { projectTableColumnLayoutInput, type TableSourceAcquisitionInput } from './table-source-acquisition.js';
 import { measureTableIntrinsicWidths, resolveTableColumnWidths, spacedAutoFitContentWidthsPt } from './table-columns.js';
@@ -141,10 +144,10 @@ import {
   layoutWholeTableOnPage,
   type PageDependentTableBlockRequest,
 } from './table-pagination.js';
-import { paragraphGapAdjustment } from './paragraph-spacing.js';
+import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
-import { wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
+import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -154,7 +157,6 @@ import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-
 import { applyDrawingMLCollisionRegistryDelta, createDrawingMLCollisionRegistry, drawingMLCollisionRegistryDelta, validateDrawingMLCollisionRegistryDelta } from './drawingml-collision-registry.js';
 import { resolveAnchorFrame } from './anchor-frame.js';
 import { isPageLevelWrapFloat } from './anchor-classification.js';
-import { physicalToLogicalAnchorBox } from '../vertical-text.js';
 import type { MeasurementTextContext } from './measurement-capabilities.js';
 import type {
   LayoutFlowBlock,
@@ -168,11 +170,17 @@ import type { TableLayoutSource } from './table-source-acquisition.js';
 import { retainedTableFromPassMemo, retainedTablePassKey, retainTableInPassMemo } from './retained-table-pass-cache.js';
 import { collectBodyFrameGroups, prepareBodyFrameMetadata } from './frame.js';
 import {
+  createSectionRegionCoordinateSpace,
   physicalToLogicalMatrix,
   sectionWritingMode,
   transformRect,
   uprightPhysicalExtent,
 } from './coordinate-space.js';
+import {
+  physicalAnchorBoxToLogical,
+  physicalDistToLogical,
+  physicalInlineBandTopPt,
+} from './upright-physical-frame.js';
 
 export function createProductionBodyLayoutRuntime(
   source: LayoutSourceStore,
@@ -273,7 +281,7 @@ function buildMeasureState(
     floatParaSeq: 0,
     layoutSettings,
     sectionLayout,
-    storyContext: BODY_STORY_CONTEXT,
+    storyContext: MAIN_BODY_STORY_CONTEXT,
     docEastAsian: layoutSettings.documentHasEastAsianText,
     fontFamilyClasses,
     resolvedLocalFonts,
@@ -284,7 +292,7 @@ function buildMeasureState(
       tableDecision: singleTableDecision,
       resolveColumns: resolveColumnWidths,
       createCellState: (state, contentWidthPt, cell) => ({
-        ...withTableCellStory(tableCellOwnerState(state)),
+        ...withTableCellStory(tableCellOwnerState(state), tableCellFlowsHorizontally(cell)),
         contentX: 0,
         contentW: contentWidthPt,
         y: 0,
@@ -465,7 +473,7 @@ function buildMeasureState(
     // physical branch on `verticalPhys`), otherwise a wrapped shape's exclusion
     // band is reserved at the raw logical rectangle during pagination while the
     // retained paint uses the physical projection — diverging page assignment.
-    // `physicalPageWidthPt` is the physical page width in canonical points.
+    // `writingMode` names the section frame whose matrix maps between them.
     // The direction flags are getters on the current `sectionLayout`, so they
     // follow each owner section. An all-rotated `btLr` section (including a
     // bottomToTop section flow) keeps horizontal glyph metrics through
@@ -487,13 +495,14 @@ function buildMeasureState(
 
 /** Physical page frame of one section context for DrawingML anchors and
  * upright tables, derived only from that context: its logical page box is
- * un-swapped with its own frame (the established clockwise mapping, or a
- * section flow's canonical matrix). Horizontal contexts have no frame. */
+ * un-swapped with its own frame's matrix (sectionWritingMode, so a section
+ * flow fact selects its canonical frame). Horizontal contexts have no frame. */
 function physicalAnchorFrameOf(
   section: DeepReadonly<SectionLayoutContext>,
 ): PhysicalAnchorFrame | undefined {
   if (!isVerticalTextDirection(section.textDirection)) return undefined;
-  const phys = physicalSectionGeometry(section.geometry, section.sectionFlow);
+  const writingMode = sectionWritingMode(section);
+  const phys = physicalSectionGeometry(section.geometry, writingMode);
   return {
     pageWidth: phys.pageWidth,
     pageHeight: phys.pageHeight,
@@ -501,8 +510,7 @@ function physicalAnchorFrameOf(
     marginRight: phys.marginRight,
     marginTop: bodyMarginInsetPt(phys.marginTop),
     marginBottom: bodyMarginInsetPt(phys.marginBottom),
-    physicalPageWidthPt: phys.pageWidth,
-    ...(section.sectionFlow ? { sectionFlow: section.sectionFlow } : {}),
+    writingMode,
   };
 }
 
@@ -554,6 +562,21 @@ function sourceElement(sourceStore: LayoutSourceStore, ref: SourceRef): LayoutFl
 function nestedSourceElement(sourceStore: LayoutSourceStore, ref: SourceRef): LayoutFlowBlock {
   return sourceStore.blocks.resolve(ref);
 }
+
+/** Whether every table cell enclosing the block at `ref` in its story flows
+ * horizontally (tableCellFlowsHorizontally), read from the source path
+ * (table, row, cell, block, ...) so re-acquisition restates the same
+ * WORD_JUSTIFICATION_PUNCTUATION_HANG admission as the first acquisition,
+ * whichever pagination path asks for it. */
+function sourceCellChainFlowsHorizontally(sourceStore: LayoutSourceStore, ref: SourceRef): boolean {
+  for (let depth = 0; depth + 3 < ref.path.length; depth += 3) {
+    const table = sourceStore.blocks.resolve({ ...ref, path: ref.path.slice(0, depth + 1) });
+    if (table.type !== 'table') return false;
+    const cell = table.rows[ref.path[depth + 1]!]?.cells[ref.path[depth + 2]!];
+    if (!cell || !tableCellFlowsHorizontally(cell)) return false;
+  }
+  return true;
+}
   /** Body acquisition stays at the kernel adapter because it resolves renderer
    * state into retained paragraph inputs; layout-owned projections below it
    * receive only immutable structural values. */
@@ -574,6 +597,15 @@ function acquireBodyParagraphAtLocation(
     bottom: 'bottom' as const,
   };
   const context = resolveBodyParagraphLayoutContext(state, paragraph);
+  const exclusions = paragraphWrapExclusions(state.floats, location.flowDomainId);
+  const sourceStore = state.layoutServices && layoutSourceStoreOf(state.layoutServices);
+  const minimumBand = sourceStore && nativeUnitMinimumBodyBand(sourceStore,
+    state.sectionLayout, state.storyContext, paragraph, context,
+    availableInlineExtentPt, exclusions.length !== 0);
+  const measurementEnvironment = paragraphMeasurementEnvironment(state);
+  const environment = minimumBand === undefined ? measurementEnvironment : {
+    ...measurementEnvironment, nativeUnitMinimumBandPt: minimumBand,
+  };
   const topBorder = paragraphContextWithTopBorder(
     context,
     paragraph,
@@ -597,8 +629,8 @@ function acquireBodyParagraphAtLocation(
         suppressSpaceBefore: topBorder.suppressSpaceBefore,
       },
       measurer: { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-      environment: paragraphMeasurementEnvironment(state),
-      exclusions: paragraphWrapExclusions(state.floats, location.flowDomainId),
+      environment,
+      exclusions,
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,
@@ -947,8 +979,12 @@ function layoutBodyStory(
     displayPageNumber: request.pageNumber?.displayNumber ?? pageFieldContext?.displayPageNumber ?? request.pageIndex + 1,
     pageNumberFormat: request.pageNumber?.format ?? pageFieldContext?.pageNumberFormat ?? state.pageNumberFormat,
     pageWidth: request.section.geometry.pageWidth,
+    // A note band's unbounded flow has no page frame of its own. A page
+    // story with unbounded flow (only a producer page object's header-class
+    // story) keeps its physical page, which its page-positioned drawings
+    // resolve against.
     pageH:
-      request.container.capacity === 'unbounded'
+      request.container.capacity === 'unbounded' && request.container.kind !== 'header'
         ? Number.MAX_SAFE_INTEGER
         : request.section.geometry.pageHeight,
     marginLeft: request.section.geometry.marginLeft,
@@ -973,6 +1009,12 @@ function layoutBodyStory(
       containers: [],
       lineNumberingEligible: false,
       ...(request.container.quarterTurned ? { quarterTurned: true } : {}),
+      ...(textBoxStoryHostedByHeaderFooter(request.source) ? { headerFooterHosted: true as const } : {}),
+      // WORD_JUSTIFICATION_PUNCTUATION_HANG: Word matches the main body in a
+      // header and a footnote (blk-0898-cjk-kincell); footers, endnotes, note
+      // separators and text-box stories are unmeasured.
+      ...(!separatorRoot && (request.source.story === 'header' || request.source.story === 'footnote')
+        ? { closingMarkHangAdmitted: true as const } : {}),
     },
   };
   if (fieldBlockIndex === undefined) preRegisterPageFloats(root, request.sourceStart?.blockIndex ?? 0, candidate);
@@ -1017,9 +1059,7 @@ function layoutBodyStory(
       marginTop: candidate.marginTop,
       marginBottom: candidate.marginBottom,
     };
-    const physical = writingMode === 'horizontal-tb'
-      ? held
-      : physicalSectionGeometry(held, request.section.sectionFlow);
+    const physical = physicalSectionGeometry(held, writingMode);
     const toStory = physicalToLogicalMatrix(
       writingMode,
       { widthPt: physical.pageWidth, heightPt: physical.pageHeight },
@@ -1184,6 +1224,7 @@ function layoutBodyStory(
         paragraph,
         previousAfterPt,
         paragraph.spaceBefore,
+        paragraphGapFoldOf(state.layoutSettings.compat),
       );
       const startYPt = Math.max(
         placement.container.bounds.yPt,
@@ -1794,12 +1835,15 @@ function measureBodyParagraphEntry(
         }),
     ...(measured.markOnly
       ? {
-          markBelowBaselinePt: measured.lastLineBelowBaselinePt,
           markOnLineGrid,
-          // The page-margin observation grants no allowance through floats.
-          // A wrapped mark keeps its complete cell, as plain text does.
-          markGridAfterLeadingPt: layout.exclusions.length === 0
+          // A wrapped mark keeps its complete cell, as plain text does
+          // (a float elsewhere on the page does not wrap it), and so does
+          // every mark of a model source whose grid lines take whole cells
+          // (`plainLineBoxes`, LibreOffice).
+          markGridAfterLeadingPt: !markLineWrapped(layout, measured)
+            && services.text?.plainLineBoxes !== true
             ? measured.markGridAfterLeadingPt ?? 0 : 0,
+          ...(measured.markMultipleLeadingPt ? { markMultipleLeadingPt: measured.markMultipleLeadingPt } : {}),
         }
       : {}),
     ...(measured.uniformRubyAdvancePt == null
@@ -2217,9 +2261,23 @@ function measureFollowingBodyBlock(
       lineStart: 0, lineEnd: 1,
       continuesFromPrevious: false, continuesOnNext: layout.lines.length > 1,
     });
-    const leadLineBoxExtentPt = firstLine
-      ? firstLine.bounds.yPt + firstLine.advancePt - layout.flowBounds.yPt
-      : layout.advancePt;
+    // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: the first line's overhang may
+    // hang below the page bottom as when it is the last line placed there.
+    // The overhang applies only when nothing retained follows the line
+    // (a single-line paragraph's bottom border or padding keeps it).
+    const firstLineEndPt = firstLine
+      ? firstLine.bounds.yPt + firstLine.advancePt - layout.flowBounds.yPt : layout.advancePt;
+    const overhangPt = (firstLine ?? layout.paragraphMark)?.pageEdgeOverhangPt ?? 0;
+    const leadLineBoxExtentPt = !(overhangPt > 0) ? firstLineEndPt
+      : firstLine && layout.lines.length > 1 ? firstLineEndPt - overhangPt
+      // A single-line successor: the selector's own completing extent
+      // (WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION, then the overhang), so a
+      // retained bottom border or padding is still charged.
+      : libreOfficeProportionalLineAdmissionExtentPt(layout, wordFinalParagraphAdmissionExtentPt({
+        advancePt: layout.advancePt,
+        retainedSpaceAfterPt: layout.spacing.afterPt,
+        authoredSpaceAfterPt: element.spaceAfter ?? 0,
+      }));
     return Object.freeze({
       fullExtentPt: layout.advancePt,
       // keepNext admits the successor's first content line, including
@@ -2262,6 +2320,14 @@ function measureFollowingBodyBlock(
   });
 }
 
+/** In a vertical section positionH runs along the block axis, where the
+ * `column` and `character` references follow the anchor paragraph
+ * (`word-vertical-section-flow-anchor-frames`), so the page-start prescan
+ * cannot place them before that paragraph is acquired. */
+function isBlockAxisHostReference(relativeFrom: string | null | undefined): boolean {
+  return relativeFrom === 'column' || relativeFrom === 'character';
+}
+
 function prescanBodyPageAnchors(
   context: BodySessionDependencies,
   request: Parameters<NonNullable<BodyLayoutSession['prescanPageAnchors']>>[0],
@@ -2299,6 +2365,10 @@ function prescanBodyPageAnchors(
     line: null,
     character: null,
     pageParity: request.location.pageIndex % 2 === 0 ? ('odd' as const) : ('even' as const),
+    pageBandDistances: Object.freeze({
+      headerPt: geometry.headerDistance,
+      footerPt: geometry.footerDistance,
+    }),
   });
   const publicParagraphs = new Set<ParagraphLayoutSource>();
   const paragraphKey = (source: SourceRef) =>
@@ -2394,7 +2464,10 @@ function prescanBodyPageAnchors(
         }),
       ];
     }
-    const paragraph = sourceElement(dependencies.source, anchor.paragraphSource);
+    // A producer page object's drawing lives in its page story, not the body.
+    const paragraph = isPageObjectSource(anchor.paragraphSource)
+      ? nestedSourceElement(dependencies.source, anchor.paragraphSource)
+      : sourceElement(dependencies.source, anchor.paragraphSource);
     if (paragraph.type !== 'paragraph') {
       throw new Error('Page-anchor prescan source kind mismatch');
     }
@@ -2447,7 +2520,9 @@ function prescanBodyPageAnchors(
           (publicRun.type === 'image' ||
             publicRun.type === 'chart' ||
             publicRun.type === 'shape') &&
-          publicRun.wrapMode === 'none'
+          (publicRun.wrapMode === 'none'
+            || (isVerticalTextDirection(request.location.section.textDirection)
+              && isBlockAxisHostReference(publicRun.anchorXRelativeFrom)))
         )
           return [];
         const candidate: BodyAcquisitionState = {
@@ -2475,33 +2550,37 @@ function prescanBodyPageAnchors(
         `Page-anchor prescan occurrence acquisition mismatch: ${anchor.occurrenceId}`,
       );
     }
+    // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
+    // extent resolve in the upright physical drawing frame, against the
+    // physical page and margins (`uprightPhysicalPageFrames`). The page
+    // registry is section-logical, so page-start prescan must apply the
+    // section writing mode's canonical physical-to-logical affine
+    // inverse before the exclusion can affect earlier body content.
+    // The anchor paragraph's own acquisition registers such an exclusion.
+    if (isVerticalTextDirection(request.location.section.textDirection)
+      && isBlockAxisHostReference(payloads[0]!.run.anchorAcquisitionInput.horizontal.relativeFrom)) {
+      return [];
+    }
+    const verticalSpace = isVerticalTextDirection(request.location.section.textDirection)
+      ? createSectionRegionCoordinateSpace(
+          sectionWritingMode(request.location.section),
+          uprightPhysicalExtent(
+            { widthPt: frames.page.widthPt, heightPt: frames.page.heightPt },
+            sectionWritingMode(request.location.section),
+          ),
+        )
+      : undefined;
     const result = resolveAnchorFrame({
       acquisition: payloads[0]!.run.anchorAcquisitionInput,
-      frames,
+      frames: verticalSpace
+        ? uprightPhysicalPageFrames(frames, sectionWritingMode(request.location.section))
+        : frames,
     });
     if (result.status !== 'resolved') {
       throw new Error(`Page-anchor prescan could not resolve occurrence: ${anchor.occurrenceId}`);
     }
-    // ECMA-376 §17.6.20 + §§20.4.2.3/.7/.10/.11: positionH/V and
-    // extent resolve in the upright physical drawing frame. The page
-    // registry is section-logical, so page-start prescan must apply the
-    // section writing mode's canonical physical-to-logical affine
-    // inverse before the exclusion can affect earlier body content.
-    const retainedResult = isVerticalTextDirection(request.location.section.textDirection)
-      ? (() => {
-          const writingMode = sectionWritingMode(request.location.section);
-          const physicalPage = uprightPhysicalExtent(
-            {
-              widthPt: frames.page.widthPt,
-              heightPt: frames.page.heightPt,
-            },
-            writingMode,
-          );
-          return projectPhysicalAnchorResult(
-            result,
-            physicalToLogicalMatrix(writingMode, physicalPage),
-          );
-        })()
+    const retainedResult = verticalSpace
+      ? projectPhysicalAnchorResult(result, verticalSpace.physicalToLogical)
       : result;
     const wrapBounds = retainedResult.geometry.wrapBounds;
     if (wrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
@@ -2865,7 +2944,10 @@ function reacquireBodyTableBlock(
     )
     ? request.paragraphAnchorReferenceDeltaPt : undefined;
   const candidate: BodyAcquisitionState = {
-    ...withTableCellStory(tableCellOwnerState(state)),
+    ...withTableCellStory(
+      tableCellOwnerState(state),
+      sourceCellChainFlowsHorizontally(sourceStore, request.acquired.source),
+    ),
     contentX: 0,
     contentW: request.acquired.flowBounds.widthPt,
     y: request.acquired.flowBounds.yPt,
@@ -2950,6 +3032,15 @@ function completeTextBoxStoryAcquirerFor(
 /** Acquire a text box's complete story with its owner's section, page and
  * frame as authority. The section-keyed story cache stays shared because its
  * key includes the full section context. */
+/** Whether a text-box story's outermost host is a header or footer story.
+ * A text-box story instance is `<host story>:<host instance>:<path>`, nested
+ * text boxes prefixing further `textbox` hosts. */
+function textBoxStoryHostedByHeaderFooter(source: SourceRef): boolean {
+  if (source.story !== 'textbox') return false;
+  const host = source.storyInstance.split(':').find((token) => token !== 'textbox');
+  return host === 'header' || host === 'footer';
+}
+
 function acquireCompleteBodyTextBoxStory(
   owner: CompleteTextBoxStoryOwner,
   storyAcquisitionContext: BodyStoryAcquisitionContext,
@@ -2957,12 +3048,15 @@ function acquireCompleteBodyTextBoxStory(
 ): ReturnType<CompleteTextBoxStoryAcquirer> {
   // An upright physical text box is horizontal: it keeps the owner section's
   // physical page box but not that section's native frame.
-  const { sectionFlow, ...sectionLayout } = owner.sectionLayout;
+  const { sectionFlow: _sectionFlow, ...sectionLayout } = owner.sectionLayout;
   const section =
     request.coordinateSpace === 'upright-physical'
       ? {
           ...sectionLayout,
-          geometry: physicalSectionGeometry(owner.sectionLayout.geometry, sectionFlow),
+          geometry: physicalSectionGeometry(
+            owner.sectionLayout.geometry,
+            sectionWritingMode(owner.sectionLayout),
+          ),
           textDirection: 'lrTb',
         }
       : owner.sectionLayout;
@@ -3339,7 +3433,7 @@ function resolveAdjacentTableGroup(
  */
 function tableDecisionEnvironment(state: BodyMeasurementContext) {
   return {
-    mode: state.layoutSettings.compat.compatibilityMode,
+    compat: state.layoutSettings.compat,
     story: state.storyContext?.story,
     topLevel: state.storyContext?.containers.length === 0,
     singleColumn: state.sectionLayout?.columns.length === 1,
@@ -3384,9 +3478,13 @@ function acquireTableColumnInput(
   const format = decision.source.format;
   const { maximumTableWidthPt, isFixedNestedTable,
     contentGrowth, forcedFitOuterMarginsPt } = decision;
+  // WORD_JUSTIFICATION_PUNCTUATION_HANG admission of the cells measured
+  // below, entered exactly as cell acquisition enters them (createCellState).
+  const tableOwnerStory = state.storyContext ?? BODY_STORY_CONTEXT;
   const intrinsicWidthsForTable = (
     owner: TableLayoutSource,
     ownerDecision = decision,
+    ownerStory: StoryContext = tableOwnerStory,
   ): ((cell: DeepReadonly<DocTableCell>, preferredWidth: TablePreferredWidthConstraint | null) => ReturnType<typeof measureTableCellIntrinsicWidths>) => {
     const ownerFormat = ownerDecision.source.format;
     const ownerLayout = ownerDecision.effectiveLayout;
@@ -3395,88 +3493,96 @@ function acquireTableColumnInput(
       const acquired = ownerFormat.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
       ownerMargins.set(cell, acquired ?? effCellMargins(cell, owner));
     }));
-    return (cell, preferredWidth) => measureTableCellIntrinsicWidths(
-      cell,
-      ownerMargins.get(cell as object) ?? effCellMargins(cell, owner),
-      {
-        paragraph: (paragraph) => {
-          const baseContext = resolveParagraphLayoutContext(
-            state.layoutSettings,
-            state.sectionLayout,
-            state.storyContext ?? BODY_STORY_CONTEXT,
-            paragraph,
-          );
-          const markerInput = paragraph.numbering
-            ? state.acquisitionInputs.numberingMarkerShapeInput(
-                paragraph.numbering,
-                getDefaultFontSize(paragraph),
-              )
-            : undefined;
-          const context = applyNumberingBodyOffset(baseContext, {
-            numbering: paragraph.numbering,
-            ...(markerInput ? { markerInput } : {}),
-            authoredFirstIndentPt: paragraph.indentFirst,
-            tabStops: paragraph.tabStops,
-            defaultTabPt: state.defaultTabPt,
-            service: state.layoutServices?.text,
-            clusterGeometry: false,
-          });
-          const numbering = context.numberingMarkerGeometry
-            ?? (paragraph.numbering && markerInput && state.layoutServices?.text
-              ? resolveNumberingMarkerGeometry(paragraph.numbering, markerInput, {
-                  authoredFirstIndentPt: paragraph.indentFirst,
-                  physicalIndentLeftPt: context.physicalIndentLeftPt,
-                  tabStops: paragraph.tabStops,
-                  defaultTabPt: state.defaultTabPt,
-                }, state.layoutServices.text, false)
-              : undefined);
-          const intrinsic = measureParagraphIntrinsicWidths(
-            paragraph,
-            context,
-            // §17.18.87 defines maximum content width without soft wrapping.
-            // Capping it at the band loses the relative demand of two growing
-            // columns (notably the 5:1 control). Only the measured auto-column
-            // growth path needs this uncapped interval; preferred and nested
-            // paths retain their existing measurement ceiling.
-            contentGrowth === 'band' && owner === table && ownerLayout !== 'fixed'
-              && preferredWidth === null
-              ? Number.MAX_SAFE_INTEGER
-              : contentWPt,
-            { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-            paragraphMeasurementEnvironment(state),
-            numbering,
-            { preserveWhitespaceOnlyContent: true },
-          );
-          if (cell.noWrap !== true || preferredWidth?.kind === 'dxa' || ownerLayout === 'fixed') return intrinsic;
-          // The nonbreaking text interval is independent of first-line
-          // positioning. Probe without a line-width ceiling: the ordinary
-          // maxWidthPt is capped at contentWPt, which is too small for an
-          // AutoFit noWrap minimum when tcW is omitted (§17.4.29, §17.4.71).
-          // Ordinary min/max still use the authored indent and width limit.
-          const unpositioned = measureParagraphIntrinsicWidths(
-            paragraph,
-            { ...context, firstIndentPt: 0 },
-            Number.MAX_SAFE_INTEGER,
-            { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
-            paragraphMeasurementEnvironment(state),
-            numbering,
-            { preserveWhitespaceOnlyContent: true },
-          );
-          return { ...intrinsic, noWrapWidthPt: unpositioned.maxWidthPt };
+    return (cell, preferredWidth) => {
+      const cellStory = enterTableCellStoryContext(ownerStory, tableCellFlowsHorizontally(cell));
+      return measureTableCellIntrinsicWidths(
+        cell,
+        ownerMargins.get(cell as object) ?? effCellMargins(cell, owner),
+        {
+          paragraph: (paragraph) => {
+            const baseContext = resolveParagraphLayoutContext(
+              state.layoutSettings,
+              state.sectionLayout,
+              state.storyContext ?? BODY_STORY_CONTEXT,
+              paragraph,
+            );
+            const markerInput = paragraph.numbering
+              ? state.acquisitionInputs.numberingMarkerShapeInput(
+                  paragraph.numbering,
+                  getDefaultFontSize(paragraph),
+                )
+              : undefined;
+            const cellContext = cellStory.closingMarkHangAdmitted
+              ? baseContext : withoutCjkClosingMarkHang(baseContext);
+            const context = applyNumberingBodyOffset(cellContext, {
+              numbering: paragraph.numbering,
+              ...(markerInput ? { markerInput } : {}),
+              authoredFirstIndentPt: paragraph.indentFirst,
+              tabStops: paragraph.tabStops,
+              defaultTabPt: state.defaultTabPt,
+              service: state.layoutServices?.text,
+              clusterGeometry: false,
+              compat: state.layoutSettings.compat,
+            });
+            const numbering = context.numberingMarkerGeometry
+              ?? (paragraph.numbering && markerInput && state.layoutServices?.text
+                ? resolveNumberingMarkerGeometry(paragraph.numbering, markerInput, {
+                    authoredFirstIndentPt: paragraph.indentFirst,
+                    physicalIndentLeftPt: context.physicalIndentLeftPt,
+                    tabStops: paragraph.tabStops,
+                    defaultTabPt: state.defaultTabPt,
+                    compat: state.layoutSettings.compat,
+                    baseRtl: context.baseRtl,
+                  }, state.layoutServices.text, false)
+                : undefined);
+            const intrinsic = measureParagraphIntrinsicWidths(
+              paragraph,
+              context,
+              // §17.18.87 defines maximum content width without soft wrapping.
+              // Capping it at the band loses the relative demand of two growing
+              // columns (notably the 5:1 control). Only the measured auto-column
+              // growth path needs this uncapped interval; preferred and nested
+              // paths retain their existing measurement ceiling.
+              contentGrowth === 'band' && owner === table && ownerLayout !== 'fixed'
+                && preferredWidth === null
+                ? Number.MAX_SAFE_INTEGER
+                : contentWPt,
+              { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
+              paragraphMeasurementEnvironment(state, cellStory),
+              numbering,
+              { preserveWhitespaceOnlyContent: true },
+            );
+            if (cell.noWrap !== true || preferredWidth?.kind === 'dxa' || ownerLayout === 'fixed') return intrinsic;
+            // The nonbreaking text interval is independent of first-line
+            // positioning. Probe without a line-width ceiling: the ordinary
+            // maxWidthPt is capped at contentWPt, which is too small for an
+            // AutoFit noWrap minimum when tcW is omitted (§17.4.29, §17.4.71).
+            // Ordinary min/max still use the authored indent and width limit.
+            const unpositioned = measureParagraphIntrinsicWidths(
+              paragraph,
+              { ...context, firstIndentPt: 0 },
+              Number.MAX_SAFE_INTEGER,
+              { context: state.ctx, fontFamilyClasses: state.fontFamilyClasses },
+              paragraphMeasurementEnvironment(state, cellStory),
+              numbering,
+              { preserveWhitespaceOnlyContent: true },
+            );
+            return { ...intrinsic, noWrapWidthPt: unpositioned.maxWidthPt };
+          },
+          nestedTable: (nested) => {
+            const source = state.acquisitionInputs.tableSourceAcquisitionInput(nested);
+            const nestedDecision = decideLogicalTable(nested, source, [{ table: nested, source }], contentWPt,
+              { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true,
+                tableCellDepth: (tableDecisionEnvironment(state).tableCellDepth ?? 0) + 1 });
+            const intrinsic = intrinsicWidthsForTable(nested, nestedDecision.logical, cellStory);
+            return measureTableIntrinsicWidths(projectTableColumnLayoutInput(source, contentWPt,
+              (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt));
+          },
         },
-        nestedTable: (nested) => {
-          const source = state.acquisitionInputs.tableSourceAcquisitionInput(nested);
-          const nestedDecision = decideLogicalTable(nested, source, [{ table: nested, source }], contentWPt,
-            { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true,
-              tableCellDepth: (tableDecisionEnvironment(state).tableCellDepth ?? 0) + 1 });
-          const intrinsic = intrinsicWidthsForTable(nested, nestedDecision.logical);
-          return measureTableIntrinsicWidths(projectTableColumnLayoutInput(source, contentWPt,
-            (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt));
-        },
-      },
-      ownerLayout,
-      preferredWidth,
-    );
+        ownerLayout,
+        preferredWidth,
+      );
+    };
   };
   const maximumWidthPt = isFixedNestedTable
     // ECMA-376 §17.18.87: the containing cell is not an implicit tblW.
@@ -3731,7 +3837,7 @@ function resolveShapeBox(
       verticalPhysicalContentState(state),
       physicalColumnTopPt(state, state.verticalPhys),
     );
-    return physicalAnchorBoxToLogical(state.verticalPhys, phys.x, phys.y, phys.w, phys.h);
+    return physicalAnchorBoxToLogical(state.verticalPhys, phys);
   }
   // ECMA-376 §20.4.2.18: when wp14:sizeRelH/sizeRelV is present it overrides
   // the static wp:extent for that axis. The size is `relativeFrom` container
@@ -3841,6 +3947,17 @@ const __test_preRegisterPageFloats = (
   state: AnchorFloatRegistrationState,
 ): void => preRegisterPageFloats(body, startIdx, state);
 
+/** Physical y of the anchor paragraph's column top: the physical top of the
+ * column's logical inline band in the section frame. The counter-clockwise
+ * case is generic library policy transformed through its own frame; no
+ * comparison with a Word-produced reference has established that placement. */
+function physicalColumnTopPt(
+  state: AnchorFloatRegistrationState,
+  frame: PhysicalAnchorFrame,
+): number {
+  return physicalInlineBandTopPt(frame, state.contentX, state.contentW);
+}
+
 /** ECMA-376 §17.6.20 + §20.4.3.x — an acquisition-state view whose page/margin geometry
  *  is the PHYSICAL (un-rotated) page, used to resolve a DrawingML anchor's
  *  `<wp:positionH/V>` against the physical page for a vertical (tbRl) section
@@ -3848,53 +3965,7 @@ const __test_preRegisterPageFloats = (
  *  the geometry fields `xContainer`/`yContainer`/`resolveAnchorX`/`resolveAnchorY`
  *  read are overridden (page size, margins, and `pageH`); everything else is
  *  the live logical state. Callers map the resolved physical box back into the
- *  logical layout frame with {@link physicalToLogicalAnchorBox}. */
-/** Physical y of the anchor paragraph's column top: the logical inline start
- * in the clockwise frame (physical y = logical x), and the logical inline end
- * in a native counter-clockwise frame (physical y = page height - logical x).
- * The native case is the same generic library policy transformed through its
- * own frame. No comparison with a Word-produced reference has established
- * this placement. */
-function physicalColumnTopPt(
-  state: AnchorFloatRegistrationState,
-  frame: PhysicalAnchorFrame,
-): number {
-  return frame.sectionFlow == null
-    ? state.contentX
-    : frame.pageHeight - (state.contentX + state.contentW);
-}
-
-/** Project a box resolved on the upright physical page into the section's
- * logical frame. The Transitional vertical frame keeps its established
- * clockwise projection; a bottomToTop section frame applies the inverse of its
- * counter-clockwise matrix (logical x = page height - physical y, logical
- * y = physical x). */
-function physicalAnchorBoxToLogical(
-  frame: PhysicalAnchorFrame,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-): { x: number; y: number; w: number; h: number } {
-  if (frame.sectionFlow == null) {
-    return physicalToLogicalAnchorBox(x, y, w, h, frame.physicalPageWidthPt);
-  }
-  return { x: frame.pageHeight - (y + h), y: x, w: h, h: w };
-}
-
-/** Relabel physical dist* padding with the logical edges of the box. Clockwise:
- * physical top/bottom are logical left/right and physical right/left are
- * logical top/bottom. bottomToTop: physical bottom/top are logical left/right
- * and physical left/right are logical top/bottom. */
-function physicalDistToLogical(
-  frame: PhysicalAnchorFrame,
-  dist: Readonly<{ dl: number; dr: number; dt: number; db: number }>,
-): { dl: number; dr: number; dt: number; db: number } {
-  return frame.sectionFlow == null
-    ? { dl: dist.dt, dr: dist.db, dt: dist.dr, db: dist.dl }
-    : { dl: dist.db, dr: dist.dt, dt: dist.dl, db: dist.dr };
-}
-
+ *  logical layout frame with {@link physicalAnchorBoxToLogical}. */
 function physicalAnchorState(
   state: AnchorFloatRegistrationState,
 ): AnchorFloatRegistrationState {
@@ -3933,13 +4004,19 @@ function physicalAnchorState(
  * directions are applied by the table itself either way. */
 function tableCellOwnerState(state: BodyAcquisitionState): BodyAcquisitionState {
   if (!state.uprightPhysicalTable) return state;
-  const { sectionFlow, ...section } = state.sectionLayout;
+  const { sectionFlow: _sectionFlow, ...section } = state.sectionLayout;
   return {
     ...(verticalPhysicalContentState(state) as BodyAcquisitionState),
+    // Upright content of a vertical section is outside the measured class of
+    // WORD_JUSTIFICATION_PUNCTUATION_HANG although it flows lrTb here.
+    storyContext: withoutClosingMarkHangAdmission(state.storyContext),
     uprightPhysicalTable: false,
     sectionLayout: {
       ...section,
-      geometry: physicalSectionGeometry(state.sectionLayout.geometry, sectionFlow),
+      geometry: physicalSectionGeometry(
+        state.sectionLayout.geometry,
+        sectionWritingMode(state.sectionLayout),
+      ),
       textDirection: 'lrTb',
     },
   };
@@ -4014,7 +4091,7 @@ function resolveAnchorBox(
       physicalColumnTopPt(state, state.verticalPhys), phys,
       img.anchorYRelativeFrom ?? null, null, null,
     );
-    const box = physicalAnchorBoxToLogical(state.verticalPhys, px, py, w, h);
+    const box = physicalAnchorBoxToLogical(state.verticalPhys, { x: px, y: py, w, h });
     // Rotate the dist* padding one quarter-turn with the box. Symmetric
     // wrapSquare dist is common, but rotate the labels so asymmetric dist
     // stays correct.
@@ -4171,7 +4248,7 @@ function registerImageFloat(
   // gate under allowOverlap=true, and the right-then-down re-seat using dist
   // padding as the float-to-float gap. See layout/floats.ts.
   const allowOverlap = img.allowOverlap ?? true;
-  const key = anchoredImageCollisionKey(img.imagePath, img.colorReplaceFrom, img.duotone);
+  const key = anchoredImageCollisionKey(img.imagePath, img.colorReplaceFrom ?? undefined, img.duotone);
   pushFloatRect(state, {
     x: box.x,
     y: box.y,
@@ -4324,4 +4401,15 @@ function effCellMargins(
       preRegisterPageFloats: __test_preRegisterPageFloats,
     }),
   });
+}
+
+/** An empty mark keeps its whole grid cell when a wrap exclusion overlaps
+ * its line cell (WORD_GRID_LINE_CONTENT_FIT_ADMISSION). */
+function markLineWrapped(
+  layout: ParagraphLayout,
+  measured: Readonly<{ contentStartYPt: number; contentEndYPt: number }>,
+): boolean {
+  return layout.exclusions.length > 0 && wordGridLeadingWrapExclusionOverlaps(
+    layout, measured.contentStartYPt, measured.contentEndYPt,
+  );
 }

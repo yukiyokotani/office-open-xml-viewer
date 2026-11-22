@@ -1,19 +1,20 @@
 /**
  * Refcounted FontFace registry shared by the embedded-font loader
- * ({@link ./embedded.ts}) and the font-source session ({@link ./source-session.ts}).
+ * ({@link ./embedded.ts}) and the library's probe registrations (route
+ * sentinels, local-metric probes). Font sources register per document under
+ * private families instead (`source-session.ts`).
  *
  * Each DOM/worker realm owns a FontFaceSet. Opening the same font repeatedly in
  * one set would otherwise add duplicate faces and leak them; same-origin child
- * windows additionally require their own registrations. Both loaders share
+ * windows additionally require their own registrations. Its users share
  * this per-set dedup + refcount so a face is added once to each target set and
  * removed only when that set's last holder releases it.
  *
  * The registry is deliberately format-agnostic: callers own how they compute a
- * face's signature (embedded fonts hash the de-obfuscated bytes; font sources
- * key on the source identity + family + descriptors + src) and how they build the `FontFace`.
- * The registry owns only the shared concern — *this exact face is referenced by
- * N holders; delete it from its set at N = 0* — so neither loader duplicates the
- * refcount / last-release / double-release-safety logic.
+ * face's signature (embedded fonts hash the de-obfuscated bytes) and how they
+ * build the `FontFace`. The registry owns only the shared concern — *this
+ * exact face is referenced by N holders; delete it from its set at N = 0* — so
+ * no user duplicates the refcount / last-release / double-release-safety logic.
  */
 
 /** One shared, refcounted FontFace registration. */

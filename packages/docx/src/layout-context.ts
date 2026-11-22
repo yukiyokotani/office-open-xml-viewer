@@ -1,3 +1,4 @@
+import { paragraphKinsokuDisabled, paragraphOffLineEdges, paragraphOffJapaneseAdmitted } from './layout/kinsoku-off-edges.js';
 import {
   resolveKinsokuRules,
   type KinsokuRules,
@@ -9,10 +10,13 @@ import {
 } from './line-layout.js';
 import { jcIsFullyJustified, jcStretchesLastLine } from './bidi-line.js';
 import { prepareBodyFrameMetadata } from './layout/frame.js';
+import { buildDocxCompatProfile, type DocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
 import {
   wordAuthoredTabReplacesImplicitHangingStop,
   wordContainerAllowsGridRightIndentAdjustment,
   wordGridRightIndentAdjustmentPt,
+  wordCjkClosingMarkHang,
+  type CjkClosingMarkHang,
 } from './layout/line-compatibility.js';
 import type { NumberingMarkerGeometry } from './layout/numbering-marker.js';
 import type { SectionFlow } from './layout/types.js';
@@ -32,25 +36,17 @@ import type {
 
 export interface DocumentLayoutSettings {
   readonly kinsoku: KinsokuRules;
+  readonly hasCustomKinsokuRules?: true;
+  /** Positive internal sealed-source capability; never parser/public wire. */
+  readonly paragraphOffBodySource?: (paragraph: ParagraphLayoutSource) => boolean;
   readonly defaultTabPt: number;
   readonly characterSpacingControl?: string;
   readonly mathDefJc?: string;
   readonly documentHasEastAsianText: boolean;
   /** ECMA-376 §17.6.5 base pitch from the resolved Normal style. */
   readonly normalStyleFontSizePt: number;
-  readonly compat: {
-    readonly adjustLineHeightInTable: boolean;
-    readonly useFeLayout: boolean;
-    readonly balanceSingleByteDoubleByteWidth: boolean;
-    readonly lineWrapLikeWord6: boolean;
-    readonly enableOpenTypeFeatures: boolean;
-    /** §17.15.3.8 ulTrailSpace: underline trailing spaces. */
-    readonly ulTrailSpace: boolean;
-    /** §17.15.3.5 doNotExpandShiftReturn. */
-    readonly doNotExpandShiftReturn: boolean;
-    /** compatSetting compatibilityMode; undefined when the document omits it. */
-    readonly compatibilityMode?: number;
-  };
+  /** Document compatibility profile (layout/compat-profile.ts). */
+  readonly compat: DocxCompatProfile;
 }
 
 /** Parser-independent document typography facts projected once at the model
@@ -96,15 +92,60 @@ export interface StoryContext {
   readonly lineNumberingEligible: boolean;
   /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
   readonly quarterTurned?: boolean;
+  /** A text-box story whose outermost host is a header or footer
+   * (`word-header-footer-off-line-grid`). */
+  readonly headerFooterHosted?: true;
+  /**
+   * The one admission fact of WORD_JUSTIFICATION_PUNCTUATION_HANG: this story
+   * position is one Word was measured in, acquired in its section's own flow:
+   * the main body, a header or a footnote (top level), or a table cell of the
+   * main body whose authored text direction is horizontal (and so is every
+   * enclosing cell's). Only the main body's root story context and the header
+   * and footnote story roots carry it; entering a cell keeps it only in the
+   * main body and only while the cell is horizontal, an upright physical
+   * table in a vertical section drops it, and every other story (footers,
+   * endnotes, note separators, text boxes) and every fallback context starts
+   * without it, keeping the previous (v0.89) overflowPunct behaviour.
+   */
+  readonly closingMarkHangAdmitted?: true;
+  /** Independent main-body-root provenance. Paragraph measurement applies
+   * the mode, axes and content gate in wordInlineDrawingRunLeadingApplies. */
+  readonly inlineObjectRunLeadingAdmitted?: true;
 }
 
-export function enterTableCellStoryContext(parent: StoryContext): StoryContext {
+/** Whether a table cell's authored text direction (§17.4.72) keeps the cell
+ * in horizontal flow: omitted or lrTb. Every other value, whether table
+ * acquisition rotates the cell or not, is outside the measured class. */
+export function tableCellFlowsHorizontally(
+  cell: Readonly<{ textDirection?: string | null }>,
+): boolean {
+  return cell.textDirection == null || cell.textDirection === 'lrTb';
+}
+
+/** `cellFlowsHorizontally`: tableCellFlowsHorizontally of the entered cell
+ * (and of every enclosing cell the parent context does not already state). */
+export function enterTableCellStoryContext(
+  parent: StoryContext,
+  cellFlowsHorizontally: boolean,
+): StoryContext {
   return {
     story: parent.story,
     containers: [...parent.containers, { kind: 'tableCell' }],
     lineNumberingEligible: false,
     ...(parent.quarterTurned ? { quarterTurned: true } : {}),
+    // `word-header-footer-off-line-grid`: a cell of header/footer-hosted
+    // content is header/footer content too.
+    ...(parent.headerFooterHosted ? { headerFooterHosted: true as const } : {}),
+    ...(parent.closingMarkHangAdmitted && parent.story === 'body' && cellFlowsHorizontally
+      ? { closingMarkHangAdmitted: true as const } : {}),
   };
+}
+
+/** The same story position without the hang admission. */
+export function withoutClosingMarkHangAdmission(story: StoryContext): StoryContext {
+  if (!story.closingMarkHangAdmitted) return story;
+  const { closingMarkHangAdmitted: _admitted, ...rest } = story;
+  return rest;
 }
 
 export interface LineGridPolicy {
@@ -130,6 +171,9 @@ export interface RightIndentGridPolicy {
 }
 
 export interface ParagraphLayoutContext {
+  /** Compatibility shape-text fallback lacks authoritative WML run-direction
+   * provenance. Complete WordprocessingML stories retain their own context. */
+  readonly runDirectionUnauthored?: true;
   readonly lineGrid: LineGridPolicy;
   readonly characterGrid: CharacterGridPolicy;
   readonly rightIndentGrid: RightIndentGridPolicy;
@@ -146,9 +190,15 @@ export interface ParagraphLayoutContext {
   readonly hasRuby: boolean;
   readonly hasEastAsianText: boolean;
   readonly kinsoku: KinsokuRules;
+  /** Observed bounded cut legality; never paragraph semantics or intrinsic policy. */
+  readonly lineEdgeRules?: KinsokuRules;
+  /** Document-base rules for a compatibility textbox, never its host OFF toggle. */
+  readonly documentKinsoku?: KinsokuRules;
   readonly defaultTabPt: number;
   /** ECMA-376 §17.3.1.21 — omission on the source paragraph resolves true. */
   readonly overflowPunct?: boolean;
+  /** WORD_JUSTIFICATION_PUNCTUATION_HANG; absent outside its measured scope. */
+  readonly cjkClosingMarkHang?: CjkClosingMarkHang;
   /** ECMA-376 §17.3.1.45 wordWrap; present only when disabled. */
   readonly wordWrap?: false;
   /** The paragraph piece ends at a page or column break of its source paragraph. */
@@ -202,24 +252,14 @@ export function resolveDocumentLayoutSettings(
   prepareBodyFrameMetadata(document.body);
   return {
     kinsoku: resolveKinsokuRules(document.settings),
+    ...(document.settings?.noLineBreaksBefore !== undefined || document.settings?.noLineBreaksAfter !== undefined
+      ? { hasCustomKinsokuRules: true as const } : {}),
     defaultTabPt: resolveDefaultTabPt(document.settings),
     characterSpacingControl: document.settings?.characterSpacingControl,
     mathDefJc: document.settings?.mathDefJc,
     documentHasEastAsianText: documentHasEastAsianText(document.body),
     normalStyleFontSizePt: typography.normalStyleFontSizePt,
-    compat: {
-      adjustLineHeightInTable: document.settings?.adjustLineHeightInTable ?? false,
-      useFeLayout: document.settings?.useFeLayout ?? false,
-      balanceSingleByteDoubleByteWidth:
-        document.settings?.balanceSingleByteDoubleByteWidth ?? false,
-      lineWrapLikeWord6: document.settings?.lineWrapLikeWord6 ?? false,
-      enableOpenTypeFeatures: document.settings?.enableOpenTypeFeatures ?? false,
-      ulTrailSpace: document.settings?.ulTrailSpace ?? false,
-      doNotExpandShiftReturn: document.settings?.doNotExpandShiftReturn ?? false,
-      ...(document.settings?.compatibilityMode !== undefined
-        ? { compatibilityMode: document.settings.compatibilityMode }
-        : {}),
-    },
+    compat: buildDocxCompatProfile(document.settings as DocxCompatSettingsInput | undefined),
   };
 }
 
@@ -259,6 +299,23 @@ function normalizeGridKind(type: string | null | undefined): SectionGridContext[
     default:
       return 'none';
   }
+}
+
+function withCjkClosingMarkHang(
+  policy: CjkClosingMarkHang | undefined,
+): { cjkClosingMarkHang?: CjkClosingMarkHang } {
+  return policy === undefined ? {} : { cjkClosingMarkHang: policy };
+}
+
+/** A paragraph context outside the measured class of
+ * WORD_JUSTIFICATION_PUNCTUATION_HANG (a compatibility text-box paragraph,
+ * or a cell paragraph whose cell leaves the class). */
+export function withoutCjkClosingMarkHang(
+  context: ParagraphLayoutContext,
+): ParagraphLayoutContext {
+  if (context.cjkClosingMarkHang === undefined) return context;
+  const { cjkClosingMarkHang: _policy, ...rest } = context;
+  return rest;
 }
 
 function isSectionLineGrid(kind: SectionGridContext['kind']): boolean {
@@ -311,20 +368,29 @@ export function resolveParagraphLayoutContext(
   story: StoryContext,
   paragraph: ParagraphLayoutSource,
 ): ParagraphLayoutContext {
-  const lineGridActive =
+  const paragraphLineGrid =
     isSectionLineGrid(section.grid.kind)
     && section.grid.linePitchPt != null
     && section.grid.linePitchPt > 0
     && paragraph.snapToGrid !== false
     && paragraph.lineSpacing?.rule !== 'exact'
     && (!hasTableCellContainer(story) || settings.compat.adjustLineHeightInTable);
+  // `word-header-footer-off-line-grid`: every paragraph of a header or footer
+  // story (top level, framed, in table cells) and of the text boxes it hosts
+  // keeps its own line height.
+  const headerFooterContent = story.story === 'header' || story.story === 'footer'
+    || story.headerFooterHosted === true;
+  const lineGridActive = paragraphLineGrid && !headerFooterContent;
   const characterGridActive = isSectionCharacterGrid(section.grid.kind);
   const baseRtl = paragraph.bidi === true;
+  const paragraphOffAdmitted = paragraphOffJapaneseAdmitted(settings, section, story, paragraph);
   const insideTableCell = hasTableCellContainer(story);
   const characterPitchPt = characterGridActive
     ? settings.normalStyleFontSizePt + (section.grid.charSpacePt ?? 0)
     : null;
   const rightIndentPitchPt = section.grid.kind === 'linesAndChars'
+    // WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT
+    && settings.compat.gridRightIndentPitchAlignment
     ? characterPitchPt
     : null;
 
@@ -392,9 +458,37 @@ export function resolveParagraphLayoutContext(
     tabStops: effectiveParagraphTabStops(paragraph),
     hasRuby: paragraphHasRuby(paragraph),
     hasEastAsianText: paragraphHasEastAsianText(paragraph),
-    kinsoku: settings.kinsoku,
+    kinsoku: paragraphOffAdmitted ? paragraphKinsokuDisabled(settings.kinsoku) : settings.kinsoku,
+    ...(paragraphOffAdmitted ? { documentKinsoku: settings.kinsoku } : {}),
+    ...withParagraphOffLineEdges(paragraphOffLineEdges(settings, paragraph, paragraphOffAdmitted)),
     defaultTabPt: settings.defaultTabPt,
     overflowPunct: paragraph.overflowPunct !== false,
+    // word-justification-punctuation-hang, admitted only for the measured
+    // class: an ordinary (non-frame), left-to-right paragraph of an admitted
+    // story position (StoryContext.closingMarkHangAdmitted) in a horizontal,
+    // grid-free section, with overflowPunct on and a measured alignment. A
+    // table cell never hangs the mark.
+    ...withCjkClosingMarkHang(wordCjkClosingMarkHang(
+      paragraph.alignment,
+      story.closingMarkHangAdmitted === true
+        && paragraph.framePr == null
+        && paragraph.overflowPunct !== false
+        && !baseRtl
+        && section.textDirection === 'lrTb'
+        && section.sectionFlow === undefined
+        // The bounded Japanese paragraph-OFF class is measured with and
+        // without a document grid (w2144-kinoff controls); the ON policy is
+        // measured grid-free only.
+        && ((!isSectionLineGrid(section.grid.kind) && !characterGridActive)
+          || (paragraphOffAdmitted && paragraph.kinsoku === false)),
+      insideTableCell,
+      // The retained paragraph fact only admits the ON hanging extension.
+      // Paragraph-OFF edge policy is resolved independently above.
+      paragraph.kinsoku === false,
+      settings.compat.cjkClosingMarkHangProfile,
+      settings.kinsoku.enabled,
+      paragraphOffAdmitted,
+    )),
     ...(paragraph.wordWrap === false ? { wordWrap: false as const } : {}),
     ...(paragraph.endsAtHardBreak === true ? { endsAtHardBreak: true as const } : {}),
     mathDefJc: settings.mathDefJc,
@@ -449,4 +543,8 @@ export function resolveRunLayoutContext(
       deltaPt: active ? paragraph.characterGrid.deltaPt : 0,
     },
   };
+}
+
+function withParagraphOffLineEdges(rules: KinsokuRules | undefined): { lineEdgeRules?: KinsokuRules } {
+  return rules ? { lineEdgeRules: rules } : {};
 }

@@ -1,8 +1,10 @@
+import { shapeNativeSourceRequest } from './native-unit-contract.js';
+import { sameNativeLevelUnit } from './native-unit-contract.js';
 import { wordArabicTextKerned, wordKerningApplies } from '../layout/line-compatibility.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
 import type { LayoutTextSeg } from '../line-layout.js';
 import type { MeasurementTextContext, VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
-import { calcEffectiveFontPx, semanticSlotStartIndex } from '../layout/text.js';
+import { calcEffectiveFontPx, semanticSlotStartIndex, type TextShapeResult } from '../layout/text.js';
 import {
   charScaleFactor,
   CONDENSED_CONTEXT_GRAPHEMES,
@@ -46,6 +48,8 @@ function hasLiveSlotSeam(segment: LayoutTextSeg | undefined): boolean {
 export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSeg, scale: number): boolean {
   const l = left.textShapeRequest;
   const r = right.textShapeRequest;
+  // Field comparisons run before the native-unit receipt check, which slices
+  // source text.
   return !!l && !!r && l.kerning === true && r.kerning === true
     && !!right.textLayoutService && right.textLayoutService === left.textLayoutService
     && !left.tateChuYoko && !right.tateChuYoko
@@ -63,7 +67,8 @@ export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSe
     && l.weight === r.weight && l.style === r.style
     && charScaleFactor(left) === charScaleFactor(right)
     && left.sourceRunIndex !== undefined && left.sourceRunIndex === right.sourceRunIndex
-    && left.sourceTextSequence === right.sourceTextSequence;
+    && left.sourceTextSequence === right.sourceTextSequence
+    && sameNativeLevelUnit(left, right);
 }
 
 /** Owns the Canvas state used by one line-breaking pass. The state recorded here
@@ -73,6 +78,8 @@ export class LineMeasurementAdapter {
   private selectedFont: string | null = null;
   private readonly initialFont: string;
   private selectedKerning: CanvasFontKerning | null;
+  /** Kerned space-seam pairs measured in this pass, by font and clusters. */
+  private readonly kernedSeamPairs = new Map<string, number>();
   readonly letterSpacing: string;
 
   constructor(
@@ -143,12 +150,28 @@ export class LineMeasurementAdapter {
     }
   }
 
+  /** Compression attempts acquire only contextual gap detail. Committed
+   * prefix advances and seam/face metadata remain owned by placement and the
+   * retained-line finalizer; reacquire the exact live request on each attempt. */
+  acquireCompressionSpaceClusters(segment: LayoutTextSeg): TextShapeResult['clusters'] {
+    if (!segment.textLayoutService || !segment.textShapeRequest) return undefined;
+    if (segment.textShapeRequest.text !== segment.text) {
+      throw new Error('Segment measurement does not match its retained text range context');
+    }
+    return segment.textLayoutService.shape({
+      ...segment.textShapeRequest,
+      fontSizePt: calcEffectiveFontPx(segment, this.scale),
+      measure: true,
+      clusterGeometry: 'spaces',
+    }).clusters;
+  }
+
   measureSegment(segment: LayoutTextSeg, clusterGeometry: boolean | 'spaces' = false): TextMetrics {
     if (segment.textLayoutService && segment.textShapeRequest) {
       if (segment.textShapeRequest.text !== segment.text) {
         throw new Error('Segment measurement does not match its retained text range context');
       }
-      const shaped = segment.textLayoutService.shape({
+      const shaped = shapeNativeSourceRequest(segment.textLayoutService, {
         ...segment.textShapeRequest,
         fontSizePt: calcEffectiveFontPx(segment, this.scale),
         measure: true,
@@ -157,16 +180,22 @@ export class LineMeasurementAdapter {
       if (clusterGeometry) {
         if (clusterGeometry === 'spaces') segment.shapedSpaceClusters = shaped.clusters;
         else segment.shapedClusters = shaped.clusters;
-        segment.selectedFaceFontBox = {
-          ascentPt: shaped.ascentPt,
-          descentPt: shaped.descentPt,
-        };
-        segment.selectedFaceInkBounds = shaped.inkBounds ?? {
-          xMinPt: 0,
-          xMaxPt: shaped.advancePt,
-          ascentPt: shaped.ascentPt,
-          descentPt: shaped.descentPt,
-        };
+        // Visible spaces-only acquisition owns gap metrics, not published face
+        // geometry. The unconditional retained-line finalizer acquires full
+        // clusters and face metrics before these pieces leave the breaker.
+        // Empty/metric-only pieces are skipped there, so retain their writers.
+        if (clusterGeometry !== 'spaces' || segment.metricOnly || segment.text.length === 0) {
+          segment.selectedFaceFontBox = {
+            ascentPt: shaped.ascentPt,
+            descentPt: shaped.descentPt,
+          };
+          segment.selectedFaceInkBounds = shaped.inkBounds ?? {
+            xMinPt: 0,
+            xMaxPt: shaped.advancePt,
+            ascentPt: shaped.ascentPt,
+            descentPt: shaped.descentPt,
+          };
+        }
       }
       return {
         width: shaped.advancePt,
@@ -206,26 +235,28 @@ export class LineMeasurementAdapter {
     const l = left?.textShapeRequest;
     const r = right.textShapeRequest;
     const service = right.textLayoutService;
-    const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
-    if (!left || !l || !r || !service || service !== left.textLayoutService
+    if (!left || !l || !r || l.kerning !== true || !service || service !== left.textLayoutService
       || !left.text.endsWith(' ') || right.text.startsWith(' ') || !right.text
       || left.metricOnly || right.metricOnly || left.ruby || right.ruby
       || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
       || left.verticalRun || right.verticalRun || left.rtl || right.rtl
-      || l.complexScript || r.complexScript || l.kerning !== true
+      || l.complexScript || r.complexScript
       || (left.script !== 'ascii' && left.script !== 'highAnsi')
       || (right.script !== 'ascii' && right.script !== 'highAnsi')
-      || (!physicalUnit && left.script !== right.script)
       || left.fontRoute?.fingerprint !== right.fontRoute?.fingerprint
       || calcEffectiveFontPx(left, this.scale) !== calcEffectiveFontPx(right, this.scale)
       || l.weight !== r.weight || l.style !== r.style || l.kerning !== r.kerning
       || charScaleFactor(left) !== charScaleFactor(right)
       || left.sourceRunIndex === undefined || left.sourceRunIndex !== right.sourceRunIndex
       || left.sourceTextSequence !== right.sourceTextSequence) return 0;
+    // The slot and native-unit checks walk spans and slice source text, so
+    // they run after the field comparisons.
+    const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
+    if ((!physicalUnit && left.script !== right.script) || !sameNativeLevelUnit(left, right)) return 0;
     const lc = l.substituteContext;
     const rc = r.substituteContext;
     if (!lc || !rc || lc.text !== rc.text || lc.offset + left.text.length !== rc.offset) return 0;
-    const measure = (request: typeof r) => service.shape({ ...request,
+    const measure = (request: typeof r) => shapeNativeSourceRequest(service, { ...request,
       fontSizePt: calcEffectiveFontPx(right, this.scale), measure: true, clusterGeometry: false });
     const joined = measure({ ...l, text: left.text + right.text,
       registeredLatinPieceText: undefined,
@@ -264,14 +295,24 @@ export class LineMeasurementAdapter {
     const before = left.text.slice(graphemeClusterOffsets(left.text).at(-1) ?? 0);
     const after = right.text.slice(0, graphemeClusterOffsets(right.text)[0] ?? right.text.length);
     const font = this.fontForSegment(left);
+    // One pass keeps one Canvas state apart from the font and kerning set
+    // here, so the pair of a face and two clusters is measured once per pass.
+    // Language-specific forms can change the pair; untagged keys are unchanged.
+    const key = left.lang === undefined
+      ? `${font}\u0000${before}\u0000${after}`
+      : `${font}\u0000${before}\u0000${after}\u0000${left.lang}`;
+    const cached = this.kernedSeamPairs.get(key);
+    if (cached !== undefined) return cached * charScaleFactor(right);
     const previousFont = this.selectedFont ?? this.initialFont;
     const previousKerning = this.context.fontKerning;
     this.setFont(font);
     this.context.fontKerning = 'normal';
     try {
       const width = (text: string) => this.context.measureText(text).width;
-      return this.withSegmentLanguage(left, () =>
-        (width(before + after) - width(before) - width(after)) * charScaleFactor(right));
+      const pair = this.withSegmentLanguage(left, () =>
+        width(before + after) - width(before) - width(after));
+      this.kernedSeamPairs.set(key, pair);
+      return pair * charScaleFactor(right);
     } finally {
       this.context.font = previousFont;
       this.selectedFont = previousFont;

@@ -133,6 +133,10 @@ export interface DecodeRasterOptions {
   /** Policy for a metafile that cannot be fully played (default
    *  `'draw-supported'`); see {@link IncompleteMetafilePolicy}. */
   incompleteMetafile?: IncompleteMetafilePolicy;
+  /** The document's served families and their private registered families
+   *  (core `LoadedFontSources.families`): metafile text paints with the
+   *  faces the document's font sources loaded. */
+  metafileFontFamilies?: ReadonlyMap<string, string>;
 }
 
 function exceedsRetainedBudget(source: RasterDimensions, pixelLimit: number): boolean {
@@ -225,6 +229,7 @@ export async function decodeRasterOrMetafileWithInspection(
     targetHeightPx,
     maxRetainedPixels = MAX_RASTER_PIXELS,
     incompleteMetafile = 'draw-supported',
+    metafileFontFamilies,
   } = opts;
   const retainedPixelLimit = Number.isSafeInteger(maxRetainedPixels) && maxRetainedPixels > 0
     ? Math.min(maxRetainedPixels, MAX_RASTER_PIXELS)
@@ -237,6 +242,7 @@ export async function decodeRasterOrMetafileWithInspection(
     const bitmap = await renderWmfToBitmap(
       new Uint8Array(await data.arrayBuffer()), w, h,
       (records) => { unsupported = records; },
+      metafileFontFamilies,
     );
     return enforceDecodedBitmapBudget(
       applyIncompleteMetafilePolicy(bitmap, unsupported, incompleteMetafile, 'wmf'),
@@ -246,7 +252,7 @@ export async function decodeRasterOrMetafileWithInspection(
   if (isEmf(head)) {
     const { w, h } = wmfRasterTarget(widthPt, heightPt);
     const { renderEmfToBitmap } = await loadEmfPlayer();
-    const played = await renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h);
+    const played = await renderEmfToBitmap(new Uint8Array(await data.arrayBuffer()), w, h, metafileFontFamilies);
     return enforceDecodedBitmapBudget(
       applyIncompleteMetafilePolicy(played.bitmap, played.unsupported, incompleteMetafile),
       retainedPixelLimit,

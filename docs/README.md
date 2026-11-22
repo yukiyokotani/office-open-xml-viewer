@@ -1,45 +1,69 @@
-# Documentation Map
+# Documentation
 
-Use the root [`README.md`](../README.md) and the generated/public API surfaces as
-the source of truth for supported features. The documents in this directory are
-grouped as follows so that completed execution plans are not mistaken for the
-current backlog.
+The root [`README.md`](../README.md), the package READMEs and the generated
+public API surfaces are the source of truth for supported features. This
+directory holds the longer guides and the architecture contracts behind them.
 
-Current architecture, contract, migration, and support documents are maintained
-in English. Parallel translated copies are not kept because they can drift from
-the implementation contract. Historical records retain their original language.
+Current documents are maintained in English. Parallel translations are not
+kept because they drift from the implementation contract.
 
-## Current architecture and contracts
+## Guides for library users
 
-- [`docx-layout-engine-redesign.md`](docx-layout-engine-redesign.md) — current
-  DOCX layout architecture and invariants.
-- [`docx-page-layer-order.md`](docx-page-layer-order.md) — canonical DOCX page
-  layer ordering.
+- [`selection-context.md`](selection-context.md) — the selection-context
+  contract shared by the viewers.
+- [`docx-footnote-continuations.md`](docx-footnote-continuations.md) — how
+  page-bottom footnotes continue across pages, and how to opt out.
+- [`legacy-office-conversion.md`](legacy-office-conversion.md) — the
+  experimental `@silurus/ooxml-legacy-office` companion (DOC, XLS, PPT).
+- [`opendocument.md`](opendocument.md) — the experimental
+  `@silurus/ooxml-opendocument` companion.
 - [`chart-compatibility-evidence.md`](chart-compatibility-evidence.md) — chart
   compatibility evidence and limits.
-- [`chart-support-matrix.md`](chart-support-matrix.md) — authoritative
-  parser/model/renderer support matrix and chart implementation backlog.
-- [`selection-context.md`](selection-context.md) — selection-context contract.
-- [`ooxml-resource-governance-design.md`](ooxml-resource-governance-design.md)
-  and [`ooxml-resource-default-calibration.md`](ooxml-resource-default-calibration.md)
-  — resource-budget architecture and calibration.
+- [`chart-support-matrix.md`](chart-support-matrix.md) — parser, model and
+  renderer support for each chart type.
+- [`pptx-follow-path-compatibility.md`](pptx-follow-path-compatibility.md) —
+  multiline Follow Path WordArt placement.
 
 ## Migration guides
 
-Files named `migration-*.md` describe consumer-visible version migrations. The
-`api-architecture-0.76` document describes the 0.76 API architecture that those
-migrations build on.
+Each guide covers one consumer-visible migration. They stay at these paths
+because released packages and changelog entries link to them.
 
-## Historical plans and audits
+- [`migration-0.90.md`](migration-0.90.md) — font sources (`fonts`) replace
+  `useGoogleFonts`.
+- [`migration-selection-context-0.77.md`](migration-selection-context-0.77.md)
+- [`migration-xlsx-selection-0.77.md`](migration-xlsx-selection-0.77.md)
+- [`migration-viewer-errors-0.77.md`](migration-viewer-errors-0.77.md)
+- [`migration-mcp-tools-0.77.md`](migration-mcp-tools-0.77.md)
+- [`migration-0.76.md`](migration-0.76.md) — 0.75 to 0.76.
 
-The following documents preserve design rationale and execution history; their
-unchecked boxes are not an authoritative list of remaining work:
+## Architecture and contracts
 
-- [`improvement-plan-2026-07b.md`](improvement-plan-2026-07b.md)
-- [`improvement-plan-2026-07b-checklist.md`](improvement-plan-2026-07b-checklist.md)
-- [`docx-layout-context-fragments-design.md`](docx-layout-context-fragments-design.md)
-- [`docx-layout-context-fragments-implementation-plan.md`](docx-layout-context-fragments-implementation-plan.md)
-- [`docx-layout-shared-primitives-audit.md`](docx-layout-shared-primitives-audit.md)
+- [`api-architecture-0.76.md`](api-architecture-0.76.md) — public API,
+  ownership and responsibility boundaries since 0.76.
+- [`review-ui-extension-design.md`](review-ui-extension-design.md) — the
+  read-only comment UI boundary.
+- [`ooxml-resource-governance-design.md`](ooxml-resource-governance-design.md)
+  and [`ooxml-resource-default-calibration.md`](ooxml-resource-default-calibration.md)
+  — resource budgets and how their defaults were calibrated.
+- [`docx-layout-engine-redesign.md`](docx-layout-engine-redesign.md) — DOCX
+  layout architecture and invariants.
+- [`docx-model-projection-layers.md`](docx-model-projection-layers.md) — the
+  DOCX model-to-layout boundary and its costs.
+- [`docx-page-layer-order.md`](docx-page-layer-order.md) — DOCX page layer
+  ordering.
 
-For current work, use open GitHub issues together with the implementation,
-tests, root README, and current architecture documents.
+## Contributor workflow
+
+- [`docx-architecture-audit.md`](docx-architecture-audit.md) — the review
+  procedure for DOCX layout changes.
+- [`../scripts/README.md`](../scripts/README.md) — what each repository script
+  does and how to rerun the generators.
+
+## Archive
+
+[`archive/`](archive/README.md) keeps completed plans and audits for their
+design rationale. They are not a backlog; use open GitHub issues for current
+work.
+
+`images/` holds the screenshots and icon used by the READMEs and the site.

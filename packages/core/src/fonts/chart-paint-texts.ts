@@ -1,0 +1,126 @@
+import { localizedExcelShortDateTexts } from '../chart/chart-number-format.js';
+import { excelDateTimeSectionNameTexts, isDateFormatSection, splitFormatSections } from '../excel-number-format.js';
+
+/**
+ * The texts a DrawingML chart may paint, for `unicode-range` font demand
+ * (library loading policy, not OOXML rendering behaviour). Shared by every
+ * format that paints the canonical chart model (PPTX graphic frames, XLSX
+ * drawing anchors and chart sheets). The chart painter
+ * (core `renderChart`) lays its labels out at paint time, so the exact label
+ * strings (tick values, elided or wrapped labels, formatted data labels) are
+ * not known before render. Every scalar they can contain is, though:
+ *
+ * - authored text: every string of the canonical chart model (titles, rich
+ *   runs, category and series caches, legend entries, data-label fields, the
+ *   format codes whose literals a formatted label copies). Face names are not
+ *   painted and are left out;
+ * - generated numbers and dates: §18.8.30 formatting writes ASCII digits,
+ *   signs, separators and exponents (printable ASCII below), the code's own
+ *   literals (above) and, for a date / time section, the formatter's name
+ *   tables (core `excelDateTimeSectionNameTexts`: month, weekday, AM/PM,
+ *   Japanese weekday, era and quarter names). Every string under a key naming
+ *   a format (`/format/i`, array items inheriting their array's key) is
+ *   tested as a code. Excel built-in format 14 in a
+ *   data table paints the viewer's locale short date (`Intl`), complete only
+ *   for a Gregorian, Latin-digit locale; any other locale declines;
+ * - the painter's own literals ({@link CHART_SYNTHESIZED_TEXT}): elision,
+ *   histogram bin bounds and trendline equations.
+ *
+ * `'all'` (every subset) when that set is not provable: a region map (its
+ * labels come from bundled geodata names), an image fill of unknown type, or
+ * a non-Gregorian / native-digit locale short date. A metafile fill's text
+ * records are demanded when it plays ({@link paintsTextFreeImage}). Strings are collected by the caller's scalar collector,
+ * which applies its own scalar rules (PUA, unknown scalars, closures).
+ */
+export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
+  const texts: string[] = [CHART_SYNTHESIZED_TEXT];
+  let localizedShortDate = false;
+  const pending: unknown[] = [chart];
+  const seen = new Set<object>();
+  const formatArrays = new Set<unknown[]>();
+  while (pending.length) {
+    const value = pending.pop();
+    if (value === null || typeof value !== 'object' || seen.has(value) || ArrayBuffer.isView(value)) continue;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    if (!Array.isArray(value)) {
+      if (record.chartType === 'regionMap') return 'all';
+      if (typeof record.imagePath === 'string' && !paintsTextFreeImage(record.imagePath, record.mimeType)) return 'all';
+      if (record.catFormatBuiltinId === 14) localizedShortDate = true;
+    }
+    // A string under a format key (`formatCode`, `valAxisFormatCode`,
+    // `catFormatCodes[i]`, `numberFormat.formatCode`, …) may be a §18.8.30
+    // code; the parent's key carries over to array items.
+    const formatArray = Array.isArray(value) && formatArrays.has(value);
+    for (const key in record) {
+      const child = record[key];
+      if (typeof child === 'string') {
+        if (CHART_FACE_KEY.test(key)) continue;
+        texts.push(child);
+        if (!formatArray && !FORMAT_KEY.test(key)) continue;
+        for (const section of splitFormatSections(child)) {
+          if (!isDateFormatSection(section)) continue;
+          texts.push(...excelDateTimeSectionNameTexts(section));
+        }
+      } else if (child !== null && typeof child === 'object') {
+        if (Array.isArray(child) && FORMAT_KEY.test(key)) formatArrays.add(child);
+        pending.push(child);
+      }
+    }
+  }
+  if (localizedShortDate) {
+    const shortDate = localizedExcelShortDateTexts();
+    if (!shortDate.complete) return 'all';
+    texts.push(...shortDate.texts);
+  }
+  return texts;
+}
+
+/** Image parts whose painting needs no load-time font demand: rasters
+ * (decoded by the browser), SVG (decoded through an `<img>`, which cannot
+ * reach document fonts) and WMF/EMF metafiles. The metafile players draw
+ * text records with served faces, and the image owner's metafile demand
+ * (core `bindMetafileFontDemand`) loads the scalars a picture's records
+ * paint before it plays; the players sniff content, so a metafile stored
+ * under any part name or type is covered the same way. An unknown type is
+ * not admitted.
+ *
+ * The type is the parser's extension mapping (`mime_from_ext`), as the
+ * package declares the part. */
+export function paintsTextFreeImage(path: unknown, mimeType: unknown): boolean {
+  if (typeof path === 'string' && METAFILE_PATH.test(path)) return true;
+  return typeof mimeType === 'string' && TEXT_FREE_IMAGE_TYPES.has(mimeType.toLowerCase());
+}
+
+const TEXT_FREE_IMAGE_TYPES: ReadonlySet<string> = new Set([
+  'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/bmp', 'image/webp', 'image/tiff', 'image/svg+xml',
+  'image/wmf', 'image/emf',
+]);
+const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
+
+/** Keys holding a §18.8.30 format code: every ChartModel code field
+ * (`*FormatCode`, `*FormatCodes`, `formatCode` of a number-format object). */
+const FORMAT_KEY = /format/i;
+
+/** Keys naming a face (core chart-font-sources CHART_FACE_KEY): not painted. */
+const CHART_FACE_KEY = /^(?:fontFace|[A-Za-z]+FontFace|themeMajorFontLatin|themeMinorFontLatin)$/;
+
+/** Printable ASCII (numbers, signs, separators, generated series and
+ * trendline names) plus the non-ASCII literals the chart painter writes: the
+ * elision ellipsis (text-elide, data-label-layout), histogram bin bounds
+ * `≤ ≥` (histogram-binning), and the trendline equation minus sign and `R²`
+ * (trendline). U+FFFD: elision's binary search measures UTF-16 prefixes that
+ * may end in a lone surrogate, which Canvas measures as the replacement
+ * character. */
+export const CHART_SYNTHESIZED_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…≤≥−²\ufffd`;
+
+/** Every vertical presentation form core substitutes in vertical text
+ * (`verticalFormSubstitute` → U+FE10–FE19, `verticalBracketFormSubstitute`
+ * → U+FE17/FE18 and U+FE35–FE44; text/vertical-orientation.ts), used by
+ * PPTX eaVert and stacked bodies, XLSX stacked cells and vertical shape text:
+ * the two blocks, a small superset. Kept static so a demand chunk shares no
+ * module with the renderers. */
+export const VERTICAL_PRESENTATION_FORMS = String.fromCharCode(
+  ...Array.from({ length: 10 }, (_, i) => 0xfe10 + i),
+  ...Array.from({ length: 0x20 }, (_, i) => 0xfe30 + i),
+);

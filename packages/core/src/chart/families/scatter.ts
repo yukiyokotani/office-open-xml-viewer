@@ -204,7 +204,7 @@ export function renderScatterChart(
     for (const value of provisionalSecondaryY.majorTicks) {
       secondaryYLabelWidth = Math.max(
         secondaryYLabelWidth,
-        measureAuthoredTextWidth(ctx, formatAxisTickWithUnits(value, secondaryY.formatCode, chart.date1904, secondaryY.displayUnits)),
+        measureAuthoredTextWidth(ctx, formatAxisTickWithUnits(value, secondaryY.formatCode, chart.date1904, secondaryY.displayUnits, secondaryY.formatDivisors)),
       );
     }
     secondaryYLabelWidth += valueTickLabelGapPx(yAxLabelFontPx) + 4;
@@ -255,7 +255,7 @@ export function renderScatterChart(
     && secondaryY.tickLabelPos !== 'none'
     ? authoredExtraLinesHeight(
       provisionalSecondaryY.majorTicks.map(value =>
-        formatAxisTickWithUnits(value, secondaryY.formatCode, chart.date1904, secondaryY.displayUnits)),
+        formatAxisTickWithUnits(value, secondaryY.formatCode, chart.date1904, secondaryY.displayUnits, secondaryY.formatDivisors)),
       axisLabelLineHeightPx(chartTextFontSizePx(secondaryY.fontSizeHpt, ptToPx) ?? yAxLabelFontPx),
     )
     : 0;
@@ -267,7 +267,7 @@ export function renderScatterChart(
         chart.catAxisMin ?? (textBubbleOrdinalMax == null ? null : 0),
         chart.catAxisMax ?? textBubbleOrdinalMax,
         w, 'horizontal', chart.catAxisMajorUnit, chart.catAxisLogBase, catAxisReversed(chart),
-      ).map(value => formatAxisTickWithUnits(value, chart.catAxisFormatCode, chart.date1904, chart.catAxisDisplayUnits)),
+      ).map(value => formatAxisTickWithUnits(value, chart.catAxisFormatCode, chart.date1904, chart.catAxisDisplayUnits, chart.catAxisFormatDivisors)),
       axisLabelLineHeightPx(xAxLabelFontPx),
     );
   const secondaryXLabelExtraH = secondaryX && !secondaryX.hidden && secondaryX.tickLabelPos !== 'none'
@@ -275,7 +275,7 @@ export function renderScatterChart(
       provisionalTicks(
         secondaryExtent.x, secondaryX.min, secondaryX.max, w, 'horizontal',
         secondaryX.majorUnit, secondaryX.logBase, secondaryX.orientation === 'maxMin',
-      ).map(value => formatAxisTickWithUnits(value, secondaryX.formatCode, chart.date1904, secondaryX.displayUnits)),
+      ).map(value => formatAxisTickWithUnits(value, secondaryX.formatCode, chart.date1904, secondaryX.displayUnits, secondaryX.formatDivisors)),
       axisLabelLineHeightPx(chartTextFontSizePx(secondaryX.fontSizeHpt, ptToPx) ?? xAxLabelFontPx),
     )
     : 0;
@@ -565,7 +565,7 @@ export function renderScatterChart(
       if (labelPos !== 'none') {
         fillAuthoredText(
           ctx,
-          formatAxisTickWithUnits(v, chart.catAxisFormatCode, chart.date1904, chart.catAxisDisplayUnits),
+          formatAxisTickWithUnits(v, chart.catAxisFormatCode, chart.date1904, chart.catAxisDisplayUnits, chart.catAxisFormatDivisors),
           gx, labelY, axisLabelLineHeightPx(tickFontPx),
         );
       }
@@ -668,7 +668,7 @@ export function renderScatterChart(
       if (secondaryX.tickLabelPos !== 'none') {
         fillAuthoredText(
           ctx,
-          formatAxisTickWithUnits(value, secondaryX.formatCode, chart.date1904, secondaryX.displayUnits),
+          formatAxisTickWithUnits(value, secondaryX.formatCode, chart.date1904, secondaryX.displayUnits, secondaryX.formatDivisors),
           sx,
           py0 - tickOutset - categoryTickLabelGapPx(fontPx),
           axisLabelLineHeightPx(fontPx),

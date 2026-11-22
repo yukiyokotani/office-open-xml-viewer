@@ -62,9 +62,6 @@ pub struct Properties {
     picture_bullet: PictureBullet,
     /// Properties projected only by the direct model (see `DirectOnly`).
     direct_only: DirectOnly,
-    /// MS-DOC 2.9.118 HresiOperand, strict-validated or explicitly retained raw. An absent sparse patch must not
-    /// erase an inherited custom method; an authored hresNormal must do so.
-    word_breaking: Option<HresiOperand>,
     /// MS-DOC 2.6.1 sprmCSymbol / 2.9.47 CSymbolOperand (ftc, xchar).
     /// Both sprmCPlain and sprmCIstd preserve it.
     symbol: Option<(u16, u16)>,
@@ -75,12 +72,6 @@ pub struct Properties {
     /// and sprmCDttmRMark. All three survive sprmCPlain and sprmCIstd.
     insertion: InsertionMark,
 }
-
-/// The exact two-byte word-breaking method and character, retained without a
-/// renderer approximation. MS-DOC 2.4.6 gives the last applied Prl ownership;
-/// 2.6.1 does not preserve Hresi across sprmCPlain or sprmCIstd resets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct HresiOperand([u8; 2]);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct InsertionMark {
@@ -150,7 +141,6 @@ enum LanguageAxis {
 enum LanguageResolution {
     Absent,
     Assigned(&'static str),
-    Unsupported(u16),
 }
 
 #[derive(Clone, Copy)]
@@ -213,7 +203,6 @@ impl Default for Properties {
             picture: Picture::default(),
             picture_bullet: PictureBullet::default(),
             direct_only: DirectOnly::default(),
-            word_breaking: None,
             symbol: None,
             field_vanish: None,
             insertion: InsertionMark::default(),
@@ -222,10 +211,6 @@ impl Default for Properties {
 }
 
 impl Properties {
-    pub(super) fn word_breaking_requires_consumer(&self) -> bool {
-        self.word_breaking.is_some_and(|value| value.0 != [1, 0])
-    }
-
     /// A resolved style patch, without injecting the document's default size.
     /// Used when list-linked styles are layered onto a paragraph mark.
     pub fn sparse() -> Self {
@@ -242,7 +227,6 @@ impl Properties {
             picture: Picture::default(),
             picture_bullet: PictureBullet::default(),
             direct_only: DirectOnly::default(),
-            word_breaking: None,
             symbol: None,
             field_vanish: None,
             insertion: InsertionMark::default(),
@@ -291,9 +275,6 @@ impl Properties {
             }
         }
         self.direct_only.overlay(&patch.direct_only);
-        if patch.word_breaking.is_some() {
-            self.word_breaking = patch.word_breaking;
-        }
         if patch.insertion.inserted.is_some() {
             self.insertion.inserted = patch.insertion.inserted;
         }
@@ -417,43 +398,41 @@ impl Properties {
         let (key, value) = match code {
             0x2a86 => {
                 // [MS-DOC] 2.6.1 sprmCNeedFontFixup / 2.9.81 FFM is an
-                // enum, not a toggle. ffmNone and ffmDefault use the existing
-                // default Unicode font route: Canvas measurement and paint
-                // share the same CSS fallback chain, which substitutes a face
-                // for missing glyphs. This delegates to the library/browser
-                // font policy; it does not reproduce Word's font choice or
-                // guarantee installed coverage/identical metrics. Language-
-                // optimal and UI-font substitution need a distinct consumer.
+                // enum, not a toggle. Every method uses the default Unicode
+                // font route: Canvas measurement and paint share the same CSS
+                // fallback chain, which substitutes a face for missing
+                // glyphs. ffmNone and ffmDefault are that route. The
+                // language-optimal (ffmUILang) and UI-font (ffmUIDialog)
+                // substitutions are approximated by it: Word PDFs of the same
+                // document with each of 0, 1, 2 and 4 are pixel-identical. A
+                // value outside the enum takes the spec default ffmDefault.
                 let [value] = operand else {
-                    return Err(unsupported("invalid Word font fixup length"));
+                    return Err(crate::rejection::corrupt("invalid Word font fixup length"));
                 };
-                return match value {
-                    0 | 1 => Ok(true),
-                    2 | 4 => Ok(false),
-                    _ => Err(unsupported("invalid Word font fixup method")),
-                };
+                match value {
+                    0 | 1 => {}
+                    2 | 4 => crate::rejection::approximated(
+                        "Word font fixup method requires a consumer",
+                        (),
+                    ),
+                    _ => crate::rejection::ignored_value("invalid Word font fixup method"),
+                }
+                return Ok(true);
             }
             0x484e => {
-                // MS-DOC 2.9.118: Hres is 1..=6; hresNormal (1) requires
-                // ChHres zero. Strict keeps the conservative ASCII domain for
-                // other methods; a later normal value cannot forgive an
-                // invalid applied operand. Every mode requires exactly two
-                // correctly framed bytes.
+                // MS-DOC 2.6.1 sprmCHresi / 2.9.118 Hresi: how a word that
+                // is hyphenated at a line break is spelled (hresNormal, or a
+                // character added, changed or deleted around the hyphen).
+                // The renderer breaks every word with the standard method, so
+                // a custom method is approximated by hresNormal. Hres outside
+                // 1..=6, or a ChHres outside its domain, is an invalid value
+                // of a correctly framed operand: the spec default hresNormal.
+                // Observed Windows Word (16.0) behavior agrees for the
+                // undefined [0, 1]: it lays out and prints exactly as [1, 0].
                 if operand.len() != 2 {
-                    return Err(unsupported("invalid Word word-breaking method"));
-                }
-                // Observed Windows Word (16.0) behavior: the spec-undefined
-                // operand [0, 1] (Hres 0, ChHres 1) lays out and prints
-                // exactly as hresNormal [1, 0]. Tested with pixel-identical
-                // PDFs (zero two-export noise) on a 292-page document whose
-                // only Hresi is [0, 1], against its [1, 0] patch, and on an
-                // automatically hyphenating page whose every hyphenated break
-                // lies in [0, 1] runs, against [1, 0] and no Hresi at all.
-                // Only this exact operand is aliased; other undefined values
-                // keep the refusal below.
-                if operand == [0, 1] {
-                    self.word_breaking = Some(HresiOperand([1, 0]));
-                    return Ok(true);
+                    return Err(crate::rejection::corrupt(
+                        "invalid Word word-breaking method",
+                    ));
                 }
                 let valid = (1..=6).contains(&operand[0])
                     && if operand[0] == 1 {
@@ -462,11 +441,14 @@ impl Properties {
                         (1..=0x7f).contains(&operand[1])
                     };
                 if !valid {
-                    return Err(unsupported("invalid Word word-breaking method"));
+                    crate::rejection::ignored_value("invalid Word word-breaking method");
+                } else if operand[0] != 1 {
+                    crate::rejection::approximated(
+                        "Word word-breaking method requires a consumer",
+                        (),
+                    );
                 }
-                self.word_breaking = Some(HresiOperand([operand[0], operand[1]]));
-                // Custom values retain the unsupported-consumer gate.
-                return Ok(operand == [1, 0]);
+                return Ok(true);
             }
             0x485f => {
                 // MS-DOC 2.6.1 sprmCLidBi / 2.9.134 LID: this axis is used for
@@ -581,12 +563,16 @@ impl Properties {
                 // Windows code page (the corpus value is 1252). MS-DOC 2.4.1
                 // already fixes compressed text to code page 1252 and stores
                 // other text as UTF-16, and a Word-saved DOC/DOCX corpus pair
-                // has no counterpart for it in the DOCX style. Only that
-                // value is accepted as having no display effect.
+                // has no counterpart for it in the DOCX style: that value has
+                // no display effect. Being undefined, any other value is
+                // skipped like every undefined property (`sprm_catalog`).
                 if operand.len() != 2 {
                     return Err(unsupported("invalid Word character code page"));
                 }
-                return Ok(u16_at(operand, 0)? == 1252);
+                if u16_at(operand, 0)? != 1252 {
+                    crate::rejection::skipped("unknown Word property");
+                }
+                return Ok(true);
             }
             0x2879 => {
                 // MS-DOC 2.6.1 sprmCLbcCRJ / 2.9.129 LBCOperand: where text
@@ -877,7 +863,7 @@ impl Properties {
             ),
             0x6870 => ("color", colorref(operand)?),
             0x6877 => ("uColor", colorref(operand)?),
-            _ => return Ok(false),
+            _ => return Ok(super::sprm_catalog::skip_undefined(code)),
         };
         self.values.insert(key, value);
         Ok(true)
@@ -885,21 +871,10 @@ impl Properties {
 
     pub(super) fn resolved_languages(&self) -> Result<ResolvedLanguages, String> {
         Ok(ResolvedLanguages {
-            default: self.resolve_language_axis(
-                self.lang_default_lid,
-                LanguageAxis::Default,
-                "default",
-            )?,
-            east_asia: self.resolve_language_axis(
-                self.lang_east_asia_lid,
-                LanguageAxis::EastAsia,
-                "East Asian",
-            )?,
-            bidi: self.resolve_language_axis(
-                self.lang_bidi_lid,
-                LanguageAxis::ComplexScript,
-                "complex-script",
-            )?,
+            default: self.resolve_language_axis(self.lang_default_lid, LanguageAxis::Default)?,
+            east_asia: self
+                .resolve_language_axis(self.lang_east_asia_lid, LanguageAxis::EastAsia)?,
+            bidi: self.resolve_language_axis(self.lang_bidi_lid, LanguageAxis::ComplexScript)?,
         })
     }
 
@@ -907,14 +882,10 @@ impl Properties {
         &self,
         lid: Option<u16>,
         axis: LanguageAxis,
-        name: &str,
     ) -> Result<Option<&'static str>, String> {
         match self.language(lid, axis) {
             LanguageResolution::Absent => Ok(None),
             LanguageResolution::Assigned(language) => Ok(Some(language)),
-            LanguageResolution::Unsupported(lid) => Err(unsupported(format!(
-                "unsupported Word {name} language ID 0x{lid:04X}"
-            ))),
         }
     }
 
@@ -947,9 +918,31 @@ impl Properties {
             }
             _ => {}
         }
+        use crate::lcid::Resolution;
         match crate::lcid::resolve(u32::from(lid)) {
-            crate::lcid::Resolution::Assigned(language) => LanguageResolution::Assigned(language),
-            _ => LanguageResolution::Unsupported(lid),
+            // MS-LCID 2.2 names every one of these locales. Word stamps the
+            // reserved ones too (0x0850, mn-Mong-CN, in a Word-saved control)
+            // and carries the Microsoft-specific names (es-ES_tradnl) into
+            // w:lang verbatim.
+            Resolution::Assigned(language)
+            | Resolution::AssignedNonLanguageTag(language)
+            | Resolution::Reserved(Some(language)) => LanguageResolution::Assigned(language),
+            Resolution::DocumentedAliases(names) => {
+                names.first().map_or(LanguageResolution::Absent, |name| {
+                    LanguageResolution::Assigned(name)
+                })
+            }
+            // A LID MS-LCID names no locale for selects no language, as an
+            // absent property does.
+            Resolution::Reserved(None)
+            | Resolution::CustomUserDefault
+            | Resolution::CustomUnspecified
+            | Resolution::Transient
+            | Resolution::Unassigned
+            | Resolution::Unknown => {
+                crate::rejection::ignored_value("Word language ID without a locale name");
+                LanguageResolution::Absent
+            }
         }
     }
 }
@@ -1195,7 +1188,16 @@ mod tests {
         let mut value = base.clone();
         assert!(value.apply(0x486b, &1252u16.to_le_bytes(), &base).unwrap());
         assert_eq!(value, base);
-        assert!(!value.apply(0x486b, &932u16.to_le_bytes(), &base).unwrap());
+        crate::rejection::take_best_effort();
+        assert!(value.apply(0x486b, &932u16.to_le_bytes(), &base).unwrap());
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::Skipped,
+                "unknown Word property"
+            )]
+        );
+        assert_eq!(value, base);
         assert!(base.clone().apply(0x486b, &[0xe4], &base).is_err());
     }
 
@@ -1249,36 +1251,47 @@ mod tests {
     }
 
     #[test]
-    fn normal_word_breaking_is_default_but_custom_and_malformed_methods_are_not() {
+    fn every_word_breaking_method_uses_standard_breaking() {
         let base = Properties::default();
+        let projected = |props: &Properties| {
+            serde_json::to_value(props.direct_text_run("quartz".into(), &[]).unwrap()).unwrap()
+        };
+        crate::rejection::take_best_effort();
         let mut normal = base.clone();
         assert!(normal.apply(0x484e, &[1, 0], &base).unwrap());
-        // The undefined [0, 1] is Word's measured alias of hresNormal.
-        let mut alias = base.clone();
-        assert!(alias.apply(0x484e, &[0, 1], &base).unwrap());
-        assert_eq!(alias.word_breaking, normal.word_breaking);
-        // Explicit normal is an authored override for sparse style patches,
-        // while its projected default word-breaking behavior stays unchanged.
-        assert_eq!(
-            serde_json::to_value(normal.direct_text_run("quartz".into(), &[]).unwrap()).unwrap(),
-            serde_json::to_value(base.direct_text_run("quartz".into(), &[]).unwrap()).unwrap()
-        );
-        // A valid custom method changes characters at a break and needs a
-        // consumer. It must not be treated as the default method.
+        assert_eq!(projected(&normal), projected(&base));
+        assert!(crate::rejection::take_best_effort().is_empty());
+        // A custom method is projected as the standard one.
         for method in 2..=6 {
-            assert!(!base.clone().apply(0x484e, &[method, b'x'], &base).unwrap());
+            let mut custom = base.clone();
+            assert!(custom.apply(0x484e, &[method, b'x'], &base).unwrap());
+            assert_eq!(projected(&custom), projected(&base));
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "Word word-breaking method requires a consumer"
+                )]
+            );
         }
-        for operand in [
-            vec![],
-            vec![1],
-            vec![1, 0, 0],
-            vec![0, 0],
-            vec![0, 2],
-            vec![7, 0],
-            vec![1, 1],
-            vec![2, 0],
-            vec![2, 0x80],
-        ] {
+        // Out-of-range values take the spec default, hresNormal.
+        for operand in [[0, 0], [0, 1], [0, 2], [7, 0], [1, 1], [2, 0], [2, 0x80]] {
+            let mut invalid = base.clone();
+            assert!(
+                invalid.apply(0x484e, &operand, &base).unwrap(),
+                "{operand:?}"
+            );
+            assert_eq!(projected(&invalid), projected(&base));
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::IgnoredValue,
+                    "invalid Word word-breaking method"
+                )]
+            );
+        }
+        // A misframed operand is corrupt.
+        for operand in [vec![], vec![1], vec![1, 0, 0]] {
             assert!(
                 base.clone().apply(0x484e, &operand, &base).is_err(),
                 "{operand:?}"
@@ -1336,10 +1349,25 @@ mod tests {
 
         assert!(base.clone().apply(0x485f, &[1], &base).is_err());
         assert!(base.clone().apply(0x485f, &[1, 2, 3], &base).is_err());
-        for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
-            let mut unresolved = base.clone();
-            unresolved.apply(0x485f, &lid.to_le_bytes(), &base).unwrap();
-            assert!(unresolved.resolved_languages().is_err(), "LID {lid:04x}");
+        // A LID without a locale name selects no language; the named
+        // reserved, alias and Microsoft-specific locales keep their name.
+        for (lid, language) in [
+            (u16::MAX, None),
+            (0x0000, None),
+            (0x007f, None),
+            (0x0467, Some("ff-NG")),
+            (0x040a, Some("es-ES_tradnl")),
+            (0x0850, Some("mn-Mong-CN")),
+        ] {
+            let mut resolved = base.clone();
+            resolved.apply(0x485f, &lid.to_le_bytes(), &base).unwrap();
+            crate::rejection::take_best_effort();
+            assert_eq!(bidi(&resolved), language, "LID {lid:04x}");
+            assert_eq!(
+                crate::rejection::take_best_effort().is_empty(),
+                language.is_some(),
+                "LID {lid:04x}"
+            );
         }
         // Word writes 0x0400 for a style without its own complex-script
         // language: it inherits. 0x1000 (a tag without an LCID) projects no

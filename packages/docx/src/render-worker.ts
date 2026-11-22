@@ -1,5 +1,7 @@
 import { prepareDocxHostFontMetrics, type HostFontLineMeasurement } from './host-font-line-metrics.js';
 import {
+  bindMetafileFontDemand,
+  bindMetafileFontFamilies,
   activeFontSet,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
@@ -45,9 +47,15 @@ import {
 } from '@silurus/ooxml-core/worker';
 import { prepareMathRuns, renderLayoutSourceToCanvas } from './renderer';
 import { createLayoutServices, nativeRouteLineRequests } from './layout-runtime.js';
-import { completeDocxFontPresence, declaredFontSubstitutions, docxFontFamilyPlan, docxOfficeFontFallbackRequests } from './font-plan.js';
-import { loadDocxFontSources, type DocxLoadedFontSources } from './font-source-load.js';
-import { assertFontSourceDescriptors, chartFontSubstitutions, WorkerFontResolverClient, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
+import { completeDocxFontPresence, docxFontFamilyPlan } from './font-demand-plan.js';
+import { loadDocxFontSources, metafileFontDemand, type DocxLoadedFontSources } from './font-source-load.js';
+import {
+  prepareServedFaceLines,
+  servedFaceLineRequests,
+  type ServedFaceLineMeasurement,
+} from './served-face-lines.js';
+import { assertFontSourceDescriptors, chartFontSubstitutions, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { loadEmbeddedFonts } from './embedded-fonts';
 import type {
   RenderWorkerResponse,
@@ -56,7 +64,8 @@ import type {
   DocumentMeta,
 } from './worker-protocol';
 import { layoutSourceModelAdapterFromOwnedModel } from './layout-source-model-adapter.js';
-import { layoutSourceStoreOf } from './layout/runtime-state.js';
+import { layoutSourceStoreOf, textAdvanceLookupOf } from './layout/runtime-state.js';
+import { errorPageLayoutReady } from './layout/document-layout-variants.js';
 import {
   retainRenderWorkerDocumentLayout,
   type RetainedRenderWorkerDocumentLayout,
@@ -143,6 +152,8 @@ function releaseRetainedFonts(): void {
   officeFontFaces = [];
   fontSourceSession = null;
   chartFontSubstitutionsOfDoc = undefined;
+  bindMetafileFontFamilies(getImage, undefined);
+  bindMetafileFontDemand(getImage, undefined);
   embeddedFontFaces = [];
   try { unloadOfficeFontFallbacks(office); } catch {}
   try { sources?.release(); } catch {}
@@ -178,6 +189,9 @@ function getImage(path: string, mimeType: string): Promise<Blob> {
 }
 
 const hostFontMeasurements = new Map<number, (measurements: HostFontLineMeasurement[]) => void>();
+const servedFaceMeasurements = new Map<number, (measurements: ServedFaceLineMeasurement[]) => void>();
+/** Aborted when a parse is superseded (served-face-lines.ts probe waits). */
+let servedFaceProbe = new AbortController();
 const nativeRouteMeasurements = new Map<number, (lines: (NativeRouteNormalLine | null)[]) => void>();
 
 self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecodeResponse>) => {
@@ -209,6 +223,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
     hostFontMeasurements.delete(req.forId);
     return;
   }
+  if (req.type === 'servedFaceLinesMeasured') {
+    servedFaceMeasurements.get(req.forId)?.(req.measurements);
+    servedFaceMeasurements.delete(req.forId);
+    return;
+  }
   if (req.type === 'nativeRouteLinesMeasured') {
     nativeRouteMeasurements.get(req.forId)?.(req.lines);
     nativeRouteMeasurements.delete(req.forId);
@@ -231,6 +250,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       fontResolverClient.reset();
       for (const resolve of hostFontMeasurements.values()) resolve([]);
       hostFontMeasurements.clear();
+      for (const resolve of servedFaceMeasurements.values()) resolve([]);
+      servedFaceMeasurements.clear();
+      // A superseded parse's probe waits end and release their registrations.
+      servedFaceProbe.abort();
+      servedFaceProbe = new AbortController();
       // A superseded parse's measurement reply is discarded by the host.
       for (const resolve of nativeRouteMeasurements.values()) resolve([]);
       nativeRouteMeasurements.clear();
@@ -346,7 +370,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       }
       let adapted: ReturnType<typeof layoutSourceModelAdapterFromOwnedModel>;
       let nativeRouteRequests: ReturnType<typeof nativeRouteLineRequests>;
-      let fontSources: readonly FontSource[];
+      let fontSources: readonly FontSourceDescriptor[];
       try {
         // Descriptors crossed the realm boundary: validate them as strictly as
         // the factories did (TypeError / font-source-limit reject the load).
@@ -440,14 +464,32 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           mathResources: preparedMath?.records,
           mathDrawables: preparedMath?.drawables,
         };
+        // Served faces without readable tables (served-face-lines.ts): the
+        // page measures them while this realm registers their private
+        // families.
+        const servedRequests = loadedSources ? servedFaceLineRequests(loadedSources.loaded) : [];
+        const servedMeasurements = servedRequests.length > 0
+          ? new Promise<ServedFaceLineMeasurement[]>(resolve => {
+              servedFaceMeasurements.set(id, resolve);
+              post({ type: 'measureServedFaceLines', forId: id, requests: servedRequests });
+            })
+          : [];
+        const servedFaceLines = await prepareServedFaceLines(
+          loadedSources?.loaded, activeFontSet(), [], servedMeasurements, servedFaceProbe.signal,
+        );
+        officeFaces = [...officeFaces, ...servedFaceLines.faces];
+        if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         let nativeRouteMetrics: ReturnType<typeof admitDocxNativeRouteLines> | undefined;
         const nativeRouteLines = await pendingNativeRouteLines;
         officeFaces = [...officeFaces, ...nativeSentinels];
         if (nativeRouteLines.some(Boolean)) {
           nativeRouteMetrics = admitDocxNativeRouteLines(nativeRouteLines, activeFontSet());
         }
+        // A fatally unparseable document loads its error page here (#2248).
+        const errorPage = errorPageLayoutReady(source);
+        if (errorPage) await errorPage;
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
-        const layoutServices = createLayoutServices(source, { ...serviceOptions, nativeRouteMetrics });
+        const layoutServices = createLayoutServices(source, { ...serviceOptions, servedFaceLines, nativeRouteMetrics });
         const requestedDoc = retainRenderWorkerDocumentLayout(
           source,
           layoutServices,
@@ -456,7 +498,11 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         officeFontFaces = officeFaces;
         fontSourceSession = loadedSources?.session ?? null;
-        chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded.substitutions);
+        chartFontSubstitutionsOfDoc = chartFontSubstitutions(loadedSources?.loaded);
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
+        bindMetafileFontFamilies(getImage, loadedSources?.loaded);
+        bindMetafileFontDemand(getImage, loadedSources ? metafileFontDemand(loadedSources.session) : undefined);
         embeddedFontFaces = embeddedFonts.faces;
         fontDiagnostics = embeddedFonts.diagnostics ?? [];
         fontsTransferred = true;
@@ -599,6 +645,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
+        textAdvances: textAdvanceLookupOf(doc.layoutServices),
       });
       const bitmap = canvas.transferToImageBitmap();
       postOwnedImageBitmap(post, { type: 'pageRendered', id, bitmap, runs, diagnostics });
@@ -609,6 +656,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       const runs = textRunsForSelectedPage(doc.layoutServices, req.pageIndex, {
         ...req.opts,
         defaultCurrentDateMs: doc.defaultCurrentDateMs,
+        textAdvances: textAdvanceLookupOf(doc.layoutServices),
       });
       post({ type: 'runsCollected', id, runs });
       return;

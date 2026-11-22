@@ -97,9 +97,19 @@ describe('slicer text and font sources', () => {
     bindXlsxOfficeFontRoutes(ctx, { rows: [] } as never, undefined, {
       substitutions: new Map([['custom ui', { family: 'Served UI' }]]),
       regularAliases: new Map(),
+      families: new Map([['served ui', 'ooxml-font-source-1-0']]),
     });
     drawSlicerFrame(ctx, 'Region', [{ name: 'North', selected: true }], 0, 0, 200, 150, 1, style);
     expect(fonts.length).toBeGreaterThan(1);
-    for (const font of fonts) expect(font).toContain('"Custom UI", "Served UI", "Segoe UI", sans-serif');
+    for (const font of fonts) expect(font).toContain(`"Custom UI", "ooxml-font-source-1-0", "Served UI", "Segoe UI", sans-serif`);
+
+    // Unstyled slicer text paints a served default face through its private family.
+    fonts.length = 0;
+    bindXlsxOfficeFontRoutes(ctx, { rows: [] } as never, undefined, {
+      substitutions: new Map(), regularAliases: new Map(), families: new Map([['meiryo ui', 'ooxml-font-source-1-1']]),
+    });
+    drawSlicerFrame(ctx, 'Region', [{ name: 'North', selected: true }], 0, 0, 200, 150, 1, undefined);
+    expect(fonts.length).toBeGreaterThan(1);
+    for (const font of fonts) expect(font).toContain('"ooxml-font-source-1-1", "Meiryo UI", "Segoe UI", sans-serif');
   });
 });

@@ -35,30 +35,83 @@ export function measureLocalFontNormalLine(
   emPx: number,
   ownerDocument: Document | null,
 ): LocalFontNormalLine | null {
-  if (face.status !== 'loaded' || !Number.isFinite(emPx) || emPx <= 0
-    || !ownerDocument?.body || ownerDocument.fonts !== fontSet) return null;
+  if (face.status !== 'loaded') return null;
   const cached = measuredLines.get(face);
   if (cached?.emPx === emPx) return cached.metric;
+  const metric = measureFontFaceNormalLine(face, face.weight, face.style, fontSet, context, emPx, ownerDocument);
+  measuredLines.set(face, { emPx, metric });
+  return metric;
+}
+
+/** {@link measureLocalFontNormalLine} for an explicit weight/style tuple of
+ * the face's family (a variable face measured at one instance, or a tuple
+ * the family synthesizes). Not cached: callers own their reuse. The family
+ * must resolve to `face` alone for the measurement to describe it. */
+export function measureFontFaceNormalLine(
+  face: FontFace,
+  weight: string | number,
+  style: string,
+  fontSet: FontFaceSet,
+  context: CanvasFontBoxProbeContext,
+  emPx: number,
+  ownerDocument: Document | null,
+): LocalFontNormalLine | null {
+  return measureFontFaceNormalLines([{ face, weight, style }], fontSet, context, emPx, ownerDocument)[0]!;
+}
+
+/** One face × tuple of {@link measureFontFaceNormalLines}. */
+export interface FontFaceNormalLineRequest {
+  readonly face: FontFace;
+  readonly weight: string | number;
+  readonly style: string;
+}
+
+/** {@link measureFontFaceNormalLine} for many faces × tuples at once, with
+ * the same result for each request: every strut of a linear-scale attempt is
+ * appended in one host and read after one style/layout pass, so a batch
+ * costs at most {@link LINEAR_PROBE_ATTEMPTS} layouts, never one (or two)
+ * per request. Each request keeps its own attempt sequence: it halves its em
+ * only while its own boxes do not scale linearly, and declines once a
+ * measurement fails. The struts are independent blocks (`display: block`,
+ * one U+200B each), so sharing a host changes no strut's height. */
+export function measureFontFaceNormalLines(
+  requests: readonly FontFaceNormalLineRequest[],
+  fontSet: FontFaceSet,
+  context: CanvasFontBoxProbeContext,
+  emPx: number,
+  ownerDocument: Document | null,
+): (LocalFontNormalLine | null)[] {
+  const results: (LocalFontNormalLine | null)[] = requests.map(() => null);
+  if (!Number.isFinite(emPx) || emPx <= 0 || !ownerDocument?.body || ownerDocument.fonts !== fontSet) return results;
   // Engines may clamp a large requested size, so a successful measurement does
   // not prove the requested scale. Accept an em only when the box measured at
   // half that size scales linearly; otherwise halve and retry, and decline
   // (catalog fallback) when no measured scale is linear.
-  let result: LocalFontNormalLine | null = null;
-  for (let em = emPx, attempt = 0; attempt < LINEAR_PROBE_ATTEMPTS; em /= 2, attempt++) {
-    const full = measureNormalBox(face, context, em, ownerDocument);
-    const half = full && measureNormalBox(face, context, em / 2, ownerDocument);
-    if (!full || !half) break;
-    if (scalesLinearly(full, half)) {
-      result = Object.freeze({
-        ascentRatio: full.ascent / em,
-        descentRatio: full.descent / em,
-        lineGapRatio: (full.height - full.ascent - full.descent) / em,
-      });
-      break;
-    }
+  let pending = requests.flatMap((request, index) => request.face.status === 'loaded' ? [{ index, request, em: emPx }] : []);
+  for (let attempt = 0; attempt < LINEAR_PROBE_ATTEMPTS && pending.length > 0; attempt++) {
+    const boxes = measureNormalBoxes(pending.flatMap(({ request, em }) => [
+      { family: request.face.family, weight: request.weight, style: request.style, em },
+      { family: request.face.family, weight: request.weight, style: request.style, em: em / 2 },
+    ]), context, ownerDocument);
+    const next: typeof pending = [];
+    pending.forEach((item, position) => {
+      const full = boxes[position * 2];
+      const half = boxes[position * 2 + 1];
+      if (!full || !half) return;
+      if (scalesLinearly(full, half)) {
+        results[item.index] = Object.freeze({
+          ascentRatio: full.ascent / item.em,
+          descentRatio: full.descent / item.em,
+          lineGapRatio: (full.height - full.ascent - full.descent) / item.em,
+        });
+        return;
+      }
+      item.em /= 2;
+      next.push(item);
+    });
+    pending = next;
   }
-  measuredLines.set(face, { emPx, metric: result });
-  return result;
+  return results;
 }
 
 /** Halvings tried before declining; bounds probe work per resource. */
@@ -66,37 +119,57 @@ const LINEAR_PROBE_ATTEMPTS = 4;
 
 interface NormalBox { readonly height: number; readonly ascent: number; readonly descent: number }
 
-function measureNormalBox(
-  face: FontFace, context: CanvasFontBoxProbeContext, emPx: number, ownerDocument: Document,
-): NormalBox | null {
-  const family = quoteCssFontFamily(face.family);
-  const font = `${face.style} ${face.weight} ${emPx}px ${family}`;
-  // The strut lives in a closed shadow tree so application stylesheets
-  // (including !important rules) cannot restyle it; the computed family is
-  // checked as well, so the DOM height belongs to the face Canvas measures.
+interface NormalBoxRequest {
+  readonly family: string;
+  readonly weight: string | number;
+  readonly style: string;
+  readonly em: number;
+}
+
+/** The CSS normal line (strut height) and Canvas font box of each request,
+ * from one host appended once: one style/layout pass for the whole list. */
+function measureNormalBoxes(
+  requests: readonly NormalBoxRequest[], context: CanvasFontBoxProbeContext, ownerDocument: Document,
+): (NormalBox | null)[] {
+  const results: (NormalBox | null)[] = requests.map(() => null);
+  // The struts live in a closed shadow tree so application stylesheets
+  // (including !important rules) cannot restyle them; each computed family
+  // is checked as well, so the DOM height belongs to the face Canvas measures.
   const host = ownerDocument.createElement('div');
   host.style.cssText = 'all:initial;position:fixed;visibility:hidden;contain:strict;';
-  const probe = ownerDocument.createElement('span');
-  probe.style.cssText = `all:initial;display:block;white-space:pre;font:${font};line-height:normal;`;
-  probe.textContent = '\u200b';
+  if (typeof host.attachShadow !== 'function') return results;
   const previousFont = context.font;
   try {
-    if (typeof host.attachShadow !== 'function') return null;
-    host.attachShadow({ mode: 'closed' }).append(probe);
-    context.font = font;
-    const box = context.measureText('');
+    const root = host.attachShadow({ mode: 'closed' });
+    const struts = requests.map(({ family, weight, style, em }) => {
+      const font = `${style} ${weight} ${em}px ${quoteCssFontFamily(family)}`;
+      const probe = ownerDocument.createElement('span');
+      probe.style.cssText = `all:initial;display:block;white-space:pre;font:${font};line-height:normal;`;
+      probe.textContent = '\u200b';
+      root.append(probe);
+      return { probe, font, family };
+    });
     ownerDocument.body.append(host);
     const view = ownerDocument.defaultView;
-    if (!view || unquoted(view.getComputedStyle(probe).fontFamily) !== unquoted(family)) return null;
-    const height = probe.offsetHeight;
-    const ascent = box.fontBoundingBoxAscent;
-    const descent = box.fontBoundingBoxDescent;
-    return Number.isFinite(height) && height > 0 && Number.isFinite(ascent)
-      && ascent >= 0 && Number.isFinite(descent) && descent >= 0
-      ? { height, ascent, descent } : null;
+    if (!view) return results;
+    struts.forEach(({ probe, font, family }, index) => {
+      try {
+        if (unquoted(view.getComputedStyle(probe).fontFamily) !== unquoted(quoteCssFontFamily(family))) return;
+        context.font = font;
+        const box = context.measureText('');
+        const height = probe.offsetHeight;
+        const ascent = box.fontBoundingBoxAscent;
+        const descent = box.fontBoundingBoxDescent;
+        results[index] = Number.isFinite(height) && height > 0 && Number.isFinite(ascent)
+          && ascent >= 0 && Number.isFinite(descent) && descent >= 0
+          ? { height, ascent, descent } : null;
+      } catch {
+        // An unavailable measurement leaves the caller's catalog fallback intact.
+      }
+    });
+    return results;
   } catch {
-    // An unavailable measurement leaves the caller's catalog fallback intact.
-    return null;
+    return requests.map(() => null);
   } finally {
     host.remove();
     context.font = previousFont;

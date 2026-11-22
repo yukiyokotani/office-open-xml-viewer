@@ -346,6 +346,19 @@ export function checkBuiltBundles(dist = 'dist', { packages = false, disabledDis
       const sidecarImports = staticSpecifiers(parse(readFileSync(sidecar, 'utf8'), { sourceType: 'module' }));
       if (sidecarImports.length > 0) throw new Error(`${sidecar} is not self-contained`);
       if (format === 'docx') assertSidecarBudget(sidecar);
+      if (format === 'pptx') {
+        // The parse workers import the font-demand collector by URL; an inline
+        // worker cannot resolve relative chunks, so it must be self-contained.
+        for (const file of [join(dist, 'pptx-font-demand.mjs'), ...(packages ? [join('packages', 'pptx', 'dist', 'pptx-font-demand.mjs')] : [])]) {
+          if (!existsSync(file)) throw new Error(`Missing font-demand sidecar ${file}`);
+          if (staticSpecifiers(parse(readFileSync(file, 'utf8'), { sourceType: 'module' })).length > 0) {
+            throw new Error(`${file} is not self-contained`);
+          }
+        }
+        for (const payload of graph.codes.flatMap(inlineWorkers)) {
+          if (payload.includes('wordArtVertRtl')) throw new Error('pptx inline worker inlines the font-demand collector');
+        }
+      }
       const packageSidecar = join('packages', format, 'dist', `${format}-source-worker.mjs`);
       if (packages && !existsSync(packageSidecar)) {
         throw new Error(`Missing optional package source sidecar ${packageSidecar}`);

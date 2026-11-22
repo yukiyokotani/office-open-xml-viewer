@@ -33,6 +33,13 @@ export class SegmentQueue implements Iterable<LayoutSeg> {
     return this.cursor.front?.segment ?? this.segments[this.cursor.index];
   }
 
+  /** The first two queued segments, without iterating further. */
+  peekPair(): readonly [LayoutSeg | undefined, LayoutSeg | undefined] {
+    const { index, front } = this.cursor;
+    if (!front) return [this.segments[index], this.segments[index + 1]];
+    return [front.segment, front.next?.segment ?? this.segments[index]];
+  }
+
   shift(): LayoutSeg | undefined {
     const { index, front } = this.cursor;
     if (front) {

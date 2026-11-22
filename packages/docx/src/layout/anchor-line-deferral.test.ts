@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import { readFile } from 'node:fs/promises';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import init, { DocxArchive } from '../wasm/docx_parser.js';
 import { storeZip } from '../conformance/generate.js';
 import { layoutDocument } from '../document-layout.js';
@@ -18,6 +18,22 @@ import {
   type PageAnchorInputEvent,
 } from './anchor-line-deferral.js';
 import type { DocumentLayout, LayoutPage } from './types.js';
+
+// Every anchor-solver pass, counted at the solver's convergence boundary.
+const solver = vi.hoisted(() => ({ passes: 0 }));
+vi.mock('./convergence.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./convergence.js')>();
+  return {
+    ...actual,
+    convergeExactStateSteps: ((options) => actual.convergeExactStateSteps({
+      ...options,
+      step: function* countedStep(previous, pass) {
+        solver.passes += 1;
+        return yield* options.step(previous, pass);
+      },
+    })) as typeof actual.convergeExactStateSteps,
+  };
+});
 
 // Word's resolution of a page-owned anchor whose own exclusion pushes its
 // anchor line off the page (issue #1615; rule in anchor-line-deferral.ts).
@@ -51,6 +67,8 @@ type Paragraph = Readonly<{
   lines?: number;
   anchorAfterLine?: number;
   keepNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
 }>;
 
 function anchorXml(id: number, anchor: Anchor): string {
@@ -99,7 +117,8 @@ function docx(
       ...(line === after ? [anchors] : []),
     ]).join('');
     return '<w:p><w:pPr>' + (spec.keepNext ? '<w:keepNext/>' : '')
-      + '<w:widowControl w:val="0"/>'
+      + (spec.keepLines ? '<w:keepLines/>' : '')
+      + `<w:widowControl w:val="${spec.widowControl ? 1 : 0}"/>`
       + '<w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
       + `${runs}</w:p>`;
   }).join('');
@@ -324,6 +343,159 @@ describe('page-owned anchor whose own exclusion pushes its anchor line off the p
       });
     }
   }, 300_000);
+});
+
+describe('anchor-line cycle recovery (library policy)', () => {
+  // LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY: where the contextual anchor-line
+  // tests above alternate, the solver must still converge. These cases pin
+  // the library's deterministic result, not a Word measurement.
+  it('settles a later anchor whose test also pushes the lines accepted before it', () => {
+    // P003's picture fits on page 1. Registering P010's 600 pt picture as well
+    // leaves room for two lines only, so that test pushes P003's line off the
+    // page too and the contextual tests alternate. Recovery keeps P003's wrap
+    // on page 1, which ends at P009; P010 starts page 2 below its picture.
+    const result = layout(docx(30, {
+      3: { anchors: [{}] },
+      10: { anchors: [{ heightPt: 600 }] },
+    }));
+    expect(pageRange(result, 1)).toEqual([0, 9]);
+    expect(lines(result).get('P000')).toMatchObject({ page: 1, yPt: 372 });
+    expect(pictures(result).get(3)).toEqual([{ page: 1, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(10)).toEqual([{ page: 2, xPt: 72, yPt: 72 }]);
+    expect(lines(result).get('P010')).toMatchObject({ page: 2, yPt: 672 });
+  });
+
+  it('settles later anchors in source order when one test pushes several lines', () => {
+    // As above, plus P011's 100 pt picture, which P010's picture pushes off
+    // page 1 too. Recovery keeps P003's wrap on page 1 and moves P010 and
+    // P011 to page 2.
+    const result = layout(docx(30, {
+      3: { anchors: [{}] },
+      10: { anchors: [{ heightPt: 600 }] },
+      11: { anchors: [{ heightPt: 100 }] },
+    }));
+    expect(pageRange(result, 1)).toEqual([0, 9]);
+    expect(pictures(result).get(3)).toEqual([{ page: 1, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(10)).toEqual([{ page: 2, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(11)).toEqual([{ page: 2, xPt: 72, yPt: 72 }]);
+    expect(lines(result).get('P010')).toMatchObject({ page: 2, yPt: 672 });
+    expect(lines(result).get('P011')).toMatchObject({ page: 2, yPt: 696 });
+  });
+
+  it('settles a deferral that keepNext extends to an earlier anchor paragraph', () => {
+    // Page 2 opens with P027. P028's square picture fits beside its line;
+    // adding P029's full-width picture pushes P027-P029 below it. Deferring
+    // P029 also moves P028 (keepNext, §17.3.1.15), whose picture follows it,
+    // so the contextual tests alternate; recovery moves the kept pair and
+    // both pictures to page 3.
+    const result = layout(docx(30, {
+      28: { keepNext: true, anchors: [{ wrap: 'square', widthPt: 200, heightPt: 600 }] },
+      29: { anchors: [{ widthPt: 468, heightPt: 600 }] },
+    }));
+    const placed = lines(result);
+    expect(pageRange(result, 2)).toEqual([27, 27]);
+    expect(placed.get('P028')).toMatchObject({ page: 3, yPt: 672 });
+    expect(placed.get('P029')).toMatchObject({ page: 3, yPt: 696 });
+    expect(pictures(result).get(28)).toEqual([{ page: 3, xPt: 72, yPt: 72 }]);
+    expect(pictures(result).get(29)).toEqual([{ page: 3, xPt: 72, yPt: 72 }]);
+  });
+
+  it('converges with every line and picture placed once for generated anchor sets', () => {
+    // Deterministic generated documents: 2-5 anchors of varied heights and
+    // wraps at varied paragraphs, many of whose later tests push earlier
+    // lines too, with keepNext/keepLines chains, widow control and
+    // multi-line anchor paragraphs around them.
+    let seed = 0x2306;
+    const next = (bound: number) => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return (seed >>> 8) % bound;
+    };
+    const heights = [100, 300, 450, 600, 640];
+    const paragraphs = 45;
+    for (let sample = 0; sample < 32; sample += 1) {
+      const special: Record<number, Paragraph> = {};
+      const count = 2 + next(4);
+      for (let index = 0; index < count; index += 1) {
+        const paragraph = 20 + next(paragraphs - 20);
+        special[paragraph] = {
+          ...special[paragraph],
+          anchors: [...(special[paragraph]?.anchors ?? []), {
+            heightPt: heights[next(heights.length)]!,
+            wrap: next(2) === 0 ? 'square' : 'topAndBottom',
+            widthPt: next(2) === 0 ? 200 : 468,
+          }],
+        };
+        // A keepNext chain of up to three paragraphs ending at the anchor.
+        for (let chain = next(4); chain > 0 && paragraph - chain >= 0; chain -= 1) {
+          special[paragraph - chain] = { ...special[paragraph - chain], keepNext: true };
+        }
+        if (next(3) === 0) {
+          special[paragraph] = {
+            ...special[paragraph], lines: 3, anchorAfterLine: next(3),
+            keepLines: next(2) === 0, widowControl: next(2) === 0,
+          };
+        }
+      }
+      const label = JSON.stringify(special);
+      let result: DocumentLayout;
+      try {
+        result = layout(docx(paragraphs, special));
+      } catch (error) {
+        throw new Error(`${label}: ${String(error)}`);
+      }
+      const placed = new Map<string, number>();
+      for (const page of result.pages) {
+        for (const node of page.layers.body) {
+          if (node.kind !== 'paragraph') continue;
+          for (const line of node.lines) {
+            const text = line.placements.map((p) => p.kind === 'text' ? p.text : '').join('');
+            const name = /P\d{3}(?:\.\d)?/.exec(text)?.[0];
+            if (name) placed.set(name, (placed.get(name) ?? 0) + 1);
+          }
+        }
+      }
+      const expected = Array.from({ length: paragraphs }, (_, index) => {
+        const name = `P${String(index).padStart(3, '0')}`;
+        return Array.from({ length: special[index]?.lines ?? 1 }, (_, line) => (
+          line === 0 ? name : `${name}.${line + 1}`
+        ));
+      }).flat();
+      expect([...placed.keys()].sort(), label).toEqual(expected.sort());
+      expect([...placed.values()].every((times) => times === 1), label).toBe(true);
+      const drawn = pictures(result);
+      for (const [paragraph, spec] of Object.entries(special)) {
+        expect(drawn.get(Number(paragraph))?.length ?? 0, label).toBe(spec.anchors?.length ?? 0);
+      }
+      expect([...drawn.values()].flat().length, label).toBe(count);
+    }
+  }, 120_000);
+
+  it('bounds the solver work of many independent anchor-line cycles', () => {
+    // Eight copies of the P003/P010 cycle above, one per 30 paragraphs. Each
+    // copy needs its own recovery; the whole run must stay within the
+    // solver's ordinary operational pass budget for its anchors (16 + 4 per
+    // page-owned anchor), not a budget per settlement.
+    const blocks = 8;
+    const special: Record<number, Paragraph> = {};
+    for (let block = 0; block < blocks; block += 1) {
+      special[block * 30 + 3] = { anchors: [{}] };
+      special[block * 30 + 10] = { anchors: [{ heightPt: 600 }] };
+    }
+    solver.passes = 0;
+    const result = layout(docx(blocks * 30, special));
+    expect(solver.passes).toBeLessThanOrEqual(16 + 4 * 2 * blocks);
+    const drawn = pictures(result);
+    const placed = lines(result);
+    for (let block = 0; block < blocks; block += 1) {
+      const first = block * 30;
+      expect(drawn.get(first + 3)).toHaveLength(1);
+      expect(drawn.get(first + 10)).toHaveLength(1);
+      // P010's picture and line share the page after P003's.
+      expect(drawn.get(first + 10)![0]!.page).toBe(drawn.get(first + 3)![0]!.page + 1);
+      expect(placed.get(`P${String(first + 10).padStart(3, '0')}`)?.page).toBe(drawn.get(first + 10)![0]!.page);
+    }
+  }, 120_000);
+
 });
 
 describe('anchor-line deferral proof', () => {

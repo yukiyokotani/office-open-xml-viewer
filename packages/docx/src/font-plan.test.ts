@@ -1,16 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { googleFonts } from '@silurus/ooxml-core/internal/font-sources';
+import { fontSourceDescriptors, googleFonts } from '@silurus/ooxml-core/internal/font-sources';
+import { declaredFontSubstitutions, docxOfficeFontFallbackRequests } from './font-plan.js';
 import {
   completeDocxFontPresence,
-  declaredFontSubstitutions,
   docxFontDemandCandidates,
   docxFontFamilyPlan,
-  docxOfficeFontFallbackRequests,
   type DocxOfficeFontPresence,
-} from './font-plan.js';
+} from './font-demand-plan.js';
 import type { DocxDocumentModel } from './types.js';
 
-const GOOGLE = [googleFonts()];
+const GOOGLE = fontSourceDescriptors([googleFonts()]);
 const SUBSTITUTES = declaredFontSubstitutions(GOOGLE);
 
 /** Demanded names before the installed check: authored, then fallback. */

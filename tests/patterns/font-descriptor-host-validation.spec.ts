@@ -179,6 +179,41 @@ test('host FontFace validates @font-face descriptors in the main thread and a wo
   expect(requests).toEqual([]);
 });
 
+/** Plain url contents (url-token code points only) whose `src` entries must
+ * share one host verdict with the placeholder url the parser probes. */
+const PLAIN_URLS = [
+  'https://fonts.gstatic.example/s/notosansjp/v57/-F62fjtqLzI2JPCgQBnw7HFowwII2lcnk-AFfrgQrvWXpdFg3KXxAMsKMbdN.0.woff2',
+  'https://fonts.example/a,b;c.woff2', 'rel/x.woff', '//cdn.example/x.ttf', 'https://[::1]/x.woff2', 'http://[x/',
+  'javascript:x', 'file:///x', 'mailto:x', 'http://a:99999/', 'https://a%/b', 'data:font/woff2;base64,AAAA',
+  'blob:https://x/y', '%%%', '?', '#a', 'https://例え.テスト/フォント.woff2', 'https://fonts.example/x.woff2?a=1&b=2#frag',
+];
+
+/** A Google-style stylesheet with every CASES body, in the plain form. */
+const PLAIN_SHEET = CASES.map(([body], index) => `/* [${index}] */\n@font-face {\n  font-family: 'Case${index}';\n  `
+  + `src: url(https://fonts.example/f${index}.woff2) format('woff2');\n  ${body}\n}`).join('\n');
+
+function plainInRealm(urls: readonly string[], css: string) {
+  const scope = self as unknown as { cssSource: { parseFontFaceCss(css: string, url: string): unknown[] } };
+  const verdict = (url: string, format: string) => new FontFace('plain-probe', `url(${url}) format('${format}')`).status;
+  return {
+    verdicts: urls.flatMap((url) => ['woff2', 'woff', 'truetype', 'opentype'].map((format) =>
+      [verdict(url, format), verdict('u', format)])),
+    plain: scope.cssSource.parseFontFaceCss(css, 'https://fonts.example/kit.css'),
+    // A trailing statement at-rule takes the sheet out of the plain form.
+    full: scope.cssSource.parseFontFaceCss(`${css}\n@x;`, 'https://fonts.example/kit.css'),
+  };
+}
+
+test('a plain stylesheet parses as its full parse, with one src verdict per format', async ({ page }) => {
+  await page.goto('about:blank');
+  await page.addScriptTag({ content: await parserScript() });
+  const outcome = await page.evaluate(`(${plainInRealm.toString()})(${JSON.stringify(PLAIN_URLS)}, ${JSON.stringify(PLAIN_SHEET)})`) as
+    { verdicts: [string, string][]; plain: unknown[]; full: unknown[] };
+  for (const [status, placeholder] of outcome.verdicts) expect(status).toBe(placeholder);
+  expect(outcome.plain).toHaveLength(CASES.length);
+  expect(outcome.plain).toEqual(outcome.full);
+});
+
 // ---- shared resolver work across sessions ------------------------------------
 
 const sessionEntry = fileURLToPath(new URL('../../packages/core/src/internal/font-sources.ts', import.meta.url));
@@ -198,7 +233,7 @@ async function resolverRaceInRealm(): Promise<RaceOutcome> {
         ensure(demand: unknown): Promise<unknown>;
         release(): void;
       };
-      fontResolver(resolve: (request: { families: readonly string[] }) => unknown[]): unknown;
+      fontResolver(resolve: (request: { authoredFamilies: readonly string[] }) => unknown[]): unknown;
     };
     document?: { fonts: FontFaceSet };
     fonts?: FontFaceSet;
@@ -209,7 +244,7 @@ async function resolverRaceInRealm(): Promise<RaceOutcome> {
   let calls = 0;
   const source = fontResolver((request) => {
     calls++;
-    return request.families.map((family) => ({ family, url: 'data:font/woff2;base64,AAAA' }));
+    return request.authoredFamilies.map((family) => ({ family, url: 'data:font/woff2;base64,AAAA' }));
   });
   const demand = { families: ['Shared'], fallbackFamilies: [], scalars: 'all' };
   const first = new FontSourceSession({ sources: [source] });

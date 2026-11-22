@@ -294,4 +294,52 @@ if (process.env.VRT_PRIVATE_CORPUS === '1') {
 }
 
 describeSelfRegression('demo corpus self regression', 'demo', PPTX_DEMO_CORPUS);
+
+// The demo decks through PptxScrollViewer in its default options: every slot
+// canvas is compared with the previous renderer's, so the scroll path is
+// covered by pixels and not only by the single-canvas viewer.
+test.describe('demo corpus scroll viewer self regression', () => {
+  const corpus = 'demo-scroll';
+  if (PPTX_DEMO_CORPUS.length > 0) {
+    test.beforeAll(() => {
+      prepareSelfVrtCorpus({ corpus, format: 'pptx', files: PPTX_DEMO_CORPUS, snapshot: SNAPSHOT });
+    });
+  }
+  for (const file of PPTX_DEMO_CORPUS) {
+    test(file, async ({ page }) => {
+      test.setTimeout(600_000);
+      const stem = file.slice(0, -'.pptx'.length);
+      if (!SNAPSHOT) clearSelfVrtCandidateOutput({ corpus, stem, itemKind: 'slide' });
+      await page.goto(
+        `/tests/visual/fixture.html?viewer=scroll&pptx=${encodeURIComponent(selfVrtInputPath({ corpus, file: stem }))}`,
+      );
+      await page.waitForFunction(
+        () => document.body.dataset.status === 'ready' || document.body.dataset.status === 'error',
+        { timeout: 120_000 },
+      );
+      const status = await page.evaluate(() => document.body.dataset.status);
+      if (status === 'error') {
+        throw new Error(`${stem}: ${await page.evaluate(() => document.body.dataset.errorMessage ?? '')}`);
+      }
+      const slideCount = Number(await page.evaluate(() => document.body.dataset.slideCount));
+      expect(slideCount, `${stem} must report its complete slide count`).toBeGreaterThan(0);
+      const differences: string[] = [];
+      for (let slideIndex = 0; slideIndex < slideCount; slideIndex++) {
+        const dataUrl = await page.evaluate((index) => (globalThis as unknown as {
+          pptxVrtSlideDataUrl(slideIndex: number): string | null;
+        }).pptxVrtSlideDataUrl(index), slideIndex);
+        if (!dataUrl) throw new Error(`${stem} slide ${slideIndex + 1}: no mounted scroll slot`);
+        const actual = Buffer.from(dataUrl.split(',')[1], 'base64');
+        const difference = captureOrCompareSelfVrtItem({
+          corpus, stem, itemKind: 'slide', itemIndex: slideIndex, actual, snapshot: SNAPSHOT,
+        });
+        if (difference) differences.push(difference);
+      }
+      verifySelfVrtItemManifest({
+        corpus, format: 'pptx', stem, itemKind: 'slide', itemCount: slideCount, snapshot: SNAPSHOT,
+      });
+      expect(differences, differences.join('\n')).toEqual([]);
+    });
+  }
+});
 describeSelfRegression('private corpus self regression', 'private', PPTX_PRIVATE_CORPUS);

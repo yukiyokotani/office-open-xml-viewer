@@ -1,3 +1,5 @@
+import type { DocxCompatSettingsInput } from './layout/compat-profile.js';
+import { withCompat } from './test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import type { FloatRect } from './float-layout.js';
@@ -43,13 +45,13 @@ const measurer: TextMeasurer = {
 };
 
 const environment = (
-  overrides: Partial<ParagraphMeasurementEnvironment> = {},
+  overrides: Partial<ParagraphMeasurementEnvironment> & DocxCompatSettingsInput = {},
 ): ParagraphMeasurementEnvironment => ({
   pageIndex: 0,
   totalPages: 1,
   pageWritingMode: 'horizontal-tb',
   documentHasEastAsianText: false,
-  ...overrides,
+  ...withCompat(overrides),
 });
 
 const RESOLVED_EA_FAMILY = 'Arbitrary Resolved EA';
@@ -523,7 +525,7 @@ describe('measureParagraph', () => {
     expect(paragraphOnlyMetrics.contentEndYPt).toBe(22);
   });
 
-  it('keeps useFELayout from selecting an East Asian mark face without a line grid', () => {
+  it('measures an off-grid empty mark with its ascii face whatever its hint (WORD_EMPTY_MARK_ASCII_FACE)', () => {
     const text = createTextLayoutService({
       fonts: createFontResolver(['Latin Mark', 'EA Mark'].map((family) => ({
         requestedFamily: family, resolvedFamily: family, source: 'local' as const,
@@ -537,9 +539,12 @@ describe('measureParagraph', () => {
         }),
       },
     });
-    const advance = (useFeLayout: boolean, eastAsianHint = false): number => measureParagraph(
+    const advance = (useFeLayout: boolean, eastAsianHint = false, gridPitchPt?: number): number => measureParagraph(
       paragraph({ defaultFontSize: 10, defaultFontFamily: 'Latin Mark', defaultFontFamilyEastAsia: 'EA Mark' }),
-      layoutContext({ spaceBeforePt: 0 }),
+      layoutContext({
+        spaceBeforePt: 0,
+        ...(gridPitchPt ? { lineGrid: { active: true, pitchPt: gridPitchPt } } : {}),
+      }),
       placement({ startYPt: 0 }),
       measurer,
       environment({
@@ -555,8 +560,14 @@ describe('measureParagraph', () => {
 
     expect(advance(false)).toBe(10);
     expect(advance(true)).toBe(10);
-    // An authored mark hint still selects the East Asian face without a grid.
-    expect(advance(true, true)).toBe(14);
+    // Windows Word measures an empty mark with its ascii face whatever its
+    // eastAsia hint: the hint does not select the East Asian face off the grid.
+    expect(advance(false, true)).toBe(10);
+    expect(advance(true, true)).toBe(10);
+    // On a line grid the hint does not select the taller East Asian face either:
+    // the ascii mark takes the 12pt pitch instead of exceeding it.
+    expect(advance(false, false, 12)).toBe(12);
+    expect(advance(false, true, 12)).toBe(12);
   });
 
   it('applies useFELayout grid-cell allocation to an empty paragraph mark', () => {
@@ -1520,7 +1531,15 @@ function bandViolation(lines: readonly PlacedLine[], obstacle: FloatRect, rtl: b
   for (const line of lines) {
     const height = line.height;
     const total = line.segments.reduce((sum, segment) => sum + segment.width, 0);
-    let pen = line.left + (rtl ? line.width - total : 0);
+    // WORD_RTL_LINE_END_SPACE_HANGS: planLine keeps the visible text of a
+    // right-to-left line inside its band and lets the line-end spaces (drawn
+    // at its left end) stand outside it, as on left-to-right lines.
+    let hang = 0;
+    for (const segment of [...line.segments].reverse()) {
+      hang += segment.width - segment.visible;
+      if (segment.visible > 1e-9) break;
+    }
+    let pen = line.left + (rtl ? line.width - total + hang : 0);
     for (const segment of line.segments) {
       const start = pen;
       const end = pen + segment.visible;
@@ -1567,12 +1586,14 @@ function physicalViolation(lines: readonly PlacedLine[], rtl: boolean): string |
   return null;
 }
 
+// Mode 15: before it WORD_TAB_DISPLACED_READING_FRAME lets a complete tab cell
+// overflow a single float window on purpose.
 it('keeps randomized content outside square and tight floats as physical lines', () => {
   for (const [index, item] of atomicFloatPropertyCases().entries()) {
     const measured = measureParagraph(paragraph({ runs: item.runs }),
       layoutContext({ spaceBeforePt: 0, baseRtl: item.rtl }),
       placement({ startYPt: 0, wrap: createFloatWrapOracle([item.float], gapReference(item.rtl)) }),
-      measurer, environment());
+      measurer, environment({ compatibilityMode: 15 }));
     const lines = placedGeometry(measured);
     const label = `case ${index}: ${JSON.stringify(item)}`;
     expect(bandViolation(lines, item.float, item.rtl), label).toBeNull();

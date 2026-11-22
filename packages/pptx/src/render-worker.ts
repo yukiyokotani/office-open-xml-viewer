@@ -3,8 +3,8 @@ import type { CjkLang } from '@silurus/ooxml-core';
 import init, { PptxArchive, reinit } from './wasm/pptx_parser.js';
 import type { PptxTextRunInfo } from './renderer';
 import { pptxSlideOfficeFontRequests } from './font-requests';
-import { FontSourceSession, PptxInstalledFamilies, pptxFontDemand } from './font-source-load.js';
-import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSource } from '@silurus/ooxml-core/internal/font-sources';
+import { FontSourceSession, PptxInstalledFamilies, metafileFontDemand, pptxFontDemand } from './font-source-load.js';
+import { assertFontSourceDescriptors, WorkerFontResolverClient, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import { acquireOfficeRoutes, distinctOfficeRouteLoads, type AcquiredOfficeRoutes } from './office-route-acquisition.js';
 import {
   findPreflightMimeType,
@@ -15,7 +15,11 @@ import { PptxSlideRepository } from './slide-repository';
 import { loadPptxSlideFromCursor } from './slide-cursor-operation';
 import { SlidePullWorker } from './slide-pull-worker';
 import {
+  bindMetafileFontDemand,
+  bindMetafileFontFamilies,
   activeFontSet,
+  createSymbolFaceOracleCache,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   unregisterEmbeddedFonts,
@@ -94,10 +98,24 @@ async function officeRoutesForRequests(
 ): Promise<AcquiredOfficeRoutes> {
   const uncovered = uncoveredOfficeFontRequests(requests, embeddedFontTuples);
   const fontSet = activeFontSet();
+  // The symbol-font oracle of each render asks its painting context through
+  // the route sentinels (core symbol-face.ts).
+  if (fontSet) await (symbolSentinels ??= loadNativeRouteSentinels(fontSet).catch(() => null));
   return acquireOfficeRoutes(officeFontLoads, uncovered, (fresh) => loadOfficeFontFallbacks(fresh, fontSet), fontSet);
 }
 
+let symbolSentinels: Promise<FontFace[] | null> | null = null;
+/** Symbol-code verdicts across this document's renders, kept while the
+ * worker realm's faces are unchanged (core createSymbolFaceOracleCache). */
+let symbolFaces = createSymbolFaceOracleCache();
+
 function releaseOfficeFonts(): void {
+  // The released faces must not stay reachable through an oracle kept for a
+  // render context (core symbol-face-cache.ts).
+  symbolFaces.dispose();
+  symbolFaces = createSymbolFaceOracleCache();
+  void symbolSentinels?.then((faces) => { if (faces) unloadOfficeFontFallbacks(faces); });
+  symbolSentinels = null;
   for (const pending of distinctOfficeRouteLoads(officeFontLoads)) {
     void pending.then((loaded) => unloadOfficeFontFallbacks(loaded.faces), () => undefined);
   }
@@ -215,7 +233,7 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   resourceUsage = undefined;
   // Descriptors crossed the realm boundary: validate them as strictly as the
   // factories did (TypeError / font-source-limit reject the parse).
-  const sources: readonly FontSource[] = request.fonts === undefined ? [] : assertFontSourceDescriptors(request.fonts);
+  const sources: readonly FontSourceDescriptor[] = request.fonts === undefined ? [] : assertFontSourceDescriptors(request.fonts);
   renderers = await loadWorkerRenderers(request.renderers);
 
   const bootstrap = await slidePull.run(() => executeArchiveFromNew(
@@ -224,6 +242,9 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   // Load-time resources belong to the parse failure channel. Complete embedded
   // extraction before preflight/publication, including a zero-slide deck, so a
   // rejected font read cannot outlive parse cleanup or publish a ready result.
+  // Fetch the optional collector chunk while embedded fonts load.
+  const collectorLoad = loadFontDemandCollector(sources.length > 0);
+  void collectorLoad.catch(() => undefined);
   const embedded = await loadEmbeddedFonts(bootstrap.embeddedFonts, getFontBytes);
   embeddedFontFaces = embedded.faces;
   embeddedFontAliases = embedded.aliases;
@@ -232,9 +253,9 @@ async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'p
   cjkFallback = request.cjkFallback;
   // Font-source subset loading is library policy keyed to the slide model
   // alone, as in main mode. Registering an optional renderer does not widen it:
-  // the text those renderers draw (math runs, charts) already yields 'all', and
-  // TIFF decoding draws no text.
-  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await loadFontDemandCollector(sources.length > 0) });
+  // math runs and region maps yield 'all', chart labels are collected from the
+  // chart model (core chart-paint-texts.ts), and TIFF decoding draws no text.
+  preflightBuilder = new PresentationPreflightBuilder(bootstrap, { cjkFallback, collectFontDemand: await collectorLoad });
   slides = new PptxSlideRepository({
     slideCount: bootstrap.slideCount,
     maxCachedSlides: HARD_MAX_PPTX_CACHED_SLIDES,
@@ -401,12 +422,17 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         // language; a request without one keeps a local surface.
         const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
+        bindMetafileFontFamilies(getImage, fontSources?.loaded);
+        bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           dpr: request.dpr,
           imageResources: request.imageResources,
           defaultTextColor: compact.defaultTextColor,
-          parsedTextChain: true,
+          // A model source's slides have no proven parsed colour chain.
+          parsedTextChain: source === undefined,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
@@ -416,7 +442,8 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           embeddedFontTuples,
           officeFontRoutes,
           officeInstalledFamilies,
-          fontSubstitutions: fontSources?.loaded.substitutions,
+          fontSources: fontSources?.loaded,
+          symbolFaces,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,
@@ -445,10 +472,15 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
         const canvas = request.canvas ?? new OffscreenCanvas(1, 1);
         const runs: PptxTextRunInfo[] = [];
+        // Metafile pictures paint their text with the served faces too, and
+        // load the scalars it paints before they play.
+        bindMetafileFontFamilies(getImage, fontSources?.loaded);
+        bindMetafileFontDemand(getImage, fontSources ? metafileFontDemand(fontSources) : undefined);
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           defaultTextColor: compact.defaultTextColor,
-          parsedTextChain: true,
+          // A model source's slides have no proven parsed colour chain.
+          parsedTextChain: source === undefined,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
@@ -458,7 +490,8 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           embeddedFontTuples,
           officeFontRoutes,
           officeInstalledFamilies,
-          fontSubstitutions: fontSources?.loaded.substitutions,
+          fontSources: fontSources?.loaded,
+          symbolFaces,
           fetchMedia: getMedia,
           fetchImage: getImage,
           svgDecoder: svgDecodeClient.decode,

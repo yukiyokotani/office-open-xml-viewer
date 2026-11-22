@@ -270,7 +270,7 @@ export interface ChartDataTable {
     fontBold?: boolean | null;
     fontItalic?: boolean | null;
     fillColor?: string | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     fillPaintAuthored?: boolean | null;
     lineColor?: string | null;
@@ -599,6 +599,7 @@ export interface ChartModel {
     subtotalIndices: number[];
     legendManualLayout?: LegendManualLayout | null;
     valAxisFormatCode?: string | null;
+    valAxisFormatDivisors?: number[] | null;
     valAxisNumberFormat?: ChartAxisNumberFormat | null;
     valAxisDisplayUnits?: ChartDisplayUnits | null;
     catAxisDisplayUnits?: ChartDisplayUnits | null;
@@ -689,6 +690,7 @@ export interface ChartModel {
     valAxisLineDash?: string | null;
     valAxisLinePaintAuthored?: boolean | null;
     catAxisFormatCode?: string | null;
+    catAxisFormatDivisors?: number[] | null;
     catAxisNumberFormat?: ChartAxisNumberFormat | null;
     catAxisMin?: number | null;
     catAxisMax?: number | null;
@@ -852,7 +854,7 @@ export interface ChartSeries {
     fillPattern?: PatternFill | null;
     invertIfNegative?: boolean | null;
     automaticNegativeStyle?: boolean | null;
-    invertedFill?: SolidFill | GradientFill | PatternFill | null;
+    invertedFill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     invertedFillHidden?: boolean | null;
     invertedFillAuthored?: boolean | null;
     invertedLineColor?: string | null;
@@ -919,6 +921,9 @@ export interface ChartSeriesDataLabels {
     fontPaintAuthored?: boolean;
     fontHidden?: boolean;
     formatCode?: string;
+    formatDivisors?: number[] | null;
+    percentFormatCode?: string | null;
+    percentFormatDivisors?: number[] | null;
     separator?: string;
     fontBold?: boolean;
     fontItalic?: boolean;
@@ -968,7 +973,7 @@ type ChartStyleRole = 'axisTitle' | 'categoryAxis' | 'chartArea' | 'dataLabel' |
 export interface ChartSurfaceBandFormat {
     idx: number;
     style?: ChartExElementStyle | null;
-    fill?: SolidFill | GradientFill | PatternFill | null;
+    fill?: SolidFill | GradientFill | PatternFill | ImageFill | null;
     fillHidden?: boolean | null;
     lineColor?: string | null;
     lineWidthEmu?: number | null;
@@ -1005,7 +1010,7 @@ export interface ChartTextRun {
     paragraphAlign?: 'l' | 'ctr' | 'r' | 'just' | 'dist' | string | null;
 }
 export interface ChartThreeD {
-    view3DPresent?: boolean | null;
+    view3dPresent?: boolean | null;
     rotationX?: number | null;
     rotationXAuthored?: boolean | null;
     rotationY?: number | null;
@@ -1180,35 +1185,22 @@ export interface FindMatch<Loc = unknown> {
 export interface FindMatchesOptions {
     caseSensitive?: boolean;
 }
-const FONT_SOURCE_PROTOCOL = 'ooxml-font-source/v1';
-export function fontCss(options: FontCssOptions): FontCssSource;
-export function fontCssApi(options: FontCssApiOptions): FontCssApiSource;
+export function fontCss(options: FontCssOptions): FontSource;
+export function fontCssApi(options: FontCssApiOptions): FontSource;
 export interface FontCssApiOptions {
     readonly urlTemplate: string;
     readonly query?: string;
     readonly families?: Readonly<Record<string, string | true>>;
-    readonly substitutes?: readonly FontSubstitution[];
-    readonly credentials?: FontSourceCredentials;
-}
-export interface FontCssApiSource extends FontSourceBase {
-    readonly kind: 'font-css-api';
-    readonly urlTemplate: string;
-    readonly query?: string;
-    readonly families?: Readonly<Record<string, string | true>>;
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
 export interface FontCssOptions {
     readonly url: string;
-    readonly substitutes?: readonly FontSubstitution[];
-    readonly credentials?: FontSourceCredentials;
-}
-export interface FontCssSource extends FontSourceBase {
-    readonly kind: 'font-css';
-    readonly url: string;
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
 export interface FontDemand {
-    readonly families: readonly string[];
+    readonly authoredFamilies: readonly string[];
     readonly fallbackFamilies: readonly string[];
 }
 export interface FontFaceDeclaration {
@@ -1220,34 +1212,26 @@ export interface FontFaceDeclaration {
     readonly stretch?: string;
     readonly unicodeRange?: string;
 }
-export function fontFiles(options: FontFilesOptions): FontFilesSource;
+export function fontFiles(options: FontFilesOptions): FontSource;
 export interface FontFilesOptions {
     readonly faces: readonly FontFaceDeclaration[];
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
     readonly credentials?: FontSourceCredentials;
 }
-export interface FontFilesSource extends FontSourceBase {
-    readonly kind: 'font-files';
-    readonly faces: readonly FontFaceDeclaration[];
-    readonly credentials?: FontSourceCredentials;
-}
-export interface FontResolveContext {
+export function fontResolver(resolve: FontResolver, options?: FontResolverOptions): FontSource;
+export type FontResolver = (demand: FontDemand, context: FontResolverContext) => readonly (Omit<FontFaceDeclaration, 'weight'> & {
+    readonly weight?: string | number;
+})[] | Promise<readonly (Omit<FontFaceDeclaration, 'weight'> & {
+    readonly weight?: string | number;
+})[]>;
+export interface FontResolverContext {
     readonly signal: AbortSignal;
 }
-export type FontResolveFn = (demand: FontDemand, context: FontResolveContext) => readonly FontFaceDeclaration[] | Promise<readonly FontFaceDeclaration[]>;
-export function fontResolver(resolve: FontResolveFn, options?: FontResolverOptions): FontResolverSource;
 export interface FontResolverOptions {
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly substitutions?: readonly FontSubstitution[];
 }
-export interface FontResolverSource extends FontSourceBase {
-    readonly kind: 'font-resolver';
-    readonly id: string;
-}
-export type FontSource = FontCssApiSource | FontCssSource | FontFilesSource | FontResolverSource;
-interface FontSourceBase {
-    readonly protocol: typeof FONT_SOURCE_PROTOCOL;
-    readonly kind: string;
-    readonly substitutes?: readonly FontSubstitution[];
+export interface FontSource {
+    readonly __ooxmlFontSource: 'opaque';
 }
 export type FontSourceCredentials = 'omit' | 'same-origin';
 export type FontSubstituteScript = 'arabic';
@@ -1261,10 +1245,11 @@ export interface Glow {
     alpha: number;
     radius: number;
 }
-export function googleFonts(options?: GoogleFontsOptions): FontCssApiSource;
+export function googleFonts(options?: GoogleFontsOptions): FontSource;
 export interface GoogleFontsOptions {
-    readonly cssOrigin?: string;
-    readonly substitutes?: readonly FontSubstitution[];
+    readonly baseUrl?: string;
+    readonly substitutions?: readonly FontSubstitution[];
+    readonly additionalFamilies?: Readonly<Record<string, string>>;
 }
 export const googleFontsSubstitutions: readonly FontSubstitution[];
 export interface GradientFill {
@@ -1553,7 +1538,7 @@ export class OoxmlDecodedImageLimitError extends RangeError {
     readonly code: 'ooxml-decoded-image-limit';
     constructor(metric: OoxmlDecodedImageLimitMetric, limit: number, observed: number);
 }
-export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work' | 'tiff-lzw-work' | 'metafile-path-commands' | 'metafile-record-points' | 'metafile-record-polygons' | 'metafile-record-rectangles' | 'metafile-record-text-units';
+export type OoxmlDecodedImageLimitMetric = 'image-dimension' | 'image-pixels' | 'active-decoded-bytes' | 'image-effect-count' | 'image-effect-work' | 'tiff-lzw-work' | 'tiff-packbits-work' | 'metafile-path-commands' | 'metafile-record-points' | 'metafile-record-polygons' | 'metafile-record-rectangles' | 'metafile-record-text-units';
 export class OoxmlError extends Error {
     readonly code: OoxmlErrorCode;
     readonly details?: OoxmlUnsupportedContentDetails;
@@ -1562,11 +1547,11 @@ export class OoxmlError extends Error {
 }
 export type OoxmlErrorCode = 'encrypted' | 'invalid-password' | 'unsupported-encryption' | 'legacy-binary-format' | 'not-ooxml' | 'unsupported-image-effect' | 'invalid-numbering' | 'unsupported-content' | 'font-source-limit';
 export type OoxmlErrorStage = 'container' | 'decompression' | 'parsing' | 'serialization' | 'layout' | 'rendering' | 'worker';
-export type OoxmlFontSourceQuota = 'stylesheet' | 'declarations' | 'families' | 'face' | 'retained' | 'url';
+export type OoxmlFontSourceQuota = ExtensibleLiteral<'stylesheet' | 'declarations' | 'families' | 'face' | 'retained' | 'url'>;
 export interface OoxmlFontSourceViolation {
     readonly resource: 'font-source';
     readonly quota: OoxmlFontSourceQuota;
-    readonly metric: 'bytes' | 'entry-count' | 'length';
+    readonly metric: 'bytes' | 'entry-count' | 'length' | (string & Record<never, never>);
     readonly limit: number;
     readonly observed: number;
 }
@@ -1681,7 +1666,7 @@ interface Paragraph__emitterCollision1 {
     tabStops: TabStop[];
     rtl?: boolean;
     runs: TextRun[];
-    endRunProperties?: TextRunData;
+    endRunProperties?: Omit<TextRunData, 'type'>;
 }
 export type PathCmd = {
     cmd: 'moveTo';
@@ -1735,7 +1720,7 @@ export interface PictureElement {
     svgImagePath?: string;
     intrinsicWidthPx?: number;
     intrinsicHeightPx?: number;
-    stroke: Stroke | null;
+    stroke?: Stroke | null;
     fill?: Fill;
     prstGeom?: string;
     prstAdjust?: number[];
@@ -1920,6 +1905,9 @@ export class PptxScrollViewer implements ZoomableViewer {
     scrollToSlide(index: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): void;
+    setHiddenSlideMode(mode: HiddenSlideMode): Promise<void>;
+    get hiddenSlideMode(): HiddenSlideMode;
+    get visibleSlideCount(): number;
     goToComment(slideIndex: number, commentIndex: number, opts?: {
         behavior?: 'auto' | 'smooth';
     }): Promise<boolean>;
@@ -1948,6 +1936,8 @@ export interface PptxScrollViewerOptions extends Pick<RenderSlideOptions, 'width
     onSelectionContextChange?: (context: PptxSelectionContext | null) => void;
     onContextMenu?: (event: ViewerContextMenuEvent<PptxSelectionContext>) => void;
     findHighlightColors?: FindHighlightColors;
+    hiddenSlideMode?: HiddenSlideMode;
+    hiddenSlideDim?: Partial<DimOptions>;
     enableMediaPlayback?: boolean;
     mediaOverscan?: number;
     zoomMin?: number;
@@ -2157,6 +2147,7 @@ export interface SecondaryValueAxis {
     title: string | null;
     hidden: boolean;
     formatCode?: string | null;
+    formatDivisors?: number[] | null;
     numberFormat?: ChartAxisNumberFormat | null;
     displayUnits?: ChartDisplayUnits | null;
     fontColor?: string | null;
@@ -2222,6 +2213,8 @@ export interface Shadow {
 export interface ShapeElement {
     mathFallback?: EquationBranchFallback;
     type: 'shape';
+    placeholderType?: string;
+    placeholderIdx?: number;
     x: number;
     y: number;
     width: number;
@@ -2238,6 +2231,7 @@ export interface ShapeElement {
     custGeomPaint?: {
         fill: string | null;
         stroke: boolean;
+        fillRule?: 'nonzero' | 'evenodd';
     }[];
     adj: number | null;
     adj2: number | null;
@@ -2349,8 +2343,8 @@ export interface TableCell {
     borderR: Stroke | null;
     borderT: Stroke | null;
     borderB: Stroke | null;
-    diagonalTL?: Stroke | null;
-    diagonalTR?: Stroke | null;
+    diagonalTl?: Stroke | null;
+    diagonalTr?: Stroke | null;
     gridSpan: number;
     rowSpan: number;
     hMerge: boolean;
@@ -2406,6 +2400,7 @@ interface TextBody__emitterCollision1 {
     autoFit: string;
     fontScale?: number | null;
     lnSpcReduction?: number | null;
+    shrinkOnOverflow?: boolean;
     numCol?: number;
     spcCol?: number;
 }
@@ -2450,7 +2445,7 @@ export interface TextRunData {
     baseline?: number;
     caps?: 'none' | 'small' | 'all';
     letterSpacing?: number;
-    fieldType?: string;
+    fieldType?: string | null;
     hyperlink?: string;
     hyperlinkAction?: string;
     hyperlinkMouseOver?: string;

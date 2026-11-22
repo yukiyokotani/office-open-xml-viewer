@@ -4,9 +4,9 @@
 
 # OOXML Viewer for VS Code
 
-A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a Rust/WASM parser and an HTML Canvas renderer.
+A viewer for `.docx`, `.xlsx`, and `.pptx` files, built on a Rust/WASM parser and an HTML Canvas renderer.
 
-> **Private by default.** Parsing and rendering happen locally inside the VS Code Webview via WebAssembly, with no extension telemetry or outbound document requests. Two strictly opt-in features can communicate outside the extension: the [MCP server](#mcp-server-for-ai-agents) exposes requested file or active-preview context to the connected AI agent, and [Google Fonts substitution](#font-substitution-google-fonts-opt-in) loads webfonts from a CDN. Both are off by default and subject to the connected service's privacy policy when enabled.
+> **Local processing.** Parsing and rendering happen locally inside the VS Code Webview via WebAssembly, with no extension telemetry or outbound document requests. Two strictly opt-in features can communicate outside the extension: the [MCP server](#mcp-server-for-ai-agents) exposes requested file or active-preview context to the connected AI agent, and [Google Fonts substitution](#font-substitution-google-fonts-opt-in) loads webfonts from a CDN. Both are off by default and subject to the connected service's privacy policy when enabled.
 
 ## Screenshots
 
@@ -20,7 +20,7 @@ A high-fidelity viewer for `.docx`, `.xlsx`, and `.pptx` files — powered by a 
 - **XLSX** — Spreadsheet viewer with cell / row / column / range selection, tab-separated copy (Ctrl+C / Cmd+C), freeze-pane support, and a multi-sheet tab bar.
 - **PPTX** — Continuous **scroll view** of every slide with a transparent text layer that handles rotated text boxes correctly, plus interactive playback for embedded audio and video.
 - **Find in preview** — Press **Ctrl+F / Cmd+F** to search the complete document, workbook, or presentation. Matching is case-insensitive; Enter / Shift+Enter moves between results.
-- **High fidelity** — Classic and ChartEx charts, 3-D charts, offline Region Maps, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more rendered straight from the OOXML spec.
+- **Rendered content** — Classic and ChartEx charts, 3-D charts, offline Region Maps, conditional formatting, theme colors, custom geometry shapes, math equations (OMML, via MathJax + STIX Two Math), and more, implemented with reference to the OOXML specification.
 - **MCP server (opt-in)** — Lets GitHub Copilot Chat in Agent mode read `.xlsx` / `.docx` / `.pptx` files and the active Viewer selection through dedicated tools instead of unzipping XML by hand. Claude Code and Codex can use the same binary for file tools through their own MCP configuration, but do not receive active Viewer selection. See [MCP server for AI agents](#mcp-server-for-ai-agents) below.
 
 Each format is parsed by its own Rust parser compiled to WebAssembly (`wasm-pack`) for accuracy and speed.
@@ -33,7 +33,7 @@ If a different editor opens by default, right-click the file → **Reopen Editor
 
 ### Selection & copy
 
-- **DOCX / PPTX** — Drag across rendered text to select, then **Ctrl+C / Cmd+C** to copy as plain text. The transparent overlay matches the canvas glyph positions, so selection feels native. *(This dual-layer rendering is planned to be unified once the Canvas [`drawElement`](https://github.com/WICG/html-in-canvas) API ships across browsers.)*
+- **DOCX / PPTX** — Drag across rendered text to select, then **Ctrl+C / Cmd+C** to copy as plain text. The transparent overlay matches the canvas glyph positions and supports browser text selection. *(This dual-layer rendering is planned to be unified once the Canvas [`drawElement`](https://github.com/WICG/html-in-canvas) API ships across browsers.)*
 - **XLSX** — Click a cell to select it, drag for a range, click row/column headers for full-row/column selection, click the corner box for sheet-wide selection. **Ctrl+C / Cmd+C** copies as TSV.
 
 ### Find
@@ -51,7 +51,7 @@ The ordinary and active match backgrounds are themeable through
 
 ## MCP server for AI agents
 
-Open a workspace that contains a `.xlsx` / `.docx` / `.pptx` file and the extension offers to enable an [MCP server](https://modelcontextprotocol.io/) — a tiny native binary that lets AI coding agents read those files directly. Without it, agents typically resort to running `unzip` + XML parsing in Python; with it, they call typed tools like `xlsx_get_cell_range`, `docx_extract_text`, or `pptx_get_slide_structure`.
+Open a workspace that contains a `.xlsx` / `.docx` / `.pptx` file and the extension offers to enable an [MCP server](https://modelcontextprotocol.io/) — a native binary that lets AI coding agents read those files directly. Without it, agents typically resort to running `unzip` + XML parsing in Python; with it, they call typed tools like `xlsx_get_cell_range`, `docx_extract_text`, or `pptx_get_slide_structure`.
 
 - The first time you click **Enable**, a ~5 MB prebuilt binary is downloaded from this repo's [GitHub Releases](https://github.com/yukiyokotani/office-open-xml-viewer/releases) and verified by SHA256. Subsequent workspaces reuse the cached binary.
 - If you already have a same-version `ooxml-mcp-server` on your `PATH` (e.g. installed via `cargo install --git ...`), it is used as-is — no download. An older binary is not reused because it may lack tools expected by the current extension; set `ooxmlViewer.mcpServer.binaryPath` explicitly only when intentionally testing a custom build.
@@ -115,13 +115,13 @@ Enabling **`ooxmlViewer.useGoogleFonts`** lets the preview load optional substit
 **Settings:**
 - `ooxmlViewer.useGoogleFonts`: `false` (default — fully offline) or `true` (load optional webfont substitutes and script fallbacks from the CDN). Force-disabled in untrusted workspaces. Toggling it re-renders already-open previews immediately.
 
-The setting keeps its name. When it is on, the preview passes the library's `fonts: [googleFonts()]` load option (the library's own `useGoogleFonts` option is deprecated), so the requests and the two CSP origins are exactly those of `googleFonts()`: stylesheets under `connect-src`, font files under `font-src`.
+The setting keeps its name. When it is on, the preview passes the library's `fonts: [googleFonts()]` load option (the library's own `useGoogleFonts` option is deprecated), so the requests and the two CSP origins are exactly those of `googleFonts()`: stylesheets under `connect-src`, font files under both `connect-src` (the library fetches the subsets it lays out with) and `font-src`.
 
 ## Privacy & Security
 
 - **Local file I/O only.** The viewer reads bytes via `vscode.workspace.fs.readFile` and never writes back — files are opened read-only.
 - **Webview is offline by default.** The Webview's Content Security Policy disallows outbound connections to any origin other than the extension itself. No analytics, no remote API. The only exception is the opt-in [Google Fonts substitution](#font-substitution-google-fonts-opt-in): enabling `ooxmlViewer.useGoogleFonts` widens the CSP to allow `fonts.googleapis.com` / `fonts.gstatic.com` and nothing else, and only in trusted workspaces.
-- **MCP server is opt-in and offline-after-install.** Until you accept the install prompt the extension makes no network requests. The download itself only contacts `github.com`, is checksum-verified, and the resulting binary parses local files only — it does not phone home. Active selection context is kept in extension memory and exposed to that MCP child through an authenticated IPv4-loopback bridge; it is never written to disk. Whatever the connected AI agent does with the data is governed by that agent's own privacy settings.
+- **MCP server is opt-in and offline-after-install.** Until you accept the install prompt the extension makes no network requests. The download itself only contacts `github.com`, is checksum-verified, and the resulting binary parses local files only and does not contact external services. Active selection context is kept in extension memory and exposed to that MCP child through an authenticated IPv4-loopback bridge; it is never written to disk. Whatever the connected AI agent does with the data is governed by that agent's own privacy settings.
 - **Open source.** Source code at [github.com/yukiyokotani/office-open-xml-viewer](https://github.com/yukiyokotani/office-open-xml-viewer).
 
 VS Code's own telemetry is independent of this extension and can be controlled via the `telemetry.telemetryLevel` setting.

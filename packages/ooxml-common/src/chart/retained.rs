@@ -87,6 +87,15 @@ impl<A: RetainedBytes, B: RetainedBytes> RetainedBytes for (A, B) {
     }
 }
 
+impl<A: RetainedBytes, B: RetainedBytes, C: RetainedBytes> RetainedBytes for (A, B, C) {
+    fn heap_bytes(&self) -> u64 {
+        self.0
+            .heap_bytes()
+            .saturating_add(self.1.heap_bytes())
+            .saturating_add(self.2.heap_bytes())
+    }
+}
+
 impl<K: RetainedBytes, V: RetainedBytes, S: BuildHasher> RetainedBytes for HashMap<K, V, S> {
     fn heap_bytes(&self) -> u64 {
         let slots = u64::try_from(self.capacity())
@@ -613,6 +622,7 @@ impl_retained_struct!(ChartModel {
     legend_overlay,
     legend_entries,
     val_axis_format_code,
+    val_axis_format_divisors,
     val_axis_number_format,
     val_axis_display_units,
     cat_axis_display_units,
@@ -676,6 +686,7 @@ impl_retained_struct!(ChartModel {
     val_axis_line_dash,
     val_axis_line_paint_authored,
     cat_axis_format_code,
+    cat_axis_format_divisors,
     cat_axis_number_format,
     cat_axis_min,
     cat_axis_max,
@@ -1212,6 +1223,9 @@ impl_retained_struct!(ChartSeriesDataLabels {
     font_paint_authored,
     font_hidden,
     format_code,
+    format_divisors,
+    percent_format_code,
+    percent_format_divisors,
     separator,
     font_bold,
     font_italic,
@@ -1263,6 +1277,7 @@ impl_retained_struct!(SecondaryValueAxis {
     title,
     hidden,
     format_code,
+    format_divisors,
     number_format,
     display_units,
     font_color,

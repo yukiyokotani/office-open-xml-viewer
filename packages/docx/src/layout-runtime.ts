@@ -1,7 +1,14 @@
 import { classifyCjkFont, type CjkLang, type NativeRouteLineRequest, type OfficeFontFallbackRoute } from '@silurus/ooxml-core';
-import { activeFontSet, isHTMLCanvas, withVertFeatureCanvasScope } from '@silurus/ooxml-core';
+import {
+  activeFontSet,
+  createReferenceAdvanceContext,
+  createTextAdvancePlanner,
+  isHTMLCanvas,
+  withReferenceAdvances,
+  withVertFeatureCanvasScope,
+} from '@silurus/ooxml-core';
 import type { DocxDocumentModel } from './types.js';
-import type { FontSubstitution, LoadedFontSources } from '@silurus/ooxml-core/internal/font-sources';
+import type { FontSubstitution } from '@silurus/ooxml-core/internal/font-sources';
 import type { LoadedEmbeddedFontRoute } from './embedded-fonts.js';
 import type { ResolvedFontMetric } from './layout/text.js';
 import { snapshotFontMetrics } from './layout/text.js';
@@ -35,7 +42,14 @@ import {
 import {
   attachBodyLayoutKernel,
   attachLayoutSourceStore,
+  attachTextAdvancePlanner,
 } from './layout/runtime-state.js';
+
+/** Reference-advance probe clusters (core reference-advances.ts): Latin
+ * letters and a digit of differing widths, plus the kana and ideograph probes
+ * layout already measures. All are in line-layout.ts LAYOUT_SYNTHESIZED_SCALARS, so
+ * finite font demand covers them and probing loads no extra font subset. */
+export const TEXT_ADVANCE_PROBE_CLUSTERS = Object.freeze(['a', 'e', 'm', 'W', '0', '\u3042', '\u4E00']);
 
 function createConcreteBodyLayoutKernel(
   source: LayoutSourceStore,
@@ -105,9 +119,15 @@ export function createLayoutServices(
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    /** The factory that made {@link measureContext}'s canvas, when the caller
+     * owns one (a Node session): symbol colour probes allocate their scratch
+     * canvas through it, on the backend that measures and paints. */
+    readonly createCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
     readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
     readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
-    readonly sourceFonts?: Readonly<{ names: readonly string[]; loaded: LoadedFontSources }>;
+    readonly sourceFonts?: import('./source-font-metrics.js').DocxSourceFonts;
+    /** Measured served/application face lines (served-face-lines.ts). */
+    readonly servedFaceLines?: import('./served-face-lines.js').PreparedServedFaceLines;
     readonly installedSubstituteFamilies?: readonly string[];
     readonly installedFamilies?: readonly string[];
     readonly allowFootnoteContinuation?: boolean;
@@ -129,16 +149,35 @@ export function createLayoutServices(
       ? new OffscreenCanvas(1, 1).getContext('2d')
       : null;
   })();
-  const context: MeasurementTextContext | null = canvasContext === null
+  // Canvas may grid-fit small sizes (core reference-advances.ts): one planner
+  // per measuring context decides, per font shorthand, whether text is
+  // measured at its own size or at the reference em under a linear scale.
+  // Every layout consumer measures through the same view, and retained paint
+  // reads the same planner's decisions, so layout and glyphs agree.
+  const advancePlanner = canvasContext === null
+    ? null
+    : createTextAdvancePlanner(canvasContext, { probeClusters: TEXT_ADVANCE_PROBE_CLUSTERS });
+  const measured = canvasContext === null || advancePlanner === null
+    ? null
+    : createReferenceAdvanceContext(canvasContext, advancePlanner);
+  // The same view, typed as the concrete context, for vertical planning.
+  const verticalContext = canvasContext === null || measured === null
+    ? null
+    : withReferenceAdvances(canvasContext, measured);
+  const context: MeasurementTextContext | null = canvasContext === null || measured === null
     ? null
     : Object.freeze(Object.defineProperties({
-        get font() { return canvasContext.font; },
-        set font(value: string) { canvasContext.font = value; },
-        get letterSpacing() { return canvasContext.letterSpacing; },
-        set letterSpacing(value: string) { canvasContext.letterSpacing = value; },
+        get textAlign() { return canvasContext.textAlign; },
+        set textAlign(value: CanvasTextAlign | undefined) { if (value !== undefined) canvasContext.textAlign = value; },
+        get direction() { return canvasContext.direction; },
+        set direction(value: CanvasDirection | undefined) { if (value !== undefined) canvasContext.direction = value; },
+        get font() { return measured.font; },
+        set font(value: string) { measured.font = value; },
+        get letterSpacing() { return measured.letterSpacing; },
+        set letterSpacing(value: string) { measured.letterSpacing = value; },
         get fontKerning() { return canvasContext.fontKerning; },
         set fontKerning(value: CanvasFontKerning) { canvasContext.fontKerning = value; },
-        measureText(text: string) { return canvasContext.measureText(text); },
+        measureText(text: string) { return measured.measureText(text); },
       }, 'lang' in canvasContext ? {
         // Canvas `lang` (language-specific glyphs) only where the engine has it.
         lang: {
@@ -165,41 +204,45 @@ export function createLayoutServices(
     fingerprint: canvasContext === null
       ? 'vertical-glyph-measurement:deterministic-v1'
       : hasDomVerticalProbe
-        ? 'vertical-glyph-measurement:dom-vert-probe-v2'
-        : 'vertical-glyph-measurement:no-dom-vert-probe-v1',
+        ? 'vertical-glyph-measurement:dom-vert-probe-v3'
+        : 'vertical-glyph-measurement:no-dom-vert-probe-v2',
     measureRunInkExtra(text: string): number {
-      if (canvasContext === null) {
+      if (canvasContext === null || verticalContext === null) {
         throw new Error('Vertical glyph measurement requires a concrete text context');
       }
       return withVertFeatureCanvasScope(
         canvasContext,
-        () => verticalRunInkExtraPx(canvasContext, text),
+        () => verticalRunInkExtraPx(verticalContext, text),
       );
     },
     planRun(input: Parameters<VerticalGlyphMeasurementService['planRun']>[0]) {
-      if (canvasContext === null) {
+      if (canvasContext === null || verticalContext === null) {
         throw new Error('Vertical glyph planning requires a concrete text context');
       }
+      // The vertical planner measures through the same reference-advance view
+      // as horizontal acquisition (its `vert` toggles re-assign the logical
+      // font, which re-applies the planned reference em).
+      const view = verticalContext;
       return withVertFeatureCanvasScope(canvasContext, () => {
-        const previousFont = canvasContext.font;
+        const previousFont = view.font;
         const previousKerning = canvasContext.fontKerning;
-        canvasContext.font = input.font;
+        view.font = input.font;
         canvasContext.fontKerning = input.fontKerning;
         try {
           return planVerticalRunWithCapability(
-            canvasContext,
+            view,
             input.text,
             input.fontSizePt,
             input.letterSpacingPt,
             input.charScale,
             input.growTrRotateInk,
-            (cp) => verticalVertGlyphReachable(canvasContext, cp),
+            (cp) => verticalVertGlyphReachable(view, cp),
             input.writingMode,
             input.characterGridDeltaPt,
             input.characterAdjustmentPt,
           );
         } finally {
-          canvasContext.font = previousFont;
+          view.font = previousFont;
           canvasContext.fontKerning = previousKerning;
         }
       });
@@ -217,6 +260,9 @@ export function createLayoutServices(
     localMetrics,
     fontMetrics: inputFontMetrics,
     measureContext: context,
+    ...(advancePlanner ? { textAdvancePlanner: advancePlanner } : {}),
+    symbolProbeOwner: canvasContext,
+    ...(options.createCanvas ? { symbolProbeCanvas: options.createCanvas } : {}),
     // A caller canvas may belong to a popup/iframe. CSS face admission must
     // inspect the FontFaceSet that also shapes this context's glyphs.
     fontSet: (isHTMLCanvas(canvasElement) ? canvasElement.ownerDocument?.fonts : undefined)
@@ -227,6 +273,7 @@ export function createLayoutServices(
   // including caller-supplied or decoded embedded font metrics.
   const fontMetrics = services.text.fontMetrics ?? inputFontMetrics;
   attachLayoutSourceStore(services, source);
+  if (advancePlanner !== null) attachTextAdvancePlanner(services, advancePlanner);
   attachBodyLayoutKernel(
     services,
     createConcreteBodyLayoutKernel(

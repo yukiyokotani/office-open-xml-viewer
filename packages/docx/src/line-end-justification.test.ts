@@ -221,12 +221,21 @@ describe('WORD_LINE_END_JUSTIFICATION', () => {
     expect(characters(line!).map(({ xPt }) => xPt)).toEqual([20, 370].map((x) => expect.closeTo(x)));
   });
 
-  it('keeps a right-to-left line whose gap stays closed at its logical start', () => {
-    const rtl = para([textRun('\u05d0\u05d1\u05d2 \u05d3\u05d4\u05d5'), BR, textRun('\u05d7')], 'distribute',
+  it('justifies the single source-word gap before a manual break in a mode-15 RTL line', () => {
+    const content = '\u05d0\u05d1\u05d2 \u05d3\u05d4\u05d5';
+    const rtl = para([textRun(content), BR, textRun('\u05d7')], 'distribute',
       { bidi: true } as Partial<DocParagraph>);
     const [broken] = lines(rtl, MODE_15);
+    // Existing Word manual-break controls spread ordinary Hebrew word gaps.
+    // Two natural30pt words in a360pt band leave one300pt source gap, without
+    // stretching either word. Preserve this minimal nonzero opportunity.
+    expect(start(broken!)).toBeCloseTo(20);
     expect(end(broken!)).toBeCloseTo(380);
-    expect(start(broken!)).toBeGreaterThan(300);
+    expect(characters(broken!).map(({ xPt }) => xPt))
+      .toEqual([20, 30, 40, 350, 360, 370].map(x => expect.closeTo(x)));
+    const source = broken!.placements.filter((p): p is TextPlacement => p.kind === 'text')
+      .sort((a, b) => a.range.start - b.range.start);
+    expect(source.map(p => p.text).join('')).toBe(content);
   });
 
   it('keeps regional-indicator pairs whole across runs when spreading characters', () => {

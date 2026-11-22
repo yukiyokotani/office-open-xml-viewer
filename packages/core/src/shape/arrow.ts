@@ -52,9 +52,10 @@ export function drawArrowHead(
   scale: number,
   unitsPerPoint: number,
   effectivePaint?: string | CanvasGradient | CanvasPattern,
+  paintInHostFrame = false,
 ): void {
   const geometry = resolveArrowGeometry(arrowEnd, stroke, scale, unitsPerPoint);
-  if (geometry) paintResolvedArrowHead(ctx, tipX, tipY, angle, geometry, stroke, effectivePaint);
+  if (geometry) paintResolvedArrowHead(ctx, tipX, tipY, angle, geometry, stroke, effectivePaint, paintInHostFrame);
 }
 
 /** Execute a resolved arrow; no path or endpoint geometry is acquired here. */
@@ -62,22 +63,28 @@ export function paintResolvedArrowHead(
   ctx: CanvasRenderingContext2D, tipX: number, tipY: number, angle: number,
   geometry: ResolvedArrowGeometry, stroke: Stroke,
   effectivePaint?: string | CanvasGradient | CanvasPattern,
+  /** Paint every gradient / pattern brush in the host (line) frame, so the
+   *  decoration continues the brush of the line it ends. Hosts without prior
+   *  decoration behaviour opt in; the default keeps the frames described below. */
+  paintInHostFrame = false,
 ): void {
 
   const paint = effectivePaint ?? hexToRgba(stroke.color);
 
-  // Only the new untiled rect/shape raster is authored in the host frame.
-  // Ordinary patterns and tiled gradients retain main's decoration-local CTM;
-  // native solid/linear/circle paints also keep their existing frames. A
-  // CanvasPattern alone cannot distinguish those brushes from a path raster.
-  const hostTransform = usesPathShade(stroke.fill)
+  // Only the new untiled rect/shape raster is authored in the host frame by
+  // default. Ordinary patterns and tiled gradients retain main's
+  // decoration-local CTM; native solid/linear/circle paints also keep their
+  // existing frames. A CanvasPattern alone cannot distinguish those brushes
+  // from a path raster. `paintInHostFrame` paints every non-solid brush at
+  // the host CTM instead.
+  const hostTransform = (usesPathShade(stroke.fill) || (paintInHostFrame && typeof paint === 'object'))
     && typeof ctx.getTransform === 'function' ? ctx.getTransform() : undefined;
   const anchorPaint = () => {
     // Canvas patterns follow the paint-time CTM; native gradients retain their
     // creation frame. The path has already captured the decoration transform.
     // Paint a host-box pattern at the host CTM so rotating/translating the
     // arrow geometry does not translate/rotate its gradient a second time.
-    if (hostTransform && typeof paint === 'object' && 'setTransform' in paint) ctx.setTransform(hostTransform);
+    if (hostTransform && typeof paint === 'object' && (paintInHostFrame || 'setTransform' in paint)) ctx.setTransform(hostTransform);
   };
   ctx.save();
   ctx.translate(tipX, tipY);
@@ -106,11 +113,12 @@ export function resolveArrowPaint(
   ctx: CanvasRenderingContext2D, stroke: Stroke, scale: number, unitsPerPoint: number,
   tipX: number, tipY: number, angle: number, end: ArrowEnd,
   frame: { x: number; y: number; w: number; h: number }, rotation: number, ptUnits: number,
+  patternCoordinateTransform?: DOMMatrix2DInit,
 ): string | CanvasGradient | CanvasPattern | undefined {
   if (!stroke.fill || end.type === 'none') return undefined;
   if (!usesPathShade(stroke.fill)
     || typeof ctx.getTransform !== 'function') {
-    return resolveFill(stroke.fill, ctx, frame.x, frame.y, frame.w, frame.h, rotation, ptUnits) ?? undefined;
+    return resolveFill(stroke.fill, ctx, frame.x, frame.y, frame.w, frame.h, rotation, ptUnits, patternCoordinateTransform) ?? undefined;
   }
   const box = lineEndLocalBounds(end, stroke, scale, unitsPerPoint);
   if (!box) return undefined;

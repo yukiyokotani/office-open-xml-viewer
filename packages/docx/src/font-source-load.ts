@@ -11,13 +11,14 @@
  */
 import {
   FontDemandScalarCollector,
+  VERTICAL_PRESENTATION_FORMS,
   type FontDemandScalars,
 } from '@silurus/ooxml-core/internal/font-scalar-demand';
 import {
   FontSourceSession,
-  type FontSessionDemand,
+  readFontResourceMetrics,
   type FontSourceSessionOptions,
-  type FontSource,
+  type FontSourceDescriptor,
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
@@ -27,9 +28,16 @@ import {
   parseFieldFormatSwitch,
 } from '@silurus/ooxml-core';
 import { docxRenderedTextUsages } from './document-content.js';
-import type { DocxFontFamilyPlan } from './font-plan.js';
+import type { DocxFontFamilyPlan } from './font-demand-plan.js';
+import { servedFontLineMetrics } from './served-font-metrics.js';
+import type { DocxSourceFonts } from './source-font-metrics.js';
+
+// The demand plan travels with the session: the main thread imports both
+// together, and only when sources are configured.
+export { completeDocxFontPresence, docxFontFamilyPlan } from './font-demand-plan.js';
 import { emphasisGlyph } from './layout/paragraph.js';
 import { LAYOUT_SYNTHESIZED_SCALARS } from './line-layout.js';
+import { mathFallbackText } from './layout/math-fallback-text.js';
 import type { DocxDocumentModel } from './types.js';
 
 /** ST_NumberFormat values (§17.18.59) whose `formatOrdinalNumber` output is
@@ -44,10 +52,17 @@ export const ASCII_NUMBER_FORMATS: ReadonlySet<string> = new Set([
   'cardinalText', 'ordinalText', 'ordinal',
 ]);
 
-/** §17.18.93 ST_TextDirection: only `lrTb` is horizontal. */
-const HORIZONTAL_TEXT_DIRECTIONS: ReadonlySet<string> = new Set(['lrTb']);
+/** §17.18.93 ST_TextDirection, strict and transitional spellings: `lrTb`
+ * is horizontal; every other value lays the text out vertically
+ * (vertical-text.ts), which substitutes vertical presentation forms. */
+const TEXT_DIRECTIONS: ReadonlySet<string> = new Set([
+  'lrTb', 'tbRl', 'btLr', 'lrTbV', 'tbRlV', 'tbLrV', 'tb', 'rl', 'lr', 'tbV', 'rlV', 'lrV',
+]);
 
 const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
+
+/** The CSS weights a WordprocessingML run paints with: regular and bold. */
+const DOCX_RUN_WEIGHTS: readonly number[] = Object.freeze([400, 700]);
 
 /**
  * Paint facts the rendered-text traversal does not spell, from one walk over
@@ -55,23 +70,35 @@ const METAFILE_PATH = /\.(?:wmf|emf|wmz|emz)$/i;
  * uses). Returns the extra texts layout synthesises for this document, or
  * `'all'` for a paint path whose scalars cannot be proven from the text:
  *
- * - vertical text (section, cell or text-box direction other than `lrTb` /
- *   `horz`; §17.3.2.10 `eastAsianLayout` vert/combine): vertical forms and
- *   rotated punctuation are font-selected alternates;
- * - ruby (§17.3.3.25), RTL runs and bidi paragraphs (UAX #9 mirroring paints
- *   scalars the text does not spell);
- * - charts and equations (their own text and number formatting) and WMF/EMF
- *   pictures (metafile text records paint with the document's fonts, and the
- *   Office-face web alias); a raster-labelled part whose bytes are a metafile
- *   is not detected (residual);
+ * - text-box direction other than `horz` and §17.3.2.10 `eastAsianLayout`
+ *   vert/combine (combined brackets are generated text);
+ * - an unknown section or cell text direction;
+ * - charts (their own text and number formatting);
  * - page / note numbers in a non-ASCII number format.
  *
+ * WMF/EMF pictures need no load-time demand: their text records demand
+ * their own scalars when they play (core `bindMetafileFontDemand`).
+ *
  * Synthesised texts: `allCaps` / `smallCaps` runs paint their text upper-cased
- * (§17.3.2.5/.33), emphasis marks paint their glyph (§17.3.2.12), and a DATE /
- * TIME picture (§17.16.4.1) paints its literal characters.
+ * (§17.3.2.5/.33), emphasis marks paint their glyph (§17.3.2.12), a DATE /
+ * TIME picture (§17.16.4.1) paints its literal characters, a ruby run
+ * (§17.3.3.25) paints its guide text, an OMML equation (§22.1) that no math
+ * renderer converted is sized by measuring its deterministic text fallback
+ * (layout math-fallback-text.ts: the run's own characters, operators and the
+ * fallback's `/^_√(),` punctuation; a converted equation paints a raster
+ * whose glyphs reach no document font), and a vertical section or cell
+ * (§17.6.20 / §17.4.72 textDirection) paints the vertical presentation forms
+ * vertical-text.ts substitutes, and kashida justification paints U+0640.
+ * Right-to-left runs and bidi paragraphs paint their texts reordered; the
+ * core collector demands what the shaper may substitute (mirrored partners,
+ * Arabic presentation forms).
  */
-function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
+function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | { texts: string[]; literal: string[] } {
   const texts: string[] = [];
+  // Texts measured as they are spelled, in no symbol-encoded face.
+  const literal: string[] = [];
+  let verticalForms = false;
+  let kashida = false;
   const settings = (doc as { __noteLayoutSettings?: { footnoteNumberFormat?: string; endnoteNumberFormat?: string } })
     .__noteLayoutSettings;
   for (const format of [settings?.footnoteNumberFormat, settings?.endnoteNumberFormat]) {
@@ -86,13 +113,29 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
     if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) continue;
     if (!Array.isArray(value)) {
       const record = value as Record<string, unknown>;
-      if (typeof record.textDirection === 'string' && !HORIZONTAL_TEXT_DIRECTIONS.has(record.textDirection)) return 'all';
+      if (typeof record.textDirection === 'string') {
+        if (!TEXT_DIRECTIONS.has(record.textDirection)) return 'all';
+        if (record.textDirection !== 'lrTb' && !verticalForms) {
+          verticalForms = true;
+          texts.push(VERTICAL_PRESENTATION_FORMS);
+        }
+      }
       if (typeof record.textVert === 'string' && record.textVert !== 'horz') return 'all';
-      if (record.ruby != null || record.eastAsianVert === true || record.eastAsianCombine === true) return 'all';
-      if (record.rtl === true || record.bidi === true) return 'all';
-      if (record.type === 'chart' || record.type === 'math') return 'all';
-      if (typeof record.mimeType === 'string' && isMetafileMime(record.mimeType)) return 'all';
-      if (typeof record.imagePath === 'string' && METAFILE_PATH.test(record.imagePath)) return 'all';
+      if (record.eastAsianVert === true || record.eastAsianCombine === true) return 'all';
+      // §17.18.44 kashida justification elongates Arabic words with inserted
+      // U+0640 TATWEEL (kashida-justify.ts).
+      if (typeof record.alignment === 'string' && record.alignment.endsWith('Kashida') && !kashida) {
+        kashida = true;
+        texts.push('\u0640');
+      }
+      if (record.type === 'chart') return 'all';
+      if (record.type === 'math') {
+        // Measured as spelled, in the paragraph's generic stack (layout
+        // break-opportunities.ts): no symbol conversion applies.
+        literal.push(typeof record.fallbackText === 'string'
+          ? record.fallbackText : mathFallbackText(record.nodes as Parameters<typeof mathFallbackText>[0]));
+        continue;
+      }
       // §17.6.12 pgNumType fmt (body and per-section markers).
       if (record.pageNumType && typeof record.pageNumType === 'object') {
         const fmt = (record.pageNumType as { fmt?: unknown }).fmt;
@@ -110,6 +153,9 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
           if (picture) own.push(picture);
         }
       }
+      // §17.3.3.25 ruby: the guide text paints above its base run.
+      const ruby = record.ruby as { text?: unknown } | null | undefined;
+      if (ruby && typeof ruby === 'object' && typeof ruby.text === 'string') own.push(ruby.text);
       texts.push(...own);
       // §17.3.2.5 caps / §17.3.2.33 smallCaps: the shaper paints the
       // upper-cased display text of the run (segment-builder.ts), including
@@ -126,20 +172,20 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | string[] {
       if (child !== null && typeof child === 'object') pending.push(child);
     }
   }
-  return texts;
+  return { texts, literal };
 }
 
 /**
  * The Unicode scalars a document paints, for `unicode-range` subset laziness
- * (core `scalar-demand.ts` owns the scalar rules: strong RTL, PUA symbol
- * codes and non-inert scalars decline to `'all'`). Texts come from
+ * (core `scalar-demand.ts` owns the scalar rules: PUA symbol codes outside
+ * a known face list and unknown scalars decline to `'all'`). Texts come from
  * {@link docxRenderedTextUsages} (body, tables, headers/footers, notes,
  * text-box stories, numbering markers, field results), plus
  * {@link LAYOUT_SYNTHESIZED_SCALARS} and the synthesised paint of
- * {@link docxSynthesizedPaint}. Any usage whose family is a symbol font
- * (Symbol / Wingdings, including `w:sym` runs and symbol bullets) is remapped
- * to other Unicode scalars by the painter (core `symbol-font.ts`), so it makes
- * demand `'all'`. The set is bounded by `HARD_MAX_FONT_DEMAND_SCALARS`; beyond
+ * {@link docxSynthesizedPaint}. A usage in a symbol font (Symbol /
+ * Wingdings, including `w:sym` runs and symbol bullets) may be remapped to
+ * other Unicode scalars by the painter (core `symbol-font.ts`), so it demands
+ * every scalar that remapping may paint (`addSymbolText`). The set is bounded by `HARD_MAX_FONT_DEMAND_SCALARS`; beyond
  * it the answer is `'all'`. `'all'` is the conservative answer, never an error.
  */
 export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars {
@@ -149,53 +195,101 @@ export function docxFontDemandScalars(doc: DocxDocumentModel): FontDemandScalars
   // only bound is the scalar-count ceiling inside the collector.
   const collector = new FontDemandScalarCollector({ budget: Number.POSITIVE_INFINITY });
   if (!collector.add(String.fromCodePoint(...LAYOUT_SYNTHESIZED_SCALARS))) return 'all';
-  for (const text of synthesized) if (!collector.add(text)) return 'all';
+  // Every symbol-encoded family the document paints with. A synthesized text
+  // (a caps run's upper case, a field picture's literals, a field result) is painted in its
+  // run's fonts, which the synthesized list does not carry, so it is
+  // collected as if painted in each of them: a finite over-approximation.
+  const symbolFamilies = new Set<string>();
   for (const usage of docxRenderedTextUsages(doc, 'font-demand')) {
-    if (usage.fontFamilies.some((family) => isSymbolFontFamily(family?.trim()))) return 'all';
-    if (!collector.add(usage.text)) return 'all';
+    for (const family of usage.fontFamilies) if (isSymbolFontFamily(family)) symbolFamilies.add(family!);
+    // The usage lists every slot face the run's symbol conversion consults
+    // (segment-builder symbolSegments, numbering-marker): with none
+    // symbol-encoded, a PUA code paints as itself.
+    if (!collector.addSymbolText(usage.text, usage.fontFamilies, true)) return 'all';
   }
+  // Layout-generated text (a field result such as a PAGE number) is painted
+  // in its field's fonts too.
+  if (!collector.addSymbolText(String.fromCodePoint(...LAYOUT_SYNTHESIZED_SCALARS), symbolFamilies)) return 'all';
+  for (const text of synthesized.texts) if (!collector.addSymbolText(text, symbolFamilies)) return 'all';
+  for (const text of synthesized.literal) if (!collector.addSymbolText(text, [], true)) return 'all';
   return collector.result();
 }
 
-/** One document's demand: the family plan plus its scalars. */
-export function docxFontDemand(doc: DocxDocumentModel, plan: DocxFontFamilyPlan): FontSessionDemand {
-  return Object.freeze({
-    families: plan.families,
-    fallbackFamilies: plan.fallbackFamilies,
-    scalars: docxFontDemandScalars(doc),
-    substituteScripts: plan.substituteScripts,
-  });
+/** Whether the document names a WMF/EMF picture part (by type or part
+ * name) or holds an OMML equation, anywhere in the parsed model. */
+export function docxRegistersEveryDeclaration(doc: DocxDocumentModel): boolean {
+  const pending: unknown[] = [doc];
+  const seen = new Set<object>();
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (value === null || typeof value !== 'object' || seen.has(value) || ArrayBuffer.isView(value)) continue;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    if (record.type === 'math'
+      || (typeof record.mimeType === 'string' && isMetafileMime(record.mimeType))
+      || (typeof record.imagePath === 'string' && METAFILE_PATH.test(record.imagePath))) return true;
+    for (const child of Object.values(record)) if (child !== null && typeof child === 'object') pending.push(child);
+  }
+  return false;
 }
 
+/** Metafile pictures demand their text's scalars when they play (core
+ * `bindMetafileFontDemand`). */
+export { metafileFontDemand } from '@silurus/ooxml-core/internal/metafile-font-demand';
+
 /** Loaded font sources for layout, plus the session that owns their faces. */
-export interface DocxLoadedFontSources {
+export interface DocxLoadedFontSources extends DocxSourceFonts {
   readonly session: FontSourceSession;
-  /** Demanded names (authored, then fallback) the inventory iterates. */
-  readonly names: readonly string[];
-  readonly loaded: LoadedFontSources;
 }
 
 /**
  * Resolve, register and load one document's faces into `fontSet` (the
- * painting realm's set) before pagination measures text. Rejects with
- * `OoxmlError('font-source-limit')` for a misconfigured or hostile source and
- * with an `AbortError` when `signal` aborts; a failed face only warns and
- * keeps its host fallback. The caller owns `session` and releases it with the
+ * painting realm's set) before pagination measures text. Rejects with an
+ * `AbortError` when `signal` aborts; a failed family or face (including a
+ * run-time limit breach) only warns and keeps its host fallback. The caller owns `session` and releases it with the
  * document.
  */
 export async function loadDocxFontSources(
   doc: DocxDocumentModel,
   plan: DocxFontFamilyPlan,
-  sources: readonly FontSource[],
+  sources: readonly FontSourceDescriptor[],
   // Worker mode passes the bridge's session options: `fontResolver`
   // functions run on main, and main fetches their claimed URL faces (core
   // resolver-bridge.ts).
-  options: Omit<FontSourceSessionOptions, 'sources' | 'resolverFailures'> = {},
+  options: Omit<FontSourceSessionOptions, 'sources' | 'resolverFailures' | 'readMetricTables'> = {},
 ): Promise<DocxLoadedFontSources> {
-  const session = new FontSourceSession({ ...options, sources });
+  // DOCX lays out with the served faces' own tables (source-font-metrics.ts):
+  // the session reads them before the snapshot. PPTX and XLSX do not.
+  const session = new FontSourceSession({
+    ...options, sources, readMetricTables: readFontResourceMetrics,
+    // Without an `'all'` paint path (docxSynthesizedPaint: no chart or other
+    // unmodelled text) every painted run is regular or bold:
+    // WordprocessingML §17.3.2.1 `b` (layout paragraph.ts, tabs,
+    // shape-drawing-plan text paths), so 400 and 700 are the only weights.
+    // The session uses them only for a finite demand (an `'all'` demand
+    // registers every declaration as its own face). Metafile text paints at
+    // its LOGFONT weight (MS-WMF 2.2.1.2, any of 1–1000), which only the
+    // picture's records tell, and the players sniff content, so a picture's
+    // part name does not prove it paints no text. Ranging is therefore kept
+    // exactly where it applied before metafile and equation text had a
+    // finite demand: a document that names a metafile picture or holds an
+    // equation registers every declaration as its own face, as its former
+    // `'all'` demand did, and the weight metafile text paints at is unchanged.
+    ...(docxRegistersEveryDeclaration(doc) ? {} : { requestedWeights: DOCX_RUN_WEIGHTS }),
+  });
   try {
-    const loaded = await session.ensure(docxFontDemand(doc, plan));
-    return { session, names: Object.freeze([...plan.families, ...plan.fallbackFamilies]), loaded };
+    // The scalars are collected while the families' stylesheets download.
+    const loaded = await session.ensureWithScalars({
+      families: plan.families,
+      fallbackFamilies: plan.fallbackFamilies,
+      substituteScripts: plan.substituteScripts,
+    }, () => docxFontDemandScalars(doc));
+    return {
+      session,
+      names: Object.freeze([...plan.families, ...plan.fallbackFamilies]),
+      loaded,
+      lineMetrics: servedFontLineMetrics,
+    };
   } catch (error) {
     session.release();
     throw error;

@@ -11,6 +11,7 @@ use docx_model::{
 
 #[cfg(test)]
 mod automatic_spacing_tests;
+mod equation;
 pub(in crate::doc) mod fields;
 mod headers;
 mod notes;
@@ -100,6 +101,7 @@ pub(super) fn build(
     }
     let note_layout_settings = notes::validate(
         &facts.note_stories,
+        &mut facts.note_references,
         facts.effective_nfib,
         facts.document_settings.as_ref(),
         &facts.sections,
@@ -235,6 +237,7 @@ pub(super) fn build(
         let fields = fields.as_ref().map_err(Clone::clone)?;
         notes::project(
             story,
+            &facts.note_references,
             fields,
             &mut facts.formatting,
             &mut facts.pictures,
@@ -253,7 +256,11 @@ pub(super) fn build(
             "direct DOC model encountered unsupported formatting",
         ));
     }
-    if facts.pictures.omitted || facts.floating.omitted {
+    facts
+        .pictures
+        .omitted
+        .admit("direct DOC model encountered omitted drawing content")?;
+    if facts.floating.omitted {
         return Err(unsupported(
             "direct DOC model encountered omitted drawing content",
         ));
@@ -1547,6 +1554,53 @@ mod tests {
     }
 
     #[test]
+    fn numbered_textbox_paragraphs_count_within_the_textbox() {
+        let bytes = with_numbering(&drawing_shape_source(Some("one\rtwo\r"), false));
+        crate::rejection::take_best_effort();
+        let result =
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).unwrap();
+        let shape = result
+            .document
+            .body
+            .iter()
+            .find_map(|element| match element {
+                BodyElement::Paragraph(paragraph) => {
+                    paragraph.runs.iter().find_map(|run| match run {
+                        DocRun::Shape(shape) => Some(shape),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("textbox shape");
+        let numbers: Vec<_> = shape
+            .text_box_content
+            .iter()
+            .map(|block| {
+                let docx_model::TextBoxBlockWire::Body(BodyElement::Paragraph(paragraph)) = block
+                else {
+                    panic!("textbox paragraph")
+                };
+                paragraph
+                    .numbering
+                    .as_ref()
+                    .map(|numbering| (numbering.format.clone(), numbering.text.clone()))
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            [
+                Some(("decimal".to_string(), "1.".to_string())),
+                Some(("decimal".to_string(), "2.".to_string())),
+            ]
+        );
+        assert!(crate::rejection::take_best_effort().contains(&(
+            crate::rejection::BestEffort::Approximated,
+            "Word textbox list numbers counted within the textbox"
+        )));
+    }
+
+    #[test]
     fn textbox_shape_projects_paint_margins_and_its_story() {
         let bytes = drawing_shape_source(Some("Inside\rbox\r"), false);
         let result =
@@ -1711,24 +1765,27 @@ mod tests {
         let (first, _) = member([0, 0xff78_6402]).unwrap();
         assert_eq!((first.0, first.1, first.2, first.3), (0.0, 0.0, 50.0, 25.0));
         assert!((first.4 - 224.391).abs() < 1e-3);
-        // A half-turned group mirrors member centres and adds 180 degrees; its
-        // textbox member makes this group rotate text, which stays rejected.
-        assert!(member([180 << 16, 0])
-            .unwrap_err()
-            .contains("rotated Word drawing text"));
+        // A half-turned group mirrors member centres and adds 180 degrees,
+        // also for its textbox member.
+        let (first, second) = member([180 << 16, 0]).unwrap();
+        assert_eq!(first, (50.0, 25.0, 50.0, 25.0, 180.0, 180.0));
+        assert_eq!(second, (0.0, 0.0, 50.0, 25.0, 180.0, 180.0));
         let (first, second) = member_with(None, [180 << 16, 90 << 16]).unwrap();
         // 100 x 50 pt frame: the rotated member's box mirrors through the
         // centre (its centre 25, 12.5 becomes 75, 37.5) and turns to 270 degrees.
         assert_eq!(first, (62.5, 12.5, 25.0, 50.0, 270.0, 270.0));
         assert_eq!(second, (0.0, 0.0, 50.0, 25.0, 180.0, 180.0));
-        // Other group angles stay unsupported.
-        assert!(member([90 << 16, 0])
-            .unwrap_err()
-            .contains("rotated Word drawing groups"));
+        // A quarter-turned group: its 100 x 50 pt anchor is the rotated
+        // bounds of a 50 x 100 pt frame about the same centre, in which the
+        // first member occupies the top-left quarter. Turned clockwise that
+        // quarter is the top-right one of the anchor.
+        let (first, second) = member_with(None, [90 << 16, 0]).unwrap();
+        assert_eq!(first, (62.5, -12.5, 25.0, 50.0, 90.0, 90.0));
+        assert_eq!(second, (12.5, 12.5, 25.0, 50.0, 90.0, 90.0));
     }
 
     #[test]
-    fn rotated_or_flipped_groups_fail_closed() {
+    fn flipped_groups_mirror_their_members_and_structural_flags_reject() {
         let bytes = drawing_source(Some("Inside\r"), false, true, [0, 0]);
         let cfb = CompoundFile::open(&bytes).unwrap();
         let word = cfb.stream("WordDocument").unwrap();
@@ -1740,19 +1797,31 @@ mod tests {
             .windows(fsp.len())
             .position(|bytes| bytes == fsp)
             .expect("top-level group FSP");
-        for (offset, value, reason) in [
-            (12, 0x41u8, "flipped"),
-            (13, 0x06, "unsupported shape flags"),
-        ] {
+        let changed = |offset: usize, value: u8| {
             let mut table = table.clone();
             table[at + offset] = value;
-            let changed = build_scoped_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
-            assert!(super::super::direct_model(
-                &CompoundFile::open(&changed).unwrap(),
-                1024 * 1024
-            )
+            let bytes = build_scoped_cfb(&[("WordDocument", word.clone()), ("0Table", table)]);
+            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
+        };
+        assert!(changed(13, 0x06)
             .unwrap_err()
-            .contains(reason));
+            .contains("unsupported shape flags"));
+        // fFlipH on the group mirrors the member frames about its centre
+        // (100 x 50 pt, members at 0,0 and 50,25) and flips each member.
+        let result = changed(12, 0x41).unwrap();
+        let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+            panic!("body paragraph")
+        };
+        let [_, _, DocRun::Shape(first), DocRun::Shape(second)] = paragraph.runs.as_slice() else {
+            panic!("two members")
+        };
+        for (shape, origin) in [(first, [55.0, 10.0]), (second, [5.0, 35.0])] {
+            assert_eq!([shape.anchor_x_pt, shape.anchor_y_pt], origin);
+            assert_eq!(
+                (shape.flip_h, shape.flip_v, shape.rotation),
+                (true, false, 0.0)
+            );
+            assert!(shape.rotation.is_sign_positive());
         }
     }
 
@@ -1887,6 +1956,9 @@ mod tests {
                 "p[t:42]",
                 "pageBreak:authored",
                 "columnBreak",
+                // WORD_COLUMN_BREAK_MARK_NEXT_COLUMN: the break-only
+                // paragraph's mark starts the next column.
+                "p[]",
                 "p[t:A]",
                 "pageBreak:authored",
                 "p[t:B]",
@@ -1894,6 +1966,45 @@ mod tests {
                 "p[t:C]",
             ]
         );
+    }
+
+    #[test]
+    fn column_break_paragraphs_share_the_docx_mark_and_page_break_before_rules() {
+        // Every paragraph carries sprmPFPageBreakBefore (0x2407) through the
+        // single PAPX run.
+        let with_page_break_before = |text: &str| {
+            let bytes = source(text);
+            let cfb = CompoundFile::open(&bytes).unwrap();
+            let mut word = cfb.stream("WordDocument").unwrap();
+            let table = cfb.stream("0Table").unwrap();
+            let bte = u32::from_le_bytes(word[0x102..0x106].try_into().unwrap()) as usize;
+            let page_number =
+                u32::from_le_bytes(table[bte + 8..bte + 12].try_into().unwrap()) as usize;
+            let page = &mut word[page_number * 512..(page_number + 1) * 512];
+            page[8] = 32;
+            page[64] = 3;
+            page[65..70].copy_from_slice(&[0, 0, 0x07, 0x24, 1]);
+            projected_body(&build_scoped_cfb(&[
+                ("WordDocument", word),
+                ("0Table", table),
+            ]))
+        };
+        // A break-only paragraph: its pageBreakBefore is the idempotent
+        // paragraph transition before the column break, and its mark follows.
+        let body = with_page_break_before("\u{e}\rB\r");
+        assert_eq!(
+            body_outline(&body["body"])[..3],
+            ["pageBreak:authored", "columnBreak", "p[]"]
+        );
+        assert_eq!(body["body"][0]["__pageBreakBefore"], true);
+        assert_eq!(body["body"][2]["pageBreakBefore"], serde_json::Value::Null);
+        // A text paragraph ending with a column break keeps its mark too.
+        let body = with_page_break_before("A\u{e}\rB\r");
+        assert_eq!(
+            body_outline(&body["body"])[..3],
+            ["p[t:A]", "columnBreak", "p[]"]
+        );
+        assert!(body["body"][0].get("__pageBreakBefore").is_none());
     }
 
     #[test]
@@ -1919,6 +2030,76 @@ mod tests {
             let mut expected: serde_json::Value = serde_json::from_str(NUMBERED_MARKER).unwrap();
             expected["text"] = text.into();
             assert_eq!(actual["body"][index]["numbering"], expected);
+        }
+    }
+
+    #[test]
+    fn markdown_projection_reprojects_the_same_model_facts() {
+        assert_eq!(
+            super::super::direct_markdown(&source("Alpha\rBeta\r"), 1024 * 1024).unwrap(),
+            "Alpha\n\nBeta\n\n"
+        );
+        // sprmCFBold on the paragraph's CHPX.
+        let bold = source_with_direct_chpx("Bold\r", &[0x35, 0x08, 1]);
+        assert_eq!(
+            super::super::direct_markdown(&bold, 1024 * 1024).unwrap(),
+            "**Bold**\n\n"
+        );
+        assert_eq!(
+            super::super::direct_markdown(&numbered_source("A\rB\r"), 1024 * 1024).unwrap(),
+            "1. A\n1. B\n"
+        );
+        assert!(super::super::direct_markdown(&[0; 16], 1024 * 1024)
+            .unwrap_err()
+            .starts_with("UNSUPPORTED:"));
+    }
+
+    /// Markdown is rendered by downstream Markdown/HTML consumers: DOC text
+    /// and hyperlink field targets must stay literal text and form no script
+    /// link, raw HTML or Markdown structure of their own.
+    #[test]
+    fn markdown_projection_keeps_hostile_text_literal() {
+        const INLINE: &str = "<img src=x onerror=alert(1)> [x](javascript:alert(1)) https://evil.example/ www.evil.example a@evil.example ~~del~~ &copy; `c`";
+        let text = format!(
+            "{INLINE}\r# forged heading\r| a | b |\u{b}| :-- | --: |\u{b}forged | row\r```\u{b}> quoted\r- item\r1. item\r===\r\u{13}HYPERLINK \"javascript:alert(1)\"\u{14}script\u{15}\r\u{13}HYPERLINK \"https://e.example/x) [y](https://evil.example/\"\u{14}safe\u{15}\r"
+        );
+        let markdown = super::super::direct_markdown(&source(&text), 1024 * 1024).unwrap();
+        let gfm = ooxml_common::markdown::gfm_check::summarize(&markdown);
+
+        assert!(!markdown.contains("javascript:alert(1)\")"), "{markdown}");
+        assert!(!markdown.contains("](javascript:"), "{markdown}");
+        assert_eq!(
+            (gfm.headings.len(), gfm.tables, gfm.images, gfm.html),
+            (0, 0, 0, 0),
+            "{markdown}"
+        );
+        assert_eq!(
+            (gfm.strikethrough, gfm.code, gfm.block_quotes),
+            (0, 0, 0),
+            "{markdown}"
+        );
+        assert_eq!((gfm.list_items, gfm.thematic_breaks), (0, 0), "{markdown}");
+        // The one link is the well-formed HTTPS field; its target cannot
+        // close the destination and open a second link.
+        assert_eq!(gfm.links, 1, "{markdown}");
+        assert!(
+            markdown.contains("[safe](https://e.example/x%29%20[y]%28https://evil.example/)"),
+            "{markdown}"
+        );
+        for literal in [
+            INLINE,
+            "# forged heading",
+            "| a | b |",
+            "| :-- | --: |",
+            "forged | row",
+            "```",
+            "> quoted",
+            "- item",
+            "1. item",
+            "===",
+            "script",
+        ] {
+            assert!(gfm.text.contains(literal), "{literal:?} in {markdown}");
         }
     }
 
@@ -2437,6 +2618,22 @@ mod tests {
                 .unwrap_err()
                 .contains("unsupported Word FIB version"));
         }
+        // A Word 97 base and back-version naming a Word 97 selector in the
+        // extension project as the Word 97 document itself.
+        crate::rejection::take_best_effort();
+        for extension in [0x00c0u16, 0x00c1, 0x00c2] {
+            let mut word = original_word.clone();
+            word[0x382..0x384].copy_from_slice(&2u16.to_le_bytes());
+            word[0x384..0x386].copy_from_slice(&extension.to_le_bytes());
+            assert_eq!(project(word).unwrap(), expected);
+            assert_eq!(
+                crate::rejection::take_best_effort(),
+                [(
+                    crate::rejection::BestEffort::Approximated,
+                    "unsupported Word FIB version"
+                )]
+            );
+        }
         let mut word = original_word.clone();
         word[2..4].copy_from_slice(&0x00c0u16.to_le_bytes());
         word[0x382..0x384].copy_from_slice(&u16::MAX.to_le_bytes());
@@ -2457,7 +2654,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_hyphen_preserves_its_own_style_and_validates_its_hresi() {
+    fn optional_hyphen_preserves_its_own_style_and_reads_its_hresi() {
         // The astral character places the isolated marker at UTF-16 CP 3,
         // rather than scalar index 2. Its formatting is absent from A/emoji/B
         // and the paragraph mark, so only marker-owner acquisition can refuse
@@ -2478,18 +2675,20 @@ mod tests {
             assert_eq!(runs[1]["fontSize"], 14.0);
             assert_eq!(runs[2]["text"], "B");
         }
+        // Out-of-range and custom methods break as hresNormal does.
+        let expected = serde_json::to_value(project(&[]).unwrap().document).unwrap();
         for chpx in [
             &[0x4e, 0x48, 0, 0][..],
             &[0x4e, 0x48, 0, 2, 0x4e, 0x48, 1, 0][..],
-            &[0x3c, 0x08, 1, 0x4e, 0x48, 0, 2][..],
+            &[0x4e, 0x48, 2, b'q'][..],
         ] {
-            assert!(project(chpx)
-                .unwrap_err()
-                .contains("invalid Word word-breaking method"));
+            assert_eq!(
+                serde_json::to_value(project(chpx).unwrap().document).unwrap(),
+                expected
+            );
         }
-        assert!(project(&[0x4e, 0x48, 2, b'q'])
-            .unwrap_err()
-            .contains("unsupported formatting"));
+        // A misframed operand is corrupt.
+        assert!(project(&[0x4e, 0x48, 1]).is_err());
         // A vanished marker contributes neither a conditional glyph nor a
         // break opportunity, after its properties have been validated.
         let hidden = project(&[0x3c, 0x08, 1, 0x4e, 0x48, 1, 0]).unwrap();
@@ -2498,7 +2697,7 @@ mod tests {
     }
 
     #[test]
-    fn hresi_final_direct_owner_admits_complete_document_and_retains_invalid_refusal() {
+    fn every_hresi_owner_projects_standard_breaking() {
         let project = |chpx: &[u8]| {
             let bytes = source_with_direct_chpx("quartz\r", chpx);
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
@@ -2509,31 +2708,21 @@ mod tests {
         for chpx in [
             &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 2, b'q', 0x33, 0x2a, 0][..],
-            // Word's measured alias of hresNormal, alone and as final owner.
             &[0x4e, 0x48, 0, 1][..],
             &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 0, 1][..],
-        ] {
-            assert_eq!(project(chpx).unwrap(), expected);
-        }
-        for chpx in [
             &[0x4e, 0x48, 2, b'q'][..],
             &[0x4e, 0x48, 1, 0, 0x4e, 0x48, 2, b'q'][..],
             &[0x86, 0x2a, 2, 0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
-        ] {
-            assert!(project(chpx)
-                .unwrap_err()
-                .contains("unsupported formatting"));
-        }
-        for chpx in [
             &[0x4e, 0x48, 0, 0][..],
             &[0x4e, 0x48, 0, 2][..],
             &[0x4e, 0x48, 0, b'Z', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 7, b'Z', 0x4e, 0x48, 1, 0][..],
-            &[0x4e, 0x48, 2][..],
         ] {
-            assert!(project(chpx).is_err());
+            assert_eq!(project(chpx).unwrap(), expected, "{chpx:?}");
         }
+        // Misframed operands stay corrupt.
         for chpx in [
+            &[0x4e, 0x48, 2][..],
             &[0x33, 0x2a, 1, 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 1, 0, 0x33, 0x2a, 1][..],
         ] {
@@ -2547,39 +2736,28 @@ mod tests {
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                 .map(|result| serde_json::to_value(result.document).unwrap())
         };
-        assert_eq!(
-            project_piece(&[0x4e, 0x48, 2, b'q'], &[0x4e, 0x48, 1, 0]).unwrap(),
-            expected
-        );
-        assert_eq!(
-            project_piece(&[], &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0]).unwrap(),
-            expected
-        );
-        assert!(project_piece(&[0x4e, 0x48, 1, 0], &[0x4e, 0x48, 2, b'q'])
-            .unwrap_err()
-            .contains("unsupported formatting"));
-        assert!(project_piece(&[0x4e, 0x48, 0, b'Z'], &[0x4e, 0x48, 1, 0]).is_err());
-    }
+        for (direct, piece) in [
+            (&[0x4e, 0x48, 2, b'q'][..], &[0x4e, 0x48, 1, 0][..]),
+            (&[][..], &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..]),
+            (&[0x4e, 0x48, 1, 0][..], &[0x4e, 0x48, 2, b'q'][..]),
+            (&[0x4e, 0x48, 0, b'Z'][..], &[0x4e, 0x48, 1, 0][..]),
+        ] {
+            assert_eq!(project_piece(direct, piece).unwrap(), expected);
+        }
 
-    #[test]
-    fn hresi_final_level_marker_owner_controls_complete_document_admission() {
-        let project = |chpx: &[u8]| {
+        // The final list-level marker owner keeps its numbering.
+        let project_level = |chpx: &[u8]| {
             let bytes = with_numbering_level_chpx(&source("quartz\r"), chpx);
             super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
                 .map(|result| serde_json::to_value(result.document).unwrap())
         };
-        let expected = project(&[0x4e, 0x48, 1, 0]).unwrap();
-        assert_eq!(
-            project(&[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0]).unwrap(),
-            expected
-        );
+        let expected = project_level(&[0x4e, 0x48, 1, 0]).unwrap();
         for chpx in [
+            &[0x4e, 0x48, 2, b'q', 0x4e, 0x48, 1, 0][..],
             &[0x4e, 0x48, 2, b'q'][..],
             &[0x4e, 0x48, 1, 0, 0x4e, 0x48, 2, b'q'][..],
         ] {
-            assert!(project(chpx)
-                .unwrap_err()
-                .contains("unsupported formatting"));
+            assert_eq!(project_level(chpx).unwrap(), expected);
         }
     }
 
@@ -2598,14 +2776,38 @@ mod tests {
                 baseline
             );
         }
-        for value in [2, 4] {
-            assert!(project(&[0x86, 0x2a, value])
-                .unwrap_err()
-                .contains("unsupported formatting"));
+        // The language and UI-font methods, and an out-of-range value, use
+        // the same default font route.
+        let plain = project(&[]).unwrap();
+        crate::rejection::take_best_effort();
+        for (value, note) in [
+            (
+                2,
+                (
+                    crate::rejection::BestEffort::Approximated,
+                    "Word font fixup method requires a consumer",
+                ),
+            ),
+            (
+                4,
+                (
+                    crate::rejection::BestEffort::Approximated,
+                    "Word font fixup method requires a consumer",
+                ),
+            ),
+            (
+                0x80,
+                (
+                    crate::rejection::BestEffort::IgnoredValue,
+                    "invalid Word font fixup method",
+                ),
+            ),
+        ] {
+            assert_eq!(project(&[0x86, 0x2a, value]).unwrap(), plain);
+            assert!(crate::rejection::take_best_effort().contains(&note));
         }
-        assert!(project(&[0x86, 0x2a, 0x80])
-            .unwrap_err()
-            .contains("font fixup method"));
+        // A misframed operand is corrupt.
+        assert!(project(&[0x86, 0x2a]).is_err());
     }
 
     #[test]
@@ -2802,7 +3004,7 @@ mod tests {
     }
 
     #[test]
-    fn unverified_private_field_results_are_rejected_not_hidden() {
+    fn private_field_results_are_not_displayed() {
         let sections = [(5, 2, 12_240, 15_840, 1, 720)];
         let slots = [
             None,
@@ -2812,16 +3014,29 @@ mod tests {
             None,
             None,
         ];
+        let header_text = |bytes: &[u8]| -> Vec<String> {
+            let result =
+                super::super::direct_model(&CompoundFile::open(bytes).unwrap(), 1024 * 1024)
+                    .unwrap();
+            let header = result.document.headers.default.expect("default header");
+            let [BodyElement::Paragraph(paragraph)] = header.body.as_slice() else {
+                panic!("one header paragraph");
+            };
+            paragraph
+                .runs
+                .iter()
+                .map(|run| match run {
+                    DocRun::Text(run) => run.text.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
         let bytes = source_with_typography("Body\r", &sections, None, None, None, Some(&slots));
-        assert!(
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024).is_ok()
-        );
+        assert_eq!(header_text(&bytes), ["x"]);
+        // MS-DOC 2.9.110 fPrivateResult: the result "is not intended to be
+        // visible to the user".
         let bytes = mark_header_field_results_private(&bytes);
-        assert!(
-            super::super::direct_model(&CompoundFile::open(&bytes).unwrap(), 1024 * 1024)
-                .unwrap_err()
-                .contains("private field result")
-        );
+        assert!(header_text(&bytes).is_empty());
     }
 
     #[test]
@@ -2982,7 +3197,7 @@ mod tests {
                     3 => facts.formatting.unsupported_character_properties = true,
                     4 => facts.formatting.unsupported_paragraph_properties = true,
                     5 => facts.formatting.unsupported_piece_properties = true,
-                    6 => facts.pictures.omitted = true,
+                    6 => facts.pictures.omitted.defer("test"),
                     7 => facts.floating.omitted = true,
                     _ => unreachable!(),
                 }
@@ -3400,9 +3615,25 @@ mod tests {
             ],
             [Some(72.0), Some(36.0)]
         );
+        // Without the `_PictureBullets` bookmark there is no picture: Word
+        // draws the level's text bullet (Word control).
+        for bookmarks in [&[][..], &[("_PictureBullet", 0, 1)][..]] {
+            let bytes = picture_bullet_source(&picture_bullet_level(0, 1), bookmarks, 75);
+            crate::rejection::take_best_effort();
+            let result = picture_bullet_result(&bytes).unwrap();
+            let BodyElement::Paragraph(paragraph) = &result.document.body[0] else {
+                panic!("paragraph")
+            };
+            let numbering = paragraph.numbering.as_ref().unwrap();
+            assert_eq!(numbering.pic_bullet_width_pt, None);
+            assert!(numbering.pic_bullet_transform.is_none());
+            assert!(result.resources.is_empty());
+            assert!(crate::rejection::take_best_effort().contains(&(
+                crate::rejection::BestEffort::Approximated,
+                "Word picture bullet without its picture shown as the text bullet"
+            )));
+        }
         for (bookmarks, relative_cp, expected) in [
-            (&[][..], 0, "lacks its bookmark"),
-            (&[("_PictureBullet", 0, 1)][..], 0, "lacks its bookmark"),
             (&[("_PictureBullets", 0, 1)][..], 1, "outside its bookmark"),
             (
                 &[("_PictureBullets", 1, 2)][..],
@@ -3476,6 +3707,7 @@ mod tests {
                 }
                 let mut numbering = docx_model::NumberingInfo {
                     num_id: 1,
+                    abstract_num_id: None,
                     level: 0,
                     format: "bullet".into(),
                     text: "•".into(),
@@ -3632,7 +3864,7 @@ mod tests {
             // Shape 100 stays outside the inline picture-frame class.
             let mut model_budget = 1024;
             assert_eq!(facts.pictures.direct_inline(0, &mut model_budget)?, None);
-            assert!(facts.pictures.omitted);
+            assert!(facts.pictures.omitted.is_pending());
             assert!(!facts.pictures.has_selected_direct_resources());
 
             // A failed acquisition commits neither budget nor a cache entry.

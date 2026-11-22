@@ -5,8 +5,8 @@ message: DOCX paint consumes retained layout data and must not import or call la
 note: |
   Paint may use `import type` from `layout/types.ts`. It must not reach layout
   algorithms, parser/renderer objects, pagination, style resolution, or Canvas
-  measurement. The transitive Node boundary checker complements this direct AST
-  rule.
+  measurement. `docx-paint-import-zone` covers every module edge of paint; this
+  rule adds the measurement and layout calls.
 rule:
   any:
     - all:

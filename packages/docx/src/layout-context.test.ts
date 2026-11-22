@@ -1,3 +1,4 @@
+import { DEFAULT_DOCX_COMPAT_PROFILE } from './layout/compat-profile.js';
 import { describe, expect, it } from 'vitest';
 import type {
   DocParagraph,
@@ -94,8 +95,8 @@ describe('layout context resolvers', () => {
   });
 
   it('preserves nested table-cell container depth', () => {
-    const outerCell = enterTableCellStoryContext(bodyStory);
-    const innerCell = enterTableCellStoryContext(outerCell);
+    const outerCell = enterTableCellStoryContext(bodyStory, true);
+    const innerCell = enterTableCellStoryContext(outerCell, true);
 
     expect(outerCell.containers).toEqual([{ kind: 'tableCell' }]);
     expect(innerCell.containers).toEqual([
@@ -126,7 +127,7 @@ describe('layout context resolvers', () => {
     expect(settings.documentHasEastAsianText).toBe(true);
     expect(settings.characterSpacingControl).toBe('compressPunctuation');
     expect(settings.mathDefJc).toBe('left');
-    expect(settings.compat).toEqual({
+    expect(settings.compat).toMatchObject({
       adjustLineHeightInTable: true,
       useFeLayout: true,
       balanceSingleByteDoubleByteWidth: true,
@@ -145,15 +146,7 @@ describe('layout context resolvers', () => {
     );
 
     expect(settings.defaultTabPt).toBe(36);
-    expect(settings.compat).toEqual({
-      adjustLineHeightInTable: false,
-      useFeLayout: false,
-      balanceSingleByteDoubleByteWidth: false,
-      lineWrapLikeWord6: false,
-      enableOpenTypeFeatures: false,
-      ulTrailSpace: false,
-      doNotExpandShiftReturn: false,
-    });
+    expect(settings.compat).toEqual(DEFAULT_DOCX_COMPAT_PROFILE);
     expect(context.grid).toEqual({
       kind: 'none',
       linePitchPt: 20,
@@ -413,6 +406,28 @@ describe('layout context resolvers', () => {
       paragraphAllowsAdjustment: false,
     });
     expect(paragraphGridRightAdjustmentPt(tableCell, 481.9)).toBe(0);
+
+    // Issue #2152: Windows Word reduces the line width only below mode 15.
+    for (const [compatibilityMode, pitchPt] of [[14, 9], [15, null], [16, null]] as const) {
+      const modeSettings = resolveDocumentLayoutSettings(
+        documentModel({ settings: { compatibilityMode } }),
+        { normalStyleFontSizePt: 9 },
+      );
+      const modeContext = resolveParagraphLayoutContext(
+        modeSettings,
+        resolveSectionLayoutContext(modeSettings, section({
+          docGridType: 'linesAndChars',
+          docGridLinePitch: 20,
+          docGridCharSpace: 0,
+        })),
+        bodyStory,
+        paragraph(),
+      );
+      expect(modeContext.characterGrid.pitchPt).toBe(9);
+      expect(modeContext.rightIndentGrid.pitchPt).toBe(pitchPt);
+      expect(paragraphGridRightAdjustmentPt(modeContext, 481.9))
+        .toBeCloseTo(pitchPt == null ? 0 : 4.9, 9);
+    }
   });
 
   it('adds the hanging indent as an implicit leading tab without hiding a bar rule', () => {

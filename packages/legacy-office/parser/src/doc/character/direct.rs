@@ -157,12 +157,15 @@ impl Properties {
         if let Some((glyph, font)) = symbol {
             // ECMA-376 17.3.3.30 sym: a one-glyph run in the symbol's font,
             // exactly as the DOCX parser projects `w:sym` (font on the
-            // ascii, high-ANSI and East Asian axes, no slot provenance).
+            // ascii, high-ANSI and East Asian axes, no slot provenance). A
+            // symbol font slot without a name keeps the run's own fonts.
             run.text = glyph;
-            run.font_family = Some(font.clone());
-            run.font_family_high_ansi = Some(font.clone());
-            run.font_family_east_asia = Some(font);
-            run.font_slots = None;
+            if let Some(font) = font {
+                run.font_family = Some(font.clone());
+                run.font_family_high_ansi = Some(font.clone());
+                run.font_family_east_asia = Some(font);
+                run.font_slots = None;
+            }
         }
         run.typography_acquisition = Some(RunTypographyWire {
             underline: match (
@@ -320,7 +323,7 @@ impl Properties {
     /// document applies it to non-fSpec U+0028 characters and Word's own PDF
     /// shows the symbol glyph there. Picture/OLE/object characters are never
     /// symbols.
-    fn direct_symbol(&self, fonts: &[String]) -> Result<Option<(String, String)>, String> {
+    fn direct_symbol(&self, fonts: &[String]) -> Result<Option<(String, Option<String>)>, String> {
         let Some((font, code)) = self.symbol else {
             return Ok(None);
         };
@@ -329,10 +332,8 @@ impl Properties {
         }
         let glyph = char::from_u32(u32::from(code))
             .ok_or_else(|| unsupported("invalid Word symbol character code"))?;
-        let font = fonts
-            .get(usize::from(font))
-            .ok_or_else(|| unsupported("Word symbol font outside font table"))?;
-        Ok(Some((glyph.to_string(), font.clone())))
+        let font = table_font(fonts, font.into(), "Word symbol font outside font table")?;
+        Ok(Some((glyph.to_string(), font)))
     }
 
     /// Text for one visible span resolved by [`Self::direct_text_run`]. A
@@ -382,12 +383,7 @@ impl Properties {
         let mut axes: FontAxes = [None, None, None, None];
         for (axis, index) in axes.iter_mut().zip(self.fonts) {
             if let Some(index) = index {
-                *axis = Some(
-                    fonts
-                        .get(index)
-                        .ok_or_else(|| unsupported("Word font index outside font table"))?
-                        .clone(),
-                );
+                *axis = table_font(fonts, index, "Word font index outside font table")?;
             }
         }
         Ok(axes)
@@ -421,6 +417,17 @@ impl Properties {
             }
             (Some(_), Some(_)) => {}
         }
+    }
+
+    /// sprmCFVanish: the character is hidden text.
+    pub(in crate::doc) fn hidden(&self) -> bool {
+        self.bool_value("vanish").unwrap_or(false)
+    }
+
+    /// The same properties as visible text.
+    pub(in crate::doc) fn shown(mut self) -> Self {
+        self.values.remove("vanish");
+        self
     }
 
     fn bool_value(&self, key: &str) -> Option<bool> {
@@ -469,6 +476,17 @@ impl Properties {
     fn signed_twentieth_points(&self, key: &str) -> Result<Option<f64>, String> {
         Ok(self.signed_number(key)?.map(|value| value / 20.0))
     }
+}
+
+/// The font-table name at `index`. An empty slot (see `read_fonts`) names no
+/// font; an index past the table is rejected with `outside`.
+fn table_font(
+    fonts: &[String],
+    index: usize,
+    outside: &'static str,
+) -> Result<Option<String>, String> {
+    let name = fonts.get(index).ok_or_else(|| unsupported(outside))?;
+    Ok((!name.is_empty()).then(|| name.clone()))
 }
 
 fn font_slots(axes: &FontAxes) -> Option<RunFontSlots> {
@@ -723,10 +741,29 @@ mod tests {
             );
         }
 
-        for lid in [u16::MAX, 0x0000, 0x007f, 0x0467, 0x040a] {
-            let unresolved = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
-            assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
-            assert!(unresolved.direct_font_facts(&[]).is_err());
+        // A LID without a locale name selects no language; the named alias
+        // and Microsoft-specific locales keep their name.
+        for (lid, expected) in [
+            (u16::MAX, None),
+            (0x0000, None),
+            (0x007f, None),
+            (0x0467, Some("ff-ng")),
+            (0x040a, Some("es-es_tradnl")),
+        ] {
+            let properties = applied(&[(0x485f, lid.to_le_bytes().to_vec())]);
+            assert_eq!(
+                properties
+                    .direct_font_facts(&[])
+                    .unwrap()
+                    .lang_bidi
+                    .as_deref(),
+                expected,
+                "LID {lid:04x}"
+            );
+            assert!(properties
+                .direct_text_run("x".into(), &[])
+                .unwrap()
+                .is_some());
         }
 
         // Word's DOCX-to-DOC evidence: 0x0000 is "x-none" on the default and
@@ -750,19 +787,31 @@ mod tests {
         let custom = applied(&[(0x4873, 0x1000u16.to_le_bytes().to_vec())]);
         assert_eq!(custom.resolved_languages().unwrap().default, None);
         assert!(custom.direct_text_run("x".into(), &[]).unwrap().is_some());
-        assert!(applied(&[(0x4874, 0x1000u16.to_le_bytes().to_vec())])
+        let custom_east_asia = applied(&[(0x4874, 0x1000u16.to_le_bytes().to_vec())])
             .direct_text_run("x".into(), &[])
-            .is_err());
+            .unwrap()
+            .unwrap();
+        assert_eq!(custom_east_asia.lang_east_asia, None);
         let inherited = applied(&[(0x485f, 0x0400u16.to_le_bytes().to_vec())])
             .direct_text_run("x".into(), &[])
             .unwrap()
             .unwrap();
         assert_eq!(inherited.lang_bidi, None);
 
-        // Projection validates the retained language before visibility.
-        let hidden_unknown =
-            applied(&[(0x485f, u16::MAX.to_le_bytes().to_vec()), (0x083c, vec![1])]);
-        assert!(hidden_unknown.direct_text_run("x".into(), &[]).is_err());
+        // A LID without a locale name projects no language.
+        crate::rejection::take_best_effort();
+        let unknown = applied(&[(0x485f, u16::MAX.to_le_bytes().to_vec())])
+            .direct_text_run("x".into(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(unknown.lang_bidi, None);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "Word language ID without a locale name"
+            )]
+        );
     }
 
     #[test]
@@ -811,9 +860,14 @@ mod tests {
         assert_eq!(facts.lang_bidi.as_deref(), Some("ar-sa"));
 
         for (code, lid) in [(0x4873, 0x0400u16), (0x4874, 0xffff)] {
-            let unresolved = applied(&[(code, lid.to_le_bytes().to_vec())]);
-            assert!(unresolved.direct_text_run("x".into(), &[]).is_err());
-            assert!(unresolved.direct_font_facts(&[]).is_err());
+            crate::rejection::take_best_effort();
+            let unnamed = applied(&[(code, lid.to_le_bytes().to_vec())]);
+            let run = unnamed.direct_text_run("x".into(), &[]).unwrap().unwrap();
+            assert_eq!(run.lang_east_asia, None);
+            assert!(crate::rejection::take_best_effort().contains(&(
+                crate::rejection::BestEffort::IgnoredValue,
+                "Word language ID without a locale name"
+            )));
         }
     }
 
@@ -1073,7 +1127,9 @@ mod tests {
     fn default_font_fixup_preserves_text_and_the_existing_font_route() {
         // FFM is an enum, not ToggleOperand. Default substitution uses the
         // renderer's existing Unicode fallback, preserving authored routing.
-        for value in [0, 1] {
+        // The language and UI-font methods and out-of-range values use the
+        // same route.
+        for value in [0, 1, 2, 3, 4, 0x80, 0xff] {
             let properties = applied(&[
                 (0x4a43, 24u16.to_le_bytes().to_vec()),
                 (0x085a, vec![1]),
@@ -1090,10 +1146,24 @@ mod tests {
             assert_eq!(run.font_hint, None);
         }
         let base = Properties::default();
+        crate::rejection::take_best_effort();
         for value in [2, 4] {
-            assert!(!base.clone().apply(0x2a86, &[value], &base).unwrap());
+            assert!(base.clone().apply(0x2a86, &[value], &base).unwrap());
         }
-        for invalid in [vec![], vec![1, 0], vec![3], vec![0x80], vec![0xff]] {
+        for value in [3, 0x80] {
+            assert!(base.clone().apply(0x2a86, &[value], &base).unwrap());
+        }
+        let notes = crate::rejection::take_best_effort();
+        assert_eq!(
+            notes.iter().map(|note| note.1).collect::<Vec<_>>(),
+            [
+                "Word font fixup method requires a consumer",
+                "Word font fixup method requires a consumer",
+                "invalid Word font fixup method",
+                "invalid Word font fixup method"
+            ]
+        );
+        for invalid in [vec![], vec![1, 0]] {
             assert!(
                 base.clone().apply(0x2a86, &invalid, &base).is_err(),
                 "{invalid:?}"
@@ -1385,14 +1455,20 @@ mod tests {
     }
 
     #[test]
-    fn percentage_character_shading_blends_and_other_patterns_stay_unsupported() {
+    fn percentage_character_shading_blends_and_hatches_stay_unsupported() {
         let base = Properties::default();
-        for operand in [
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14),
-            cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26),
-            cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1),
+        // A hatch pattern is not one color.
+        let hatch = cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 14);
+        assert!(!base.clone().apply(0xca71, &hatch, &base).unwrap());
+        // An automatic foreground is black and an automatic background
+        // white (Word controls of table cells with these shadings).
+        for (operand, fill) in [
+            (cshd([0, 0, 0, 0xff], [0, 0, 0, 0xff], 0x26), "d9d9d9"),
+            (cshd([0, 0, 0, 0xff], [0xff, 0xff, 0xff, 0], 1), "000000"),
         ] {
-            assert!(!base.clone().apply(0xca71, &operand, &base).unwrap());
+            let mut properties = base.clone();
+            assert!(properties.apply(0xca71, &operand, &base).unwrap());
+            assert_eq!(public_run(&properties)["background"], fill);
         }
         // Word paints pct15 with an automatic foreground over white as #D9D9D9.
         let pct = applied(&[(0x4866, 0x9900u16.to_le_bytes().to_vec())]);
@@ -1401,6 +1477,30 @@ mod tests {
         assert_eq!(public_run(&pct)["background"], "d9d9d9");
         let cleared = applied(&[(0xca71, cshd([0, 0, 0, 0xff], [0xff; 4], 0))]);
         assert!(public_run(&cleared)["background"].is_null());
+    }
+
+    #[test]
+    fn an_empty_font_table_slot_names_no_font_on_any_axis() {
+        let fonts = ["", "Arial"].map(String::from);
+        // sprmCRgFtc0 selects Arial, sprmCRgFtc1 the empty slot, and
+        // sprmCSymbol a glyph in the empty slot.
+        let properties = applied(&[
+            (0x4a4f, vec![1, 0]),
+            (0x4a50, vec![0, 0]),
+            (0x6a09, vec![0, 0, 0xb0, 0xf0]),
+        ]);
+        let run = properties
+            .direct_text_run(String::new(), &fonts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.text, "\u{f0b0}");
+        assert_eq!(run.font_family.as_deref(), Some("Arial"));
+        assert_eq!(run.font_family_east_asia, None);
+        assert_eq!(run.font_family_high_ansi, None);
+        assert_eq!(run.font_family_cs, None);
+        let slots = run.font_slots.expect("the Arial axis keeps its slot");
+        assert_eq!(slots.direct.ascii.as_deref(), Some("Arial"));
+        assert_eq!(slots.direct.east_asia, None);
     }
 
     #[test]

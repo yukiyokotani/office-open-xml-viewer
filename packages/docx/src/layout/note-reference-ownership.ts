@@ -45,6 +45,33 @@ export function indexNotes<T extends Readonly<{ id: string }>>(
   return indexed;
 }
 
+/** For each footnote id the main document story references more than once,
+ * the index of the last top-level element that references it. A recovery
+ * permission is granted per id, so it reaches every occurrence (#2113,
+ * `notePublicationPageLimit`). */
+export function repeatedFootnoteLastReferenceIndexes(
+  elements: readonly NoteReferenceSourceBlock[],
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  const last = new Map<string, number>();
+  const visit = (blocks: readonly NoteReferenceSourceBlock[], index: number) => {
+    for (const element of blocks) {
+      if (element.type === 'paragraph' && 'runs' in element) {
+        for (const run of element.runs) {
+          if (run.type === 'text' && run.noteRef?.kind === 'footnote' && run.noteRef.id.length > 0) {
+            counts.set(run.noteRef.id, (counts.get(run.noteRef.id) ?? 0) + 1);
+            last.set(run.noteRef.id, index);
+          }
+        }
+      } else if (element.type === 'table' && 'rows' in element) {
+        for (const row of element.rows) for (const cell of row.cells) visit(cell.content, index);
+      }
+    }
+  };
+  elements.forEach((element, index) => visit([element], index));
+  return new Map([...last].filter(([id]) => (counts.get(id) ?? 0) > 1));
+}
+
 /** Collect first reference order from the main document story. */
 export function noteReferenceIdsInDocumentOrder(
   elements: readonly NoteReferenceSourceBlock[],

@@ -465,7 +465,7 @@ export function renderBarChart(
     for (const category of cats) {
       horizontalCategoryLabelBandW = Math.max(
         horizontalCategoryLabelBandW,
-        measureAuthoredTextWidth(ctx, formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904)),
+        measureAuthoredTextWidth(ctx, formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors)),
       );
     }
     ctx.restore();
@@ -803,6 +803,7 @@ export function renderBarChart(
         sec.formatCode ?? null,
         chart.date1904,
         sec.displayUnits,
+        sec.formatDivisors,
       )));
     }
     secLabelBandW = wmax + 18;
@@ -826,6 +827,7 @@ export function renderBarChart(
         sec.formatCode ?? null,
         chart.date1904,
         sec.displayUnits,
+        sec.formatDivisors,
       )),
       axisLabelLineHeightPx(secFontPx),
     )
@@ -989,6 +991,7 @@ export function renderBarChart(
         category,
         chart.catAxisFormatCode,
         chart.date1904,
+        chart.catAxisFormatDivisors,
       );
       wrappedColumnCategories.push(wrapMeasuredText(
         ctx,
@@ -1001,7 +1004,7 @@ export function renderBarChart(
     const maxLines = Math.max(1, ...wrappedColumnCategories.map(lines => lines.length));
     if (maxLines > 1) innerCategoryExtraH = (maxLines - 1) * (wrapFontPx + 2);
     innerAuthoredExtraH = authoredExtraLinesHeight(
-      cats.map(category => formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904)),
+      cats.map(category => formatCategoryLabel(category, chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors)),
       axisLabelLineHeightPx(wrapFontPx),
     );
   } else if (!tableOwnsCategoryLabels && !isH && !chart.catAxisHidden && catLabelsVisible(chart)) {
@@ -1012,9 +1015,9 @@ export function renderBarChart(
       : Math.max(8, Math.min(11, (pw / n) * 0.5));
     const labels = dateAxisPlan
       ? dateAxisPlan.majorTicks.map(tick =>
-        formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904))
+        formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
       : cats.map(category =>
-        formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904));
+        formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
     innerCategoryExtraH = authoredExtraLinesHeight(
       labels,
       axisLabelLineHeightPx(labelFontPx),
@@ -2034,14 +2037,14 @@ export function renderBarChart(
     const rotRad = catLabelRotation;
     const labelEntries = dateAxisPlan
       ? dateAxisPlan.majorTicks.map(tick => ({
-        raw: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        raw: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
         fraction: tick.fraction,
         categoryIndex: -1,
       }))
       : cats.map((category, categoryIndex) => ({
         // §21.2.2.71: a category-axis numFmt formats numeric-serial categories
         // (e.g. dateAx serials → real dates). No-op for string categories.
-        raw: formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904),
+        raw: formatCategoryLabel(category.toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
         fraction: null,
         categoryIndex,
       }));

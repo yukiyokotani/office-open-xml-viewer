@@ -416,6 +416,31 @@ describe('font toggles — explicit off is a set property (ECMA-376 §18.8.2)', 
   });
 });
 
+// ─── first-match blocks ──────────────────────────────────────────
+describe('firstMatch: only the first matching format of a block applies (OpenDocument)', () => {
+  const rules: CfRule[] = [
+    { type: 'cellIs', operator: 'greaterThan', formulas: ['0'], dxfId: 0, priority: 1, stopIfTrue: false },
+    { type: 'cellIs', operator: 'greaterThan', formulas: ['1'], dxfId: 1, priority: 2, stopIfTrue: false },
+  ];
+  const other: CfRule = { type: 'expression', formula: 'TRUE', dxfId: 1, priority: 3, stopIfTrue: false };
+  const evaluate = (blocks: Parameters<typeof sheetFromColumn>[1]) =>
+    evaluateCf(numCell(1, 0, 5), 1, 0, compileCf(sheetFromColumn([1, 5], blocks)), [FILL_RED, FONT_BLUE]);
+
+  it('skips the later rules of the block, not other blocks', () => {
+    const independent = evaluate([{ sqref: [fullColumnSqref(2)], rules }]);
+    const first = evaluate([{ sqref: [fullColumnSqref(2)], rules, firstMatch: true }]);
+    // Without the flag the second rule adds its format to the first's.
+    expect(first).not.toEqual(independent);
+    expect(first).toEqual(evaluate([{ sqref: [fullColumnSqref(2)], rules: [rules[0]] }]));
+    // An overlapping block still applies.
+    const overlapping = evaluate([
+      { sqref: [fullColumnSqref(2)], rules, firstMatch: true },
+      { sqref: [fullColumnSqref(2)], rules: [other], firstMatch: true },
+    ]);
+    expect(overlapping).toEqual(independent);
+  });
+});
+
 // ─── stopIfTrue ──────────────────────────────────────────────────
 describe('stopIfTrue — a matching rule stops lower-priority rules (ECMA-376 §18.3.1.10)', () => {
   // Column [1, 5]; the cell under test holds 5, which each stopping rule

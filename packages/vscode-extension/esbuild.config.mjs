@@ -1,7 +1,7 @@
 import * as esbuild from 'esbuild';
 import { mkdir, readdir, rm } from 'node:fs/promises';
 import { mainThreadOnlyWorkerStubs } from './esbuild-worker-stub.mjs';
-import { bundledAssetSidecars } from './esbuild-asset-sidecars.mjs';
+import { bundledAssetSidecars, singleParserWasmPerFormat } from './esbuild-asset-sidecars.mjs';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -37,7 +37,9 @@ const webviewConfig = {
     '.wasm': 'file',
     '.ttf': 'file',
   },
-  plugins: [mainThreadOnlyWorkerStubs, bundledAssetSidecars],
+  // singleParserWasmPerFormat fails the build unless exactly one parser WASM
+  // per format is emitted (the bootstrap and the viewers must share the file).
+  plugins: [mainThreadOnlyWorkerStubs, bundledAssetSidecars, singleParserWasmPerFormat],
 };
 
 async function build() {

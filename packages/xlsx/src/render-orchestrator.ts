@@ -1,11 +1,6 @@
 import { decodeSvgBlobOnMainThread } from '@silurus/ooxml-core/worker';
 import type { CjkLang } from '@silurus/ooxml-core';
-import {
-  errorPlaceholderDetail,
-  errorPlaceholderTitle,
-  resolvedFromWire,
-  type ResolvedErrorPlaceholder,
-} from '@silurus/ooxml-core/internal/part-failures';
+import { ERROR_PLACEHOLDER_TEXT_HOST, onDemandModule } from '@silurus/ooxml-core/internal/part-failures';
 import { XlsxErrorPlaceholderRequired } from './part-failures.js';
 import { chartFontSubstitutions, withChartFontSubstitutions } from '@silurus/ooxml-core/internal/chart-font-sources';
 import {
@@ -557,6 +552,14 @@ export async function prefetchImages(
           : reach, NO_EFFECT_REACH),
       )) continue;
       for (const shape of grp.shapes) {
+        if (shape.fill?.fillType === 'image') {
+          // A picture fill (OpenDocument `draw:fill-image`): its natural
+          // bitmap, keyed by path; the painter scales it as a pattern.
+          setImageRef(refs, shape.fill.imagePath, {
+            imagePath: shape.fill.imagePath,
+            mimeType: shape.fill.mimeType,
+          });
+        }
         if (shape.geom.type === 'image') {
           const display = anchorDisplaySize(grp, ws, geometry, opts?.cellScale ?? 1);
           const effectFrame = groupLeafEffectFrame(grp, shape);
@@ -695,7 +698,7 @@ export async function prefetchImages(
     for (const descriptor of chartDescriptors) {
       for (const { fill, occurrence } of collectChartFillRenderedSizes(
         // The same substituted model the paint pass draws (renderCharts).
-        withChartFontSubstitutions(descriptor.chart.chart, chartFontSubstitutions(opts?.fontSources?.substitutions)),
+        withChartFontSubstitutions(descriptor.chart.chart, chartFontSubstitutions(opts?.fontSources)),
         { x: 0, y: 0, w: descriptor.displayWidth / scale, h: descriptor.displayHeight / scale },
         PT_TO_PX, 0, opts?.threeD, opts?.regionMap, opts?.chartEx, resolved,
       )) {
@@ -917,7 +920,7 @@ export function worksheetWithAutoRowHeights(
   // intent before geometry/wrapping. Render-cache inheritance also runs after
   // worker size overrides, so it must never overwrite their CSS channel.
   inheritWorksheetSizeContext(source, projection);
-  inheritSheetRenderCache(source, projection);
+  inheritSheetRenderCache(source, projection, styles);
   // The viewer/main realm supplies the authoritative Normal-font MDW used by
   // hit-testing and spacer geometry. Preserve it across the render-local clone
   // so worker/direct auto-fit wraps at the exact same column pixels.
@@ -953,7 +956,7 @@ export async function renderWorksheetViewport(
   const hasDecodedImages = !deps.ws.isDialogSheet && (
     (deps.ws.images?.length ?? 0) > 0
     || (deps.ws.shapeGroups?.some(group => (
-      group.shapes.some(shape => shape.geom.type === 'image')
+      group.shapes.some(shape => shape.geom.type === 'image' || shape.fill?.fillType === 'image')
     )) ?? false)
     || collectChartImageFillUsagesForCharts(
       (deps.ws.charts ?? []).map(chart => chart.chart),
@@ -963,6 +966,11 @@ export async function renderWorksheetViewport(
     ? withBitmapCacheLease(opts.fetchImage, opts.imageResources, paint)
     : paint();
 }
+
+/** The broken-sheet overlay, loaded with the first sheet that needs it
+ *  (#2248). A self-contained worker bundle inlines it. */
+const sheetErrorOverlay = /* @__PURE__ */ onDemandModule(async () =>
+  (await import('./sheet-error-overlay.js')).sheetErrorOverlay(ERROR_PLACEHOLDER_TEXT_HOST));
 
 /** {@link renderWorksheetViewport}'s body, verbatim; runs under the caller's
  *  render-pass lease. */
@@ -981,7 +989,7 @@ async function renderWorksheetViewportLeased(
   const styles = deps.styles;
   const measurementCtx = target.getContext('2d') as CanvasRenderingContext2D | null;
   if (!measurementCtx) throw new Error('XLSX render target does not provide a 2-D canvas context');
-  bindXlsxOfficeFontRoutes(measurementCtx, deps.ws, opts.officeFontRoutes, opts.fontSources);
+  bindXlsxOfficeFontRoutes(measurementCtx, deps.ws, opts.officeFontRoutes, opts.fontSources, opts.symbolFaces);
   pinXlsxGridGeometry(deps.ws, opts.authoritativeMdw);
   const ws = deps.ws.isDialogSheet
     ? deps.ws
@@ -1039,6 +1047,12 @@ async function renderWorksheetViewportLeased(
     await prepareWorksheetMath(ws, deps.math);
   }
 
+  // The broken-sheet overlay's code is one more asynchronous input, loaded
+  // with the first sheet that needs it (#2248); later frames find it loaded.
+  const drawSheetParseErrorOverlay = ws.parseError
+    ? sheetErrorOverlay.loaded ?? await sheetErrorOverlay.load()
+    : undefined;
+
   // Resource preparation above may yield. A viewer can be destroyed or a newer
   // frame can supersede this one while it waits; never mutate the caller-owned
   // canvas after that lifecycle generation is stale.
@@ -1088,13 +1102,13 @@ async function renderWorksheetViewportLeased(
   // error overlay in place of the grid so the workbook's OTHER sheets stay usable
   // and this tab clearly reads as "broken". Healthy sheets never take this path.
   if (ws.parseError) {
-    drawSheetParseErrorOverlay(
+    drawSheetParseErrorOverlay!(
       ctx,
       width,
       height,
       ws.name,
       ws.parseError,
-      resolvedFromWire(opts.errorPlaceholderText),
+      opts.errorPlaceholderText,
     );
     return;
   }
@@ -1132,74 +1146,5 @@ function drawDialogSheetNotice(
   ctx.textBaseline = 'middle';
   ctx.font = `${Math.max(13, base * 0.035)}px sans-serif`;
   ctx.fillText('Legacy dialog sheets are not displayed', widthPx / 2, heightPx / 2);
-  ctx.restore();
-}
-
-/**
- * RB7: paint a placeholder overlay for a worksheet whose part failed to parse.
- * A neutral fill, a warning glyph, a heading naming the sheet, and the
- * part-tagged error wrapped to a few lines. Coordinates are in CSS px (the ctx
- * is already dpr-scaled by the caller). Only ever called for a sheet carrying
- * `parseError`.
- */
-function drawSheetParseErrorOverlay(
-  ctx: CanvasRenderingContext2D,
-  widthPx: number,
-  heightPx: number,
-  sheetName: string,
-  message: string,
-  placeholder: ResolvedErrorPlaceholder | null,
-): void {
-  ctx.save();
-  ctx.fillStyle = '#f7f7f8';
-  ctx.fillRect(0, 0, widthPx, heightPx);
-  const cx = widthPx / 2;
-  const base = Math.min(widthPx, heightPx);
-
-  const glyph = Math.max(20, base * 0.1);
-  ctx.fillStyle = '#b23b3b';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.font = `${glyph}px sans-serif`;
-  ctx.fillText('⚠', cx, heightPx * 0.32);
-
-  const headSize = Math.max(13, base * 0.035);
-  ctx.fillStyle = '#333333';
-  ctx.font = `600 ${headSize}px sans-serif`;
-  ctx.fillText(
-    errorPlaceholderTitle(placeholder, `Sheet "${sheetName}" could not be displayed`),
-    cx,
-    heightPx * 0.46,
-  );
-  const detail = errorPlaceholderDetail(placeholder, message);
-  if (detail === null) {
-    ctx.restore();
-    return;
-  }
-
-  const detailSize = Math.max(10, base * 0.022);
-  ctx.fillStyle = '#666666';
-  ctx.font = `${detailSize}px sans-serif`;
-  const maxLineWidth = Math.min(widthPx * 0.8, 640);
-  const words = detail.split(/\s+/);
-  const lines: string[] = [];
-  let line = '';
-  for (const word of words) {
-    const candidate = line ? `${line} ${word}` : word;
-    if (ctx.measureText(candidate).width > maxLineWidth && line) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = candidate;
-    }
-    if (lines.length >= 4) break;
-  }
-  if (line && lines.length < 4) lines.push(line);
-  const lineHeight = detailSize * 1.4;
-  let y = heightPx * 0.52 + lineHeight;
-  for (const l of lines.slice(0, 4)) {
-    ctx.fillText(l, cx, y);
-    y += lineHeight;
-  }
   ctx.restore();
 }

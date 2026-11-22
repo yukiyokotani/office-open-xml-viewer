@@ -1,8 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fontCssApi, fontFiles, fontResolver, OFFICE_FONT_SUBSTITUTIONS } from '@silurus/ooxml-core/internal/font-sources';
-import { docxFontFamilyPlan } from './font-plan.js';
+import {
+  fontCssApi as publicFontCssApi,
+  fontFiles as publicFontFiles,
+  fontResolver as publicFontResolver,
+  fontSourceDescriptors,
+  OFFICE_FONT_SUBSTITUTIONS,
+  type FontSource,
+} from '@silurus/ooxml-core/internal/font-sources';
+
+// The descriptors behind the opaque factory results (what a load hands the
+// internal font-source pipeline).
+const descriptor = (source: FontSource) => fontSourceDescriptors([source])[0]!;
+const fontCssApi = (...args: Parameters<typeof publicFontCssApi>) => descriptor(publicFontCssApi(...args));
+const fontFiles = (...args: Parameters<typeof publicFontFiles>) => descriptor(publicFontFiles(...args));
+const fontResolver = (...args: Parameters<typeof publicFontResolver>) => descriptor(publicFontResolver(...args));
+import { docxFontFamilyPlan } from './font-demand-plan.js';
 import { formatOrdinalNumber } from '@silurus/ooxml-core';
-import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, loadDocxFontSources } from './font-source-load.js';
+import { ASCII_NUMBER_FORMATS, docxFontDemandScalars, docxRegistersEveryDeclaration, loadDocxFontSources } from './font-source-load.js';
 import { LAYOUT_SYNTHESIZED_SCALARS } from './line-layout.js';
 import type { DocxDocumentModel } from './types.js';
 
@@ -45,20 +59,87 @@ describe('docxFontDemandScalars (design §6)', () => {
     expect(dated.has('月'.codePointAt(0)!)).toBe(true);
   });
 
+  it('demands an equation\'s text fallback, and nothing at load for a metafile picture', () => {
+    // §22.1: an unconverted equation is sized by measuring its text fallback.
+    const equation = scalarsOf(docWith([{ type: 'math', nodes: [{ kind: 'sup', base: [{ kind: 'run', text: 'πr' }],
+      sup: [{ kind: 'run', text: '2' }] }], display: false, fontSize: 10 }]));
+    expect(equation).not.toBe('all');
+    for (const ch of 'πr^2') expect(equation, ch).toContain(ch.codePointAt(0)!);
+    // Measured as spelled: a private-use code is demanded as itself.
+    const literal = scalarsOf(docWith([{ type: 'math', nodes: [{ kind: 'run', text: 'x\uF061' }], display: false, fontSize: 10 }]));
+    expect(literal).not.toBe('all');
+    expect(literal).toContain(0xf061);
+    // A metafile's text records demand their own scalars when it plays (core
+    // bindMetafileFontDemand).
+    expect(scalarsOf(docWith([{ type: 'image', imagePath: 'word/media/image1.emf', mimeType: 'image/emf' }]))).not.toBe('all');
+  });
+
+  it('registers every declaration as its own face exactly where demand was \'all\' before', () => {
+    // Metafile text paints at any LOGFONT weight: a document naming a
+    // metafile picture or holding an equation keeps per-declaration faces.
+    expect(docxRegistersEveryDeclaration(docWith([{ type: 'image', imagePath: 'word/media/image1.emf', mimeType: 'image/emf' }]))).toBe(true);
+    expect(docxRegistersEveryDeclaration(docWith([{ type: 'image', imagePath: 'word/media/image1.wmf', mimeType: 'application/octet-stream' }]))).toBe(true);
+    expect(docxRegistersEveryDeclaration(docWith([{ type: 'math', nodes: [], display: false, fontSize: 10 }]))).toBe(true);
+    expect(docxRegistersEveryDeclaration(docWith([text('a'), { type: 'image', imagePath: 'word/media/image1.png', mimeType: 'image/png' }]))).toBe(false);
+  });
+
   it.each([
-    ['strong RTL text', docWith([text('مرحبا')])],
-    ['an RTL run', docWith([text('abc', { rtl: true })])],
-    ['ruby', docWith([text('漢', { ruby: { text: 'かん' } })])],
-    ['vertical text', docWith([text('a')], { section: { textDirection: 'tbRl' } as never })],
+    ['an unknown text direction', docWith([text('a')], { section: { textDirection: 'diagonal' } as never })],
+    ['a vertical text box', docWith([{ type: 'shape', textVert: 'eaVert' }])],
+    ['an east Asian combine', docWith([text('12', { eastAsianCombine: true })])],
     ['a chart', docWith([{ type: 'chart', chart: {} }])],
-    ['an equation', docWith([{ type: 'math', nodes: [], display: false, fontSize: 10 }])],
-    ['a metafile picture', docWith([{ type: 'image', imagePath: 'word/media/image1.emf', mimeType: 'image/emf' }])],
-    ['a symbol font', docWith([text('l', { fontFamily: 'Wingdings' })])],
-    ['a PUA symbol code', docWith([text('')])],
     ['a non-ASCII page number format', docWith([text('a')], { section: { pageNumType: { fmt: 'hebrew1' } } as never })],
     ['a non-ASCII field switch', docWith([{ type: 'field', fieldType: 'page', instruction: 'PAGE \\* HEBREW1', fallbackText: '1' }])],
   ])('answers all for %s', (_label, doc) => {
     expect(scalarsOf(doc)).toBe('all');
+  });
+
+  it('demands only what a symbol font may paint, never every subset', () => {
+    // A Symbol bullet (U+F0B7) and a Wingdings run: the authored codes, their
+    // F0-shifted forms, their conversion targets and VS15, nothing else.
+    const doc = docWith([text('l', { fontFamily: 'Wingdings' })]);
+    (doc.body[0] as { numbering?: object }).numbering = { text: '\uF0B7', fontFamily: 'Symbol' };
+    const scalars = scalarsOf(doc);
+    expect(scalars).not.toBe('all');
+    const set = new Set(scalars as number[]);
+    for (const cp of [0xf0b7, 0x2022, 0x6c, 0xf06c, 0x25cf, 0xfe0e]) expect(set.has(cp), cp.toString(16)).toBe(true);
+    // Bounded by the tables (layout-generated text counts as painted in each
+    // symbol family too): a few hundred scalars, not every subset.
+    expect(set.size).toBeLessThan(1024);
+    // §17.3.2.5 caps paints the upper case, converted in the run's symbol face (Α).
+    expect(new Set(scalarsOf(docWith([text('a', { fontFamily: 'Symbol', allCaps: true })])) as number[]).has(0x391)).toBe(true);
+    // A generated field result (PAGE \* ROMAN may paint V) is converted too (ς).
+    expect(new Set(scalarsOf(docWith([{ type: 'field', fieldType: 'page', instruction: 'PAGE \\* ROMAN',
+      fallbackText: 'I', fontFamily: 'Symbol' }])) as number[]).has(0x3c2)).toBe(true);
+    // A PUA code in a run none of whose slot faces is symbol-encoded is
+    // never converted: it paints, and is demanded, as itself.
+    const literal = scalarsOf(docWith([text('\uF0B7', { fontFamily: 'Arial' })]));
+    expect(literal).not.toBe('all');
+    expect(literal).toContain(0xf0b7);
+    expect(literal).not.toContain(0x2022);
+  });
+
+  it('demands right-to-left, ruby and vertical text with what their layout adds', () => {
+    const set = (doc: DocxDocumentModel) => {
+      const scalars = scalarsOf(doc);
+      expect(scalars).not.toBe('all');
+      return new Set(scalars as number[]);
+    };
+    // UAX #9 mirroring: the partner of a mirrored character.
+    const rtl = set(docWith([text('مرحبا (1)', { rtl: true })]));
+    for (const cp of [0x645, 0x28, 0x29]) expect(rtl.has(cp)).toBe(true);
+    expect(set(docWith([text('[a', { rtl: true })], { body: [{ type: 'paragraph', bidi: true, runs: [text('[a')] } as never] })).has(0x5d)).toBe(true);
+    // §17.18.44 kashida justification inserts U+0640.
+    expect(set(docWith([text('بين')], { body: [{ type: 'paragraph', alignment: 'lowKashida', runs: [text('بين')] } as never] })).has(0x640)).toBe(true);
+    // §17.3.3.25 the ruby guide text, upper-cased in a caps run.
+    const ruby = set(docWith([text('漢', { ruby: { text: 'かん', fontSizePt: 5 } }), text('x', { ruby: { text: 'ß', fontSizePt: 5 }, allCaps: true })]));
+    for (const ch of 'かんßS') expect(ruby.has(ch.codePointAt(0)!), ch).toBe(true);
+    // §17.18.93 vertical directions: the vertical presentation forms.
+    for (const textDirection of ['tbRl', 'btLr', 'tbRlV']) {
+      const vertical = set(docWith([text('あ、「')], { section: { textDirection } as never }));
+      for (const cp of [0x3042, 0x3001, 0xfe11, 0xfe41]) expect(vertical.has(cp), `${textDirection} ${cp.toString(16)}`).toBe(true);
+    }
+    expect(set(docWith([text('、')], { section: { textDirection: 'lrTb' } as never })).has(0xfe11)).toBe(false);
   });
 
   it('treats as ASCII only number formats whose every output is ASCII', () => {
@@ -109,6 +190,10 @@ function install() {
   const fetched: string[] = [];
   G.fetch = vi.fn(async (url: string) => {
     fetched.push(url);
+    // A face file the library fetches itself: its body names the file.
+    if (/\.woff2$/.test(url)) {
+      return { ok: true, status: 200, url, arrayBuffer: async () => new TextEncoder().encode(url).buffer };
+    }
     const css = url.includes('Noto') ? NOTO_CSS : url.includes('Carlito') ? CARLITO_CSS : '';
     return { ok: css !== '', status: css ? 200 : 404, url, text: async () => css };
   });
@@ -124,7 +209,7 @@ const SOURCE = fontCssApi({
   urlTemplate: 'https://fonts.example/css?family={family}',
   families: { 'Noto Sans JP': true, Carlito: true },
   query: 'x',
-  substitutes: OFFICE_FONT_SUBSTITUTIONS,
+  substitutions: OFFICE_FONT_SUBSTITUTIONS,
 });
 
 describe('loadDocxFontSources', () => {
@@ -134,20 +219,27 @@ describe('loadDocxFontSources', () => {
     const latin = docWith([text('Hello')]);
     const plan = { ...docxFontFamilyPlan(latin, [SOURCE], undefined, { routes: {} }), fallbackFamilies: ['Noto Sans JP'] };
     const loaded = await loadDocxFontSources(latin, plan, [SOURCE], { fontSet: set });
-    const status = () => Object.fromEntries(faces.filter((face) => face.family === 'Noto Sans JP')
-      .map((face) => [face.source, face.status]));
+    // A demanded subset is registered from the bytes the library fetched;
+    // the others are neither fetched nor registered.
+    const sourceName = (source: unknown) => typeof source === 'string' ? source
+      : `bytes:${new TextDecoder().decode(source as ArrayBuffer)}`;
+    const status = () => Object.fromEntries(faces.filter((face) => face.family === loaded.loaded.families.get('noto sans jp'))
+      .map((face) => [sourceName(face.source), face.status]));
     expect(status()).toEqual({
-      'url("https://fonts.example/jp-latin.woff2")': 'loaded',
+      'bytes:https://fonts.example/jp-latin.woff2': 'loaded',
       // U+3042 and U+4E00, layout probes (LAYOUT_SYNTHESIZED_SCALARS).
-      'url("https://fonts.example/jp-kana.woff2")': 'loaded',
-      'url("https://fonts.example/jp-kanji.woff2")': 'unloaded',
+      'bytes:https://fonts.example/jp-kana.woff2': 'loaded',
     });
     expect(loaded.loaded.substitutions.get('calibri')).toEqual({ family: 'Carlito' });
     expect(loaded.names).toEqual(['Calibri', 'Noto Sans JP']);
-    // One stylesheet per served family; Calibri is asked for through Carlito.
+    // One stylesheet per served family (Calibri is asked for through
+    // Carlito), and one request per demanded subset.
     expect(fetched.sort()).toEqual([
+      'https://fonts.example/carlito.woff2',
       'https://fonts.example/css?family=Carlito',
       'https://fonts.example/css?family=Noto+Sans+JP',
+      'https://fonts.example/jp-kana.woff2',
+      'https://fonts.example/jp-latin.woff2',
     ]);
     loaded.session.release();
     expect(faces).toHaveLength(0);
@@ -157,14 +249,28 @@ describe('loadDocxFontSources', () => {
     const mixedPlan = docxFontFamilyPlan(mixed, [SOURCE], undefined, { routes: {} });
     expect(mixedPlan.fallbackFamilies).toContain('Noto Sans JP');
     const second = await loadDocxFontSources(mixed, mixedPlan, [SOURCE], { fontSet: set });
-    expect(faces.filter((face) => face.family === 'Noto Sans JP').every((face) => face.status === 'loaded')).toBe(true);
+    const jp = second.loaded.families.get('noto sans jp');
+    expect(faces.filter((face) => face.family === jp).every((face) => face.status === 'loaded')).toBe(true);
     second.session.release();
+  });
+
+  it('keeps a Symbol-bullet document lazy: only the subsets of its painted scalars load', async () => {
+    const { faces, set } = install();
+    const doc = docWith([text('Hello')]);
+    (doc.body[0] as { numbering?: object }).numbering = { text: '\uF0B7', fontFamily: 'Symbol' };
+    const plan = { ...docxFontFamilyPlan(doc, [SOURCE], undefined, { routes: {} }), fallbackFamilies: ['Noto Sans JP'] };
+    const loaded = await loadDocxFontSources(doc, plan, [SOURCE], { fontSet: set });
+    const jp = loaded.loaded.families.get('noto sans jp');
+    // The kanji subset holds no scalar the bullet or its conversion paints.
+    expect(faces.filter((face) => face.family === jp).map((face) => [face.unicodeRange, face.status]))
+      .toEqual([[SUBSETS.latin, 'loaded'], [SUBSETS.kana, 'loaded']]);
+    loaded.session.release();
   });
 
   it('forwards the worker bridge options: claimed resolver URL faces go through the acquirer', async () => {
     const { faces, set, fetched } = install();
     const url = 'https://fonts.app.example/brand.woff2';
-    const source = fontResolver((request) => request.families.map((family) => ({ family, url })));
+    const source = fontResolver((request) => request.authoredFamilies.map((family) => ({ family, url })));
     const bytes = new Uint8Array(12).buffer;
     const acquireResolverFaces = vi.fn(async (_request: { readonly sourceIndex: number }) => new Map([[url, { data: bytes }]]));
     const doc = docWith([text('Hello', { fontFamily: 'Brand' })]);
@@ -174,7 +280,7 @@ describe('loadDocxFontSources', () => {
     });
     expect(acquireResolverFaces).toHaveBeenCalledTimes(1);
     expect(acquireResolverFaces.mock.calls[0][0]).toMatchObject({ sourceIndex: 0, families: [{ family: 'Brand', urls: [url] }] });
-    expect(faces.filter((face) => face.family === 'Brand').map((face) => face.source)).toEqual([bytes]);
+    expect(faces.filter((face) => face.family === loaded.loaded.families.get('brand')).map((face) => face.source)).toEqual([bytes]);
     expect(fetched).toEqual([]);
     loaded.session.release();
   });
@@ -198,7 +304,7 @@ describe('loadDocxFontSources', () => {
       urlTemplate: 'https://fonts.example/css?family={family}',
       families: { 'Noto Naskh Arabic': true },
       query: 'x',
-      substitutes: OFFICE_FONT_SUBSTITUTIONS,
+      substitutions: OFFICE_FONT_SUBSTITUTIONS,
     });
     for (const sources of [[own, naskh], [own]]) {
       const plan = docxFontFamilyPlan(doc, sources, undefined, { routes: {} });

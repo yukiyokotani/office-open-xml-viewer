@@ -1,17 +1,24 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   clampPartFailureMessage,
-  errorPlaceholderDetail,
-  errorPlaceholderTitle,
+  ERROR_PLACEHOLDER_TEXT_HOST,
   normalizeErrorPlaceholderText,
+  onDemandModule,
   PART_FAILURE_MESSAGES_MAX_UTF8,
   PartFailureDelivery,
   PartFailureLog,
   prepareErrorPlaceholder,
   resolveErrorPlaceholderFor,
-  resolvedFromWire,
   wireErrorPlaceholder,
 } from './part-failures';
+import { errorPlaceholderText, resolvedFromWire } from './error-placeholder-text';
+
+const {
+  errorPlaceholderCanvasLines,
+  errorPlaceholderDetail,
+  errorPlaceholderTitle,
+  wrapErrorPlaceholderText,
+} = errorPlaceholderText(ERROR_PLACEHOLDER_TEXT_HOST);
 
 interface Failure { readonly kind: 'slide'; readonly slideIndex: number; readonly message: string }
 const failure = (slideIndex: number, message = `ppt/slides/slide${slideIndex + 1}.xml: bad`): Failure =>
@@ -218,3 +225,71 @@ describe('PartFailureDelivery', () => {
   });
 });
 
+
+describe('placeholder text bounds', () => {
+  const width = (value: string) => [...value].length * 10;
+
+  it('caps caller and parser text before it is painted', () => {
+    const huge = 'word '.repeat(200_000);
+    const title = errorPlaceholderTitle({ title: huge, detail: undefined }, 'Built-in');
+    const detail = errorPlaceholderDetail(null, huge)!;
+    for (const text of [title, detail]) {
+      expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(1024);
+      expect(text.endsWith('…')).toBe(true);
+    }
+    expect(errorPlaceholderDetail({ title: null, detail: null }, huge)).toBeNull();
+  });
+
+  it('fits every line to the width, breaking long words and marking cut text', () => {
+    const title = wrapErrorPlaceholderText('Sheet could not be displayed at all', 120, 1, width);
+    expect(title).toHaveLength(1);
+    expect(title[0].endsWith('…')).toBe(true);
+    const detail = wrapErrorPlaceholderText(`${'x'.repeat(30)} tail`, 100, 4, width);
+    expect(detail).toEqual(['x'.repeat(10), 'x'.repeat(10), 'x'.repeat(10), 'tail']);
+    for (const line of [...title, ...wrapErrorPlaceholderText('y'.repeat(100), 100, 4, width)]) {
+      expect(width(line)).toBeLessThanOrEqual(120);
+    }
+  });
+
+  it('reuses the wrapped lines while the text, font and width are unchanged', () => {
+    const measureText = vi.fn((value: string) => ({ width: width(value) }));
+    const ctx = { font: '10px sans-serif', measureText };
+    const first = errorPlaceholderCanvasLines(ctx, 'a b c d e f', 30, 4);
+    const calls = measureText.mock.calls.length;
+    expect(errorPlaceholderCanvasLines(ctx, 'a b c d e f', 30, 4)).toBe(first);
+    expect(measureText).toHaveBeenCalledTimes(calls);
+    ctx.font = '20px sans-serif';
+    errorPlaceholderCanvasLines(ctx, 'a b c d e f', 30, 4);
+    expect(measureText.mock.calls.length).toBeGreaterThan(calls);
+  });
+});
+
+/** #2248 — placeholder code is loaded with the first failed part. */
+describe('onDemandModule', () => {
+  it('loads once, on the first request, and keeps the module', async () => {
+    const importModule = vi.fn(async () => ({ value: 1 }));
+    const lazy = onDemandModule(importModule);
+    expect(lazy.loaded).toBeUndefined();
+    expect(importModule).not.toHaveBeenCalled();
+    const first = lazy.load();
+    expect(lazy.load()).toBe(first);
+    expect(lazy.loaded).toBeUndefined();
+    expect(await first).toEqual({ value: 1 });
+    expect(lazy.loaded).toEqual({ value: 1 });
+    await lazy.load();
+    expect(importModule).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not cache a failed load: the next failed part tries again', async () => {
+    let attempts = 0;
+    const lazy = onDemandModule(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('chunk unavailable');
+      return 'loaded';
+    });
+    await expect(lazy.load()).rejects.toThrow('chunk unavailable');
+    expect(lazy.loaded).toBeUndefined();
+    await expect(lazy.load()).resolves.toBe('loaded');
+    expect(lazy.loaded).toBe('loaded');
+  });
+});

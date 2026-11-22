@@ -26,18 +26,24 @@ it('retains clear cell shading as the first cell background only', async () => {
 });
 
 it.each([
-  [1, 'cannot resolve automatic solid cell shading'],
-  [8, 'cannot retain patterned cell shading'],
-  [0x23, 'encountered unsupported formatting'],
-])('direct rejects cell shading pattern %i', async (pattern, reason) => {
-  // The converter wrote w:shd patterns (and warned and dropped the unmappable
-  // 0x23); the DOCX cell model has only a resolved solid background, and a
-  // solid pattern takes the automatic foreground here.
-  await expect(load(tableFixture(0xd612, concat(new Uint8Array([10]), modern(pattern as number))))).rejects.toMatchObject({ code: 'unsupported-content', details: { format: 'doc', reason: 'source-subset' } });
+  // An automatic solid foreground is black; pct50 (8) is half of it over the
+  // background 123456 (Word controls of both rules).
+  [1, '000000'],
+  [8, '091a2b'],
+])('paints cell shading pattern %i as its one color', async (pattern, background) => {
+  const table = await tableOf(tableFixture(0xd612, concat(new Uint8Array([10]), modern(pattern as number))));
+  expect(table.rows.map(row => row.cells.map(c => c.background))).toEqual([[background, null]]);
 });
 
-it('direct rejects table-wide shading instead of synthesizing cell overrides', async () => {
-  await expect(load(tableFixture(0xd660, concat(new Uint8Array([10]), modern())))).rejects.toMatchObject({ code: 'unsupported-content', details: { format: 'doc', reason: 'source-subset' } });
+it('direct rejects a cell shading pattern without an ST_Shd counterpart', async () => {
+  await expect(load(tableFixture(0xd612, concat(new Uint8Array([10]), modern(0x23))))).rejects.toMatchObject({ code: 'unsupported-content', details: { format: 'doc', reason: 'source-subset' } });
+});
+
+it('shades no cell for table-wide shading', async () => {
+  // sprmTSetShdTable shades the table itself, which Word paints only
+  // between spaced cells.
+  const table = await tableOf(tableFixture(0xd660, concat(new Uint8Array([10]), modern())));
+  expect(table.rows.map(row => row.cells.map(c => c.background))).toEqual([[null, null]]);
 });
 
 it.each([

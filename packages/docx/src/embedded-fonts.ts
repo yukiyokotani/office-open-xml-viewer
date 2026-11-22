@@ -17,7 +17,7 @@ import {
 } from '@silurus/ooxml-core/worker';
 import type { LayoutDiagnostic } from './layout/types.js';
 import type { DocxDocumentModel, EmbeddedFontRef } from './types';
-import { wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { libreOfficeProducerLineMetric, wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
 import { sha256 } from '@silurus/ooxml-core/internal/sha256';
 
 // Resource governance for one retained DOCX font set. The byte ceiling matches
@@ -101,6 +101,9 @@ export async function loadEmbeddedFonts(
 ): Promise<LoadedEmbeddedFonts> {
   const refs = doc.embeddedFonts;
   if (!refs || refs.length === 0) return { faces: [], metrics: {}, routes: [] };
+  const producer = doc.settings as {
+    readonly __libreOfficeLineBoxes?: boolean;
+  } | undefined;
 
   // A CSS family/weight/style tuple cannot identify two different resources.
   // Preserve document order and admit only the first definition before any
@@ -168,17 +171,24 @@ export async function loadEmbeddedFonts(
         let metric: ResolvedFontMetric | null = null;
         try {
           const openType = parseOpenTypeResourceMetrics(data);
+          // A LibreOffice producer's face (libreOfficeProducerLineMetric).
+          const libreOfficeLineBoxes = producer?.__libreOfficeLineBoxes === true;
           // The wordOpenTypeAutoLineRatios projection requires this face's
           // OS/2 code-page class and usWin data; cmap coverage is a separate
           // question. A face without declared code-page ranges does not gain
           // this authority merely because it contains a CJK glyph.
-          const line = openType?.farEastCodePage == null
+          const line = openType?.farEastCodePage == null || libreOfficeLineBoxes
             ? null
             : wordOpenTypeAutoLineRatios({
                 ...openType,
                 farEastCodePage: openType.farEastCodePage,
               });
-          if (line || openType?.averageCharWidthRatio != null) {
+          // A `libreOfficeLineBoxes` producer sizes a face without a Word
+          // projection from its hhea alone (LIBREOFFICE_FONT_LINE_BOX).
+          // (Never Word's box: libreOfficeProducerLineMetric.)
+          const libreOfficeOnly = openType && libreOfficeLineBoxes
+            ? libreOfficeProducerLineMetric(openType, undefined) : undefined;
+          if (line || libreOfficeOnly || openType?.averageCharWidthRatio != null) {
             metric = Object.freeze({
               family,
               requestedFamily: ref.fontName,
@@ -187,10 +197,13 @@ export async function loadEmbeddedFonts(
               sourceIdentity: `embedded:${family}`,
               synthesized: false,
               ...(line ? {
+                // The parsed class, as the installed-face catalogue carries
+                // it (reference-font-line-metrics.ts): grid allocation reads it.
+                farEastCodePage: openType!.farEastCodePage!,
                 lineHeightRatio: line.lineHeightRatio,
                 designAscentRatio: line.designAscentRatio,
                 designDescentRatio: line.designDescentRatio,
-              } : {}),
+              } : libreOfficeOnly ?? {}),
               ...(openType?.averageCharWidthRatio == null ? {} : {
                 averageCharWidthRatio: openType.averageCharWidthRatio,
               }),

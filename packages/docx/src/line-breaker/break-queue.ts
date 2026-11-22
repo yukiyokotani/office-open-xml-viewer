@@ -1,3 +1,4 @@
+import { remapSourceBoundary } from './source-cursor.js';
 import { createMixedSpaceState } from './mixed-space-fit.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
@@ -19,8 +20,10 @@ export function prepareBreakQueue(
   scale: number,
   measurement: LineMeasurementAdapter,
 ): LayoutSeg[] {
+  startBoundary = startBoundary ? remapSourceBoundary(segs, startBoundary) : undefined;
   const sourcedSegs = segs.map((seg, segIndex) => {
-    seg.src = { segIndex, charOffset: 0 };
+    seg.src = { segIndex, charOffset: 0,
+      ...(seg.sourceCursorStart !== undefined ? { sourceTextStart: seg.sourceCursorStart } : {}) };
     // Issue #797 / #960 — attach the SEA (Thai/Lao/Khmer) break offsets ONCE per
     // segment (perf: never per line/char). Only for SEA text; non-SEA segments
     // keep `seaBreaks` absent so their wrap path is byte-identical. The set now
@@ -178,6 +181,13 @@ export interface GapWindow {
  * placement would need a forced break or overflow at the fragment head, the
  * fragment rolls back and the next gap is searched with a strictly larger
  * requirement. Admission and placement therefore share one implementation. */
+/** An anchor character (a floating object's inline anchor) or a
+ * paragraph-mark metric placeholder: it has no advance and no ink, and moves
+ * with the unit that follows it. */
+export function isInklessLineItem(item: LayoutSeg): boolean {
+  return ('text' in item && item.metricOnly === true) || ('imagePath' in item && Boolean(item.anchor));
+}
+
 export interface GapTransaction {
   /** Continuation origin while this physical line may still take a later gap. */
   cursor: { topY: number; left: number; right: number } | null;
@@ -201,6 +211,13 @@ export interface GapTransaction {
   /** WORD_KASHIDA_LINE_FIT: requirement of a window reaching the band's far
    * edge, when it differs from `requirement` (an interior window's). */
   farEdgeRequirement?: number;
+  /** WORD_NUMBERED_FIRST_LINE_GAP_FIT: the rejected head unit of a numbered
+   * first line, which every candidate window must hold after the marker body
+   * that window resolves. */
+  numberingHead?: number;
+  /** WORD_NUMBERED_FIRST_LINE_GAP_FIT: `numberingHead` in a window that may
+   * hang its trailing overflow punctuation (one not ending at an exclusion). */
+  numberingHangingHead?: number;
 }
 
 export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx) {
@@ -242,6 +259,8 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineIntendedSingle: 0,
     lineHasInlinePicture: false,
     linePictureMarkSingle: 0,
+    lineObjectBaselineMinimum: 0,
+    lineObjectAdvanceMinimum: 0,
     lineGridCountSingle: 0,
     lineLatinGridCountSingle: 0,
     lineVisibleAscent: 0,

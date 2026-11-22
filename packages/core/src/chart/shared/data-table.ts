@@ -141,15 +141,16 @@ export function measureChartDataTable(
   const face = chartFontFamily(chart, table.fontFace, 'minor');
   ctx.save();
   ctx.font = chartFontCss(fontPx, face, table.fontBold ?? false, table.fontItalic ?? false);
-  const categoryFormat = chart.series.find(series => series.catFormatCode)?.catFormatCode
-    ?? chart.catAxisFormatCode;
+  const seriesCategoryFormat = chart.series.find(series => series.catFormatCode)?.catFormatCode;
+  const categoryFormat = seriesCategoryFormat ?? chart.catAxisFormatCode;
+  const categoryDivisors = seriesCategoryFormat == null ? chart.catAxisFormatDivisors : null;
   const categoryBuiltinId = chart.series
     .find(series => series.catFormatBuiltinId != null)?.catFormatBuiltinId;
   const headerLines = chartCategories(chart).map(category => {
     const numeric = category.trim() === '' ? Number.NaN : Number(category);
     const label = categoryBuiltinId === 14 && Number.isFinite(numeric)
       ? formatLocalizedExcelShortDate(numeric, chart.date1904)
-      : formatCategoryLabel(category, categoryFormat, chart.date1904);
+      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors);
     return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
   });
   ctx.restore();

@@ -18,6 +18,7 @@ use crate::depth::DepthGuard;
 // (every node there derives both); the math AST is only ever serialized in
 // practice. `default` on the skip-serialized fields keeps a round-trip valid.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MathNode {
     Run {

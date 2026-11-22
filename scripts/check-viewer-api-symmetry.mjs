@@ -370,7 +370,7 @@ for (const relativePath of ['docs/api-architecture-0.76.md']) {
 const publicGuide = readFileSync(path.join(root, 'site/src/pages/production.astro'), 'utf8');
 for (const token of [
   'id="ownership"',
-  'one Viewer own one document',
+  'Viewer-owned and shared documents',
   'several views must share one parse',
   'DocxDocument',
   'PptxPresentation',

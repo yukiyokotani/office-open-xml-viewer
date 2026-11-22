@@ -4,6 +4,7 @@ import {
 } from './note-overflow-policy.js';
 import { NoteRecoveryProgress, noteSourceAdvanced } from './note-recovery-progress.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
+import { DEFAULT_DOCX_COMPAT_PROFILE } from './compat-profile.js';
 import type { SectionLayoutContext } from '../layout-context.js';
 import type {
   BodyLayoutInput,
@@ -36,11 +37,13 @@ import {
   type CanonicalPageDraft,
 } from './body-pagination.js';
 import { assertAndDeepFreezeDocumentLayoutSteps } from './invariants.js';
+import { atMostWithinFloatingPrecision } from './floating-precision.js';
 import {
   bodyLayoutKernelOf,
   createFieldAcquisitionServicesView,
   createParagraphAcquisitionCacheServicesView,
 } from './runtime-state.js';
+import { sectionPhysicalPageExtent, withPageBackground } from './page-background.js';
 import {
   accumulatePagePaintNode,
   accumulatePageSectionRegion,
@@ -66,6 +69,7 @@ import {
 
 import {
   createPageFlowSectionContext,
+  effectiveHeaderFooterInlineMargins,
   physicalSectionGeometry,
   resolveSectionContextForPage,
 } from './context.js';
@@ -81,6 +85,8 @@ import {
 import {
   anchorKeysId,
   anchorLineDeferralApplies,
+  anchorLineFloor,
+  anchorLineFloorKey,
   anchorLineDeferralKey,
   anchorLineDeferralsIdentity,
   createAnchorLineDeferralProof,
@@ -100,7 +106,7 @@ import {
   type FootnoteCursor,
 } from './footnote-fragmentation.js';
 import { noteSeparatorOccurrence } from './reserved-note-separators.js';
-import { paragraphGapAdjustment } from './paragraph-spacing.js';
+import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import {
   endnoteIdsInRetainedSlice,
   footnoteIdsInRetainedLines,
@@ -115,6 +121,7 @@ import {
   sectionContentFirstAppearancePageIndices,
 } from './section-page-identity.js';
 import {
+  libreOfficeProportionalLineRetainedSpaceAfterPt,
   wordFinalParagraphAdmissionExtentPt,
   wordGridLineAdmissionExtentPt,
   wordParagraphFootnoteMayContinue,
@@ -383,6 +390,33 @@ function sectionContextForPage(owner: BodySectionLayoutInput, pageIndex: number)
   return resolveSectionContextForPage(owner.context as SectionLayoutContext, owner.pageLayout, pageIndex);
 }
 
+/** The section frame a horizontal page's header and footer stories are laid
+ * out in. Under two-page imposition their inline extent can differ from the
+ * body's (`word-two-page-sheet-imposition`); otherwise it is the page section. */
+function headerFooterStorySection(
+  owner: BodySectionLayoutInput,
+  pageIndex: number,
+  section: DeepReadonly<SectionLayoutContext>,
+): DeepReadonly<SectionLayoutContext> {
+  const margins = effectiveHeaderFooterInlineMargins(owner.pageLayout, pageIndex);
+  const { geometry } = section;
+  if (margins.marginLeft === geometry.marginLeft && margins.marginRight === geometry.marginRight) {
+    return section;
+  }
+  const storyGeometry = Object.freeze({ ...geometry, ...margins });
+  return Object.freeze({
+    ...section,
+    geometry: storyGeometry,
+    columns: Object.freeze([Object.freeze({
+      xPt: Math.abs(storyGeometry.marginLeft),
+      wPt: Math.max(
+        0,
+        storyGeometry.pageWidth - Math.abs(storyGeometry.marginLeft) - Math.abs(storyGeometry.marginRight),
+      ),
+    })]),
+  });
+}
+
 function flowSection(owner: BodySectionLayoutInput, pageIndex: number) {
   const context = sectionContextForPage(owner, pageIndex);
   return createPageFlowSectionContext({
@@ -431,10 +465,7 @@ function physicalPage(
   interval: ReservedBodyInterval,
 ) {
   const writingMode = sectionWritingMode(section);
-  const extent = uprightPhysicalExtent({
-    widthPt: section.geometry.pageWidth,
-    heightPt: section.geometry.pageHeight,
-  }, writingMode);
+  const extent = sectionPhysicalPageExtent(section);
   if (writingMode !== 'horizontal-tb') {
     return Object.freeze({
       ...extent,
@@ -619,6 +650,8 @@ function acceptNode(
     yPt: number;
     sectionFlowOwnership?: 'host-flow' | 'page';
   }>,
+  /** Retained space after still inside `blockExtentPt` (default: all of it). */
+  retainedSpaceAfterPt?: number,
 ): BodyPaginationState {
   const page = state.pages.at(-1);
   if (!page || page.kind !== 'content') throw new Error('Body content requires an active page');
@@ -661,7 +694,7 @@ function acceptNode(
         const contentStartPt = admittedBlockStartPt + ownershipRetained.spacing.beforePt;
         const contentEndPt = admittedBlockStartPt
           + blockExtentPt
-          - ownershipRetained.spacing.afterPt;
+          - (retainedSpaceAfterPt ?? ownershipRetained.spacing.afterPt);
         return Object.freeze({
           ...ownershipRetained,
           flowBounds: Object.freeze({
@@ -769,6 +802,8 @@ function frameMeetsEarlierFlowContent(
 function paragraphFragmentStartKey(cursor: ParagraphFragmentCursor): string {
   return cursor.boundary === null
     ? 'root'
+    : cursor.boundary.sourceTextStart !== undefined
+      ? `source:${cursor.boundary.sourceTextStart + cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`
     : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}`;
 }
 
@@ -921,7 +956,9 @@ export type BodyPaginationPassResult = Readonly<{
 
 interface BodyPaginationPassObserver {
   shouldPublish(committedPages: number): boolean;
-  publish(pass: BodyPaginationPassResult, processedEntries: number): void;
+  /** `noteLimit` lowers a candidate published page limit for note recovery
+   * (`notePublicationPageLimit`); absent, notes impose no bound. */
+  publish(pass: BodyPaginationPassResult, processedEntries: number, noteLimit?: NotePublicationLimit): void;
   /** Receives, in pass order, every value the pass reads from the page-anchor
    * convergence carry (see `anchorStablePageLimit`). */
   onPageAnchorInput?(event: PageAnchorInputEvent): void;
@@ -939,13 +976,21 @@ interface BodyPaginationPassObserver {
 
 type PageStartAnchors = PageAnchorPrescanInput['anchors'];
 
+/** Lowers a candidate first-unpublished page index (#2113). */
+type NotePublicationLimit = (pageIndexLimit: number) => number;
+
 /** Receives provisional snapshots of one or more passes of the canonical
  * session; `pageIndexLimit` bounds the leading pages the caller may show. */
 interface BodyPagePublisher {
   /** Pages already delivered; a publication must extend this prefix. */
   readonly publishedPages: number;
   readonly failed: boolean;
-  publish(pass: BodyPaginationPassResult, processedEntries: number, pageIndexLimit: number): void;
+  publish(
+    pass: BodyPaginationPassResult,
+    processedEntries: number,
+    pageIndexLimit: number,
+    noteLimit?: NotePublicationLimit,
+  ): void;
 }
 
 /** Checkpoint schedule for one pass: publish when the committed page count
@@ -968,10 +1013,10 @@ function passPublicationObserver(
       && committedPages >= Math.max(nextCheckpoint, publisher.publishedPages + 2)
       && (extra.canExtend?.() ?? true)
     ),
-    publish: (pass, processedEntries) => {
+    publish: (pass, processedEntries, noteLimit) => {
       const pages = pass.layout.pages.length;
       nextCheckpoint = Math.max(pages + 1, pages * 2);
-      publisher.publish(pass, processedEntries, pageIndexLimit(pass));
+      publisher.publish(pass, processedEntries, pageIndexLimit(pass), noteLimit);
     },
     ...(extra.onPageAnchorInput ? { onPageAnchorInput: extra.onPageAnchorInput } : {}),
     ...(extra.onPageAnchorRollback ? { onPageAnchorRollback: extra.onPageAnchorRollback } : {}),
@@ -1139,8 +1184,9 @@ function* paginateBodyPassSteps(
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
   const owners = ownerMap(input);
+  const compat = input.compat ?? DEFAULT_DOCX_COMPAT_PROFILE;
   // WORD_PAGE_WIDE_FOOTNOTE_AREA: only the live page replays when its common area changes.
-  const pageLocalNotes = input.compatibilityMode === 15
+  const pageLocalNotes = compat.pageWideFootnoteArea
     && (input.initialSection.context.columns.length > 1 || input.sequence.some(entry =>
       entry.kind === 'begin-section' && entry.section.context.columns.length > 1));
   // A failed note guard replays only the live physical page. Anchor observers
@@ -1300,6 +1346,34 @@ function* paginateBodyPassSteps(
     // interval, not by that reduced current-page section band.
     return interval.blockEndPt - interval.blockStartPt;
   };
+  // Producer page objects (never DOCX): their wrapping drawings register at
+  // the opening prescan of their own page, whatever the flow. They depend on
+  // the page index alone, so every pass registers them identically; they are
+  // therefore not convergence reads (the recorded prescan holds only the
+  // flow's anchors, which the destination plan reproduces).
+  const pageObjectAnchors = new Map<number, PageStartAnchors[number][]>();
+  for (const object of input.pageObjects ?? []) {
+    const anchors = pageObjectAnchors.get(object.pageIndex) ?? [];
+    for (const anchor of object.wrapAnchors) {
+      anchors.push(Object.freeze({
+        kind: 'drawing' as const,
+        occurrenceId: anchor.occurrenceId,
+        paragraphSource: anchor.paragraphSource,
+      }));
+    }
+    pageObjectAnchors.set(object.pageIndex, anchors);
+  }
+  const pageOpeningDomains = new Map<number, string>();
+  const pageObjectsAt = (target: BodyPaginationState): PageStartAnchors => {
+    if (pageObjectAnchors.size === 0) return Object.freeze([]);
+    const location = acquisitionLocation(target);
+    if (!pageOpeningDomains.has(location.pageIndex)) {
+      pageOpeningDomains.set(location.pageIndex, location.flowDomainId);
+    }
+    return Object.freeze(pageOpeningDomains.get(location.pageIndex) === location.flowDomainId
+      ? pageObjectAnchors.get(location.pageIndex) ?? []
+      : []);
+  };
   const pageStartAnchors = (target: BodyPaginationState, startIndex: number): PageStartAnchors => {
     if (anchorDestinations !== null) {
       const location = acquisitionLocation(target);
@@ -1378,13 +1452,14 @@ function* paginateBodyPassSteps(
       registeredAnchorKeys.clear();
     }
     anchors.forEach((anchor) => registeredAnchorKeys.add(anchor.occurrenceId));
-    if (anchors.length === 0) return;
+    const pageObjects = pageObjectsAt(target);
+    if (anchors.length === 0 && pageObjects.length === 0) return;
     if (!session.prescanPageAnchors) {
       throw new Error('Page-owned anchors require canonical prescan acquisition');
     }
     const location = acquisitionLocation(target);
     const delta = session.prescanPageAnchors({
-      anchors,
+      anchors: pageObjects.length === 0 ? anchors : Object.freeze([...anchors, ...pageObjects]),
       location,
       availableInlineExtentPt: location.availableBounds.widthPt,
     });
@@ -1398,17 +1473,26 @@ function* paginateBodyPassSteps(
   const anchorLineDeferred = (keys: readonly string[]): boolean => {
     if (anchorLineDeferrals === null || keys.length === 0) return false;
     const pageIndex = state.flow.pageIndex;
-    if (registeredAnchorPage === pageIndex && keys.some((key) => registeredAnchorKeys.has(key))) {
-      return false;
-    }
     const keysId = anchorKeysId(keys);
-    if (deferralPage === pageIndex && appliedDeferralKeys.has(keysId)) return true;
-    let proof: AnchorLineDeferralProof | undefined;
-    for (const key of keys) {
-      proof = anchorLineDeferrals.get(anchorLineDeferralKey(key, pageIndex));
-      if (proof) break;
+    // A settled floor holds in every context, also against a stale
+    // registration of the line's own anchors on this page.
+    const floored = state.flow.pageHasContent && keys.some((key) => (
+      (anchorLineDeferrals.get(anchorLineFloorKey(key))?.pageIndex ?? -1) > pageIndex
+    ));
+    if (!floored) {
+      if (registeredAnchorPage === pageIndex && keys.some((key) => registeredAnchorKeys.has(key))) {
+        return false;
+      }
+      if (deferralPage === pageIndex && appliedDeferralKeys.has(keysId)) return true;
+      let proof: AnchorLineDeferralProof | undefined;
+      for (const key of keys) {
+        proof = anchorLineDeferrals.get(anchorLineDeferralKey(key, pageIndex));
+        if (proof) break;
+      }
+      if (!proof || !anchorLineDeferralApplies(proof, keys, pageIndex, deferralContext)) return false;
+    } else if (deferralPage === pageIndex && appliedDeferralKeys.has(keysId)) {
+      return true;
     }
-    if (!proof || !anchorLineDeferralApplies(proof, keys, pageIndex, deferralContext)) return false;
     if (deferralPage !== pageIndex) {
       deferralPage = pageIndex;
       appliedDeferralKeys.clear();
@@ -1475,6 +1559,8 @@ function* paginateBodyPassSteps(
       resetNotePage();
       capturePageCheckpoint(nextEntryIndex);
       if (!skipPageAnchorPrescan) yield* prescanPageAnchors(state, nextEntryIndex);
+      // The closed page's unfinished footnotes, before the new page takes them.
+      footnotesCarriedFromClosedPage = new Set(pendingFootnoteContinuations.keys());
       placePendingFootnoteContinuations();
     } else {
       const nextLocation = acquisitionLocation(state);
@@ -1500,6 +1586,64 @@ function* paginateBodyPassSteps(
   const footnoteIdsByPage = new Map<number, Set<string>>();
   const footnoteReserveByPage = new Map<number, number>();
   const footnoteLayoutsByPage = new Map<number, NoteLayout[]>();
+  // Note recovery facts for progressive publication (`notePublicationPageLimit`).
+  let footnotesCarriedFromClosedPage: ReadonlySet<string> = new Set();
+  const footnoteQueryPages = new Map<string, number>();
+  let endnoteFlowStartPage = Number.POSITIVE_INFINITY;
+  const permissionsAtPassStart = notePolicy?.permissionCount ?? 0;
+  /**
+   * The published prefix must be one every later pass reproduces (#2113).
+   * Recovery grants a footnote its permission at the page that rejects it,
+   * and every later pass applies it wherever that note's permission is read:
+   * its reference admission (even on a page the reference was deferred
+   * from), reserve, continuation and note-area choices. Each footnote spans
+   * from the first page that read its permission or holds its reference or a
+   * fragment to the last such page, unbounded while it continues past the
+   * last closed page, has no closed reference yet, was permitted during this
+   * pass, or is referenced again by an entry not yet processed (a permission
+   * covers every occurrence). A span crossing the limit can still change at or after it,
+   * reject there, and change its earlier pages, so the limit drops to the
+   * span's start, repeatedly. Endnote recovery acts only in the
+   * document-end flow, so publication stops at that flow's first page. Only
+   * publication timing depends on this bound.
+   */
+  let processedEntries = 0;
+  const notePublicationPageLimit: NotePublicationLimit = (pageIndexLimit) => {
+    const spans = new Map<string, { first: number; last: number }>();
+    const extend = (id: string, pageIndex: number) => {
+      const span = spans.get(id);
+      if (!span) spans.set(id, { first: pageIndex, last: pageIndex });
+      else { span.first = Math.min(span.first, pageIndex); span.last = Math.max(span.last, pageIndex); }
+    };
+    for (const [id, pageIndex] of footnoteQueryPages) extend(id, pageIndex);
+    for (const [pageIndex, ids] of footnoteIdsByPage) for (const id of ids) extend(id, pageIndex);
+    for (const [pageIndex, notes] of footnoteLayoutsByPage) {
+      for (const note of notes) extend(note.source.storyInstance, pageIndex);
+    }
+    const live = state.flow.pageIndex;
+    const closedReference = new Set<string>();
+    for (const [pageIndex, ids] of footnoteIdsByPage) if (pageIndex < live) ids.forEach(id => closedReference.add(id));
+    const unbounded = new Set(footnotesCarriedFromClosedPage);
+    // A later reference to the same footnote may still be rejected.
+    for (const { id, entryIndex } of input.repeatedFootnoteLastEntries ?? []) {
+      if (entryIndex >= processedEntries) unbounded.add(id);
+    }
+    for (const { kind, id } of notePolicy?.permittedSince(permissionsAtPassStart) ?? []) {
+      if (kind === 'footnote') unbounded.add(id);
+    }
+    for (const [id, span] of spans) {
+      if (unbounded.has(id) || !closedReference.has(id)) span.last = Number.POSITIVE_INFINITY;
+    }
+    let limit = Math.min(pageIndexLimit, endnoteFlowStartPage);
+    // Descending starts compute the closure in one sweep: after lowering,
+    // every previously visited span starts at or beyond the new limit.
+    // Repeated unsorted scans would be quadratic for a chain of notes
+    // continuing onto the next note's reference page.
+    for (const span of [...spans.values()].sort((a, b) => b.first - a.first)) {
+      if (span.first < limit && span.last >= limit) limit = span.first;
+    }
+    return limit;
+  };
   let liveNoteLayoutsById = new Map<string, NoteLayout[]>();
   // Non-zero source-cut shifts of committed continued tails, by page and note
   // (FootnotePartition.hostShiftPt; footnoteBandPlan).
@@ -1524,7 +1668,7 @@ function* paginateBodyPassSteps(
   };
   const pageFootnoteBandId = (pageIndex: number) => `notes:page:${pageIndex}`;
   const perColumnFootnoteBands = (): boolean => wordPerColumnFootnoteBandsApply(
-    input.compatibilityMode,
+    compat,
     activeRegion(state).columns.length,
   );
   const activeFootnoteBandId = (): string => {
@@ -1555,7 +1699,15 @@ function* paginateBodyPassSteps(
   // any body (placePendingFootnoteContinuations). Not a newly referenced note,
   // a notice, a separator-only band or a carried line-free paragraph.
   const incomingTailPages = new Set<number>();
-  const recoveryAllowed = (kind: 'footnote' | 'endnote', ids: readonly string[]) => noteOverflowAllowed(services, kind, ids);
+  const recoveryAllowed = (kind: 'footnote' | 'endnote', ids: readonly string[]) => {
+    if (kind === 'footnote') {
+      const pageIndex = state.flow.pageIndex;
+      for (const id of ids) {
+        footnoteQueryPages.set(id, Math.min(footnoteQueryPages.get(id) ?? pageIndex, pageIndex));
+      }
+    }
+    return noteOverflowAllowed(services, kind, ids);
+  };
   const assertAdmission = (ids: readonly string[], reservePt: number, chargePt: number) => {
     if (recoveryAllowed('footnote', ids)) {
       noteProgress.authorize(notePolicy?.failure('footnote', ids));
@@ -2532,6 +2684,7 @@ function* paginateBodyPassSteps(
     // first publication must never run in the same uninterrupted task as the
     // layout work that produced it, otherwise the browser cannot paint it.
     if (observer?.shouldPublish(state.pages.length)) {
+      processedEntries = entryIndex;
       observer.publish(paginationPassResult(
         state,
         owners,
@@ -2544,7 +2697,7 @@ function* paginateBodyPassSteps(
         [],
         [],
         frameObservations,
-      ), entryIndex);
+      ), entryIndex, notePublicationPageLimit);
     }
     const entry = input.sequence[entryIndex]!;
     if (entry.kind === 'consume-source') {
@@ -2598,7 +2751,7 @@ function* paginateBodyPassSteps(
       // WORD_CONTINUOUS_SECTION_FOOTNOTE_PAGE separates the mode15 observation
       // from the normative WW8 compatibility flag and its later-reference limit.
       const mayShareFootnotePage = wordContinuousSectionMayShareFootnotePage(
-        input.compatibilityMode, input.footnoteLayoutLikeWW8, pageHasColumnFootnoteBands(state.flow.pageIndex));
+        compat, pageHasColumnFootnoteBands(state.flow.pageIndex));
       const boundaryPage = state.flow.pageIndex;
       try {
         yield* commitTransition(
@@ -2614,7 +2767,7 @@ function* paginateBodyPassSteps(
           ),
           entryIndex + 1,
         );
-        if (notesBeforeBoundary && mayShareFootnotePage && input.compatibilityMode !== 15
+        if (notesBeforeBoundary && mayShareFootnotePage && !compat.continuousSectionKeepsFootnotePage
           && effectiveStartType === 'continuous' && state.flow.pageIndex === boundaryPage) {
           continuousSectionNotePage = boundaryPage;
         }
@@ -2661,7 +2814,8 @@ function* paginateBodyPassSteps(
       const spacing = resumed?.kind === 'paragraph'
         ? { suppressBefore: resumed.suppressBefore, overlap: 0 }
         : paragraphGapAdjustment(previousParagraph, block, previousAfterPt,
-          block.continuousSectionRole === 'suppress-before' ? 0 : block.spaceBeforePt);
+          block.continuousSectionRole === 'suppress-before' ? 0 : block.spaceBeforePt,
+          paragraphGapFoldOf(compat));
       const spacingOverlap = block.continuousSectionRole === 'drop-previous-after'
         ? previousAfterPt
         : spacing.overlap;
@@ -2686,6 +2840,9 @@ function* paginateBodyPassSteps(
       // A text-anchored frame takes no flow space, so the next in-flow
       // paragraph collapses its spacing against the text before the frames
       // (WORD_TEXT_FRAME_PRECEDING_TEXT_PUSH).
+      // Space after left inside the last fragment's flow charge, when the
+      // region bottom cut part of it (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT).
+      let cutSpaceAfterPt = 0;
       while (cursor) {
         const fragmentStartKey = paragraphFragmentStartKey(cursor);
         let location = acquisitionLocation(state);
@@ -2716,7 +2873,7 @@ function* paginateBodyPassSteps(
             || (
               cursor.boundary === null
               && block.pageBreakBefore
-              && input.compatibilityMode === 15
+              && compat.pageBreakBeforeSuppressesTopSpacing
               && !state.flow.pageHasContent
             )
             || (
@@ -2999,8 +3156,8 @@ function* paginateBodyPassSteps(
             hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
             followsNextPageSectionBoundary,
             markExtentPt: acquired.blockExtentPt,
-            markBelowBaselinePt: acquired.markBelowBaselinePt ?? 0,
             markOnLineGrid: acquired.markOnLineGrid === true,
+            markMultipleLeadingPt: acquired.markMultipleLeadingPt ?? 0,
             markGridAfterLeadingPt: acquired.markGridAfterLeadingPt,
           });
         // A proven anchor-line deferral ends this page just above that line.
@@ -3068,15 +3225,19 @@ function* paginateBodyPassSteps(
           }));
           pendingFrameRun = null;
         }
+        const chargePt = Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt);
+        const retainedSpaceAfterPt = libreOfficeProportionalLineRetainedSpaceAfterPt(selected.fragment, chargePt);
+        cutSpaceAfterPt = selected.fragment.spacing.afterPt - retainedSpaceAfterPt;
         state = acceptPageNode(
           state,
           selected.fragment,
           block.source,
-          Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt),
+          chargePt,
           fragmentStartKey,
           acceptedOccurrenceIds,
           allocations,
           acquired.placement,
+          retainedSpaceAfterPt,
         );
         const notes = plannedNotes
           ?? footnoteAdmission(selected.fragment, location.availableBounds.widthPt);
@@ -3099,7 +3260,11 @@ function* paginateBodyPassSteps(
         location = acquisitionLocation(state);
         session.moveAcquisitionCursor(location);
       }
-      if (!block.textFrameMember) previousParagraph = block;
+      if (!block.textFrameMember) {
+        previousParagraph = cutSpaceAfterPt > 0
+          ? Object.freeze({ ...block, spaceAfterPt: Math.max(0, block.spaceAfterPt - cutSpaceAfterPt) })
+          : block;
+      }
     } else {
       previousParagraph = null;
       // Only a paragraph anchors a frame run (ECMA-376 §17.3.1.11).
@@ -3222,27 +3387,31 @@ function* paginateBodyPassSteps(
           chargePt: flowChargePt(acquired) + notes.reservePt,
         });
         const seenCandidates = new Set<string>();
-        // The region extent and the fragment charge reconstruct the same
-        // authored boundary through different arithmetic, so the comparison
-        // must tolerate single-ULP drift exactly like the invariant layer
-        // (invariants.ts atMostWithinFloatingPrecision, mirrored inline here
-        // because the layout-boundary gate pins this module's invariants
-        // import to exactly assertAndDeepFreezeDocumentLayout): a fragment
-        // whose charge exceeds the region only within floating-point
-        // precision is already placed, and with an unchanged footnote
-        // reserve the retry request would be identical to the first — a
-        // raw `>` here could never converge and would trip the fingerprint
-        // guard below on floating-point dust.
-        const fitsWithinFloatingPrecision = (chargePt: number, heightPt: number): boolean =>
-          chargePt <= heightPt
-          || chargePt - heightPt
-            <= Number.EPSILON * Math.max(1, Math.abs(chargePt), Math.abs(heightPt));
+        // Admission decides fit exactly as page containment will check it
+        // (invariants.ts, through the shared floating-precision predicate):
+        // the allocation end placeFlowNode will retain, cursor + charge,
+        // against the region end net of the committed and candidate note
+        // reserves. The region extent handed to the measurer is a difference
+        // of page coordinates whose rounding scales with those coordinates,
+        // so a table that ends a column exactly can exceed that extent by
+        // several ULPs of the extent; comparing charge with the extent would
+        // reject a fragment containment accepts, or accept one it rejects.
+        // A fragment whose end agrees with the region end within
+        // floating-point precision is already placed: with an unchanged
+        // footnote reserve the retry request would be identical to the
+        // first and would trip the fingerprint guard below. Genuine
+        // overshoot still retries and still reaches that guard. An
+        // allocation that charges no block extent and no reserve claims no
+        // space and fits even a region the cursor has already reached.
+        const admittedEndFits = (chargePt: number, reservePt: number): boolean =>
+          (chargePt <= 0 && reservePt <= 0)
+          || atMostWithinFloatingPrecision(
+            state.flow.cursorBlockPt + chargePt,
+            activeBlockEndPt(state) - state.footnoteReservePt - reservePt,
+          );
         while (
           !acquired.requiresFreshFlowRegion
-          && !fitsWithinFloatingPrecision(
-            flowChargePt(acquired) + notes.reservePt,
-            location.availableBounds.heightPt,
-          )
+          && !admittedEndFits(flowChargePt(acquired), notes.reservePt)
         ) {
           const fingerprint = JSON.stringify({
             advancePt: acquired.blockExtentPt,
@@ -3441,7 +3610,8 @@ function* paginateBodyPassSteps(
   // Continuation belongs to the endnote area, not just an individual note:
   // §17.11.4 applies also when the next band starts with a new note.
   let endnoteFlowStarted = false;
-  const modernEndnotes = input.compatibilityMode === 15 && activeRegion(state).columns.length > 1;
+  if (endnoteIds.length > 0) endnoteFlowStartPage = state.flow.pageIndex;
+  const modernEndnotes = compat.pageWideEndnoteArea && activeRegion(state).columns.length > 1;
   if (modernEndnotes) {
     let pending: readonly PageNoteSource[] = endnoteIds.map(id => Object.freeze({ id, cursor: null }));
     while (pending.length > 0) {
@@ -3557,10 +3727,11 @@ function* paginateBodyPassSteps(
       observer?.onPageDrafts?.(state.pages);
       yield state.pages.length;
       if (observer?.shouldPublish(state.pages.length)) {
+        processedEntries = input.sequence.length;
         observer.publish(paginationPassResult(state, owners, session, allocations,
           footnoteReserveByPage, footnoteLayoutsByPage, footnoteHostShiftsByPage,
           terminalDiagnostic, anchorInputs, serializedAnchorInputs, frameObservations,
-          frameAnchorObservations, endnoteLayoutsByPage), input.sequence.length);
+          frameAnchorObservations, endnoteLayoutsByPage), input.sequence.length, notePublicationPageLimit);
       }
     }
   }
@@ -3578,6 +3749,17 @@ function* paginateBodyPassSteps(
     // Text-only tail transitions have no anchor prescan to suspend them.
     // Publish a safe page draft/checkpoint after each admitted note fragment,
     // so slicing and cancellation do not wait for the entire remaining note.
+    observer?.onPageDrafts?.(state.pages);
+    yield state.pages.length;
+  }
+  // A page object on a page past the content: the document runs to its page
+  // with empty pages, as LibreOffice extends it (ODF §19.758).
+  const lastPageObjectIndex = Math.max(-1, ...(input.pageObjects ?? []).map((object) => object.pageIndex));
+  while (state.flow.pageIndex < lastPageObjectIndex) {
+    yield* commitTransition(
+      advanceToPage(state.flow, state.flow.section, 'overflow'),
+      input.sequence.length,
+    );
     observer?.onPageDrafts?.(state.pages);
     yield state.pages.length;
   }
@@ -3795,11 +3977,12 @@ function measurePageHeaderFooterReserve(
   session: BodyLayoutSession,
   context: PageStoryContext,
 ): HeaderFooterReserve {
-  const { owner, pageIndex, section, firstPageOfSection, pageNumber } = context;
+  const { owner, pageIndex, firstPageOfSection, pageNumber } = context;
   // Vertical stories paint in physical page space; their overflow must not
   // charge the logical body interval. Use the resolved frame, including native
   // flow facts, rather than the text-direction token alone.
-  if (sectionWritingMode(section) !== 'horizontal-tb') return { top: 0, bottom: 0 };
+  if (sectionWritingMode(context.section) !== 'horizontal-tb') return { top: 0, bottom: 0 };
+  const section = headerFooterStorySection(owner, pageIndex, context.section);
   const inlineExtentPt = Math.max(
     0,
     section.geometry.pageWidth
@@ -3888,11 +4071,22 @@ function composePageStories(
   owners: ReadonlyMap<string, BodySectionLayoutInput>,
   footnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
   endnotesByPage: ReadonlyMap<number, readonly NoteLayout[]>,
+  pageObjects: BodyLayoutInput['pageObjects'] = undefined,
+  backgroundStory: SourceRef | null = null,
 ): DocumentLayout {
   const storyDiagnostics: LayoutDiagnostic[] = [];
+  const pageObjectSources = new Map<number, SourceRef[]>();
+  for (const object of pageObjects ?? []) {
+    const sources = pageObjectSources.get(object.pageIndex) ?? [];
+    sources.push(object.source);
+    pageObjectSources.set(object.pageIndex, sources);
+  }
   const visited = new WeakSet<object>();
   const pages = layout.pages.map((page, pageIndex) => {
-    if (page.parityBlank) return page;
+    // A parity blank page carries no stories, except a page object anchored
+    // to it (LibreOffice draws it there).
+    // The §17.2.1 background story belongs to every page, parity blanks too.
+    if (page.parityBlank && !pageObjectSources.has(page.pageIndex) && backgroundStory === null) return page;
     const owner = owners.get(page.sectionOccurrenceId);
     if (!owner) throw new Error(`Unknown body section ${page.sectionOccurrenceId}`);
     if (!session.layoutStory) {
@@ -3900,14 +4094,23 @@ function composePageStories(
         || Object.values(owner.footers).some((source) => source !== null)
         || (footnotesByPage.get(page.pageIndex)?.length ?? 0) > 0
         || (endnotesByPage.get(page.pageIndex)?.length ?? 0) > 0;
-      if (!hasPageStories) return page;
+      if (!hasPageStories && !pageObjectSources.has(page.pageIndex) && backgroundStory === null) return page;
       throw new Error('Page-story composition requires a story-capable layout session');
     }
     const vertical = sectionWritingMode(page.section) !== 'horizontal-tb';
+    const horizontalStorySection = vertical
+      ? page.section
+      : headerFooterStorySection(owner, page.pageIndex, page.section);
+    // A vertical section's page stories are laid out in the upright physical
+    // page, so they take the physical header/footer margins of the page
+    // (`word-two-page-sheet-imposition`) after the frame conversion.
     const geometry = vertical
       // `word-vertical-section-physical-header-footer`
-      ? physicalSectionGeometry(page.section.geometry, page.section.sectionFlow)
-      : page.section.geometry;
+      ? Object.freeze({
+          ...physicalSectionGeometry(page.section.geometry, sectionWritingMode(page.section)),
+          ...effectiveHeaderFooterInlineMargins(owner.pageLayout, page.pageIndex),
+        })
+      : horizontalStorySection.geometry;
     const inlineStartPt = Math.abs(geometry.marginLeft);
     const inlineExtentPt = Math.max(
       0,
@@ -3927,7 +4130,7 @@ function composePageStories(
           })]),
           textDirection: 'lrTb',
         })
-      : page.section;
+      : horizontalStorySection;
     const sourceFor = (kind: 'header' | 'footer') => selectedHeaderFooterStory(
       kind === 'header' ? owner.headers : owner.footers,
       {
@@ -3960,8 +4163,102 @@ function composePageStories(
       }), kind, geometry);
       return translateStoryLayout(story, translation);
     };
-    const header = acquire('header');
-    const footer = acquire('footer');
+    const header = page.parityBlank ? null : acquire('header');
+    const footer = page.parityBlank ? null : acquire('footer');
+    // ECMA-376 §17.2.1: the background drawings (page-anchored, page-sized,
+    // behind text, unwrapped) are a page story laid out in the upright page
+    // frame like a header, over the whole page box, and painted in the
+    // page's `background` layer beneath every other story.
+    const backgroundDomainId = `story:page-background:page:${page.pageIndex}`;
+    const backgroundBounds = Object.freeze({
+      xPt: 0, yPt: 0, widthPt: geometry.pageWidth, heightPt: geometry.pageHeight,
+    });
+    const background = backgroundStory === null ? null : (() => {
+      const { story, translation } = layoutBandStory((band) => session.layoutStory!({
+        source: backgroundStory,
+        pageStoryOwner: owner.sectionOccurrenceId,
+        pageIndex: page.pageIndex,
+        pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
+        section: pageStorySection,
+        container: {
+          id: backgroundDomainId,
+          kind: 'header',
+          // Only page-positioned drawings: a page-sized drawing must not
+          // exhaust a band.
+          capacity: 'unbounded',
+          bounds: backgroundBounds,
+        },
+        ...(band ? { bandTranslationPt: band } : {}),
+      }), 'header', geometry);
+      return translateStoryLayout(story, translation);
+    })();
+    // The page's producer page objects: a header-class page story whose
+    // drawings are positioned on the page (their wrap was registered on the
+    // body at the page's start). It is laid out in the body's own section
+    // frame (as the prescan resolved its exclusions, vertical pages too) and
+    // painted in the body stacking context, so its drawings order with body
+    // text and body anchors as body page anchors do.
+    // A parity blank page has no body region: its page objects (nothing to
+    // wrap there) are laid out like the page's other stories, in the
+    // upright page frame.
+    const blankPageObjects = page.parityBlank;
+    const bodyGeometry = blankPageObjects ? geometry : page.section.geometry;
+    // The inline frame the prescan resolved the objects' exclusions in: the
+    // page's opening body flow domain (its first column), so column- and
+    // paragraph-relative positions paint where they wrap.
+    const openingDomainId = page.sectionRegions[0]?.flowDomainIds[0];
+    const openingDomain = blankPageObjects || openingDomainId === undefined
+      ? undefined
+      : page.flowDomains.find((domain) => domain.id === openingDomainId);
+    const pageObjectBounds = Object.freeze({
+      xPt: openingDomain ? openingDomain.logicalBounds.xPt : Math.abs(bodyGeometry.marginLeft),
+      yPt: 0,
+      widthPt: openingDomain
+        ? openingDomain.logicalBounds.widthPt
+        : Math.max(0, bodyGeometry.pageWidth
+          - Math.abs(bodyGeometry.marginLeft) - Math.abs(bodyGeometry.marginRight)),
+      heightPt: bodyGeometry.pageHeight,
+    });
+    const pageObjectLayouts = (pageObjectSources.get(page.pageIndex) ?? []).map((source) => {
+      const { story, translation } = layoutBandStory((band) => session.layoutStory!({
+        source,
+        pageStoryOwner: owner.sectionOccurrenceId,
+        pageIndex: page.pageIndex,
+        pageNumber: { displayNumber: page.pageNumber.displayNumber, format: page.pageNumber.format },
+        section: blankPageObjects ? pageStorySection : page.section,
+        container: {
+          id: `story:${source.storyInstance}`,
+          kind: 'header',
+          // The story only carries page-positioned drawings; a drawing as
+          // large as the page must not exhaust a band.
+          capacity: 'unbounded',
+          bounds: pageObjectBounds,
+        },
+        ...(band ? { bandTranslationPt: band } : {}),
+      }), 'header', bodyGeometry);
+      return Object.freeze({ id: `story:${source.storyInstance}`, story: translateStoryLayout(story, translation) });
+    });
+    const pageObjectNodes = pageObjectLayouts.flatMap(({ story }) => story.blocks);
+    // The page objects' domains are in the body's section frame, as their
+    // contents are; physical bounds through the page's own transform.
+    const bodyRegion = blankPageObjects ? undefined : page.sectionRegions[0];
+    const pageObjectDomains = pageObjectLayouts.map(({ id, story }) => {
+      const logicalBounds = Object.freeze({
+        xPt: pageObjectBounds.xPt,
+        yPt: story.flowBounds.yPt,
+        widthPt: pageObjectBounds.widthPt,
+        heightPt: story.advancePt,
+      });
+      return Object.freeze({
+        id,
+        kind: 'header' as const,
+        ...(bodyRegion ? { sectionRegionId: bodyRegion.id } : {}),
+        logicalBounds,
+        physicalBounds: bodyRegion
+          ? Object.freeze(transformRect(bodyRegion.coordinateSpace.logicalToPhysical, logicalBounds))
+          : logicalBounds,
+      });
+    });
     const retainedNotes = footnotesByPage.get(page.pageIndex) ?? [];
     const noteRegion = page.sectionRegions.at(-1);
     const noteStack = footnoteStack(page, retainedNotes, sessionNotePolicies.get(session));
@@ -3993,6 +4290,12 @@ function composePageStories(
         ))
       : noteLogicalBounds;
     const storyDomains = [
+      ...(background ? [Object.freeze({
+        id: backgroundDomainId,
+        kind: 'header' as const,
+        logicalBounds: backgroundBounds,
+        physicalBounds: backgroundBounds,
+      })] : []),
       ...(header ? [Object.freeze({
         id: `story:header:page:${page.pageIndex}`,
         kind: 'header' as const,
@@ -4038,6 +4341,7 @@ function composePageStories(
               : logicalBounds,
           });
         })),
+      ...pageObjectDomains,
       ...(footer ? [Object.freeze({
         id: `story:footer:page:${page.pageIndex}`,
         kind: 'footer' as const,
@@ -4072,7 +4376,13 @@ function composePageStories(
     }
     const noteIndex = lastBodyIndex < 0 ? withHeader.length : lastBodyIndex + 1;
     const entries: PageLayerNode[] = [
+      ...(background?.blocks.map((node): PageLayerNode => ({
+        layer: 'background', node, coordinateSpace,
+      })) ?? []),
       ...withHeader.slice(0, noteIndex),
+      ...pageObjectNodes.map((node): PageLayerNode => ({
+        layer: 'body', node, coordinateSpace: blankPageObjects ? coordinateSpace : 'section-logical',
+      })),
       ...notes.map((node): PageLayerNode => ({
         layer: 'notes', node, coordinateSpace: 'section-logical',
       })),
@@ -4083,14 +4393,20 @@ function composePageStories(
     ];
     // The body pass collected only body diagnostics; these stories are
     // composed here, so their own diagnostics are collected here.
-    storyDiagnostics.push(...[...(header?.blocks ?? []), ...notes, ...(footer?.blocks ?? [])]
+    storyDiagnostics.push(...[...(background?.blocks ?? []), ...(header?.blocks ?? []), ...pageObjectNodes, ...notes,
+      ...(footer?.blocks ?? [])]
       .flatMap((node) => nestedStoryDiagnostics(node, visited)));
     return Object.freeze({
       ...page,
+      // A parity blank page holding a page object is no longer blank: it
+      // carries that drawing (LibreOffice draws it on the inserted page).
+      ...(page.parityBlank && pageObjectSources.has(page.pageIndex) ? { parityBlank: false } : {}),
       flowDomains: Object.freeze([...page.flowDomains, ...storyDomains]),
       layers: createPageLayers(entries),
       readingOrder: Object.freeze([
+        ...(background?.blocks.map((node) => node.id) ?? []),
         ...(header?.blocks.map((node) => node.id) ?? []),
+        ...pageObjectNodes.map((node) => node.id),
         ...page.readingOrder,
         ...notes.map((note) => note.id),
         ...(footer?.blocks.map((node) => node.id) ?? []),
@@ -4579,6 +4895,7 @@ function resolveAnchorLineTests(
   pass: BodyPaginationPassResult,
   observed: Map<string, PageWrapDestination>,
   previous: AnchorLineDeferrals,
+  prefixTests = false,
 ): Readonly<{ plan: ReadonlyMap<string, PageWrapDestination>; deferrals: AnchorLineDeferrals }> {
   const events = pass.anchorInputs;
   const prescansByPage = new Map<number, number[]>();
@@ -4638,6 +4955,52 @@ function resolveAnchorLineTests(
       line.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
       continue;
     }
+    // Prefix tests (LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY, cycle recovery only,
+    // see `converge`): the retest below cannot record that the earlier lines
+    // registered on N were accepted, so a pass that registers them again with
+    // L, the last registered line, and pushes them all would retest the first
+    // of them for ever. Instead L is deferred from N by this pass's proof and
+    // the next pass registers the source-order prefix without L. The proof
+    // applies only where a pass reaches L on N with exactly that prefix
+    // registered, that is, where the prefix fits; when it does not, its own
+    // last line is deferred the same way.
+    if (prefixTests) {
+      const lastKey = [...registeredAt.keys()].reduce<string | null>((latest, key) => {
+        const order = positions!.get(key)?.order;
+        return order !== undefined && (latest === null || order > positions!.get(latest)!.order) ? key : latest;
+      }, null);
+      const lastLineKey = lastKey === null ? null : positions.get(lastKey)!.lineKey;
+      const lastLine = lastKey === null ? [] : [...positions]
+        .filter(([, position]) => position.lineKey === lastLineKey)
+        .map(([key]) => key);
+      const lastRegistration = lastKey === null ? -1 : registeredAt.get(lastKey)!;
+      if (lastKey !== null && lastLineKey !== lineKey
+        && lastLine.every((key) => registeredAt.get(key) === lastRegistration
+          && (observed.get(key)?.pageIndex ?? -1) > pageIndex)) {
+        const proof = createAnchorLineDeferralProof(
+          lastLine,
+          pageIndex,
+          events,
+          pass.serializedAnchorInputs,
+          lastRegistration,
+          pageStartAnchorsIdentity,
+        );
+        deferrals ??= new Map(previous);
+        lastLine.forEach((key) => deferrals!.set(anchorLineDeferralKey(key, pageIndex), proof));
+        plan ??= new Map(observed);
+        const deferred = new Set(lastLine);
+        for (const key of registeredAt.keys()) {
+          if (deferred.has(key) || !observed.has(key)) continue;
+          const event = events[registeredAt.get(key)!] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
+          plan.set(key, Object.freeze({
+            ...observed.get(key)!,
+            pageIndex,
+            flowDomainId: event.flowDomainId,
+          }));
+        }
+        continue;
+      }
+    }
     plan ??= new Map(observed);
     const registration = events[registrationIndex] as Extract<PageAnchorInputEvent, { kind: 'prescan' }>;
     for (const key of line) {
@@ -4665,6 +5028,25 @@ function compareTableSourceOrder(left: string, right: string): number {
     if (a[index] !== b[index]) return a[index]! - b[index]!;
   }
   return a.length - b.length || (left < right ? -1 : left > right ? 1 : 0);
+}
+
+/** Source order of two page-owned drawings: their anchor paragraphs' body
+ * paths element by element, then their occurrence keys (whose trailing
+ * number follows the anchors' document order within one paragraph). */
+function compareDrawingSourceOrder(
+  leftKey: string,
+  left: SourceRef,
+  rightKey: string,
+  right: SourceRef,
+): number {
+  for (let index = 0; index < Math.min(left.path.length, right.path.length); index += 1) {
+    if (left.path[index] !== right.path[index]) return left.path[index]! - right.path[index]!;
+  }
+  if (left.path.length !== right.path.length) return left.path.length - right.path.length;
+  const ordinal = (key: string) => Number(/(\d+)$/.exec(key)?.[1] ?? NaN);
+  const byOrdinal = ordinal(leftKey) - ordinal(rightKey);
+  return Number.isFinite(byOrdinal) && byOrdinal !== 0 ? byOrdinal
+    : leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
 }
 
 function changedAnchorKeys(
@@ -4833,6 +5215,12 @@ function* paginateBodyWithAnchorConvergenceSteps(
     // Pages below this index are closed in the first pass.
     let closedBefore = 0;
     let abandoned = false;
+    // A note permission granted while the passes overlap reaches pages the
+    // second pass may already have laid out without it, unlike the ordinary
+    // second pass, which starts with it (#2113). Stop overlapping then.
+    const overlapPolicy = noteOverflowPolicyOf(services);
+    const overlapPermissions = overlapPolicy?.permissionCount ?? 0;
+    const permissionsChanged = () => (overlapPolicy?.permissionCount ?? 0) !== overlapPermissions;
     const addDestinations = (pages: readonly LayoutPage[]) => {
       for (const [key, destination] of pageAnchorDestinationPlan({ pages, diagnostics: [] })) {
         // A destination on a closed page cannot reappear on a later one; if
@@ -4852,7 +5240,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     const firstPublisher = anchorPassObserver(null)!;
     const firstObserver: BodyPaginationPassObserver = {
       shouldPublish: (committedPages) => firstPublisher.shouldPublish(committedPages),
-      publish: (pass, processedEntries) => firstPublisher.publish(pass, processedEntries),
+      publish: (pass, processedEntries, noteLimit) => firstPublisher.publish(pass, processedEntries, noteLimit),
       onPageAnchorInput: (event) => firstPublisher.onPageAnchorInput?.(event),
       onPageAnchorRollback: (pageIndex) => firstPublisher.onPageAnchorRollback?.(pageIndex),
       // Destinations come from each newly closed page alone: they depend
@@ -4883,7 +5271,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     const secondPublisher = anchorPassObserver(view, () => firstResult !== null)!;
     const secondObserver: BodyPaginationPassObserver = {
       shouldPublish: (committedPages) => !abandoned && secondPublisher.shouldPublish(committedPages),
-      publish: (pass, processedEntries) => secondPublisher.publish(pass, processedEntries),
+      publish: (pass, processedEntries, noteLimit) => secondPublisher.publish(pass, processedEntries, noteLimit),
       // One body entry can open several pages. The second pass suspends
       // until the first has closed the page this read needs.
       pageAnchorPlanPending: (pageIndex) => {
@@ -4900,11 +5288,14 @@ function* paginateBodyWithAnchorConvergenceSteps(
     );
     // Both passes advance one suspension at a time, each forwarded to the
     // scheduler, so host turns and cancellation are never starved.
-    const secondMayStep = () => !abandoned && secondResult === null && (
-      secondWaitsFor !== null
-        ? closedBefore > secondWaitsFor
-        // Keep the second pass at most one page behind the closed prefix.
-        : closedBefore > secondLive + 1);
+    const secondMayStep = () => {
+      if (!abandoned && permissionsChanged()) abandoned = true;
+      return !abandoned && secondResult === null && (
+        secondWaitsFor !== null
+          ? closedBefore > secondWaitsFor
+          // Keep the second pass at most one page behind the closed prefix.
+          : closedBefore > secondLive + 1);
+    };
     while (firstResult === null) {
       if (secondMayStep()) {
         const next = second.next();
@@ -4927,6 +5318,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     }
     const firstPass = firstResult as BodyPaginationPassResult | null;
     if (firstPass === null) throw new Error('The opening anchor pass did not complete');
+    if (permissionsChanged()) abandoned = true;
     if (abandoned) return Object.freeze({ first: firstPass, second: null });
     const appliedPlan = JSON.stringify([...view]);
     return Object.freeze({
@@ -4967,6 +5359,12 @@ function* paginateBodyWithAnchorConvergenceSteps(
     }>;
     const noDeferrals: AnchorLineDeferrals = new Map();
     const settledFloors = new Map<string, number>(initialFloors ?? []);
+    // Set by cycle recovery: anchor lines are tested by source-order prefix
+    // (see `resolveAnchorLineTests`). A fixed input of every later pass.
+    let prefixTests = false;
+    let lineRecoveryBudgeted = false;
+    // Anchor-line floors settled by cycle recovery, by drawing key.
+    const settledLineFloors = new Map<string, number>();
     let restart: AnchorPassCarry | null = null;
     const latest: { carry: AnchorPassCarry | null } = { carry: null };
     let remainingPasses = anchorPassLimit;
@@ -5022,9 +5420,9 @@ function* paginateBodyWithAnchorConvergenceSteps(
             }
             // The unseeded pass registers source-order estimates, not anchor
             // lines that reached their page, so it proves nothing about them.
-            const lineTests = appliedPlan === null
+            const lineTests: ReturnType<typeof resolveAnchorLineTests> = appliedPlan === null
               ? Object.freeze({ plan: observed, deferrals: appliedDeferrals })
-              : resolveAnchorLineTests(pass, observed, appliedDeferrals);
+              : resolveAnchorLineTests(pass, observed, appliedDeferrals, prefixTests);
             const minimumTablePageBySource = new Map<string, number>();
             // Compare all destinations once. Testing every table against a fresh
             // copy of the full plan would make table-heavy documents quadratic.
@@ -5113,9 +5511,16 @@ function* paginateBodyWithAnchorConvergenceSteps(
           .map((state) => new Map(JSON.parse(state.split('\u0004')[0]!) as Array<[string, PageWrapDestination]>));
         const changed = new Set<string>();
         const later = new Map<string, number>();
+        const laterDrawings = new Map<string, Readonly<{ pageIndex: number; source: SourceRef }>>();
         for (const plan of cycle) {
           for (const key of changedAnchorKeys(cycle[0]!, plan)) changed.add(key);
           for (const [key, destination] of plan) {
+            if (destination.kind === 'drawing') {
+              const prior = laterDrawings.get(key);
+              if (!prior || destination.pageIndex > prior.pageIndex) {
+                laterDrawings.set(key, { pageIndex: destination.pageIndex, source: destination.paragraphSource });
+              }
+            }
             if (destination.kind !== 'floating-table') continue;
             later.set(key, Math.max(later.get(key) ?? -1, destination.pageIndex));
           }
@@ -5123,12 +5528,45 @@ function* paginateBodyWithAnchorConvergenceSteps(
         const pinned = [...later]
           .filter(([key, pageIndex]) => changed.has(key) && pageIndex > (settledFloors.get(key) ?? -1))
           .sort(([left], [right]) => compareTableSourceOrder(right, left))[0];
-        if (!pinned) throw error;
-        settledFloors.set(pinned[0], pinned[1]);
-        // Every settlement strictly raises a table floor: at most one raise
-        // per table per page. Restarts share the original operational pass
-        // budget as well, so even a growing page count cannot run unbounded.
+        // LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY (library policy, not a Word
+        // measurement). `word-page-anchor-line-deferral` tests anchor lines
+        // in flow order, each with the anchors accepted before it, but the
+        // plan does not record acceptance: a test that also pushes earlier
+        // accepted lines, or a deferral that moves a keepNext, keepLines or
+        // widow-control group, can make the run alternate. Without a table to
+        // pin, recover in two stages, each entered once per run:
+        // 1. Prefix tests (`resolveAnchorLineTests`): later lines are deferred
+        //    first by context-checked proofs, on every page in one pass.
+        // 2. If that still cycles, floor the last oscillating drawing in
+        //    source order at the latest page it reached in the cycle, so its
+        //    line starts no earlier page; a persisting cycle floors the next.
+        //    A floor holds in every page context, so a kept group moves with
+        //    it as one unit.
+        // This recovers convergence where the contextual tests cycle, within
+        // the bounded pass budget below (beyond it the run still fails
+        // closed); it claims no fidelity. Only otherwise-fatal cycles get
+        // here, so converging runs keep their output.
+        const drawingCycle = [...changed].some((key) => laterDrawings.has(key));
+        const floored = pinned || !prefixTests ? undefined : [...laterDrawings]
+          .filter(([key, { pageIndex }]) => changed.has(key) && pageIndex > (settledLineFloors.get(key) ?? -1))
+          .sort(([leftKey, left], [rightKey, right]) => compareDrawingSourceOrder(
+            rightKey, right.source, leftKey, left.source,
+          ))[0];
+        if (pinned) settledFloors.set(pinned[0], pinned[1]);
+        else if (!prefixTests && drawingCycle) prefixTests = true;
+        else if (floored) settledLineFloors.set(floored[0], floored[1].pageIndex);
+        else throw error;
+        // Every settlement strictly raises a table floor or an anchor-line
+        // floor, or enters prefix tests once. All restarts share the run's
+        // operational pass budget, so the total work stays bounded however
+        // many settlements a document needs. Anchor-line recovery adds that
+        // budget once more for the whole run (each drawing's settlement
+        // needs a cycle of a few passes), never per settlement.
         remainingPasses -= error.passes;
+        if (!pinned && !lineRecoveryBudgeted) {
+          lineRecoveryBudgeted = true;
+          remainingPasses += anchorPassLimit;
+        }
         if (remainingPasses < 2) {
           throw new ExactConvergenceError('limit', error.states, anchorPassLimit);
         }
@@ -5136,7 +5574,11 @@ function* paginateBodyWithAnchorConvergenceSteps(
         for (const [key, pageIndex] of settledFloors) {
           floors.set(key, Math.max(pageIndex, floors.get(key) ?? pageIndex));
         }
-        restart = Object.freeze({ ...latest.carry, minimumTablePageBySource: floors });
+        const deferrals = new Map(latest.carry.deferrals);
+        for (const [key, pageIndex] of settledLineFloors) {
+          deferrals.set(anchorLineFloorKey(key), anchorLineFloor(key, pageIndex));
+        }
+        restart = Object.freeze({ ...latest.carry, minimumTablePageBySource: floors, deferrals });
       }
     }
   };
@@ -5398,6 +5840,7 @@ function* paginateBodyWithColumnBalancingSteps(
   pageScoped = false,
 ): PaginationSteps<BodyPaginationPassResult> {
   let plan: BodyBalancePlan = new Map();
+  const compat = input.compat ?? DEFAULT_DOCX_COMPAT_PROFILE;
   let lastBodyEntry = input.sequence.length - 1;
   while (lastBodyEntry >= 0 && input.sequence[lastBodyEntry]!.kind !== 'body-block'
     && input.sequence[lastBodyEntry]!.kind !== 'adjacent-table-group') lastBodyEntry--;
@@ -5407,14 +5850,14 @@ function* paginateBodyWithColumnBalancingSteps(
     }
     return undefined;
   };
-  const seedPublisher = publisher && input.compatibilityMode === 15 && (input.endnoteIds?.length ?? 0) > 0
+  const seedPublisher = publisher && compat.pageWideEndnoteArea && (input.endnoteIds?.length ?? 0) > 0
     ? {
         get publishedPages() { return publisher.publishedPages; },
         get failed() { return publisher.failed; },
-        publish(pass: BodyPaginationPassResult, processedEntries: number, limit: number) {
+        publish(pass: BodyPaginationPassResult, processedEntries: number, limit: number, noteLimit?: NotePublicationLimit) {
           const terminal = processedEntries > lastBodyEntry
             ? terminalBodyPage(pass.layout)?.pageIndex : undefined;
-          publisher.publish(pass, processedEntries, terminal === undefined ? limit : Math.min(limit, terminal));
+          publisher.publish(pass, processedEntries, terminal === undefined ? limit : Math.min(limit, terminal), noteLimit);
         },
       } : publisher;
   let pass: BodyPaginationPassResult | null = yield* paginateBodyWithAnchorConvergenceSteps(
@@ -5452,7 +5895,7 @@ function* paginateBodyWithColumnBalancingSteps(
     );
     if (pass.terminalDiagnostic !== null) return pass;
   }
-  if (input.compatibilityMode === 15 && pass.endnoteLayoutsByPage.size > 0) {
+  if (compat.pageWideEndnoteArea && pass.endnoteLayoutsByPage.size > 0) {
     const terminal = terminalBodyPage(pass.layout);
     const region = terminal?.sectionRegions.at(-1);
     if (terminal && region && region.flowDomainIds.length > 1) {
@@ -5520,6 +5963,8 @@ function composeBodyPaginationResult(
     owners,
     pass.footnoteLayoutsByPage,
     pass.endnoteLayoutsByPage,
+    input.pageObjects,
+    input.pageBackground?.story ?? null,
   );
   const hasRetainedFootnotes = pageStories.pages.some((page) =>
     page.layers.notes.some((note) => note.source.story === 'footnote'));
@@ -5557,7 +6002,12 @@ function composeBodyPaginationResult(
       });
   const finalized = Object.freeze({
     ...withParserDiagnostics,
-    pages: Object.freeze(withParserDiagnostics.pages.map(finalizePageBookmarkStarts)),
+    // §17.2.1: the document background is a fact of every physical page,
+    // fixed once the page geometry is final.
+    pages: Object.freeze(withParserDiagnostics.pages.map((page) => withPageBackground(
+      finalizePageBookmarkStarts(page),
+      input.pageBackground,
+    ))),
   });
   const withChangeBars = options.showTrackedChanges === true
     ? attachTrackChangeBars(finalized)
@@ -5594,12 +6044,13 @@ export function* paginateBodySteps(
       ? {
           get publishedPages() { return publishedPages; },
           get failed() { return publicationFailed; },
-          publish: (pass, processedEntries, pageIndexLimit) => {
+          publish: (pass, processedEntries, pageIndexLimit, noteLimit) => {
             // The live page still owns the transition edge: section-region and
             // page-final composition can change when the following page opens.
             // It is never published, and the pass-level rule may bound the
             // prefix further (see `anchorStablePageLimit`).
-            const limit = Math.min(pageIndexLimit, livePageIndex(pass));
+            const candidate = Math.min(pageIndexLimit, livePageIndex(pass));
+            const limit = noteLimit ? noteLimit(candidate) : candidate;
             const count = pass.layout.pages.findIndex((page) => page.pageIndex >= limit);
             if (count <= publishedPages) return;
             try {

@@ -186,7 +186,7 @@ export function renderStockChart(
     let maxLabelWidth = 0;
     for (const value of secScale.majorLines) {
       maxLabelWidth = Math.max(maxLabelWidth, measureAuthoredTextWidth(ctx, formatAxisTickWithUnits(
-        value, sec.formatCode ?? null, chart.date1904, sec.displayUnits,
+        value, sec.formatCode ?? null, chart.date1904, sec.displayUnits, sec.formatDivisors,
       )));
     }
     secLabelBandW = maxLabelWidth + 18;
@@ -246,7 +246,7 @@ export function renderStockChart(
     sec && secScale && !sec.hidden && sec.tickLabelPos !== 'none'
       ? authoredExtraLinesHeight(
         secScale.majorLines.map(value => formatAxisTickWithUnits(
-          value, sec.formatCode ?? null, chart.date1904, sec.displayUnits,
+          value, sec.formatCode ?? null, chart.date1904, sec.displayUnits, sec.formatDivisors,
         )),
         axisLabelLineHeightPx(secFontPx),
       )
@@ -288,9 +288,9 @@ export function renderStockChart(
     const labelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
     const labels = dateAxisPlan && dateAxisPlan.majorTicks.length > 0
       ? dateAxisPlan.majorTicks.map(tick =>
-        formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904))
+        formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) =>
-        formatCategoryLabel((cats[index * labelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904));
+        formatCategoryLabel((cats[index * labelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
     const manualInner = chart.plotAreaManualLayout?.layoutTarget === 'inner' &&
       chart.plotAreaManualLayout.w != null && chart.plotAreaManualLayout.h != null;
     const categoryLabelExtraH = authoredExtraLinesHeight(
@@ -724,14 +724,14 @@ export function renderStockChart(
     const rotRad = catLabelRotationRad(chart);
     const labelEntries = dateAxisPlan && dateAxisPlan.majorTicks.length > 0
       ? dateAxisPlan.majorTicks.map(tick => ({
-        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
         x: px0 + tick.fraction * pw,
         categoryIndex: -1,
       }))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
         const ci = index * labelInterval;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
           x: toX(ci),
           categoryIndex: ci,
         };

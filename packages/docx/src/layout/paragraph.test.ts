@@ -1,3 +1,5 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
+import { normalizeDocxDocumentModel, paragraphAcquisitionInput } from '../parser-model.js';
 import { lineGapModel } from '../line-breaker/line-gaps.js';
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
@@ -16,7 +18,7 @@ import type { MeasuredParagraph } from '../paragraph-measure.js';
 import { measureParagraph } from '../paragraph-measure.js';
 import { buildSegments, layoutLines } from '../line-layout.js';
 import { createLayoutServices } from '../layout-runtime.js';
-import type { DocParagraph } from '../types.js';
+import type { DocParagraph, DocxDocumentModel } from '../types.js';
 import type { AnchorAcquisitionInput } from './anchor-input.js';
 import type { LayoutRect } from './types.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
@@ -789,23 +791,424 @@ describe('layoutParagraph', () => {
 });
 
 describe('paragraphLayoutFromMeasurement retained authorities', () => {
-  it('flows consecutive wp:inline WPS shapes at their paragraph pen positions', () => {
-    const inlineShape = () => ({
-      type: 'shape' as const,
-      inline: true,
-      widthPt: 20,
-      heightPt: 10,
-      anchorXPt: 0,
-      anchorYPt: 0,
-      anchorXFromMargin: false,
-      anchorYFromPara: false,
-      zOrder: 0,
-      subpaths: [],
-      presetGeometry: 'rect',
-      fill: { fillType: 'solid' as const, color: '009989' },
-      stroke: null,
-      textBlocks: [],
+  const inlineShape = (heightPt = 10) => ({
+    type: 'shape' as const,
+    inline: true,
+    widthPt: 20,
+    heightPt,
+    anchorXPt: 0,
+    anchorYPt: 0,
+    anchorXFromMargin: false,
+    anchorYFromPara: false,
+    zOrder: 0,
+    subpaths: [],
+    presetGeometry: 'rect',
+    fill: { fillType: 'solid' as const, color: '009989' },
+    stroke: null,
+    textBlocks: [],
+  });
+
+  function inlineFontMetricContext(eastAsian = false): CanvasRenderingContext2D {
+    return {
+      font: '', letterSpacing: '0px', fontKerning: 'auto',
+      measureText(this: { font: string }, text: string) {
+        const size = Number(/([\d.]+)px/u.exec(this.font)?.[1] ?? 10);
+        const ascent = size * (eastAsian && /[^\x00-\x7f]/u.test(text) ? 1.4 : 0.8);
+        return { width: [...text].length * size / 2, actualBoundingBoxAscent: ascent,
+          actualBoundingBoxDescent: size * 0.2, fontBoundingBoxAscent: ascent,
+          fontBoundingBoxDescent: size * 0.2 } as TextMetrics;
+      },
+    } as unknown as CanvasRenderingContext2D;
+  }
+
+  function measureInlineParagraph(runs: DocParagraph['runs'], multiple: number | null = 1, options: { markFontSize?: number; context?: CanvasRenderingContext2D; documentHasEastAsianText?: boolean; compatibilityMode?: number; admitRunLeading?: boolean; exactPt?: number; atLeastPt?: number; vertical?: boolean | 'lr'; source?: typeof source | { story: 'header'; storyInstance: string; path: readonly number[] } } = {}) {
+    const selectedContext = options.context ?? measureContext;
+    const value = {
+      ...paragraph, runs, defaultFontSize: options.markFontSize ?? 10, defaultFontFamily: 'Test Sans',
+      lineSpacing: options.exactPt !== undefined
+        ? { rule: 'exact' as const, value: options.exactPt, explicit: true }
+        : options.atLeastPt !== undefined
+        ? { rule: 'atLeast' as const, value: options.atLeastPt, explicit: true }
+        : multiple === null ? null : { rule: 'auto' as const, value: multiple },
+    };
+    const context = { ...acquisitionContext, lineSpacing: value.lineSpacing };
+    const placement = {
+      startYPt: 10, paragraphXPt: 10, availableWidthPt: 100, maximumYPt: 500,
+      suppressSpaceBefore: false,
+    };
+    const measurer = { context: selectedContext, fontFamilyClasses: {} };
+    const layoutServices = createLayoutServices({
+      section: {
+        pageWidth: 612, pageHeight: 792,
+        marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
+        headerDistance: 36, footerDistance: 36,
+        titlePage: false, evenAndOddHeaders: false,
+      },
+      body: [], headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+    }, { measureContext: selectedContext });
+    const environment = {
+      documentHasEastAsianText: options.documentHasEastAsianText ?? false, pageWritingMode: 'horizontal-tb' as const,
+      pageIndex: 0, totalPages: 1, layoutServices,
+      compat: compatProfile({ compatibilityMode: options.compatibilityMode ?? 15 }),
+      ...(options.admitRunLeading === false ? {} : { inlineObjectRunLeadingAdmitted: true as const }),
+      ...(options.vertical ? {
+        pageWritingMode: options.vertical === 'lr' ? 'vertical-lr' as const : 'vertical-rl' as const, verticalPageFrame: true,
+        uprightResourceOrientation: 'upright-physical' as const,
+      } : {}),
+    };
+    // Parser-private run facts reach acquisition only through normalization.
+    const normalized = runs.some((run) => '__inlinePosition' in run)
+      ? normalizeDocxDocumentModel({
+          body: [{ type: 'paragraph', ...value }],
+          section: { pageWidth: 612, pageHeight: 792, marginTop: 72, marginRight: 72, marginBottom: 72,
+            marginLeft: 72, headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false },
+          headers: { default: null, first: null, even: null },
+          footers: { default: null, first: null, even: null },
+        } as unknown as DocxDocumentModel).body[0] as unknown as typeof value
+      : value;
+    const paragraphSource = options.source ?? source;
+    const acquired = paragraphAcquisitionInput(normalized, paragraphSource);
+    const measured = measureParagraph(acquired, context, placement, measurer, environment);
+    return paragraphLayoutFromMeasurement(acquired, {
+      id: 'inline-shape-line', source: paragraphSource, flowDomainId: 'body', ordinaryFlow: true,
+      context, placement, measurer, environment, exclusions: [],
+    } as never, measured);
+  }
+
+  describe('inline object run position (§17.3.2.24, WORD_INLINE_OBJECT_POSITION)', () => {
+    const picture = (heightPt: number, positionPt: number, origin?: 'drawingml') => ({
+      type: 'image' as const, imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+      ...(origin ? { __inlineObjectOrigin: origin } : {}),
+      __inlineObjectFontFacts: { fontSize: 10, fontFamily: 'Test Sans' },
+      ...(positionPt ? { __inlinePosition: positionPt } : {}),
+    }) as unknown as DocParagraph['runs'][number];
+    const resource = (node: ReturnType<typeof measureInlineParagraph>) =>
+      node.lines[0]!.placements.find((placement) => placement.kind === 'resource')!;
+
+    it('lowers a picture with its run and keeps the text on the shifted union', () => {
+      const text = measureInlineParagraph([paragraph.runs[0]!]).lines[0]!;
+      const textAscent = text.baselinePt - text.bounds.yPt;
+      const textDescent = text.bounds.yPt + text.advancePt - text.baselinePt;
+      const node = measureInlineParagraph([paragraph.runs[0]!, picture(16, -15, 'drawingml')]);
+      const line = node.lines[0]!;
+      // Only 1pt of the 16pt picture stays above the baseline: the text ascent
+      // owns the line top and the lowered 15pt sets the descent.
+      expect(line.baselinePt - line.bounds.yPt).toBeCloseTo(textAscent, 10);
+      expect(line.advancePt).toBeCloseTo(textAscent + Math.max(15, textDescent), 10);
+      const box = resource(node).bounds;
+      expect(box.yPt).toBeCloseTo(line.baselinePt - 1, 10);
+      expect(box.yPt + box.heightPt).toBeCloseTo(line.baselinePt + 15, 10);
     });
+
+    it('adds a raise to a box-only line and keeps the object at the line top', () => {
+      const node = measureInlineParagraph([picture(16, 5, 'drawingml')]);
+      const line = node.lines[0]!;
+      expect(line.advancePt).toBeCloseTo(21, 10);
+      expect(resource(node).bounds.yPt).toBeCloseTo(line.bounds.yPt, 10);
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 21, 10);
+    });
+
+    it('keeps a lowered box-only line at the object height', () => {
+      const line = measureInlineParagraph([picture(16, -15, 'drawingml')]).lines[0]!;
+      expect(line.advancePt).toBeCloseTo(16, 10);
+    });
+
+    it('stands objects on the four-fifths baseline of an exact line and clips only DrawingML (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
+      for (const origin of ['drawingml', undefined] as const) {
+        const node = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, origin)], 1, { exactPt: 24 });
+        const line = node.lines[0]!;
+        expect(line.advancePt).toBeCloseTo(24, 10);
+        expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 19.2, 10);
+        const placement = resource(node);
+        expect(placement.bounds.yPt).toBeCloseTo(line.baselinePt - 25, 10);
+        expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(origin === 'drawingml');
+      }
+    });
+
+    it('hangs an upright picture from the exact line top in a vertical section (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
+      for (const [heightPt, positionPt] of [[30, -5], [16, 5], [30, 0]] as const) {
+        const node = measureInlineParagraph([picture(heightPt, positionPt, 'drawingml')], 1,
+          { exactPt: 24, vertical: true });
+        const line = node.lines[0]!;
+        expect(line.advancePt).toBeCloseTo(24, 10);
+        const placement = resource(node);
+        // word-vertical-inline-picture-upright-extent: the 20pt physical width runs
+        // across the line and the physical height along it.
+        expect(placement.bounds.heightPt).toBeCloseTo(20, 10);
+        expect(placement.bounds.widthPt).toBeCloseTo(heightPt, 10);
+        expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt - positionPt, 10);
+        expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+      }
+    });
+
+    it('mirrors only a clipped DrawingML picture across a tbLrV strip', () => {
+      for (const origin of ['drawingml', undefined] as const) {
+        const node = measureInlineParagraph([picture(30, -5, origin)], 1, { exactPt: 24, vertical: 'lr' });
+        const line = node.lines[0]!;
+        const placement = resource(node);
+        // 20pt across a 24pt strip: lowered 5pt it starts 5pt from the far
+        // edge when mirrored, 5pt below the near edge otherwise.
+        expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt + (origin ? 24 - 5 - 20 : 5), 10);
+      }
+    });
+
+    it('places a rotated clipped DrawingML picture like an unrotated one in a tbLrV exact line', () => {
+      // A turned picture clips to its line on its own account; its exact-line
+      // placement must not depend on that (180 degrees keeps the footprint).
+      const turned = { ...picture(30, -5, 'drawingml'), rotation: 180 } as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([turned], 1, { exactPt: 24, vertical: 'lr' });
+      const line = node.lines[0]!;
+      const placement = resource(node);
+      expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt + 24 - 5 - 20, 10);
+      expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+    });
+
+    // Availability only changes what is painted: a placeholder lays out as the
+    // picture or chart it stands for.
+    describe('availability parity of inline pictures and charts', () => {
+      const facts = { __inlineObjectFontFacts: { fontSize: 10, fontFamily: 'Test Sans' } };
+      const subject = (kind: 'picture' | 'chart', available: boolean, positionPt: number,
+        orientation: Readonly<{ rotation?: number; flipH?: boolean; flipV?: boolean }> = {}) => {
+        // The parser records a run position on pictures only (charts keep
+        // their established placement), for the picture and its placeholder,
+        // and the picture's a:xfrm orientation on both.
+        const position = kind === 'picture' && positionPt ? { __inlinePosition: positionPt, ...orientation }
+          : kind === 'picture' ? orientation : {};
+        if (kind === 'picture') {
+          return (available
+            ? { type: 'image', imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt: 30,
+              anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+              __inlineObjectOrigin: 'drawingml', ...facts, ...position }
+            : { type: 'unavailableDrawing', resourceKind: 'image', widthPt: 20, heightPt: 30, ...facts, ...position }
+          ) as unknown as DocParagraph['runs'][number];
+        }
+        return (available
+          ? { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } }
+          : { type: 'unavailableDrawing', resourceKind: 'chart', widthPt: 40, heightPt: 30 }
+        ) as unknown as DocParagraph['runs'][number];
+      };
+      const box = (node: ReturnType<typeof measureInlineParagraph>) => {
+        const placement = node.lines[0]!.placements.find((candidate) =>
+          (candidate.kind === 'resource' && candidate.resourceKind !== 'image')
+          || candidate.kind === 'drawing'
+          || (candidate.kind === 'resource' && candidate.resourceKind === 'image'
+            && candidate.bounds.heightPt !== 16 && candidate.bounds.widthPt !== 16))!;
+        return { bounds: placement.bounds,
+          clip: placement.kind === 'resource' || placement.kind === 'drawing' ? placement.lineClip : undefined };
+      };
+      const spacings = [
+        ['single', 1, {}], ['1.5', 1.5, {}], ['exact 24pt', 1, { exactPt: 24 }], ['atLeast 30pt', 1, { atLeastPt: 30 }],
+      ] as const;
+      const stories = [
+        ['body', undefined],
+        ['table cell', { story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] }],
+        ['text box', { story: 'textbox', storyInstance: 'body:body:0.0', path: [0] }],
+      ] as const;
+      const modes = [['lrTb', undefined], ['tbRl', true], ['tbLrV', 'lr']] as const;
+      for (const kind of ['picture', 'chart'] as const) {
+        for (const [spacing, multiple, spacingOptions] of spacings) {
+          for (const [storyName, story] of stories) {
+            for (const [mode, vertical] of modes) {
+              it(`${kind}, ${spacing}, ${storyName}, ${mode}`, () => {
+                const orientations = kind === 'chart' ? [{}] : [0, 90, 180, 270].flatMap((rotation) =>
+                  [{}, { flipH: true }, { flipV: true }].map((flip) => ({ ...(rotation ? { rotation } : {}), ...flip })));
+                for (const [positionPt, layout, orientation] of [-5, 0, 5].flatMap((value) =>
+                  (['text', 'neighbour', 'alone'] as const).flatMap((variant) =>
+                    orientations.map((turn) => [value, variant, turn] as const)))) {
+                  const options = { ...spacingOptions, ...(story ? { source: story as never } : {}),
+                    ...(vertical === undefined ? {} : { vertical }) };
+                  // Beside text; beside text and a 16pt picture, which puts an
+                  // exact line in the inline-object class whichever the subject
+                  // is; and alone in its paragraph.
+                  const runs = (available: boolean) => layout === 'alone'
+                    ? [subject(kind, available, positionPt, orientation)]
+                    : [paragraph.runs[0]!, subject(kind, available, positionPt, orientation),
+                      ...(layout === 'neighbour' ? [picture(16, 0, 'drawingml')] : [])];
+                  const a = measureInlineParagraph(runs(true), multiple, options);
+                  const u = measureInlineParagraph(runs(false), multiple, options);
+                  const [al, ul] = [a.lines[0]!, u.lines[0]!];
+                  expect(ul.advancePt, `advance at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toBeCloseTo(al.advancePt, 10);
+                  expect(ul.baselinePt - ul.bounds.yPt, `baseline at ${positionPt} ${layout} ${JSON.stringify(orientation)}`)
+                    .toBeCloseTo(al.baselinePt - al.bounds.yPt, 10);
+                  const [ab, ub] = [box(a), box(u)];
+                  expect(ub.bounds, `box at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toEqual(ab.bounds);
+                  expect(ub.clip, `clip at ${positionPt} ${layout} ${JSON.stringify(orientation)}`).toEqual(ab.clip);
+                }
+              });
+            }
+          }
+        }
+      }
+    });
+
+    it('keeps the four-fifths baseline in every story and clips DrawingML outside cells and text boxes', () => {
+      for (const [other, clips] of [
+        [{ story: 'header', storyInstance: 'header:default', path: [0] }, true],
+        [{ story: 'footnote', storyInstance: 'footnote:1', path: [0] }, true],
+        [{ story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] }, false],
+        [{ story: 'textbox', storyInstance: 'body:body:0.0', path: [0] }, false],
+      ] as const) {
+        for (const exactPt of [8, 48]) {
+          const node = measureInlineParagraph([paragraph.runs[0]!, picture(30, -5, 'drawingml')], 1,
+            { exactPt, source: other as never });
+          const line = node.lines[0]!;
+          expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + exactPt * 0.8, 10);
+          const placement = resource(node);
+          expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(clips);
+        }
+      }
+    });
+
+    it('clips a DrawingML picture in an exact line whose baseline the ruby rule selects', () => {
+      const rubyText = { ...paragraph.runs[0]!, ruby: { text: 'r', fontSizePt: 5, hpsRaisePt: 8 } } as DocParagraph['runs'][number];
+      const node = measureInlineParagraph([rubyText, picture(30, -5, 'drawingml')], 1, { exactPt: 24 });
+      const line = node.lines[0]!;
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + 19.2, 10);
+      const placement = resource(node);
+      expect(placement.kind === 'resource' && placement.lineClip !== undefined).toBe(true);
+    });
+  });
+
+  it('keeps a single-spaced inline shape line exactly its box height', () => {
+    const node = measureInlineParagraph([inlineShape(40)]);
+    const line = node.lines[0]!;
+    const box = node.drawings[0]!.flowBounds;
+    expect(node.lines).toHaveLength(1);
+    expect(line.advancePt).toBe(40);
+    expect(box.yPt).toBe(line.bounds.yPt);
+    expect(box.yPt + box.heightPt).toBe(line.baselinePt);
+  });
+
+  it('adds paragraph-mark single-line leading to a 1.5-spaced inline shape', () => {
+    // Independent mark-only control supplies the selected face's single line.
+    const markSingle = measureInlineParagraph([]).advancePt;
+    expect(markSingle).toBeGreaterThan(0);
+    expect(markSingle).toBeLessThan(40);
+    const node = measureInlineParagraph([inlineShape(40)], 1.5);
+    expect(node.lines[0]!.advancePt).toBeCloseTo(40 + 0.5 * markSingle, 10);
+    expect(node.lines[0]!.advancePt).not.toBe(60);
+  });
+
+  it('reserves the drawing run minimum above a small box while preserving actual text descent', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const minimum = measureInlineParagraph([], 1, { context, markFontSize: 20 }).advancePt;
+    const suffix = { ...paragraph.runs[0]!, fontSize: 8 };
+    for (const mixed of [false, true]) {
+      const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'drawingml',
+        __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+      const node = measureInlineParagraph(mixed ? [drawing, suffix] : [drawing], 1, options);
+      const line = node.lines[0]!;
+      expect(line.advancePt).toBeCloseTo(minimum, 10);
+      // Only the real suffix contributes descent; the drawing run is a
+      // minimum line box, not an invisible glyph with another descent.
+      expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + minimum - (mixed ? 1.6 : 0), 10);
+      expect(node.drawings[0]!.flowBounds.heightPt).toBe(8);
+      expect(node.drawings[0]!.flowBounds.yPt + 8).toBeCloseTo(line.baselinePt, 10);
+      const large = { ...drawing, heightPt: 40 };
+      const largeNode = measureInlineParagraph(mixed ? [large, suffix] : [large], 1, options);
+      expect(largeNode.lines[0]!.advancePt).toBeCloseTo(40 + (mixed ? 1.6 : 0), 10);
+    }
+  });
+
+  it('treats line spacing never specified as auto single for the drawing-run minimum (§17.3.1.33)', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'drawingml',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const explicit = measureInlineParagraph([drawing], 1, options).lines[0]!;
+    const absent = measureInlineParagraph([drawing], null, options).lines[0]!;
+    expect(explicit.advancePt).toBeGreaterThan(8);
+    expect(absent.advancePt).toBe(explicit.advancePt);
+    expect(absent.baselinePt).toBe(explicit.baselinePt);
+  });
+
+  it('keeps the measured static VML textbox top while its run reserves advance below', () => {
+    const context = inlineFontMetricContext();
+    const options = { context, markFontSize: 8 };
+    const drawing = { ...inlineShape(8), __inlineObjectOrigin: 'vmlStaticTextbox',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const node = measureInlineParagraph([drawing], 1, options);
+    expect(node.lines[0]!.advancePt).toBeCloseTo(20, 10);
+    expect(node.drawings[0]!.flowBounds.yPt).toBeCloseTo(node.lines[0]!.bounds.yPt, 10);
+    expect(node.drawings[0]!.flowBounds.heightPt).toBe(8);
+    // Mixed VML is unmeasured: preserve its previous allocation rather than
+    // turning the absent outer glyph into a suffix descent or top offset.
+    const suffix = { ...paragraph.runs[0]!, fontSize: 8 };
+    const mixed = measureInlineParagraph([drawing, suffix], 1, options);
+    const unknownDrawing = { ...drawing, __inlineObjectOrigin: undefined };
+    const unknown = measureInlineParagraph([unknownDrawing, suffix], 1, options);
+    expect(mixed.lines[0]!.advancePt).toBe(unknown.lines[0]!.advancePt);
+  });
+
+  it('applies literal-picture minimum and resets it before the following physical line', () => {
+    const context = inlineFontMetricContext();
+    const drawing = { type: 'image' as const, imagePath: 'inline.png', mimeType: 'image/png',
+      widthPt: 20, heightPt: 8, anchor: false, anchorXPt: 0, anchorYPt: 0,
+      anchorXFromMargin: false, anchorYFromPara: false, __inlineObjectOrigin: 'drawingml',
+      __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    const suffix = { ...paragraph.runs[0]!, text: 'next', fontSize: 8 };
+    const node = measureInlineParagraph([drawing, { type: 'break', breakType: 'line' }, suffix], 1, { context, markFontSize: 8 });
+    expect(node.lines[0]!.advancePt).toBeCloseTo(20, 10);
+    expect(node.lines[1]!.advancePt).toBeCloseTo(8, 10);
+    expect(node.lines[1]!.bounds.yPt).toBeCloseTo(node.lines[0]!.bounds.yPt + 20, 10);
+    const unknownDrawing = { ...drawing, __inlineObjectOrigin: undefined };
+    const unknown = measureInlineParagraph([unknownDrawing], 1,
+      { context, markFontSize: 8 });
+    expect(unknown.lines[0]!.advancePt).toBe(8);
+  });
+
+  it.each(['shape', 'image'] as const)('takes inline %s leading from its effective drawing-run font, independently of its mark', (kind) => {
+    const context = inlineFontMetricContext(false);
+    const drawing = kind === 'shape' ? inlineShape(40) : { type: 'image' as const,
+      imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt: 40,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false };
+    const object = { ...drawing, __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Test Sans' } };
+    const runSingle = measureInlineParagraph([], 1, { context, markFontSize: 30 }).advancePt;
+    const node = measureInlineParagraph([object], 1.5, { context, markFontSize: 10 });
+    expect(node.lines[0]!.advancePt).toBeCloseTo(40 + runSingle / 2, 10);
+  });
+
+  it.each([
+    { compatibilityMode: 14 },
+    { admitRunLeading: false },
+    { mixed: true },
+  ])('keeps paragraph-mark leading outside the measured inline-run class: %j', (scope) => {
+    const context = inlineFontMetricContext();
+    const object = { ...inlineShape(40), __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Test Sans' } };
+    const markSingle = measureInlineParagraph([], 1, { context }).advancePt;
+    const runs = 'mixed' in scope ? [paragraph.runs[0]!, object] : [object];
+    const natural = measureInlineParagraph(runs, 1, { context }).lines[0]!.advancePt;
+    expect(measureInlineParagraph(runs, 1.5, { ...scope, context }).lines[0]!.advancePt)
+      .toBeCloseTo(natural + markSingle / 2, 10);
+  });
+
+  it('keeps the existing East Asian slot policy when acquiring inline-run leading', () => {
+    const context = inlineFontMetricContext(true);
+    const options = { context, documentHasEastAsianText: true };
+    // The East Asian probe box of the context above at the run's 20pt. An empty
+    // paragraph is no reference: WORD_EMPTY_MARK_ASCII_FACE measures its mark
+    // with the ascii face, while object-run leading keeps the slot policy.
+    const runSingle = 20 * (1.4 + 0.2);
+    const object = { ...inlineShape(40), __inlineObjectFontFacts: { fontSize: 20, fontFamily: 'Test Sans' } };
+    expect(measureInlineParagraph([object], 1.5, options).lines[0]!.advancePt)
+      .toBeCloseTo(40 + runSingle / 2, 10);
+  });
+
+  it('places an inline shape bottom on the visible text baseline', () => {
+    const node = measureInlineParagraph([paragraph.runs[0]!, inlineShape(40)]);
+    const line = node.lines[0]!;
+    const box = node.drawings[0]!.flowBounds;
+    const text = line.placements.find((item) => item.kind === 'text')!;
+    expect(box.yPt + box.heightPt).toBe(line.baselinePt);
+    expect(text.origin.yPt).toBe(line.baselinePt);
+    // The fixture's visible text has 2pt descent; no synthetic host adds more.
+    expect(line.advancePt).toBe(42);
+  });
+
+  it('flows consecutive wp:inline WPS shapes at their paragraph pen positions', () => {
     const tabRun = {
       ...(paragraph.runs[0] as Extract<DocParagraph['runs'][number], { type: 'text' }>),
       text: '\t',
@@ -2240,6 +2643,130 @@ describe('planLine visual geometry', () => {
     }],
   });
 
+  it('keeps attached and already-atomic source spaces equivalent across a joined word seam', () => {
+    const piece = (text: string, start: number, breakBefore = true) => ({
+      ...measuredText(text, start, text.length * 5, true), breakBefore,
+      clusters: [...text].map((_character, index) => ({
+        range: { start: start + index, end: start + index + 1 },
+        offset: { xPt: index * 5, yPt: 0 }, advancePt: 5,
+      })),
+    });
+    const projected = (segments: ReturnType<typeof piece>[]) => planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'distribute', baseRtl: true,
+      isFirstLine: true, isLastLine: true, stretchLastLine: true,
+      lineEndJustificationBeforeMode15: false,
+      line: { range: { start: 0, end: 10 }, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false, segments },
+    });
+    // Formatting split inside the first Hebrew word joins its visible pieces.
+    // Its later SPACE cuts are independent acquired cluster boundaries.
+    const attached = projected([piece('א', 0), piece('בגד  ', 1, false), piece('הוזח', 6)]);
+    const atomic = projected([piece('א', 0), piece('בגד', 1, false), piece(' ', 4), piece(' ', 5), piece('הוזח', 6)]);
+    for (const line of [attached, atomic]) {
+      const texts = line.placements.filter((placement): placement is TextPlacement => placement.kind === 'text')
+        .sort((a, b) => a.range.start - b.range.start);
+      expect(texts.map(placement => placement.text).join('')).toBe('אבגד  הוזח');
+      const spaces = texts.filter(placement => placement.text === ' ');
+      expect(spaces.map(placement => placement.range)).toEqual([{ start: 4, end: 5 }, { start: 5, end: 6 }]);
+      // 50 pt natural content in a 100 pt band: each source space is5+25.
+      expect(spaces.map(placement => placement.advancePt)).toEqual([30, 30]);
+      expect(spaces.map(placement => placement.clusters[0]!.advancePt)).toEqual([30, 30]);
+      expect(line.bounds.widthPt).toBe(100);
+    }
+    expect(atomic).toEqual(attached);
+  });
+
+  it.each([
+    { first: 'אבXray ', rtl: false },
+    { first: 'אבXray ', rtl: true },
+    // The decimal interior is now uniform; its terminal period still keeps
+    // the numeric word mixed. Plain 12.5 is covered by the production tab test.
+    { first: '12.5. ', rtl: true },
+  ])('keeps the complete legacy line for mixed visible islands ($first, rtl=$rtl)', ({ first, rtl }) => {
+    const piece = (text: string, start: number, marked: boolean) => ({
+      ...measuredText(text, start, text.length * 5, marked), rtl: marked,
+      clusters: [...text].map((_character, index) => ({
+        range: { start: start + index, end: start + index + 1 },
+        offset: { xPt: index * 5, yPt: 0 }, advancePt: 5,
+      })),
+    });
+    const segments = [piece(first, 0, rtl), piece('Yoke ', first.length, rtl), piece('טקסט', first.length + 5, true)];
+    const project = (legacy: boolean) => planLine({
+      paragraphXPt: 0, availableWidthPt: 150, alignment: 'both', baseRtl: true,
+      runDirectionUnauthored: legacy, isFirstLine: true, isLastLine: false, stretchLastLine: false,
+      line: { range: { start: 0, end: first.length + 9 }, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 150, endsWithBreak: false, segments },
+    });
+    // Compatibility-source mode supplies the existing complete parent plan;
+    // this mixed visible island already forces its old no-isolate ordering.
+    const legacy = project(true);
+    expect(project(false)).toEqual(legacy);
+    const placed = legacy.placements.filter((p): p is TextPlacement => p.kind === 'text');
+    expect(placed.sort((a, b) => a.range.start - b.range.start).map(p => p.text).join(''))
+      .toBe(`${first}Yoke טקסט`);
+  });
+
+  it.each([0, 5])('spreads a distribute RTL line by its visible prefix with a %s pt source-tail SPACE', (spaceAdvancePt) => {
+    const piece = (text: string, start: number) => ({
+      ...measuredText(text, start, [...text].reduce((sum, char) => sum + (char === ' ' ? spaceAdvancePt : 5), 0), true), rtl: true,
+      clusters: [...text].map((_character, index) => ({
+        range: { start: start + index, end: start + index + 1 },
+        offset: { xPt: index * 5, yPt: 0 }, advancePt: text[index] === ' ' ? spaceAdvancePt : 5,
+      })),
+    });
+    const segments = [piece('אבגד ', 0), piece('הוזח ', 5)];
+    const project = (legacy: boolean) => planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'distribute', baseRtl: true,
+      runDirectionUnauthored: legacy, isFirstLine: true, isLastLine: true, stretchLastLine: true,
+      lineEndJustificationBeforeMode15: false,
+      line: { range: { start: 0, end: 10 }, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false, segments },
+    });
+    // WORD_RTL_LINE_END_SPACE_HANGS: the line-end SPACE hangs past the end
+    // (left) edge, and the visible words spread over the whole band.
+    const texts = project(false).placements.filter((p): p is TextPlacement => p.kind === 'text');
+    const visible = texts.filter((p) => p.text.trim() !== '');
+    expect(Math.min(...visible.map((p) => p.bounds.xPt))).toBeCloseTo(0, 6);
+    expect(Math.max(...visible.map((p) => p.bounds.xPt + p.bounds.widthPt))).toBeCloseTo(100, 6);
+    const tail = texts.find((p) => p.range.start === 9)!;
+    expect(tail.bounds.xPt + tail.bounds.widthPt).toBeLessThanOrEqual(1e-6);
+  });
+
+  it('preserves a contextual operation when a space cut would remove a visible head across NBSP', () => {
+    const value = 'אבגד \u00a0הוזח';
+    const base = measuredText(value, 0, value.length * 5, true);
+    const segment = {
+      ...base,
+      clusters: [...value].map((_character, index) => ({
+        range: { start: index, end: index + 1 }, offset: { xPt: index * 5, yPt: 0 }, advancePt: 5,
+      })),
+      basePaintOps: [{ ...base.basePaintOps[0]!,
+        inkBounds: { xMinPt: 0, xMaxPt: 50, ascentPt: 8, descentPt: 2 },
+      }],
+    };
+    const projected = (before15: boolean) => planLine({
+      paragraphXPt: 0, availableWidthPt: 100, alignment: 'distribute', baseRtl: true,
+      isFirstLine: true, isLastLine: true, stretchLastLine: true,
+      lineEndJustificationBeforeMode15: before15,
+      line: { range: segment.range, topPt: 0, baselinePt: 8, advancePt: 10,
+        xOffsetPt: 0, availableWidthPt: 100, endsWithBreak: false, segments: [segment] },
+    });
+    // In this bounded RTL class both versions use the same legacy word
+    // allocator/order. The pre15 character-topology gate supplies its old path.
+    const legacy = projected(true);
+    const current = projected(false);
+    expect(current).toEqual(legacy);
+    const text = current.placements.filter((placement): placement is TextPlacement => placement.kind === 'text');
+    expect(text.map(placement => placement.text).join('')).toBe(value);
+    let cursor = 0;
+    for (const operation of text.flatMap(placement => placement.paintOps)) {
+      expect(operation.range.start).toBe(cursor);
+      expect(operation.text).toBe(value.slice(operation.range.start, operation.range.end));
+      cursor = operation.range.end;
+    }
+    expect(cursor).toBe(value.length);
+  });
+
   it.each(['a😀 b  c', `a${' '.repeat(50_000)}b`])(
     'projects retained proportional gaps through clusters and contextual paint ops in one sweep', (value) => {
       let utf16 = 0;
@@ -2511,12 +3038,42 @@ describe('planLine visual geometry', () => {
       },
     });
 
+    // A justified line widens only gaps after its last tab, soft-wrapped lines
+    // included (WORD_ALIGNED_TAB_CELL_FIT_BACK); 'b' alone offers none.
     expect(line.placements).toEqual([
       expect.objectContaining({ kind: 'text', text: 'a ', origin: { xPt: 0, yPt: 10 } }),
-      expect.objectContaining({ kind: 'tab', advancePt: 10, bounds: expect.objectContaining({ xPt: 40 }) }),
-      expect.objectContaining({ kind: 'text', text: 'b', origin: { xPt: 50, yPt: 10 } }),
+      expect.objectContaining({ kind: 'tab', advancePt: 10, bounds: expect.objectContaining({ xPt: 10 }) }),
+      expect.objectContaining({ kind: 'text', text: 'b', origin: { xPt: 20, yPt: 10 } }),
     ]);
     expect(() => stableFingerprint('planned-line', line)).not.toThrow();
+  });
+
+  // WORD_ALIGNED_TAB_CELL_FIT_BACK: a cell fitted with no gap takes the room
+  // its unjustified line leaves, up to the stop-aligned gap; a justified line
+  // that has gaps after the tab spreads them and keeps the gap empty.
+  it.each([
+    { alignment: 'left' as const, cellX: 35 },
+    { alignment: 'both' as const, cellX: 10 },
+  ])('resolves a fitted-back aligned tab gap under jc=$alignment', ({ alignment, cellX }) => {
+    const line = planLine({
+      paragraphXPt: 0, availableWidthPt: 60, alignment, baseRtl: false,
+      isFirstLine: false, isLastLine: false, stretchLastLine: false,
+      line: {
+        range: { start: 0, end: 7 }, topPt: 0, baselinePt: 10, advancePt: 12,
+        xOffsetPt: 0, availableWidthPt: 60, endsWithBreak: false,
+        segments: [
+          measuredText('a', 0, 10),
+          { kind: 'tab', range: { start: 1, end: 2 }, measuredWidthPt: 0, leader: 'none', fontSizePt: 10, alignedGapLimitPt: 25 },
+          measuredText('bb ', 2, 15),
+          measuredText('cc', 5, 10),
+        ],
+      },
+    });
+    const texts = line.placements.filter((placement) => placement.kind === 'text');
+    // jc=left: the 25 pt slack all goes to the gap, so the cell starts at 35 pt;
+    // jc=both: the gap stays empty and the bb/cc space takes the slack.
+    expect(texts[1]?.origin.xPt).toBe(cellX);
+    expect(texts.at(-1)?.origin.xPt).toBe(50);
   });
 
   it('retains an underline across the full advance of an underlined tab run', () => {
@@ -2637,21 +3194,23 @@ describe('planLine visual geometry', () => {
         ],
       },
     });
-    const placement = line.placements.find((candidate) => candidate.range.start === start);
-    expect(placement?.kind).toBe('text');
-    if (placement?.kind !== 'text') throw new Error('expected retained text placement');
-
-    expect(placement.range).toEqual({ start: 246, end: 250 });
-    expect(placement.paintOps.map((operation) => operation.range)).toEqual([
-      { start: 246, end: 248 },
-      { start: 248, end: 249 },
-      { start: 249, end: 250 },
-    ]);
-    expect(placement.paintOps.map((operation) => operation.text)).toEqual([
-      'نص',
-      ' ',
-      ' ',
-    ]);
+    const owned = line.placements.filter((candidate): candidate is TextPlacement => candidate.kind === 'text'
+      && candidate.range.start >= start && candidate.range.end <= start + value.length)
+      .sort((a, b) => a.range.start - b.range.start);
+    expect(owned.map(placement => placement.text).join('')).toBe(value);
+    // Cell/op packetization may change; the protection is complete,
+    // exactly-once source coverage across visible and zero-ink fragments.
+    let cursor = start;
+    for (const placement of owned) {
+      expect(placement.range.start).toBe(cursor);
+      for (const operation of placement.paintOps) {
+        expect(operation.range.start).toBe(cursor);
+        expect(operation.text).toBe(value.slice(operation.range.start - start, operation.range.end - start));
+        cursor = operation.range.end;
+      }
+      expect(cursor).toBe(placement.range.end);
+    }
+    expect(cursor).toBe(start + value.length);
   });
 
   it('shifts cluster-aligned vertical paint operations during internal justification', () => {

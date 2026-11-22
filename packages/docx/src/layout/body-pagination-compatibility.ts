@@ -4,6 +4,7 @@ import type {
   BodyParagraphSourceInput,
 } from './body-layout-input.js';
 import { defineCompatibilityRule } from './compatibility.js';
+import type { DocxCompatProfile } from './compat-profile.js';
 import type {
   LineLayout,
   ParagraphLayout,
@@ -102,6 +103,18 @@ export const WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION = defineCompatibilityRule({
   description: 'Admit the final visible paragraph content at a flow-region edge when only its authored trailing space crosses the edge, while retaining that space for placement and paint. Library policy, no Office measurement: trailing space-after admission assumption from PR #1080; nothing measured.',
 });
 
+export const WORD_COLUMN_BREAK_MARK_NEXT_COLUMN = defineCompatibilityRule({
+  id: 'word-column-break-mark-next-column',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'leading-column-break-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.3.1 br type="column" restarts the text in the next column but does not say where the paragraph mark after a terminal break goes (Part 4 §14.8.3.38 splitPgBreakAndParaMark covers only page breaks). Windows Word 16.0.20527 controls (a two-column continuous section, Times New Roman 11pt; compatibility modes 14 and 15, splitPgBreakAndParaMark absent and present) put a paragraph mark that follows a column break on its own empty line at the top of the next column: a paragraph holding only a column break pushes the next column\'s text down by one 12pt mark line (13.8pt), and a text paragraph ending with a column break by one 11pt mark line (12.65pt). Mode 15 and splitPgBreakAndParaMark (in mode 14 and 15) leave this unchanged: the setting governs page-break marks only. A paragraph that starts with a column break keeps no line before the break in the previous column (12pt and 20pt break runs, space before or after, an exact 30pt line, a bookmark before the break), as already laid out. The parser therefore keeps the mark of a terminal column break as an empty paragraph after the column break, with the same ownership rules as the §14.8.3.38 page-break mark; the pageBreakBefore (§17.3.1.23) of a paragraph that starts with a column break stays that paragraph property, applied before the break and satisfied by an empty page start. DOC sources share this normalizer.',
+});
+
 export const WORD_GRID_LINE_CONTENT_FIT_ADMISSION = defineCompatibilityRule({
   id: 'word-grid-line-content-fit-admission',
   evidence: {
@@ -111,7 +124,7 @@ export const WORD_GRID_LINE_CONTENT_FIT_ADMISSION = defineCompatibilityRule({
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'Windows Word 16.0 build 20430 admits a centered text box inside a 20pt line-grid cell when the natural box ends inside the body, even when the cell overhangs the bottom margin. A later-positioned caption whose natural box crosses the body bottom moves to the next page. These inside/outside observations support content-box admission, not baseline-only admission or a fixed overhang tolerance. ECMA-376 §§17.6.5 and 17.3.1.32 define grid participation, not this page-edge rule. trr3 family D further observes the same page boundary for 11pt MS Mincho empty marks and single-character paragraphs on a 16.4pt grid (modes 14/15, lines/linesAndChars, zero/one preceding empty mark): 15pt moves and 15.5pt stays. Empty marks carry the equivalent metric-only allowance through word-trailing-empty-mark-baseline-admission. Only leading added beyond its own natural/authored height is eligible; authored atLeast minima and auto multiples remain charged. The allowance is restricted to a positive whitelist of plain glyph paint in undecorated paragraphs: paragraph/run borders (including between/bar rules), shading/highlight, underline/strike/emphasis, ruby, fields, tabs, objects and unknown retained paint retain the full cell, even when a continuation slice omits paragraph edges. The issue #2099 restriction removes grid-leading relief only for whole source paragraphs with no placements on any acquired line (break-only/empty-line-only, bookmarks allowed), retaining full-box admission. Placements include text, tabs, anchor hosts, resources and drawings. Mixed paragraphs are unmeasured and keep v0.89 behaviour, including blank candidate prefixes and blank-only continuations after earlier placements; the trr3 family C counterexamples and evidence limits are recorded beside the predicate. Off-grid and exact lines retain full-box admission. This observation applies only at the physical body bottom with no intervening reservation; note bands, wrap exclusions and shortened column regions retain the whole grid cell. Evidence: issue #1674 / PR #1796 controls; issue #2099.',
+  description: 'Windows Word 16.0 build 20430 admits a centered text box inside a 20pt line-grid cell when the natural box ends inside the body, even when the cell overhangs the bottom margin. A later-positioned caption whose natural box crosses the body bottom moves to the next page. These inside/outside observations support content-box admission, not baseline-only admission or a fixed overhang tolerance. ECMA-376 §§17.6.5 and 17.3.1.32 define grid participation, not this page-edge rule. trr3 family D further observes the same page boundary for 11pt MS Mincho empty marks and single-character paragraphs on a 16.4pt grid (modes 14/15, lines/linesAndChars, zero/one preceding empty mark): 15pt moves and 15.5pt stays. Empty marks carry the equivalent metric-only allowance through word-trailing-empty-mark-baseline-admission. Only leading added beyond its own natural/authored height is eligible; authored atLeast minima and auto multiples remain charged. The allowance is restricted to a positive whitelist of plain glyph paint in undecorated paragraphs: paragraph/run borders (including between/bar rules), shading/highlight, underline/strike/emphasis, ruby, fields, tabs, objects and unknown retained paint retain the full cell, even when a continuation slice omits paragraph edges. The issue #2099 restriction removes grid-leading relief only for whole source paragraphs with no placements on any acquired line (break-only/empty-line-only, bookmarks allowed), retaining full-box admission. Placements include text, tabs, anchor hosts, resources and drawings. Mixed paragraphs are unmeasured and keep v0.89 behaviour, including blank candidate prefixes and blank-only continuations after earlier placements; the trr3 family C counterexamples and evidence limits are recorded beside the predicate. Off-grid and exact lines retain full-box admission. This observation applies only at the physical body bottom with no intervening reservation; note bands and shortened column regions retain the whole grid cell, and so does a line that a wrap exclusion overlaps. A wrap exclusion elsewhere on the page leaves the allowance: Windows Word 16.0.20527 controls (mode 14, 20pt lines grid, 16.5pt left for a trailing empty mark) keep the mark on the page with a square-wrapped float higher on the page (one or two empty marks) and with a wrapNone float, and move it to the next page when the square float lies beside the mark (16.5 and 17.5pt left) or when only 16.0pt is left. Evidence: issue #1674 / PR #1796 controls; issue #2099.',
 });
 
 // Positive paint whitelist for the bounded plain-caption observation. Unknown
@@ -123,14 +136,17 @@ export const WORD_GRID_LINE_CONTENT_FIT_ADMISSION = defineCompatibilityRule({
 const GRID_PLAIN_PARAGRAPH_KEYS = new Set([
   'kind', 'id', 'source', 'flowDomainId', 'ordinaryFlow', 'sectionFlowOwnership',
   'flowBounds', 'inkBounds', 'clipBounds', 'advancePt', 'diagnostics',
-  'paragraphId', 'styleId', 'bookmarkStarts', 'spacing', 'contextualSpacing',
+  'paragraphId', 'styleId', 'bookmarkStarts', 'spacing', 'contextualSpacing', 'additiveParagraphGap',
   'lines', 'resources', 'events', 'exclusions', 'cellContainmentBounds', 'anchorCollisions',
   'anchorFrames',
   'continuation',
+  // A tbLrV line strip paints as a tbRl strip (word-section-tblrv-line-strip);
+  // its reflection does not move ink across the strip's block edges.
+  'lineFrame',
 ]);
 const GRID_PLAIN_LINE_KEYS = new Set([
-  'range', 'bounds', 'baselinePt', 'advancePt', 'gridAfterLeadingPt', 'placements',
-  'wrapBounds', 'wrapFragments',
+  'range', 'bounds', 'baselinePt', 'advancePt', 'gridAfterLeadingPt', 'pageEdgeOverhangPt', 'placements',
+  'wrapBounds', 'wrapFragments', 'justificationExpansionPt',
 ]);
 const GRID_PLAIN_TEXT_KEYS = new Set([
   'kind', 'text', 'optionalHyphenGlyph', 'semanticSlotSpans', 'sourceRunIndex',
@@ -194,6 +210,29 @@ function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout)
           && placement.typography.emphasis.status === 'missing')));
 }
 
+/** WORD_GRID_LINE_CONTENT_FIT_ADMISSION: a wrap exclusion cancels the grid
+ * leading relief only where it overlaps the line's band (from the line top to
+ * `bandBottomPt`) inside the paragraph's flow column; one elsewhere on the
+ * page leaves it. */
+export function wordGridLeadingWrapExclusionOverlaps(
+  paragraph: Pick<ParagraphLayout, 'exclusions' | 'flowBounds'>,
+  lineTopPt: number,
+  bandBottomPt: number,
+  blockOffsetPt = 0,
+): boolean {
+  void WORD_GRID_LINE_CONTENT_FIT_ADMISSION;
+  // Keep-next lookahead acquires successors at the current cursor; only
+  // its terminal slice moves by the preceding keep members' full advances;
+  // host-owned exclusions move with it, while page-owned exclusions stay put.
+  return paragraph.exclusions.some(({ bounds, verticalOwnership }) => {
+    const topPt = bounds.yPt + (verticalOwnership === 'host' ? blockOffsetPt : 0);
+    return topPt < bandBottomPt
+      && topPt + bounds.heightPt > lineTopPt + blockOffsetPt
+      && bounds.xPt < paragraph.flowBounds.xPt + paragraph.flowBounds.widthPt
+      && bounds.xPt + bounds.widthPt > paragraph.flowBounds.xPt;
+  });
+}
+
 /** Omit only eligible blank terminal grid leading, preserving paragraph trailing extents
  * and all retained placement/paint geometry. Applies to complete and continuing
  * fragments; earlier lines still consume their full grid cells. The caller
@@ -218,16 +257,9 @@ export function wordGridLineAdmissionExtentPt(
   if (unreservedBodyBottomPt === undefined || additionalReservePt > 0) {
     return logicalLineBoxExtentPt;
   }
-  // Keep-next lookahead acquires successors at the current cursor; only
-  // its terminal slice moves by the preceding keep members' full advances;
-  // host-owned exclusions move with it, while page-owned exclusions stay put.
-  if (lastLine && paragraph.exclusions.some(({ bounds, verticalOwnership }) => {
-    const topPt = bounds.yPt + (verticalOwnership === 'host' ? blockOffsetPt : 0);
-    return topPt < unreservedBodyBottomPt
-      && topPt + bounds.heightPt > lastLine.bounds.yPt + blockOffsetPt
-      && bounds.xPt < paragraph.flowBounds.xPt + paragraph.flowBounds.widthPt
-      && bounds.xPt + bounds.widthPt > paragraph.flowBounds.xPt;
-  })) return logicalLineBoxExtentPt;
+  if (lastLine && wordGridLeadingWrapExclusionOverlaps(
+    paragraph, lastLine.bounds.yPt, unreservedBodyBottomPt, blockOffsetPt,
+  )) return logicalLineBoxExtentPt;
   // Authored paragraph paint also disables gridAfterLeadingPt at acquisition,
   // before continuation/keep-next slicing can remove a top/bottom/between edge.
   if (!lastLine || !wordGridLineHasPlainPaint(paragraph, lastLine)) {
@@ -273,6 +305,78 @@ export function wordLoweredDropCapAnchorLeadingPt(
  * an ordinary `w:framePr` remains governed by §17.3.2.24 metrics. */
 export function wordFramePositionExtendsLineBox(dropCap: string): boolean {
   return dropCap === 'none';
+}
+
+export const LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT = defineCompatibilityRule({
+  id: 'libreoffice-proportional-line-page-fit',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'odt-proportional-line-page-fit',
+    application: 'LibreOffice',
+    version: '26.8.2.2',
+    platform: 'macOS (headless PDF export)',
+  },
+  description: 'A producer laying lines out as LibreOffice does (DocumentSettings.__libreOfficeLineBoxes; DOCX never sets it) keeps a line with proportional spacing on a page when its natural line (LIBREOFFICE_FONT_LINE_BOX, before the multiple) fits above the bottom of the text area; the multiple\'s extra space below it may extend past the margin, and the next line starts the next page. Evidence: odt-proportional-line-page-fit controls, A4 with 2 cm margins (text area bottom 785.20 pt), a filler paragraph whose spacing after was bisected to 0.02 pt, then a probe paragraph of 1, 2 or 3 lines (manual line breaks, no widow or orphan control) at 100, 120, 150, 200 and 300%: in 12 pt Liberation Serif (natural line 13.79 pt) the last line kept on the first page starts at most 13.78 pt above the bottom for every multiple (771.41 pt), the first of two lines at 120/150/200/300% leaves 30.34/34.49/41.38/55.19 pt (its full advance plus one natural line), and the middle line of three lines follows the same rule (743.82 and 730.01 pt at 200 and 300%); in 12 pt Hiragino Sans the single line keeps 18.00 pt (its natural line with the 0.5 em gap) at 100 to 300%. An empty paragraph needs its natural line too, also at 100% (an empty 12 pt Liberation Serif paragraph stays with 13.78 pt left at 100 and 200%), so Word\'s below-baseline empty-mark allowance does not apply. The line that moves starts the next page at its top. A footnote area is a bottom of the same kind: with 10 pt Liberation Serif footnotes (separator 0.1 cm before and after, 0.018 cm line) the 200% threshold moved by exactly the area height (17.58 pt for one note line, 40.66 pt for three, against 17.67 and 40.65 pt), whether the reference sits in an earlier paragraph or on the kept line itself, so the kept line\'s natural line ends above the area and its extra space hangs into it (a one-line note: line top 753.66 pt, natural end 767.45 pt, area top 767.53 pt); the body\'s flow charge therefore ends at the area, as it ends at the margin. Only proportional multiples above 100% on unsnapped lines are covered; other trailing extents keep their own admission rules.',
+});
+
+/** {@link LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT}: the fit extent of a
+ * fragment whose retained extent ends with its last line, without that
+ * line's page-edge overhang. Retained content after the line (a bottom
+ * border or padding) keeps the extent. */
+export function libreOfficeProportionalLineAdmissionExtentPt(
+  fragment: ParagraphLayout,
+  logicalLineBoxExtentPt: number,
+): number {
+  const lastLine = fragment.lines.at(-1);
+  // An empty paragraph's mark line has the same allowance.
+  const mark = lastLine ? undefined : fragment.paragraphMark;
+  const overhangPt = (lastLine ?? mark)?.pageEdgeOverhangPt ?? 0;
+  if (!(overhangPt > 0)) return logicalLineBoxExtentPt;
+  const lineEndPt = lastLine
+    ? lastLine.bounds.yPt + lastLine.advancePt - fragment.flowBounds.yPt
+    : mark!.bounds.yPt + mark!.bounds.heightPt - fragment.flowBounds.yPt;
+  if (logicalLineBoxExtentPt > lineEndPt + 1e-6) return logicalLineBoxExtentPt;
+  return Math.max(0, Math.min(logicalLineBoxExtentPt, lineEndPt - overhangPt));
+}
+
+/** {@link LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT}: the flow charge of an
+ * admitted fragment whose last line's extra space may hang below the region
+ * bottom. A page-local reserve this fragment adds (a footnote area) starts
+ * that bottom just as the margin does: the natural line fits above it and the
+ * extra space hangs into it, so the charge ends at the reserve and the body
+ * never claims the note area. The admission extent stays charged even when a
+ * fragment is forced into a region it overflows. */
+export function libreOfficeProportionalLineAdmittedExtentPt(
+  fragment: ParagraphLayout,
+  admittedBlockExtentPt: number,
+  availableBlockExtentPt: number,
+  reservePt: number,
+  admissionExtentPt: number,
+): number {
+  const lastLine = fragment.lines.at(-1);
+  const mark = lastLine ? undefined : fragment.paragraphMark;
+  const overhangPt = (lastLine ?? mark)?.pageEdgeOverhangPt ?? 0;
+  if (!(overhangPt > 0) || !(reservePt > 0)) return admittedBlockExtentPt;
+  return Math.min(admittedBlockExtentPt, Math.max(admissionExtentPt, availableBlockExtentPt - reservePt));
+}
+
+/** {@link LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT}: the part of a fragment's
+ * retained space after that remains inside a flow charge shorter than its
+ * advance. The space after follows the last line's extra space, so the region
+ * bottom (margin or footnote area) cuts it first: content-owned bounds keep
+ * the hanging line, and a following paragraph's spacing collapse cannot rewind
+ * the cursor into that line. Fragments without an overhang keep their whole
+ * retained space after. */
+export function libreOfficeProportionalLineRetainedSpaceAfterPt(
+  fragment: ParagraphLayout,
+  chargePt: number,
+): number {
+  const afterPt = fragment.spacing.afterPt;
+  const lastLine = fragment.lines.at(-1);
+  const mark = lastLine ? undefined : fragment.paragraphMark;
+  const overhangPt = (lastLine ?? mark)?.pageEdgeOverhangPt ?? 0;
+  if (!(overhangPt > 0)) return afterPt;
+  return Math.max(0, Math.min(afterPt, afterPt - (fragment.advancePt - chargePt)));
 }
 
 /** Compatibility projection governed by {@link WORD_TRAILING_SPACE_AFTER_FIT_ADMISSION}. */
@@ -415,6 +519,75 @@ export function wordContinuousSectionRole(
     && afterNext.section.startType === 'continuous'
     ? 'drop-previous-after'
     : undefined;
+}
+
+export const WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK = defineCompatibilityRule({
+  id: 'word-hidden-paragraph-unjoinable-page-break',
+  evidence: {
+    kind: 'regression-test',
+    reference: 'packages/docx/src/pagination.test.ts#keeps the page break of a hidden paragraph followed by a framed paragraph',
+  },
+  description: 'ECMA-376 does not define how a vanished paragraph mark (§17.3.1.29, §17.3.2.41) interacts with paragraph properties. A run of consecutive hidden, unframed, inkless paragraphs joins the next paragraph and takes its properties, so a pageBreakBefore (§17.3.1.23) in the run is lost; when the run is followed directly by a table or by a non-drop-cap framed paragraph (§17.3.1.11) it cannot join, and the pageBreakBefore of the only break-carrying paragraph in the run applies. Evidence: PR #2195 Word 16 for Mac page counts on synthetic probes (hidden paragraphs with and without text; the break on the first or a later hidden paragraph; page-, margin- and text-anchored frames and a table keep the break; an ordinary following paragraph, directly or after another hidden paragraph, drops it). Untested and left on the previous behaviour (break dropped): runs ending at a section break, an explicit break, the end of the body or a hidden framed paragraph, hidden framed paragraphs themselves (they stay members of their frame group, §17.3.1.11), drop-cap successors, and runs in which more than one paragraph carries pageBreakBefore.',
+});
+
+/** One flow item for {@link wordHiddenParagraphRetainedBreaks}: a hidden
+ * (swallowed) paragraph, or any other item, which may block the join. */
+export type WordHiddenParagraphRunFact =
+  | Readonly<{ hidden: true; framed: boolean; pageBreakBefore: boolean }>
+  | Readonly<{ hidden: false; blocksJoin: boolean }>;
+
+/** Rule core of {@link WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK} over any
+ * flow representation, in one linear pass: indices of the hidden paragraphs
+ * whose pageBreakBefore applies as an authored break. A run is a sequence of
+ * consecutive unframed hidden paragraphs; `blocksJoin` marks a table or a
+ * non-drop-cap framed paragraph. */
+export function wordHiddenParagraphRetainedBreaks<T>(
+  items: readonly T[],
+  fact: (item: T) => WordHiddenParagraphRunFact,
+): ReadonlySet<number> {
+  const retained = new Set<number>();
+  const facts = items.map(fact);
+  const runMember = (index: number): boolean => {
+    const entry = facts[index];
+    return entry?.hidden === true && !entry.framed;
+  };
+  for (let start = 0; start < facts.length;) {
+    if (!runMember(start)) {
+      start += 1;
+      continue;
+    }
+    let end = start;
+    while (runMember(end)) end += 1;
+    const next = facts[end];
+    if (next?.hidden === false && next.blocksJoin) {
+      const breaks: number[] = [];
+      for (let index = start; index < end; index += 1) {
+        const entry = facts[index]!;
+        if (entry.hidden && entry.pageBreakBefore) breaks.push(index);
+      }
+      // Only a run with exactly one break was observed; several stay dropped.
+      if (breaks.length === 1) retained.add(breaks[0]!);
+    }
+    start = end;
+  }
+  return retained;
+}
+
+/** Compatibility projection governed by
+ * {@link WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK}: sequence indices of the
+ * hidden paragraphs whose pageBreakBefore applies as an authored break. */
+export function wordHiddenParagraphPageBreakEntries(
+  sequence: readonly BodyLayoutSequenceEntryFor<unknown>[],
+): ReadonlySet<number> {
+  return wordHiddenParagraphRetainedBreaks(sequence, (entry): WordHiddenParagraphRunFact => (
+    entry.kind === 'consume-source'
+      ? { hidden: true, framed: entry.framed !== undefined, pageBreakBefore: entry.pageBreakBefore === true }
+      : {
+          hidden: false,
+          blocksJoin: entry.kind === 'adjacent-table-group'
+            || (entry.kind === 'body-block'
+              && (entry.block.kind === 'table' || entry.block.framed === 'frame')),
+        }));
 }
 
 function paragraphHasOnlyDrawingAnchors(layout: ParagraphLayout): boolean {
@@ -569,12 +742,14 @@ export const WORD_PER_COLUMN_FOOTNOTE_BANDS = defineCompatibilityRule({
   description: 'ECMA-376 §17.11.21 puts pageBottom footnotes at the bottom of the page without defining multi-column note geometry. In Windows Word controls of two- and three-column sections (equal and 144/288pt columns, exact 12pt body and 10pt note lines), compatibility modes 11, 12 and 14 give each column its own note band, independent of footnoteLayoutLikeWW8 and the other legacy compatibility flags: a column\'s band holds the notes referenced in that column, wraps them at that column\'s width, starts with its own one-line separator band (also for an empty separator story) and ends at the body bottom, even when a column break ends the column early; a column without references keeps its full height. A note that does not fit continues at the top of the next column\'s band, before that column\'s own notes, and then on the next page; the reference line stays with as much of the note as fits, even when the whole note would fit the next column or a fresh page with nothing after the reference (one-line paragraphs closed by the reference, 10- and 20-line notes), unlike the single-column fallback of WORD_PARAGRAPH_FOOTNOTE_CONTINUATION. Endnotes follow the text in the column flow. Compatibility mode 15 (with or without footnoteLayoutLikeWW8) instead flows one page-wide note area through the columns; see WORD_PAGE_WIDE_FOOTNOTE_AREA. An omitted compatibility mode keeps the page band.',
 });
 
-/** Gate of {@link WORD_PER_COLUMN_FOOTNOTE_BANDS} for the active region. */
+/** Gate of {@link WORD_PER_COLUMN_FOOTNOTE_BANDS} for the active region; the
+ * document gate (including a producer that lays notes out per column, such as
+ * LibreOffice) is DocxCompatProfile.perColumnFootnoteBands. */
 export function wordPerColumnFootnoteBandsApply(
-  compatibilityMode: number | undefined,
+  compat: Pick<DocxCompatProfile, 'perColumnFootnoteBands'>,
   regionColumnCount: number,
 ): boolean {
-  return compatibilityMode !== undefined && compatibilityMode < 15 && regionColumnCount > 1;
+  return regionColumnCount > 1 && compat.perColumnFootnoteBands;
 }
 
 
@@ -617,9 +792,9 @@ export const WORD_CONTINUOUS_SECTION_FOOTNOTE_PAGE = defineCompatibilityRule({
 });
 
 export function wordContinuousSectionMayShareFootnotePage(
-  compatibilityMode: number | undefined,
-  footnoteLayoutLikeWW8: boolean | undefined,
+  compat: Pick<DocxCompatProfile, 'continuousSectionKeepsFootnotePage' | 'footnoteLayoutLikeWW8'>,
   hasColumnBands: boolean,
 ): boolean {
-  return compatibilityMode === 15 || (footnoteLayoutLikeWW8 === true && !hasColumnBands);
+  return compat.continuousSectionKeepsFootnotePage
+    || (compat.footnoteLayoutLikeWW8 && !hasColumnBands);
 }

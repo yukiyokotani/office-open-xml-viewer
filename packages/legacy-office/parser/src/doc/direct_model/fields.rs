@@ -12,20 +12,26 @@
 //!   renderer-evaluated `DocRun::Field` values (`classify_field` in the DOCX
 //!   parser). Word re-evaluates them for display: the Word PDF of a DOC whose
 //!   header DATE field stores an older date shows the export date, and page
-//!   numbers follow pagination. They are projected onto the same `FieldRun`,
-//!   limited to instructions whose switches the shared renderer interprets
-//!   exactly; anything else is rejected instead of showing a stale value.
+//!   numbers follow pagination. They are projected onto the same `FieldRun`.
+//!   A switch the shared renderer does not interpret leaves the value in its
+//!   default format, or the stored result for a date, as it does for a DOCX.
+//!   A locked field (grffldEnd fLocked) is not updated: it displays its
+//!   stored result. The dirty and edited flags do not stop Word from
+//!   updating the field when it prints (Word controls).
 //! * Every other field displays its stored result, which stays ordinary runs,
 //!   matching the DOCX parser's complex-field behavior. Fields never execute.
-//! * Fields that Word draws without a stored result or as a control (EQ,
-//!   MACROBUTTON, GOTOBUTTON, ADVANCE, SYMBOL without a result, form check boxes
-//!   and drop-downs) are rejected until they are projected.
+//! * EQ and a SYMBOL without a stored result are drawn by Word itself: an EQ
+//!   field becomes a phonetic guide or an inline equation (`equation.rs`),
+//!   a SYMBOL field one character in its font (ECMA-376 17.16.5.63).
+//! * MACROBUTTON, GOTOBUTTON, ADVANCE and FORMDROPDOWN are rejected until
+//!   they are projected.
+//! * grffldEnd fDiffer inverts the field-code view of one field. Word prints
+//!   the result of such a field (Word control), so the flag changes nothing.
 //!
-//! A field result flagged fPrivateResult is displayed like any other result
-//! only for INCLUDEPICTURE: the Word PDF of a DOC with such a picture result
-//! shows the picture. MS-DOC only says the result "is not intended to be
-//! visible to the user", so other private results with content stay rejected
-//! until an Office control establishes their display.
+//! A field result flagged fPrivateResult "is not intended to be visible to
+//! the user" (MS-DOC 2.9.110): its content is not displayed. INCLUDEPICTURE
+//! is the exception: the Word PDF of a DOC with such a picture result shows
+//! the picture.
 
 use crate::doc::{header_fields, unsupported, Paragraph, Token};
 
@@ -53,27 +59,49 @@ pub(in crate::doc) struct Evaluated {
     /// FORMCHECKBOX only: the instruction's binary-data character, whose
     /// NilPICFAndBinData holds the FFData (MS-DOC 2.9.78, 2.9.158).
     pub(in crate::doc) form_data_cp: Option<usize>,
-    /// EQ phonetic guide only (see `eq_ruby`).
-    pub(in crate::doc) ruby: Option<Box<RubyForm>>,
+    /// What Word draws for a field that is not a `FieldRun`.
+    pub(in crate::doc) drawn: Option<Box<Drawn>>,
 }
 
-/// A Word phonetic guide stored as an EQ field (ECMA-376 Part 4 14.10.4.6
-/// \o overstrike with \ad alignment of a \s\up raised guide over its base).
-/// Evidence: the local DOC files Word saved from DOCX files store every DOCX
-/// `w:ruby` as `EQ \* jc2 \* "Font:..." \* hpsN \o\ad(\s\up K(guide),base)`
-/// with `w:rubyAlign="distributeSpace"`, `w:hps` = N and `w:hpsRaise` = 2K.
+pub(in crate::doc) use super::equation::RubyForm;
+
+/// The display of a field Word draws itself.
+#[derive(Debug, Clone)]
+pub(in crate::doc) enum Drawn {
+    /// EQ phonetic guide.
+    Ruby(RubyForm),
+    /// Any other EQ field, as an inline equation.
+    Equation(Vec<ooxml_common::math::MathNode>),
+    /// SYMBOL without a stored result.
+    Symbol(SymbolForm),
+}
+
+impl PartialEq for Drawn {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ruby(a), Self::Ruby(b)) => a == b,
+            (Self::Symbol(a), Self::Symbol(b)) => a == b,
+            // The shared equation model has no equality of its own.
+            (Self::Equation(a), Self::Equation(b)) => {
+                serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Drawn {}
+
+/// ECMA-376 17.16.5.63 SYMBOL: one character, by code.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::doc) struct RubyForm {
-    /// Guide text and its CPs inside the (hidden) instruction.
-    pub(in crate::doc) guide: String,
-    pub(in crate::doc) guide_cp: usize,
-    /// Base text and its CPs inside the instruction.
-    pub(in crate::doc) base: String,
-    pub(in crate::doc) base_cp: usize,
-    /// `w:hps`: guide text size in half-points.
-    pub(in crate::doc) guide_half_points: u16,
-    /// `w:hpsRaise` / 2: raise of the guide in points.
-    pub(in crate::doc) raise_pt: u16,
+pub(in crate::doc) struct SymbolForm {
+    pub(in crate::doc) code: u32,
+    /// `\f`: the font the character is drawn in.
+    pub(in crate::doc) font: Option<String>,
+    /// `\s`: the font size in half-points.
+    pub(in crate::doc) size_half_points: Option<u16>,
+    /// `\u`: the code is a Unicode scalar value, not an ANSI code.
+    pub(in crate::doc) unicode: bool,
 }
 
 /// Link semantics of stored-result content, as the DOCX parser derives them
@@ -107,6 +135,19 @@ pub(in crate::doc) struct StoryFields {
     /// Piecewise-constant link context: each entry applies from its CP up to
     /// the next entry.
     links: Vec<(usize, Option<Link>)>,
+    /// Sorted, disjoint CP ranges (first, last) of private results, whose
+    /// content is not displayed.
+    private: Vec<(usize, usize)>,
+}
+
+/// What `classify` decides for one field.
+enum Display {
+    /// The stored result, as ordinary runs.
+    Result,
+    /// One token in place of the field.
+    Evaluated(Evaluated),
+    /// Nothing: the stored result is private.
+    Private,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -155,7 +196,8 @@ impl StoryFields {
         partitions: &[usize],
     ) -> Result<Self, String> {
         let mut stack: Vec<Open> = Vec::new();
-        let mut evaluated = Vec::new();
+        let mut evaluated: Vec<(usize, usize, Evaluated)> = Vec::new();
+        let mut private: Vec<(usize, usize)> = Vec::new();
         let mut links = Vec::new();
         let mut listed = 0usize;
         let mut cp = 0usize;
@@ -207,9 +249,9 @@ impl StoryFields {
                         return Err(unsupported("Word field has two separators"));
                     }
                     if !field.hidden && field.listed_type.is_some() {
-                        field.role = role(&field.instruction)?;
+                        field.role = role(&field.instruction);
                         if field.role != Role::None {
-                            links.push((cp + 1, effective_link(&stack)?));
+                            links.push((cp + 1, effective_link(&stack)));
                         }
                     }
                 }
@@ -230,11 +272,41 @@ impl StoryFields {
                     if first != last {
                         return Err(unsupported("Word field crosses a story boundary"));
                     }
-                    if let Some(entry) = classify(&field, flags)? {
-                        evaluated.push((field.begin, cp, entry));
+                    match classify(&field, flags)? {
+                        Display::Result => {}
+                        Display::Evaluated(entry) => {
+                            // The token replaces everything the field holds,
+                            // fields nested in its result included. Those
+                            // closed after this field began: they are the
+                            // tail of the list.
+                            while evaluated
+                                .last()
+                                .is_some_and(|(begin, ..)| *begin > field.begin)
+                            {
+                                evaluated.pop();
+                            }
+                            evaluated.push((field.begin, cp, entry));
+                        }
+                        Display::Private => {
+                            if let Some(separator) = field.separator {
+                                while evaluated
+                                    .last()
+                                    .is_some_and(|(begin, ..)| *begin > field.begin)
+                                {
+                                    evaluated.pop();
+                                }
+                                while private
+                                    .last()
+                                    .is_some_and(|(first, _)| *first > field.begin)
+                                {
+                                    private.pop();
+                                }
+                                private.push((separator + 1, cp));
+                            }
+                        }
                     }
                     if field.role != Role::None {
-                        links.push((cp, effective_link(&stack)?));
+                        links.push((cp, effective_link(&stack)));
                     }
                 }
                 _ => {
@@ -253,9 +325,22 @@ impl StoryFields {
                 "Word field table lists characters absent from its story",
             ));
         }
-        // Evaluated fields have no nested fields, so closing order is begin order.
+        // A field closing after the fields nested in it dropped them, so the
+        // remaining ranges are disjoint.
         evaluated.sort_unstable_by_key(|(begin, ..)| *begin);
-        Ok(Self { evaluated, links })
+        private.sort_unstable();
+        Ok(Self {
+            evaluated,
+            links,
+            private,
+        })
+    }
+
+    fn is_private(&self, cp: usize) -> bool {
+        let index = self.private.partition_point(|(first, _)| *first <= cp);
+        index
+            .checked_sub(1)
+            .is_some_and(|index| cp <= self.private[index].1)
     }
 
     fn link_at(&self, cp: usize) -> Option<&Link> {
@@ -292,12 +377,9 @@ impl StoryFields {
                         .push((Token::EvaluatedField(Box::new(field.clone())), *begin));
                     covered_until = Some(*end);
                 }
-                if covered_until.is_some_and(|end| cp <= end) {
-                    // Only stored-result text can lie inside an evaluated
-                    // field; `classify` rejected every other content.
-                    if !matches!(token, Token::Text(_)) {
-                        return Err(unsupported("unexpected content in evaluated Word field"));
-                    }
+                if covered_until.is_some_and(|end| cp <= end) || self.is_private(cp) {
+                    // The stored result Word replaces when it evaluates the
+                    // field, or a result it does not display.
                     continue;
                 }
                 paragraph.tokens.push((token, cp));
@@ -372,7 +454,7 @@ impl Open {
 
 /// DOCX precedence: a hyperlink's own target and anchor, else the innermost
 /// `\h` field anchor; any enclosing TOC result marks the run as a TOC link.
-fn effective_link(stack: &[Open]) -> Result<Option<Link>, String> {
+fn effective_link(stack: &[Open]) -> Option<Link> {
     let mut in_toc = false;
     let mut hyperlink = None;
     let mut field_anchor = None;
@@ -381,16 +463,19 @@ fn effective_link(stack: &[Open]) -> Result<Option<Link>, String> {
             Role::None => {}
             Role::Toc => in_toc = true,
             Role::Hyperlink { href, anchor } => {
+                // A run has one target: the innermost hyperlink, the one
+                // Word follows.
                 if hyperlink.replace((href, anchor)).is_some() {
-                    return Err(unsupported(
-                        "nested Word hyperlink fields are not supported",
-                    ));
+                    crate::rejection::approximated(
+                        "nested Word hyperlink fields link to the innermost target",
+                        (),
+                    );
                 }
             }
             Role::Anchor(anchor) => field_anchor = Some(anchor),
         }
     }
-    Ok(match hyperlink {
+    match hyperlink {
         Some((href, anchor)) => Some(Link {
             href: href.clone(),
             anchor: anchor.clone().or_else(|| field_anchor.cloned()),
@@ -401,15 +486,15 @@ fn effective_link(stack: &[Open]) -> Result<Option<Link>, String> {
             anchor: Some(anchor.clone()),
             in_toc,
         }),
-    })
+    }
 }
 
 /// Result-display role of a visible cached field, from its instruction.
-fn role(instruction: &str) -> Result<Role, String> {
+fn role(instruction: &str) -> Role {
     let words: Vec<&str> = instruction.split_whitespace().collect();
     let keyword = words.first().copied().unwrap_or_default();
     if keyword.eq_ignore_ascii_case("TOC") {
-        return Ok(Role::Toc);
+        return Role::Toc;
     }
     if keyword.eq_ignore_ascii_case("HYPERLINK") {
         return hyperlink(instruction);
@@ -427,43 +512,45 @@ fn role(instruction: &str) -> Result<Role, String> {
             .map(|target| target.trim_matches(['\'', '"']))
             .filter(|target| !target.is_empty())
         {
-            return Ok(Role::Anchor(anchor.to_string()));
+            return Role::Anchor(anchor.to_string());
         }
     }
-    Ok(Role::None)
+    Role::None
 }
 
 /// ECMA-376 17.16.5.25 HYPERLINK with 17.16.1 argument quoting: an optional
 /// target argument, `\l` location, and the display-neutral `\m`, `\n`,
-/// `\o` and `\t` switches.
-fn hyperlink(instruction: &str) -> Result<Role, String> {
-    let reject = || {
-        unsupported(format!(
-            "unsupported Word hyperlink instruction: {instruction}"
-        ))
-    };
-    let items = arguments(instruction).ok_or_else(reject)?;
-    let mut items = items.into_iter().skip(1).peekable();
-    let href = items.next_if(|(switch, _)| !switch).map(|(_, value)| value);
-    let mut anchor = None;
-    while let Some((switch, name)) = items.next() {
-        if !switch {
-            return Err(reject());
-        }
-        match name.as_str() {
-            "\\l" | "\\o" | "\\t" => {
-                let (_, value) = items.next_if(|(switch, _)| !switch).ok_or_else(reject)?;
-                if name == "\\l" && anchor.replace(value).is_some() {
-                    return Err(reject());
-                }
+/// `\o` and `\t` switches. An instruction that does not read this way links
+/// nowhere; its result is displayed like any other.
+fn hyperlink(instruction: &str) -> Role {
+    fn read(instruction: &str) -> Option<Role> {
+        let items = arguments(instruction)?;
+        let mut items = items.into_iter().skip(1).peekable();
+        let href = items.next_if(|(switch, _)| !switch).map(|(_, value)| value);
+        let mut anchor = None;
+        while let Some((switch, name)) = items.next() {
+            if !switch {
+                return None;
             }
-            // Word also writes `\h` on HYPERLINK fields; like `\m` and `\n` it
-            // takes no argument and does not change the stored result.
-            "\\m" | "\\n" | "\\h" => {}
-            _ => return Err(reject()),
+            match name.as_str() {
+                "\\l" | "\\o" | "\\t" => {
+                    let (_, value) = items.next_if(|(switch, _)| !switch)?;
+                    if name == "\\l" && anchor.replace(value).is_some() {
+                        return None;
+                    }
+                }
+                // Word also writes `\h` on HYPERLINK fields; like `\m` and `\n`
+                // it takes no argument and does not change the stored result.
+                "\\m" | "\\n" | "\\h" => {}
+                _ => return None,
+            }
         }
+        Some(Role::Hyperlink { href, anchor })
     }
-    Ok(Role::Hyperlink { href, anchor })
+    read(instruction).unwrap_or_else(|| {
+        crate::rejection::skipped("Word hyperlink instruction without a readable target");
+        Role::None
+    })
 }
 
 /// Split an instruction into (is_switch, text) items. Quoted arguments may
@@ -513,7 +600,11 @@ fn mismatch() -> String {
 /// stores them in the text only; none of them displays a result.
 const UNLISTED_TYPES: [&str; 5] = ["XE", "TC", "RD", "TA", "PRIVATE"];
 
-fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String> {
+/// MS-DOC 2.9.110 grffldEnd.
+const F_LOCKED: u8 = 0x10;
+const F_PRIVATE_RESULT: u8 = 0x20;
+
+fn classify(field: &Open, flags: Option<u8>) -> Result<Display, String> {
     let keyword = field
         .instruction
         .split_whitespace()
@@ -524,76 +615,75 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String
         if !UNLISTED_TYPES.contains(&keyword.as_str()) || field.separator.is_some() {
             return Err(mismatch());
         }
-        return Ok(None);
+        return Ok(Display::Result);
     };
     // MS-DOC 2.9.110: fHasSep and fNested MUST describe the actual structure.
     if (flags & 0x80 != 0) != field.separator.is_some() || (flags & 0x40 != 0) != field.parent {
         return Err(unsupported("Word field flags disagree with its structure"));
     }
     if field.hidden {
-        return Ok(None);
+        return Ok(Display::Result);
     }
-    if flags & 0x01 != 0 {
-        // fDiffer inverts the document's field-code display for this field.
-        return Err(unsupported(
-            "Word field displaying its instructions is not supported",
+    // A field Word evaluates or draws is read from its whole instruction and
+    // replaced as a whole: scratch that did not hold all of it is a limit of
+    // this reader, not content to drop.
+    let evaluated_keyword = matches!(
+        keyword.as_str(),
+        "PAGE" | "NUMPAGES" | "DATE" | "TIME" | "EQ" | "SYMBOL"
+    );
+    // A locked field and a SYMBOL with a stored result display that result
+    // as ordinary runs, whatever its length.
+    let stored_result = flags & F_LOCKED != 0 || (keyword == "SYMBOL" && field.separator.is_some());
+    if evaluated_keyword && !stored_result && (field.instruction_overflow || field.result_overflow)
+    {
+        return Err(crate::rejection::resource(
+            "Word evaluated field text budget exceeded",
         ));
     }
+    // fDiffer (0x01) only inverts the field-code view on screen; fZombieEmbed
+    // (0x02), fResultsDirty (0x04) and fResultsEdited (0x08) do not change
+    // what Word prints: it updates the field (Word controls: an edited PAGE
+    // result prints the page number).
+    let stored = || {
+        if flags & F_PRIVATE_RESULT != 0
+            && field.has_result_content()
+            && keyword != "INCLUDEPICTURE"
+        {
+            Display::Private
+        } else {
+            Display::Result
+        }
+    };
     let (field_type, listed_type) = match keyword.as_str() {
         "PAGE" => ("page", 0x21),
         "NUMPAGES" => ("numPages", 0x1a),
         "DATE" => ("date", 0x1f),
         "TIME" => ("time", 0x20),
-        "FORMCHECKBOX" => return checkbox(field, flags).map(Some),
-        "EQ" => return eq_ruby(field, flags).map(Some),
+        "FORMCHECKBOX" => return checkbox(field, flags).map(Display::Evaluated),
+        "EQ" => return Ok(equation(field)),
         "MACROBUTTON" | "GOTOBUTTON" | "ADVANCE" | "FORMDROPDOWN" => {
             return Err(unsupported(format!(
                 "Word {keyword} field display is not supported"
             )));
         }
-        "SYMBOL" if field.separator.is_none() => {
-            return Err(unsupported(
-                "Word SYMBOL field without a stored result is not supported",
-            ));
-        }
-        _ => {
-            if flags & 0x20 != 0 && field.has_result_content() && keyword != "INCLUDEPICTURE" {
-                return Err(unsupported(
-                    "Word private field result display is not established",
-                ));
-            }
-            return Ok(None);
-        }
+        "SYMBOL" if field.separator.is_none() => return Ok(symbol(field)),
+        _ => return Ok(stored()),
     };
     if field.listed_type != Some(listed_type) {
         return Err(unsupported(
             "Word evaluated field type disagrees with its instruction",
         ));
     }
-    // fZombieEmbed, fResultsDirty, fResultsEdited, fLocked and fPrivateResult
-    // each change whether Word re-evaluates or shows the stored result. None
-    // has an Office control yet, so keep them closed for evaluated fields.
-    if flags & 0x3e != 0 {
-        return Err(unsupported(
-            "Word evaluated field with edited, locked or private result is not supported",
-        ));
+    // A locked field is not updated: Word displays the stored result.
+    if flags & F_LOCKED != 0 {
+        return Ok(stored());
     }
-    if field.parent
-        || field.child_in_instruction
-        || field.child_in_result
-        || field.instruction_controls
-        || field.form_data_cp.is_some()
-        || field.instruction_overflow
-        || field.result_controls
-        || field.result_overflow
-    {
-        return Err(unsupported(
-            "Word evaluated field with nested or structural content is not supported",
-        ));
-    }
-    let source = match field_type {
-        "page" | "numPages" => number_switches(&field.instruction)?,
-        _ => date_switches(&field.instruction)?,
+    let (instruction, source) = match field_type {
+        "page" | "numPages" => number_switches(&field.instruction),
+        _ => (
+            field.instruction.trim().to_string(),
+            date_switches(&field.instruction),
+        ),
     };
     let instruction_cp = field.begin + 1;
     let (format_cp, agreeing_result_cp) = match source {
@@ -604,19 +694,110 @@ fn classify(field: &Open, flags: Option<u8>) -> Result<Option<Evaluated>, String
         // takes it from the first stored-result run.
         FormatSource::MergeFormat => (field.result_cp.unwrap_or(instruction_cp), None),
         // Without a switch the DOCX parser formats the value like the first
-        // instruction run. Word's choice is not specified, so a stored result
-        // formatted differently is rejected by the projector.
+        // instruction run. Word's choice is not specified; the projector
+        // records a stored result formatted differently.
         FormatSource::Default => (instruction_cp, field.result_cp),
     };
-    Ok(Some(Evaluated {
+    Ok(Display::Evaluated(Evaluated {
         field_type,
-        instruction: field.instruction.trim().to_string(),
+        instruction,
         cached_result: field.result.clone(),
         format_cp,
         agreeing_result_cp,
         form_data_cp: None,
-        ruby: None,
+        drawn: None,
     }))
+}
+
+/// An EQ field stores no result: Word draws the instruction (`equation.rs`).
+fn equation(field: &Open) -> Display {
+    let (drawn, format_cp) = match super::equation::parse(&field.instruction_chars) {
+        super::equation::Equation::Ruby(form) => {
+            let cp = form.base_cp;
+            (Drawn::Ruby(form), cp)
+        }
+        super::equation::Equation::Math(nodes, cp) => {
+            (Drawn::Equation(nodes), cp.unwrap_or(field.begin + 1))
+        }
+    };
+    Display::Evaluated(Evaluated {
+        field_type: if matches!(drawn, Drawn::Ruby(_)) {
+            "ruby"
+        } else {
+            "equation"
+        },
+        instruction: field.instruction.trim().to_string(),
+        cached_result: String::new(),
+        format_cp,
+        agreeing_result_cp: None,
+        form_data_cp: None,
+        drawn: Some(Box::new(drawn)),
+    })
+}
+
+/// ECMA-376 17.16.5.63 SYMBOL: "the character whose code point value is
+/// specified", decimal or `0x` hexadecimal, with `\f` font, `\s` size and
+/// the `\a` (ANSI, the default), `\u` (Unicode) and `\j` (Shift-JIS) code
+/// interpretations. `\h` does not change the character.
+fn symbol(field: &Open) -> Display {
+    let items = arguments(&field.instruction).unwrap_or_default();
+    let mut items = items.into_iter().skip(1).peekable();
+    let code = items.next_if(|(switch, _)| !switch).and_then(|(_, value)| {
+        match value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+        {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => value.parse().ok(),
+        }
+    });
+    let (mut font, mut size_half_points, mut unicode) = (None, None, false);
+    while let Some((switch, name)) = items.next() {
+        if !switch {
+            continue;
+        }
+        match name.to_ascii_lowercase().as_str() {
+            "\\f" => font = items.next_if(|(switch, _)| !switch).map(|(_, value)| value),
+            "\\s" => {
+                // MS-DOC 2.6.1 sprmCHps: a size of 1 to 1638 points.
+                size_half_points = items
+                    .next_if(|(switch, _)| !switch)
+                    .and_then(|(_, value)| value.parse::<f64>().ok())
+                    .filter(|size| (1.0..=1638.0).contains(size))
+                    .map(|size| (size * 2.0).round() as u16);
+            }
+            "\\u" => unicode = true,
+            "\\j" => {
+                // The reader holds no Shift-JIS table.
+                crate::rejection::approximated(
+                    "Word SYMBOL Shift-JIS code read as a Unicode value",
+                    (),
+                );
+                unicode = true;
+            }
+            _ => {}
+        }
+    }
+    let Some(code) = code else {
+        // No character is named: nothing is drawn.
+        crate::rejection::ignored_value("Word SYMBOL field without a character code");
+        return Display::Private;
+    };
+    Display::Evaluated(Evaluated {
+        field_type: "symbol",
+        instruction: field.instruction.trim().to_string(),
+        cached_result: String::new(),
+        // 17.16.5.63: the field's own character formatting applies.
+        format_cp: field.keyword_cp.unwrap_or(field.begin + 1),
+        agreeing_result_cp: None,
+        form_data_cp: None,
+        drawn: Some(Box::new(Drawn::Symbol(SymbolForm {
+            code,
+            font,
+            size_half_points,
+            unicode,
+        }))),
+    })
 }
 
 /// ECMA-376 17.16.5.20 FORMCHECKBOX, which the DOCX parser turns into a
@@ -658,163 +839,7 @@ fn checkbox(field: &Open, flags: u8) -> Result<Evaluated, String> {
         format_cp: field.begin,
         agreeing_result_cp: None,
         form_data_cp: Some(form_data_cp),
-        ruby: None,
-    })
-}
-
-/// Project only the EQ phonetic-guide form the DOC/DOCX pairs settle; every
-/// other EQ switch or shape stays rejected (Word draws those itself).
-fn eq_ruby(field: &Open, flags: u8) -> Result<Evaluated, String> {
-    let reject = || {
-        unsupported(format!(
-            "Word EQ field display is not supported: {}",
-            field.instruction.trim()
-        ))
-    };
-    // An EQ field stores no result; a nested, locked or otherwise flagged
-    // field is outside the evidence.
-    if field.listed_type != Some(0x31)
-        || flags != 0
-        || field.parent
-        || field.child_in_instruction
-        || field.child_in_result
-        || field.instruction_controls
-        || field.instruction_overflow
-        || field.form_data_cp.is_some()
-    {
-        return Err(reject());
-    }
-    let chars = &field.instruction_chars;
-    let mut at = 0usize;
-    let skip_space = |at: &mut usize| {
-        while chars.get(*at).is_some_and(|(c, _)| c.is_whitespace()) {
-            *at += 1;
-        }
-    };
-    let literal = |at: &mut usize, text: &str| -> bool {
-        let matched = text
-            .chars()
-            .enumerate()
-            .all(|(offset, expected)| chars.get(*at + offset).map(|(c, _)| *c) == Some(expected));
-        if matched {
-            *at += text.chars().count();
-        }
-        matched
-    };
-    let number = |at: &mut usize| -> Option<u16> {
-        let start = *at;
-        while chars.get(*at).is_some_and(|(c, _)| c.is_ascii_digit()) {
-            *at += 1;
-        }
-        chars[start..*at]
-            .iter()
-            .map(|(c, _)| *c)
-            .collect::<String>()
-            .parse()
-            .ok()
-    };
-    skip_space(&mut at);
-    if !(literal(&mut at, "EQ") || literal(&mut at, "eq")) {
-        return Err(reject());
-    }
-    // \* jc2
-    skip_space(&mut at);
-    if !literal(&mut at, "\\*") {
-        return Err(reject());
-    }
-    skip_space(&mut at);
-    if !literal(&mut at, "jc2") {
-        return Err(reject());
-    }
-    // \* "Font:name" (Word also writes typographic quotes here). The guide's
-    // own character properties carry its font, as in the DOCX w:rt run.
-    skip_space(&mut at);
-    if !literal(&mut at, "\\*") {
-        return Err(reject());
-    }
-    skip_space(&mut at);
-    let close = match chars.get(at).map(|(c, _)| *c) {
-        Some('"') => '"',
-        Some('\u{201c}') => '\u{201d}',
-        _ => return Err(reject()),
-    };
-    at += 1;
-    if !literal(&mut at, "Font:") {
-        return Err(reject());
-    }
-    while chars.get(at).is_some_and(|(c, _)| *c != close) {
-        at += 1;
-    }
-    if chars.get(at).is_none() {
-        return Err(reject());
-    }
-    at += 1;
-    // \* hpsN
-    skip_space(&mut at);
-    if !literal(&mut at, "\\*") {
-        return Err(reject());
-    }
-    skip_space(&mut at);
-    if !literal(&mut at, "hps") {
-        return Err(reject());
-    }
-    let guide_half_points = number(&mut at)
-        .filter(|value| *value > 0)
-        .ok_or_else(reject)?;
-    // \o\ad(\s\up K(guide),base)
-    skip_space(&mut at);
-    if !literal(&mut at, "\\o\\ad(\\s\\up") {
-        return Err(reject());
-    }
-    skip_space(&mut at);
-    let raise_pt = number(&mut at).ok_or_else(reject)?;
-    if !literal(&mut at, "(") {
-        return Err(reject());
-    }
-    let text = |at: &mut usize, end: char| -> Option<(String, usize)> {
-        let start = *at;
-        while let Some((c, _)) = chars.get(*at) {
-            if *c == end {
-                break;
-            }
-            if matches!(c, '(' | ')' | ',' | '\\') {
-                return None;
-            }
-            *at += 1;
-        }
-        chars.get(*at)?;
-        (*at > start).then(|| {
-            (
-                chars[start..*at].iter().map(|(c, _)| *c).collect(),
-                chars[start].1,
-            )
-        })
-    };
-    let (guide, guide_cp) = text(&mut at, ')').ok_or_else(reject)?;
-    if !literal(&mut at, "),") {
-        return Err(reject());
-    }
-    let (base, base_cp) = text(&mut at, ')').ok_or_else(reject)?;
-    at += 1;
-    skip_space(&mut at);
-    if at != chars.len() {
-        return Err(reject());
-    }
-    Ok(Evaluated {
-        field_type: "ruby",
-        instruction: field.instruction.trim().to_string(),
-        cached_result: String::new(),
-        format_cp: base_cp,
-        agreeing_result_cp: None,
-        form_data_cp: None,
-        ruby: Some(Box::new(RubyForm {
-            guide,
-            guide_cp,
-            base,
-            base_cp,
-            guide_half_points,
-            raise_pt,
-        })),
+        drawn: None,
     })
 }
 
@@ -872,58 +897,98 @@ enum FormatSource {
 }
 
 /// ECMA-376 17.16.4.3.1 general numeric formats that the shared field renderer
-/// maps one-to-one (case-sensitive arguments).
-const NUMBER_FORMATS: [&str; 7] = [
-    "Arabic",
-    "ArabicDash",
-    "Hex",
-    "Roman",
-    "roman",
-    "ALPHABETIC",
-    "alphabetic",
+/// maps one-to-one. The renderer matches them case-sensitively; Word does
+/// not (Word control: `\* ROMAN` prints `I`), and takes the capitalization of
+/// the result from the first letter of the argument.
+const NUMBER_FORMATS: [(&str, &str, &str); 4] = [
+    ("arabic", "Arabic", "Arabic"),
+    ("arabicdash", "ArabicDash", "ArabicDash"),
+    ("hex", "Hex", "Hex"),
+    ("roman", "Roman", "roman"),
 ];
 
-fn general_format(argument: &str, source: &mut FormatSource) -> Result<bool, String> {
+fn canonical_number_format(argument: &str) -> Option<&'static str> {
+    let lower = argument.to_ascii_lowercase();
+    let upper = argument.starts_with(|first: char| first.is_ascii_uppercase());
+    if lower == "alphabetic" {
+        return Some(if upper { "ALPHABETIC" } else { "alphabetic" });
+    }
+    NUMBER_FORMATS
+        .iter()
+        .find(|(name, ..)| *name == lower)
+        .map(|(_, capital, small)| if upper { *capital } else { *small })
+}
+
+fn general_format(argument: &str, source: &mut FormatSource) -> bool {
     let selected = if argument.eq_ignore_ascii_case("MERGEFORMAT") {
         FormatSource::MergeFormat
     } else if argument.eq_ignore_ascii_case("CHARFORMAT") {
         FormatSource::CharFormat
     } else {
-        return Ok(false);
+        return false;
     };
     if *source != FormatSource::Default && *source != selected {
-        return Err(unsupported(
-            "Word field combines MERGEFORMAT and CHARFORMAT",
-        ));
+        // Neither ECMA-376 17.16.4.3.3 nor a Word control settles which of
+        // the two wins; the first one is kept.
+        crate::rejection::approximated(
+            "Word field combines MERGEFORMAT and CHARFORMAT: the first applies",
+            (),
+        );
+        return true;
     }
     *source = selected;
-    Ok(true)
+    true
 }
 
-fn number_switches(instruction: &str) -> Result<FormatSource, String> {
-    let mut words = instruction.split_whitespace().skip(1);
+/// The instruction as the shared renderer reads it, and the format source.
+/// The renderer leaves a number in its default format for a switch it does
+/// not interpret, as it does for a DOCX.
+fn number_switches(instruction: &str) -> (String, FormatSource) {
+    let instruction = instruction.trim();
+    // Words with their byte offsets: only a format name changes.
+    let mut words = instruction
+        .split_whitespace()
+        .map(|word| (word.as_ptr() as usize - instruction.as_ptr() as usize, word));
+    words.next();
+    let mut output = String::with_capacity(instruction.len());
+    let mut copied = 0;
     let mut source = FormatSource::Default;
     let mut numeric = false;
-    while let Some(switch) = words.next() {
-        let argument = words.next();
-        let supported = switch == "\\*"
-            && argument.is_some_and(|argument| {
-                if NUMBER_FORMATS.contains(&argument) && !numeric {
-                    numeric = true;
-                    return true;
-                }
-                general_format(argument, &mut source).unwrap_or(false)
-            });
-        if !supported {
-            return Err(unsupported(format!(
-                "unsupported Word page-number field instruction: {instruction}"
-            )));
+    let mut interpreted = true;
+    while let Some((_, switch)) = words.next() {
+        if switch != "\\*" {
+            interpreted = false;
+            continue;
+        }
+        let Some((offset, argument)) = words.next() else {
+            interpreted = false;
+            break;
+        };
+        match canonical_number_format(argument) {
+            Some(canonical) if !numeric => {
+                numeric = true;
+                output.push_str(&instruction[copied..offset]);
+                output.push_str(canonical);
+                copied = offset + argument.len();
+            }
+            _ => interpreted &= general_format(argument, &mut source),
         }
     }
-    Ok(source)
+    output.push_str(&instruction[copied..]);
+    if !interpreted {
+        crate::rejection::approximated(
+            "Word page-number field switch without a renderer format",
+            (),
+        );
+    }
+    (output, source)
 }
 
-fn date_switches(instruction: &str) -> Result<FormatSource, String> {
+/// The format source of a DATE or TIME field. The shared renderer formats
+/// the current date through the `\@` picture; without a picture, or with a
+/// picture item it does not implement, it shows the stored result, as it
+/// does for a DOCX.
+fn date_switches(instruction: &str) -> FormatSource {
     let mut rest = instruction.trim_start();
     rest = rest[rest.find(char::is_whitespace).unwrap_or(rest.len())..].trim_start();
     let mut source = FormatSource::Default;
@@ -931,89 +996,30 @@ fn date_switches(instruction: &str) -> Result<FormatSource, String> {
     while !rest.is_empty() {
         let (switch, tail) = rest.split_at(rest.find(char::is_whitespace).unwrap_or(rest.len()));
         let tail = tail.trim_start();
-        if switch == "\\@" && !picture && tail.starts_with('"') {
-            let close = tail[1..]
-                .find('"')
-                .ok_or_else(|| unsupported("unterminated Word date-time picture"))?;
-            validate_date_picture(&tail[1..1 + close])?;
+        if switch == "\\@" && tail.starts_with('"') {
             picture = true;
-            rest = tail[close + 2..].trim_start();
+            rest = match tail[1..].find('"') {
+                Some(close) => tail[close + 2..].trim_start(),
+                None => "",
+            };
             continue;
         }
         let (argument, tail) = tail.split_at(tail.find(char::is_whitespace).unwrap_or(tail.len()));
-        if switch != "\\*" || !general_format(argument, &mut source)? {
-            return Err(unsupported(format!(
-                "unsupported Word date-time field instruction: {instruction}"
-            )));
+        if switch == "\\@" {
+            picture = true;
+        } else if switch == "\\*" {
+            general_format(argument, &mut source);
         }
         rest = tail.trim_start();
     }
     if !picture {
-        // Without a picture Word uses a language-dependent default format;
-        // the shared renderer then shows the stored result instead.
-        return Err(unsupported(
-            "Word date-time field without a picture is not supported",
-        ));
+        // Without a picture Word uses a language-dependent default format.
+        crate::rejection::approximated(
+            "Word date-time field without a picture shows its stored result",
+            (),
+        );
     }
-    Ok(source)
-}
-
-/// ECMA-376 17.16.4.1 picture items that the shared renderer formats without
-/// locale data: numeric year, month, day, hour, minute and second items, the
-/// AM/PM designators, quoted literals and punctuation. Month/weekday names and
-/// calendar/era items are language dependent and stay rejected.
-fn validate_date_picture(picture: &str) -> Result<(), String> {
-    let characters: Vec<char> = picture.chars().collect();
-    let reject = || unsupported(format!("unsupported Word date-time picture: {picture}"));
-    let mut index = 0;
-    while index < characters.len() {
-        let character = characters[index];
-        if character == '\'' {
-            index += 1;
-            loop {
-                match characters.get(index) {
-                    Some('\'') if characters.get(index + 1) == Some(&'\'') => index += 2,
-                    Some('\'') => {
-                        index += 1;
-                        break;
-                    }
-                    Some(_) => index += 1,
-                    None => return Err(reject()),
-                }
-            }
-            continue;
-        }
-        if character.is_ascii_alphabetic() {
-            let designator = characters[index..].iter().collect::<String>();
-            if let Some(length) = ["AM/PM", "am/pm", "A/P", "a/p"]
-                .iter()
-                .find(|value| designator.starts_with(**value))
-                .map(|value| value.len())
-            {
-                index += length;
-                continue;
-            }
-            let run = characters[index..]
-                .iter()
-                .take_while(|value| **value == character)
-                .count();
-            let allowed = match character {
-                'y' | 'Y' => run == 2 || run == 4,
-                'M' | 'd' | 'D' | 'H' | 'h' | 'm' | 's' => run <= 2,
-                _ => false,
-            };
-            if !allowed {
-                return Err(reject());
-            }
-            index += run;
-            continue;
-        }
-        if character.is_alphanumeric() || character == '"' || character == '\\' {
-            return Err(reject());
-        }
-        index += 1;
-    }
-    Ok(())
+    source
 }
 
 #[cfg(test)]
@@ -1061,7 +1067,7 @@ mod tests {
             format_cp: 2,
             agreeing_result_cp: None,
             form_data_cp: None,
-            ruby: None,
+            drawn: None,
         }
     }
 
@@ -1189,42 +1195,277 @@ mod tests {
         assert!(tokens(text, &wrong).unwrap_err().contains("type disagrees"));
     }
 
+    fn evaluated(text: &str, kind: u8, flags: u8) -> Vec<Evaluated> {
+        let table = with_types(text, &[kind], &[flags]);
+        tokens(text, &table)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(token, _)| match token {
+                Token::EvaluatedField(field) => Some(*field),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn best_effort() -> Vec<&'static str> {
+        crate::rejection::take_best_effort()
+            .into_iter()
+            .map(|(_, site)| site)
+            .collect()
+    }
+
     #[test]
-    fn fields_word_draws_itself_or_with_unverified_state_are_rejected() {
+    fn fields_without_a_projection_stay_rejected() {
         for (text, kind, flags) in [
-            ("\u{13}EQ \\o(a,b)\u{15}\r", 0x31, 0x00),
-            (
-                "\u{13}EQ \\* jc2 \\* \"Font:X\" \\* hps16 \\o\\ad(\\s\\up 14(a),b)\u{15}\r",
-                0x31,
-                0x40,
-            ),
             ("\u{13} FORMCHECKBOX \u{14}\u{15}\r", 0x47, 0xa0),
             ("\u{13} FORMCHECKBOX \u{1}\u{14}x\u{15}\r", 0x47, 0xa0),
             ("\u{13} FORMCHECKBOX \u{1}\u{14}\u{15}\r", 0x47, 0xb0),
             ("\u{13}MACROBUTTON M Click\u{15}\r", 0x33, 0x00),
-            ("\u{13}SYMBOL 183\u{15}\r", 0x39, 0x00),
-            ("\u{13}REF x\u{14}secret\u{15}\r", 0x03, 0xa0),
-            ("\u{13}PAGE\u{14}1\u{15}\r", 0x21, 0x90),
-            ("\u{13}PAGE\u{14}1\u{15}\r", 0x21, 0x81),
-            ("\u{13}PAGE \\# 0\u{14}1\u{15}\r", 0x21, 0x80),
-            ("\u{13}PAGE \\* ROMAN\u{14}I\u{15}\r", 0x21, 0x80),
-            ("\u{13}PAGE \\* roman \\* Arabic\u{14}i\u{15}\r", 0x21, 0x80),
-            ("\u{13}PAGE\u{14}1\u{b}2\u{15}\r", 0x21, 0x80),
-            ("\u{13}DATE\u{14}1/1/2000\u{15}\r", 0x1f, 0x80),
-            ("\u{13}DATE \\@ \"MMMM d\"\u{14}x\u{15}\r", 0x1f, 0x80),
-            ("\u{13}DATE \\@ \"d\" \\l\u{14}x\u{15}\r", 0x1f, 0x80),
         ] {
             let table = with_types(text, &[kind], &[flags]);
             assert!(tokens(text, &table).is_err(), "{text:?}");
         }
-        // Nested evaluated fields inside a cached result are rejected too.
-        let nested = "\u{13}REF x\u{14}\u{13}PAGE\u{14}1\u{15}\u{15}\r";
-        let table = with_types(nested, &[0x03, 0x21], &[0xc0, 0x80]);
-        assert!(tokens(nested, &table).is_err());
+    }
+
+    #[test]
+    fn locked_fields_display_their_stored_result() {
+        // grffldEnd fLocked: Word does not update the field (Word control:
+        // a locked DATE prints its stored result).
+        let text = "\u{13}PAGE\u{14}7\u{15}\r";
+        let table = with_types(text, &[0x21], &[0x90]);
+        assert_eq!(
+            tokens(text, &table).unwrap(),
+            vec![(Token::Text("7".into()), 6)]
+        );
+    }
+
+    #[test]
+    fn display_and_edit_flags_do_not_stop_the_evaluation() {
+        // fDiffer (0x01), fResultsDirty (0x04) and fResultsEdited (0x08):
+        // Word prints the updated value (Word controls).
+        best_effort();
+        for flags in [0x81, 0x84, 0x88, 0x8c] {
+            let fields = evaluated("\u{13}PAGE\u{14}99\u{15}\r", 0x21, flags);
+            assert_eq!(fields.len(), 1, "{flags:02x}");
+            assert_eq!(
+                (fields[0].field_type, fields[0].cached_result.as_str()),
+                ("page", "99")
+            );
+        }
+        assert!(best_effort().is_empty());
+    }
+
+    #[test]
+    fn private_results_are_not_displayed() {
+        // MS-DOC 2.9.110 fPrivateResult: "not intended to be visible".
+        let text = "A\u{13}REF x\u{14}sec\u{13}PAGE\u{14}1\u{15}ret\u{15}B\r";
+        let table = with_types(text, &[0x03, 0x21], &[0xc0, 0xa0]);
+        assert_eq!(
+            tokens(text, &table).unwrap(),
+            vec![(Token::Text("A".into()), 0), (Token::Text("B".into()), 23)]
+        );
         // A private INCLUDEPICTURE result keeps its displayed picture.
         let picture = "\u{13}INCLUDEPICTURE \"x\"\u{14}\u{1}\u{15}\r";
         let table = with_types(picture, &[0x43], &[0xac]);
         assert_eq!(tokens(picture, &table).unwrap(), vec![(Token::Picture, 20)]);
+    }
+
+    #[test]
+    fn page_number_switches_reach_the_renderer_in_its_spelling() {
+        best_effort();
+        // Word matches the format name without case and capitalizes like
+        // its first letter (Word control: `\* ROMAN` prints `I`).
+        for (instruction, projected) in [
+            ("PAGE \\* ROMAN", "PAGE \\* Roman"),
+            ("PAGE \\* roman", "PAGE \\* roman"),
+            ("PAGE \\* Alphabetic", "PAGE \\* ALPHABETIC"),
+            (
+                "PAGE \\* alphabetic \\* mergeformat",
+                "PAGE \\* alphabetic \\* mergeformat",
+            ),
+            ("PAGE \\* ARABICDASH", "PAGE \\* ArabicDash"),
+        ] {
+            let text = format!("\u{13}{instruction}\u{14}1\u{15}\r");
+            let fields = evaluated(&text, 0x21, 0x80);
+            assert_eq!(fields[0].instruction, projected);
+        }
+        assert!(best_effort().is_empty());
+        // A switch without a renderer format leaves the default format.
+        for instruction in [
+            "PAGE \\# 0",
+            "PAGE \\* CardText",
+            "PAGE \\* roman \\* Arabic",
+        ] {
+            let text = format!("\u{13}{instruction}\u{14}1\u{15}\r");
+            let fields = evaluated(&text, 0x21, 0x80);
+            assert_eq!(fields[0].instruction, instruction);
+            assert_eq!(
+                best_effort(),
+                ["Word page-number field switch without a renderer format"]
+            );
+        }
+        // Both general formats: the first one selects the source.
+        let fields = evaluated(
+            "\u{13}PAGE \\* MERGEFORMAT \\* CHARFORMAT\u{14}1\u{15}\r",
+            0x21,
+            0x80,
+        );
+        assert_eq!(
+            (fields[0].format_cp, fields[0].agreeing_result_cp),
+            (35, None)
+        );
+        assert_eq!(
+            best_effort(),
+            ["Word field combines MERGEFORMAT and CHARFORMAT: the first applies"]
+        );
+    }
+
+    #[test]
+    fn evaluated_fields_replace_structured_results_and_nest_in_results() {
+        // The stored result Word regenerates may hold anything.
+        let text = "\u{13}PAGE\u{14}1\u{b}2\u{15}B\r";
+        let table = with_types(text, &[0x21], &[0x80]);
+        let actual = tokens(text, &table).unwrap();
+        assert_eq!(actual.len(), 2);
+        assert!(matches!(actual[0].0, Token::EvaluatedField(_)));
+        assert_eq!(actual[1].0, Token::Text("B".into()));
+        // A PAGE field inside a hyperlink result is evaluated (Word control).
+        let nested = "\u{13}HYPERLINK \"http://a\"\u{14}\u{13}PAGE\u{14}1\u{15}\u{15}\r";
+        let table = with_types(nested, &[0x58, 0x21], &[0xc0, 0x80]);
+        let actual = tokens(nested, &table).unwrap();
+        let [(Token::EvaluatedField(field), 22)] = actual.as_slice() else {
+            panic!("{actual:?}");
+        };
+        assert_eq!(field.field_type, "page");
+    }
+
+    #[test]
+    fn date_fields_leave_their_picture_to_the_renderer() {
+        best_effort();
+        // A picture item the renderer does not implement shows the stored
+        // result there, as for a DOCX.
+        let fields = evaluated("\u{13}DATE \\@ \"MMMM d\" \\l\u{14}x\u{15}\r", 0x1f, 0x80);
+        assert_eq!(
+            (fields[0].field_type, fields[0].instruction.as_str()),
+            ("date", "DATE \\@ \"MMMM d\" \\l")
+        );
+        assert!(best_effort().is_empty());
+        let fields = evaluated("\u{13}DATE\u{14}1/1/2000\u{15}\r", 0x1f, 0x80);
+        assert_eq!(fields[0].cached_result, "1/1/2000");
+        assert_eq!(
+            best_effort(),
+            ["Word date-time field without a picture shows its stored result"]
+        );
+    }
+
+    #[test]
+    fn an_evaluated_field_longer_than_the_scratch_is_a_resource_limit() {
+        // The token replaces the whole field: an instruction or result the
+        // scratch did not hold is not dropped.
+        for text in [
+            format!("\u{13}EQ {}\u{15}\r", "x".repeat(MAX_FIELD_TEXT + 8)),
+            format!("\u{13}PAGE\u{14}{}\u{15}\r", "9".repeat(MAX_FIELD_TEXT + 8)),
+        ] {
+            let kind = if text.contains("EQ") { 0x31 } else { 0x21 };
+            let flags = if text.contains('\u{14}') { 0x80 } else { 0x00 };
+            let table = with_types(&text, &[kind], &[flags]);
+            let error = tokens(&text, &table).unwrap_err();
+            assert!(error.starts_with("LEGACY_RESOURCE_LIMIT:"), "{error}");
+        }
+        // A SYMBOL with a stored result displays that result unchanged.
+        let text = format!(
+            "\u{13}SYMBOL 167\u{14}{}\u{15}\r",
+            "s".repeat(MAX_FIELD_TEXT + 8)
+        );
+        let table = with_types(&text, &[0x39], &[0x80]);
+        assert_eq!(
+            tokens(&text, &table).unwrap(),
+            vec![(Token::Text("s".repeat(MAX_FIELD_TEXT + 8)), 12)]
+        );
+        // A cached field needs only its keyword.
+        let text = format!(
+            "\u{13}REF {}\u{14}r\u{15}\r",
+            "x".repeat(MAX_FIELD_TEXT + 8)
+        );
+        let table = with_types(&text, &[0x03], &[0x80]);
+        assert_eq!(tokens(&text, &table).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_field_replaces_only_the_fields_nested_in_it() {
+        // Fields before an evaluated field stay; a private result drops the
+        // evaluated field nested in it.
+        let text = "\u{13}PAGE\u{14}1\u{15}\u{13}NUMPAGES\u{14}2\u{15}\u{13}REF x\u{14}\u{13}PAGE\u{14}3\u{15}\u{15}\r";
+        let table = with_types(text, &[0x21, 0x1a, 0x03, 0x21], &[0x80, 0x80, 0xc0, 0xa0]);
+        let kinds: Vec<_> = tokens(text, &table)
+            .unwrap()
+            .into_iter()
+            .map(|(token, _)| match token {
+                Token::EvaluatedField(field) => field.field_type,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["page", "numPages"]);
+    }
+
+    #[test]
+    fn symbol_fields_name_one_character() {
+        let fields = evaluated("\u{13}SYMBOL 167 \\f \"Symbol\" \\s 14\u{15}\r", 0x39, 0x00);
+        assert_eq!(fields[0].field_type, "symbol");
+        assert_eq!(fields[0].format_cp, 1);
+        assert_eq!(
+            fields[0].drawn.as_deref(),
+            Some(&Drawn::Symbol(SymbolForm {
+                code: 167,
+                font: Some("Symbol".into()),
+                size_half_points: Some(28),
+                unicode: false,
+            }))
+        );
+        let fields = evaluated("\u{13}SYMBOL 0x2022 \\u\u{15}\r", 0x39, 0x00);
+        assert_eq!(
+            fields[0].drawn.as_deref(),
+            Some(&Drawn::Symbol(SymbolForm {
+                code: 0x2022,
+                font: None,
+                size_half_points: None,
+                unicode: true,
+            }))
+        );
+        // No character code: nothing is drawn.
+        best_effort();
+        assert!(evaluated("\u{13}SYMBOL \\f \"Symbol\"\u{15}\r", 0x39, 0x00).is_empty());
+        assert_eq!(
+            best_effort(),
+            ["Word SYMBOL field without a character code"]
+        );
+    }
+
+    #[test]
+    fn hyperlinks_without_a_readable_target_link_nowhere() {
+        best_effort();
+        let text = "\u{13}HYPERLINK \"http://a\" \\z\u{14}T\u{15}\r";
+        let table = with_types(text, &[0x58], &[0x80]);
+        assert_eq!(
+            tokens(text, &table).unwrap(),
+            vec![(Token::Text("T".into()), 25)]
+        );
+        assert_eq!(
+            best_effort(),
+            ["Word hyperlink instruction without a readable target"]
+        );
+        // Nested hyperlinks: the innermost target.
+        let text =
+            "\u{13}HYPERLINK \"http://a\"\u{14}\u{13}HYPERLINK \"http://b\"\u{14}T\u{15}\u{15}\r";
+        let table = with_types(text, &[0x58, 0x58], &[0xc0, 0x80]);
+        let actual = tokens(text, &table).unwrap();
+        let [(Token::Linked(linked), _)] = actual.as_slice() else {
+            panic!("{actual:?}");
+        };
+        assert_eq!(linked.link.href.as_deref(), Some("http://b"));
+        assert!(
+            best_effort().contains(&"nested Word hyperlink fields link to the innermost target")
+        );
     }
 
     #[test]
@@ -1239,7 +1480,7 @@ mod tests {
             format_cp: 1,
             agreeing_result_cp: None,
             form_data_cp: Some(16),
-            ruby: None,
+            drawn: None,
         };
         assert_eq!(
             actual,
@@ -1299,50 +1540,38 @@ mod tests {
         let Token::EvaluatedField(field) = &actual[1].0 else {
             panic!("ruby token: {actual:?}");
         };
-        let ruby = field.ruby.as_deref().unwrap();
+        let Some(Drawn::Ruby(ruby)) = field.drawn.as_deref() else {
+            panic!("ruby form: {field:?}");
+        };
         assert_eq!(field.field_type, "ruby");
         assert_eq!(
-            (ruby.guide.as_str(), ruby.base.as_str()),
-            ("\u{3042}", "\u{4e0a}")
+            (ruby.guide.as_str(), ruby.base.as_str(), ruby.align),
+            ("\u{3042}", "\u{4e0a}", "distributeSpace")
         );
-        assert_eq!((ruby.guide_half_points, ruby.raise_pt), (16, 14));
+        assert_eq!((ruby.guide_half_points, ruby.raise_pt), (Some(16), 14));
         let units: Vec<u16> = text.encode_utf16().collect();
         assert_eq!(units[ruby.guide_cp], 0x3042);
         assert_eq!(units[ruby.base_cp], 0x4e0a);
         assert_eq!(actual[2].0, Token::Text("B".into()));
-        // Other EQ forms and alignments are not settled by the pairs.
-        for instruction in [
-            "EQ \\* jc0 \\* \"Font:X\" \\* hps16 \\o\\ad(\\s\\up 14(a),b)",
-            "EQ \\* jc2 \\* \"Font:X\" \\* hps16 \\o\\ac(\\s\\up 14(a),b)",
-            "EQ \\* jc2 \\* \"Font:X\" \\* hps16 \\o\\ad(\\s\\up 14(a),b,c)",
-            "EQ \\f(1,2)",
-        ] {
-            let text = format!("\u{13}{instruction}\u{15}\r");
-            let table = with_types(&text, &[0x31], &[0x00]);
-            assert!(tokens(&text, &table).is_err(), "{instruction}");
-        }
     }
 
     #[test]
-    fn date_pictures_are_limited_to_locale_independent_items() {
-        for picture in [
-            "MM/dd/yyyy",
-            "YYYY",
-            "H:mm:ss",
-            "h:mm AM/PM",
-            "d 'of' M",
-            "yy.M.d",
-        ] {
-            let instruction = format!("DATE \\@ \"{picture}\" \\* MERGEFORMAT");
-            assert_eq!(
-                date_switches(&instruction).unwrap(),
-                FormatSource::MergeFormat,
-                "{picture}"
-            );
-        }
-        for picture in ["MMM", "dddd", "yyy", "ggg", "'open", "\\d"] {
-            assert!(validate_date_picture(picture).is_err(), "{picture}");
-        }
+    fn other_eq_fields_become_equations() {
+        let fields = evaluated("A\u{13}EQ \\f(1,2)\u{15}\r", 0x31, 0x00);
+        assert_eq!(fields[0].field_type, "equation");
+        // The first displayed character (the numerator) sizes the equation.
+        assert_eq!(fields[0].format_cp, 8);
+        let Some(Drawn::Equation(nodes)) = fields[0].drawn.as_deref() else {
+            panic!("{fields:?}");
+        };
+        assert_eq!(
+            serde_json::to_value(nodes).unwrap(),
+            serde_json::json!([{
+                "kind": "fraction",
+                "num": [{ "kind": "run", "text": "1", "style": "roman" }],
+                "den": [{ "kind": "run", "text": "2", "style": "roman" }],
+            }])
+        );
     }
 
     #[test]

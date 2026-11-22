@@ -1,5 +1,7 @@
+import { compatProfile } from '../test-support/compat-environment.test-support.js';
 import { describe, expect, it } from 'vitest';
 import { sourceFontLayoutOptions } from '../testing/font-sources.js';
+import { servedFontLineMetrics } from '../served-font-metrics.js';
 import {
   buildSegments,
   layoutLines,
@@ -108,6 +110,72 @@ describe('production layout service integration', () => {
     const lines = layoutLines(ctx, segments, 8, 0, 1);
     expect(lines).toHaveLength(1);
     expect(lines[0].segments.map((segment) => 'text' in segment ? segment.text : '')).toEqual(['a', '\u0301']);
+  });
+
+  // A measuring context whose "Symbol" face (when `installed`) is symbol-
+  // encoded: it draws codes 0x21..0xFE bare and F0-shifted with one glyph each.
+  // Every other text has width by character, so the context is conclusive.
+  function symbolHostContext(installed: boolean | string): CanvasRenderingContext2D {
+    const face = `"${typeof installed === 'string' ? installed : 'Symbol'}"`;
+    const ctx = {
+      font: '',
+      letterSpacing: '0px',
+      fontKerning: 'auto',
+      measureText(text: string) {
+        const cp = text.codePointAt(0) ?? 0;
+        const code = cp >= 0xf000 ? cp - 0xf000 : cp;
+        const owned = installed !== false && this.font.includes(face) && code >= 0x21 && code <= 0xfe;
+        const width = owned ? 100 + code : cp >= 0xf000 ? 7 : 5 + (cp % 5);
+        return {
+          width: owned || text.length === 1 ? width : [...text].length * 8,
+          actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
+          fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
+        };
+      },
+    };
+    return ctx as unknown as CanvasRenderingContext2D;
+  }
+
+  const symbolText = (installed: boolean | string, runs: DocRun[]) => {
+    const services = createLayoutServices(model(), { measureContext: symbolHostContext(installed) });
+    return buildSegments(runs, { pageIndex: 0, totalPages: 1, layoutServices: services })
+      .filter((segment) => 'text' in segment)
+      .map((segment) => segment as { text: string; fontFamily?: string | null });
+  };
+  const symbol = { fontFamily: 'Symbol', fontFamilyHighAnsi: 'Symbol' };
+
+  it('converts Symbol text, bare and private-use, when the measured face lacks it (#2177)', () => {
+    const text = symbolText(false, [textRun('abcp', symbol), textRun('\uF061\uF0E5', symbol)]);
+    expect(text.map((segment) => segment.text).join('')).toBe('αβχπα∑');
+    expect(text.every((segment) => segment.fontFamily !== 'Symbol')).toBe(true);
+  });
+
+  it('judges each scalar against the face its rFonts slot selects', () => {
+    // §17.3.2.26: PUA scalars take the hAnsi slot. A Unicode-encoded Symbol on
+    // ascii does not decide them; the installed Wingdings on hAnsi keeps them.
+    const text = symbolText('Wingdings', [textRun('\uF0B7\uF0A7', { fontFamily: 'Symbol', fontFamilyHighAnsi: 'Wingdings' })]);
+    expect(text.map((segment) => segment.text).join('')).toBe('\uF0B7\uF0A7');
+  });
+
+  it('judges symbol text against the complete route it paints with, named fallbacks included', () => {
+    // An embedded Symbol (listed in the font table) resolves to its private
+    // alias, whose route continues with the authored "Symbol": a code the
+    // alias lacks paints in the installed, symbol-encoded host Symbol, so it
+    // is kept.
+    const services = createLayoutServices(model({ fontFamilyClasses: { Symbol: 'roman' } }), {
+      measureContext: symbolHostContext(true),
+      embeddedRoutes: [{ requestedFamily: 'Symbol', resolvedFamily: 'Embedded Symbol Alias 2177',
+        weight: 400, style: 'normal', resourceIdentity: 'embedded-symbol-2177' }],
+    });
+    const text = buildSegments([textRun('\uF062', symbol)], { pageIndex: 0, totalPages: 1, layoutServices: services })
+      .filter((segment) => 'text' in segment) as { text: string }[];
+    expect(text.map((segment) => segment.text).join('')).toBe('\uF062');
+  });
+
+  it('keeps the codes a symbol-encoded host face draws in that face', () => {
+    const text = symbolText(true, [textRun('a\uF062', symbol)]);
+    expect(text.map((segment) => segment.text).join('')).toBe('a\uF062');
+    expect(text.every((segment) => segment.fontFamily === 'Symbol')).toBe(true);
   });
 
   it('normalizes service-backed w:sym private encoding before measurement and paint', () => {
@@ -319,7 +387,7 @@ describe('production layout service integration', () => {
     const off = buildSegments([hinted, unhinted], { pageIndex: 0, totalPages: 1 });
     const on = buildSegments(
       [hinted, unhinted],
-      { pageIndex: 0, totalPages: 1, useFeLayout: true, lineGridActive: true },
+      { pageIndex: 0, totalPages: 1, compat: compatProfile({ useFeLayout: true }), lineGridActive: true },
     );
 
     expect(off.filter((segment) => 'text' in segment)
@@ -839,7 +907,7 @@ describe('production layout service integration', () => {
     for (const [weight, style] of [[700, 'normal'], [400, 'italic'], [700, 'italic']] as const) {
       const styled = loaded.text.shape({ text: 'x', fontSizePt: 10, fonts: { ascii: 'Calibri' }, weight, style });
       expect(styled.spans[0]?.font).toMatchObject({ source: 'substitute', resolvedFamily: 'Carlito', weight, style });
-      expect(styled.spans[0]?.font.route.familyList).toMatch(/^"Carlito"/);
+      expect(styled.spans[0]?.font.route.familyList).toMatch(/^"ooxml-font-source-test-\d+", "Carlito"/);
     }
   });
 
@@ -866,7 +934,9 @@ describe('production layout service integration', () => {
               faces: [face],
               substitutions: new Map(substitution ? [['review missing', substitution]] : []),
               regularAliases: new Map(),
+              families: new Map([['review served', 'ooxml-font-source-test-0']]),
             },
+            lineMetrics: servedFontLineMetrics,
           },
         });
         for (const [weight, style] of [[400, 'normal'], [700, 'normal'], [400, 'italic'], [700, 'italic']] as const) {
@@ -874,7 +944,8 @@ describe('production layout service integration', () => {
           expect(shaped.spans[0]?.font, `${descriptors.style} ${requested} ${weight} ${style}`).toMatchObject({
             source: substitution ? 'substitute' : 'source', resolvedFamily: 'Review Served',
           });
-          expect(shaped.spans[0]?.font.route.familyList).toMatch(/^"Review Served"/);
+          // The served family paints through this document's private family.
+          expect(shaped.spans[0]?.font.route.familyList).toMatch(/^"ooxml-font-source-test-0", "Review Served"/);
         }
       }
     }

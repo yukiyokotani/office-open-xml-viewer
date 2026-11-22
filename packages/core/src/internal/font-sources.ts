@@ -4,6 +4,8 @@
 export {
   FONT_SOURCE_PROTOCOL,
   assertFontSourceDescriptors,
+  fontSourceDescriptors,
+  optionFontSources,
   fontCssApi,
   fontCssApiRequests,
   fontCss,
@@ -20,12 +22,13 @@ export {
   type FontFaceDeclaration,
   type FontFilesOptions,
   type FontFilesSource,
-  type FontResolveContext,
-  type FontResolveFn,
+  type FontResolverContext,
+  type FontResolver,
   type FontResolverOptions,
   type FontResolverSource,
   type FontSource,
   type FontSourceCredentials,
+  type FontSourceDescriptor,
 } from '../fonts/source.js';
 export {
   OFFICE_FONT_SUBSTITUTIONS,
@@ -39,7 +42,7 @@ export {
 } from '../fonts/substitutions.js';
 export {
   GOOGLE_FONTS_CATALOG,
-  GOOGLE_FONTS_DEFAULT_CSS_ORIGIN,
+  GOOGLE_FONTS_DEFAULT_BASE_URL,
   GOOGLE_FONTS_SUBSTITUTIONS,
   GOOGLE_NOTO_CJK_NAMING,
   googleFonts,
@@ -56,7 +59,8 @@ export {
   type LoadedFontSources,
   type LoadedSourceFace,
 } from '../fonts/source-session.js';
-export { fetchFontStylesheet, parseFontFaceCss, parseUnicodeRange } from '../fonts/css-source.js';
+export { fetchFontStylesheet, parseFontFaceCss } from '../fonts/css-source.js';
+export { parseUnicodeRange } from '../fonts/unicode-range.js';
 export { inRealmResolverFaceAcquirer } from '../fonts/face-download.js';
 export {
   WorkerFontResolverClient,
@@ -68,7 +72,14 @@ export {
   type WorkerFontResolveMessage,
   type WorkerFontResolveRequest,
 } from '../fonts/resolver-bridge.js';
+// The host only through import(): the gate loads it (resolver-bridge-gate.ts).
 export { FontResolverBridgeHost, type FontResolverBridgeHostOptions } from '../fonts/resolver-bridge-host.js';
+export {
+  FONT_RESOLVER_BRIDGE_UNAVAILABLE,
+  FontResolverBridge,
+  type FontResolverBridgeHostModule,
+  type FontResolverBridgeOptions,
+} from '../fonts/resolver-bridge-gate.js';
 export {
   USE_GOOGLE_FONTS_DEPRECATION_MESSAGE,
   normalizeFontOptions,
@@ -85,5 +96,9 @@ export {
   chartFontFamilies,
   chartFontSubstitutions,
   withChartFontSubstitutions,
-  type LoadedChartFontSubstitutions,
+  type LoadedChartFontSources,
 } from '../fonts/chart-font-sources.js';
+export { instanceOpenTypeLineMetrics, parseVariableOpenTypeResourceMetrics } from '../fonts/open-type-instances.js';
+export { readFontResourceMetrics } from '../fonts/source-metric-tables.js';
+export { retainFace, releaseFaces } from '../fonts/font-registry.js';
+export { scopeServedFontFamilies } from './css-font-family.js';

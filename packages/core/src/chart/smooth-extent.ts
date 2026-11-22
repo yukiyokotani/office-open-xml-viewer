@@ -51,6 +51,10 @@ export function seriesPaintsSmoothedLine(
     && classicDataPointLineStyle(chart, 'dataPointLine', series, undefined, styleIndex).paint !== null;
 }
 
+/** Clamps a logarithmic bound to the positive finite doubles. */
+const positiveFinite = (value: number): number =>
+  Math.min(Math.max(value, Number.MIN_VALUE), Number.MAX_VALUE);
+
 /** The value range of the smoothed curves drawn through `runs`, each an
  * ordered list of one coordinate (y for category charts; x or y for scatter).
  *
@@ -128,5 +132,10 @@ export function smoothCurveExtent(
       }
     }
   }
-  return Number.isFinite(lo) ? [fromSpace(lo), fromSpace(hi)] : null;
+  if (!Number.isFinite(lo)) return null;
+  // A logarithmic extent beyond the double range underflows to zero or
+  // overflows to Infinity; keep it a positive finite bound.
+  return log
+    ? [positiveFinite(fromSpace(lo)), positiveFinite(fromSpace(hi))]
+    : [lo, hi];
 }

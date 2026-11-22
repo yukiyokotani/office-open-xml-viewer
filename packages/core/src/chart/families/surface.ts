@@ -1489,7 +1489,7 @@ export function renderSurfaceChart(
         const point = projection.project(valueAxisX, toValueY(value), nearDepth);
         fillAuthoredText(
           ctx,
-          formatChartValWithCode(value, chart.valAxisFormatCode, chart.date1904),
+          formatChartValWithCode(value, chart.valAxisFormatCode, chart.date1904, chart.valAxisFormatDivisors),
           point.x + (left ? -6 : 6),
           point.y,
           axisLabelLineHeightPx(valFontPx),

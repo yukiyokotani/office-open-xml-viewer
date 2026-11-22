@@ -3,7 +3,8 @@
 // Authored synthetic inputs keep this PR/release gate redistributable.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, realpath, writeFile, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, mkdir, readdir, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -23,11 +24,24 @@ try {
     const files = packed[0].files.map(file => file.path).sort();
     const wasm = files.filter(path => path.endsWith('.wasm'));
     if (directory.endsWith('opendocument')) {
-      // Exactly the reader assets: never the local private corpus.
-      assert.deepEqual(files, [
-        'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'dist/odt-source-module.mjs', 'dist/odt.mjs',
-        'dist/opendocument_odt_bg.wasm', 'dist/types/odt.d.ts', 'package.json',
-      ]);
+      // Exactly the reader assets of every exported format (one cargo feature
+      // each): never the local private corpus, never a format without its WASM.
+      const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+      const formats = Object.keys(manifest.exports).map(entry => entry.replace(/^\.\//, ''));
+      // The formats' entries share one chunk (the source factory), named by
+      // its content hash, as the legacy readers share `legacy-source-*`.
+      const shared = files.filter(path => /^dist\/odf-source-[\w-]+\.js$/.test(path));
+      assert.ok(shared.length <= 1, 'more than one shared OpenDocument chunk');
+      assert.deepEqual(files.filter(path => !shared.includes(path)), [
+        'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md', 'package.json',
+        ...formats.flatMap(f => [`dist/${f}-source-module.mjs`, `dist/${f}.mjs`, `dist/opendocument_${f}_bg.wasm`, `dist/types/${f}.d.ts`]),
+      ].sort());
+      for (const [entry, target] of Object.entries(manifest.exports)) {
+        assert.deepEqual(target, { types: `./dist/types/${entry.slice(2)}.d.ts`, import: `./dist/${entry.slice(2)}.mjs`, default: `./dist/${entry.slice(2)}.mjs` });
+      }
+      assert.equal(manifest.sideEffects, false);
+      assert.equal(manifest.license, 'MIT');
+      assert.deepEqual(manifest.publishConfig, { access: 'public', provenance: true });
     } else if (directory !== root) {
       assert.deepEqual(wasm, ['doc', 'ppt', 'xls'].map(f => `dist/legacy_${f}_direct_bg.wasm`));
     } else {
@@ -53,8 +67,15 @@ try {
     await writeFile(join(scratch, 'public', `unsupported.${family}`), new Uint8Array(fixtures.buildCfbFixture(['Root Entry', stream])));
   }
   await writeFile(join(scratch, 'public', 'deferred.ppt'), fixtures.buildPptFixture());
+  // A text deck for the font-source path: the main-mode parse worker imports
+  // the font-demand collector sidecar by URL from the consumer's build.
+  await writeFile(join(scratch, 'public', 'sample.pptx'), readFileSync(join(root, 'packages/pptx/public/demo/sample-1.pptx')));
   await writeFile(join(scratch, 'public', 'sample.odt'), fixtures.buildOdtFixture({ body: '<text:p>Hello ODT</text:p>' }));
-  await writeFile(join(scratch, 'public', 'unsupported.odt'), fixtures.buildOdtFixture({ body: '<table:table xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"/>' }));
+  // The ODT reader renders every text feature; it refuses encrypted input.
+  await writeFile(join(scratch, 'public', 'unsupported.odt'), fixtures.buildOdtFixture({
+    body: '<text:p>x</text:p>',
+    manifestExtra: '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"><manifest:encryption-data/></manifest:file-entry>',
+  }));
   await writeFile(join(scratch, 'node-smoke.mjs'), `
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -88,7 +109,9 @@ for (const [family, open, options] of [
   ['odt', materializeDocxDocument, { odt: createOdt() }],
 ]) {
   await assert.rejects(async () => open(await readFile('public/unsupported.' + family), options),
-    error => error instanceof OoxmlError && error.code === 'unsupported-content' && error.details.format === family && error.details.reason === 'source-subset');
+    error => error instanceof OoxmlError && (family === 'odt'
+      ? error.code === 'unsupported-encryption'
+      : error.code === 'unsupported-content' && error.details.format === family && error.details.reason === 'source-subset'));
 }
 await assert.rejects(async () => materializePptxPresentation(await readFile('public/deferred.ppt'), { legacyPpt }),
   error => error instanceof OoxmlError && error.code === 'unsupported-content' && error.details.format === 'ppt');
@@ -99,7 +122,7 @@ console.log('Packed Node imports, all three legacy readers and the ODT reader pa
   await writeFile(join(scratch, 'main.js'), `
 import { DocxDocument, DocxViewer, OoxmlError } from '@silurus/ooxml/docx';
 import { XlsxWorkbook, XlsxViewer } from '@silurus/ooxml/xlsx';
-import { PptxPresentation, PptxViewer } from '@silurus/ooxml/pptx';
+import { PptxPresentation, PptxViewer, fontResolver } from '@silurus/ooxml/pptx';
 import { legacyDoc, createLegacyDoc } from '@silurus/ooxml-legacy-office/doc';
 import { legacyXls, createLegacyXls } from '@silurus/ooxml-legacy-office/xls';
 import { legacyPpt, createLegacyPpt } from '@silurus/ooxml-legacy-office/ppt';
@@ -120,8 +143,10 @@ try {
       const unsupported = await (await fetch('/unsupported.' + family)).arrayBuffer();
       try { await Loader.load(unsupported, options); throw new Error('unsupported input was accepted'); }
       catch (error) {
-        if (!(error instanceof OoxmlError) || error.code !== 'unsupported-content'
-          || error.details?.format !== family || error.details?.reason !== 'source-subset') throw error;
+        if (!(error instanceof OoxmlError)) throw error;
+        if (family === 'odt' ? error.code !== 'unsupported-encryption'
+          : error.code !== 'unsupported-content'
+            || error.details?.format !== family || error.details?.reason !== 'source-subset') throw error;
       }
       if (family === 'ppt') {
         const deferred = await (await fetch('/deferred.ppt')).arrayBuffer();
@@ -142,19 +167,45 @@ try {
       finally { viewer.destroy(); element.remove(); }
     }
   }
+  // Font sources make the parse worker import the font-demand collector
+  // sidecar; a sidecar the consumer build did not emit fails the load.
+  for (const [file, sourceOptions] of [['/sample.pptx', {}], ['/sample.ppt', { legacyPpt }]]) {
+    const deck = await PptxPresentation.load(await (await fetch(file)).arrayBuffer(),
+      { mode: 'main', fonts: [fontResolver(() => [])], ...sourceOptions });
+    deck.destroy();
+  }
   window.packedResult = 'passed';
 } catch (error) { window.packedResult = String(error?.stack || error); }
 `);
   await build({ configFile: false, root: scratch, base: './', logLevel: 'warn', build: { target: 'esnext' } });
+  // The consumer build must emit the font-demand collector sidecar: a load
+  // without it still succeeds (every subset is demanded), so its absence is
+  // checked here directly.
+  const sidecars = (await readdir(join(scratch, 'dist', 'assets'))).filter(name => /^pptx-font-demand.*\.mjs$/.test(name));
+  assert.equal(sidecars.length, 1, `consumer build emitted ${sidecars.length} font-demand sidecars`);
   server = await preview({ configFile: false, root: scratch, preview: { host: '127.0.0.1', port: 0, open: false } });
   browser = await chromium.launch({ channel: 'chrome', headless: true });
   const page = await browser.newPage();
+  const sidecarResponses = [];
+  const isSidecar = (request) => /\/pptx-font-demand[^/]*\.mjs$/.test(new URL(request.url()).pathname);
+  page.context().on('requestfinished', async (request) => {
+    if (isSidecar(request)) sidecarResponses.push((await request.response())?.status());
+  });
+  page.context().on('requestfailed', (request) => { if (isSidecar(request)) sidecarResponses.push('failed'); });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(server.resolvedUrls.local[0]);
   await page.waitForFunction(() => window.packedResult !== undefined, undefined, { timeout: 90_000 });
   assert.equal(await page.evaluate(() => window.packedResult), 'passed');
   assert.deepEqual(errors, []);
+  // Both font-source loads' parse workers (PPTX and the legacy PPT source)
+  // fetched the sidecar successfully, before any page-side import.
+  const workerResponses = [...sidecarResponses];
+  assert.ok(workerResponses.length >= 2 && workerResponses.every(status => status === 200), `sidecar responses ${JSON.stringify(workerResponses)}`);
+  // The emitted sidecar is served and exports the collector.
+  assert.equal(await page.evaluate(async (file) => typeof (await import(new URL('assets/' + file, location.href).href)).collectSlideFontDemand,
+    sidecars[0]), 'function');
+
   console.log('Packed Vite viewers/loaders: DOC/XLS/PPT/ODT main + worker passed');
 } finally {
   await browser?.close();

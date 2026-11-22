@@ -60,3 +60,15 @@ test('DOCX admits only the native route barrier after math preparation', () => {
   assert.throws(() => auditAwaitCase(file, 'load', previous, twice), /OOXML awaits changed/);
   assert.throws(() => auditAwaitCase('sample.ts', 'load', previous, changed), /OOXML awaits changed/);
 });
+
+test('DOCX admits only the served-face barrier after the native route barrier', () => {
+  const file = 'packages/docx/src/document.ts';
+  const previous = 'async function load() { await parse(); await prepareMathRuns(); await nativeRoutesPending(); await publish(); }';
+  const changed = 'async function load() { await parse(); await prepareMathRuns(); await nativeRoutesPending(); await prepareServedFaceLines(); await publish(); }';
+  assert.equal(auditAwaitCase(file, 'load', previous, changed), 4);
+  const moved = 'async function load() { await prepareServedFaceLines(); await parse(); await prepareMathRuns(); await nativeRoutesPending(); await publish(); }';
+  assert.throws(() => auditAwaitCase(file, 'load', previous, moved), /OOXML awaits changed/);
+  const twice = 'async function load() { await parse(); await prepareMathRuns(); await nativeRoutesPending(); await prepareServedFaceLines(); await prepareServedFaceLines(); await publish(); }';
+  assert.throws(() => auditAwaitCase(file, 'load', previous, twice), /OOXML awaits changed/);
+  assert.throws(() => auditAwaitCase('sample.ts', 'load', previous, changed), /OOXML awaits changed/);
+});

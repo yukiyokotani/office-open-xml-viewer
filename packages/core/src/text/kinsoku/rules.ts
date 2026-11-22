@@ -1,12 +1,11 @@
 /* ------------------------------------------------------------------ *
  * Japanese line-breaking (kinsoku shori / 禁則処理)
  *
- * ECMA-376 §17.3.1.16 `w:kinsoku` is a document-wide on/off toggle for
- * "East Asian typography line-breaking rules". Its default, when the
- * element is absent from settings.xml, is TRUE (the toggle is a
- * ST_OnOff whose absence Word treats as enabled for kinsoku). So a doc
- * with no <w:kinsoku> still gets Japanese line breaking — which is what
- * Word does and what users see.
+ * ECMA-376 §17.3.1.16 `w:kinsoku` is a paragraph property for East Asian
+ * typography line-breaking rules. Format adapters own interpretation and
+ * inheritance; these shared helpers accept the caller's `enabled` toggle,
+ * defaulting to true. The primitive does not resolve Word paragraph
+ * properties or assume that the property lives in settings.xml.
  *
  * §17.15.1.58 `w:noLineBreaksAfter` / §17.15.1.59 `w:noLineBreaksBefore`
  * let a document override the character set used by the kinsoku engine

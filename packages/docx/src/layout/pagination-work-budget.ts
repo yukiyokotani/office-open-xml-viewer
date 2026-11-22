@@ -147,6 +147,12 @@ export function createPaginationWorkBudget(source?: LayoutSourceStore): Paginati
         if (ref && !weights.has(sourceKey(ref))) weights.set(sourceKey(ref), work.total(ref));
       }
     }
+    // Producer page objects are page stories of their one page.
+    for (const object of source.bodyLayoutInput.pageObjects ?? []) {
+      if (!weights.has(sourceKey(object.source))) {
+        weights.set(sourceKey(object.source), work.total(object.source));
+      }
+    }
     // Sum local definitions, not transitive totals: shared descendants earn U
     // once, while each selected page story earns its entire closure in W.
     // Include empty detached roots discovered through complete SourceRefs too.

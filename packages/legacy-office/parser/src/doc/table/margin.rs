@@ -31,9 +31,9 @@ pub(in crate::doc) struct Patch {
 
 impl Patch {
     pub(super) fn apply(&mut self, cssa: Cssa) {
-        for side in 0..4 {
+        for (side, slot) in self.sides.iter_mut().enumerate() {
             if cssa.sides & (1 << side) != 0 {
-                self.sides[side] = Some(cssa.value);
+                *slot = Some(cssa.value);
             }
         }
     }

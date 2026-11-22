@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import { fontSubstituteScriptClusterClass } from '@silurus/ooxml-core';
+import { FONT_SUBSTITUTE_SCRIPTS, fontFamilyKey, normalizeFontDemand } from '@silurus/ooxml-core/internal/font-sources';
+import { pptxFontDemand } from './font-source-load';
 import {
   PptxFontPreloadAccumulator,
+  mayProveSubstituteScript,
   pptxSlideCjkFallback,
   pptxSlideOfficeFontRequests,
 } from './font-requests';
@@ -80,6 +84,138 @@ describe('PPTX exact Office face requests', () => {
       { family: 'Calibri', weight: 400, style: 'normal' },
       { family: 'Calibri', weight: 700, style: 'italic' },
     ]));
+  });
+});
+
+describe('PPTX exact Office face requests of repeated tuples', () => {
+  const runs = (...families: string[]): Slide => ({ elements: [{ type: 'shape', textBody: { paragraphs: [{
+    bullet: { type: 'none' }, runs: families.map((fontFamily) => ({ type: 'text', text: 'x', fontFamily })),
+  }] } }] }) as unknown as Slide;
+
+  it('keeps the spelling of the last run that names a face, however often a tuple repeats', () => {
+    expect(pptxSlideOfficeFontRequests(runs('Arial', 'arial', 'Arial'), null, null)).toEqual([
+      { family: 'Arial', weight: 400, style: 'normal' },
+      { family: 'Arial', presenceOnly: true },
+    ]);
+    expect(pptxSlideOfficeFontRequests(runs('Arial', 'Arial', 'arial'), null, null)).toEqual([
+      { family: 'arial', weight: 400, style: 'normal' },
+      { family: 'arial', presenceOnly: true },
+    ]);
+  });
+
+  it('keeps every face whose name reads like another face request key', () => {
+    // A typeface is any string (ST_TextTypeface), so names can spell another
+    // face's request key; every face still gets its own requests.
+    const names = ['presence:X:400:normal', 'X:400:normal:400:normal', 'presence:presence:X'];
+    const requests = pptxSlideOfficeFontRequests(runs(...names), null, null);
+    expect(requests).toEqual(names.flatMap((family) => [
+      { family, weight: 400, style: 'normal' },
+      { family, presenceOnly: true },
+    ]));
+    const accumulator = new PptxFontPreloadAccumulator(null, null, undefined, undefined, undefined, undefined, true);
+    accumulator.addSlide(runs(...names));
+    expect(accumulator.names().slice(0, accumulator.demandFacts()!.familyCount)).toEqual(names);
+  });
+
+  it('returns a distinct request object for every key', () => {
+    const requests = pptxSlideOfficeFontRequests(runs('Arial', 'Calibri', 'Arial', 'serif', '+mn-lt'), null, 'Calibri');
+    expect(requests).toEqual([
+      { family: 'Arial', weight: 400, style: 'normal' },
+      { family: 'Arial', presenceOnly: true },
+      { family: 'Calibri', weight: 400, style: 'normal' },
+      { family: 'Calibri', presenceOnly: true },
+    ]);
+    expect(new Set(requests).size).toBe(requests.length);
+  });
+});
+
+describe('PPTX font-source demand of case-variant spellings', () => {
+  // Faces named only by end-of-paragraph properties, so the demand path (not
+  // the run-family path) contributes them.
+  const endMarks = (...marks: { fontFamily: string; bold: boolean }[]): Slide => ({ elements: [{
+    type: 'shape', textBody: { paragraphs: marks.map((endRunProperties) => ({
+      bullet: { type: 'none' }, runs: [], endRunProperties,
+    })) },
+  }] }) as unknown as Slide;
+  const demand = (slide: Slide) => {
+    const accumulator = new PptxFontPreloadAccumulator(null, null, undefined, undefined, undefined, undefined, true);
+    accumulator.addSlide(slide);
+    const names = accumulator.names();
+    const facts = accumulator.demandFacts()!;
+    return { names, facts, families: names.slice(0, facts.familyCount) };
+  };
+  const keys = (families: readonly (string | null)[]) => [...new Set(families.map((family) => fontFamilyKey(family!)))];
+
+  it('demands each face once, by the spelling of its family-presence request', () => {
+    // "Calibri Light" is catalogued only at weight 300, so its regular and
+    // bold marks share one face tuple; the presence request keeps the last
+    // spelling, and so does the weight-free demand.
+    const slide = endMarks({ fontFamily: 'Calibri Light', bold: false }, { fontFamily: 'CALIBRI LIGHT', bold: true });
+    const requests = pptxSlideOfficeFontRequests(slide, null, null);
+    expect(requests).toEqual([
+      { family: 'CALIBRI LIGHT', weight: 300, style: 'normal' },
+      { family: 'CALIBRI LIGHT', presenceOnly: true },
+    ]);
+    const { names, facts, families } = demand(slide);
+    expect(families).toEqual(['CALIBRI LIGHT']);
+    const session = normalizeFontDemand(pptxFontDemand(names, facts, 'all', new Map()));
+    expect(session.names.map((name) => name.name)).toEqual(['CALIBRI LIGHT']);
+  });
+
+  it('never demands more spellings than the face requests carry, and the same faces', () => {
+    // Weighted tuples that differ (Arial has regular and bold cuts) keep one
+    // spelling each in the face requests; the demand keeps one per face, so
+    // its mandatory projection never grows, and names the same faces.
+    const slide = endMarks({ fontFamily: 'Arial', bold: false }, { fontFamily: 'ARIAL', bold: true });
+    const requests = pptxSlideOfficeFontRequests(slide, null, null);
+    const requestSpellings = [...new Set(requests.map((request) => request.family))];
+    expect(requestSpellings).toEqual(['Arial', 'ARIAL']);
+    const { families } = demand(slide);
+    expect(families).toEqual(['ARIAL']);
+    expect(keys(families)).toEqual(keys(requestSpellings));
+    // A face a run already names in another case adds no second spelling.
+    const named = endMarks({ fontFamily: 'TAHOMA', bold: false });
+    (named.elements[0] as unknown as { textBody: { paragraphs: { runs: unknown[] }[] } })
+      .textBody.paragraphs[0].runs.push({ type: 'text', text: 'x', fontFamily: 'Tahoma' });
+    expect(demand(named).families).toEqual(['Tahoma']);
+  });
+});
+
+describe('scoped-substitute script prefilter', () => {
+  it('admits every character that can prove a script', () => {
+    // A text proves a script only by a cluster whose base is a proof
+    // character (core fontSubstituteScriptScope): none may be filtered out.
+    const missed: string[] = [];
+    for (const script of FONT_SUBSTITUTE_SCRIPTS) {
+      for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+        if (cp >= 0xd800 && cp <= 0xdfff) continue;
+        const character = String.fromCodePoint(cp);
+        if (!mayProveSubstituteScript(character) && fontSubstituteScriptClusterClass(script, character) === 'proof') {
+          missed.push(`${script} U+${cp.toString(16)}`);
+        }
+      }
+    }
+    expect(missed).toEqual([]);
+    expect(mayProveSubstituteScript('Latin 123, 漢字')).toBe(false);
+    expect(mayProveSubstituteScript('')).toBe(false);
+    expect(mayProveSubstituteScript('abc ع')).toBe(true);
+  });
+
+  it('proves the same scripts as without the prefilter', () => {
+    const facts = (text: string, bullet: unknown = { type: 'none' }) => {
+      const accumulator = new PptxFontPreloadAccumulator(null, null, undefined, undefined, undefined, undefined, true);
+      accumulator.addSlide({ elements: [{ type: 'shape', textBody: { paragraphs: [{ bullet,
+        runs: [{ type: 'text', text, fontFamily: 'Sakkal Majalla', fontFamilyCs: 'Arial,sans-serif' }] }] } }] } as unknown as Slide);
+      return accumulator.demandFacts()?.substituteScripts;
+    };
+    expect(facts('Latin')).toEqual({});
+    expect(facts('')).toEqual({});
+    // Digits and the Arabic comma belong to the script but never prove it.
+    expect(facts('\u0661\u0662\u060c')).toEqual({});
+    expect(facts('abc \u0639')).toEqual({ 'sakkal majalla': ['arabic'], arial: ['arabic'] });
+    expect(facts('x', { type: 'char', char: '\u0639', fontFamily: 'Tahoma' })).toEqual({ tahoma: ['arabic'] });
+    // Every auto-number scheme labels in Latin or full-width characters.
+    expect(facts('x', { type: 'autoNum', numType: 'arabicPeriod', fontFamily: 'Tahoma' })).toEqual({});
   });
 });
 

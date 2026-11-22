@@ -1,8 +1,19 @@
 # Agent Instructions
 
-This file is the canonical workflow for AI coding agents working on this
-repository. Tool-specific files such as `CLAUDE.md` may add supplements, but they
-must not contradict this file.
+This file is the single source of agent instructions for this repository. It
+applies to every AI coding agent and to every tool.
+
+Instruction files:
+
+- `AGENTS.md` (this file) — all repository-wide rules. Tools that follow the
+  `AGENTS.md` convention load it directly.
+- `packages/<name>/AGENTS.md` — facts specific to one package. They add to this
+  file and do not repeat it.
+- `.claude/CLAUDE.md` (imports `../AGENTS.md`) and `packages/<name>/CLAUDE.md`
+  (imports `AGENTS.md`) — one-line files for Claude Code. They hold no rules.
+
+Add or change rules only in an `AGENTS.md`. Do not add tool-specific rule
+files.
 
 ## Project
 
@@ -28,11 +39,11 @@ Use this flow for ordinary bug fixes and feature work:
 2. If the checkout is dirty, preserve unrelated work before switching or pulling.
    Prefer `git stash push -u -m <clear-message>` for work that appears to belong
    to another session.
-3. Create a feature branch. Use `codex/<topic>` for Codex work when possible;
-   otherwise follow the repository's existing branch naming.
-4. When creating or entering a Codex/Claude worktree, make the root checkout's
+3. Create a feature branch named `<agent>/<topic>`, for example
+   `codex/<topic>` or `claude/<topic>`.
+4. When creating or entering a Git worktree, make the root checkout's
    ignored `spec/` directory available from that worktree as a local symlink.
-   For the standard `.claude/worktrees/<name>` layout, run:
+   For a worktree under `.claude/worktrees/<name>`, run:
 
    ```bash
    ln -s ../../../spec spec
@@ -51,6 +62,22 @@ Use this flow for ordinary bug fixes and feature work:
    or generated local artifacts.
 8. Push the feature branch, create a PR, wait for checks when practical, and merge
    with a merge commit. Do not squash.
+
+## Worktrees and Parallel Sessions
+
+Several agent sessions may work on this repository at the same time, each in
+its own Git worktree.
+
+- Before editing, make sure `spec` exists in the worktree (step 4 of the
+  Standard Development Flow) and read the `AGENTS.md` of each package you will
+  edit.
+- A task scoped to one format edits that format's package. Reading other
+  packages is fine. Edit `packages/core`, `packages/ooxml-common`, or another
+  format only for a coherent fix described in Cross-Package Integration, or
+  when the user asks for a cross-package change.
+- Treat unexpected dirty files as work that belongs to the user or to another
+  session. Do not revert or overwrite unrelated changes; preserve them as in
+  step 2 of the Standard Development Flow.
 
 ## Git and PR Rules
 
@@ -79,11 +106,10 @@ Use this flow for ordinary bug fixes and feature work:
   the actual model used for that task; do not hard-code a model name across
   tasks. Examples:
   - Codex: `Co-Authored-By: Codex <model-name> <noreply@openai.com>`
-  - Claude/Fable: `Co-Authored-By: Claude <model-name> <noreply@anthropic.com>`
-- If Claude starts or delegates work to Codex, include both trailers in the
-  resulting commit, including the model each agent actually used for that task.
-  This preserves the human-readable provenance of the orchestration layer and
-  the implementation agent.
+  - Claude: `Co-Authored-By: Claude <model-name> <noreply@anthropic.com>`
+- If one agent directs or delegates work to another, include a trailer for
+  each agent in the resulting commit, with the model each one used for that
+  task.
 
 ## Verification
 
@@ -261,6 +287,10 @@ or PR description; do not silently waive an unresolved item.
   renderer as the self-VRT oracle and keep Office-reference fidelity evaluation
   separate. Investigate every unexplained difference; do not weaken comparison
   thresholds merely to make the review pass.
+- **DOCX architecture:** After major DOCX layout, pagination, measurement,
+  paint, parser-model, worker, or compatibility changes, and before declaring
+  Issue #1037-style architecture work complete, also follow
+  `docs/docx-architecture-audit.md`.
 
 ## Private Samples and Storybook
 
@@ -272,12 +302,18 @@ Typical local-only paths:
 - `packages/docx/public/private/docx/`
 - `packages/xlsx/public/private/xlsx/`
 - `packages/pptx/public/private/pptx/`
+- `packages/legacy-office/public/private/{doc,xls,ppt}/` (DOC/XLS/PPT samples
+  and the paired OOXML controls)
+- `packages/opendocument/public/private/{odt,ods,odp}/` (LibreOffice-converted
+  ODF corpus and its PDFs)
 - `packages/*/src/*privateDemo.stories.ts`
 
 Generated build output such as `packages/*/src/wasm/` is also git-ignored and
-must not be committed; rebuild it instead of copying it between worktrees.
+must not be committed; rebuild it instead of copying it between worktrees. VRT
+screenshots and diffs also stay local unless the user explicitly asks to commit
+them.
 
-When using a Codex/Claude worktree, copy local private stories/samples from the
+When using a worktree, copy local private stories/samples from the
 main local checkout if needed. Avoid copying `.DS_Store`, temporary Office lock
 files, screenshots, VRT diffs, or private reference images unless the user
 explicitly asks.
@@ -292,9 +328,9 @@ pnpm build:wasm
 or per package:
 
 ```bash
-cd packages/docx/parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/docx_parser.js
-cd packages/xlsx/parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/xlsx_parser.js
-cd packages/pptx/parser && wasm-pack build --target web --out-dir ../src/wasm && node ../../../scripts/append-wasm-reinit.mjs ../src/wasm/pptx_parser.js
+pnpm --filter @silurus/ooxml-docx wasm
+pnpm --filter @silurus/ooxml-xlsx wasm
+pnpm --filter @silurus/ooxml-pptx wasm
 ```
 
 Storybook is unified at the repository root. Static prefixes are:
@@ -472,13 +508,26 @@ Release checklist:
    - `site/package.json`,
    - `packages/mcp-server/Cargo.toml`.
 
-   After bumping the root version, run `pnpm sync:versions` to synchronize
-   `packages/legacy-office/package.json` (the public
-   `@silurus/ooxml-legacy-office` package), its exact `@silurus/ooxml` peer pin,
-   and the compiled companion runtime version. Run `pnpm install --lockfile-only`
-   and `pnpm check:versions`; CI and publishing reject any mismatch. Both npm
-   packages publish from the same tag, viewer first; retries skip exact versions
-   already present on npm.
+   After bumping the root version, run `pnpm sync:versions` to synchronize the
+   companion packages `packages/legacy-office/package.json`
+   (`@silurus/ooxml-legacy-office`) and `packages/opendocument/package.json`
+   (`@silurus/ooxml-opendocument`), their exact `@silurus/ooxml` peer pins, and
+   the compiled companion runtime version (`src/companion-version.ts`). Run
+   `pnpm install --lockfile-only` and `pnpm check:versions`; CI and publishing
+   reject any mismatch. All three npm packages publish from the same tag
+   (`scripts/publish-packages.mjs`): the viewer first, then legacy-office, then
+   opendocument; retries skip exact versions already present on npm.
+   `pnpm build:wasm` builds one OpenDocument reader per `./<format>` export of
+   the opendocument package through its `wasm:<format>` script, and
+   `pnpm test:packed-packages` expects exactly those formats' assets in the
+   tarball, so a new format needs only its export, script and build entry.
+   `publish.yml` authenticates with the `NPM_TOKEN` secret (plus OIDC for
+   provenance). Before the first release of a new companion package, the
+   repository owner must make sure that token can create new packages in the
+   `@silurus` scope (or publish the package once by hand and grant the token
+   access to it); a token limited to existing packages fails with E404/E403
+   after the viewer has already published, and the retry dispatch then
+   publishes only the missing companions.
 6. Run `cargo check -p ooxml-mcp-server` after bumping the MCP server so
    `Cargo.lock` follows.
 7. Open PR `chore(release): 0.x.0`.

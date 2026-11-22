@@ -281,6 +281,7 @@ export function drawSecondaryValueAxis(
             sec.formatCode ?? null,
             date1904,
             sec.displayUnits,
+            sec.formatDivisors,
           ),
           side === 'left' ? axX - 14 : axX + 14,
           gy,
@@ -420,7 +421,7 @@ export function drawSecondaryCategoryAxis(
       ctx.textAlign = anchor.textAlign;
       fillAuthoredText(
         ctx,
-        formatCategoryLabel(categories[index], axis.formatCode, chart.date1904),
+        formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors),
         px0 + anchor.fraction * pw,
         py0 - labelGap,
         axisLabelLineHeightPx(fontPx),
@@ -482,7 +483,7 @@ export function secondaryCategoryLabelExtraH(
   const labelSkip = Math.max(1, Math.floor(axis.tickLabelSkip ?? 1));
   const labels: string[] = [];
   for (let index = 0; index < categories.length; index += labelSkip) {
-    labels.push(formatCategoryLabel(categories[index], axis.formatCode, chart.date1904));
+    labels.push(formatCategoryLabel(categories[index], axis.formatCode, chart.date1904, axis.formatDivisors));
   }
   return authoredExtraLinesHeight(labels, axisLabelLineHeightPx(fontPx));
 }

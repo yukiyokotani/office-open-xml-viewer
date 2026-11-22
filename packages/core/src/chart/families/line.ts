@@ -303,7 +303,7 @@ export function renderLineChart(
     );
     let wmax = 0;
     for (const value of secScale.majorLines) {
-      wmax = Math.max(wmax, measureAuthoredTextWidth(ctx, formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits)));
+      wmax = Math.max(wmax, measureAuthoredTextWidth(ctx, formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits, sec.formatDivisors)));
     }
     secLabelBandW = wmax + 18;
     ctx.font = prevFont;
@@ -364,7 +364,7 @@ export function renderLineChart(
       ),
     sec && secScale && !sec.hidden && sec.tickLabelPos !== 'none'
       ? authoredExtraLinesHeight(
-        secScale.majorLines.map(value => formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits)),
+        secScale.majorLines.map(value => formatAxisTickWithUnits(value, sec.formatCode ?? null, chart.date1904, sec.displayUnits, sec.formatDivisors)),
         axisLabelLineHeightPx(secFontPx),
       )
       : 0,
@@ -457,9 +457,9 @@ export function renderLineChart(
   const categoryLabelInterval = Math.max(1, Math.floor(chart.catAxisTickLabelSkip ?? 1));
   const categoryLabelTexts = (): string[] => dateAxisPlan
     ? dateAxisPlan.majorTicks.map(tick =>
-      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904))
+      formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors))
     : Array.from({ length: Math.ceil(n / categoryLabelInterval) }, (_, index) =>
-      formatCategoryLabel((cats[index * categoryLabelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904));
+      formatCategoryLabel((cats[index * categoryLabelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them, as the column
   // family does for its wrapped labels. An authored inner rectangle already
@@ -862,14 +862,14 @@ export function renderLineChart(
     const rotRad = catLabelRotation;
     const labelEntries = dateAxisPlan
       ? dateAxisPlan.majorTicks.map(tick => ({
-        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904),
+        label: formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
         x: px0 + tick.fraction * pw,
         categoryIndex: -1,
       }))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
         const ci = index * labelInterval;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904),
+          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors),
           x: toX(ci),
           categoryIndex: ci,
         };

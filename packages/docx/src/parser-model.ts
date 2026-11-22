@@ -1,5 +1,9 @@
 import type { VmlShapeAcquisitionFacts } from './layout/types.js';
-import { resolveAutomaticParagraphMarginsPt } from './layout/paragraph-spacing.js';
+import {
+  automaticSpacingNeighbourhood,
+  resolveAutomaticParagraphMarginsPt,
+  type AutomaticSpacingNeighbourhood,
+} from './layout/paragraph-spacing.js';
 import type {
   ReservedNoteSeparatorsInput,
   ReservedNoteSeparatorStoriesInput,
@@ -36,6 +40,11 @@ import type {
   VmlTextPathAcquisitionInput,
 } from './layout/types.js';
 import type { MathOccurrence } from './layout/resources.js';
+import {
+  documentPageBackgroundStory,
+  documentPageObjects,
+  type PageObjectStoryWire,
+} from './page-object-wire.js';
 import { anchorOccurrenceKey, chartResourceKey, mathResourceKey, sourceKey } from './layout/source-key.js';
 import { mathFallbackText } from './layout/math-fallback-text.js';
 import type {
@@ -80,18 +89,26 @@ import {
   sectionPageBox,
   type BodySectionIndexInput,
   type BodySectionOccurrence,
+  type PageSheetOrientation,
 } from './layout/context.js';
 import { normalizeAdjacentTables, type AdjacentTableSequenceInput } from './layout/adjacent-tables.js';
+import { repeatedFootnoteLastReferenceIndexes } from './layout/note-reference-ownership.js';
 import { isWrapFloat } from './float-layout.js';
 import type {
   BodyLayoutAcquisitionInput,
   BodyLayoutInput,
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
-import { projectBodyLayoutInput } from './layout/body-layout-input.js';
+import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
+import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
+import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
-import { isInklessParagraph } from './layout/paragraph-visibility.js';
+import { isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import {
+  wordHiddenParagraphRetainedBreaks,
+  type WordHiddenParagraphRunFact,
+} from './layout/body-pagination-compatibility.js';
 import {
   cellOwnedGridFramePosition,
   wordTableCellSpacingValuePt,
@@ -197,6 +214,11 @@ interface UnavailableDrawingSidecarEntry {
  * The normalized paragraph identity is the ownership boundary: acquisition can
  * reconstruct the authored run order, while callers observing/serializing
  * `DocxDocumentModel` see only the declared `DocRun` union. */
+/** ECMA-376 §17.3.2.24 position (pt) of the run hosting an inline object,
+ * keyed by the normalized public run. The parser wire carries it as a private
+ * field; normalization moves it here so the public model never exposes it. */
+const inlineObjectPositions = new WeakMap<object, number>();
+
 const unavailableDrawingSidecars = new WeakMap<
   DocParagraph,
   readonly UnavailableDrawingSidecarEntry[]
@@ -258,8 +280,40 @@ export type InternalMathRun = Extract<DocRun, { type: 'math' }> & {
   readonly resourceKey: string;
 };
 
+export { documentPageBackgroundStory, documentPageObjects, type PageObjectStoryWire };
+
+/** Private producer settings (never authored by OOXML, and not part of the
+ * public `DocumentSettings`): a model source sets them on the settings it
+ * hands over. */
+export interface ProducerDocumentSettings {
+  /** Every column of a multi-column section owns its footnote band, as
+   *  LibreOffice lays out footnotes. */
+  readonly __footnoteColumnBands?: boolean;
+  /** Lines snapped to an active line grid count cells from each face's own
+   *  line box, without Word's Far East 1.3 x usWin rule, as LibreOffice
+   *  does, and take their whole cells at the page edge (no grid-leading
+   *  overhang). */
+  readonly __plainFontLineBoxes?: boolean;
+  /** Unsnapped lines take each face's own normal line with its line gap
+   *  below the baseline, and a proportional line's extra space may hang
+   *  below a page's bottom, as LibreOffice lays lines out
+   *  (LIBREOFFICE_FONT_LINE_BOX, LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT). */
+  readonly __libreOfficeLineBoxes?: boolean;
+  /** With `__libreOfficeLineBoxes`: lines in a Far East face keep Word's
+   *  projection (LibreOffice's MsWordCompGridMetrics). */
+  readonly __libreOfficeMsWordGridMetrics?: boolean;
+  /** With `__libreOfficeLineBoxes`: AddExternalLeading off (no line gap). */
+  readonly __libreOfficeNoExternalLeading?: boolean;
+}
+
+/** The producer settings of a model; none is set for a DOCX document. */
+export function producerDocumentSettings(doc: DocxDocumentModel): ProducerDocumentSettings {
+  return (doc.settings ?? {}) as ProducerDocumentSettings;
+}
+
 export interface InternalDocxDocumentModel extends DocxDocumentModel {
   fontFamilyCharsets?: Record<string, string>;
+  __pageObjects?: PageObjectStoryWire[];
   readonly diagnostics?: readonly ParseDiagnosticWire[];
   readonly __pageLayoutSettings?: Readonly<{
     mirrorMargins?: boolean;
@@ -292,6 +346,9 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
   readonly __documentTypographySettings?: Readonly<{
     normalStyleFontSizePt?: number;
   }>;
+  /** ECMA-376 §17.2.1 background, present only while §17.15.1.26
+   * displayBackgroundShape is on; see layout/page-background.ts. */
+  readonly __pageBackground?: unknown;
 }
 
 export function documentTypographySettingsInput(
@@ -378,18 +435,17 @@ function reservedNoteSeparatorsInput(
   if (!isWireRecord(value as unknown)) throw new Error('Unsupported reserved note separator story');
   // Reserved stories are not ordinary numbered-note bodies and do not enter
   // normalizeBody. Resolve their effective automatic spacing flags here with
-  // the same document setting and paragraph-base em as other stories,
-  // before canonical acquisition. At most two kinds × three roles are visited;
-  // clone only changed ancestry, then use the enclosing single frozen snapshot.
+  // the same document setting and amount as other stories (a standalone
+  // paragraph: no box edge or list neighbour), before canonical acquisition.
+  // At most two kinds × three roles are visited; clone only changed
+  // ancestry, then use the enclosing single frozen snapshot.
   const normalizeStory = (story: ReservedNoteSeparatorStoryInput): ReservedNoteSeparatorStoryInput => {
     reservedNoteSeparatorStoryInput(story);
     const authored = story.paragraph;
     if (!isWireRecord(authored) || !isWireRecord(authored.paragraph)) return story;
     const paragraph = authored.paragraph;
     if (paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true) return story;
-    const spacing = resolveAutomaticParagraphMarginsPt(
-      paragraph, paragraph.defaultFontSize ?? 10, fixedParagraphAutoSpacing,
-    );
+    const spacing = resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing);
     if (spacing.spaceBefore === paragraph.spaceBefore && spacing.spaceAfter === paragraph.spaceAfter) return story;
     return { ...story, paragraph: { ...authored, paragraph: { ...paragraph, ...spacing } } };
   };
@@ -423,7 +479,7 @@ function selectedNoteSeparatorParagraphsInput(
     if (paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true) return paragraph;
     return {
       ...paragraph,
-      ...resolveAutomaticParagraphMarginsPt(paragraph, paragraph.defaultFontSize ?? 10, fixedParagraphAutoSpacing),
+      ...resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing),
     };
   };
   const separator = resolve(settings?.footnoteSeparatorParagraph, settings?.footnoteSeparator);
@@ -508,6 +564,8 @@ interface InternalSectionPlacementWire {
     headerDistance?: number | null;
     footerDistance?: number | null;
   }> | null;
+  /** §17.6.13 pgSz/@orient; present whenever the sectPr authors pgSz. */
+  readonly pageOrient?: string | null;
 }
 
 type InternalSectionBreak = Extract<BodyElement, { type: 'sectionBreak' }> & {
@@ -533,6 +591,8 @@ export interface SectionPlacementInput {
   readonly pageBordersAuthored: boolean;
   readonly pageBorders: Readonly<import('./types.js').PageBorders> | null;
   readonly pageGeometry: InternalSectionPlacementWire['pageGeometry'];
+  /** §17.6.13 sheet orientation of an authored pgSz; null when pgSz is absent. */
+  readonly pageOrient: PageSheetOrientation | null;
   /** Canonical counter-clockwise page frame; absent for OOXML sections. */
   readonly sectionFlow?: SectionFlow;
 }
@@ -799,8 +859,10 @@ function effectiveTableCellMargins(
     const logicalEdge = edge === 'left'
       ? (bidi ? 'end' : 'start')
       : (bidi ? 'start' : 'end');
-    return { width: margins?.[edge] ?? margins?.[logicalEdge], edge: logicalEdge,
-      physicalLeftAuthored: edge === 'left' && margins?.left != null };
+    // Word takes the logical start/end over a physical left/right for the
+    // same edge, whichever comes first (#2125 controls, merged tcMar).
+    return { width: margins?.[logicalEdge] ?? margins?.[edge], edge: logicalEdge,
+      physicalLeftAuthored: edge === 'left' && margins?.left != null && margins?.[logicalEdge] == null };
   };
   const selectMargin = (
     edge: TableMarginEdge,
@@ -915,6 +977,8 @@ export function tableFormatInput(table: TableLayoutSource): TableFormatInput {
     return {
       height: rowWire?.height ? privateTableRowHeight(rowWire.height) : publicTableRowHeight(row),
       cantSplit: row.cantSplit === true,
+      ...((row as { __cutsInPlace?: boolean }).__cutsInPlace === true
+        ? { cutsInPlace: true as const } : {}),
       repeatedHeader: row.isHeader === true,
       cellSpacingPt: wordTableCellSpacingPt(
         rowWire?.cellSpacing,
@@ -1073,6 +1137,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     widowControl: paragraph.widowControl !== false,
     ...(paragraph.framePr?.vAnchor === 'text' && paragraph.framePr.dropCap === 'none'
       ? { textFrameMember: true as const } : {}),
+    ...paragraphFrameFact(paragraph),
     spaceBeforePt: paragraph.spaceBefore ?? 0,
     spaceAfterPt: paragraph.spaceAfter ?? 0,
     contextualSpacing: paragraph.contextualSpacing === true,
@@ -1094,6 +1159,44 @@ function acquiredBodyTable(source: SourceRef, table: TableLayoutSource) {
       ? { pageOwnedFloatingTable: true }
       : {}),
   });
+}
+
+/** Each repeated footnote id with the sequence entry holding its last
+ * reference. Entries map one-to-one onto body elements except adjacent table
+ * groups, which hold several (`bodyLayoutSequenceInput`). */
+function repeatedFootnoteLastEntries(
+  body: readonly BodyElement[],
+  sequence: readonly BodyLayoutSequenceEntryFor<AcquiredBodySectionReference>[],
+): readonly Readonly<{ id: string; entryIndex: number }>[] {
+  const lastBodyIndex = repeatedFootnoteLastReferenceIndexes(body);
+  if (lastBodyIndex.size === 0) return Object.freeze([]);
+  const entryByBodyIndex: number[] = [];
+  sequence.forEach((entry, entryIndex) => {
+    const count = entry.kind === 'adjacent-table-group' ? entry.tables.length : 1;
+    for (let index = 0; index < count; index += 1) entryByBodyIndex.push(entryIndex);
+  });
+  return Object.freeze([...lastBodyIndex].map(([id, bodyIndex]) => Object.freeze({
+    id,
+    entryIndex: entryByBodyIndex[bodyIndex] ?? sequence.length,
+  })));
+}
+
+/** §17.3.1.11 frame presence as a parse fact; dropCap other than none
+ * (§17.18.20) marks a drop-cap frame. */
+function paragraphFrameFact(
+  paragraph: Pick<DocParagraph, 'framePr'>,
+): Readonly<{ framed?: 'frame' | 'drop-cap' }> {
+  if (!paragraph.framePr) return {};
+  const dropCap = paragraph.framePr.dropCap;
+  return { framed: dropCap === 'drop' || dropCap === 'margin' ? 'drop-cap' : 'frame' };
+}
+
+/** A vanished, inkless body paragraph acquires no block: body flow consumes
+ * its source (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK owns its break).
+ * Model paragraphs keep unavailable drawings in a sidecar, so they are checked
+ * here beside layout's isSwallowedHiddenParagraph. */
+function isSwallowedHiddenBodyParagraph(paragraph: Readonly<DocParagraph>): boolean {
+  return !paragraphHasUnavailableDrawing(paragraph) && isSwallowedHiddenParagraph(paragraph);
 }
 
 function bodyLayoutSequenceInput(
@@ -1120,17 +1223,31 @@ function bodyLayoutSequenceInput(
     const source = bodySourceAt(entryBodyIndex);
     bodyIndex += 1;
     if (element.type === 'paragraph') {
-      return element.markVanish === true
-        && !paragraphHasUnavailableDrawing(element)
-        && isInklessParagraph(element)
-        ? Object.freeze({ kind: 'consume-source' as const, source, reason: 'hidden-paragraph' as const })
-        : Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
+      if (!isSwallowedHiddenBodyParagraph(element)) {
+        return Object.freeze({ kind: 'body-block' as const, block: acquiredBodyParagraph(element, source) });
+      }
+      // Facts only: whether the hidden paragraph's pageBreakBefore
+      // (§17.3.1.23) still applies is decided by
+      // wordHiddenParagraphPageBreakEntries in projectBodyLayoutInput.
+      return Object.freeze({
+        kind: 'consume-source' as const,
+        source,
+        reason: 'hidden-paragraph' as const,
+        ...(element.pageBreakBefore === true ? { pageBreakBefore: true as const } : {}),
+        ...paragraphFrameFact(element),
+      });
     }
     if (element.type === 'table') {
       return Object.freeze({
         kind: 'body-block' as const,
         block: acquiredBodyTable(source, element),
       });
+    }
+    if (element.type === 'pageBreak'
+      && (element as { readonly __pageBreakBefore?: boolean }).__pageBreakBefore === true) {
+      // §17.3.1.23 of a paragraph whose first content is a column break: the
+      // paragraph property, satisfied by an empty page start.
+      return Object.freeze({ kind: 'authored-break' as const, source, break: 'pageBreakBefore' as const });
     }
     if (element.type === 'pageBreak' || element.type === 'columnBreak') {
       return Object.freeze({
@@ -1197,6 +1314,12 @@ function setBodySectionPlacementInputs(
   byFinalSection.set(finalSection, inputs);
 }
 
+/** ECMA-376 §17.18.65 ST_PageOrientation; an authored pgSz defaults to portrait. */
+function sheetOrientation(value: string | null | undefined): PageSheetOrientation | null {
+  if (value == null) return null;
+  return value === 'landscape' ? 'landscape' : 'portrait';
+}
+
 function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): DocumentSectionPlacementInputs {
   const endingSections = new Map<number, SectionPlacementInput>();
   let ordinal = 0;
@@ -1216,6 +1339,7 @@ function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): Document
       pageBordersAuthored: wire?.pageBordersAuthored ?? false,
       pageBorders: wire?.pageBorders ?? null,
       pageGeometry: wire?.pageGeometry ?? element.geom ?? {},
+      pageOrient: sheetOrientation(wire?.pageOrient),
       ...sectionFlowFacts(wire, element.textDirection),
     }, 'DOCX ending-section placement input'));
     ordinal += 1;
@@ -1240,6 +1364,7 @@ function projectSectionPlacementInputs(doc: InternalDocxDocumentModel): Document
       pageBorders: finalWire?.pageBorders ?? doc.section?.pageBorders ?? null,
       pageGeometry: finalWire?.pageGeometry
         ?? (doc.section ? sectionPageBox(doc.section) : {}),
+      pageOrient: sheetOrientation(finalWire?.pageOrient),
       ...sectionFlowFacts(finalWire, doc.section?.textDirection),
     }, 'DOCX final-section placement input'),
   });
@@ -1296,9 +1421,10 @@ const EMPTY_SECTION_HEADERS_FOOTERS: HeadersFooters = Object.freeze({
  * layout receives no document-model scanning capability or parser-private wire.
  */
 export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexInput {
-  type PendingOccurrence = Omit<BodySectionOccurrence, 'geometry' | 'gutterPt'> & {
+  type PendingOccurrence = Omit<BodySectionOccurrence, 'geometry' | 'gutterPt' | 'sheetOrientation'> & {
     readonly authoredGeometry: Readonly<Partial<import('./types.js').SectionGeom>>;
     readonly authoredGutterPt: number | null;
+    readonly authoredSheetOrientation: PageSheetOrientation | null;
   };
   const pending: PendingOccurrence[] = [];
   const placements = projectSectionPlacementInputs(doc as InternalDocxDocumentModel);
@@ -1331,6 +1457,7 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
       docGridLinePitch: placement.docGridLinePitch,
       docGridCharSpace: placement.docGridCharSpace,
       authoredGutterPt: placement.gutterPt,
+      authoredSheetOrientation: placement.pageOrient,
       rtlGutter: placement.rtlGutter === true,
       pageBordersAuthored: placement.pageBordersAuthored,
       pageBorders: placement.pageBorders,
@@ -1365,6 +1492,7 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
     docGridLinePitch: placement.docGridLinePitch,
     docGridCharSpace: placement.docGridCharSpace,
     authoredGutterPt: placement.gutterPt,
+    authoredSheetOrientation: placement.pageOrient,
     rtlGutter: placement.rtlGutter === true,
     pageBordersAuthored: placement.pageBordersAuthored,
     pageBorders: placement.pageBorders,
@@ -1375,6 +1503,9 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
   const documentGeometry = sectionPageBox(doc.section);
   let followingGeometry: import('./types.js').SectionGeom | null = null;
   let followingGutterPt: number | null = null;
+  // The orientation belongs to pgSz, so it falls back exactly as the page box.
+  const documentSheetOrientation = placements.finalSection.pageOrient ?? 'portrait';
+  let followingSheetOrientation: PageSheetOrientation | null = null;
   for (let index = pending.length - 1; index >= 0; index -= 1) {
     const occurrence = pending[index]!;
     // pgSz/pgMar are optional children and ECMA-376 does not define a Letter /
@@ -1400,14 +1531,19 @@ export function bodySectionIndexInput(doc: DocxDocumentModel): BodySectionIndexI
     const gutterPt: number = occurrence.authoredGutterPt
       ?? (occurrence.startType === 'continuous' ? followingGutterPt : null)
       ?? 0;
+    const sheetOrientation: PageSheetOrientation = occurrence.authoredSheetOrientation
+      ?? (occurrence.startType === 'continuous' ? followingSheetOrientation : null)
+      ?? documentSheetOrientation;
     const {
       authoredGeometry: _authoredGeometry,
       authoredGutterPt: _authoredGutterPt,
+      authoredSheetOrientation: _authoredSheetOrientation,
       ...facts
     } = occurrence;
-    occurrences[index] = { ...facts, geometry, gutterPt };
+    occurrences[index] = { ...facts, geometry, gutterPt, sheetOrientation };
     followingGeometry = geometry;
     followingGutterPt = gutterPt;
+    followingSheetOrientation = sheetOrientation;
   }
 
   // Section placement is also consumed independently by public-model callers.
@@ -1435,14 +1571,31 @@ export function bodyLayoutAcquisitionInput(doc: DocxDocumentModel): BodyLayoutAc
       startType: occurrence.startType,
     });
   });
+  // Producer page objects: each page's story and its wrapping drawings
+  // (page-owned on both axes, as `acquiredBodyParagraph` selects them).
+  const pageObjects = documentPageObjects(doc).map((object, ordinal) => {
+    const source = pageObjectStorySource(ordinal);
+    const wrapAnchors = object.body.flatMap((element, index) => {
+      if (element.type !== 'paragraph') return [];
+      const paragraphSource: SourceRef = Object.freeze({ ...source, path: Object.freeze([index]) as unknown as number[] });
+      return (acquiredBodyParagraph(element, paragraphSource).pageOwnedAnchorOccurrenceIds ?? [])
+        .map((occurrenceId) => Object.freeze({ occurrenceId, paragraphSource }));
+    });
+    return Object.freeze({ pageIndex: object.page - 1, source, wrapAnchors: Object.freeze(wrapAnchors) });
+  });
   return {
+    ...(pageObjects.length > 0 ? { pageObjects: Object.freeze(pageObjects) } : {}),
     sectionIndex,
-    compatibilityMode: doc.settings?.compatibilityMode,
-    footnoteLayoutLikeWW8: doc.settings?.footnoteLayoutLikeWW8,
+    // Producer settings (__footnoteColumnBands) ride on the same settings object.
+    compat: buildDocxCompatProfile(doc.settings as DocxCompatSettingsInput | undefined),
     evenAndOddHeaders: doc.section.evenAndOddHeaders,
     endnoteIds: (doc.endnotes ?? []).map((note) => note.id),
+    repeatedFootnoteLastEntries: repeatedFootnoteLastEntries(doc.body, sequence),
     noteLayoutSettings: documentNoteLayoutSettingsInput(doc),
     pageLayoutSettings: documentPageLayoutSettingsInput(doc),
+    pageBackground: pageBackgroundAcquisitionInput(
+      (doc as InternalDocxDocumentModel).__pageBackground,
+    ),
     parserDiagnostics: mapParseDiagnostics(
       (doc as InternalDocxDocumentModel).diagnostics,
       doc.body.length,
@@ -1613,19 +1766,40 @@ export function paragraphMarkShapeInput(
   paragraph: ParagraphLayoutSource,
 ): NumberingMarkerShapeInput | undefined {
   const facts = internalParagraph(paragraph).paragraphMarkFontFacts;
-  if (!facts) return undefined;
+  return facts ? nonContentRunShapeInput(facts, paragraph) : undefined;
+}
+
+/** Project the effective outer drawing-run font once; text-box text is a
+ * separate story and must not replace its object's automatic-leading face. */
+/** ECMA-376 §17.3.2.24: the raise/lower (pt) of the run hosting an inline
+ * object; the object moves with its run like text. */
+export function inlineObjectPositionPt(run: Readonly<{ type: string }>): number | undefined {
+  if (run.type !== 'image' && run.type !== 'shape') return undefined;
+  return inlineObjectPositions.get(run);
+}
+
+export function inlineObjectShapeInput(run: Readonly<{ type: string }>): NumberingMarkerShapeInput | undefined {
+  if (run.type !== 'image' && run.type !== 'shape') return undefined;
+  const facts = (run as { readonly __inlineObjectFontFacts?: InternalRunFontFacts }).__inlineObjectFontFacts;
+  return facts ? nonContentRunShapeInput(facts) : undefined;
+}
+
+function nonContentRunShapeInput(
+  facts: InternalRunFontFacts,
+  paragraph?: ParagraphLayoutSource,
+): NumberingMarkerShapeInput {
   const complexScript = facts.rtl === true || facts.cs === true;
-  const fallbackFontSizePt = paragraph.runs.find(
+  const fallbackFontSizePt = paragraph?.runs.find(
     (run): run is Extract<DocRun, { type: 'text' | 'field' }> => run.type === 'text' || run.type === 'field',
-  )?.fontSize ?? paragraph.defaultFontSize ?? 10;
+  )?.fontSize ?? paragraph?.defaultFontSize ?? 10;
   const fontSizePt = complexScript
     ? (facts.fontSizeCs ?? facts.fontSize ?? fallbackFontSizePt)
     : (facts.fontSize ?? fallbackFontSizePt);
-  const ascii = facts.fontFamily ?? paragraph.defaultFontFamily ?? null;
+  const ascii = facts.fontFamily ?? paragraph?.defaultFontFamily ?? null;
   const fallbackFonts: TextFontSlots = {
     ascii,
     highAnsi: facts.fontFamilyHighAnsi ?? ascii,
-    eastAsia: facts.fontFamilyEastAsia ?? paragraph.defaultFontFamilyEastAsia ?? ascii,
+    eastAsia: facts.fontFamilyEastAsia ?? paragraph?.defaultFontFamilyEastAsia ?? ascii,
     complexScript: facts.fontFamilyCs ?? ascii,
   };
   return Object.freeze({
@@ -1735,9 +1909,25 @@ export function paragraphAcquisitionInput(
             ...localAnchorInput,
             occurrenceId: anchorOccurrenceKey(source, localAnchorInput.occurrenceId),
           }, 'DOCX scoped unavailable drawing anchor acquisition input');
-      const { __anchorAcquisition: _privateAnchor, ...retainedRun } = internalRun;
+      const {
+        __anchorAcquisition: _privateAnchor,
+        __inlinePosition: inlinePosition,
+        __inlineObjectFontFacts: inlineFontFacts,
+        ...retainedRun
+      } = internalRun as typeof internalRun & {
+        __inlinePosition?: number;
+        __inlineObjectFontFacts?: InternalRunFontFacts;
+      };
+      // An inline picture placeholder takes its picture's acquisition facts:
+      // the hosting run's font (automatic leading) and the DrawingML origin.
+      const placeholderPicture = internalRun.resourceKind === 'image' && anchorInput === undefined;
       return Object.freeze({
         ...retainedRun,
+        ...(placeholderPicture ? { inlineObjectOrigin: 'drawingml' as const } : {}),
+        ...(placeholderPicture && inlineFontFacts
+          ? { inlineObjectShapeInput: nonContentRunShapeInput(inlineFontFacts) } : {}),
+        ...(typeof inlinePosition === 'number' && Number.isFinite(inlinePosition) && inlinePosition !== 0
+          ? { inlinePositionPt: inlinePosition } : {}),
         ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
       });
     }
@@ -1782,8 +1972,16 @@ export function paragraphAcquisitionInput(
       const {
         __anchorAcquisition: _privateAnchor,
         __listLabel: listLabel,
+        __inlineObjectFontFacts: _privateInlineFont,
+        __inlineObjectOrigin: privateInlineOrigin,
+        __inlineGroupRotation: privateGroupRotation,
         ...publicRun
-      } = run as typeof run & InternalAnchorRunWire & Pick<InternalNoBreakHyphenWire, '__listLabel'>;
+      } = run as typeof run & InternalAnchorRunWire & Pick<InternalNoBreakHyphenWire, '__listLabel'>
+        & { __inlineObjectFontFacts?: InternalRunFontFacts; __inlineObjectOrigin?: string; __inlineGroupRotation?: number };
+      const inlineFont = inlineObjectShapeInput(originalRun);
+      const inlinePositionPt = inlineObjectPositionPt(originalRun);
+      const inlineOrigin = privateInlineOrigin === 'drawingml' || privateInlineOrigin === 'vmlStaticTextbox'
+        ? privateInlineOrigin : undefined;
       if (run.type !== 'shape') {
         const retainedRun = run.type === 'chart'
           ? (({ chart: _chartPayload, ...marker }) => ({
@@ -1793,6 +1991,9 @@ export function paragraphAcquisitionInput(
           : publicRun;
         return Object.freeze({
           ...structuredClone(retainedRun),
+          ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+          ...(inlinePositionPt === undefined ? {} : { inlinePositionPt }),
+          ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
           ...(anchorInput === undefined ? {} : { anchorAcquisitionInput: anchorInput }),
           ...(run.type === 'image' && isListLabel(listLabel) ? { listLabel } : {}),
         }) as ParagraphAcquisitionRun;
@@ -1817,6 +2018,11 @@ export function paragraphAcquisitionInput(
       return Object.freeze({
         type: 'shape' as const,
         ...structuredClone(retainedShape),
+        ...(inlineFont ? { inlineObjectShapeInput: inlineFont } : {}),
+        ...(inlinePositionPt === undefined ? {} : { inlinePositionPt }),
+        ...(inlineOrigin ? { inlineObjectOrigin: inlineOrigin } : {}),
+        ...(typeof privateGroupRotation === 'number' && Number.isFinite(privateGroupRotation)
+          ? { inlineGroupRotation: privateGroupRotation } : {}),
         ...(vmlTextPathInput === undefined ? {} : { vmlTextPathInput }),
         ...((textBoxInput.kind === 'complete'
           ? textBoxInput.blockCount
@@ -1936,6 +2142,74 @@ export function normalizeOwnedInternalDocumentModel(doc: DocxDocumentModel): Nor
   return normalizeInternalDocumentModelWithOwnership(doc, true);
 }
 
+type AutomaticSpacingEdges = Parameters<typeof automaticSpacingNeighbourhood>[2];
+/** Box edges that drop automatic paragraph margins (WORD_HTML_PARAGRAPH_AUTO_SPACING):
+ * both edges of a table cell, and the start of the document body, a header
+ * and a text box. Footer and note starts and every other end keep them. */
+const CELL_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: true, end: true });
+const STORY_START_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: true, end: false });
+const NO_AUTO_SPACING_EDGES: AutomaticSpacingEdges = Object.freeze({ start: false, end: false });
+/** Which automatic-spacing edges a sibling sequence has; `body` also takes its
+ * neighbours from the body flow participants. */
+type AutomaticSpacingFlow = 'body' | 'cell' | 'header' | 'story';
+/** Stands for a hidden paragraph whose page break still applies. */
+const RETAINED_HIDDEN_BREAK = Object.freeze({ type: 'pageBreak' });
+
+/**
+ * Automatic-spacing neighbourhoods of the document body's flow participants,
+ * in one linear pass. Body flow swallows vanished inkless paragraphs
+ * (isSwallowedHiddenBodyParagraph), so they neither open the body nor
+ * separate or join list items; one whose pageBreakBefore still applies
+ * (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK) remains a break. Swallowed
+ * paragraphs get no neighbourhood: they lay out no block.
+ */
+function bodyFlowAutoSpacingNeighbourhoods(
+  body: readonly BodyElement[],
+): readonly (AutomaticSpacingNeighbourhood | undefined)[] {
+  const swallowed = (element: BodyElement): boolean =>
+    element.type === 'paragraph' && isSwallowedHiddenBodyParagraph(element);
+  const retainedBreaks = wordHiddenParagraphRetainedBreaks(body, (element): WordHiddenParagraphRunFact => (
+    swallowed(element)
+      ? {
+          hidden: true,
+          framed: element.type === 'paragraph' && paragraphFrameFact(element).framed !== undefined,
+          pageBreakBefore: element.type === 'paragraph' && element.pageBreakBefore === true,
+        }
+      : {
+          hidden: false,
+          blocksJoin: element.type === 'table'
+            || (element.type === 'paragraph' && paragraphFrameFact(element).framed === 'frame'),
+        }));
+  const participants: Parameters<typeof automaticSpacingNeighbourhood>[0][number][] = [];
+  const positions = body.map((element, index) => {
+    if (!swallowed(element)) return participants.push(element) - 1;
+    if (retainedBreaks.has(index)) participants.push(RETAINED_HIDDEN_BREAK);
+    return -1;
+  });
+  return positions.map((position) => (position < 0
+    ? undefined
+    : automaticSpacingNeighbourhood(participants, position, STORY_START_AUTO_SPACING_EDGES)));
+}
+
+/**
+ * Automatic-spacing neighbourhoods of a table cell's flow participants. A cell
+ * swallows a vanished inkless paragraph other than its last one
+ * (WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT, the layout side is
+ * isSwallowedHiddenCellParagraph), so it neither opens nor closes the cell
+ * and separates no neighbours; it gets no neighbourhood.
+ */
+function cellFlowAutoSpacingNeighbourhoods(
+  content: readonly BodyElement[],
+): readonly (AutomaticSpacingNeighbourhood | undefined)[] {
+  const participants: BodyElement[] = [];
+  const positions = content.map((element, index) => (
+    index < content.length - 1 && element.type === 'paragraph' && isSwallowedHiddenBodyParagraph(element)
+      ? -1 : participants.push(element) - 1));
+  return positions.map((position) => (position < 0
+    ? undefined
+    : automaticSpacingNeighbourhood(participants, position, CELL_AUTO_SPACING_EDGES)));
+}
+
 function normalizeInternalDocumentModelWithOwnership(
   doc: DocxDocumentModel,
   consumeOwned: boolean,
@@ -1946,6 +2220,7 @@ function normalizeInternalDocumentModelWithOwnership(
     story: SourceRef['story'],
     storyInstance: string,
     path: number[],
+    autoSpacing?: AutomaticSpacingNeighbourhood,
   ): BodyElement => {
     if (element.type === 'paragraph') {
       const internalParagraph = element as InternalDocParagraph;
@@ -1956,7 +2231,32 @@ function normalizeInternalDocumentModelWithOwnership(
       const hasEmbeddedUnavailableDrawing = (
         element.runs as unknown as readonly Readonly<{ type: string }>[]
       ).some((run) => run.type === 'unavailableDrawing');
-      paragraphRunsWithUnavailableDrawings(element).forEach((rawRun, runIndex) => {
+      paragraphRunsWithUnavailableDrawings(element).forEach((wireRun, runIndex) => {
+        // Parser-private object position: keep it off the public run and in
+        // the run-identity side table (inlineObjectPositionPt).
+        // An unavailable drawing stays in the parser-private sidecar, which
+        // keeps the fact as authored.
+        const wirePosition = wireRun.type === 'unavailableDrawing'
+          ? undefined : (wireRun as { readonly __inlinePosition?: unknown }).__inlinePosition;
+        let rawRun = wireRun;
+        if (wirePosition !== undefined) {
+          const { __inlinePosition: _privatePosition, ...publicRun } = wireRun as typeof wireRun & { __inlinePosition?: unknown };
+          rawRun = publicRun as typeof wireRun;
+          runsChanged = true;
+        }
+        // A run normalized before carries its fact in the side table; any
+        // replacement identity (a cloned shape whose text box changed) must
+        // keep it.
+        const position = typeof wirePosition === 'number'
+          ? wirePosition : inlineObjectPositions.get(wireRun);
+        const firstRunIndex = runs.length;
+        normalizeParagraphRun(rawRun, runIndex);
+        if (position !== undefined && Number.isFinite(position) && position !== 0
+          && runs.length === firstRunIndex + 1) {
+          inlineObjectPositions.set(runs[firstRunIndex]!, position);
+        }
+      });
+      function normalizeParagraphRun(rawRun: Readonly<DocRun | UnavailableDrawingRunWire>, runIndex: number): void {
         const revision = runRevisions[runIndex] ?? undefined;
         const rawRevision = (rawRun as Readonly<{ revision?: DocRun['revision'] }>).revision;
         const run = revision === undefined || rawRevision !== undefined
@@ -1997,9 +2297,10 @@ function normalizeInternalDocumentModelWithOwnership(
         }
         let shape = run as Extract<DocRun, { type: 'shape' }> & InternalShapeRun;
         if (shape.textBlocks?.some(block => block.beforeAutospacing === true || block.afterAutospacing === true)) {
-          const textBlocks = shape.textBlocks.map(block => {
+          const textBlocks = shape.textBlocks.map((block, blockIndex, blocks) => {
             const spacing = resolveAutomaticParagraphMarginsPt(
-              block, block.defaultFontSize ?? block.fontSizePt, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true,
+              block, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true,
+              automaticSpacingNeighbourhood(blocks, blockIndex, STORY_START_AUTO_SPACING_EDGES),
             );
             return spacing.spaceBefore === block.spaceBefore && spacing.spaceAfter === block.spaceAfter
               ? block : { ...block, ...spacing };
@@ -2032,6 +2333,7 @@ function normalizeInternalDocumentModelWithOwnership(
             'textbox',
             textBoxStoryInstance,
             [blockIndex],
+            automaticSpacingNeighbourhood(content, blockIndex, STORY_START_AUTO_SPACING_EDGES),
           ) as Extract<BodyElement, { type: 'paragraph' | 'table' }>;
           if (normalized !== block) contentChanged = true;
           textBoxContent[blockIndex] = normalized;
@@ -2047,10 +2349,9 @@ function normalizeInternalDocumentModelWithOwnership(
         } else {
           runs.push({ ...shape, textBoxContent } as DocRun);
         }
-      });
+      }
       const spacing = resolveAutomaticParagraphMarginsPt(
-        element, element.defaultFontSize ?? 10,
-        doc.settings?.doNotUseHtmlParagraphAutoSpacing === true,
+        element, doc.settings?.doNotUseHtmlParagraphAutoSpacing === true, autoSpacing,
       );
       const spacingChanged = spacing.spaceBefore !== element.spaceBefore
         || spacing.spaceAfter !== element.spaceAfter;
@@ -2079,6 +2380,7 @@ function normalizeInternalDocumentModelWithOwnership(
         element.rows.forEach((row, rowIndex) => row.cells.forEach((cell, cellIndex) => {
           cell.content = normalizeBody(
             cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
+            'cell',
           ) as typeof cell.content;
         }));
         return element;
@@ -2089,6 +2391,7 @@ function normalizeInternalDocumentModelWithOwnership(
         const cells = row.cells.map((cell, cellIndex) => {
           const content = normalizeBody(
             cell.content as BodyElement[], story, storyInstance, [...path, rowIndex, cellIndex],
+            'cell',
           );
           if (content === cell.content) return cell;
           rowChanged = true;
@@ -2112,7 +2415,10 @@ function normalizeInternalDocumentModelWithOwnership(
       for (const kind of ['default', 'first', 'even'] as const) {
         const part = parts[kind];
         if (!part) continue;
-        const nextBody = normalizeBody(part.body, partStory, `section:${elementIndex}:${kind}`);
+        const nextBody = normalizeBody(
+          part.body, partStory, `section:${elementIndex}:${kind}`, [],
+          partStory === 'header' ? 'header' : 'story',
+        );
         if (nextBody === part.body) continue;
         if (result === parts) result = { ...parts };
         result[kind] = { ...part, body: nextBody };
@@ -2130,7 +2436,15 @@ function normalizeInternalDocumentModelWithOwnership(
     story: SourceRef['story'],
     storyInstance: string,
     prefix: number[] = [],
+    flow: AutomaticSpacingFlow = 'story',
   ): BodyElement[] => {
+    const flowNeighbourhoods = flow === 'body' ? bodyFlowAutoSpacingNeighbourhoods(body)
+      : flow === 'cell' ? cellFlowAutoSpacingNeighbourhoods(body) : undefined;
+    const edges = flow === 'header' ? STORY_START_AUTO_SPACING_EDGES : NO_AUTO_SPACING_EDGES;
+    const neighbourhoodAt = (elementIndex: number): AutomaticSpacingNeighbourhood | undefined => (
+      flowNeighbourhoods
+        ? flowNeighbourhoods[elementIndex]
+        : automaticSpacingNeighbourhood(body, elementIndex, edges));
     if (consumeOwned) {
       for (let elementIndex = 0; elementIndex < body.length; elementIndex += 1) {
         body[elementIndex] = normalizeElement(
@@ -2138,6 +2452,7 @@ function normalizeInternalDocumentModelWithOwnership(
           story,
           storyInstance,
           [...prefix, elementIndex],
+          neighbourhoodAt(elementIndex),
         );
       }
       return body;
@@ -2149,6 +2464,7 @@ function normalizeInternalDocumentModelWithOwnership(
         story,
         storyInstance,
         [...prefix, elementIndex],
+        neighbourhoodAt(elementIndex),
       );
       if (next !== element) changed = true;
       return next;
@@ -2164,14 +2480,14 @@ function normalizeInternalDocumentModelWithOwnership(
     for (const kind of ['default', 'first', 'even'] as const) {
       const part = parts[kind];
       if (!part) continue;
-      const body = normalizeBody(part.body, story, kind);
+      const body = normalizeBody(part.body, story, kind, [], story === 'header' ? 'header' : 'story');
       if (body === part.body) continue;
       if (result === parts) result = { ...parts };
       result[kind] = { ...part, body };
     }
     return result;
   };
-  const body = normalizeBody(doc.body, 'body', 'body');
+  const body = normalizeBody(doc.body, 'body', 'body', [], 'body');
   const headers = normalizeParts(doc.headers, 'header');
   const footers = normalizeParts(doc.footers, 'footer');
   const normalizeNotes = <T extends { id: string; content: BodyElement[] }>(
@@ -2194,10 +2510,35 @@ function normalizeInternalDocumentModelWithOwnership(
   };
   const footnotes = normalizeNotes(doc.footnotes, 'footnote');
   const endnotes = normalizeNotes(doc.endnotes, 'endnote');
+  const sourcePageObjects = (doc as InternalDocxDocumentModel).__pageObjects;
+  let pageObjects = sourcePageObjects;
+  if (sourcePageObjects) {
+    let pageObjectsChanged = false;
+    const normalized = sourcePageObjects.map((object, ordinal) => {
+      const objectBody = normalizeBody(object.body, 'header', pageObjectStorySource(ordinal).storyInstance);
+      if (objectBody === object.body) return object;
+      pageObjectsChanged = true;
+      return { ...object, body: objectBody };
+    });
+    if (pageObjectsChanged) pageObjects = normalized;
+  }
+  // The §17.2.1 background drawing story normalizes like a header story.
+  const sourceBackground = (doc as InternalDocxDocumentModel).__pageBackground as
+    | (Record<string, unknown> & { body?: BodyElement[] }) | undefined;
+  let pageBackground = sourceBackground;
+  if (sourceBackground && Array.isArray(sourceBackground.body)) {
+    const backgroundBody = normalizeBody(
+      sourceBackground.body, 'header', pageBackgroundStorySource().storyInstance,
+    );
+    if (backgroundBody !== sourceBackground.body) pageBackground = { ...sourceBackground, body: backgroundBody };
+  }
   const changed = body !== doc.body || headers !== doc.headers || footers !== doc.footers
-    || footnotes !== doc.footnotes || endnotes !== doc.endnotes;
+    || footnotes !== doc.footnotes || endnotes !== doc.endnotes || pageObjects !== sourcePageObjects
+    || pageBackground !== sourceBackground;
   const document = (changed
-    ? { ...doc, body, headers, footers, footnotes, endnotes }
+    ? { ...doc, body, headers, footers, footnotes, endnotes,
+        ...(pageObjects ? { __pageObjects: pageObjects } : {}),
+        ...(pageBackground ? { __pageBackground: pageBackground } : {}) }
     : doc) as InternalDocxDocumentModel;
   const sectionPlacementInputs = projectSectionPlacementInputs(document);
   sectionPlacementInputsByDocument.set(document, sectionPlacementInputs);

@@ -45,3 +45,25 @@ it('retains a surviving sub-cell glyph component when simplification would colla
     return area + p.x*q.y - p.y*q.x;
   }, 0)) > 0)).toBe(true);
 });
+
+
+it('uses the acquired native base on its owned contour surface and disposes it', () => {
+  const directions: string[] = [];
+  const surfaces: Canvas[] = [];
+  class DirectedCanvas extends Canvas {
+    constructor(w: number, h: number) {
+      super(w, h); surfaces.push(this);
+      const context = this.getContext('2d');
+      const fill = context.fillText.bind(context);
+      context.fillText = (text: string, x: number, y: number) => {
+        directions.push(context.direction);
+        fill(text, x, y);
+      };
+    }
+  }
+  vi.stubGlobal('OffscreenCanvas', DirectedCanvas);
+  expect(acquireCanvasGlyphContours({ ...request, baseDirection: 'rtl' })?.length).toBeGreaterThan(0);
+  expect(directions.length).toBeGreaterThan(0);
+  expect(directions.every(direction => direction === 'rtl')).toBe(true);
+  expect(surfaces.every(surface => surface.width === 1 && surface.height === 1)).toBe(true);
+});

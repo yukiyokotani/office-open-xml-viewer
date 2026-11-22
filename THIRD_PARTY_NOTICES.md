@@ -133,6 +133,46 @@ Arabic joining classes).
 The `unicode-ident` Rust crate listed above also carries `Unicode-3.0` in
 its SPDX expression for the same reason (embedded UCD-derived tables).
 
+## Symbol and dingbat font encoding tables
+
+Symbol-font text (Symbol, Wingdings, Wingdings 2, Wingdings 3, Webdings) is
+converted to Unicode with code tables shipped in `dist/`.
+
+### Adobe Symbol Encoding to Unicode
+
+`packages/core/src/fonts/symbol-encoding.ts` reproduces the mapping data of
+"Adobe Symbol Encoding to Unicode" (table version 1.0, 2011 July 12),
+<https://www.unicode.org/Public/MAPPINGS/VENDORS/ADOBE/symbol.txt>, with the
+deviations recorded in that file. The data is used under this notice, which
+is reproduced in full as its terms require:
+
+```text
+Copyright (c) 1991-2011 Unicode, Inc. All Rights reserved.
+
+This file is provided as-is by Unicode, Inc. (The Unicode Consortium). No
+claims are made as to fitness for any particular purpose. No warranties of
+any kind are expressed or implied. The recipient agrees to determine
+applicability of information provided. If this file has been provided on
+magnetic media by Unicode, Inc., the sole remedy for any claim will be
+exchange of defective media within 90 days of receipt.
+
+Unicode, Inc. hereby grants the right to freely use the information
+supplied in this file in the creation of products supporting the
+Unicode Standard, and to make copies of this file in any form for
+internal or external distribution as long as this notice remains
+attached.
+```
+
+### Wingdings, Wingdings 2, Wingdings 3 and Webdings
+
+`packages/core/src/fonts/dingbat-encoding.ts` records, for each code of these
+fonts, the Unicode character the Unicode Standard encoded for its glyph, as
+listed in the source reference of that encoding: Michel Suignard, "Status of
+encoding of Wingdings and Webdings Symbols", ISO/IEC JTC1/SC2/WG2 N4384 =
+UTC L2/12-368 (2012), section 7, <https://www.unicode.org/wg2/docs/n4384.pdf>.
+Only code-to-code-point correspondences are reproduced; no text, glyph image
+or font data from the document or the fonts is included.
+
 ## License texts
 
 - **MIT** — see [LICENSE](./LICENSE) (this repository's own license; the

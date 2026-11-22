@@ -8,16 +8,22 @@ import { resolveCjkFallback, type CjkLang } from '@silurus/ooxml-core';
 import { xlsxCjkFallback } from './font-requests.js';
 import InlineWorker from './worker.ts?worker&inline';
 import wasmAssetUrl from './wasm/xlsx_parser_bg.wasm?url';
+import { realmBaseUrl } from '@silurus/ooxml-core/internal/bundled-asset-url';
 import {
-  FontResolverBridgeHost,
+  FontResolverBridge,
   normalizeFontOptions,
+  optionFontSources,
   type FontSessionDemand,
   type FontResolverFailures,
-  type FontSource,
+  type FontSourceDescriptor,
   type FontSourceSession,
   type InstalledFamilyExclusion,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
+  bindMetafileFontDemand,
+  bindMetafileFontFamilies,
+  createSymbolFaceOracleCache,
+  loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   unloadOfficeFontFallbacks,
   type LoadedOfficeFontFallbacks,
@@ -60,7 +66,8 @@ import { selectSheetVisibility } from './sheet-visibility.js';
 import { renderWorksheetViewport, xlsxRenderCommitGuardOf } from './render-orchestrator.js';
 import { xlsxOfficeFontRequests, xlsxWorksheetOfficeFontRequests } from './font-requests.js';
 import { officeRequestKey } from './shape-office-line.js';
-import { formatCellValue } from './number-format.js';
+import { cellDisplayTexts, formatCellValue } from './number-format.js';
+import { compileCf, evaluateCf } from './conditional-format.js';
 import {
   addWorksheetUsage,
   addWorksheetCacheUsage,
@@ -136,6 +143,8 @@ export const prepareXlsxViewerRowHeights = Symbol('prepare-xlsx-viewer-row-heigh
 export const releaseXlsxViewerProjection = Symbol('release-xlsx-viewer-projection');
 /** @internal XlsxSheetViewer-only source dispatcher. */
 export const loadXlsxSheetSource = Symbol('load-xlsx-sheet-source');
+/** @internal Viewer find: every text a cell may display at some column width. */
+export const xlsxCellDisplayTexts = Symbol('xlsx-cell-display-texts');
 
 interface RetainedFontSet {
   refs: number;
@@ -241,21 +250,26 @@ export class XlsxWorkbook {
    * their own set even when they share this workbook instance. */
   /** Validated `LoadOptions.fonts` (normalised from the deprecated
    *  `useGoogleFonts`); undefined without sources. */
-  private fonts: readonly FontSource[] | undefined;
+  private fonts: readonly FontSourceDescriptor[] | undefined;
   /** The workbook's incremental font-source demand (main realm), and the
    *  installed-family probe every delta passes before it registers. */
   private fontDemand: import('./font-source-load.js').XlsxFontDemand | null = null;
   private installedFamilies: InstalledFamilyExclusion | null = null;
   private fontSessionType: typeof FontSourceSession | null = null;
   private fontAcquirerFor: typeof import('./font-source-load.js').inRealmResolverFaceAcquirer | null = null;
+  private fontMetafileDemand: typeof import('./font-source-load.js').metafileFontDemand | null = null;
   /** Every demand delta so far, replayed into each newly retained set. */
   private fontDeltas: Promise<FontSessionDemand>[] = [];
   private officeFontRequests: OfficeFontFallbackRequest[] = [];
+  /** Symbol-code verdicts across this workbook's main-realm measurements and
+   *  renders, kept while a realm's faces are unchanged (core
+   *  createSymbolFaceOracleCache); replaced in {@link destroy}. */
+  private symbolFaces = createSymbolFaceOracleCache();
   private readonly retainedFontSets = new Map<FontFaceSet, RetainedFontSet>();
   /** Worker mode: runs this workbook's `fontResolver` functions for the
-   *  worker's font-source session (core `resolver-bridge-host.ts`); disposed
+   *  worker's font-source session (core `resolver-bridge-gate.ts`); disposed
    *  in {@link destroy}, which aborts every in-flight resolver call. */
-  private fontResolverBridge: FontResolverBridgeHost | null = null;
+  private fontResolverBridge: FontResolverBridge | null = null;
   /** Resolver failures of this workbook, shared by its viewer-realm sessions
    * and its worker bridge (core `resolver-resolution.ts`). */
   private fontResolverFailures: FontResolverFailures = new Map();
@@ -305,11 +319,12 @@ export class XlsxWorkbook {
         );
       },
     });
-    // Default: the parser WASM emitted next to this bundle, resolved relative to
-    // the document URL. `wasmUrl` overrides it (CDN / self-hosted copy); a
-    // relative override is still resolved against `location.href`.
+    // Default: the parser WASM emitted next to this bundle. `wasmUrl` overrides
+    // it (CDN / self-hosted copy). A relative URL (a re-bundled asset or an
+    // override) resolves against the page's base URL, `<base href>` included,
+    // before it is posted to the worker, whose own location is not that base.
     if (initializeWasm) {
-      const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, location.href).href;
+      const wasmUrl = new URL(wasmUrlOverride ?? wasmAssetUrl, realmBaseUrl()).href;
       this.bridge.post({ type: 'init', wasmUrl } satisfies WorkerRequest);
     }
   }
@@ -504,6 +519,9 @@ export class XlsxWorkbook {
     onUsage?: (usage: import('@silurus/ooxml-core').OoxmlResourceUsageSnapshot) => void,
     preserveCallerBuffer = false,
   ): Promise<void> {
+    // The font-source module loads once the workbook is parsed: import it
+    // now, while the worker parses.
+    if (opts.fonts) void import('./font-source-load.js').catch(() => undefined);
     const worksheetPolicy = normalizeXlsxWorksheetPolicy(opts);
     const bridge = this.requireBridge();
     this.worksheetPolicy = worksheetPolicy;
@@ -558,7 +576,7 @@ export class XlsxWorkbook {
     // the resolved ZIP is literally the caller's buffer. URL and decrypted
     // buffers are library-owned and can transfer directly without a peak copy.
     const workerData = preserveCallerBuffer ? data.slice(0) : data;
-    this.attachFontResolverBridge(bridge, opts.fonts);
+    this.attachFontResolverBridge(bridge, optionFontSources(opts.fonts));
     const parsed = await bridge.request(
       (id) =>
         this._mode === 'worker'
@@ -568,7 +586,7 @@ export class XlsxWorkbook {
               data: workerData,
               resourcePolicy,
               worksheetPolicy,
-              ...(opts.fonts ? { fonts: opts.fonts } : {}),
+              ...(opts.fonts ? { fonts: optionFontSources(opts.fonts) } : {}),
               cjkFallback: this.cjkFallback,
               renderers: rendererDescriptors,
               japaneseCellFonts: this.japaneseCellFonts,
@@ -617,7 +635,7 @@ export class XlsxWorkbook {
     // realm even when paint runs in a worker. Register the same font-source
     // faces in both realms before any worksheet geometry snapshot is made so
     // ECMA-376 MDW is identical across paint and interaction.
-    await this.prepareFontSources(parsedWorkbook, opts.fonts);
+    await this.prepareFontSources(parsedWorkbook, optionFontSources(opts.fonts));
     if (typeof document !== 'undefined' && document.fonts) {
       await this.retainFontsInSet(document.fonts);
     }
@@ -643,7 +661,7 @@ export class XlsxWorkbook {
     const rendererDescriptors = this._mode === 'worker'
       ? workerRendererDescriptors(opts)
       : undefined;
-    this.attachFontResolverBridge(bridge, opts.fonts);
+    this.attachFontResolverBridge(bridge, optionFontSources(opts.fonts));
     const response = await bridge.request(
       (id) => ({
         type: 'parseDelimitedText',
@@ -653,7 +671,7 @@ export class XlsxWorkbook {
         options,
         worksheetPolicy,
         // Only the render worker paints; the parse-only worker needs no fonts.
-        ...(this._mode === 'worker' && opts.fonts ? { fonts: opts.fonts } : {}),
+        ...(this._mode === 'worker' && opts.fonts ? { fonts: optionFontSources(opts.fonts) } : {}),
         cjkFallback: this.cjkFallback,
         renderers: rendererDescriptors,
       } satisfies DelimitedTextParseRequest),
@@ -680,7 +698,7 @@ export class XlsxWorkbook {
     this.retainedSheetUsage = measured;
 
     this.officeFontRequests = xlsxOfficeFontRequests(response.workbook);
-    await this.prepareFontSources(response.workbook, opts.fonts);
+    await this.prepareFontSources(response.workbook, optionFontSources(opts.fonts));
     if (typeof document !== 'undefined' && document.fonts) {
       await this.retainFontsInSet(document.fonts);
       await this.retainWorksheetOfficeFonts(worksheet);
@@ -691,12 +709,12 @@ export class XlsxWorkbook {
   }
 
   /** Worker mode: answer the render worker's `fontResolver` calls for the
-   * document about to be parsed (core `resolver-bridge-host.ts`). */
-  private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSource[] | undefined): void {
+   * document about to be parsed (core `resolver-bridge-gate.ts`). */
+  private attachFontResolverBridge(bridge: WorkbookBridge, fonts: readonly FontSourceDescriptor[] | undefined): void {
     this.fontResolverBridge?.dispose();
     this.fontResolverFailures = new Map();
     this.fontResolverBridge = this._mode === 'worker'
-      ? new FontResolverBridgeHost({
+      ? new FontResolverBridge({
         post: (message, transfer) => bridge.post(message, transfer),
         sources: fonts,
         // One outcome per family for the whole workbook: the viewer-realm
@@ -713,12 +731,13 @@ export class XlsxWorkbook {
    * demand collector load only when sources are configured; the workbook
    * delta is replayed into every set this workbook retains.
    */
-  private async prepareFontSources(workbook: ParsedWorkbook, fonts: readonly FontSource[] | undefined): Promise<void> {
+  private async prepareFontSources(workbook: ParsedWorkbook, fonts: readonly FontSourceDescriptor[] | undefined): Promise<void> {
     this.fonts = fonts;
     if (!fonts?.length) return;
     const fontSourceLoad = await import('./font-source-load.js');
     this.fontSessionType = fontSourceLoad.FontSourceSession;
     this.fontAcquirerFor = fontSourceLoad.inRealmResolverFaceAcquirer;
+    this.fontMetafileDemand = fontSourceLoad.metafileFontDemand;
     this.fontDemand = new fontSourceLoad.XlsxFontDemand(workbook, this.cjkFallback, fontSourceLoad.declaredFontSubstitutions(fonts));
     // Installed authored faces are probed before any source face of a delta
     // registers, and never demanded (core installed-families.ts).
@@ -736,8 +755,8 @@ export class XlsxWorkbook {
     return task;
   }
 
-  /** Record a demand delta and ensure it in every retained set. A ceiling
-   * breach (`font-source-limit`) rejects; a failed face only warns. */
+  /** Record a demand delta and ensure it in every retained set. A failed
+   * family or face (including a run-time limit breach) only warns. */
   private async pushFontDelta(delta: FontSessionDemand | null): Promise<void> {
     if (!delta || !this.installedFamilies || this.fontsDestroyed) return;
     const excluded = this.installedFamilies.exclude(delta);
@@ -774,6 +793,11 @@ export class XlsxWorkbook {
           // same cache and failure record, so both realms paint the same bytes.
           ...(this._mode === 'worker' && this.fontAcquirerFor
             ? { acquireResolverFaces: this.fontAcquirerFor(this.fontResolverFailures) } : {}),
+          // Worker mode: resolve only once the bridge host is ready, and fail
+          // the resolver's families if it never will be, as the worker does
+          // (core resolver-bridge-gate.ts), so both realms reach one outcome.
+          ...(this._mode === 'worker' && this.fontResolverBridge
+            ? { resolverBridge: this.fontResolverBridge.sessionState } : {}),
         })
         : null;
       const record = {
@@ -781,14 +805,23 @@ export class XlsxWorkbook {
       } as Omit<RetainedFontSet, 'loading'> as RetainedFontSet;
       // Replay every delta so far, in order, into this set.
       const sourcesReady = Promise.all(this.fontDeltas.map((delta) => this.enqueueFontDelta(record, delta)));
-      // Settle both loads: a rejected source delta (font-source-limit) must
+      // Settle both loads: a rejected source delta (an abort) must
       // not drop the parallel Office-face result, whose faces would then never
       // be released. On any failure every face this set took is returned.
       const loading = Promise.allSettled([
         sourcesReady,
         loadOfficeFontFallbacks(this.officeFontRequests, fontSet),
-      ]).then(([sources, office]) => {
-        if (sources.status === 'fulfilled' && office.status === 'fulfilled') return { office: office.value };
+        // The symbol-font oracle asks this set's painting contexts through
+        // the route sentinels (core symbol-face.ts); without them it declines
+        // and the 0.89 behaviour stays. Released with the Office faces.
+        loadNativeRouteSentinels(fontSet).catch(() => null),
+      ]).then(([sources, office, sentinels]) => {
+        const sentinelFaces = sentinels.status === 'fulfilled' ? sentinels.value ?? [] : [];
+        if (sources.status === 'fulfilled' && office.status === 'fulfilled') {
+          office.value.faces.push(...sentinelFaces);
+          return { office: office.value };
+        }
+        unloadOfficeFontFallbacks(sentinelFaces);
         if (office.status === 'fulfilled') unloadOfficeFontFallbacks(office.value.faces);
         record.session?.release();
         throw sources.status === 'rejected' ? sources.reason : (office as PromiseRejectedResult).reason;
@@ -866,7 +899,7 @@ export class XlsxWorkbook {
     const set = isHTMLCanvas(ctx.canvas)
       ? ctx.canvas.ownerDocument.fonts : null;
     const routes = set ? this.retainedFontSets.get(set)?.loaded?.office.routes : undefined;
-    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.loadedFontSources(set));
+    bindXlsxOfficeFontRoutes(ctx, worksheet, routes, this.loadedFontSources(set), this.symbolFaces);
     getGridGeometryForWorksheet(worksheet);
     applyAutoRowHeights(ctx, worksheet, this.parsedWorkbook.styles, this.cjkFallback);
   }
@@ -1488,6 +1521,23 @@ export class XlsxWorkbook {
     return formatCellValue(cell, this.parsedWorkbook.styles, null, ws.date1904);
   }
 
+  /** @internal For one worksheet, each cell's displayed text under its
+   *  effective number format, conditional formatting's override included (as
+   *  paint resolves it), followed by each shorter form a General number can
+   *  display at a narrower column (ECMA-376 §18.8.30); paint picks one by
+   *  width, so find matches any of them. The conditional formats are compiled
+   *  once per call. Every cell yields `[]` before the workbook is loaded. */
+  [xlsxCellDisplayTexts](ws: Worksheet): (cell: Cell) => string[] {
+    const parsed = this.parsedWorkbook;
+    if (!parsed) return () => [];
+    const styles = parsed.styles;
+    const cf = ws.conditionalFormats?.length ? compileCf(ws) : null;
+    return (cell) => {
+      const numFmt = cf ? evaluateCf(cell, cell.row, cell.col, cf, styles.dxfs ?? []).numFmt : null;
+      return cellDisplayTexts(cell, styles, numFmt, ws.date1904);
+    };
+  }
+
   /** Render a sheet viewport into `target`. Image bytes and decoded-image cache
    * ownership stay with this workbook instance. */
   async renderViewport(
@@ -1520,6 +1570,14 @@ export class XlsxWorkbook {
     const targetFontSet = isHTMLCanvas(target)
       ? target.ownerDocument.fonts
       : (typeof document !== 'undefined' ? document.fonts : null);
+    // Metafile pictures are rasterized in this realm (its own FontFaceSet)
+    // and paint their text with the served faces of this realm's session.
+    // Their text's scalars load before they play.
+    const metafileSession = typeof document !== 'undefined'
+      ? this.retainedFontSets.get(document.fonts)?.session : undefined;
+    bindMetafileFontFamilies(this._fetchImage, metafileSession?.loaded);
+    bindMetafileFontDemand(this._fetchImage, metafileSession && this.fontMetafileDemand
+      ? this.fontMetafileDemand(metafileSession) : undefined);
     const preview = this.sheetPreviews?.get(sheetIndex);
     if (preview?.worksheet && extracted.worksheet) {
       await preview.waitFor(Math.max(
@@ -1546,6 +1604,7 @@ export class XlsxWorkbook {
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
             : undefined,
           fontSources: this.loadedFontSources(targetFontSet),
+          symbolFaces: this.symbolFaces,
           fetchImage: this._fetchImage,
           ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
         },
@@ -1554,7 +1613,7 @@ export class XlsxWorkbook {
     }
     return this.withWorksheetArchiveOperation(sheetIndex, (source) => {
       const ws = extracted.worksheet ?? createSizeOverriddenWorksheet(source, sizeOverrides);
-      if (ws !== source) inheritSheetRenderCache(source, ws);
+      if (ws !== source) inheritSheetRenderCache(source, ws, styles);
       const errorPlaceholderText = this.sheetErrorPlaceholderText(preparedPlaceholder, sheetIndex, ws);
       // The render bind may invalidate a geometry snapshot made in another
       // font realm. Pin the viewer's MDW inside the renderer after binding.
@@ -1580,6 +1639,7 @@ export class XlsxWorkbook {
             ? this.retainedFontSets.get(targetFontSet)?.loaded?.office.routes
             : undefined,
           fontSources: this.loadedFontSources(targetFontSet),
+          symbolFaces: this.symbolFaces,
           fetchImage: this._fetchImage,
           ...(errorPlaceholderText === undefined ? {} : { errorPlaceholderText }),
         },
@@ -1799,6 +1859,10 @@ export class XlsxWorkbook {
       // callback and releases exactly once when the faces become available.
     }
     this.retainedFontSets.clear();
+    // A caller canvas may outlive the workbook: its bound oracle must not
+    // keep the released faces reachable.
+    this.symbolFaces?.dispose();
+    this.symbolFaces = createSymbolFaceOracleCache();
     // The descriptors may hold application font bytes (fontFiles data,
     // inline data: URLs): a destroyed workbook must not keep them reachable.
     this.fonts = undefined;
@@ -1806,11 +1870,13 @@ export class XlsxWorkbook {
     this.installedFamilies = null;
     this.fontSessionType = null;
     this.fontAcquirerFor = null;
+    this.fontMetafileDemand = null;
     this.fontDeltas = [];
     this.officeFontRequests = [];
     // Frame-local lookup maps never escape the renderer; drop the owning core
     // caches to release decoded surfaces and SVG references.
     dropDecodedBitmapCache(this._fetchImage);
+    bindMetafileFontDemand(this._fetchImage, undefined);
     dropSvgImageCache(this._fetchImage);
     this.rawParts.clear();
     this.queuedImageLoads?.clear();

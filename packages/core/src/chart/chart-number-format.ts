@@ -9,6 +9,8 @@ import { excelSerialToUtcDate, isExcelDisplayDateSerial } from '../excel-date';
 import {
   formatExcelDateTime,
   isDateFormatSection,
+  generalSectionAffixes,
+  selectFormatSection,
   splitFormatSections,
   textSectionIndex,
 } from '../excel-number-format';
@@ -113,26 +115,41 @@ export function formatChartValWithCode(
   /** Chart date system (`<c:date1904>`, §21.2.2.38). `true` resolves serial
    *  date codes against the 1904 epoch. Defaults to false (1900 system). */
   date1904 = false,
+  /** Per numeric section of `code`, the divisor applied once the section is
+   *  chosen on the undivided value (an OpenDocument display factor, ODF 1.3
+   *  Part 3 §19.346), exactly as worksheet cells apply it. */
+  divisors?: readonly number[] | null,
 ): string {
   // Absent `code`, or the reserved "General" keyword (ECMA-376 §18.8.30), both
   // mean the General number format. LibreOffice charts emit
   // `<c:numFmt formatCode="General">`; tokenizing it as a literal pattern would
   // render the word "General" instead of the value (issue #358).
-  if (!code || code.trim().toLowerCase() === 'general') return formatChartVal(v);
-  // Section selection per §18.8.30: positive;negative;zero, with the text
-  // section left out (it never formats a number). When the negative section
-  // is omitted, a negative number is formatted with the positive section and
-  // a leading minus.
+  if (!code || isGeneralSection(code)) return formatChartVal(v / sectionDivisor(divisors, 0));
+  // Section selection per §18.8.30, shared with worksheet cells: explicit
+  // conditions (`[>=1000]`) when any section has one, else
+  // positive;negative;zero, with the text section left out (it never formats
+  // a number). When the negative section is omitted, a negative number is
+  // formatted with the positive section and a leading minus.
+  const selected = selectFormatSection(v, code);
+  if (selected === null) return formatChartVal(v);
+  // No condition met and no unconditional section: Excel shows `#`.
+  if (selected === 'none') return '#';
   const sections = splitFormatSections(code);
   const textIndex = textSectionIndex(sections);
-  const numeric = sections.filter((_, i) => i !== textIndex);
-  if (numeric.length === 0) return formatChartVal(v);
-  let section: string;
-  if (v > 0) section = numeric[0];
-  else if (v < 0) section = numeric[1] ?? numeric[0];
-  else section = numeric[2] ?? numeric[0];
+  const section = sections.filter((_, i) => i !== textIndex)[selected.index];
   if (section === '') return '';
-  const explicitNegative = v < 0 && numeric.length >= 2;
+  // The section formats the magnitude: its literals carry the sign.
+  const explicitNegative = selected.useMagnitude;
+  v /= sectionDivisor(divisors, selected.index);
+  // A section whose body is the General keyword (`General;General`,
+  // `[Red]General`) formats its value as General: the magnitude in a section
+  // that carries the sign itself.
+  const general = generalSectionAffixes(selected.section.body);
+  if (general) {
+    const scaled = general.percent ? v * 100 : v;
+    const shown = explicitNegative ? Math.abs(scaled) : scaled;
+    return (shown < 0 ? '-' : '') + general.prefix + formatChartVal(Math.abs(shown)) + general.suffix;
+  }
   // Date/time is a property of the selected section: the value is a serial
   // date (scatter / time-series axes), rendered by the same formatter as
   // worksheet cells.
@@ -160,6 +177,8 @@ export function formatCategoryLabel(
   /** Chart date system (`<c:date1904>`, §21.2.2.38). Threaded to the date
    *  formatter for serial-date category labels. Defaults to false. */
   date1904 = false,
+  /** Section divisors of `code` ({@link formatChartValWithCode}). */
+  divisors?: readonly number[] | null,
 ): string {
   if (!code) return raw;
   // Only numeric-looking categories are formatted. `Number('')` and
@@ -168,17 +187,34 @@ export function formatCategoryLabel(
   if (raw.trim() === '') return raw;
   const num = Number(raw);
   if (!Number.isFinite(num)) return raw;
-  return formatChartValWithCode(num, code, date1904);
+  return formatChartValWithCode(num, code, date1904, divisors);
+}
+
+/** The divisor of numeric section `index`: a finite positive factor, else 1. */
+function sectionDivisor(divisors: readonly number[] | null | undefined, index: number): number {
+  const divisor = divisors?.[index];
+  return divisor != null && Number.isFinite(divisor) && divisor > 0 ? divisor : 1;
+}
+
+/** Whether a code or section is the reserved General keyword (§18.8.30). */
+function isGeneralSection(section: string): boolean {
+  return section.trim().toLowerCase() === 'general';
 }
 
 function applyChartNumberSection(abs: number, section: string): string {
   // Tokenize the section, separating numeric-pattern runs (`#`, `0`, `.`,
   // `,`, `?`) from literal runs so percent / decimal handling runs once.
-  type Tok = { kind: 'lit' | 'num'; text: string };
+  // A scientific section (§18.8.30 `E+` / `E-` after the digit pattern) has
+  // one `exp` token where its exponent goes; a fraction section (`# ?/?`,
+  // `?/8`) one `den` token, the digit run before its `/` being the numerator.
+  type Tok = { kind: 'lit' | 'num' | 'exp' | 'den' | 'slash'; text: string };
   const toks: Tok[] = [];
   let i = 0;
   let pushedNum = false;
   let percent = false;
+  let exponent: { plus: boolean; digits: number } | null = null;
+  let fraction = false;
+  const isPlaceholder = (ch: string | undefined): boolean => ch === '0' || ch === '#' || ch === '?';
   while (i < section.length) {
     const c = section[i];
     if (c === '"') {
@@ -225,6 +261,25 @@ function applyChartNumberSection(abs: number, section: string): string {
       pushedNum = true;
       continue;
     }
+    if ((c === 'E' || c === 'e') && pushedNum && !exponent && !fraction
+        && (section[i + 1] === '+' || section[i + 1] === '-') && isPlaceholder(section[i + 2])) {
+      let j = i + 2;
+      let digits = 0;
+      while (isPlaceholder(section[j])) { if (section[j] === '0') digits++; j++; }
+      exponent = { plus: section[i + 1] === '+', digits };
+      toks.push({ kind: 'exp', text: '' });
+      i = j;
+      continue;
+    }
+    if (c === '/' && !fraction && !exponent && toks[toks.length - 1]?.kind === 'num'
+        && (isPlaceholder(section[i + 1]) || /[1-9]/.test(section[i + 1] ?? ''))) {
+      let j = i + 1;
+      while (isPlaceholder(section[j]) || /[0-9]/.test(section[j] ?? '')) j++;
+      fraction = true;
+      toks.push({ kind: 'slash', text: '/' }, { kind: 'den', text: section.slice(i + 1, j) });
+      i = j;
+      continue;
+    }
     // Everything else (currency symbols like ¥, $, parens, spaces) is literal.
     toks.push({ kind: 'lit', text: c });
     i++;
@@ -234,6 +289,32 @@ function applyChartNumberSection(abs: number, section: string): string {
     return toks.map(t => t.text).join('');
   }
   const value = percent ? abs * 100 : abs;
+  if (fraction) return formatFractionSection(value, toks);
+  if (exponent) {
+    let pattern = '';
+    for (const t of toks) if (t.kind === 'num') pattern += t.text;
+    // The exponent is a multiple of the integer placeholders (`##0.0E+0`
+    // is engineering notation); a mantissa that rounds up to the next
+    // power takes the next exponent.
+    const places = Math.max(1, (pattern.split('.')[0].match(/[#0?]/g) ?? []).length);
+    const [digits, power] = value === 0 ? ['0', '0'] : value.toExponential().split('e');
+    let exp = Math.floor(Number(power) / places) * places;
+    let mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
+    if (Number(mantissa.replace(/,/g, '')) >= 10 ** places) {
+      exp += places;
+      mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
+    }
+    const sign = exp < 0 ? '-' : exponent.plus ? '+' : '';
+    const exponentText = `E${sign}${String(Math.abs(exp)).padStart(exponent.digits, '0')}`;
+    let seen = false;
+    return toks.map(t => {
+      if (t.kind === 'lit') return t.text;
+      if (t.kind === 'exp') return exponentText;
+      if (seen) return '';
+      seen = true;
+      return mantissa;
+    }).join('');
+  }
   // Merge numeric tokens into one pattern — Excel treats `#,##0.00` as a
   // single pattern even when flanked by literals. We keep the literal tokens
   // where they are and replace the first num token with the formatted number,
@@ -247,6 +328,67 @@ function applyChartNumberSection(abs: number, section: string): string {
     if (seenNum) return '';
     seenNum = true;
     return formatted;
+  }).join('');
+}
+
+/** The fraction `numerator / denominator` nearest to the non-negative
+ *  `value` with a denominator of at most `maxDenominator`: the last
+ *  convergent of its continued fraction within the bound, or the last
+ *  semiconvergent after it, whichever is nearer. The terms of a continued
+ *  fraction grow the denominator at least as fast as the Fibonacci numbers,
+ *  so the loop is short whatever the bound. */
+function nearestFraction(value: number, maxDenominator: number): [number, number] {
+  let [p0, q0, p1, q1] = [0, 1, 1, 0];
+  let x = value;
+  for (let i = 0; i < 64; i++) {
+    const term = Math.floor(x);
+    const q2 = q0 + term * q1;
+    if (q2 > maxDenominator) break;
+    [p0, q0, p1, q1] = [p1, q1, p0 + term * p1, q2];
+    const rest = x - term;
+    if (rest < 1e-12) return [p1, q1];
+    x = 1 / rest;
+  }
+  const steps = Math.floor((maxDenominator - q0) / q1);
+  const [sn, sd] = [p0 + steps * p1, q0 + steps * q1];
+  return Math.abs(sn / sd - value) < Math.abs(p1 / q1 - value) ? [sn, sd] : [p1, q1];
+}
+
+/** A fraction section: the digit run before `/` is the numerator, the runs
+ *  before that the whole part (none: an improper fraction), and the
+ *  denominator is fixed (`?/8`) or has at most as many digits as its
+ *  placeholders. A value without a fractional part shows its whole part
+ *  alone, and one below 1 its fraction alone. */
+function formatFractionSection(
+  value: number,
+  toks: { kind: 'lit' | 'num' | 'exp' | 'den' | 'slash'; text: string }[],
+): string {
+  const slash = toks.findIndex(t => t.kind === 'slash');
+  const numerator = slash - 1;
+  const denominatorSpec = toks[slash + 1].text;
+  const wholeToks = toks.slice(0, numerator).filter(t => t.kind === 'num');
+  const mixed = wholeToks.length > 0;
+  const fixed = /^[0-9]+$/.test(denominatorSpec) && Number(denominatorSpec) > 0 ? Number(denominatorSpec) : null;
+  const whole = mixed ? Math.floor(value) : 0;
+  const rest = value - whole;
+  let [n, d] = fixed !== null
+    ? [Math.round(rest * fixed), fixed]
+    : nearestFraction(rest, 10 ** Math.min(denominatorSpec.length, 7) - 1);
+  let shownWhole = whole;
+  if (mixed && n >= d) { shownWhole += 1; n -= d; }
+  const wholeText = mixed ? formatNumericPattern(shownWhole, wholeToks.map(t => t.text).join('')) : '';
+  const first = toks.findIndex(t => t.kind === 'num');
+  const showWhole = mixed && (shownWhole !== 0 || n === 0);
+  const showFraction = !mixed || n !== 0;
+  return toks.map((t, index) => {
+    // Literals between the whole part and the fraction (the space of
+    // `# ?/?`) belong to showing both.
+    if (mixed && index > first && index < numerator) return showWhole && showFraction && t.kind === 'lit' ? t.text : '';
+    if (index === first && mixed) return showWhole ? (wholeText || '0') : '';
+    if (index === numerator) return showFraction ? String(n) : '';
+    if (t.kind === 'slash') return showFraction ? '/' : '';
+    if (t.kind === 'den') return showFraction ? String(d) : '';
+    return t.kind === 'lit' ? t.text : '';
   }).join('');
 }
 

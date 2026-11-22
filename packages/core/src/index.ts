@@ -191,6 +191,25 @@ export {
   type LoadedOfficeFontFallbacks,
 } from './fonts/office-fallback';
 export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
+// Size-proportional Canvas advances: a shorthand the host grid-fits at its own
+// size is measured and painted at a reference em under a linear scale.
+export {
+  TEXT_ADVANCE_REFERENCE_PX,
+  createReferenceAdvanceContext,
+  createTextAdvancePlanner,
+  fillTextAtReference,
+  referenceTextFont,
+  scaleTextMetrics,
+  withReferenceAdvances,
+  type ReferenceAdvanceContext,
+  type ReferenceAdvanceTarget,
+  type ReferenceTextFont,
+  type ReferenceTextPaintTarget,
+  type TextAdvanceLookup,
+  type TextAdvanceMeasurer,
+  type TextAdvancePlanner,
+  type TextAdvancePlannerOptions,
+} from './text/reference-advances';
 export {
   parseOpenTypeLineMetrics,
   parseOpenTypeResourceMetrics,
@@ -221,8 +240,21 @@ export {
   symbolFontToUnicode,
   isSymbolFontFamily,
   symbolTextToUnicodeSegments,
+  symbolFontKey,
+  type SymbolFontKey,
+  type SymbolTextOptions,
   type SymbolTextSegment,
 } from './fonts/symbol-font';
+export {
+  createSymbolFaceOracle,
+  createSymbolMonochromeProbe,
+  type SymbolFaceOracle,
+  type SymbolFaceOracleOptions,
+  type SymbolProbeCanvasFactory,
+  type SymbolFallbackFont,
+  type SymbolProbeContext,
+} from './fonts/symbol-face';
+export { createSymbolFaceOracleCache, type SymbolFaceOracleCache } from './fonts/symbol-face-cache';
 export { renderChart, collectChartFillRenderedSizes, assertChartFillRenderedSizeCount } from './chart/renderer';
 export { formatLocalizedExcelShortDate, localizedExcelShortDateTexts } from './chart/chart-number-format';
 export { autoResize, type AutoResizeOptions } from './autoResize';
@@ -262,6 +294,17 @@ export {
   tracePresetLeader,
   trimGeometryPathEnds,
 } from './shape/arrow';
+export {
+  CONNECTOR_PRESETS,
+  CALLOUT_PRESETS,
+  hasPresetLineEnds,
+  isRetractableLeaderPreset,
+  planPresetLeader,
+  tracePlannedPresetLeader,
+  drawPresetLineEndArrows,
+  type PresetLeaderPlan,
+  type LineEndAnchors,
+} from './shape/preset-line-ends';
 // Shared embedded-SVG decoder (Microsoft asvg:svgBlip extension) — used by all
 // three renderers to prefer the vector original over the raster fallback.
 // Path-keyed for the lazy byte-on-demand pipeline: fetches SVG bytes via a
@@ -292,6 +335,8 @@ export {
   resolvedCachedBitmapVariantKey,
   peekCachedBitmapByPath,
   dropDecodedBitmapCache,
+  bindMetafileFontFamilies,
+  bindMetafileFontDemand,
   releaseOwnedBitmap,
   dropBitmapCacheByPath,
   acquireBitmapCacheLease,
@@ -300,6 +345,7 @@ export {
   type DecodedBitmapCacheEpoch,
   type DecodedBitmapCacheOwner,
   type CachedBitmapOptions,
+  type MetafileFontDemand,
 } from './image/bitmap-image-by-path';
 export {
   isBrowserResizableRasterMimeType,
@@ -307,6 +353,7 @@ export {
   type RasterBlobInspection,
   type RasterFormat,
 } from './image/raster-blob-inspection';
+export type { RasterResolution } from './image/raster-resolution';
 export {
   chartImageFillKey,
   chartImageFillPixelTransform,
@@ -699,10 +746,14 @@ export { excelSerialToUtcDate, utcDateToExcelSerial, isExcelDisplayDateSerial } 
 export {
   excelDateTimeSectionNameTexts,
   formatExcelDateTime,
+  generalSectionAffixes,
   isDateFormatSection,
+  parseFormatSection,
+  selectFormatSection,
   splitFormatSections,
   textSectionIndex,
 } from './excel-number-format';
+export type { ParsedFormatSection, SelectedFormatSection } from './excel-number-format';
 export { highlightBox } from './text/highlight-box';
 export {
   distributeLineSlack,
@@ -787,6 +838,7 @@ export {
   type ReferenceFontSource,
   type ReferenceFontStyle,
 } from './fonts/reference-font-metrics';
+export { normalizeReferenceFontFamilyName } from './fonts/reference-font-name';
 // Backward-compatible exact-local resource loader. Format packages should not
 // add family-specific requests; DOCX now derives its metrics from resolved
 // resources and no longer uses this API for a Meiryo-only path.
@@ -800,13 +852,16 @@ export {
 } from './fonts/local-metrics';
 export {
   measureLocalFontNormalLine,
+  measureFontFaceNormalLine,
+  measureFontFaceNormalLines,
   loadLocalFontCoverageProbe,
   localFontMetricCoversText,
   measureLocalFontSourceNormalLine,
+  type FontFaceNormalLineRequest,
   type LocalFontNormalLine,
 } from './fonts/local-line-metrics';
+export { loadNativeRouteSentinels } from './fonts/route-sentinels';
 export {
-  loadNativeRouteSentinels,
   measureNativeRouteNormalLines,
   verifyNativeRouteNormalLines,
   type NativeRouteLineRequest,

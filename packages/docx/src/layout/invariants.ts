@@ -1,5 +1,6 @@
 import { requireResolvedDrawingMLGeometry } from '@silurus/ooxml-core';
 import { LayoutInvariantError } from './diagnostics.js';
+import { atMostWithinFloatingPrecision } from './floating-precision.js';
 import {
   createSectionRegionCoordinateSpace,
   logicalPageExtent,
@@ -267,16 +268,6 @@ function requireDrawingMLShapePlan(
       throw new LayoutInvariantError('INVALID_GEOMETRY', `${path}.plan.stroke.width is negative`);
     }
   }
-}
-
-/** Inclusive geometry comparisons must tolerate the single-ULP drift produced
- * when the same authored boundary is reconstructed through different retained
- * subtraction/addition paths. This is floating-point precision, not a layout
- * tolerance: a geometrically distinct point value remains outside. */
-function atMostWithinFloatingPrecision(left: number, right: number): boolean {
-  if (left <= right) return true;
-  const precision = Number.EPSILON * Math.max(1, Math.abs(left), Math.abs(right));
-  return left - right <= precision;
 }
 
 function strictlyLessBeyondFloatingPrecision(left: number, right: number): boolean {
@@ -547,8 +538,12 @@ function requireDrawingGeometry(node: DrawingLayout, path: string): void {
   if (node.clip?.kind === 'polygon') {
     node.clip.points.forEach((point, index) => requirePoint(point, `${path}.clip.points[${index}]`));
   }
-  node.commands.forEach((command, index) => {
-    const commandPath = `${path}.commands[${index}]`;
+  requireDrawingCommands(node.commands, `${path}.commands`);
+}
+
+function requireDrawingCommands(commands: DrawingLayout['commands'], path: string): void {
+  commands.forEach((command, index) => {
+    const commandPath = `${path}[${index}]`;
     if (command.kind === 'noop') return;
     if (command.kind === 'drawingml-shape') {
       requireDrawingMLShapePlan(command, commandPath);
@@ -661,6 +656,20 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
       );
     }
     requirePageBorder(page, `pages[${pageIndex}].pageBorder`);
+    if (page.pageBackground !== undefined) {
+      const { color, commands } = page.pageBackground;
+      if ((color !== null && !/^#[0-9A-F]{6}$/u.test(color))
+        || !Array.isArray(commands) || (color === null && commands.length === 0)) {
+        throw new LayoutInvariantError(
+          'INVALID_GEOMETRY',
+          `pages[${pageIndex}].pageBackground paints nothing or has an invalid colour`,
+        );
+      }
+      requireDrawingCommands(
+        page.pageBackground.commands,
+        `pages[${pageIndex}].pageBackground.commands`,
+      );
+    }
 
     const domains = new Map<string, FlowDomain>();
     page.flowDomains.forEach((domain, domainIndex) => {
@@ -678,13 +687,19 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
       domains.set(domain.id, domain);
     });
 
+    // A parity blank page carries no stories, but ECMA-376 §17.2.1 makes the
+    // document background a fact of every page: its `background`-layer
+    // story (and that story's flow domain) is the only content admitted.
+    const backgroundRoots = page.layers.roots.filter((root) => root.layer === 'background');
+    const backgroundNodeIds = new Set(backgroundRoots.map((root) => root.node.id));
+    const backgroundDomainIds = new Set(backgroundRoots.map((root) => root.node.flowDomainId));
     if (page.parityBlank && (
-      page.flowDomains.length > 0
+      page.flowDomains.some((domain) => !backgroundDomainIds.has(domain.id))
       || (page.sectionRegions?.length ?? 0) > 0
       || (page.columnSeparators?.length ?? 0) > 0
-      || pageLayerNodes(page).length > 0
-      || page.layers.roots.length > 0
-      || page.readingOrder.length > 0
+      || pageLayerNodes(page).some((root) => root.layer !== 'background')
+      || page.layers.roots.some((root) => root.layer !== 'background')
+      || page.readingOrder.some((id) => !backgroundNodeIds.has(id))
       || (page.bookmarkStarts?.length ?? 0) > 0
     )) {
       throw new LayoutInvariantError(
@@ -919,7 +934,10 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
     }
     const regionById = new Map(page.sectionRegions.map((region) => [region.id, region]));
     for (const domain of page.flowDomains) {
-      if (domain.kind !== 'footnote' && domain.kind !== 'endnote') continue;
+      // Note bands, and any page story that declares the section region its
+      // contents are laid out in (a producer page object), map through it.
+      if (domain.kind !== 'footnote' && domain.kind !== 'endnote'
+        && domain.sectionRegionId === undefined) continue;
       const storyRegion = domain.sectionRegionId
         ? regionById.get(domain.sectionRegionId)
         : page.sectionRegions[0];
@@ -1067,8 +1085,31 @@ function* assertDocumentLayoutUncheckedSteps(layout: DocumentLayout): Generator<
       }
     }
 
+    // Only pairs that can conflict are compared (same domain, body and note,
+    // two note stories), in the same (index, other) order as a full scan, so
+    // nodes of unrelated page stories add no pairwise work.
+    const indexesByDomain = new Map<string, number[]>();
+    const bodyIndexes: number[] = [];
+    const noteIndexes: number[] = [];
+    ordinary.forEach((node, index) => {
+      const list = indexesByDomain.get(node.flowDomainId) ?? [];
+      list.push(index);
+      indexesByDomain.set(node.flowDomainId, list);
+      const kind = domains.get(node.flowDomainId)?.kind;
+      if (kind === 'body') bodyIndexes.push(index);
+      if (kind === 'footnote' || kind === 'endnote') noteIndexes.push(index);
+    });
     for (let index = 0; index < ordinary.length; index += 1) {
-      for (let other = index + 1; other < ordinary.length; other += 1) {
+      const node = ordinary[index]!;
+      const kind = domains.get(node.flowDomainId)?.kind;
+      const candidates = new Set<number>(indexesByDomain.get(node.flowDomainId) ?? []);
+      if (kind === 'body') noteIndexes.forEach((other) => candidates.add(other));
+      if (kind === 'footnote' || kind === 'endnote') {
+        bodyIndexes.forEach((other) => candidates.add(other));
+        noteIndexes.forEach((other) => candidates.add(other));
+      }
+      const others = [...candidates].filter((other) => other > index).sort((a, b) => a - b);
+      for (const other of others) {
         const first = ordinary[index];
         const second = ordinary[other];
         if (!first || !second) continue;

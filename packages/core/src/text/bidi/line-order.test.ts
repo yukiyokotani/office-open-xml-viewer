@@ -6,6 +6,67 @@ import {
   buildVisualOrder,
 } from './line-order.js';
 import { getDefaultBidiEngine } from './engine.js';
+import { certifyNativeSegmentLineOrder, computeSegmentLineVisualOrder, type SegmentLineBidiOptions } from './segment-line.js';
+import { unicodePunctuationOrSymbol } from './char-data.js';
+
+describe('native anchor certificate', () => {
+  it('retains exact tab, numeric HL1 and space-only slice directions', () => {
+    const segments = [{ isTab: true }, { text: '12.50', rtl: true },
+      { text: ' ' }, { text: 'אבגד ', rtl: true }];
+    const options = {
+      isTab: (segment: unknown) => 'isTab' in (segment as object),
+      isRtlMarked: (segment: unknown) => (segment as { rtl?: boolean }).rtl === true,
+      isRtlAmbiguous: (character: string) => character === '.',
+      directionFromAnyOdd: true,
+    };
+    expect(certifyNativeSegmentLineOrder(segments, true, options))
+      .toEqual({ order: [3, 2, 1, 0], rtl: [true, true, false, true] });
+    expect(computeSegmentLineVisualOrder(segments, true, options))
+      .toEqual({ order: [3, 2, 1, 0], rtl: [true, true, false, true] });
+    const prefixed = [{ text: 'AB' }, { text: 'CD' }, segments[0], segments[1],
+      { text: ' ', rtl: true }, segments[3]];
+    const wordOptions = {
+      ...options,
+      isolateDirection: (segment: unknown): 'ltr' | 'rtl' | undefined => {
+        const s = segment as { text?: string; rtl?: boolean };
+        return s.text === undefined ? undefined : s.rtl ? 'rtl' : 'ltr';
+      },
+      isolateRequiresUniformSlices: true,
+    };
+    const expected = { order: [5, 4, 3, 2, 0, 1], rtl: [false, false, true, true, false, true] };
+    expect(certifyNativeSegmentLineOrder(prefixed, true, wordOptions)).toEqual(expected);
+    expect(computeSegmentLineVisualOrder(prefixed, true, wordOptions)).toEqual(expected);
+  });
+
+  it('keeps the canonical UTF-16 HL1 boundary for astral L text', () => {
+    const segments = [{ text: '\u{10400}' }, { text: 'א' }];
+    const options = {
+      isRtlMarked: () => true,
+      // Canonical hooks receive individual code units, never this whole scalar.
+      isRtlAmbiguous: (character: string) => character === '\u{10400}',
+      directionFromAnyOdd: true,
+    };
+    const visual = certifyNativeSegmentLineOrder(segments, true, options)
+      ?? computeSegmentLineVisualOrder(segments, true, options);
+    expect(visual).toEqual({ order: [1, 0], rtl: [false, true] });
+  });
+
+  it('refuses a repeated numeric piece after its mutable character policy changes', () => {
+    let pieces = 0;
+    const options: SegmentLineBidiOptions = {
+      directionFromAnyOdd: true,
+      isRtlMarked: () => {
+        if (++pieces === 2) options.isRtlAmbiguous = () => false;
+        return true;
+      },
+      isRtlAmbiguous: unicodePunctuationOrSymbol,
+    };
+    // Only the first piece has an HL1 R period. The second has no R anchor;
+    // reusing the first classification would falsely certify both as RTL.
+    expect(certifyNativeSegmentLineOrder([{ text: '12.50' }, { text: '12.50' }], true, options))
+      .toBeUndefined();
+  });
+});
 
 describe('hasStrongRtl / RTL_GATE', () => {
   it('detects Arabic, Hebrew and RTL controls; ignores Latin/digits/neutrals', () => {

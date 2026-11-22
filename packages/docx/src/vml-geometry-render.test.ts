@@ -341,7 +341,13 @@ it('applies effective host and child grayscale/chromakey and discloses unavailab
   expect(counter(keyed.pixels)(255, 0, 0)).toBe(0);
   expect(counter(keyed.pixels)(0, 255, 0)).toBeGreaterThan(2500);
   expect(keyed.diagnostics).toEqual([]);
-  for (const attribute of ['gamma="2"', 'gain="2"', 'blacklevel=".2"', 'bilevel="t"']) {
+  // gain/blacklevel are the shared luminance correction (#2175): blacklevel
+  // .2 is bright .4, which lifts pure red to (255,102,102).
+  const lifted = await renderVml(`<v:group style="width:80pt;height:80pt" coordsize="80,80"><v:image src="media/two.png" blacklevel=".2" style="width:80;height:80" stroked="f"/></v:group>`);
+  expect(lifted.diagnostics).toEqual([]);
+  expect(counter(lifted.pixels)(255, 0, 0)).toBe(0);
+  expect(counter(lifted.pixels)(255, 102, 102)).toBeGreaterThan(2500);
+  for (const attribute of ['gamma="2"', 'gain="2" grayscale="f" chromakey="blue"', 'bilevel="t"']) {
     const unavailable = await renderVml(`<v:group style="width:80pt;height:80pt" coordsize="80,80"><v:image src="media/two.png" ${attribute} style="width:80;height:80" stroked="f"/></v:group>`);
     expect(unavailable.diagnostics.length, attribute).toBeGreaterThan(0);
     expect(counter(unavailable.pixels)(255, 0, 0), attribute).toBeGreaterThan(2500);

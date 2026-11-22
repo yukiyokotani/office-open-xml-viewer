@@ -20,7 +20,7 @@
 // KANJINUM1–3, IROHA, AIUEO — are intentionally OMITTED: a single argument like
 // `\* DBNUM1` maps to ideographDigital (ja-JP) OR koreanDigital (ko-KR)
 // depending on the field's `w:lang`, which this parser does not thread. Guessing
-// a locale would be a heuristic (root CLAUDE.md forbids), so they return null and
+// a locale would be a heuristic (root AGENTS.md forbids), so they return null and
 // the caller keeps the section format instead of choosing the wrong script.
 
 import type { NumberFormat } from './number-format';

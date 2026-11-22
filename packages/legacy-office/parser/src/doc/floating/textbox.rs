@@ -237,7 +237,10 @@ fn plc_count(plc: &[u8], element: usize) -> Result<usize, String> {
 /// 2.9.312), whose per-box text distribution is not reconstructed.
 fn validate_breaks(breaks: &[u8], ranges: &[Option<(u32, Range<usize>)>]) -> Result<(), String> {
     let count = plc_count(breaks, 6)?;
-    let mut seen = vec![false; ranges.len()];
+    // The CP up to which the break descriptors of each textbox cover its
+    // text. A chain of linked textboxes has one descriptor per box, each
+    // continuing where the previous one ends (MS-DOC 2.8.30 PlcfTxbxBkd).
+    let mut covered: Vec<Option<usize>> = vec![None; ranges.len()];
     // The final Tbkd is not associated with any FTXBXS.
     for index in 0..count - 1 {
         let start = u32_at(breaks, index * 4)? as usize;
@@ -249,18 +252,25 @@ fn validate_breaks(breaks: &[u8], ranges: &[Option<(u32, Range<usize>)>]) -> Res
         else {
             continue; // Spare structures carry no displayed text.
         };
-        let slot = &mut seen[itxbxs as usize];
-        if *slot || start != range.start || end != range.end {
-            return Err(unsupported("linked Word textbox chains are not supported"));
+        let slot = &mut covered[itxbxs as usize];
+        if start != slot.unwrap_or(range.start) || end <= start || end > range.end {
+            return Err(crate::rejection::corrupt(
+                "Word textbox break descriptors do not cover its text in order",
+            ));
         }
-        *slot = true;
+        *slot = Some(end);
     }
-    if ranges
-        .iter()
-        .zip(&seen)
-        .any(|(range, seen)| range.is_some() && !seen)
-    {
-        return Err(unsupported("Word textbox lacks its break descriptor"));
+    for (range, covered) in ranges.iter().zip(&covered) {
+        match (range, covered) {
+            (Some((_, range)), Some(end)) if *end == range.end => {}
+            (Some(_), Some(_)) => {
+                return Err(crate::rejection::corrupt(
+                    "Word textbox break descriptors do not cover its text in order",
+                ))
+            }
+            (Some(_), None) => return Err(unsupported("Word textbox lacks its break descriptor")),
+            (None, _) => {}
+        }
     }
     Ok(())
 }
@@ -377,13 +387,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_linked_chains_missing_breaks_and_unterminated_ranges() {
+    fn reads_linked_chains_and_rejects_missing_breaks_and_unterminated_ranges() {
         let text = "ab\rcd\r\r";
         let plc2 = plc(&[0, 6, 7], &[ftxbxs(false, 7), ftxbxs(false, 0)]);
+        // A chain of linked textboxes: one break descriptor per box, each
+        // continuing the text of one FTXBXS. The story is one textbox.
         let chain = plc(&[0, 3, 6, 7], &[tbkd(0), tbkd(0), tbkd(-1)]);
-        assert!(boxes(text, 7, &plc2, &chain)
-            .unwrap_err()
-            .contains("linked"));
+        let linked = boxes(text, 7, &plc2, &chain).unwrap();
+        assert_eq!(
+            linked[0].as_ref().map(|textbox| textbox.bytes.clone()),
+            Some(0..6)
+        );
+        // Descriptors that start late or stop short are malformed.
+        for cps in [[1, 3, 6, 7], [0, 3, 5, 7]] {
+            let broken = plc(&cps, &[tbkd(0), tbkd(0), tbkd(-1)]);
+            assert!(boxes(text, 7, &plc2, &broken).is_err(), "{cps:?}");
+        }
         let missing = plc(&[0, 6, 7], &[tbkd(1), tbkd(-1)]);
         assert!(boxes(text, 7, &plc2, &missing).is_err());
         let unterminated = plc(&[0, 2, 7], &[ftxbxs(false, 7), ftxbxs(false, 0)]);

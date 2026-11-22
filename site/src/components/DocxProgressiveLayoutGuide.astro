@@ -27,7 +27,7 @@ console.log('Final page count:', viewer.pageCount);`;
 <section class="progressive-guide" id="progressive-layout" aria-labelledby="progressive-layout-title">
   <header class="progressive-head">
     <p class="eyebrow">Large documents</p>
-    <h2 id="progressive-layout-title">Show the opening pages before pagination finishes</h2>
+    <h2 id="progressive-layout-title">Progressive layout: opening pages before pagination finishes</h2>
   </header>
   <div class="progressive-body">
     <div class="progressive-copy">
@@ -40,7 +40,7 @@ console.log('Final page count:', viewer.pageCount);`;
       </p>
       <div class="progressive-rules">
         <article>
-          <h3>Totals are provisional</h3>
+          <h3>Provisional page count</h3>
           <p>
             While <code>layoutComplete</code> is false, <code>pageCount</code> means pages
             available so far, not the final total. Do not snapshot it when <code>load()</code>
@@ -48,7 +48,7 @@ console.log('Final page count:', viewer.pageCount);`;
           </p>
         </article>
         <article>
-          <h3>Subscribe or await</h3>
+          <h3>Callbacks and completion</h3>
           <p>
             Use <code>onPageChange</code> or <code>onVisiblePageChange</code> for live navigation
             UI. Await <code>waitUntilLayoutComplete()</code> before printing, exporting, or relying on
@@ -56,10 +56,23 @@ console.log('Final page count:', viewer.pageCount);`;
           </p>
         </article>
         <article>
-          <h3>Page fields converge too</h3>
+          <h3>Provisional pages</h3>
           <p>
-            In-document <code>NUMPAGES</code> fields are repainted with the authoritative value
-            after pagination converges. Application-owned “Page X of Y” UI should use the
+            Pages shown before layout completes are provisional. Page breaks may move and content
+            can occasionally overlap, for example body text over a tall footer.
+            <code>DocxViewer</code> and <code>DocxScrollViewer</code> redraw every page once layout
+            completes; code that calls <code>DocxDocument.renderPage()</code> directly must render
+            its pages again.
+          </p>
+        </article>
+        <article>
+          <h3>Page-count fields</h3>
+          <p>
+            <code>DocxViewer</code> and <code>DocxScrollViewer</code> repaint provisional pages,
+            including in-document <code>NUMPAGES</code> fields, with the authoritative layout after
+            pagination converges. Code that calls <code>DocxDocument.renderPage()</code> directly
+            owns its canvases and must render those pages again after
+            <code>waitUntilLayoutComplete()</code>. Application-owned “Page X of Y” UI should use the
             callback’s <code>layoutComplete</code> flag to mark provisional totals.
           </p>
         </article>

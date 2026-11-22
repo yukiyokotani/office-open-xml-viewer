@@ -15,14 +15,14 @@ function u32(value: number): number[] {
 
 /** Minimal stored ZIP used by parser-boundary tests. Inputs are authored test
  * XML, never private Office samples or generated golden files. */
-export function storedZip(files: Readonly<Record<string, string>>): Uint8Array {
+export function storedZip(files: Readonly<Record<string, string | Uint8Array>>): Uint8Array {
   const encoder = new TextEncoder();
   const localChunks: number[] = [];
   const central: number[] = [];
   let offset = 0;
   for (const [name, content] of Object.entries(files)) {
     const nameBytes = [...encoder.encode(name)];
-    const data = [...encoder.encode(content)];
+    const data = [...(typeof content === 'string' ? encoder.encode(content) : content)];
     const checksum = crc32(Uint8Array.from(data)) >>> 0;
     const local = [
       ...u32(0x04034b50), ...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0),

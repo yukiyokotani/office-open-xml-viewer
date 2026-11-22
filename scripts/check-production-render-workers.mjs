@@ -20,9 +20,11 @@ export function checkProductionRenderWorkers(directory = 'dist') {
     if (/new URL\(\s*["']\/assets\//.test(source)) {
       throw new Error(`${hostName} resolves its worker from the origin root`);
     }
-    const match = /new URL\(\s*["'](assets\/render-worker-[^"']+\.js)["']\s*,\s*import\.meta\.url\s*\)/.exec(source);
+    // `./` keeps a consumer bundler from resolving the URL through an app
+    // alias such as Nuxt's `assets` (#2134).
+    const match = /new URL\(\s*["']\.\/(assets\/render-worker-[^"']+\.js)["']\s*,\s*import\.meta\.url\s*\)/.exec(source);
     if (!match) {
-      throw new Error(`${hostName} does not resolve a module worker from import.meta.url`);
+      throw new Error(`${hostName} does not resolve a dot-relative module worker from import.meta.url`);
     }
     const assetPath = join(distDir, match[1]);
     if (!existsSync(assetPath)) {

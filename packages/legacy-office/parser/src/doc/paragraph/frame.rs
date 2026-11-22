@@ -7,6 +7,7 @@
 //! fail-closed (see [`Frame::direct`]).
 
 use super::super::{u16_at, unsupported};
+use crate::rejection;
 
 mod provenance;
 pub(in crate::doc) use provenance::{FrameOrigin, FrameOrigins, FrameProperty, NativeFrameFacts};
@@ -100,7 +101,7 @@ impl Frame {
             0x2423 => {
                 let value = *operand
                     .first()
-                    .ok_or_else(|| unsupported("truncated Word frame wrap"))?;
+                    .ok_or_else(|| rejection::corrupt("truncated Word frame wrap"))?;
                 if value > 5 {
                     return Err(unsupported("invalid Word frame wrap"));
                 }
@@ -356,6 +357,7 @@ mod tests {
             (0x442c, vec![1 | (11 << 3), 0]),
             (0x442c, vec![1, 0]),
             (0x261b, vec![]),
+            (0x2423, vec![]),
             (0x8418, vec![1]),
         ] {
             assert!(

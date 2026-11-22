@@ -1,5 +1,12 @@
 /** Raw line metrics read from one OpenType face. Values remain in design units;
  * format consumers decide which table and compatibility rule governs layout. */
+import type { OpenTypeVariation, parseOpenTypeVariation } from './open-type-variations.js';
+
+/** The fvar/avar/MVAR reader of open-type-variations.ts. Only the font-source
+ * session instances variable faces; it passes the reader in
+ * (open-type-instances.ts), so the static parsers here do not carry it. */
+export type OpenTypeVariationReader = typeof parseOpenTypeVariation;
+
 export interface OpenTypeLineMetrics {
   readonly unitsPerEm: number;
   /** Positive OS/2 xAvgCharWidth / head.unitsPerEm, from this selected face.
@@ -25,6 +32,11 @@ export interface OpenTypeLineMetrics {
   /** Scalar ranges proven by the caller-resource parser; omitted by the legacy
    * line-metric API so its existing embedded-font policy remains unchanged. */
   readonly unicodeRanges?: readonly (readonly [number, number])[];
+  /** fvar/avar/MVAR of a variable font; present only when the caller asked
+   * for variations ({@link parseOpenTypeResourceMetrics} `variations`). The
+   * other fields are then the default instance; see
+   * {@link instanceOpenTypeLineMetrics}. */
+  readonly variation?: OpenTypeVariation;
 }
 
 const tagValue = (tag: string): number => (
@@ -390,18 +402,21 @@ export function parseOpenTypeLineMetrics(
 
 /** Strict coverage for any concrete resource whose design metrics may own
  * layout. The caller and embedded loaders must both check the returned cmap
- * ranges before attributing a shaped segment to this face. */
+ * ranges before attributing a shaped segment to this face. A variable face
+ * (fvar) is read only with `options.variations`, the variation reader. */
 export function parseOpenTypeResourceMetrics(
   bytes: Uint8Array,
   faceIndex?: number,
+  options: Readonly<{ variations?: OpenTypeVariationReader }> = {},
 ): OpenTypeLineMetrics | null {
-  return readOpenTypeLineMetrics(bytes, faceIndex, true);
+  return readOpenTypeLineMetrics(bytes, faceIndex, true, options.variations);
 }
 
 function readOpenTypeLineMetrics(
   bytes: Uint8Array,
   faceIndex: number | undefined,
   resourceCoverage: boolean,
+  variations?: OpenTypeVariationReader,
 ): OpenTypeLineMetrics | null {
   if ((faceIndex !== undefined && (!Number.isSafeInteger(faceIndex) || faceIndex < 0))
     || bytes.byteLength < 12) return null;
@@ -439,7 +454,18 @@ function readOpenTypeLineMetrics(
   // Caller-resource layout does not resolve axes or apply those deltas yet, so
   // default-instance tables cannot certify a requested weight/style. Restrict
   // this opt-in authority to static sfnt; the legacy embedded parser is unchanged.
-  if (resourceCoverage && tables.has(FVAR)) return null;
+  // A caller that instances the face (instanceOpenTypeLineMetrics) opts in.
+  let variation: OpenTypeVariation | undefined;
+  if (tables.has(FVAR)) {
+    if (!resourceCoverage) {
+      // Legacy embedded parser: unchanged.
+    } else if (!variations) {
+      return null;
+    } else {
+      variation = variations(view, tables, tagValue) ?? undefined;
+      if (!variation) return null;
+    }
+  }
 
   const head = tables.get(HEAD);
   const hhea = tables.get(HHEA);
@@ -484,5 +510,6 @@ function readOpenTypeLineMetrics(
       winDescent: view.getUint16(os2.offset + 76),
       useTypoMetrics: (view.getUint16(os2.offset + 62) & 0x0080) !== 0,
     } : {}),
+    ...(variation ? { variation } : {}),
   });
 }

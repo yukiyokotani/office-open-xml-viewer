@@ -3,7 +3,7 @@ import type { DocxTextRunInfo } from './renderer';
 /**
  * ECMA-376 §17.3.2.10 eastAsianLayout `w:vert` (縦中横 / horizontal-in-vertical)
  * overlay geometry — shared by the find-highlight overlay and the text-selection
- * overlay so both clamp a tate-chu-yoko run identically (packages/docx/CLAUDE.md
+ * overlay so both clamp a tate-chu-yoko run identically (packages/docx/AGENTS.md
  * — no duplicated geometry).
  *
  * The 縦中横 draw path lays a run's glyphs out horizontally, side by side,

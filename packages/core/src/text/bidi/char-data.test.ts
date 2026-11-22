@@ -2,6 +2,18 @@ import { describe, it, expect } from 'vitest';
 import { bidiClass, mirror, bracket, UNICODE_VERSION } from './char-data.js';
 
 describe('bidiClass', () => {
+  it('preserves every ASCII class and the fractional numeric fallback', () => {
+    // Unicode 17 DerivedBidiClass: independent ASCII/control-domain oracle.
+    const ranges: [number, string][] = [
+      [9, 'BN'], [1, 'S'], [1, 'B'], [1, 'S'], [1, 'WS'], [1, 'B'],
+      [14, 'BN'], [3, 'B'], [1, 'S'], [1, 'WS'], [2, 'ON'], [3, 'ET'],
+      [5, 'ON'], [1, 'ES'], [1, 'CS'], [1, 'ES'], [2, 'CS'], [10, 'EN'],
+      [1, 'CS'], [6, 'ON'], [26, 'L'], [6, 'ON'], [26, 'L'], [4, 'ON'], [1, 'BN'],
+    ];
+    const expected = ranges.flatMap(([count, type]) => Array<string>(count).fill(type));
+    expect(Array.from({ length: 128 }, (_, cp) => bidiClass(cp))).toEqual(expected);
+    expect(bidiClass(65.5)).toBe('L');
+  });
   it('classifies strong types', () => {
     expect(bidiClass(0x41)).toBe('L'); // LATIN CAPITAL LETTER A
     expect(bidiClass(0x5d0)).toBe('R'); // HEBREW LETTER ALEF

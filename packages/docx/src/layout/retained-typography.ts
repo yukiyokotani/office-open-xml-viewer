@@ -118,14 +118,24 @@ export function retainedWavePath(
   from: PointPt,
   to: PointPt,
   strokeWidthPt: number,
+  /** -1 starts the wave toward logical top (horizontal underline), 1 toward
+   * logical bottom (an underline reflected to the over side). */
+  phase: -1 | 1 = -1,
 ): readonly PointPt[] {
   const widthPt = Math.max(0, to.xPt - from.xPt);
   const stepPt = strokeWidthPt * 2;
   const count = Math.max(1, Math.ceil(widthPt / stepPt));
   return Array.from({ length: count + 1 }, (_, index) => ({
     xPt: from.xPt + widthPt * index / count,
-    yPt: from.yPt + (index % 2 === 0 ? -strokeWidthPt / 2 : strokeWidthPt / 2),
+    yPt: from.yPt + (index % 2 === 0 ? phase : -phase) * strokeWidthPt / 2,
   }));
+}
+
+/** The phase a retained wave path was generated with, so regenerating it
+ * (merging, trimming) keeps a reflected wave reflected. */
+export function retainedWavePhase(decoration: Readonly<{ from: PointPt; path?: readonly PointPt[] }>): -1 | 1 {
+  const first = decoration.path?.[0];
+  return first !== undefined && first.yPt > decoration.from.yPt ? 1 : -1;
 }
 
 /** Retains underline and strike geometry from selected-face glyph probes. `_`

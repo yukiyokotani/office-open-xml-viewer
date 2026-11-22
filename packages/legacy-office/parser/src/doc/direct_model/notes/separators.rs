@@ -75,10 +75,12 @@ impl AcquiredSeparator<'_> {
     /// one paragraph mark before its guard; a rule story is exactly its
     /// control, the content paragraph mark and the guard. Anything else is a
     /// custom separator.
-    pub(super) fn into_wire(self) -> Result<ReservedNoteSeparatorStoryWire, String> {
+    /// Whether the story is one of the closed shapes of the shared wire
+    /// (see `into_wire`).
+    pub(super) fn wire_shape(&self) -> bool {
         let content = &self.source.content_cp;
         let mark_ends_content = |paragraph: &ParagraphFacts| paragraph.source.cp + 1 == content.end;
-        let admitted = match (self.source.guard_cp, self.source.content) {
+        match (self.source.guard_cp, self.source.content) {
             (_, "") => self.rule.is_none() && self.paragraph.is_none(),
             (Some(_), "\r") => {
                 self.rule.is_none() && self.paragraph.as_ref().is_some_and(mark_ends_content)
@@ -93,8 +95,11 @@ impl AcquiredSeparator<'_> {
                     && self.paragraph.as_ref().is_some_and(mark_ends_content)
             }
             _ => false,
-        };
-        if !admitted {
+        }
+    }
+
+    pub(super) fn into_wire(self) -> Result<ReservedNoteSeparatorStoryWire, String> {
+        if !self.wire_shape() {
             return Err(unsupported("custom Word note separators are not supported"));
         }
         Ok(ReservedNoteSeparatorStoryWire {

@@ -1,6 +1,8 @@
 import { adjustForWidowOrphan, selectLargestFittingEnd } from '../line-fit-policy.js';
 import type { LineBoundary } from '../line-layout.js';
 import {
+  libreOfficeProportionalLineAdmissionExtentPt,
+  libreOfficeProportionalLineAdmittedExtentPt,
   wordFinalParagraphAdmissionExtentPt,
   wordGridLineAdmissionExtentPt,
   wordVerticalRlFinalLineAdmissionExtentPt,
@@ -65,9 +67,9 @@ function completingParagraphAdmissionExtentPt(
     retainedSpaceAfterPt: fragment.spacing.afterPt,
     authoredSpaceAfterPt,
   });
-  const logicalLineBoxExtentPt = wordGridLineAdmissionExtentPt(
+  const logicalLineBoxExtentPt = libreOfficeProportionalLineAdmissionExtentPt(fragment, wordGridLineAdmissionExtentPt(
     fragment, wholeParagraphHasPlacements, withoutSpaceAfterPt, unreservedBodyBottomPt, reservePt,
-  );
+  ));
   return wordVerticalRlFinalLineAdmissionExtentPt({
     paragraph: fragment,
     writingMode,
@@ -77,7 +79,9 @@ function completingParagraphAdmissionExtentPt(
 }
 
 function compareLineBoundaries(left: LineBoundary, right: LineBoundary): number {
-  return left.segIndex - right.segIndex || left.charOffset - right.charOffset;
+  return left.sourceTextStart !== undefined && right.sourceTextStart !== undefined
+    ? (left.sourceTextStart + left.charOffset) - (right.sourceTextStart + right.charOffset)
+    : left.segIndex - right.segIndex || left.charOffset - right.charOffset;
 }
 
 export function selectParagraphFragment(
@@ -155,9 +159,9 @@ export function selectParagraphFragment(
         policy.writingMode ?? 'horizontal-tb', availableBlockExtentPt,
         policy.unreservedBodyBottomPt, reservePt,
       )
-      : wordGridLineAdmissionExtentPt(
+      : libreOfficeProportionalLineAdmissionExtentPt(fragment, wordGridLineAdmissionExtentPt(
         fragment, wholeParagraphHasPlacements, fragment.advancePt, policy.unreservedBodyBottomPt, reservePt,
-      )
+      ))
   );
   if (fragmentation.kind === 'indivisible') {
     const completeReserve = reserveFor(acquired);
@@ -182,7 +186,10 @@ export function selectParagraphFragment(
       nextCursor: null,
       requiresFreshFlowRegion: false,
       additionalReservePt: completeReserve,
-      admittedBlockExtentPt: Math.min(acquired.advancePt, availableBlockExtentPt),
+      admittedBlockExtentPt: libreOfficeProportionalLineAdmittedExtentPt(
+        acquired, Math.min(acquired.advancePt, availableBlockExtentPt),
+        availableBlockExtentPt, completeReserve, completeExtentPt,
+      ),
       admissionExtentPt: completeExtentPt,
     };
   }
@@ -202,7 +209,10 @@ export function selectParagraphFragment(
     return {
       fragment: acquired, nextCursor: null,
       requiresFreshFlowRegion: false, additionalReservePt: reserve,
-      admittedBlockExtentPt: Math.min(acquired.advancePt, availableBlockExtentPt),
+      admittedBlockExtentPt: libreOfficeProportionalLineAdmittedExtentPt(
+        acquired, Math.min(acquired.advancePt, availableBlockExtentPt),
+        availableBlockExtentPt, reserve, completeExtentPt,
+      ),
       admissionExtentPt: completeExtentPt,
     };
   }
@@ -287,6 +297,7 @@ export function selectParagraphFragment(
     throw new Error('Paragraph continuation source boundary did not advance');
   }
   const finalReservePt = reserveFor(fragment);
+  const finalAdmissionExtentPt = admissionExtent(fragment, end === total, finalReservePt);
   return {
     fragment,
     nextCursor: nextBoundary === null ? null : Object.freeze({
@@ -297,7 +308,10 @@ export function selectParagraphFragment(
     }),
     requiresFreshFlowRegion: false,
     additionalReservePt: finalReservePt,
-    admittedBlockExtentPt: Math.min(fragment.advancePt, availableBlockExtentPt),
-    admissionExtentPt: admissionExtent(fragment, end === total, finalReservePt),
+    admittedBlockExtentPt: libreOfficeProportionalLineAdmittedExtentPt(
+      fragment, Math.min(fragment.advancePt, availableBlockExtentPt),
+      availableBlockExtentPt, finalReservePt, finalAdmissionExtentPt,
+    ),
+    admissionExtentPt: finalAdmissionExtentPt,
   };
 }

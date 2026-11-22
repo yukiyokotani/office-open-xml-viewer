@@ -47,11 +47,15 @@ export function chartFaceList(face: string, chart?: ChartFontSubstitutions): str
   return substitute ? `"${face}", "${substitute.replace(/["\\]/g, '')}"` : `"${face}"`;
 }
 
-/** {@link CHART_FALLBACK_FONT_STACK} with the loaded substitute of its
- *  Calibri head, when a font source loaded one. */
+/** {@link CHART_FALLBACK_FONT_STACK} with, after each of its named families,
+ *  the family a font source loaded for it. */
 export function chartFallbackFontStack(chart?: ChartFontSubstitutions): string {
-  const substitute = chartFontSubstitute(chart, 'Calibri');
-  return substitute ? `Calibri, "${substitute.replace(/["\\]/g, '')}", Arial, sans-serif` : CHART_FALLBACK_FONT_STACK;
+  if (!chart?.fontSubstitutions) return CHART_FALLBACK_FONT_STACK;
+  const named = (family: string) => {
+    const substitute = chartFontSubstitute(chart, family);
+    return substitute ? `${family}, "${substitute.replace(/["\\]/g, '')}"` : family;
+  };
+  return `${named('Calibri')}, ${named('Arial')}, sans-serif`;
 }
 
 /** CSS family list for a resolved chart face plus {@link CHART_FALLBACK_FONT_STACK}. */

@@ -33,9 +33,16 @@ export interface BitmapSlotHooks<Slot extends BitmapSlot, Run> {
  * token guards jointly close that orphan. A plain render failure never retries
  * because it could otherwise create an unbounded reject/redispatch loop. */
 export class BitmapSlotRenderer<Slot extends BitmapSlot, Run> {
+  /** The in-flight paint of each unit, including the dispatches it follows. */
+  private readonly pending = new Map<number, Promise<void>>();
+
   constructor(private readonly hooks: BitmapSlotHooks<Slot, Run>) {}
 
-  async render(
+  /** Paint `unit` into `slot`. A request for a unit already in flight is
+   *  coalesced into that dispatch, which follows a superseded dispatch until
+   *  the live slot is painted; the returned promise settles with that final
+   *  paint, so a caller can await the pixels it asked for. */
+  render(
     unit: number,
     slot: Slot,
     width: number,
@@ -46,8 +53,31 @@ export class BitmapSlotRenderer<Slot extends BitmapSlot, Run> {
     generation = dispatcher.begin(),
     reportErrors = true,
   ): Promise<void> {
+    if (this.hooks.inFlight().has(unit)) {
+      const pending = this.pending.get(unit) ?? Promise.resolve();
+      // The coalesced dispatch reports its own failure to its first caller.
+      return pending.catch(() => {});
+    }
+    if (this.hooks.slots().get(unit) !== slot) return Promise.resolve();
+    const paint = this.paint(unit, slot, width, dpr, scale, token, dispatcher, generation, reportErrors);
+    this.pending.set(unit, paint);
+    const forget = () => { if (this.pending.get(unit) === paint) this.pending.delete(unit); };
+    paint.then(forget, forget);
+    return paint;
+  }
+
+  private async paint(
+    unit: number,
+    slot: Slot,
+    width: number,
+    dpr: number,
+    scale: number,
+    token: number,
+    dispatcher: StaticCanvasRenderDispatcher,
+    generation: number,
+    reportErrors: boolean,
+  ): Promise<void> {
     const inFlight = this.hooks.inFlight();
-    if (inFlight.has(unit) || this.hooks.slots().get(unit) !== slot) return;
     const epoch = this.hooks.epoch();
     const canvas = slot.canvas;
     inFlight.add(unit);

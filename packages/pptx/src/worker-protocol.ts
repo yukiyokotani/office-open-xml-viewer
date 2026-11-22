@@ -66,9 +66,11 @@ export type PptxWorkerRequest =
        *  renderer paints the resolved one. */
       cjkFallback: import('@silurus/ooxml-core').CjkLang;
       /** Font sources are configured: the parse worker's preflight also
-       * collects the font-source demand facts and scalars. Internal opt-in
+       * collects the font-source demand facts and scalars, with the
+       * collector imported from this absolute sidecar URL (`''`: none
+       * resolvable, every subset is demanded). Internal opt-in
        * only; omission preserves ordinary parse payloads. */
-      collectFontDemand?: boolean;
+      collectFontDemand?: string;
       progressiveLayout?: boolean;
     }
   | ({
@@ -121,7 +123,7 @@ export type RenderWorkerRequest =
        * re-validates them and runs the same font-source demand and session as
        * main mode against its own FontFaceSet. Never the deprecated
        * `useGoogleFonts`. */
-      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSource[];
+      fonts?: readonly import('@silurus/ooxml-core/internal/font-sources').FontSourceDescriptor[];
       cjkFallback?: import('@silurus/ooxml-core').CjkLang;
       renderers?: WorkerRendererDescriptors;
       progressiveLayout?: boolean;

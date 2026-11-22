@@ -30,6 +30,7 @@ mod pictures;
 mod sections;
 mod settings;
 mod sprm;
+mod sprm_catalog;
 mod table;
 // Logical table/row/cell indexing for the direct model's style resolution.
 mod table_context;
@@ -97,6 +98,9 @@ enum Token {
     /// An automatic note-number character inside note text (the DOCX
     /// `footnoteRef`/`endnoteRef`), projected by the direct model only.
     NoteNumber(notes::Kind),
+    /// The number of a note the reader numbers itself, as its text, inside
+    /// the note. Projected by the direct model only.
+    NoteMark(String),
     /// A displayed token inside a hyperlink or `\h` field result, projected
     /// by the direct model only.
     Linked(Box<direct_model::fields::Linked>),
@@ -107,6 +111,25 @@ pub(crate) fn direct_model(
     max_model_bytes: usize,
 ) -> Result<direct_model::DirectDocResult, String> {
     with_acquired_doc(cfb, |facts| direct_model::build(facts, max_model_bytes))
+}
+
+/// GitHub-flavoured Markdown projection of a direct DOC source, through the
+/// shared `docx_model` Markdown renderer so a legacy DOC reads exactly like
+/// the equivalent DOCX. Projects from the source bytes on every call (see
+/// `doc_wasm::MarkdownSource`). The projection shares the DOCX Markdown hard
+/// ceiling; crossing it is a resource-limit rejection, not a truncated
+/// document.
+pub(crate) fn direct_markdown(data: &[u8], max_model_bytes: usize) -> Result<String, String> {
+    let cfb = CompoundFile::open(data).map_err(unsupported)?;
+    let result = direct_model(&cfb, max_model_bytes)?;
+    let limit = ooxml_common::resource::HARD_MAX_DOCX_MARKDOWN_BYTES;
+    let output = docx_model::markdown::render_document_with_limit(&result.document, limit);
+    if output.exceeded() {
+        return Err(crate::rejection::resource(
+            "DOC markdown projection exceeds its hard ceiling",
+        ));
+    }
+    Ok(output.into_string())
 }
 
 fn with_acquired_doc<T>(
@@ -133,7 +156,7 @@ fn with_acquired_doc<T>(
     let fib_schema = fib::known_schema(&word)?;
     let effective_nfib = fib_schema.effective_version();
     if effective_nfib < FIB_WORD_97 {
-        return Err(unsupported(
+        return Err(crate::rejection::out_of_scope_version(
             "only Word 97-2003 binary documents are supported",
         ));
     }

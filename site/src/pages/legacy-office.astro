@@ -71,8 +71,8 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
   <header class="legacy-hero">
     <div class="wrap">
       <p class="eyebrow">Optional add-on · experimental</p>
-      <h1>Legacy Office files.</h1>
-      <p>Read a supported subset of .doc, .xls and .ppt with the same viewers.</p>
+      <h1>Legacy Office files</h1>
+      <p>The experimental legacy Office add-on reads a supported subset of .doc, .xls and .ppt through the DOCX, XLSX and PPTX viewers.</p>
     </div>
   </header>
   <main class="wrap legacy-layout">
@@ -90,7 +90,7 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
     <div class="legacy-content">
       <section id="install">
         <p class="section-label">Install</p>
-        <h2>An experimental opt-in.</h2>
+        <h2>Package and versions</h2>
         <p>OOXML Viewer remains a viewer for DOCX, XLSX and PPTX. The separate
           <code>@silurus/ooxml-legacy-office</code> package adds experimental reading of legacy binary
           Office files. Each reader projects a supported binary subset directly into the existing
@@ -105,7 +105,7 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
       </section>
       <section id="browser">
         <p class="section-label">Browser viewers</p>
-        <h2>Enable each format explicitly.</h2>
+        <h2>Reader options by format</h2>
         <p>Import a reader and pass it as its own option, like the other opt-in modules:
           <code>&#123; legacyDoc &#125;</code>, <code>&#123; legacyXls &#125;</code> or
           <code>&#123; legacyPpt &#125;</code>. The DOC reader enables DOC only; XLS and PPT each need
@@ -119,7 +119,7 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
       </section>
       <section id="node">
         <p class="section-label">Node sessions</p>
-        <h2>Use the same source in a bounded session.</h2>
+        <h2>Readers in Node sessions</h2>
         <div class="code-card"><Code code={nodeExample} lang="ts" themes={codeThemes} defaultColor={false} /></div>
         <p><code>openDocxDocument</code>, <code>openXlsxWorkbook</code> and the materialization APIs also
           accept the same option. Keep the normal canvas factory options when rendering in Node,
@@ -127,7 +127,7 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
       </section>
       <section id="support">
         <p class="section-label">Supported subset</p>
-        <h2>Check the boundary before enabling it.</h2>
+        <h2>Supported content by reader</h2>
         <p>The readers are experimental. They reject input they cannot represent instead of
           showing a partial document. They do not execute macros, fields, formulas, actions or embedded objects.
           Stored results and supported layout fields can be displayed; this is not an Office fidelity guarantee.</p>
@@ -141,14 +141,15 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
             </tbody>
           </table>
         </div>
-        <p>All three readers lack Markdown export and ZIP accounting. <code>toMarkdown()</code> rejects;
-          resource metrics have no ZIP usage snapshot. Password-protected legacy binaries,
+        <p>All three readers lack ZIP accounting: resource metrics have no ZIP usage snapshot.
+          DOC supports <code>toMarkdown()</code> through the DOCX Markdown projection; for XLS and PPT
+          <code>toMarkdown()</code> rejects. Password-protected legacy binaries,
           pre-CFB formats and unsupported binary structures are outside the supported subset.</p>
         <p><a href="https://github.com/yukiyokotani/office-open-xml-viewer/blob/main/docs/legacy-office-conversion.md">Read the full support list and compatibility boundaries on GitHub →</a></p>
       </section>
       <section id="errors">
         <p class="section-label">Failures</p>
-        <h2>Keep a conversion fallback.</h2>
+        <h2>Rejections and conversion fallback</h2>
         <p>Without a matching source, legacy binary input rejects with <code>OoxmlError</code>,
           <code>code === 'legacy-binary-format'</code>. Enable the corresponding add-on source or
           ask for conversion to DOCX, XLSX or PPTX. An unclaimed or ambiguous container still takes
@@ -163,11 +164,19 @@ const viewer = new PptxViewer(canvas, { legacyPpt });`;
           and throws a <code>RangeError</code> when claimed input exceeds it. There is no
           default input-size ceiling. To retain the former 256 MiB limit, explicitly set
           <code>maxInputBytes: 256 * 1024 * 1024</code>.</p>
+        <h3>Difference from the OpenDocument readers</h3>
+        <p>The two optional reader packages currently follow different policies. The legacy readers
+          reject the whole document with <code>unsupported-content</code> when they meet a structure
+          they cannot map. The <a href="/opendocument#policy">OpenDocument readers</a> render every
+          feature they read and reject only corrupt, encrypted or unsafe input, or input over a
+          resource limit. Keep a conversion fallback for legacy input. The legacy behaviour may change
+          in a later release: aligning it with the OpenDocument policy is tracked in
+          <a href="https://github.com/yukiyokotani/office-open-xml-viewer/issues/2263">issue #2263</a>.</p>
         <p><a href="/errors">Error delivery and application messages →</a></p>
       </section>
       <section id="loading">
         <p class="section-label">Loading and deployment</p>
-        <h2>Pay for the reader only when used.</h2>
+        <h2>Asset loading</h2>
         <p>Each format has its own source entry, self-contained ES source module and dedicated WASM.
           Importing a reader fetches nothing. Its module and WASM are fetched only when the reader
           claims a file, in the parser Worker or Node. Import the entry dynamically when selecting a

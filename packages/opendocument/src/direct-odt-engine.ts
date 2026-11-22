@@ -51,7 +51,7 @@ export function createOdtSourceEngine(
 }> {
   const runtime = createDirectSourceRuntime<OdtGlue, OdtNativeDocument, ModelSourceOpenContext>({
     label: 'OpenDocument ODT',
-    mapNativeError: (error) => odfNativeRejection(error, 'odt'),
+    mapNativeError: odfNativeRejection,
     loadGlue,
     resolveWasm,
     // The shared governor's WASM encoding: absent → standard limit, 0 → the

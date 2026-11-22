@@ -4,16 +4,18 @@ import { type CjkLang } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
   type FontSubstitution,
-  type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import {
   activeFontSet,
   canvasFontString,
+  createSymbolFaceOracle,
   fontFaceWeightCovers,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { FontSubstituteScript, OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import { scriptScopedSubstitutedFamilies } from '../font-substitution-scope.js';
+import { appFontResourceIdentity, sourceFontLineMetrics, sourceFontResourceIdentity } from '../source-font-metrics.js';
+import type { PreparedServedFaceLines } from '../served-face-lines.js';
 import type { LoadedEmbeddedFontRoute } from '../embedded-fonts.js';
 import { normalizeFontFamilyUncached } from '../line-layout.js';
 import type { LayoutSourceStore } from './layout-source-store.js';
@@ -36,6 +38,7 @@ import {
 import {
   classifyDocxFontGeneric,
   createTextLayoutService,
+  nativeVisiblePrefixMatches,
   snapshotFontMetrics,
   type GlyphMeasureRequest,
   type TextLayoutService,
@@ -63,16 +66,29 @@ export interface ProductionLayoutServiceOptions {
   readonly mathResources?: readonly MathLayoutResource[];
   readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
   readonly measureContext: MeasurementTextContext | null;
+  /** The 2D context behind {@link measureContext}: symbol-face colour probes
+   * draw on a scratch canvas of its realm (core symbol-face.ts). */
+  readonly symbolProbeOwner?: unknown;
+  /** The canvas factory of the measuring/painting backend, for those
+   * probes (a Node session's canvas factory). */
+  readonly symbolProbeCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
   /** FontFaceSet of the measuring canvas, including foreign DOM realms. */
   readonly fontSet?: FontFaceSet | null;
   readonly verticalGlyphMeasurement: VerticalGlyphMeasurementService;
+  /** The reference-advance planner of {@link measureContext} (core
+   * reference-advances.ts): glyph contour acquisition rasterizes with the
+   * same em as measurement. Absent: contours rasterize at the request size. */
+  readonly textAdvancePlanner?: import('@silurus/ooxml-core').TextAdvancePlanner;
   /** Exact registrations returned by the DOCX loader. */
   readonly embeddedRoutes?: readonly LoadedEmbeddedFontRoute[];
   /** Exact local registrations, scoped to this FontFaceSet. */
   readonly officeRoutes?: readonly OfficeFontFallbackRoute[];
   /** Faces the font sources loaded for this document (`font-source-load.ts`):
    * the demanded names in demand order and the session snapshot. */
-  readonly sourceFonts?: Readonly<{ names: readonly string[]; loaded: LoadedFontSources }>;
+  readonly sourceFonts?: import('../source-font-metrics.js').DocxSourceFonts;
+  /** Measured normal lines of served faces without readable tables and of
+   * application-registered faces (served-face-lines.ts). */
+  readonly servedFaceLines?: PreparedServedFaceLines;
   /** Normalized families whose authored face is installed; they are never
    * routed to a different-family substitute (`docxFontFamilyPlan`). */
   readonly installedSubstituteFamilies?: readonly string[];
@@ -95,18 +111,30 @@ export interface ProductionLayoutServiceOptions {
  * an override only when a loaded scoped substitute wins the exact resource
  * tuple, after embedded, local and authored CSS inventory precedence. */
 function docxScriptScopedFamilies(
-  substitutes: readonly FontSubstitution[],
+  substitutions: readonly FontSubstitution[],
   installed: readonly string[],
 ): Record<string, { script: FontSubstituteScript; substituteFamilies: string[] }> {
-  const scoped = scriptScopedSubstitutedFamilies(substitutes);
+  const scoped = scriptScopedSubstitutedFamilies(substitutions);
   return Object.fromEntries([...scoped]
     .filter(([key]) => !installed.includes(key))
     .map(([key, script]) => [key, {
       script,
-      substituteFamilies: [...new Set(substitutes
+      substituteFamilies: [...new Set(substitutions
         .filter((substitution) => substitution.script === script && fontFamilyKey(substitution.use) !== key)
         .map((substitution) => substitution.use))],
     }]));
+}
+
+/** Every family layout can route for this document (authored, classified,
+ * pitched and theme families). */
+export function documentRoutedFontFamilies(source: LayoutSourceStore): string[] {
+  return [...new Set([
+    ...Object.keys(source.fonts.familyClasses),
+    ...Object.keys(source.fonts.familyPitches),
+    ...source.fonts.renderedFamilies,
+    ...(source.fonts.majorFamily ? [source.fonts.majorFamily] : []),
+    ...(source.fonts.minorFamily ? [source.fonts.minorFamily] : []),
+  ])];
 }
 
 /** The production text service alone: font inventory, resolver and Canvas
@@ -184,7 +212,16 @@ export function createProductionTextLayoutService(
       ? requested : `${requested}:${route.weight}:${route.style}`;
     return [[key, route.metric]];
   }));
+  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
+  // Served faces are sized from their own tables (source-font-metrics.ts),
+  // exactly as an installed or embedded face with the same tables.
+  const sourceMetrics = options.sourceFonts || options.servedFaceLines
+    ? sourceFontLineMetrics(options.sourceFonts, fontSet, options.servedFaceLines,
+      source.fonts.libreOfficeLineBoxes === true) : {};
+  const appFaceIdentities = new Set(Object.values(sourceMetrics)
+    .flatMap((metric) => metric.sourceIdentity?.startsWith('app-face:') ? [metric.sourceIdentity] : []));
   const fontMetrics = snapshotFontMetrics({
+    ...sourceMetrics,
     ...localMetrics,
     ...officeMetrics,
     ...unshadowed(options.fontMetrics),
@@ -249,6 +286,7 @@ export function createProductionTextLayoutService(
           requestedFamily: name,
           resolvedFamily: displayFamily,
           source: substitution ? 'substitute' : 'source',
+          resourceIdentity: sourceFontResourceIdentity(displayFamily),
           ...(substitution?.script === undefined ? {} : { script: substitution.script }),
           weight,
           style,
@@ -257,32 +295,30 @@ export function createProductionTextLayoutService(
     }
   }
   const context = options.measureContext;
-  const routedFontFamilies = [...new Set([
-    ...Object.keys(source.fonts.familyClasses),
-    ...Object.keys(source.fonts.familyPitches),
-    ...source.fonts.renderedFamilies,
-    ...(source.fonts.majorFamily ? [source.fonts.majorFamily] : []),
-    ...(source.fonts.minorFamily ? [source.fonts.minorFamily] : []),
-  ])];
+  const routedFontFamilies = documentRoutedFontFamilies(source);
   // An application-owned @font-face with the authored family is a real Canvas
   // route, even though the library cannot read its font bytes. Snapshot loaded
   // tuples at service creation so line layout uses Canvas's own line box rather
   // than the pinned reference for a different version of the same family.
   // A face loaded after this snapshot needs a new layout service/pagination.
   const requestedNames = new Set(routedFontFamilies.map(normalizedFaceFamily));
-  const fontSet = options.fontSet === undefined ? activeFontSet() : options.fontSet;
   // Any loaded application face declaring an authored family shadows the
   // system family for every tuple, whatever its descriptors (oblique, weight
   // 950...), even ones the exact-tuple inventory below cannot represent.
   const shadowedFamilies = new Set<string>();
   if (fontSet && typeof fontSet[Symbol.iterator] === 'function') {
+    // Font sources register under private families (core
+    // source-session.ts), so a face declaring an authored family is the
+    // application's own, never a served face of this or another document.
     for (const face of fontSet) {
       if (!requestedNames.has(normalizedFaceFamily(face.family))) continue;
       if (face.status === 'loaded') shadowedFamilies.add(normalizedFaceFamily(face.family));
       for (const loaded of loadedFaces([face])) {
+        const appIdentity = appFontResourceIdentity(loaded.displayFamily);
         inventory.push({
           requestedFamily: loaded.displayFamily,
           resolvedFamily: loaded.displayFamily,
+          ...(appFaceIdentities.has(appIdentity) ? { resourceIdentity: appIdentity } : {}),
           source: 'css',
           weight: loaded.weight,
           style: loaded.style,
@@ -290,8 +326,118 @@ export function createProductionTextLayoutService(
       }
     }
   }
+  // An explicitly directed request uses the same metric implementation as
+  // ordinary acquisition, but only a context exposing Canvas direction opts in.
+  // Unknown structural/custom contexts retain their ordinary contract.
+  const supportsDirectedContext = context !== null
+    && ['ltr', 'rtl', 'inherit'].includes(context.direction ?? '')
+    && ['start', 'end', 'left', 'right', 'center'].includes(context.textAlign ?? '');
+  const measure = (request: Readonly<GlyphMeasureRequest>) => {
+    if (!context) return {
+      advancePt: [...request.text].length * request.fontSizePt * 0.5,
+      ascentPt: request.fontSizePt * 0.8,
+      descentPt: request.fontSizePt * 0.2,
+    };
+    const previousFont = context.font;
+    const previousLetterSpacing = context.letterSpacing;
+    const previousKerning = context.fontKerning;
+    const previousDirection = request.baseDirection !== undefined ? context.direction : undefined;
+    const previousTextAlign = request.baseDirection !== undefined ? context.textAlign : undefined;
+    const previousLang = selectCanvasLanguage(context, request.lang);
+    try {
+      if (request.baseDirection !== undefined) {
+        context.direction = request.baseDirection;
+        // Native ink bounds must use the same physical left origin as retained
+        // point geometry. Canvas start + RTL would instead use a right anchor.
+        context.textAlign = 'left';
+        if (context.direction !== request.baseDirection || context.textAlign !== 'left') {
+          throw new TypeError('Canvas did not honor directed measurement and left anchor');
+        }
+      }
+      context.font = canvasFontString(
+        request.fontRoute,
+        request.fontSizePt,
+        request.weight,
+        request.style,
+      );
+      context.letterSpacing = `${request.letterSpacingPt}px`;
+      if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
+      const metrics = context.measureText(request.text);
+      const horizontalInkBoundsAreTight =
+        Number.isFinite(metrics.actualBoundingBoxLeft)
+        && Number.isFinite(metrics.actualBoundingBoxRight);
+      // Retain the historical full-advance fallback for consumers that need
+      // a stable ink box (ruby, decoration, hit geometry), but label whether
+      // the horizontal edges are genuinely tight. Whitespace-trimming
+      // consumers must not infer sidebearings from the fallback box.
+      const inkBounds = {
+        xMinPt: horizontalInkBoundsAreTight
+          ? -metrics.actualBoundingBoxLeft : 0,
+        xMaxPt: horizontalInkBoundsAreTight
+          ? metrics.actualBoundingBoxRight : metrics.width,
+        ascentPt: metrics.actualBoundingBoxAscent,
+        descentPt: metrics.actualBoundingBoxDescent,
+      };
+      return {
+        advancePt: metrics.width,
+        ...(request.baseDirection !== undefined ? { nativeBaseDirection: request.baseDirection } : {}),
+        ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
+        descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
+        ...(Object.values(inkBounds).every(Number.isFinite) ? {
+          inkBounds,
+          ...(horizontalInkBoundsAreTight ? { horizontalInkBoundsAreTight: true } : {}),
+        } : {}),
+      };
+    } finally {
+      if (request.baseDirection !== undefined) {
+        context.direction = previousDirection;
+        context.textAlign = previousTextAlign;
+      }
+      context.font = previousFont;
+      context.letterSpacing = previousLetterSpacing;
+      if (request.kerning != null) context.fontKerning = previousKerning;
+      restoreCanvasLanguage(context, previousLang);
+    }
+  };
   return createTextLayoutService({
-    ...(context ? { glyphContours: acquireCanvasGlyphContours, glyphContourFingerprint: 'canvas-half-coverage-contours-v1' } : {}),
+    ...(supportsDirectedContext ? {
+      acquireProjectableNativeUnits: (requests, shape) => {
+        // Each request remains one native word operation plus optional charged
+        // ASCII suffix. Joined SPACE+Y probes are metrics, not new paint words.
+        // Do not manufacture an isolated SPACE or split a contextual multiword
+        // operation merely to make it look projectable.
+        if (requests.some(request => !request.text.trimEnd()
+          || request.text.replace(/ +$/u, '').includes(' '))) return undefined;
+        const results = requests.map(request => shape({ ...request, measure: true, clusterGeometry: 'spaces' }));
+        for (let index = 0; index < results.length; index++) {
+          const request = requests[index]!, entry = results[index]!, result = entry.shape;
+          if (result.spans.length !== 1) return undefined;
+          if (request.baseDirection === 'rtl' && request.text.endsWith(' ')
+            && !nativeVisiblePrefixMatches(request, result, entry.visiblePrefix)) return undefined;
+          if (result.nativeBaseDirection !== request.baseDirection) throw new TypeError('Native unit receipt mismatch');
+          if (!Number.isFinite(result.advancePt) || result.advancePt < 0
+            || result.spans.map(span => span.text).join('') !== request.text) return undefined;
+          let previous = 0;
+          const boundaries = new Set([0, request.text.length, ...result.graphemeBoundaries]);
+          for (const cluster of result.clusters ?? []) {
+            if (request.text.slice(cluster.range.start, cluster.range.end) !== ' '
+              || !boundaries.has(cluster.range.start) || !boundaries.has(cluster.range.end)
+              || !Number.isFinite(cluster.offsetPt) || !Number.isFinite(cluster.advancePt)
+              || cluster.offsetPt < previous || cluster.advancePt < 0
+              || cluster.offsetPt + cluster.advancePt > result.advancePt) return undefined;
+            previous = cluster.offsetPt + cluster.advancePt;
+          }
+          const spaces = request.text.split(' ').length - 1;
+          if (spaces !== (result.clusters?.length ?? 0)) return undefined;
+        }
+        return results;
+      },
+    } : {}),
+    ...(context ? {
+      glyphContours: (request: Parameters<typeof acquireCanvasGlyphContours>[0]) =>
+        acquireCanvasGlyphContours(request, options.textAdvancePlanner),
+      glyphContourFingerprint: 'canvas-half-coverage-contours-v3',
+      ...(supportsDirectedContext ? { glyphContoursSupportDirection: true as const } : {}) } : {}),
     fonts: createFontResolver(inventory, {
       installedFamilies: options.installedFamilies,
       shadowedFamilies: [...shadowedFamilies],
@@ -306,6 +452,7 @@ export function createProductionTextLayoutService(
         ? docxScriptScopedFamilies(options.fontSubstitutes, options.installedSubstituteFamilies ?? [])
         : undefined,
       nativeRouteMetrics: options.nativeRouteMetrics,
+      ...(options.sourceFonts ? { servedFamilies: options.sourceFonts.loaded.families } : {}),
       nativeFamilyLists: Object.fromEntries(routedFontFamilies.map((family) => [
         family,
         normalizeFontFamilyUncached(
@@ -317,7 +464,33 @@ export function createProductionTextLayoutService(
     }),
     cjkFallback: options.cjkFallback,
     fontMetrics,
+    ...(source.fonts.plainLineBoxes ? { plainLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeLineBoxes ? { libreOfficeLineBoxes: true } : {}),
+    ...(source.fonts.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true } : {}),
+    ...(source.fonts.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true } : {}),
     eastAsiaFontCharsets: fontFamilyCharsets,
+    ...(() => {
+      // Symbol-encoded text (core symbol-font.ts) is judged by the core oracle
+      // in this very measuring context, with the Canvas font each resolution
+      // paints with (its complete family list, weight and style).
+      const oracle = createSymbolFaceOracle(context, {
+        probeOwner: options.symbolProbeOwner,
+        ...(options.symbolProbeCanvas ? { createCanvas: options.symbolProbeCanvas } : {}),
+      });
+      const fontOf = (resolution: import('./font-service.js').FontResolution) =>
+        canvasFontString(resolution.route, 32, resolution.weight, resolution.style);
+      return {
+        symbolText: (text: string, family: string, resolution: import('./font-service.js').FontResolution,
+          convertedRoute: (converted: string) => import('./font-service.js').FontResolution,
+          keepsShifted?: (shifted: string) => boolean) =>
+          // The colour proof is for the route the converted text paints with.
+          oracle.segments(text, family, fontOf(resolution), (converted) => fontOf(convertedRoute(converted)), keepsShifted),
+        symbolDraws: (code: string, resolution: import('./font-service.js').FontResolution) =>
+          oracle.draws(code, fontOf(resolution)),
+        symbolMonochrome: (text: string, resolution: import('./font-service.js').FontResolution) =>
+          oracle.monochrome(text, fontOf(resolution)),
+      };
+    })(),
     genericFamilies: Object.fromEntries(routedFontFamilies.map((family) => [
       family,
       classifyDocxFontGeneric(family, source.fonts.familyClasses, source.fonts.familyPitches),
@@ -327,60 +500,16 @@ export function createProductionTextLayoutService(
       // DOM-dependent vertical documents cannot retain worker mode, so folding
       // that unused capability into the general text snapshot would make equal
       // horizontal main/worker services advertise unequal cache identities.
-      // v2: the Canvas measurer also proves synthesized faces (#1848).
-      fingerprint: context ? 'canvas-text-metrics-v2' : 'deterministic-text-metrics-v1',
+      // v2 proves synthesized faces; v4 additionally owns temporary projectable
+      // directed source bundles. Capability participates in the stable semantic
+      // fingerprint, independently of source occurrence or cache history.
+      // v6/v3: a shorthand the context grid-fits at its own size is measured
+      // at the reference em (core reference-advances.ts).
+      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v6'
+        : context ? 'canvas-text-metrics-v3' : 'deterministic-text-metrics-v1',
       ...(context ? { sameGlyphRaster, ownsGlyphs } : {}),
-      measure(request: Readonly<GlyphMeasureRequest>) {
-        if (!context) return {
-          advancePt: [...request.text].length * request.fontSizePt * 0.5,
-          ascentPt: request.fontSizePt * 0.8,
-          descentPt: request.fontSizePt * 0.2,
-        };
-        const previousFont = context.font;
-        const previousLetterSpacing = context.letterSpacing;
-        const previousKerning = context.fontKerning;
-        const previousLang = selectCanvasLanguage(context, request.lang);
-        try {
-          context.font = canvasFontString(
-            request.fontRoute,
-            request.fontSizePt,
-            request.weight,
-            request.style,
-          );
-          context.letterSpacing = `${request.letterSpacingPt}px`;
-          if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
-          const metrics = context.measureText(request.text);
-          const horizontalInkBoundsAreTight =
-            Number.isFinite(metrics.actualBoundingBoxLeft)
-            && Number.isFinite(metrics.actualBoundingBoxRight);
-          // Retain the historical full-advance fallback for consumers that need
-          // a stable ink box (ruby, decoration, hit geometry), but label whether
-          // the horizontal edges are genuinely tight. Whitespace-trimming
-          // consumers must not infer sidebearings from the fallback box.
-          const inkBounds = {
-            xMinPt: horizontalInkBoundsAreTight
-              ? -metrics.actualBoundingBoxLeft : 0,
-            xMaxPt: horizontalInkBoundsAreTight
-              ? metrics.actualBoundingBoxRight : metrics.width,
-            ascentPt: metrics.actualBoundingBoxAscent,
-            descentPt: metrics.actualBoundingBoxDescent,
-          };
-          return {
-            advancePt: metrics.width,
-            ascentPt: metrics.fontBoundingBoxAscent ?? metrics.actualBoundingBoxAscent ?? 0,
-            descentPt: metrics.fontBoundingBoxDescent ?? metrics.actualBoundingBoxDescent ?? 0,
-            ...(Object.values(inkBounds).every(Number.isFinite) ? {
-              inkBounds,
-              ...(horizontalInkBoundsAreTight ? { horizontalInkBoundsAreTight: true } : {}),
-            } : {}),
-          };
-        } finally {
-          context.font = previousFont;
-          context.letterSpacing = previousLetterSpacing;
-          if (request.kerning != null) context.fontKerning = previousKerning;
-          restoreCanvasLanguage(context, previousLang);
-        }
-      },
+      measure,
+      ...(supportsDirectedContext ? { measureDirected: measure, supportsDirectedAuxiliaries: true as const } : {}),
     },
   });
 }

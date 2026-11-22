@@ -14,11 +14,15 @@ crate-type = ["cdylib", "rlib"]
 odt = [
     "dep:js-sys",
     "dep:docx-model",
-    "dep:png",
-    "dep:gif",
-    "dep:zune-jpeg",
-    "dep:zune-core",
-    "dep:crc32fast",
+]
+odp = ["odf-chart", "dep:js-sys", "dep:pptx-model", "dep:serde"]
+# The ODF chart reader, shared by the spreadsheet and presentation readers.
+odf-chart = ["dep:serde_json"]
+ods = [
+    "odf-chart",
+    "dep:js-sys",
+    "dep:xlsx-model",
+    "dep:serde",
 ]
 
 [dependencies]
@@ -29,12 +33,17 @@ roxmltree = { workspace = true }
 ooxml-common = { workspace = true }
 crc32fast = { workspace = true, optional = true }
 docx-model = { workspace = true, optional = true, features = ["owned-source-cursor"] }
+pptx-model = { workspace = true, optional = true }
+xlsx-model = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 png = { version = "0.18", default-features = false, optional = true }
 gif = { version = "0.14", default-features = false, features = ["std"], optional = true }
 zune-jpeg = { version = "0.5", default-features = false, features = ["std"], optional = true }
 zune-core = { version = "0.5", default-features = false, features = ["std"], optional = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 zip = { workspace = true }
 flate2 = { workspace = true }
 
@@ -47,3 +56,15 @@ omit-default-module-path = true
 [[example]]
 name = "inspect_odt"
 required-features = ["odt"]
+
+[[example]]
+name = "inspect_odp"
+required-features = ["odp"]
+
+[[example]]
+name = "inspect_ods"
+required-features = ["ods"]
+
+[[example]]
+name = "inspect_odp_charts"
+required-features = ["odp"]

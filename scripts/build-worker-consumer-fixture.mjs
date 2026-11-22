@@ -24,6 +24,10 @@ await build({
   base: './',
   resolve: {
     alias: {
+      // Nuxt (and many other apps) alias `assets` to their own folder. A
+      // bundled sibling URL without `./` would resolve there and the render
+      // worker would silently not be emitted (#2134).
+      assets: resolve(root, 'tests/worker-dist/consumer/app-assets'),
       '@silurus/ooxml/docx': entry('docx'),
       '@silurus/ooxml/xlsx': entry('xlsx'),
       '@silurus/ooxml/pptx': entry('pptx'),

@@ -128,6 +128,90 @@ const CONTROL = 'Quiet rivers carry morning light across the valley beyond the d
 const MANY_GAPS = `${Array.from({ length: 24 }, () => 'a').join(' ')} beyond the distant hills today`;
 
 describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
+  it.each([
+    { alignment: 'start' as const, stop: 216, count: 6, extra: 'seventh', admitted: 7 },
+    { alignment: 'end' as const, stop: 360, count: 16, extra: '', admitted: 13 },
+    { alignment: 'center' as const, stop: 216, count: 16, extra: '', admitted: 13 },
+  ])('admits the same near-overflow tab cell at a $alignment stop', async ({ alignment, stop, count, extra, admitted }) => {
+    // Independent Courier hmtx: every source glyph advances 1229/2048 em.
+    // A 481.9pt band leaves 265.9pt after the start stop, or 460.3pt after
+    // the three-glyph label when an end/center cell fits back. Word admits
+    // the next word under both, distribute and lowKashida in mode 15; mode
+    // 14 keeps it on the next line in all three original tab geometries.
+    const text = `${Array.from({ length: count }, () => 'word').join(' ')}${extra ? ` ${extra}` : ''}`;
+    const firstCellWords = async (jc: DocParagraph['alignment'], mode: number) => {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      const element = paragraph(`Row\t${text}`, jc, 12, false, { fontFamily: 'Courier New' }) as DocParagraph;
+      element.tabStops = [{ pos: stop, alignment, leader: 'none' }];
+      const [first] = await renderLines(element as BodyElement, 481.9, { compatibilityMode: mode }, {}, canvas);
+      const last = first!.at(-1)!;
+      const hanging = (last.text.match(/ +$/)?.[0].length ?? 0) * last.fontSize * 1229 / 2048;
+      expect(last.x + last.w - hanging).toBeLessThanOrEqual(481.9 + 1e-6);
+      return first!.map(run => run.text).join('').replace(/\t/g, '').replace(/^Row/, '').trim().split(/ +/).length;
+    };
+    for (const jc of ['both', 'distribute', 'lowKashida'] as const) {
+      expect.soft(await firstCellWords(jc, 15), `${jc}, mode 15`).toBe(admitted);
+      expect.soft(await firstCellWords(jc, 14), `${jc}, mode 14`).toBe(admitted - 1);
+    }
+  });
+
+  it.each([
+    { label: 'authored RTL mark', word: 'word', extra: 'seventh', rtl: true },
+    { label: 'unmarked RTL text', word: 'אבגד', extra: 'אבגדהוז', rtl: false },
+  ])('preserves natural-width partitions outside the LTR capability: $label', async ({ word, extra, rtl }) => {
+    // Six four-glyph words and their following spaces occupy 216.04pt;
+    // the seven-glyph next word exceeds the remaining 265.9pt cell at its
+    // natural Courier advance. The new alignment capability must preserve
+    // that partition when source gaps need RTL physical-edge ownership.
+    for (const alignment of ['distribute', 'lowKashida'] as const) {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      const element = paragraph(`Row\t${Array(6).fill(word).join(' ')} ${extra}`, alignment, 12, false,
+        { fontFamily: 'Courier New', rtl }) as DocParagraph;
+      element.tabStops = [{ pos: 216, alignment: 'start', leader: 'none' }];
+      const [first, second] = await renderLines(element as BodyElement, 481.9, { compatibilityMode: 15 }, {}, canvas);
+      const visibleWords = (line: readonly DocxTextRunInfo[]) => line.map(run => run.text)
+        .join(' ').replace('Row', '').trim().split(/\s+/).filter(Boolean);
+      expect.soft(visibleWords(first!), alignment).toHaveLength(6);
+      expect.soft(visibleWords(second!), alignment).toEqual([extra]);
+    }
+  });
+
+  it('keeps the natural breakable fit of CJK units under distribute and lowKashida', async () => {
+    // Issue #1660 mode-15 distribute controls: Word wraps the last ideograph
+    // of a CJK word that follows a space instead of compressing the line's
+    // U+0020 gaps, although the overflow is within the quarter-space cap.
+    // Courier stub: every glyph advances 1229/2048 em at 12pt (7.37pt).
+    const advance = 12 * 1229 / 2048;
+    const text = '甲甲甲甲 乙乙 丙丙丙丙';
+    for (const alignment of ['distribute', 'lowKashida'] as const) {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      // 12 glyphs with two spaces; 0.4 of a glyph short of the natural width,
+      // well inside the quarter of the two spaces' width.
+      const element = paragraph(text, alignment, 12, false, { fontFamily: 'Courier New' });
+      const lines = await renderLines(element, advance * 11.6, { compatibilityMode: 15 }, {}, canvas);
+      const visible = lines.map(line => line.map(run => run.text).join('').replace(/ +$/, ''));
+      expect.soft(visible, alignment).toEqual(['甲甲甲甲 乙乙 丙丙丙', '丙']);
+    }
+  });
+
   it('preserves a native space-to-letter pair only when its tokens share a line', async () => {
     // An independent whole-string measure owns this boundary: the stub adds
     // a 200/2048 em space-T pair, in addition to its ordinary letter pairs.
@@ -279,12 +363,58 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
     ...(paragraph('', 'both') as DocParagraph), runs, ...extra,
   }) as unknown as BodyElement;
 
+  it('keeps later Latin admissions after a refused CJK unit with a styled space', async () => {
+    // A refused CJK unit ends with its separately styled space, which reaches
+    // the line without the compression path; the Latin words after it must
+    // stay eligible, so distribute and lowKashida break like both/justify
+    // (whose admission they share for Latin words). Courier stub: every glyph
+    // advances 1229/2048 em.
+    const tail = 'Quiet rivers carry morning light across the valley';
+    const courier = () => {
+      const canvas = georgiaCanvas();
+      const context = canvas.getContext('2d') as CanvasRenderingContext2D;
+      const measure = context.measureText.bind(context);
+      context.measureText = value => {
+        const width = [...value].length * Number(/([\d.]+)px/.exec(context.font)?.[1] ?? 12) * 1229 / 2048;
+        return { ...measure(value), width, actualBoundingBoxRight: width };
+      };
+      return canvas;
+    };
+    const run = (text: string, extra: Partial<DocxTextRun> = {}) =>
+      textRun(text, { fontSize: 12, fontFamily: 'Courier New', ...extra });
+    const partition = async (alignment: DocParagraph['alignment'], width: number) =>
+      (await renderLines(withRuns([
+        run('Lead 丙丙'), run(' ', { color: 'ff0000' }), run(tail),
+      ], { alignment }), width, undefined, {}, courier())).map(words);
+    for (let width = 80; width <= 120; width += 0.25) {
+      const justified = await partition('both', width);
+      for (const alignment of ['distribute', 'lowKashida'] as const) {
+        expect.soft(await partition(alignment, width), `${alignment} at ${width}pt`).toEqual(justified);
+      }
+    }
+  });
+
   it('fits a word split at an authored style seam as one candidate', async () => {
     const [first] = await renderLines(withRuns([
       textRun('Quiet rivers carry morning light across the val'),
       textRun('ley beyond the distant hills today', { color: 'ff0000' }),
     ]), 233.3);
     expect(words(first).at(-1)).toBe('valley');
+  });
+
+  it('keeps later compression available after a refused source-split word', async () => {
+    const element = withRuns([
+      textRun('Quiet rivers carry morning light across the valley be'),
+      textRun('yond the distant hills today Quiets rivers carry morning light across the valley beyond the distant hills today', { color: 'ff0000' }),
+    ]);
+    (element as DocParagraph).alignment = 'distribute';
+    const result = await renderLines(element, 233.3);
+    // The style-split next word is refused on the first compressed line.
+    // On the next line the independently measured visible phrase advances
+    // 235.667pt, so retaining its final word also needs real contraction.
+    expect(words(result[0]).at(-1)).toBe('valley');
+    expect(words(result[1]).join(' ')).toBe('beyond the distant hills today Quiets rivers carry');
+    expect(result[1].at(-1)!.x + GEORGIA_SUM('carry') * 11 / 2048).toBeCloseTo(233.3, 3);
   });
 
   it('counts double spaces and separators in their own source runs', async () => {
@@ -383,12 +513,14 @@ describe('WORD_JUSTIFIED_INTERWORD_COMPRESSION', () => {
   });
 
   // Closed paragraph/layout classes are outside the measured Word rule.
-  // Compare their actual partitions with the previous mode-14 policy.
+  // Compare their actual partitions with the previous mode-14 policy. The
+  // linesAndChars row opts out of the pre-15 grid line-width reduction
+  // (WORD_GRID_RIGHT_INDENT_PITCH_ALIGNMENT), which mode 15 does not apply,
+  // so the two modes differ only in the compression rule under test.
   it.each([
-    ['linesAndChars', paragraph(CONTROL, 'both'), { docGridType: 'linesAndChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
+    ['linesAndChars', { ...paragraph(CONTROL, 'both'), adjustRightInd: false } as BodyElement, { docGridType: 'linesAndChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
     ['snapToChars', paragraph(CONTROL, 'both'), { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 }, {}],
-    ['distribute', paragraph(CONTROL, 'distribute'), {}, {}],
-    ['kashida', paragraph(CONTROL, 'lowKashida'), {}, {}],
+    ['medium kashida', paragraph(CONTROL, 'mediumKashida'), {}, {}],
     ['RTL', withRuns([textRun(CONTROL)], { bidi: true }), {}, {}],
     ['left', paragraph(CONTROL, 'left'), {}, {}],
   ] as const)('preserves the previous partition for %s', async (_name, element, section, settings) => {

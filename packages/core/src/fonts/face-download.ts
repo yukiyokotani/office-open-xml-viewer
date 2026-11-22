@@ -2,32 +2,45 @@
  * Library acquisition of `url` faces. Library resource policy, not OOXML
  * behaviour.
  *
- * Face files are normally left to `FontFace.load()` in the painting realm.
- * The library fetches them itself, and hands the bytes to `FontFace` as a
- * `data` face, in two cases only:
+ * The library fetches every http(s) / blob: face file itself, and keeps the
+ * bytes (so their OpenType tables can be read for line metrics, and every
+ * limit judges them); only data: URLs are left to `FontFace`. The face is
+ * registered from those bytes, or, for a preset's stated file host, from the
+ * URL they were downloaded from (`source-session.ts`). Every source kind
+ * takes one path (`source-session.ts`): a face is fetched when the demand
+ * first needs its `unicode-range` subset (one request per needed subset),
+ * after its family is claimed (claim precedence is unchanged: a claimed face
+ * that cannot be fetched fails like a face that cannot load), within the
+ * painting realm's face-loading ceiling, as the browser's own fetch would.
  *
- * - a source configured with `credentials: 'omit'` (`fontCssApi`, `fontCss`,
- *   `fontFiles`): CSS font fetching always sends same-origin credentials, so
- *   omitting them needs a request of the library's own, in the painting realm;
- * - a {@link fontResolver} answer of a worker-mode document: the page fetches
- *   the claimed faces' http(s) / blob: URLs and the worker receives the bytes
- *   (`resolver-bridge-host.ts`), so cookies, HTTP authentication and Referer
- *   checks see the page exactly as when the page paints. The viewer-realm
- *   sessions of an XLSX worker-mode workbook acquire through the same cache,
- *   so both realms paint the same bytes from one request.
+ * - a `fontCssApi` / `fontCss` / `fontFiles` source: in the painting realm,
+ *   with the source's credentials (`'same-origin'` by default, as CSS font
+ *   fetching; `'omit'` when configured);
+ * - a {@link fontResolver} answer: in the page realm, with `'same-origin'`,
+ *   for a main-mode document by its own session
+ *   ({@link inRealmResolverFaceAcquirer}), for a worker-mode document by the
+ *   page, and the worker receives the bytes (`resolver-bridge-host.ts`), so
+ *   cookies, HTTP authentication and Referer checks see the page exactly as
+ *   when the page paints. The viewer-realm sessions of an XLSX worker-mode
+ *   workbook acquire through the same cache, so both realms paint the same
+ *   bytes from one request.
  *
- * Acquisition runs after a family is claimed (claim precedence is unchanged:
- * a claimed face that cannot be fetched fails like a face that cannot load)
- * and within the painting realm's face-loading ceiling, as the browser's own
- * fetch would. Requests are CORS requests, as CSS font fetching is, at most
- * {@link MAX_CONCURRENT_FACE_DOWNLOADS} at a time per realm.
+ * Requests are CORS requests, as CSS font fetching is, at most
+ * {@link MAX_CONCURRENT_FACE_DOWNLOADS} at a time per realm, or the
+ * {@link FontCssApiSource.parallelFaceDownloads} of a library preset whose
+ * file host it states (a pool of its own, also per realm).
  *
  * Bytes are charged to the realm's retained-byte ceiling as they arrive, so
- * no batch can outgrow it, and each body is bounded by the face ceiling; a
- * breach rejects with `OoxmlError('font-source-limit')` and aborts the rest of
- * the batch. A network error, a non-OK status or a missed deadline fails that
- * face only. A completed download is shared by every holder of the same
- * (credentials, URL) until the last holder releases it; a failure is not kept.
+ * no batch can outgrow it, and each body is bounded by the face ceiling. A
+ * breach, a network error, a non-OK status or a missed deadline fails that
+ * face only (its family is warned). A download in flight is joined, and a
+ * completed one shared, by every holder of the same (credentials, URL) until
+ * the last holder releases it: the bytes are the same for each, so sharing
+ * them is only a memory and request saving. Each holder judges its own
+ * outcome against its own deadline; a holder's outcome never decides
+ * another's, since every document registers its faces under names of its own
+ * (`source-session.ts`). A failure is not kept: a later request retries. A
+ * cancellation (the requester released) is no outcome.
  */
 import { fontSourceLimitError } from '../errors/font-source-limit.js';
 import { OoxmlError } from '../errors/ooxml-error.js';
@@ -35,7 +48,7 @@ import { createAbortError } from '../internal/abort.js';
 import { HARD_MAX_FONT_SOURCE_FACE_BYTES } from '../worker/resource-policy.generated.js';
 import type { FontResolverFailures } from './resolver-failures.js';
 import { chargeRetainedBytes, fontSourceId, refundRetainedBytes, SharedTask } from './source-cache.js';
-import type { FontFaceDeclaration, FontResolverSource, FontSourceCredentials } from './source.js';
+import type { FontCssApiSource, FontFaceDeclaration, FontResolverSource, FontSourceCredentials } from './source.js';
 
 /**
  * Abort reason of a deadline (the face-loading ceiling, a bridged call's
@@ -44,7 +57,8 @@ import type { FontFaceDeclaration, FontResolverSource, FontSourceCredentials } f
  */
 export const FONT_DEADLINE_REASON: unique symbol = Symbol('font deadline');
 
-/** Parallel face downloads per realm (the HTTP/1.1 per-host norm). */
+/** Parallel face downloads per realm (the HTTP/1.1 per-host norm), for every
+ * source that sets no {@link FontCssApiSource.parallelFaceDownloads}. */
 export const MAX_CONCURRENT_FACE_DOWNLOADS = 6;
 
 /** Whether the library acquires `declaration` (an http(s) or blob: URL). */
@@ -57,15 +71,21 @@ export type FaceAcquisition = { readonly data: ArrayBuffer } | { readonly reason
 
 // ---- download slots -------------------------------------------------------------
 
-let active = 0;
-const queued: (() => void)[] = [];
+/** One realm-wide download slot pool per parallelism (the default pool, and
+ * a source's own {@link FontCssApiSource.parallelFaceDownloads} pool). */
+interface SlotPool { active: number; readonly queued: (() => void)[] }
+const pools = new Map<number, SlotPool>();
 
-/** Wait for a download slot; the returned function frees it. A freed slot
- * passes straight to the first queued waiter (it stays counted as taken), so
- * a newcomer can never take it during the handoff. */
-async function slot(signal: AbortSignal): Promise<() => void> {
-  if (active < MAX_CONCURRENT_FACE_DOWNLOADS) {
-    active++;
+/** Wait for a download slot of the pool of `parallel` slots; the returned
+ * function frees it. A freed slot passes straight to the first queued waiter
+ * (it stays counted as taken), so a newcomer can never take it during the
+ * handoff. */
+async function slot(signal: AbortSignal, parallel: number): Promise<() => void> {
+  let pool = pools.get(parallel);
+  if (!pool) pools.set(parallel, pool = { active: 0, queued: [] });
+  const { queued } = pool;
+  if (pool.active < parallel) {
+    pool.active++;
   } else {
     await new Promise<void>((resolve, reject) => {
       const take = () => { signal.removeEventListener('abort', onAbort); resolve(); };
@@ -85,7 +105,7 @@ async function slot(signal: AbortSignal): Promise<() => void> {
     freed = true;
     const next = queued.shift();
     if (next) next();
-    else active--;
+    else pool.active--;
   };
 }
 
@@ -131,6 +151,10 @@ async function readBoundedBytes(response: FaceResponse, charge: (bytes: number) 
     reader.cancel().catch(() => undefined);
     throw error;
   }
+  // One chunk that is its whole buffer is the body itself: no copy.
+  const [only] = chunks;
+  if (chunks.length === 1 && only!.byteOffset === 0 && only!.byteLength === only!.buffer.byteLength
+    && only!.buffer instanceof ArrayBuffer) return only!.buffer;
   const bytes = new Uint8Array(size);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
@@ -175,12 +199,13 @@ async function download(
   credentials: FontSourceCredentials,
   signal: AbortSignal,
   entry: Entry,
+  parallel: number,
 ): Promise<FaceAcquisition> {
   const charge = (bytes: number) => {
     chargeRetainedBytes(bytes);
     entry.charged += bytes;
   };
-  const free = await slot(signal);
+  const free = await slot(signal, parallel);
   let result: FaceAcquisition;
   try {
     if (typeof fetch !== 'function') {
@@ -197,8 +222,8 @@ async function download(
     }
   } catch (error) {
     dropEntry(key, entry);
-    if (error instanceof OoxmlError) throw error;
-    if (signal.aborted) throw createAbortError('Font download abandoned');
+    // A ceiling breach is this face's failure, like a network error.
+    if (signal.aborted && !(error instanceof OoxmlError)) throw createAbortError('Font download abandoned');
     return { reason: error instanceof Error ? error.message : String(error) };
   } finally {
     free();
@@ -234,6 +259,7 @@ async function acquireOne(
   credentials: FontSourceCredentials,
   signal: AbortSignal,
   holder: object,
+  parallel: number,
 ): Promise<FaceAcquisition> {
   // A requester that already left starts nothing and takes no hold.
   if (signal.aborted || releasedHolders.has(holder)) return { reason: 'timed out' };
@@ -243,7 +269,7 @@ async function acquireOne(
     // Abandoned before it settled (every waiter left): forget it, so the next
     // request starts afresh; the producer refunds what it charged.
     entry = new Entry(
-      (taskSignal, created) => download(key, url, credentials, taskSignal, created),
+      (taskSignal, created) => download(key, url, credentials, taskSignal, created, parallel),
       (created) => { if (entries.get(key) === created) entries.delete(key); },
     );
     entries.set(key, entry);
@@ -282,9 +308,14 @@ function keptAcquisition(url: string, credentials: FontSourceCredentials, holder
  * Acquire `urls` for `holder` (which keeps every completed download until
  * {@link releaseAcquiredFaces}). A face completed after `deadline` (an
  * absolute `Date.now()` value) fails with `'timed out'`, whatever the timers
- * did. Rejects with `OoxmlError('font-source-limit')` on a ceiling breach,
- * after aborting the rest of the batch; an abort of `signal` fails every
- * unfinished face with `'timed out'`.
+ * did; a face beyond a ceiling fails with the breach as its reason; an abort
+ * of `signal` fails every unfinished face with `'timed out'`.
+ *
+ * `parallel` picks the realm's download pool a new download waits in
+ * ({@link MAX_CONCURRENT_FACE_DOWNLOADS} by default). `onAcquired` is told of
+ * each URL as soon as its bytes are in hand within the deadline, before the
+ * whole batch settles, so a caller can prepare work on them while the rest
+ * still downloads; the returned map stays the outcome.
  */
 export async function acquireFaceUrls(
   urls: Iterable<string>,
@@ -293,28 +324,37 @@ export async function acquireFaceUrls(
     readonly signal: AbortSignal;
     readonly deadline: number;
     readonly holder: object;
+    readonly parallel?: number;
+    readonly onAcquired?: (url: string, data: ArrayBuffer) => void;
   },
 ): Promise<Map<string, FaceAcquisition>> {
-  const { credentials, holder, deadline } = options;
-  const batch = new AbortController();
-  const onAbort = () => batch.abort();
-  options.signal.addEventListener('abort', onAbort, { once: true });
-  if (options.signal.aborted) batch.abort();
-  try {
-    const unique = [...new Set(urls)];
-    const results = await Promise.all(unique.map(async (url): Promise<[string, FaceAcquisition]> => {
-      try {
-        const result = await acquireOne(url, credentials, batch.signal, holder);
-        return [url, Date.now() > deadline ? { reason: 'timed out' } : result];
-      } catch (error) {
-        if (error instanceof OoxmlError) { batch.abort(); throw error; }
-        return [url, { reason: 'timed out' }];
+  const { credentials, holder, deadline, signal, onAcquired } = options;
+  const parallel = options.parallel ?? MAX_CONCURRENT_FACE_DOWNLOADS;
+  // A deadline ends the wait with an outcome; any other abort of `signal` is
+  // a cancellation (the requester is gone), which decides nothing.
+  const cancelled = () => releasedHolders.has(holder)
+    || (signal.aborted && signal.reason !== FONT_DEADLINE_REASON);
+  const unique = [...new Set(urls)];
+  const results = await Promise.all(unique.map(async (url): Promise<[string, FaceAcquisition]> => {
+    const key = `${credentials}\u0000${url}`;
+    let result: FaceAcquisition;
+    try {
+      result = await acquireOne(url, credentials, signal, holder, parallel);
+      if (Date.now() > deadline && 'data' in result) {
+        // Missed the deadline: the bytes stay only if another holder keeps them.
+        const entry = entries.get(key);
+        if (entry) returnLease(key, entry, holder);
+        result = { reason: 'timed out' };
       }
-    }));
-    return new Map(results);
-  } finally {
-    options.signal.removeEventListener('abort', onAbort);
-  }
+    } catch {
+      result = { reason: 'timed out' };
+    }
+    if (cancelled() && !('data' in result)) return [url, { reason: 'timed out' }];
+    // Preparation only: whatever it does, the outcome stands.
+    if (onAcquired && 'data' in result) try { onAcquired(url, result.data); } catch { /* ignored */ }
+    return [url, result];
+  }));
+  return new Map(results);
 }
 
 /** Return every acquisition `holder` keeps; idempotent. */
@@ -346,20 +386,21 @@ export function withAcquiredBytes(declaration: FontFaceDeclaration, data: ArrayB
 
 // ---- resolver faces of a worker-mode document --------------------------------
 
-/** One resolver source's claimed URL faces to acquire. */
+/** URL faces of one resolver source's claimed families that the demand now
+ * needs (a subset of each family's faces: the needed `unicode-range` subsets). */
 export interface ResolverFaceRequest {
   readonly source: FontResolverSource;
   /** Position of the source in the document's `fonts`. */
   readonly sourceIndex: number;
-  /** Claimed families and the URLs of their faces. */
+  /** Claimed families and the URLs of their faces the demand needs. */
   readonly families: readonly { readonly family: string; readonly urls: readonly string[] }[];
 }
 
 /**
- * Acquires the claimed URL faces of a resolver in the page realm: the worker
- * bridge (`resolver-bridge.ts`) or, for a viewer realm sharing a worker-mode
- * document, {@link acquireResolverFacesInRealm}. Resolves with an outcome per
- * URL; rejects with `OoxmlError('font-source-limit')` on a ceiling breach.
+ * Acquires needed URL faces of a resolver's claimed families in the page
+ * realm: the worker bridge (`resolver-bridge.ts`) or, in the page,
+ * {@link acquireResolverFacesInRealm}. Resolves with an outcome per URL (a
+ * ceiling breach is that URL's failure).
  */
 export type ResolverFaceAcquirer = (
   request: ResolverFaceRequest,
@@ -396,7 +437,7 @@ export function inRealmResolverFaceAcquirer(failures: FontResolverFailures | und
 }
 
 /**
- * Acquire a resolver's claimed URL faces in this (the page) realm, with one
+ * Acquire URL faces of a resolver's claimed families in this (the page) realm, with one
  * outcome per URL for the whole document: the first terminal outcome any
  * requester of the document reaches (the worker bridge, the XLSX viewer
  * realm) is recorded, and every requester adopts it, including one whose own

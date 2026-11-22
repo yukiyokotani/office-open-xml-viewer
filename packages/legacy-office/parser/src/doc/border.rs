@@ -132,16 +132,13 @@ impl Border {
             25 => "threeDEngrave",
             26 => "outset",
             27 => "inset",
-            // MS-DOC 2.9.22 lists 0xFF as "MUST be ignored". It is not
-            // an undefined type or a no-border style. This projection cannot
-            // preserve an ignored assignment separately from an authored
-            // clear while resolving inherited edges, so winning FF stays
-            // unsupported. Modern native cell assignments can retain a
-            // validated FF until a complete later owner or reset replaces it;
-            // their surviving active row-mark-owned value still errors in
-            // PreparedBorder::decode or is refused by an existing table gate.
-            // A structural discard of unresolved FF is also refused. The exact
-            // Nil sentinel was handled before interpreting these fields.
+            // MS-DOC 2.9.22 lists 0xFF without a drawing. Direct modern
+            // sprmTSetBrc cell assignments are normalized to the single
+            // border Word prints before they reach this decoder
+            // (PreparedBorder::read_cell_assignment). Other carriers
+            // (paragraph, row-array, TC80, old and table-style borders) have
+            // no Word evidence yet and stay unsupported. The exact Nil
+            // sentinel was handled before interpreting these fields.
             0xff => {
                 return Err(unsupported(
                     "unsupported Word border type 0xFF ignore semantics",

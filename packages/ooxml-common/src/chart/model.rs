@@ -25,6 +25,7 @@ use super::*;
 
 /// One DrawingML custom-dash atom, normalized to line-width multipliers.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartLineDashSegment {
     /// Dash length as a multiplier of the rendered line width.
@@ -35,6 +36,7 @@ pub struct ChartLineDashSegment {
 
 /// Effective paint for one role in an Office 2013+ Chart Style part.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartExElementStyle {
     /// The source element carried a local `spPr`. On a direct formatting
@@ -211,6 +213,7 @@ pub struct ChartExElementStyle {
 /// as shapes, so this wire shape intentionally mirrors core's shared `Fill`
 /// discriminated union instead of introducing chart-specific paint semantics.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "fillType", rename_all = "camelCase")]
 pub enum ChartStyleFill {
     #[serde(rename = "solid")]
@@ -291,6 +294,7 @@ pub enum ChartStyleFill {
 /// Bands are indexed low-to-high (§21.2.2.14); paint uses the shared DrawingML
 /// fill model so pattern/gradient behavior stays host-independent.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSurfaceBandFormat {
     pub idx: u32,
@@ -316,6 +320,7 @@ pub struct ChartSurfaceBandFormat {
 /// complete role; Table 5 Fade palettes retain one bounded role per final
 /// 1..48 band count because their endpoint depends on the domain maximum.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartClassicSurfaceBandStyles {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +332,7 @@ pub struct ChartClassicSurfaceBandStyles {
 /// `<c:plotArea><c:dTable>` (`CT_DTable`) for classic DrawingML charts.
 /// It is common chart content shared by DOCX/XLSX/PPTX hosts.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDataTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -375,6 +381,7 @@ pub struct ChartDataTable {
 /// Source-order metadata for one direct classic chart-group child of
 /// `<c:plotArea>`. The range indexes the single flattened `series` vector.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartPlotGroup {
     pub kind: String,
@@ -414,6 +421,7 @@ pub struct ChartPlotGroup {
 /// Office-observed policies; arbitrary numeric layout tuning is deliberately
 /// not part of the wire model.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum ChartCartesianAutoLayoutProfile {
     WordClassicColumn,
@@ -424,6 +432,7 @@ pub enum ChartCartesianAutoLayoutProfile {
 /// starting point for binary-source projections; the XML parser still fills
 /// every field explicitly.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartModel {
     // ── Required (always serialized) ────────────────────────────────────────
@@ -560,6 +569,13 @@ pub struct ChartModel {
     pub legend_entries: Option<Vec<ChartLegendEntryOverride>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_format_code: Option<String>,
+    /// Per numeric section of `val_axis_format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub val_axis_format_divisors: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub val_axis_number_format: Option<ChartAxisNumberFormat>,
     /// `<c:valAx><c:dispUnits>` (§21.2.2.45) scales displayed axis-associated
@@ -700,6 +716,13 @@ pub struct ChartModel {
     pub val_axis_line_paint_authored: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_format_code: Option<String>,
+    /// Per numeric section of `cat_axis_format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cat_axis_format_divisors: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cat_axis_number_format: Option<ChartAxisNumberFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1190,6 +1213,7 @@ pub struct ChartModel {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartStockBarPaint {
     /// Direct `<c:upBars|downBars><c:spPr>` DrawingML effects. Fill/line stay
@@ -1221,6 +1245,7 @@ pub struct ChartStockBarPaint {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartStockUpDownBarStyle {
     pub gap_width_percent: f64,
@@ -1229,6 +1254,7 @@ pub struct ChartStockUpDownBarStyle {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartStockAutomaticStyle {
     pub line_color: String,
@@ -1239,6 +1265,7 @@ pub struct ChartStockAutomaticStyle {
 
 /// Direct DrawingML line paint for group-owned chart decoration geometry.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDecorationLineStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1265,6 +1292,7 @@ pub struct ChartDecorationLineStyle {
 /// zero-based document-order index among line groups, matching
 /// `ChartSeries::line_group_index`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartLineGroupDecorations {
     pub group_index: u32,
@@ -1277,6 +1305,7 @@ pub struct ChartLineGroupDecorations {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartAreaGroupDecorations {
     pub group_index: u32,
@@ -1285,6 +1314,7 @@ pub struct ChartAreaGroupDecorations {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartBarGroupDecorations {
     pub group_index: u32,
@@ -1293,6 +1323,7 @@ pub struct ChartBarGroupDecorations {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartOfPie {
     pub r#type: String,
@@ -1311,6 +1342,7 @@ pub struct ChartOfPie {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartThreeDSeriesAxis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1376,6 +1408,7 @@ pub struct ChartThreeDSeriesAxis {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartThreeDSurface {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1399,6 +1432,7 @@ pub struct ChartThreeDSurface {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartThreeDPictureOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1418,6 +1452,7 @@ pub struct ChartThreeDPictureOptions {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartThreeD {
     /// Whether `<c:view3D>` itself is present. Child values retain their schema
@@ -1474,6 +1509,7 @@ pub struct ChartThreeD {
 
 /// One formatted run in a chart-drawing text box.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartTextRun {
     pub text: String,
@@ -1505,6 +1541,7 @@ pub struct ChartTextRun {
 
 /// One DrawingML paragraph in a chart-drawing text box.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartTextParagraph {
     pub runs: Vec<ChartTextRun>,
@@ -1514,6 +1551,7 @@ pub struct ChartTextParagraph {
 
 /// A text shape anchored relative to the chart space.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartTextBox {
     pub x: f64,
@@ -1541,6 +1579,7 @@ pub struct ChartTextBox {
 
 /// Pattern-only chart-series fill descriptor matching TS `PatternFill`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartPatternFill {
     pub fill_type: String,
@@ -1551,6 +1590,7 @@ pub struct ChartPatternFill {
 
 /// Mirror of TS `ChartSeries`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSeries {
     pub name: String,
@@ -1723,6 +1763,7 @@ pub struct ChartSeries {
 
 /// Mirror of TS `ChartTrendline` — `<c:ser><c:trendline>` (§21.2.2.211).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartTrendline {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1816,6 +1857,7 @@ pub struct ChartTrendline {
 
 /// Mirror of TS `ChartDataPointOverride`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDataPointOverride {
     pub idx: u32,
@@ -1872,6 +1914,7 @@ pub struct ChartDataPointOverride {
 
 /// Mirror of TS `ChartDataLabelOverride`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDataLabelOverride {
     pub idx: u32,
@@ -1980,6 +2023,7 @@ pub struct ChartDataLabelOverride {
 /// A `None` on `ChartSeriesDataLabels::label_box` means the file wrote no box
 /// shape, so the renderer keeps the historical plain-text label (no callout).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartLabelBox {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2022,6 +2066,7 @@ pub struct ChartLabelBox {
 
 /// Mirror of TS `ChartSeriesDataLabels`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartSeriesDataLabels {
     /// Series-level `<c:dLbls><c:delete>` suppresses the collection. A
@@ -2048,6 +2093,24 @@ pub struct ChartSeriesDataLabels {
     pub font_hidden: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    /// Per numeric section of `format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_divisors: Option<Vec<f64>>,
+    /// The format of the percentage in a label, where it is not
+    /// `format_code`: an OpenDocument label formats its value and its
+    /// percentage by separate data styles (ODF 1.3 Part 3 §19.511
+    /// `style:percentage-data-style-name`). Absent (never set by DrawingML
+    /// parsers): the percentage takes `format_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_format_code: Option<String>,
+    /// The section divisors of `percent_format_code`, as `format_divisors`
+    /// are of `format_code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_format_divisors: Option<Vec<f64>>,
     /// `<c:dLbls><c:separator>` (§21.2.2.170) inserted between enabled label
     /// components. Office commonly stores a line break here for pie labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2118,6 +2181,7 @@ pub struct ChartSeriesDataLabels {
 
 /// Mirror of TS `ChartErrBars`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartErrBars {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2141,6 +2205,7 @@ pub struct ChartErrBars {
 
 /// Mirror of TS `SecondaryValueAxis`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SecondaryValueAxis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2157,6 +2222,13 @@ pub struct SecondaryValueAxis {
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_code: Option<String>,
+    /// Per numeric section of `format_code` (the text section excluded), the
+    /// divisor a value is divided by once its section is chosen on the
+    /// undivided value: an OpenDocument `number:display-factor` (ODF 1.3
+    /// Part 3 §19.346), as a cell's `NumFmt::section_divisors`. Absent (never
+    /// set by DrawingML parsers) or empty: no section divides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_divisors: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub number_format: Option<ChartAxisNumberFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2272,6 +2344,7 @@ pub struct SecondaryValueAxis {
 /// label. The divisor is kept explicitly so custom and built-in units share
 /// one renderer rule. Label formatting is separate from the axis title.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDisplayUnits {
     pub divisor: f64,
@@ -2284,6 +2357,7 @@ pub struct ChartDisplayUnits {
 /// Authored display-unit label properties. `text` is absent for Office's
 /// automatic label generated from the unit token/divisor.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartDisplayUnitsLabel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2324,6 +2398,7 @@ pub struct ChartDisplayUnitsLabel {
 /// the parser only groups the raw points by category and threads the flags.
 /// Mirror of TS `ChartexBoxSeries`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexBoxSeries {
     /// Series display name (`<cx:tx><cx:txData><cx:v>`), e.g. "Series1".
@@ -2368,6 +2443,7 @@ pub struct ChartexBoxSeries {
 /// A chartEx box-and-whisker chart: the unique categories plus one series per
 /// data column. Mirror of TS `ChartexBoxWhisker`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexBoxWhisker {
     /// The source omitted its category dimension, so every series represents
@@ -2389,6 +2465,7 @@ pub struct ChartexBoxWhisker {
 /// terminates early); `size` is that row's size value. Mirror of TS
 /// `ChartexSunburstRow`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexSunburstRow {
     /// Label chain root→leaf (Branch, Stem, …, Leaf), empty tail trimmed.
@@ -2401,6 +2478,7 @@ pub struct ChartexSunburstRow {
 /// A chartEx sunburst: the flat rows the renderer folds into a ring tree, plus
 /// the theme accent palette to color branches. Mirror of TS `ChartexSunburst`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexSunburst {
     /// One row per deepest-level data point.
@@ -2411,6 +2489,7 @@ pub struct ChartexSunburst {
 /// The row encoding is identical to sunburst because both layouts consume the
 /// same deepest→root `<cx:strDim type="cat">` levels and numeric size values.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexTreemap {
     pub rows: Vec<ChartexSunburstRow>,
@@ -2422,6 +2501,7 @@ pub struct ChartexTreemap {
 
 /// One geospatial data row from a chartEx `regionMap` series.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexRegionMapRow {
     /// Authored category label (usually a country/region name).
@@ -2438,6 +2518,7 @@ pub struct ChartexRegionMapRow {
 /// copied onto the public wire; their presence/provider are retained so a host
 /// can distinguish authored geography from an offline fallback.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexGeography {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2458,6 +2539,7 @@ pub struct ChartexGeography {
 
 /// A minimum/middle/maximum stop position in a Region Map value ramp.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexValueColorStop {
     /// `extremeValue`, `number`, or `percent`.
@@ -2468,6 +2550,7 @@ pub struct ChartexValueColorStop {
 
 /// Optional authored `valueColors`/`valueColorPositions` gradient contract.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexRegionMapColors {
     /// `CT_ValueColorPositions@count`; omitted defaults to two stops.
@@ -2490,6 +2573,7 @@ pub struct ChartexRegionMapColors {
 /// ChartEx Region Map data-only model. Country lookup and geometry stay in the
 /// core renderer so parser hosts remain deterministic and network-free.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexRegionMap {
     pub rows: Vec<ChartexRegionMapRow>,
@@ -2505,6 +2589,7 @@ pub struct ChartexRegionMap {
 /// underflow/overflow bounds are retained; the schema's `auto` token remains
 /// `None`, as does omission.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartexHistogramBinning {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2525,6 +2610,7 @@ pub struct ChartexHistogramBinning {
 
 /// Mirror of TS `ChartManualLayout`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartManualLayout {
     pub x_mode: String,
@@ -2543,6 +2629,7 @@ pub struct ChartManualLayout {
 
 /// Mirror of TS `LegendManualLayout`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LegendManualLayout {
     pub x_mode: String,
@@ -2559,6 +2646,7 @@ pub struct LegendManualLayout {
 
 /// Indexed classic-chart legend entry override (`CT_LegendEntry`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChartLegendEntryOverride {
     pub idx: u32,
