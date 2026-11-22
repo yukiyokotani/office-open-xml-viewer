@@ -2612,9 +2612,9 @@ thread_local! {
 /// rule (mark None).
 /// The marker run stays in place even when it is the paragraph's only run, so
 /// the paragraph's indents, alignment and direction position it like any
-/// other inline content. Paragraph ink, numbering, frames,
-/// a hidden mark, tables and other run content are not represented; those
-/// stories stay unsupported (absent).
+/// other inline content. Paragraph borders and shading paint with the
+/// story. Numbering, frames, a hidden mark, tables and other run content are
+/// not represented; those stories stay unsupported (absent).
 #[allow(clippy::too_many_arguments)]
 fn selected_note_separator_story(
     note: roxmltree::Node<'_, '_>,
@@ -2678,6 +2678,10 @@ fn selected_note_separator_story(
             || is_w(*node, "delInstrText")
             || is_w(*node, "separator")
             || is_w(*node, "continuationSeparator")
+            // §17.3.3.30 symbols and §17.3.3.18/.29 hyphens parse as text.
+            || is_w(*node, "sym")
+            || is_w(*node, "noBreakHyphen")
+            || is_w(*node, "softHyphen")
             || (is_w(*node, "br")
                 && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
     };
@@ -2789,11 +2793,11 @@ fn selected_note_separator_story(
                     }
             )
         });
+        // Paragraph borders and shading (§17.3.1.24/.31) are laid out and
+        // painted with the story's paragraph.
         if !representable
             || parsed.numbering.is_some()
             || parsed.frame_pr.is_some()
-            || parsed.borders.is_some()
-            || parsed.shading.is_some()
             || parsed.mark_vanish
         {
             return None;
@@ -3224,11 +3228,9 @@ mod note_separator_tests {
                         .any(|run| matches!(run, DocRun::Text(text) if text.note_separator_marker))
                 });
             // A marker run formatted unlike its mark, beside a text run or
-            // with text inside it, is retained in place; ink, borders and a
-            // hidden mark are not represented.
-            let represented = !paragraph.contains("pBdr")
-                && !paragraph.contains("shd")
-                && !paragraph.contains("vanish");
+            // with text inside it, is retained in place, as are paragraph
+            // borders and shading; a hidden mark is not represented.
+            let represented = !paragraph.contains("vanish");
             assert_eq!(marker, represented.then_some(true), "{paragraph}");
             if paragraph.contains("<w:separator/><w:t>") {
                 // The marker is split from the text of its run.

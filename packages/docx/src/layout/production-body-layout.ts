@@ -823,10 +823,15 @@ function acquireBodyStoryLayout(
   // cannot change their acquisition. Recovery field blocks are destination-
   // acquired before fit, not painted from this shared template. All other
   // stories keep their page and placement facts in the cache key.
-  // A separator story holding a field (PAGE, §17.16.5.44) reads its
-  // destination page, so each page acquires its own occurrence.
-  const sharedAcquisition = reusableNote || (reservedRole !== undefined && !root.some((block) =>
-    block.type === 'paragraph' && block.runs.some((run) => run.type === 'field')));
+  // A separator story holding a field (PAGE, §17.16.5.44; NUMPAGES) reads
+  // its destination page and the page count, so each page acquires its own
+  // occurrence, keyed by that field context.
+  const separatorFields = reservedRole !== undefined && root.some((block) =>
+    block.type === 'paragraph' && block.runs.some((run) => run.type === 'field'));
+  const sharedAcquisition = reusableNote || (reservedRole !== undefined && !separatorFields);
+  const runtime = paragraphAcquisitionCacheOf(services);
+  const field = fieldAcquisitionContextOf(services);
+  const pageField = field.resolveDestinationPage?.(request.pageIndex);
   const occurrence = JSON.stringify(overflowingNote
     ? [request.source, sharedAcquisition ? null : request.pageIndex, 'overflow']
     : [request.source, sharedAcquisition ? null : request.pageIndex]);
@@ -836,12 +841,10 @@ function acquireBodyStoryLayout(
     band: sharedAcquisition ? null : request.bandTranslationPt ?? null,
     pageFrames: sharedAcquisition ? null : request.pageFrames ?? null,
     sourceStart: request.sourceStart ?? null,
+    fields: separatorFields ? [field.totalPages, pageField ?? null, dependencies.state.pageNumberFormat ?? null] : null,
   });
   const pageStoryCache = (request.source.story === 'header' || request.source.story === 'footer')
     ? headerFooterLayoutCacheOf(services) : undefined;
-  const runtime = paragraphAcquisitionCacheOf(services);
-  const field = fieldAcquisitionContextOf(services);
-  const pageField = field.resolveDestinationPage?.(request.pageIndex);
   if (request.source.story === 'header' || request.source.story === 'footer'
     || request.source.story === 'footnote' || request.source.story === 'endnote') {
     // Admit at the acquisition boundary, before either trial or descendant
@@ -2265,6 +2268,8 @@ function acquireSelectedNoteSeparatorBand(
         + wordNoteSeparatorRuleDropPt(markFontSizePt),
       markFontSizePt,
       bidi,
+      // Its borders and shading still paint.
+      ...(paragraph.borders.length > 0 || paragraph.shading !== undefined ? { paragraphs } : {}),
     });
   }
   // The marker laid out in place: its inline object's line and position
@@ -2286,9 +2291,12 @@ function acquireSelectedNoteSeparatorBand(
   const markFontSizePt = (markerRun as Readonly<{ fontSize?: number }>).fontSize ?? 10;
   const box = marker.line.bounds;
   // Content beside the marker paints with the story: text (symbols
-  // included) or a field, its result or computed value. Line breaks, empty
-  // text and the marker's own inline object only shape the lines.
-  const hasText = paragraphs.length > 1 || source.runs.some((run) => run.type === 'field'
+  // included), a field (its result or computed value), or paragraph borders
+  // and shading. Line breaks, empty text and the marker's own inline object
+  // only shape the lines.
+  const hasText = paragraphs.length > 1
+    || paragraphs.some((laid) => laid.borders.length > 0 || laid.shading !== undefined)
+    || source.runs.some((run) => run.type === 'field'
     || (run.type === 'text' && !isNoteSeparatorMarkerRun(run)
       && ((run as Readonly<{ text?: string }>).text ?? '').length > 0));
   return Object.freeze({

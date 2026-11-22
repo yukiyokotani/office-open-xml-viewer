@@ -518,10 +518,19 @@ function buildLayoutSourceModelAdapter(
   }, bodyLayoutInput.pageBackground);
   const footnotes = frozenNotes(privateDocument.footnotes);
   const endnotes = frozenNotes(privateDocument.endnotes);
+  // Selected separator stories paint on every page with notes: a PAGE or
+  // NUMPAGES field in them depends on pagination like any other story's.
+  const separatorStories = [
+    bodyLayoutInput.noteLayoutSettings?.footnoteSeparatorParagraphs,
+    bodyLayoutInput.noteLayoutSettings?.endnoteSeparatorParagraphs,
+  ].flatMap((paragraphs) => paragraphs === undefined ? []
+    : [paragraphs.separator, paragraphs.continuationSeparator].flatMap((story) =>
+      // Story paragraphs are bare paragraph records (no block tag).
+      story === undefined ? [] : [story.map((paragraph) => ({ ...paragraph, type: 'paragraph' }) as unknown as BodyElement)]));
   const hasPaginationFields = paginatedFlowHasPaginationDependentFields(
     privateDocument.body,
     footnotes,
-    [...storyBodies(privateDocument), ...endnotes.map((note) => note.content)],
+    [...storyBodies(privateDocument), ...endnotes.map((note) => note.content), ...separatorStories],
   );
   const requiresDomVerticalGlyphLayout = documentRequiresDomVerticalGlyphLayout(privateDocument);
   const fatalParse = privateDocument.parseError === undefined ? null : {

@@ -2045,7 +2045,16 @@ function appendRunsToSegments(
         // A negative number is the acquisition map's custom-note sentinel
         // (CUSTOM_NOTE_MARK); the note's own automatic *Ref placeholder is
         // suppressed by the same contract.
-        if (t.noteRef.customMarkFollows === true || (noteText !== undefined && noteText < 0)) {
+        const customMark = t.noteRef.customMarkFollows === true || (noteText !== undefined && noteText < 0);
+        const label = customMark ? '' : noteText != null
+          ? formatNoteNumber(
+              noteText,
+              noteNumberingOf(environment.noteNumbering, t.noteRef.kind, t.noteRef.id),
+            )
+          : t.text || '';
+        // A suppressed label (§17.18.59 numFmt none) keeps the same
+        // zero-width host as a custom mark, so the note stays attached.
+        if (customMark || label.length === 0) {
           // As for an empty/anchor-only mark, a bounded Latin probe resolves
           // the four font slots and selected-face metrics through the ordinary
           // text service. Discard its ink/text, never its font authority.
@@ -2072,25 +2081,16 @@ function appendRunsToSegments(
           }
           continue;
         }
-        const label =
-          noteText != null
-            ? formatNoteNumber(
-                noteText,
-                noteNumberingOf(environment.noteNumbering, t.noteRef.kind, t.noteRef.id),
-              )
-            : t.text || '';
-        if (label.length > 0) {
-          appendTextPiece(
-            segmentBuildContext,
-            label,
-            t,
-            t.vertAlign ?? null,
-            runIndex,
-            ownRunContext(label, t, environment),
-            0,
-            joinFromPreviousNoBreakHyphen,
-          );
-        }
+        appendTextPiece(
+          segmentBuildContext,
+          label,
+          t,
+          t.vertAlign ?? null,
+          runIndex,
+          ownRunContext(label, t, environment),
+          0,
+          joinFromPreviousNoBreakHyphen,
+        );
         for (let index = emittedStart; index < segs.length; index += 1) {
           segs[index].sourceRunIndex = runIndex;
         }

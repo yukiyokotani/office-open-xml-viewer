@@ -181,6 +181,15 @@ describe('section-aware note numbering', () => {
     expect(unsupported(['<w:pos w:val="beneathText"/>', ''])).toEqual([]);
   });
 
+  it.each(['footnote', 'endnote'] as const)('keeps %s notes whose number format is none', (kind) => {
+    const none = '<w:numFmt w:val="none"/>';
+    const model = control({ kind, sectionPr: [none, none] });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+    const notes = layout.pages.flatMap((page) => page.layers.notes).filter((node) => node.kind === 'note');
+    expect(notes.map((note) => note.kind === 'note' ? note.source.storyInstance : '')).toEqual(['1', '2', '3', '4']);
+    expect(referenceLabels(layout)).toEqual([]);
+  });
+
   it('gives a final section without its own sectPr the default numbering', () => {
     expect(render({ kind: 'footnote', sectionPr: ['<w:numFmt w:val="upperLetter"/>', ''], omitFinalSectPr: true }))
       .toEqual(['A', 'B', '3', '4']);
