@@ -77,14 +77,14 @@ export function isAnchorOnlyParagraph(
 
 /** The layout of a paragraph that takes no flow (a vanished or collapsed
  * mark that displays nothing but floating drawings), as it is retained:
- * nothing painted of its own (no list marker, border, shading or line
- * number), like the empty paragraph it stands for. Its lines keep only the
+ * nothing painted of its own (no list marker, border, shading, line number
+ * or bar-tab rule), like the empty paragraph it stands for. Its lines keep only the
  * positions its drawings are anchored at; the drawings stay. */
 export function withoutParagraphDecoration(layout: ParagraphLayout): ParagraphLayout {
   const { shading: _shading, lineNumbers: _lineNumbers, ...markless } = layout;
   return Object.freeze({
     ...markless,
-    lines: Object.freeze(markless.lines.map((line) => Object.freeze({
+    lines: Object.freeze(markless.lines.map(({ barTabRules: _barTabRules, ...line }) => Object.freeze({
       ...line,
       placements: Object.freeze(line.placements.filter((placement) => placement.kind === 'anchor-host')),
     }))),

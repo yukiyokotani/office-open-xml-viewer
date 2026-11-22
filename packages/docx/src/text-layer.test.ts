@@ -97,8 +97,10 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(a.style.position).toBe('absolute');
     expect(a.style.left).toBe(`${(12 / 700) * 100}%`);
     expect(a.style.top).toBe(`${(34 / 900) * 100}%`);
-    expect(a.style.font).toBe('bold 14px Arial');
-    expect(a.style['line-height']).toBe('16px');
+    // Glyph metrics in units of the layer width (cqw), so the span scales with
+    // the page: 14px and 16px of a 700px page.
+    expect(a.style.font).toBe(`bold ${(14 / 700) * 100}cqw Arial`);
+    expect(a.style['line-height']).toBe(`${(16 / 700) * 100}cqw`);
     expect(a.style['letter-spacing']).toBe('0');
     expect(a.style['white-space']).toBe('pre');
     expect(a.style.color).toBe('transparent');
@@ -122,7 +124,7 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     ], 100, 100);
 
     expect(layer.children[0].style.width).toBe('4%');
-    expect(layer.children[0].style.overflow).toBe('hidden');
+    expect(layer.children[0].style.overflow).toBe('clip');
     expect(layer.children[1].style.width ?? '').toBe('');
     expect(layer.children[1].style.overflow ?? '').toBe('');
   });
@@ -169,5 +171,94 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 1, 1, undefined, measureForFont);
     // Ordinary run: no transform at all (horizontal page), so no scaleX sneaks in.
     expect(layer.children[0].style.transform ?? '').toBe('');
+  });
+});
+
+describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
+  const layerWith = (runs: DocxTextRunInfo[], onLink?: () => void) => {
+    vi.stubGlobal('document', {
+      createElement: (t: string) => Object.assign(makeEl(t), { addEventListener() {}, title: '', dataset: {} }),
+    });
+    const layer = Object.assign(makeEl('div'), { dataset: {} });
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 100, 100, onLink);
+    return layer.children;
+  };
+  const cell = { x: 40, y: 0, width: 30, height: 12 };
+
+  it('places a partly clipped hyperlink in a container of its clip, in page percentages', () => {
+    // A 60px link at x=10 whose clip starts 30px into it; the container cuts
+    // its hit box and scales with the page, whatever the span's own size.
+    const [container] = layerWith([run({
+      text: 'linklinklink', x: 10, w: 60,
+      hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
+      clips: [cell],
+    })], () => {});
+    expect(container!.style.overflow).toBe('clip');
+    expect([container!.style.left, container!.style.width]).toEqual(['40%', '30%']);
+    const [span] = container!.children;
+    expect(span!.style.left).toBe('-100%');
+    expect(span!.style.cursor).toBe('pointer');
+  });
+
+  it('puts a wholly clipped run in an empty container and leaves an unclipped run on the layer', () => {
+    const empty = { x: 20, y: 0, width: 0, height: 12 };
+    const [hidden, open] = layerWith([
+      run({ x: 0, w: 10, clips: [empty] }),
+      run({ x: 0, w: 10 }),
+    ]);
+    expect(hidden!.style.width).toBe('0%');
+    expect(open!.style['pointer-events']).toBe('all');
+  });
+
+  it('keeps document order: a container is shared only by consecutive runs with the same clips', () => {
+    const [first, between, second] = layerWith([
+      run({ text: 'A', x: 45, clips: [cell] }),
+      run({ text: 'C', x: 0 }),
+      run({ text: 'B', x: 50, clips: [cell] }),
+    ]);
+    expect(first!.children.map((child) => child.textContent)).toEqual(['A']);
+    expect(between!.textContent).toBe('C');
+    expect(second!.children.map((child) => child.textContent)).toEqual(['B']);
+  });
+
+  it('nests a turned container for a turned clip and orients the run against it', () => {
+    // A text box turned 90deg at (60, 10): the run shares its orientation.
+    const box = { x: 60, y: 10, width: 40, height: 20, transform: 'rotate(90deg)' };
+    const [outer] = layerWith([run({ x: 60, y: 15, w: 30, transform: 'rotate(90deg)', clips: [cell, box] })]);
+    const [inner] = outer!.children;
+    expect(inner!.style.overflow).toBe('clip');
+    expect(inner!.style.transform).toBe('matrix(0, 1, -1, 0, 0, 0)');
+    const [span] = inner!.children;
+    // 5px along the box's own x axis, and no orientation left to apply.
+    expect([span!.style.left, span!.style.top]).toEqual(['12.5%', '0%']);
+    expect(span!.style.transform ?? '').toBe('');
+  });
+});
+
+describe('buildDocxTextLayer — without a measurer', () => {
+  const scaled = () => run({
+    // `ABCD` painted at twice its natural advances: 12px per cluster.
+    text: 'ABCD', x: 10, w: 48,
+    clusterBoxes: [0, 1, 2, 3].map((index) => ({ start: index, end: index + 1, x: index * 12, width: 12, rtl: false })),
+  });
+
+  it('measures with a canvas of the document, so a scaled run keeps its painted caret positions', () => {
+    const canvas = { getContext: () => ({ font: '', measureText: (text: string) => ({ width: text.length * 6 }) }) };
+    vi.stubGlobal('document', { createElement: (tag: string) => (tag === 'canvas' ? canvas : makeEl(tag)) });
+    const layer = makeEl('div');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [scaled()], 100, 100);
+    expect(layer.children).toHaveLength(1);
+    expect(layer.children[0]!.textContent).toBe('ABCD');
+    // 48px painted over 24px natural: the span's advances are scaled to it.
+    expect(layer.children[0]!.style.transform).toBe('scaleX(2)');
+    expect(layer.children[0]!.style.width ?? '').toBe('');
+  });
+
+  it('sizes the span to its painted width where the document cannot measure', () => {
+    vi.stubGlobal('document', { createElement: (tag: string) => makeEl(tag) });
+    const layer = makeEl('div');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [scaled()], 100, 100);
+    expect(layer.children).toHaveLength(1);
+    expect(layer.children[0]!.style.width).toBe('48%');
   });
 });

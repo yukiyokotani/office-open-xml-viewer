@@ -4606,7 +4606,9 @@ export function attachBarTabRules(
 ): readonly LineLayout[] {
   const bars = tabStops.filter((stop) => stop.alignment === 'bar');
   if (bars.length === 0) return lines;
-  return lines.map((line) => ({
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: the mark line of an anchor-only
+  // paragraph is the empty mark, which has no line to rule.
+  return lines.map((line) => (line.markLine ? line : {
     ...line,
     barTabRules: bars.map((bar) => {
       const xPt = baseRtl

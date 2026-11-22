@@ -28,8 +28,8 @@ const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordproce
 /** What a page shows after a vanished mark (with paragraph properties
  * `properties`) holding `content`: the top of the following text, every
  * text piece painted, the paragraph decoration painted and the drawings. */
-function observe(content: string, properties = '', inCell = false) {
-  const paragraphs = `<w:p><w:pPr>${properties}<w:rPr><w:vanish/></w:rPr></w:pPr>${content}</w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>`;
+function observe(content: string, properties = '', inCell = false, vanish = true) {
+  const paragraphs = `<w:p><w:pPr>${properties}${vanish ? '<w:rPr><w:vanish/></w:rPr>' : ''}</w:pPr>${content}</w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>`;
   const body = inCell
     ? '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>'
       + `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${paragraphs}</w:tc></w:tr></w:tbl><w:p/>`
@@ -72,6 +72,7 @@ function observe(content: string, properties = '', inCell = false) {
           else if (placement.kind === 'resource') painted.push('resource');
           else if (placement.kind === 'tab' && placement.leader && placement.leader !== 'none') painted.push('leader');
         }
+        if ((line as { barTabRules?: unknown[] }).barTabRules?.length) painted.push('bar-tab');
       }
       if ((record.borders as unknown[] | undefined)?.length) painted.push('border');
       if (record.shading) painted.push('shading');
@@ -107,6 +108,17 @@ describe('a vanished paragraph mark that anchors only a floating VML shape', () 
     expect(anchored.painted).toEqual(empty.painted);
     expect(anchored.top).toBe(empty.top);
     expect(anchored.drawings).toBe(empty.drawings + 1);
+  });
+});
+
+describe('a paragraph that holds only a floating shape and has a bar tab stop', () => {
+  const barTab = '<w:tabs><w:tab w:val="bar" w:pos="2880"/></w:tabs>';
+  it.each([['a vanished', true], ['an ordinary', false]])('paints no bar-tab rule with %s mark, as its empty paragraph', (_kind, vanish) => {
+    const empty = observe('', barTab, false, vanish);
+    const anchored = observe(VML_RECT, barTab, false, vanish);
+    expect(empty.painted).toEqual(['text:After']);
+    expect(anchored.painted).toEqual(empty.painted);
+    expect(anchored.top).toBe(empty.top);
   });
 });
 

@@ -4,8 +4,14 @@ import { buildDocxHighlightLayer } from './find-highlight-layer.js';
 import {
   clipRunRect, overlayBoxes, placeRunRect, runAdvanceRects, runGlyphRects, runOverlayRects, runTextVisible,
 } from './overlay-geometry.js';
+import { DocxFindController } from './find.js';
+import { textRunSourceIndexForDocument } from './layout/text-index.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
+import { collectLayoutSourceCommentRanges } from './comments.js';
+import { buildDocxTextLayer } from './text-layer.js';
 import {
-  fakeElement, intersect, layerBoxes, pageBoxOf, paintedDocument, withFakeDocument, type PageBox, type PaintedGlyph,
+  fakeElement, inlinePictureRun, intersect, layerBoxes, pageBoxOf, paintedDocument, PICTURE_PART, withFakeDocument,
+  type FakeElement, type PageBox, type PaintedGlyph,
 } from './test-support/painted-glyphs.test-support.js';
 import type { DocxTextRunInfo } from './types.js';
 
@@ -386,5 +392,126 @@ describe('a comment highlight covers everything in its range of runs and nothing
     expect(rects[0]!.left).toBeCloseTo(a!.left, 6);
     expect(rects[0]!.right).toBeGreaterThanOrEqual(d!.right + 3 - 1e-6);
     expect(rects[0]!.right).toBeLessThanOrEqual(e!.left + 1e-6);
+  });
+});
+
+describe('text an exact-height row hides', () => {
+  const hidden = exactRowCell(240,
+    '<w:p><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Visible</w:t><w:br/><w:t>Secret</w:t></w:r></w:p>');
+
+  it('is no find match, while the visible line is', async () => {
+    const { runs } = await paintedDocument(hidden);
+    const find = new DocxFindController(() => 1, async () => runs);
+    expect(await find.find('Secret')).toEqual([]);
+    expect((await find.find('Visible')).map((match) => match.text)).toEqual(['Visible']);
+  });
+
+  it('is not selectable in the text layer', async () => {
+    const { runs } = await paintedDocument(hidden);
+    const spans: FakeElement[] = [];
+    const collect = (element: FakeElement): void => {
+      if (element.children.length === 0 && (element as { textContent?: string }).textContent) spans.push(element);
+      element.children.forEach(collect);
+    };
+    withFakeDocument(() => {
+      const layer = fakeElement();
+      buildDocxTextLayer(layer as never, runs, 612, 792);
+      collect(layer);
+    });
+    const text = (span: FakeElement): string => (span as { textContent?: string }).textContent ?? '';
+    const of = (value: string) => spans.filter((span) => (
+      span.dataset.runIndex === String(runs.findIndex((run) => run.text === value))));
+    const secret = of('Secret');
+    const visible = of('Visible');
+    expect(secret.map(text).join('')).toBe('Secret');
+    expect(visible.map(text).join('')).toBe('Visible');
+    for (const span of secret) {
+      expect(span.dataset.clippedAway).toBe('');
+      expect(span.style.cssText).toContain('user-select:none');
+    }
+    for (const span of visible) {
+      expect(span.dataset.clippedAway).toBeUndefined();
+      expect(span.style.cssText).not.toContain('user-select:none');
+    }
+  });
+});
+
+describe('a comment on inline content that is not text', () => {
+  const sized = '<w:sz w:val="24"/>';
+  const letters = (value: string) => `<w:r><w:rPr>${sized}</w:rPr><w:t>${value}</w:t></w:r>`;
+  const rectsOf = (runs: DocxTextRunInfo[], first: number, end: number): PageBox[] => {
+    const source = runs[0]!.source!;
+    const [thread] = resolveDocxCommentThreads([{ id: '1', author: 'A', text: 'c' }], [{
+      commentId: '1', source, startRunIndex: first, endRunIndex: end,
+      reference: { source, runIndex: end, affinity: 'preceding' as const },
+    }], runs);
+    return thread?.anchors[0]?.rects.map(pageBoxOf) ?? [];
+  };
+
+  it('tints an inline picture of the range over the box it is painted in, with the text around it', async () => {
+    const { runs, glyphs, pictures } = await paintedDocument(
+      `<w:p>${letters('ab')}${inlinePictureRun(40, 30)}${letters('cd')}</w:p>`, PICTURE_PART);
+    expect(pictures).toHaveLength(1);
+    const picture = intersect(pictures[0]!.box, pictures[0]!.clip)!;
+    expect(picture.right - picture.left).toBeCloseTo(40, 6);
+    expect(regionDifference(rectsOf(runs, 0, 3), [...paintedBoxes(glyphs, 'abcd'), picture])).toBeNull();
+    // A comment on the picture alone tints the picture alone.
+    expect(regionDifference(rectsOf(runs, 1, 2), [picture])).toBeNull();
+  });
+
+  it('leaves an inline picture outside the range untinted', async () => {
+    const { runs, glyphs } = await paintedDocument(
+      `<w:p>${letters('ab')}${inlinePictureRun(40, 30)}${letters('cd')}</w:p>`, PICTURE_PART);
+    expect(regionDifference(rectsOf(runs, 0, 1), paintedBoxes(glyphs, 'ab'))).toBeNull();
+    expect(regionDifference(rectsOf(runs, 2, 3), paintedBoxes(glyphs, 'cd'))).toBeNull();
+  });
+
+  it('tints a raised picture only where its exact line shows it', async () => {
+    // A 30pt picture raised 5pt on an exact 24pt line: the line cuts it.
+    const { runs, pictures } = await paintedDocument(
+      '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>'
+      + `${inlinePictureRun(40, 30, '<w:position w:val="10"/>')}</w:p>`, PICTURE_PART);
+    expect(pictures[0]!.clip).not.toBeNull();
+    const shown = intersect(pictures[0]!.box, pictures[0]!.clip)!;
+    expect(shown.bottom - shown.top).toBeLessThan(30);
+    expect(regionDifference(rectsOf(runs, 0, 1), [shown])).toBeNull();
+  });
+
+  it('gives a comment on a paragraph that holds only a tab its own geometry, not the next text', async () => {
+    const comments = '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + '<w:comment w:id="1" w:author="A"><w:p><w:r><w:t>c</w:t></w:r></w:p></w:comment></w:comments>';
+    const { layout, model, runs } = await paintedDocument(
+      '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="2880"/></w:tabs></w:pPr><w:commentRangeStart w:id="1"/>'
+      + `<w:r><w:rPr>${sized}</w:rPr><w:tab/></w:r><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>`
+      + `<w:p><w:pPr><w:pageBreakBefore/></w:pPr>${letters('Unrelated')}</w:p>`, {
+        parts: { 'word/comments.xml': comments },
+        relationships: '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" '
+          + 'Target="comments.xml"/>',
+        contentTypes: '<Override PartName="/word/comments.xml" '
+          + 'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>',
+      });
+    expect(layout.pages).toHaveLength(2);
+    const anchors = collectLayoutSourceCommentRanges(model.comments ?? [], layoutSourceStore(model),
+      textRunSourceIndexForDocument(layout));
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0]!.geometryFallback).toBeUndefined();
+    const [thread] = resolveDocxCommentThreads(model.comments ?? [], anchors, runs);
+    expect(thread!.anchors[0]!.rects).toHaveLength(1);
+    expect(thread!.anchors[0]!.rects[0]!.width).toBeCloseTo(144, 6);
+  });
+
+  it('gives each tab of many lines the extent of the text on its own line', async () => {
+    // Lines of two sizes in turn: every tab joins its own line into one rect.
+    const line = (size: number, index: number) => `<w:r><w:rPr><w:sz w:val="${size}"/></w:rPr><w:t>a</w:t></w:r>`
+      + `<w:r><w:rPr><w:sz w:val="${size}"/></w:rPr><w:tab/></w:r><w:r><w:rPr><w:sz w:val="${size}"/></w:rPr><w:t>b</w:t>`
+      + `${index < 39 ? '<w:br/>' : ''}</w:r>`;
+    const { runs } = await paintedDocument('<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="2880"/></w:tabs></w:pPr>'
+      + `${Array.from({ length: 40 }, (_, index) => line(index % 2 === 0 ? 24 : 16, index)).join('')}</w:p>`);
+    const rects = rectsOf(runs, 0, Number.MAX_SAFE_INTEGER);
+    expect(rects).toHaveLength(40);
+    rects.forEach((rect, index) => {
+      expect(rect.bottom - rect.top).toBeCloseTo(index % 2 === 0 ? 12 : 8, 6);
+      expect(rect.left).toBeCloseTo(72, 6);
+    });
   });
 });

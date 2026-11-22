@@ -140,13 +140,17 @@ describe('reference-em text advances on a grid-fitting host', () => {
       ownerDocument: {
         createElement: () => ({ style: { cssText: '' }, dataset: {}, addEventListener() {} }),
       },
+      style: {},
       appendChild: (child: { style: { cssText: string } }) => spans.push(child),
       dataset: {},
       set innerHTML(_value: string) { spans.length = 0; },
     };
     buildDocxTextLayer(layer as unknown as HTMLDivElement, [run], 600, 400);
-    expect(spans[0]!.style.cssText).toContain(`font:${run.referenceFont!.font};`);
-    expect(spans[0]!.style.cssText).toContain(`line-height:${run.h / k}px;`);
+    // Glyph metrics are in units of the 600px layer width (cqw).
+    const pageLength = (px: number) => `${(px / 600) * 100}cqw`;
+    expect(spans[0]!.style.cssText).toContain(`font:${run.referenceFont!.font.replace(
+      /(\d+(?:\.\d+)?)px/u, (_match, size: string) => pageLength(Number(size)))};`);
+    expect(spans[0]!.style.cssText).toContain(`line-height:${pageLength(run.h / k)};`);
     expect(spans[0]!.style.cssText).toContain(`transform:scale(${k});transform-origin:top left;`);
 
     // Find highlight extents measure the reference font and scale it back.

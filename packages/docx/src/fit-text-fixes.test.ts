@@ -377,7 +377,8 @@ describe('selection span uses the drawn letter-spacing (finding 3)', () => {
       700, 900,
     );
     expect(layer.children).toHaveLength(1);
-    expect(layer.children[0].style['letter-spacing']).toBe('9.6px');
+    // In units of the layer width (700px), so it scales with the page.
+    expect(layer.children[0].style['letter-spacing']).toBe(`${(9.6 / 700) * 100}cqw`);
   });
 
   it('a run without letterSpacingPx keeps the letter-spacing reset (0)', () => {

@@ -340,6 +340,62 @@ export function runOverlayRects(run: Run, start = 0, end = run.text.length): Run
   return mergeRunRects(runGlyphRects(run, start, end).flatMap((rect) => clipRunRect(run, rect)));
 }
 
+/** Rects of one frame by the edges they start and end at along the run,
+ * each edge's rects ordered across it. */
+class EdgeIndex<Rect extends RunRect & { readonly order: number }> {
+  private readonly starts = new Map<number, Rect[]>();
+  private readonly ends = new Map<number, Rect[]>();
+
+  /** Edges within TOUCH share a key or lie in neighbouring ones. */
+  private static key(edge: number): number {
+    return Math.round(edge / (4 * TOUCH));
+  }
+
+  add(rect: Rect): void {
+    for (const [edges, edge] of [[this.starts, rect.x], [this.ends, rect.x + rect.width]] as const) {
+      const key = EdgeIndex.key(edge);
+      const list = edges.get(key) ?? [];
+      if (list.length === 0) edges.set(key, list);
+      let low = 0;
+      let high = list.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (list[middle]!.y < rect.y) low = middle + 1;
+        else high = middle;
+      }
+      list.splice(low, 0, rect);
+    }
+  }
+
+  /** The rect that ends at `left` or starts at `right` and lies across the
+   * run within `[top, bottom]`: the one nearest to `order`, an earlier one
+   * first. */
+  touching(left: number, right: number, top: number, bottom: number, order: number): Rect | undefined {
+    let best: Rect | undefined;
+    for (const [edges, edge, at] of [[this.ends, left, (rect: Rect) => rect.x + rect.width],
+      [this.starts, right, (rect: Rect) => rect.x]] as const) {
+      for (const key of [EdgeIndex.key(edge) - 1, EdgeIndex.key(edge), EdgeIndex.key(edge) + 1]) {
+        const list = edges.get(key);
+        if (!list) continue;
+        let low = 0;
+        let high = list.length;
+        while (low < high) {
+          const middle = (low + high) >> 1;
+          if (list[middle]!.y < top - TOUCH) low = middle + 1;
+          else high = middle;
+        }
+        for (let index = low; index < list.length && list[index]!.y <= bottom + TOUCH; index += 1) {
+          const rect = list[index]!;
+          if (rect.y + rect.height > bottom + TOUCH || Math.abs(at(rect) - edge) > TOUCH) continue;
+          if (!best || Math.abs(rect.order - order) < Math.abs(best.order - order)
+            || (Math.abs(rect.order - order) === Math.abs(best.order - order) && rect.order < best.order)) best = rect;
+        }
+      }
+    }
+    return best;
+  }
+}
+
 /** The boxes that mark a range of source runs on the page (invariant 4):
  * the range rects of each run of `runs` and the boxes of its tabs and inline
  * objects, cut to their clips and joined between runs of one orientation
@@ -375,34 +431,30 @@ export function overlayBoxes(runs: readonly Run[]): OverlayBox[] {
   const boxes: { box: OverlayBox; order: number; index: number }[] = [];
   for (const group of groups.values()) {
     // A tab is marked over the extent across the run of the marked text it
-    // touches (the text before it first), within its own line box; a tab
-    // that touches none keeps its line box.
-    const place = (tab: { run: Run; order: number }, neighbour: Ordered | undefined): void => {
+    // touches, within its own line box; a tab that touches none keeps its
+    // line box. Rects are found by the edge they end or start at along the
+    // run and by their place across it, so each tab looks at the rects of
+    // its own line only. Tabs are taken in order, then the unplaced ones in
+    // reverse, so a row of tabs takes its extent from the text at either
+    // end in two passes.
+    const edges = new EdgeIndex<Ordered>();
+    for (const rect of group.rects) edges.add(rect);
+    const place = (tab: { run: Run; order: number }, required: boolean): boolean => {
       const { along, across } = frameOf(tab.run);
+      const neighbour = edges.touching(along, along + tab.run.w, across, across + tab.run.h, tab.order);
+      if (!neighbour && !required) return false;
       const rect = neighbour
         ? { x: 0, y: neighbour.y - across, width: tab.run.w, height: neighbour.height }
         : { x: 0, y: 0, width: tab.run.w, height: tab.run.h };
       for (const part of clipRunRect(tab.run, rect)) {
-        group.rects.push({ x: along + part.x, y: across + part.y, width: part.width, height: part.height, order: tab.order });
+        const placed = { x: along + part.x, y: across + part.y, width: part.width, height: part.height, order: tab.order };
+        group.rects.push(placed);
+        edges.add(placed);
       }
+      return true;
     };
-    let pending = group.tabs;
-    while (pending.length > 0) {
-      const waiting: typeof pending = [];
-      for (const tab of pending) {
-        const { along, across } = frameOf(tab.run);
-        const neighbour = group.rects
-          .filter((rect) => rect.y >= across - TOUCH && rect.y + rect.height <= across + tab.run.h + TOUCH
-            && (Math.abs(rect.x + rect.width - along) <= TOUCH || Math.abs(along + tab.run.w - rect.x) <= TOUCH))
-          .sort((left, right) => Math.abs(left.order - tab.order) - Math.abs(right.order - tab.order)
-            || left.order - right.order)[0];
-        if (neighbour) place(tab, neighbour);
-        else waiting.push(tab);
-      }
-      // No tab left touches marked text: each keeps its line box.
-      if (waiting.length === pending.length) for (const tab of waiting) place(tab, undefined);
-      pending = waiting.length === pending.length ? [] : waiting;
-    }
+    const waiting = group.tabs.filter((tab) => !place(tab, false));
+    for (let index = waiting.length - 1; index >= 0; index -= 1) place(waiting[index]!, true);
     for (const rect of joinRects(group.rects)) {
       boxes.push({ box: placeRunRect(group.frame, rect), order: rect.order, index: boxes.length });
     }
