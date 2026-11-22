@@ -118,3 +118,16 @@ test('tests, benches, test support, declarations and generated WASM glue are not
   }
   assert.deepEqual(violations(t, files), []);
 });
+
+test('deleted DOCX pagination names are rejected in Node sources, test files included', (t) => {
+  assert.deepEqual(violations(t, {
+    'packages/node/src/docx-probe.test.ts': 'type RendererModule = { paginateDocument: (doc: unknown) => unknown[][] };\n',
+    'packages/node/src/docx.ts': 'export const options = { prebuiltPages: [] };\n',
+    'packages/node/src/docx-ok.test.ts': 'const total = layoutDocument(doc).pages.length;\n',
+    // The migration-switch pattern of the DOCX entry does not apply here.
+    'packages/node/src/legacy.test.ts': 'export const legacyDocument = 1;\n',
+  }), [
+    'DELETED_IDENTIFIER: packages/node/src/docx-probe.test.ts#paginateDocument',
+    'DELETED_IDENTIFIER: packages/node/src/docx.ts#prebuiltPages',
+  ]);
+});

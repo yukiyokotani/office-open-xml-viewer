@@ -243,7 +243,9 @@ pub(super) fn parse_classic_impl(
     // bounded Office rules observed across 3/4-series stock charts, omitted
     // and explicit legacy styles, direct/noFill controls, and a substituted
     // dark-1 theme. Styles outside this observed set stay unresolved instead
-    // of receiving a guessed palette.
+    // of receiving a guessed palette; Style 48 was observed to give a
+    // different light/no-bar result and is the counterexample that keeps the
+    // set closed.
     let stock_has_decoration = stock_drop_lines.is_some()
         || stock_hi_low_lines == Some(true)
         || stock_up_down_bars == Some(true);

@@ -30,8 +30,8 @@ Other committed generators live beside their output:
   download them only when a copy is missing); `gen-bidi-char-data.mjs` and
   `gen-line-break-class.mjs` always download their UCD 17.0.0 inputs from
   unicode.org, so they need network access.
-- `packages/pptx/scripts/` — preset shape and text-warp geometry JSON; see
-  its [README](../packages/pptx/scripts/README.md).
+- `packages/pptx/scripts/` — preset shape and text-warp geometry JSON; the
+  header of each `extract-*.mjs` script gives its source and rerun command.
 - `tests/patterns/fixtures/build-*.py` — the synthetic PPTX pattern fixtures
   beside them; run with `python3 <path>`.
 - `fuzz/generate-part-corpus.py` — part-level fuzz seeds from public demo
@@ -68,7 +68,7 @@ from `.github/workflows/ci.yml`.
   `check-docx-layout-boundaries.mjs`, `check-model-source-lazy-graph.mjs`,
   `check-model-source-lazy-runtime.mjs` (with its `model-source-runtime-*.mjs`
   helpers), `check-model-source-ooxml-path.mjs`. Plain import restrictions
-  (DOCX paint and layout import zones) are ast-grep rules under `rules/`,
+  (DOCX paint and layout import zones) are ast-grep rules under `ast-grep/rules/`,
   run by `pnpm lint`.
 - Deleted code that must not return: `tombstones.mjs` (the list) and
   `check-tombstones.mjs`.

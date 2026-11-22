@@ -30,7 +30,7 @@ export const WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION = defineCompatibilityRu
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'At the unreserved physical body edge, Word admits an undecorated non-terminal empty paragraph mark by its baseline when later ink follows in the same flow and the mark does not occupy a document-grid line cell. Windows Word 16.0.20430 trr3 family D (272 controls: modes 14/15, lines/linesAndChars, 16.4pt pitch, 11pt MS Mincho, zero/one preceding empty mark) instead admits grid marks by their centered natural/authored content box: 15pt remaining moves, 15.5–16.35pt stays, and 16.4pt fully fits. The single-character counterexamples follow the existing plain-text content-box rule too. Grid-only trailing leading may overhang; the complete advance remains retained. Other fonts/pitches use the same resolved metrics, not a measured per-font allowance. Next-page section marks retain their separate blank-page suppression. Evidence: issue #981 / PR #989 and trr3 family D.',
+  description: 'At the unreserved physical body edge, an undecorated non-terminal empty paragraph mark off the document grid is admitted only when its single line fits; an automatic multiple\'s extra space below that line may hang below the bottom margin. Windows Word controls (compatibility mode 14 with useFELayout, an ink paragraph following): on 16.0.20527 a Times New Roman 11pt mark (12.65pt single line) stays with 13.15pt left and moves with 12.15pt and 9.65pt left, although its baseline fits; on 16.0.20625 exact 12pt and 20pt lines, atLeast 12pt and 20pt lines, an Angsana New 16pt (Thai) and an MS Mincho 11pt (CJK) mark at single spacing all move 0.5pt below their full line; automatic 1.15, 1.5 and 2.0 multiples stay 0.5pt below their full line and move 0.6pt below the baseline. The earlier baseline admission (issue #981, inferred from a private document) is withdrawn. On a document grid the mark keeps its centered natural/authored content box inside the body (Windows Word 16.0.20430 trr3 family D, 272 controls: modes 14/15, lines/linesAndChars, 16.4pt pitch, 11pt MS Mincho, zero/one preceding empty mark: 15pt remaining moves, 15.5–16.35pt stays, 16.4pt fully fits; Windows Word 16.0.20527, 20pt pitch, Times New Roman/MS Mincho 11pt marks: 16.0pt moves, 16.25pt moves, 16.5pt stays), so grid-only trailing leading may overhang; the complete advance remains retained. Other fonts/pitches use the same resolved metrics. Next-page section marks retain their separate blank-page suppression.',
 });
 
 export const WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION = defineCompatibilityRule({
@@ -91,9 +91,9 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   hasFollowingInk: boolean;
   followsNextPageSectionBoundary: boolean;
   markExtentPt: number;
-  markBelowBaselinePt: number;
   markOnLineGrid: boolean;
   markGridAfterLeadingPt?: number;
+  markMultipleLeadingPt?: number;
 }>): number {
   const eligible = !input.hasContinuationBoundary
     && input.inkless
@@ -112,7 +112,9 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   if (input.markOnLineGrid) {
     return input.hasFollowingInk ? input.markGridAfterLeadingPt ?? 0 : 0;
   }
-  return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
+  // Off the grid the mark's single line must fit; an automatic multiple's
+  // extra space below it may hang (no baseline allowance).
+  return input.hasFollowingInk ? input.markMultipleLeadingPt ?? 0 : 0;
 }
 
 export const WORD_SECTION_TBRLV_TBLRV_PAGE_FRAME = defineCompatibilityRule({
