@@ -1,6 +1,11 @@
 import type { LayoutServices } from './types.js';
 import { stableFingerprint } from './fingerprint.js';
 
+/** Geometry-selecting render inputs, normalized before layout. Only inputs
+ * that can change layout belong here: paint-only scale, DPR, target width and
+ * colour never enter a layout variant key. The keyer reads these options plus
+ * the `text`, `images` and `math` service fingerprints and the
+ * `verticalGlyphFingerprint` scalar of the injected `LayoutServices`. */
 export interface LayoutOptions {
   readonly currentDateMs: number;
   /** ECMA-376 §17.13.5 tracked-change view. `false` (the default) lays the

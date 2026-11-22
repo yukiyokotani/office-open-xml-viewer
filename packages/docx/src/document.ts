@@ -139,12 +139,19 @@ export function docxModelSourcesConfigured(
 }
 
 export interface LoadOptions extends CoreLoadOptions {
-  /** Continue paragraph footnotes across physical pages. Omitted means true:
-   * the library's default display policy, chosen to follow Word's page
-   * allocation in finite controls rather than as a normative ECMA-376 rule.
-   * Pass `false` to keep the previous whole-note pagination. With continuation,
-   * table splitting and changed source cuts can reject layout,
-   * and full-note acquisition is subject to the library source/page budgets. */
+  /** Let footnotes continue across physical pages. Omitted means true: the
+   * library's default display policy, chosen to follow Word's page allocation
+   * in tested Word controls rather than as a normative ECMA-376 rule.
+   * Pass `false` to select whole-note pagination for ordinary note admission;
+   * a note too large to place whole can still be fragmented by oversized-note
+   * recovery. Omitting the option can therefore change line placement and page
+   * counts compared with `false`. The same option and default apply to
+   * `DocxViewer`, `DocxScrollViewer`, the Node `openDocxDocument` session and
+   * documents opened through `legacyDoc`. With continuation, tables in notes
+   * can continue across pages, but a table whose layout depends on its page
+   * (for example through a PAGE field) is not split by continuation; a field
+   * reflow that changes a note's source cut can reject layout, and full-note
+   * acquisition is subject to library source/page budgets. */
   allowFootnoteContinuation?: boolean;
   /**
    * Opt-in model source for document input that is not an OOXML package (a

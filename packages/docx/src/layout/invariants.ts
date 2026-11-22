@@ -1193,8 +1193,8 @@ export function layoutFingerprint(layout: DocumentLayout): string {
 
 function deepFreeze<T>(value: T, seen: WeakSet<object>): DeepReadonly<T> {
   if (value === null || typeof value !== 'object') {
-    // Non-finite geometry is fatal state (see docs/docx-layout-engine-redesign
-    // "Convergence and Errors"): the check rides the freeze walk that always
+    // Non-finite geometry is fatal state, never a recoverable diagnostic
+    // (see assertAndDeepFreezeDocumentLayout): the check rides the freeze walk that always
     // runs, so no retained layout can seal a NaN even on the paths that skip
     // the development-only plain-data pre-pass.
     if (typeof value === 'number' && !Number.isFinite(value)) {

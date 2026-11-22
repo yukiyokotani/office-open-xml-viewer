@@ -1,4 +1,20 @@
 //! Native-only evidence for XLS drawing integration; not a worksheet renderer.
+//!
+//! Extracts the supported passive PNG, JPEG, EMF and WMF entries of a BIFF8
+//! global image store (MS-XLS 2.4.58/171, MS-ODRAW 2.2.12/20/22) without font
+//! metrics:
+//!
+//! ```sh
+//! cargo run -p legacy-office-parser --features inspection \
+//!   --example inspect_xls_images -- [--used] sample.xls [fresh-output-directory]
+//! ```
+//!
+//! Without a directory it prints catalog indices, formats and byte counts.
+//! The directory must not exist yet. `--used` keeps only images referenced by
+//! explicitly owned plain picture objects (`inspect_xls_pictures`). A catalog
+//! entry is not proof that an image is displayed. Extracted images can hold
+//! private document content and must stay local. The inspection APIs are
+//! available only on native targets.
 mod support;
 use std::io::Write;
 

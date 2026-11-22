@@ -2,6 +2,8 @@
 """Generate opt-in normalization-inert assigned ranges from pinned UnicodeData.
 Input: https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt
 No renderer normalization/shaping/catalogue implementation is used or generated.
+Output: packages/core/src/fonts/inert-scalar-ranges.ts.
+Run: python3 scripts/generate-font-demand-inert-ranges.py --unicode-data <UnicodeData.txt> [--check]
 """
 import argparse, hashlib
 from pathlib import Path

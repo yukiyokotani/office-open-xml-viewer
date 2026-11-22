@@ -14,7 +14,17 @@ export class WasmTrapError extends Error {
   }
 }
 
-/** Classify by boundary error type/name, never by message substring. */
+/**
+ * Classify by boundary error type/name, never by message substring.
+ *
+ * With `panic = "abort"`, a Rust panic, an aborting allocation failure or `unreachable`
+ * ends the export in a trap without a typed `Result`, and engines may report
+ * OOM or stack exhaustion through implementation-defined errors (for example
+ * `RangeError`, `InternalError` or `OOMError`). The cause is not preserved, so
+ * `WasmTrapError` has the single code `parser-crashed` and is not relabelled
+ * as out-of-memory. A plain `Error` is not treated as a trap: it cannot be
+ * told apart from a graceful parser `Result::Err`.
+ */
 export function isWasmTrap(error: unknown): boolean {
   const RuntimeError = (globalThis as { WebAssembly?: { RuntimeError?: unknown } }).WebAssembly
     ?.RuntimeError as (new () => Error) | undefined;

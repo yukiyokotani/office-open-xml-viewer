@@ -16,6 +16,9 @@ import { documentBytes, measureContext, matrix, fittingMatrix } from '../../src/
 // checkout: vitest run --config packages/docx/tests/differential/tab-fitting.config.ts.
 // Compare observable line partitions and placement geometry, never private
 // breaker state. The two layout graphs use the same parsed facts and metrics.
+// Install dependencies and build WASM in both checkouts first. This gate is not
+// part of `pnpm test` because it needs the second checkout. Set
+// DOCX_TAB_DIFFERENTIAL_REPORT to a path outside the checkout to save counts.
 beforeAll(async () => {
   const base = process.env.DOCX_TAB_BASELINE_CHECKOUT;
   if (!base) throw new Error('DOCX_TAB_BASELINE_CHECKOUT must name a clean origin/main checkout');
