@@ -2392,22 +2392,58 @@ export function takeTableFragment(
 // A continued note can span thousands of bands. Scan each immutable source
 // once, then test a remaining suffix in O(1); neither this weak index nor its
 // scalar arrays retain an expired acquisition. Ordinary table pagination keeps
-// its established arithmetic/selection path.
+// its established arithmetic/selection path (retainedRemainderFitsWithin).
 const noteSourceMetrics = new WeakMap<RetainedTableAcquisition, {
   needsOrigins: boolean; suffixHeights: Float64Array;
 }>();
 function noteMetrics(source: RetainedTableAcquisition, chargeWork?: (units: number) => void) {
   let metrics = noteSourceMetrics.get(source);
   if (!metrics) {
-    const suffixHeights = new Float64Array(source.layout.rows.length + 1);
-    for (let i = source.layout.rows.length - 1; i >= 0; i--) {
-      chargeWork?.(1);
-      suffixHeights[i] = suffixHeights[i + 1]! + Math.max(0, source.layout.rows[i]!.heightPt);
-    }
-    metrics = { needsOrigins: needsNestedPageOrigins(source, chargeWork), suffixHeights };
+    metrics = {
+      needsOrigins: needsNestedPageOrigins(source, chargeWork),
+      suffixHeights: retainedRowSuffixHeights(source, chargeWork),
+    };
     noteSourceMetrics.set(source, metrics);
   }
   return metrics;
+}
+
+/** `suffix[i]`: the retained height of rows `i` and later. Every fragment of
+ * a continued table asks whether its remaining rows fit, so the sums are
+ * taken once per acquisition instead of once per fragment. */
+const retainedRowSuffixes = new WeakMap<RetainedTableAcquisition, Float64Array>();
+function retainedRowSuffixHeights(
+  source: RetainedTableAcquisition,
+  chargeWork?: (units: number) => void,
+): Float64Array {
+  let suffixHeights = retainedRowSuffixes.get(source);
+  if (!suffixHeights) {
+    const rows = source.layout.rows;
+    suffixHeights = new Float64Array(rows.length + 1);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      chargeWork?.(1);
+      suffixHeights[i] = suffixHeights[i + 1]! + Math.max(0, rows[i]!.heightPt);
+    }
+    retainedRowSuffixes.set(source, suffixHeights);
+  }
+  return suffixHeights;
+}
+
+/** Whether the retained rows from `rowIndex` fit `limitPt`, decided as their
+ * left-to-right sum decides it (the established arithmetic of ordinary table
+ * pagination) without summing them for every fragment: the cached suffix sum
+ * differs from that sum only by rounding, so it settles every case outside a
+ * margin far wider than that rounding, and the rows are summed only inside
+ * it. */
+function retainedRemainderFitsWithin(source: RetainedTableAcquisition, rowIndex: number, limitPt: number): boolean {
+  const suffixPt = retainedRowSuffixHeights(source)[rowIndex]!;
+  const marginPt = 1e-9 * (1 + Math.abs(suffixPt) + Math.abs(limitPt));
+  if (Math.abs(suffixPt - limitPt) > marginPt) return suffixPt <= limitPt;
+  let heightPt = 0;
+  for (let index = rowIndex; index < source.layout.rows.length; index += 1) {
+    heightPt += Math.max(0, source.layout.rows[index]!.heightPt);
+  }
+  return heightPt <= limitPt;
 }
 
 function takeTableFragmentPass(
@@ -2538,10 +2574,9 @@ function takeTableFragmentPass(
   const retainedRemainderFits = cursor.rowFragmentIndex === 0
     && cursor.cells.length === 0
     && !(metrics ? metrics.needsOrigins : needsNestedPageOrigins(source))
-    && (metrics ? metrics.suffixHeights[cursor.rowIndex]!
-      : source.layout.rows.slice(cursor.rowIndex)
-        .reduce((heightPt, row) => heightPt + Math.max(0, row.heightPt), 0))
-      <= availablePt + EPSILON_PT;
+    && (metrics
+      ? metrics.suffixHeights[cursor.rowIndex]! <= availablePt + EPSILON_PT
+      : retainedRemainderFitsWithin(source, cursor.rowIndex, availablePt + EPSILON_PT));
   let followsCompletedPartialRow = false;
   while (rowIndex < source.input.rows.length) {
     const ownership: TableFragmentOwnership = 'source';

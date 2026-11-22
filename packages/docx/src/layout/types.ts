@@ -905,18 +905,6 @@ export interface TableLayout extends LayoutNodeBase {
    * page coordinates (a page/margin frame result). Like a page-owned anchor
    * layer, story band and occurrence translation leave those axes in place. */
   readonly ownerHostPageAxes?: Readonly<{ horizontal: boolean; vertical: boolean }>;
-  /** @internal `word-vertical-section-upright-block-table`: the exclusion of
-   * this upright block table (its first fragment) of a vertical section in
-   * section-logical page points (x inline, y block), under its plan key.
-   * `flowBlockPt` is the block position the flow had reached at the table,
-   * and `pinned` whether the table was placed at a pin of the round's plan
-   * instead. Pagination pins the table from these (nextUprightBlockPlan). */
-  readonly uprightBlockExclusion?: Readonly<{
-    key: string;
-    bounds: LayoutRect;
-    flowBlockPt: number;
-    pinned: boolean;
-  }>;
 }
 
 /**
@@ -978,20 +966,6 @@ interface FloatRegistryEntryCorePt {
   readonly topEdgeInclusiveFromYPt?: number;
   /** See WrapExclusion.anchorLineExemptTopPt. */
   readonly anchorLineExemptTopPt?: number;
-  /** `word-vertical-section-upright-block-table`: the exclusion of an upright
-   * block table of a vertical section, in the section-logical frame. Line
-   * bands meet it from its block start inclusive (WrapExclusion.bandStartInclusive).
-   * `planned` marks the page-start registration of a pin of the pagination
-   * round's plan, which earlier lines of the page wrap around; the table in
-   * column `tableFlowDomainId` takes its block position and registers its own
-   * exclusion again when the flow reaches it, under that column too. */
-  readonly uprightBlockTable?: Readonly<{
-    key: string;
-    planned: boolean;
-    tableFlowDomainId?: string;
-    /** Top-level body index of the placed block's table. */
-    sourceIndex?: number;
-  }>;
 }
 
 /** Point-space snapshot used while final table-fragment float placement is

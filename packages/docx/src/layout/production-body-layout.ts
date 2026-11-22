@@ -112,6 +112,7 @@ import {
   uprightBlockPaginates,
   measureBodyTableEntry,
   ownerSegmentedFlowExtents,
+  planBodyUprightBlocks,
 } from './body-table-measurement.js';
 import {
   finishOwnerHostLayout,
@@ -150,10 +151,14 @@ import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
-import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
+import { WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
-import { emptyUprightBlockPageIndex } from './acquisition-context.js';
+import {
+  addUprightBlockBox,
+  emptyUprightBlockPageIndex,
+  type UprightBlockRegistration,
+} from './upright-block-index.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-float-authority.js';
@@ -1795,6 +1800,12 @@ function measureBodyParagraphEntry(
     floats: [...state.floats],
     pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
   };
+  // `word-vertical-section-upright-table-rewrapped-strip`: the upright blocks
+  // planned after this fragment exclude its text as registered ones do.
+  const planned = state.uprightBlockIndex?.exclusionCount ?? 0;
+  request.besideUprightBlocks?.exclusions.forEach((exclusion, at) => {
+    candidate.floats.push(uprightBlockExclusionFloat(exclusion, planned + at));
+  });
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
   const publicFloats =
     request.continuation.boundary === null
@@ -2455,27 +2466,6 @@ function prescanBodyPageAnchors(
         }),
       ];
     }
-    if (anchor.kind === 'upright-table') {
-      // `word-vertical-section-upright-block-table`: the lines laid out
-      // before the table wrap around its pinned exclusion; the table takes
-      // the pin's block position when the flow reaches it.
-      return [
-        Object.freeze({
-          kind: 'frame' as const,
-          occurrenceId: anchor.occurrenceId,
-          exclusionId: anchor.occurrenceId,
-          paragraphId: paragraphIdFor(anchor.tableSource),
-          exclusionMode: 'square' as const,
-          bounds: anchor.bounds,
-          exclusionBounds: anchor.bounds,
-          uprightBlockTable: Object.freeze({
-            key: anchor.key,
-            planned: true,
-            tableFlowDomainId: anchor.tableFlowDomainId,
-          }),
-        }),
-      ];
-    }
     if (anchor.kind === 'floating-table') {
       // §17.4.57 topFromText is the minimum gap above a positioned
       // table. In controlled Word output, a page-positioned table
@@ -2825,7 +2815,6 @@ function commitBodyFlowRegistryDelta(
         ? {} : { topEdgeInclusiveFromYPt: entry.topEdgeInclusiveFromYPt }),
       ...(entry.anchorLineExemptTopPt === undefined
         ? {} : { exemptLineTopPt: entry.anchorLineExemptTopPt }),
-      ...(entry.uprightBlockTable === undefined ? {} : { bandStartInclusive: true as const }),
     };
     return entry.kind === 'table'
       ? {
@@ -2836,26 +2825,6 @@ function commitBodyFlowRegistryDelta(
       : { ...core, kind: entry.kind };
   });
   if (delta.floats) {
-    // `word-vertical-section-upright-block-table`: index each accepted
-    // upright block once, where its registration is committed.
-    const uprightBlocks = state.uprightBlockIndex
-      ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
-    for (const entry of delta.floats.entries) {
-      const upright = entry.uprightBlockTable;
-      if (!upright) continue;
-      if (upright.planned) {
-        uprightBlocks.pins.set(entry.occurrenceId, Object.freeze({
-          tableFlowDomainId: upright.tableFlowDomainId, bounds: entry.bounds,
-        }));
-        continue;
-      }
-      uprightBlocks.boxes.push(entry.bounds);
-      if (upright.sourceIndex !== undefined && upright.tableFlowDomainId !== undefined) {
-        uprightBlocks.lastBySource.set(upright.sourceIndex, Object.freeze({
-          flowDomainId: upright.tableFlowDomainId, bounds: entry.bounds,
-        }));
-      }
-    }
     state.floats.push(...retainedFloats);
     sessionState.floatRegistry = Object.freeze({
       ...sessionState.floatRegistry,
@@ -2865,6 +2834,61 @@ function commitBodyFlowRegistryDelta(
     state.floatParaSeq = delta.floats.nextParagraphId;
   }
   sessionState.drawingCollisionRegistry = nextDrawingCollisionRegistry;
+}
+
+/** The wrap rectangle of an upright block's text exclusion
+ * (`word-vertical-section-upright-block-table`): a square exclusion that a
+ * line strip ending exactly at its block start meets too. `ordinal` numbers
+ * the page's upright exclusions; it gives each its own float paragraph id, so
+ * the same-paragraph overlap rule never pairs it with another float. */
+function uprightBlockExclusionFloat(
+  exclusion: UprightBlockRegistration['exclusions'][number],
+  ordinal: number,
+): FloatRect {
+  const { xPt, yPt, widthPt, heightPt } = exclusion.bounds;
+  return {
+    kind: 'frame',
+    mode: 'square',
+    imageKey: exclusion.id,
+    imageX: xPt,
+    imageY: yPt,
+    imageW: widthPt,
+    imageH: heightPt,
+    xLeft: xPt,
+    xRight: xPt + widthPt,
+    yTop: yPt,
+    yBottom: yPt + heightPt,
+    side: 'bothSides',
+    distLeft: 0,
+    distRight: 0,
+    distTop: 0,
+    distBottom: 0,
+    paraId: -1 - ordinal,
+    bandStartInclusive: true,
+  };
+}
+
+/**
+ * BodyLayoutSession.commitUprightBlocks. Upright blocks are kept beside the
+ * float registry, not in it: a registration appends one box to the page's
+ * upright block index, its slots, and one wrap rectangle per exclusion, each
+ * in constant time however many blocks the page already holds. Floating
+ * tables and anchored drawings therefore do not avoid upright block tables
+ * (library policy; no control combines them), while every line laid out
+ * afterwards wraps around them.
+ */
+function commitBodyUprightBlocks(
+  context: BodySessionDependencies,
+  registration: UprightBlockRegistration,
+): void {
+  const { state } = context;
+  const index = state.uprightBlockIndex ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
+  if (registration.box) addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
+  for (const slot of registration.slots) index.slots.set(slot.sourceIndex, slot);
+  for (const exclusion of registration.exclusions) {
+    state.floats.push(uprightBlockExclusionFloat(exclusion, index.exclusionCount));
+    index.exclusionCount += 1;
+  }
 }
 
 function acquirePublicParagraphFloats(
@@ -3276,6 +3300,10 @@ function openConcreteBodyLayoutSession(
     effectiveTablePositioning,
   };
 
+  const tableOperations = {
+    setBodyAcquisitionLocation, sourceElement, computeTablePtLayout, computeAdjacentTablePtLayouts,
+    ordinaryAcquisitionInputForAdjacentGroup, reacquireBodyTableBlock,
+  };
   const session: BodyLayoutSession = {
     hasPaginationFields: source.hasPaginationFields,
     measureParagraph(
@@ -3286,11 +3314,10 @@ function openConcreteBodyLayoutSession(
     measureTable(
       request: Parameters<NonNullable<BodyLayoutSession['measureTable']>>[0],
     ): ReturnType<NonNullable<BodyLayoutSession['measureTable']>> {
-      return measureBodyTableEntry(sessionDependencies, request, {
-        setBodyAcquisitionLocation, sourceElement, computeTablePtLayout, computeAdjacentTablePtLayouts,
-        ordinaryAcquisitionInputForAdjacentGroup, reacquireBodyTableBlock,
-      });
+      return measureBodyTableEntry(sessionDependencies, request, tableOperations);
     },
+    planUprightBlocks: (request) => planBodyUprightBlocks(sessionDependencies, request, tableOperations),
+    commitUprightBlocks: (registration) => commitBodyUprightBlocks(sessionDependencies, registration),
     layoutStory: (request) => acquireBodyStoryLayout(storyAcquisitionContext, request),
     layoutNotes(
       request: Parameters<NonNullable<BodyLayoutSession['layoutNotes']>>[0],

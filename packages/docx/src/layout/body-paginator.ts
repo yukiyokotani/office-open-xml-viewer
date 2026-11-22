@@ -12,14 +12,17 @@ import type {
   BodySectionLayoutInput,
 } from './body-layout-input.js';
 import type {
+  AcquiredParagraphBlock,
   BodyAcquisitionLocation,
   BodyLayoutSession,
+  BodyParagraphAcquisitionInput,
   BodyTableContinuationCursor,
   CarriedHostAnchor,
   FrameCarryObservation,
   PageAnchorPrescanInput,
 } from './body-layout-kernel.js';
 import { NoteCapacityExceededError, noteBandKey } from './body-layout-kernel.js';
+import type { UprightBlockRegistration } from './upright-block-index.js';
 import { NoteStack } from './note-stack.js';
 import { PageNoteController, PageNoteReplay } from './page-note-controller.js';
 import { acquireNoteColumnPartition as acquireNoteColumnPartitionBase, destinationOwnedNote } from './note-column-acquisition.js';
@@ -141,7 +144,6 @@ import {
   bodyOccurrenceKey,
   bodyRootFloatingTablePlacementKey,
   sourceKey,
-  uprightBlockTablePrescanKey,
   tableFragmentStartKey,
 } from './source-key.js';
 import {
@@ -650,7 +652,6 @@ function acceptNode(
     xPt: number;
     yPt: number;
     sectionFlowOwnership?: 'host-flow' | 'page';
-    uprightBlockExclusion?: NonNullable<TableLayout['uprightBlockExclusion']>;
   }>,
   /** Retained space after still inside `blockExtentPt` (default: all of it). */
   retainedSpaceAfterPt?: number,
@@ -718,9 +719,6 @@ function acceptNode(
           ...contentOwned.flowBounds,
           heightPt: blockExtentPt,
         }),
-        ...(placement.uprightBlockExclusion && contentOwned.kind === 'table'
-          ? { uprightBlockExclusion: placement.uprightBlockExclusion }
-          : {}),
       } as typeof contentOwned)
     : contentOwned;
   const transition = placeFlowNode(state.flow, retainedAtDestination, blockExtentPt);
@@ -1185,7 +1183,6 @@ function* paginateBodyPassSteps(
   balancePlan: BodyBalancePlan,
   observer?: BodyPaginationPassObserver,
   anchorLineDeferrals: AnchorLineDeferrals | null = null,
-  uprightPlan: UprightBlockPlan = NO_UPRIGHT_BLOCK_PLAN,
 ): PaginationSteps<BodyPaginationPassResult> {
   const kernel = bodyLayoutKernelOf(services);
   if (!kernel) throw new Error('Body layout kernel is not attached to the supplied services');
@@ -1459,17 +1456,13 @@ function* paginateBodyPassSteps(
     }
     anchors.forEach((anchor) => registeredAnchorKeys.add(anchor.occurrenceId));
     const pageObjects = pageObjectsAt(target);
-    // The upright block plan is a fixed input of every pass of an anchor
-    // run, not a read of its carry, so it is not recorded above.
-    const upright = uprightBlockPrescanAnchors(uprightPlan, at.pageIndex, at.flowDomainId);
-    if (anchors.length === 0 && pageObjects.length === 0 && upright.length === 0) return;
+    if (anchors.length === 0 && pageObjects.length === 0) return;
     if (!session.prescanPageAnchors) {
       throw new Error('Page-owned anchors require canonical prescan acquisition');
     }
     const location = acquisitionLocation(target);
     const delta = session.prescanPageAnchors({
-      anchors: pageObjects.length === 0 && upright.length === 0
-        ? anchors : Object.freeze([...anchors, ...upright, ...pageObjects]),
+      anchors: pageObjects.length === 0 ? anchors : Object.freeze([...anchors, ...pageObjects]),
       location,
       availableInlineExtentPt: location.availableBounds.widthPt,
     });
@@ -2856,7 +2849,7 @@ function* paginateBodyPassSteps(
       while (cursor) {
         const fragmentStartKey = paragraphFragmentStartKey(cursor);
         let location = acquisitionLocation(state);
-        const acquired = session.measureParagraph({
+        const paragraphRequest: BodyParagraphAcquisitionInput = {
           input: block,
           location,
           availableInlineExtentPt: location.availableBounds.widthPt,
@@ -2893,7 +2886,8 @@ function* paginateBodyPassSteps(
               && standaloneHardPageStartEntryIndex === entryIndex
             ),
           continuation: cursor,
-        });
+        };
+        let acquired = session.measureParagraph(paragraphRequest);
         if (acquired.placement) {
           const notes = footnoteAdmission(
             acquired.layout,
@@ -3139,80 +3133,143 @@ function* paginateBodyPassSteps(
             continue;
           }
         }
-        // The empty-mark allowance can apply only to an undecorated inkless
-        // mark that starts here without keepNext; any other fragment ignores
-        // the reserve, so its whole-note acquisition is not performed (it
-        // would otherwise touch every note of a long paragraph per attempt).
-        const markReserveMatters = cursor.boundary === null && block.inkless === true
-          && !block.keepNext && isUndecoratedInklessMark(acquired.layout);
-        const markReservePt = markReserveMatters
-          ? footnoteAdmission(acquired.layout, location.availableBounds.widthPt).reservePt
-          : 0;
-        const pageBottomIsUnreserved = (reserves[state.flow.pageIndex]?.bottom ?? 0) === 0
-          && state.footnoteReservePt === 0;
-        const physicalRegionBottomIsActive = activeBlockEndPt(state) === activeRegion(state).blockEndPt;
-        const followsNextPageSectionBoundary = followingEntry?.kind === 'begin-section'
-          && followingEntry.section.startType === 'nextPage';
-        // Compatibility-owned physical-edge empty-mark admission.
-        const trailingMarkAdmissionAllowancePt =
-          wordTrailingEmptyMarkAdmissionAllowancePt({
-            hasContinuationBoundary: cursor.boundary !== null,
-            inkless: block.inkless === true,
-            undecorated: isUndecoratedInklessMark(acquired.layout),
-            keepNext: block.keepNext,
-            markReservePt,
-            pageBottomIsUnreserved,
-            physicalRegionBottomIsActive,
-            hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
-            followsNextPageSectionBoundary,
-            markExtentPt: acquired.blockExtentPt,
-            markOnLineGrid: acquired.markOnLineGrid === true,
-            markMultipleLeadingPt: acquired.markMultipleLeadingPt ?? 0,
-            markGridAfterLeadingPt: acquired.markGridAfterLeadingPt,
-          });
-        // A proven anchor-line deferral ends this page just above that line.
-        const anchorLineBreak = deferredAnchorLineIndex(acquired.layout);
-        // Same fresh-region rule as framed paragraphs: a page whose band
-        // holds carried note lines is not fresh (pageCanGainSpaceByRelocating).
-        const canRelocateParagraph = pageCanGainSpaceByRelocating();
-        // Continuation mode (the public default) reserves each referenced note
-        // at its reference line; later lines are admitted only beside those
-        // committed plans. With continuation off every note stays whole.
-        const notePlans = services.allowFootnoteContinuation === true
-          ? referenceLineFootnotePlans(acquired.layout, {
-              canRelocate: canRelocateParagraph,
-              indivisible: acquired.fragmentation.kind === 'indivisible',
-              continuesFromPrevious: cursor.boundary !== null,
-              entryIndex,
-              keepLines: cursor.boundary === null && block.keepLines,
+        const fragmentCursor = cursor;
+        // Selects the fragment of one acquisition of this paragraph that
+        // fits here, with the footnote plans charged while selecting it.
+        const selectFragment = (measured: AcquiredParagraphBlock) => {
+          // The empty-mark allowance can apply only to an undecorated inkless
+          // mark that starts here without keepNext; any other fragment ignores
+          // the reserve, so its whole-note acquisition is not performed (it
+          // would otherwise touch every note of a long paragraph per attempt).
+          const markReserveMatters = fragmentCursor.boundary === null && block.inkless === true
+            && !block.keepNext && isUndecoratedInklessMark(measured.layout);
+          const markReservePt = markReserveMatters
+            ? footnoteAdmission(measured.layout, location.availableBounds.widthPt).reservePt
+            : 0;
+          const pageBottomIsUnreserved = (reserves[state.flow.pageIndex]?.bottom ?? 0) === 0
+            && state.footnoteReservePt === 0;
+          const physicalRegionBottomIsActive = activeBlockEndPt(state) === activeRegion(state).blockEndPt;
+          const followsNextPageSectionBoundary = followingEntry?.kind === 'begin-section'
+            && followingEntry.section.startType === 'nextPage';
+          // Compatibility-owned physical-edge empty-mark admission.
+          const trailingMarkAdmissionAllowancePt =
+            wordTrailingEmptyMarkAdmissionAllowancePt({
+              hasContinuationBoundary: fragmentCursor.boundary !== null,
+              inkless: block.inkless === true,
+              undecorated: isUndecoratedInklessMark(measured.layout),
+              keepNext: block.keepNext,
+              markReservePt,
+              pageBottomIsUnreserved,
+              physicalRegionBottomIsActive,
+              hasFollowingInk: hasFollowingInkContent(input, entryIndex + 1),
+              followsNextPageSectionBoundary,
+              markExtentPt: measured.blockExtentPt,
+              markOnLineGrid: measured.markOnLineGrid === true,
+              markMultipleLeadingPt: measured.markMultipleLeadingPt ?? 0,
+              markGridAfterLeadingPt: measured.markGridAfterLeadingPt,
+            });
+          // A proven anchor-line deferral ends this page just above that line.
+          const anchorLineBreak = deferredAnchorLineIndex(measured.layout);
+          // Same fresh-region rule as framed paragraphs: a page whose band
+          // holds carried note lines is not fresh (pageCanGainSpaceByRelocating).
+          const canRelocateParagraph = pageCanGainSpaceByRelocating();
+          // Continuation mode (the public default) reserves each referenced note
+          // at its reference line; later lines are admitted only beside those
+          // committed plans. With continuation off every note stays whole.
+          const notePlans = services.allowFootnoteContinuation === true
+            ? referenceLineFootnotePlans(measured.layout, {
+                canRelocate: canRelocateParagraph,
+                indivisible: measured.fragmentation.kind === 'indivisible',
+                continuesFromPrevious: fragmentCursor.boundary !== null,
+                entryIndex,
+                keepLines: fragmentCursor.boundary === null && block.keepLines,
+                widowControl: block.widowControl,
+                lineEndLimit: anchorLineBreak,
+                admissionLimitPt: location.availableBounds.heightPt + trailingMarkAdmissionAllowancePt,
+                authoredSpaceAfterPt: block.spaceAfterPt,
+                writingMode: activeRegion(state).writingMode,
+              })
+            : null;
+          const selected = selectParagraphFragment(
+            measured.layout,
+            fragmentCursor,
+            measured.fragmentation,
+            location.availableBounds.heightPt + trailingMarkAdmissionAllowancePt,
+            freshPageExtent(state),
+            canRelocateParagraph,
+            {
+              keepLines: block.keepLines,
               widowControl: block.widowControl,
-              lineEndLimit: anchorLineBreak,
-              admissionLimitPt: location.availableBounds.heightPt + trailingMarkAdmissionAllowancePt,
               authoredSpaceAfterPt: block.spaceAfterPt,
+              ...(unreservedBodyBottomPt === undefined ? {} : { unreservedBodyBottomPt }),
               writingMode: activeRegion(state).writingMode,
-            })
-          : null;
-        const selected = selectParagraphFragment(
-          acquired.layout,
-          cursor,
-          acquired.fragmentation,
-          location.availableBounds.heightPt + trailingMarkAdmissionAllowancePt,
-          freshPageExtent(state),
-          canRelocateParagraph,
-          {
-            keepLines: block.keepLines,
-            widowControl: block.widowControl,
-            authoredSpaceAfterPt: block.spaceAfterPt,
-            ...(unreservedBodyBottomPt === undefined ? {} : { unreservedBodyBottomPt }),
-            writingMode: activeRegion(state).writingMode,
-            ...(anchorLineBreak === undefined ? {} : { lineEndLimit: anchorLineBreak }),
-          },
-          (fragment) => notePlans
-            ? notePlans.reservePt(fragment.lines.length)
-            : footnoteAdmission(fragment, location.availableBounds.widthPt).reservePt,
-          acquired.uniformRubyAdvancePt,
-          (reservePt) => !footnoteReserveInvadesCommittedPageContent(reservePt),
-        );
+              ...(anchorLineBreak === undefined ? {} : { lineEndLimit: anchorLineBreak }),
+            },
+            (fragment) => notePlans
+              ? notePlans.reservePt(fragment.lines.length)
+              : footnoteAdmission(fragment, location.availableBounds.widthPt).reservePt,
+            measured.uniformRubyAdvancePt,
+            (reservePt) => !footnoteReserveInvadesCommittedPageContent(reservePt),
+          );
+          return { selected, notePlans };
+        };
+        let { selected, notePlans } = selectFragment(acquired);
+        // `word-vertical-section-upright-table-rewrapped-strip`: the line
+        // strip before an upright block table of a vertical section wraps
+        // around the table, and the table stays at the block position the
+        // flow reaches when that strip is laid out without it. So a fragment
+        // that ends its paragraph just before such a table is laid out
+        // twice: once as selected above, which gives that block position and
+        // with it the tables placed there, and once around those tables. The
+        // second layout is kept when it still ends the paragraph in this
+        // region; its overflow fills the following strips beside the tables
+        // and the flow continues after it, while the tables take the planned
+        // slots when the flow reaches them. Otherwise (library policy, not
+        // measured: the wrapped strip overflows out of the tables' column)
+        // the first layout stands, nothing is planned, and only the lines
+        // after the tables wrap. Each fragment is tried once and nothing
+        // placed earlier is revised, so a pass needs no further pass for it.
+        let uprightBlocks: UprightBlockRegistration | null = null;
+        const tableAfter = input.sequence[entryIndex + 1];
+        if (
+          session.planUprightBlocks
+          && selected.fragment && selected.nextCursor === null && !selected.requiresFreshFlowRegion
+          && tableAfter?.kind === 'body-block' && tableAfter.block.kind === 'table'
+          && activeRegion(state).writingMode !== 'horizontal-tb'
+        ) {
+          const unwrappedChargePt = Math.min(selected.admittedBlockExtentPt, location.availableBounds.heightPt);
+          const unwrappedReservePt = notePlans
+            ? notePlans.reservePt(selected.fragment.lines.length)
+            : footnoteAdmission(selected.fragment, location.availableBounds.widthPt).reservePt;
+          // Where the flow reaches the table after this fragment and its notes.
+          const reached = locationAfter(location, unwrappedChargePt);
+          const tableLocation = Object.freeze({
+            ...reached,
+            availableBounds: Object.freeze({
+              ...reached.availableBounds,
+              heightPt: Math.max(0, reached.availableBounds.heightPt - unwrappedReservePt),
+            }),
+          });
+          const planned = session.planUprightBlocks({
+            input: tableAfter.block,
+            location: tableLocation,
+            availableInlineExtentPt: tableLocation.availableBounds.widthPt,
+            availableBlockExtentPt: tableLocation.availableBounds.heightPt,
+            freshPageBlockExtentPt: freshPageExtent(state),
+            pageHasContent: true,
+          });
+          if (planned) {
+            const wrapped = session.measureParagraph({ ...paragraphRequest, besideUprightBlocks: planned });
+            const wrappedChoice = wrapped.placement ? null : selectFragment(wrapped);
+            if (wrappedChoice?.selected.fragment && wrappedChoice.selected.nextCursor === null
+              && !wrappedChoice.selected.requiresFreshFlowRegion) {
+              acquired = wrapped;
+              ({ selected, notePlans } = wrappedChoice);
+              uprightBlocks = planned;
+            }
+          }
+          session.moveAcquisitionCursor(location);
+        }
         if (selected.requiresFreshFlowRegion) {
           yield* commitTransition(
             advanceColumnOrPage(state.flow, 'overflow'),
@@ -3260,6 +3317,7 @@ function* paginateBodyPassSteps(
           );
           if (acceptedDelta) session.commitFlowRegistryDelta(acceptedDelta);
         }
+        if (uprightBlocks) session.commitUprightBlocks?.(uprightBlocks);
         cursor = selected.nextCursor;
         if (cursor) {
           yield* commitTransition(
@@ -3525,6 +3583,8 @@ function* paginateBodyPassSteps(
             bodyOccurrenceKey(block.source, location.flowDomainId, fragmentStartKey),
           ));
         }
+        // `word-vertical-section-upright-block-table`
+        if (acquired.uprightBlocks) session.commitUprightBlocks?.(acquired.uprightBlocks);
         cursor = acquired.nextCursor ?? undefined;
         unwrappedLocation = undefined;
         complete = cursor === undefined;
@@ -4570,9 +4630,6 @@ function pageStartAnchorsIdentity(anchors: PageStartAnchors): string {
       ? `host|${anchor.occurrenceId}|${sourceKey(anchor.paragraphSource)}|${JSON.stringify(anchor.carry)}`
       : anchor.kind === 'frame'
       ? `frame|${anchor.occurrenceId}|${sourceKey(anchor.paragraphSource)}|${JSON.stringify(anchor.carry)}`
-      : anchor.kind === 'upright-table'
-      ? `upright|${anchor.occurrenceId}|${anchor.tableFlowDomainId}|${anchor.bounds.xPt}|${
-        anchor.bounds.yPt}|${anchor.bounds.widthPt}|${anchor.bounds.heightPt}`
       : `table|${anchor.occurrenceId}|${sourceKey(anchor.tableSource)}|${anchor.bounds.xPt}|${
         anchor.bounds.yPt}|${anchor.bounds.widthPt}|${anchor.bounds.heightPt}`)).join('\n');
 }
@@ -5121,217 +5178,6 @@ type LeadingSecondPass = Readonly<{
 
 const ANCHOR_PASS_BASE_LIMIT = 16;
 
-/** One upright block table (`word-vertical-section-upright-block-table`) in
- * the plan a pagination round applies. A pinned table is registered where its
- * section region opens on its page, so the strips laid out before it wrap
- * around it, and is placed at `bounds.yPt` whatever block position the flow
- * has reached (`word-vertical-section-upright-table-rewrapped-strip`). A pin
- * is `settled` once a round has applied it and found the flow before the
- * table where it was when the pin was taken. */
-type UprightBlockPin = Readonly<{
-  key: string;
-  tableSource: SourceRef;
-  /** The table's exclusion in section-logical page points. */
-  bounds: LayoutRect;
-  pageIndex: number;
-  /** Where the page prescan registers it: the opening of its section region. */
-  prescanFlowDomainId: string;
-  /** The table's own column. */
-  tableFlowDomainId: string;
-  /** Block start of the paragraph before the table in its column when the
-   * pin was taken, or null when none precedes it there. The table's own wrap
-   * can change how far that paragraph runs, never where it starts. */
-  syncPt: number | null;
-  /** The block position the flow had reached at the table in the latest round. */
-  flowBlockPt: number;
-  settled: boolean;
-}>;
-
-/** The upright block tables a round registers at page starts, and those that
- * never are (`forwardOnly`): a table the flow reaches outside the page or
- * column of its pin cannot be placed there, so it is laid out where the flow
- * reaches it and only the lines after it wrap (library policy). `misses`
- * counts the rounds an unsettled pin was reached elsewhere. */
-type UprightBlockPlan = Readonly<{
-  entries: ReadonlyMap<string, UprightBlockPin>;
-  forwardOnly: ReadonlySet<string>;
-  misses: ReadonlyMap<string, number>;
-  /** Upright block tables the round laid out. */
-  tableCount: number;
-  /** `entries` as page-start registrations, by page and prescan flow domain. */
-  prescan: ReadonlyMap<string, PageStartAnchors>;
-}>;
-
-const NO_PAGE_START_ANCHORS: PageStartAnchors = Object.freeze([]);
-
-function uprightBlockPlan(
-  entries: ReadonlyMap<string, UprightBlockPin>,
-  forwardOnly: ReadonlySet<string>,
-  misses: ReadonlyMap<string, number>,
-  tableCount: number,
-): UprightBlockPlan {
-  const grouped = new Map<string, Array<PageStartAnchors[number]>>();
-  for (const pin of entries.values()) {
-    const at = `${pin.pageIndex}|${pin.prescanFlowDomainId}`;
-    const anchors = grouped.get(at) ?? [];
-    anchors.push(Object.freeze({
-      kind: 'upright-table' as const,
-      occurrenceId: uprightBlockTablePrescanKey(pin.key, pin.pageIndex),
-      tableSource: pin.tableSource,
-      key: pin.key,
-      bounds: pin.bounds,
-      tableFlowDomainId: pin.tableFlowDomainId,
-    }));
-    grouped.set(at, anchors);
-  }
-  return Object.freeze({
-    entries,
-    forwardOnly,
-    misses,
-    tableCount,
-    prescan: new Map([...grouped].map(([at, anchors]) => [at, Object.freeze(anchors)] as const)),
-  });
-}
-
-const NO_UPRIGHT_BLOCK_PLAN = uprightBlockPlan(new Map(), new Set(), new Map(), 0);
-
-function uprightBlockPrescanAnchors(
-  plan: UprightBlockPlan,
-  pageIndex: number,
-  flowDomainId: string,
-): PageStartAnchors {
-  return plan.prescan.get(`${pageIndex}|${flowDomainId}`) ?? NO_PAGE_START_ANCHORS;
-}
-
-/** Lowest page index holding an upright block table, from which a later
- * round can replace the pages of this one. */
-function firstUprightBlockTablePage(layout: DocumentLayout): number {
-  for (const page of layout.pages) {
-    if (page.layers.body.some((node) => node.kind === 'table' && node.uprightBlockExclusion)) {
-      return page.pageIndex;
-    }
-  }
-  return Number.POSITIVE_INFINITY;
-}
-
-/** Rounds an unsettled pin may be reached outside its page or column before
- * its table becomes forward-only. The first miss can be a pin taken from a
- * flow that has since moved; a second one is the table's own wrap pushing the
- * flow out of its column. */
-const UPRIGHT_BLOCK_PIN_MISSES = 2;
-
-/**
- * The upright block plan the round that applied `plan` implies, or null when
- * it implies `plan` itself: then every table is settled or forward-only, and
- * the round's layout has each registered exclusion where its table is.
- *
- * Pages are judged one by one, tables in flow order. A page is `clean` while
- * every table on it so far was placed at a pin this round found right and
- * left the flow where the previous round did:
- * - a table not in the plan is pinned where the flow reached it, on a clean
- *   page only;
- * - an unsettled pin is right when the round placed the table there, the page
- *   is clean, and the paragraph before the table starts where it did when
- *   the pin was taken (the table's own wrap, the only thing the pin added,
- *   cannot move that start). It then settles. Otherwise it is dropped and
- *   the page is no longer clean; a pin reached outside its page or column
- *   UPRIGHT_BLOCK_PIN_MISSES times makes its table forward-only instead;
- * - a settled pin keeps its position for good. If the flow reached its table
- *   elsewhere than in the previous round (its wrap pushed text into further
- *   strips, or an earlier table changed), the page is no longer clean; if the
- *   table was reached outside the pin's page or column, it becomes
- *   forward-only.
- *
- * Termination: a pin never moves and a table only goes from unpinned to
- * pinned to settled to forward-only, except that an unsettled pin can be
- * dropped. Take the first table in flow order that is neither settled nor
- * forward-only. Everything before it is, so the flow before it repeats;
- * later pins can only change text after its pin. Within two rounds its page
- * is clean at it (a round with stale later pins drops them, and the next
- * records the flow), the round after pins it, and the one after that settles
- * it or counts a miss. So that table advances every few rounds, and tables on
- * pages that do not depend on each other advance in the same rounds. With n
- * tables the plan changes at most 8n + 8 times.
- */
-function nextUprightBlockPlan(layout: DocumentLayout, plan: UprightBlockPlan): UprightBlockPlan | null {
-  const entries = new Map<string, UprightBlockPin>();
-  const forwardOnly = new Set(plan.forwardOnly);
-  const misses = new Map(plan.misses);
-  const seen = new Set<string>();
-  for (const page of layout.pages) {
-    let clean = true;
-    const paragraphStartPt = new Map<string, number>();
-    for (const node of page.layers.body) {
-      if (node.kind === 'paragraph') {
-        // Where the flow placed the paragraph, not where its first line landed:
-        // a line with no room beside the table is itself moved past it.
-        paragraphStartPt.set(node.flowDomainId, node.flowBounds.yPt);
-        continue;
-      }
-      if (node.kind !== 'table' || !node.uprightBlockExclusion) continue;
-      const placed = node.uprightBlockExclusion;
-      const { key } = placed;
-      seen.add(key);
-      if (forwardOnly.has(key)) continue;
-      const syncPt = paragraphStartPt.get(node.flowDomainId) ?? null;
-      const applied = plan.entries.get(key);
-      if (!applied) {
-        if (!clean) continue;
-        entries.set(key, Object.freeze({
-          key,
-          tableSource: node.source,
-          bounds: Object.freeze({ ...placed.bounds }),
-          pageIndex: page.pageIndex,
-          prescanFlowDomainId: regionFlowDomainOpening(page, node.flowDomainId),
-          tableFlowDomainId: node.flowDomainId,
-          syncPt,
-          flowBlockPt: placed.flowBlockPt,
-          settled: false,
-        }));
-        continue;
-      }
-      const honored = placed.pinned && applied.pageIndex === page.pageIndex
-        && applied.tableFlowDomainId === node.flowDomainId;
-      if (applied.settled) {
-        if (!honored) {
-          forwardOnly.add(key);
-          clean = false;
-          continue;
-        }
-        if (placed.flowBlockPt !== applied.flowBlockPt) clean = false;
-        entries.set(key, placed.flowBlockPt === applied.flowBlockPt
-          ? applied : Object.freeze({ ...applied, flowBlockPt: placed.flowBlockPt }));
-        continue;
-      }
-      if (honored && clean && syncPt === applied.syncPt) {
-        if (placed.flowBlockPt !== applied.flowBlockPt) clean = false;
-        entries.set(key, Object.freeze({
-          ...applied,
-          bounds: Object.freeze({ ...placed.bounds }),
-          flowBlockPt: placed.flowBlockPt,
-          settled: true,
-        }));
-        continue;
-      }
-      clean = false;
-      if (!honored) {
-        const missed = (misses.get(key) ?? 0) + 1;
-        if (missed >= UPRIGHT_BLOCK_PIN_MISSES) forwardOnly.add(key);
-        else misses.set(key, missed);
-      }
-    }
-  }
-  // A pinned table that no longer starts anywhere cannot be placed at its pin.
-  for (const key of plan.entries.keys()) if (!seen.has(key)) forwardOnly.add(key);
-  const identity = (value: Pick<UprightBlockPlan, 'entries' | 'forwardOnly' | 'misses'>) => JSON.stringify([
-    [...value.entries.values()].sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0),
-    [...value.forwardOnly].sort(),
-    [...value.misses].sort(),
-  ]);
-  return identity({ entries, forwardOnly, misses }) === identity(plan)
-    ? null : uprightBlockPlan(entries, forwardOnly, misses, seen.size);
-}
-
 /** Passes whose anchor run needed the page-scoped table floor proof (#2012).
  * Balance and header/footer reserve reruns of the same document start in that
  * mode instead of failing their strict runs again. */
@@ -5355,45 +5201,6 @@ function* paginateBodyWithAnchorConvergenceSteps(
   seedPlan?: ReturnType<typeof pageAnchorDestinationPlan>,
   pageScoped = false,
 ): PaginationSteps<BodyPaginationPassResult> {
-  // `word-vertical-section-upright-block-table`: the strip laid out before an
-  // upright block table wraps around it, so the table's exclusion has to be
-  // registered before the flow reaches the table. Each round is a complete
-  // anchor run with a fixed upright block plan; the plan it implies for the
-  // next round (nextUprightBlockPlan) changes at most 8 * tables + 8 times.
-  let plan: UprightBlockPlan = NO_UPRIGHT_BLOCK_PLAN;
-  let scoped = pageScoped;
-  for (let round = 0; ; round += 1) {
-    // Only the first round publishes pages while it runs, and only those
-    // before its first upright block table: later rounds can replace the rest.
-    const pass: BodyPaginationPassResult = yield* paginateBodyAnchorRunSteps(
-      input, services, options, reserves, balancePlan,
-      round === 0 ? publisher : undefined, seedPlan, scoped, plan,
-    );
-    if (pass.terminalDiagnostic !== null) return pass;
-    const next = nextUprightBlockPlan(pass.layout, plan);
-    if (next === null) return pass;
-    if (round > 8 * next.tableCount + 8) {
-      throw new LayoutInvariantError(
-        'NON_CONVERGENCE',
-        'Upright block table placement exceeded its monotone round bound',
-      );
-    }
-    scoped = scoped || pageScopedFloorProofPasses.has(pass);
-    plan = next;
-  }
-}
-
-function* paginateBodyAnchorRunSteps(
-  input: BodyLayoutInput,
-  services: LayoutServices,
-  options: LayoutOptions,
-  reserves: readonly HeaderFooterReserve[],
-  balancePlan: BodyBalancePlan,
-  publisher: BodyPagePublisher | undefined,
-  seedPlan: ReturnType<typeof pageAnchorDestinationPlan> | undefined,
-  pageScoped: boolean,
-  uprightPlan: UprightBlockPlan,
-): PaginationSteps<BodyPaginationPassResult> {
   let pageOwnedAnchorCount = 0;
   for (const entry of input.sequence) {
     if (entry.kind !== 'body-block') continue;
@@ -5416,7 +5223,6 @@ function* paginateBodyAnchorRunSteps(
       limit(pass),
       firstHostCarryPage(pass.layout),
       firstFrameCarryPage(pass),
-      firstUprightBlockTablePage(pass.layout),
     );
   // Every anchor pass may publish, but only the leading pages
   // `anchorStablePageLimit` proves every later pass of this run reproduces. A
@@ -5531,7 +5337,6 @@ function* paginateBodyAnchorRunSteps(
     };
     const first = paginateBodyPassSteps(
       input, services, options, reserves, null, null, balancePlan, firstObserver, null,
-      uprightPlan,
     );
     const secondPublisher = anchorPassObserver(view, () => firstResult !== null)!;
     const secondObserver: BodyPaginationPassObserver = {
@@ -5550,7 +5355,6 @@ function* paginateBodyAnchorRunSteps(
     };
     const second = paginateBodyPassSteps(
       input, services, options, reserves, view, new Map(), balancePlan, secondObserver, null,
-      uprightPlan,
     );
     // Both passes advance one suspension at a time, each forwarded to the
     // scheduler, so host turns and cancellation are never starved.
@@ -5676,7 +5480,6 @@ function* paginateBodyAnchorRunSteps(
                   balancePlan,
                   publish ? anchorPassObserver(appliedPlan) : undefined,
                   appliedDeferrals.size > 0 ? appliedDeferrals : null,
-                  uprightPlan,
                 );
             const observed = pageAnchorDestinationPlan(pass.layout);
             for (const [key, destination] of keptHostAnchorCarries(appliedPlan, pass.layout)) {
@@ -5859,8 +5662,6 @@ function* paginateBodyAnchorRunSteps(
       return yield* paginateBodyPassSteps(
         input, services, options, reserves, null, null, balancePlan,
         publisher ? passPublicationObserver(publisher, carryBounded(livePageIndex)) : undefined,
-        null,
-        uprightPlan,
       );
     }
     const seededThenUnseeded = function* (scoped: boolean) {

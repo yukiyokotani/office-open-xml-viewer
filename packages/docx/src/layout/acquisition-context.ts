@@ -22,6 +22,7 @@ import type {
   RetainedTableAcquisitionDependencies,
 } from './table-acquisition.js';
 import type { LayoutRect, LayoutServices, WritingMode } from './types.js';
+import type { UprightBlockPageIndex } from './upright-block-index.js';
 
 /** One acquired body-table occurrence and the point-space placement facts that
  * bind it to the current retained-layout session. */
@@ -66,23 +67,6 @@ export interface AnchorGeometryContext {
   readonly marginTop: number;
   readonly marginBottom: number;
   readonly pageWidth: number;
-}
-
-/** The upright block tables of one page under
- * `word-vertical-section-upright-block-table`, in section-logical page
- * points. Placement reads it instead of scanning the flow registry: `pins`
- * are the page-start registrations of the pagination round's plan by
- * registry occurrence, `boxes` every block placed so far, and `lastBySource`
- * the latest block of each top-level table, by which a table that directly
- * follows another finds the block it runs on from. */
-export interface UprightBlockPageIndex {
-  readonly pins: Map<string, Readonly<{ tableFlowDomainId: string | undefined; bounds: LayoutRect }>>;
-  readonly boxes: LayoutRect[];
-  readonly lastBySource: Map<number, Readonly<{ flowDomainId: string; bounds: LayoutRect }>>;
-}
-
-export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
-  return { pins: new Map(), boxes: [], lastBySource: new Map() };
 }
 
 /** Mutable exclusion registry owned by one layout-acquisition flow domain. */
@@ -167,8 +151,8 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
   /** Set only while acquiring a body table that is placed upright in the
    * physical page (identity paint root); its cells take that frame. */
   uprightPhysicalTable?: boolean;
-  /** `word-vertical-section-upright-block-table`: the upright blocks of the
-   * current page, kept as the flow registry accepts them. */
+  /** `word-vertical-section-upright-block-table`: the upright blocks placed
+   * on the current page (upright-block-index.ts). */
   uprightBlockIndex?: UprightBlockPageIndex;
   kinsoku: KinsokuRules;
   defaultTabPt: number;

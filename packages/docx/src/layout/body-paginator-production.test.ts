@@ -3396,8 +3396,7 @@ describe('canonical body producer', () => {
         measureFollowingBlock: () => ({ fullExtentPt: 20, leadContentExtentPt: 20 }),
         prescanPageAnchors: ({ anchors, location }) => {
           events.push(`prescan:${anchors.map((anchor) => (
-            anchor.kind === 'floating-table' || anchor.kind === 'upright-table'
-              ? anchor.tableSource : anchor.paragraphSource
+            anchor.kind === 'floating-table' ? anchor.tableSource : anchor.paragraphSource
           ).path[0]).join(',')}`);
           return {
             floats: {
@@ -3609,100 +3608,5 @@ describe('canonical body producer', () => {
     expect(incomingLead?.kind === 'paragraph' ? incomingLead.exclusions : []).toHaveLength(1);
     expect(commitCounts.length).toBeGreaterThan(0);
     expect(commitCounts.every((count) => count === 1)).toBe(true);
-  });
-});
-
-describe('upright block table plan rounds', () => {
-  // `word-vertical-section-upright-block-table`: every page holds a paragraph
-  // and an upright table, then an authored page break. Registering a table's
-  // pin lengthens the paragraph before it by one strip (the wrapped strip
-  // overflows), so the flow reaches the table 10 pt later than its pin.
-  function layOut(pageCount: number) {
-    const services = Object.freeze({
-      text: { fingerprint: 'text' }, images: { fingerprint: 'images' }, math: { fingerprint: 'math' },
-    }) as LayoutServices;
-    let tableAcquisitions = 0;
-    attachBodyLayoutKernel(services, {
-      openBodyLayoutSession: () => {
-        const registered = new Set<string>();
-        return {
-          hasPaginationFields: false,
-          measureParagraph: ({ input }) => {
-            const heightPt = registered.has(`table:${input.source.path[0]! + 1}`) ? 20 : 10;
-            return {
-              layout: paragraph(`p${input.source.path[0]}`, input.source, heightPt),
-              blockExtentPt: heightPt,
-              fragmentation: { kind: 'indivisible' },
-            };
-          },
-          measureTable: ({ input, location }) => {
-            tableAcquisitions += 1;
-            const key = `table:${input.source.path[0]}`;
-            const pinned = registered.has(key);
-            // A pinned table keeps the block position of the unwrapped strip.
-            const blockPt = pinned ? 20 : location.cursorPt.yPt;
-            return {
-              layout: table(`t${input.source.path[0]}`, input.source, 30),
-              blockExtentPt: 0,
-              placement: {
-                coordinateSpace: 'upright-physical' as const,
-                xPt: 10,
-                yPt: 10,
-                sectionFlowOwnership: 'host-flow' as const,
-                uprightBlockExclusion: {
-                  key,
-                  bounds: { xPt: 10, yPt: blockPt, widthPt: 30, heightPt: 40 },
-                  flowBlockPt: location.cursorPt.yPt,
-                  pinned,
-                },
-              },
-            };
-          },
-          measureStoryExtent: () => 0,
-          measureFootnoteReserve: () => 0,
-          measureFollowingBlock: () => ({ fullExtentPt: 0, leadContentExtentPt: 0 }),
-          prescanPageAnchors: ({ anchors }) => {
-            for (const anchor of anchors) if (anchor.kind === 'upright-table') registered.add(anchor.key);
-            return null;
-          },
-          measureLineNumberGlyph: () => ({ widthPt: 0, ascentPt: 0, descentPt: 0 }),
-          resetPageAcquisition: () => undefined,
-          moveAcquisitionCursor: () => undefined,
-          flowRegistrySnapshot: emptyFlowRegistrySnapshot,
-          commitFlowRegistryDelta: () => undefined,
-        };
-      },
-    });
-    const sequence = Array.from({ length: pageCount }, (_, page) => [
-      { kind: 'body-block', block: {
-        kind: 'paragraph', source: source(3 * page), pageBreakBefore: false,
-        keepLines: false, keepNext: false, widowControl: true,
-        spaceBeforePt: 0, spaceAfterPt: 0, contextualSpacing: false, styleId: null,
-      } },
-      { kind: 'body-block', block: { kind: 'table', source: source(3 * page + 1) } },
-      ...(page + 1 < pageCount
-        ? [{ kind: 'authored-break', source: source(3 * page + 2), break: 'page' }] : []),
-    ]).flat();
-    const layout = paginateBody({
-      source: { story: 'body', storyInstance: 'body', path: [] },
-      initialSection: bodyOwner(),
-      sequence,
-    } as unknown as BodyLayoutInput, services, { currentDateMs: 0 });
-    return { layout, tableAcquisitions };
-  }
-
-  it('settles tables on independent pages in a number of rounds that does not grow with the pages', () => {
-    const small = layOut(8);
-    const large = layOut(32);
-    expect(small.layout.pages).toHaveLength(8);
-    expect(large.layout.pages).toHaveLength(32);
-    // Pin, apply and confirm: three acquisitions of each table, however many pages.
-    expect(small.tableAcquisitions).toBe(3 * 8);
-    expect(large.tableAcquisitions).toBe(3 * 32);
-    for (const page of large.layout.pages) {
-      const placed = page.layers.body.find((node) => node.kind === 'table');
-      expect(placed?.kind === 'table' ? placed.uprightBlockExclusion : undefined)
-        .toMatchObject({ pinned: true, flowBlockPt: 30, bounds: { yPt: 20 } });
-    }
   });
 });

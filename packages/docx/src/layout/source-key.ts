@@ -58,15 +58,10 @@ export function bodyRootFloatingTablePlacementKey(
   return `table:${source.path.join('.')}:root:${pageIndex}:${rowIndex}:${rowFragmentIndex}`;
 }
 
-/** Identity of an upright block table of a vertical section, shared by the
- * upright block plan, the page prescan and the table's own acquisition. */
+/** Identity of an upright block table of a vertical section
+ * (`word-vertical-section-upright-block-table`). */
 export function uprightBlockTableKey(source: SourceRef): string {
   return `upright-table:${sourceKey(source)}`;
-}
-
-/** Registry identity of the page-start registration of {@link uprightBlockTableKey}. */
-export function uprightBlockTablePrescanKey(key: string, pageIndex: number): string {
-  return `${key}:planned:${pageIndex}`;
 }
 
 export function imageResourceKey(source: SourceRef, partPath: string): string {

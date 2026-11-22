@@ -1,13 +1,19 @@
-/// <reference types="node" />
-
-import { readFile } from 'node:fs/promises';
 import { beforeAll, describe, expect, it } from 'vitest';
-import init, { DocxArchive } from './wasm/docx_parser.js';
-import type { DocxDocumentModel } from './types.js';
-import { normalizeInternalDocumentModel } from './parser-model.js';
-import { createLayoutServices } from './layout-runtime.js';
-import { layoutDocument } from './document-layout.js';
-import { storeZip } from './conformance/generate.js';
+import {
+  COLUMN_END,
+  MARGIN,
+  P,
+  PAGE_W,
+  PITCH,
+  T,
+  TABLE_W,
+  layOutPages,
+  loadParser,
+  paragraph,
+  table,
+  type Direction,
+  type Page,
+} from './test-support/vertical-section-upright.test-support.js';
 
 // `word-vertical-section-upright-block-table`: a block table of a tbRl or
 // tbLrV section (ECMA-376 §17.6.20) is an upright, zero-advance block at the
@@ -15,141 +21,14 @@ import { storeZip } from './conformance/generate.js';
 // interval meets the table's (closed interval) starts below it, including the
 // strip laid out just before the table.
 //
-// Geometry of the Word controls: A4, margins left 40, right 90, top 60,
-// bottom 80 pt, an 18 pt line grid, 10.5 pt text and a 2x2 single-bordered
-// table 72 + 108 pt wide. The table's height comes from the test metrics, so
-// every expectation below is stated against the laid-out table box.
-
-const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
-const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-const PAGE_W = 11906 / 20;
-const MARGIN = { left: 40, right: 90, top: 60 };
-const PITCH = 18;
-/** Physical y of the column end: page height less the 80 pt bottom margin. */
-const COLUMN_END = 16838 / 20 - 80;
-const TABLE_W = 180;
-const encoder = new TextEncoder();
-const xml = (body: string) => encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${body}`);
-
-const paragraph = (text: string) =>
-  `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
-const P = paragraph('あいうえお');
-const cell = (width: number, text: string) =>
-  `<w:tc><w:tcPr><w:tcW w:w="${width}" w:type="dxa"/></w:tcPr>${paragraph(text)}</w:tc>`;
-const table = (rows: number, rowHeightPt?: number) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>'
-  + ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
-    .map((edge) => `<w:${edge} w:val="single" w:sz="4"/>`).join('')
-  + '</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>'
-  + Array.from({ length: rows }, (_, row) =>
-    `<w:tr>${rowHeightPt === undefined ? '' : `<w:trPr><w:trHeight w:val="${rowHeightPt * 20}" w:hRule="atLeast"/></w:trPr>`}`
-    + `${cell(1440, `A${row + 1}`)}${cell(2160, `B${row + 1}`)}</w:tr>`).join('')
-  + '</w:tbl>';
-const T = table(2);
-
-type Direction = 'tbRl' | 'tbLrV';
-
-function docx(direction: Direction, body: readonly string[], columns = 1): Uint8Array {
-  const document = `<w:document xmlns:w="${W}"><w:body>${body.join('')}`
-    + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
-    + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
-    + (columns > 1 ? `<w:cols w:num="${columns}" w:space="425"/>` : '')
-    + `<w:textDirection w:val="${direction}"/><w:docGrid w:type="lines" w:linePitch="360"/>`
-    + '</w:sectPr></w:body></w:document>';
-  return storeZip(new Map([
-    ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-      + '<Default Extension="xml" ContentType="application/xml"/>'
-      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-      + '</Types>')],
-    ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-      + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
-    ['word/document.xml', xml(document)],
-  ]));
-}
-
-function measureContext(): CanvasRenderingContext2D {
-  let font = '10px serif';
-  return {
-    get font() { return font; },
-    set font(value: string) { font = value; },
-    letterSpacing: '0px',
-    fontKerning: 'normal',
-    measureText: (text: string) => {
-      const px = parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
-      return {
-        width: [...text].length * px,
-        fontBoundingBoxAscent: px * 0.8,
-        fontBoundingBoxDescent: px * 0.2,
-        actualBoundingBoxAscent: px * 0.8,
-        actualBoundingBoxDescent: px * 0.2,
-      } as TextMetrics;
-    },
-  } as unknown as CanvasRenderingContext2D;
-}
-
-interface Page {
-  /** Upright table boxes on the physical page, in source order: the grid's
-   * left edge, the physical x extent its vertical rules paint, and the block
-   * extent of the text exclusion it registered. */
-  readonly tables: Array<Readonly<{
-    left: number;
-    top: number;
-    bottom: number;
-    paintedLeft: number;
-    paintedRight: number;
-    exclusionBlockExtent: number | undefined;
-  }>>;
-  /** Line strips per body paragraph, in source order: the strip's distance
-   * from the first strip of the page along the block axis, and the physical
-   * y at which its inline flow starts. */
-  readonly strips: Array<Array<Readonly<{ block: number; inlineStart: number }>>>;
-}
+// The fixtures (test-support/vertical-section-upright.test-support.ts) use the
+// geometry of the Word controls. A table's height comes from the test
+// metrics, so every expectation below is stated against the laid-out box.
 
 function layOut(direction: Direction, body: readonly string[]): Page {
   const pages = layOutPages(direction, body);
   expect(pages).toHaveLength(1);
   return pages[0]!;
-}
-
-function layOutPages(direction: Direction, body: readonly string[], columns = 1): Page[] {
-  const archive = new DocxArchive(docx(direction, body, columns));
-  let model: DocxDocumentModel;
-  try {
-    model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
-  } finally {
-    archive.free();
-  }
-  const layout = layoutDocument(
-    model,
-    createLayoutServices(model, { measureContext: measureContext() }),
-    { currentDateMs: 0 },
-  );
-  // The section-logical block origin: the right margin in tbRl (lines advance
-  // leftward from it), the left margin in tbLrV.
-  const blockOrigin = direction === 'tbRl' ? MARGIN.right : MARGIN.left;
-  // Each column's strips restart at the block origin.
-  return layout.pages.map((laidOut) => {
-  const page: Page = { tables: [], strips: [] };
-  for (const node of laidOut.layers.body) {
-    if (node.kind === 'table') {
-      const rules = node.borders.filter((border) => border.from.xPt === border.to.xPt);
-      page.tables.push({
-        left: node.flowBounds.xPt,
-        top: node.flowBounds.yPt,
-        bottom: node.flowBounds.yPt + node.advancePt,
-        paintedLeft: Math.min(...rules.map((rule) => rule.from.xPt - rule.widthPt / 2)),
-        paintedRight: Math.max(...rules.map((rule) => rule.from.xPt + rule.widthPt / 2)),
-        exclusionBlockExtent: node.uprightBlockExclusion?.bounds.heightPt,
-      });
-    } else if (node.kind === 'paragraph') {
-      page.strips.push(node.lines.map((line) => ({
-        block: line.bounds.yPt - blockOrigin,
-        inlineStart: line.bounds.xPt,
-      })));
-    }
-  }
-  return page;
-  });
 }
 
 /** Width of the tables' border rules (w:sz 4). */
@@ -160,9 +39,7 @@ const tableLeft = (direction: Direction, block: number) => direction === 'tbRl'
   ? PAGE_W - MARGIN.right - block - RULE / 2 - TABLE_W
   : MARGIN.left + block + RULE / 2;
 
-beforeAll(async () => {
-  await init({ module_or_path: await readFile(new URL('./wasm/docx_parser_bg.wasm', import.meta.url)) });
-});
+beforeAll(loadParser);
 
 describe('upright block table of a vertical section', () => {
   it.each(['tbRl', 'tbLrV'] as const)(
@@ -343,17 +220,20 @@ describe('upright block table of a vertical section', () => {
   });
 
   it('takes the box from the outermost painted rules under cell spacing', () => {
-    // No table borders, 6 pt cell rules and 2 pt cell spacing.
+    // No table borders, 6 pt cell rules and 2 pt cell spacing; one 696 pt row
+    // leaves no room for text below the table.
     const cellRules = '<w:tcBorders>' + ['top', 'left', 'bottom', 'right']
       .map((edge) => `<w:${edge} w:val="single" w:sz="48"/>`).join('') + '</w:tcBorders>';
-    const spaced = T.replace(/<w:tblBorders>.*?<\/w:tblBorders>/, '<w:tblCellSpacing w:w="40" w:type="dxa"/>')
+    const spaced = table(1, 696).replace(/<w:tblBorders>.*?<\/w:tblBorders>/, '<w:tblCellSpacing w:w="40" w:type="dxa"/>')
       .replaceAll('</w:tcPr>', `${cellRules}</w:tcPr>`);
-    const { tables } = layOut('tbRl', [P, spaced, P]);
-    const [table] = tables;
-    // The near rule's outer edge is at the block position and the exclusion
-    // covers the painted width plus the 7.14 pt text clearance.
-    expect(table!.paintedRight).toBeCloseTo(PAGE_W - MARGIN.right - PITCH, 6);
-    expect(table!.exclusionBlockExtent).toBeCloseTo(table!.paintedRight - table!.paintedLeft + 7.14, 6);
+    const { tables, strips } = layOut('tbRl', [spaced, P]);
+    const [placed] = tables;
+    expect(COLUMN_END - placed!.bottom).toBeLessThan(10.5);
+    // The near rule's outer edge is at the block position, and the text
+    // resumes 7.14 pt past the outer edge of the far rule.
+    expect(placed!.paintedRight).toBeCloseTo(PAGE_W - MARGIN.right, 6);
+    expect(strips[0]![0]!.inlineStart).toBe(MARGIN.top);
+    expect(strips[0]![0]!.block).toBeCloseTo(placed!.paintedRight - placed!.paintedLeft + 7.14, 6);
   });
 
   it('keeps a continued fragment at the offset of the whole table\'s border rules', () => {
@@ -441,14 +321,51 @@ describe('upright block table of a vertical section', () => {
     });
 
     it('does not raise a table of the second column into a table of the first', () => {
-      // The 800 pt table of column 2 is raised above its column and would
-      // cross the 20 pt table of column 1 at the same block position: it
-      // clears that table along the block axis first.
+      // Measured: the 800 pt table of column 2 is raised above its column
+      // and would cross the 20 pt table of column 1 at the same block
+      // position: it clears that table along the block axis first.
       const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
       const pages = layOutPages('tbRl', [table(1, 20), columnBreak, table(1, 800)], 2);
       const [short, tall] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
       expect(tall.top).toBeLessThan(short.bottom);
       expect(tall.left).toBeCloseTo(tableLeft('tbRl', TABLE_W + RULE + 14.28), 6);
+    });
+
+    it('clears a table of the second column that lies under a raised table of the first', () => {
+      // Measured: the 800 pt table of column 1 is raised over both columns.
+      // The empty strip the column-break paragraph leaves in column 2 has no
+      // room beside it and resumes 7.14 pt past it; the 20 pt table follows
+      // one strip further on, at the top of column 2, and the paragraph after
+      // it starts at its bottom edge.
+      const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+      const pages = layOutPages('tbRl', [table(1, 800), columnBreak, table(1, 20), P], 2);
+      expect(pages).toHaveLength(1);
+      const [tall, short] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(tall.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+      expect(tall.bottom).toBeCloseTo(16838 / 20, 6);
+      expect(short.left).toBeCloseTo(tableLeft('tbRl', TABLE_W + RULE + 7.14 + PITCH), 6);
+      expect(short.top).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
+      const after = pages[0]!.strips.at(-1)![0]!;
+      expect(after.block).toBeCloseTo(TABLE_W + RULE + 7.14 + PITCH, 6);
+      expect(after.inlineStart).toBeCloseTo(short.bottom, 6);
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('clears and raises a %s table that meets a table of its own second column', (direction) => {
+      // Measured: both tables lie in column 2, whose first strip is the empty
+      // one of the column-break paragraph. The 800 pt table clears the 20 pt
+      // one by 14.28 pt along the block axis and is raised to the page edge;
+      // the paragraphs beside the 20 pt table start at its bottom edge.
+      const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+      const pages = layOutPages(direction, [P, columnBreak, table(1, 20), P, table(1, 800), P], 2);
+      expect(pages).toHaveLength(1);
+      const [short, tall] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(short.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
+      expect(tall.left).toBeCloseTo(tableLeft(direction, PITCH + TABLE_W + RULE + 14.28), 6);
+      expect(tall.bottom).toBeCloseTo(16838 / 20, 6);
+      const [between, after] = pages[0]!.strips.slice(-2) as [Page['strips'][number], Page['strips'][number]];
+      expect(between[0]!.inlineStart).toBeCloseTo(short.bottom, 6);
+      expect(after[0]!.inlineStart).toBeCloseTo(short.bottom, 6);
+      expect([between[0]!.block, after[0]!.block]).toEqual([PITCH, 2 * PITCH]);
     });
 
     it('keeps a table below the one it directly follows when that one was moved aside', () => {
@@ -495,5 +412,106 @@ describe('upright block table of a vertical section', () => {
     expect(table.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
     expect(strips.map((lines) => lines.map((line) => line.block))).toEqual([[0, PITCH], [2 * PITCH]]);
     for (const line of strips.flat()) expect(line.inlineStart).toBeCloseTo(table.bottom, 6);
+  });
+
+  describe('placement in one forward pass', () => {
+    /** Pairs of tables of one page whose painted boxes share an area. */
+    const overlapping = (pages: readonly Page[]) => pages.flatMap((page, pageIndex) =>
+      page.tables.flatMap((first, at) => page.tables.slice(at + 1).flatMap((second) => {
+        const shared = (startA: number, endA: number, startB: number, endB: number) =>
+          Math.min(endA, endB) - Math.max(startA, startB) > 1e-6;
+        return shared(first.paintedLeft, first.paintedRight, second.paintedLeft, second.paintedRight)
+          && shared(first.top, first.bottom, second.top, second.bottom)
+          ? [{ pageIndex, first, second }] : [];
+      })));
+    const strips = (count: number) => Array.from({ length: count }, () => P);
+
+    it('places a table, a paragraph and two tables that run on in two columns', () => {
+      // A table placed later never changes the text before the table it runs
+      // on from, so nothing is placed twice: the 20 pt and 750 pt tables are
+      // one block, which does not fit below the first table and clears it
+      // along the block axis, at the column top.
+      const pages = layOutPages('tbRl', [table(1, 20), P, table(1, 20), table(1, 750)], 2);
+      expect(pages).toHaveLength(1);
+      const [first, leader, follower] = pages[0]!.tables as [
+        Page['tables'][number], Page['tables'][number], Page['tables'][number],
+      ];
+      expect(overlapping(pages)).toEqual([]);
+      expect(follower.top).toBeCloseTo(leader.bottom, 6);
+      expect(follower.left).toBeCloseTo(leader.left, 6);
+      expect(first.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+      expect(leader.top).toBeCloseTo(MARGIN.top, 6);
+      expect(leader.left).toBeCloseTo(tableLeft('tbRl', TABLE_W + RULE + 14.28), 6);
+    });
+
+    it.each([1, 2])('keeps a table that runs on clear of an earlier table in %i column(s)', (columns) => {
+      // X at the column top, Y stacked under it, then Z and a table that runs
+      // on from Z, which both meet Y but not X.
+      const pages = layOutPages('tbRl', [P, T, ...strips(5), T, ...strips(6), T, T], columns);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.tables).toHaveLength(4);
+      expect(overlapping(pages)).toEqual([]);
+      const [x, y, z, follower] = pages[0]!.tables as [
+        Page['tables'][number], Page['tables'][number], Page['tables'][number], Page['tables'][number],
+      ];
+      expect(y.top).toBeCloseTo(x.bottom, 6);
+      expect(follower.left).toBeCloseTo(z.left, 6);
+      if (columns === 1) {
+        // Z returns to the column top; the table after it cannot run on
+        // below Z, where Y is, and takes the first free position below Y.
+        expect(z.top).toBeCloseTo(MARGIN.top, 6);
+        expect(follower.top).toBeCloseTo(y.bottom, 6);
+      } else {
+        // The two are one block, placed below Y.
+        expect(z.top).toBeCloseTo(y.bottom, 6);
+        expect(follower.top).toBeCloseTo(z.bottom, 6);
+      }
+    });
+
+    it('lays out generated table and paragraph sequences without overlapping tables', () => {
+      // A fixed pseudo-random stream (mulberry32) of short and full-length
+      // paragraphs, column breaks and tables from two rows to taller than the
+      // page, in one and two columns of both directions. Every sequence has
+      // to lay out (pagination ends) with no two table boxes of a page
+      // sharing an area, and with every table present.
+      let seed = 0x2326;
+      const random = () => {
+        seed = (seed + 0x6d2b79f5) | 0;
+        let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+        value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+      };
+      const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
+      const thick = T.replaceAll('w:sz="4"', 'w:sz="24"');
+      const tables = [T, T, thick, table(1, 20), table(30), table(45), table(63), table(1, 800), table(80)];
+      const paragraphs = [P, P, P, paragraph('長'.repeat(30)), paragraph('長'.repeat(66)),
+        P.replace('<w:pPr>', '<w:pPr><w:keepNext/>')];
+      const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+      for (const direction of ['tbRl', 'tbLrV'] as const) {
+        for (const columns of [1, 2]) {
+          for (let sample = 0; sample < 10; sample += 1) {
+            const body: string[] = [];
+            let tableCount = 0;
+            const length = 3 + Math.floor(random() * 10);
+            for (let at = 0; at < length; at += 1) {
+              const kind = random();
+              if (kind < 0.45) {
+                body.push(pick(tables));
+                tableCount += 1;
+              } else if (kind < 0.5 && columns > 1) {
+                body.push(columnBreak);
+              } else {
+                for (let run = 1 + Math.floor(random() * 6); run > 0; run -= 1) body.push(pick(paragraphs));
+              }
+            }
+            const context = `${direction} ${columns} column(s) sample ${sample}`;
+            const pages = layOutPages(direction, body, columns);
+            expect(overlapping(pages), context).toEqual([]);
+            // A table continued on later pages has several fragments.
+            expect(pages.flatMap((page) => page.tables).length, context).toBeGreaterThanOrEqual(tableCount);
+          }
+        }
+      }
+    }, 120_000);
   });
 });

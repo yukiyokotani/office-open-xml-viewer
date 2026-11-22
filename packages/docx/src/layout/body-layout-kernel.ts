@@ -20,6 +20,7 @@ import type {
   NoteLayout,
   TableLayout,
 } from './types.js';
+import type { UprightBlockRegistration } from './upright-block-index.js';
 
 /** A note can occur in multiple column bands of one physical page. */
 export function noteBandKey(bandId: string, noteId: string): string {
@@ -62,6 +63,11 @@ export interface BodyParagraphAcquisitionInput {
   readonly availableInlineExtentPt: number;
   readonly suppressSpaceBefore: boolean;
   readonly continuation: ParagraphFragmentCursor;
+  /** `word-vertical-section-upright-table-rewrapped-strip`: upright blocks
+   * planned after this fragment (BodyLayoutSession.planUprightBlocks) whose
+   * text exclusions this acquisition wraps around although they are not
+   * registered yet. */
+  readonly besideUprightBlocks?: UprightBlockRegistration;
 }
 
 export interface AdjacentTableGroupCursor {
@@ -163,13 +169,15 @@ export interface AcquiredTableBlock {
    * not the next column. */
   readonly requiresFreshPage?: boolean;
   readonly retryAtBlockStartPt?: number;
+  /** `word-vertical-section-upright-block-table`: what accepting this
+   * fragment adds to the page's upright blocks
+   * (BodyLayoutSession.commitUprightBlocks). */
+  readonly uprightBlocks?: UprightBlockRegistration;
   readonly placement?: Readonly<{
     coordinateSpace: 'logical-body' | 'upright-physical';
     xPt: number;
     yPt: number;
     sectionFlowOwnership?: 'host-flow' | 'page';
-    /** Retained on the accepted table (TableLayout.uprightBlockExclusion). */
-    uprightBlockExclusion?: NonNullable<TableLayout['uprightBlockExclusion']>;
   }>;
 }
 
@@ -304,18 +312,6 @@ export interface PageAnchorPrescanInput {
         bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
       }>
     | Readonly<{
-        /** `word-vertical-section-upright-block-table`: a pin of the
-         * pagination round's upright block plan: the table's exclusion in
-         * section-logical page points, registered at the page start. The
-         * table, in column `tableFlowDomainId`, takes its block position. */
-        kind: 'upright-table';
-        occurrenceId: string;
-        tableSource: SourceRef;
-        key: string;
-        bounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>;
-        tableFlowDomainId: string;
-      }>
-    | Readonly<{
         /** WORD_LATER_ANCHOR_EARLIER_LINE_WRAP: a paragraph-relative drawing
          * carried from a previous pass with its first-placement geometry. */
         kind: 'host-drawing';
@@ -358,6 +354,17 @@ export interface BodyLayoutSession {
   moveAcquisitionCursor(location: BodyAcquisitionLocation): void;
   flowRegistrySnapshot(): BodyFlowRegistrySnapshotPt;
   commitFlowRegistryDelta(delta: BodyFlowRegistryDeltaPt): void;
+  /**
+   * `word-vertical-section-upright-block-table`: the upright block tables
+   * that are placed whole on this page if the flow reaches `request.input`
+   * at `request.location`, or null when that table is not such a block or is
+   * not placed whole there. Reads the page's upright blocks and changes
+   * nothing; the paginator commits the result once the paragraph fragment
+   * before the table is accepted wrapped around it.
+   */
+  planUprightBlocks?(request: BodyTableAcquisitionInput): UprightBlockRegistration | null;
+  /** Registers accepted upright blocks on the current page. */
+  commitUprightBlocks?(registration: UprightBlockRegistration): void;
 }
 
 /** Document-private acquisition adapter. Page construction and transition
