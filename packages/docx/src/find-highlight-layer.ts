@@ -1,4 +1,5 @@
-import { countSpacingCharacters } from './character-spacing.js';
+import { countSpacingCharacters, resolvedBidiLevels } from './character-spacing.js';
+import { bidiPlacedOffsets } from './layout/visual-cluster-geometry.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -22,6 +23,7 @@ import { countSpacingCharacters } from './character-spacing.js';
  * matching a browser find bar's current-vs-other highlighting.
  */
 import {
+  hasStrongRtl,
   sliceHorizontalExtent,
   overlayPercent,
   type FindHighlightColors,
@@ -103,13 +105,14 @@ export function buildDocxHighlightLayer(
       // §17.3.2.10 縦中横 alone compresses natural extents into the retained
       // one-em cell. Ordinary runs preserve the established natural measurement.
       const k = tateChuYokoOverlayScale(run, measure);
-      // A right-to-left run is painted from its right edge: the slice's
-      // logical prefix lies to its right, so its box mirrors within the run.
-      const runCount = countSpacingCharacters(run.text).pitchBearing;
-      const runWidth = sliceHorizontalExtent(run.text, 0, run.text.length, measure).width
-        + Math.max(0, runCount - 1) * pitch;
-      const x = (run.direction === 'rtl' ? Math.max(0, runWidth - pitchedX - pitchedWidth) : pitchedX) * k;
-      const width = pitchedWidth * k;
+      // A run with right-to-left text is painted in the visual order of its
+      // bidi levels: the slice covers one box per painted interval.
+      const intervals = run.direction === 'rtl' || hasStrongRtl(run.text)
+        ? visualSliceIntervals(run.text, run.direction ?? 'ltr', start, end, measure, pitch)
+        : [{ x: pitchedX, width: pitchedWidth }];
+      for (const interval of intervals) {
+      const x = interval.x * k;
+      const width = interval.width * k;
       if (width <= 0) continue;
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and
@@ -130,6 +133,45 @@ export function buildDocxHighlightLayer(
         transform +
         `background:${fill};pointer-events:none;`;
       layer.appendChild(box);
+      }
     }
   }
+}
+
+/** Where the characters `[start, end)` of a run are painted, from the run's
+ * left edge: each character's measured advance placed in the visual order
+ * of the run's UAX#9 levels (the order the run was painted in), adjacent
+ * characters merged into one interval. */
+function visualSliceIntervals(
+  text: string,
+  direction: 'ltr' | 'rtl',
+  start: number,
+  end: number,
+  measure: (value: string) => number,
+  pitch: number,
+): { x: number; width: number }[] {
+  const levels = resolvedBidiLevels(text, direction);
+  const items: { xPt: number; advancePt: number; level: number; from: number }[] = [];
+  let offset = 0;
+  let pitched = 0;
+  for (const character of text) {
+    const extent = sliceHorizontalExtent(text, offset, offset + character.length, measure);
+    const bearing = countSpacingCharacters(character).pitchBearing;
+    items.push({ xPt: extent.x + pitched * pitch, advancePt: extent.width + bearing * pitch,
+      level: levels[offset] ?? (direction === 'rtl' ? 1 : 0), from: offset });
+    pitched += bearing;
+    offset += character.length;
+  }
+  const placed = bidiPlacedOffsets(items);
+  const boxes = items
+    .map((item, index) => ({ x: placed[index]!, width: item.advancePt, from: item.from }))
+    .filter((box) => box.from >= start && box.from < end && box.width > 0)
+    .sort((left, right) => left.x - right.x);
+  const merged: { x: number; width: number }[] = [];
+  for (const box of boxes) {
+    const last = merged.at(-1);
+    if (last && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
+    else merged.push({ x: box.x, width: box.width });
+  }
+  return merged;
 }

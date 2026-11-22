@@ -167,6 +167,8 @@ const GRID_PLAIN_TYPOGRAPHY_KEYS = new Set([
   'caps', 'smallCaps', 'strike', 'doubleStrike', 'verticalAlign', 'positionPt', 'emphasis',
 ]);
 
+const floatingDrawingIds = new WeakMap<ParagraphLayout['drawings'], ReadonlySet<string>>();
+
 /** WORD_ANCHOR_HOST_NO_LINE_METRIC: the placements of a line that belong to
  * its flow: everything but the position-only hosts of floating drawings and
  * the drawings placed through them. */
@@ -178,7 +180,12 @@ export function wordFlowPlacements(
   if (!line.placements.some((placement) => placement.kind === 'anchor-host' || placement.kind === 'drawing')) {
     return line.placements;
   }
-  const floating = new Set(paragraph.drawings.flatMap((drawing) => drawing.anchorLayer ? [drawing.id] : []));
+  // One set per paragraph: every line of the paragraph asks.
+  let floating = floatingDrawingIds.get(paragraph.drawings);
+  if (!floating) {
+    floating = new Set(paragraph.drawings.flatMap((drawing) => drawing.anchorLayer ? [drawing.id] : []));
+    floatingDrawingIds.set(paragraph.drawings, floating);
+  }
   return line.placements.filter((placement) => placement.kind === 'anchor-host'
     ? placement.anchorOccurrenceId === undefined
     : placement.kind !== 'drawing' || !floating.has(placement.drawingId));

@@ -1076,11 +1076,13 @@ describe('a floating anchor inside a text piece changes nothing derived from tha
     const owned = sourceOwnedTextPlacements({ ...piece, kind: 'text', advancePt: 42, paintOps: [],
       sourceRuns: [{ sourceRunIndex: 0, range: { start: 0, end: 4 } }, { sourceRunIndex: 2, range: { start: 4, end: 7 } }],
     } as never);
-    // alef bet 1 2: [12, 42); 3 gimel dalet: [0, 30).
-    expect(owned.map((part) => [part.text, part.bounds.xPt, part.bounds.widthPt]))
-      .toEqual([['\u05d0\u05d112', 112, 30], ['3\u05d2\u05d3', 100, 30]]);
-    expect(owned.map((part) => part.origin.xPt)).toEqual([112, 100]);
-    expect(owned.map((part) => part.clusters[0]!.offset.xPt)).toEqual([0, 0]);
+    // Each owner reports one rectangle per interval it is painted in: alef
+    // bet [30, 42) and "12" [12, 24); "3" [24, 30) and gimel dalet [0, 12).
+    expect(owned.map((part) => [part.text, part.sourceRunIndex, part.bounds.xPt, part.bounds.widthPt])).toEqual([
+      ['\u05d0\u05d1', 0, 130, 12], ['12', 0, 112, 12], ['3', 2, 124, 6], ['\u05d2\u05d3', 2, 100, 12]]);
+    expect(owned.map((part) => [part.range.start, part.range.end])).toEqual([[0, 2], [2, 4], [4, 5], [5, 7]]);
+    expect(owned.map((part) => part.origin.xPt)).toEqual([130, 112, 124, 100]);
+    expect(owned.map((part) => part.clusters[0]!.offset.xPt)).toEqual([0, 0, 0, 0]);
   });
 
   it('continues a dashed underline across the anchor and the next formatting boundary', () => {

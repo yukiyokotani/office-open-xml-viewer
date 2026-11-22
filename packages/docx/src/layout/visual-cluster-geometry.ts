@@ -55,20 +55,67 @@ export function bidiPlacedOffsets(
     : xs[index]!);
 }
 
-type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>;
-type VisualClusters = Readonly<{ startsPt: readonly number[]; odd: readonly boolean[] }>;
-const visualClustersByTable = new WeakMap<TextPlacement['clusters'], VisualClusters | null>();
+type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>
+  & Partial<Pick<TextPlacement, 'paintOps' | 'advancePt'>>;
+type VisualClusters = Readonly<{
+  /** Visual start of each cluster from the left edge of the piece's box. */
+  startsPt: readonly number[];
+  /** Painted advance of each cluster (kashida elongation included). */
+  advancesPt: readonly number[];
+  odd: readonly boolean[];
+}>;
+const visualClustersByPlacement = new WeakMap<object, VisualClusters | null>();
+const TATWEEL = '\u0640';
 
-/** The visual start of each retained cluster, relative to the left edge of
- * the placement's box (`bounds.xPt`), or null when the piece paints in
- * logical order from its origin. Retained cluster offsets are logical pen
- * positions; a piece with right-to-left text paints in the visual order of
- * its UAX#9 levels within the same extent, and its paint origin may stand
- * past the trailing whitespace that visual order moves to the left. Everything
- * derived from a piece's geometry (anchor positions, source ownership) reads
- * positions through this one table. Computed once per cluster table. */
+/** Extra advance each cluster is painted with under kashida justification:
+ * the piece paints one operation whose text holds the inserted tatweels
+ * (`sourceMapping: 'kashida'`), while the retained clusters keep their
+ * natural advances. An equal share of the added width per tatweel extends
+ * the cluster before each insertion. */
+function kashidaExtensionsPt(placement: ClusteredText): number[] | null {
+  const operation = placement.paintOps?.length === 1 ? placement.paintOps[0] : undefined;
+  if (operation?.sourceMapping !== 'kashida' || placement.advancePt === undefined) return null;
+  const addedPt = placement.advancePt - placement.clusters.reduce((sum, cluster) => sum + cluster.advancePt, 0);
+  if (!(addedPt > 0)) return null;
+  const source = [...placement.text];
+  const painted = [...operation.text];
+  const run = (text: readonly string[], from: number): number => {
+    let count = 0;
+    while (text[from + count] === TATWEEL) count += 1;
+    return count;
+  };
+  const extensions = placement.clusters.map(() => 0);
+  let paintedIndex = 0;
+  let offset = placement.range.start;
+  let cluster = 0;
+  let total = 0;
+  source.forEach((character, index) => {
+    const inserted = Math.max(0, run(painted, paintedIndex) - run(source, index));
+    while (cluster < placement.clusters.length - 1 && placement.clusters[cluster]!.range.end <= offset) cluster += 1;
+    if (inserted > 0) {
+      // Before this character: after the cluster that precedes it.
+      const owner = placement.clusters[cluster]!.range.start >= offset && cluster > 0 ? cluster - 1 : cluster;
+      extensions[owner]! += inserted;
+      total += inserted;
+    }
+    paintedIndex += inserted + 1;
+    offset += character.length;
+  });
+  if (total === 0) return null;
+  return extensions.map((count) => count * addedPt / total);
+}
+
+/** Where each retained cluster of a piece is painted, or null when the piece
+ * paints in logical order from its origin at its retained offsets. Retained
+ * cluster offsets are logical pen positions; a piece with right-to-left text
+ * paints in the visual order of its UAX#9 levels within the same extent, its
+ * paint origin may stand past the trailing whitespace that visual order
+ * moves to the left, and kashida elongation widens clusters in paint only.
+ * Everything derived from a piece's geometry (anchor positions, source
+ * ownership) reads positions through this one table. Computed once per
+ * placement. */
 export function visualClusters(placement: ClusteredText): VisualClusters | null {
-  const cached = visualClustersByTable.get(placement.clusters);
+  const cached = visualClustersByPlacement.get(placement);
   if (cached !== undefined) return cached;
   let result: VisualClusters | null = null;
   const direction = placement.direction;
@@ -77,14 +124,21 @@ export function visualClusters(placement: ClusteredText): VisualClusters | null 
     const levels = resolvedBidiLevels(placement.text, direction);
     const level = (index: number): number =>
       levels[placement.clusters[index]!.range.start - placement.range.start] ?? (direction === 'rtl' ? 1 : 0);
+    const extensions = kashidaExtensionsPt(placement);
+    let shiftPt = 0;
+    const logical = placement.clusters.map((cluster, index) => {
+      const item = { xPt: cluster.offset.xPt + shiftPt, advancePt: cluster.advancePt + (extensions?.[index] ?? 0),
+        level: level(index) };
+      shiftPt += extensions?.[index] ?? 0;
+      return item;
+    });
     result = {
-      startsPt: bidiPlacedOffsets(placement.clusters.map((cluster, index) => ({
-        xPt: cluster.offset.xPt, advancePt: cluster.advancePt, level: level(index),
-      }))),
-      odd: placement.clusters.map((_, index) => level(index) % 2 === 1),
+      startsPt: bidiPlacedOffsets(logical),
+      advancesPt: logical.map((item) => item.advancePt),
+      odd: logical.map((item) => item.level % 2 === 1),
     };
   }
-  visualClustersByTable.set(placement.clusters, result);
+  visualClustersByPlacement.set(placement, result);
   return result;
 }
 
@@ -99,7 +153,7 @@ export function visualBoundaryXPt(placement: ClusteredText, index: number): numb
   const startPt = visual ? placement.bounds.xPt + visual.startsPt[at]! : placement.origin.xPt + clusters[at]!.offset.xPt;
   const leadingIsRight = visual?.odd[at] === true;
   const trailing = index >= clusters.length;
-  return leadingIsRight !== trailing ? startPt + clusters[at]!.advancePt : startPt;
+  return leadingIsRight !== trailing ? startPt + (visual?.advancesPt[at] ?? clusters[at]!.advancePt) : startPt;
 }
 
 /** Visual x of the start (left edge) of cluster `index`. */
@@ -108,4 +162,24 @@ export function visualClusterStartXPt(placement: ClusteredText, index: number): 
   return visual
     ? placement.bounds.xPt + visual.startsPt[index]!
     : placement.origin.xPt + placement.clusters[index]!.offset.xPt;
+}
+
+/** `clusters[from, to)` (contiguous in source order) as maximal groups that
+ * are also contiguous where they are painted: `[first, end)` index pairs. A
+ * mixed-direction span paints as several disjoint intervals. */
+export function visuallyContiguousGroups(placement: ClusteredText, from: number, to: number): [number, number][] {
+  const visual = visualClusters(placement);
+  if (!visual || to - from <= 1) return to > from ? [[from, to]] : [];
+  const groups: [number, number][] = [];
+  let first = from;
+  for (let index = from + 1; index <= to; index += 1) {
+    const adjacent = index < to && (
+      Math.abs(visual.startsPt[index - 1]! + visual.advancesPt[index - 1]! - visual.startsPt[index]!) < 1e-6
+      || Math.abs(visual.startsPt[index]! + visual.advancesPt[index]! - visual.startsPt[index - 1]!) < 1e-6);
+    if (!adjacent) {
+      groups.push([first, index]);
+      first = index;
+    }
+  }
+  return groups;
 }

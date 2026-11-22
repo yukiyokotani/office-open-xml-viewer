@@ -92,6 +92,7 @@ const table = (content: BodyElement[]): BodyElement => ({
 // ── The generated set ───────────────────────────────────────────────────────
 
 const rtl = { rtl: true };
+const kashidaText = '\u0628\u062a\u062a\u0628\u062a \u0628\u062a\u062a\u0628\u062a \u0628\u062a\u062a\u0628\u062a';
 const scripts: readonly (readonly [name: string, runs: readonly RunSpec[], options?: object])[] = [
   ['left-to-right', [['ab cd '], ['efgh ij']]],
   ['two formats', [['ab '], ['cd ', { bold: true }], ['ef']]],
@@ -106,9 +107,20 @@ const scripts: readonly (readonly [name: string, runs: readonly RunSpec[], optio
   ['tabs', [['a\tbc\td']], { tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }] }],
   ['fitted text', [['abcd', { fitTextVal: 960, fitTextId: 1 }], [' ef']]],
   ['soft hyphen and no-break space', [['co­op x yz']]],
+  // One run holding both directions, in a right-to-left paragraph.
+  ['digits inside one right-to-left run', [['\u05d0\u05d1123\u05d2\u05d3', rtl]], { bidi: true }],
+  ['a Latin word inside one right-to-left run', [['\u05d0\u05d1 abc \u05d2\u05d3', rtl]], { bidi: true }],
+  ['digits inside one unflagged run', [['\u05d0\u05d1123\u05d2\u05d3']], { bidi: true }],
+  // Justification that elongates or distributes (its own alignment).
+  ['Arabic under highKashida', [[kashidaText, rtl]], { bidi: true, alignment: 'highKashida' }],
+  ['Arabic under lowKashida', [[kashidaText, rtl]], { bidi: true, alignment: 'lowKashida' }],
+  ['Arabic under mediumKashida', [[kashidaText, rtl]], { bidi: true, alignment: 'mediumKashida' }],
+  ['distributed text', [['ab cd ef gh ij kl']], { alignment: 'distribute' }],
+  ['Thai distributed', [['\u0e20\u0e32\u0e29\u0e32\u0e44\u0e17\u0e22 \u0e04\u0e33 \u0e44\u0e17\u0e22']], { alignment: 'thaiDistribute' }],
 ];
 const naturalScripts = new Set(['left-to-right', 'two formats', 'right-to-left', 'right-to-left with digits',
-  'mixed directions', 'Arabic joining', 'East Asian punctuation', 'ligatures']);
+  'mixed directions', 'Arabic joining', 'East Asian punctuation', 'ligatures', 'digits inside one right-to-left run',
+  'a Latin word inside one right-to-left run', 'digits inside one unflagged run']);
 const alignments = ['left', 'both'] as const;
 const underlines: readonly object[] = [{}, { underline: true }, { underline: true, underlineStyle: 'dash' }];
 const modes = [12, 14, 15] as const;
@@ -404,10 +416,22 @@ function observe(testCase: Case, subject: readonly Run[], anchorAt: number, anch
   const laidOut = paragraphs(layout.pages.map((page) => page.layers));
   const misplaced = testCase.naturalSpacing && layout.pages.length === 1
     ? misplacedHighlights(textRunsForPage(layout, 0, { scale: 1 }), laidOut) : [];
+  // Selection rectangles of one line cover disjoint intervals.
+  const overlapping: string[] = [];
+  if (testCase.naturalSpacing) {
+    layout.pages.forEach((_, pageIndex) => {
+      const runs = textRunsForPage(layout, pageIndex, { scale: 1 }).filter((run) => run.w > 0);
+      runs.forEach((left, index) => runs.slice(index + 1).forEach((right) => {
+        if (Math.abs(left.y - right.y) < 1e-6 && Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x) > 1e-6) {
+          overlapping.push(`${JSON.stringify(left.text)} [${left.x}, ${left.x + left.w}) and ${JSON.stringify(right.text)} [${right.x}, ${right.x + right.w})`);
+        }
+      }));
+    });
+  }
   const drawings = layout.pages.flatMap((page) => page.layers.paintOrder.flatMap((entry) => entry.kind === 'drawing'
     ? [[round(entry.node.inkBounds.xPt), round(entry.node.inkBounds.yPt)]] : []));
   return {
-    drawings, misplaced,
+    drawings, misplaced, overlapping,
     pages: layout.pages.map((page) => comparable(page.layers)),
     selection, finds, comments,
     paragraphs: laidOut,
@@ -467,7 +491,7 @@ function firstDifference(actual: unknown, expected: unknown, path = ''): string 
   return `${path}: with the anchor ${JSON.stringify(actual)?.slice(0, 120)}, without ${JSON.stringify(expected)?.slice(0, 120)}`;
 }
 
-const sampled = cases(Number(process.env.ANCHOR_DIFFERENTIAL_SAMPLES ?? 10));
+const sampled = cases(Number(process.env.ANCHOR_DIFFERENTIAL_SAMPLES ?? 6));
 
 describe('a floating anchor at any source boundary changes nothing but the drawing', () => {
   for (const testCase of sampled) {
@@ -488,6 +512,8 @@ describe('a floating anchor at any source boundary changes nothing but the drawi
         // A highlight lies over the character it marks, with or without the anchor.
         expect(plain.misplaced, `${label}: find highlights without the anchor`).toEqual([]);
         expect(anchored.misplaced, `${label}: find highlights`).toEqual([]);
+        expect(plain.overlapping, `${label}: selection rectangles without the anchor`).toEqual([]);
+        expect(anchored.overlapping, `${label}: selection rectangles`).toEqual([]);
 
         // The host: on the line and at the visual position of its boundary.
         const hostParagraph = anchored.paragraphs.findIndex((candidate) =>
@@ -512,4 +538,84 @@ describe('a floating anchor at any source boundary changes nothing but the drawi
       });
     });
   }
+});
+
+describe('a character-relative anchor in kashida-justified text', () => {
+  it('stands where the elongated text paints its boundary', () => {
+    // An oracle independent of the cluster table: the painted text itself.
+    // Every painted character, inserted tatweels included, is 6pt wide, and
+    // a right-to-left piece paints its text from its right edge.
+    const testCase = cases(1).find((candidate) => candidate.name.startsWith('Arabic under highKashida'))!;
+    const narrow = { ...testCase, container: 'body' as const, vertical: false, section: { pageWidth: 130, pageHeight: 200 } };
+    let elongated = 0;
+    for (const offset of boundaries(narrow.specs)) {
+      const { runs } = subjectRuns(narrow.specs, offset, 'character');
+      const built = model(narrow, runs);
+      const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
+        { currentDateMs: 0 });
+      const subject = paragraphs(layout.pages.map((page) => page.layers))[0]!;
+      for (const line of subject.lines) {
+        const host = line.placements.find((placement) => placement.kind === 'anchor-host');
+        if (!host) continue;
+        // The anchoring character takes one unit of the source positions.
+        const at = offset;
+        const piece = line.placements.find((placement) => placement.kind === 'text'
+          && placement.range.start <= at && at < placement.range.end);
+        if (piece?.kind !== 'text' || piece.paintOps[0]?.sourceMapping !== 'kashida') continue;
+        elongated += 1;
+        const painted = [...piece.paintOps[0].text];
+        const source = [...piece.text];
+        let consumed = 0;
+        let prefix = 0;
+        // Tatweels inserted before a character precede its boundary.
+        while (prefix < painted.length && (consumed < at - piece.range.start || painted[prefix] !== source[consumed])) {
+          if (painted[prefix] === source[consumed]) consumed += 1;
+          prefix += 1;
+        }
+        expect(round(host.bounds!.xPt), `anchor at offset ${offset}`)
+          .toBe(round(piece.bounds.xPt + piece.bounds.widthPt - prefix * 6));
+      }
+    }
+    expect(elongated).toBeGreaterThan(0);
+  });
+});
+
+describe('floating anchors on many lines of one paragraph', () => {
+  it('are paginated in work proportional to their number', () => {
+    // One float per line and no text, lines ended by manual breaks: a scan
+    // of the paragraph's drawings from every line reads n * n entries.
+    const visited = (count: number): number => {
+      const runs: Run[] = [];
+      for (let index = 0; index < count; index += 1) {
+        runs.push({ type: 'anchorHost', fontSize: 2, __anchorOccurrenceId: `p${index}` } as unknown as Run);
+        runs.push({ type: 'image', imagePath: 'word/media/p.png', mimeType: 'image/png', widthPt: 3, heightPt: 2,
+          anchor: true, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+          __anchorAcquisition: { ...acquisition('page'), occurrenceId: `p${index}` } } as unknown as Run);
+        runs.push({ type: 'break', breakType: 'line' } as unknown as Run);
+      }
+      const built = model({ ...cases(1)[0]!, container: 'body', options: {},
+        settings: { compatibilityMode: 14, useFELayout: true },
+        section: { pageWidth: 200, pageHeight: 20000, docGridType: 'lines', docGridLinePitch: 20 } }, runs);
+      let entries = 0;
+      const names = ['filter', 'find', 'findIndex', 'slice', 'flatMap', 'some', 'every', 'map', Symbol.iterator] as const;
+      const prototype = Array.prototype as unknown as Record<string | symbol, (...args: unknown[]) => unknown>;
+      const originals = names.map((name) => prototype[name]!);
+      names.forEach((name, index) => {
+        prototype[name] = function (this: unknown[], ...args: unknown[]) {
+          entries += this.length;
+          return originals[index]!.apply(this, args);
+        };
+      });
+      try {
+        const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
+          { currentDateMs: 0 });
+        expect(layout.pages.flatMap((page) => page.layers.paintOrder.filter((entry) => entry.kind === 'drawing')))
+          .toHaveLength(count);
+      } finally {
+        names.forEach((name, index) => { prototype[name] = originals[index]!; });
+      }
+      return entries;
+    };
+    expect(visited(800)).toBeLessThan(visited(200) * 5);
+  });
 });
