@@ -212,9 +212,12 @@ export interface LoadOptions {
    * `null` disables that configurable limit only. Limits are admission policy,
    * not guarantees of exact browser-process memory use.
    *
-   * Limits apply per package session. A Viewer reload keeps the previous
-   * engine until the new load succeeds, so two sessions coexist during that
-   * window and their combined peak is not bounded by these limits.
+   * Limits apply per package session. When a self-loading Viewer reloads, the
+   * previous engine stays alive while the replacement engine is acquired, so
+   * the two sessions overlap and their combined peak is not bounded by these
+   * limits. The previous engine is released when the replacement is installed,
+   * which happens before the initial page, slide or sheet render; a failed
+   * acquisition keeps the previous engine, but a failed initial render does not.
    */
   resourceLimits?: OoxmlResourceLimits;
   /**

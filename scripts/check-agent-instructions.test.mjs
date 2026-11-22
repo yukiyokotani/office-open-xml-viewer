@@ -51,12 +51,16 @@ const isInside = (dir, path) => {
   return offset !== '' && offset.split(sep)[0] !== '..' && offset === relative(dir, resolve(dir, offset));
 };
 
+// A fenced code block and its body. The fence may be indented, as it is under
+// a list item.
+const FENCED_BLOCK = /^[ \t]*```[^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$/gm;
+
 // Link destinations a Markdown reader would follow: inline links, and
 // reference links that are used and defined. Fenced code, code spans and HTML
 // comments hold no links, and an unused definition is not one.
 function markdownLinks(text) {
   const body = text
-    .replace(/^```[\s\S]*?^```/gm, '')
+    .replace(FENCED_BLOCK, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/`[^`\n]*`/g, '');
   const label = (raw) => raw.trim().replace(/\s+/g, ' ').toLowerCase();
@@ -87,6 +91,7 @@ test('Markdown links are the destinations a reader can follow', () => {
   ]);
   assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);
   assert.deepEqual(markdownLinks('```\n[fenced](f.md)\n```\n[guide][g]\n\n[g]: missing.md\n'), ['missing.md']);
+  assert.deepEqual(markdownLinks('1. Run:\n\n   ```bash\n   echo "[guide](docs/example.md)"\n   ```\n'), []);
 });
 
 test('every AGENTS.md chain fits within the Codex instruction limit', () => {
@@ -337,7 +342,7 @@ test('docs/ holds only procedures, the core beliefs, linked user guides and thei
 test('docs/ carries no task lists', () => {
   const found = [];
   for (const file of docsFiles()) {
-    const lines = read(file).replace(/^```[\s\S]*?^```/gm, '').split('\n');
+    const lines = read(file).replace(FENCED_BLOCK, '').split('\n');
     if (lines.some((line) => /^\s*[-*] \[[ xX]\] /.test(line))) found.push(rel(file));
   }
   assert.deepEqual(found, [], 'plans and trackers are GitHub issues, not documents');
@@ -359,8 +364,8 @@ function missingReferences(file, text, { exists, scriptsOf }) {
   // Words of inline code and of fenced examples: a command names its script as
   // one of its words (`node scripts/x.mjs`).
   const words = [
-    ...[...text.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)].map((match) => match[1]),
-    ...[...text.replace(/^```[\s\S]*?^```/gm, '').matchAll(/`([^`\n]+)`/g)].map((match) => match[1]),
+    ...[...text.matchAll(FENCED_BLOCK)].map((match) => match[1]),
+    ...[...text.replace(FENCED_BLOCK, '').matchAll(/`([^`\n]+)`/g)].map((match) => match[1]),
   ].flatMap((code) => code.split(/\s+/)).map((word) => word.replace(/^["'(]+|["'),;:]+$/g, ''));
   for (const span of new Set(words)) {
     // A repository path: at least one slash, no placeholders, globs or assignments.
@@ -397,6 +402,9 @@ test('a removed path or a script of another package is reported', () => {
   assert.deepEqual(check('Run `node scripts/missing.mjs --flag`.\n\n```bash\nnode scripts/a.mjs && python3 scripts/absent.py\n```\n'), [
     'AGENTS.md: scripts/absent.py',
     'AGENTS.md: scripts/missing.mjs',
+  ]);
+  assert.deepEqual(check('4. Run the gates:\n\n   ```bash\n   mise exec -- node scripts/removed.mjs --final\n   ```\n'), [
+    'AGENTS.md: scripts/removed.mjs',
   ]);
   assert.deepEqual(check('`scripts/gone.mjs` and `rules/example.yml`'), [
     'AGENTS.md: scripts/gone.mjs',

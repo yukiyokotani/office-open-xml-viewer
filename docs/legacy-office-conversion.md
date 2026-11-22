@@ -239,7 +239,8 @@ supports:
 - DATE and TIME show the current date or time when the field has a date-time
   picture the renderer can format; otherwise they show the result stored in
   the file.
-- A locked PAGE, NUMPAGES, DATE or TIME field shows its stored result.
+- A locked PAGE, NUMPAGES, DATE or TIME field is not recomputed; it shows its
+  stored result unless that result is marked private.
 - EQ fields become phonetic guides or inline equations.
 - HYPERLINK fields whose instruction the reader can parse, and REF or PAGEREF
   fields with a bookmark and `\h`, become links. Stored results are not

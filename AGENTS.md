@@ -35,7 +35,7 @@ viewers.
 4. Never push to `main` or a release branch. Open PRs as drafts, take them
    through the merge gate, and merge with a merge commit, never a squash
    ([Git, PRs and issues](docs/workflow/git-and-prs.md)).
-5. Never commit private samples or generated output, and keep local paths,
+5. Never commit private samples or generated local artifacts, and keep local paths,
    usernames and private sample contents out of commits, PRs and public docs.
 6. Never update the reference images in
    `packages/*/tests/visual/references/` or loosen VRT thresholds unless the

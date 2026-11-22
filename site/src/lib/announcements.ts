@@ -1296,8 +1296,9 @@ document.destroy();`,
           'parsePptx() → await materializePptxPresentation().',
           'parseXlsx() → await materializeXlsxWorkbookIndex() for metadata/index only.',
           'parseXlsxSheet() → await materializeXlsxWorksheet() for one caller-owned worksheet.',
-          'parseXlsxAllSheets() → await materializeXlsxWorkbook() for the index and every worksheet; this has the highest time and retained-memory cost.',
-          'PPTX image and media extraction → await session.getImage() or session.getMedia() on openPptxPresentation().',
+          'parseXlsxAllSheets() → await materializeXlsxWorkbook() for the index and every worksheet; this has the highest time and retained-memory cost. The result is { workbookIndex, worksheets } with worksheets in sheet-index order, replacing the old { workbook, worksheets } record keyed by sheet name.',
+          'extractPptxImage() → await session.getImage() on openPptxPresentation().',
+          'extractPptxMedia() → await session.getMedia() on openPptxPresentation().',
         ],
         examples: [
           {
