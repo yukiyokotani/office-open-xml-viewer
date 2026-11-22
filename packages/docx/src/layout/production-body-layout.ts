@@ -2288,7 +2288,11 @@ function acquireSelectedNoteSeparatorBand(
     }
     return Object.freeze({ advancePt: story.advancePt, ruleOffsetPt: 0, markFontSizePt: 10, bidi, paragraphs });
   }
-  const markFontSizePt = (markerRun as Readonly<{ fontSize?: number }>).fontSize ?? 10;
+  // The size its line is laid out with: the complex-script size (§17.3.2.39
+  // szCs) for an rtl or cs marker run, as for any such run's text.
+  const markerSizes = markerRun as Readonly<{ fontSize?: number; fontSizeCs?: number; rtl?: boolean; cs?: boolean }>;
+  const markFontSizePt = (markerSizes.rtl === true || markerSizes.cs === true
+    ? markerSizes.fontSizeCs ?? markerSizes.fontSize : markerSizes.fontSize) ?? 10;
   const box = marker.line.bounds;
   // Content beside the marker paints with the story: text (symbols
   // included), a field (its result or computed value), or paragraph borders
