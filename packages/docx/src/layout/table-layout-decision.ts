@@ -73,9 +73,12 @@ interface MemberScopeExtensions {
   readonly contentFitted: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY, absent outside measured structures. */
   readonly spacingGeometry: Readonly<{ spacingPt: number; borderPt: number }> | null;
+  /** WORD_AUTOFIT_CONTENT_RESOLUTION. */
+  readonly contentResolution: boolean;
 }
 const NO_SCOPE_EXTENSIONS: MemberScopeExtensions = Object.freeze({
   marginHang: 'none', nestedNegativeIndentIgnored: false, contentFitted: false, spacingGeometry: null,
+  contentResolution: false,
 });
 
 /** All compatibility selection lives at this boundary. A member receives facts
@@ -92,7 +95,7 @@ function memberContext(
   nonleadingIndentIgnored = false,
   extensions: MemberScopeExtensions = NO_SCOPE_EXTENSIONS,
 ) {
-  const { marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry } = extensions;
+  const { marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry, contentResolution } = extensions;
   const format = source.format;
   const firstRowException = format.firstRowException;
   // MS-OI29500 §2.1.156/158: first-logical-row indent/layout authority
@@ -334,7 +337,7 @@ function memberContext(
     effectiveLayout,
     rowTranslationsPt: Object.freeze(rowTranslationsPt), maximumTableWidthPt,
     isFixedNestedTable, usesLeadingIndentBand, contentGrowth, forcedFitOuterMarginsPt,
-    percentWidthBasePt, spacingGeometry });
+    percentWidthBasePt, spacingGeometry, contentResolution });
 }
 
 export type TableMemberDecision = ReturnType<typeof memberContext>;
@@ -486,7 +489,18 @@ export function decideLogicalTable(
     rowOverrides,
     gridSkips,
   });
-  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry });
+  // WORD_AUTOFIT_CONTENT_RESOLUTION: one leading, unindented AutoFit table
+  // of a single-column body, or nested once in a body table cell.
+  const contentResolution = input.layout !== 'fixed' && singleTable && commonFrame && commonGrid
+    && environment.compat.tableMode15Geometry && environment.story === 'body'
+    && ((environment.topLevel && environment.singleColumn) || environment.tableCellDepth === 1)
+    && !isVerticalTextDirection(environment.textDirection) && environment.quarterTurnedStory !== true
+    && format.ordinaryFlow && format.positioning == null && format.outerEdgeIndent !== true
+    && !rowOverrides && !gridSkips && table.bidiVisual !== true
+    && (table.jc == null || table.jc === 'left' || table.jc === 'start') && origin.tableIndentPt === 0
+    && format.rows.every((row) => row.cellSpacingPt === 0
+      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true));
+  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry, contentResolution });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
     usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);
   return Object.freeze({ measuredOrigin, usesLogicalProperties, dropsUnusedLeadingGrid, logical,

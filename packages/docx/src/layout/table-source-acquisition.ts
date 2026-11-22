@@ -199,6 +199,17 @@ export function projectEffectiveCellPreferredWidth(
 /** WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE: an authored first-row tblPrEx/tblW governs the
  * whole table, including auto/nil/zero clearing the body's preference. Both
  * occurrence ceiling selection and column projection use this resolver. */
+/** Whether the width projectEffectiveTablePreferredWidthPt resolves is a percentage. */
+function effectiveTablePreferredWidthIsRelative(input: TableSourceAcquisitionInput): boolean {
+  if (input.format.firstRowException?.preferredWidthAuthored) {
+    return input.format.firstRowException.preferredWidth?.kind === 'pct';
+  }
+  const lexical = tableWidthConstraintFromLexical(input.lexical.table?.preferredWidth);
+  if (lexical) return lexical.kind === 'pct';
+  return !(input.semantic.widthPt != null && input.semantic.widthPt > 0)
+    && input.semantic.widthPct != null && input.semantic.widthPct > 0;
+}
+
 export function projectEffectiveTablePreferredWidthPt(
   input: TableSourceAcquisitionInput,
   availableWidthPt: number,
@@ -357,6 +368,7 @@ export function projectTableColumnLayoutInput(
     gridWidthsPt,
     gridWidthKeys,
     tablePreferredWidthPt: projectEffectiveTablePreferredWidthPt(input, availableWidthPt),
+    ...(effectiveTablePreferredWidthIsRelative(input) ? { tablePreferredWidthRelative: true } : {}),
     rows: table.rows.map((row, rowIndex) => {
       const rowInput = input.lexical.rows[rowIndex];
       const beforeSpan = normalizedBeforeSpans[rowIndex] ?? 0;

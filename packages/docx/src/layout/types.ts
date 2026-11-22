@@ -1485,6 +1485,9 @@ export interface TableColumnLayoutInput {
    * past the saved grid toward their maximum content width; 'nonbinding'
    * only when every maximum fits the ceiling together. */
   readonly growUnpreferredColumns?: boolean | 'nonbinding';
+  /** WORD_AUTOFIT_CONTENT_RESOLUTION: resolve the columns from content and
+   * preferred widths, without the saved grid. */
+  readonly contentResolution?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
   /** The text band the intrinsic maxima were capped at; a 'nonbinding'
@@ -1493,6 +1496,8 @@ export interface TableColumnLayoutInput {
   readonly gridWidthsPt: readonly number[];
   readonly gridWidthKeys?: readonly (string | null)[];
   readonly tablePreferredWidthPt: number | null;
+  /** The preferred table width is a share of its container. */
+  readonly tablePreferredWidthRelative?: boolean;
   readonly rows: readonly TableColumnRowConstraint[];
 }
 

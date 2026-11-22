@@ -84,6 +84,7 @@ export interface DocxCompatProfile {
    * @compatRule word-table-origin-compatibility
    * @compatRule word-table-cell-spacing-geometry
    * @compatRule word-table-margin-hang-scope
+   * @compatRule word-autofit-content-resolution
    */
   readonly tableMode15Geometry: boolean;
   /**

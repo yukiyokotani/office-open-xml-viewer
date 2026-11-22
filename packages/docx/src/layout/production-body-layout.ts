@@ -3575,8 +3575,9 @@ function acquireTableColumnInput(
               { ...tableDecisionEnvironment(state), topLevel: false, inTableCell: true,
                 tableCellDepth: (tableDecisionEnvironment(state).tableCellDepth ?? 0) + 1 });
             const intrinsic = intrinsicWidthsForTable(nested, nestedDecision.logical, cellStory);
-            return measureTableIntrinsicWidths(projectTableColumnLayoutInput(source, contentWPt,
-              (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt));
+            return measureTableIntrinsicWidths({ ...projectTableColumnLayoutInput(source, contentWPt,
+              (row, cellIndex, preferred) => intrinsic(nested.rows[row]!.cells[cellIndex]!, preferred), contentWPt),
+              contentResolution: nestedDecision.logical.contentResolution });
           },
         },
         ownerLayout,
@@ -3600,6 +3601,7 @@ function acquireTableColumnInput(
   return {
     ...columnInput,
     outerMarginAllowancePt: forcedFitOuterMarginsPt,
+    contentResolution: decision.contentResolution,
     growUnpreferredColumns: contentGrowth === 'band' ? true : contentGrowth === 'nonbinding' ? 'nonbinding' : false,
     // The ceiling the intrinsic maxima above were capped at.
     contentBandPt: contentWPt,
