@@ -83,8 +83,11 @@ function paintPlacedChild(
   // keeps a single anti-aliased edge instead of being faded by a second,
   // fractional clip edge. A paragraph without escaping content is clipped
   // whole in this frame; otherwise the clip is handed to the paragraph.
+  // An empty clip stays empty: widening it would open a one-pixel strip.
   const clip = cellContentClip && layout.kind === 'paragraph'
-    ? outwardRasterClipBounds(cellContentClip, context) : undefined;
+    ? cellContentClip.widthPt <= 0 || cellContentClip.heightPt <= 0
+      ? cellContentClip : outwardRasterClipBounds(cellContentClip, context)
+    : undefined;
   const clipWhole = clip !== undefined && layout.kind === 'paragraph'
     && !paragraphEscapesCellClip(layout, context.omitAnchoredDrawings);
   const frame = canvasPaintFrame(context.ctx, () => {

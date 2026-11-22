@@ -434,7 +434,8 @@ function paintParagraphContents(node: ParagraphLayout, clipContext: CanvasPaintC
   if (!context.omitAnchoredDrawings) {
     for (const drawing of behind) paintDrawingWithTextBoxes(drawing);
   }
-  clipped(() => {
+  // Each clipped group opens a Canvas frame only when it paints something.
+  if ((node.lineNumbers?.length ?? 0) > 0 || node.shading) clipped(() => {
     for (const retained of node.lineNumbers ?? []) {
       for (const operation of retained.paintOps) {
         ctx.fillStyle = operation.color;
@@ -470,26 +471,34 @@ function paintParagraphContents(node: ParagraphLayout, clipContext: CanvasPaintC
       () => paintLineContents(line, lineContext, run),
     )();
   };
-  for (const line of node.lines) {
-    if (!cellClip) {
-      paintLine(line);
-      continue;
+  if (!cellClip) {
+    for (const line of node.lines) paintLine(line);
+  } else {
+    // Maximal runs of placements on the same side of the clip, in paint
+    // order; consecutive clipped runs, across lines too, share one frame.
+    const segments: Array<Readonly<{ line: ParagraphLayout['lines'][number]; run: LinePlacementRun; escapes: boolean }>> = [];
+    for (const line of node.lines) {
+      const escapes = line.placements.map((placement) => placement.kind === 'resource' && placement.escapesCellClip === true);
+      for (let start = 0; start < Math.max(1, escapes.length);) {
+        let end = start + 1;
+        while (end < escapes.length && escapes[end] === escapes[start]) end++;
+        segments.push({ line, run: { start, end }, escapes: escapes[start] === true });
+        start = end;
+      }
     }
-    // Maximal runs of placements on the same side of the clip, in line order.
-    const escapes = line.placements.map((placement) => placement.kind === 'resource' && placement.escapesCellClip === true);
-    for (let start = 0; start < Math.max(1, escapes.length);) {
+    for (let start = 0; start < segments.length;) {
       let end = start + 1;
-      while (end < escapes.length && escapes[end] === escapes[start]) end++;
-      const run = { start, end };
-      if (escapes[start]) paintLine(line, run);
-      else clipped(() => paintLine(line, run));
+      while (end < segments.length && segments[end]!.escapes === segments[start]!.escapes) end++;
+      const group = segments.slice(start, end);
+      if (group[0]!.escapes) group.forEach(({ line, run }) => paintLine(line, run));
+      else clipped(() => group.forEach(({ line, run }) => paintLine(line, run)));
       start = end;
     }
   }
   // Keep authored paragraph-border geometry in retained layout, while matching
   // Word's raster treatment of subpixel rules with at least one device pixel
   // of coverage. Text decorations and run borders retain their own widths.
-  clipped(() => {
+  if (node.borders.length > 0) clipped(() => {
     const paragraphBorderMinimumCssWidthPx = oneDevicePixelCssWidth(context);
     for (const border of node.borders) {
       paintStrokeSegment(border, context, paragraphBorderMinimumCssWidthPx);
@@ -510,7 +519,7 @@ function paintParagraphContents(node: ParagraphLayout, clipContext: CanvasPaintC
         || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
     for (const drawing of front) paintDrawingWithTextBoxes(drawing);
   }
-  clipped(() => {
+  if (node.textBoxes.some((textBox) => !ownedTextBoxIds.has(textBox.id))) clipped(() => {
     for (const textBox of node.textBoxes) {
       if (!ownedTextBoxIds.has(textBox.id)) {
         // Page materialization owns only anchors in the retained page root.

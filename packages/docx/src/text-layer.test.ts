@@ -171,3 +171,36 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(layer.children[0].style.transform ?? '').toBe('');
   });
 });
+
+describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
+  const layerWith = (runs: DocxTextRunInfo[], onLink?: () => void) => {
+    vi.stubGlobal('document', {
+      createElement: (t: string) => Object.assign(makeEl(t), { addEventListener() {}, title: '', dataset: {} }),
+    });
+    const layer = Object.assign(makeEl('div'), { dataset: {} });
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 100, 100, onLink);
+    return layer.children;
+  };
+
+  it('limits a partly clipped hyperlink to its visible part', () => {
+    // A 60px link whose clip starts 30px into it.
+    const [span] = layerWith([run({
+      text: 'linklinklink', x: 10, w: 60,
+      hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
+      clipBounds: { x: 40, y: 0, width: 100, height: 12 },
+    })], () => {});
+    expect(span!.style['clip-path']).toBe('polygon(30px -100vh,200vw -100vh,200vw 200vh,30px 200vh)');
+    expect(span!.style['pointer-events']).toBe('all');
+    expect(span!.style.cursor).toBe('pointer');
+  });
+
+  it('makes a wholly clipped run inert and leaves an unclipped run unchanged', () => {
+    const [hidden, open] = layerWith([
+      run({ x: 0, w: 10, clipBounds: { x: 20, y: 0, width: 10, height: 12 } }),
+      run({ x: 0, w: 10 }),
+    ]);
+    expect(hidden!.style['pointer-events']).toBe('none');
+    expect(open!.style['pointer-events']).toBe('all');
+    expect(open!.style['clip-path']).toBeUndefined();
+  });
+});

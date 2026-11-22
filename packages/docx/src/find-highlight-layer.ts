@@ -1,5 +1,5 @@
 import { countSpacingCharacters } from './character-spacing.js';
-import { clipRunRect } from './run-clip.js';
+import { clipRunRect, placeRunRect } from './run-clip.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -105,7 +105,11 @@ export function buildDocxHighlightLayer(
       // one-em cell. Ordinary runs preserve the established natural measurement.
       const k = tateChuYokoOverlayScale(run, measure);
       // The highlight is cut to the run's paint clip, like its glyphs.
-      const visible = clipRunRect(run, { x: run.x + pitchedX * k, y: run.y, width: pitchedWidth * k, height: run.h });
+      // A clipped run's slice is placed along the run's own axes to meet its
+      // clip; other runs keep their established placement.
+      const visible = clipRunRect(run, run.clipBounds
+        ? placeRunRect(run, pitchedX * k, 0, pitchedWidth * k, run.h)
+        : { x: run.x + pitchedX * k, y: run.y, width: pitchedWidth * k, height: run.h });
       if (!visible || visible.width <= 0) continue;
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and

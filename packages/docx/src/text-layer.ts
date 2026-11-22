@@ -1,4 +1,4 @@
-import { clipRunRect } from './run-clip.js';
+import { visibleRunExtent } from './run-clip.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -103,10 +103,9 @@ export function buildDocxTextLayer(
     const k = reference && reference.scale > 0 && Number.isFinite(reference.scale) ? reference.scale : 1;
     let transformValue = run.transform ?? '';
     if (k !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scale(${k})`;
-    if (measureForFont && run.eastAsianVert) {
-      const tcy = tateChuYokoOverlayScale(run, runOverlayMeasure(run, measureForFont));
-      if (tcy !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${tcy})`;
-    }
+    const tcy = measureForFont && run.eastAsianVert
+      ? tateChuYokoOverlayScale(run, runOverlayMeasure(run, measureForFont)) : 1;
+    if (tcy !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${tcy})`;
     const transform = transformValue
       ? `transform:${transformValue};transform-origin:top left;`
       : '';
@@ -117,7 +116,20 @@ export function buildDocxTextLayer(
     // identical to a plain run. A non-link run is byte-identical to before.
     // A run wholly outside its paint clip (DocxTextRunInfo.clipBounds) has
     // no visible glyph to select or click.
-    const hidden = clipRunRect(run, { x: run.x, y: run.y, width: run.w, height: run.h }) === null;
+    const visible = visibleRunExtent(run);
+    const hidden = visible === null;
+    // A partly clipped run keeps hit testing only over its visible part: the
+    // clip in the span's own (pre-transform, reference px) frame.
+    const clipPath = visible && (visible.left > 0 || visible.top > 0
+      || visible.right < run.w || visible.bottom < run.h) ? (() => {
+      const sx = k * tcy;
+      // Unbounded where the clip does not cut the run.
+      const l = visible.left > 0 ? `${visible.left / sx}px` : '-100vw';
+      const t = visible.top > 0 ? `${visible.top / k}px` : '-100vh';
+      const r = visible.right < run.w ? `${visible.right / sx}px` : '200vw';
+      const b = visible.bottom < run.h ? `${visible.bottom / k}px` : '200vh';
+      return `clip-path:polygon(${l} ${t},${r} ${t},${r} ${b},${l} ${b});`;
+    })() : '';
     const link = onHyperlinkClick && !hidden ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
     const letterSpacing = run.letterSpacingPx !== undefined
@@ -141,6 +153,7 @@ export function buildDocxTextLayer(
       `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
       `font:${k !== 1 && reference ? reference.font : run.font};line-height:${run.h / k}px;letter-spacing:${letterSpacing};` +
       compressedHitBox +
+      clipPath +
       transform +
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:${hidden ? 'none' : 'all'};`;
     if (link && onHyperlinkClick) {

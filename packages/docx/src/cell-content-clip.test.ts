@@ -11,7 +11,7 @@ import { paintTableLayout } from './paint/canvas-table.js';
 import { hitTestDocxElementContext } from './element-context.js';
 import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import { textRunsForPage } from './text-run-projection.js';
-import { clipRunRect } from './run-clip.js';
+import { clipRunRect, visibleRunExtent } from './run-clip.js';
 import type { LayoutRect, ParagraphLayout, TableLayout } from './layout/types.js';
 import type { CanvasPaintContext, PaintCanvas2D } from './paint/types.js';
 
@@ -198,6 +198,25 @@ describe('word-cell-content-clip', () => {
     expect(translates).toBe(1);
   });
 
+  it('keeps an empty content clip empty when widening it to device pixels', () => {
+    const table = layoutTable(exactLine(drawingml(5)));
+    const cell = table.rows[0]!.cells[0]!;
+    const empty = { ...cell.contentClipBounds!, widthPt: 0 };
+    const [picture] = paintTable({
+      ...table,
+      rows: [{ ...table.rows[0]!, cells: [{ ...cell, contentClipBounds: empty }] }],
+    }).painted;
+    expect(picture!.clips).toEqual([empty]);
+  });
+
+  it('opens one more frame for a VML picture than for a DrawingML picture', () => {
+    // The text before the VML picture is clipped in one frame; the picture
+    // itself, and absent shading, borders and text boxes, open none.
+    const drawing = paintTable(layoutTable(exactLine(drawingml(-15)))).saves;
+    const legacy = paintTable(layoutTable(exactLine(vml(-15)))).saves;
+    expect(legacy - drawing).toBe(1);
+  });
+
   it('marks VML pictures as escaping only in table cells', () => {
     const page = layoutPage(docx('', `${exactLine(vml(-15))}<w:p/>`));
     const paragraph = page.layers.body[0];
@@ -252,5 +271,50 @@ describe('word-text-box-content-clip', () => {
     expect(clip!.widthPt).toBeCloseTo(300, 6);
     expect(clip!.yPt).toBeCloseTo(textBox!.flowBounds.yPt + 360000 / 12700, 6);
     expect(clip!.heightPt).toBeCloseTo(120 - (360000 + 36000) / 12700, 6);
+  });
+});
+
+describe('clipped text runs in a turned text box', () => {
+  it('report a run indented out of a 45-degree text box in a cell as hidden', () => {
+    const box = '<w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="T"/>'
+      + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
+      + '<wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm rot="2700000"><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/></a:xfrm>'
+      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>'
+      + '<w:p><w:pPr><w:ind w:left="-2400"/></w:pPr><w:r><w:t>Hidden</w:t></w:r></w:p>'
+      + '<w:p><w:r><w:t>Shown</w:t></w:r></w:p>'
+      + '</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr>'
+      + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    const layout = layoutDocx(docx(`<w:p>${box}</w:p>`));
+    const runs = textRunsForPage(layout, 0, { scale: 1 });
+    const hidden = runs.find((run) => run.text.includes('Hidden'));
+    const shown = runs.find((run) => run.text.includes('Shown'));
+    expect(hidden?.transform).toBeDefined();
+    expect(hidden?.clipBounds).toBeDefined();
+    expect(visibleRunExtent(hidden!)).toBeNull();
+    expect(visibleRunExtent(shown!)).not.toBeNull();
+  });
+});
+
+describe('clipRunRect', () => {
+  const base = { text: 'X', h: 10, fontSize: 10, font: '10px serif' };
+
+  it('cuts a rotated run along its own axes', () => {
+    // A vertical (rotate 90deg) run at (100, 50): its axis runs down the page.
+    const run = { ...base, x: 100, y: 50, w: 40, transform: 'rotate(90deg)',
+      clipBounds: { x: 100, y: 70, width: 100, height: 10 } };
+    // The first 20px of the run (page y 50-70) are clipped away.
+    expect(clipRunRect(run, { x: 100, y: 50, width: 40, height: 10 }))
+      .toEqual({ x: 100, y: 70, width: 20, height: 10 });
+    expect(visibleRunExtent(run)).toEqual({ left: 20, top: 0, right: 40, bottom: 10 });
+    expect(visibleRunExtent({ ...run, clipBounds: { x: 100, y: 95, width: 5, height: 10 } })).toBeNull();
+  });
+
+  it('cuts a run turned by a matrix transform', () => {
+    const c = Math.SQRT1_2;
+    const run = { ...base, x: 0, y: 0, w: 40, transform: `matrix(${c}, ${c}, ${-c}, ${c}, 0, 0)`,
+      clipBounds: { x: 10 * c, y: 10 * c, width: 100, height: 10 } };
+    expect(visibleRunExtent(run)).toEqual({
+      left: expect.closeTo(10, 9), top: expect.closeTo(0, 9), right: expect.closeTo(40, 9), bottom: expect.closeTo(10, 9),
+    });
   });
 });

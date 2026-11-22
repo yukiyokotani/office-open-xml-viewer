@@ -1898,10 +1898,17 @@ export interface DocxTextRunInfo {
   hyperlink?: HyperlinkTarget;
   /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
   eastAsianVert?: boolean;
-  /** The region of the page, in canvas CSS px, outside which the run's glyphs
-   * are clipped (a table cell, an exact-height row, a text box). Overlays
-   * clip highlights to it, and a run wholly outside it is not interactive.
-   * Absent for an unclipped run or a clip that is not axis-aligned. */
+  /** The part of the run left visible by the clips it is painted under (a
+   *  table cell, an exact-height row, a text box), placed like
+   *  {@link highlightBounds}: `x`/`y` is the canvas CSS px position of its
+   *  top-left corner and `width`/`height` lie along the run's own axes (so a
+   *  run with a {@link transform} carries the same transform). Overlays cut
+   *  highlights to it, and the text layer makes only this part interactive.
+   *  It is the logical clip in CSS px; the Canvas widens its edges to whole
+   *  device pixels, so painted ink can extend up to one device pixel beyond.
+   *  Where a clip is turned against the run (a rotated text box inside an
+   *  unrotated cell), this is the bounding box of the visible part of the run
+   *  box, so it can include a little hidden ink. Absent for an unclipped run. */
   clipBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
 }
 

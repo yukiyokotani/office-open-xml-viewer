@@ -31,44 +31,12 @@ export interface SelectedTextRunsForPageOptions {
   readonly textAdvances?: TextAdvanceLookup;
 }
 
-/** The visible region of a clipped run in CSS px: the intersection of its
- * ancestor paint clips (a table cell, an exact row, a text box). Absent when
- * the run is unclipped or a clip is not axis-aligned. */
-function runClipBounds(
-  geometry: TextRunGeometry,
-  displayScale: Matrix2DData,
-): DocxTextRunInfo['clipBounds'] {
-  if (geometry.clips.length === 0) return undefined;
-  let left = -Infinity;
-  let top = -Infinity;
-  let right = Infinity;
-  let bottom = Infinity;
-  for (const clip of geometry.clips) {
-    const toCss = composeAffine(displayScale, clip.pointToPage);
-    if (toCss.b !== 0 || toCss.c !== 0) return undefined;
-    const a = mapAffinePoint(toCss, clip.bounds);
-    const b = mapAffinePoint(toCss, {
-      xPt: clip.bounds.xPt + clip.bounds.widthPt,
-      yPt: clip.bounds.yPt + clip.bounds.heightPt,
-    });
-    left = Math.max(left, Math.min(a.xPt, b.xPt));
-    top = Math.max(top, Math.min(a.yPt, b.yPt));
-    right = Math.min(right, Math.max(a.xPt, b.xPt));
-    bottom = Math.min(bottom, Math.max(a.yPt, b.yPt));
-  }
-  return Object.freeze({
-    x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top),
-  });
-}
-
 function projectTextRun(
   geometry: TextRunGeometry,
   pointToCss: Matrix2DData,
   textAdvances: TextAdvanceLookup | undefined,
-  displayScale: Matrix2DData,
 ): DocxTextRunInfo {
   const { placement } = geometry;
-  const clipBounds = runClipBounds(geometry, displayScale);
   const origin = mapAffinePoint(pointToCss, placement.bounds);
   const highlightOrigin = placement.highlightBounds
     ? mapAffinePoint(pointToCss, placement.highlightBounds)
@@ -76,6 +44,16 @@ function projectTextRun(
   const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
   const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
   const transform = cssTransformFor(pointToCss);
+  // The run's visible part, placed like highlightBounds: its local top-left
+  // mapped to the page, its lengths along the run's own axes.
+  const visible = geometry.visibleBounds;
+  const visibleOrigin = visible ? mapAffinePoint(pointToCss, visible) : undefined;
+  const clipBounds = visible && visibleOrigin ? Object.freeze({
+    x: visibleOrigin.xPt,
+    y: visibleOrigin.yPt,
+    width: visible.widthPt * inlineScale,
+    height: visible.heightPt * blockScale,
+  }) : undefined;
   const letterSpacingPt = placement.letterSpacingPt;
   const font = canvasFontString(
     placement.fontRoute,
@@ -153,7 +131,6 @@ export function textRunsForPage(
       geometry,
       composeAffine(displayScale, geometry.pointToPage),
       options.textAdvances,
-      displayScale,
     )
   ));
 }

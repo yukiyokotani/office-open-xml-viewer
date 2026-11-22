@@ -1634,6 +1634,12 @@ export interface DocxTextRunInfo {
     transform?: string;
     hyperlink?: HyperlinkTarget;
     eastAsianVert?: boolean;
+    clipBounds?: Readonly<{
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    }>;
 }
 export interface DocxTextSelectionContext {
     readonly format: 'docx';
