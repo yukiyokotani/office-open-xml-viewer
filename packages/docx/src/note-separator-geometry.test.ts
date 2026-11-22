@@ -219,4 +219,53 @@ describe('word-note-separator-geometry', () => {
     })))[0]!;
     expect(bordered).toEqual(plain);
   });
+
+  const leadingOf = (layout: DocumentLayout) => layout.pages[0]!.layers.notes
+    .find((node): node is NoteLayout => node.kind === 'note')!;
+  const paragraphTexts = (note: NoteLayout) => [note.leading?.paragraph, ...(note.leading?.followingParagraphs ?? [])]
+    .flatMap((paragraph) => paragraph?.kind === 'paragraph' ? [paragraph.lines.map((line) => line.placements
+      .flatMap((placement) => placement.kind === 'text' ? [placement.text] : []).join('')).join('|')] : []);
+
+  it('renders a listed story without a marker, and text in other paragraphs', () => {
+    const plain = leadingOf(render(control({ kind: 'footnote', listed: true,
+      separatorParagraph: '<w:p><w:r><w:t>NOTES</w:t></w:r></w:p>' })));
+    expect(paragraphTexts(plain)).toEqual(['NOTES']);
+    expect(plain.leading?.rule).toBeUndefined();
+    expect(plain.separator).toEqual([]);
+    const two = leadingOf(render(control({ kind: 'footnote', listed: true,
+      separatorParagraph: '<w:p><w:r><w:t>NOTES</w:t></w:r></w:p><w:p><w:r><w:t>A</w:t></w:r><w:r><w:separator/></w:r></w:p>' })));
+    expect(paragraphTexts(two).map((text) => text.replace(/\u200b/gu, ''))).toEqual(['NOTES', 'A']);
+    expect(two.leading?.rule?.segment.from.yPt).toBeGreaterThan(two.leading!.paragraph!.flowBounds.yPt
+      + two.leading!.paragraph!.flowBounds.heightPt);
+  });
+
+  it('reads runs of a second WordprocessingML prefix and authored U+FFFC/U+200B as text', () => {
+    const aliased = leadingOf(render(control({ kind: 'footnote', listed: true,
+      separatorParagraph: `<w:p xmlns:a="${W}"><w:r><w:t>W1</w:t><w:separator/><w:t>W2</w:t></w:r><a:r><a:t>A1</a:t></a:r></w:p>` })));
+    expect(paragraphTexts(aliased).map((text) => text.replace(/\u200b/gu, ''))).toEqual(['W1W2A1']);
+    const authored = leadingOf(render(control({ kind: 'footnote', listed: true,
+      separatorParagraph: '<w:p><w:r><w:t>&#xFFFC;</w:t></w:r><w:r><w:separator/></w:r><w:r><w:t>AFTER</w:t></w:r></w:p>' })));
+    expect(paragraphTexts(authored)[0]).toContain('\ufffc');
+    expect(paragraphTexts(authored)[0]).toContain('AFTER');
+    expect(authored.leading?.rule).toBeDefined();
+    // A 10pt authored U+200B beside a 20pt marker run: the marker sizes the rule.
+    const zwsp = leadingOf(render(control({ kind: 'footnote', listed: true,
+      separatorParagraph: '<w:p><w:r><w:t>&#x200B;</w:t></w:r><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:separator/></w:r></w:p>' })));
+    expect(zwsp.leading?.rule?.segment.widthPt ?? zwsp.separator[0]?.widthPt).toBe(1);
+  });
+
+  it('keeps a short rule inside the note area under a large indent', () => {
+    const note = leadingOf(render(control({ kind: 'footnote', listed: true, textWidthPt: 100,
+      separatorParagraph: '<w:p><w:pPr><w:ind w:left="3000"/></w:pPr><w:r><w:rPr><w:sz w:val="40"/></w:rPr><w:separator/></w:r></w:p>' })));
+    const rule = note.leading?.rule?.segment ?? note.separator[0]!;
+    expect(rule.from.xPt).toBeGreaterThanOrEqual(72);
+    expect(rule.from.xPt).toBeLessThanOrEqual(rule.to.xPt);
+    expect(rule.to.xPt).toBeLessThanOrEqual(172);
+  });
+
+  it('keeps the default band when Normal has automatic spacing after', () => {
+    const plain = bands(render(control({ kind: 'endnote' })))[0]!;
+    const automatic = bands(render(control({ kind: 'endnote', normalPPr: '<w:spacing w:afterAutospacing="1"/>' })))[0]!;
+    expect(automatic).toEqual(plain);
+  });
 });

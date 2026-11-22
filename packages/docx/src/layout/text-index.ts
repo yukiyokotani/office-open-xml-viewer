@@ -623,6 +623,7 @@ function visitNode(
       // Separator/notice paragraphs carry only zero-advance participants, so
       // they add source ownership but no selectable text.
       if (node.leading?.paragraph) visitNode(node.leading.paragraph, projection, context);
+      for (const block of node.leading?.followingParagraphs ?? []) visitNode(block, projection, context);
       for (const block of node.story.blocks) {
         visitNode(block, withClip(projection, node.story.clipBounds), context);
       }

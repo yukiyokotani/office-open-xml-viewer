@@ -445,8 +445,10 @@ function requireNoteSeparatorOwnership(node: PaintNode, path: string): void {
       )) {
       throw new LayoutInvariantError('FLOW_DOMAIN_INVASION', `${occurrencePath} lies outside its note`);
     }
-    if (occurrence.paragraph && occurrence.paragraph.flowDomainId !== node.flowDomainId) {
-      throw new LayoutInvariantError('INVALID_REFERENCE', `${occurrencePath} leaves its note flow domain`);
+    for (const paragraph of [occurrence.paragraph, ...(occurrence.followingParagraphs ?? [])]) {
+      if (paragraph && paragraph.flowDomainId !== node.flowDomainId) {
+        throw new LayoutInvariantError('INVALID_REFERENCE', `${occurrencePath} leaves its note flow domain`);
+      }
     }
     if (occurrence.rule) {
       for (const point of [occurrence.rule.segment.from, occurrence.rule.segment.to]) {

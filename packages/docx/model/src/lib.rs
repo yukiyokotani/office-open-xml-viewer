@@ -285,11 +285,11 @@ mod serialization_tests {
         assert_eq!(settings, r#"{"footnoteSeparator":"short"}"#);
         let story = serde_json::to_value(NoteLayoutSettingsWire {
             footnote_separator: Some(NoteSeparatorMark::Short),
-            footnote_separator_paragraph: Some(Box::default()),
+            footnote_separator_story: Some(vec![DocParagraph::default()]),
             ..NoteLayoutSettingsWire::default()
         })
         .unwrap();
-        assert!(story["footnoteSeparatorParagraph"].is_object());
+        assert!(story["footnoteSeparatorStory"].is_array());
         assert!(story
             .get("footnoteContinuationSeparatorParagraph")
             .is_none());
@@ -426,20 +426,21 @@ pub struct NoteLayoutSettingsWire {
     pub footnote_continuation_separator: Option<NoteSeparatorMark>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_continuation_separator: Option<NoteSeparatorMark>,
-    /// Ordinary DOCX producer only: the effective paragraph of a document-
-    /// listed (§17.11.3/.9) separator story whose one paragraph holds its
-    /// §17.11.23/§17.11.1 mark run, or is bare and empty. Present with a
-    /// matching Short/Full/None mark above. Layout measures inherited and
-    /// authored spacing and line facts (§17.3.1.33); no pPr does not mean zero
-    /// or a fixed gap. Missing and unsupported stories retain the fallback.
+    /// Ordinary DOCX producer only: the effective paragraphs of a document-
+    /// listed (§17.11.3/.9) separator story, in order. At most one text run
+    /// is its §17.11.23/§17.11.1 marker (`note_separator_marker`); a story
+    /// without one draws no rule. Present with a matching Short/Full/None mark
+    /// above. Layout measures inherited and authored spacing and line facts
+    /// (§17.3.1.33); no pPr does not mean zero or a fixed gap. Missing and
+    /// unsupported stories retain the fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub footnote_separator_paragraph: Option<Box<DocParagraph>>,
+    pub footnote_separator_story: Option<Vec<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub footnote_continuation_separator_paragraph: Option<Box<DocParagraph>>,
+    pub footnote_continuation_separator_story: Option<Vec<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub endnote_separator_paragraph: Option<Box<DocParagraph>>,
+    pub endnote_separator_story: Option<Vec<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub endnote_continuation_separator_paragraph: Option<Box<DocParagraph>>,
+    pub endnote_continuation_separator_story: Option<Vec<DocParagraph>>,
     /// Reserved note separator stories (ECMA-376 §17.11.2/§17.11.10
     /// `w:footnote`/`w:endnote` of §17.18.33 type `separator`,
     /// `continuationSeparator` or `continuationNotice`) supplied as resolved
@@ -3399,6 +3400,13 @@ pub struct TextRun {
     /// the note's 1-based position, not the raw id). `None` for ordinary runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_ref: Option<NoteRef>,
+    /// Parser-private: this empty run stands for the §17.11.23/§17.11.1
+    /// separator marker of a listed separator story, with its run properties.
+    #[serde(
+        rename = "__noteSeparatorMarker",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub note_separator_marker: bool,
     #[serde(
         rename = "__typographyAcquisition",
         skip_serializing_if = "Option::is_none"

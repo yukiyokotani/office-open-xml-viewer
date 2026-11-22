@@ -65,8 +65,8 @@ function model(
     __noteLayoutSettings: {
       footnoteSeparator: 'short',
       footnoteContinuationSeparator: 'full',
-      footnoteSeparatorParagraph: { ...paragraph(''), runs: [] },
-      footnoteContinuationSeparatorParagraph: { ...paragraph(''), runs: [] },
+      footnoteSeparatorStory: [{ ...paragraph(''), runs: [] }],
+      footnoteContinuationSeparatorStory: [{ ...paragraph(''), runs: [] }],
     },
   } as unknown as DocxDocumentModel;
 }

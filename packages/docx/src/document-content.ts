@@ -22,7 +22,7 @@ import {
 } from './parser-model.js';
 import { requestedFamily, shapeRunToDocRun, type TextFontSlots } from './layout/text.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
-import { NOTE_SEPARATOR_MARKER_TEXT } from './layout/selected-note-separators.js';
+import { isNoteSeparatorMarkerRun } from './layout/selected-note-separators.js';
 
 type InternalRenderedFontAxes = Readonly<InternalRunSlotMetadata>;
 
@@ -327,11 +327,9 @@ function* selectedSeparatorUsages(
   collection: FontCollection,
 ): Generator<DocxRenderedTextUsage> {
   const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
-  for (const paragraph of [settings?.footnoteSeparatorParagraph, settings?.footnoteContinuationSeparatorParagraph,
-    settings?.endnoteSeparatorParagraph, settings?.endnoteContinuationSeparatorParagraph]) {
-    if (!paragraph) continue;
-    const runs = (paragraph.runs ?? []).map((run) => run.type === 'text' && run.text === NOTE_SEPARATOR_MARKER_TEXT
-      ? { ...run, text: '\u200b' } : run);
+  for (const paragraph of [settings?.footnoteSeparatorStory, settings?.footnoteContinuationSeparatorStory,
+    settings?.endnoteSeparatorStory, settings?.endnoteContinuationSeparatorStory].flatMap((story) => story ?? [])) {
+    const runs = (paragraph.runs ?? []).map((run) => isNoteSeparatorMarkerRun(run) ? { ...run, text: '\u200b' } : run);
     yield* paragraphUsages({ ...paragraph, runs } as DocParagraph, collection);
   }
 }

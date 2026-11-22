@@ -88,6 +88,7 @@ function paintNode(node: PaintNode, context: CanvasPaintContext): void {
       // occurrences are outside the story clip like the scalar rule.
       node.separator.forEach((segment) => paintStrokeSegment(segment, context));
       if (node.leading?.paragraph) paintNode(node.leading.paragraph, context);
+      node.leading?.followingParagraphs?.forEach((block) => paintNode(block, context));
       if (node.leading?.rule) paintStrokeSegment(node.leading.rule.segment, context);
       const paintStory = () => node.story.blocks.forEach((block) => paintNode(block, context));
       if (!node.story.clipBounds) {

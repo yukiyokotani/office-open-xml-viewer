@@ -119,17 +119,19 @@ export type SelectedNoteSeparatorRole = 'separator' | 'continuationSeparator';
  * separator stories. The source-model adapter replaces them
  * with {@link SelectedNoteSeparatorDefinitionsInput} before sealing. */
 export type SelectedNoteSeparatorParagraphsInput = Readonly<
-  Partial<Record<SelectedNoteSeparatorRole, DeepReadonly<DocParagraph>>>
+  Partial<Record<SelectedNoteSeparatorRole, readonly DeepReadonly<DocParagraph>[]>>
 >;
 
 /** Canonical definition of one ordinary DOCX selected story: a `selected:*`
  * root (never native `reserved:*` provenance or a DOCX note id) shared by
- * every page occurrence, and its single paragraph `[0]`. Its mark stays the
- * role's existing Short/Full separator mode. */
+ * every page occurrence, its `paragraphCount` paragraphs `[0..n)`, and the
+ * paragraph holding its marker (or `[0]` without one). Its mark stays the
+ * role's existing Short/Full/None separator mode. */
 export interface SelectedNoteSeparatorDefinitionInput {
   readonly role: SelectedNoteSeparatorRole;
   readonly root: SourceRef;
   readonly paragraph: SourceRef;
+  readonly paragraphCount: number;
 }
 
 export type SelectedNoteSeparatorDefinitionsInput = Readonly<

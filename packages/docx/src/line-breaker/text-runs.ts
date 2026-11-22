@@ -65,16 +65,41 @@ export function formatNoteNumber(
     : formatOrdinalNumber(value, numbering.format as NumberFormat);
 }
 
+/** Numbering sequences a custom format token can start (XSLT 1.0 §7.7.1:
+ * "any other format token indicates a numbering sequence that starts with
+ * that token"): the ST_NumberFormat (§17.18.59) sequence whose first value is
+ * the token, e.g. `ア` (U+30A2, the §17.11.17/.18 example) for Katakana. */
+const CUSTOM_TOKEN_SEQUENCES: readonly NumberFormat[] = [
+  'aiueoFullWidth', 'aiueo', 'decimalEnclosedCircle', 'ideographDigital', 'ganada', 'chosung',
+  'arabicAlpha', 'arabicAbjad', 'russianLower', 'russianUpper', 'thaiLetters', 'thaiNumbers',
+  'hindiVowels', 'hindiConsonants', 'hindiNumbers', 'hebrew2',
+];
+let customTokenSequences: ReadonlyMap<string, NumberFormat> | undefined;
+function customTokenSequence(token: string): NumberFormat | undefined {
+  if (!customTokenSequences) {
+    const sequences = new Map<string, NumberFormat>();
+    for (const format of CUSTOM_TOKEN_SEQUENCES) {
+      const first = formatOrdinalNumber(1, format);
+      if (!sequences.has(first)) sequences.set(first, format);
+    }
+    customTokenSequences = sequences;
+  }
+  return customTokenSequences.get(token);
+}
+
 /** A custom numFmt/@format pattern (ECMA-376 §17.11.17/.18 `format`, "the
  * syntax defined by the XSLT format attribute"): its first alphanumeric
  * format token numbers the value (XSLT 1.0 §7.7.1). A run of ASCII or
  * full-width digits ending in one zero-pads to the token's length in that
  * digit family (`001`, `０１`); `a`, `A`, `i` and `I` select letters and
- * Roman numerals; any other token numbers in decimal. A pattern such as
- * "001, 002, 003, ..." lists sample values: only its first token numbers a
- * single note, and its separators and later tokens add no prefix or suffix. */
+ * Roman numerals; another token starts the sequence whose first value it is
+ * (`ア` Katakana); a token that starts no known sequence numbers in decimal.
+ * A pattern such as "001, 002, 003, ..." lists sample values: only its first
+ * token numbers a single note, and its separators and later tokens add no
+ * prefix or suffix. */
 export function formatCustomNoteNumber(value: number, pattern: string): string {
-  const token = /[\p{L}\p{Nd}]+/u.exec(pattern)?.[0];
+  // XSLT 1.0 §7.7.1 alphanumerics: letters and Nd/Nl/No numbers.
+  const token = /[\p{L}\p{Nd}\p{Nl}\p{No}]+/u.exec(pattern)?.[0];
   if (!token || !Number.isSafeInteger(value) || value < 0) return String(value);
   for (const zero of [0x30, 0xff10]) {
     const digits = [...token].map((digit) => digit.codePointAt(0)! - zero);
@@ -89,7 +114,10 @@ export function formatCustomNoteNumber(value: number, pattern: string): string {
     case 'A': return formatOrdinalNumber(value, 'upperLetter');
     case 'i': return formatOrdinalNumber(value, 'lowerRoman');
     case 'I': return formatOrdinalNumber(value, 'upperRoman');
-    default: return String(value);
+    default: {
+      const sequence = customTokenSequence(token);
+      return sequence ? formatOrdinalNumber(value, sequence) : String(value);
+    }
   }
 }
 

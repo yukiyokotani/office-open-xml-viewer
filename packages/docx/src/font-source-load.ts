@@ -102,10 +102,10 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | { texts: string[]
   const settings = (doc as { __noteLayoutSettings?: {
     footnoteNumberFormat?: string; endnoteNumberFormat?: string;
     sectionNoteNumbering?: readonly { footnote?: { format?: string }; endnote?: { format?: string } }[];
-    footnoteSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
-    footnoteContinuationSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
-    endnoteSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
-    endnoteContinuationSeparatorParagraph?: { runs?: readonly { text?: unknown }[] };
+    footnoteSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
+    footnoteContinuationSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
+    endnoteSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
+    endnoteContinuationSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
   } })
     .__noteLayoutSettings;
   // Document- and section-wide note formats (a custom pattern is never ASCII
@@ -117,10 +117,12 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | { texts: string[]
     if (format !== undefined && !ASCII_NUMBER_FORMATS.has(format)) return 'all';
   }
   // Separator story text, and the marker measured as a zero-width text run.
-  for (const paragraph of [settings?.footnoteSeparatorParagraph, settings?.footnoteContinuationSeparatorParagraph,
-    settings?.endnoteSeparatorParagraph, settings?.endnoteContinuationSeparatorParagraph]) {
-    for (const run of paragraph?.runs ?? []) {
-      if (typeof run.text === 'string') literal.push(run.text === '\ufffc' ? '\u200b' : run.text);
+  for (const paragraph of [settings?.footnoteSeparatorStory, settings?.footnoteContinuationSeparatorStory,
+    settings?.endnoteSeparatorStory, settings?.endnoteContinuationSeparatorStory].flatMap((story) => story ?? [])) {
+    for (const run of paragraph.runs ?? []) {
+      if (typeof run.text === 'string') {
+        literal.push((run as { __noteSeparatorMarker?: boolean }).__noteSeparatorMarker === true ? '\u200b' : run.text);
+      }
     }
   }
   const pending: unknown[] = [doc];
