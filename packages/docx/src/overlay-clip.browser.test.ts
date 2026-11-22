@@ -273,6 +273,48 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(await hits([run], 800, [[190, 110], [205, 110]])).toEqual(['ABCD', '']);
   });
 
+  it('stretches a span\'s glyphs to its painted width for native drag selection', async () => {
+    const selected = await page.evaluate(async () => {
+      const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
+      const layer = document.getElementById('layer') as HTMLDivElement;
+      layer.style.width = '800px';
+      layer.style.height = '600px';
+      const canvas = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D;
+      const measureForFont = (font: string) => (text: string) => { canvas.font = font; return canvas.measureText(text).width; };
+      // Four clusters painted 24px wide (12px glyphs) from x=100.
+      api.buildDocxTextLayer(layer, [{
+        text: 'ABCD', x: 100, y: 100, w: 96, h: 20, fontSize: 20, font: '20px monospace',
+        clusterBoxes: [0, 1, 2, 3].map((index) => ({ start: index, end: index + 1, x: index * 24, width: 24, rtl: false })),
+      }], 800, 600, undefined, measureForFont, 0);
+      const origin = layer.getBoundingClientRect();
+      return { x: origin.left, y: origin.top };
+    });
+    // Drag across the painted 'CD' (x=148-196).
+    await page.mouse.move(selected.x + 150, selected.y + 110);
+    await page.mouse.down();
+    await page.mouse.move(selected.x + 194, selected.y + 110, { steps: 8 });
+    await page.mouse.up();
+    const text = await page.evaluate(() => { const value = window.getSelection()?.toString() ?? ''; window.getSelection()?.removeAllRanges(); return value; });
+    expect(text).toBe('CD');
+  });
+
+  it('keeps a clipped link on its painted text after browser find', async () => {
+    const run = {
+      ...cellRun('LINKtailtoken', 100, 12, [{ x: 100, y: 90, width: 40, height: 40 }]),
+      hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
+    };
+    expect(await hits([run], 800, [[135, 110]])).toEqual(['LINK']);
+    const after = await page.evaluate(() => {
+      (window as unknown as { find(text: string): boolean }).find('tailtoken');
+      window.getSelection()?.removeAllRanges();
+      const layer = document.getElementById('layer') as HTMLDivElement;
+      const origin = layer.getBoundingClientRect();
+      const hit = document.elementFromPoint(origin.left + 135, origin.top + 110);
+      return hit?.tagName === 'SPAN' ? hit.textContent : '';
+    });
+    expect(after).toBe('LINK');
+  });
+
   it('places find highlights by painted clusters, not measured text', async () => {
     const box = await page.evaluate(() => {
       const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
@@ -296,10 +338,12 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(box.width).toBeCloseTo(24, 3);
   });
 
-  it('splits a long run without measuring text', async () => {
+  it('splits a long run with linear work', async () => {
     const text = 'x'.repeat(10_000);
     const result = await selectAll([cellRun(text, 0, 0.05, [{ x: 250, y: 90, width: 400, height: 40 }])]);
-    expect(result.measured).toBe(0);
+    // No prefix is measured to split it; each span's own text, once, to fit
+    // it to its painted width.
+    expect(result.measured).toBeLessThanOrEqual(text.length);
     expect(result.text.length).toBe(5_000);
   });
 

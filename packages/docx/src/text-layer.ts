@@ -1,4 +1,5 @@
 import { clippedBoxVisible, OverlayClipFrames, runPartVisible, runStraddlesClip } from './run-clip.js';
+import { countSpacingCharacters } from './character-spacing.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -118,9 +119,6 @@ export function buildDocxTextLayer(
     const tcy = measureForFont && run.eastAsianVert
       ? tateChuYokoOverlayScale(run, runOverlayMeasure(run, measureForFont)) : 1;
     if (tcy !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scaleX(${tcy})`;
-    const transform = transformValue
-      ? `transform:${transformValue};transform-origin:top left;`
-      : '';
     // IX1 — a run with a resolved hyperlink target becomes a clickable region.
     // Only the cursor changes to a pointer and a title tooltip is added; the
     // glyphs stay `color:transparent` (the link's blue/underline is already
@@ -152,17 +150,25 @@ export function buildDocxTextLayer(
       }
       span.textContent = run.text.slice(piece.start, piece.end);
       const pieceLink = piece.hidden ? undefined : link;
+      // A span lies where its clusters are painted (scaled or fitted glyphs
+      // included): scaled along the run so its glyph advances, and with them
+      // native selection and the hit box, match the paint. Without a measurer
+      // the box is sized to the painted width instead.
+      const paintScale = piece.width !== undefined && measureForFont && !run.eastAsianVert
+        ? paintedScale(run, piece, measureForFont) : undefined;
+      const pieceTransformValue = paintScale !== undefined && Math.abs(paintScale - 1) > 1e-3
+        ? `${transformValue ? `${transformValue} ` : ''}scaleX(${paintScale})` : transformValue;
+      const pieceTransform = pieceTransformValue
+        ? `transform:${pieceTransformValue};transform-origin:top left;` : '';
       span.style.cssText =
         `position:absolute;` +
         frame.position(piece.offset, 0) +
         `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
-        // A span spans exactly where its clusters are painted (scaled or
-        // fitted glyphs included), in the span's own units.
-        (piece.width !== undefined
-          ? `width:${frame.width(piece.width / (k * tcy))};overflow:hidden;`
-          : piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
-            ? `width:${frame.width((run.w - piece.offset) / k)};overflow:hidden;` : '') +
-        transform +
+        (piece.width !== undefined && paintScale === undefined
+          ? `width:${frame.width(piece.width / (k * tcy))};overflow:hidden;overflow:clip;`
+          : piece.width === undefined && piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
+            ? `width:${frame.width((run.w - piece.offset) / k)};overflow:hidden;overflow:clip;` : '') +
+        pieceTransform +
         `white-space:pre;color:transparent;cursor:${pieceLink ? 'pointer' : 'text'};pointer-events:all;` +
         (piece.hidden ? 'user-select:none;-webkit-user-select:none;' : '');
       if (pieceLink && onHyperlinkClick) {
@@ -243,4 +249,18 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
       hidden: group.hidden,
     };
   });
+}
+
+/** The horizontal scale that stretches `piece`'s natural text (its font and
+ * tracking, measured once) to its painted width; undefined when the text
+ * has no measurable width. */
+function paintedScale(
+  run: Readonly<DocxTextRunInfo>,
+  piece: RunPiece,
+  measureForFont: (font: string) => (s: string) => number,
+): number | undefined {
+  const text = run.text.slice(piece.start, piece.end);
+  const natural = runOverlayMeasure(run as DocxTextRunInfo, measureForFont)(text)
+    + countSpacingCharacters(text).pitchBearing * (run.letterSpacingPx ?? 0);
+  return natural > 0 && piece.width! > 0 ? piece.width! / natural : undefined;
 }

@@ -128,6 +128,7 @@ function projectTextRun(
     ...(placement.optionalHyphenGlyph ? {} : {
       clusterBoxes: geometry.clusterBoxes.map((box) => ({
         start: box.start, end: box.end, x: box.xPt * inlineScale, width: box.widthPt * inlineScale, rtl: box.rtl,
+        ...(box.trackingExcluded ? { trackingExcluded: true as const } : {}),
       })),
     }),
     ...(transform ? { transform } : {}),

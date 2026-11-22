@@ -1651,6 +1651,7 @@ export interface DocxTextRunInfo {
         x: number;
         width: number;
         rtl: boolean;
+        trackingExcluded?: true;
     }>[];
     transform?: string;
     hyperlink?: HyperlinkTarget;

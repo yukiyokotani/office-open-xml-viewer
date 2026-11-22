@@ -1906,8 +1906,12 @@ export interface DocxTextRunInfo {
    * retained geometry: UTF-16 offsets `[start, end)` in `text`, the left
    * edge from `x` and the painted width in CSS px along the run, and whether
    * the cluster reads right to left. Overlays that address part of the run
-   * (find highlights) use these instead of measuring text. */
-  clusterBoxes?: readonly Readonly<{ start: number; end: number; x: number; width: number; rtl: boolean }>[];
+   * (find highlights) use these instead of measuring text. The run's final
+   * cluster carries `trackingExcluded` when its box already leaves out the
+   * tracking after it (a fitted run). */
+  clusterBoxes?: readonly Readonly<{
+    start: number; end: number; x: number; width: number; rtl: boolean; trackingExcluded?: true;
+  }>[];
   /** CSS transform used by the overlay for vertical-page text. */
   transform?: string;
   /** Resolved external or internal hyperlink target. */

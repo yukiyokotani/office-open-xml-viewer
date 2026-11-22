@@ -295,7 +295,7 @@ export interface OverlayPlacement {
 }
 
 /** WORD_CELL_CONTENT_CLIP: overlay elements of clipped runs are placed in
- * nested `overflow:hidden` containers, one per clip in DocxTextRunInfo.clips,
+ * nested clipping (`overflow:clip`) containers, one per clip in DocxTextRunInfo.clips,
  * each positioned, sized and oriented to its clip in percentages of its
  * parent, so the browser clips hit testing, selection and highlights for any
  * transform or responsive resize. Containers are shared only by runs placed
@@ -353,7 +353,10 @@ export class OverlayClipFrames {
       `width:${overlayPercent(width, parentWidth)};height:${overlayPercent(height, parentHeight)};` +
       (turn ? `transform:${turn};transform-origin:top left;` : '') +
       unionClipPath(clip, width, height) +
-      'overflow:hidden;pointer-events:none;';
+      // overflow:clip, unlike hidden, makes no scroll container, so browser
+      // find cannot scroll the frame off the painted text; browsers without
+      // it keep hidden.
+      'overflow:hidden;overflow:clip;overflow-clip-margin:0;pointer-events:none;';
     parent.appendChild(element);
     this.open.push({ key: clipKey(clip), element, fromPage: invert(clipToPage), width, height });
   }

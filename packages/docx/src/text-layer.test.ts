@@ -124,7 +124,7 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     ], 100, 100);
 
     expect(layer.children[0].style.width).toBe('4%');
-    expect(layer.children[0].style.overflow).toBe('hidden');
+    expect(layer.children[0].style.overflow).toBe('clip');
     expect(layer.children[1].style.width ?? '').toBe('');
     expect(layer.children[1].style.overflow ?? '').toBe('');
   });
@@ -193,7 +193,7 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
       hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
       clips: [cell],
     })], () => {});
-    expect(container!.style.overflow).toBe('hidden');
+    expect(container!.style.overflow).toBe('clip');
     expect([container!.style.left, container!.style.width]).toEqual(['40%', '30%']);
     const [span] = container!.children;
     expect(span!.style.left).toBe('-100%');
@@ -226,7 +226,7 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
     const box = { x: 60, y: 10, width: 40, height: 20, transform: 'rotate(90deg)' };
     const [outer] = layerWith([run({ x: 60, y: 15, w: 30, transform: 'rotate(90deg)', clips: [cell, box] })]);
     const [inner] = outer!.children;
-    expect(inner!.style.overflow).toBe('hidden');
+    expect(inner!.style.overflow).toBe('clip');
     expect(inner!.style.transform).toBe('matrix(0, 1, -1, 0, 0, 0)');
     const [span] = inner!.children;
     // 5px along the box's own x axis, and no orientation left to apply.

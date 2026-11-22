@@ -405,7 +405,7 @@ describe('overlay clip containers', () => {
       // One container for the consecutive runs' shared clip.
       expect(layer.children).toHaveLength(1);
       const container = layer.children[0]!;
-      expect(container.style.overflow).toBe('hidden');
+      expect(container.style.overflow).toBe('clip');
       expect([container.style.left, container.style.top, container.style.width, container.style.height])
         .toEqual(['20%', '10%', '40%', '20%']);
       const [whole, partial] = container.children;
@@ -413,6 +413,28 @@ describe('overlay clip containers', () => {
       expect(whole!.style.transform).toBe('matrix(0, 1, -1, 0, 0, 0)');
       // A slice 10px into the run advances down the turned run, not across.
       expect([partial!.style.left, partial!.style.top]).toEqual(['25%', '100%']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not take the tracking off a fitted run\'s final cluster twice', () => {
+    vi.stubGlobal('document', { createElement: () => element() });
+    try {
+      const layer = element();
+      // Tracking of 2px; the final cluster's box already leaves it out.
+      const run = { text: 'ABCD', x: 0, y: 0, w: 26, h: 10, fontSize: 10, font: '10px serif', letterSpacingPx: 2,
+        clusterBoxes: [
+          { start: 0, end: 1, x: 0, width: 7, rtl: false }, { start: 1, end: 2, x: 7, width: 7, rtl: false },
+          { start: 2, end: 3, x: 14, width: 7, rtl: false },
+          { start: 3, end: 4, x: 21, width: 5, rtl: false, trackingExcluded: true as const },
+        ] };
+      buildDocxHighlightLayer(layer as unknown as HTMLDivElement, [run],
+        [{ slices: [{ runIndex: 0, start: 3, end: 4 }, { runIndex: 0, start: 1, end: 2 }], active: false }],
+        100, 100, () => () => 0);
+      const [last, inner] = layer.children;
+      expect(last!.style.width).toBe('5%');
+      expect(inner!.style.width).toBe('5%');
     } finally {
       vi.unstubAllGlobals();
     }
