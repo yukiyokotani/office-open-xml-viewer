@@ -15,4 +15,3 @@ invalid:
   - "const { measureText: measure } = ctx;"
   - "const { measureText } = ctx;"
   - "const lines = layoutLines(ctx, segments, width);"
-  - "const table = computeTableLayout(input, services);"

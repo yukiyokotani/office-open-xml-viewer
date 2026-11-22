@@ -16,7 +16,7 @@ rule:
             regex: "^import\\s+type\\b[\\s\\S]*from\\s+['\"]\\.\\./layout/types(?:\\.js)?['\"]\\s*;?$"
     - all:
         - kind: import_statement
-        - regex: "from\\s+['\"]\\.\\./(types|renderer|layout-context|line-layout|paragraph-measure|table-geometry|table-fragments|layout-fragments)(\\.js)?['\"]"
+        - regex: "from\\s+['\"]\\.\\./(types|renderer|layout-context|line-layout|paragraph-measure)(\\.js)?['\"]"
     - pattern: $OBJ.measureText($$$ARGS)
     - pattern: $OBJ['measureText']($$$ARGS)
     - pattern: measureText($$$ARGS)
@@ -26,10 +26,6 @@ rule:
     - pattern: $OBJ.layoutLines($$$ARGS)
     - pattern: measureParagraph($$$ARGS)
     - pattern: $OBJ.measureParagraph($$$ARGS)
-    - pattern: computeTableLayout($$$ARGS)
-    - pattern: $OBJ.computeTableLayout($$$ARGS)
-    - pattern: paginateDocument($$$ARGS)
-    - pattern: $OBJ.paginateDocument($$$ARGS)
 files:
   - "packages/docx/src/paint/**/*.ts"
   - "packages/docx/src/paint/**/*.tsx"

@@ -18,7 +18,8 @@ export const DELETED_PATHS = [
   { under: 'packages/docx/src', basename: 'layout-fragments.ts' },
 ];
 
-/** Identifiers that must not appear in production TypeScript under `root`. */
+/** Identifiers that must not appear in production TypeScript under `root`.
+ * `includeTests` extends an entry to test files as well. */
 export const DELETED_IDENTIFIERS = [{
   root: 'packages/docx/src',
   // Any identifier with one of these names.
@@ -92,4 +93,11 @@ export const DELETED_IDENTIFIERS = [{
     'sectionPageNumType',
     'sectionTextDirection',
   ],
+}, {
+  // Node DOCX probes type their dynamic renderer import by hand, so a deleted
+  // name would keep type-checking until a gated probe runs. Select pages from
+  // `layoutDocument(...).pages` instead.
+  root: 'packages/node/src',
+  includeTests: true,
+  names: ['paginateDocument', 'prebuiltPages'],
 }];

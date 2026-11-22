@@ -78,7 +78,8 @@ viewers.
 - `.agents/skills/<name>/SKILL.md` — thin pointers that load a
   `docs/workflow/` page on demand. Codex reads `.agents/skills/`; Claude Code
   reads each through the relative symlink `.claude/skills/<name>` ->
-  `../../.agents/skills/<name>`. Skills hold no content of their own.
+  `../../.agents/skills/<name>`. Skills hold no content of their own. On
+  Windows the links need `git config core.symlinks true` before checkout.
 - `.claude/CLAUDE.md` and `packages/<name>/CLAUDE.md` — one-line imports of
   the matching `AGENTS.md` for Claude Code.
 - `ast-grep/` — lint rules (`rules/`), shared matchers (`utils/`) and rule

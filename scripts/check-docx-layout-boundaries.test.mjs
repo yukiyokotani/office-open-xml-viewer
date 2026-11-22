@@ -914,27 +914,6 @@ test('computed paint measurement and TSX layout display inputs are audited', () 
   expectDiagnostic(layout, 'LAYOUT_DISPLAY_CAPABILITY', 'TSX dpr', '--final');
 });
 
-test('allows only the exact parser normalization gateway and erased contracts', () => {
-  const root = initializeCanonicalFixture('docx-layout-boundary-parser-gateway-');
-  write(root, 'packages/docx/src/parser-model.ts',
-    'export function normalizeInternalDocumentModel(document) { return { document, mathOccurrences: [] }; }\n');
-  write(root, 'packages/docx/src/layout/resources.ts',
-    "import { normalizeInternalDocumentModel } from '../parser-model.js';\n"
-      + 'export function documentMathOccurrences(doc) {\n'
-      + '  return [...normalizeInternalDocumentModel(doc).mathOccurrences];\n'
-      + '}\n'
-      + 'export function productionDocumentInput(doc) {\n'
-      + '  return normalizeInternalDocumentModel(doc);\n'
-      + '}\n');
-  const allowed = runChecker(root, '--final');
-  assert.equal(allowed.status, 0, allowed.output);
-
-  write(root, 'packages/docx/src/layout/resources.ts',
-    "import { normalizeInternalDocumentModel as normalize } from '../parser-model.js';\n"
-      + 'export function documentMathOccurrences(doc) { return [...normalize(doc).mathOccurrences]; }\n');
-  expectDiagnostic(root, 'LAYOUT_PARSER_MODEL_DEPENDENCY', 'aliased gateway', '--final');
-});
-
 test('layout rejects direct and transitive parser-model runtime dependencies', () => {
   for (const [name, setup] of [
     ['direct', (root) => write(root, 'packages/docx/src/layout/parser-edge.ts',
@@ -957,13 +936,17 @@ test('layout rejects direct and transitive parser-model runtime dependencies', (
   }
 });
 
-test('parser normalization gateway rejects aliases, re-exports, leaks, and extra bindings', () => {
+test('layout resources cannot import parser normalization in any form', () => {
   const exact =
     "import { normalizeInternalDocumentModel } from '../parser-model.js';\n"
     + 'export function documentMathOccurrences(doc) {\n'
     + '  return [...normalizeInternalDocumentModel(doc).mathOccurrences];\n'
     + '}\n';
   const sources = [
+    exact,
+    `${exact}export function productionDocumentInput(doc) {\n  return normalizeInternalDocumentModel(doc);\n}\n`,
+    "import { normalizeInternalDocumentModel as normalize } from '../parser-model.js';\n"
+      + 'export function documentMathOccurrences(doc) { return [...normalize(doc).mathOccurrences]; }\n',
     "import { normalizeInternalDocumentModel, parserFact } from '../parser-model.js';\n"
       + 'export const leaked = [normalizeInternalDocumentModel, parserFact];\n',
     "import * as parserModel from '../parser-model.js';\nexport const leaked = parserModel;\n",
@@ -976,12 +959,12 @@ test('parser normalization gateway rejects aliases, re-exports, leaks, and extra
       + 'export function documentMathOccurrences(doc) { return [...normalize(doc).mathOccurrences]; }\n',
   ];
   for (const [index, source] of sources.entries()) {
-    const root = initializeCanonicalFixture(`docx-layout-boundary-parser-gateway-${index}-`);
+    const root = initializeCanonicalFixture(`docx-layout-boundary-parser-resources-${index}-`);
     write(root, 'packages/docx/src/parser-model.ts',
       'export const parserFact = true;\n'
         + 'export function normalizeInternalDocumentModel(document) { return { document, mathOccurrences: [] }; }\n');
     write(root, 'packages/docx/src/layout/resources.ts', source);
-    expectDiagnostic(root, 'LAYOUT_PARSER_MODEL_DEPENDENCY', `gateway case ${index}`, '--final');
+    expectDiagnostic(root, 'LAYOUT_PARSER_MODEL_DEPENDENCY', `resources case ${index}`, '--final');
   }
 });
 
