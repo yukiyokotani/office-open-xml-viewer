@@ -481,8 +481,10 @@ export function createNamedFamilyOracle(
     });
   })();
   let admits: boolean | undefined;
+  // Grapheme segmentation is part of the capability: clusters are what the
+  // proof certifies (see draws), so without it nothing could be admitted.
   const available = (): boolean => admits ??= !!measuring && typeof measuring === 'object'
-    && 'lang' in measuring && sentinelsApply();
+    && 'lang' in measuring && getGraphemeSegmenter() !== null && sentinelsApply();
   const listIds = new Map<string, number>();
   let listUnits = 0;
   const results = new Map<string, boolean>();

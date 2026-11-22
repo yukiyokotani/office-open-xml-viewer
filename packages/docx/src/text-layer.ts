@@ -74,6 +74,9 @@ export function buildDocxTextLayer(
       setSelectionData(span, 'sourcePath', JSON.stringify(run.source.path));
     }
     span.textContent = run.text;
+    // The Canvas language the run was drawn in shapes the span alike, so its
+    // native selection and hit geometry follow the drawn advances.
+    if (run.lang !== undefined) span.lang = run.lang;
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
     // CSS rule cannot drift the trailing edge of the selection. Kerning /

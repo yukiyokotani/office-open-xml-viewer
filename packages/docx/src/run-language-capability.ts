@@ -1,6 +1,8 @@
 import type { DocxDocumentModel } from './types.js';
 
-const LANGUAGE_KEYS = new Set(['lang', 'langEastAsia', 'langBidi']);
+// Run languages (lang, langEastAsia, langBidi) and ruby guide languages
+// (w:rubyPr/w:lid and guide-run w:lang, stored as `language`).
+const LANGUAGE_KEYS = new Set(['lang', 'langEastAsia', 'langBidi', 'language']);
 
 /**
  * Whether the document names any §17.3.2.20 run language (other than Word's
@@ -16,14 +18,23 @@ export function documentCarriesRunLanguage(document: DocxDocumentModel): boolean
     const value = pending.pop();
     if (value === null || typeof value !== 'object' || seen.has(value)) continue;
     seen.add(value);
-    if (!Array.isArray(value)) {
-      for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
-        if (LANGUAGE_KEYS.has(key) && typeof field === 'string' && field !== '' && field.toLowerCase() !== 'x-none') {
-          return true;
-        }
-      }
+    if (Array.isArray(value)) {
+      // One push per child: spreading a wide array as call arguments would
+      // exceed the engine's argument limit on large documents.
+      for (const child of value) pending.push(child);
+      continue;
     }
-    pending.push(...Object.values(value));
+    for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+      if (LANGUAGE_KEYS.has(key) && isLanguageValue(field)) return true;
+      pending.push(field);
+    }
   }
   return false;
+}
+
+/** A language string, or a typography wire value carrying one. */
+function isLanguageValue(field: unknown): boolean {
+  const value = field !== null && typeof field === 'object' && 'value' in field
+    ? (field as { value: unknown }).value : field;
+  return typeof value === 'string' && value !== '' && value.toLowerCase() !== 'x-none';
 }

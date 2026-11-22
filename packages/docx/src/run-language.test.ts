@@ -24,7 +24,7 @@ import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { createLayoutServices } from './layout-runtime.js';
 import type { ParagraphLayoutContext } from './layout-context.js';
 import { runOverlayMeasure } from './run-overlay-measure.js';
-import { createTextLayoutService, rubyGuideShapeRequest, sliceTextShapeRequest, type GlyphMeasureRequest } from './layout/text.js';
+import { canvasLanguageTag, createTextLayoutService, rubyGuideShapeRequest, sliceTextShapeRequest, type GlyphMeasureRequest } from './layout/text.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, NumberingInfo, SectionProps } from './types';
 
@@ -347,6 +347,13 @@ describe('Canvas lang at measure and paint', () => {
       run('\u0433', { lang: 'sr-rs' }), run('\u0301', { lang: 'en-us' }), run('\u0323', { lang: 'sr-rs' }),
     ]), canvas, 0, { dpr: 1, width: 600 });
     expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['\u0433\u0301\u0323', 'sr-rs']]);
+  });
+
+  it('admits only well-formed BCP 47 tags', () => {
+    expect(['sr-Latn-RS', 'i-klingon', 'zh-min-nan', 'x-private', 'iw'].map(canvasLanguageTag))
+      .toEqual(['sr-latn-rs', 'i-klingon', 'zh-min-nan', 'x-private', 'he']);
+    expect(['en-a', 'en-us-gb', 'x-none', 'inherit', '', `en-${'a'.repeat(70)}`].map(canvasLanguageTag))
+      .toEqual([undefined, undefined, undefined, undefined, undefined, undefined]);
   });
 
   it('measures overlay slices in the run language', () => {

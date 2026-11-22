@@ -603,15 +603,26 @@ export type CanvasLanguagePin = Readonly<{ group: LanguageSlotGroup; lang: strin
 /** Longest tag admitted: bounds what enters route fingerprints and keys. */
 const MAX_LANGUAGE_TAG_UNITS = 64;
 const canonicalTags = new Map<string, string | null>();
+/** RFC 5646 §2.2.8 grandfathered tags (irregular and regular): well-formed
+ * BCP 47 outside the ECMA-402 locale grammar, kept as written. */
+const GRANDFATHERED_TAGS = new Set([
+  'en-gb-oed', 'i-ami', 'i-bnn', 'i-default', 'i-enochian', 'i-hak', 'i-klingon', 'i-lux', 'i-mingo',
+  'i-navajo', 'i-pwn', 'i-tao', 'i-tay', 'i-tsu', 'sgn-be-fr', 'sgn-be-nl', 'sgn-ch-de',
+  'art-lojban', 'cel-gaulish', 'no-bok', 'no-nyn', 'zh-guoyu', 'zh-hakka', 'zh-min', 'zh-min-nan', 'zh-xiang',
+]);
+/** RFC 5646 §2.1 privateuse: "x" 1*("-" (1*8alphanum)). */
+const PRIVATE_USE_TAG = /^x(?:-[a-z0-9]{1,8})+$/u;
 
-/** `tag` as a canonical, lower-case BCP 47 tag (RFC 5646 well-formed, via
- * ECMA-402 Intl.getCanonicalLocales, which also maps grandfathered and
- * deprecated tags), or undefined when it names no language: Word's `x-none`,
- * the Canvas keyword `inherit`, or an ill-formed or oversized value. */
+/** `tag` as a lower-case BCP 47 tag, or undefined when it names no language:
+ * Word's `x-none`, the Canvas keyword `inherit`, or an ill-formed (RFC 5646
+ * §2.1) or oversized value. Language tags are canonicalized by ECMA-402
+ * Intl.getCanonicalLocales; grandfathered (§2.2.8) and private-use tags,
+ * which its locale grammar does not cover, are kept as written. */
 export function canvasLanguageTag(tag: string | undefined): string | undefined {
   if (!tag || tag.length > MAX_LANGUAGE_TAG_UNITS) return undefined;
   const lower = tag.toLowerCase();
   if (lower === 'x-none' || lower === 'inherit') return undefined;
+  if (GRANDFATHERED_TAGS.has(lower) || PRIVATE_USE_TAG.test(lower)) return lower;
   let canonical = canonicalTags.get(lower);
   if (canonical === undefined) {
     try {

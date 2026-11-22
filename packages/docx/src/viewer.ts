@@ -1180,7 +1180,7 @@ export class DocxViewer implements ZoomableViewer {
       this._hyperlinkHandler(),
       // §17.3.2.10 縦中横 (#836) — the same measurer the highlight overlay uses,
       // so a tate-chu-yoko selection span is clamped to its drawn one-em cell.
-      (font) => this._measureForFont(font),
+      (font, lang) => this._measureForFont(font, lang),
       this._currentPage,
     );
   }

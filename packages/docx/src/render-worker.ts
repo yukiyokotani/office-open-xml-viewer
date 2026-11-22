@@ -345,19 +345,20 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         if (nativeSentinels) unloadOfficeFontFallbacks(nativeSentinels);
         throw new Error('render-worker parse was superseded');
       }
-      // Registration is not application. The main realm lays out with
-      // sentinels its measuring context applies; this realm continues only
-      // where its own measuring context (the one createLayoutServices makes
-      // here) applies them too, judged by the oracle whose capability the
-      // text service's fingerprint records (core createNamedFamilyOracle).
-      // Otherwise glyph ownership, symbol codes and run languages would be
-      // judged here and declined there. A document naming a run language
-      // also needs Canvas `lang` here (`available`): without it every tag
-      // would be withheld here while the main realm may apply them.
-      if (nativeSentinels && nativeSentinels.length > 0 && typeof OffscreenCanvas !== 'undefined') {
-        const measuring = new OffscreenCanvas(1, 1).getContext('2d');
-        const oracle = measuring ? createNamedFamilyOracle(measuring) : undefined;
-        if (oracle && !(documentCarriesRunLanguage(pulledModels.document) ? oracle.available : oracle.sentinelsApply)) {
+      // A document naming a run language (run-language-capability.ts) is
+      // laid out here only where this realm's measuring context can judge
+      // its languages exactly as the text service will (core
+      // createNamedFamilyOracle `available`: sentinels applied, Canvas
+      // `lang`, grapheme segmentation); otherwise tags would be withheld
+      // here while the main realm may apply them, so it continues there.
+      // Untagged documents keep the admission they had before languages.
+      if (nativeSentinels && documentCarriesRunLanguage(pulledModels.document)) {
+        // The same oracle the text service builds on this realm's measuring
+        // context (an OffscreenCanvas here): tagged text is laid out here
+        // only where it can judge, else on the main thread.
+        const measuring = typeof OffscreenCanvas !== 'undefined'
+          ? new OffscreenCanvas(1, 1).getContext('2d') : null;
+        if (!measuring || !createNamedFamilyOracle(measuring).available) {
           unloadOfficeFontFallbacks(nativeSentinels);
           nativeSentinels = null;
         }

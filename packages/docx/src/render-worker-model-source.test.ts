@@ -28,13 +28,21 @@ const workerMocks = vi.hoisted(() => ({
   unloadLocal: vi.fn(),
   paginate: vi.fn(async () => undefined),
   verticalFallback: vi.fn(() => false),
+  carriesLanguage: vi.fn(() => false),
+  oracleAvailable: vi.fn(() => true),
 }));
 vi.mock('@silurus/ooxml-core', async importOriginal => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
   loadOfficeFontFallbacks: workerMocks.metrics,
   unloadOfficeFontFallbacks: workerMocks.unloadLocal,
   loadNativeRouteSentinels: async () => [],
+  createNamedFamilyOracle: () => ({
+    get available() { return workerMocks.oracleAvailable(); },
+    sentinelsApply: true,
+    draws: () => false,
+  }),
 }));
+vi.mock('./run-language-capability.js', () => ({ documentCarriesRunLanguage: workerMocks.carriesLanguage }));
 vi.mock('@silurus/ooxml-core/internal/model-source', async importOriginal => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core/internal/model-source')>(),
   openModelSourceModule: (...args: unknown[]) => workerMocks.opens.at(-1)!(...args),
@@ -102,6 +110,10 @@ beforeEach(() => {
   workerMocks.paginate.mockResolvedValue(undefined);
   workerMocks.verticalFallback.mockReset();
   workerMocks.verticalFallback.mockReturnValue(false);
+  workerMocks.carriesLanguage.mockReset();
+  workerMocks.carriesLanguage.mockReturnValue(false);
+  workerMocks.oracleAvailable.mockReset();
+  workerMocks.oracleAvailable.mockReturnValue(true);
 });
 
 describe('DOCX render worker with a model source', () => {
@@ -189,6 +201,33 @@ describe('DOCX render worker with a model source', () => {
     expect(posted(posts, 'mainThreadVerticalFallback', 16)).toEqual([
       expect.objectContaining({ viewDefaults: { showTrackedChanges: true } }),
     ]);
+  });
+
+  it.each([
+    ['tagged, judging realm', true, true, true, 'parsedMeta'],
+    ['tagged, no Canvas lang or sentinels applied', true, false, true, 'mainThreadVerticalFallback'],
+    ['tagged, no measuring context', true, true, false, 'mainThreadVerticalFallback'],
+    ['untagged, realm that cannot judge', false, false, true, 'parsedMeta'],
+  ] as const)('admits a run-language document to the worker only where it can judge it: %s', async (
+    _label, tagged, available, offscreen, published,
+  ) => {
+    workerMocks.carriesLanguage.mockReturnValue(tagged);
+    workerMocks.oracleAvailable.mockReturnValue(available);
+    if (offscreen) {
+      vi.stubGlobal('OffscreenCanvas', class { getContext() { return {}; } });
+    } else {
+      vi.stubGlobal('OffscreenCanvas', undefined);
+    }
+    try {
+      const { dispatch, posts } = await loadWorker();
+      workerMocks.opens.push(async () => modelSource({}).opened);
+      await dispatch({ data: parseRequest(30) } as MessageEvent);
+      expect(posted(posts, published, 30)).toHaveLength(1);
+      // Untagged documents never consult the capability.
+      if (!tagged) expect(workerMocks.oracleAvailable).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('does not let a deferred old parse publish or close the newer source', async () => {
