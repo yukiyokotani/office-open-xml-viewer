@@ -113,10 +113,12 @@ without private sample contents or paths.
   the evidence. Do not copy an entire experiment log into comments.
 - Parameter sweeps, generated Office samples/PDFs/images, probe scripts, logs,
   comparison builds, and scratch notes are temporary investigation artifacts.
-  Create them in a task-owned temporary directory outside the checkout and
-  remove them once their conclusions are captured in source and focused
-  regression coverage. Do not accumulate `output/` directories as an
-  alternative specification store.
+  Create them by default in a task-owned temporary directory outside the
+  checkout and remove them once their conclusions are captured in source and
+  focused regression coverage. Controls and reference PDFs kept for later
+  adjudication are not scratch: they go to the git-ignored private corpus
+  ([Office reference export](../workflow/office-reference-export.md)). Do not
+  accumulate `output/` directories as an alternative specification store.
 - Unresolved observations are not established compatibility rules. Record any
   implemented limitation beside its gate.
 - Before cleanup, inspect contents, tracked status, symlinks, and active-task

@@ -71,7 +71,7 @@ function markdownLinks(text) {
     return '';
   });
   const targets = [
-    ...[...prose.matchAll(/\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
+    ...[...prose.matchAll(/\[[^\]]*\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
     // Raw HTML: <img src="…">, <a href="…">.
     ...[...prose.matchAll(/<(?:img|a|source|video)\b[^>]*?\b(?:src|href)=["']([^"']+)["']/gi)].map((match) => match[1]),
     // Autolinks: <https://…>.
@@ -136,6 +136,7 @@ test('Markdown links are the destinations a reader can follow', () => {
   ]);
   assert.deepEqual(markdownLinks('<img src="docs/images/icon.png" width="80" alt="icon" />'), ['docs/images/icon.png']);
   assert.deepEqual(markdownLinks('See <https://example.org/docs/a.md> and <span>text</span>.'), ['https://example.org/docs/a.md']);
+  assert.deepEqual(markdownLinks('Prose ](docs/missing.md) and ![alt](a.png).'), ['a.png']);
   assert.deepEqual(markdownLinks('Example: `wrapped\n[fake](docs/missing.md)` end.'), []);
   assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);
   assert.deepEqual(markdownLinks('```\n[fenced](f.md)\n```\n[guide][g]\n\n[g]: missing.md\n'), ['missing.md']);
@@ -325,13 +326,14 @@ function linkedDocs(path, text, blobUrl, renderedProperties = new Set()) {
 const renderedLinkProperties = (text) =>
   new Set([...withoutComments(text).matchAll(/href=\{\s*[\w$]+(?:\?)?\.([\w$]+)\s*\}/g)].map((match) => match[1]));
 
-// A module's name as an import specifier ends with it: file name without extension.
-const moduleName = (path) => path.split('/').at(-1).replace(/\.[cm]?[jt]sx?$|\.astro$/, '');
-// Names of the modules a source text imports.
-const importedModuleNames = (text) =>
+// A repository path without its source extension, as a relative import names it.
+const moduleName = (path) => path.replace(/\.[cm]?[jt]sx?$|\.astro$/, '');
+// Repository paths (without extension) of the modules `file` imports by a
+// relative specifier. Package imports name no file of the site.
+const importedModuleNames = (file, text) =>
   new Set(
-    [...withoutComments(text).matchAll(/\bfrom\s+["']([^"']+)["']/g)].map((match) =>
-      moduleName(match[1].split('/').at(-1)),
+    [...withoutComments(text).matchAll(/\bfrom\s+["'](\.[^"']+)["']/g)].map((match) =>
+      moduleName(posix.normalize(posix.join(posix.dirname(file), match[1]))),
     ),
   );
 
@@ -369,10 +371,16 @@ test('a consumer link to a guide is a real link destination, not incidental text
   );
   assert.deepEqual([...renderedLinkProperties('<!-- <a href={o.detailsHref}>d</a> -->')], []);
   assert.deepEqual(
-    [...importedModuleNames("import { A } from '../lib/api-reference';\nimport b from './b.js';\n// import c from './c';")],
-    ['api-reference', 'b'],
+    [
+      ...importedModuleNames(
+        'site/src/components/A.astro',
+        "import { A } from '../lib/api-reference';\nimport b from './b.js';\nimport { D } from '@scope/pkg/docx';\n// import c from './c';",
+      ),
+    ],
+    ['site/src/lib/api-reference', 'site/src/components/b'],
   );
-  assert.equal(moduleName('site/src/lib/api-reference.ts'), 'api-reference');
+  assert.equal(moduleName('site/src/lib/api-reference.ts'), 'site/src/lib/api-reference');
+  assert.equal(moduleName('site/src/pages/api/docx.astro'), 'site/src/pages/api/docx');
   assert.equal(isShippedSource('packages/docx/src/test-support/tab-fitting.test-support.ts'), false);
   assert.equal(isShippedSource('packages/docx/src/a.test.ts'), false);
   assert.equal(isShippedSource('packages/xlsx/src/viewer-destroy-test-dom.ts'), false);
@@ -423,13 +431,13 @@ test('docs/ holds only procedures, the core beliefs, linked user guides and thei
       path === 'README.md' ||
       /^packages\/[^/]+\/README\.md$/.test(path) ||
       (/^site\/src\//.test(path) && isShippedSource(path)) ||
-      (/^packages\/[^/]+\/src\/.*\.[cm]?[jt]s$/.test(path) && isShippedSource(path)),
+      (/^(packages\/[^/]+\/)?src\/.*\.[cm]?[jt]s$/.test(path) && isShippedSource(path)),
   );
   const texts = new Map(surfaces.map((surface) => [surface, read(join(ROOT, surface))]));
   const siteTexts = [...texts].filter(([surface]) => surface.startsWith('site/'));
   const rendered = new Set(siteTexts.flatMap(([, text]) => [...renderedLinkProperties(text)]));
   // Data properties count only in a module that another site file imports.
-  const imported = new Set(siteTexts.flatMap(([, text]) => [...importedModuleNames(text)]));
+  const imported = new Set(siteTexts.flatMap(([surface, text]) => [...importedModuleNames(surface, text)]));
   const linked = new Set();
   for (const [surface, text] of texts) {
     if (!text.includes('docs/')) continue;

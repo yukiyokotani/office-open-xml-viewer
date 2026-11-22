@@ -2,11 +2,9 @@
  * Layout diagnostics and the failure-containment policy (library policy).
  *
  * These recoverable cases omit content or keep its authored geometry:
- * - a drawing whose payload otherwise resolves, that takes its size from
- *   `wp:extent` and has a missing or invalid one, is omitted by the parser and
- *   reported through
- *   PARSER_DIAGNOSTIC_CONTRACT below (anchored shapes and groups take their
- *   size from `a:xfrm` and are kept);
+ * - a drawing the parser cannot size is omitted, and PARSER_DIAGNOSTIC_CONTRACT
+ *   below lists the diagnostics the parser can attach (for example a visible
+ *   picture that needs `wp:extent` and has none);
  * - an unavailable inline image or chart keeps its authored extent as an
  *   `unavailable-resource` line segment, painted as a `noop` drawing that owns
  *   a `MISSING_RESOURCE` warning;

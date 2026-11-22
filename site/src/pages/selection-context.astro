@@ -278,10 +278,12 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
       <p>
         The comment-thread limit bounds message text only: every reply is still returned with its
         identifiers, author and date, so the limit does not cap the reply count or the serialized
-        size. Text limits count UTF-16 code units, and text is cut with a surrogate-safe prefix, so a
+        size. A host that needs a transport or prompt limit bounds the serialized snapshot itself.
+        Text limits count UTF-16 code units, and text is cut with a surrogate-safe prefix, so a
         surrogate pair is not split. Pass different limits to <code>getSelectionContext()</code>.
         DOCX and PPTX <code>onSelectionContextChange</code> notifications use the default limits; XLSX
-        notifications use the default cell limit with at most 65,536 characters of text and are
+        notifications use the default cell limit and a 65,536-character budget for extracted cell and
+        comment text (comment authors, dates and identifiers are copied outside that budget) and are
         coalesced to one per animation frame (one per microtask where the host has no
         <code>requestAnimationFrame</code>). A native text selection produces context only when
         every range endpoint lies on a Viewer text surface, and its text is taken only from tagged

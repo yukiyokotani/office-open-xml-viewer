@@ -218,6 +218,11 @@ export interface LoadOptions {
    * limits. The previous engine is released when the replacement is installed,
    * which happens before the initial page, slide or sheet render; a failed
    * acquisition keeps the previous engine, but a failed initial render does not.
+   *
+   * To choose values, read `largestInflatedEntryBytes` (for
+   * `maxArchiveEntryBytes`) and `distinctInflatedBytes` (for
+   * `maxTotalInflatedBytes`) from the debug resource report of representative
+   * documents, add headroom, and confirm on the lowest-memory device supported.
    */
   resourceLimits?: OoxmlResourceLimits;
   /**
