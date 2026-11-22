@@ -1,3 +1,4 @@
+import { clipRunRect } from './run-clip.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -114,7 +115,10 @@ export function buildDocxTextLayer(
     // glyphs stay `color:transparent` (the link's blue/underline is already
     // painted on the canvas), so a link run's selection behaviour is otherwise
     // identical to a plain run. A non-link run is byte-identical to before.
-    const link = onHyperlinkClick ? run.hyperlink : undefined;
+    // A run wholly outside its paint clip (DocxTextRunInfo.clipBounds) has
+    // no visible glyph to select or click.
+    const hidden = clipRunRect(run, { x: run.x, y: run.y, width: run.w, height: run.h }) === null;
+    const link = onHyperlinkClick && !hidden ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
     const letterSpacing = run.letterSpacingPx !== undefined
       ? `${run.letterSpacingPx / k}px`
@@ -138,7 +142,7 @@ export function buildDocxTextLayer(
       `font:${k !== 1 && reference ? reference.font : run.font};line-height:${run.h / k}px;letter-spacing:${letterSpacing};` +
       compressedHitBox +
       transform +
-      `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;
+      `white-space:pre;color:transparent;cursor:${cursor};pointer-events:${hidden ? 'none' : 'all'};`;
     if (link && onHyperlinkClick) {
       span.title = link.kind === 'external' ? link.url : link.ref;
       span.addEventListener('click', (event) => {

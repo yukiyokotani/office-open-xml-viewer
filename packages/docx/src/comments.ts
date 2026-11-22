@@ -1,5 +1,6 @@
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import { sourceKey } from './layout/source-key.js';
+import { clipRunRect } from './run-clip.js';
 import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
 import type { DocComment, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
@@ -452,15 +453,16 @@ function highlightRects(
   runs: readonly Readonly<DocxTextRunInfo>[],
 ): readonly Readonly<DocxCommentHighlightRect>[] {
   const rects = runs
-    .map((run): DocxCommentHighlightRect => {
+    .flatMap((run): DocxCommentHighlightRect[] => {
       const bounds = run.highlightBounds;
-      return {
+      // A run's highlight is cut to its paint clip, like its glyphs.
+      const visible = clipRunRect(run, {
         x: bounds?.x ?? run.x,
         y: bounds?.y ?? run.y,
         width: bounds?.width ?? run.w,
         height: bounds?.height ?? run.h,
-        ...(run.transform ? { transform: run.transform } : {}),
-      };
+      });
+      return visible ? [{ ...visible, ...(run.transform ? { transform: run.transform } : {}) }] : [];
     })
     .filter(({ width, height }) => width > 0 && height > 0)
     .sort((left, right) => left.y - right.y || left.x - right.x);

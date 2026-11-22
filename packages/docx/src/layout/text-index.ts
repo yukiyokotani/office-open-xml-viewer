@@ -28,6 +28,8 @@ import type {
 export interface TextRunGeometry {
   readonly placement: SourceOwnedTextGeometry;
   readonly pointToPage: Matrix2DData;
+  /** Ancestor paint clips, in their retained local coordinate spaces. */
+  readonly clips: readonly ElementClipGeometry[];
   /** Canonical structural source of the owning paragraph. */
   readonly source: ParagraphLayout['source'];
   /** Source `w14:paraId` of the owning paragraph, when authored. */
@@ -100,6 +102,10 @@ interface NodeProjection {
   /** Projected inside a line's retained frame; nested stories do not apply
    * their own (paint/types.ts CanvasPaintContext.lineFramed). */
   readonly lineFramed?: true;
+  /** WORD_CELL_CONTENT_CLIP: the clip of the cell owning this paragraph. It
+   * applies to the paragraph's text and inline content, not to its VML
+   * pictures, anchored drawings or nested tables, as paint applies it. */
+  readonly cellContentClip?: ElementClipGeometry;
 }
 
 const IDENTITY_AFFINE = Object.freeze({
@@ -414,7 +420,15 @@ function visitParagraph(
   projection: NodeProjection,
   context: ProjectionContext,
 ): void {
-  const paragraphProjection = withClip(projection, paragraph.clipBounds);
+  const { cellContentClip, ...unclippedProjection } = withClip(projection, paragraph.clipBounds);
+  const paragraphProjection: NodeProjection = unclippedProjection;
+  // WORD_CELL_CONTENT_CLIP: the projection of content painted under the cell clip.
+  const clippedProjection: NodeProjection = cellContentClip
+    ? { ...paragraphProjection, clips: Object.freeze([...paragraphProjection.clips, cellContentClip]) }
+    : paragraphProjection;
+  const escapingDrawingIds = new Set(cellContentClip ? paragraph.lines.flatMap((line) => line.placements.flatMap(
+    (placement) => placement.kind === 'drawing' && placement.escapesCellClip ? [placement.drawingId] : [],
+  )) : []);
   // An inline drawing is line content: it projects through its owning
   // line's frame, as paint draws it (line-frame.ts).
   const inlineDrawingLines = new Map<string, ParagraphLayout['lines'][number]>();
@@ -427,13 +441,15 @@ function visitParagraph(
   }
   const inlineDrawingProjection = (drawing: DrawingLayout): NodeProjection => {
     const line = drawing.anchorLayer ? undefined : inlineDrawingLines.get(drawing.id);
-    return line && !paragraphProjection.lineFramed && paragraph.lineFrame !== undefined
+    const base = drawing.anchorLayer || escapingDrawingIds.has(drawing.id)
+      ? paragraphProjection : clippedProjection;
+    return line && !base.lineFramed && paragraph.lineFrame !== undefined
       ? {
-          ...paragraphProjection,
+          ...base,
           lineFramed: true,
-          pointToPage: lineProjectionPointToPage(paragraph, line, paragraphProjection),
+          pointToPage: lineProjectionPointToPage(paragraph, line, base),
         }
-      : paragraphProjection;
+      : base;
   };
   const textBoxesById = new Map(
     paragraph.textBoxes.map((textBox) => [textBox.id, textBox]),
@@ -463,6 +479,7 @@ function visitParagraph(
             context.runs.push(Object.freeze({
               placement,
               pointToPage: linePointToPage,
+              clips: clippedProjection.clips,
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }
@@ -550,14 +567,14 @@ function visitParagraph(
         path: Object.freeze([...paragraph.source.path, entry.runIndex]),
       }),
       pointToPage: entry.pointToPage,
-      clips: paragraphProjection.clips,
+      clips: entry.placement.escapesCellClip ? paragraphProjection.clips : clippedProjection.clips,
       paintOrderIndex: paragraphProjection.paintOrderIndex,
       sourceOrder: context.drawingSourceOrder++,
     }));
   }
   for (const textBox of paragraph.textBoxes) {
     if (!ownedTextBoxIds.has(textBox.id)) {
-      visitTextBox(textBox, paragraphProjection, context);
+      visitTextBox(textBox, clippedProjection, context);
     }
   }
 }
@@ -588,6 +605,16 @@ function visitTable(
         }
         continue;
       }
+      // WORD_CELL_CONTENT_CLIP: the cell's paragraphs, not its nested tables.
+      const paragraphProjection: NodeProjection = cell.contentClipBounds
+        ? {
+            ...cellProjection,
+            cellContentClip: Object.freeze({
+              bounds: cell.contentClipBounds,
+              pointToPage: cellProjection.pointToPage,
+            }),
+          }
+        : cellProjection;
       for (const block of cell.blocks) {
         const child = block.layout;
         visitNode(child, placedChildProjection(child, {
@@ -595,7 +622,7 @@ function visitTable(
             + (child.kind === 'table' ? child.flowBounds.xPt : 0),
           yPt: cell.flowBounds.yPt + block.offsetPt
             + (child.kind === 'table' ? child.flowBounds.yPt : 0),
-        }, cellProjection), context);
+        }, child.kind === 'paragraph' ? paragraphProjection : cellProjection), context);
       }
     }
   }

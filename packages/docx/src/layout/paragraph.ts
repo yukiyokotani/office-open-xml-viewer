@@ -4274,7 +4274,8 @@ function planMeasuredLines(
         } | undefined)?.inlineObjectOrigin;
         const exactClipped = !image.chart && exactObjectClips
           && wordInlineObjectExactLineClips(inlineObjectOrigin);
-        const escapesCellClip = wordCellContentClipEscapesInlinePicture({
+        // Only a cell paragraph (a nested source path) has a cell clip to escape.
+        const escapesCellClip = source.path.length > 1 && wordCellContentClipEscapesInlinePicture({
           chart: Boolean(image.chart),
           listLabel: image.listLabel !== undefined,
           inlineObjectOrigin,

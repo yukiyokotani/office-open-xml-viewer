@@ -1,3 +1,4 @@
+import { clipRunRect } from './run-clip.js';
 import {
   overlayPercent,
   type ViewerCommentsOptions,
@@ -136,15 +137,16 @@ function createTint(
   return tint;
 }
 
-function wordHighlightRun(run: Readonly<DocxTextRunInfo>): DocxTextRunInfo {
+function wordHighlightRun(run: Readonly<DocxTextRunInfo>): DocxTextRunInfo[] {
   const bounds = run.highlightBounds;
-  return {
-    ...run,
+  // A run's highlight is cut to its paint clip, like its glyphs.
+  const visible = clipRunRect(run, {
     x: bounds?.x ?? run.x,
     y: bounds?.y ?? run.y,
-    w: bounds?.width ?? run.w,
-    h: bounds?.height ?? run.h,
-  };
+    width: bounds?.width ?? run.w,
+    height: bounds?.height ?? run.h,
+  });
+  return visible ? [{ ...run, x: visible.x, y: visible.y, w: visible.width, h: visible.height }] : [];
 }
 
 /** Fill the whitespace between consecutive anchor runs on one rendered line.
@@ -217,7 +219,7 @@ export function buildDocxCommentMargin(
   for (const { anchor, runs: anchorRuns } of resolvedPageAnchors) {
     if (!visibleThreadIds.has(anchor.commentId)) continue;
     const active = activeId === anchor.commentId;
-    for (const run of mergeSameLineRuns(anchorRuns.map(wordHighlightRun))) {
+    for (const run of mergeSameLineRuns(anchorRuns.flatMap(wordHighlightRun))) {
       const tint = createTint(
         tintLayer,
         run,

@@ -92,12 +92,10 @@ export interface CanvasPaintContext {
   readonly textBoxVerticalMode?: 'vert' | 'vert270' | 'eaVert' | 'mongolianVert';
   /** The page paint plan owns anchored drawings for this retained root. */
   readonly omitAnchoredDrawings?: boolean;
-  /** WORD_CELL_CONTENT_CLIP: the pass in which a table-cell paragraph is
-   * painted. `clipped` (under the cell content clip) paints everything except
-   * anchored drawings and VML pictures; `behind` paints only its behind-text
-   * anchors and `front` its VML pictures, front anchors and free-standing text
-   * boxes, both outside the clip. Never inherited by nested stories. */
-  readonly cellClipPass?: 'behind' | 'clipped' | 'front';
+  /** WORD_CELL_CONTENT_CLIP: the cell content clip, in the coordinates of
+   * the paragraph being painted, for a cell paragraph whose VML pictures or
+   * anchored drawings paint outside it. Never inherited by nested stories. */
+  readonly cellContentClip?: LayoutRect;
   /** Layout measurement's reference-advance decisions (core
    * reference-advances.ts): a retained shorthand layout measured at the
    * reference em is drawn there under a linear scale, so the shaped glyph

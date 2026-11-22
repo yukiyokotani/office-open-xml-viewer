@@ -1,4 +1,5 @@
 import { countSpacingCharacters } from './character-spacing.js';
+import { clipRunRect } from './run-clip.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -103,9 +104,9 @@ export function buildDocxHighlightLayer(
       // §17.3.2.10 縦中横 alone compresses natural extents into the retained
       // one-em cell. Ordinary runs preserve the established natural measurement.
       const k = tateChuYokoOverlayScale(run, measure);
-      const x = pitchedX * k;
-      const width = pitchedWidth * k;
-      if (width <= 0) continue;
+      // The highlight is cut to the run's paint clip, like its glyphs.
+      const visible = clipRunRect(run, { x: run.x + pitchedX * k, y: run.y, width: pitchedWidth * k, height: run.h });
+      if (!visible || visible.width <= 0) continue;
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and
       // carries a rotate transform; apply the same transform (about the box's
@@ -120,8 +121,8 @@ export function buildDocxHighlightLayer(
       // column exactly as before at 1× scale.
       box.style.cssText =
         `position:absolute;` +
-        `left:${overlayPercent(run.x + x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-        `width:${overlayPercent(width, cssWidth)};height:${overlayPercent(run.h, cssHeight)};` +
+        `left:${overlayPercent(visible.x, cssWidth)};top:${overlayPercent(visible.y, cssHeight)};` +
+        `width:${overlayPercent(visible.width, cssWidth)};height:${overlayPercent(visible.height, cssHeight)};` +
         transform +
         `background:${fill};pointer-events:none;`;
       layer.appendChild(box);

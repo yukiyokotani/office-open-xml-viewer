@@ -1898,6 +1898,11 @@ export interface DocxTextRunInfo {
   hyperlink?: HyperlinkTarget;
   /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
   eastAsianVert?: boolean;
+  /** The region of the page, in canvas CSS px, outside which the run's glyphs
+   * are clipped (a table cell, an exact-height row, a text box). Overlays
+   * clip highlights to it, and a run wholly outside it is not interactive.
+   * Absent for an unclipped run or a clip that is not axis-aligned. */
+  clipBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
 }
 
 export interface RenderPageOptions {

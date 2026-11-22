@@ -8,6 +8,10 @@ import { normalizeInternalDocumentModel } from './parser-model.js';
 import { layoutDocument } from './document-layout.js';
 import { createLayoutServices } from './layout-runtime.js';
 import { paintTableLayout } from './paint/canvas-table.js';
+import { hitTestDocxElementContext } from './element-context.js';
+import { createPaintResourceRegistry } from './layout/paint-resources.js';
+import { textRunsForPage } from './text-run-projection.js';
+import { clipRunRect } from './run-clip.js';
 import type { LayoutRect, ParagraphLayout, TableLayout } from './layout/types.js';
 import type { CanvasPaintContext, PaintCanvas2D } from './paint/types.js';
 
@@ -64,14 +68,18 @@ function docx(paragraphs: string, body?: string): Uint8Array {
   ]));
 }
 
-function layoutPage(bytes: Uint8Array) {
+function layoutDocx(bytes: Uint8Array) {
   const archive = new DocxArchive(bytes);
   let parsed;
   try {
     parsed = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse())));
   } finally { archive.free(); }
   const model = parsed.document;
-  return layoutDocument(model, createLayoutServices(model, { measureContext: measureContext(5) }), { currentDateMs: 0 }).pages[0]!;
+  return layoutDocument(model, createLayoutServices(model, { measureContext: measureContext(5) }), { currentDateMs: 0 });
+}
+
+function layoutPage(bytes: Uint8Array) {
+  return layoutDocx(bytes).pages[0]!;
 }
 
 function layoutTable(paragraphs: string): TableLayout {
@@ -82,20 +90,24 @@ function layoutTable(paragraphs: string): TableLayout {
 }
 
 type Clip = Readonly<{ rect: LayoutRect; dxPt: number; dyPt: number }>;
+type Painted = Readonly<{ bounds: LayoutRect; clips: readonly LayoutRect[] }>;
 
-/** Paints `table` and returns, for each painted picture, the clips active
- * when it was painted (in page points; the paint applies only translations). */
-function paintedPictureClips(table: TableLayout): Array<Readonly<{ bounds: LayoutRect; clips: readonly LayoutRect[] }>> {
+/** Paints `table` and returns, in paint order, each painted picture with the
+ * clips active when it was painted (in page points; the paint applies only
+ * translations), and the number of save and translate calls. */
+function paintTable(table: TableLayout): Readonly<{ painted: Painted[]; saves: number; translates: number }> {
   let dx = 0;
   let dy = 0;
   let clips: Clip[] = [];
   let pending: LayoutRect | undefined;
+  let saves = 0;
+  let translates = 0;
   const stack: Array<Readonly<{ dx: number; dy: number; clips: Clip[] }>> = [];
-  const painted: Array<Readonly<{ bounds: LayoutRect; clips: readonly LayoutRect[] }>> = [];
+  const painted: Painted[] = [];
   const ctx = new Proxy({
-    save() { stack.push({ dx, dy, clips: [...clips] }); },
+    save() { saves++; stack.push({ dx, dy, clips: [...clips] }); },
     restore() { const top = stack.pop(); if (top) ({ dx, dy, clips } = top); },
-    translate(x: number, y: number) { dx += x; dy += y; },
+    translate(x: number, y: number) { translates++; dx += x; dy += y; },
     beginPath() { pending = undefined; },
     rect(xPt: number, yPt: number, widthPt: number, heightPt: number) { pending = { xPt, yPt, widthPt, heightPt }; },
     clip() { if (pending) clips.push({ rect: pending, dxPt: dx, dyPt: dy }); },
@@ -119,7 +131,19 @@ function paintedPictureClips(table: TableLayout): Array<Readonly<{ bounds: Layou
     },
   };
   paintTableLayout(table, context);
-  return painted;
+  return { painted, saves, translates };
+}
+
+/** The painted clip is the content clip widened to whole device pixels. */
+function expectPixelWidened(painted: LayoutRect, clip: LayoutRect): void {
+  expect(painted.xPt).toBeLessThanOrEqual(clip.xPt);
+  expect(painted.xPt).toBeGreaterThan(clip.xPt - 1);
+  expect(painted.yPt).toBeLessThanOrEqual(clip.yPt);
+  expect(painted.yPt).toBeGreaterThan(clip.yPt - 1);
+  expect(painted.xPt + painted.widthPt).toBeGreaterThanOrEqual(clip.xPt + clip.widthPt);
+  expect(painted.xPt + painted.widthPt).toBeLessThan(clip.xPt + clip.widthPt + 1);
+  expect(painted.yPt + painted.heightPt).toBeGreaterThanOrEqual(clip.yPt + clip.heightPt);
+  expect(painted.yPt + painted.heightPt).toBeLessThan(clip.yPt + clip.heightPt + 1);
 }
 
 describe('word-cell-content-clip', () => {
@@ -136,26 +160,76 @@ describe('word-cell-content-clip', () => {
     expect(clip.yPt).toBeCloseTo(lineTopPt, 6);
     expect(clip.heightPt).toBeCloseTo(24, 6);
 
-    const [picture, legacy] = paintedPictureClips(table);
+    const [picture, legacy] = paintTable(table).painted;
     // The DrawingML picture, raised 5pt in the exact 24pt line, crosses the
     // clip top and is painted under the clip; the VML one is not clipped.
     expect(picture!.bounds.yPt).toBeLessThan(clip.yPt);
-    expect(picture!.clips).toContainEqual(expect.objectContaining({
-      xPt: expect.closeTo(clip.xPt, 6), yPt: expect.closeTo(clip.yPt, 6),
-      widthPt: expect.closeTo(clip.widthPt, 6), heightPt: expect.closeTo(clip.heightPt, 6),
-    }));
+    expect(picture!.clips).toHaveLength(1);
+    expectPixelWidened(picture!.clips[0]!, clip);
     expect(legacy!.bounds.yPt + legacy!.bounds.heightPt).toBeGreaterThan(clip.yPt + clip.heightPt);
     expect(legacy!.clips).toEqual([]);
   });
 
   it('keeps a picture that overlaps a neighbouring line inside the cell unclipped by that line', () => {
     const table = layoutTable(exactLine(drawingml(0)) + exactLine(drawingml(0)));
-    const [, second] = paintedPictureClips(table);
+    const [, second] = paintTable(table).painted;
     const cell = table.rows[0]!.cells[0]!;
     // The second picture rises 10.8pt above its line into the first line; only
     // the cell clip applies, and the picture lies within it.
     expect(second!.clips).toHaveLength(1);
     expect(second!.bounds.yPt).toBeGreaterThan(cell.contentClipBounds!.yPt);
+  });
+
+  it('keeps the inline paint order when an earlier VML picture escapes the clip', () => {
+    // The lowered VML picture of the first line overlaps the DrawingML picture
+    // of the second; the second, later in the cell, stays on top.
+    const table = layoutTable(exactLine(vml(-15)) + exactLine(drawingml(0)));
+    const [first, second] = paintTable(table).painted;
+    expect(first!.clips).toEqual([]);
+    expect(second!.clips).toHaveLength(1);
+    expect(first!.bounds.yPt + first!.bounds.heightPt).toBeGreaterThan(second!.bounds.yPt);
+  });
+
+  it('adds no canvas frames to a text-only cell paragraph', () => {
+    // One frame per paragraph, holding both the clip and the translation.
+    const { saves, translates } = paintTable(layoutTable(exactLine('')));
+    const { saves: tableSaves } = paintTable({ ...layoutTable(exactLine('')), rows: [] });
+    expect(saves - tableSaves).toBe(1);
+    expect(translates).toBe(1);
+  });
+
+  it('marks VML pictures as escaping only in table cells', () => {
+    const page = layoutPage(docx('', `${exactLine(vml(-15))}<w:p/>`));
+    const paragraph = page.layers.body[0];
+    const placement = paragraph?.kind === 'paragraph'
+      ? paragraph.lines[0]!.placements.find((item) => item.kind === 'resource') : undefined;
+    expect(placement?.kind).toBe('resource');
+    expect(placement).not.toHaveProperty('escapesCellClip');
+  });
+
+  it('keeps clipped content out of hit testing and highlights', () => {
+    // A picture raised past the cell clip and a run indented past the cell's
+    // leading edge.
+    const layout = layoutDocx(docx(exactLine(drawingml(5))
+      + '<w:p><w:pPr><w:ind w:left="-1200"/></w:pPr><w:r><w:t>Hidden</w:t></w:r></w:p>'));
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
+    const clip = table.rows[0]!.cells[0]!.contentClipBounds!;
+    const picture = (table.rows[0]!.cells[0]!.blocks[0]!.layout as ParagraphLayout).lines[0]!.placements
+      .find((item) => item.kind === 'resource');
+    if (picture?.kind !== 'resource') throw new Error('expected the picture');
+    const registry = createPaintResourceRegistry([{
+      kind: 'image', resourceKey: picture.resourceKey, partPath: 'word/media/p.png',
+      mimeType: 'image/png', intrinsicSize: { widthPt: 40, heightPt: 30 },
+    }]);
+    const pictureXPt = clip.xPt + 40;
+    expect(hitTestDocxElementContext(layout, 0, { xPt: pictureXPt, yPt: clip.yPt + 1 }, registry)).not.toBeNull();
+    expect(hitTestDocxElementContext(layout, 0, { xPt: pictureXPt, yPt: clip.yPt - 1 }, registry)).toBeNull();
+
+    const runs = textRunsForPage(layout, 0, { scale: 1 });
+    const hidden = runs.find((run) => run.text.includes('Hidden'));
+    expect(hidden?.clipBounds).toBeDefined();
+    expect(hidden!.x + hidden!.w).toBeLessThanOrEqual(hidden!.clipBounds!.x);
+    expect(clipRunRect(hidden!, { x: hidden!.x, y: hidden!.y, width: hidden!.w, height: hidden!.h })).toBeNull();
   });
 });
 
