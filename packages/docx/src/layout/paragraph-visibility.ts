@@ -48,6 +48,15 @@ export function displaysOnlyParagraphMark(
   return metricVisibleRuns(runs, showTrackedChanges).every((run) => run.type === 'text' && (run.text ?? '') === '');
 }
 
+/** A list marker (text or picture bullet) is painted: visible ink that no
+ * spacing, collapsing or structural-mark role may remove. */
+export function hasVisibleNumbering(paragraph: Readonly<{
+  numbering?: Readonly<{ text?: string; picBulletImagePath?: string | null }> | null;
+}>): boolean {
+  const numbering = paragraph.numbering;
+  return numbering != null && ((numbering.text ?? '') !== '' || Boolean(numbering.picBulletImagePath));
+}
+
 /** A paragraph that displays only its mark and anchors at least one floating
  * drawing the view displays. */
 export function isAnchorOnlyParagraph(

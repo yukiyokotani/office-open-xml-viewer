@@ -175,6 +175,8 @@ import { layoutDocument } from './document-layout.js';
 import type { AnchorAcquisitionInput } from './layout/anchor-input.js';
 import type { PaintNode } from './layout/types.js';
 import type { BodyElement, DocxDocumentModel } from './types.js';
+import { attachAnchorPlacements } from './line-breaker/model.js';
+import { planLine } from './layout/paragraph.js';
 
 function documentContext(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -255,12 +257,12 @@ function documentModel(body: BodyElement[], header: BodyElement[] | null, settin
   } as unknown as DocxDocumentModel;
 }
 
-const tableOf = (content: BodyElement[]): BodyElement => ({
+const tableOf = (content: BodyElement[], cell: object = {}): BodyElement => ({
   type: 'table', colWidths: [160], borders: { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null },
   cellMarginTop: 0, cellMarginRight: 0, cellMarginBottom: 0, cellMarginLeft: 0, jc: 'left', layout: 'fixed',
   rows: [{ rowHeight: null, rowHeightRule: 'auto', isHeader: false, cells: [{ content, colSpan: 1, vMerge: null,
     borders: { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null },
-    background: null, vAlign: 'top', widthPt: 160 }] }],
+    background: null, vAlign: 'top', widthPt: 160, ...cell }] }],
 }) as unknown as BodyElement;
 
 const round = (value: number): number => Math.round(value * 1e6) / 1e6;
@@ -348,6 +350,9 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating anchor changes no paginati
       bodyParagraph([word('After')])], null]],
     ['last paragraph of a table cell', (subject) => [[tableOf([bodyParagraph([word('Cell')]), subject]),
       bodyParagraph([word('After')])], null]],
+    // §17.4.21: the end-of-cell mark of a hideMark cell owns no row height.
+    ['sole paragraph of a hideMark table cell', (subject) => [[tableOf([subject], { hideMark: true }),
+      bodyParagraph([word('After')])], null]],
   ];
   const settingsMatrix: readonly (readonly [string, object, object])[] = [
     ['mode 15', { compatibilityMode: 15 }, {}],
@@ -390,4 +395,92 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating anchor changes no paginati
       });
     }
   }
+});
+
+describe('a hideMark cell whose final paragraph holds only floating anchors', () => {
+  const numbering = { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 36, tab: 36, suff: 'tab',
+    fontFamily: 'NotInMetrics', fontFacts: { fontSize: 12, fontFamily: 'NotInMetrics' } };
+  const rowHeight = (runs: readonly Run[], options: ParagraphOptions = {}, showTrackedChanges = false): number => {
+    const model = documentModel([tableOf([bodyParagraph(runs, options)], { hideMark: true }),
+      bodyParagraph([word('After')])], null, { compatibilityMode: 15 });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+      { currentDateMs: 0, showTrackedChanges });
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (table?.kind !== 'table') throw new Error('Expected a table');
+    return table.rows[0]!.heightPt;
+  };
+  const anchor = documentAnchorShapes[0]![1];
+  const numbered = { numbering, indentLeft: 36, indentFirst: -36 } as ParagraphOptions;
+
+  it('keeps the flow height of a painted list marker', () => {
+    // The 12pt "1." is ink: its row may not collapse under the rows below.
+    expect(rowHeight([], numbered)).toBeCloseTo(12, 6);
+    expect(rowHeight(anchor(), numbered)).toBe(rowHeight([], numbered));
+    expect(rowHeight(anchor())).toBe(rowHeight([]));
+    expect(rowHeight([])).toBeLessThan(12);
+  });
+
+  it('classifies the mark in the active revision view', () => {
+    const deleted = word('gone', 12, deletion);
+    // The final view omits the deletion: still nothing but the mark.
+    expect(rowHeight([...anchor(), deleted])).toBe(rowHeight([]));
+    expect(rowHeight([deleted])).toBe(rowHeight([]));
+    // The markup view shows it: the row holds its line, with and without the anchor.
+    expect(rowHeight([deleted], {}, true)).toBeCloseTo(12, 6);
+    expect(rowHeight([...anchor(), deleted], {}, true)).toBe(rowHeight([deleted], {}, true));
+  });
+});
+
+describe('floating anchors are placed in linear work', () => {
+  const counted = <T extends object>(items: T[], reads: { count: number }): T[] => new Proxy(items, {
+    get(target, key, receiver) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) reads.count += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+
+  it('attaches hosts to the finished lines without rescanning the hosts that follow', () => {
+    const reads = (hostCount: number): number => {
+      const hostSegment = { text: '', metricOnly: true, anchorHostWithoutMetric: true, measuredWidth: 0 };
+      const content = { text: 'x', measuredWidth: 5, src: { segIndex: hostCount, charOffset: 0 } };
+      const count = { count: 0 };
+      const segs = counted([...Array.from({ length: hostCount }, () => ({ ...hostSegment })), content] as never[], count);
+      const [line] = attachAnchorPlacements([{ segments: [content], height: 10, ascent: 8, descent: 2,
+        intendedSingle: 0, gridCountSingle: 10, xOffset: 0, availWidth: 100,
+        consumedEnd: { segIndex: hostCount + 1, charOffset: 0 } } as never], segs, undefined);
+      expect(line!.segments).toHaveLength(hostCount + 1);
+      expect(line!.segments.at(-1)).toBe(content);
+      return count.count;
+    };
+    // A rescan per host reads about n * n / 2 segments.
+    expect(reads(400)).toBeLessThan(reads(100) * 5);
+  });
+
+  it('plans a line holding many hosts in one sweep over its content', () => {
+    const reads = (count: number): number => {
+      const rangeReads = { count: 0 };
+      // Zero-advance content (metric hosts that are no floating anchors),
+      // each followed by a floating anchor host at the same offset.
+      const content = Array.from({ length: count }, (_, index) => new Proxy({ kind: 'anchor-host',
+        measuredWidthPt: 0, range: { start: index, end: index } }, {
+        get(target, key, receiver) {
+          if (key === 'range') rangeReads.count += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      }));
+      const hosts = Array.from({ length: count }, (_, index) => ({ kind: 'anchor-host', anchorPlacement: true,
+        measuredWidthPt: 0, range: { start: count, end: count }, anchorOccurrenceId: `a${index}` }));
+      const planned = planLine({ paragraphXPt: 0, availableWidthPt: 100, alignment: 'left', baseRtl: false,
+        isFirstLine: true, isLastLine: true, stretchLastLine: false,
+        line: { range: { start: 0, end: count }, topPt: 0, baselinePt: 8, advancePt: 10, xOffsetPt: 0,
+          availableWidthPt: 100, endsWithBreak: false, segments: [...content, ...hosts] as never } });
+      expect(planned.placements).toHaveLength(2 * count);
+      // Every floating host follows all content, in source order.
+      expect(planned.placements.slice(count).map((placement) =>
+        (placement as { anchorOccurrenceId?: string }).anchorOccurrenceId)).toEqual(hosts.map((host) => host.anchorOccurrenceId));
+      return rangeReads.count;
+    };
+    // A search per host reads every content range again for each host.
+    expect(reads(400)).toBeLessThan(reads(100) * 5);
+  });
 });

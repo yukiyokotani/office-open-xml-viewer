@@ -2028,10 +2028,16 @@ function planContentLine(
   // at or after its source position; the hosts after all content stand at the
   // line's logical end.
   const hostsBefore = new Map<number, MeasuredAnchorHostPlanSegment[]>();
+  // Hosts arrive in source order, so one forward sweep finds every target.
+  let hostTarget = 0;
+  let hostStart = Number.NEGATIVE_INFINITY;
   for (const host of anchorHosts) {
-    let target = segments.findIndex((segment) => segment.range.start >= host.range.start);
-    if (target < 0) target = segments.length;
-    hostsBefore.set(target, [...(hostsBefore.get(target) ?? []), host]);
+    if (host.range.start < hostStart) hostTarget = 0;
+    hostStart = host.range.start;
+    while (hostTarget < segments.length && segments[hostTarget]!.range.start < hostStart) hostTarget += 1;
+    let bucket = hostsBefore.get(hostTarget);
+    if (!bucket) hostsBefore.set(hostTarget, bucket = []);
+    bucket.push(host);
   }
   const placeHosts = (target: number, hostXPt: number): void => {
     for (const host of hostsBefore.get(target) ?? []) {

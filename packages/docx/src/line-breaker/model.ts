@@ -614,14 +614,21 @@ export function attachAnchorPlacements(
   /** Source order of a boundary against the start of segment `segIndex`. */
   const compare = (boundary: LineBoundary, segIndex: number): number =>
     boundary.segIndex - segIndex || boundary.charOffset;
+  // Each segment's next content segment, in one backward pass.
+  const nextContent = new Array<number>(segs.length);
+  for (let index = segs.length - 1, next = segs.length; index >= 0; index -= 1) {
+    nextContent[index] = next;
+    if (!isAnchorPlacementSegment(segs[index]!)) next = index;
+  }
   const additions = new Map<number, { at: number; host: LayoutSeg }[]>();
   let lineIndex = 0;
+  // Position reached in the current line's segments: targets never decrease.
+  let at = 0;
   for (let index = 0; index < segs.length; index += 1) {
     const host = segs[index]!;
     if (!isAnchorPlacementSegment(host) || !('text' in host)) continue;
     // The host's source position: the start of the content segment `target`.
-    let target = index + 1;
-    while (target < segs.length && isAnchorPlacementSegment(segs[target]!)) target += 1;
+    const target = nextContent[index]!;
     // An earlier fragment of the paragraph already holds that position.
     if (startBoundary && target < segs.length) {
       const order = compare(startBoundary, target);
@@ -634,14 +641,17 @@ export function attachAnchorPlacements(
       const order = line.consumedEnd ? compare(line.consumedEnd, target) : 1;
       if (order > 0 || (order === 0 && line.anchorLine === true)) break;
       lineIndex += 1;
+      at = 0;
     }
     const line = lines[lineIndex]!;
-    let at = line.segments.findIndex((segment) =>
-      segment.src !== undefined && compare(segment.src, target) >= 0);
-    if (at < 0) at = line.segments.length;
-    const list = additions.get(lineIndex) ?? [];
+    while (at < line.segments.length) {
+      const src = line.segments[at]!.src;
+      if (src !== undefined && compare(src, target) >= 0) break;
+      at += 1;
+    }
+    let list = additions.get(lineIndex);
+    if (!list) additions.set(lineIndex, list = []);
     list.push({ at, host: { ...host, src: { segIndex: index, charOffset: 0 }, measuredWidth: 0 } });
-    additions.set(lineIndex, list);
   }
   if (additions.size === 0) return lines;
   return lines.map((line, index) => {

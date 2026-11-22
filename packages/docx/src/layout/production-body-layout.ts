@@ -291,6 +291,7 @@ function buildMeasureState(
       tableFormat: bodyAcquisitionInputProjections.tableFormatInput,
       tableDecision: singleTableDecision,
       resolveColumns: resolveColumnWidths,
+      showTrackedChanges: (state) => state.showTrackedChanges,
       createCellState: (state, contentWidthPt, cell) => ({
         ...withTableCellStory(tableCellOwnerState(state), tableCellFlowsHorizontally(cell)),
         contentX: 0,

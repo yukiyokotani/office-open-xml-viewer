@@ -43,6 +43,8 @@ import type {
 export interface RetainedTableAcquisitionDependencies<State> {
   tableDecision?(table: TableLayoutSource, contentWidthPt: number, state: State): LogicalTableDecision;
   layoutServices(state: State): LayoutServices | undefined;
+  /** ECMA-376 §17.13.5 view of the state: true = markup, else final. */
+  showTrackedChanges?(state: State): boolean | undefined;
   tableFormat(table: TableLayoutSource): TableFormatInput;
   resolveColumns(table: TableLayoutSource, contentWidthPt: number, state: State, decision?: LogicalTableDecision): readonly number[];
   createCellState(state: State, contentWidthPt: number, cell: TableLayoutSource['rows'][number]['cells'][number]): State;
@@ -852,6 +854,7 @@ export function acquireRetainedTable<State>(
               cell.content,
               sourceBlockIndex,
               cell.hideMark === true,
+              dependencies.showTrackedChanges?.(outerState),
             )
               ? { ownsNoCellFlow: true }
               : {}),

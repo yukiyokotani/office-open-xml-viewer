@@ -104,7 +104,7 @@ import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/c
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
-import { displaysOnlyParagraphMark, isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { displaysOnlyParagraphMark, hasVisibleNumbering, isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
 import { anchorFreeRuns } from './layout/metric-visible-runs.js';
 import {
   wordHiddenParagraphRetainedBreaks,
@@ -1149,8 +1149,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
       .every((run) => run.type === 'text'
         || (run.type === 'break' && (run as { breakType?: string }).breakType === 'line')),
     ...(inkless ? {} : markOnlyViewFact(paragraphRunsWithUnavailableDrawings(paragraph))),
-    ...(paragraph.numbering && (paragraph.numbering.text !== '' || paragraph.numbering.picBulletImagePath)
-      ? { visibleNumbering: true as const } : {}),
+    ...(hasVisibleNumbering(paragraph) ? { visibleNumbering: true as const } : {}),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
   });
 }
