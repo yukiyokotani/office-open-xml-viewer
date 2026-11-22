@@ -354,7 +354,8 @@ export function projectTableColumnLayoutInput(
     layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
     ...(spacingGeometry ? {
       separatedCellSpacingPt: spacingGeometry.spacingPt,
-      separatedBorderPt: spacingGeometry.borderPt + (spacingGeometry.hostRuleInsetPt ?? 0),
+      separatedBorderPt: spacingGeometry.borderPt,
+      ...(spacingGeometry.hostRuleInsetPt ? { separatedHostInsetPt: spacingGeometry.hostRuleInsetPt } : {}),
     } : {}),
     availableWidthPt: maximumWidthPt === null ? null : Math.max(0, maximumWidthPt),
     gridWidthsPt,

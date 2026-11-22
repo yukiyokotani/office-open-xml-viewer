@@ -594,6 +594,40 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     expect(firstBox - 4 - 0.25).toBeCloseTo(rulePt / 2, 6);
   });
 
+  it('leaves the bottom rule of a continued merge to its last row', () => {
+    // Only the opening row's exception has a 6 pt bottom rule. A last page
+    // holding one row of the merge ends with the table's 0.5 pt rule.
+    const exception = '<w:tblPrEx><w:tblBorders><w:bottom w:val="single" w:sz="48"/></w:tblBorders></w:tblPrEx>';
+    const table = (rowCount: number) => tableXml(AUTO, [1440, 2160], Array.from({ length: rowCount }, (_unused, row) =>
+      (row === 0 ? exception : '') + cell(1440, row === 0 ? 'A' : '', `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>`) + cell(2160, `B${row}`)));
+    let lastPage: ReturnType<typeof tablePages>[number] | undefined;
+    for (let rowCount = 60; rowCount < 90 && lastPage === undefined; rowCount += 1) {
+      const pages = tablePages(table(rowCount), 15);
+      if (pages.length > 1 && pages.at(-1)!.rows.length === 1) lastPage = pages.at(-1);
+    }
+    if (!lastPage) throw new Error('expected a last page of one row');
+    const bottom = lastPage.flowBounds.yPt + lastPage.flowBounds.heightPt;
+    const bottomRules = lastPage.borders.filter((border) => border.from.yPt === border.to.yPt
+      && Math.abs(border.from.yPt - bottom) < 1);
+    expect(bottomRules.length).toBeGreaterThan(0);
+    expect(bottomRules.every((border) => border.widthPt === 0.5)).toBe(true);
+  });
+
+  it('fits a nested table between wide side rules of its cell', () => {
+    // A 36 pt cell with 6 pt collapsed side rules leaves 30 pt: two boxes of
+    // 8.75 pt with their gaps and the table's own half rules.
+    const sz48 = BORDERS.replaceAll('w:sz="4"', 'w:sz="48"');
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const nested = tableXml('<w:tblW w:w="5000" w:type="pct"/>' + spacing(2), [360, 360], [cell(360, '') + cell(360, '')]);
+    const outer = `<w:tbl><w:tblPr>${AUTO}${sz48}${noMargins}</w:tblPr><w:tblGrid>`
+      + '<w:gridCol w:w="720"/><w:gridCol w:w="2160"/></w:tblGrid><w:tr>'
+      + `<w:tc><w:tcPr><w:tcW w:w="720" w:type="dxa"/></w:tcPr>${nested}${paragraph('')}</w:tc>`
+      + `${cell(2160, 'B1')}</w:tr></w:tbl>`;
+    const { widths, firstCellXPt } = nestedCells(outer);
+    expect(widths).toEqual([8.75, 8.75]);
+    expect(firstCellXPt).toBeCloseTo(3 + 0.25 + 4, 6);
+  });
+
   it('keeps the upright table of a two-column vertical section on its previous geometry', () => {
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 2).table).toBeCloseTo(180, 6);
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 1).table).toBeCloseTo(192, 6);

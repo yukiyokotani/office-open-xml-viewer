@@ -1489,6 +1489,8 @@ export interface TableColumnLayoutInput {
   readonly separatedCellSpacingPt?: number;
   /** Width of the uniform table border rule of the spaced geometry. */
   readonly separatedBorderPt?: number;
+  /** The side-rule inset of the cell around a nested spaced table. */
+  readonly separatedHostInsetPt?: number;
   /** The text band the intrinsic maxima were capped at; a 'nonbinding'
    * fit must stay strictly inside it, so no maximum was capped. */
   readonly contentBandPt?: number;

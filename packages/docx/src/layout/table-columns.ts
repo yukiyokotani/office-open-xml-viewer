@@ -656,17 +656,18 @@ function spacedAutoFitPreferredBoxesPt(
   const preferred = input.tablePreferredWidthPt !== null || input.rows.some((row) =>
     row.before !== null || row.after !== null || row.cells.some((cell) => cell.preferredWidth !== null));
   if (!preferred) return null;
-  const cellInput = { ...input, separatedCellSpacingPt: undefined, separatedBorderPt: undefined };
+  const cellInput = { ...input, separatedCellSpacingPt: undefined, separatedBorderPt: undefined,
+    separatedHostInsetPt: undefined };
   const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
-  // Every box holds at least its own two rules (and, nested, the inset of
-  // its host's rules, which the same input carries); less is outside the rule.
+  // Every box holds at least its own two rules; less is outside the rule.
   const rulesPt = 2 * finiteNonNegative(input.separatedBorderPt);
   const holdsRules = (boxes: readonly number[]): readonly number[] | null =>
     (boxes.every((width) => width > rulesPt + EPSILON_PT) ? boxes : null);
   // The table's border box, half a rule past the grid on either side, is
   // held to the ceiling.
   const ceilingPt = input.availableWidthPt === null
-    ? null : finiteNonNegative(input.availableWidthPt) - finiteNonNegative(input.separatedBorderPt);
+    ? null : finiteNonNegative(input.availableWidthPt) - finiteNonNegative(input.separatedBorderPt)
+      - finiteNonNegative(input.separatedHostInsetPt);
   if (input.tablePreferredWidthPt === null) {
     const resolved = solveTableColumnWidths(cellInput);
     const totalPt = resolved.reduce((sum, width) => sum + width, 0);

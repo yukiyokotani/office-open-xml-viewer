@@ -680,12 +680,19 @@ function resolvedBoundaries(input: TableLayoutInput): Readonly<{
     const exceptionRowIndex = terminal && cell !== owner.input
       ? owner.lastRowIndex
       : owner.rowIndex;
+    const rowException = input.rows[exceptionRowIndex]?.exceptionBorders ?? null;
+    // A continuation that opens its merge here takes the side rules of the
+    // row that opens the merge in the source; the top and bottom edges stay
+    // with its own row, and the bottom with the merge's last row.
+    const opening = terminal ? undefined : owner.input.mergeOpenerExceptionBorders;
+    const exception = opening === undefined ? rowException : (opening === null && rowException === null ? null : {
+      top: rowException?.top ?? null, bottom: rowException?.bottom ?? null, insideH: rowException?.insideH ?? null,
+      left: opening?.left ?? null, right: opening?.right ?? null, insideV: opening?.insideV ?? null,
+    });
     return physicalCellEdges(
       cell,
       input.borders,
-      cell === owner.input && cell.mergeOpenerExceptionBorders !== undefined
-        ? cell.mergeOpenerExceptionBorders
-        : input.rows[exceptionRowIndex]?.exceptionBorders ?? null,
+      exception,
       owner.rowIndex,
       owner.lastRowIndex,
       rowCount,
