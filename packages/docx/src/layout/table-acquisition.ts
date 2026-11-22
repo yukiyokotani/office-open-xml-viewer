@@ -10,7 +10,7 @@ import {
   cellParagraphOwnsNoFlow,
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
+import { collapsedRowSideRuleWidthsPt, layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { unmeasuredTableMemberDecision, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import { snapshotPlainData } from './plain-data.js';
@@ -41,7 +41,10 @@ import type {
 } from './types.js';
 
 export interface RetainedTableAcquisitionDependencies<State> {
-  tableDecision?(table: TableLayoutSource, contentWidthPt: number, state: State): LogicalTableDecision;
+  tableDecision?(
+    table: TableLayoutSource, contentWidthPt: number, state: State,
+    hostCellRuleInsetPt?: Readonly<{ leftPt: number; rightPt: number }>,
+  ): LogicalTableDecision;
   layoutServices(state: State): LayoutServices | undefined;
   tableFormat(table: TableLayoutSource): TableFormatInput;
   resolveColumns(table: TableLayoutSource, contentWidthPt: number, state: State, decision?: LogicalTableDecision): readonly number[];
@@ -641,7 +644,21 @@ export function acquireRetainedTable<State>(
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
+    let ruleColumnStart = columnStart;
+    // Spaced cells keep their own boxes; only collapsed rules straddle the cell edge.
+    const sideRulesPt = (rowFormat?.cellSpacingPt ?? 0) > 0 ? [] : collapsedRowSideRuleWidthsPt(
+      row.cells.map((cell) => {
+        const start = ruleColumnStart;
+        const span = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - start));
+        ruleColumnStart += span;
+        return { borders: retainedEdges(cell.borders), columnStart: start, columnSpan: span };
+      }),
+      retainedEdges(table.borders),
+      rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
+      rowIndex, table.rows.length, columnWidthsPt.length, bidiVisual,
+    );
     const cells = row.cells.map((cell, cellIndex) => {
+      const sideRules = sideRulesPt[cellIndex];
       const formatMargins = rowFormat?.cells[cellIndex]?.marginsPt ?? {
         top: cell.marginTop ?? table.cellMarginTop,
         right: cell.marginRight ?? table.cellMarginRight,
@@ -665,6 +682,11 @@ export function acquireRetainedTable<State>(
         member.spacingGeometry !== null,
       );
       const cellBorderInsetsPt = 2 * (member.spacingGeometry?.borderPt ?? 0);
+      // WORD_TABLE_CELL_SPACING_GEOMETRY: the part of each half side rule the margin leaves uncovered.
+      const hostRuleInsetPt = sideRules ? {
+        leftPt: Math.max(0, sideRules.leftPt / 2 - formatMargins.left),
+        rightPt: Math.max(0, sideRules.rightPt / 2 - formatMargins.right),
+      } : undefined;
       const cellPath = [...sourcePath, rowIndex, cellIndex];
       const cellId = `${flowDomainId}:cell:${rowIndex}.${cellIndex}`;
       // Same grouped insets as the horizontal content width below.
@@ -715,7 +737,7 @@ export function acquireRetainedTable<State>(
               sourceAt(paragraphPath),
             ),
             acquireNestedTable: (cellState, nestedTable, nestedContentWidthPt, nestedPath) => {
-              const nestedDecision = dependencies.tableDecision?.(nestedTable, nestedContentWidthPt, cellState);
+              const nestedDecision = dependencies.tableDecision?.(nestedTable, nestedContentWidthPt, cellState, hostRuleInsetPt);
               const nestedColumns = dependencies.resolveColumns(
                 nestedTable,
                 nestedContentWidthPt,

@@ -111,8 +111,9 @@ function tableOf(table: string, direction: string | null = null) {
   };
 }
 
-/** Cell box widths of the table nested in the first cell of `table`. */
-function nestedCellWidths(table: string): number[] {
+/** Cell boxes of the table nested in the first cell of `table`: their widths
+ * and the first one's offset from the outer cell's content box. */
+function nestedCells(table: string): { widths: number[]; firstCellXPt: number } {
   const archive = new DocxArchive(docx(table, null));
   let model: DocxDocumentModel;
   try {
@@ -130,7 +131,10 @@ function nestedCellWidths(table: string): number[] {
   const inner = outer.rows[0]!.cells[0]!.blocks.map((block) => block.layout)
     .find((block) => block.kind === 'table');
   if (inner?.kind !== 'table') throw new Error('expected a nested table');
-  return inner.rows[0]!.cells.map((box) => Math.round(box.flowBounds.widthPt * 1e6) / 1e6);
+  return {
+    widths: inner.rows[0]!.cells.map((box) => Math.round(box.flowBounds.widthPt * 1e6) / 1e6),
+    firstCellXPt: inner.rows[0]!.cells[0]!.flowBounds.xPt,
+  };
 }
 
 const tableWidths = (spacingPt: number, tableWidth: string, direction: string | null = null) => {
@@ -226,21 +230,27 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
   });
 
   it.each([
-    // [outer cell, nested tblW, width of each nested cell box]
-    [144, AUTO, 30],
-    [144, '<w:tblW w:w="5000" w:type="pct"/>', (144 - 0.5 - 12) / 2],
-    [72, AUTO, (72 - 0.5 - 12) / 2],
-  ])('gives a spaced table nested in a %d pt cell the same two forms', (outerPt, nestedWidth, boxPt) => {
+    // [outer cell, its side margins, nested tblW, width of each nested cell box]
+    [144, 0, AUTO, 30],
+    [144, 0, '<w:tblW w:w="5000" w:type="pct"/>', (144 - 0.5 - 0.5 - 12) / 2],
+    [72, 0, AUTO, (72 - 0.5 - 0.5 - 12) / 2],
+    [72, 5.4, AUTO, (72 - 10.8 - 0.5 - 12) / 2],
+  ])('gives a spaced table nested in a %d pt cell with %d pt margins the same two forms', (outerPt, marginPt, nestedWidth, boxPt) => {
     // A 30 + 30 pt table with 2 pt spacing wants 72 pt. It keeps that in a
     // wider cell, takes the cell's width when asked for 100%, and is held to
-    // a 72 pt cell by its own border box.
+    // a 72 pt cell by its own border box. The cell's 0.5 pt side rules each
+    // take half their width from a cell without margins.
     const nested = tableXml(nestedWidth + spacing(2), [600, 600], [cell(600, 'n1') + cell(600, 'n2')]);
-    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
-    const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+    const margins = `<w:tblCellMar><w:left w:w="${marginPt * 20}" w:type="dxa"/><w:right w:w="${marginPt * 20}" w:type="dxa"/></w:tblCellMar>`;
+    const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${margins}</w:tblPr><w:tblGrid>`
       + `<w:gridCol w:w="${outerPt * 20}"/><w:gridCol w:w="2160"/></w:tblGrid><w:tr>`
       + `<w:tc><w:tcPr><w:tcW w:w="${outerPt * 20}" w:type="dxa"/></w:tcPr>${nested}${paragraph('A1')}</w:tc>`
       + `${cell(2160, 'B1')}</w:tr></w:tbl>`;
-    expect(nestedCellWidths(outer)).toEqual([boxPt, boxPt].map((width) => Math.round(width * 1e6) / 1e6));
+    const { widths, firstCellXPt } = nestedCells(outer);
+    expect(widths).toEqual([boxPt, boxPt].map((width) => Math.round(width * 1e6) / 1e6));
+    // From the cell's content box: the half rule its margin leaves
+    // uncovered, then the gap.
+    expect(firstCellXPt).toBeCloseTo(Math.max(0, 0.25 - marginPt) + 4, 6);
   });
 
   it('applies both forms to the upright block table of a tbRl section', () => {

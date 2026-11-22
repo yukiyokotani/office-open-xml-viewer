@@ -22,6 +22,9 @@ export interface TableDecisionEnvironment {
   readonly inTableCell: boolean;
   /** Number of enclosing table cells; omitted by hand-built environments. */
   readonly tableCellDepth?: number;
+  /** Half of each collapsed side rule of the enclosing cell that its margin
+   * does not cover; omitted outside a table cell. */
+  readonly hostCellRuleInsetPt?: Readonly<{ leftPt: number; rightPt: number }>;
   readonly contentX: number;
   readonly pageWidth: number;
 }
@@ -75,8 +78,10 @@ interface MemberScopeExtensions {
   /** WORD_AUTOFIT_CONTENT_COLUMN_GROWTH for a content-sized table. */
   readonly contentFitted: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY, absent outside measured structures. */
-  readonly spacingGeometry: Readonly<{ spacingPt: number; borderPt: number }> | null;
+  readonly spacingGeometry: SpacingGeometry | null;
 }
+/** `hostRuleInsetPt` narrows the width ceiling of a nested table. */
+type SpacingGeometry = Readonly<{ spacingPt: number; borderPt: number; hostRuleInsetPt?: number }>;
 const NO_SCOPE_EXTENSIONS: MemberScopeExtensions = Object.freeze({
   marginHang: 'none', nestedNegativeIndentIgnored: false, contentFitted: false, spacingGeometry: null,
 });
@@ -145,6 +150,7 @@ function memberContext(
   const rowTranslationsPt = format.rows.map((row) => spacingGeometry ? wordSpacedTableTranslationPt({
     compat: state.compat, justification: row.justification ?? table.jc, bidi: table.bidiVisual === true,
     indentPt: tableIndentPt, indentAuthored: origin.indentAuthored, ...spacingGeometry,
+    hostRuleInsetPt: state.hostCellRuleInsetPt,
     leadingMarginPt: table.bidiVisual ? row.cells[0]?.marginsPt.right ?? 0 : row.cells[0]?.marginsPt.left ?? 0,
     trailingMarginPt: table.bidiVisual ? row.cells.at(-1)?.marginsPt.left ?? 0 : row.cells.at(-1)?.marginsPt.right ?? 0,
   }) : wordTableOriginTranslationPt({
@@ -409,7 +415,8 @@ export function decideLogicalTable(
   const preferredSized = input.layout !== 'fixed' && !contentSized && input.gridWidthsPt.length > 0;
   const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table, preferredSized) : null;
   const vertical = isVerticalTextDirection(environment.textDirection);
-  let spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
+  const hostRuleInsetPt = (environment.hostCellRuleInsetPt?.leftPt ?? 0) + (environment.hostCellRuleInsetPt?.rightPt ?? 0);
+  let spacingGeometry: SpacingGeometry | null = spacingPt > 0 && uniformBorderPt !== null
     && singleTable && commonFrame && commonGrid
     // Measured in a two-column section and nested in a body table cell for
     // the preferred-sized form only.
@@ -440,7 +447,8 @@ export function decideLogicalTable(
         && contentWidthPt > (input.gridWidthsPt.length + 1) * 2 * spacingPt && input.rows.every((row) =>
         row.cells.length === input.gridWidthsPt.length && row.cells.every((cell, index) =>
           cell.columnSpan === 1 && cell.columnStart === index))))
-    ? Object.freeze({ spacingPt, borderPt: uniformBorderPt }) : null;
+    ? Object.freeze({ spacingPt, borderPt: uniformBorderPt,
+      ...(hostRuleInsetPt > 0 ? { hostRuleInsetPt } : {}) }) : null;
   if (spacingGeometry && input.layout === 'autofit') {
     // Binding distribution is outside WORD_TABLE_CELL_SPACING_GEOMETRY.
     // Resolve this before origin, content constraints, child acquisition or
