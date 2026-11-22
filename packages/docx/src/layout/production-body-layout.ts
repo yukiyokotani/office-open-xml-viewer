@@ -2320,15 +2320,14 @@ function measureFollowingBodyBlock(
     // `word-vertical-section-upright-block-table`: what the table needs of
     // the block axis to start here. A table too tall for the inline extent
     // below the column top starts a fresh page whenever content precedes it,
-    // so it needs more than is left; otherwise it needs its physical width,
-    // except in a multi-column section, where it never moves.
+    // so it needs more than is left; otherwise it needs its physical width.
+    // In a multi-column section it never moves and needs nothing.
+    const multiColumn = request.location.section.columns.length > 1;
     const tooTall = layout.advancePt
       > physical.pageHeight - physical.marginBottom - request.location.cursorPt.xPt;
-    const neededPt = tooTall
-      ? request.location.availableBounds.heightPt
-      : request.location.section.columns.length <= 1
-        ? layout.columnWidthsPt.reduce((sum, width) => sum + width, 0)
-        : 0;
+    const neededPt = multiColumn ? 0
+      : tooTall ? request.location.availableBounds.heightPt
+        : layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
     return Object.freeze({
       fullExtentPt: neededPt,
       leadContentExtentPt: neededPt,

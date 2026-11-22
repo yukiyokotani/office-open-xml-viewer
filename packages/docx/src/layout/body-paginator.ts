@@ -5125,62 +5125,83 @@ const ANCHOR_PASS_BASE_LIMIT = 16;
  * the plan a pagination round applies. A pinned table is registered where its
  * section region opens on its page, so the strips laid out before it wrap
  * around it, and is placed at `bounds.yPt` whatever block position the flow
- * has reached (`word-vertical-section-upright-table-rewrapped-strip`).
- * - `unsure`: taken where the flow reached the table in a round in which an
- *   earlier table was not registered yet; right unless that table's wrap
- *   moves the flow.
- * - `sure`: taken where the flow reached the table with every earlier table
- *   registered and unmoved, which is its position; its own wrap has not been
- *   applied yet.
- * - `settled`: a round has applied the pin. */
+ * has reached (`word-vertical-section-upright-table-rewrapped-strip`). A pin
+ * is `settled` once a round has applied it and found the flow before the
+ * table where it was when the pin was taken. */
 type UprightBlockPin = Readonly<{
   key: string;
   tableSource: SourceRef;
   /** The table's exclusion in section-logical page points. */
   bounds: LayoutRect;
-  /** The block position the flow had reached when the pin was taken. */
-  flowBlockPt: number;
   pageIndex: number;
   /** Where the page prescan registers it: the opening of its section region. */
   prescanFlowDomainId: string;
   /** The table's own column. */
   tableFlowDomainId: string;
-  state: 'unsure' | 'sure' | 'settled';
+  /** Block start of the paragraph before the table in its column when the
+   * pin was taken, or null when none precedes it there. The table's own wrap
+   * can change how far that paragraph runs, never where it starts. */
+  syncPt: number | null;
+  /** The block position the flow had reached at the table in the latest round. */
+  flowBlockPt: number;
+  settled: boolean;
 }>;
 
 /** The upright block tables a round registers at page starts, and those that
  * never are (`forwardOnly`): a table the flow reaches outside the page or
  * column of its pin cannot be placed there, so it is laid out where the flow
- * reaches it and only the lines after it wrap (library policy). */
+ * reaches it and only the lines after it wrap (library policy). `misses`
+ * counts the rounds an unsettled pin was reached elsewhere. */
 type UprightBlockPlan = Readonly<{
   entries: ReadonlyMap<string, UprightBlockPin>;
   forwardOnly: ReadonlySet<string>;
+  misses: ReadonlyMap<string, number>;
+  /** Upright block tables the round laid out. */
+  tableCount: number;
+  /** `entries` as page-start registrations, by page and prescan flow domain. */
+  prescan: ReadonlyMap<string, PageStartAnchors>;
 }>;
 
-const NO_UPRIGHT_BLOCK_PLAN: UprightBlockPlan = Object.freeze({
-  entries: new Map<string, UprightBlockPin>(),
-  forwardOnly: new Set<string>(),
-});
+const NO_PAGE_START_ANCHORS: PageStartAnchors = Object.freeze([]);
 
-function uprightBlockPrescanAnchors(
-  plan: UprightBlockPlan,
-  pageIndex: number,
-  flowDomainId: string,
-): PageStartAnchors {
-  if (plan.entries.size === 0) return NO_PAGE_START_ANCHORS;
-  return Object.freeze([...plan.entries.values()]
-    .filter((pin) => pin.pageIndex === pageIndex && pin.prescanFlowDomainId === flowDomainId)
-    .map((pin) => Object.freeze({
+function uprightBlockPlan(
+  entries: ReadonlyMap<string, UprightBlockPin>,
+  forwardOnly: ReadonlySet<string>,
+  misses: ReadonlyMap<string, number>,
+  tableCount: number,
+): UprightBlockPlan {
+  const grouped = new Map<string, Array<PageStartAnchors[number]>>();
+  for (const pin of entries.values()) {
+    const at = `${pin.pageIndex}|${pin.prescanFlowDomainId}`;
+    const anchors = grouped.get(at) ?? [];
+    anchors.push(Object.freeze({
       kind: 'upright-table' as const,
       occurrenceId: uprightBlockTablePrescanKey(pin.key, pin.pageIndex),
       tableSource: pin.tableSource,
       key: pin.key,
       bounds: pin.bounds,
       tableFlowDomainId: pin.tableFlowDomainId,
-    })));
+    }));
+    grouped.set(at, anchors);
+  }
+  return Object.freeze({
+    entries,
+    forwardOnly,
+    misses,
+    tableCount,
+    prescan: new Map([...grouped].map(([at, anchors]) => [at, Object.freeze(anchors)] as const)),
+  });
 }
 
-const NO_PAGE_START_ANCHORS: PageStartAnchors = Object.freeze([]);
+const NO_UPRIGHT_BLOCK_PLAN = uprightBlockPlan(new Map(), new Set(), new Map(), 0);
+
+function uprightBlockPrescanAnchors(
+  plan: UprightBlockPlan,
+  pageIndex: number,
+  flowDomainId: string,
+): PageStartAnchors {
+  return plan.prescan.get(`${pageIndex}|${flowDomainId}`) ?? NO_PAGE_START_ANCHORS;
+}
 
 /** Lowest page index holding an upright block table, from which a later
  * round can replace the pages of this one. */
@@ -5193,103 +5214,122 @@ function firstUprightBlockTablePage(layout: DocumentLayout): number {
   return Number.POSITIVE_INFINITY;
 }
 
+/** Rounds an unsettled pin may be reached outside its page or column before
+ * its table becomes forward-only. The first miss can be a pin taken from a
+ * flow that has since moved; a second one is the table's own wrap pushing the
+ * flow out of its column. */
+const UPRIGHT_BLOCK_PIN_MISSES = 2;
+
 /**
  * The upright block plan the round that applied `plan` implies, or null when
  * it implies `plan` itself: then every table is settled or forward-only, and
  * the round's layout has each registered exclusion where its table is.
  *
- * Tables are visited in flow order. `exact` holds while every table so far
- * was registered by this round and left the flow where its pin was taken, so
- * the flow up to the next table is final:
- * - a table not in the plan is pinned where the flow reached it: `sure` if no
- *   table before it was pinned in this visit, else `unsure`;
- * - a pinned table the flow reached in the page and column of its pin was
- *   placed there. A `sure` or `unsure` pin becomes `settled`; if the flow
- *   reached it past the pin (its own wrap pushed text into further strips),
- *   `exact` ends. An `unsure` pin the flow reached before the pin was taken
- *   too late and is dropped, which also ends `exact`;
- * - a pinned table reached elsewhere becomes forward-only, ending `exact`;
- * - once `exact` has ended, `unsure` pins are dropped and nothing new is
- *   pinned, because the flow they were taken from has moved.
+ * Pages are judged one by one, tables in flow order. A page is `clean` while
+ * every table on it so far was placed at a pin this round found right and
+ * left the flow where the previous round did:
+ * - a table not in the plan is pinned where the flow reached it, on a clean
+ *   page only;
+ * - an unsettled pin is right when the round placed the table there, the page
+ *   is clean, and the paragraph before the table starts where it did when
+ *   the pin was taken (the table's own wrap, the only thing the pin added,
+ *   cannot move that start). It then settles. Otherwise it is dropped and
+ *   the page is no longer clean; a pin reached outside its page or column
+ *   UPRIGHT_BLOCK_PIN_MISSES times makes its table forward-only instead;
+ * - a settled pin keeps its position for good. If the flow reached its table
+ *   elsewhere than in the previous round (its wrap pushed text into further
+ *   strips, or an earlier table changed), the page is no longer clean; if the
+ *   table was reached outside the pin's page or column, it becomes
+ *   forward-only.
  *
- * Termination: a state only rises (unpinned or unsure, sure, settled,
- * forward-only). Every change of the plan raises a state, except a round that
- * only drops `unsure` pins, and that round's first dropped table is `sure`
- * in the next one. With n tables the plan therefore changes at most 6n times.
+ * Termination: a pin never moves and a table only goes from unpinned to
+ * pinned to settled to forward-only, except that an unsettled pin can be
+ * dropped. Take the first table in flow order that is neither settled nor
+ * forward-only. Everything before it is, so the flow before it repeats;
+ * later pins can only change text after its pin. Within two rounds its page
+ * is clean at it (a round with stale later pins drops them, and the next
+ * records the flow), the round after pins it, and the one after that settles
+ * it or counts a miss. So that table advances every few rounds, and tables on
+ * pages that do not depend on each other advance in the same rounds. With n
+ * tables the plan changes at most 8n + 8 times.
  */
 function nextUprightBlockPlan(layout: DocumentLayout, plan: UprightBlockPlan): UprightBlockPlan | null {
   const entries = new Map<string, UprightBlockPin>();
   const forwardOnly = new Set(plan.forwardOnly);
+  const misses = new Map(plan.misses);
   const seen = new Set<string>();
-  let exact = true;
-  let pinnedInVisit = false;
   for (const page of layout.pages) {
+    let clean = true;
+    const paragraphStartPt = new Map<string, number>();
     for (const node of page.layers.body) {
+      if (node.kind === 'paragraph') {
+        // Where the flow placed the paragraph, not where its first line landed:
+        // a line with no room beside the table is itself moved past it.
+        paragraphStartPt.set(node.flowDomainId, node.flowBounds.yPt);
+        continue;
+      }
       if (node.kind !== 'table' || !node.uprightBlockExclusion) continue;
       const placed = node.uprightBlockExclusion;
       const { key } = placed;
       seen.add(key);
       if (forwardOnly.has(key)) continue;
+      const syncPt = paragraphStartPt.get(node.flowDomainId) ?? null;
       const applied = plan.entries.get(key);
       if (!applied) {
-        if (!exact) continue;
+        if (!clean) continue;
         entries.set(key, Object.freeze({
           key,
           tableSource: node.source,
           bounds: Object.freeze({ ...placed.bounds }),
-          flowBlockPt: placed.flowBlockPt,
           pageIndex: page.pageIndex,
           prescanFlowDomainId: regionFlowDomainOpening(page, node.flowDomainId),
           tableFlowDomainId: node.flowDomainId,
-          state: pinnedInVisit ? 'unsure' as const : 'sure' as const,
+          syncPt,
+          flowBlockPt: placed.flowBlockPt,
+          settled: false,
         }));
-        pinnedInVisit = true;
         continue;
       }
       const honored = placed.pinned && applied.pageIndex === page.pageIndex
         && applied.tableFlowDomainId === node.flowDomainId;
-      if (applied.state === 'settled') {
-        if (honored) {
-          entries.set(key, applied);
-        } else {
+      if (applied.settled) {
+        if (!honored) {
           forwardOnly.add(key);
-          exact = false;
+          clean = false;
+          continue;
         }
+        if (placed.flowBlockPt !== applied.flowBlockPt) clean = false;
+        entries.set(key, placed.flowBlockPt === applied.flowBlockPt
+          ? applied : Object.freeze({ ...applied, flowBlockPt: placed.flowBlockPt }));
         continue;
       }
-      if (!exact) {
-        if (applied.state === 'sure') entries.set(key, applied);
+      if (honored && clean && syncPt === applied.syncPt) {
+        if (placed.flowBlockPt !== applied.flowBlockPt) clean = false;
+        entries.set(key, Object.freeze({
+          ...applied,
+          bounds: Object.freeze({ ...placed.bounds }),
+          flowBlockPt: placed.flowBlockPt,
+          settled: true,
+        }));
         continue;
       }
+      clean = false;
       if (!honored) {
-        forwardOnly.add(key);
-        exact = false;
-        continue;
+        const missed = (misses.get(key) ?? 0) + 1;
+        if (missed >= UPRIGHT_BLOCK_PIN_MISSES) forwardOnly.add(key);
+        else misses.set(key, missed);
       }
-      if (placed.flowBlockPt < applied.flowBlockPt) {
-        exact = false;
-        continue;
-      }
-      if (pinnedInVisit) {
-        entries.set(key, applied);
-        continue;
-      }
-      entries.set(key, Object.freeze({
-        ...applied,
-        bounds: Object.freeze({ ...placed.bounds }),
-        state: 'settled' as const,
-      }));
-      if (placed.flowBlockPt !== applied.flowBlockPt) exact = false;
     }
   }
   // A pinned table that no longer starts anywhere cannot be placed at its pin.
   for (const key of plan.entries.keys()) if (!seen.has(key)) forwardOnly.add(key);
-  const identity = (value: UprightBlockPlan) => JSON.stringify([
+  const identity = (value: Pick<UprightBlockPlan, 'entries' | 'forwardOnly' | 'misses'>) => JSON.stringify([
     [...value.entries.values()].sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0),
     [...value.forwardOnly].sort(),
+    [...value.misses].sort(),
   ]);
-  const next: UprightBlockPlan = Object.freeze({ entries, forwardOnly });
-  return identity(next) === identity(plan) ? null : next;
+  return identity({ entries, forwardOnly, misses }) === identity(plan)
+    ? null : uprightBlockPlan(entries, forwardOnly, misses, seen.size);
 }
 
 /** Passes whose anchor run needed the page-scoped table floor proof (#2012).
@@ -5319,7 +5359,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
   // upright block table wraps around it, so the table's exclusion has to be
   // registered before the flow reaches the table. Each round is a complete
   // anchor run with a fixed upright block plan; the plan it implies for the
-  // next round (nextUprightBlockPlan) changes at most 6 * tables + 2 times.
+  // next round (nextUprightBlockPlan) changes at most 8 * tables + 8 times.
   let plan: UprightBlockPlan = NO_UPRIGHT_BLOCK_PLAN;
   let scoped = pageScoped;
   for (let round = 0; ; round += 1) {
@@ -5332,7 +5372,7 @@ function* paginateBodyWithAnchorConvergenceSteps(
     if (pass.terminalDiagnostic !== null) return pass;
     const next = nextUprightBlockPlan(pass.layout, plan);
     if (next === null) return pass;
-    if (round > 6 * (next.entries.size + next.forwardOnly.size) + 2) {
+    if (round > 8 * next.tableCount + 8) {
       throw new LayoutInvariantError(
         'NON_CONVERGENCE',
         'Upright block table placement exceeded its monotone round bound',

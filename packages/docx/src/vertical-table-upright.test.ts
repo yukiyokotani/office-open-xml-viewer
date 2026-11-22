@@ -514,6 +514,24 @@ describe('vertical (tbRl) table cells render upright/horizontal (§17.6.20 + §1
     });
   });
 
+  it('resolves a nested float against the cell of a parent whose indent is not applied', () => {
+    // `word-vertical-section-upright-block-table`: the upright parent's
+    // indent does not move it, so the float's text-relative x is taken from
+    // the cell where it is finally placed.
+    const doc = verticalNestedFloatingTableDoc(false, false, true);
+    (doc.body[0] as unknown as { tblInd: number }).tblInd = 10;
+    const layout = documentLayout(doc);
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+    if (table?.kind !== 'table' || !('resolvedFloatingTables' in table)) {
+      throw new Error('expected an indented upright parent with a nested float');
+    }
+    const fragment = table as TableFragmentLayout;
+    const [placement] = fragment.resolvedFloatingTables;
+    const widthPt = fragment.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+    expect(fragment.flowBounds.xPt).toBeCloseTo(CSS_W - FLOW_TOP - widthPt, 6);
+    expect(placement!.bounds.xPt).toBeCloseTo(fragment.rows[0]!.cells[0]!.flowBounds.xPt + 5, 6);
+  });
+
   it('records the destination column on an upright retained placement', () => {
     const narrow = fixedTable('', 20);
     const physical = {

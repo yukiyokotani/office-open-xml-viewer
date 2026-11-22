@@ -88,8 +88,17 @@ function measureContext(): CanvasRenderingContext2D {
 }
 
 interface Page {
-  /** Upright table boxes on the physical page, in source order. */
-  readonly tables: Array<Readonly<{ left: number; top: number; bottom: number }>>;
+  /** Upright table boxes on the physical page, in source order: the grid's
+   * left edge, the physical x extent its vertical rules paint, and the block
+   * extent of the text exclusion it registered. */
+  readonly tables: Array<Readonly<{
+    left: number;
+    top: number;
+    bottom: number;
+    paintedLeft: number;
+    paintedRight: number;
+    exclusionBlockExtent: number | undefined;
+  }>>;
   /** Line strips per body paragraph, in source order: the strip's distance
    * from the first strip of the page along the block axis, and the physical
    * y at which its inline flow starts. */
@@ -123,10 +132,14 @@ function layOutPages(direction: Direction, body: readonly string[], columns = 1)
   const page: Page = { tables: [], strips: [] };
   for (const node of laidOut.layers.body) {
     if (node.kind === 'table') {
+      const rules = node.borders.filter((border) => border.from.xPt === border.to.xPt);
       page.tables.push({
         left: node.flowBounds.xPt,
         top: node.flowBounds.yPt,
         bottom: node.flowBounds.yPt + node.advancePt,
+        paintedLeft: Math.min(...rules.map((rule) => rule.from.xPt - rule.widthPt / 2)),
+        paintedRight: Math.max(...rules.map((rule) => rule.from.xPt + rule.widthPt / 2)),
+        exclusionBlockExtent: node.uprightBlockExclusion?.bounds.heightPt,
       });
     } else if (node.kind === 'paragraph') {
       page.strips.push(node.lines.map((line) => ({
@@ -307,6 +320,45 @@ describe('upright block table of a vertical section', () => {
     expect(pages[1]!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
   });
 
+  it('moves a table whose border rules pass the block extent left to the next page', () => {
+    // Fifteen strips leave 195.3 pt. The 195 pt grid fits; its box with two
+    // 3 pt side rules is 198 pt wide and does not.
+    const wide = T.replaceAll('w:sz="4"', 'w:sz="24"').replaceAll('"2160"', '"2460"');
+    const pages = layOutPages('tbRl', [...Array.from({ length: 15 }, () => P), wide, P]);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]!.tables).toHaveLength(0);
+    expect(pages[1]!.tables).toHaveLength(1);
+  });
+
+  it('takes the box from the outermost painted rules under cell spacing', () => {
+    // No table borders, 6 pt cell rules and 2 pt cell spacing.
+    const cellRules = '<w:tcBorders>' + ['top', 'left', 'bottom', 'right']
+      .map((edge) => `<w:${edge} w:val="single" w:sz="48"/>`).join('') + '</w:tcBorders>';
+    const spaced = T.replace(/<w:tblBorders>.*?<\/w:tblBorders>/, '<w:tblCellSpacing w:w="40" w:type="dxa"/>')
+      .replaceAll('</w:tcPr>', `${cellRules}</w:tcPr>`);
+    const { tables } = layOut('tbRl', [P, spaced, P]);
+    const [table] = tables;
+    // The near rule's outer edge is at the block position and the exclusion
+    // covers the painted width plus the 7.14 pt text clearance.
+    expect(table!.paintedRight).toBeCloseTo(PAGE_W - MARGIN.right - PITCH, 6);
+    expect(table!.exclusionBlockExtent).toBeCloseTo(table!.paintedRight - table!.paintedLeft + 7.14, 6);
+  });
+
+  it('gives a continued fragment the border rules of its own rows', () => {
+    // Forty 20 pt rows without table borders; only the first row's first cell
+    // has a 3 pt left rule, which the rows continued on page 2 do not carry.
+    const row = (index: number) => '<w:tr><w:trPr><w:trHeight w:val="400" w:hRule="atLeast"/></w:trPr>'
+      + '<w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/>'
+      + (index === 0 ? '<w:tcBorders><w:left w:val="single" w:sz="24"/></w:tcBorders>' : '')
+      + `</w:tcPr>${paragraph(`R${index}`)}</w:tc></w:tr>`;
+    const long = '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="3600"/></w:tblGrid>'
+      + Array.from({ length: 40 }, (_, index) => row(index)).join('') + '</w:tbl>';
+    const pages = layOutPages('tbLrV', [long]);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]!.tables[0]!.left).toBeCloseTo(MARGIN.left + 1.5, 6);
+    expect(pages[1]!.tables[0]!.left).toBeCloseTo(MARGIN.left, 6);
+  });
+
   describe('in a two-column section', () => {
     it('settles tables whose strips cannot wrap beside them', () => {
       const pages = layOutPages('tbRl', [P, table(30), P, table(30), P], 2);
@@ -330,6 +382,27 @@ describe('upright block table of a vertical section', () => {
       expect(tall!.top).toBeCloseTo(MARGIN.top, 6);
       expect(tall!.bottom).toBeGreaterThan((MARGIN.top + COLUMN_END) / 2);
       expect(tall!.bottom).toBeLessThanOrEqual(COLUMN_END);
+    });
+
+    it('moves a second tall table past the first instead of raising it over it', () => {
+      // Two tables of one 800 pt row each: both are raised to end at the
+      // bottom page edge, the second clear of the first along the block axis.
+      const pages = layOutPages('tbRl', [table(1, 800), table(1, 800)], 2);
+      expect(pages).toHaveLength(1);
+      const [first, second] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(first.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+      expect(second.left).toBeCloseTo(tableLeft('tbRl', TABLE_W + RULE + 14.28), 6);
+      expect(second.top).toBeCloseTo(first.top, 6);
+      expect(first.top).toBeLessThan(MARGIN.top);
+    });
+
+    it('does not move a keepNext paragraph and a tall table to the second column', () => {
+      const keepNext = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+      const pages = layOutPages('tbLrV', [P, keepNext, table(1, 800)], 2);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.tables[0]!.left).toBeCloseTo(tableLeft('tbLrV', 2 * PITCH), 6);
+      // Both paragraphs stay in the first column, whose strips start at the top margin.
+      expect(pages[0]!.strips.flat().map((line) => line.inlineStart)).toEqual([MARGIN.top, MARGIN.top]);
     });
 
     it.each(['tbRl', 'tbLrV'] as const)('keeps a %s table taller than the page whole and raises it to the page top', (direction) => {
