@@ -69,7 +69,11 @@ function markdownLinks(text) {
     if (!definitions.has(label(name))) definitions.set(label(name), target);
     return '';
   });
-  const targets = [...prose.matchAll(/\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]);
+  const targets = [
+    ...[...prose.matchAll(/\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
+    // Autolinks: <https://…>.
+    ...[...prose.matchAll(/<([a-z][a-z0-9+.-]*:\/\/[^\s<>]+)>/gi)].map((match) => match[1]),
+  ];
   // [text][label], [label][] and the shortcut form [label].
   for (const [, text, explicit] of prose.matchAll(/\[([^\]]+)\](?:\[([^\]]*)\])?(?![(:])/g)) {
     const target = definitions.get(label(explicit || text));
@@ -85,10 +89,49 @@ function relativeLinks(file) {
     .filter((target) => target && !/^[a-z][a-z0-9+.-]*:/i.test(target));
 }
 
+// The anchors GitHub generates for a Markdown file's headings.
+function headingAnchors(text) {
+  const anchors = new Set();
+  for (const [, title] of text.replace(FENCED_BLOCK, '').matchAll(/^#{1,6}[ \t]+(.+?)[ \t]*#*$/gm)) {
+    const base = title
+      .replace(/`/g, '')
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N} _-]/gu, '')
+      .replace(/ /g, '-');
+    let anchor = base;
+    for (let n = 1; anchors.has(anchor); n += 1) anchor = `${base}-${n}`;
+    anchors.add(anchor);
+  }
+  return anchors;
+}
+
+// Relative links of a Markdown file whose `#fragment` names no heading of the
+// Markdown file they point to (or of the file itself, for `#fragment` alone).
+function brokenFragments(file) {
+  const broken = [];
+  for (const target of markdownLinks(read(file))) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(target) || !target.includes('#')) continue;
+    const [path, fragment] = target.split('#');
+    const destination = path ? resolve(dirname(file), path) : file;
+    if (!fragment || !destination.endsWith('.md') || !existsSync(destination)) continue;
+    if (!headingAnchors(read(destination)).has(fragment.toLowerCase())) broken.push(`${rel(file)} -> ${target}`);
+  }
+  return broken;
+}
+
+test('heading anchors follow the generated form', () => {
+  assert.deepEqual(
+    [...headingAnchors('# Top\n\n## Keeping `docs/` current\n\n### Gardening pass\n\n## Git, PRs and Issues\n\n## Top\n')],
+    ['top', 'keeping-docs-current', 'gardening-pass', 'git-prs-and-issues', 'top-1'],
+  );
+});
+
 test('Markdown links are the destinations a reader can follow', () => {
   assert.deepEqual(markdownLinks('[a](x.md) and [b][ref] and [ref] and [c][].\n\n[ref]: y.md\n[c]: z.md "t"\n'), [
     'x.md', 'y.md', 'y.md', 'z.md',
   ]);
+  assert.deepEqual(markdownLinks('See <https://example.org/docs/a.md> and <span>text</span>.'), ['https://example.org/docs/a.md']);
   assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);
   assert.deepEqual(markdownLinks('```\n[fenced](f.md)\n```\n[guide][g]\n\n[g]: missing.md\n'), ['missing.md']);
   assert.deepEqual(markdownLinks('1. Run:\n\n   ```bash\n   echo "[guide](docs/example.md)"\n   ```\n'), []);
@@ -142,6 +185,7 @@ test('relative links in agent knowledge resolve', () => {
     for (const target of relativeLinks(file)) {
       if (!existsSync(resolve(dirname(file), target))) broken.push(`${rel(file)} -> ${target}`);
     }
+    broken.push(...brokenFragments(file));
   }
   assert.deepEqual(broken, [], 'fix or remove each broken link');
 });
@@ -242,7 +286,21 @@ function linkedDocs(path, text, blobUrl) {
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/(^|\s)\/\/.*$/gm, '$1');
-  for (const [url] of code.matchAll(/https:\/\/github\.com\/[^\s"'`<>)]+?\.md(?![\w-]|\.\w)/g)) absolute(url);
+  const url = String.raw`(https:\/\/github\.com\/[^\s"'\`<>)]+?\.md)(?![\w-]|\.\w)`;
+  if (path.startsWith('site/')) {
+    // A site file links a page where the URL is rendered as a link: an `href`
+    // attribute, a constant an `href={name}` uses, or a property named
+    // `…Href` / `…Url` that a page renders. A URL in an unused constant or in
+    // prose is not a link.
+    for (const [, target] of code.matchAll(new RegExp(String.raw`href=["']` + url, 'g'))) absolute(target);
+    for (const [, target] of code.matchAll(new RegExp(String.raw`\b\w*(?:[hH]ref|[uU]rl)\s*:\s*["'\`]` + url, 'g'))) absolute(target);
+    for (const [, name, target] of code.matchAll(new RegExp(String.raw`\bconst\s+(\w+)\s*=\s*["'\`]` + url, 'g'))) {
+      if (new RegExp(String.raw`href=\{\s*${name}\s*\}`).test(code)) absolute(target);
+    }
+    return found;
+  }
+  // Package source: a URL in a string the shipped code can print.
+  for (const [, target] of code.matchAll(new RegExp(url, 'g'))) absolute(target);
   return found;
 }
 
@@ -268,6 +326,14 @@ test('a consumer link to a guide is a real link destination, not incidental text
     ['docs/example.md'],
   );
   assert.deepEqual(links('site/src/pages/a.astro', '<p>See docs/example.md for details</p>'), []);
+  const constant = "const guide = 'https://github.com/o/r/blob/main/docs/example.md';\n";
+  assert.deepEqual(links('site/src/pages/a.astro', `${constant}<a href={guide}>guide</a>`), ['docs/example.md']);
+  assert.deepEqual(links('site/src/pages/a.astro', `${constant}<p>no link</p>`), []);
+  assert.deepEqual(
+    links('site/src/lib/a.ts', "export const entry = { detailsHref: 'https://github.com/o/r/blob/main/docs/example.md' };"),
+    ['docs/example.md'],
+  );
+  assert.deepEqual(links('README.md', 'See <https://github.com/o/r/blob/main/docs/example.md>.'), ['docs/example.md']);
   assert.deepEqual(links('site/src/pages/a.astro', '<!-- https://github.com/o/r/blob/main/docs/example.md -->'), []);
   assert.deepEqual(
     links('packages/core/src/a.ts', "export const MESSAGE = 'See https://github.com/o/r/blob/main/docs/example.md.';"),

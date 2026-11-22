@@ -42,16 +42,18 @@ one script belongs in that script's header.
 - A change that makes a statement in `docs/`, a `README.md` or an `AGENTS.md`
   false corrects or deletes that statement in the same PR.
 - Delete instead of archiving. Git history and the PR keep the old text.
-- A migration guide is deleted once nothing on `main` links to it and no
-  supported release prints a URL that resolves to its path on `main`. Until
-  then it keeps its path. A relative link inside a release branch resolves
+- A migration guide is deleted, together with its entry in `docs/README.md`,
+  once no consumer-facing surface on `main` links to it and no supported
+  release prints a URL that resolves to its path on `main`. Until then it
+  keeps its path. A relative link inside a release branch resolves
   within that branch and does not keep the file on `main`. A guide kept only
   for a supported release is listed, with the reason, in
   `RELEASE_RETAINED_GUIDES` in `scripts/check-agent-instructions.test.mjs`.
 - Do not cite an issue as open work unless it is open. When the issue closes,
   remove the sentence or state the outcome.
-- Do not record dated status, checklists, case counts or one-time measurements
-  in a document; they are stale after the next change.
+- Do not record dated status, progress checklists, case counts or one-time
+  measurements in a document; they are stale after the next change. The
+  standing checklist of a repeated procedure is part of that procedure.
 
 `scripts/check-agent-instructions.test.mjs` (part of `pnpm test`) enforces what
 can be checked mechanically:

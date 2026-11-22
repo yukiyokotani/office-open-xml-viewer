@@ -136,12 +136,12 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
           <tbody>
             <tr><th><code>docx / text</code></th><td>Browser-native text selection</td><td>Selected text and page, paragraph, and run locators</td></tr>
             <tr><th><code>docx / element</code></th><td>Clicked topmost picture, chart, or shape</td><td>Element type, page bounds, and structural source locator for inline or floating content</td></tr>
-            <tr><th><code>docx / comment</code></th><td>Active comment thread in <code>DocxScrollViewer</code></td><td>Page index, comment id, optional source locator, and the bounded thread</td></tr>
+            <tr><th><code>docx / comment</code></th><td>Active comment thread in <code>DocxScrollViewer</code></td><td>Page index, comment id, optional source locator, and the thread (message text bounded)</td></tr>
             <tr><th><code>xlsx / range</code></th><td>Cells, rows, columns, sheet, or multiple areas</td><td>Canonical selection state, sheet identity, formulas, display text, and populated cells</td></tr>
             <tr><th><code>xlsx / element</code></th><td>Clicked topmost worksheet object</td><td>Chart, picture, or shape type, sheet anchor, and bounded descriptive text</td></tr>
             <tr><th><code>pptx / text</code></th><td>Browser-native text selection</td><td>Selected text and slide, shape, and run locators</td></tr>
             <tr><th><code>pptx / element</code></th><td>Clicked topmost slide element</td><td>Type, provenance, bounds, identifiers, and bounded descriptive text</td></tr>
-            <tr><th><code>pptx / comment</code></th><td>Active comment thread in <code>PptxScrollViewer</code></td><td>Slide index, comment index and occurrence id, optional comment id and point, and the bounded thread</td></tr>
+            <tr><th><code>pptx / comment</code></th><td>Active comment thread in <code>PptxScrollViewer</code></td><td>Slide index, comment index and occurrence id, optional comment id and point, and the thread (message text bounded)</td></tr>
           </tbody>
         </table>
       </div>
@@ -209,8 +209,8 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         press outside a comment card or marker clears the active thread, and while a thread is active
         the getter returns its <code>comment</code> context ahead of text. A right-click on a comment
         card in the margin therefore keeps the thread active, so <code>getSelectionContext()</code>
-        still returns the comment, but with element selection on the menu lookup resolves to
-        <code>null</code> because the card lies outside the canvas.
+        still returns the comment, but with element selection on and no Viewer text selection live
+        the menu lookup resolves to <code>null</code> because the card lies outside the canvas.
       </p>
     </section>
 
@@ -271,11 +271,14 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
             <tr><th>XLSX one cell field</th><td>65,536</td><td>65,536</td></tr>
             <tr><th>DOCX/PPTX element text (<code>maxTextCharacters</code>)</th><td>16,384</td><td>65,536</td></tr>
             <tr><th>XLSX element text</th><td>65,536</td><td>65,536</td></tr>
+            <tr><th>DOCX/PPTX comment thread message text, summed over the thread (<code>maxTextCharacters</code>)</th><td>65,536</td><td>65,536</td></tr>
           </tbody>
         </table>
       </div>
       <p>
-        Text limits count UTF-16 code units, and text is cut with a surrogate-safe prefix, so a
+        The comment-thread limit bounds message text only: every reply is still returned with its
+        identifiers, author and date, so the limit does not cap the reply count or the serialized
+        size. Text limits count UTF-16 code units, and text is cut with a surrogate-safe prefix, so a
         surrogate pair is not split. Pass different limits to <code>getSelectionContext()</code>.
         DOCX and PPTX <code>onSelectionContextChange</code> notifications use the default limits; XLSX
         notifications use the default cell limit with at most 65,536 characters of text and are
