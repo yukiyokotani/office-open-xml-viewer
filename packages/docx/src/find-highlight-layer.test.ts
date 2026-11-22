@@ -245,7 +245,8 @@ describe('highlights in right-to-left runs', () => {
   it('leaves out the tracking after the final matched glyph, as in left-to-right runs', () => {
     // 7px glyphs tracked by 2px. Painted left to right: gimel, bet, alef,
     // each with its tracking on its left (after it in reading order).
-    const rtl = run({ text: hebrew, direction: 'rtl', letterSpacingPx: 2, w: 27 });
+    const rtl = run({ text: hebrew, direction: 'rtl', letterSpacingPx: 2, w: 27,
+      clusterBoxes: [0, 1, 2].map((index) => ({ start: index, end: index + 1, x: (2 - index) * 9, width: 9, rtl: true })) });
     const hit = (start: number, end: number) => boxes([rtl], [{ slices: [{ runIndex: 0, start, end }], active: false }]);
     expect(hit(1, 2)).toEqual([[11, 7]]);
     expect(hit(0, 1)).toEqual([[20, 7]]);
@@ -256,16 +257,17 @@ describe('highlights in right-to-left runs', () => {
     expect(boxes([ltr], [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }])).toEqual([[9, 7]]);
   });
 
-  it('measures a run once for all of its hits', () => {
-    const calls = (length: number): number => {
-      let count = 0;
-      const measure = () => (value: string) => { count += 1; return value.length * W; };
-      const text = hebrew.repeat(length / 3);
-      const matches = Array.from({ length }, (_, start) => ({ slices: [{ runIndex: 0, start, end: start + 1 }], active: false }));
-      expect(boxes([run({ text, direction: 'rtl' })], matches, measure)).toHaveLength(length);
-      return count;
-    };
-    // A table rebuilt per hit measures length prefixes for each of length hits.
-    expect(calls(300)).toBeLessThan(calls(75) * 5);
+  it('measures nothing for a run that carries its cluster boxes', () => {
+    let measured = 0;
+    const measure = () => (value: string) => { measured += value.length; return value.length * W; };
+    const length = 300;
+    const text = hebrew.repeat(length / 3);
+    const clusterBoxes = Array.from({ length }, (_, index) => ({ start: index, end: index + 1,
+      x: (length - 1 - index) * W, width: W, rtl: true }));
+    const matches = Array.from({ length }, (_, start) => ({ slices: [{ runIndex: 0, start, end: start + 1 }], active: false }));
+    const placed = boxes([run({ text, direction: 'rtl', clusterBoxes })], matches, measure);
+    expect(placed).toHaveLength(length);
+    expect(placed[0]).toEqual([(length - 1) * W, W]);
+    expect(measured).toBe(0);
   });
 });

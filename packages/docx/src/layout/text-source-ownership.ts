@@ -1,13 +1,18 @@
 import { sliceSemanticSlotSpans } from './text.js';
 import type { TextPlacement } from './types.js';
-import { visualClusters, visuallyContiguousGroups } from './visual-cluster-geometry.js';
+import { clusterBoxes, visualClusters, visuallyContiguousGroups, type ClusterBox } from './visual-cluster-geometry.js';
 
 /** Project original ownership from retained clusters; never reshape or repaint
  * source fragments. The full sequence remains the only paint authority. This
  * projection serves source-addressed overlays and destination-field convergence.
  * A seam inside a grapheme shares its retained cluster rectangle between owners;
  * detached marks must never acquire independent measured geometry. */
-export type SourceOwnedTextGeometry = Omit<TextPlacement, 'paintOps'> & Readonly<{ letterSpacingPt: number }>;
+export type SourceOwnedTextGeometry = Omit<TextPlacement, 'paintOps'> & Readonly<{
+  letterSpacingPt: number;
+  /** Where each of the part's clusters is painted, from `bounds.xPt`, by
+   * offset in the part's text: the retained geometry overlays address. */
+  clusterBoxes: readonly ClusterBox[];
+}>;
 
 export function sourceOwnedTextPlacements(placement: TextPlacement): readonly SourceOwnedTextGeometry[] {
   const { paintOps, trailingSpaceCompressionPt, ...geometry } = placement;
@@ -15,9 +20,11 @@ export function sourceOwnedTextPlacements(placement: TextPlacement): readonly So
   // paints without pitch; the run's tracking is that of its other operations.
   const tracked = paintOps.find((operation) => operation.naturalAdvancePt === undefined) ?? paintOps[0];
   const unreduced = { ...geometry, letterSpacingPt: tracked?.letterSpacingPt ?? 0 };
-  const projected = trailingSpaceCompressionPt === undefined
-    ? unreduced : { ...unreduced, trailingSpaceCompressionPt };
-  if (!placement.sourceRuns) return [projected];
+  if (!placement.sourceRuns) {
+    const whole = { ...unreduced, clusterBoxes: clusterBoxes(placement, 0, placement.clusters.length,
+      placement.range.start, placement.range.end, placement.bounds.xPt) };
+    return [trailingSpaceCompressionPt === undefined ? whole : { ...whole, trailingSpaceCompressionPt }];
+  }
   // The retained reduction is an equal share of each trailing U+0020 (see
   // textPlanSegment); an owner reports only the share inside its own advance.
   const spacesStart = trailingSpaceCompressionPt === undefined
@@ -76,6 +83,8 @@ export function sourceOwnedTextPlacements(placement: TextPlacement): readonly So
           ...placement.highlightBounds, xPt: placement.highlightBounds.xPt + from, widthPt: to - from,
         } } : {}),
         advancePt: whole ? placement.advancePt : to - from,
+        clusterBoxes: clusterBoxes(placement, first, last, range.start, range.end,
+          whole ? placement.bounds.xPt : placement.bounds.xPt + from),
         clusters: whole ? placement.clusters : clusters.map(cluster => ({ ...cluster,
           range: { start: Math.max(range.start, cluster.range.start), end: Math.min(range.end, cluster.range.end) },
           offset: { ...cluster.offset, xPt: cluster.offset.xPt - logicalFrom },

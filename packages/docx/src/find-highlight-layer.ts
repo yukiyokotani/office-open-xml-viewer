@@ -1,5 +1,4 @@
-import { countSpacingCharacters, resolvedBidiLevels } from './character-spacing.js';
-import { bidiPlacedOffsets } from './layout/visual-cluster-geometry.js';
+import { countSpacingCharacters } from './character-spacing.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -23,7 +22,6 @@ import { bidiPlacedOffsets } from './layout/visual-cluster-geometry.js';
  * matching a browser find bar's current-vs-other highlighting.
  */
 import {
-  hasStrongRtl,
   sliceHorizontalExtent,
   overlayPercent,
   type FindHighlightColors,
@@ -82,47 +80,20 @@ export function buildDocxHighlightLayer(
   const matchColor = colors.match ?? DEFAULT_FIND_HIGHLIGHT;
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
 
-  // Each run's visual character table is built once and serves every hit.
-  const tables = new Map<number, VisualRunTable>();
-  const visualRunTable = (
-    runIndex: number, run: DocxTextRunInfo, measure: (value: string) => number, pitch: number,
-  ): VisualRunTable => {
-    let table = tables.get(runIndex);
-    if (!table) tables.set(runIndex, table = buildVisualRunTable(run.text, run.direction ?? 'ltr', measure, pitch));
-    return table;
-  };
-
   for (const match of matches) {
     const fill = match.active ? activeColor : matchColor;
     for (const slice of match.slices) {
       const run = runs[slice.runIndex];
       if (!run) continue;
-      // Measure the way the run was laid out and drawn (its reference-em font
-      // scaled onto the run when projected with one).
-      const measure = runOverlayMeasure(run, measureForFont);
-      const extent = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
-      // Match offsets are UTF-16; count tracking with the same rendered-
-      // character rule as layout. Marks and unselected SHY add no run pitch.
-      // Exclude the pitch following the slice's final rendered character.
-      const pitch = run.letterSpacingPx ?? 0;
       const start = Math.max(0, Math.min(slice.start, run.text.length));
       const end = Math.max(start, Math.min(slice.end, run.text.length));
-      const sliceCount = countSpacingCharacters(run.text.slice(start, end)).pitchBearing;
-      const prefixCount = countSpacingCharacters(run.text.slice(0, start)).pitchBearing;
-      const pitchedX = extent.x + prefixCount * pitch;
-      // Keep main's multiply-before-add order for ordinary slices as well.
-      const pitchedWidth = extent.width + Math.max(0, sliceCount - 1) * pitch;
-      // §17.3.2.10 縦中横 alone compresses natural extents into the retained
-      // one-em cell. Ordinary runs preserve the established natural measurement.
-      const k = tateChuYokoOverlayScale(run, measure);
-      // A run with right-to-left text is painted in the visual order of its
-      // bidi levels: the slice covers one box per painted interval.
-      const intervals = run.direction === 'rtl' || hasStrongRtl(run.text)
-        ? visualSliceIntervals(visualRunTable(slice.runIndex, run, measure, pitch), start, end, pitch)
-        : [{ x: pitchedX, width: pitchedWidth }];
-      for (const interval of intervals) {
-      const x = interval.x * k;
-      const width = interval.width * k;
+      const pitch = run.letterSpacingPx ?? 0;
+      // A projected run carries where its clusters are painted: the slice
+      // covers one box per painted interval, and nothing is measured.
+      const intervals = run.clusterBoxes
+        ? clusterSliceIntervals(run.clusterBoxes, start, end, pitch)
+        : [measuredSliceInterval(run, start, end, pitch, measureForFont)];
+      for (const { x, width } of intervals) {
       if (width <= 0) continue;
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and
@@ -148,73 +119,46 @@ export function buildDocxHighlightLayer(
   }
 }
 
-interface VisualRunTable {
-  /** One entry per character, in source order. */
-  readonly characters: readonly Readonly<{
-    from: number; x: number; width: number; odd: boolean; pitchBearing: boolean;
-  }>[];
-  /** Index of the character starting at each UTF-16 offset. */
-  readonly indexAt: ReadonlyMap<number, number>;
-}
+type ClusterBoxes = NonNullable<DocxTextRunInfo['clusterBoxes']>;
 
-/** Where each character of a run is painted, from the run's left edge: its
- * measured advance (tracking included) placed in the visual order of the
- * run's UAX#9 levels, the order the run was painted in. */
-function buildVisualRunTable(
-  text: string,
-  direction: 'ltr' | 'rtl',
-  measure: (value: string) => number,
-  pitch: number,
-): VisualRunTable {
-  const levels = resolvedBidiLevels(text, direction);
-  const items: { xPt: number; advancePt: number; level: number; from: number; pitchBearing: boolean }[] = [];
-  let offset = 0;
-  let pitched = 0;
-  let pen = 0;
-  for (const character of text) {
-    const end = offset + character.length;
-    const next = end >= text.length ? measure(text) : measure(text.slice(0, end));
-    const bearing = countSpacingCharacters(character).pitchBearing;
-    items.push({ xPt: pen + pitched * pitch, advancePt: Math.max(0, next - pen) + bearing * pitch,
-      level: levels[offset] ?? (direction === 'rtl' ? 1 : 0), from: offset, pitchBearing: bearing > 0 });
-    pitched += bearing;
-    pen = next;
-    offset = end;
-  }
-  const placed = bidiPlacedOffsets(items);
-  return {
-    characters: items.map((item, index) => ({ from: item.from, x: placed[index]!, width: item.advancePt,
-      odd: item.level % 2 === 1, pitchBearing: item.pitchBearing })),
-    indexAt: new Map(items.map((item, index) => [item.from, index])),
-  };
-}
-
-/** Where the characters `[start, end)` of a run are painted: adjacent
- * characters merged into one interval. As for a left-to-right slice, the
- * tracking that follows the slice's final rendered character is left out:
- * it lies after that character in its own direction. */
-function visualSliceIntervals(
-  table: VisualRunTable,
+/** Where the characters `[start, end)` of a run are painted, from the run's
+ * retained cluster boxes: adjacent boxes merged into one interval. A slice
+ * that covers part of a cluster takes that share of its box. The tracking
+ * that follows the slice's final rendered cluster is left out, on the side
+ * that cluster ends on. */
+function clusterSliceIntervals(
+  clusters: ClusterBoxes,
   start: number,
   end: number,
   pitch: number,
 ): { x: number; width: number }[] {
-  let first = table.indexAt.get(start);
-  // A slice that starts inside a character starts at the next one.
-  for (let offset = start; first === undefined && offset < end; offset += 1) first = table.indexAt.get(offset + 1);
-  if (first === undefined) return [];
-  const boxes: { x: number; width: number }[] = [];
-  let final = -1;
-  for (let index = first; index < table.characters.length && table.characters[index]!.from < end; index += 1) {
-    const character = table.characters[index]!;
-    if (character.pitchBearing) final = boxes.length;
-    boxes.push({ x: character.x, width: character.width });
+  // Clusters are listed in source order: the first one that ends after `start`.
+  let low = 0;
+  let high = clusters.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (clusters[middle]!.end <= start) low = middle + 1;
+    else high = middle;
   }
+  const boxes: { x: number; width: number; rtl: boolean }[] = [];
+  for (let index = low; index < clusters.length && clusters[index]!.start < end; index += 1) {
+    const cluster = clusters[index]!;
+    const length = Math.max(1, cluster.end - cluster.start);
+    const from = (Math.max(start, cluster.start) - cluster.start) / length;
+    const to = (Math.min(end, cluster.end) - cluster.start) / length;
+    boxes.push({
+      x: cluster.x + cluster.width * (cluster.rtl ? 1 - to : from),
+      width: cluster.width * (to - from),
+      rtl: cluster.rtl,
+    });
+  }
+  let final = boxes.length - 1;
+  while (final >= 0 && !(boxes[final]!.width > 0)) final -= 1;
   if (final >= 0 && pitch !== 0) {
-    const character = table.characters[first + final]!;
     const box = boxes[final]!;
-    box.width -= pitch;
-    if (character.odd) box.x += pitch;
+    const trimmed = Math.min(pitch, box.width);
+    box.width -= trimmed;
+    if (box.rtl) box.x += trimmed;
   }
   const merged: { x: number; width: number }[] = [];
   for (const box of boxes.filter((candidate) => candidate.width > 0).sort((left, right) => left.x - right.x)) {
@@ -223,4 +167,32 @@ function visualSliceIntervals(
     else merged.push({ x: box.x, width: box.width });
   }
   return merged;
+}
+
+/** The extent of a slice of a run that carries no cluster boxes (a run not
+ * projected from a layout): measured as a prefix of the run's text, from
+ * its left edge. */
+function measuredSliceInterval(
+  run: DocxTextRunInfo,
+  start: number,
+  end: number,
+  pitch: number,
+  measureForFont: (font: string) => (s: string) => number,
+): { x: number; width: number } {
+  // Measure the way the run was laid out and drawn (its reference-em font
+  // scaled onto the run when projected with one).
+  const measure = runOverlayMeasure(run, measureForFont);
+  const extent = sliceHorizontalExtent(run.text, start, end, measure);
+  // Match offsets are UTF-16; count tracking with the same rendered-
+  // character rule as layout. Marks and unselected SHY add no run pitch.
+  // Exclude the pitch following the slice's final rendered character.
+  const sliceCount = countSpacingCharacters(run.text.slice(start, end)).pitchBearing;
+  const prefixCount = countSpacingCharacters(run.text.slice(0, start)).pitchBearing;
+  const pitchedX = extent.x + prefixCount * pitch;
+  // Keep main's multiply-before-add order for ordinary slices as well.
+  const pitchedWidth = extent.width + Math.max(0, sliceCount - 1) * pitch;
+  // §17.3.2.10 縦中横 alone compresses natural extents into the retained
+  // one-em cell. Ordinary runs preserve the established natural measurement.
+  const k = tateChuYokoOverlayScale(run, measure);
+  return { x: pitchedX * k, width: pitchedWidth * k };
 }

@@ -100,6 +100,11 @@ function projectTextRun(
     ...(letterSpacingPt !== 0
       ? { letterSpacingPx: letterSpacingPt * inlineScale }
       : {}),
+    ...(placement.optionalHyphenGlyph ? {} : {
+      clusterBoxes: placement.clusterBoxes.map((box) => ({
+        start: box.start, end: box.end, x: box.xPt * inlineScale, width: box.widthPt * inlineScale, rtl: box.rtl,
+      })),
+    }),
     ...(transform ? { transform } : {}),
     ...(placement.hyperlink ? { hyperlink: placement.hyperlink } : {}),
     ...(placement.tateChuYoko ? { eastAsianVert: true } : {}),

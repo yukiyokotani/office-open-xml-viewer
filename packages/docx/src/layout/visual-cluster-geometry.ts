@@ -123,6 +123,11 @@ export function visualClusters(placement: ClusteredText): VisualClusters | null 
       shiftPt += extensions?.[index] ?? 0;
       return item;
     });
+    // The piece's box ends its last cluster: tracking after the final
+    // character of a fitted run lies outside the fitted width.
+    const last = logical.at(-1)!;
+    const overflowPt = last.xPt + last.advancePt - logical[0]!.xPt - placement.bounds.widthPt;
+    if (overflowPt > 1e-9) last.advancePt = Math.max(0, last.advancePt - overflowPt);
     result = {
       startsPt: bidiPlacedOffsets(logical),
       advancesPt: logical.map((item) => item.advancePt),
@@ -144,7 +149,10 @@ export function visualBoundaryXPt(placement: ClusteredText, index: number): numb
   const startPt = visual ? placement.bounds.xPt + visual.startsPt[at]! : placement.origin.xPt + clusters[at]!.offset.xPt;
   const leadingIsRight = visual?.odd[at] === true;
   const trailing = index >= clusters.length;
-  return leadingIsRight !== trailing ? startPt + (visual?.advancesPt[at] ?? clusters[at]!.advancePt) : startPt;
+  if (leadingIsRight === trailing) return startPt;
+  const endPt = startPt + (visual?.advancesPt[at] ?? clusters[at]!.advancePt);
+  // A piece in logical order ends at its box as well.
+  return visual || !trailing ? endPt : Math.min(endPt, Math.max(startPt, placement.bounds.xPt + placement.bounds.widthPt));
 }
 
 /** Visual x of the start (left edge) of cluster `index`. */
@@ -173,4 +181,46 @@ export function visuallyContiguousGroups(placement: ClusteredText, from: number,
     }
   }
   return groups;
+}
+
+/** Where one cluster is painted, for readers that address text by offset. */
+export interface ClusterBox {
+  /** UTF-16 offsets of the cluster in the text the boxes are listed for. */
+  readonly start: number;
+  readonly end: number;
+  /** Left edge from the listing's origin, and painted advance. */
+  readonly xPt: number;
+  readonly widthPt: number;
+  /** The cluster reads right to left: it starts at its right edge. */
+  readonly rtl: boolean;
+}
+
+/** The painted boxes of `clusters[first, last)`, with text offsets from
+ * `textStart` (clipped to `textEnd`) and positions from `originXPt`. */
+export function clusterBoxes(
+  placement: ClusteredText,
+  first: number,
+  last: number,
+  textStart: number,
+  textEnd: number,
+  originXPt: number,
+): ClusterBox[] {
+  const visual = visualClusters(placement);
+  const boxes: ClusterBox[] = [];
+  for (let index = first; index < last; index += 1) {
+    const cluster = placement.clusters[index]!;
+    const startPt = visualClusterStartXPt(placement, index);
+    const widthPt = visual ? visual.advancesPt[index]!
+      : index === placement.clusters.length - 1
+        ? Math.max(0, Math.min(cluster.advancePt, placement.bounds.xPt + placement.bounds.widthPt - startPt))
+        : cluster.advancePt;
+    boxes.push({
+      start: Math.max(cluster.range.start, textStart) - textStart,
+      end: Math.min(cluster.range.end, textEnd) - textStart,
+      xPt: startPt - originXPt,
+      widthPt,
+      rtl: visual?.odd[index] === true,
+    });
+  }
+  return boxes;
 }
