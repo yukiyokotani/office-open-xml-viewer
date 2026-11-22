@@ -45,6 +45,11 @@ export interface DocxCommentHighlightRect {
   readonly width: number;
   readonly height: number;
   readonly transform?: string;
+  /** The clip of the highlighted text (DocxTextRunInfo.clipBounds), present
+   *  for a turned run: a rectangle with a `transform` is not cut to it, so a
+   *  host clips the drawn highlight to this page region (for example with an
+   *  `overflow:hidden` container). An unturned highlight is already cut. */
+  readonly clipBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
 }
 
 /** One authored anchor resolved against the text geometry supplied for a page. */
@@ -462,7 +467,11 @@ function highlightRects(
         width: bounds?.width ?? run.w,
         height: bounds?.height ?? run.h,
       });
-      return visible ? [{ ...visible, ...(run.transform ? { transform: run.transform } : {}) }] : [];
+      return visible ? [{
+        ...visible,
+        ...(run.transform ? { transform: run.transform } : {}),
+        ...(run.transform && run.clipBounds ? { clipBounds: run.clipBounds } : {}),
+      }] : [];
     })
     .filter(({ width, height }) => width > 0 && height > 0)
     .sort((left, right) => left.y - right.y || left.x - right.x);
@@ -474,6 +483,7 @@ function highlightRects(
       && previous.y === rect.y
       && previous.height === rect.height
       && previous.transform === rect.transform
+      && JSON.stringify(previous.clipBounds) === JSON.stringify(rect.clipBounds)
     ) {
       const left = Math.min(previous.x, rect.x);
       const right = Math.max(previous.x + previous.width, rect.x + rect.width);

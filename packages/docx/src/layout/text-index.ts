@@ -1,7 +1,6 @@
 import { sourceOwnedTextPlacements, type SourceOwnedTextGeometry } from './text-source-ownership.js';
 import {
   composeAffine,
-  inverseMapAffinePoint,
   mapAffinePoint,
   quarterTurnAffine,
   translationAffine,
@@ -30,11 +29,12 @@ import type {
 export interface TextRunGeometry {
   readonly placement: SourceOwnedTextGeometry;
   readonly pointToPage: Matrix2DData;
-  /** The part of the run's local frame (the frame of `placement.bounds`)
-   * that its ancestor paint clips leave visible: their intersection where a
-   * clip is axis-aligned with the run, and the bounding box of the clipped run
-   * box where it is not. Absent for an unclipped run. */
-  readonly visibleBounds?: LayoutRect;
+  /** WORD_CELL_CONTENT_CLIP: in page points, the intersection of the run's
+   * ancestor paint clips that are axis-aligned on the page, further cut to
+   * the run's box when the run itself is unturned; empty (zero width or
+   * height) when nothing of an unturned run is visible. Clips turned on the
+   * page are not represented. Absent for an unclipped run. */
+  readonly pageClipBounds?: LayoutRect;
   /** Canonical structural source of the owning paragraph. */
   readonly source: ParagraphLayout['source'];
   /** Source `w14:paraId` of the owning paragraph, when authored. */
@@ -420,95 +420,40 @@ function lineProjectionPointToPage(
   return lineFrame ? composeAffine(projection.pointToPage, lineFrame) : projection.pointToPage;
 }
 
-const CLIP_ALIGNMENT_EPSILON_PT = 1e-6;
-
-/** TextRunGeometry.visibleBounds of a run box under `clips`. */
-function visibleBoundsEntry(
+/** TextRunGeometry.pageClipBounds of a run box under `clips`. */
+function pageClipBoundsEntry(
   bounds: LayoutRect,
   runPointToPage: Matrix2DData,
   clips: readonly ElementClipGeometry[],
-): Readonly<{ visibleBounds?: LayoutRect }> {
-  if (clips.length === 0) return {};
-  let left = -Infinity;
-  let top = -Infinity;
-  let right = Infinity;
-  let bottom = Infinity;
+): Readonly<{ pageClipBounds?: LayoutRect }> {
+  const pageRect = (rect: LayoutRect, matrix: Matrix2DData) => {
+    const a = mapAffinePoint(matrix, rect);
+    const b = mapAffinePoint(matrix, { xPt: rect.xPt + rect.widthPt, yPt: rect.yPt + rect.heightPt });
+    return { left: Math.min(a.xPt, b.xPt), top: Math.min(a.yPt, b.yPt), right: Math.max(a.xPt, b.xPt), bottom: Math.max(a.yPt, b.yPt) };
+  };
+  const pageAligned = (matrix: Matrix2DData) => (matrix.b === 0 && matrix.c === 0) || (matrix.a === 0 && matrix.d === 0);
+  let region: { left: number; top: number; right: number; bottom: number } | undefined;
   for (const clip of clips) {
-    const { xPt, yPt, widthPt, heightPt } = clip.bounds;
-    const corners = [
-      { xPt, yPt }, { xPt: xPt + widthPt, yPt }, { xPt: xPt + widthPt, yPt: yPt + heightPt }, { xPt, yPt: yPt + heightPt },
-    ].map((corner) => inverseMapAffinePoint(runPointToPage, mapAffinePoint(clip.pointToPage, corner)));
-    if (corners.some((corner) => corner === null)) return {};
-    const local = corners as PointPt[];
-    const xs = local.map((point) => point.xPt);
-    const ys = local.map((point) => point.yPt);
-    const aligned = local.every((point, index) => {
-      const next = local[(index + 1) % 4]!;
-      return Math.abs(point.xPt - next.xPt) < CLIP_ALIGNMENT_EPSILON_PT
-        || Math.abs(point.yPt - next.yPt) < CLIP_ALIGNMENT_EPSILON_PT;
-    });
-    const region = aligned ? {
-      left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys),
-    } : clippedRunBoxExtent(bounds, local);
-    left = Math.max(left, region.left);
-    top = Math.max(top, region.top);
-    right = Math.min(right, region.right);
-    bottom = Math.min(bottom, region.bottom);
+    if (!pageAligned(clip.pointToPage)) continue;
+    const next = pageRect(clip.bounds, clip.pointToPage);
+    region = region ? {
+      left: Math.max(region.left, next.left), top: Math.max(region.top, next.top),
+      right: Math.min(region.right, next.right), bottom: Math.min(region.bottom, next.bottom),
+    } : next;
   }
-  const xPt = Math.min(left, right);
-  const yPt = Math.min(top, bottom);
-  return { visibleBounds: Object.freeze({ xPt, yPt, widthPt: Math.max(0, right - xPt), heightPt: Math.max(0, bottom - yPt) }) };
-}
-
-/** The extent of `box` cut by the convex quadrilateral `polygon` (a clip
- * turned against the run); an empty extent when nothing remains. */
-function clippedRunBoxExtent(
-  box: LayoutRect,
-  polygon: readonly PointPt[],
-): Readonly<{ left: number; top: number; right: number; bottom: number }> {
-  let points: PointPt[] = [
-    { xPt: box.xPt, yPt: box.yPt }, { xPt: box.xPt + box.widthPt, yPt: box.yPt },
-    { xPt: box.xPt + box.widthPt, yPt: box.yPt + box.heightPt }, { xPt: box.xPt, yPt: box.yPt + box.heightPt },
-  ];
-  // Orient the clip edges so that the inside is on the left of each edge.
-  const area = polygon.reduce((sum, point, index) => {
-    const next = polygon[(index + 1) % polygon.length]!;
-    return sum + point.xPt * next.yPt - next.xPt * point.yPt;
-  }, 0);
-  const sign = area >= 0 ? 1 : -1;
-  for (let index = 0; index < polygon.length && points.length > 0; index++) {
-    const a = polygon[index]!;
-    const b = polygon[(index + 1) % polygon.length]!;
-    const side = (point: PointPt) => sign * ((b.xPt - a.xPt) * (point.yPt - a.yPt) - (b.yPt - a.yPt) * (point.xPt - a.xPt));
-    const next: PointPt[] = [];
-    for (let i = 0; i < points.length; i++) {
-      const current = points[i]!;
-      const following = points[(i + 1) % points.length]!;
-      const sc = side(current);
-      const sf = side(following);
-      if (sc >= 0) next.push(current);
-      if ((sc >= 0) !== (sf >= 0)) {
-        const t = sc / (sc - sf);
-        next.push({
-          xPt: current.xPt + t * (following.xPt - current.xPt),
-          yPt: current.yPt + t * (following.yPt - current.yPt),
-        });
-      }
-    }
-    points = next;
+  if (!region) return {};
+  if (pageAligned(runPointToPage)) {
+    const run = pageRect(bounds, runPointToPage);
+    region = {
+      left: Math.max(region.left, run.left), top: Math.max(region.top, run.top),
+      right: Math.min(region.right, run.right), bottom: Math.min(region.bottom, run.bottom),
+    };
   }
-  // A clip of no area (a turned zero-height cell) leaves nothing visible,
-  // although its edge may cross the run box.
-  const clippedArea = Math.abs(points.reduce((sum, point, index) => {
-    const next = points[(index + 1) % points.length]!;
-    return sum + point.xPt * next.yPt - next.xPt * point.yPt;
-  }, 0)) / 2;
-  if (points.length < 3 || clippedArea < CLIP_ALIGNMENT_EPSILON_PT) {
-    return { left: box.xPt, top: box.yPt, right: box.xPt, bottom: box.yPt };
-  }
-  const xs = points.map((point) => point.xPt);
-  const ys = points.map((point) => point.yPt);
-  return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
+  const xPt = Math.min(region.left, region.right);
+  const yPt = Math.min(region.top, region.bottom);
+  return { pageClipBounds: Object.freeze({
+    xPt, yPt, widthPt: Math.max(0, region.right - xPt), heightPt: Math.max(0, region.bottom - yPt),
+  }) };
 }
 
 function visitParagraph(
@@ -575,7 +520,7 @@ function visitParagraph(
             context.runs.push(Object.freeze({
               placement,
               pointToPage: linePointToPage,
-              ...visibleBoundsEntry(placement.bounds, linePointToPage, clippedProjection.clips),
+              ...pageClipBoundsEntry(placement.bounds, linePointToPage, clippedProjection.clips),
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }

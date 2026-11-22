@@ -1898,17 +1898,20 @@ export interface DocxTextRunInfo {
   hyperlink?: HyperlinkTarget;
   /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
   eastAsianVert?: boolean;
-  /** The part of the run left visible by the clips it is painted under (a
-   *  table cell, an exact-height row, a text box), placed like
-   *  {@link highlightBounds}: `x`/`y` is the canvas CSS px position of its
-   *  top-left corner and `width`/`height` lie along the run's own axes (so a
-   *  run with a {@link transform} carries the same transform). Overlays cut
-   *  highlights to it, and the text layer makes only this part interactive.
-   *  It is the logical clip in CSS px; the Canvas widens its edges to whole
-   *  device pixels, so painted ink can extend up to one device pixel beyond.
-   *  Where a clip is turned against the run (a rotated text box inside an
-   *  unrotated cell), this is the bounding box of the visible part of the run
-   *  box, so it can include a little hidden ink. Absent for an unclipped run. */
+  /** The page region, in canvas CSS px, outside which the run's glyphs are
+   *  clipped: the intersection of the clips it is painted under that are
+   *  axis-aligned on the page (a table cell, an exact-height row, an unturned
+   *  text box). It is the logical clip; the Canvas widens its edges to whole
+   *  device pixels, so painted ink can reach up to one device pixel beyond.
+   *  - Unturned run (no {@link transform}): further cut to the run box
+   *    (`x`/`y`/`w`/`h`); an empty rectangle (zero width or height) means the
+   *    run is wholly clipped away.
+   *  - Run with a {@link transform}: the clip box itself, not cut to the run.
+   *    Overlays enforce it by placing the run's elements in a container of
+   *    that box with `overflow:hidden`, as the viewer's text, find and
+   *    comment layers do.
+   *  Clips turned on the page (inside a rotated text box) are not included.
+   *  Absent for an unclipped run. */
   clipBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
 }
 

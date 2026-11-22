@@ -1346,6 +1346,12 @@ export interface DocxCommentHighlightRect {
     readonly width: number;
     readonly height: number;
     readonly transform?: string;
+    readonly clipBounds?: Readonly<{
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    }>;
 }
 export interface DocxCommentMark {
     id: string;

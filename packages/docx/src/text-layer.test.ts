@@ -182,26 +182,28 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
     return layer.children;
   };
 
-  it('limits a partly clipped hyperlink to its visible part', () => {
-    // A 60px link whose clip starts 30px into it.
-    const [span] = layerWith([run({
+  it('places a partly clipped hyperlink in a container of its clip, in page percentages', () => {
+    // A 60px link at x=10 whose clip starts 30px into it; the container cuts
+    // its hit box and scales with the page, whatever the span's own size.
+    const [container] = layerWith([run({
       text: 'linklinklink', x: 10, w: 60,
       hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
-      clipBounds: { x: 40, y: 0, width: 100, height: 12 },
+      clipBounds: { x: 40, y: 0, width: 30, height: 12 },
     })], () => {});
-    // In percentages of the span, so it scales with responsive resizing.
-    expect(span!.style['clip-path']).toBe('polygon(50% -100vh,200vw -100vh,200vw 200vh,50% 200vh)');
-    expect(span!.style['pointer-events']).toBe('all');
+    expect(container!.style.overflow).toBe('hidden');
+    expect([container!.style.left, container!.style.width]).toEqual(['40%', '30%']);
+    const [span] = container!.children;
+    expect(span!.style.left).toBe('-100%');
     expect(span!.style.cursor).toBe('pointer');
   });
 
-  it('makes a wholly clipped run inert and leaves an unclipped run unchanged', () => {
+  it('makes a wholly clipped run inert and leaves an unclipped run on the layer', () => {
     const [hidden, open] = layerWith([
-      run({ x: 0, w: 10, clipBounds: { x: 20, y: 0, width: 10, height: 12 } }),
+      run({ x: 0, w: 10, clipBounds: { x: 20, y: 0, width: 0, height: 12 } }),
       run({ x: 0, w: 10 }),
     ]);
-    expect(hidden!.style['pointer-events']).toBe('none');
+    expect(hidden!.style.width).toBe('0%');
+    expect(hidden!.children[0]!.style['pointer-events']).toBe('none');
     expect(open!.style['pointer-events']).toBe('all');
-    expect(open!.style['clip-path']).toBeUndefined();
   });
 });

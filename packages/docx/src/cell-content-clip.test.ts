@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import { readFile } from 'node:fs/promises';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import init, { DocxArchive } from './wasm/docx_parser.js';
 import { storeZip } from './conformance/generate.js';
 import { measureContext } from './test-support/tab-fitting.test-support.js';
@@ -11,7 +11,8 @@ import { paintTableLayout } from './paint/canvas-table.js';
 import { hitTestDocxElementContext } from './element-context.js';
 import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import { textRunsForPage } from './text-run-projection.js';
-import { clipRunRect, visibleRunExtent } from './run-clip.js';
+import { buildDocxHighlightLayer } from './find-highlight-layer.js';
+import { runIsClippedAway } from './run-clip.js';
 import type { LayoutRect, ParagraphLayout, TableLayout } from './layout/types.js';
 import type { CanvasPaintContext, PaintCanvas2D } from './paint/types.js';
 
@@ -270,9 +271,18 @@ describe('word-cell-content-clip', () => {
 
     const runs = textRunsForPage(layout, 0, { scale: 1 });
     const hidden = runs.find((run) => run.text.includes('Hidden'));
+    // The run lies wholly before the cell: its clip is empty, not the cell.
+    expect(hidden!.x + hidden!.w).toBeLessThanOrEqual(clip.xPt);
     expect(hidden?.clipBounds).toBeDefined();
-    expect(hidden!.x + hidden!.w).toBeLessThanOrEqual(hidden!.clipBounds!.x);
-    expect(clipRunRect(hidden!, { x: hidden!.x, y: hidden!.y, width: hidden!.w, height: hidden!.h })).toBeNull();
+    expect(hidden!.clipBounds!.width).toBe(0);
+    expect(runIsClippedAway(hidden!)).toBe(true);
+    // A visible run reports the exact intersection with the cell clip.
+    const visible = runs.find((run) => run.text.startsWith('Xg'))!;
+    expect(visible.clipBounds).toEqual({
+      x: expect.closeTo(Math.max(visible.x, clip.xPt), 9), y: expect.closeTo(Math.max(visible.y, clip.yPt), 9),
+      width: expect.any(Number), height: expect.any(Number),
+    });
+    expect(visible.clipBounds!.width).toBeGreaterThan(0);
   });
 });
 
@@ -298,67 +308,88 @@ describe('word-text-box-content-clip', () => {
   });
 });
 
-describe('clipped text runs in a turned text box', () => {
-  it('report a run indented out of a 45-degree text box in a cell as hidden', () => {
-    const box = '<w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="T"/>'
-      + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
-      + '<wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm rot="2700000"><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/></a:xfrm>'
-      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>'
-      + '<w:p><w:pPr><w:ind w:left="-2400"/></w:pPr><w:r><w:t>Hidden</w:t></w:r></w:p>'
-      + '<w:p><w:r><w:t>Shown</w:t></w:r></w:p>'
-      + '</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr>'
-      + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
-    const layout = layoutDocx(docx(`<w:p>${box}</w:p>`));
-    const runs = textRunsForPage(layout, 0, { scale: 1 });
-    const hidden = runs.find((run) => run.text.includes('Hidden'));
-    const shown = runs.find((run) => run.text.includes('Shown'));
-    expect(hidden?.transform).toBeDefined();
-    expect(hidden?.clipBounds).toBeDefined();
-    expect(visibleRunExtent(hidden!)).toBeNull();
-    expect(visibleRunExtent(shown!)).not.toBeNull();
-  });
-});
+const turnedBox = (text: string) => '<w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="T"/>'
+  + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
+  + '<wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm rot="2700000"><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/></a:xfrm>'
+  + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>'
+  + text + '</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr>'
+  + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
 
-describe('clipped text runs in a zero-height cell', () => {
-  it('report turned text as hidden when the cell clip has no area', () => {
-    const box = '<w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="T"/>'
-      + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
-      + '<wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm rot="2700000"><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/></a:xfrm>'
-      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>'
-      + '<w:p><w:r><w:t>Unseen</w:t></w:r></w:p>'
-      + '</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr>'
-      + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+describe('clipped text runs in a turned text box', () => {
+  it('report the cell clip box itself for a turned run', () => {
+    const layout = layoutDocx(docx(`<w:p>${turnedBox('<w:p><w:r><w:t>Turned</w:t></w:r></w:p>')}</w:p>`));
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
+    const clip = table.rows[0]!.cells[0]!.contentClipBounds!;
+    const run = textRunsForPage(layout, 0, { scale: 2 }).find((item) => item.text.includes('Turned'));
+    expect(run?.transform).toBeDefined();
+    expect(run?.clipBounds).toEqual({
+      x: expect.closeTo(2 * clip.xPt, 9), y: expect.closeTo(2 * clip.yPt, 9),
+      width: expect.closeTo(2 * clip.widthPt, 9), height: expect.closeTo(2 * clip.heightPt, 9),
+    });
+  });
+
+  it('report an empty clip box for turned text in a zero-height cell', () => {
     // The single row is exact and zero high.
-    const layout = layoutDocx(docx(`<w:p>${box}</w:p>`, undefined, '<w:trHeight w:val="0" w:hRule="exact"/>', 0, false));
+    const layout = layoutDocx(docx(`<w:p>${turnedBox('<w:p><w:r><w:t>Unseen</w:t></w:r></w:p>')}</w:p>`,
+      undefined, '<w:trHeight w:val="0" w:hRule="exact"/>', 0, false));
     const run = textRunsForPage(layout, 0, { scale: 1 }).find((item) => item.text.includes('Unseen'));
     const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
     expect(table.rows[0]!.cells[0]!.contentClipBounds!.heightPt).toBe(0);
     expect(run?.transform).toBeDefined();
-    expect(run?.clipBounds).toBeDefined();
-    expect(visibleRunExtent(run!)).toBeNull();
+    expect(runIsClippedAway(run!)).toBe(true);
   });
 });
 
-describe('clipRunRect', () => {
-  const base = { text: 'X', h: 10, fontSize: 10, font: '10px serif' };
+describe('overlay clip containers', () => {
+  interface FakeElement {
+    style: Record<string, string> & { cssText: string };
+    children: FakeElement[];
+    appendChild(child: FakeElement): void;
+  }
+  const element = (): FakeElement => {
+    const style = { cssText: '' } as Record<string, string> & { cssText: string };
+    return {
+      style: new Proxy(style, {
+        set(target, key: string, value: string) {
+          if (key === 'cssText') {
+            for (const declaration of value.split(';')) {
+              const index = declaration.indexOf(':');
+              if (index > 0) target[declaration.slice(0, index).trim()] = declaration.slice(index + 1).trim();
+            }
+          }
+          target[key] = value;
+          return true;
+        },
+      }),
+      children: [],
+      appendChild(child) { this.children.push(child); },
+    };
+  };
 
-  it('cuts a rotated run along its own axes', () => {
-    // A vertical (rotate 90deg) run at (100, 50): its axis runs down the page.
-    const run = { ...base, x: 100, y: 50, w: 40, transform: 'rotate(90deg)',
-      clipBounds: { x: 100, y: 70, width: 100, height: 10 } };
-    // The first 20px of the run (page y 50-70) are clipped away.
-    expect(clipRunRect(run, { x: 100, y: 50, width: 40, height: 10 }))
-      .toEqual({ x: 100, y: 70, width: 20, height: 10 });
-    expect(visibleRunExtent(run)).toEqual({ left: 20, top: 0, right: 40, bottom: 10 });
-    expect(visibleRunExtent({ ...run, clipBounds: { x: 100, y: 95, width: 5, height: 10 } })).toBeNull();
-  });
-
-  it('cuts a run turned by a matrix transform', () => {
-    const c = Math.SQRT1_2;
-    const run = { ...base, x: 0, y: 0, w: 40, transform: `matrix(${c}, ${c}, ${-c}, ${c}, 0, 0)`,
-      clipBounds: { x: 10 * c, y: 10 * c, width: 100, height: 10 } };
-    expect(visibleRunExtent(run)).toEqual({
-      left: expect.closeTo(10, 9), top: expect.closeTo(0, 9), right: expect.closeTo(40, 9), bottom: expect.closeTo(10, 9),
-    });
+  it('places a turned clipped run\'s find highlight in a container of its clip box', () => {
+    vi.stubGlobal('document', { createElement: () => element() });
+    try {
+      const layer = element();
+      const run = {
+        text: 'abc', x: 30, y: 20, w: 30, h: 10, fontSize: 10, font: '10px serif',
+        transform: 'rotate(90deg)', clipBounds: { x: 20, y: 10, width: 40, height: 20 },
+      };
+      buildDocxHighlightLayer(layer as unknown as HTMLDivElement, [run, { ...run }],
+        [{ slices: [{ runIndex: 0, start: 0, end: 3 }, { runIndex: 1, start: 0, end: 1 }], active: false }],
+        100, 100, () => (text: string) => text.length * 10);
+      // One container for the shared clip, positioned in page percentages.
+      expect(layer.children).toHaveLength(1);
+      const container = layer.children[0]!;
+      expect(container.style.overflow).toBe('hidden');
+      expect([container.style.left, container.style.top, container.style.width, container.style.height])
+        .toEqual(['20%', '10%', '40%', '20%']);
+      // The highlight sits in it at the run's offset from the clip, in
+      // percentages of the container, so it scales with the page.
+      const [box] = container.children;
+      expect([box!.style.left, box!.style.top, box!.style.width]).toEqual(['25%', '50%', '75%']);
+      expect(box!.style.transform).toBe('rotate(90deg)');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

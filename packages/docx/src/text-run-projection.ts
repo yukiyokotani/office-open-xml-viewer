@@ -35,6 +35,7 @@ function projectTextRun(
   geometry: TextRunGeometry,
   pointToCss: Matrix2DData,
   textAdvances: TextAdvanceLookup | undefined,
+  displayScale: Matrix2DData,
 ): DocxTextRunInfo {
   const { placement } = geometry;
   const origin = mapAffinePoint(pointToCss, placement.bounds);
@@ -44,15 +45,14 @@ function projectTextRun(
   const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
   const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
   const transform = cssTransformFor(pointToCss);
-  // The run's visible part, placed like highlightBounds: its local top-left
-  // mapped to the page, its lengths along the run's own axes.
-  const visible = geometry.visibleBounds;
-  const visibleOrigin = visible ? mapAffinePoint(pointToCss, visible) : undefined;
-  const clipBounds = visible && visibleOrigin ? Object.freeze({
-    x: visibleOrigin.xPt,
-    y: visibleOrigin.yPt,
-    width: visible.widthPt * inlineScale,
-    height: visible.heightPt * blockScale,
+  // WORD_CELL_CONTENT_CLIP: the page-space clip in canvas CSS px.
+  const clip = geometry.pageClipBounds;
+  const clipOrigin = clip ? mapAffinePoint(displayScale, clip) : undefined;
+  const clipBounds = clip && clipOrigin ? Object.freeze({
+    x: clipOrigin.xPt,
+    y: clipOrigin.yPt,
+    width: clip.widthPt * displayScale.a,
+    height: clip.heightPt * displayScale.d,
   }) : undefined;
   const letterSpacingPt = placement.letterSpacingPt;
   const font = canvasFontString(
@@ -131,6 +131,7 @@ export function textRunsForPage(
       geometry,
       composeAffine(displayScale, geometry.pointToPage),
       options.textAdvances,
+      displayScale,
     )
   ));
 }

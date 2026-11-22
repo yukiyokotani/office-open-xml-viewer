@@ -1,4 +1,4 @@
-import { visibleRunExtent } from './run-clip.js';
+import { overlayClipFrame, runIsClippedAway } from './run-clip.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -64,6 +64,7 @@ export function buildDocxTextLayer(
   setSelectionData(layer, 'pageIndex', pageIndex === undefined ? undefined : String(pageIndex));
 
   const ownerDocument = layer.ownerDocument ?? document;
+  const clipContainers = new Map<string, HTMLElement>();
   for (const [runIndex, run] of runs.entries()) {
     const span = ownerDocument.createElement('span');
     setSelectionData(span, 'ooxmlSelectionRun', 'docx');
@@ -114,24 +115,10 @@ export function buildDocxTextLayer(
     // glyphs stay `color:transparent` (the link's blue/underline is already
     // painted on the canvas), so a link run's selection behaviour is otherwise
     // identical to a plain run. A non-link run is byte-identical to before.
-    // A run wholly outside its paint clip (DocxTextRunInfo.clipBounds) has
-    // no visible glyph to select or click.
-    const visible = visibleRunExtent(run);
-    const hidden = visible === null;
-    // A partly clipped run keeps hit testing only over its visible part: the
-    // clip in the span's own (pre-transform, reference px) frame.
-    // In percentages of the span's own box, so the clip scales with the run
-    // when the page is resized responsively.
-    const clipPath = visible && (visible.left > 0 || visible.top > 0
-      || visible.right < run.w || visible.bottom < run.h) ? (() => {
-      const percent = (value: number, extent: number) => `${(value / extent) * 100}%`;
-      // Unbounded where the clip does not cut the run.
-      const l = visible.left > 0 ? percent(visible.left, run.w) : '-100vw';
-      const t = visible.top > 0 ? percent(visible.top, run.h) : '-100vh';
-      const r = visible.right < run.w ? percent(visible.right, run.w) : '200vw';
-      const b = visible.bottom < run.h ? percent(visible.bottom, run.h) : '200vh';
-      return `clip-path:polygon(${l} ${t},${r} ${t},${r} ${b},${l} ${b});`;
-    })() : '';
+    // WORD_CELL_CONTENT_CLIP: a clipped run is placed in a container sized to
+    // its clip (overflow hidden), which clips its hit box and selection.
+    const frame = overlayClipFrame(layer, run, cssWidth, cssHeight, clipContainers);
+    const hidden = runIsClippedAway(run);
     const link = onHyperlinkClick && !hidden ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
     const letterSpacing = run.letterSpacingPx !== undefined
@@ -142,7 +129,7 @@ export function buildDocxTextLayer(
     // that run's hit box so it cannot cover the following run/link. Keep the
     // width percentage-based like its position under responsive canvas scaling.
     const compressedHitBox = run.trailingSpaceCompressionPx !== undefined
-      ? `width:${overlayPercent(run.w / k, cssWidth)};overflow:hidden;`
+      ? `width:${frame.width(run.w / k)};overflow:hidden;`
       : '';
     // Position the span as a % of the page's intended CSS box so it tracks the
     // canvas's actual rendered size under external CSS scaling. `font` /
@@ -152,10 +139,9 @@ export function buildDocxTextLayer(
     // rotates into the column exactly as before at 1× scale.
     span.style.cssText =
       `position:absolute;` +
-      `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
+      `left:${frame.left(run.x)};top:${frame.top(run.y)};` +
       `font:${k !== 1 && reference ? reference.font : run.font};line-height:${run.h / k}px;letter-spacing:${letterSpacing};` +
       compressedHitBox +
-      clipPath +
       transform +
       `white-space:pre;color:transparent;cursor:${cursor};pointer-events:${hidden ? 'none' : 'all'};`;
     if (link && onHyperlinkClick) {
@@ -168,6 +154,6 @@ export function buildDocxTextLayer(
         onHyperlinkClick(link);
       });
     }
-    layer.appendChild(span);
+    frame.parent.appendChild(span);
   }
 }

@@ -1,4 +1,4 @@
-import { clipRunRect } from './run-clip.js';
+import { clipRunRect, overlayClipFrame } from './run-clip.js';
 import {
   overlayPercent,
   type ViewerCommentsOptions,
@@ -122,18 +122,22 @@ function createTint(
   cssHeight: number,
   active: boolean,
   accent: string,
+  clipContainers: Map<string, HTMLElement>,
 ): HTMLDivElement {
+  // WORD_CELL_CONTENT_CLIP: a clipped run's tint lies in a container sized to
+  // its clip, which cuts it like the glyphs.
+  const frame = overlayClipFrame(layer, run, cssWidth, cssHeight, clipContainers);
   const tint = layer.ownerDocument.createElement('div');
   tint.style.cssText =
     `--ooxml-comment-author-accent:${accent};` +
-    `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-    `width:${overlayPercent(run.w, cssWidth)};height:${overlayPercent(run.h, cssHeight)};`;
+    `left:${frame.left(run.x)};top:${frame.top(run.y)};` +
+    `width:${frame.width(run.w)};height:${frame.height(run.h)};`;
   tint.dataset.ooxmlCommentHighlight = '';
   tint.dataset.active = String(active);
   if (run.transform) {
     tint.style.transform = run.transform;
   }
-  layer.appendChild(tint);
+  frame.parent.appendChild(tint);
   return tint;
 }
 
@@ -149,6 +153,11 @@ function wordHighlightRun(run: Readonly<DocxTextRunInfo>): DocxTextRunInfo[] {
   return visible ? [{ ...run, x: visible.x, y: visible.y, w: visible.width, h: visible.height }] : [];
 }
 
+function sameClip(left: DocxTextRunInfo['clipBounds'], right: DocxTextRunInfo['clipBounds']): boolean {
+  return left === right || (left !== undefined && right !== undefined
+    && left.x === right.x && left.y === right.y && left.width === right.width && left.height === right.height);
+}
+
 /** Fill the whitespace between consecutive anchor runs on one rendered line.
  * Exact line geometry and transform equality are the boundary: this never uses
  * a proximity threshold and never joins different baselines or transforms. */
@@ -162,6 +171,7 @@ function mergeSameLineRuns(
       previous &&
       previous.y === run.y &&
       previous.h === run.h &&
+      sameClip(previous.clipBounds, run.clipBounds) &&
       previous.transform === run.transform
     ) {
       const left = Math.min(previous.x, run.x);
@@ -216,6 +226,7 @@ export function buildDocxCommentMargin(
     direction?: 'ltr' | 'rtl';
   }>>();
   const surface = tintLayer.parentElement;
+  const clipContainers = new Map<string, HTMLElement>();
   for (const { anchor, runs: anchorRuns } of resolvedPageAnchors) {
     if (!visibleThreadIds.has(anchor.commentId)) continue;
     const active = activeId === anchor.commentId;
@@ -227,6 +238,7 @@ export function buildDocxCommentMargin(
         cssHeight,
         active,
         accentById.get(anchor.commentId) ?? readOnlyCommentAuthorAccent(undefined),
+        clipContainers,
       );
       const rect = run.transform && surface
         ? relativeElementRect(tint, surface)
