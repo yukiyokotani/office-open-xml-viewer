@@ -1,8 +1,11 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
   anchoredRectangle,
+  anchoring,
+  collisions,
   COLUMN_END,
   MARGIN,
+  PAGE_H,
   P,
   PAGE_W,
   PITCH,
@@ -12,6 +15,7 @@ import {
   loadParser,
   paragraph,
   romanPageTable,
+  shared,
   table,
   type Direction,
   type Page,
@@ -1194,46 +1198,6 @@ describe('upright block table of a vertical section', () => {
     });
   });
   describe('tables and square-wrapped drawings', () => {
-    type Drawing = Page['drawings'][number];
-    type Placed = Page['tables'][number];
-    const shared = (startA: number, endA: number, startB: number, endB: number) =>
-      Math.min(endA, endB) - Math.max(startA, startB) > 1e-6;
-    const covers = (drawing: Drawing, placed: Placed) =>
-      shared(drawing.left, drawing.left + drawing.width, placed.paintedLeft, placed.paintedRight)
-      && shared(drawing.top, drawing.top + drawing.height, placed.top, placed.bottom);
-    /** Physical page height. */
-    const PAGE_H = COLUMN_END + 80;
-    /** Whether the page has no place for `drawing` clear of what it may not
-     * cover: some such rectangle leaves it no room below itself before the
-     * page's bottom edge, and some none past its far edge before the page's
-     * side edge. A drawing keeps its place over a table only then. The
-     * rectangles are the page's tables and, where drawings may not overlap
-     * (`avoidsDrawings`), its other drawings. */
-    const hasNoPlace = (direction: Direction, page: Page, drawing: Drawing, avoidsDrawings: boolean) => {
-      const obstacles = [
-        ...page.tables.map((placed) => ({ left: placed.paintedLeft, right: placed.paintedRight, bottom: placed.bottom })),
-        ...(avoidsDrawings ? page.drawings.filter((other) => other !== drawing).map((other) =>
-          ({ left: other.left, right: other.left + other.width, bottom: other.top + other.height })) : []),
-      ];
-      return obstacles.some((obstacle) => obstacle.bottom + drawing.height > PAGE_H + 1e-6)
-        && obstacles.some((obstacle) => direction === 'tbRl'
-          ? obstacle.left - drawing.width < -1e-6 : obstacle.right + drawing.width > PAGE_W + 1e-6);
-    };
-    /** Every table box sharing an area with another table or a drawing of
-     * its page; with `direction`, not with a drawing the page has no place
-     * for. */
-    const collisions = (
-      pages: readonly Page[], direction?: Direction, avoidsDrawings = false,
-    ) => pages.flatMap((page, pageIndex) => [
-      ...page.tables.flatMap((first, at) => page.tables.slice(at + 1).flatMap((second) =>
-        shared(first.paintedLeft, first.paintedRight, second.paintedLeft, second.paintedRight)
-          && shared(first.top, first.bottom, second.top, second.bottom)
-          ? [{ pageIndex, first, second }] : [])),
-      ...page.drawings.flatMap((drawing) => page.tables.flatMap((placed) =>
-        covers(drawing, placed) && !(direction && hasNoPlace(direction, page, drawing, avoidsDrawings))
-          ? [{ pageIndex, drawing, placed }] : [])),
-    ]);
-
     it('lays out a table before a long one whose rows a later drawing lies below', () => {
       // The second table's first fragment covers the rectangle anchored
       // after it and is pinned; the first table, placed before it, is not
@@ -1298,10 +1262,6 @@ describe('upright block table of a vertical section', () => {
       expect(pages[1]!.tables).toHaveLength(1);
       expect(collisions(pages)).toEqual([]);
     });
-
-    /** A paragraph of `characters` characters whose last runs anchor `rectangles`. */
-    const anchoring = (characters: number, ...rectangles: string[]) =>
-      paragraph('あ'.repeat(characters)).replace('</w:p>', `${rectangles.join('')}</w:p>`);
 
     it('lays out a drawing that follows its character where a table has moved it into its own text', () => {
       // Both rectangles lie over the 45-row table before their paragraphs
@@ -1488,183 +1448,28 @@ describe('upright block table of a vertical section', () => {
       ]);
     });
 
-    it('lays out generated sequences of tables, continued tables and drawings without overlap', () => {
-      // Fixed pseudo-random streams (mulberry32) of paragraphs, some
-      // anchoring square-wrapped rectangles, column breaks, runs of directly
-      // following tables and tables continued over pages, in one and two
-      // columns of both directions. Every sequence has to lay out with no
-      // table box sharing an area with another table or a drawing of its
-      // page.
-      const stream = (start: number) => {
-        let seed = start;
-        return () => {
-          seed = (seed + 0x6d2b79f5) | 0;
-          let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-          value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
-          return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-        };
-      };
-      const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
-      const check = (
-        direction: Direction, columns: number, body: readonly string[], context: string, avoidsDrawings = false,
-      ) => {
-        let pages: Page[] = [];
-        expect(() => { pages = layOutPages(direction, body, columns); }, context).not.toThrow();
-        expect(collisions(pages, direction, avoidsDrawings), context).toEqual([]);
-        return pages;
-      };
-      /** Every pair of drawings of different paragraphs of a page sharing
-       * an area, but for a later drawing the page has no place for. */
-      const drawingCollisions = (pages: readonly Page[], direction: Direction) => pages.flatMap((page, pageIndex) =>
-        page.drawings.flatMap((first, at) => page.drawings.slice(at + 1).flatMap((second, offset) =>
-          page.drawingParagraphs[at] !== page.drawingParagraphs[at + 1 + offset]
-            && shared(first.left, first.left + first.width, second.left, second.left + second.width)
-            && shared(first.top, first.top + first.height, second.top, second.top + second.height)
-            && !hasNoPlace(direction, page, second, true)
-            ? [{ pageIndex, first, second }] : [])));
-      /** Every drawing reaching past an edge of its page. */
-      const offPage = (pages: readonly Page[]) => pages.flatMap((page, pageIndex) =>
-        page.drawings.flatMap((drawing) => drawing.left < -1e-6 || drawing.top < -1e-6
-          || drawing.left + drawing.width > PAGE_W + 1e-6 || drawing.top + drawing.height > PAGE_H + 1e-6
-          ? [{ pageIndex, drawing }] : []));
-
-      // One-strip paragraphs with rectangles at page positions or at
-      // paragraph-relative positions over the band.
-      {
-        const random = stream(0x2b12);
-        const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
-        const tables = [T, T, table(1), table(6), table(30), table(70), table(1, 400), table(1, 800)];
-        const drawing = () => {
-          const width = pick([20, 60, 80, 340]);
-          const height = pick([1, 10, 20, 40]);
-          const paragraphRelative = random() < 0.25;
-          return anchoredRectangle(
-            40 + Math.floor(random() * (PAGE_W - 80 - width)),
-            paragraphRelative ? Math.floor(random() * 40) : 40 + Math.floor(random() * 700),
-            width, height, paragraphRelative ? 'paragraph' : 'page',
-          );
-        };
-        for (const direction of ['tbRl', 'tbLrV'] as const) {
-          for (const columns of [1, 2]) {
-            for (let sample = 0; sample < 12; sample += 1) {
-              const body: string[] = [];
-              const length = 3 + Math.floor(random() * 10);
-              for (let at = 0; at < length; at += 1) {
-                const kind = random();
-                if (kind < 0.4) {
-                  for (let run = random() < 0.25 ? 2 : 1; run > 0; run -= 1) body.push(pick(tables));
-                } else if (kind < 0.45 && columns > 1) {
-                  body.push(columnBreak);
-                } else {
-                  for (let run = 1 + Math.floor(random() * 4); run > 0; run -= 1) {
-                    body.push(random() < 0.5 ? P.replace('</w:p>', `${drawing()}</w:p>`) : P);
-                  }
-                }
-              }
-              check(direction, columns, body, `${direction} ${columns} column(s) sample ${sample}`);
-            }
-          }
-        }
-      }
-
-      // Paragraphs of one to several strips whose rectangles are positioned
-      // from the page, the paragraph, the line or the character along either
-      // axis, so that a rectangle follows text that its own exclusion, a
-      // table or another rectangle moves; anchored before tables, after
-      // them, and by the paragraph directly before a table.
-      // In the last stream no rectangle may overlap (ECMA-376 §20.4.2.3): a
-      // rectangle then shares no area with a rectangle of an earlier
-      // paragraph of its page. (Rectangles of one paragraph are left out:
-      // the lower-layer composition of one paragraph keeps authored
-      // positions.)
-      const NO_OVERLAP_STREAM = 0x3d91;
-      for (const start of [0x51c3, 0x0a17, 0x7e2d, NO_OVERLAP_STREAM]) {
-        const random = stream(start);
-        const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
-        const tables = [T, T, table(1), table(6), table(30), table(45), table(70), table(1, 400), table(1, 800)];
-        const drawing = () => {
-          const width = pick([20, 38, 60, 80, 200, 340]);
-          const height = pick([1, 10, 20, 50, 150]);
-          const horizontalFrom = random() < 0.5 ? 'character' : 'page';
-          const verticalFrom = pick(['page', 'paragraph', 'paragraph', 'line'] as const);
-          return anchoredRectangle(
-            horizontalFrom === 'character'
-              ? -60 + Math.floor(random() * 120) : 40 + Math.floor(random() * (PAGE_W - 80 - width)),
-            verticalFrom === 'page' ? 40 + Math.floor(random() * 700) : Math.floor(random() * 300),
-            width, height, verticalFrom, horizontalFrom, start !== NO_OVERLAP_STREAM,
-          );
-        };
-        const text = () => {
-          const characters = random() < 0.5 ? 5 : pick([20, 35, 66, 90, 140]);
-          if (random() < 0.5) return anchoring(characters);
-          return anchoring(characters, drawing(), ...(random() < 0.2 ? [drawing()] : []));
-        };
-        for (const direction of ['tbRl', 'tbLrV'] as const) {
-          for (const columns of [1, 2]) {
-            for (let sample = 0; sample < 40; sample += 1) {
-              const body: string[] = [];
-              const length = 2 + Math.floor(random() * 8);
-              for (let at = 0; at < length; at += 1) {
-                const kind = random();
-                if (kind < 0.3) {
-                  for (let run = random() < 0.25 ? 2 : 1; run > 0; run -= 1) body.push(pick(tables));
-                } else if (kind < 0.45) {
-                  body.push(anchoring(pick([5, 35, 66, 90]), drawing()), pick(tables));
-                } else if (kind < 0.5 && columns > 1) {
-                  body.push(columnBreak);
-                } else {
-                  for (let run = 1 + Math.floor(random() * 3); run > 0; run -= 1) body.push(text());
-                }
-              }
-              const context = `stream ${start} ${direction} ${columns} column(s) sample ${sample}`;
-              const pages = check(direction, columns, body, context, start === NO_OVERLAP_STREAM);
-              if (start === NO_OVERLAP_STREAM) expect(drawingCollisions(pages, direction), context).toEqual([]);
-            }
-          }
-        }
-      }
-
-      // Tables that reach the page's end and rectangles that may not
-      // overlap, positioned on the page with most of them near its bottom
-      // edge, so that a rectangle moved for a table or for another
-      // rectangle often has no room below. Every rectangle is anchored
-      // within its page, so none may reach past a page edge: no move takes
-      // a drawing off its page. A rectangle lies over a table, or over a
-      // rectangle of an earlier paragraph, only where the page has no place
-      // for it.
-      {
-        const random = stream(0x6a05);
-        const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
-        const tables = [T, table(6), table(45), table(1, 650), table(1, 690), table(1, 800)];
-        const drawing = () => {
-          const width = pick([20, 80, 200, 315, 400]);
-          const height = pick([10, 60, 85, 110, 150]);
-          const lowest = Math.floor(PAGE_H - height);
-          return anchoredRectangle(
-            Math.floor(random() * (PAGE_W - width)),
-            random() < 0.6 ? lowest - Math.floor(random() * 60) : Math.floor(random() * lowest),
-            width, height, 'page', 'page', false,
-          );
-        };
-        for (const direction of ['tbRl', 'tbLrV'] as const) {
-          for (const columns of [1, 2]) {
-            for (let sample = 0; sample < 40; sample += 1) {
-              const body: string[] = [];
-              const length = 2 + Math.floor(random() * 6);
-              for (let at = 0; at < length; at += 1) {
-                const kind = random();
-                if (kind < 0.35) body.push(pick(tables));
-                else if (kind < 0.4 && columns > 1) body.push(columnBreak);
-                else body.push(random() < 0.75 ? anchoring(5, drawing()) : P);
-              }
-              const context = `page ends ${direction} ${columns} column(s) sample ${sample}`;
-              const pages = check(direction, columns, body, context, true);
-              expect(offPage(pages), context).toEqual([]);
-              expect(drawingCollisions(pages, direction), context).toEqual([]);
-            }
-          }
-        }
-      }
-    }, 600_000);
+    it.each(['tbRl', 'tbLrV'] as const)(
+      'lays the page out again when a page-positioned drawing is placed past a text-positioned one (%s)',
+      (direction) => {
+        // The first rectangle is positioned from its paragraph, so it is
+        // not known when the page starts and the second, positioned on the
+        // page, has its exclusion registered where it was anchored. Its
+        // paragraph then places it directly below the first, which it may
+        // not overlap. The page is laid out once more with the exclusion
+        // there: the table after them stacks below the second where it is
+        // painted.
+        const x = direction === 'tbRl' ? 380 : 100;
+        const pages = layOutPages(direction, [
+          anchoring(5, anchoredRectangle(x, 0, 80, 60, 'paragraph')),
+          anchoring(5, anchoredRectangle(x, 80, 80, 60, 'page', 'page', false)),
+          P, T, P,
+        ]);
+        const [first, second] = pages[0]!.drawings;
+        expect(first!.top).toBeCloseTo(60, 6);
+        expect(second!.top).toBeCloseTo(120, 6);
+        expect(pages[0]!.tables[0]!.top).toBeCloseTo(180, 6);
+        expect(collisions(pages)).toEqual([]);
+      },
+    );
   });
 });

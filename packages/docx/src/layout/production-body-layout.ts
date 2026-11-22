@@ -1864,8 +1864,21 @@ function measureBodyParagraphEntry(
   // public wrapNone run therefore has no collision entry) until the Series
   // B/C bridge removal migrates those runs to the retained OOXML contract.
   const collisionEntries = ownedParagraphAnchorCollisions(layout);
+  // `word-vertical-section-upright-block-table`: a drawing whose exclusion
+  // was registered when the page started (the registry already holds it)
+  // elsewhere than where this acquisition places it.
+  const uprightDrawingPins = request.continuation.boundary !== null || collisionEntries.length === 0
+    || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys) ? []
+    : collisionEntries.flatMap((entry) => {
+        const registered = sessionState.floatRegistry.entries.find((float) =>
+          float.kind === 'shape' && float.occurrenceId === entry.occurrenceId);
+        return registered && (Math.abs(registered.bounds.xPt - entry.bounds.xPt) > 1e-6
+          || Math.abs(registered.bounds.yPt - entry.bounds.yPt) > 1e-6)
+          ? [Object.freeze({ occurrenceId: entry.occurrenceId, frame: entry.bounds })] : [];
+      });
   return Object.freeze({
     layout,
+    ...(uprightDrawingPins.length > 0 ? { uprightDrawingPins: Object.freeze(uprightDrawingPins) } : {}),
     blockExtentPt: layout.advancePt,
     fragmentation: measured.markOnly
       ? Object.freeze({ kind: 'indivisible' as const })
@@ -2562,7 +2575,12 @@ function prescanBodyPageAnchors(
       || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return null;
     const paragraphIndex = anchor.paragraphSource.path[0]!;
     const { allowOverlap, relativeHeight } = drawing.behavior;
-    const move = allowOverlap === null || relativeHeight === null ? null : anchorObstacleMove({
+    // Pinned by an earlier layout of the page, where its acquisition placed
+    // it past a drawing that is not known here (body-paginator.ts).
+    const pinned = request.drawingPins?.get(anchor.occurrenceId);
+    const move = pinned
+      ? { xPt: pinned.xPt - drawing.rect.xPt, yPt: pinned.yPt - drawing.rect.yPt }
+      : allowOverlap === null || relativeHeight === null ? null : anchorObstacleMove({
       occurrenceId: anchor.occurrenceId,
       rect: drawing.rect,
       exclusionBounds: drawing.exclusionBounds,

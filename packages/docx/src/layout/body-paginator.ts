@@ -1489,6 +1489,8 @@ function* paginateBodyPassSteps(
       anchors: pageObjects.length === 0 ? anchors : Object.freeze([...anchors, ...pageObjects]),
       location,
       availableInlineExtentPt: location.availableBounds.widthPt,
+      ...(uprightPinPage === location.pageIndex && uprightDrawingPins.size > 0
+        ? { drawingPins: uprightDrawingPins } : {}),
     });
     if (delta) session.commitFlowRegistryDelta(delta);
   };
@@ -1593,6 +1595,17 @@ function* paginateBodyPassSteps(
   const uprightPinKey = (tableKey: string, fragmentStartKey: string): string => `${tableKey}|${fragmentStartKey}`;
   let uprightPinPage = -1;
   let uprightPins = new Map<string, UprightPagePin>();
+  // Drawing pins of the live page, by acquisition occurrence: a wrapped
+  // drawing whose text exclusion was registered when the page started
+  // somewhere else than where its paragraph's acquisition then placed it
+  // (AcquiredParagraphBlock.uprightDrawingPins) is registered at that frame
+  // when the page is laid out again, so the text and the tables of the page
+  // meet it where it is painted. The page is laid out again as soon as
+  // the paragraph finds it, with the table pins found so far. Each drawing
+  // is pinned at most once per page, so this adds at most one layout of the
+  // page per drawing registered at its start; a pinned drawing whose
+  // acquisition places it elsewhere again keeps its pin.
+  let uprightDrawingPins = new Map<string, LayoutRect>();
   /** This layout of the live page found pins that are not registered yet. */
   let uprightReplayPending = false;
   /** Pins asked for, by page and pin key: each is asked for once per page. */
@@ -1609,9 +1622,11 @@ function* paginateBodyPassSteps(
    * tables needed none. A pin never makes the layout fail where the layout
    * without it succeeds. */
   const dropUprightPinsAfterFailure = (): boolean => {
-    if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex || uprightPins.size === 0
+    if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex
+      || (uprightPins.size === 0 && uprightDrawingPins.size === 0)
       || uprightPinsDroppedHere()) return false;
     uprightPins = new Map();
+    uprightDrawingPins = new Map();
     uprightReplayPending = false;
     uprightPinsDroppedPage = state.flow.pageIndex;
     return true;
@@ -1620,6 +1635,7 @@ function* paginateBodyPassSteps(
     if (uprightPinPage !== pageIndex) {
       uprightPinPage = pageIndex;
       uprightPins = new Map();
+      uprightDrawingPins = new Map();
       uprightReplayPending = false;
     }
     return uprightPins;
@@ -3491,6 +3507,28 @@ function* paginateBodyPassSteps(
           continue;
         }
         if (!selected.fragment) throw new Error('Paragraph acquisition made no progress');
+        if (acquired.uprightDrawingPins && canRecoverOnPage && !uprightPinsDroppedHere()) {
+          // `word-vertical-section-upright-block-table`: a drawing of this
+          // fragment was registered when the page started somewhere else
+          // than where the fragment places it. The page is laid out again
+          // from its start right away, before the fragment is accepted and
+          // before any table after it is placed against the stale
+          // exclusion.
+          const accepted = new Set(selected.fragment.drawings.flatMap((drawing) => {
+            const occurrenceId = drawing.anchorLayer?.acquisitionOccurrenceId ?? drawing.anchorLayer?.occurrenceId;
+            return occurrenceId === undefined ? [] : [occurrenceId];
+          }));
+          let pinned = false;
+          for (const pin of acquired.uprightDrawingPins) {
+            const askedKey = `${state.flow.pageIndex}|drawing:${pin.occurrenceId}`;
+            if (!accepted.has(pin.occurrenceId) || uprightPinnedOnce.has(askedKey)) continue;
+            uprightPinnedOnce.add(askedKey);
+            uprightPinsOf(state.flow.pageIndex);
+            uprightDrawingPins.set(pin.occurrenceId, pin.frame);
+            pinned = true;
+          }
+          if (pinned) throw new UprightBlockPageReplay();
+        }
         // Commit exactly the plan objects charged during selection, taken
         // against the pre-acceptance page state; plans of rejected later
         // reference lines are never committed.
@@ -3920,6 +3958,7 @@ function* paginateBodyPassSteps(
   // Every body table has been reached: nothing is left to release.
   uprightPinPage = -1;
   uprightPins = new Map();
+  uprightDrawingPins = new Map();
   // ECMA-376 §17.11.22: document-end notes are flow following the main
   // story, not decoration of its terminal page. Paginate them here through
   // the same column/page transitions, before draining footnote tails, so

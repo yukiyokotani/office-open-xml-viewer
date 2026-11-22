@@ -244,3 +244,49 @@ export function layOutPages(
 export async function loadParser(): Promise<void> {
   await init({ module_or_path: await readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url)) });
 }
+
+// Checks shared by the tests of tables and square-wrapped drawings.
+
+export type Drawing = Page['drawings'][number];
+export type Placed = Page['tables'][number];
+export const shared = (startA: number, endA: number, startB: number, endB: number) =>
+  Math.min(endA, endB) - Math.max(startA, startB) > 1e-6;
+export const covers = (drawing: Drawing, placed: Placed) =>
+  shared(drawing.left, drawing.left + drawing.width, placed.paintedLeft, placed.paintedRight)
+  && shared(drawing.top, drawing.top + drawing.height, placed.top, placed.bottom);
+/** Physical page height. */
+export const PAGE_H = COLUMN_END + 80;
+/** Whether the page has no place for `drawing` clear of what it may not
+ * cover: some such rectangle leaves it no room below itself before the
+ * page's bottom edge, and some none past its far edge before the page's
+ * side edge. A drawing keeps its place over a table only then. The
+ * rectangles are the page's tables and, where drawings may not overlap
+ * (`avoidsDrawings`), its other drawings. */
+export const hasNoPlace = (direction: Direction, page: Page, drawing: Drawing, avoidsDrawings: boolean) => {
+  const obstacles = [
+    ...page.tables.map((placed) => ({ left: placed.paintedLeft, right: placed.paintedRight, bottom: placed.bottom })),
+    ...(avoidsDrawings ? page.drawings.filter((other) => other !== drawing).map((other) =>
+      ({ left: other.left, right: other.left + other.width, bottom: other.top + other.height })) : []),
+  ];
+  return obstacles.some((obstacle) => obstacle.bottom + drawing.height > PAGE_H + 1e-6)
+    && obstacles.some((obstacle) => direction === 'tbRl'
+      ? obstacle.left - drawing.width < -1e-6 : obstacle.right + drawing.width > PAGE_W + 1e-6);
+};
+/** Every table box sharing an area with another table or a drawing of
+ * its page; with `direction`, not with a drawing the page has no place
+ * for. */
+export const collisions = (
+  pages: readonly Page[], direction?: Direction, avoidsDrawings = false,
+) => pages.flatMap((page, pageIndex) => [
+  ...page.tables.flatMap((first, at) => page.tables.slice(at + 1).flatMap((second) =>
+    shared(first.paintedLeft, first.paintedRight, second.paintedLeft, second.paintedRight)
+      && shared(first.top, first.bottom, second.top, second.bottom)
+      ? [{ pageIndex, first, second }] : [])),
+  ...page.drawings.flatMap((drawing) => page.tables.flatMap((placed) =>
+    covers(drawing, placed) && !(direction && hasNoPlace(direction, page, drawing, avoidsDrawings))
+      ? [{ pageIndex, drawing, placed }] : [])),
+]);
+
+/** A paragraph of `characters` characters whose last runs anchor `rectangles`. */
+export const anchoring = (characters: number, ...rectangles: string[]) =>
+  paragraph('あ'.repeat(characters)).replace('</w:p>', `${rectangles.join('')}</w:p>`);
