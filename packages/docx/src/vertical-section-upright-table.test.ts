@@ -642,6 +642,30 @@ describe('upright block table of a vertical section', () => {
       expect(after[0]!.block).toBe(moved.length * PITCH);
     });
 
+    it('flows the first column around a raised table whose own strip moved to the next column', () => {
+      // Three columns, 40 strips and a full-length strip before the table:
+      // laid out without it they fill column 1 (25) and reach 16 strips into
+      // column 2, where the table is raised over the page. Beside it the
+      // full-length strip has no room in column 2 and moves to column 3,
+      // which leaves the table placed ahead of the flow in another column.
+      // It still lies over column 1, whose text has to flow around it too:
+      // every column then holds the strips before the table's block range.
+      const full = paragraph('長'.repeat(20));
+      const pages = layOutPages('tbLrV', [...strips(40), full, table(1, 800), P], 3);
+      expect(pages).toHaveLength(1);
+      const [page] = pages;
+      const [raised] = page!.tables;
+      expect(raised!.bottom).toBeCloseTo(16838 / 20, 6);
+      const blockStart = raised!.left - MARGIN.left - RULE / 2;
+      expect(blockStart).toBeCloseTo(16 * PITCH, 6);
+      const lines = page!.strips.flat();
+      expect(lines).toHaveLength(42);
+      // The table spans the page: no strip lies in its exclusion, and none
+      // ends where it starts.
+      for (const line of lines) expect(line.block + PITCH, `strip at block ${line.block}`).toBeLessThan(blockStart + 1e-6);
+      expect(lines.filter((line) => line.inlineStart === MARGIN.top)).toHaveLength(15);
+    });
+
     it('starts the next page with a table too wide for the block extent left in the last column', () => {
       // Measured: the same at the end of column 2. The table does not stay
       // there overflowing: it starts page 2, and the strip before it is not
@@ -706,6 +730,33 @@ describe('upright block table of a vertical section', () => {
       expect(rest.paintedLeft).toBeCloseTo(wide.paintedLeft, 6);
       expect(pages[0]!.tables[0]!.paintedLeft).toBeCloseTo(wide.paintedLeft, 6);
       expect(wide.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
+    });
+
+    it('takes a run again on a page where its tables measure differently', () => {
+      // One 12 pt wide column of cells holding a PAGE field in roman
+      // numerals: "I" is one line, "II" two, so every row is twice as tall
+      // on page 2. Three 30-row tables fill page 1 and continue on page 2,
+      // where the 15-row table after them no longer fits whole below the
+      // continued rows, although it did by the heights taken on page 1.
+      const field = '<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>'
+        + '<w:fldSimple w:instr=" PAGE \\* Roman "><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>I</w:t></w:r></w:fldSimple></w:p>';
+      const numbered = (rows: number) => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+        + '<w:tblGrid><w:gridCol w:w="240"/></w:tblGrid>'
+        + Array.from({ length: rows }, () => '<w:tr><w:tc><w:tcPr><w:tcW w:w="240" w:type="dxa"/>'
+          + '<w:tcMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tcMar></w:tcPr>'
+          + `${field}</w:tc></w:tr>`).join('') + '</w:tbl>';
+      const pages = layOutPages('tbRl', [numbered(30), numbered(30), numbered(30), numbered(15)]);
+      expect(pages.length).toBeGreaterThanOrEqual(3);
+      const second = pages[1]!.tables;
+      // The rows continued on page 2 are twice as tall as on page 1.
+      const firstPageRow = (pages[0]!.tables[0]!.bottom - pages[0]!.tables[0]!.top) / 30;
+      expect((second[0]!.bottom - second[0]!.top) / firstPageRow).toBeGreaterThan(40);
+      for (const page of pages) {
+        page.tables.forEach((placed, at) => {
+          expect(placed.bottom).toBeLessThanOrEqual(COLUMN_END + 1e-6);
+          if (at > 0) expect(placed.top).toBeCloseTo(page.tables[at - 1]!.bottom, 6);
+        });
+      }
     });
 
     it('continues below the last rows of the table before it', () => {

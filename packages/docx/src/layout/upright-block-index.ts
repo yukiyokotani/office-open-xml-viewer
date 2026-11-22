@@ -56,15 +56,18 @@ export type UprightBlockExclusionEntry = Readonly<{ exclusion: UprightBlockExclu
 export interface UprightBlockSlot {
   readonly sourceIndex: number;
   /** The column the table was placed for. A table the flow reaches in
-   * another column has no slot, unless the slot is `pinned`. */
+   * another column has no slot, unless the slot is `anyColumn`. */
   readonly flowDomainId: string;
   /** Its box between the outer edges of its border rules. */
   readonly bounds: LayoutRect;
   /** Placed with the paragraph before it, which already wraps around it, or
    * pinned: the text exclusion is registered and the placement is final. */
   readonly reserved: boolean;
-  /** Registered when the page's layout started (a page pin): the table takes
-   * the slot in whichever column of the page the flow reaches it. */
+  /** The table takes the slot in whichever column of the page the flow
+   * reaches it: the text before it was moved to another column around it. */
+  readonly anyColumn: boolean;
+  /** Registered when the page's layout started (a page pin): all text of the
+   * page already flows around the table, so it asks for no further pin. */
   readonly pinned: boolean;
   /** The table does not fit the band from `bounds` and is cut between rows
    * there; the rest continues on the next page. */

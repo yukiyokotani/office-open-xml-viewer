@@ -640,6 +640,11 @@ const uprightRunsBySession = new WeakMap<object, Map<number, UprightRun>>();
  * as one table over however many pages it takes, so its dimensions are taken
  * once, when the flow first reaches one of its tables, and every later page
  * reads them instead of walking the rest of the run again.
+ *
+ * A table whose cells hold page-dependent content (a PAGE field, say) can
+ * measure differently on the page it is placed on than when the run was
+ * taken. `stale` is asked about the cached run before it is used; a stale
+ * run is dropped for all its tables and taken again from the current page.
  */
 function uprightRunAt(
   context: BodyTableMeasurementContext,
@@ -647,15 +652,20 @@ function uprightRunAt(
   operations: BodyTableMeasurementOperations,
   physical: PhysicalAnchorFrame,
   sourceIndex: number,
+  /** Whether the cached run no longer holds for the tables being placed. */
+  stale?: (run: UprightRun, at: number) => boolean,
 ): Readonly<{ run: UprightRun; at: number }> {
   const { dependencies, state, effectiveTablePositioning } = context;
   let runs = uprightRunsBySession.get(context.sessionState);
   if (!runs) uprightRunsBySession.set(context.sessionState, runs = new Map());
   const cached = runs.get(sourceIndex);
   if (cached && cached.availableInlineExtentPt === request.availableInlineExtentPt
-    && cached.writingMode === physical.writingMode) {
+    && cached.writingMode === physical.writingMode
+    && !stale?.(cached, sourceIndex - cached.startIndex)) {
     return { run: cached, at: sourceIndex - cached.startIndex };
   }
+  // A run measured differently now is taken again from this page's tables.
+  if (cached) for (const member of cached.members) runs.delete(member.sourceIndex);
   const memberAt = (index: number): UprightRunMember | null => {
     const element = dependencies.source.blocks.body[index];
     if (element?.type !== 'table') return null;
@@ -702,6 +712,12 @@ function uprightRunAt(
   return { run, at: sourceIndex - run.startIndex };
 }
 
+/** Whether a table now measures as the run recorded it. */
+function uprightRunMemberHolds(recorded: UprightRunMember, current: UprightRunMember): boolean {
+  return recorded.inlineExtentPt === current.inlineExtentPt
+    && recorded.boxBlockExtentPt === current.boxBlockExtentPt;
+}
+
 /** Block start of a table's box inside its run's box, which starts at
  * `runBlockStartPt`: the tables of a run share the physical left edge, the
  * far edge of the box in the clockwise frame and the near edge in
@@ -746,6 +762,8 @@ function planUprightRun(
   physical: PhysicalAnchorFrame,
   leader: UprightRunMember,
   reserving: boolean,
+  /** The run was just taken again for this plan. */
+  retried = false,
 ): UprightRunPlan {
   const { state } = context;
   const index = uprightBlockIndexOf(state);
@@ -753,9 +771,36 @@ function planUprightRun(
   const flowDomainId = request.location.flowDomainId;
   const multiColumn = request.location.section.columns.length > 1;
   const pageHasContent = request.pageHasContent === true;
-  const { run, at } = uprightRunAt(context, request, operations, physical, leader.sourceIndex);
+  const { run, at } = uprightRunAt(
+    context, request, operations, physical, leader.sourceIndex,
+    (recorded, index) => !uprightRunMemberHolds(recorded.members[index]!, leader),
+  );
   const { members, boxBlockExtentPt } = run;
   const totalInlinePt = run.suffixInlinePt[at]!;
+  /** The table of the run at `memberIndex` as it measures on this page. */
+  const measuredNow = (memberIndex: number): UprightRunMember => {
+    const member = members[memberIndex]!;
+    if (memberIndex === at) return leader;
+    const element = context.dependencies.source.blocks.body[member.sourceIndex];
+    if (element?.type !== 'table') throw new Error('Upright block table run member is not a table');
+    operations.computeTablePtLayout(
+      bodyTableAcquisitionState(state, element, context.effectiveTablePositioning),
+      element, request.availableInlineExtentPt, member.sourceIndex,
+    );
+    return uprightRunMember(physical, member.source, retainedTableRecord(state, member.sourceIndex).acquisition);
+  };
+  // The tables placed on this page have to measure here as the run recorded
+  // them; otherwise the run is taken again and the plan made anew. One check
+  // per table placed, so the checks grow with the tables, not their square.
+  const replanIfStale = (plan: UprightRunPlan): UprightRunPlan => {
+    if (plan.kind !== 'placed' || retried) return plan;
+    for (let offset = 1; offset < plan.slots.length; offset += 1) {
+      if (uprightRunMemberHolds(members[at + offset]!, measuredNow(at + offset))) continue;
+      uprightRunAt(context, request, operations, physical, leader.sourceIndex, () => true);
+      return planUprightRun(context, request, operations, physical, leader, reserving, true);
+    }
+    return plan;
+  };
   // `wholeCount` tables from this one placed whole from `inlineStartPt`,
   // then at most one cut by rows.
   const placedOf = (blockStartPt: number, inlineStartPt: number, wholeCount: number): UprightRunPlan => {
@@ -771,6 +816,7 @@ function planUprightRun(
         heightPt: member.boxBlockExtentPt,
       }),
       reserved: reserving,
+      anyColumn: false,
       pinned: false,
       splitRows,
     });
@@ -799,7 +845,7 @@ function planUprightRun(
   );
   if (found.leavesBlockExtent && pageHasContent) return Object.freeze({ kind: 'fresh-region', freshPage: true });
   if (multiColumn || totalInlinePt <= found.inlineRoomPt) {
-    return placedOf(found.blockStartPt, found.inlineStartPt, members.length - at);
+    return replanIfStale(placedOf(found.blockStartPt, found.inlineStartPt, members.length - at));
   }
   // Too tall for the inline extent below its start: a fresh page when
   // content precedes it, unless it continues the table before it.
@@ -814,7 +860,7 @@ function planUprightRun(
   if (wholeCount === 0 || reserving) return reserving
     ? Object.freeze({ kind: 'fresh-region', freshPage: true })
     : Object.freeze({ kind: 'rows', found });
-  return placedOf(found.blockStartPt, found.inlineStartPt, wholeCount);
+  return replanIfStale(placedOf(found.blockStartPt, found.inlineStartPt, wholeCount));
 }
 
 /** `word-vertical-section-upright-block-table`: the top-level upright block
@@ -888,7 +934,8 @@ function uprightPagePin(
 ): UprightBlockRegistration {
   return Object.freeze({
     box,
-    slots: Object.freeze(slots.map((slot) => Object.freeze({ ...slot, reserved: true, pinned: true }))),
+    slots: Object.freeze(slots.map((slot) =>
+      Object.freeze({ ...slot, reserved: true, anyColumn: true, pinned: true }))),
     exclusions: Object.freeze(uprightRunExclusion(request, box)),
     tail: Object.freeze({ sourceIndex: lastSourceIndex, flowDomainId: request.location.flowDomainId, bounds: box }),
   });
@@ -915,7 +962,7 @@ export function bodyUprightBlockStartsHere(
     const found = uprightBlockLeader(context, request, operations);
     if (!found) return null;
     const slot = uprightBlockIndexOf(state).slots.get(found.leader.sourceIndex);
-    if (slot && (slot.pinned || slot.flowDomainId === request.location.flowDomainId)) return true;
+    if (slot && (slot.anyColumn || slot.flowDomainId === request.location.flowDomainId)) return true;
     return planUprightRun(context, request, operations, found.physical, found.leader, false).kind
       !== 'fresh-region';
   } finally {
@@ -1032,7 +1079,10 @@ function measureUprightBlockTable(
     ),
     acquisitionState,
   ) as TableLayout;
-  const { run } = uprightRunAt(context, request, operations, physical, sourceIndex);
+  const { run } = uprightRunAt(
+    context, request, operations, physical, sourceIndex,
+    (recorded, at) => !uprightRunMemberHolds(recorded.members[at]!, leader),
+  );
   /** Whole rows from `cursor` that fit the band below `at`, the position of
    * the run's box; a row taller than the band takes a page of its own. Every
    * fragment keeps the box edges of the whole table (rows continued on a
@@ -1079,7 +1129,7 @@ function measureUprightBlockTable(
 
   if (!request.cursor) {
     const slot = index.slots.get(sourceIndex);
-    if (slot && (slot.pinned || slot.flowDomainId === flowDomainId)) {
+    if (slot && (slot.anyColumn || slot.flowDomainId === flowDomainId)) {
       // A table that runs on from an earlier one still starts a fresh region
       // when the block extent left has shrunk below its box since.
       if (!slot.reserved && uprightBlockTooWide(request, leader.boxBlockExtentPt)) return freshRegion(false);

@@ -1575,18 +1575,18 @@ function* paginateBodyPassSteps(
     }
     return uprightPins;
   };
-  /** Keeps a plan for replays of the page: every table in its slot for good. */
-  const retainUprightPlan = (
-    tableKey: string,
-    registration: UprightBlockRegistration,
-  ): UprightBlockRegistration => {
-    const pinned = Object.freeze({
-      ...registration,
-      slots: Object.freeze(registration.slots.map((slot) =>
-        Object.freeze({ ...slot, reserved: true, pinned: true }))),
+  /** Keeps a plan for replays of the page, where it is registered from the
+   * page's start as a pin: every table in its slot for good. */
+  const retainUprightPlan = (tableKey: string, registration: UprightBlockRegistration): void => {
+    if (!canRecoverOnPage) return;
+    uprightPinsOf(state.flow.pageIndex).set(tableKey, {
+      registration: Object.freeze({
+        ...registration,
+        slots: Object.freeze(registration.slots.map((slot) =>
+          Object.freeze({ ...slot, reserved: true, anyColumn: true, pinned: true }))),
+      }),
+      consumed: false,
     });
-    if (canRecoverOnPage) uprightPinsOf(state.flow.pageIndex).set(tableKey, { registration: pinned, consumed: false });
-    return pinned;
   };
   /** Before the live page closes: releases the tables placed ahead of the
    * flow that it never reached there, and lays the page out again. */
@@ -3364,8 +3364,14 @@ function* paginateBodyPassSteps(
               // paginated again as any paragraph beside an exclusion (its
               // lines move to the next column or page as they must), and the
               // tables keep their place.
-              // Pinned: the flow can reach them in another column.
-              session.commitUprightBlocks?.(retainUprightPlan(sourceKey(tableAfter.block.source), planned));
+              // The flow can reach them in another column. They are not
+              // page pins yet: a table raised over an earlier column still
+              // asks for one when the flow reaches it.
+              retainUprightPlan(sourceKey(tableAfter.block.source), planned);
+              session.commitUprightBlocks?.(Object.freeze({
+                ...planned,
+                slots: Object.freeze(planned.slots.map((slot) => Object.freeze({ ...slot, anyColumn: true }))),
+              }));
               session.moveAcquisitionCursor(location);
               continue;
             }
