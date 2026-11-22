@@ -643,4 +643,41 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
       variant = {};
     }
   });
+
+  it('omits an inserted shape of a note whose only reference is deleted', () => {
+    const body = '<w:p><w:r><w:t>BODY</w:t></w:r><w:del w:id="9" w:author="a" w:date="2026-01-01T00:00:00Z">'
+      + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:del></w:p>';
+    const storyRuns = `<w:ins w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:ins>`;
+    variant = { body, storyRuns };
+    try {
+      // The final view needs both the reference and the shape.
+      expect(bodyHostDrawingBoxes('footnote', 'vml-text-square')).toEqual([]);
+      expect(layOutDocument('footnote', 'vml-text-square').pages[0]!.layers.body
+        .filter((node) => node.kind === 'paragraph')).toHaveLength(1);
+    } finally {
+      variant = {};
+    }
+  });
+
+  it.each(['footnote', 'endnote'] as const)('appends no %s host paragraph for a deleted shape', (story) => {
+    const paragraphs = (markup: boolean, storyRuns: string) => {
+      variant = { storyRuns, markup };
+      return layOutDocument(story, 'vml-text-square').pages.flatMap((page) => page.layers.body)
+        .filter((node) => node.kind === 'paragraph').length;
+    };
+    const deleted = `<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:del>`;
+    try {
+      const plain = paragraphs(false, '');
+      // The live reference keeps the note; only the shape is deleted.
+      expect(paragraphs(false, deleted)).toBe(plain);
+      variant = { storyRuns: deleted };
+      expect(bodyHostDrawingBoxes(story, 'vml-text-square')).toEqual([]);
+      // The markup view shows the deleted shape without a host line.
+      expect(paragraphs(true, deleted)).toBe(paragraphs(true, ''));
+      variant = { storyRuns: deleted, markup: true };
+      expect(bodyHostDrawingBoxes(story, 'vml-text-square')).toEqual([{ xPt: 300, yPt: 0 }]);
+    } finally {
+      variant = {};
+    }
+  });
 });

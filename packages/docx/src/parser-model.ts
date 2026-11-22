@@ -2247,25 +2247,28 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
     return kind === 'deletion' || kind === 'moveFrom';
   };
   const groups = (noteShapes ?? []).filter((group) => references.has(`${group.kind}:${group.id}`));
-  // A note whose every reference is deleted gives up its shapes with that
-  // deletion, so the final view omits them as it omits the note; a host
-  // paragraph is appended only for a note that some reference keeps.
-  const visible = groups.some((group) => references.get(`${group.kind}:${group.id}`)!.some((revision) => !omitted(revision)));
+  // Each shape's effective revision: a note whose every reference is deleted
+  // gives up its shapes with that deletion (whatever their own revision), so
+  // the final view omits them as it omits the note; otherwise the shape keeps
+  // its own revision.
   const runs = groups.flatMap((group) => group.runs);
   const revisions = groups.flatMap((group) => {
     const own = references.get(`${group.kind}:${group.id}`)!;
-    const deletion = own.every(omitted) ? own[0] : null;
-    return group.runs.map((_, index) => group.__runRevisions?.[index] ?? deletion ?? null);
+    const deletion = own.every(omitted) ? own[0] : undefined;
+    return group.runs.map((_, index) => deletion ?? group.__runRevisions?.[index] ?? null);
   });
+  // The host paragraph is appended only when some shape survives in the
+  // final view; otherwise the shapes ride the last body paragraph, so no
+  // view gains an empty host line or page.
+  const visible = revisions.some((revision) => !omitted(revision));
   const withRevisions = (paragraph: BodyElement, before: number, existing: readonly unknown[] = []) =>
     revisions.some((revision) => revision !== null)
       ? { __runRevisions: [...Array.from({ length: before }, (_, index) => existing[index] ?? null), ...revisions] }
       : existing.length > 0 ? { __runRevisions: existing } : {};
   if (!host || runs.length === 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
   if (!visible) {
-    // Only deleted references keep these notes: the markup view shows their
-    // shapes (marked deleted) and the final view omits them. They ride the
-    // last body paragraph, so the final view gains no empty host line.
+    // Every shape is deleted (or its note's references are): the markup view
+    // shows them marked deleted and the final view omits them.
     const lastIndex = doc.body.map((element) => element.type).lastIndexOf('paragraph');
     if (lastIndex >= 0) {
       const last = doc.body[lastIndex] as DocParagraph;
