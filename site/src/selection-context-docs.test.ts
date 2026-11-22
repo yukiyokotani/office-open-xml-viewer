@@ -28,7 +28,7 @@ describe('official selection-context guide', () => {
   it('documents every current context kind and the VS Code MCP outcomes', () => {
     for (const context of [
       'docx / text', 'docx / element', 'xlsx / range', 'xlsx / element',
-      'pptx / text', 'pptx / element',
+      'pptx / text', 'pptx / element', 'docx / comment', 'pptx / comment',
     ]) {
       expect(page).toContain(context);
     }

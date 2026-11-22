@@ -28,9 +28,11 @@ legacy input continues to reject with
 `OoxmlError.code === 'legacy-binary-format'`, so no migration is required for
 applications that do not opt in.
 
-These readers are experimental and deliberately narrow. They reject input
-they cannot represent instead of showing a partial document, and none of them
-executes macros, fields, formulas, actions or embedded objects.
+These readers are experimental and deliberately narrow. Many structures they
+cannot map still reject the whole document. Some details without a model
+equivalent are left out of an otherwise complete document instead; the
+sections below give examples. None of the readers executes macros, fields,
+formulas, actions or embedded objects.
 
 ## Enabling a source
 
@@ -156,7 +158,7 @@ modes and Node. Background failures use the same error through `onError`.
 
 The two optional reader packages currently follow different policies. The
 legacy readers reject the whole document with `unsupported-content` when they
-meet a structure they cannot map. The OpenDocument readers
+meet many structures they cannot map. The OpenDocument readers
 (`@silurus/ooxml-opendocument`, see [opendocument.md](./opendocument.md))
 render every feature they read and reject only corrupt, encrypted or unsafe
 input, or input over a resource limit. Keep a conversion fallback for legacy
@@ -221,91 +223,47 @@ reject the entire document.
 
 When a DOC prints its revision markup (MS-DOC `DopBase.fRMPrint`) and carries
 revision marks, the reader reports `showTrackedChanges: true` as its view
-default. An explicit `showTrackedChanges` option, including `false`, always
-wins.
+default. An explicit `showTrackedChanges` option, including `false`, takes
+precedence.
 
 Missing header and footer distances use the MS-DOC 2.6.4 defaults for the
-stored producer installation LCID when the specification lists that LCID.
-Explicit values, including zero, win. Unlisted languages keep the
-unresolved-margin recovery. The host locale and the document's text language
-are not used to guess the producer's settings.
+stored producer installation language when the specification lists that
+language; explicit values, including zero, take priority. The host locale and
+the document's text language are not used. A missing distance that no listed
+language resolves rejects the document.
 
-A default character language of 0x007F (reserved in MS-LCID 2.2; Windows
-names it LOCALE_INVARIANT), stamped by some third-party producers, projects
-no language: Word opens such documents and writes an empty `w:lang
-w:val=""` on DOCX save, which the DOCX reader treats as no language. The
-other language axes have no Office evidence for this value and stay
-rejected, as do unlisted LCIDs.
-
-A table whose style selection resolves to istd 0x000B (MS-DOC 2.6.3
-sprmTIstd) in a stylesheet that does not define even that slot gets no
-table style: Word opens such documents and saves the tables without
-`w:tblStyle`. A 0x000B slot defined with another style type, and
-unsupported content inside a defined table style, stay rejected.
-
-A modern compatibility shading array (sprmTDefTableShd and its later
-segments, MS-DOC 2.6.3) marks non-shaded cells with ShdAuto, the clear
-pattern over automatic colors (MS-DOC 2.9.247). In a table-styled row
-such an entry, or any clear pattern over an automatic background, no
-longer rejects the document. It matters only as the fallback of an
-explicit Raw ShdNil cell: where the table style gives that cell no fill
-it projects no fill, which both possible precedence readings agree on.
-Over a style fill, whether current Word lets it clear the fill is not
-established, so that cell stays rejected, as do patterned entries.
-
-Fields in the direct DOC source are checked against each story's own field
-table: the main document, headers and footers, footnotes, endnotes and
-textboxes (MS-DOC 2.8.25). They map onto the fields the DOCX reader already
+Fields are never executed. Visible fields map onto the fields the DOCX reader
 supports:
 
-- PAGE, NUMPAGES, DATE and TIME are computed when the document is laid out,
-  as for DOCX. Word does the same: a DOC header DATE field prints the export
-  date in Word's PDF, not the date stored in the file. Only switches the
-  renderer interprets exactly are accepted: numeric page formats,
-  MERGEFORMAT or CHARFORMAT, and date pictures that need no language data.
-- Form check boxes show their stored state and size.
-- Every other field shows its stored result. Fields are never executed.
-  HYPERLINK fields and REF or PAGEREF fields with `\h` become links. Inside a
-  table of contents, link text keeps the paragraph's color and underline,
-  which matches Word's PDF. Stored results are not recomputed, so a
-  PAGEREF number can differ from a PDF that Word produced after updating it.
-- Some fields reject the document. These include equations (EQ, often used
-  for phonetic guides), macro buttons, drop-down form fields and SYMBOL
-  fields without a stored result. Others are fields shown as codes, locked
-  or edited page and date fields, and nested hyperlinks. A private result
-  with content is rejected unless it is an INCLUDEPICTURE picture, which
-  Word's PDF shows.
+- PAGE and NUMPAGES are computed when the document is laid out.
+- DATE and TIME show the current date or time when the field has a date-time
+  picture the renderer can format; otherwise they show the result stored in
+  the file.
+- A locked PAGE, NUMPAGES, DATE or TIME field is not recomputed; it shows its
+  stored result unless that result is marked private.
+- EQ fields become phonetic guides or inline equations.
+- HYPERLINK fields whose instruction the reader can parse, and REF or PAGEREF
+  fields with a bookmark and `\h`, become links. Stored results are not
+  recomputed, so a PAGEREF number can differ from a PDF that Word produced
+  after updating it.
+- A visible MACROBUTTON, GOTOBUTTON, ADVANCE or FORMDROPDOWN field rejects the
+  document. A field nested inside another field's instruction is hidden and
+  is not checked against this list.
 
-Footnotes and endnotes become DOCX notes. Automatic reference marks and the
-numbers inside each note use the document-wide note format and starting
-value. Arabic, Roman and letter formats are supported, with Word's
-lowercase-Roman default for endnotes in later Word versions. Footnotes must be
-at the page bottom and endnotes at the end of the document. A custom
-reference mark is shown as its own literal text and does not use up a number,
-as in Word. A separator story that is only an empty paragraph keeps that
-paragraph's space with no line. Documents are rejected if they use number
-restarts per section or per page, sections with different note numbering, or
-other custom separator stories.
+Footnotes and endnotes become DOCX notes. Word numbers notes per section;
+when that numbering is not what the document-wide model produces, the reader
+writes each automatic mark as text, and in those marks number formats other
+than Arabic, Roman, letters and Chicago symbols are written as Arabic
+numbers. A per-page restart counts continuously across pages. A custom
+reference mark shows its own text and uses no number.
 
-Section text flow (MS-DOC sprmSTextFlow, an MS-ODRAW MSOTXFL value) is shown
-per section, following the basic rules of the specification:
-
-- Values 0 and 4 are horizontal. No different glyph treatment is inferred
-  for value 4 from its name.
-- Value 1 is vertical with upright East Asian characters, as before.
-- Values 3 and 5 run downward with later lines to the left and every
-  character rotated a quarter turn clockwise.
-- Value 2 runs upward with later lines to the right and every character
-  rotated a quarter turn counter-clockwise.
-
-MS-ODRAW notes that Word 2007 and 2010 place later lines of value 5 to the
-right. The file does not record which application displays it, so the
-documented basic rule is used. Word's placement of headers, footers, notes,
-anchored drawings and upright tables in value-2 sections has not been
-established. They follow the library's general placement for vertical
-sections, turned with the section's own direction, without a claim of
-matching Word. Horizontal-in-vertical runs remain supported only in value-1
-sections.
+Section text flow is read per section. Horizontal-in-vertical runs are
+rendered only in body paragraphs of sections with upright East Asian vertical
+text (`tbRl`); in other sections, in table cells and in headers or footers
+they reject the document. For upward-flowing sections, the
+placement of headers, footers, notes, anchored drawings and upright tables
+follows the library's general vertical placement, without a claim of
+matching Word.
 
 ## Experimental direct PPT source
 
@@ -347,107 +305,22 @@ try {
 ```
 
 The direct source is an experimental, bounded subset, not a full-fidelity
-PowerPoint implementation. Besides Markdown and ZIP accounting, it currently
-lacks audio/video media and embedded fonts. It rejects constructs it cannot
-represent, including paragraph origins that cannot be resolved from the
-stored text and master records. Its explicit unsupported diagnostics are
-authoritative.
+PowerPoint implementation. Besides Markdown and ZIP accounting, it does not
+load the presentation's embedded fonts.
 
 A slide's own `SlideShowSlideInfoAtom.fHidden` marks it hidden; hidden slides
 and their content remain in the presentation. Display follows the existing
 `PptxViewer` `hiddenSlideMode` option, whose default remains `'show'`.
 
-The direct reader shows an embedded OLE object, such as an Excel or Graph
-chart, as the presentation picture the file stores for it: an OLE shape is a
-picture frame whose `pib` names the BLIP to display (MS-ODRAW 2.2.40 and
-2.3.23.5), resolved through the shape's `ExObjRefAtom` to the document's
-external object list (MS-PPT 2.7.7 and 2.10.1). The object storage is never
-read or activated. PowerPoint's own PDF exports show that stored picture
-unchanged for embedded objects drawn as content and for a linked object.
-Objects shown as an icon or thumbnail and ActiveX controls are drawn from the
-stored picture too; no Office output was available for them. An OLE shape
-without a stored picture is drawn as an unfilled frame with its own line, or
-a thin gray one. Pictures without a supported BLIP and unsupported picture
-fill placements are rejected instead of being drawn without them.
+An embedded or linked OLE object is drawn from the presentation picture the
+file stores for it; the object itself is never read or activated. Some OLE
+structures, for example an OLE group shape, reject the document.
 
-A JPEG picture whose frame is well formed but is not an 8-bit Huffman
-baseline, extended-sequential or progressive frame (arithmetic-coded,
-lossless and 12-bit frames) is drawn as the same kind of frame: PowerPoint
-draws the arithmetic-coded and lossless ones, and this reader carries no
-decoder for them.
-
-PowerPoint displays GIF data that a producer stored in a PNG picture slot,
-so the direct PPT reader identifies such a slot by its GIF87a/GIF89a
-signature and emits it as `image/gif`; other mismatched content stays
-rejected.
-
-Classic linear gradients (MS-ODRAW `msofillShade` and `msofillShadeScale`)
-keep their ordered shade colours, signed focus and 16.16 angle. Explicit
-shade-array stops at either endpoint take precedence over scalar front or
-back colours; a missing final endpoint uses the scalar back colour. Linear,
-scaled, two-colour and translucent shades are projected, including on rotated
-shapes and inside rotated or flipped groups. Other shade types, custom fill
-rectangles and opacity combined with a shade-colour array fail closed. Twenty
-controlled Office comparisons covered focus, angle, endpoint conflicts and
-leaf flips; the projected positions were within one DrawingML position unit
-of Office's serialized integers.
-
-Concentric shades (`msofillShadeCenter`, PowerPoint's "from corner" and "from
-centre" styles) become DrawingML `path="rect"` gradients on shapes and slide
-backgrounds, as PowerPoint writes them: the stops keep the linear order from
-the centre rectangle outwards, and `fillToRect` is `fillToLeft`, `fillToTop`,
-1 - `fillToRight` and 1 - `fillToBottom`, each a signed fraction (the centre
-rectangle may reach outside the shape). `msofillShadeShape` becomes `path="shape"` and the host-defined
-`msofillShadeTitle` is drawn as the rectangle shade its properties describe;
-neither could be authored in PowerPoint, so both follow the specification
-only.
-
-Pattern fills on shapes and slide backgrounds become tiled picture fills
-that follow PowerPoint's own output: white pixels in the fill colour and
-black pixels in the background colour, each with its own opacity, tiled from
-the top-left corner. A stored 8x8 bitmap tiles whole at 0.75 pt per pixel; of
-a stored 10x10 bitmap the 8x8 area tiles at one pixel per point. The pattern
-stays upright and unmirrored on rotated and flipped shapes: for a flipped
-shape the reader writes the bitmap as seen through the reflection, because
-the presentation renderer reflects a picture fill with its shape. A bitmap it
-cannot read (neither black-and-white GIF nor PNG) is tiled reflected. A
-bitmap of another size has no evidence and tiles like an 8x8 one. Texture fills tile
-the stored picture at its own size from the top-left corner. A picture frame
-with a shade, pattern or texture fill gets that fill behind its picture; a
-pattern or texture is drawn by a rectangle under the picture, because the
-presentation renderer paints no picture fill behind a picture.
-Pattern and shape texture placements with a fill rectangle, a view-relative
-fill, an origin or a unit remain rejected, on shapes and picture frames
-alike.
-
-Picture colour settings follow how PowerPoint itself reads the binary
-properties when it saves a binary deck as PPTX: "Black and White" becomes
-DrawingML `grayscl` plus `biLevel` at 50%, and a transparent colour becomes a
-`clrChange` to the same colour with zero alpha. The presentation renderer
-applies these blip effects in document order for PPTX files as well.
-Brightness/contrast (washout) on a picture becomes DrawingML `lum`: bright is
-the brightness over 0x8000, and contrast is k - 1 or 1 - 1/k for the stored
-16.16 slope k. PowerPoint writes exactly these values when it saves the
-binary deck as PPTX. The renderer's `lum` formula reproduces PowerPoint's PDF
-of a gray ramp under a bright × contrast grid, from both PPTX and .ppt, to
-within 0.7 of 255. Grayscale alone becomes `grayscl`; with
-brightness/contrast it follows `lum`, the order PowerPoint's PDF shows.
-Brightness/contrast combined with a transparent colour or black-and-white
-(whose order has no evidence), black-and-white without grayscale, recolouring
-and adjustments on picture fills stay rejected until Office output confirms
-their rendering.
-
-In a shape that carries alternative shape XML, a text range with a mouse-over
-hyperlink, or with a click or mouse-over jump to the next, previous, first,
-last or last viewed slide or to the end of the show, states the DrawingML run
-property PowerPoint writes for it (`hlinkMouseOver` with a target, or
-`hlinkClick` or `hlinkMouseOver` with only a `ppaction://hlinkshowjump`
-action). A range must lie within its text and end after it begins. The presentation renderer styles only
-click hyperlinks with a target as links, for PPTX files as well.
-
-A modern Office-saved PPT can retain paragraph properties in the OfficeArt
-`metroBlob` alternative shape XML rather than in its classic text ruler. The
-direct PPT source adopts that XML under the rule described below.
+Some modern Office-saved PPT files also store DrawingML for a shape in an
+alternative shape XML part. Depending on how it compares with the binary
+shape, the reader draws the alternative or the binary projection, and some
+disagreements reject the load. The comparison rules are documented in the
+reader source (`packages/legacy-office/parser/src/ppt/metro.rs`).
 
 ## Experimental direct XLS source
 
@@ -464,122 +337,41 @@ await viewer.load(legacyXlsBytes);
 `openXlsxWorkbook(bytes, { legacyXls, factory })`
 accept the same source.
 
-The direct XLS source is experimental and bounded. It reads a BIFF8 workbook
-subset into the shared worksheet model: sheet names, cell values and cached
-formula results, merged ranges, the date system, number formats, fonts,
-palette and extension colors, fills, borders, alignment, rich-text runs, row
-heights and column widths, and row/column hiding and outlines. It also
-projects conditional formatting (classic CF with its CFEx extensions, CF12
-comparison, formula, color-scale, data-bar and icon-set rules, their
-differential formats and decompiled formulas), Excel tables with custom table
-styles, frozen panes, tab colors, XFExt gradient fills, hyperlinks, worksheet
-AutoFilter ranges (whose application-inserted drop-down objects become the
-renderer's filter buttons; active filter criteria reject), data validations
-and defined names, plus embedded charts, chart sheets, pictures, and
-rectangles, text boxes and their groups as shape anchors. Variants the shared
-model cannot show (for example inactive rules, suppressed list drop-downs,
-displayed phonetic guides, or table-style elements outside the model) reject
-the workbook instead of being dropped. Print areas and titles travel as
-defined names; page setup, headers and footers affect printing only and are
-not part of the model.
+The direct XLS source is experimental and bounded. It projects a BIFF8
+workbook into the shared worksheet model: sheet names and visibility, cell
+values with their cached formula results, merged ranges, cell styles,
+shared-string character formatting and phonetic guides, row and column
+geometry, sheet views, conditional formatting, tables, hyperlinks, filters,
+data validations, defined names, cell comments (shown as comment indicators),
+PivotTable layout, charts, chart sheets, pictures and shapes. Formula token
+programs, external links and macros are never evaluated.
+
+Some content without a model equivalent is left out while the workbook still
+loads, for example AutoFilter criteria, list validations whose drop-down is
+suppressed, the comment box Excel keeps visible on the sheet, and drawing
+shadows. Other structures the model cannot state reject the workbook, for
+example inactive conditional-formatting rules. Page setup, headers, footers
+and page breaks are not part of the model; print areas and titles are
+defined names.
 
 Worksheet visibility, including very hidden sheets, is kept as model
 metadata; display follows the existing `XlsxViewer` `hiddenSheetMode` option,
-whose default remains `'show'`. Gridline visibility, zero-value display and
-right-to-left direction come from the sheet's window settings. Pane
-selections, scrolling, zoom and window placement are not reconstructed.
+whose default remains `'show'`. Of the sheet views, only display flags and
+frozen panes are projected.
 
-Column widths and drawing anchors depend on the Normal font's maximum digit
-width (ECMA-376 §18.3.1.13). The XLS source asks the host for it through a
-generic host-layout capability, and the XLSX renderer answers with its own
-`computeMdw`, the same measurement that sizes the painted grid. It measures
-in the rendering realm: the render Worker in `mode: 'worker'`, the page in
-main mode, and the session canvas `factory` in Node. There is no measurement
-callback option. Without a measurable font (for example in Node without a
-`factory`), charts, pictures and shapes are omitted. On macOS the renderer
-quantizes the advance to whole points like Excel for Mac, so XLS drawings
-follow that platform's rule.
+A cell-anchored drawing stores each corner as a row and column plus signed
+offsets in 1/1024 of the column width and 1/256 of the row height. Resolving
+column widths needs the Normal font's maximum digit width (ECMA-376
+§18.3.1.13). The XLS source asks the host for it through a generic
+host-layout capability, and the XLSX renderer answers with its own
+`computeMdw`, the same measurement that sizes the painted grid, in the
+rendering realm: the render Worker in `mode: 'worker'`, the page in main
+mode, and the session canvas `factory` in Node. There is no measurement
+callback option. Without a measured width (for example in Node without a
+`factory`), drawings that need the worksheet grid to resolve their anchors
+are omitted; a chart sheet's charts use absolute anchors and remain.
 
-## XLS drawing inspection for development
-
-A native-only inspection helper can
-extract the supported passive PNG, JPEG, EMF and WMF entries from a BIFF8 global
-image store without requiring font metrics:
-
-```sh
-cargo run -p legacy-office-parser --features inspection \
-  --example inspect_xls_images -- sample.xls fresh-output-directory
-```
-
-Omit the output directory to print catalog indices, formats and byte counts
-without saving images. The optional directory must not already exist. Extracted
-images can contain private document content and must remain local. A catalog
-entry is not proof that an image is displayed on a worksheet.
-
-The helper follows MS-XLS 2.4.58/171 and the documented first-continuation
-exception in 2.1.7.20.3 implementation note 6. It bounds the stream to workbook
-globals and requires one MS-ODRAW 2.2.12/20/22 drawing-group/image-store owner.
-Shared passive-image validation remains unchanged; malformed supported images
-fail inspection rather than being silently repaired. Unsupported encodings,
-unreferenced slots and unresolved delayed entries are not exposed. No external
-resource, macro, OLE object or drawing action is evaluated.
-
-Native inspection examples read the complete source with fallible allocation and
-no default input-length ceiling. Inspection caps assembled drawing data and retained
-media at 128 MiB each, and the drawing/decoding walk at two million records. Shared
-image limits also apply. These are independent resource ceilings, not a combined
-process-memory guarantee: source, workbook, assembled data and extracted images
-can coexist. The helper is excluded from production WASM even when its Cargo
-feature is enabled. It does not change the reader or renderer.
-
-The companion `inspect_xls_anchors` native example prints raw worksheet anchor
-metadata without extracting images:
-
-```sh
-cargo run -p legacy-office-parser --features inspection \
-  --example inspect_xls_anchors -- sample.xls
-```
-
-It uses BoundSheet tab order and disjoint worksheet substreams, excludes nested
-chart streams, and joins only owned drawing fragments. MS-XLS 2.5.194/195 client
-markers must end at the exact fragment boundary immediately preceding the
-matching Obj/TxO record. The inspector retains the shape identity, FtCmo object
-identity/type/flags, enclosing group depth and signed MS-XLS 2.5.193 endpoint
-fractions. It does not flatten groups or interpret client formulas and actions.
-The fractions are not pixels or EMUs; negative and beyond-cell fractions remain
-unchanged. Reserved anchor bits are ignored as specified. Invalid movement flags,
-duplicate identities, ambiguous clients and truncated streams fail inspection.
-The current subset does not reclassify Continue records following Obj/TxO as
-drawing data; producer output requiring that interleaving remains unsupported.
-
-For explicitly owned plain picture objects, anchor metadata also retains a
-one-based BStore reference, raw signed crop/rotation values, clipboard format and
-the aspect-preservation flag. The reference must be a scalar `pib` with `fBid`
-set in the shape's own FOPT; complex BLIPs and drawing-wide properties are not
-substituted. FtCf and FtPioGrbit must occupy their specified Obj fields. DDE,
-ActiveX, camera, icon, dynamic/default-sized, controls-stream and auto-load forms,
-additional client fields, linked BLIPs, explicit hidden/script anchors and
-deleted/OLE/group/background shape flags do not produce passive references.
-Unknown property content is never decoded as a script, URL or nested object.
-
-Use `inspect_xls_images --used sample.xls fresh-output-directory` with the same
-Cargo invocation to extract only supported images referenced by those objects.
-The native `inspect_xls_pictures` helper parses the workbook stream once, binds
-anchors to the global catalog by index, and decodes each requested image at most
-once. It returns only anchors with a corresponding supported image. Unused
-catalog entries are not inflated; an invalid referenced image or out-of-range
-index still fails inspection. There is no fallback to another image, file or URL.
-The anchor and media stages each retain their separate two-million-work budget.
-This raw inspection is not an assertion of complete inherited visibility or
-geometry. The direct XLS reader applies additional picture eligibility.
-
-Anchor inspection limits cumulative drawing bytes to 128 MiB, record work to
-two million, substream/group nesting to 32, retained anchors to 65,536, and
-per-sheet shape/client identities to 65,536. The disjoint ranges prevent repeated
-scanning through overlapping worksheet references. Native metadata does not prove
-visibility, image eligibility or complete object validity: non-picture objects,
-deleted shapes and OLE-marked shapes can have anchors too. These development
-helpers remain separate from the direct XLS reader.
+XLS worksheets are delivered complete, without an early row preview.
 
 ## Current implementation boundary
 
@@ -587,116 +379,10 @@ The repository contains only the direct readers; legacy input is never
 converted to OOXML. The Rust crate `legacy-office-parser` builds one reader
 per feature: `direct-doc`, `direct-xls` and `direct-ppt`. Building it for
 `wasm32` with none of them enabled is a compile error. The `inspection`
-feature adds the native-only examples above, and `fuzzing` exposes the fuzz
+feature adds native-only development examples, and `fuzzing` exposes the fuzz
 entry points.
-
-The local direct-render survey described below renders every installed
-legacy sample through its source and pairs it with the Office-exported PDF.
-The corpus is deliberately not redistributed. Broader binary-record coverage,
-visual fidelity against Office, fuzzing and resource measurements remain part
-of [issue #1472](https://github.com/yukiyokotani/office-open-xml-viewer/issues/1472).
-
-## Best-effort fidelity evaluation
-
-Loading without an error is a smoke test, **not reader completion**. The
-target is useful best-effort preservation of the binary input's content and
-display, with missing content and visual differences explicitly reported.
-Pixel equality is not required for each incremental improvement. Pairing a
-legacy file with its original OOXML is useful for investigation, but does not
-prove fidelity: saving to an old format can itself change or remove features.
-Use Office opening the actual legacy file as the visual reference. Office's
-upgraded OOXML is useful for mapping binary records to XML, but Office's own
-conversion can change layout and is not an absolute visual oracle. In
-particular, rebuilt or down-saved corpus members must not silently be treated
-as lossless copies of their original OOXML.
-
-The local macOS exporter opens a disposable copy with installed Microsoft
-Office, with macros disabled and Word/Excel external-link updates disabled,
-and writes a PDF to a fresh output path:
-
-```bash
-osascript packages/legacy-office/tools/legacy-office-export.applescript \
-  doc disposable-copy.doc fresh-output.pdf
-```
-
-The first argument is `doc`, `xls` or `ppt`. The exporter requires Office for
-macOS and macOS automation permission for each Office application. Runs are
-sequential; an Office failure stops rather than accumulating open documents
-or dialogs. Original corpus files and existing visual references are never
-changed, and PDFs and page images stay in a local temporary directory; no
-private artifact is committed or uploaded.
-
-The exporter refuses to open a document unless Office reports its automation
-security setting and confirms that macros are disabled. PowerPoint builds that
-return no value for this property are currently blocked, even after macOS
-automation permission is granted. Word and Excel PDF export have been exercised;
-the PowerPoint export path is not yet validated end to end. Do not weaken this
-guard to obtain a passing report.
-
-Compare the direct reader's Canvas output with those Office PDFs through the
-local direct-render survey. Keep renderer self-regression tests against the
-previous renderer separate from this fidelity comparison. Neither whole-corpus
-Office equality nor Canvas display equality has been reached.
 
 Treat the rendered model as a derived view of the original binary, keep the
 binary as the authoritative source, and gate production use on a corpus
-representative of the documents being ingested.
-
-## Alternative shape XML
-
-Modern Office can retain DrawingML in an OfficeArt `metroBlob`
-([MS-ODRAW] §2.3.4.41). The source uses three outcomes: a package with no
-alternative or a verified disagreement uses the binary projection; a verified
-consistent alternative is adopted; an unreadable or unverifiable alternative
-rejects the load. Some attributes are encoded differently in the two forms,
-so a difference does not show which side was edited; for these the source
-follows the side that PowerPoint PDF exports draw. Different gradient stops,
-or a gradient rotation flag that only the alternative states, adopt the
-alternative. A rotation flag that only the binary sets keeps the binary
-projection. So do a concentric shade whose alternative adds a tile rectangle
-or restates a stop, a pattern whose bitmap or preset cannot be compared, and
-a shade whose fill colour differs from its first shade colour (PowerPoint
-writes them equal, and draws the binary shape once that colour is edited).
-Custom path commands that do not pair one to one are compared as
-traced outlines (another start point, or collinear lines split differently,
-is the same outline). Outlines that then pair segment by segment but at other
-points are a verified difference and keep the binary projection. A stroked
-path whose outline matches only where a line turns back on itself also keeps
-the binary projection, because the stroke draws joins at those turns.
-Outlines that do not pair, and stroked paths with dashes or arrowheads (which
-follow the traversal), still reject the load.
-Exhausting an optional alternative's verification budgets keeps that
-shape's binary projection and does not poison the document. Input work uses
-the standard OOXML package allowance (256 MiB of actual consumed input per
-alternative, including rereads); inflated output remains bounded to 1 MiB per
-part and 4 MiB per alternative package. Round-trip theme verification
-also has its own input-work allowance. Failed attempts retain no model, text,
-or image charges. A checksum-only package does not require a theme.
-
-Adopted alternatives retain their formatting and resource references, while
-characters, identifiers and transforms come from the binary. Theme style
-references must resolve to existing entries. Compatibility comparisons cover
-only the properties documented beside the implementation; edits to other
-properties can leave a stale alternative undetected. This is an experimental
-compatibility boundary, not a claim of complete PowerPoint equivalence.
-
-Per-entry and cumulative budgets bound input, records, decoded themes, text,
-model storage and emitted JSON. Repeated hyperlink targets and split text
-styles consume the model budget before they are copied. These ceilings are
-library resource policy, not Office format restrictions.
-
-The private Office corpus and its visual survey remain local development
-material. Current completion requires fresh parser-backed tests, renderer
-self-regression checks and separately adjudicated Office fidelity evidence.
-Historical survey counts do not establish the current release's behavior.
-
-### XLS worksheet ownership
-
-XLS worksheets use the ordinary XLSX cache admission, leases, LRU and render
-worker eviction. Native projections belong to one cursor and are released on
-terminal acknowledgement, cancellation or close. Reopening projects only the
-selected sheet from retained, bounded neutral BIFF facts.
-
-The cursor emits an explicit `metadata-unavailable` preview before row units.
-XLS viewers therefore wait for the complete worksheet. Early viewport rendering
-requires a separately verified BIFF preview eligibility rule.
+representative of the documents being ingested. The readers' internal budgets
+are library resource policy, not Office format restrictions.

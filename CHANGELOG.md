@@ -1320,7 +1320,7 @@ Breaking minor release. Unifies Browser Viewer ownership, replaces the legacy
 synchronous Node parser helpers with one bounded asynchronous pipeline, and adds
 an independently mountable XLSX sheet surface without changing the ordinary
 Browser `new Viewer(target)` plus `await viewer.load(source)` flow. See the
-[0.75 to 0.76 migration guide](docs/migration-0.76.md).
+[0.75 to 0.76 migration guide](https://ooxml.silurus.dev/announcements/v076-migration-guide/).
 
 - **browser Viewer architecture:** add `XlsxSheetViewer`, a caller-canvas active
   worksheet viewport with selection, search, zoom, logical scrolling, and

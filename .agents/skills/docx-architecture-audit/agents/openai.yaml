@@ -1,0 +1,4 @@
+interface:
+  display_name: "DOCX Architecture Audit"
+  short_description: "Audit the immutable DOCX layout pipeline"
+  default_prompt: "Use $docx-architecture-audit to audit the DOCX layout architecture and report evidence-backed findings."

@@ -8,6 +8,12 @@ coverage vert lacks) over the fixed 45-character stacked-sideways domain is
 metadata: only covered Unicode characters are emitted,
 not glyph identities or advances. OS/2 xAvgCharWidth is a scalar font metric,
 not a shaped text advance.
+
+Run (writes packages/core/src/fonts/reference-font-metrics-data.json and
+scripts/reference-font-metrics-provenance.json from the fonts installed with
+Office and macOS; tests: `pnpm test:python`):
+
+    uv run --no-project --with fonttools==4.67.0 python scripts/generate-font-reference-metrics.py
 """
 
 from __future__ import annotations
