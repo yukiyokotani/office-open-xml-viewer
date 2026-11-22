@@ -5148,6 +5148,33 @@ interface AcquiredAnchorOccurrence {
   readonly hostRange: import('./types.js').TextRange;
 }
 
+type LocatedAnchorHost = Readonly<{
+  lineIndex: number;
+  host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>;
+}>;
+const anchorHostsByLines = new WeakMap<readonly LineLayout[], ReadonlyMap<string, LocatedAnchorHost>>();
+
+/** Each anchor occurrence's host on the planned lines (its first, in line
+ * order), indexed once per line list: a paragraph acquires every occurrence
+ * against the same lines, and a search per occurrence would visit every
+ * placement once per anchor. */
+function anchorHostsOf(lines: readonly LineLayout[]): ReadonlyMap<string, LocatedAnchorHost> {
+  let index = anchorHostsByLines.get(lines);
+  if (!index) {
+    const hosts = new Map<string, LocatedAnchorHost>();
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      for (const placement of lines[lineIndex]!.placements) {
+        if (placement.kind === 'anchor-host' && placement.anchorOccurrenceId !== undefined
+          && !hosts.has(placement.anchorOccurrenceId)) {
+          hosts.set(placement.anchorOccurrenceId, { lineIndex, host: placement });
+        }
+      }
+    }
+    anchorHostsByLines.set(lines, index = hosts);
+  }
+  return index;
+}
+
 function acquireAnchorOccurrence(
   occurrenceId: string,
   payloads: readonly Readonly<{ run: AnchoredPayloadRun; runIndex: number }>[],
@@ -5165,18 +5192,9 @@ function acquireAnchorOccurrence(
   contentStartYPt: number,
   lineReference?: AnchorLineReference,
 ): AcquiredAnchorOccurrence | null {
-  let hostLineIndex = -1;
-  let host: Extract<ParagraphPlacement, { kind: 'anchor-host' }> | undefined;
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const found = lines[lineIndex]?.placements.find((placement) =>
-      placement.kind === 'anchor-host' && placement.anchorOccurrenceId === occurrenceId);
-    if (found?.kind === 'anchor-host') {
-      hostLineIndex = lineIndex;
-      host = found;
-      break;
-    }
-  }
-  if (!host || hostLineIndex < 0) return null;
+  const located = anchorHostsOf(lines).get(occurrenceId);
+  if (!located) return null;
+  const { lineIndex: hostLineIndex, host } = located;
   const ordered = [...payloads].sort((a, b) =>
     (a.run.anchorAcquisitionInput?.group?.sourceIndex ?? 0)
       - (b.run.anchorAcquisitionInput?.group?.sourceIndex ?? 0)

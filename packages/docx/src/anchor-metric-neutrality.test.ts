@@ -817,7 +817,7 @@ describe('a line with many anchors inside its text is planned in linear work', (
       const model = documentModel([bodyParagraph(runs)], null, { compatibilityMode: 15 });
       (model.section as { pageWidth: number }).pageWidth = 4000;
       let entries = 0;
-      const names = ['filter', 'findIndex', 'slice', 'flatMap'] as const;
+      const names = ['filter', 'find', 'findIndex', 'slice', 'flatMap'] as const;
       const prototype = Array.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
       const originals = names.map((name) => prototype[name]!);
       names.forEach((name, index) => {
