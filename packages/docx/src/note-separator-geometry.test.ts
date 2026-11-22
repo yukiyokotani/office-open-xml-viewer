@@ -395,6 +395,17 @@ describe('word-note-separator-geometry', () => {
     expect(note.leading?.rule).toBeDefined();
   });
 
+  it('parses a separator story like a note body', () => {
+    // A block content control around the separator paragraph.
+    const wrapped = separatorOf('<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>FOOTNOTES</w:t></w:r><w:r><w:separator/></w:r></w:p></w:sdtContent></w:sdt>');
+    expect(clean(paragraphTexts(wrapped))).toEqual(['FOOTNOTES']);
+    expect(wrapped.leading?.rule).toBeDefined();
+    // A hidden paragraph mark leaves the visible caption and marker.
+    const hiddenMark = separatorOf('<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r></w:p>');
+    expect(clean(paragraphTexts(hiddenMark))).toEqual(['Sources']);
+    expect(hiddenMark.leading?.rule).toBeDefined();
+  });
+
   it('keeps text after the marker in the same run', () => {
     const note = separatorOf('<w:p><w:r><w:separator/><w:noBreakHyphen/><w:t>Sources</w:t></w:r></w:p>');
     expect(clean(paragraphTexts(note))).toEqual(['-Sources']);

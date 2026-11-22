@@ -2601,43 +2601,25 @@ thread_local! {
     /// Set while a listed separator story is parsed: only there does a
     /// §17.11.23/§17.11.1 marker become a marker run.
     static PARSING_SEPARATOR_STORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Marker elements of hidden (§17.3.2.41 vanish) runs met while a
-    /// separator story is parsed: the run parser skips them, so they are no
-    /// markers of the story.
-    static HIDDEN_SEPARATOR_MARKERS: std::cell::RefCell<Vec<roxmltree::NodeId>> =
+    /// The marker runs parsed for the current separator story, in order: the
+    /// marker kind (`separator` or `continuationSeparator`) and whether its
+    /// run is a deletion or move away (§17.13.5), which leaves the story.
+    static PARSED_SEPARATOR_MARKERS: std::cell::RefCell<Vec<(&'static str, bool)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Record the marker children of a hidden run while a separator story is
-/// parsed (see `HIDDEN_SEPARATOR_MARKERS`).
-fn note_hidden_separator_markers(run: roxmltree::Node<'_, '_>) {
-    if !PARSING_SEPARATOR_STORY.with(std::cell::Cell::get) {
-        return;
-    }
-    HIDDEN_SEPARATOR_MARKERS.with(|hidden| {
-        hidden.borrow_mut().extend(
-            run.children()
-                .filter(|child| {
-                    is_w_ns(child.tag_name().namespace())
-                        && matches!(child.tag_name().name(), "separator" | "continuationSeparator")
-                })
-                .map(|child| child.id()),
-        );
-    });
-}
-
-/// The closed class of a listed story (§17.11.3/.9): one or more `w:p`
-/// whose runs hold text, tabs and text-wrapping breaks, with at most one
-/// §17.11.23/§17.11.1 marker among them, parsed in place as an empty marker
-/// run (`note_separator_marker`). Each paragraph's effective properties (style
-/// cascade, §17.3.1.33 spacing, line rule) are kept so layout measures the band
-/// from them instead of a mark-only scalar. A story without a marker draws no
-/// rule (mark None).
-/// The marker run stays in place even when it is the paragraph's only run, so
-/// the paragraph's indents, alignment and direction position it like any
-/// other inline content. Paragraph borders and shading paint with the
-/// story. Numbering, frames, a hidden mark, tables and other run content are
-/// not represented; those stories stay unsupported (absent).
+/// A listed separator story (§17.11.3/.9), parsed like any note body: the
+/// story parser unwraps content controls, selects markup-compatibility
+/// choices, applies revisions and hidden text and skips range markup, and its
+/// §17.11.23/§17.11.1 marker becomes an empty marker run
+/// (`note_separator_marker`) in place. Representability is then decided on
+/// the parsed paragraphs: each keeps its effective properties (style cascade,
+/// §17.3.1.33 spacing, line rule, borders and shading) so layout measures the
+/// band from them. Kept: text, fields, line breaks and inline pictures, with
+/// at most one surviving marker (a story without one draws no rule, mark
+/// None). Not represented (the story stays absent and the default rule
+/// applies): tables and other block content, numbered or framed paragraphs,
+/// an empty paragraph with a hidden mark, and other run content.
 #[allow(clippy::too_many_arguments)]
 fn selected_note_separator_story(
     note: roxmltree::Node<'_, '_>,
@@ -2652,147 +2634,40 @@ fn selected_note_separator_story(
     synthesized: bool,
 ) -> Option<(crate::types::NoteSeparatorMark, Vec<DocParagraph>)> {
     use crate::types::NoteSeparatorMark;
-    let is_w = |node: roxmltree::Node<'_, '_>, name: &str| {
-        is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == name
-    };
-    // Structure only: paragraph properties, zero-width range markup (§17.13
-    // bookmarks, comment, permission and move ranges, proofing marks) and
-    // runs of run properties, text, tabs, text-wrapping breaks and the marker.
-    // Any other content (foreign or not represented here) leaves the story
-    // unsupported.
-    let range_markup = |node: &roxmltree::Node<'_, '_>| {
-        is_w_ns(node.tag_name().namespace())
-            && matches!(
-                node.tag_name().name(),
-                "bookmarkStart"
-                    | "bookmarkEnd"
-                    | "proofErr"
-                    | "permStart"
-                    | "permEnd"
-                    | "commentRangeStart"
-                    | "commentRangeEnd"
-                    | "moveFromRangeStart"
-                    | "moveFromRangeEnd"
-                    | "moveToRangeStart"
-                    | "moveToRangeEnd"
-                    | "customXmlInsRangeStart"
-                    | "customXmlInsRangeEnd"
-                    | "customXmlDelRangeStart"
-                    | "customXmlDelRangeEnd"
-                    | "customXmlMoveFromRangeStart"
-                    | "customXmlMoveFromRangeEnd"
-                    | "customXmlMoveToRangeStart"
-                    | "customXmlMoveToRangeEnd"
-            )
-    };
-    // Block-level zero-width range markup (bookmarks, comment, permission
-    // and move ranges, proofing marks) may sit between the story's
-    // paragraphs; it holds no content.
-    let blocks: Vec<_> = note
-        .children()
-        .filter(|child| child.is_element() && !range_markup(child))
-        .collect();
-    if blocks.is_empty() || !blocks.iter().all(|block| is_w(*block, "p")) {
-        return None;
-    }
-    let run_content = |node: &roxmltree::Node<'_, '_>| {
-        is_w(*node, "rPr")
-            || is_w(*node, "lastRenderedPageBreak")
-            || is_w(*node, "t")
-            || is_w(*node, "delText")
-            || is_w(*node, "tab")
-            || is_w(*node, "cr")
-            || is_w(*node, "fldChar")
-            || is_w(*node, "instrText")
-            || is_w(*node, "delInstrText")
-            || is_w(*node, "separator")
-            || is_w(*node, "continuationSeparator")
-            // §17.3.3.30 symbols and §17.3.3.18/.29 hyphens parse as text.
-            || is_w(*node, "sym")
-            || is_w(*node, "noBreakHyphen")
-            || is_w(*node, "softHyphen")
-            // Drawing content (§17.3.3.9 drawing, VML pict, a §M.3 markup
-            // compatibility choice): only an inline picture survives the
-            // representability check after parsing and MC selection.
-            || is_w(*node, "drawing")
-            || is_w(*node, "pict")
-            || (node.tag_name().name() == "AlternateContent"
-                && node.tag_name().namespace() == Some("http://schemas.openxmlformats.org/markup-compatibility/2006"))
-            || (is_w(*node, "br")
-                && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
-    };
-    // Inline containers (§17.16.22 hyperlinks, §17.16.19 simple fields,
-    // §17.5.1 smart tags and custom XML, §17.5.2 content controls, §17.13.5
-    // tracked insertions, deletions and moves) hold the same content.
-    fn inline_content(
-        node: roxmltree::Node<'_, '_>,
-        range_markup: &dyn Fn(&roxmltree::Node<'_, '_>) -> bool,
-        run_content: &dyn Fn(&roxmltree::Node<'_, '_>) -> bool,
-    ) -> bool {
-        let w = |name: &str| is_w_ns(node.tag_name().namespace()) && node.tag_name().name() == name;
-        let children_ok = |skip: &[&str]| {
-            node.children().filter(|child| child.is_element()).all(|child| {
-                (is_w_ns(child.tag_name().namespace()) && skip.contains(&child.tag_name().name()))
-                    || inline_content(child, range_markup, run_content)
-            })
-        };
-        if range_markup(&node) {
-            true
-        } else if w("r") {
-            node.children().filter(|child| child.is_element()).all(|child| run_content(&child))
-        } else if w("hyperlink") || w("ins") || w("del") || w("moveFrom") || w("moveTo") {
-            children_ok(&[])
-        } else if w("fldSimple") {
-            children_ok(&["fldData"])
-        } else if w("smartTag") {
-            children_ok(&["smartTagPr"])
-        } else if w("customXml") {
-            children_ok(&["customXmlPr"])
-        } else if w("sdt") {
-            children_ok(&["sdtPr", "sdtEndPr", "sdtContent"])
-                && node
-                    .children()
-                    .filter(|child| child.is_element() && child.tag_name().name() == "sdtContent")
-                    .all(|content| {
-                        content.children().filter(|child| child.is_element())
-                            .all(|child| inline_content(child, range_markup, run_content))
-                    })
-        } else {
-            false
-        }
-    }
-    let supported = blocks.iter().all(|paragraph| {
-        paragraph.children().filter(|child| child.is_element()).all(|child| {
-            is_w(child, "pPr") || inline_content(child, &range_markup, &run_content)
-        })
-    });
-    if !supported {
-        return None;
-    }
-    // The story is parsed against scratch list counters (an unsupported
-    // story falls back and must not advance the notes' lists; a supported
-    // one holds no numbered paragraph) and one field state, since a complex
-    // field (§17.16.18) may span its paragraphs.
+    // Scratch list counters: a story that falls back must not advance the
+    // lists the notes share (a supported one holds no numbered paragraph).
     let mut scratch_numbering = num_map.clone();
-    let mut field = FieldState::default();
-    HIDDEN_SEPARATOR_MARKERS.with(|hidden| hidden.borrow_mut().clear());
-    let mut paragraphs = Vec::with_capacity(blocks.len());
-    for paragraph in &blocks {
-        PARSING_SEPARATOR_STORY.with(|flag| flag.set(true));
-        let parsed = parse_paragraph_with_diagnostics(
-            *paragraph,
-            style_map,
-            &mut scratch_numbering,
-            media_map,
-            chart_map,
-            rel_map,
-            theme,
-            None,
-            &mut field,
-            &mut Vec::new(),
-        );
-        PARSING_SEPARATOR_STORY.with(|flag| flag.set(false));
-        let mut parsed = parsed;
+    PARSED_SEPARATOR_MARKERS.with(|markers| markers.borrow_mut().clear());
+    PARSING_SEPARATOR_STORY.with(|flag| flag.set(true));
+    let content = parse_body_elements_in_story(
+        note,
+        style_map,
+        &mut scratch_numbering,
+        media_map,
+        chart_map,
+        rel_map,
+        theme,
+        &HashMap::new(),
+        TablePositioningContext::IgnoredStory,
+        None,
+        StoryFlow::Fixed,
+    );
+    PARSING_SEPARATOR_STORY.with(|flag| flag.set(false));
+    let kinds: Vec<&'static str> = PARSED_SEPARATOR_MARKERS
+        .with(|markers| std::mem::take(&mut *markers.borrow_mut()))
+        .into_iter()
+        .filter(|(_, omitted)| !omitted)
+        .map(|(kind, _)| kind)
+        .collect();
+    if kinds.len() > 1 {
+        return None;
+    }
+    let mut paragraphs = Vec::with_capacity(content.len());
+    for element in content {
+        let BodyElement::Paragraph(parsed) = element else {
+            return None;
+        };
+        let mut parsed = *parsed;
         // §17.3.1.20: a saved page-break hint is no content of the story,
         // and the story shows its final text: deleted and moved-away runs
         // (§17.13.5) leave it.
@@ -2825,33 +2700,19 @@ fn selected_note_separator_story(
                     && shape.text_blocks.is_empty()
                     && shape.text_box_content.is_empty())
         });
-        // Paragraph borders and shading (§17.3.1.24/.31) are laid out and
-        // painted with the story's paragraph.
+        // A hidden mark (§17.3.2.41 on the paragraph mark) hides only the
+        // mark: visible runs keep their line. An empty paragraph whose mark
+        // is hidden has no line to measure.
         if !representable
             || parsed.numbering.is_some()
             || parsed.frame_pr.is_some()
-            || parsed.mark_vanish
+            || (parsed.mark_vanish && parsed.runs.is_empty())
         {
             return None;
         }
         paragraphs.push(parsed);
     }
-    // Markers of the final, visible content only: a marker in a deleted or
-    // moved-away run (§17.13.5) or in a hidden run is no marker of the
-    // story, so a tracked replacement keeps exactly the surviving marker.
-    let hidden = HIDDEN_SEPARATOR_MARKERS.with(|hidden| std::mem::take(&mut *hidden.borrow_mut()));
-    let markers: Vec<_> = note
-        .descendants()
-        .filter(|node| {
-            (is_w(*node, "separator") || is_w(*node, "continuationSeparator"))
-                && !hidden.contains(&node.id())
-                && !node
-                    .ancestors()
-                    .take_while(|ancestor| *ancestor != note)
-                    .any(|ancestor| is_w(ancestor, "del") || is_w(ancestor, "moveFrom"))
-        })
-        .collect();
-    if markers.len() > 1 {
+    if paragraphs.is_empty() {
         return None;
     }
     let marked = paragraphs
@@ -2859,12 +2720,12 @@ fn selected_note_separator_story(
         .flat_map(|paragraph| &paragraph.runs)
         .filter(|run| matches!(run, DocRun::Text(text) if text.note_separator_marker))
         .count();
-    // Every marker element must be one parsed marker run.
-    if marked != markers.len() {
+    // Every surviving marker is one marker run of the parsed story.
+    if marked != kinds.len() {
         return None;
     }
-    let mark = match markers.first() {
-        Some(marker) if marker.tag_name().name() == "separator" => NoteSeparatorMark::Short,
+    let mark = match kinds.first() {
+        Some(&"separator") => NoteSeparatorMark::Short,
         Some(_) => NoteSeparatorMark::Full,
         None => NoteSeparatorMark::None,
     };
@@ -3426,10 +3287,18 @@ mod note_separator_tests {
             assert_eq!(document.footnotes.len(), 1);
             assert_eq!(document.footnotes[0].id, "1");
             // A foreign element is no listed story: Word's default applies.
-            // A listed story with foreign content stays unrepresented.
-            let expected = story
-                .starts_with("<x:footnote")
-                .then_some(crate::types::NoteSeparatorMark::Short);
+            // Foreign content inside a listed story is read as the story
+            // parser reads it everywhere: what is left without a marker is an
+            // empty story paragraph (no rule).
+            // A foreign block wrapper is transparent to it (its w:p and
+            // marker stay); a foreign run or marker leaves no marker.
+            let expected = Some(if story.starts_with("<x:footnote")
+                || story.contains("<x:p><w:r><w:separator/>")
+            {
+                crate::types::NoteSeparatorMark::Short
+            } else {
+                crate::types::NoteSeparatorMark::None
+            });
             assert_eq!(
                 document
                     .note_layout_settings
@@ -8811,10 +8680,7 @@ fn parse_run_inner(
     let (rpr_node, mut fmt) = match segment {
         // A hidden run is skipped below before any copy is needed; check the
         // shared formatting first so hidden segments cost nothing.
-        Some(segment) if segment.fmt.vanish.unwrap_or(false) => {
-            note_hidden_separator_markers(node);
-            return;
-        }
+        Some(segment) if segment.fmt.vanish.unwrap_or(false) => return,
         Some(segment) => (segment.rpr, segment.fmt.clone()),
         None => {
             let rpr_node = child_w(node, "rPr");
@@ -8824,7 +8690,6 @@ fn parse_run_inner(
 
     // Skip hidden runs entirely
     if fmt.vanish.unwrap_or(false) {
-        note_hidden_separator_markers(node);
         return;
     }
     if collect_run_diagnostics {
@@ -9118,6 +8983,14 @@ fn parse_run_inner(
                 // §17.11.23 / §17.11.1: the separator marker of a separator
                 // story, kept in place as an empty marker run with its run
                 // properties (only listed separator stories read it).
+                let kind = if child.tag_name().name() == "separator" {
+                    "separator"
+                } else {
+                    "continuationSeparator"
+                };
+                let omitted = revision
+                    .is_some_and(|revision| matches!(revision.kind.as_str(), "deletion" | "moveFrom"));
+                PARSED_SEPARATOR_MARKERS.with(|markers| markers.borrow_mut().push((kind, omitted)));
                 let this = TextRun {
                     text: String::new(),
                     no_break_before: false,
