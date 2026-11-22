@@ -659,6 +659,22 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
     }
   });
 
+  it('adds no page for a deleted note shape in a table-only body', () => {
+    // One exact 720pt row fills the page; the only reference is deleted.
+    const body = '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>'
+      + '<w:tr><w:trPr><w:trHeight w:val="14400" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>'
+      + '<w:p><w:r><w:t>BODY</w:t></w:r><w:del w:id="9" w:author="a" w:date="2026-01-01T00:00:00Z">'
+      + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:del></w:p></w:tc></w:tr></w:tbl>';
+    try {
+      for (const markup of [false, true]) {
+        variant = { body, markup };
+        expect(layOutDocument('footnote', 'vml-text-square').pages).toHaveLength(1);
+      }
+    } finally {
+      variant = {};
+    }
+  });
+
   it.each(['footnote', 'endnote'] as const)('appends no %s host paragraph for a deleted shape', (story) => {
     const paragraphs = (markup: boolean, storyRuns: string) => {
       variant = { storyRuns, markup };
