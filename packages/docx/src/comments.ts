@@ -1,6 +1,6 @@
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import { sourceKey } from './layout/source-key.js';
-import { runHighlightRect } from './run-clip.js';
+import { joinLineBoxes, runHighlightRect } from './run-clip.js';
 import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
 import type { DocComment, DocxClipRegion, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
@@ -468,20 +468,11 @@ function highlightRects(
   const merged: DocxCommentHighlightRect[] = [];
   for (const rect of rects) {
     const previous = merged.at(-1);
-    if (
-      previous
-      && previous.y === rect.y
-      && previous.height === rect.height
-      && previous.transform === rect.transform
-      && JSON.stringify(previous.clips) === JSON.stringify(rect.clips)
-    ) {
-      const left = Math.min(previous.x, rect.x);
-      const right = Math.max(previous.x + previous.width, rect.x + rect.width);
-      merged[merged.length - 1] = Object.freeze({
-        ...previous,
-        x: left,
-        width: right - left,
-      });
+    // One line in the run's own frame: a turned line joins along its axis.
+    const joined = previous && JSON.stringify(previous.clips) === JSON.stringify(rect.clips)
+      ? joinLineBoxes(previous, rect) : null;
+    if (previous && joined) {
+      merged[merged.length - 1] = Object.freeze({ ...previous, ...joined });
     } else {
       merged.push(Object.freeze({ ...rect }));
     }

@@ -136,4 +136,22 @@ describe('resolvePageCommentAnchors', () => {
     expect(percent('top')).toBeCloseTo(18, 9);
     expect(percent('height')).toBeCloseTo(7, 9);
   });
+
+  it('joins tints along a turned line and never across two turned columns', () => {
+    installDom();
+    const comments = [{ id: 'turned', author: 'Ada', text: 'Turned' }];
+    const turned = (x: number, y: number): DocxTextRunInfo => ({
+      ...run([1]), x, y, w: 40, h: 14, transform: 'rotate(90deg)',
+    });
+    const tints = (runs: DocxTextRunInfo[]) => {
+      const tint = makeEl('div');
+      buildDocxCommentMargin(tint as unknown as HTMLDivElement, null, runs,
+        { comments, anchors: [anchor('turned', [1])] }, 600, 800, null, () => undefined, 1, 260, false);
+      return tint.children.length;
+    };
+    // Two columns side by side at the same page y: two tints.
+    expect(tints([turned(200, 100), turned(150, 100)])).toBe(2);
+    // One column, consecutive runs down its line: one tint.
+    expect(tints([turned(200, 100), turned(200, 150)])).toBe(1);
+  });
 });

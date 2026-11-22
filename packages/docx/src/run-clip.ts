@@ -189,6 +189,27 @@ export function runHighlightRect(run: Readonly<DocxTextRunInfo>): Readonly<{
   return run.clips ? { ...rect, clips: run.clips } : rect;
 }
 
+/** Two highlight boxes (placed like DocxTextRunInfo.highlightBounds) of one
+ * rendered line, joined across the gap between them: they must share their
+ * orientation, height and position across the line, measured in their own
+ * frame, so a turned line joins along its own axis and two turned columns
+ * never join. Returns the joined box's origin and length, or null. */
+export function joinLineBoxes(
+  previous: Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>,
+  next: Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>,
+): Readonly<{ x: number; y: number; width: number }> | null {
+  if (previous.transform !== next.transform || previous.height !== next.height) return null;
+  const [a, b, c, d] = orientation(previous.transform);
+  // Orientations are rotations or reflections: the inverse is the transpose.
+  const along = (x: number, y: number) => a * x + b * y;
+  const across = (x: number, y: number) => c * x + d * y;
+  const line = across(previous.x, previous.y);
+  if (Math.abs(line - across(next.x, next.y)) > 1e-9) return null;
+  const start = Math.min(along(previous.x, previous.y), along(next.x, next.y));
+  const end = Math.max(along(previous.x, previous.y) + previous.width, along(next.x, next.y) + next.width);
+  return { x: a * start + c * line, y: b * start + d * line, width: end - start };
+}
+
 /** The linear part of an orientation transform as text-run-projection emits
  * it (`rotate(±90deg)` or `matrix(a, b, c, d, 0, 0)`); identity when absent. */
 function orientation(transform: string | undefined): readonly [number, number, number, number] {

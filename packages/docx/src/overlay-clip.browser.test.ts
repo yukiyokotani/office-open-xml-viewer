@@ -88,8 +88,9 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
       api.buildDocxTextLayer(layer, runs, 800, 600, () => undefined);
       layer.style.width = `${width}px`;
       layer.style.height = `${width * 0.75}px`;
+      const origin = layer.getBoundingClientRect();
       return points.map(([x, y]) => {
-        const hit = document.elementFromPoint(x, y);
+        const hit = document.elementFromPoint(origin.left + x, origin.top + y);
         return hit?.tagName === 'SPAN' ? hit.textContent ?? '' : '';
       });
     },
@@ -134,6 +135,17 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(await hits(runs, 800, [[190, 110]])).toEqual(['MMMMMMMMMM']);
     // At 1600px the clip starts at x=340 and the span has grown with the page.
     expect(await hits(runs, 1600, [[380, 220]])).toEqual(['MMMMMMMMMM']);
+  });
+
+  it('sizes spans by the page width inside a vertical-rl host', async () => {
+    await page.evaluate(() => { document.body.style.writingMode = 'vertical-rl'; });
+    try {
+      const runs = [link({ text: 'MMMMMMMMMM', w: 120 })];
+      // The 20px monospace link covers about x=100-220 as on a horizontal page.
+      expect(await hits(runs, 800, [[150, 110], [300, 110]])).toEqual(['MMMMMMMMMM', '']);
+    } finally {
+      await page.evaluate(() => { document.body.style.writingMode = ''; });
+    }
   });
 
   it('keeps a link out of reach under an empty clip union', async () => {

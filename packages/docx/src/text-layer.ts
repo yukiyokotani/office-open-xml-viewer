@@ -70,6 +70,9 @@ export function buildDocxTextLayer(
   // when the page is resized uniformly, as its position and any clip
   // container do. At the intended size they equal the px values.
   layer.style.containerType = 'inline-size';
+  // The layer's inline axis is the page width whatever the host's writing
+  // mode, so cqw measure the page.
+  layer.style.writingMode = 'horizontal-tb';
   const pageLength = (px: number): string => (cssWidth > 0 ? `${(px / cssWidth) * 100}cqw` : `${px}px`);
   const pageFont = (font: string): string => font.replace(
     /(\d+(?:\.\d+)?)px/u, (_match, size: string) => pageLength(Number(size)),

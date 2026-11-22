@@ -1,4 +1,4 @@
-import { clippedBoxBounds, OverlayClipFrames, runHighlightRect } from './run-clip.js';
+import { clippedBoxBounds, joinLineBoxes, OverlayClipFrames, runHighlightRect } from './run-clip.js';
 import {
   overlayPercent,
   type ViewerCommentsOptions,
@@ -162,16 +162,14 @@ function mergeSameLineRuns(
   const merged: DocxTextRunInfo[] = [];
   for (const run of runs) {
     const previous = merged.at(-1);
-    if (
-      previous &&
-      previous.y === run.y &&
-      previous.h === run.h &&
-      sameClips(previous.clips, run.clips) &&
-      previous.transform === run.transform
-    ) {
-      const left = Math.min(previous.x, run.x);
-      const right = Math.max(previous.x + previous.w, run.x + run.w);
-      merged[merged.length - 1] = { ...previous, x: left, w: right - left };
+    const joined = previous && sameClips(previous.clips, run.clips)
+      ? joinLineBoxes(
+        { x: previous.x, y: previous.y, width: previous.w, height: previous.h, transform: previous.transform },
+        { x: run.x, y: run.y, width: run.w, height: run.h, transform: run.transform },
+      )
+      : null;
+    if (previous && joined) {
+      merged[merged.length - 1] = { ...previous, x: joined.x, y: joined.y, w: joined.width };
       continue;
     }
     merged.push({ ...run });
