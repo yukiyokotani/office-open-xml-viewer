@@ -1316,7 +1316,7 @@ try {
       {
         title: 'Render one XLSX sheet into a canvas',
         paragraphs: [
-          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs or footer controls. Native worksheet scrollbars are shown by default; set showScrollbars: false only when the host provides its own viewport navigation.',
+          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs or footer controls. Native worksheet scrollbars are shown by default; from 0.76.2, set showScrollbars: false only when the host provides its own viewport navigation.',
           'This is an XLSX-specific Viewer boundary. A worksheet is not treated as equivalent to a DOCX page or PPTX slide; each format keeps the Viewer split that matches its own document model.',
           'fromWorkbook() does not materialize an arbitrary first worksheet. The first goToSheet(index) materializes only the requested sheet, which keeps parse-once multi-window integrations efficient. The full XlsxViewer still starts its initial sheet display immediately.',
         ],

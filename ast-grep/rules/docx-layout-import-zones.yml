@@ -5,8 +5,9 @@ message: The DOCX renderer adapter must not import a pre-retained-layout measure
 note: |
   Banned by module name wherever it lives, so moving one of these modules
   under `layout/` or `paint/` (which the renderer may otherwise import)
-  cannot bring the edge back. The deleted fragment and table-geometry modules
-  are banned as paths in `scripts/tombstones.mjs`.
+  cannot bring the edge back. The fragment and table-geometry modules are
+  deleted (`scripts/tombstones.mjs` bans their `.ts` files); the names stay
+  here so no other module form can stand in for them.
 rule:
   any:
     # `\u0072equire` is `require`; names are read as written.
@@ -26,7 +27,7 @@ utils:
       - all:
           - regex: "^['\"`]\\."
           - not: { regex: "^['\"`](\\./|(\\.\\./)+)[A-Za-z0-9_@-][A-Za-z0-9_.@-]*(/[A-Za-z0-9_@-][A-Za-z0-9_.@-]*)*['\"`]$" }
-      - regex: "^['\"`](.*/)?(layout-context|line-layout|paragraph-measure)(\\.(js|mjs|cjs|ts|tsx))?([?#].*)?['\"`]$"
+      - regex: "^['\"`](.*/)?(layout-context|layout-fragments|line-layout|paragraph-measure|table-fragments|table-geometry)(\\.(js|mjs|cjs|ts|tsx))?([?#].*)?['\"`]$"
 files:
   - "packages/docx/src/renderer.ts"
 ---

@@ -6,13 +6,16 @@
 --
 -- Opens the copy in installed Microsoft Office for macOS and exports a PDF,
 -- the visual reference for the legacy survey. Requires macOS automation
--- permission for each Office application. Runs are sequential, and an Office
--- failure stops the run rather than leaving documents or dialogs open.
+-- permission for each Office application. Run one export at a time; on an
+-- Office error the script closes the document it opened and stops.
 -- Each application must report its automation security and confirm that
 -- macros are disabled before a document is opened; Word and Excel link
 -- updates are disabled too. A build that cannot report the setting is
--- refused. Do not weaken this guard to get a passing run. Originals and
--- existing references are never changed; PDFs and page images stay local.
+-- refused. Do not weaken this guard to get a passing run.
+-- The script does not check whether the output path already exists (Excel and
+-- Word alerts are turned off while it saves), so an existing file at that path
+-- can be overwritten: pass a fresh path, never a corpus original or an
+-- existing reference. Keep the PDFs and page images local.
 on sameLocalFile(actualPath, expectedPath)
     -- Office can return a different symbolic-link spelling of the same path.
     -- Resolve both existing files outside the application's terminology scope.

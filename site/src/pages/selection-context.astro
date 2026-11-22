@@ -283,7 +283,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
       <p>
         The extension keeps the snapshot in memory and exposes it only to its MCP child through an
         authenticated IPv4-loopback bridge. Each bridge start creates a random 256-bit bearer token
-        that is passed only to the MCP child process, so restarting MCP replaces the credentials.
+        that is passed only to the MCP child process, so restarting the bridge replaces the credentials.
         Reloading a preview starts a new selection session, so an obsolete page cannot restore a
         selection from an earlier document. <code>context: null</code> means there is no active
         OOXML preview. A non-null context can still have <code>selection: null</code> when the active

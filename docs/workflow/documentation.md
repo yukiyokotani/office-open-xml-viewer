@@ -41,8 +41,10 @@ one script belongs in that script's header.
 - A change that makes a statement in `docs/`, a `README.md` or an `AGENTS.md`
   false corrects or deletes that statement in the same PR.
 - Delete instead of archiving. Git history and the PR keep the old text.
-- A migration guide is deleted once no supported release branch links to it or
-  prints its URL. Until then it keeps its path.
+- A migration guide is deleted once nothing on `main` links to it and no
+  supported release prints a URL that resolves to its path on `main`. Until
+  then it keeps its path. A relative link inside a release branch resolves
+  within that branch and does not keep the file on `main`.
 - Do not cite an issue as open work unless it is open. When the issue closes,
   remove the sentence or state the outcome.
 - Do not record dated status, checklists, case counts or one-time measurements
@@ -53,8 +55,9 @@ can be checked mechanically:
 
 - every `AGENTS.md` chain fits Codex's 32 KiB limit and stays a short map;
 - every page under `docs/` is indexed and every relative link resolves;
-- a top-level `docs/*.md` guide is linked from a consumer-facing surface, so a
-  guide nothing links to any more fails the check and is deleted;
+- `docs/` holds Markdown only, and a top-level `docs/*.md` guide is a link
+  destination in a consumer-facing surface, so a guide nothing links to any
+  more fails the check and is deleted;
 - no Markdown file exists outside the names listed above;
 - repository paths and `pnpm` scripts named in `AGENTS.md`, `docs/workflow/`,
   `docs/design-docs/` and the skills exist;

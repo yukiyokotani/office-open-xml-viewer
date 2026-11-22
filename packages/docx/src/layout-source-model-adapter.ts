@@ -48,9 +48,8 @@ import { defaultSectionGeometry } from './layout/context.js';
 
 /** The public compatibility model and the sealed layout source are separate
  * ownership graphs, so mutating the public model can never change retained
- * layout. Caller-owned input is detached one logical block at a time (at most
- * one table copied at once); exclusively owned input is consumed in place.
- * Neither path makes a whole-document deep copy. */
+ * layout. Caller-owned input is detached one top-level block at a time, not
+ * by a whole-document clone; exclusively owned input is consumed in place. */
 export interface LayoutSourceModelAdapter {
   /** Stable public compatibility model, intentionally outside the source graph. */
   readonly document: DocxDocumentModel;

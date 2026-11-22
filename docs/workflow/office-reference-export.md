@@ -101,9 +101,10 @@ without leaving it in a changed state.
   Word `ExportAsFixedFormat`/`SaveAs2` and Excel embedded-chart export called
   from PowerShell hang indefinitely with no dialog, while the same calls from
   VBScript finish in seconds.
-- Use `scripts/office-export/windows-export.ps1`, which wraps that per-file
-  VBScript with a timeout per item and kills only the Office processes it
-  started.
+- Wrap the per-file VBScript in a driver that verifies macros are disabled
+  before opening a file, applies a timeout per item, ends only the Office
+  process it started, treats a non-zero exit as a failure, and removes its
+  staging copies when the run ends.
 - Word: `$wa.Quit()` (not `Quit(0)`); iterate merged tables through
   `Range.Cells`; screenshots need `SetProcessDPIAware` and an explicit
   `Zoom.Percentage` (PageFit is ignored). Layout probes can read

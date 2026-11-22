@@ -1,15 +1,16 @@
 /**
  * Layout diagnostics and the failure-containment policy (library policy).
  *
- * Unsupported or malformed optional content is recoverable only where its
- * retained node can stand in as a deterministic no-op without inventing
- * geometry or changing surrounding flow; the node owns the diagnostic and it
- * reaches `DocumentLayout.diagnostics`. An unavailable image or chart keeps its
- * authored extent as an `unavailable-resource` segment (`MISSING_RESOURCE`).
- * Non-finite or negative geometry, invalid ownership, non-convergence and
- * invariant violations stay fatal. Classify at the narrowest layer that knows
- * the content is optional; a catch-all at the viewer boundary would paint a
- * structurally invalid layout.
+ * Recoverable cases never invent geometry:
+ * - a drawing whose authored extent is missing or invalid is omitted by the
+ *   parser and reported through PARSER_DIAGNOSTIC_CONTRACT below;
+ * - an unavailable inline image or chart keeps its authored extent as an
+ *   `unavailable-resource` line segment with a `MISSING_RESOURCE` warning;
+ * - an unavailable anchored image keeps its flow bounds and wrap exclusion and
+ *   paints a `noop` drawing command that owns the `MISSING_RESOURCE` warning.
+ * Invalid retained geometry (non-finite values, non-plain data), invalid
+ * ownership, non-convergence and other invariant violations throw
+ * `LayoutInvariantError` and stay fatal.
  */
 import type {
   LayoutDiagnostic,

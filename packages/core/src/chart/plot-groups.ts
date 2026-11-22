@@ -140,9 +140,10 @@ export function classicPlotDispatch(chart: ChartModel): ClassicPlotDispatch {
   const onPrimaryCategories = (group: ChartPlotGroup): boolean =>
     group.categoryAxis === 'primary'
     || (group.categoryAxis === 'secondary' && sharesCategories);
-  // Excel canonicalizes a 2-D plus 3-D group input to one 3-D family. Mixed
-  // 2-D/3-D geometry is therefore never inferred: a multi-group plot area with
-  // any 3-D group fails closed.
+  // In the observed Office control, Excel rewrote a 2-D plus 3-D group input
+  // as one 3-D family, so mixed 2-D/3-D geometry is not inferred: two or more
+  // populated groups that include a 3-D group fail closed. (Empty groups were
+  // filtered above, and a single populated group is routed above.)
   if (groups.some(group => THREE_D_GROUPS.has(group.kind))) return 'unsupported';
   if (groups.length === 2 && groups[0].kind === 'bar' && groups[1].kind === 'scatter') {
     const [bar, scatter] = groups;
