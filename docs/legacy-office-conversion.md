@@ -258,8 +258,9 @@ numbers. A per-page restart counts continuously across pages. A custom
 reference mark shows its own text and uses no number.
 
 Section text flow is read per section. Horizontal-in-vertical runs are
-rendered only in sections with upright East Asian vertical text (`tbRl`);
-elsewhere they reject the document. For upward-flowing sections, the
+rendered only in body paragraphs of sections with upright East Asian vertical
+text (`tbRl`); in other sections, in table cells and in headers or footers
+they reject the document. For upward-flowing sections, the
 placement of headers, footers, notes, anchored drawings and upright tables
 follows the library's general vertical placement, without a claim of
 matching Word.

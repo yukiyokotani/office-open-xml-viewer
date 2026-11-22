@@ -265,6 +265,17 @@ const RELEASE_RETAINED_GUIDES = new Map([
   ['docs/migration-0.90.md', '0.90.x prints this URL in the useGoogleFonts deprecation warning'],
 ]);
 
+// Source text without block, HTML and line comments.
+const withoutComments = (text) =>
+  text
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/(^|\s)\/\/.*$/gm, '$1');
+
+// Shipped source of a package or the site: not a test, story, bench or
+// test-support module.
+const isShippedSource = (path) => !/\.(test|spec|stories|test-support|bench)\.[cm]?[jt]sx?$/.test(path);
+
 // Repository paths of the docs/ pages a consumer-facing file links to.
 // Markdown: inline and reference link destinations, relative or the page's
 // GitHub URL on `main`. Site and package source: that GitHub URL outside
@@ -285,10 +296,7 @@ function linkedDocs(path, text, blobUrl, renderedProperties = new Set()) {
     }
     return found;
   }
-  const code = text
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/(^|\s)\/\/.*$/gm, '$1');
+  const code = withoutComments(text);
   const url = String.raw`(https:\/\/github\.com\/[^\s"'\`<>)]+?\.md)(?![\w-]|\.\w)`;
   if (path.startsWith('site/')) {
     // A site file links a page where the URL is rendered as a link: an `href`
@@ -313,7 +321,7 @@ function linkedDocs(path, text, blobUrl, renderedProperties = new Set()) {
 // Names of the data properties a site component renders as a link target:
 // `href={item.property}`.
 const renderedLinkProperties = (text) =>
-  new Set([...text.matchAll(/href=\{\s*[\w$]+(?:\?)?\.([\w$]+)\s*\}/g)].map((match) => match[1]));
+  new Set([...withoutComments(text).matchAll(/href=\{\s*[\w$]+(?:\?)?\.([\w$]+)\s*\}/g)].map((match) => match[1]));
 
 // Guides that no consumer surface links to and no supported release retains.
 const guidesToDelete = (guides, linked, retained) =>
@@ -347,6 +355,10 @@ test('a consumer link to a guide is a real link destination, not incidental text
     [...renderedLinkProperties('<a class="x" href={o.detailsHref}>d</a> <a href={guide}>g</a> <a href={item?.url}>u</a>')],
     ['detailsHref', 'url'],
   );
+  assert.deepEqual([...renderedLinkProperties('<!-- <a href={o.detailsHref}>d</a> -->')], []);
+  assert.equal(isShippedSource('packages/docx/src/test-support/tab-fitting.test-support.ts'), false);
+  assert.equal(isShippedSource('packages/docx/src/a.test.ts'), false);
+  assert.equal(isShippedSource('packages/core/src/fonts/deprecations.ts'), true);
   assert.deepEqual(links('README.md', 'See <https://github.com/o/r/blob/main/docs/example.md>.'), ['docs/example.md']);
   assert.deepEqual(links('site/src/pages/a.astro', '<!-- https://github.com/o/r/blob/main/docs/example.md -->'), []);
   assert.deepEqual(
@@ -392,8 +404,8 @@ test('docs/ holds only procedures, the core beliefs, linked user guides and thei
     (path) =>
       path === 'README.md' ||
       /^packages\/[^/]+\/README\.md$/.test(path) ||
-      (/^site\/src\//.test(path) && !/\.test\.[cm]?[jt]s$/.test(path)) ||
-      (/^packages\/[^/]+\/src\/.*\.[cm]?[jt]s$/.test(path) && !/\.test\.[cm]?[jt]s$/.test(path)),
+      (/^site\/src\//.test(path) && isShippedSource(path)) ||
+      (/^packages\/[^/]+\/src\/.*\.[cm]?[jt]s$/.test(path) && isShippedSource(path)),
   );
   const texts = new Map(surfaces.map((surface) => [surface, read(join(ROOT, surface))]));
   const rendered = new Set(
@@ -448,7 +460,8 @@ function missingReferences(file, text, { exists, hasFileNamed, scriptsOf }) {
   // one of its words (`node scripts/x.mjs`).
   const words = [
     ...[...text.matchAll(FENCED_BLOCK)].map((match) => match[1]),
-    ...[...text.replace(FENCED_BLOCK, '').matchAll(/`([^`\n]+)`/g)].map((match) => match[1]),
+    // An inline code span may wrap across lines.
+    ...[...text.replace(FENCED_BLOCK, '').matchAll(/`([^`]+)`/g)].map((match) => match[1]),
   ]
     .flatMap((code) => code.split(/\s+/))
     .map((word) => word.replace(/^["'(]+|["'),;:]+$/g, ''))
@@ -477,7 +490,7 @@ function missingReferences(file, text, { exists, hasFileNamed, scriptsOf }) {
       missing.push(`${file}: ${span}`);
     }
   }
-  for (const [, filter, name] of text.matchAll(/\bpnpm (?:--filter (\S+) )?(?:run )?([a-z][\w:.-]*)/g)) {
+  for (const [, filter, name] of text.matchAll(/\bpnpm\s+(?:--filter\s+(\S+)\s+)?(?:run\s+)?([a-z][\w:.-]*)/g)) {
     if (pnpmBuiltins.has(name)) continue;
     // `<fmt>` stands for each format package; any other placeholder names no
     // single package.
@@ -530,6 +543,10 @@ test('a removed path or a script of another package is reported', () => {
   assert.deepEqual(check('`pnpm --filter @scope/<fmt> conformance`'), [
     'AGENTS.md: pnpm --filter @scope/xlsx conformance',
     'AGENTS.md: pnpm --filter @scope/pptx conformance',
+  ]);
+  assert.deepEqual(check('Rebuild (`pnpm\ngone-script` or `node\nscripts/gone.mjs`).'), [
+    'AGENTS.md: scripts/gone.mjs',
+    'AGENTS.md: pnpm gone-script',
   ]);
   assert.deepEqual(check('`pnpm --filter @scope/pptx conformance` and `pnpm nope`'), [
     'AGENTS.md: pnpm --filter @scope/pptx conformance',

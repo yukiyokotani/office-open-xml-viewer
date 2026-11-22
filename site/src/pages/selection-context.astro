@@ -282,7 +282,8 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         surrogate pair is not split. Pass different limits to <code>getSelectionContext()</code>.
         DOCX and PPTX <code>onSelectionContextChange</code> notifications use the default limits; XLSX
         notifications use the default cell limit with at most 65,536 characters of text and are
-        coalesced to one per animation frame. A native text selection produces context only when
+        coalesced to one per animation frame (one per microtask where the host has no
+        <code>requestAnimationFrame</code>). A native text selection produces context only when
         every range endpoint lies on a Viewer text surface, and its text is taken only from tagged
         Viewer runs.
       </p>

@@ -3,7 +3,8 @@ type RuntimeState = 'uninitialized' | 'ready' | 'poisoned';
 /**
  * Environment-neutral realm initialization, generation, and poison fan-out.
  *
- * wasm-bindgen keeps one module instance per JavaScript realm, so sessions
+ * Each format's wasm-bindgen glue keeps one module instance per JavaScript
+ * realm (DOCX, XLSX and PPTX each have their own generation), so sessions
  * never reinitialize WASM themselves. A trap poisons the whole generation:
  * every live session registered through `onPoison` fails, and the next
  * `ensureReady()` performs the single reinitialization. Sessions from the old

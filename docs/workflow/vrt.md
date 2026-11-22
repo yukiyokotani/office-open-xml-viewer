@@ -7,8 +7,9 @@ VRT is local-only because private samples are not redistributable.
 - The regression oracle is the previous renderer's output. Never use
   Word/Excel/PowerPoint or PDF images as the oracle; keep Office-reference
   fidelity evaluation as a separate run.
-- The baseline for unmerged work is the latest `origin/main`; stacked PRs
-  compare adjacent heads. A release compares against the previous release tag.
+- The baseline is the previous renderer the change will land on; see
+  [Choosing the baseline](#choosing-the-baseline) for unmerged work, backports,
+  stacked PRs and releases.
 - A missing or mismatched baseline fails the run; it is not a pass.
 - Every exact difference is a regression candidate, even when every changed
   document carries the feature being implemented. Adjudicate each changed
