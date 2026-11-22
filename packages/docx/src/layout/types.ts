@@ -241,6 +241,10 @@ export interface DrawingLayout extends LayoutNodeBase {
     layoutInCell?: true;
     /** @internal This occurrence contributes to its owning table-cell extent. */
     cellContainment?: true;
+    /** A DOCX text-box story's VML shape placed from the page origin
+     * (WORD_STORY_VML_PAGE_POSITION): its text box paints and indexes it in
+     * the box's host frame, outside the box's transform and clip. */
+    storyPagePosition?: true;
   }>;
   readonly textBoxIds?: readonly LayoutNodeId[];
 }

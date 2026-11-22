@@ -106,6 +106,10 @@ export interface AnchorAcquisitionInput {
   /** WORD_STORY_VML_PAGE_POSITION: a text-box story's text- or line-relative
    * wrapping VML shape stays at or below the page's top margin. */
   readonly storyTopMarginFloor?: boolean;
+  /** WORD_STORY_VML_PAGE_POSITION: a text-box or note story's VML shape
+   * placed from the page origin, painted and indexed in its text box's host
+   * frame. */
+  readonly storyPagePosition?: boolean;
 }
 
 export interface InternalAnchorRunWire {

@@ -428,10 +428,10 @@ pub struct NoteLayoutSettingsWire {
     /// matching Short/Full/None mark above. Layout measures inherited and
     /// authored spacing and line facts (§17.3.1.33); no pPr does not mean zero
     /// or a fixed gap. Missing and unsupported stories retain the fallback.
-    /// word-note-vml-host-paragraph: the empty Normal paragraph Word appends
-    /// to the end of the main story to hold the absolutely positioned VML
-    /// shapes of the referenced footnotes and endnotes (its runs are empty;
-    /// `note_shapes` holds the shapes by note).
+    /// word-note-vml-host-paragraph: the empty Normal-style paragraph
+    /// appended to the end of the main story that hosts the absolutely
+    /// positioned VML shapes of the referenced footnotes and endnotes (its
+    /// runs are empty; `note_shapes` holds the shapes by note).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_shape_host_paragraph: Option<Box<DocParagraph>>,
     /// The absolutely positioned VML shapes each note gives up, in part and
@@ -2194,6 +2194,11 @@ pub struct AnchorAcquisitionWire {
     /// margin. Serialized only when set.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub story_top_margin_floor: bool,
+    /// word-story-vml-page-position: a text-box or note story's VML shape
+    /// placed from the page origin; its text box paints and indexes it in
+    /// the box's host frame. Serialized only when set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub story_page_position: bool,
 }
 
 /// VML §19.1.2.18 facts. Absolute offsets remain points; fractional offsets

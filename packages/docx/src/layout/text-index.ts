@@ -1,4 +1,5 @@
 import { sourceOwnedTextPlacements, type SourceOwnedTextGeometry } from './text-source-ownership.js';
+import { storyPagePositionedAnchors } from './story-page-anchors.js';
 import {
   composeAffine,
   quarterTurnAffine,
@@ -80,6 +81,8 @@ interface ProjectionContext {
   readonly drawingPaintOrder: ReadonlyMap<string, number>;
   readonly emittedTextBoxes: Set<string>;
   readonly emittedDrawings: Set<string>;
+  /** Drawings already indexed in their text box's host frame. */
+  readonly hostFrameDrawings: Set<string>;
   readonly runs: TextRunGeometry[];
   readonly sourceRuns: Map<string, Set<number>>;
   readonly completedParagraphSources: Set<string>;
@@ -329,6 +332,13 @@ function visitTextBox(
     textBoxVerticalMode: textBox.verticalMode ?? projection.textBoxVerticalMode,
   };
   const textBoxProjection = withClip(transformedProjection, textBox.clipBounds);
+  // WORD_STORY_VML_PAGE_POSITION: the story's page-positioned VML shapes are
+  // indexed in the box's host frame, as paint draws them (outside the box's
+  // transform and clip); the story's own visit skips them.
+  for (const { owner, drawing } of storyPagePositionedAnchors(textBox.story.blocks)) {
+    context.hostFrameDrawings.add(drawing.id);
+    visitDrawing(new Map(owner.textBoxes.map((box) => [box.id, box])), drawing, projection, context);
+  }
   for (const block of textBox.story.blocks) {
     visitNode(block, textBoxProjection, context);
   }
@@ -539,6 +549,7 @@ function visitParagraph(
   ].sort((left, right) => left.runIndex - right.runIndex || left.index - right.index);
   for (const entry of elementsInSourceOrder) {
     if (entry.kind === 'drawing') {
+      if (context.hostFrameDrawings.has(entry.drawing.id)) continue;
       visitDrawing(textBoxesById, entry.drawing, inlineDrawingProjection(entry.drawing), context);
       continue;
     }
@@ -691,6 +702,7 @@ function pageGeometryIndex(
     drawingPaintOrder,
     emittedTextBoxes: new Set(),
     emittedDrawings: new Set(),
+    hostFrameDrawings: new Set(),
     runs: [],
     sourceRuns: new Map(),
     completedParagraphSources: new Set(),

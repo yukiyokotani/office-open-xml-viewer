@@ -5450,6 +5450,8 @@ function acquireAnchorOccurrence(
         && options.anchorCellBounds
         ? { cellContainment: true as const }
         : {}),
+      ...(outer.run.anchorAcquisitionInput.storyPagePosition === true
+        ? { storyPagePosition: true as const } : {}),
     },
     ...(textBoxIds.length ? { textBoxIds } : {}),
   };

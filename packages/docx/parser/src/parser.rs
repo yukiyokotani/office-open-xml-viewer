@@ -2055,11 +2055,25 @@ fn finish_document(
     let mut note_shapes = std::mem::take(&mut footnote_stories.note_shapes);
     note_shapes.append(&mut endnote_stories.note_shapes);
     if !note_shapes.is_empty() {
-        // word-note-vml-host-paragraph: one empty Normal paragraph at the end
-        // of the main story hosts the shapes of the referenced notes, which
-        // normalization selects once the whole body is known.
+        // word-note-vml-host-paragraph: one empty paragraph in the Normal
+        // style at the end of the main story hosts the shapes of the
+        // referenced notes, which normalization selects once the whole body
+        // is known. The style is explicit, so another default paragraph
+        // style does not apply.
+        let style = environment
+            .style_map
+            .normal_paragraph_style_id()
+            .map(|id| {
+                format!(
+                    r#"<w:pPr><w:pStyle w:val="{}"/></w:pPr>"#,
+                    id.replace('&', "&amp;")
+                        .replace('"', "&quot;")
+                        .replace('<', "&lt;")
+                )
+            })
+            .unwrap_or_default();
         if let Ok(doc) = parse_guarded(&format!(
-            r#"<w:p xmlns:w="{}"/>"#,
+            r#"<w:p xmlns:w="{}">{style}</w:p>"#,
             ooxml_common::ns::wordprocessingml::TRANSITIONAL
         )) {
             let mut host = parse_paragraph_with_diagnostics(
@@ -2075,6 +2089,20 @@ fn finish_document(
                 &mut Vec::new(),
             );
             host.runs = Vec::new();
+            // The moved anchor characters take the host paragraph's mark
+            // formatting, not their note run's.
+            let (_, mark) = environment.style_map.resolve_normal_paragraph_style();
+            for group in &mut note_shapes {
+                for run in &mut group.runs {
+                    if let DocRun::AnchorHost(anchor) = run {
+                        anchor.font_size = host.default_font_size.unwrap_or(DEFAULT_FONT_SIZE);
+                        anchor.font_family = host.default_font_family.clone();
+                        anchor.font_family_east_asia = None;
+                        anchor.bold = mark.bold.unwrap_or(false);
+                        anchor.italic = mark.italic.unwrap_or(false);
+                    }
+                }
+            }
             let settings = environment
                 .note_layout_settings
                 .get_or_insert_with(Default::default);
@@ -11129,6 +11157,7 @@ fn parse_anchor_acquisition_wire(container: &roxmltree::Node) -> AnchorAcquisiti
         },
         group: None,
         story_top_margin_floor: false,
+        story_page_position: false,
     }
 }
 
@@ -14837,6 +14866,7 @@ fn apply_vml_story_page_position(
         ..page()
     };
     acquisition.story_top_margin_floor = floor;
+    acquisition.story_page_position = true;
     // The page origin is the frame, so a table cell of the story does not
     // stand in for it.
     acquisition.behavior.layout_in_cell = Some(false);

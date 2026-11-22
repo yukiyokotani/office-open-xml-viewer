@@ -9,11 +9,12 @@ import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { storeZip } from './conformance/generate.js';
 import { paintTextBoxLayout } from './paint/canvas-text.js';
+import { elementGeometryForPage } from './layout/text-index.js';
 
-// word-story-anchor-inline: Windows Word 16.0.20625 lays a wp:anchor inside a
-// text box, footnote or endnote story out exactly like a wp:inline of the same
-// extent, whatever its wrap, layer or relative frame. Synthetic reductions of
-// those controls: a DrawingML or VML text box, a footnote or an endnote
+// word-story-anchor-inline: a wp:anchor inside a text box, footnote or
+// endnote story lays out like a wp:inline of the same extent, whatever its
+// wrap, layer or relative frame (the evidence is in the rule). Synthetic
+// reductions of its controls: a DrawingML or VML text box, a footnote or an endnote
 // holding M01, a 40x20pt picture anchored 300pt from the column followed by
 // Ab, and MEND.
 
@@ -38,7 +39,13 @@ type Placement = 'inline' | 'wrapNone' | 'wrapSquare' | 'wrapTopAndBottom' | 'be
   | 'vml-text-square' | 'vml-text-square-mt50' | 'vml-margin' | 'vml-text-none' | 'vml-aligned';
 
 /** Story variants: the content in a table of the story, or a rotated box. */
-let variant: Readonly<{ table?: boolean; rotationDeg?: number }> = {};
+let variant: Readonly<{
+  table?: boolean; rotationDeg?: number;
+  /** Size of the VML rect's run (half points). */
+  shapeRunHalfPoints?: number;
+  /** A default paragraph style other than Normal, at this size (half points). */
+  defaultStyleHalfPoints?: number;
+}> = {};
 
 const encoder = new TextEncoder();
 const xml = (body: string) => encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${body}`);
@@ -51,7 +58,8 @@ function vmlRect(placement: Placement): string {
   const top = placement === 'vml-text-square-mt50' ? 50 : 0;
   const wrap = placement === 'vml-text-none' ? 'none' : 'square';
   const aligned = placement === 'vml-aligned' ? 'mso-position-horizontal:center;mso-position-vertical:bottom;' : '';
-  return `<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:${top}pt;width:40pt;height:20pt;${aligned}`
+  const runProperties = variant.shapeRunHalfPoints ? `<w:rPr><w:sz w:val="${variant.shapeRunHalfPoints}"/></w:rPr>` : '';
+  return `<w:r>${runProperties}<w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:${top}pt;width:40pt;height:20pt;${aligned}`
     + `mso-position-horizontal-relative:${frames};mso-position-vertical-relative:${frames === 'text' ? 'text' : 'margin'}" `
     + `fillcolor="black" stroked="f"><w10:wrap type="${wrap}"/></v:rect></w:pict></w:r>`;
 }
@@ -114,7 +122,12 @@ function docx(story: Story, placement: Placement): Uint8Array {
     + 'w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr></w:body></w:document>';
   const styles = `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr>`
     + '<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault></w:docDefaults>'
-    + '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>';
+    + (variant.defaultStyleHalfPoints
+      ? '<w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+        + '<w:style w:type="paragraph" w:default="1" w:styleId="Big"><w:name w:val="Big"/>'
+        + `<w:rPr><w:sz w:val="${variant.defaultStyleHalfPoints}"/></w:rPr></w:style>`
+      : '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>')
+    + '</w:styles>';
   const settings = `<w:settings xmlns:w="${W}"><w:compat><w:compatSetting w:name="compatibilityMode" `
     + 'w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>';
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -174,6 +187,10 @@ function measureContext(): CanvasRenderingContext2D {
 }
 
 function layOut(story: Story, placement: Placement) {
+  return layOutDocument(story, placement).pages[0]!;
+}
+
+function layOutDocument(story: Story, placement: Placement) {
   const archive = new DocxArchive(docx(story, placement));
   let model: DocxDocumentModel;
   try {
@@ -187,7 +204,7 @@ function layOut(story: Story, placement: Placement) {
     model,
     createLayoutServices(model, { measureContext: measureContext() }),
     { currentDateMs: 0 },
-  ).pages[0]!;
+  );
 }
 
 beforeAll(async () => {
@@ -280,7 +297,12 @@ describe('word-story-vml-page-position', () => {
 });
 
 /** Device boxes of the filled paths a text box paints (identity base frame). */
-function paintedFills(story: Story, placement: Placement): Array<{ xPt: number; yPt: number; clipped: boolean }> {
+function paintedFills(
+  story: Story,
+  placement: Placement,
+  /** Paint the drawings as another producer's page-owned drawings. */
+  withoutStoryFlag = false,
+): Array<{ xPt: number; yPt: number; clipped: boolean }> {
   type M = { a: number; b: number; c: number; d: number; e: number; f: number };
   let m: M = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
   let clipped = false;
@@ -309,7 +331,8 @@ function paintedFills(story: Story, placement: Placement): Array<{ xPt: number; 
       if (path.length === 0) return;
       const xs = path.map(([x]) => x);
       const ys = path.map(([, y]) => y);
-      const width = Math.max(...xs) - Math.min(...xs);
+      // The rect's first edge is 40pt long in any rotation.
+      const width = path.length >= 2 ? Math.hypot(path[1]![0] - path[0]![0], path[1]![1] - path[0]![1]) : 0;
       if (Math.abs(width - 40) < 0.5) {
         fills.push({ xPt: Math.round(Math.min(...xs) * 100) / 100, yPt: Math.round(Math.min(...ys) * 100) / 100, clipped });
       }
@@ -331,7 +354,12 @@ function paintedFills(story: Story, placement: Placement): Array<{ xPt: number; 
   const page = layOut(story, placement);
   for (const node of page.layers.body) {
     if (node.kind !== 'paragraph') continue;
-    for (const textBox of node.textBoxes) paintTextBoxLayout(textBox, { ctx, scale: 1, dpr: 1, resources: { paint: () => {} } });
+    for (const textBox of node.textBoxes) {
+      const painted = withoutStoryFlag
+        ? JSON.parse(JSON.stringify(textBox, (key, value) => key === 'storyPagePosition' ? undefined : value)) as typeof textBox
+        : textBox;
+      paintTextBoxLayout(painted, { ctx, scale: 1, dpr: 1, resources: { paint: () => {} } });
+    }
   }
   return fills;
 }
@@ -426,5 +454,56 @@ describe('word-note-vml-host-paragraph ownership', () => {
     expect(result.hosted).toEqual([300]);
     const none = twoNotePackage({ endnote: 400 }, []);
     expect(none).toMatchObject({ hosted: [], pages: 1, bodyParagraphs: 1 });
+  });
+});
+
+describe('word-note-vml-host-paragraph formatting and story shape indexing', () => {
+  const hostLine = () => {
+    const body = layOut('endnote', 'vml-text-square').layers.body.filter((node) => node.kind === 'paragraph');
+    const host = body.at(-1)!;
+    return host.kind === 'paragraph' ? host.flowBounds.heightPt : NaN;
+  };
+
+  it('formats the host paragraph as an empty Normal paragraph, not with the note run', () => {
+    const plain = hostLine();
+    try {
+      variant = { shapeRunHalfPoints: 160 };
+      expect(hostLine()).toBe(plain);
+      variant = { defaultStyleHalfPoints: 160 };
+      expect(hostLine()).toBe(plain);
+    } finally {
+      variant = {};
+    }
+  });
+
+  it.each([0, 30])('indexes a story shape where it paints (text box rotated by %d degrees)', (rotationDeg) => {
+    variant = { rotationDeg };
+    try {
+      for (const story of ['drawingml-textbox', 'vml-textbox'] as const) {
+        const entries = elementGeometryForPage(layOutDocument(story, 'vml-text-square'), 0)
+          .filter((entry): entry is Extract<typeof entry, { drawing: unknown }> => 'drawing' in entry
+            && entry.drawing.flowBounds.widthPt === 40);
+        expect(entries).toHaveLength(1);
+        const { drawing, pointToPage, clips } = entries[0]!;
+        const x = pointToPage.a * drawing.flowBounds.xPt + pointToPage.c * drawing.flowBounds.yPt + pointToPage.e;
+        const y = pointToPage.b * drawing.flowBounds.xPt + pointToPage.d * drawing.flowBounds.yPt + pointToPage.f;
+        expect([Math.round(x * 100) / 100, Math.round(y * 100) / 100]).toEqual([300, 36]);
+        expect(clips).toEqual([]);
+      }
+    } finally {
+      variant = {};
+    }
+  });
+
+  it('keeps the text box transform and clip for page-owned drawings of other producers', () => {
+    variant = { rotationDeg: 30 };
+    try {
+      const fills = paintedFills('drawingml-textbox', 'vml-text-square', true);
+      expect(fills).toHaveLength(1);
+      expect(fills[0]).not.toEqual({ xPt: 300, yPt: 36, clipped: false });
+      expect(fills[0]!.clipped).toBe(true);
+    } finally {
+      variant = {};
+    }
   });
 });
