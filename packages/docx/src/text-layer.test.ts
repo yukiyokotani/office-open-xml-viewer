@@ -181,6 +181,7 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
     buildDocxTextLayer(layer as unknown as HTMLDivElement, runs, 100, 100, onLink);
     return layer.children;
   };
+  const cell = { x: 40, y: 0, width: 30, height: 12 };
 
   it('places a partly clipped hyperlink in a container of its clip, in page percentages', () => {
     // A 60px link at x=10 whose clip starts 30px into it; the container cuts
@@ -188,7 +189,7 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
     const [container] = layerWith([run({
       text: 'linklinklink', x: 10, w: 60,
       hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
-      clipBounds: { x: 40, y: 0, width: 30, height: 12 },
+      clips: [cell], clipBounds: cell,
     })], () => {});
     expect(container!.style.overflow).toBe('hidden');
     expect([container!.style.left, container!.style.width]).toEqual(['40%', '30%']);
@@ -198,12 +199,37 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
   });
 
   it('makes a wholly clipped run inert and leaves an unclipped run on the layer', () => {
+    const empty = { x: 20, y: 0, width: 0, height: 12 };
     const [hidden, open] = layerWith([
-      run({ x: 0, w: 10, clipBounds: { x: 20, y: 0, width: 0, height: 12 } }),
+      run({ x: 0, w: 10, clips: [empty], clipBounds: empty }),
       run({ x: 0, w: 10 }),
     ]);
     expect(hidden!.style.width).toBe('0%');
     expect(hidden!.children[0]!.style['pointer-events']).toBe('none');
     expect(open!.style['pointer-events']).toBe('all');
+  });
+
+  it('keeps document order: a container is shared only by consecutive runs with the same clips', () => {
+    const [first, between, second] = layerWith([
+      run({ text: 'A', x: 45, clips: [cell] }),
+      run({ text: 'C', x: 0 }),
+      run({ text: 'B', x: 50, clips: [cell] }),
+    ]);
+    expect(first!.children.map((child) => child.textContent)).toEqual(['A']);
+    expect(between!.textContent).toBe('C');
+    expect(second!.children.map((child) => child.textContent)).toEqual(['B']);
+  });
+
+  it('nests a turned container for a turned clip and orients the run against it', () => {
+    // A text box turned 90deg at (60, 10): the run shares its orientation.
+    const box = { x: 60, y: 10, width: 40, height: 20, transform: 'rotate(90deg)' };
+    const [outer] = layerWith([run({ x: 60, y: 15, w: 30, transform: 'rotate(90deg)', clips: [cell, box] })]);
+    const [inner] = outer!.children;
+    expect(inner!.style.overflow).toBe('hidden');
+    expect(inner!.style.transform).toBe('matrix(0, 1, -1, 0, 0, 0)');
+    const [span] = inner!.children;
+    // 5px along the box's own x axis, and no orientation left to apply.
+    expect([span!.style.left, span!.style.top]).toEqual(['12.5%', '0%']);
+    expect(span!.style.transform ?? '').toBe('');
   });
 });

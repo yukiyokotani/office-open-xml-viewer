@@ -1646,6 +1646,13 @@ export interface DocxTextRunInfo {
         width: number;
         height: number;
     }>;
+    clips?: readonly Readonly<{
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        transform?: string;
+    }>[];
 }
 export interface DocxTextSelectionContext {
     readonly format: 'docx';

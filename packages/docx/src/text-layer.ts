@@ -1,4 +1,4 @@
-import { overlayClipFrame, runIsClippedAway } from './run-clip.js';
+import { OverlayClipFrames, runIsClippedAway } from './run-clip.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -64,7 +64,7 @@ export function buildDocxTextLayer(
   setSelectionData(layer, 'pageIndex', pageIndex === undefined ? undefined : String(pageIndex));
 
   const ownerDocument = layer.ownerDocument ?? document;
-  const clipContainers = new Map<string, HTMLElement>();
+  const clipFrames = new OverlayClipFrames(layer, cssWidth, cssHeight);
   for (const [runIndex, run] of runs.entries()) {
     const span = ownerDocument.createElement('span');
     setSelectionData(span, 'ooxmlSelectionRun', 'docx');
@@ -102,7 +102,10 @@ export function buildDocxTextLayer(
     // reference px, i.e. divided by k. A run without it keeps `font` as is.
     const reference = run.referenceFont;
     const k = reference && reference.scale > 0 && Number.isFinite(reference.scale) ? reference.scale : 1;
-    let transformValue = run.transform ?? '';
+    // WORD_CELL_CONTENT_CLIP: a clipped run is placed in nested containers
+    // of its clips (overflow hidden), which clip its hit box and selection.
+    const frame = clipFrames.place(run);
+    let transformValue = frame.orientation;
     if (k !== 1) transformValue = `${transformValue ? `${transformValue} ` : ''}scale(${k})`;
     const tcy = measureForFont && run.eastAsianVert
       ? tateChuYokoOverlayScale(run, runOverlayMeasure(run, measureForFont)) : 1;
@@ -115,9 +118,6 @@ export function buildDocxTextLayer(
     // glyphs stay `color:transparent` (the link's blue/underline is already
     // painted on the canvas), so a link run's selection behaviour is otherwise
     // identical to a plain run. A non-link run is byte-identical to before.
-    // WORD_CELL_CONTENT_CLIP: a clipped run is placed in a container sized to
-    // its clip (overflow hidden), which clips its hit box and selection.
-    const frame = overlayClipFrame(layer, run, cssWidth, cssHeight, clipContainers);
     const hidden = runIsClippedAway(run);
     const link = onHyperlinkClick && !hidden ? run.hyperlink : undefined;
     const cursor = link ? 'pointer' : 'text';
@@ -139,7 +139,7 @@ export function buildDocxTextLayer(
     // rotates into the column exactly as before at 1× scale.
     span.style.cssText =
       `position:absolute;` +
-      `left:${frame.left(run.x)};top:${frame.top(run.y)};` +
+      frame.position(0, 0) +
       `font:${k !== 1 && reference ? reference.font : run.font};line-height:${run.h / k}px;letter-spacing:${letterSpacing};` +
       compressedHitBox +
       transform +

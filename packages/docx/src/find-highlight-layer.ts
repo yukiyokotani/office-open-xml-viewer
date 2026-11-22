@@ -1,5 +1,5 @@
 import { countSpacingCharacters } from './character-spacing.js';
-import { overlayClipFrame } from './run-clip.js';
+import { OverlayClipFrames } from './run-clip.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -80,7 +80,7 @@ export function buildDocxHighlightLayer(
 
   const matchColor = colors.match ?? DEFAULT_FIND_HIGHLIGHT;
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
-  const clipContainers = new Map<string, HTMLElement>();
+  const clipFrames = new OverlayClipFrames(layer, cssWidth, cssHeight);
 
   for (const match of matches) {
     const fill = match.active ? activeColor : matchColor;
@@ -110,14 +110,14 @@ export function buildDocxHighlightLayer(
       if (width <= 0) continue;
       // WORD_CELL_CONTENT_CLIP: a clipped run's box lies in a container sized
       // to its clip, which cuts it like the glyphs.
-      const frame = overlayClipFrame(layer, run, cssWidth, cssHeight, clipContainers);
+      const frame = clipFrames.place(run);
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and
       // carries a rotate transform; apply the same transform (about the box's
       // top-left) so the highlight lies along the rotated glyph run, exactly as
       // the selection span does.
-      const transform = run.transform
-        ? `transform:${run.transform};transform-origin:top left;`
+      const transform = frame.orientation
+        ? `transform:${frame.orientation};transform-origin:top left;`
         : '';
       // Positioned as a % of the page's intended CSS box so the box scales with
       // the container under external CSS scaling. A vertical (tbRl) run's
@@ -125,7 +125,8 @@ export function buildDocxHighlightLayer(
       // column exactly as before at 1× scale.
       box.style.cssText =
         `position:absolute;` +
-        `left:${frame.left(run.x + x)};top:${frame.top(run.y)};` +
+        // The slice offset runs along the run's own axis.
+        frame.position(x, 0) +
         `width:${frame.width(width)};height:${frame.height(run.h)};` +
         transform +
         `background:${fill};pointer-events:none;`;

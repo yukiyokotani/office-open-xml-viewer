@@ -92,4 +92,22 @@ describe('resolvePageCommentAnchors', () => {
     expect(laterPage.tint.children).toHaveLength(1);
     expect(laterPage.margin.children).toHaveLength(0);
   });
+
+  it('merges the tints of a cell line across a tab into one tint in the shared clip container', () => {
+    installDom();
+    const comments = [{ id: 'cell', author: 'Ada', text: 'In a cell' }];
+    const clips = [{ x: 0, y: 0, width: 300, height: 100 }];
+    // Two runs of one comment either side of a tab, in the same cell clip but
+    // with different run-box clipBounds.
+    const runs: DocxTextRunInfo[] = [
+      { ...run([1]), x: 10, w: 40, clips, clipBounds: { x: 10, y: 20, width: 40, height: 14 } },
+      { ...run([1]), x: 90, w: 40, clips, clipBounds: { x: 90, y: 20, width: 40, height: 14 } },
+    ];
+    const tint = makeEl('div');
+    buildDocxCommentMargin(tint as unknown as HTMLDivElement, null, runs,
+      { comments, anchors: [{ ...anchor('cell', [1]), endRunIndex: 1 }] }, 600, 800, null, () => undefined, 1, 260, false);
+    expect(tint.children).toHaveLength(1);
+    const [container] = tint.children;
+    expect(container!.children).toHaveLength(1);
+  });
 });

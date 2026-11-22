@@ -366,28 +366,43 @@ describe('overlay clip containers', () => {
     };
   };
 
-  it('places a turned clipped run\'s find highlight in a container of its clip box', () => {
+  it('places a turned clipped run\'s find highlights in one container of its clip', () => {
     vi.stubGlobal('document', { createElement: () => element() });
     try {
       const layer = element();
+      const clip = { x: 20, y: 10, width: 40, height: 20 };
       const run = {
         text: 'abc', x: 30, y: 20, w: 30, h: 10, fontSize: 10, font: '10px serif',
-        transform: 'rotate(90deg)', clipBounds: { x: 20, y: 10, width: 40, height: 20 },
+        transform: 'rotate(90deg)', clipBounds: clip, clips: [clip],
       };
       buildDocxHighlightLayer(layer as unknown as HTMLDivElement, [run, { ...run }],
-        [{ slices: [{ runIndex: 0, start: 0, end: 3 }, { runIndex: 1, start: 0, end: 1 }], active: false }],
+        [{ slices: [{ runIndex: 0, start: 0, end: 3 }, { runIndex: 1, start: 1, end: 2 }], active: false }],
         100, 100, () => (text: string) => text.length * 10);
-      // One container for the shared clip, positioned in page percentages.
+      // One container for the consecutive runs' shared clip.
       expect(layer.children).toHaveLength(1);
       const container = layer.children[0]!;
       expect(container.style.overflow).toBe('hidden');
       expect([container.style.left, container.style.top, container.style.width, container.style.height])
         .toEqual(['20%', '10%', '40%', '20%']);
-      // The highlight sits in it at the run's offset from the clip, in
-      // percentages of the container, so it scales with the page.
-      const [box] = container.children;
-      expect([box!.style.left, box!.style.top, box!.style.width]).toEqual(['25%', '50%', '75%']);
-      expect(box!.style.transform).toBe('rotate(90deg)');
+      const [whole, partial] = container.children;
+      expect([whole!.style.left, whole!.style.top, whole!.style.width]).toEqual(['25%', '50%', '75%']);
+      expect(whole!.style.transform).toBe('matrix(0, 1, -1, 0, 0, 0)');
+      // A slice 10px into the run advances down the turned run, not across.
+      expect([partial!.style.left, partial!.style.top]).toEqual(['25%', '100%']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('advances a find slice along an unclipped turned run', () => {
+    vi.stubGlobal('document', { createElement: () => element() });
+    try {
+      const layer = element();
+      const run = { text: 'abc', x: 30, y: 40, w: 30, h: 10, fontSize: 10, font: '10px serif', transform: 'rotate(90deg)' };
+      buildDocxHighlightLayer(layer as unknown as HTMLDivElement, [run],
+        [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }], 100, 100, () => (text: string) => text.length * 10);
+      const [box] = layer.children;
+      expect([box!.style.left, box!.style.top]).toEqual(['30%', '50%']);
     } finally {
       vi.unstubAllGlobals();
     }

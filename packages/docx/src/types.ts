@@ -1903,16 +1903,25 @@ export interface DocxTextRunInfo {
    *  axis-aligned on the page (a table cell, an exact-height row, an unturned
    *  text box). It is the logical clip; the Canvas widens its edges to whole
    *  device pixels, so painted ink can reach up to one device pixel beyond.
-   *  - Unturned run (no {@link transform}): further cut to the run box
+   *  - Unturned run (no {@link transform}, so no rotation, quarter turn or
+   *    reflection): further cut to the run box
    *    (`x`/`y`/`w`/`h`); an empty rectangle (zero width or height) means the
    *    run is wholly clipped away.
-   *  - Run with a {@link transform}: the clip box itself, not cut to the run.
-   *    Overlays enforce it by placing the run's elements in a container of
-   *    that box with `overflow:hidden`, as the viewer's text, find and
-   *    comment layers do.
-   *  Clips turned on the page (inside a rotated text box) are not included.
+   *  - Run with any {@link transform}: the clip box itself, not cut to the
+   *    run.
+   *  Clips turned on the page (inside a rotated text box) are not included;
+   *  {@link clips} lists every clip, which the viewer's text, find and
+   *  comment layers enforce with nested `overflow:hidden` containers.
    *  Absent for an unclipped run. */
   clipBounds?: Readonly<{ x: number; y: number; width: number; height: number }>;
+  /** Every clip the run is painted under, outermost first, turned clips
+   *  included. Each is placed like {@link highlightBounds}: `x`/`y` is the
+   *  canvas CSS px position of its top-left corner, `width`/`height` lie
+   *  along its own axes and `transform` (about that corner) orients it. An
+   *  overlay that nests one `overflow:hidden` container per clip has the
+   *  browser clip the run exactly as the Canvas does, for any transform or
+   *  responsive resize. Absent for an unclipped run. */
+  clips?: readonly Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>[];
 }
 
 export interface RenderPageOptions {

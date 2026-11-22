@@ -54,6 +54,19 @@ function projectTextRun(
     width: clip.widthPt * displayScale.a,
     height: clip.heightPt * displayScale.d,
   }) : undefined;
+  // Every paint clip, placed like highlightBounds with its own orientation.
+  const clips = geometry.clips.map((paintClip) => {
+    const clipToCss = composeAffine(displayScale, paintClip.pointToPage);
+    const clipCorner = mapAffinePoint(clipToCss, paintClip.bounds);
+    const clipTransform = cssTransformFor(clipToCss);
+    return Object.freeze({
+      x: clipCorner.xPt,
+      y: clipCorner.yPt,
+      width: paintClip.bounds.widthPt * Math.hypot(clipToCss.a, clipToCss.b),
+      height: paintClip.bounds.heightPt * Math.hypot(clipToCss.c, clipToCss.d),
+      ...(clipTransform ? { transform: clipTransform } : {}),
+    });
+  });
   const letterSpacingPt = placement.letterSpacingPt;
   const font = canvasFontString(
     placement.fontRoute,
@@ -114,6 +127,7 @@ function projectTextRun(
     ...(placement.hyperlink ? { hyperlink: placement.hyperlink } : {}),
     ...(placement.tateChuYoko ? { eastAsianVert: true } : {}),
     ...(clipBounds ? { clipBounds } : {}),
+    ...(clips.length > 0 ? { clips: Object.freeze(clips) } : {}),
   };
 }
 

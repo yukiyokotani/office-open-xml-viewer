@@ -31,10 +31,14 @@ export interface TextRunGeometry {
   readonly pointToPage: Matrix2DData;
   /** WORD_CELL_CONTENT_CLIP: in page points, the intersection of the run's
    * ancestor paint clips that are axis-aligned on the page, further cut to
-   * the run's box when the run itself is unturned; empty (zero width or
-   * height) when nothing of an unturned run is visible. Clips turned on the
-   * page are not represented. Absent for an unclipped run. */
+   * the run's box when the run itself is unturned (no rotation, quarter turn
+   * or reflection); empty (zero width or height) when nothing of an unturned
+   * run is visible. Clips turned on the page are not represented. Absent for
+   * an unclipped run. */
   readonly pageClipBounds?: LayoutRect;
+  /** Every ancestor paint clip of the run, outermost first, in its retained
+   * local space (turned clips included): overlays clip with them. */
+  readonly clips: readonly ElementClipGeometry[];
   /** Canonical structural source of the owning paragraph. */
   readonly source: ParagraphLayout['source'];
   /** Source `w14:paraId` of the owning paragraph, when authored. */
@@ -442,7 +446,9 @@ function pageClipBoundsEntry(
     } : next;
   }
   if (!region) return {};
-  if (pageAligned(runPointToPage)) {
+  // Only an unturned run is cut to its box; any rotation, quarter turn or
+  // reflection keeps the clip box itself.
+  if (runPointToPage.b === 0 && runPointToPage.c === 0 && runPointToPage.a > 0 && runPointToPage.d > 0) {
     const run = pageRect(bounds, runPointToPage);
     region = {
       left: Math.max(region.left, run.left), top: Math.max(region.top, run.top),
@@ -521,6 +527,7 @@ function visitParagraph(
               placement,
               pointToPage: linePointToPage,
               ...pageClipBoundsEntry(placement.bounds, linePointToPage, clippedProjection.clips),
+              clips: clippedProjection.clips,
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }
