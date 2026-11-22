@@ -1770,7 +1770,7 @@ export function paragraphMarkShapeInput(
 /** ECMA-376 §17.3.2.24: the raise/lower (pt) of the run hosting an inline
  * object; the object moves with its run like text. */
 export function inlineObjectPositionPt(run: Readonly<{ type: string }>): number | undefined {
-  if (run.type !== 'image' && run.type !== 'shape') return undefined;
+  if (run.type !== 'image' && run.type !== 'shape' && run.type !== 'chart') return undefined;
   return inlineObjectPositions.get(run);
 }
 

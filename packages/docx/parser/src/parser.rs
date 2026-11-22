@@ -7771,12 +7771,10 @@ fn set_inline_object_position(run: &mut DocRun, position: Option<f64>) {
     match run {
         DocRun::Shape(shape) if shape.inline => shape.inline_position = position,
         DocRun::Image(image) if !image.anchor => image.inline_position = position,
-        // An unavailable inline picture keeps the position its picture would
-        // have (charts keep their established placement either way).
-        DocRun::UnavailableDrawing(drawing)
-            if drawing.anchor_acquisition.is_none()
-                && matches!(drawing.resource_kind, UnavailableDrawingResourceKind::Image) =>
-        {
+        DocRun::Chart(chart) if !chart.anchor => chart.inline_position = position,
+        // An unavailable inline picture or chart keeps the position its
+        // resource would have.
+        DocRun::UnavailableDrawing(drawing) if drawing.anchor_acquisition.is_none() => {
             drawing.inline_position = position
         }
         _ => {}
@@ -9788,6 +9786,7 @@ fn parse_drawing_container(
                                 anchor_x_relative_from: None,
                                 anchor_y_relative_from: None,
                                 anchor_acquisition: None,
+                                inline_position: None,
                             }))];
                         }
                     }
@@ -10143,6 +10142,7 @@ fn parse_drawing_container(
                             anchor_x_relative_from: rel_h.clone(),
                             anchor_y_relative_from: rel_v.clone(),
                             anchor_acquisition: Some(anchor_acquisition.clone()),
+                            inline_position: None,
                         }))];
                     }
                 }
@@ -25193,6 +25193,29 @@ mod anchor_image_relative_from_tests {
             (drawing.rotation, drawing.flip_h, drawing.flip_v),
             (90.0, true, false)
         );
+    }
+
+    #[test]
+    fn unavailable_inline_chart_keeps_its_run_position() {
+        // WORD_INLINE_OBJECT_EXACT_LINE: an inline chart moves with its
+        // hosting run's §17.3.2.24 position like a picture, and so does its
+        // placeholder.
+        let body = r#"<w:p><w:r><w:rPr><w:position w:val="10"/></w:rPr><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="508000" cy="203200"/>
+    <wp:docPr id="1" name="chart"/>
+    <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+      <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdMissing"/>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let doc = parse_from_bytes(&build_docx_without_media(body))
+            .expect("a dangling chart relationship must not abort parsing");
+        let drawing = first_unavailable_drawing(&doc);
+        assert_eq!(drawing.resource_kind, UnavailableDrawingResourceKind::Chart);
+        assert_eq!(drawing.inline_position, Some(5.0));
     }
 
     #[test]

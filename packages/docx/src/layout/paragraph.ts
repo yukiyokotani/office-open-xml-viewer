@@ -4051,16 +4051,17 @@ function planMeasuredLines(
           paragraphMarkShapeInput,
           markerAscentPt === undefined ? undefined : Math.max(markerAscentPt, raw.ascent) + raw.descent)
       : null;
-    // WORD_INLINE_OBJECT_EXACT_LINE: an exact line holding an inline picture or
-    // drawing shape keeps the same four-fifths baseline; the object (moved by
-    // its run's position) stands on that baseline instead of lowering it, and
-    // a DrawingML picture is clipped to the line box. Clipping belongs to the
-    // line class, whichever rule (ruby, text or object) selected the baseline.
+    // WORD_INLINE_OBJECT_EXACT_LINE: an exact line holding an inline picture,
+    // chart or drawing shape keeps the same four-fifths baseline; the object
+    // (moved by its run's position) stands on that baseline instead of
+    // lowering it, and a DrawingML picture or chart is clipped to the line
+    // box. Clipping belongs to the line class, whichever rule (ruby, text or
+    // object) selected the baseline.
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
       wrapOrigin: raw.wrapAffected === true,
       hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
-        && segment.inlinePicture === true),
+        && (segment.inlinePicture === true || segment.chart === true)),
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
     const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
@@ -4068,20 +4069,19 @@ function planMeasuredLines(
     // the line, whatever its text, ruby, pictures or position. Fixed lines of
     // a LibreOffice producer (`libreOfficeLineBoxes`) take their own placement
     // (`__lineExtraAbove` below, else the centred box); only their
-    // inline-picture lines retain WORD_INLINE_OBJECT_EXACT_LINE.
-    // A line holding an inline chart or math (outside WORD_INLINE_OBJECT_EXACT_LINE's
-    // measured class) keeps the rules it had: the picture/shape rule when the
-    // line also holds such an object, the four-fifths ruby partition of the
-    // measured ruby class (WORD_RUBY_LINE_ASCENT, exact 12-30pt, mode 15, no
-    // grid, no float), and otherwise the centred box.
-    const chartOrMathLine = raw.segments.some((segment) => 'math' in segment
-      || ('imagePath' in segment && !segment.anchor && segment.chart != null));
+    // inline-object lines retain WORD_INLINE_OBJECT_EXACT_LINE.
+    // A line holding inline math (outside WORD_INLINE_OBJECT_EXACT_LINE's
+    // measured class) keeps the rules it had: the object rule when the line
+    // also holds a picture, chart or shape, the four-fifths ruby partition of
+    // the measured ruby class (WORD_RUBY_LINE_ASCENT, exact 12-30pt, mode 15,
+    // no grid, no float), and otherwise the centred box.
+    const mathLine = raw.segments.some((segment) => 'math' in segment);
     const measuredExactRubyLine = measuredRubyLine(raw)
       && context.lineSpacing?.rule === 'exact' && context.lineSpacing.value >= 12
       && context.lineSpacing.value <= 30 && compat.specifiedTextLineBoxMode15
       && !context.lineGrid.active && raw.wrapAffected !== true;
     const exactBaselinePt = exactObjectClass
-      || (exactWordLineBoxes && (!chartOrMathLine || measuredExactRubyLine))
+      || (exactWordLineBoxes && (!mathLine || measuredExactRubyLine))
       ? wordExactLineBaselineOffsetPt(context.lineSpacing) : undefined;
     // In a vertical section the upright object hangs from the exact line's
     // top instead of standing on its baseline.
@@ -4279,13 +4279,18 @@ function planMeasuredLines(
           ) / 2;
         // Exact-line clipping (and its tbLrV placement) is decided apart from a
         // rotated picture's own clip to the line.
-        const exactClipped = !image.chart && exactObjectClips
-          && wordInlineObjectExactLineClips(
-            (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
+        // A chart is a DrawingML graphic frame (§21.2.2.27 in wp:inline).
+        const exactClipped = exactObjectClips
+          && wordInlineObjectExactLineClips(image.chart ? 'drawingml'
+            : (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
               ?.inlineObjectOrigin);
-        const topOffsetPt = labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
-          : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt;
-        const clipToLine = !image.chart && (image.clipToLine || exactClipped);
+        // A chart's run position places it only in an exact line
+        // (LayoutImageSeg.chartPositionPt).
+        const positionPt = image.chart
+          ? exactBaselinePt === undefined ? undefined : image.chartPositionPt
+          : image.positionPt;
+        const topOffsetPt = labelTopPt ?? objectTopOffsetPt(image.heightPt, positionPt, exactClipped) + effectTopPt;
+        const clipToLine = exactClipped || (!image.chart && image.clipToLine === true);
         if (image.unavailableResourceKind) {
           segments.push({
             kind: 'unavailable-resource',
