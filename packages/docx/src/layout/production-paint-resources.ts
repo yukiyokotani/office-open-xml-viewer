@@ -60,12 +60,20 @@ function imageCandidate(
   };
 }
 
+/** Acquired paragraphs registered outside the document's own stories (the
+ * selected note separator stories): their source and acquisition runs. */
+export type ExtraResourceParagraph = Readonly<{
+  source: import('./types.js').SourceRef;
+  runs: readonly DocRun[];
+}>;
+
 function collectDescriptorCandidates(
   doc: DocxDocumentModel,
   acquisitionInputs: BodyAcquisitionInputProjections | undefined,
   mathOccurrences: readonly MathOccurrence[],
   resolvePictureBulletSize?: PictureBulletSizeResolver,
   pageBackground?: PageBackgroundLayoutInput,
+  extraParagraphs: readonly ExtraResourceParagraph[] = [],
 ): Readonly<{ imageMetadata: ImageMetadataRecord[]; descriptors: PaintResourceDescriptor[] }> {
   const imageCandidates: ImageDescriptorCandidate[] = [];
   const imageMetadata: ImageMetadataRecord[] = [];
@@ -266,6 +274,13 @@ function collectDescriptorCandidates(
   visitBody(documentPageBackgroundStory(doc), 'header', pageBackgroundStorySource().storyInstance);
   for (const note of doc.footnotes ?? []) visitBody(note.content, 'footnote', note.id);
   for (const note of doc.endnotes ?? []) visitBody(note.content, 'endnote', note.id);
+  for (const { source, runs } of extraParagraphs) {
+    runs.forEach((run, runIndex) => {
+      if (run.type === 'image' || run.type === 'chart' || run.type === 'shape') {
+        visitRun(run, { ...source, path: [...source.path, runIndex] });
+      }
+    });
+  }
   // ECMA-376 §17.2.1 background picture fills: one resource per physical page
   // size, whose extent is the host box of the Part 4 §19.1.2.5 brush.
   for (const fill of pageBackground?.fills ?? []) {
@@ -326,9 +341,10 @@ export function projectDocumentSnapshotResources(
   mathOccurrences: readonly MathOccurrence[],
   resolvePictureBulletSize?: PictureBulletSizeResolver,
   pageBackground?: PageBackgroundLayoutInput,
+  extraParagraphs: readonly ExtraResourceParagraph[] = [],
 ): DocumentSnapshotResourceProjection {
   const projected = collectDescriptorCandidates(
-    doc, acquisitionInputs, mathOccurrences, resolvePictureBulletSize, pageBackground,
+    doc, acquisitionInputs, mathOccurrences, resolvePictureBulletSize, pageBackground, extraParagraphs,
   );
   return Object.freeze({
     imageMetadata: Object.freeze(projected.imageMetadata.map((record) => Object.freeze({ ...record }))),

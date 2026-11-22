@@ -2705,6 +2705,10 @@ fn selected_note_separator_story(
             || is_w(*node, "sym")
             || is_w(*node, "noBreakHyphen")
             || is_w(*node, "softHyphen")
+            // An inline (§20.4.2.8 wp:inline) DrawingML object; its picture
+            // is checked once parsed.
+            || (is_w(*node, "drawing")
+                && node.children().filter(|child| child.is_element()).all(|child| child.tag_name().name() == "inline"))
             || (is_w(*node, "br")
                 && attr_w(*node, "type").is_none_or(|kind| kind == "textWrapping"))
     };
@@ -2805,7 +2809,7 @@ fn selected_note_separator_story(
                     | DocRun::Break {
                         break_type: BreakType::Line
                     }
-            )
+            ) || matches!(run, DocRun::Image(image) if !image.anchor)
         });
         // Paragraph borders and shading (§17.3.1.24/.31) are laid out and
         // painted with the story's paragraph.
