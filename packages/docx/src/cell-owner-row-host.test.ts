@@ -1610,8 +1610,10 @@ describe('cell-owner row host at the production layout boundary', () => {
     const control = document(null);
     const hosted = document(frame({ x: 150, y: 200 }));
     // The upright control table starts at the physical top margin, right of
-    // the logical flow start: physical x = pageWidth − margin − grid.
-    const dx = 150 - (PAGE - MARGIN - 200);
+    // the logical flow start: the outer edge of its 1 pt near border rule is
+    // at the flow start (`word-vertical-section-upright-block-table`), so
+    // physical x = pageWidth − margin − half a rule − grid.
+    const dx = 150 - (PAGE - MARGIN - 0.5 - 200);
     const dy = 200 - MARGIN;
     const controlRuns = runs(control);
     const hostRuns = runs(hosted);

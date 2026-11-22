@@ -139,10 +139,13 @@ function layOutPages(direction: Direction, body: readonly string[], columns = 1)
   });
 }
 
-/** Physical left edge of a table whose near edge is at block position `block`. */
+/** Width of the tables' border rules (w:sz 4). */
+const RULE = 0.5;
+/** Physical left grid edge of a table whose box starts at block position
+ * `block`: the outer edge of its near rule is there, the grid half a rule on. */
 const tableLeft = (direction: Direction, block: number) => direction === 'tbRl'
-  ? PAGE_W - MARGIN.right - block - TABLE_W
-  : MARGIN.left + block;
+  ? PAGE_W - MARGIN.right - block - RULE / 2 - TABLE_W
+  : MARGIN.left + block + RULE / 2;
 
 beforeAll(async () => {
   await init({ module_or_path: await readFile(new URL('./wasm/docx_parser_bg.wasm', import.meta.url)) });
@@ -234,17 +237,28 @@ describe('upright block table of a vertical section', () => {
     const [x, y] = tables as [Page['tables'][number], Page['tables'][number]];
     expect(x.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
     expect(y.top).toBeCloseTo(MARGIN.top, 6);
-    // X ends at block 198; Y clears it by the measured 14.25 pt plus half of
-    // each of the two facing 0.5 pt border rules.
-    expect(y.left).toBeCloseTo(tableLeft('tbRl', PITCH + TABLE_W + 14.25 + 0.5), 6);
+    // X's box ends at block 198 plus its two half rules; Y's box clears it by
+    // the measured 14.28 pt.
+    expect(y.left).toBeCloseTo(tableLeft('tbRl', PITCH + TABLE_W + RULE + 14.28), 6);
     // The flow is not advanced: the paragraphs keep consecutive strips.
     expect(strips.map((lines) => lines.map((line) => line.block))).toEqual([[0], [PITCH], [2 * PITCH]]);
   });
 
-  it('leaves a table with a table indent at the block position', () => {
-    const indented = T.replace('<w:tblBorders>', '<w:tblInd w:w="200" w:type="dxa"/><w:tblBorders>');
-    const { tables } = layOut('tbRl', [P, indented, P]);
+  it.each([
+    ['a table indent', '<w:tblInd w:w="200" w:type="dxa"/>'],
+    ['center alignment', '<w:jc w:val="center"/>'],
+    ['right alignment', '<w:jc w:val="right"/>'],
+  ])('leaves a table with %s at the block position', (_name, property) => {
+    const { tables } = layOut('tbRl', [P, T.replace('<w:tblBorders>', `${property}<w:tblBorders>`), P]);
     expect(tables[0]!.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+  });
+
+  it('places the outer edge of the near border rule at the block position', () => {
+    const thick = T.replaceAll('w:sz="4"', 'w:sz="24"');
+    const { tables, strips } = layOut('tbRl', [P, thick, P]);
+    // 3 pt rules: the grid starts 1.5 pt past the block position.
+    expect(tables[0]!.left).toBeCloseTo(PAGE_W - MARGIN.right - PITCH - 1.5 - TABLE_W, 6);
+    expect(strips.map(([line]) => line!.inlineStart)).toEqual([tables[0]!.bottom, tables[0]!.bottom]);
   });
 
   it('resumes text with no room beside a table past its far edge, at the column top', () => {
@@ -252,9 +266,9 @@ describe('upright block table of a vertical section', () => {
     const { tables, strips } = layOut('tbRl', [table(63), P, P]);
     expect(COLUMN_END - tables[0]!.bottom).toBeLessThan(10.5);
     expect(strips.map(([line]) => line!.inlineStart)).toEqual([MARGIN.top, MARGIN.top]);
-    // The measured 7.7 pt past the far edge, then one strip further.
-    expect(strips[0]![0]!.block).toBeCloseTo(TABLE_W + 7.7, 6);
-    expect(strips[1]![0]!.block).toBeCloseTo(TABLE_W + 7.7 + PITCH, 6);
+    // The measured 7.14 pt past the box's far edge, then one strip further.
+    expect(strips[0]![0]!.block).toBeCloseTo(TABLE_W + RULE + 7.14, 6);
+    expect(strips[1]![0]!.block).toBeCloseTo(TABLE_W + RULE + 7.14 + PITCH, 6);
   });
 
   it('stacks a later table below the rows a table continues with on the next page', () => {

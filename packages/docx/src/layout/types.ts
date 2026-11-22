@@ -989,8 +989,6 @@ interface FloatRegistryEntryCorePt {
     key: string;
     planned: boolean;
     tableFlowDomainId?: string;
-    /** Width of the border rule on the block's far edge (placed blocks). */
-    farBorderPt?: number;
   }>;
 }
 

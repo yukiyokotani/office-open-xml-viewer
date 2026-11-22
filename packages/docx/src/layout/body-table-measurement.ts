@@ -373,7 +373,8 @@ function wholeRowAcquisition(retained: RetainedTableAcquisition): RetainedTableA
 
 /** Physical x of an upright block placed with its near edge at `originXPt`.
  * Under `word-vertical-section-upright-block-table` the table's §17.4.50
- * indent does not move it: its edge stays at the block position. Elsewhere
+ * indent and alignment (§17.4.50, §17.4.28) do not move it: its edge stays
+ * at the block position. Elsewhere
  * the acquired inline offset applies as before. */
 function uprightBlockPlacedXPt(
   physical: PhysicalAnchorFrame,
@@ -412,9 +413,9 @@ function uprightBlockEdgeBordersPt(
  * current block position and charges no flow advance: the following
  * paragraph takes the next line strip as if the block were absent. Along the
  * inline axis it takes the first position from the column top at which its
- * box clears the blocks placed before it on the page that it meets (up to
- * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past their far edge, plus half of
- * each of the two facing border rules), so overlapping
+ * box (taken between the outer edges of its border rules) clears the blocks
+ * placed before it on the page that it meets (up to
+ * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past their far edge), so overlapping
  * tables stack; a block that fits the band but not below them clears the
  * nearest along the block axis instead. Its section-logical box, extended by
  * WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT past its far edge, is a text
@@ -471,23 +472,22 @@ function uprightBlockPlacement(
   const bandEndPt = physical.pageHeight - physical.marginBottom;
   // The blocks placed in this pass; a planned registration is a pin, also of
   // blocks later in source order.
+  // The block's box runs between the outer edges of its border rules: the
+  // near rule starts at the block position, so the grid starts half that
+  // rule further on, and the far rule adds half its width past the grid.
   const edgeBorders = uprightBlockEdgeBordersPt(table, blockExtentPt, physical);
-  // The block end up to which an earlier block is met: the clearance past
-  // its far edge, wider by half of each of the two facing border rules.
+  const boxBlockExtentPt = edgeBorders.nearPt / 2 + blockExtentPt + edgeBorders.farPt / 2;
   const placed = registry.entries.flatMap((entry) => {
     if (entry.uprightBlockTable?.planned !== false) return [];
     const box = entry.bounds;
-    if (box.xPt >= columnEndPt || box.xPt + box.widthPt <= cursorPt.xPt) return [];
-    const metEndPt = box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT
-      + ((entry.uprightBlockTable.farBorderPt ?? 0) + edgeBorders.nearPt) / 2;
-    return [{ ...box, metEndPt }];
+    return box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt ? [box] : [];
   });
   let blockStartPt = pin ? pin.bounds.yPt : cursorPt.yPt;
   let inlineStartPt = cursorPt.xPt;
   for (;;) {
     // An earlier block is met up to the clearance past its far edge.
-    const met = placed.filter((box) => box.yPt <= blockStartPt + blockExtentPt
-      && blockStartPt < box.metEndPt);
+    const met = placed.filter((box) => box.yPt <= blockStartPt + boxBlockExtentPt
+      && blockStartPt < box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
     inlineStartPt = cursorPt.xPt;
     // Every move adopts the inline end of a box it leaves behind for good.
     for (let moved = true; moved;) {
@@ -506,7 +506,8 @@ function uprightBlockPlacement(
     if (pin || role !== 'first' || met.length === 0
       || inlineStartPt + inlineExtentPt <= bandEndPt
       || cursorPt.xPt + inlineExtentPt > bandEndPt) break;
-    blockStartPt = Math.min(...met.map((box) => box.metEndPt));
+    blockStartPt = Math.min(...met.map((box) =>
+      box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT));
   }
   if (request.location.section.columns.length > 1) {
     // A multi-column section never splits or moves the block: one that
@@ -515,7 +516,7 @@ function uprightBlockPlacement(
     inlineStartPt = Math.max(0, Math.min(inlineStartPt, physical.pageHeight - inlineExtentPt));
   }
   const leavesBlockExtent = blockStartPt !== cursorPt.yPt && !pin
-    && blockStartPt + blockExtentPt
+    && blockStartPt + boxBlockExtentPt
       > request.location.availableBounds.yPt + request.location.availableBounds.heightPt;
   const inlineRoomPt = bandEndPt - inlineStartPt;
   const inlineBandPt = bandEndPt - cursorPt.xPt;
@@ -523,15 +524,18 @@ function uprightBlockPlacement(
     xPt: inlineStartPt,
     yPt: blockStartPt,
     widthPt: inlineExtentPt,
-    heightPt: blockExtentPt,
+    heightPt: boxBlockExtentPt,
   });
   // Line strips clear the block only past the text clearance at its far edge.
   const exclusionBounds: LayoutRect = Object.freeze({
     ...bounds,
-    heightPt: blockExtentPt + WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
+    heightPt: boxBlockExtentPt + WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
   });
   const originPt = uprightBlockPhysicalOrigin(
-    physical, { xPt: inlineStartPt, yPt: blockStartPt }, blockExtentPt, inlineExtentPt,
+    physical,
+    { xPt: inlineStartPt, yPt: blockStartPt + edgeBorders.nearPt / 2 },
+    blockExtentPt,
+    inlineExtentPt,
   );
   if (!(blockExtentPt > 0) || !(inlineExtentPt > 0)) {
     return Object.freeze({
@@ -557,7 +561,7 @@ function uprightBlockPlacement(
     exclusionMode: 'square' as const,
     bounds,
     exclusionBounds,
-    uprightBlockTable: Object.freeze({ key, planned: false, farBorderPt: edgeBorders.farPt }),
+    uprightBlockTable: Object.freeze({ key, planned: false }),
   });
   return Object.freeze({
     originPt,
