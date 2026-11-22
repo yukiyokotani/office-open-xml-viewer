@@ -542,6 +542,14 @@ describe('native reference font vertical layout', () => {
     // Noto Sans JP 1.882 em: a 10pt mark (18.82pt) takes two 18pt cells.
     expect(height('Noto Sans JP', 10, 18)).toBe(36);
     expect(height('Noto Sans JP', 13, 20)).toBe(40);
+    // Windows Word yugrid1 controls 039-041 and 052 (18pt pitch, modes 15/14):
+    // the Far East 1.3 x usWin line of Yu Mincho (1.673 em) and MS Mincho
+    // (1.3 em), and Calibri's 1.221 em line, cross each cell boundary there.
+    for (const [family, sizePt, cells] of [
+      ['Yu Mincho', 10.5, 1], ['Yu Mincho', 11, 2], ['Yu Mincho', 21, 2], ['Yu Mincho', 22, 3],
+      ['MS Mincho', 12, 1], ['MS Mincho', 14, 2], ['MS Mincho', 24, 2],
+      ['Calibri', 14, 1], ['Calibri', 16, 2], ['Calibri', 24, 2],
+    ] as const) expect([family, sizePt, height(family, sizePt, 18)]).toEqual([family, sizePt, cells * 18]);
     // A non-empty stand-in keeps its natural height above the one-cell floor.
     expect(height('Noto Sans', 18, 20, false)).toBeCloseTo(18 * 1.362, 8);
     // A face without an admitted design line keeps the floor.
