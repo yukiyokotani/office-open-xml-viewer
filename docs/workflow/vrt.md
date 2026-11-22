@@ -88,8 +88,8 @@ and whose renderer is unmodified: no tracked change, and no untracked file
 outside dependencies and the private corpus. The checkout is re-verified
 before every item is read, so a baseline that changes mid-run fails. Snapshot
 manifests record the checkout's real path and each image's SHA-256; the
-comparison requires both to match, and rejects any symlink below the baseline
-checkout, so copied, replaced or redirected images are never accepted. The
+comparison requires both to match, and rejects a symlink on the path of any
+baseline file it opens, so copied, replaced or redirected images are never accepted. The
 harness runs Git with every `GIT_*` variable removed. A missing or mismatched
 baseline fails the run; it is not a successful regression check.
 

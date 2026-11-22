@@ -220,8 +220,8 @@ export interface LoadOptions {
    * acquisition keeps the previous engine, but a failed initial render does not.
    *
    * To choose values, open representative documents and exercise their
-   * content first (pages, slides, sheets, images and media are read lazily, so
-   * the report emitted at load is too early), then read
+   * content first (later interactions can inflate further archive entries, so
+   * the report emitted at load can be too early), then read
    * `largestInflatedEntryBytes` (for `maxArchiveEntryBytes`) and
    * `distinctInflatedBytes` (for `maxTotalInflatedBytes`) from the `usage` of
    * the report that `await getResourceMetrics()` resolves to, add headroom, and

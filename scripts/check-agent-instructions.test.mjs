@@ -53,7 +53,7 @@ const isInside = (dir, path) => {
 
 // A fenced code block and its body. The fence may be indented, as it is under
 // a list item.
-const FENCED_BLOCK = /^[ \t]*```[^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$/gm;
+const FENCED_BLOCK = /^[ \t]*(?:```[^\n]*\n([\s\S]*?)^[ \t]*```|~~~[^\n]*\n([\s\S]*?)^[ \t]*~~~)[ \t]*$/gm;
 
 // Link destinations a Markdown reader would follow: inline links, and
 // reference links that are used and defined. Fenced code, code spans and HTML
@@ -63,11 +63,13 @@ function markdownLinks(text) {
     .replace(FENCED_BLOCK, '')
     // An indented code block: lines indented four or more columns at the
     // start of the file or after a blank line. Under a list item, whose
-    // continuation text is itself indented, six or more columns.
+    // continuation text is indented to the item's content, four columns more
+    // than that.
     .replace(/(^|^\S[^\n]*\n(?:[ \t]*\n)+)((?:(?: {4,}|\t)[^\n]*(?:\n|$)|[ \t]*\n)+)/gm, (block, lead, code, offset) => {
       if (lead === '' && offset !== 0) return block;
-      if (!/^(?:[-*+]|\d+[.)])\s/.test(lead)) return lead;
-      return /^(?: {6,}|\t\t)/.test(code) ? lead : block;
+      const marker = /^(?:[-*+]|\d+[.)])\s+/.exec(lead);
+      if (!marker) return lead;
+      return new RegExp(`^(?: {${marker[0].length + 4},}|\\t\\t)`).test(code) ? lead : block;
     })
     .replace(/<!--[\s\S]*?-->/g, '')
     // A code span may wrap across lines.
@@ -148,6 +150,8 @@ test('Markdown links are the destinations a reader can follow', () => {
   assert.deepEqual(markdownLinks('- item\n\n    continued [b](b.md)\n'), ['b.md']);
   assert.deepEqual(markdownLinks('    [start](docs/orphan.md)\n\nText [c](c.md).\n'), ['c.md']);
   assert.deepEqual(markdownLinks('- item\n\n      [code](docs/orphan.md)\n'), []);
+  assert.deepEqual(markdownLinks('10. Item\n\n      continued [e](e.md)\n'), ['e.md']);
+  assert.deepEqual(markdownLinks('~~~md\n[fenced](docs/orphan.md)\n~~~\n[f](f.md)\n'), ['f.md']);
   assert.deepEqual(markdownLinks('<a data-href="docs/orphan.md">x</a> <a href="d.md">d</a>'), ['d.md']);
   assert.deepEqual(markdownLinks('Prose ](docs/missing.md) and ![alt](a.png).'), ['a.png']);
   assert.deepEqual(markdownLinks('Example: `wrapped\n[fake](docs/missing.md)` end.'), []);
@@ -181,15 +185,12 @@ test('every AGENTS.md stays a short map', () => {
 });
 
 test('every docs/ page is listed in an index', () => {
-  // An index is docs/README.md or the README.md of the page's own directory.
-  const indexed = new Set();
-  for (const file of docsFiles().filter((path) => path.endsWith('README.md'))) {
-    for (const target of relativeLinks(file)) indexed.add(resolve(dirname(file), target));
-  }
+  const index = join(ROOT, 'docs', 'README.md');
+  const indexed = new Set(relativeLinks(index).map((target) => resolve(dirname(index), target)));
   const missing = docsFiles()
     .filter((path) => path !== join(ROOT, 'docs', 'README.md') && !indexed.has(path))
     .map(rel);
-  assert.deepEqual(missing, [], 'link each page from docs/README.md (or its directory README.md) with a one-line summary');
+  assert.deepEqual(missing, [], 'link each page from docs/README.md with a one-line summary');
 });
 
 test('relative links in agent knowledge resolve', () => {
@@ -504,7 +505,7 @@ function missingReferences(file, text, { exists, hasFileNamed, scriptsOf }) {
   // Words of inline code and of fenced examples: a command names its script as
   // one of its words (`node scripts/x.mjs`).
   const words = [
-    ...[...text.matchAll(FENCED_BLOCK)].map((match) => match[1]),
+    ...[...text.matchAll(FENCED_BLOCK)].map((match) => match[1] ?? match[2]),
     // An inline code span may wrap across lines.
     ...[...text.replace(FENCED_BLOCK, '').matchAll(/`([^`]+)`/g)].map((match) => match[1]),
   ]

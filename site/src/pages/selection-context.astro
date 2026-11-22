@@ -169,7 +169,8 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
       <p>
         The callbacks report semantic changes, not assistant actions. Your application decides
         whether the action is explain, summarize, compare, evaluate, or something else; the Viewer
-        does not grow one API for each prompt.
+        does not grow one API for each prompt. A new read-only focus target is added as a new
+        <code>kind</code> of the same context, with its fields inside that kind's snapshot.
       </p>
       <p>
         There is no separate <code>onClick</code> option. For a raw browser click, add a native
@@ -316,8 +317,7 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         location messages from an obsolete page session are ignored. Check <code>available</code> first: when it is
         <code>true</code>, <code>context: null</code> means there is no active OOXML preview, and a
         non-null context can still have <code>selection: null</code> when the active preview has no
-        selection. When it is <code>false</code>, <code>context</code> is also <code>null</code>, but
-        because the bridge could not be reached.
+        selection. When it is <code>false</code>, <code>context</code> is also <code>null</code>.
         <code>available: false</code> means the bridge is unavailable; inspect <code>reason</code> to
         distinguish an unconnected standalone server from a bridge error. Remote VS Code documents
         expose only a document name and no local <code>document.path</code>, so path-based file tools
