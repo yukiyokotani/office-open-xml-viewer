@@ -239,6 +239,26 @@ describe('upright block table of a vertical section', () => {
     expect(line.inlineStart).toBeCloseTo(placed.bottom, 6);
   });
 
+  it('wraps a line that the negative indent of its numbering level takes into the first column', () => {
+    // The same with the indent on the list level (§17.9.6), not on the
+    // paragraph: the level's -30 pt start indent, with no hanging indent,
+    // takes the numbered line into the table's inline extent.
+    const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+    const level = '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/>'
+      + '<w:suff w:val="nothing"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="-600" w:hanging="0"/></w:pPr></w:lvl>';
+    const numbered = P.replace('<w:pPr>', '<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>');
+    const body = [table(1, 350), columnBreak, numbered];
+    const pages = layOutPages('tbRl', body, 2, 360, level);
+    const placed = pages[0]!.tables[0]!;
+    // The line wraps at the table's bottom edge; its text follows the
+    // one-digit number (10.5 pt in the test metrics).
+    expect(pages[0]!.strips.at(-1)![0]!.inlineStart).toBeCloseTo(placed.bottom + 10.5, 6);
+    // Without the level's indent the line starts at the top of column 2,
+    // past the table.
+    const plain = layOutPages('tbRl', body, 2, 360, level.replace('w:left="-600"', 'w:left="0"'));
+    expect(plain[0]!.strips.at(-1)![0]!.inlineStart).toBeGreaterThan(placed.bottom + 20);
+  });
+
   it.each(['tbRl', 'tbLrV'] as const)('wraps the strip before a %s table on a line grid of a fractional pitch', (direction) => {
     // A 15.15 pt pitch: the strip's end and the table's start are the same
     // block position computed two ways, equal only to within rounding.

@@ -41,7 +41,13 @@ export const T = table(2);
 
 export type Direction = 'tbRl' | 'tbLrV';
 
-function docx(direction: Direction, body: readonly string[], columns = 1, linePitch = 360): Uint8Array {
+function docx(
+  direction: Direction,
+  body: readonly string[],
+  columns = 1,
+  linePitch = 360,
+  numberingLevel?: string,
+): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${body.join('')}`
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
@@ -53,10 +59,18 @@ function docx(direction: Direction, body: readonly string[], columns = 1, linePi
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + (numberingLevel === undefined ? ''
+        : '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>')
       + '</Types>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
+    ...(numberingLevel === undefined ? [] : [
+      ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/></Relationships>`)],
+      ['word/numbering.xml', xml(`<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0">${numberingLevel}</w:abstractNum>`
+        + '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>')],
+    ] as Array<[string, Uint8Array]>),
   ]));
 }
 
@@ -96,14 +110,16 @@ export interface Page {
   readonly strips: Array<Array<Readonly<{ block: number; inlineStart: number }>>>;
 }
 
-/** `linePitch`: the section's line grid pitch in twentieths of a point. */
+/** `linePitch`: the section's line grid pitch in twentieths of a point.
+ * `numberingLevel`: the `w:lvl` of level 0 of the list `w:numId` 1. */
 export function layOutPages(
   direction: Direction,
   body: readonly string[],
   columns = 1,
   linePitch = 360,
+  numberingLevel?: string,
 ): Page[] {
-  const archive = new DocxArchive(docx(direction, body, columns, linePitch));
+  const archive = new DocxArchive(docx(direction, body, columns, linePitch, numberingLevel));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;

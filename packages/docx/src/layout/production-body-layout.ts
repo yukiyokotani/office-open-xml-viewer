@@ -2913,20 +2913,23 @@ function commitBodyUprightBlocks(
  * The inline band searched is the column's, widened on both sides by the
  * paragraph's largest negative indent (§17.3.1.12: start, first line or
  * hanging, end): such a line leaves the column band and can reach a block of
- * the neighbouring column.
+ * the neighbouring column. The indents are the resolved ones the paragraph
+ * is laid out with (resolveBodyParagraphLayoutContext), so those of its
+ * style and of its numbering level (§17.9.6) count like its own.
  */
 function addUprightBlockExclusionFloats(
   candidate: BodyAcquisitionState,
   location: BodyAcquisitionLocation,
-  paragraph: Readonly<{ indentLeft?: number; indentRight?: number; indentFirst?: number }>,
+  paragraph: ParagraphLayoutSource,
   planned?: UprightBlockRegistration,
 ): void {
   const index = candidate.uprightBlockIndex;
   if (index && index.exclusionCount > 0) {
     const band = location.availableBounds;
-    const startPt = paragraph.indentLeft ?? 0;
+    const indents = resolveBodyParagraphLayoutContext(candidate, paragraph);
+    const startPt = indents.physicalIndentLeftPt;
     const outdentPt = Math.max(
-      0, -startPt, -(startPt + (paragraph.indentFirst ?? 0)), -(paragraph.indentRight ?? 0),
+      0, -startPt, -(startPt + indents.firstIndentPt), -indents.physicalIndentRightPt,
     );
     for (const entry of uprightBlockExclusionsAhead(
       index, location.cursorPt.yPt, band.xPt - outdentPt, band.xPt + band.widthPt + outdentPt,
