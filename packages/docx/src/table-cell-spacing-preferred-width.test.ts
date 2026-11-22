@@ -630,6 +630,43 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     expect(firstCellXPt).toBeCloseTo(3 + 0.25 + 4, 6);
   });
 
+  it('keeps a nested table in a merged cell clear of the widest rule beside the merge', () => {
+    // The first column is one cell over eight rows and holds the nested
+    // table. The cells beside it share a 0.5 pt rule in the first row and
+    // carry a 6 pt left rule below it.
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const nested = tableXml('<w:tblW w:w="5000" w:type="pct"/>' + spacing(2), [600, 600], [cell(600, 'n1') + cell(600, 'n2')]);
+    const rows = Array.from({ length: 8 }, (_unused, row) => '<w:tr>'
+      + (row === 0
+        ? `<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/><w:vMerge w:val="restart"/></w:tcPr>${nested}${paragraph('A')}</w:tc>`
+        : cell(2880, '', '<w:vMerge/>'))
+      + cell(1440, `B${row}`, row === 0 ? '' : '<w:tcBorders><w:left w:val="single" w:sz="48"/></w:tcBorders>')
+      + '</w:tr>').join('');
+    const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="2880"/><w:gridCol w:w="1440"/></w:tblGrid>${rows}</w:tbl>`;
+    const { widths, firstCellXPt } = nestedCells(outer);
+    // Half the table's 0.5 pt rule on the left, half the 6 pt rule on the right.
+    expect(widths).toEqual([(144 - 0.25 - 3 - 0.5 - 12) / 2, (144 - 0.25 - 3 - 0.5 - 12) / 2]);
+    expect(firstCellXPt).toBeCloseTo(0.25 + 0.25 + 4, 6);
+  });
+
+  it('mirrors the outer rules of a right-to-left spaced table', () => {
+    // start is red and end is blue: in a bidiVisual table start is on the right.
+    const borders = '<w:tblBorders><w:top w:val="single" w:sz="4"/><w:start w:val="single" w:sz="4" w:color="FF0000"/>'
+      + '<w:bottom w:val="single" w:sz="4"/><w:end w:val="single" w:sz="4" w:color="0000FF"/>'
+      + '<w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders>';
+    const table = (bidi: string) => `<w:tbl><w:tblPr>${bidi}${AUTO}${spacing(2)}${borders}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid><w:tr>${cell(1440, 'A1')}${cell(2160, 'B1')}</w:tr></w:tbl>`;
+    const frame = (bidi: string) => {
+      const page = tablePages(table(bidi), 15)[0]!;
+      const vertical = page.borders.filter((border) => border.from.xPt === border.to.xPt)
+        .sort((a, b) => a.from.xPt - b.from.xPt);
+      return [vertical[0]!.color.toLowerCase(), vertical.at(-1)!.color.toLowerCase()];
+    };
+    expect(frame('')).toEqual(['#ff0000', '#0000ff']);
+    expect(frame('<w:bidiVisual/>')).toEqual(['#0000ff', '#ff0000']);
+  });
+
   it('keeps the upright table of a two-column vertical section on its previous geometry', () => {
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 2).table).toBeCloseTo(180, 6);
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 1).table).toBeCloseTo(192, 6);

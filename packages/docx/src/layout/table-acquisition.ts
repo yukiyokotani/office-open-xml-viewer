@@ -641,38 +641,60 @@ export function acquireRetainedTable<State>(
   const nestedById: Record<string, RetainedTableAcquisition> = {};
   const floatingTables: NestedFloatingTableOccurrence[] = [];
   const rotatedCells: RotatedCellAcquisition[] = [];
-  const mergeOpeners = new Map<number, Readonly<{ cell: TableLayoutSource['rows'][number]['cells'][number]; rowIndex: number }>>();
+  // WORD_TABLE_CELL_SPACING_GEOMETRY: the collapsed side rules of every cell,
+  // by row and by the cell's first grid column. Spaced cells keep their own
+  // boxes, so only collapsed rules straddle a cell edge. One pass over the
+  // table, made only when a cell holds a nested spaced table; the cell that
+  // opens a vertical merge, carried from row to row, owns the side rules of
+  // all its rows.
+  type SourceCell = TableLayoutSource['rows'][number]['cells'][number];
+  let sideRulesByRow: ReadonlyMap<number, Readonly<{ leftPt: number; rightPt: number; continues: boolean }>>[] | undefined;
+  const sideRules = () => sideRulesByRow ??= (() => {
+    const openers = new Map<number, Readonly<{ cell: SourceCell; rowIndex: number }>>();
+    return table.rows.map((row, rowIndex) => {
+      const rowFormat = format.rows[rowIndex];
+      let start = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
+      const skeleton = row.cells.map((cell) => {
+        const columnStart = start;
+        const columnSpan = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - columnStart));
+        start += columnSpan;
+        if (cell.vMerge === true) openers.set(columnStart, { cell, rowIndex });
+        else if (cell.vMerge !== false) openers.delete(columnStart);
+        const opener = cell.vMerge === false ? openers.get(columnStart) : undefined;
+        if (!opener) return { borders: retainedEdges(cell.borders), columnStart, columnSpan };
+        const openerException = format.rows[opener.rowIndex]?.exception?.borders;
+        return { borders: retainedEdges(opener.cell.borders), columnStart, columnSpan,
+          ownerException: openerException ? retainedEdges(openerException) : null };
+      });
+      const widths = (rowFormat?.cellSpacingPt ?? 0) > 0 ? [] : collapsedRowSideRuleWidthsPt(
+        skeleton,
+        retainedEdges(table.borders),
+        rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
+        rowIndex, table.rows.length, columnWidthsPt.length, bidiVisual,
+      );
+      return new Map(skeleton.flatMap((entry, cellIndex) => (widths[cellIndex]
+        ? [[entry.columnStart, { ...widths[cellIndex]!, continues: row.cells[cellIndex]!.vMerge === false }] as const]
+        : [])));
+    });
+  })();
+  /** The widest side rules along the rows a cell covers: its own row, and
+   * for the cell that opens a vertical merge every row of that merge. */
+  const cellSideRulesPt = (rowIndex: number, columnStart: number, opensMerge: boolean) => {
+    const rules = sideRules();
+    const own = rules[rowIndex]?.get(columnStart);
+    if (!own) return undefined;
+    let { leftPt, rightPt } = own;
+    for (let below = rowIndex + 1; opensMerge && below < rules.length; below += 1) {
+      const continuation = rules[below]!.get(columnStart);
+      if (!continuation?.continues) break;
+      leftPt = Math.max(leftPt, continuation.leftPt);
+      rightPt = Math.max(rightPt, continuation.rightPt);
+    }
+    return { leftPt, rightPt };
+  };
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
-    let ruleColumnStart = columnStart;
-    // The cell opening the vertical merge each column is in, carried from row to row.
-    let openerColumnStart = columnStart;
-    for (const cell of row.cells) {
-      if (cell.vMerge === true) mergeOpeners.set(openerColumnStart, { cell, rowIndex });
-      else if (cell.vMerge !== false) mergeOpeners.delete(openerColumnStart);
-      openerColumnStart += Math.max(1, cell.colSpan);
-    }
-    const rowMergeOpeners = new Map(mergeOpeners);
-    // Spaced cells keep their own boxes; only collapsed rules straddle the
-    // cell edge. Resolved once per row, and only for a nested spaced table.
-    let sideRulesPt: ReturnType<typeof collapsedRowSideRuleWidthsPt> | undefined;
-    const rowSideRulesPt = () => sideRulesPt ??= (rowFormat?.cellSpacingPt ?? 0) > 0 ? [] : collapsedRowSideRuleWidthsPt(
-      row.cells.map((cell) => {
-        const start = ruleColumnStart;
-        const span = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - start));
-        ruleColumnStart += span;
-        // The cell that opens a vertical merge owns the side rules of all its rows.
-        const opener = cell.vMerge === false ? rowMergeOpeners.get(start) : undefined;
-        if (!opener) return { borders: retainedEdges(cell.borders), columnStart: start, columnSpan: span };
-        const openerException = format.rows[opener.rowIndex]?.exception?.borders;
-        return { borders: retainedEdges(opener.cell.borders), columnStart: start, columnSpan: span,
-          ownerException: openerException ? retainedEdges(openerException) : null };
-      }),
-      retainedEdges(table.borders),
-      rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
-      rowIndex, table.rows.length, columnWidthsPt.length, bidiVisual,
-    );
     const cells = row.cells.map((cell, cellIndex) => {
       const formatMargins = rowFormat?.cells[cellIndex]?.marginsPt ?? {
         top: cell.marginTop ?? table.cellMarginTop,
@@ -700,10 +722,10 @@ export function acquireRetainedTable<State>(
       // WORD_TABLE_CELL_SPACING_GEOMETRY: the part of each half side rule the margin leaves uncovered.
       const hostRuleInsetPt = (nestedTable: TableLayoutSource) => {
         if (!dependencies.tableFormat(nestedTable).rows.some((nestedRow) => nestedRow.cellSpacingPt > 0)) return undefined;
-        const sideRules = rowSideRulesPt()[cellIndex];
-        return sideRules ? {
-          leftPt: Math.max(0, sideRules.leftPt / 2 - formatMargins.left),
-          rightPt: Math.max(0, sideRules.rightPt / 2 - formatMargins.right),
+        const rules = cellSideRulesPt(rowIndex, currentColumnStart, cell.vMerge === true);
+        return rules ? {
+          leftPt: Math.max(0, rules.leftPt / 2 - formatMargins.left),
+          rightPt: Math.max(0, rules.rightPt / 2 - formatMargins.right),
         } : undefined;
       };
       const cellPath = [...sourcePath, rowIndex, cellIndex];

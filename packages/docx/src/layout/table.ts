@@ -946,7 +946,10 @@ function materializeBorders(
       push(edges.left, 'left', { xPt: left + t / 2, yPt: top + t / 2 }, { xPt: left + t / 2, yPt: bottom - t / 2 });
       push(edges.right, 'right', { xPt: right - t / 2, yPt: top + t / 2 }, { xPt: right - t / 2, yPt: bottom - t / 2 });
     };
-    rectangle(rowXPt[0] ?? 0, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt, rowY(input.rows.length), input.borders);
+    // The table's left and right rules are its start and end ones
+    // (§17.4.36, §17.4.13): a visually right-to-left table mirrors them.
+    rectangle(rowXPt[0] ?? 0, tableYPt, (rowXPt[0] ?? 0) + tableWidthPt, rowY(input.rows.length),
+      input.bidiVisual ? { ...input.borders, left: input.borders.right, right: input.borders.left } : input.borders);
     input.rows.forEach((row, rowIndex) => {
       const spacing = rowSpacingInsets(input.rows, rowIndex);
       for (const cell of row.cells) {
