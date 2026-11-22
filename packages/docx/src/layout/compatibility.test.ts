@@ -616,10 +616,10 @@ describe('layout compatibility inventory', () => {
       hasFollowingInk: true,
       followsNextPageSectionBoundary: false,
       markExtentPt: 12,
-      markBelowBaselinePt: 3,
       markOnLineGrid: false,
     };
-    expect(wordTrailingEmptyMarkAdmissionAllowancePt(trailingMark)).toBe(3);
+    // Off the grid the whole mark line must fit (Windows Word, excess4).
+    expect(wordTrailingEmptyMarkAdmissionAllowancePt(trailingMark)).toBe(0);
     expect(wordTrailingEmptyMarkAdmissionAllowancePt({
       ...trailingMark,
       hasFollowingInk: false,

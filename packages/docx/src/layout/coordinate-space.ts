@@ -75,8 +75,10 @@ export function writingModeFromTextDirection(textDirection: string): WritingMode
     case 'rl':
     case 'rlV':
     case 'tbRl':
-    case 'tbRlV':
       return 'vertical-rl';
+    case 'tbRlV':
+      // Compatibility rule `word-section-tbrlv-tblrv-page-frame`.
+      return 'vertical-lr';
     case 'btLr':
       // Compatibility rule `word-section-btlr-tbrl-page-frame`; the evidence
       // resolves to the table-driven coordinate-space regression test.

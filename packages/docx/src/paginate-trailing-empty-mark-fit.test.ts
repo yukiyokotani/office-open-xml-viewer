@@ -9,9 +9,11 @@ import type {
   SectionProps,
 } from './types';
 
-// Issue #981 (dense-page bottom fill).
+// Issue #981 (dense-page bottom fill). Windows Word controls later showed that
+// an off-grid empty mark is admitted only when its whole line fits; the
+// baseline admission described below is withdrawn, its gates kept.
 //
-// The existing off-grid empty-mark page-break test is baseline-based: a line
+// The earlier off-grid empty-mark page-break test was baseline-based: a line
 // whose baseline sits within the text area may let its below-baseline whitespace
 // (descent + half of any leading)
 // extend into the bottom margin. An empty paragraph's mark line paints no ink, so an
@@ -167,13 +169,14 @@ describe('canonical body layout — trailing empty-paragraph mark grazes the bot
     expect(mark.advancePt).toBeCloseTo(16.4);
   });
 
-  it('KEEPS an inkless empty paragraph on the page when ink-bearing content follows and only its below-baseline whitespace overflows', () => {
-    // a,b,c,d fill page 1; the empty grazes the bottom (baseline within the band) and
-    // is KEPT (page 1 = a,b,c,d,empty = 5); the following visible "e" flows to page 2.
+  it('MOVES an empty mark whose whole line does not fit although its baseline does (Windows Word)', () => {
+    // a,b,c,d fill page 1; the empty's baseline is inside the band but its line is
+    // not, so it starts page 2 before "e" (Windows Word: an off-grid empty mark is
+    // admitted only when its whole line fits; WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION).
     const pages = bodyPages(doc(B(para('a'), para('b'), para('c'), para('d'), para(''), para('e')), PAGE_HEIGHT));
     expect(pages.length).toBe(2);
-    expect(pages[0].length).toBe(5); // was 4 before the fix (empty pushed to page 2 top)
-    expect(pages[1].length).toBe(1);
+    expect(pages[0].length).toBe(4);
+    expect(pages[1].length).toBe(2);
   });
 
   it('does NOT graze a document-terminal empty run (no following ink) — Word keeps the trailing blank page', () => {
