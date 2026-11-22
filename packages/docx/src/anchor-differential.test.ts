@@ -545,38 +545,63 @@ describe('a character-relative anchor in kashida-justified text', () => {
     // An oracle independent of the cluster table: the painted text itself.
     // Every painted character, inserted tatweels included, is 6pt wide, and
     // a right-to-left piece paints its text from its right edge.
-    const testCase = cases(1).find((candidate) => candidate.name.startsWith('Arabic under highKashida'))!;
-    const narrow = { ...testCase, container: 'body' as const, vertical: false, section: { pageWidth: 130, pageHeight: 200 } };
-    let elongated = 0;
-    for (const offset of boundaries(narrow.specs)) {
-      const { runs } = subjectRuns(narrow.specs, offset, 'character');
-      const built = model(narrow, runs);
-      const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
-        { currentDateMs: 0 });
-      const subject = paragraphs(layout.pages.map((page) => page.layers))[0]!;
-      for (const line of subject.lines) {
-        const host = line.placements.find((placement) => placement.kind === 'anchor-host');
-        if (!host) continue;
-        // The anchoring character takes one unit of the source positions.
-        const at = offset;
-        const piece = line.placements.find((placement) => placement.kind === 'text'
-          && placement.range.start <= at && at < placement.range.end);
-        if (piece?.kind !== 'text' || piece.paintOps[0]?.sourceMapping !== 'kashida') continue;
-        elongated += 1;
-        const painted = [...piece.paintOps[0].text];
-        const source = [...piece.text];
-        let consumed = 0;
-        let prefix = 0;
-        // Tatweels inserted before a character precede its boundary.
-        while (prefix < painted.length && (consumed < at - piece.range.start || painted[prefix] !== source[consumed])) {
-          if (painted[prefix] === source[consumed]) consumed += 1;
-          prefix += 1;
+    // The second text holds an authored tatweel: painted, it cannot be told
+    // from an inserted one, so a boundary beside it may stand on either side
+    // of the tatweels inserted there (the plan decides; see the direct test
+    // of the cluster table).
+    const base = cases(1).find((candidate) => candidate.name.startsWith('Arabic under highKashida'))!;
+    const tatweel = '\u0640';
+    for (const value of [kashidaText, kashidaText.replace('\u062a\u062a', `\u062a${tatweel}\u062a`)]) {
+      const narrow = { ...base, specs: [[value, rtl]] as const, container: 'body' as const, vertical: false,
+        section: { pageWidth: 130, pageHeight: 200 } };
+      let elongated = 0;
+      for (const offset of boundaries(narrow.specs)) {
+        const { runs } = subjectRuns(narrow.specs, offset, 'character');
+        const built = model(narrow, runs);
+        const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
+          { currentDateMs: 0 });
+        const subject = paragraphs(layout.pages.map((page) => page.layers))[0]!;
+        for (const line of subject.lines) {
+          const host = line.placements.find((placement) => placement.kind === 'anchor-host');
+          if (!host) continue;
+          const piece = line.placements.find((placement) => placement.kind === 'text'
+            && placement.range.start <= offset && offset < placement.range.end);
+          if (piece?.kind !== 'text' || piece.paintOps[0]?.sourceMapping !== 'kashida') continue;
+          elongated += 1;
+          const painted = [...piece.paintOps[0].text];
+          const source = [...piece.text];
+          const target = offset - piece.range.start;
+          // Painted characters before the boundary: the source characters
+          // before it, then the tatweels inserted before its character.
+          let consumed = 0;
+          let early = 0;
+          while (consumed < target) {
+            if (painted[early] === source[consumed]) consumed += 1;
+            early += 1;
+          }
+          let late = early;
+          while (late < painted.length && painted[late] !== source[target]) late += 1;
+          const run = (text: readonly string[], from: number): number => {
+            let count = 0;
+            while (text[from + count] === tatweel) count += 1;
+            return count;
+          };
+          // Beside an authored tatweel the inserted ones are not identified.
+          if (source[target] === tatweel) late = early + run(painted, early) - run(source, target);
+          const rightPt = piece.bounds.xPt + piece.bounds.widthPt;
+          const besideAuthored = source[target] === tatweel || source[target - 1] === tatweel;
+          const xPt = round(host.bounds!.xPt);
+          if (besideAuthored) {
+            expect(xPt, `anchor at offset ${offset}`).toBeGreaterThanOrEqual(round(rightPt - late * 6));
+            expect(xPt, `anchor at offset ${offset}`).toBeLessThanOrEqual(round(rightPt - early * 6));
+            expect((rightPt - xPt) / 6 % 1, `anchor at offset ${offset}`).toBeCloseTo(0, 6);
+          } else {
+            expect(xPt, `anchor at offset ${offset}`).toBe(round(rightPt - late * 6));
+          }
         }
-        expect(round(host.bounds!.xPt), `anchor at offset ${offset}`)
-          .toBe(round(piece.bounds.xPt + piece.bounds.widthPt - prefix * 6));
       }
+      expect(elongated).toBeGreaterThan(0);
     }
-    expect(elongated).toBeGreaterThan(0);
   });
 });
 

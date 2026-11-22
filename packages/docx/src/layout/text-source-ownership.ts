@@ -60,6 +60,8 @@ export function sourceOwnedTextPlacements(placement: TextPlacement): readonly So
         ...unreduced,
         ...(ownedSpaces > 0 && perSpacePt > 0 ? { trailingSpaceCompressionPt: ownedSpaces * perSpacePt } : {}),
         sourceRuns: undefined,
+        // A part's text and clusters are its own; the piece's plan is not.
+        kashidaInsertions: undefined,
         sourceRunIndex: owner.sourceRunIndex,
         role: owner.role ?? 'content',
         dependency: owner.dependency,

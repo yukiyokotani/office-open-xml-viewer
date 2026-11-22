@@ -1031,6 +1031,23 @@ describe('a floating anchor inside a text piece changes nothing derived from tha
     expect(first[3]).toBe(12);
   });
 
+  it('reads kashida insertions from the plan, beside an authored tatweel', () => {
+    // beh, an authored tatweel, teh: 6pt clusters, and two inserted tatweels
+    // (12pt). The painted text is the same wherever the plan inserted them;
+    // only the plan says which side of the authored tatweel they are on.
+    const piece = (insertBefore: number) => ({ text: '\u0628\u0640\u062a', range: { start: 0, end: 3 }, direction: 'rtl' as const,
+      origin: { xPt: 100, yPt: 0 }, bounds: { xPt: 100, yPt: 0, widthPt: 30, heightPt: 12 }, advancePt: 30,
+      kashidaInsertions: [{ beforeCp: insertBefore, count: 2 }],
+      clusters: [0, 1, 2].map((index) => ({ range: { start: index, end: index + 1 },
+        offset: { xPt: index * 6, yPt: 0 }, advancePt: 6 })) });
+    const boundaries = (insertBefore: number) => [0, 1, 2, 3].map((index) =>
+      visualBoundaryXPt(piece(insertBefore) as never, index) - 100);
+    // Before the authored tatweel: beh is elongated, [12, 30).
+    expect(boundaries(1)).toEqual([30, 12, 6, 0]);
+    // After it: the authored tatweel is, [6, 24).
+    expect(boundaries(2)).toEqual([30, 24, 6, 0]);
+  });
+
   it('keeps the box of a right-to-left piece that ends in a space', () => {
     // Painted left to right: space, dalet, gimel, bet, alef (6pt each). The
     // first run fills the right 12pt of the piece's box, and the boundary

@@ -228,3 +228,44 @@ describe('buildDocxHighlightLayer', () => {
     expect(layer.children).toHaveLength(0);
   });
 });
+
+describe('highlights in right-to-left runs', () => {
+  const hebrew = '\u05d0\u05d1\u05d2';
+  const boxes = (runs: DocxTextRunInfo[], matches: DocxHighlightMatch[], measure = measureForFont) => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measure);
+    return layer.children.map((child) => {
+      const css = child.style.cssText;
+      const rounded = (value: string) => Math.round(Number(value) * 1e9) / 1e9;
+      return [rounded(/left:([-\d.e]+)%/.exec(css)![1]!), rounded(/width:([-\d.e]+)%/.exec(css)![1]!)];
+    });
+  };
+
+  it('leaves out the tracking after the final matched glyph, as in left-to-right runs', () => {
+    // 7px glyphs tracked by 2px. Painted left to right: gimel, bet, alef,
+    // each with its tracking on its left (after it in reading order).
+    const rtl = run({ text: hebrew, direction: 'rtl', letterSpacingPx: 2, w: 27 });
+    const hit = (start: number, end: number) => boxes([rtl], [{ slices: [{ runIndex: 0, start, end }], active: false }]);
+    expect(hit(1, 2)).toEqual([[11, 7]]);
+    expect(hit(0, 1)).toEqual([[20, 7]]);
+    // Two glyphs keep the tracking between them only.
+    expect(hit(0, 2)).toEqual([[11, 16]]);
+    // The same slices in a left-to-right run.
+    const ltr = run({ text: 'abc', letterSpacingPx: 2, w: 27 });
+    expect(boxes([ltr], [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }])).toEqual([[9, 7]]);
+  });
+
+  it('measures a run once for all of its hits', () => {
+    const calls = (length: number): number => {
+      let count = 0;
+      const measure = () => (value: string) => { count += 1; return value.length * W; };
+      const text = hebrew.repeat(length / 3);
+      const matches = Array.from({ length }, (_, start) => ({ slices: [{ runIndex: 0, start, end: start + 1 }], active: false }));
+      expect(boxes([run({ text, direction: 'rtl' })], matches, measure)).toHaveLength(length);
+      return count;
+    };
+    // A table rebuilt per hit measures length prefixes for each of length hits.
+    expect(calls(300)).toBeLessThan(calls(75) * 5);
+  });
+});

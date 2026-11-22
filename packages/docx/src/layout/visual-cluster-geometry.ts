@@ -56,7 +56,7 @@ export function bidiPlacedOffsets(
 }
 
 type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>
-  & Partial<Pick<TextPlacement, 'paintOps' | 'advancePt'>>;
+  & Partial<Pick<TextPlacement, 'advancePt' | 'kashidaInsertions'>>;
 type VisualClusters = Readonly<{
   /** Visual start of each cluster from the left edge of the piece's box. */
   startsPt: readonly number[];
@@ -65,43 +65,34 @@ type VisualClusters = Readonly<{
   odd: readonly boolean[];
 }>;
 const visualClustersByPlacement = new WeakMap<object, VisualClusters | null>();
-const TATWEEL = '\u0640';
-
-/** Extra advance each cluster is painted with under kashida justification:
- * the piece paints one operation whose text holds the inserted tatweels
- * (`sourceMapping: 'kashida'`), while the retained clusters keep their
- * natural advances. An equal share of the added width per tatweel extends
- * the cluster before each insertion. */
+/** Extra advance each cluster is painted with under kashida justification.
+ * The piece paints one operation whose text holds the inserted tatweels
+ * while the retained clusters keep their natural advances; the insertions
+ * come from the plan (`kashidaInsertions`), never from the painted text,
+ * where an authored tatweel is indistinguishable. An equal share of the
+ * added width per inserted tatweel extends the cluster before each one. */
 function kashidaExtensionsPt(placement: ClusteredText): number[] | null {
-  const operation = placement.paintOps?.length === 1 ? placement.paintOps[0] : undefined;
-  if (operation?.sourceMapping !== 'kashida' || placement.advancePt === undefined) return null;
+  const insertions = placement.kashidaInsertions;
+  if (!insertions || placement.advancePt === undefined) return null;
+  const total = insertions.reduce((sum, insertion) => sum + insertion.count, 0);
   const addedPt = placement.advancePt - placement.clusters.reduce((sum, cluster) => sum + cluster.advancePt, 0);
-  if (!(addedPt > 0)) return null;
-  const source = [...placement.text];
-  const painted = [...operation.text];
-  const run = (text: readonly string[], from: number): number => {
-    let count = 0;
-    while (text[from + count] === TATWEEL) count += 1;
-    return count;
-  };
-  const extensions = placement.clusters.map(() => 0);
-  let paintedIndex = 0;
+  if (total === 0 || !(addedPt > 0)) return null;
+  // UTF-16 offset of each code point, in order.
+  const starts: number[] = [];
   let offset = placement.range.start;
-  let cluster = 0;
-  let total = 0;
-  source.forEach((character, index) => {
-    const inserted = Math.max(0, run(painted, paintedIndex) - run(source, index));
-    while (cluster < placement.clusters.length - 1 && placement.clusters[cluster]!.range.end <= offset) cluster += 1;
-    if (inserted > 0) {
-      // Before this character: after the cluster that precedes it.
-      const owner = placement.clusters[cluster]!.range.start >= offset && cluster > 0 ? cluster - 1 : cluster;
-      extensions[owner]! += inserted;
-      total += inserted;
-    }
-    paintedIndex += inserted + 1;
+  for (const character of placement.text) {
+    starts.push(offset);
     offset += character.length;
-  });
-  if (total === 0) return null;
+  }
+  const extensions = placement.clusters.map(() => 0);
+  let cluster = 0;
+  for (const insertion of [...insertions].sort((left, right) => left.beforeCp - right.beforeCp)) {
+    const at = starts[insertion.beforeCp] ?? offset;
+    while (cluster < placement.clusters.length - 1 && placement.clusters[cluster]!.range.end <= at) cluster += 1;
+    // Before this character: after the cluster that precedes it.
+    const owner = placement.clusters[cluster]!.range.start >= at && cluster > 0 ? cluster - 1 : cluster;
+    extensions[owner]! += insertion.count;
+  }
   return extensions.map((count) => count * addedPt / total);
 }
 

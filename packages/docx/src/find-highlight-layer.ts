@@ -82,6 +82,16 @@ export function buildDocxHighlightLayer(
   const matchColor = colors.match ?? DEFAULT_FIND_HIGHLIGHT;
   const activeColor = colors.active ?? DEFAULT_FIND_ACTIVE_HIGHLIGHT;
 
+  // Each run's visual character table is built once and serves every hit.
+  const tables = new Map<number, VisualRunTable>();
+  const visualRunTable = (
+    runIndex: number, run: DocxTextRunInfo, measure: (value: string) => number, pitch: number,
+  ): VisualRunTable => {
+    let table = tables.get(runIndex);
+    if (!table) tables.set(runIndex, table = buildVisualRunTable(run.text, run.direction ?? 'ltr', measure, pitch));
+    return table;
+  };
+
   for (const match of matches) {
     const fill = match.active ? activeColor : matchColor;
     for (const slice of match.slices) {
@@ -108,7 +118,7 @@ export function buildDocxHighlightLayer(
       // A run with right-to-left text is painted in the visual order of its
       // bidi levels: the slice covers one box per painted interval.
       const intervals = run.direction === 'rtl' || hasStrongRtl(run.text)
-        ? visualSliceIntervals(run.text, run.direction ?? 'ltr', start, end, measure, pitch)
+        ? visualSliceIntervals(visualRunTable(slice.runIndex, run, measure, pitch), start, end, pitch)
         : [{ x: pitchedX, width: pitchedWidth }];
       for (const interval of intervals) {
       const x = interval.x * k;
@@ -138,37 +148,76 @@ export function buildDocxHighlightLayer(
   }
 }
 
-/** Where the characters `[start, end)` of a run are painted, from the run's
- * left edge: each character's measured advance placed in the visual order
- * of the run's UAX#9 levels (the order the run was painted in), adjacent
- * characters merged into one interval. */
-function visualSliceIntervals(
+interface VisualRunTable {
+  /** One entry per character, in source order. */
+  readonly characters: readonly Readonly<{
+    from: number; x: number; width: number; odd: boolean; pitchBearing: boolean;
+  }>[];
+  /** Index of the character starting at each UTF-16 offset. */
+  readonly indexAt: ReadonlyMap<number, number>;
+}
+
+/** Where each character of a run is painted, from the run's left edge: its
+ * measured advance (tracking included) placed in the visual order of the
+ * run's UAX#9 levels, the order the run was painted in. */
+function buildVisualRunTable(
   text: string,
   direction: 'ltr' | 'rtl',
-  start: number,
-  end: number,
   measure: (value: string) => number,
   pitch: number,
-): { x: number; width: number }[] {
+): VisualRunTable {
   const levels = resolvedBidiLevels(text, direction);
-  const items: { xPt: number; advancePt: number; level: number; from: number }[] = [];
+  const items: { xPt: number; advancePt: number; level: number; from: number; pitchBearing: boolean }[] = [];
   let offset = 0;
   let pitched = 0;
+  let pen = 0;
   for (const character of text) {
-    const extent = sliceHorizontalExtent(text, offset, offset + character.length, measure);
+    const end = offset + character.length;
+    const next = end >= text.length ? measure(text) : measure(text.slice(0, end));
     const bearing = countSpacingCharacters(character).pitchBearing;
-    items.push({ xPt: extent.x + pitched * pitch, advancePt: extent.width + bearing * pitch,
-      level: levels[offset] ?? (direction === 'rtl' ? 1 : 0), from: offset });
+    items.push({ xPt: pen + pitched * pitch, advancePt: Math.max(0, next - pen) + bearing * pitch,
+      level: levels[offset] ?? (direction === 'rtl' ? 1 : 0), from: offset, pitchBearing: bearing > 0 });
     pitched += bearing;
-    offset += character.length;
+    pen = next;
+    offset = end;
   }
   const placed = bidiPlacedOffsets(items);
-  const boxes = items
-    .map((item, index) => ({ x: placed[index]!, width: item.advancePt, from: item.from }))
-    .filter((box) => box.from >= start && box.from < end && box.width > 0)
-    .sort((left, right) => left.x - right.x);
+  return {
+    characters: items.map((item, index) => ({ from: item.from, x: placed[index]!, width: item.advancePt,
+      odd: item.level % 2 === 1, pitchBearing: item.pitchBearing })),
+    indexAt: new Map(items.map((item, index) => [item.from, index])),
+  };
+}
+
+/** Where the characters `[start, end)` of a run are painted: adjacent
+ * characters merged into one interval. As for a left-to-right slice, the
+ * tracking that follows the slice's final rendered character is left out:
+ * it lies after that character in its own direction. */
+function visualSliceIntervals(
+  table: VisualRunTable,
+  start: number,
+  end: number,
+  pitch: number,
+): { x: number; width: number }[] {
+  let first = table.indexAt.get(start);
+  // A slice that starts inside a character starts at the next one.
+  for (let offset = start; first === undefined && offset < end; offset += 1) first = table.indexAt.get(offset + 1);
+  if (first === undefined) return [];
+  const boxes: { x: number; width: number }[] = [];
+  let final = -1;
+  for (let index = first; index < table.characters.length && table.characters[index]!.from < end; index += 1) {
+    const character = table.characters[index]!;
+    if (character.pitchBearing) final = boxes.length;
+    boxes.push({ x: character.x, width: character.width });
+  }
+  if (final >= 0 && pitch !== 0) {
+    const character = table.characters[first + final]!;
+    const box = boxes[final]!;
+    box.width -= pitch;
+    if (character.odd) box.x += pitch;
+  }
   const merged: { x: number; width: number }[] = [];
-  for (const box of boxes) {
+  for (const box of boxes.filter((candidate) => candidate.width > 0).sort((left, right) => left.x - right.x)) {
     const last = merged.at(-1);
     if (last && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
     else merged.push({ x: box.x, width: box.width });
