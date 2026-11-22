@@ -99,7 +99,8 @@ export function normalizeSelectedNoteSeparators(
     if (!Array.isArray(paragraphs) || paragraphs.length === 0) reject(`${role} story has no paragraph`);
     // The closed shape the parser admits: text and field runs and line
     // breaks with at most one marker run in the whole story, and no
-    // numbering, frame or hidden mark (borders and shading paint).
+    // numbering or frame; a hidden mark only on a paragraph with runs
+    // (borders and shading paint).
     let markerParagraph = -1;
     paragraphs.forEach((paragraph, index) => {
       if (!isNoteSeparatorStoryRuns(paragraph.runs ?? [])) reject(`${role} paragraph carries unrepresented runs`);
@@ -107,7 +108,8 @@ export function normalizeSelectedNoteSeparators(
         if (markerParagraph >= 0) reject(`${role} story holds two markers`);
         markerParagraph = index;
       }
-      if (paragraph.numbering != null || paragraph.framePr != null || paragraph.markVanish === true) {
+      if (paragraph.numbering != null || paragraph.framePr != null
+        || (paragraph.markVanish === true && (paragraph.runs ?? []).length === 0)) {
         reject(`${role} paragraph carries unrepresented properties`);
       }
     });
