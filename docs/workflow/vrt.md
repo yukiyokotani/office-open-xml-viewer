@@ -15,8 +15,9 @@ VRT is local-only because private samples are not redistributable.
   page, sheet, or slide against an Office-produced reference, or get the
   user's explicit decision; report anything else as unadjudicated. Never
   approve a group of differences because the files share a feature.
-- Never update files under `packages/*/tests/visual/references/` unless the
-  user explicitly asks. Never loosen `RATCHET_DROP_PCT` or `FAIL_ABOVE_PCT` to
+- Never update the reference images under
+  `packages/*/tests/visual/references/` unless the user explicitly asks. The
+  `scores.json` files beside them follow the recording rule below. Never loosen `RATCHET_DROP_PCT` or `FAIL_ABOVE_PCT` to
   make a run pass. Run `pnpm vrt:fidelity` with every renderer change, and
   record `scores.json` only from committed renderer code.
 
@@ -27,8 +28,9 @@ and compare exact decoded pixels with the previous renderer's images:
 
 - **demo**: every file under `packages/<fmt>/public/demo/` (tracked). Captured
   by `pnpm vrt:snapshot` and checked by `pnpm vrt`.
-- **private**: every file under `packages/<fmt>/public/private/<fmt>/`
-  (gitignored). Captured by `pnpm vrt:private:snapshot` and checked by
+- **private**: every file directly in `packages/<fmt>/public/private/<fmt>/`
+  (gitignored). Subdirectories are not read: a control that should take part
+  in the self-VRT is placed at the top level of that directory. Captured by `pnpm vrt:private:snapshot` and checked by
   `pnpm vrt:private`.
 
 `pnpm vrt` also runs the package's other visual specs (worker parity, overlays,
@@ -59,6 +61,8 @@ base=$(git rev-parse origin/main)
 git worktree add --detach /tmp/ooxml-vrt-baseline "$base"
 cd /tmp/ooxml-vrt-baseline
 pnpm install --frozen-lockfile && pnpm build:wasm
+# The private corpus is git-ignored, so a new worktree has none: copy the same
+# files into each packages/<fmt>/public/private/<fmt>/ here and in the candidate.
 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:snapshot
 VRT_BASELINE_REVISION=$base VRT_PORT=5190 pnpm vrt:private:snapshot
 

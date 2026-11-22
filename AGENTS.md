@@ -37,8 +37,9 @@ viewers.
    ([Git, PRs and issues](docs/workflow/git-and-prs.md)).
 5. Never commit private samples or generated output, and keep local paths,
    usernames and private sample contents out of commits, PRs and public docs.
-6. Never update `packages/*/tests/visual/references/` or loosen VRT thresholds
-   unless the user explicitly asks. The VRT oracle is the previous renderer
+6. Never update the reference images in
+   `packages/*/tests/visual/references/` or loosen VRT thresholds unless the
+   user explicitly asks. The VRT oracle is the previous renderer
    ([VRT](docs/workflow/vrt.md)).
 7. Review every OOXML feature or fix adversarially before calling it complete
    ([adversarial review](docs/workflow/adversarial-review.md)).

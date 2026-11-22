@@ -15,7 +15,7 @@ This file records only PPTX-specific facts.
 
 ```
 packages/pptx/
-├── parser/            Rust/wasm-pack parser crate (src/lib.rs, shape.rs, text.rs,
+├── parser/src/        Rust/wasm-pack parser crate (lib.rs, shape.rs, text.rs,
 │                      master.rs, theme.rs, chart.rs, …); emits the slide model
 ├── model/             Rust model crate shared by the parser
 ├── src/

@@ -109,7 +109,7 @@ without leaving it in a changed state.
   before opening a file, applies a timeout per item, ends only the Office
   process it started, treats a non-zero exit as a failure, and removes its
   staging copies when the run ends.
-- Word: `$wa.Quit()` (not `Quit(0)`); iterate merged tables through
+- Word: quit with `Quit` and no argument (not `Quit(0)`); iterate merged tables through
   `Range.Cells`; screenshots need `SetProcessDPIAware` and an explicit
   `Zoom.Percentage` (PageFit is ignored). Layout probes can read
   `Information(6)` and shape positions without a PDF export.

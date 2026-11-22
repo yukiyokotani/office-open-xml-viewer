@@ -271,7 +271,9 @@ export function planLinearValueAxis(options: LinearValueAxisOptions): LinearValu
     // Observed Office rule (not in ECMA-376 §21.2.2.107/108/160): the strict
     // 1.2 zero-pin boundary, the 1/2/5 ladder and the 5 % padding come from
     // an Office corpus of 6,354 fully automatic finite linear value axes
-    // (#1236 / #1246).
+    // (#1236 / #1246). In that corpus, 24 outputs for tiny offsets were
+    // unstable and are deliberately not emulated; the tiny-offset test checks
+    // bounded finite ticks, not an Office match.
     // The 1.2 boundary is intentionally strict: equality remains offset.
     // Once an endpoint is zero-anchored, padding is computed from that same
     // effective span. This keeps identical automatic axes family-invariant

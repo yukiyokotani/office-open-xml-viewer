@@ -473,11 +473,13 @@ export function projectBodyLayoutInput(acquired: BodyLayoutAcquisitionInput): Bo
       }),
     });
   });
-  // The trust and immutability boundary of the body input: snapshotPlainData
-  // returns frozen plain data (reusing blocks it already snapshotted) or
-  // throws a TypeError for non-plain input. It stays
-  // in TypeScript because public models can be hand-built in JavaScript;
-  // parser-side (serde) defaults cannot make such input plain or detached.
+  // Immutability boundary for this engine-acquired body input, not a trust
+  // boundary: snapshotPlainData returns a frozen copy, sharing nodes it has
+  // already snapshotted. In production it throws a TypeError only for
+  // functions, symbols, non-finite numbers and objects whose prototype is not
+  // Object.prototype or null; it reads enumerable getters and preserves
+  // cycles. Rejecting accessors, cycles and proxies needs the strict
+  // pre-pass, which validation-policy.ts disables in production.
   return snapshotPlainData({
     source: { story: 'body', storyInstance: 'body', path: [] },
     compat: acquired.compat,

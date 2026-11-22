@@ -136,16 +136,22 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
           <tbody>
             <tr><th><code>docx / text</code></th><td>Browser-native text selection</td><td>Selected text and page, paragraph, and run locators</td></tr>
             <tr><th><code>docx / element</code></th><td>Clicked topmost picture, chart, or shape</td><td>Element type, page bounds, and structural source locator for inline or floating content</td></tr>
+            <tr><th><code>docx / comment</code></th><td>Active comment thread in <code>DocxScrollViewer</code></td><td>Page index, comment id, optional source locator, and the bounded thread</td></tr>
             <tr><th><code>xlsx / range</code></th><td>Cells, rows, columns, sheet, or multiple areas</td><td>Canonical selection state, sheet identity, formulas, display text, and populated cells</td></tr>
             <tr><th><code>xlsx / element</code></th><td>Clicked topmost worksheet object</td><td>Chart, picture, or shape type, sheet anchor, and bounded descriptive text</td></tr>
             <tr><th><code>pptx / text</code></th><td>Browser-native text selection</td><td>Selected text and slide, shape, and run locators</td></tr>
             <tr><th><code>pptx / element</code></th><td>Clicked topmost slide element</td><td>Type, provenance, bounds, identifiers, and bounded descriptive text</td></tr>
+            <tr><th><code>pptx / comment</code></th><td>Active comment thread in <code>PptxScrollViewer</code></td><td>Slide index, comment index and occurrence id, optional comment id and point, and the bounded thread</td></tr>
           </tbody>
         </table>
       </div>
       <p class="priority-note">
         In DOCX and PPTX, a live text selection takes precedence over element focus. Selecting text clears an
         earlier element focus, so collapsing the browser selection does not resurrect a stale click.
+        In <code>DocxScrollViewer</code> and <code>PptxScrollViewer</code>, an active comment thread takes
+        precedence over both: while a thread is active, <code>getSelectionContext()</code> returns its
+        <code>comment</code> context even if text is selected. <code>DocxViewer</code>,
+        <code>PptxViewer</code>, and the XLSX Viewers return no <code>comment</code> kind.
       </p>
     </section>
 
@@ -191,9 +197,12 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         inside the current selection keeps the whole selection; a right-click outside it selects the
         target cell, row, or column, or the whole sheet from the corner header. With
         <code>enableElementSelection: true</code>, a right-click on a chart, picture, or shape
-        selects and outlines that object instead. In DOCX and PPTX, a live text selection is kept;
-        otherwise, with element selection enabled, the object at the target becomes the focus, and a
-        right-click on empty page or slide space, or outside it, clears the object focus.
+        selects and outlines that object instead. In DOCX and PPTX, a live text selection is kept and
+        the lookup returns the getter's current context; otherwise, with element selection enabled,
+        the object at the target becomes the focus, and a right-click on empty page or slide space, or
+        outside it, clears the object focus. In the scroll viewers with comments enabled, any pointer
+        press outside a comment card or marker clears the active thread; while a thread is
+        still active, the lookup returns its <code>comment</code> context ahead of text.
       </p>
     </section>
 

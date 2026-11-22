@@ -51,17 +51,43 @@ const isInside = (dir, path) => {
   return offset !== '' && offset.split(sep)[0] !== '..' && offset === relative(dir, resolve(dir, offset));
 };
 
-// Relative Markdown link targets outside fenced code blocks, without anchors.
-function relativeLinks(file) {
-  const text = read(file).replace(/^```[\s\S]*?^```/gm, '');
-  const targets = [];
-  for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
-    const target = match[1].split('#')[0];
-    if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) continue;
-    targets.push(target);
+// Link destinations a Markdown reader would follow: inline links, and
+// reference links that are used and defined. Fenced code, code spans and HTML
+// comments hold no links, and an unused definition is not one.
+function markdownLinks(text) {
+  const body = text
+    .replace(/^```[\s\S]*?^```/gm, '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/`[^`\n]*`/g, '');
+  const label = (raw) => raw.trim().replace(/\s+/g, ' ').toLowerCase();
+  const definitions = new Map();
+  const prose = body.replace(/^ {0,3}\[([^\]]+)\]:[ \t]*<?(\S+?)>?(?:[ \t]+.*)?$/gm, (_, name, target) => {
+    if (!definitions.has(label(name))) definitions.set(label(name), target);
+    return '';
+  });
+  const targets = [...prose.matchAll(/\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]);
+  // [text][label], [label][] and the shortcut form [label].
+  for (const [, text, explicit] of prose.matchAll(/\[([^\]]+)\](?:\[([^\]]*)\])?(?![(:])/g)) {
+    const target = definitions.get(label(explicit || text));
+    if (target !== undefined) targets.push(target);
   }
   return targets;
 }
+
+// Relative link targets of a Markdown file, without anchors.
+function relativeLinks(file) {
+  return markdownLinks(read(file))
+    .map((target) => target.split('#')[0])
+    .filter((target) => target && !/^[a-z][a-z0-9+.-]*:/i.test(target));
+}
+
+test('Markdown links are the destinations a reader can follow', () => {
+  assert.deepEqual(markdownLinks('[a](x.md) and [b][ref] and [ref] and [c][].\n\n[ref]: y.md\n[c]: z.md "t"\n'), [
+    'x.md', 'y.md', 'y.md', 'z.md',
+  ]);
+  assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);
+  assert.deepEqual(markdownLinks('```\n[fenced](f.md)\n```\n[guide][g]\n\n[g]: missing.md\n'), ['missing.md']);
+});
 
 test('every AGENTS.md chain fits within the Codex instruction limit', () => {
   const over = [];
@@ -104,6 +130,7 @@ test('relative links in agent knowledge resolve', () => {
     ...agentsFiles(),
     ...docsFiles(),
     ...walk(join(ROOT, '.agents'), (name) => name === 'SKILL.md'),
+    ...tracked().filter((path) => /(^|\/)README\.md$/.test(path) && !path.startsWith('docs/')).map((path) => join(ROOT, path)),
   ];
   const broken = [];
   for (const file of sources) {
@@ -200,12 +227,7 @@ function linkedDocs(path, text, blobUrl) {
     if (target.startsWith(blobUrl)) add(posix.normalize(target.slice(blobUrl.length)));
   };
   if (path.endsWith('.md')) {
-    const body = text.replace(/^```[\s\S]*?^```/gm, '');
-    const targets = [
-      ...[...body.matchAll(/\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
-      ...[...body.matchAll(/^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s|$)/gm)].map((match) => match[1]),
-    ];
-    for (const target of targets) {
+    for (const target of markdownLinks(text)) {
       if (/^[a-z][a-z0-9+.-]*:/i.test(target)) absolute(target);
       else add(posix.normalize(posix.join(posix.dirname(path), target)));
     }
@@ -233,6 +255,7 @@ test('a consumer link to a guide is a real link destination, not incidental text
   assert.deepEqual(links('README.md', 'Read the [guide][g].\n\n[g]: docs/example.md\n'), ['docs/example.md']);
   assert.deepEqual(links('README.md', 'The file `docs/example.md` is mentioned, [old](docs/example.md.old).'), []);
   assert.deepEqual(links('README.md', '[other](https://github.com/unrelated/project/blob/old/docs/example.md)'), []);
+  assert.deepEqual(links('README.md', '<!-- [unused](docs/hidden.md) -->\n\n[unused]: docs/orphan.md\n'), []);
   assert.deepEqual(links('README.md', '[tag](https://github.com/o/r/blob/v1.0.0/docs/example.md)'), []);
   // Site and source: only the page's URL on main, outside comments.
   assert.deepEqual(
@@ -249,6 +272,13 @@ test('a consumer link to a guide is a real link destination, not incidental text
     links('packages/core/src/a.ts', '// https://github.com/o/r/blob/main/docs/example.md\nexport {};'),
     [],
   );
+});
+
+// Linked docs/ pages that are not in the repository.
+const staleGuideLinks = (linked, existing) => [...linked].filter((target) => !existing.has(target)).sort();
+
+test('a consumer link to a deleted guide is reported', () => {
+  assert.deepEqual(staleGuideLinks(new Set(['docs/kept.md', 'docs/deleted.md']), new Set(['docs/kept.md'])), ['docs/deleted.md']);
 });
 
 test('a guide is deleted only when nothing links to it and no supported release retains it', () => {
@@ -288,6 +318,11 @@ test('docs/ holds only procedures, the core beliefs, linked user guides and thei
   }
   const guides = files.filter((path) => /^docs\/[^/]+\.md$/.test(path) && path !== 'docs/README.md');
   assert.deepEqual(
+    staleGuideLinks(linked, new Set(files)),
+    [],
+    'a README, site page or shipped source links a docs/ page that does not exist',
+  );
+  assert.deepEqual(
     guidesToDelete(guides, linked, RELEASE_RETAINED_GUIDES),
     [],
     'no README, site page or shipped source links this guide: delete it, or move design rationale beside the source',
@@ -316,13 +351,19 @@ test('docs/ carries no task lists', () => {
 function missingReferences(file, text, { exists, scriptsOf }) {
   const pnpmBuiltins = new Set(['install', 'exec', 'add', 'run', 'dlx', 'why', 'pack', 'publish']);
   // Generated, git-ignored or local-only locations a page may legitimately name.
-  const localOnly = [/^spec(\/|$)/, /(^|\/)src\/wasm(\/|$)/, /\/public\/private(\/|$)/, /^node_modules\//, /(^|\/)dist(\/|$)/, /^\/?tmp\//];
+  const localOnly = [/^(\.\.\/)*spec(\/|$)/, /(^|\/)src\/wasm(\/|$)/, /(^|\/)public\/private(\/|$)/, /^node_modules\//, /(^|\/)dist(\/|$)/, /^\/?tmp\//];
   // Part names inside an OOXML or ODF package, not repository paths.
   const packageParts = /^(word|xl|ppt|docProps|_rels|customXml|META-INF)\//;
   const sourceFile = /\.(md|mjs|cjs|js|ts|tsx|json|ya?ml|rs|py|sh|ps1|toml|html|astro|applescript)$/;
   const missing = [];
-  for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) {
-    // A repository path: at least one slash, no spaces, placeholders or globs.
+  // Words of inline code and of fenced examples: a command names its script as
+  // one of its words (`node scripts/x.mjs`).
+  const words = [
+    ...[...text.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)].map((match) => match[1]),
+    ...[...text.replace(/^```[\s\S]*?^```/gm, '').matchAll(/`([^`\n]+)`/g)].map((match) => match[1]),
+  ].flatMap((code) => code.split(/\s+/)).map((word) => word.replace(/^["'(]+|["'),;:]+$/g, ''));
+  for (const span of new Set(words)) {
+    // A repository path: at least one slash, no placeholders, globs or assignments.
     if (!/^\.?[\w@.-]+(\/[\w@.-]+)+\/?$/.test(span) || /^(https?:|@silurus\/|origin\/|refs\/)/.test(span)) continue;
     if (localOnly.some((pattern) => pattern.test(span)) || packageParts.test(span)) continue;
     const first = span.replace(/^\.\//, '').split('/')[0];
@@ -353,6 +394,10 @@ test('a removed path or a script of another package is reported', () => {
   };
   const check = (text) => missingReferences('AGENTS.md', text, context);
   assert.deepEqual(check('`scripts/a.mjs`, `packages/docx/`, `lIns/tIns`, `word/fontTable.xml`, `spec/part1`'), []);
+  assert.deepEqual(check('Run `node scripts/missing.mjs --flag`.\n\n```bash\nnode scripts/a.mjs && python3 scripts/absent.py\n```\n'), [
+    'AGENTS.md: scripts/absent.py',
+    'AGENTS.md: scripts/missing.mjs',
+  ]);
   assert.deepEqual(check('`scripts/gone.mjs` and `rules/example.yml`'), [
     'AGENTS.md: scripts/gone.mjs',
     'AGENTS.md: rules/example.yml',

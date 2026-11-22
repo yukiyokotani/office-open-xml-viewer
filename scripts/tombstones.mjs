@@ -94,9 +94,9 @@ export const DELETED_IDENTIFIERS = [{
     'sectionTextDirection',
   ],
 }, {
-  // Node DOCX probes type their dynamic renderer import by hand, so a deleted
-  // name would keep type-checking until a gated probe runs. Select pages from
-  // `layoutDocument(...).pages` instead.
+  // Node DOCX probes once declared the type of their dynamic renderer import by
+  // hand, which let a deleted name keep type-checking until a gated probe ran.
+  // Select pages from `layoutDocument(...).pages` instead.
   root: 'packages/node/src',
   includeTests: true,
   names: ['paginateDocument', 'prebuiltPages'],

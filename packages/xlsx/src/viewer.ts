@@ -3069,8 +3069,10 @@ export class XlsxSheetViewer implements ZoomableViewer {
    * throw `Error("XlsxSheetViewer is destroyed")`; `getCellAt()` and
    * `getCellViewportRect()` return `null`. The last sheet index, count and
    * names, viewport offset, selection state, scale, hidden-sheet mode and
-   * visible count, and `canvasElement` stay readable; `getResourceMetrics()`
-   * returns the last snapshot it returned before destroy, or rejects if none.
+   * visible count, and `canvasElement` stay readable. `getResourceMetrics()`
+   * returns the last cached metrics report, whether it came from an
+   * `onResourceMetrics` delivery or an earlier `getResourceMetrics()` call, and
+   * rejects only when nothing was cached.
    */
   destroy(): void {
     if (this.destroyed) return;

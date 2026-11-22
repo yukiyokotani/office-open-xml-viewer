@@ -7,7 +7,7 @@
 // below the non-disableable hard ceiling in the same file (the policy
 // generator rejects a default above it).
 //
-// Usage: pnpm measure:archive-entries -- <corpus-root> [more-roots...]
+// Usage: pnpm measure:archive-entries <corpus-root> [more-roots...]
 
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';

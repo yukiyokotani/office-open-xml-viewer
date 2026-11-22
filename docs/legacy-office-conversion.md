@@ -239,7 +239,7 @@ supports:
 - DATE and TIME show the current date or time when the field has a date-time
   picture the renderer can format; otherwise they show the result stored in
   the file.
-- A locked field shows its stored result.
+- A locked PAGE, NUMPAGES, DATE or TIME field shows its stored result.
 - EQ fields become phonetic guides or inline equations.
 - HYPERLINK fields whose instruction the reader can parse, and REF or PAGEREF
   fields with a bookmark and `\h`, become links. Stored results are not
@@ -357,8 +357,10 @@ metadata; display follows the existing `XlsxViewer` `hiddenSheetMode` option,
 whose default remains `'show'`. Of the sheet views, only display flags and
 frozen panes are projected.
 
-Cell-anchored drawings are expressed in the Normal font's maximum digit width
-(ECMA-376 §18.3.1.13). The XLS source asks the host for it through a generic
+A cell-anchored drawing stores each corner as a row and column plus signed
+offsets in 1/1024 of the column width and 1/256 of the row height. Resolving
+column widths needs the Normal font's maximum digit width (ECMA-376
+§18.3.1.13). The XLS source asks the host for it through a generic
 host-layout capability, and the XLSX renderer answers with its own
 `computeMdw`, the same measurement that sizes the painted grid, in the
 rendering realm: the render Worker in `mode: 'worker'`, the page in main
