@@ -2292,6 +2292,8 @@ function appendRunsToSegments(
       segs.push({
         text: '',
         metricOnly: true,
+        ...((run as Readonly<{ __metricNeutral?: boolean }>).__metricNeutral === true
+          ? { lineMetricNeutral: true as const } : {}),
         ...(eastAsian ? { metricEastAsian: true as const } : {}),
         bold,
         italic,

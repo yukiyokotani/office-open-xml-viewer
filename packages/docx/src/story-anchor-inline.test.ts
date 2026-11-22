@@ -696,9 +696,13 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
     }
   });
 
-  it('keeps a carried deleted shape out of its carrier line metrics', () => {
+  it.each([
+    '<w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>CAPTION</w:t></w:r>',
+    // A complex-script run lays out at its szCs, not its w:sz.
+    '<w:r><w:rPr><w:cs/><w:sz w:val="96"/><w:szCs w:val="16"/></w:rPr><w:t>\u0645\u062b\u0627\u0644</w:t></w:r>',
+  ])('keeps a carried deleted shape out of its carrier line metrics (%#)', (captionRun) => {
     const body = '<w:p><w:r><w:t>BODY</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>'
-      + '<w:p><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>CAPTION</w:t></w:r></w:p>';
+      + `<w:p>${captionRun}</w:p>`;
     const deleted = `<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:del>`;
     const captionLine = (storyRuns: string) => {
       variant = { body, storyRuns, markup: true };

@@ -2273,26 +2273,17 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
     // ending without a paragraph (Word always ends one with a paragraph) has
     // no carrier whose page frame bounds them: they are left out, never
     // placed inside a table cell laid out before its page's note area.
-    // The carried anchor characters take the carrier's own text metrics
-    // (its last text run, else its paragraph mark), so they lend its line
-    // no height of their own; they were sized for a host paragraph.
-    const carried = (carrier: DocParagraph): DocRun[] => {
-      const text = [...carrier.runs].reverse().find((run) => run.type === 'text' && run.text.length > 0) as
-        Extract<DocRun, { type: 'text' }> | undefined;
-      const metrics = text
-        ? { fontSize: text.fontSize, fontFamily: text.fontFamily ?? null,
-            fontFamilyEastAsia: text.fontFamilyEastAsia ?? null, bold: text.bold, italic: text.italic }
-        : { fontSize: carrier.defaultFontSize ?? 10, fontFamily: carrier.defaultFontFamily ?? null,
-            fontFamilyEastAsia: null, bold: false, italic: false };
-      return runs.map((run) => (run.type === 'anchorHost' ? { ...run, ...metrics } : run));
-    };
+    // The carried anchor characters attach their shapes to the carrier's
+    // last line but lend it no metrics: they were sized for a host paragraph.
+    const carried = (): DocRun[] => runs.map((run) => (run.type === 'anchorHost'
+      ? { ...run, __metricNeutral: true } as unknown as DocRun : run));
     const lastIndex = doc.body.map((element) => element.type).lastIndexOf('paragraph');
     if (lastIndex < 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
     const last = doc.body[lastIndex] as DocParagraph;
     const body = [...doc.body];
     body[lastIndex] = {
       ...last,
-      runs: [...last.runs, ...carried(last)],
+      runs: [...last.runs, ...carried()],
       ...withRevisions(body[lastIndex]!, last.runs.length, (last as InternalDocParagraph).__runRevisions ?? []),
     } as unknown as BodyElement;
     return { ...doc, body, __noteLayoutSettings: retained } as DocxDocumentModel;
