@@ -335,8 +335,10 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     [1, 40, [4400, 4800], AUTO, 465.3 - 40 - 0.5],
     [1, 40, [1440, 2160], DXA_180, 180],
     [1, 40, [1440, 2160], '<w:tblW w:w="5000" w:type="pct"/>', 465.3 - 0.5],
-    // A negative indent does not raise the ceiling.
-    [1, -40, [4400, 4800], AUTO, 465.3 - 0.5],
+    // A negative indent leaves the table's end at the column's end.
+    [1, -40, [4400, 4800], AUTO, 472],
+    [2, -40, [4400, 4800], AUTO, 222.65 + 40 - 0.5],
+    [2, -40, [1440, 2160], '<w:tblW w:w="5000" w:type="pct"/>', 222.65 - 0.5],
   ] as const)('holds an indented automatic table to what the indent leaves of its column (%d columns, %d pt, %j)', (columnCount, indentPt, widths, tableWidth, expected) => {
     // An automatic table ends with its column; a preferred width is kept
     // and moves with the indent.
@@ -662,12 +664,14 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     }
   });
 
-  it('does not let a negative indent raise the ceiling in the older modes', () => {
+  it('ends a negatively indented table with its column in every mode', () => {
+    // 220 + 240 pt cells and their gaps are 472 pt: from an origin 20 pt
+    // left of the text they end before the column does.
     const indented = `<w:tbl><w:tblPr>${AUTO}${spacing(2)}<w:tblInd w:w="-400" w:type="dxa"/>${BORDERS}</w:tblPr><w:tblGrid>`
       + `<w:gridCol w:w="4400"/><w:gridCol w:w="4800"/></w:tblGrid><w:tr>${cell(4400, 'A1')}${cell(4800, 'B1')}</w:tr></w:tbl>`;
     for (const mode of [12, 14, 15]) {
       const page = tablePages(indented, mode)[0]!;
-      expect(page.columnWidthsPt.reduce((sum, width) => sum + width, 0)).toBeCloseTo(465.3 - 0.5, 6);
+      expect(page.columnWidthsPt.reduce((sum, width) => sum + width, 0)).toBeCloseTo(472, 6);
     }
   });
 

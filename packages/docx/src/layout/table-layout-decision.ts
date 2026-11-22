@@ -270,16 +270,14 @@ function memberContext(
         // The center/right controls retain the leading band's width in mode
         // 14, but use the full text band in mode 15. This is a width rule;
         // origin translation is acquired separately under WORD_TABLE_ORIGIN_COMPATIBILITY.
-        // A spaced table gains nothing from a negative indent (unmeasured).
-        const bandIndentPt = spacingGeometry ? Math.max(0, indentPt) : indentPt;
-        return leading || outerCellMarginsHangOutsideBand ? contentWPt - bandIndentPt : contentWPt;
+        return leading || outerCellMarginsHangOutsideBand ? contentWPt - indentPt : contentWPt;
       })))
     // WORD_TABLE_CELL_SPACING_GEOMETRY: an automatic spaced table ends with
     // its column wherever the leading-indent band is not established.
     : spacingGeometry && effectiveLayout !== 'fixed' && !hasPreferredTableWidth
       ? Math.max(0, Math.min(...rowPlacements.map(({ justification, indentPt }) =>
           (justification == null || justification === 'left' || justification === 'start'
-            ? contentWPt - Math.max(0, indentPt) : contentWPt))))
+            ? contentWPt - indentPt : contentWPt))))
       : contentWPt;
   // WORD_AUTOFIT_OUTER_CELL_MARGIN_BAND (table-compatibility.ts): an AutoFit
   // grid can include outer §17.4.42 cell margins beyond the text band. For a
