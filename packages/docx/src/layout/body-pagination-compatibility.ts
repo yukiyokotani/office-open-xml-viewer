@@ -22,7 +22,7 @@ export const WORD_NOTE_SEPARATOR_GEOMETRY = defineCompatibilityRule({
     version: '16.0.20625',
     platform: 'Windows',
   },
-  description: 'ECMA-376 §§17.11.1/17.11.23 give the continuation mark the main-story width and the ordinary mark a shorter, unspecified width; §17.11.3/.9 select the special notes listed in settings. Word draws the ordinary (short) rule min(144pt, note-area width) long from the area start (a column in per-column note bands, the page-wide area in compatibility mode 15), the rule is font size / 20 thick, and its centre lies an eighth of the separator mark font size below the middle of the separator line box. Special separator stories that settings.xml does not list are ignored: Word lays out its default separator, one Normal-style mark-only line with a short rule, whatever the unlisted story holds (larger or smaller mark, spacing, exact line, another font, an empty paragraph, or no story). Its default footnote continuation separator is short as well, while its default endnote continuation separator spans the area width. Evidence: Windows Word 16.0.20625 PDF exports. 21 controls vary listed and unlisted stories, the mark size (6/10/20pt), the separator paragraph spacing and line rule, the Normal font (Times New Roman/Arial) and size (10/14pt), an empty story, a missing story and the note number format. 14 controls vary the text width (100, 144, 200 and 468pt), two 120pt columns in modes 14 and 15, and multi-page footnotes and endnotes at 468 and 200pt. A public specimen exports a 144pt rule at a 467.7pt column with a 9pt exact-12pt separator line (Windows and Mac). Measured rule centres lie 7.0pt (10pt mark, 11.5pt line), 14.0pt (20pt mark, 23pt line), 9.8pt (14pt mark, 16.1pt line) and 7.0pt (9pt mark, exact 12pt line) below the band top.',
+  description: 'ECMA-376 §§17.11.1/17.11.23 give the continuation mark the main-story width and the ordinary mark a shorter, unspecified width; §17.11.3/.9 select the special notes listed in settings. Word draws the ordinary (short) rule min(144pt, note-area width) long from the area start (a column in per-column note bands, the page-wide area in compatibility mode 15), the rule is font size / 20 thick, and its centre lies an eighth of the separator mark font size below the middle of the separator line box. Special separator stories that settings.xml does not list are ignored: Word lays out its default separator, one Normal-style mark-only line, single-spaced with no space after whatever the Normal spacing, with a short rule, whatever the unlisted story holds (larger or smaller mark, spacing, exact line, another font, an empty paragraph, or no story). Its default footnote continuation separator is short as well, while its default endnote continuation separator spans the area width. A footnote continued onto a page is separated by the separator story, never the continuation story; an endnote continuation takes its continuation story. The rule starts at the separator paragraph\'s start edge (the right edge of a bidi separator paragraph, the left edge otherwise, whatever the section direction; a mode-15 page-wide area in a right-to-left two-column section still starts at its left edge). A listed story may hold text runs around the mark run: the short mark lays out inline as a 144pt object between them and the rule is drawn at its position, the continuation mark owns its own line (text before and after it takes the lines around it), and the mark run\'s own font size sets the line and rule (a 20pt mark run in a 10pt paragraph gives a 23pt line with a 1pt rule) while an East Asian hint on the mark changes nothing. Evidence: Windows Word 16.0.20625 PDF exports. 21 controls vary listed and unlisted stories, the mark size (6/10/20pt), the separator paragraph spacing and line rule, the Normal font (Times New Roman/Arial) and size (10/14pt), an empty story, a missing story and the note number format. 14 controls vary the text width (100, 144, 200 and 468pt), two 120pt columns in modes 14 and 15, and multi-page footnotes and endnotes at 468 and 200pt. 22 further controls place text before and after the mark, a continuation mark followed by text, a 20pt mark run, an East Asian hinted mark, bidi and non-bidi separator paragraphs in right-to-left and left-to-right sections, two right-to-left 120pt columns in modes 14 and 15 and a 200pt right-to-left continuation, for footnotes and endnotes; 20 more vary the Normal spacing after (0 and 12pt) under unlisted stories. A public specimen exports a 144pt rule at a 467.7pt column with a 9pt exact-12pt separator line (Windows and Mac). Measured rule centres lie 7.0pt (10pt mark, 11.5pt line), 14.0pt (20pt mark, 23pt line), 9.8pt (14pt mark, 16.1pt line) and 7.0pt (9pt mark, exact 12pt line) below the band top.',
 });
 
 /** Length of Word's ordinary (short) note separator rule. */
@@ -33,11 +33,11 @@ export function wordShortNoteSeparatorLengthPt(areaWidthPt: number): number {
 /** Horizontal extent of a note separator rule.
  *
  * Word (WORD_NOTE_SEPARATOR_GEOMETRY): the rule lies in the note area, every
- * column of the section for a page-wide area, and starts at the area's
- * start edge (the right edge in a right-to-left section). The continuation
- * mark spans the area and the ordinary mark is min(144pt, area width); a
- * story-less role takes Word's default marks (short, full for an endnote
- * continuation). Another producer keeps the library policy: the rule starts
+ * column of the section for a page-wide area, and starts at the separator
+ * paragraph's start edge (the right edge of a right-to-left paragraph,
+ * whatever the section direction). The continuation mark spans the area and
+ * the ordinary mark is min(144pt, area width); a story-less continuation
+ * role is full (a Word footnote continuation uses the separator role). Another producer keeps the library policy: the rule starts
  * at the column's left edge, the ordinary mark is a third of the column and
  * a story-less continuation spans it. */
 export function noteSeparatorRuleSpan(input: Readonly<{
@@ -62,7 +62,7 @@ export function noteSeparatorRuleSpan(input: Readonly<{
     ? Math.max(...input.columns.map((column) => column.xPt + column.wPt))
     : input.container.xPt + input.container.widthPt;
   const width = Math.max(0, right - left);
-  const full = input.mode === 'full' || (storyless && input.continuing && input.kind === 'endnote');
+  const full = input.mode === 'full' || (storyless && input.continuing);
   const length = full ? width : wordShortNoteSeparatorLengthPt(width);
   return input.rtl
     ? { fromXPt: right - length, toXPt: right }

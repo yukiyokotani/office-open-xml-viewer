@@ -61,7 +61,7 @@ function control({ kind, documentPr = '', sectionPr = ['', ''] }: Control): Docx
     ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="n" Type="${R}/${kind}s" Target="${kind}s.xml"/><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/></Relationships>`],
     ['word/settings.xml', `<w:settings xmlns:w="${W}" xmlns:mc="${MC}" xmlns:w14="${W14}">${pr(documentPr)}</w:settings>`],
-    ['word/document.xml', `<w:document xmlns:w="${W}"><w:body>${body}</w:body></w:document>`],
+    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:mc="${MC}" xmlns:w14="${W14}"><w:body>${body}</w:body></w:document>`],
     [`word/${kind}s.xml`, `<w:${kind}s xmlns:w="${W}">${notes}</w:${kind}s>`],
   ]);
   const archive = new DocxArchive(storeZip(new Map([...parts].map(([name, xml]) => [name, encode(xml)]))));
@@ -99,24 +99,31 @@ describe('section-aware note numbering', () => {
   });
 
   it('restarts each section with that section numbering', () => {
-    expect(render({ kind: 'footnote', documentPr: '<w:numRestart w:val="eachSect"/>',
-      sectionPr: ['', '<w:numFmt w:val="lowerLetter"/>'] })).toEqual(['1', '2', 'a', 'b']);
+    expect(render({ kind: 'footnote',
+      sectionPr: ['<w:numRestart w:val="eachSect"/>', '<w:numFmt w:val="lowerLetter"/><w:numRestart w:val="eachSect"/>'] }))
+      .toEqual(['1', '2', 'a', 'b']);
   });
 
-  it('formats a custom numFmt pattern, also inside mc:AlternateContent', () => {
-    expect(render({ kind: 'footnote', documentPr: '<mc:AlternateContent><mc:Choice Requires="w14">'
-      + '<w:numFmt w:val="custom" w:format="001, 002, 003, ..."/></mc:Choice>'
-      + '<mc:Fallback><w:numFmt w:val="decimal"/></mc:Fallback></mc:AlternateContent>' }))
-      .toEqual(['001', '002', '003', '004']);
+  it('ignores document-wide numbering in settings.xml (word-section-note-numbering)', () => {
+    expect(render({ kind: 'footnote', documentPr: '<w:numFmt w:val="upperLetter"/><w:numStart w:val="3"/>' }))
+      .toEqual(['1', '2', '3', '4']);
+    expect(render({ kind: 'endnote', documentPr: '<w:numFmt w:val="decimal"/>' })).toEqual(['i', 'ii', 'iii', 'iv']);
+  });
+
+  it('formats a custom numFmt pattern', () => {
+    const custom = '<w:numFmt w:val="custom" w:format="001, 002, 003, ..."/>';
+    expect(render({ kind: 'footnote', sectionPr: [custom, custom] })).toEqual(['001', '002', '003', '004']);
     expect(formatCustomNoteNumber(7, '０１, ０２, ...')).toBe('０７');
     expect(formatCustomNoteNumber(4, 'A, B, C, ...')).toBe('D');
     expect(formatCustomNoteNumber(12, 'x')).toBe('12');
   });
 
   it('ignores a numStart beyond the Word unsignedShort range instead of failing', () => {
-    expect(render({ kind: 'endnote', documentPr: '<w:numStart w:val="5000000"/>' })).toEqual(['i', 'ii', 'iii', 'iv']);
+    const huge = '<w:numStart w:val="5000000"/>';
+    expect(render({ kind: 'endnote', sectionPr: [huge, huge] })).toEqual(['i', 'ii', 'iii', 'iv']);
     // The largest Word start still formats within the number-format budget.
-    expect(render({ kind: 'endnote', documentPr: '<w:numStart w:val="65535"/>' }).join('').startsWith('m'.repeat(65)))
+    const largest = '<w:numStart w:val="65535"/>';
+    expect(render({ kind: 'endnote', sectionPr: [largest, largest] }).join('').startsWith('m'.repeat(65)))
       .toBe(true);
   });
 });

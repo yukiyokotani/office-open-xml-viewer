@@ -6,6 +6,18 @@ import type { OpenTypeLineMetrics, ResolvedFontMetric } from '@silurus/ooxml-cor
 import type { LineSpacing, TabStop } from '../types.js';
 import type { ParagraphLayoutSource } from './text.js';
 
+export const WORD_SECTION_NOTE_NUMBERING = defineCompatibilityRule({
+  id: 'word-section-note-numbering',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'section-note-numbering',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.11.4/§17.11.12 make settings.xml footnotePr/endnotePr the document-wide note properties that a section without its own §17.11.5/§17.11.11 properties uses. Word numbers notes from the section properties alone: a document-wide numFmt, numStart or numRestart in settings.xml changes no note number, and a section without its own properties takes the defaults (decimal footnotes, lowerRoman endnotes, start 1, continuous). Evidence: Windows Word 16.0.20625 PDF exports with settings.xml footnotePr upperLetter + numStart 0 + numRestart eachPage (footnotes numbered 1-6 continuously), settings.xml numRestart eachPage alone (1-6), settings.xml endnotePr numFmt bullet (i, ii, iii), while the same numRestart eachPage on the sectPr restarts footnotes on every page.',
+});
+
 export const WORD_NOTE_NUMBER_FORMAT_DEFAULTS = defineCompatibilityRule({
   id: 'word-note-number-format-defaults',
   evidence: {

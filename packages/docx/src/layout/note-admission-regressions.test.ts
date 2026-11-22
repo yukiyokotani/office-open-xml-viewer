@@ -157,26 +157,27 @@ function assertLinearRecovery(results: readonly { work: number }[]) {
 // covers IDs, source cuts, fields, ordering and all geometry, not a summary.
 // Since WORD_NOTE_SEPARATOR_GEOMETRY the separator rule geometry differs from
 // v0.89 (min(144pt, note-area width) short rules within the column band or
-// page-wide area, default footnote continuation rule), so these digests were
-// re-recorded with that change alone.
+// page-wide area spanning every column, default footnote continuation rule),
+// so these digests were re-recorded with that change alone (only rule ends
+// differ).
 const ordinaryLayouts = [
-  {"kind": "footnote", "continuation": false, "shape": "unequal-tables", "digest": "181ad3e30b3db14362060d5986d7fb287efe2bf2b10b5dcaf8fc2d80d8d00469"},
-  {"kind": "footnote", "continuation": false, "shape": "paragraph-balance", "digest": "4787c23f24b417e0e0986f0d3fc74d4a78e6ff409ae0770f9c9554cc2c40919e"},
-  {"kind": "footnote", "continuation": false, "shape": "fitting-table", "digest": "b16f5f5d645ec650dbc0fde44023b65fd551997807634d9c1ac49d32e7ee7f1b"},
-  {"kind": "footnote", "continuation": true, "shape": "unequal-tables", "digest": "181ad3e30b3db14362060d5986d7fb287efe2bf2b10b5dcaf8fc2d80d8d00469"},
-  {"kind": "footnote", "continuation": true, "shape": "paragraph-balance", "digest": "4787c23f24b417e0e0986f0d3fc74d4a78e6ff409ae0770f9c9554cc2c40919e"},
-  {"kind": "footnote", "continuation": true, "shape": "fitting-table", "digest": "b16f5f5d645ec650dbc0fde44023b65fd551997807634d9c1ac49d32e7ee7f1b"},
-  {"kind": "footnote", "continuation": true, "shape": "text-continuation", "digest": "0ead08c5282b7b2c1f0043985e49fe14cc4d687fe810a83709a6f52d3a63cdaa"},
-  {"kind": "endnote", "continuation": false, "shape": "unequal-tables", "digest": "7da9d07f7e99c242f9ec1c7c66d929bf6a02b9865907b0737719a2c4e5677383"},
-  {"kind": "endnote", "continuation": false, "shape": "paragraph-balance", "digest": "2b0a1ebc5b53d00efa423ba0a6f5a31a28c088c1d15cb5f2acecd8df358fd452"},
-  {"kind": "endnote", "continuation": false, "shape": "fitting-table", "digest": "05215e065a96e4c372c163cb186d0a638969caa3353c06fb550febd1d229dd89"},
-  {"kind": "endnote", "continuation": false, "shape": "text-continuation", "digest": "b5b24426b465901e27771c39d974088e01a794d6fdcb7e593711bf0dbfe9e4d7"},
-  {"kind": "endnote", "continuation": false, "shape": "three-heads", "digest": "17a66b1e67b28845eecef1ebad66925bbbbeaf24f29a563f9091897ff0d17deb"},
-  {"kind": "endnote", "continuation": true, "shape": "unequal-tables", "digest": "7da9d07f7e99c242f9ec1c7c66d929bf6a02b9865907b0737719a2c4e5677383"},
-  {"kind": "endnote", "continuation": true, "shape": "paragraph-balance", "digest": "2b0a1ebc5b53d00efa423ba0a6f5a31a28c088c1d15cb5f2acecd8df358fd452"},
-  {"kind": "endnote", "continuation": true, "shape": "fitting-table", "digest": "05215e065a96e4c372c163cb186d0a638969caa3353c06fb550febd1d229dd89"},
-  {"kind": "endnote", "continuation": true, "shape": "text-continuation", "digest": "b5b24426b465901e27771c39d974088e01a794d6fdcb7e593711bf0dbfe9e4d7"},
-  {"kind": "endnote", "continuation": true, "shape": "three-heads", "digest": "17a66b1e67b28845eecef1ebad66925bbbbeaf24f29a563f9091897ff0d17deb"},
+  {"kind": "footnote", "continuation": false, "shape": "unequal-tables", "digest": "deddb7ef4dfdd9e962bac4117fd9533f9e2f9377e795e2a4c16dbf2cd66be4ad"},
+  {"kind": "footnote", "continuation": false, "shape": "paragraph-balance", "digest": "767e5fa63962234a10596b837408cdd60a32945dd1c68c5018fdb4a4f37f5fea"},
+  {"kind": "footnote", "continuation": false, "shape": "fitting-table", "digest": "909cb344537e439b4df1d4074191549525743dfab3e7adbcd58f14695f14b531"},
+  {"kind": "footnote", "continuation": true, "shape": "unequal-tables", "digest": "deddb7ef4dfdd9e962bac4117fd9533f9e2f9377e795e2a4c16dbf2cd66be4ad"},
+  {"kind": "footnote", "continuation": true, "shape": "paragraph-balance", "digest": "767e5fa63962234a10596b837408cdd60a32945dd1c68c5018fdb4a4f37f5fea"},
+  {"kind": "footnote", "continuation": true, "shape": "fitting-table", "digest": "909cb344537e439b4df1d4074191549525743dfab3e7adbcd58f14695f14b531"},
+  {"kind": "footnote", "continuation": true, "shape": "text-continuation", "digest": "c61f8c771da6d3a27a5fb85b5489dc65a4b680a9e7cac43f790ed58ffa6a047b"},
+  {"kind": "endnote", "continuation": false, "shape": "unequal-tables", "digest": "a137beef044b0a14501c48bc062421aadc885a4eee48945610d1ba7d22393f4c"},
+  {"kind": "endnote", "continuation": false, "shape": "paragraph-balance", "digest": "04dcae3bdc496c330336e196a584e3143f0e22660c089f848d71d791dfcdc188"},
+  {"kind": "endnote", "continuation": false, "shape": "fitting-table", "digest": "ecf4ca01e0a0c69ac6846bac335df615386c9c6de70dcac3c5e1004566094eb0"},
+  {"kind": "endnote", "continuation": false, "shape": "text-continuation", "digest": "8b61c0475860939c81ca75d54264906efdde0426b0e1e6d35e5647cf07900fb9"},
+  {"kind": "endnote", "continuation": false, "shape": "three-heads", "digest": "7f62be8396aaef3670a1eb565aff1f9b38a798bd5506fec2a03729c378dc8ef6"},
+  {"kind": "endnote", "continuation": true, "shape": "unequal-tables", "digest": "a137beef044b0a14501c48bc062421aadc885a4eee48945610d1ba7d22393f4c"},
+  {"kind": "endnote", "continuation": true, "shape": "paragraph-balance", "digest": "04dcae3bdc496c330336e196a584e3143f0e22660c089f848d71d791dfcdc188"},
+  {"kind": "endnote", "continuation": true, "shape": "fitting-table", "digest": "ecf4ca01e0a0c69ac6846bac335df615386c9c6de70dcac3c5e1004566094eb0"},
+  {"kind": "endnote", "continuation": true, "shape": "text-continuation", "digest": "8b61c0475860939c81ca75d54264906efdde0426b0e1e6d35e5647cf07900fb9"},
+  {"kind": "endnote", "continuation": true, "shape": "three-heads", "digest": "7f62be8396aaef3670a1eb565aff1f9b38a798bd5506fec2a03729c378dc8ef6"},
 ] as const;
 
 describe('reviewed note admission regressions', () => {
