@@ -255,9 +255,14 @@ export interface LayoutTextSeg extends LayoutSegSource {
     hpsRaisePt?: number;
     /** Valid authored §17.3.3.1 w:rubyAlign (ST_RubyAlign). */
     align?: string;
-    /** This segment holds the whole base text (it was not split into pieces). */
-    wholeBase?: true;
+    /** The run's complete base text, of which this is the first piece. */
+    baseText?: string;
   };
+  /** The last piece of a ruby run: the run's guide (WORD_RUBY_ALIGN_PLACEMENT). */
+  rubyGroupEnd?: LayoutTextSeg['ruby'];
+  /** WORD_RUBY_ALIGN_PLACEMENT: the advance of the ruby run's cell, from the
+   * first piece's start (the larger of the whole base and the guide). */
+  rubyCellAdvancePx?: number;
   /** WORD_RUBY_ALIGN_PLACEMENT: offset of the base text inside a ruby run
    * widened to a longer guide. */
   rubyBaseOffsetPx?: number;

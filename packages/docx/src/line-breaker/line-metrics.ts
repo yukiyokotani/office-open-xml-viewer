@@ -489,23 +489,28 @@ export function paragraphMarkLineMetrics(
     : routedEastAsian
       ? resolvedLocalFont?.lineHeightRatio ?? resolvedLocalFont?.eastAsianLineHeightRatio
       : resolvedLocalFont?.lineHeightRatio;
-  const designIntendedSingle = referenceMarkMetric
+  // WORD_VERTICAL_LINE_CENTRED_BOX: a vertical mark line is centred and one
+  // vertical single line high; its design height counts grid cells too.
+  const verticalExtraPx = verticalLine
+    ? wordVerticalSingleLineExtraPx(fs * scale,
+      (referenceMarkMetric?.farEastCodePage ?? resolvedLocalFont?.farEastCodePage) === true
+        || (designSides == null && resourceRatio == null && markUsesEastAsianFace))
+    : 0;
+  const horizontalDesignSingle = referenceMarkMetric
     ? referenceMarkMetric.lineHeightRatio * fs * scale
     : resourceRatio != null
       ? resourceRatio * fs * scale
       : 0;
+  const designIntendedSingle = horizontalDesignSingle > 0 ? horizontalDesignSingle + verticalExtraPx : 0;
   // A native Canvas box may set the ordinary automatic-line floor, but it
   // cannot establish the Word Far-East design height used to count grid cells.
   // Keep an untabled mark on the same 1.3em grid fallback as visible text.
-  let intendedSingle = Math.max(designIntendedSingle, (nativeMarkRatio ?? 0) * fs * scale);
+  const intendedSingle = Math.max(designIntendedSingle,
+    nativeMarkRatio == null ? 0 : nativeMarkRatio * fs * scale + verticalExtraPx);
   if (verticalLine) {
-    const farEast = (referenceMarkMetric?.farEastCodePage ?? resolvedLocalFont?.farEastCodePage) === true
-      || (designSides == null && resourceRatio == null && markUsesEastAsianFace);
-    const extraPx = wordVerticalSingleLineExtraPx(fs * scale, farEast);
-    const half = (asc + desc + extraPx) / 2;
+    const half = (asc + desc + verticalExtraPx) / 2;
     asc = half;
     desc = half;
-    if (intendedSingle > 0) intendedSingle += extraPx;
   }
   const gridCountSingle = eastAsian
     ? Math.max(

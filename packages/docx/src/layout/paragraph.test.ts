@@ -201,6 +201,24 @@ function input(overrides: Partial<AcquiredParagraphLayoutInput> = {}): AcquiredP
   };
 }
 
+/** Retained geometry equal up to binary rounding: vertical single lines carry
+ * a fraction of the em (WORD_VERTICAL_LINE_CENTRED_BOX) that different
+ * summation orders round differently. */
+function expectSameGeometry(actual: unknown, expected: unknown, path = ''): void {
+  if (typeof actual === 'number' && typeof expected === 'number') {
+    expect(actual, path).toBeCloseTo(expected, 9);
+    return;
+  }
+  if (actual && expected && typeof actual === 'object' && typeof expected === 'object') {
+    expect(Object.keys(actual).sort(), path).toEqual(Object.keys(expected).sort());
+    for (const key of Object.keys(expected)) {
+      expectSameGeometry((actual as Record<string, unknown>)[key], (expected as Record<string, unknown>)[key], `${path}.${key}`);
+    }
+    return;
+  }
+  expect(actual, path).toEqual(expected);
+}
+
 describe('layoutParagraph', () => {
   it('retains exact text ranges and distinguishes flow advance from ink height', () => {
     const node = layoutParagraph(input());
@@ -2212,7 +2230,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
         const fixed = layoutFor({
           vertical: choice, verticalSection, textAutofit: 'none', heightPt: fittedHeightPt,
         });
-        expect(geometry(fitted)).toEqual(geometry(fixed));
+        expectSameGeometry(geometry(fitted), geometry(fixed));
       }
       for (const choice of [
         { kind: 'align', value: 'right' },
@@ -2229,7 +2247,7 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
           textVert: 'eaVert', widthPt: fittedWidthPt, heightPt: 40, verticalSection,
           textAutofit: 'none',
         });
-        expect(geometry(fitted)).toEqual(geometry(fixed));
+        expectSameGeometry(geometry(fitted), geometry(fixed));
       }
     }
   });

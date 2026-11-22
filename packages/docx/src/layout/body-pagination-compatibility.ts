@@ -462,8 +462,8 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   }
   const finalLine = input.paragraph.lines.at(-1);
   if (!finalLine) return input.logicalLineBoxExtentPt;
-  // Windows Word admits no such column: a centred vertical line box
-  // (WORD_VERTICAL_LINE_CENTRED_BOX) keeps the whole box as its extent.
+  // A line of vertical runs keeps its whole centred box
+  // (WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION scope).
   if (finalLine.placements.some((placement) =>
     placement.kind === 'text' && placement.writingMode === 'vertical-rl')) {
     return input.logicalLineBoxExtentPt;

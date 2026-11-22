@@ -22,7 +22,6 @@ import {
   wordIsOverflowPunctuation,
   WORD_RUBY_LINE_ASCENT,
   wordVerticalSingleLineExtraPx,
-  wordRubyBaseOffset,
 } from '../layout/line-compatibility.js';
 import {
   type LayoutImageSeg,
@@ -71,7 +70,7 @@ import {
   segmentEastAsiaFloorSingleLinePx,
   segmentIntendedSingleLinePx,
 } from './font-routes.js';
-import { rubyAscentReservePx, rubyGuideAdvancePx } from './ruby-metrics.js';
+import { rubyAscentReservePx, rubyCellGeometryPx } from './ruby-metrics.js';
 import { fitCJKPrefix, fitsLineWidth, hasEastAsianVisiblePredecessor } from './fit-search.js';
 import { rebaseSeaBreaks, hasCJKBreakOpportunity } from './text-runs.js';
 import {
@@ -362,6 +361,7 @@ function resetPhysicalLineMetrics({ breakerState }: PassOperationState): void {
   breakerState.lineAscent = 0;
   breakerState.lineDescent = 0;
   breakerState.lineSignedDescent = Number.NEGATIVE_INFINITY;
+  breakerState.lineSignedAscent = Number.NEGATIVE_INFINITY;
   breakerState.lineIntendedSingle = 0;
   breakerState.lineHasInlinePicture = false;
   breakerState.linePictureMarkSingle = 0;
@@ -1140,8 +1140,12 @@ export function performFlush(
       || segment.verticalFrameRun === 'upright'))
     ? linePositionReferencePt * scale : 0;
   const unmovedDescent = breakerState.lineSignedDescent + verticalUniformPx;
+  // Both sides are restored from their signed values: a raise or lowering
+  // larger than a half box takes that side below zero before it is undone.
   const contentAscent = hasContent
-    ? Math.max(0, breakerState.lineAscent - verticalUniformPx) : contentHeight * scale * 0.8;
+    ? (verticalUniformPx === 0 ? breakerState.lineAscent
+      : Math.max(0, breakerState.lineSignedAscent - verticalUniformPx))
+    : contentHeight * scale * 0.8;
   const desc = hasContent
     ? (verticalUniformPx === 0 ? breakerState.lineDescent
       : Math.max(0, unmovedDescent, verticalUniformPx))
@@ -1526,6 +1530,7 @@ export function performAddToLine(
   if (asc > breakerState.lineAscent) breakerState.lineAscent = asc;
   if (desc > breakerState.lineDescent) breakerState.lineDescent = desc;
   if (desc > breakerState.lineSignedDescent) breakerState.lineSignedDescent = desc;
+  if (asc > breakerState.lineSignedAscent) breakerState.lineSignedAscent = asc;
   const paintsInlineInk = !('text' in s) || s.metricOnly !== true;
   if (paintsInlineInk) {
     breakerState.lineHasVisibleMetrics = true;
@@ -2340,13 +2345,27 @@ export function performTextSegmentBox(
   ) + leadingAutoSpacePx(operationState, s);
   // WORD_RUBY_ALIGN_PLACEMENT: a guide longer than its whole base widens the
   // run; the base sits inside it by the authored alignment.
+  // Measured only for authored alignments; a split base widens its first
+  // piece by the base offset and its last piece by the rest.
   s.rubyBaseOffsetPx = undefined;
-  if (s.ruby?.wholeBase) {
-    const overhang = rubyGuideAdvancePx(s, scale, ctx, fontFamilyClasses) - width;
-    if (overhang > 0) {
-      s.rubyBaseOffsetPx = wordRubyBaseOffset(s.ruby.align, overhang);
-      width += overhang;
+  s.rubyCellAdvancePx = undefined;
+  // An unsplit base uses its own laid-out advance (grid, spacing included).
+  const ownBasePx = s.rubyGroupEnd !== undefined && s.ruby !== undefined ? width : undefined;
+  const rubyCell = (ruby: NonNullable<LayoutTextSeg['ruby']>) => {
+    const cell = rubyCellGeometryPx(s, ruby, scale, ctx, fontFamilyClasses, ownBasePx);
+    return cell;
+  };
+  if (s.ruby?.align) {
+    const cell = rubyCell(s.ruby);
+    s.rubyCellAdvancePx = Math.max(cell.basePx, cell.guidePx);
+    if (cell.baseOffsetPx > 0) {
+      s.rubyBaseOffsetPx = cell.baseOffsetPx;
+      width += cell.baseOffsetPx;
     }
+  }
+  if (s.rubyGroupEnd?.align) {
+    const cell = rubyCell(s.rubyGroupEnd);
+    width += cell.overhangPx - cell.baseOffsetPx;
   }
   s.snapGridNaturalWidthPx = width;
   // The seam pair with the preceding piece (WORD_KERNED_SPACE_PAIRS; for

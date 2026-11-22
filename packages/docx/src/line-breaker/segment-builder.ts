@@ -545,6 +545,22 @@ export function finalizeBuiltSegments(
   // Atomic cells and external-link syntax have their own owners below.
   const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && segment.ruby)
     .map(segment => segment.sourceRunIndex));
+  // WORD_RUBY_ALIGN_PLACEMENT: the last piece of a ruby run whose base was
+  // split (by script slot or case) carries the run's guide so it can close the
+  // widened cell.
+  for (let index = 0; index < segs.length; index++) {
+    const first = segs[index]!;
+    if (!('text' in first) || !first.ruby) continue;
+    let last = index;
+    while (last + 1 < segs.length) {
+      const next = segs[last + 1]!;
+      if (!('text' in next) || !next.rubyPiece || next.ruby
+        || next.sourceRunIndex !== first.sourceRunIndex) break;
+      last++;
+    }
+    (segs[last] as LayoutTextSeg).rubyGroupEnd = first.ruby;
+    index = last;
+  }
   for (let start = 0; start < segs.length;) {
     const ordinary = (s: LayoutSeg): s is LayoutTextSeg => 'text' in s
       && s.hyperlink?.kind !== 'external' && s.fitTextRegionIndex === undefined
@@ -1780,7 +1796,7 @@ function emitResolvedTextSegment(
     colorAuto: r.colorAuto ?? false,
     border: r.border ?? null,
     ruby: emissionState.firstSeg && ruby
-      ? ('text' in r && r.text === text ? { ...ruby, wholeBase: true as const } : ruby)
+      ? { ...ruby, baseText: 'text' in r ? r.text : text }
       : undefined,
     ...(ruby ? { rubyPiece: true as const } : {}),
     revision,

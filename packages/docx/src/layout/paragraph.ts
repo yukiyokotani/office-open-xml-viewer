@@ -2225,7 +2225,9 @@ export function planLine(input: PlanLineInput): LineLayout {
               origin: {
                 xPt: operation.origin.xPt + xPt
                   + (widthPt - segment.measuredWidthPt) / 2,
-                yPt: operation.origin.yPt + line.baselinePt,
+                // The guide stands hpsRaise from its own base, which a run
+                // position may have moved off the line's baseline.
+                yPt: operation.origin.yPt + line.baselinePt + baselineOffsetPt,
               },
             })),
           },
@@ -2777,7 +2779,9 @@ function textPlacement(
   const rubyPaintOps = segment.ruby && rubyShape
     ? rubyPaintOperations({
         baseOrigin: { xPt: 0, yPt: 0 },
-        baseAdvancePt: segment.measuredWidth,
+        // WORD_RUBY_ALIGN_PLACEMENT: the run's whole cell, also when its base
+        // is split into pieces.
+        baseAdvancePt: segment.rubyCellAdvancePx ?? segment.measuredWidth,
         guideAdvancePt: rubyShape.advancePt,
         ...(segment.ruby.align ? { align: segment.ruby.align } : {}),
         ...(rubyRaisePt === undefined ? {} : { raisePt: rubyRaisePt }),
@@ -3388,8 +3392,8 @@ function verticalRubyGuide(
   const first = ruby.paintOps[0];
   if (!first || !segment.ruby) return ruby;
   void WORD_VERTICAL_RUBY_UPRIGHT_GUIDE;
-  const cells = verticalGlyphMeasurement.planRun({
-    text: segment.ruby.text,
+  const plan = (text: string) => verticalGlyphMeasurement.planRun({
+    text,
     font: canvasFontString(first.fontRoute, first.fontSizePt, first.fontWeight, first.fontStyle),
     fontKerning: 'none',
     fontSizePt: first.fontSizePt,
@@ -3398,9 +3402,26 @@ function verticalRubyGuide(
     growTrRotateInk: false,
     writingMode: writingMode ?? 'vertical-rl',
   });
+  // Alignment spaces letters, so a turned cell of several letters is planned
+  // letter by letter.
+  const cells = plan(segment.ruby.text).flatMap((cell) => {
+    const bounds = cell.orientation === 'sideways'
+      ? [...new Set([0, ...graphemeClusterOffsets(cell.text), cell.text.length])].sort((a, b) => a - b)
+      : [];
+    if (bounds.length <= 2) return [cell];
+    let penPt = cell.originPt;
+    return bounds.slice(0, -1).flatMap((start, index) => {
+      const end = bounds[index + 1]!;
+      return plan(cell.text.slice(start, end)).map((letter) => {
+        const placed = { ...letter, originPt: penPt + letter.originPt };
+        penPt += letter.advancePt;
+        return placed;
+      });
+    });
+  });
   const guideAdvancePt = cells.reduce((sum, cell) => sum + cell.advancePt, 0);
   const spacing = wordRubyGuideSpacing(
-    segment.ruby.align, segment.measuredWidth - guideAdvancePt, cells.length,
+    segment.ruby.align, (segment.rubyCellAdvancePx ?? segment.measuredWidth) - guideAdvancePt, cells.length,
   );
   // The authored rightVertical guide stands half its size nearer the base.
   const axisYPt = first.origin.yPt
@@ -3452,7 +3473,7 @@ function textPlanSegment(
   if (horizontalProjection.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
   const projected = {
     ...horizontalProjection,
-    ...(segment.verticalRun && verticalGlyphMeasurement && horizontalProjection.ruby
+    ...((segment.verticalRun || segment.tateChuYoko) && verticalGlyphMeasurement && horizontalProjection.ruby
       ? { ruby: verticalRubyGuide(segment, horizontalProjection.ruby, verticalGlyphMeasurement,
         horizontalProjection.paintOps[0]?.writingMode) }
       : {}),
@@ -6099,7 +6120,11 @@ export function acquireShapeTextBoxLayout(
         ...(stackedWordArt && shape.textWrap === 'none' ? { noWrap: true } : {}),
       },
       measurer: options.measurer,
-      environment: options.environment,
+      // WORD_VERTICAL_LINE_CENTRED_BOX: the quarter-turned frame's lines.
+      environment: verticalMode && !stackedWordArt
+        ? { ...options.environment,
+          verticalFrameLines: verticalMode === 'eaVert' || verticalMode === 'mongolianVert' ? 'upright' : 'rotated' }
+        : options.environment,
       exclusions: [],
     });
     yPt += child.advancePt - child.spacing.afterPt;

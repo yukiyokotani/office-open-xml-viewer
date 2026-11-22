@@ -3,6 +3,9 @@ import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import type { LineLayout, ParagraphLayout, TextPlacement } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
+import { createFontResolver } from './layout/font-service.js';
+import { createTextLayoutService } from './layout/text.js';
+import { paragraphMarkLineMetrics } from './line-layout.js';
 
 // WORD_VERTICAL_LINE_CENTRED_BOX, WORD_VERTICAL_RUBY_UPRIGHT_GUIDE and
 // WORD_RUBY_ALIGN_PLACEMENT over a stub face (0.8/0.2 em box, one em per
@@ -34,7 +37,7 @@ function makeCtx(): CanvasRenderingContext2D {
 };
 
 type Ruby = Readonly<{ text: string; fontSizePt: number; hpsRaisePt: number; align?: string }>;
-type Run = Readonly<{ text: string; ruby?: Ruby; position?: number }>;
+type Run = Readonly<{ text: string; ruby?: Ruby; position?: number; fontFamily?: string; eastAsianVert?: boolean; fontSize?: number }>;
 
 function typographyInput(ruby: Ruby) {
   const value = <T>(v: T | undefined) => v === undefined
@@ -52,6 +55,8 @@ function layoutParagraph(
   runs: readonly Run[],
   textDirection?: string,
   lineSpacing: DocParagraph['lineSpacing'] = null,
+  sectionExtra: Partial<SectionProps> = {},
+  markFontFamily = 'NotInMetrics',
 ): Readonly<{ node: ParagraphLayout; lines: readonly LineLayout[] }> {
   const paragraph = {
     type: 'paragraph',
@@ -59,7 +64,8 @@ function layoutParagraph(
     spaceBefore: 0, spaceAfter: 0, lineSpacing, numbering: null, tabStops: [],
     runs: runs.map((run) => ({
       type: 'text', text: run.text, bold: false, italic: false, underline: false, strikethrough: false,
-      fontSize: 10, color: null, fontFamily: 'NotInMetrics', isLink: false, background: null,
+      fontSize: run.fontSize ?? 10, color: null, fontFamily: run.fontFamily ?? 'NotInMetrics', isLink: false, background: null,
+      ...(run.eastAsianVert ? { eastAsianVert: true } : {}),
       vertAlign: null, hyperlink: null,
       ...(run.position !== undefined ? { position: run.position } : {}),
       ...(run.ruby ? {
@@ -67,13 +73,14 @@ function layoutParagraph(
         typographyInput: typographyInput(run.ruby),
       } : {}),
     })),
-    defaultFontSize: 10, defaultFontFamily: 'NotInMetrics', widowControl: false,
+    defaultFontSize: 10, defaultFontFamily: markFontFamily, widowControl: false,
   } as unknown as DocParagraph & BodyElement;
   const section = {
     pageWidth: 600, pageHeight: 800,
     marginTop: 60, marginRight: 90, marginBottom: 80, marginLeft: 40,
     headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false,
     ...(textDirection ? { textDirection } : {}),
+    ...sectionExtra,
   } as SectionProps;
   const document = {
     section, body: [paragraph],
@@ -165,7 +172,7 @@ describe('vertical ruby guide (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE)', () => {
     const line = layoutParagraph([{ text: '漢字', ruby }], direction).lines[0]!;
     const placement = textPlacements(line).find((entry) => entry.ruby)!;
     const ops = placement.ruby!.paintOps;
-    expect(ops.map((op) => op.glyphOrientation)).toEqual(['upright', 'upright', 'sideways']);
+    expect(ops.map((op) => op.glyphOrientation)).toEqual(['upright', 'upright', 'sideways', 'sideways']);
     for (const op of ops) expect(op.origin.yPt).toBeCloseTo(line.baselinePt - 9, 6);
     // Upright cells are centred on their one-em advance; the guide is
     // centred along the two-em base.
@@ -214,5 +221,77 @@ describe('ruby alignment (WORD_RUBY_ALIGN_PLACEMENT)', () => {
     expect(next!.origin.xPt - annotated!.origin.xPt).toBeCloseTo(25, 6);
     expect(annotated!.ruby!.paintOps[0]!.origin.xPt - annotated!.origin.xPt).toBeCloseTo(0, 6);
     expect(annotated!.paintOps[0]!.offset.xPt).toBeCloseTo(baseStart, 6);
+  });
+});
+
+describe('review regressions', () => {
+  it.each([undefined, 'tbRl'])('widens a split base to its longer guide (%s)', (direction) => {
+    const ruby = { text: '\u3042\u3044\u3046\u3048\u304a\u304b\u304d', fontSizePt: 5, hpsRaisePt: 9, align: 'left' };
+    const line = layoutParagraph([{ text: '\u6f22A', ruby }, { text: '\u5f8c' }], direction).lines[0]!;
+    const placements = textPlacements(line);
+    const first = placements.find((entry) => entry.ruby)!;
+    const next = placements.find((entry) => entry.text === '\u5f8c')!;
+    expect(next.origin.xPt - first.origin.xPt).toBeCloseTo(35, 6);
+  });
+
+  it('keeps a guide unwidened without an authored alignment', () => {
+    const ruby = { text: '\u3072\u304c\u3057\u304c\u308f', fontSizePt: 5, hpsRaisePt: 9 };
+    const line = layoutParagraph([{ text: '\u6771', ruby }, { text: '\u5f8c' }]).lines[0]!;
+    const [annotated, next] = textPlacements(line);
+    expect(next!.origin.xPt - annotated!.origin.xPt).toBeCloseTo(10, 6);
+  });
+
+  it.each(['tbRl', 'tbLrV'])('keeps a uniformly lowered %s line one single line wide', (direction) => {
+    const single = layoutParagraph([{ text: '\u3042' }], direction).lines[0]!.advancePt;
+    const lowered = layoutParagraph([{ text: '\u3042', position: -12 }], direction).lines[0]!;
+    expect(lowered.advancePt).toBeCloseTo(single, 6);
+  });
+
+  it('distributes a mixed vertical guide letter by letter', () => {
+    const ruby = { text: '\u304bAB', fontSizePt: 5, hpsRaisePt: 9, align: 'distributeLetter' };
+    const line = layoutParagraph([{ text: '\u6f22\u5b57\u65e5\u672c', ruby }], 'tbRl').lines[0]!;
+    const placement = textPlacements(line).find((entry) => entry.ruby)!;
+    const ops = placement.ruby!.paintOps;
+    expect(ops.map((op) => op.text)).toEqual(['\u304b', 'A', 'B']);
+    // Letter starts: the upright kana's origin is its centre.
+    const starts = [ops[0]!.origin.xPt - 2.5, ops[1]!.origin.xPt, ops[2]!.origin.xPt];
+    expect(starts[1]! - starts[0]!).toBeCloseTo(starts[2]! - starts[1]!, 6);
+    expect(starts[0]! - placement.origin.xPt).toBeCloseTo(0, 6);
+    expect(starts[2]! + 5 - placement.origin.xPt).toBeCloseTo(40, 6);
+  });
+
+  it('keeps the guide hpsRaise from a raised base', () => {
+    const ruby = { text: '\u304b', fontSizePt: 5, hpsRaisePt: 9 };
+    const line = layoutParagraph([{ text: '\u524d' }, { text: '\u6f22', ruby, position: 6 }], 'tbRl').lines[0]!;
+    const op = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps[0]!;
+    expect(op.origin.yPt).toBeCloseTo(line.baselinePt - 6 - 9, 6);
+  });
+
+  it('plans the guide of a tate-chu-yoko run upright', () => {
+    const ruby = { text: '\u304b', fontSizePt: 5, hpsRaisePt: 9 };
+    const line = layoutParagraph([{ text: '\u524d' }, { text: '12', ruby, eastAsianVert: true }], 'tbRl').lines[0]!;
+    const op = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps[0]!;
+    expect(op.glyphOrientation).toBe('upright');
+  });
+
+  it('counts the grid cells of an empty vertical mark from its vertical single line', () => {
+    // Noto Sans 10pt: a 13.62pt horizontal single line, 13.95pt vertically.
+    const text = createTextLayoutService({
+      fonts: createFontResolver([{ requestedFamily: 'Noto Sans', resolvedFamily: 'Noto Sans',
+        source: 'local' as const, resourceIdentity: 'office-local:local("Noto Sans")' }]),
+      measurer: { fingerprint: 'vertical-mark-fixture',
+        measure: (request) => ({ advancePt: [...request.text].length * 5, ascentPt: 8, descentPt: 2 }) },
+    });
+    const paragraph = {
+      type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+      spaceBefore: 0, spaceAfter: 0, lineSpacing: { rule: 'auto', value: 1, explicit: true },
+      numbering: null, tabStops: [], runs: [], widowControl: false,
+      defaultFontSize: 10, defaultFontFamily: 'Noto Sans',
+    } as unknown as DocParagraph;
+    const advance = (vertical: boolean) => paragraphMarkLineMetrics(paragraph, 1,
+      { type: 'lines', linePitchPt: 13.8 }, false, false, makeCtx(), {}, paragraph.lineSpacing, {},
+      text, undefined, false, 0, true, vertical).advancePx;
+    expect(advance(false)).toBeCloseTo(13.8, 6);
+    expect(advance(true)).toBeCloseTo(27.6, 6);
   });
 });

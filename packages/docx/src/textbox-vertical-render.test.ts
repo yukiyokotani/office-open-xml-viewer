@@ -687,13 +687,15 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       fallback.columnAdvance - plain.columnAdvance,
       'absent hpsRaise reserves selected-face base ascent + guide descent',
     ).toBeCloseTo(13.5, 5);
-    // Each strip keeps its own arrangement (WORD_VERTICAL_LINE_CENTRED_BOX), so
-    // the next column follows the ruby line's head extent: the 15pt raise plus
-    // the 7.5pt guide against the 12pt ascent plus the 13.5pt fallback.
+    // Each strip keeps its own arrangement and the upright frame centres its
+    // box (WORD_VERTICAL_LINE_CENTRED_BOX), so the next column follows the
+    // ruby line's head extent: the 15pt raise plus half the guide's vertical
+    // single line against half the base's plus the 13.5pt fallback.
+    const vertical = (sizePt: number) => sizePt + sizePt / 30 * 1.3;
     expect(
       raised.columnAdvance - fallback.columnAdvance,
       'the authored 15pt raise and guide replace the ink-touching fallback',
-    ).toBeCloseTo((15 + 7.5) - (12 + 13.5), 5);
+    ).toBeCloseTo((15 + vertical(7.5) / 2) - (vertical(15) / 2 + 13.5), 5);
     expect(zero.columnAdvance, 'zero hpsRaise adds no column reservation')
       .toBeCloseTo(plain.columnAdvance, 5);
     expect(zero.rubyCrossOffset, 'zero hpsRaise draws ruby on the base centerline').toBeCloseTo(0, 5);
@@ -862,4 +864,23 @@ it.each(['cached', 'no engine', 'conversion', 'rasterization'] as const)('%s pre
   } finally {
     vi.mocked(rasterizeMathSvg).mockResolvedValue({ source: {} as CanvasImageSource, widthPx: 3, heightPx: 2 });
   }
+});
+
+describe('public textBlocks frames (WORD_VERTICAL_LINE_CENTRED_BOX)', () => {
+  it.each(['vert', 'vert270', 'eaVert', 'mongolianVert'] as const)(
+    'gives %s lines the vertical single line', (mode) => {
+      const { ctx, glyphs } = makeMatrixCtx();
+      const block = (text: string): ShapeText => ({
+        text, fontSizePt: 10, alignment: 'left',
+        runs: [{ text, fontSizePt: 10, fontFamily: 'NotInMetrics' }],
+      });
+      const shape = richTextbox([{ text: 'A', fontSizePt: 10, fontFamily: 'NotInMetrics' }], mode);
+      (shape as unknown as { textBlocks: ShapeText[] }).textBlocks = [block('A'), block('B')];
+      acquireAndPaintShapeTextBox(shape, 0, 0, 200, 100, ctx, 1, {});
+      const a = glyphs.find((g) => g.text.includes('A'))!;
+      const b = glyphs.find((g) => g.text.includes('B'))!;
+      // The stub's 10pt box plus one thirtieth of the em.
+      expect(Math.abs(b.devX - a.devX)).toBeCloseTo(10 + 10 / 30, 5);
+    },
+  );
 });
