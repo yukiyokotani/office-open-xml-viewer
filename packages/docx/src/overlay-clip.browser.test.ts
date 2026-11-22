@@ -41,7 +41,8 @@ async function runsOf(body: string): Promise<DocxTextRunInfo[]> {
   return textRunsForPage(layout, 0, { scale: 1 });
 }
 
-type Api = typeof import('./text-layer') & typeof import('./find-highlight-layer') & typeof import('./comment-margin');
+type Api = typeof import('./text-layer') & typeof import('./find-highlight-layer') & typeof import('./comment-margin')
+  & typeof import('./selection-context');
 
 /** WORD_CELL_CONTENT_CLIP in Chromium: the overlay clip containers clip hit
  * testing and highlights after a responsive resize and inside turned clips. */
@@ -70,7 +71,8 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
       import * as text from '/src/text-layer.ts';
       import * as find from '/src/find-highlight-layer.ts';
       import * as margin from '/src/comment-margin.ts';
-      window.overlayClipTest = { ...text, ...find, ...margin };
+      import * as selection from '/src/selection-context.ts';
+      window.overlayClipTest = { ...text, ...find, ...margin, ...selection };
     ` });
     await page.waitForFunction(() => 'overlayClipTest' in window);
   }, 60_000);
@@ -146,6 +148,33 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     } finally {
       await page.evaluate(() => { document.body.style.writingMode = ''; });
     }
+  });
+
+  it('leaves text its cell clip hides wholly out of a drag selection', async () => {
+    const result = await page.evaluate(() => {
+      const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
+      const layer = document.getElementById('layer') as HTMLDivElement;
+      layer.style.width = '800px';
+      layer.style.height = '600px';
+      const cell = { x: 160, y: 90, width: 300, height: 40 };
+      const run = (text: string, x: number) => ({
+        text, x, y: 100, w: 60, h: 20, fontSize: 20, font: '20px monospace', clips: [cell],
+      });
+      // 'Hidden' lies wholly left of the cell; the others are inside it.
+      api.buildDocxTextLayer(layer, [run('Shown1', 170), run('Hidden', 50), run('Shown2', 300)], 800, 600, undefined, undefined, 0);
+      const range = document.createRange();
+      range.selectNodeContents(layer);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const context = api.readDocxTextSelectionContext(layer, selection);
+      const native = selection.toString();
+      selection.removeAllRanges();
+      return { text: context?.text ?? '', runs: context?.runs.map((item) => item.runIndex) ?? [], native };
+    });
+    expect(result.text).not.toContain('Hidden');
+    expect(result.runs).toEqual([0, 2]);
+    expect(result.native).not.toContain('Hidden');
   });
 
   it('keeps a link out of reach under an empty clip union', async () => {

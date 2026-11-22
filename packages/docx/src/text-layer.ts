@@ -1,4 +1,4 @@
-import { OverlayClipFrames } from './run-clip.js';
+import { clippedBoxVisible, OverlayClipFrames } from './run-clip.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -81,6 +81,13 @@ export function buildDocxTextLayer(
     const span = ownerDocument.createElement('span');
     setSelectionData(span, 'ooxmlSelectionRun', 'docx');
     setSelectionData(span, 'runIndex', String(runIndex));
+    // WORD_CELL_CONTENT_CLIP: a run its clips hide wholly is not selectable
+    // text: it is unselectable and readDocxTextSelectionContext skips it.
+    const clippedAway = run.clips !== undefined && !clippedBoxVisible(
+      { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
+      run.clips,
+    );
+    if (clippedAway) setSelectionData(span, 'clippedAway', '');
     if (run.paragraphId !== undefined) setSelectionData(span, 'paragraphId', run.paragraphId);
     if (run.source !== undefined) {
       setSelectionData(span, 'sourceStory', run.source.story);
@@ -153,7 +160,8 @@ export function buildDocxTextLayer(
       `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
       compressedHitBox +
       transform +
-      `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;`;
+      `white-space:pre;color:transparent;cursor:${cursor};pointer-events:all;` +
+      (clippedAway ? 'user-select:none;-webkit-user-select:none;' : '');
     if (link && onHyperlinkClick) {
       span.title = link.kind === 'external' ? link.url : link.ref;
       span.addEventListener('click', (event) => {

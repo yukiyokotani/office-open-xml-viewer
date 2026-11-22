@@ -171,6 +171,8 @@ export function readDocxTextSelectionContext(
   options: DocxSelectionContextOptions = {},
 ): DocxTextSelectionContext | null {
   const bounded = readBoundedNativeTextSelection(root, selection, (run) => {
+    // A run its cell clip hides wholly (text-layer.ts) is not selected text.
+    if (run.dataset.clippedAway !== undefined) return null;
     const pageIndex = pageIndexFor(run);
     const runIndex = nonNegativeInteger(run.dataset.runIndex);
     if (pageIndex === null || runIndex === null) return null;
