@@ -45,11 +45,15 @@ export function retractLeadingKinsoku(
   const retractCount = crossRunKinsokuRetract(chars, kinsoku, minKeep);
   if (retractCount <= 0) return { kind: 'none' };
 
-  const headText = chars.slice(0, chars.length - retractCount).join('');
+  // WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is indivisible; it moves whole,
+  // and not when it alone holds the line.
+  const rubyCell = lastText.rubyGroup !== undefined;
+  const headText = rubyCell ? '' : chars.slice(0, chars.length - retractCount).join('');
   const split = headText.length;
   // Moving the whole segment would cut the hard source seam immediately
   // before it. A protected no-break edge is equally indivisible.
   if (
+    (rubyCell && breakerState.currentLine.length === 1) ||
     (split === 0 && lastText.hardJoinPrev === true) ||
     protectedNoBreakOffsets(lastText).has(split)
   ) {

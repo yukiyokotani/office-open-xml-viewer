@@ -83,42 +83,48 @@ function horizontalUnits(
   return units;
 }
 
+/** The letters a turned guide cell is spaced by: its graphemes, with each
+ * run of cursively joining graphemes kept whole so it keeps its joined
+ * forms, while the letters around it are spaced on their own. */
+function turnedGuideLetters(text: string): readonly Readonly<{ start: number; end: number }>[] {
+  const bounds = [...new Set([0, ...graphemeClusterOffsets(text), text.length])].sort((a, b) => a - b);
+  const letters: { start: number; end: number; joins: boolean }[] = [];
+  for (let index = 0; index + 1 < bounds.length; index++) {
+    const start = bounds[index]!;
+    const end = bounds[index + 1]!;
+    const joins = joinsCursively(text.slice(start, end));
+    const previous = letters.at(-1);
+    if (joins && previous?.joins) previous.end = end;
+    else letters.push({ start, end, joins });
+  }
+  return letters;
+}
+
+type PlannedGuideCell = ReturnType<VerticalGlyphMeasurementService['planRun']>[number];
+
 /** WORD_VERTICAL_RUBY_UPRIGHT_GUIDE: the guide planned as a vertical run of
- * its own size. A turned cell spaces letter by letter at its contextual
- * prefix offsets inside the cell, so later cells keep their planned pens; a
- * joining cell stays whole. */
+ * its own size, one unit per planned cell. Only when the alignment spaces
+ * the guide's letters (`spaced`) is a turned cell split into its letters
+ * (turnedGuideLetters), each at its contextual prefix offset inside the
+ * cell, so later cells keep their planned pens. */
 function verticalUnits(
-  shape: NonNullable<ReturnType<NonNullable<LayoutTextSeg['textLayoutService']>['shape']>>,
-  text: string,
-  sizePx: number,
-  service: VerticalGlyphMeasurementService,
-): Readonly<{ units: GuideUnit[]; advancePx: number }> {
-  const span = shape.spans[0];
-  if (!span) throw new Error('Ruby shaping produced no selected-face span');
-  const plan = (part: string) => service.planRun({
-    text: part,
-    font: canvasFontString(span.fontRoute, sizePx, span.font.weight, span.font.style),
-    fontKerning: 'none',
-    fontSizePt: sizePx,
-    letterSpacingPt: 0,
-    charScale: 1,
-    growTrRotateInk: false,
-    writingMode: 'vertical-rl',
-  });
-  const face = { fontRoute: span.fontRoute, fontWeight: span.font.weight, fontStyle: span.font.style };
+  cells: readonly PlannedGuideCell[],
+  face: Pick<GuideUnit, 'fontRoute' | 'fontWeight' | 'fontStyle'>,
+  spaced: boolean,
+  advanceOf: (text: string) => number,
+): GuideUnit[] {
   let penPx = 0;
-  const units = plan(text).flatMap((cell): GuideUnit[] => {
+  return cells.flatMap((cell): GuideUnit[] => {
     const cellPenPx = penPx;
     penPx += cell.advancePt;
     const common = {
       ...face,
       orientation: cell.orientation,
       ...(cell.verticalFeature ? { verticalFeature: true as const } : {}),
+      ...(cell.drawOffsetPt.xPt !== 0 || cell.drawOffsetPt.yPt !== 0 ? { drawOffsetPx: cell.drawOffsetPt } : {}),
     };
-    const bounds = cell.orientation === 'sideways' && !joinsCursively(cell.text)
-      ? [...new Set([0, ...graphemeClusterOffsets(cell.text), cell.text.length])].sort((a, b) => a - b)
-      : [];
-    if (bounds.length <= 2) {
+    const letters = spaced && cell.orientation === 'sideways' ? turnedGuideLetters(cell.text) : [];
+    if (letters.length <= 1) {
       return [{
         ...common,
         text: cell.text,
@@ -126,28 +132,32 @@ function verticalUnits(
         end: cell.range.end,
         offsetPx: cell.originPt,
         advancePx: cell.advancePt,
-        ...(cell.drawOffsetPt.xPt !== 0 || cell.drawOffsetPt.yPt !== 0 ? { drawOffsetPx: cell.drawOffsetPt } : {}),
       }];
     }
-    const prefixPx = (end: number) => end === 0 ? 0 : end === cell.text.length
-      ? cell.advancePt
-      : plan(cell.text.slice(0, end)).reduce((sum, part) => sum + part.advancePt, 0);
+    // The contextual prefix advance before each letter, in linear work.
+    // Library policy: a turned letter's context is its predecessor (a pair
+    // adjustment; a joining run is one letter), so each prefix extends the
+    // previous one by the predecessor's advance plus that predecessor's pair
+    // adjustment with its own predecessor. Planning every prefix gives the
+    // same offsets at quadratic cost.
+    const texts = letters.map(({ start, end }) => cell.text.slice(start, end));
+    const own = texts.map(advanceOf);
+    const prefixPx = [0, own[0]!];
+    for (let index = 1; index + 1 < texts.length; index++) {
+      const pairPx = advanceOf(texts[index - 1]! + texts[index]!);
+      prefixPx.push(prefixPx[index]! + pairPx - own[index - 1]!);
+    }
+    prefixPx.push(cell.advancePt);
     const letterOrigin = cell.originPt - cellPenPx;
-    return bounds.slice(0, -1).map((start, index) => {
-      const end = bounds[index + 1]!;
-      const startPx = prefixPx(start);
-      return {
-        ...common,
-        text: cell.text.slice(start, end),
-        start: cell.range.start + start,
-        end: cell.range.start + end,
-        offsetPx: cellPenPx + letterOrigin + startPx,
-        advancePx: prefixPx(end) - startPx,
-        ...(cell.drawOffsetPt.xPt !== 0 || cell.drawOffsetPt.yPt !== 0 ? { drawOffsetPx: cell.drawOffsetPt } : {}),
-      };
-    });
+    return letters.map(({ start, end }, index) => ({
+      ...common,
+      text: texts[index]!,
+      start: cell.range.start + start,
+      end: cell.range.start + end,
+      offsetPx: cellPenPx + letterOrigin + prefixPx[index]!,
+      advancePx: prefixPx[index + 1]! - prefixPx[index]!,
+    }));
   });
-  return { units, advancePx: penPx };
 }
 
 /** WORD_RUBY_ALIGN_PLACEMENT: the one geometry of the ruby run that `s` is a
@@ -161,21 +171,45 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   const { ruby, pieces } = group;
   const first = pieces[0]!;
   const sizePx = ruby.fontSizePt * inputs.scale;
+  const service = inputs.verticalGlyphMeasurement;
+  const vertical = service !== undefined && (first.verticalRun === true || first.tateChuYoko === true);
   const shape = first.textLayoutService && first.textShapeRequest
     ? first.textLayoutService.shape({
         ...independentTextShapeRequest(first.textShapeRequest, ruby.text),
         fontSizePt: sizePx,
         measure: true,
+        // A vertical guide takes its geometry from its planned cells; only
+        // its face is read from the shape.
+        ...(vertical ? { clusterGeometry: false } : {}),
       })
     : undefined;
-  const vertical = shape !== undefined && inputs.verticalGlyphMeasurement !== undefined
-    && (first.verticalRun === true || first.tateChuYoko === true);
-  const planned = vertical ? verticalUnits(shape, ruby.text, sizePx, inputs.verticalGlyphMeasurement!) : undefined;
-  const units = planned?.units ?? (shape ? horizontalUnits(shape, ruby.text) : []);
-  const guidePx = planned?.advancePx ?? shape?.advancePt ?? inputs.fallbackGuideAdvancePx(ruby.text);
+  const span = vertical && shape ? shape.spans[0] : undefined;
+  if (vertical && shape && !span) throw new Error('Ruby shaping produced no selected-face span');
+  const plan = span ? (part: string) => service!.planRun({
+    text: part,
+    font: canvasFontString(span.fontRoute, sizePx, span.font.weight, span.font.style),
+    fontKerning: 'none',
+    fontSizePt: sizePx,
+    letterSpacingPt: 0,
+    charScale: 1,
+    growTrRotateInk: false,
+    writingMode: 'vertical-rl',
+  }) : undefined;
+  const cells = plan?.(ruby.text);
+  const guidePx = cells
+    ? cells.reduce((sum, cell) => sum + cell.advancePt, 0)
+    : shape?.advancePt ?? inputs.fallbackGuideAdvancePx(ruby.text);
   const basePx = pieces.reduce((sum, piece) => sum + inputs.baseAdvancePx(piece), 0);
   // Only an authored alignment widens the base to a longer guide.
   const widenedPx = ruby.align ? Math.max(basePx, guidePx) : basePx;
+  // Only the distributed alignments space a longer base's guide letter by
+  // letter (wordRubyGuideSpacing).
+  const spaced = widenedPx > guidePx
+    && (ruby.align === 'distributeLetter' || ruby.align === 'distributeSpace');
+  const units = cells && span && plan
+    ? verticalUnits(cells, { fontRoute: span.fontRoute, fontWeight: span.font.weight, fontStyle: span.font.style },
+      spaced, (part) => plan(part).reduce((sum, cell) => sum + cell.advancePt, 0))
+    : shape ? horizontalUnits(shape, ruby.text) : [];
   const pitch = inputs.snapPitchPx;
   const advancePx = pitch && pitch > 0 && widenedPx > basePx
     ? Math.ceil(widenedPx / pitch - 1e-9) * pitch
@@ -195,7 +229,7 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     })),
     raisePx: inputs.reservePx - (inputs.verticalLine && ruby.align === 'rightVertical' ? sizePx / 2 : 0),
     headPx: inputs.headPx,
-    vertical,
+    vertical: cells !== undefined,
   };
   group.cell = cell;
   return cell;

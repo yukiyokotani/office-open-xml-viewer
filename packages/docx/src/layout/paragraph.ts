@@ -3585,8 +3585,14 @@ function textPlanSegment(
   let decorationTerminalAdvancePt = segment.measuredWidth
     - (segment.snapGridTrailingPadPx ?? 0);
   let griddedTerminalInkAdvancePt: number | undefined;
+  // The snapped clusters are rebuilt from whole cells; like the unsnapped
+  // ones they keep the segment's lead (the seam pair, the automatic East
+  // Asian gap and the ruby base offset inside its cell), which every
+  // projection of the clusters (an upright cell's paint, hit-testing) reads.
   if (segment.snapGridClass === 'eastAsia' && segment.snapGridCellPitchPx) {
     const cellPitchPt = segment.snapGridCellPitchPx;
+    const leadPt = (segment.leadingWordBoundaryPx ?? 0) + (segment.autoSpaceLeadingPx ?? 0)
+      + rubyBaseOffsetPx(segment);
     let precedingCells = 0;
     clusters = clusters.map((cluster, index) => {
       const cells = wordSnapToCharsEastAsianCellCount(
@@ -3594,7 +3600,7 @@ function textPlanSegment(
         cellPitchPt,
       );
       const allocatedAdvancePt = cells * cellPitchPt;
-      const centeredOffsetPt = precedingCells * cellPitchPt
+      const centeredOffsetPt = leadPt + precedingCells * cellPitchPt
         + (allocatedAdvancePt - cluster.advancePt) / 2;
       if (index === clusters.length - 1) {
         decorationTerminalAdvancePt = centeredOffsetPt + cluster.advancePt;
@@ -3834,9 +3840,10 @@ function textPlanSegment(
       ...(segment.optionalHyphenGlyph ? { range: { start: sourceOffset, end: sourceOffset } } : {}),
       offset: { ...operation.offset,
         // Cluster-origin groups (punctuation compression, condensed floor)
-        // take their origins from the clusters, which already hold the word
-        // boundary and the automatic East Asian gap.
-        xPt: clusterOriginPaintOps
+        // and snapped East Asian cells take their origins from the clusters,
+        // which already hold the word boundary, the automatic East Asian gap
+        // and the ruby base offset.
+        xPt: clusterOriginPaintOps || segment.snapGridClass === 'eastAsia'
           ? operation.offset.xPt
           : operation.offset.xPt + (segment.leadingWordBoundaryPx ?? 0)
             + (segment.autoSpaceLeadingPx ?? 0) + rubyBaseOffsetPx(segment) },

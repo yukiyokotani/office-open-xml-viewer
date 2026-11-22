@@ -231,8 +231,7 @@ describe('paragraph page-local reserve selection', () => {
   });
 
   it('relocates a vertical-rl final text line whose retained line box crosses the block end', () => {
-    // Windows Word does not admit such a column even when its axis and glyph
-    // ink stay inside (WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION).
+    // WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION.
     const selected = selectParagraphFragment(
       verticalEdgeParagraph('vertical-rl', 17.5),
       { boundary: null }, splittable([{ segIndex: 0, charOffset: 1 }]),

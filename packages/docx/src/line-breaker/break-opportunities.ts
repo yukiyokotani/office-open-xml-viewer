@@ -1397,6 +1397,8 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     s.measuredWidth = w;
     addToLine(s, w, h, asc, desc);
     appendQueuedIdeographicSpaceSegment(s);
+  } else if (s.rubyGroup !== undefined) {
+    placeRubyCell(context, frame);
   } else if (admitsTrailingOverflowPunctuation) {
     s.measuredWidth = w;
     addToLine(s, w, h, asc, desc);
@@ -1583,6 +1585,40 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     flush(undefined, false, s.src);
     breakerState.queue.unshift(s);
   }
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT: a ruby cell (every piece of one ruby run, its
+ * widening included) is one indivisible unit, so none of the CJK, SEA,
+ * hanging-punctuation or emergency split paths may cut its base or charge
+ * less than its advance. A cell that does not fit after content moves whole
+ * to a fresh line; on a line it would start it overflows whole. */
+function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitFrame): void {
+  const { breakerState, flush, addToLine, availW, segAdvance } = context;
+  const { s, w, h, asc, desc, wForFit } = frame;
+  const group = s.rubyGroup!;
+  if ((s.rubyPieceIndex ?? 0) === 0) {
+    let unitWidth = wForFit;
+    for (const follower of breakerState.queue) {
+      if (!('text' in follower) || follower.rubyGroup !== group) break;
+      unitWidth += segAdvance(follower);
+    }
+    const startsLine = breakerState.currentLine.length === 0
+      || (s.listLabel === undefined && breakerState.currentWidth < availW()
+        && breakerState.currentLine.every(isListLabelItem))
+      || (breakerState.currentLine.every(isInklessLineItem) && overlongAnchorLineInScope(context, unitWidth));
+    if (!startsLine) {
+      flush(undefined, false, s.src);
+      breakerState.queue.unshift(s);
+      return;
+    }
+    context.forcedPlacement(unitWidth);
+  } else {
+    // A later piece never starts a line: its cell's first piece is placed.
+    const unitStart = joinedUnitStart(breakerState.currentLine);
+    context.forcedPlacement(lineAdvanceFrom(breakerState.currentLine, unitStart) + wForFit, unitStart);
+  }
+  s.measuredWidth = w;
+  addToLine(s, w, h, asc, desc);
 }
 
 function prepareAtomicTextFit(

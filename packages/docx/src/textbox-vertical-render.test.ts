@@ -570,11 +570,7 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     expect(withRuby - plain, `ruby advance ${withRuby} vs plain ${plain}`).toBeCloseTo(9, 5);
   });
 
-  // GT (Word PDF): mongolianVert's first column mirrors the eaVert first
-  // column (sample-53: flow-start-edge → label glyph-box gap within 0.5pt); a
-  // centred auto line is its own mirror. vert2 controls with exact, ruby and
-  // raised lines show that each strip keeps the eaVert arrangement inside it
-  // (axis toward the same edge), only the strip order is reversed.
+  // WORD_VERTICAL_LINE_CENTRED_BOX.
   it('mongolianVert reverses the strip order and keeps the arrangement inside each strip', () => {
     const firstColumnCenterX = (mode: 'eaVert' | 'mongolianVert'): number => {
       const { ctx, glyphs } = makeMatrixCtx();

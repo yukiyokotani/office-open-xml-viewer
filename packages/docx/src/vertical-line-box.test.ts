@@ -12,6 +12,9 @@ import { wordVerticalSingleLinePx } from './layout/line-compatibility.js';
 // WORD_RUBY_ALIGN_PLACEMENT over a stub face (0.8/0.2 em box, one em per
 // character) that no metric table describes.
 
+/** Characters every stub context has measured (a work counter). */
+let measuredCharacters = 0;
+
 function makeCtx(): CanvasRenderingContext2D {
   let font = '10px serif';
   const px = () => parseFloat(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? '10');
@@ -19,6 +22,7 @@ function makeCtx(): CanvasRenderingContext2D {
     get font() { return font; },
     set font(value: string) { font = value; },
     measureText: (text: string) => {
+      measuredCharacters += text.length;
       const size = px();
       return {
         // One em per character; the pair "AV" kerns 0.2 em tighter.
@@ -116,7 +120,11 @@ function layoutParagraph(
 }
 
 /** The lines of a one-cell table whose cell has `textDirection`. */
-function layoutCellParagraph(runs: readonly Run[], textDirection: string): readonly LineLayout[] {
+function layoutCellParagraph(
+  runs: readonly Run[],
+  textDirection: string,
+  sectionExtra: Partial<SectionProps> = {},
+): readonly LineLayout[] {
   const cell = {
     content: [paragraphOf(runs)], colSpan: 1, vMerge: null,
     borders: { top: null, bottom: null, left: null, right: null, insideH: null, insideV: null },
@@ -129,7 +137,7 @@ function layoutCellParagraph(runs: readonly Run[], textDirection: string): reado
     cellMarginTop: 0, cellMarginBottom: 0, cellMarginLeft: 0, cellMarginRight: 0,
     jc: 'left', layout: 'fixed',
   } as unknown as BodyElement;
-  const page = layoutBody([table]);
+  const page = layoutBody([table], undefined, sectionExtra);
   const found: LineLayout[] = [];
   const visit = (node: unknown): void => {
     if (!node || typeof node !== 'object') return;
@@ -147,7 +155,7 @@ function layoutCellParagraph(runs: readonly Run[], textDirection: string): reado
   return found;
 }
 
-// Word holds vertical single lines in whole twips (wordVerticalSingleLinePx).
+// Vertical single lines are whole twips (wordVerticalSingleLinePx).
 const twips = (pt: number): number => Math.round(pt * 20) / 20;
 
 function textPlacements(line: LineLayout): TextPlacement[] {
@@ -235,7 +243,10 @@ describe('vertical ruby guide (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE)', () => {
     const line = layoutParagraph([{ text: '漢字', ruby }], direction).lines[0]!;
     const placement = textPlacements(line).find((entry) => entry.ruby)!;
     const ops = placement.ruby!.paintOps;
-    expect(ops.map((op) => op.glyphOrientation)).toEqual(['upright', 'upright', 'sideways', 'sideways']);
+    // The turned Latin cell is painted whole, as the base run paints one.
+    expect(ops.map((op) => [op.text, op.glyphOrientation])).toEqual([
+      ['か', 'upright'], ['ん', 'upright'], ['AB', 'sideways'],
+    ]);
     for (const op of ops) expect(op.origin.yPt).toBeCloseTo(line.baselinePt - 9, 6);
     // Upright cells are centred on their one-em advance; the guide is
     // centred along the two-em base.
@@ -478,5 +489,94 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 2)', () =>
       return latin.origin.yPt + op.offset.yPt - line.baselinePt;
     };
     expect(offsetOf(6) - offsetOf(undefined)).toBeCloseTo(-6, 6);
+  });
+});
+
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 3)', () => {
+  const guides = (lines: readonly LineLayout[]) => lines.flatMap((line) =>
+    textPlacements(line).filter((entry) => entry.ruby));
+  const lineOf = (lines: readonly LineLayout[], text: string) =>
+    lines.findIndex((line) => textPlacements(line).some((entry) => entry.text.includes(text)));
+  const lengthOf = (direction: string | undefined, pt: number) =>
+    direction ? { pageHeight: 60 + 80 + pt } : { pageWidth: 40 + 90 + pt };
+
+  it.each([undefined, 'tbRl'])('wraps an unsplit ideographic ruby base as its whole cell (%s)', (direction) => {
+    const ruby = { text: 'かきくけこさ', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const { lines } = layoutParagraph(
+      [{ text: '前' }, { text: '漢字', ruby }, { text: '後' }], direction, null, lengthOf(direction, 35),
+    );
+    expect(lineOf(lines, '前')).toBe(0);
+    // The 30pt cell does not fit after the first ideograph; it moves whole.
+    expect(lineOf(lines, '漢字')).toBe(1);
+    const annotated = guides(lines);
+    expect(annotated).toHaveLength(1);
+    expect(annotated[0]!.advancePt).toBeCloseTo(30, 6);
+  });
+
+  it.each([undefined, 'tbRl'])('keeps an overlong ruby cell whole and paints its guide once (%s)', (direction) => {
+    const ruby = { text: 'かきくけこさ', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const { lines } = layoutParagraph(
+      [{ text: '前' }, { text: '漢字', ruby }, { text: '後' }], direction, null, lengthOf(direction, 16),
+    );
+    const annotated = guides(lines);
+    expect(annotated).toHaveLength(1);
+    expect(annotated[0]!.text).toBe('漢字');
+    expect(annotated[0]!.ruby!.paintOps.map((op) => op.text).join('')).toBe('かきくけこさ');
+  });
+
+  it('keeps the ruby base alignment of a snapped base in an upright cell', () => {
+    const grid = { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 } as Partial<SectionProps>;
+    const baseAt = (align: string) => {
+      const ruby = { text: 'かきくけこ', fontSizePt: 5, hpsRaisePt: 9, align };
+      const line = layoutCellParagraph([{ text: '漢', ruby }], 'tbRlV', grid)[0]!;
+      const placement = textPlacements(line).find((entry) => entry.ruby)!;
+      const op = placement.paintOps.find((entry) => entry.text === '漢')!;
+      return placement.origin.xPt + op.offset.xPt;
+    };
+    // The 25pt guide widens the 10pt base: rubyAlign moves the base along
+    // the column by the 15pt overhang.
+    expect(baseAt('right') - baseAt('left')).toBeCloseTo(15, 6);
+  });
+
+  // A centred guide over one ideograph widens its cell; a distributed one
+  // over a longer base spaces every turned letter.
+  it.each([['center', false], ['distributeLetter', true]] as const)('plans a long turned guide in linear work (%s)', (align, longBase) => {
+    const work = (run: Run, length: number) => {
+      const before = measuredCharacters;
+      layoutParagraph([run], 'tbRl', null, { pageHeight: 60 + 80 + 10 * length });
+      return measuredCharacters - before;
+    };
+    // The guide's share: the annotated run less its bare base.
+    const guideWork = (length: number) => {
+      const base = '漢'.repeat(longBase ? length : 1);
+      const ruby = { text: 'Q'.repeat(length), fontSizePt: 5, hpsRaisePt: 9, align };
+      return work({ text: base, ruby }, length) - work({ text: base }, length);
+    };
+    const short = guideWork(128);
+    const long = guideWork(256);
+    // Doubling the guide at most doubles its work, with headroom for fixed
+    // per-guide cost; quadratic planning quadruples it.
+    expect(long / short).toBeLessThan(2.5);
+  });
+
+  it('distributes turned Latin letters beside a joining run kept whole', () => {
+    const ruby = { text: 'ABسلامか', fontSizePt: 5, hpsRaisePt: 9, align: 'distributeLetter' };
+    const line = layoutParagraph([{ text: '漢字日本', ruby }], 'tbRl').lines[0]!;
+    const placement = textPlacements(line).find((entry) => entry.ruby)!;
+    const ops = placement.ruby!.paintOps;
+    expect(ops.map((op) => op.text)).toEqual(['A', 'B', 'سلام', 'か']);
+    // A 35pt guide over the 40pt base: four letters share 5pt in three gaps.
+    const gap = 5 / 3;
+    expect(ops[1]!.origin.xPt - placement.origin.xPt).toBeCloseTo(5 + gap, 6);
+    expect(ops[2]!.origin.xPt - placement.origin.xPt).toBeCloseTo(10 + 2 * gap, 6);
+  });
+
+  it('moves a ruby cell whole ahead of a line-start-forbidden follower', () => {
+    const ruby = { text: 'かき', fontSizePt: 5, hpsRaisePt: 9 };
+    const { lines } = layoutParagraph(
+      [{ text: '前' }, { text: '漢字', ruby }, { text: 'ゃ' }], undefined, null, lengthOf(undefined, 30),
+    );
+    expect(guides(lines).map((entry) => entry.text)).toEqual(['漢字']);
+    expect(lineOf(lines, '漢字')).toBe(lineOf(lines, 'ゃ'));
   });
 });
