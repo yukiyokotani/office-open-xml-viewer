@@ -21,7 +21,7 @@ export interface ParagraphBorderSegment {
   y2: number;
 }
 
-/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: the total thickness Word gives a
+/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: the total thickness of a
  * paragraph border of ST_Border style `style` (§17.18.2) and authored stroke
  * width `width` (w:sz / 8): the sum of its strokes and the gaps between them. */
 export function wordParagraphBorderThicknessPt(style: string, width: number): number {
@@ -47,6 +47,32 @@ export function wordParagraphBorderThicknessPt(style: string, width: number): nu
  * `w:space`): its whole thickness. */
 export function paragraphBorderStrokeOutsetPt(edge: ParaBorderEdge): number {
   return wordParagraphBorderThicknessPt(edge.style, edge.width ?? 0);
+}
+
+/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: a wave paragraph border paints
+ * hairline zigzags filling its band, whatever its w:sz: one for `wave`, two
+ * stacked for `doubleWave`. */
+export function wordParagraphWaveBorder(
+  style: string,
+  width: number,
+): Readonly<{ bandPt: number; rows: 1 | 2; hairlinePt: number }> | undefined {
+  void WORD_PARAGRAPH_BORDER_FLOW_RESERVATION;
+  if (style !== 'wave' && style !== 'doubleWave') return undefined;
+  return Object.freeze({
+    bandPt: wordParagraphBorderThicknessPt(style, width),
+    rows: style === 'wave' ? 1 : 2,
+    hairlinePt: WORD_PARAGRAPH_WAVE_HAIRLINE_PT,
+  });
+}
+
+const WORD_PARAGRAPH_WAVE_HAIRLINE_PT = 0.375;
+
+/** Half the block extent a retained paragraph border segment paints about its
+ * centre line: half its whole thickness (the stroke pattern is centred in it). */
+export function paragraphBorderSegmentHalfExtentPt(
+  border: Readonly<{ authoredStyle: string; widthPt: number }>,
+): number {
+  return wordParagraphBorderThicknessPt(border.authoredStyle, border.widthPt) / 2;
 }
 
 /** Vertical extent reserved below text for a visible bottom paragraph border

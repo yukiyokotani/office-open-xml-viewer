@@ -159,6 +159,50 @@ export function oneDevicePixelCssWidth(
   return 1 / context.dpr;
 }
 
+/** A paragraph wave border (`BorderSegment.wave`): `rows` zigzags stacked
+ * across a band centred on the axis-aligned segment, each filling its row
+ * with a hairline that crosses the row once per row height along the
+ * segment, starting from the band's outer (top or left) side. */
+function paintParagraphWave(
+  from: Readonly<{ xPt: number; yPt: number }>,
+  to: Readonly<{ xPt: number; yPt: number }>,
+  wave: NonNullable<BorderSegment['wave']>,
+  hairlinePt: number,
+  context: CanvasPaintContext,
+): void {
+  const { ctx } = context;
+  const horizontal = from.yPt === to.yPt;
+  const startPt = horizontal ? Math.min(from.xPt, to.xPt) : Math.min(from.yPt, to.yPt);
+  const endPt = horizontal ? Math.max(from.xPt, to.xPt) : Math.max(from.yPt, to.yPt);
+  const centrePt = horizontal ? from.yPt : from.xPt;
+  const rowPt = wave.bandPt / wave.rows;
+  if (!(rowPt > 0) || endPt <= startPt) return;
+  const amplitudePt = Math.max(0, rowPt - hairlinePt) / 2;
+  const steps = Math.ceil((endPt - startPt) / rowPt);
+  ctx.lineWidth = hairlinePt;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  for (let row = 0; row < wave.rows; row++) {
+    const rowCentrePt = centrePt - wave.bandPt / 2 + rowPt * (row + 0.5);
+    for (let step = 0; step <= steps; step++) {
+      const alongPt = Math.min(endPt, startPt + step * rowPt);
+      // The final vertex is cut at the segment end on the same slope.
+      const phase = (alongPt - startPt) / rowPt;
+      const k = Math.min(step, Math.floor(phase));
+      const sideAt = (index: number): number => (index % 2 === 0 ? -amplitudePt : amplitudePt);
+      const acrossPt = rowCentrePt + sideAt(k) + (sideAt(k + 1) - sideAt(k)) * (phase - k);
+      const x = horizontal ? alongPt : acrossPt;
+      const y = horizontal ? acrossPt : alongPt;
+      if (step === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+  }
+  ctx.save();
+  (ctx as unknown as { lineJoin: CanvasLineJoin }).lineJoin = 'bevel';
+  ctx.stroke();
+  ctx.restore();
+}
+
 /** Paint one already-resolved point-space rule; layout owns every conflict and path. */
 export function paintStrokeSegment(
   retainedSegment: BorderSegment | TextDecorationLayout,
@@ -200,6 +244,11 @@ export function paintStrokeSegment(
   const normalScale = horizontal
     ? Math.hypot(pointToCss.c, pointToCss.d)
     : vertical ? Math.hypot(pointToCss.a, pointToCss.b) : 0;
+  const wave = 'wave' in segment ? segment.wave : undefined;
+  if (wave && axisAligned) {
+    paintParagraphWave(path[0]!, path[1]!, wave, Math.max(wave.hairlinePt, minimumWidthPt), context);
+    return;
+  }
   const compound = segment.style === 'compound' && axisAligned && normalScale > 0
     ? compoundBorderBands(segment.authoredStyle, segment.widthPt * normalScale, context.dpr)
     : null;

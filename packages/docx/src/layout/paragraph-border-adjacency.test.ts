@@ -47,4 +47,11 @@ describe('wordParagraphBorderThicknessPt (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION
   ] as const)('gives %s at %spt a %spt band', (style, width, thickness) => {
     expect(wordParagraphBorderThicknessPt(style, width)).toBeCloseTo(thickness, 10);
   });
+
+  it('keeps a wave band independent of w:sz except at w:sz 12', () => {
+    for (const sz of [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 24, 36, 48]) {
+      expect(wordParagraphBorderThicknessPt('wave', sz / 8)).toBe(sz === 12 ? 3.75 : 3);
+      expect(wordParagraphBorderThicknessPt('doubleWave', sz / 8)).toBe(5.25);
+    }
+  });
 });

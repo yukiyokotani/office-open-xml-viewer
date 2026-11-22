@@ -39,6 +39,7 @@ function makeRecordingCanvas(): {
   textBaselines: number[];
   textCalls: { text: string; y: number }[];
   fillRects: FillRectCall[];
+  strokedPaths: { points: { x: number; y: number }[]; strokeStyle: string; lineWidth: number }[];
 } {
   let font = '10px serif';
   let strokeStyle = '#000';
@@ -47,6 +48,7 @@ function makeRecordingCanvas(): {
   const textBaselines: number[] = [];
   const textCalls: { text: string; y: number }[] = [];
   const fillRects: FillRectCall[] = [];
+  const strokedPaths: { points: { x: number; y: number }[]; strokeStyle: string; lineWidth: number }[] = [];
   let path: { x: number; y: number }[] = [];
   const ctx = {
     get font() { return font; },
@@ -73,6 +75,7 @@ function makeRecordingCanvas(): {
       for (let i = 1; i < path.length; i++) {
         if (path[i].y === path[i - 1].y) hStrokes.push({ y: path[i].y, strokeStyle });
       }
+      strokedPaths.push({ points: [...path], strokeStyle, lineWidth: ctx.lineWidth });
     },
     fill() {},
     fillRect(x: number, y: number, w: number, h: number) {
@@ -95,7 +98,7 @@ function makeRecordingCanvas(): {
   // Real CanvasRenderingContext2D has a `.canvas` back-reference; the renderer
   // reads it on some table paths (e.g. the §17.4.80 Y-axis clip).
   (ctx as unknown as { canvas: unknown }).canvas = canvas;
-  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines, textCalls, fillRects };
+  return { canvas: canvas as unknown as HTMLCanvasElement, hStrokes, textBaselines, textCalls, fillRects, strokedPaths };
 }
 
 function bottomBorderOnly(): ParagraphBorders {
@@ -259,9 +262,31 @@ describe('a bottom paragraph border reserves flow so following content clears it
       await renderDocumentToCanvas(docOf(lead, para('Follower', null)), canvas, 0, { dpr: 1, width: PAGE_WIDTH });
       return textCalls.find((call) => call.text === 'Follower')!.y;
     };
-    // Windows Word pbdr1: 6pt after a 5.5pt reservation moves the next
-    // paragraph 11.5pt, not max(6, 5.5).
+    // Additive: space after plus the reservation, not their maximum.
     expect(await followerY(true) - await followerY(false)).toBeCloseTo(EXPECTED_EXTENT, 3);
+  });
+
+  it('paints a wave top border as a hairline zigzag filling its band, whatever its w:sz', async () => {
+    for (const [width, band] of [[0.25, 3], [1.5, 3.75], [6, 3]] as const) {
+      const wave = (): ParagraphBorders => ({
+        top: { style: 'wave', color: BORDER_COLOR, width, space: 0 } as NonNullable<ParagraphBorders['top']>,
+        bottom: null, left: null, right: null, between: null,
+      });
+      const { canvas, strokedPaths, textCalls } = makeRecordingCanvas();
+      await renderDocumentToCanvas(docOf(para('Wave', wave())), canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      const plain = makeRecordingCanvas();
+      await renderDocumentToCanvas(docOf(para('Wave', null)), plain.canvas, 0, { dpr: 1, width: PAGE_WIDTH });
+      // The text moves down by the band; the zigzag stays inside it.
+      expect(textCalls[0]!.y - plain.textCalls[0]!.y).toBeCloseTo(band, 6);
+      const strokes = strokedPaths.filter((stroke) => stroke.strokeStyle === `#${BORDER_COLOR}`);
+      expect(strokes).toHaveLength(1);
+      // A 0.375pt hairline, raised to one device pixel at this scale.
+      const half = strokes[0]!.lineWidth / 2;
+      expect(strokes[0]!.lineWidth).toBe(1);
+      const ys = strokes[0]!.points.map((point) => point.y);
+      expect(Math.min(...ys) - half).toBeCloseTo(0, 6);
+      expect(Math.max(...ys) + half).toBeCloseTo(band, 6);
+    }
   });
 
   it('reserves a between border\'s spacing on both sides of its stroke', async () => {
