@@ -45,6 +45,8 @@ let variant: Readonly<{
   shapeRunHalfPoints?: number;
   /** A default paragraph style other than Normal, at this size (half points). */
   defaultStyleHalfPoints?: number;
+  /** Runs replacing the story's object paragraph content. */
+  storyRuns?: string;
 }> = {};
 
 const encoder = new TextEncoder();
@@ -87,7 +89,7 @@ function picture(placement: Placement): string {
 }
 
 function docx(story: Story, placement: Placement): Uint8Array {
-  const paragraphs = text('M01') + `<w:p>${picture(placement)}<w:r><w:t>Ab</w:t></w:r></w:p>` + text('MEND');
+  const paragraphs = text('M01') + `<w:p>${variant.storyRuns ?? picture(placement)}<w:r><w:t>Ab</w:t></w:r></w:p>` + text('MEND');
   const content = variant.table
     ? '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>'
       + `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${paragraphs}</w:tc></w:tr></w:tbl>${text('END')}`
@@ -505,5 +507,26 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
     } finally {
       variant = {};
     }
+  });
+
+  it('indexes story shapes in paint order: behind text, story content, then the others', () => {
+    const rect = (id: string, z: number) => `<w:r><w:pict><v:rect id="${id}" style="position:absolute;margin-left:72pt;`
+      + `margin-top:66pt;width:40pt;height:20pt;z-index:${z};mso-position-horizontal-relative:text;`
+      + 'mso-position-vertical-relative:text" fillcolor="black" stroked="f"><w10:wrap type="none"/></v:rect></w:pict></w:r>';
+    const order = (runs: string) => {
+      variant = { storyRuns: runs };
+      try {
+        return elementGeometryForPage(layOutDocument('drawingml-textbox', 'inline'), 0).flatMap((entry) => {
+          if ('drawing' in entry) {
+            return entry.drawing.flowBounds.widthPt === 40 ? [entry.drawing.anchorLayer?.behindDoc ? 'behind' : 'front'] : [];
+          }
+          return ['inline'];
+        });
+      } finally {
+        variant = {};
+      }
+    };
+    expect(order(picture('inline') + rect('front', 1))).toEqual(['inline', 'front']);
+    expect(order(rect('front', 1) + rect('behind', -1))).toEqual(['behind', 'front']);
   });
 });

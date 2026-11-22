@@ -335,13 +335,21 @@ function visitTextBox(
   // WORD_STORY_VML_PAGE_POSITION: the story's page-positioned VML shapes are
   // indexed in the box's host frame, as paint draws them (outside the box's
   // transform and clip); the story's own visit skips them.
-  for (const { owner, drawing } of storyPagePositionedAnchors(textBox.story.blocks)) {
-    context.hostFrameDrawings.add(drawing.id);
-    visitDrawing(new Map(owner.textBoxes.map((box) => [box.id, box])), drawing, projection, context);
-  }
+  // Index order follows paint order: behind-text shapes, the story, then the
+  // other shapes, each in stacking order.
+  const anchors = storyPagePositionedAnchors(textBox.story.blocks);
+  for (const { drawing } of anchors) context.hostFrameDrawings.add(drawing.id);
+  const visitAnchors = (behindDoc: boolean) => {
+    for (const { owner, drawing } of anchors) {
+      if ((drawing.anchorLayer?.behindDoc === true) !== behindDoc) continue;
+      visitDrawing(new Map(owner.textBoxes.map((box) => [box.id, box])), drawing, projection, context);
+    }
+  };
+  visitAnchors(true);
   for (const block of textBox.story.blocks) {
     visitNode(block, textBoxProjection, context);
   }
+  visitAnchors(false);
 }
 
 function visitDrawing(
