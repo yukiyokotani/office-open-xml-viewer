@@ -440,6 +440,27 @@ describe('upright block table of a vertical section', () => {
       });
     });
 
+    it('does not raise a table of the second column into a table of the first', () => {
+      // The 800 pt table of column 2 is raised above its column and would
+      // cross the 20 pt table of column 1 at the same block position: it
+      // clears that table along the block axis first.
+      const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
+      const pages = layOutPages('tbRl', [table(1, 20), columnBreak, table(1, 800)], 2);
+      const [short, tall] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(tall.top).toBeLessThan(short.bottom);
+      expect(tall.left).toBeCloseTo(tableLeft('tbRl', TABLE_W + RULE + 14.28), 6);
+    });
+
+    it('keeps a table below the one it directly follows when that one was moved aside', () => {
+      // The 800 pt table clears the 20 pt table before it along the block
+      // axis; the table that directly follows runs on from it there.
+      const pages = layOutPages('tbRl', [table(1, 20), P, table(1, 800), table(1, 20)], 2);
+      const [, tall, follower] = pages[0]!.tables as [unknown, Page['tables'][number], Page['tables'][number]];
+      expect(tall.left).toBeCloseTo(tableLeft('tbRl', TABLE_W + RULE + 14.28), 6);
+      expect(follower.left).toBeCloseTo(tall.left, 6);
+      expect(follower.top).toBeCloseTo(tall.bottom, 6);
+    });
+
     it('does not move a keepNext paragraph and a tall table to the second column', () => {
       const keepNext = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
       const pages = layOutPages('tbLrV', [P, keepNext, table(1, 800)], 2);

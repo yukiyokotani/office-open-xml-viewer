@@ -390,9 +390,12 @@ export function uprightBlockPaginates(physical: PhysicalAnchorFrame): boolean {
  * cantSplit rows do. */
 const wholeRowAcquisitions = new WeakMap<RetainedTableAcquisition, RetainedTableAcquisition>();
 function wholeRowAcquisition(retained: RetainedTableAcquisition): RetainedTableAcquisition {
-  if (retained.input.rows.every((row) => row.cantSplit === true)) return retained;
   let whole = wholeRowAcquisitions.get(retained);
   if (!whole) {
+    if (retained.input.rows.every((row) => row.cantSplit === true)) {
+      wholeRowAcquisitions.set(retained, retained);
+      return retained;
+    }
     whole = Object.freeze({
       ...retained,
       input: Object.freeze({
@@ -544,9 +547,11 @@ function uprightBlockPlacement(
   }
   const registry = context.sessionState.floatRegistry;
   const key = uprightBlockTableKey(request.input.source);
-  const pin = role !== 'first' ? undefined : registry.entries.find((entry) =>
-    entry.occurrenceId === uprightBlockTablePrescanKey(key, request.location.pageIndex)
-    && entry.uprightBlockTable?.tableFlowDomainId === request.location.flowDomainId);
+  const placedOnPage = context.state.uprightBlockIndex;
+  const sourceIndex = request.input.source.path[0]!;
+  const planned = role !== 'first' ? undefined
+    : placedOnPage?.pins.get(uprightBlockTablePrescanKey(key, request.location.pageIndex));
+  const pin = planned?.tableFlowDomainId === request.location.flowDomainId ? planned : undefined;
   const multiColumn = request.location.section.columns.length > 1;
   const columnEndPt = cursorPt.xPt + request.availableInlineExtentPt;
   const bandEndPt = physical.pageHeight - physical.marginBottom;
@@ -556,27 +561,22 @@ function uprightBlockPlacement(
   // near rule starts at the block position, so the grid starts half that
   // rule further on, and the far rule adds half its width past the grid.
   const boxBlockExtentPt = edges.nearPt + blockExtentPt + edges.farPt;
-  // Blocks of this column, wherever a run or a raise has taken them, and
-  // blocks of other columns that reach into this column's inline band.
-  const placed = registry.entries.flatMap((entry) => {
-    if (entry.uprightBlockTable?.planned !== false) return [];
-    const box = entry.bounds;
-    const sameColumn = entry.uprightBlockTable.tableFlowDomainId === request.location.flowDomainId;
-    return sameColumn || (box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt)
-      ? [{ ...box, sameColumn }] : [];
-  });
-  let blockStartPt = pin ? pin.bounds.yPt : cursorPt.yPt;
+  // A table the flow reaches directly after another upright table of its
+  // column, with nothing between them, runs on from it: it starts where
+  // that block ends, at its block position wherever that block was moved,
+  // and meets nothing else.
+  const previous = role === 'first' ? placedOnPage?.lastBySource.get(sourceIndex - 1) : undefined;
+  const leader = previous?.flowDomainId === request.location.flowDomainId ? previous.bounds : null;
+  // Every block of the page can be met, in whichever column it was placed:
+  // a raise can take a block out of its own column's band.
+  const placed = leader ? [] : placedOnPage?.boxes ?? [];
+  let blockStartPt = leader ? leader.yPt : pin ? pin.bounds.yPt : cursorPt.yPt;
   // A multi-column section never splits or moves the block: one that would
   // pass the page's bottom edge from the column top is raised to end there,
   // no higher than the page top, together with the blocks that run on from
   // it. The search below starts from that raised position, so the block is
   // never raised into an earlier one.
-  // A block the flow reaches at the block position of an earlier one, with
-  // nothing between them, runs on from that block: it starts where the run
-  // so far ends and is not moved along the block axis.
-  const runEndPt = role !== 'first' ? null : placed.reduce<number | null>((end, box) => (
-    box.sameColumn && box.yPt === blockStartPt
-      ? Math.max(end ?? box.xPt + box.widthPt, box.xPt + box.widthPt) : end), null);
+  const runEndPt = leader ? leader.xPt + leader.widthPt : null;
   const inlineOriginPt = runEndPt ?? (multiColumn
     ? Math.max(0, Math.min(cursorPt.xPt, physical.pageHeight - inlineExtentPt - runOnExtentPt))
     : cursorPt.xPt);
@@ -655,7 +655,7 @@ function uprightBlockPlacement(
     bounds,
     exclusionBounds,
     uprightBlockTable: Object.freeze({
-      key, planned: false, tableFlowDomainId: request.location.flowDomainId,
+      key, planned: false, tableFlowDomainId: request.location.flowDomainId, sourceIndex,
     }),
   });
   return Object.freeze({

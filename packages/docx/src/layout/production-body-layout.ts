@@ -153,6 +153,7 @@ import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissi
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
+import { emptyUprightBlockPageIndex } from './acquisition-context.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
 import { acquireRegisteredParagraph } from './registered-paragraph-acquisition.js';
 import { paragraphAnchorCollisions, paragraphWrapExclusions } from './paragraph-float-authority.js';
@@ -2716,6 +2717,7 @@ function resetBodyPageAcquisition(
   state.floatParaSeq = 0;
   state.pageAnchorPrescanned = new Set();
   state.frozenAnchorFrames = new Map();
+  state.uprightBlockIndex = emptyUprightBlockPageIndex();
   sessionState.floatRegistry = Object.freeze({
     coordinateSpace: 'logical-page-points' as const,
     flowDomainId: pageRegistryFlowDomainId(next.pageIndex),
@@ -2834,6 +2836,26 @@ function commitBodyFlowRegistryDelta(
       : { ...core, kind: entry.kind };
   });
   if (delta.floats) {
+    // `word-vertical-section-upright-block-table`: index each accepted
+    // upright block once, where its registration is committed.
+    const uprightBlocks = state.uprightBlockIndex
+      ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
+    for (const entry of delta.floats.entries) {
+      const upright = entry.uprightBlockTable;
+      if (!upright) continue;
+      if (upright.planned) {
+        uprightBlocks.pins.set(entry.occurrenceId, Object.freeze({
+          tableFlowDomainId: upright.tableFlowDomainId, bounds: entry.bounds,
+        }));
+        continue;
+      }
+      uprightBlocks.boxes.push(entry.bounds);
+      if (upright.sourceIndex !== undefined && upright.tableFlowDomainId !== undefined) {
+        uprightBlocks.lastBySource.set(upright.sourceIndex, Object.freeze({
+          flowDomainId: upright.tableFlowDomainId, bounds: entry.bounds,
+        }));
+      }
+    }
     state.floats.push(...retainedFloats);
     sessionState.floatRegistry = Object.freeze({
       ...sessionState.floatRegistry,

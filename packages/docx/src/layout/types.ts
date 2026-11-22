@@ -989,6 +989,8 @@ interface FloatRegistryEntryCorePt {
     key: string;
     planned: boolean;
     tableFlowDomainId?: string;
+    /** Top-level body index of the placed block's table. */
+    sourceIndex?: number;
   }>;
 }
 
