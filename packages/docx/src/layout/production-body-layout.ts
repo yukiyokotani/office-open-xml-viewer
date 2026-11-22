@@ -1835,12 +1835,6 @@ function measureBodyParagraphEntry(
         }),
     ...(measured.markOnly
       ? {
-          // LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT gives a LibreOffice
-          // producer's empty line the allowance of a text line instead of
-          // Word's below-baseline empty-mark allowance (an empty 13.79 pt
-          // Liberation Serif line needs 13.78 pt at 100% and 200%).
-          markBelowBaselinePt: services.text?.libreOfficeLineBoxes === true && !markOnLineGrid
-            ? 0 : measured.lastLineBelowBaselinePt,
           markOnLineGrid,
           // A wrapped mark keeps its complete cell, as plain text does
           // (a float elsewhere on the page does not wrap it), and so does
@@ -1849,6 +1843,7 @@ function measureBodyParagraphEntry(
           markGridAfterLeadingPt: !markLineWrapped(layout, measured)
             && services.text?.plainLineBoxes !== true
             ? measured.markGridAfterLeadingPt ?? 0 : 0,
+          ...(measured.markMultipleLeadingPt ? { markMultipleLeadingPt: measured.markMultipleLeadingPt } : {}),
         }
       : {}),
     ...(measured.uniformRubyAdvancePt == null
