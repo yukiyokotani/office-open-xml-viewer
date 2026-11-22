@@ -2251,6 +2251,38 @@ export function planLine(input: PlanLineInput): LineLayout {
     xPt += widthPt;
     if (geometryStretch?.trailingGap) xPt += geometryStretch.trailingDelta ?? perGapPt;
   }
+  // WORD_RUBY_ALIGN_PLACEMENT: a guide's origins run along the line from
+  // the start of its cell. The cell is every piece of the base, and a
+  // right-to-left base places its later pieces before its first, so the
+  // cell starts at its leading piece on the line, not at its first in
+  // source order.
+  if (placements.some((placement) => placement.kind === 'text' && placement.ruby)) {
+    const laterPieces = new Map<number, TextPlacement>();
+    for (const placement of placements) {
+      if (placement.kind === 'text' && placement.rubyBasePiece && !placement.ruby) {
+        laterPieces.set(placement.range.start, placement);
+      }
+    }
+    placements.forEach((first, index) => {
+      if (first.kind !== 'text' || !first.ruby) return;
+      let startPt = first.bounds.xPt;
+      for (let piece = laterPieces.get(first.range.end); piece;
+        piece = piece.range.end > piece.range.start ? laterPieces.get(piece.range.end) : undefined) {
+        startPt = Math.min(startPt, piece.bounds.xPt);
+      }
+      const shiftPt = startPt - first.bounds.xPt;
+      if (shiftPt === 0) return;
+      placements[index] = {
+        ...first,
+        ruby: {
+          ...first.ruby,
+          paintOps: first.ruby.paintOps.map((operation) => ({
+            ...operation, origin: { xPt: operation.origin.xPt + shiftPt, yPt: operation.origin.yPt },
+          })),
+        },
+      };
+    });
+  }
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
   // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to
   // the line's band edge. A snapToChars underline keeps

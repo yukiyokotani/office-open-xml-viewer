@@ -1044,6 +1044,105 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 8)', () =>
   });
 });
 
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 9)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+  const column = (pt: number) => ({ pageHeight: 60 + 80 + pt });
+  const guide = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+
+  it('aligns the guide of a right-to-left base on the cell however its runs are split', () => {
+    const ruby = { text: 'かき', fontSizePt: 5, hpsRaisePt: 9, align: 'right' };
+    const guideOf = (runs: readonly Run[]) => {
+      const line = layoutParagraph([{ text: '前' }, ...runs, { text: '後' }]).lines[0]!;
+      return textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps.map((op) => op.origin.xPt);
+    };
+    const whole = guideOf([{ text: 'אבגד', ruby, extra: { rtl: true } }]);
+    const split = guideOf([
+      { text: 'אב', ruby, extra: { rtl: true } },
+      { text: 'גד', extra: { rtl: true, rubyBaseContinuation: true, bold: true } },
+    ]);
+    expect(split).toHaveLength(whole.length);
+    split.forEach((xPt, index) => expect(xPt).toBeCloseTo(whole[index]!, 6));
+  });
+
+  it('takes a character back with its variation selector', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前辻\u{E0100}' }, { text: 'ゃ京', ruby: guide }], 'tbRl', null, column(35),
+    );
+    expect(lineTexts(lines)).toEqual(['前', '辻\u{E0100}ゃ京']);
+  });
+
+  it('keeps a fitText region whole when its opener moves with the ruby cell', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前前前' }, { text: 'AB「', extra: { fitTextVal: 400, fitTextId: 7 } }, { text: '東京', ruby: guide }],
+      'tbRl', null, column(55),
+    );
+    expect(lineTexts(lines)).toEqual(['前前前', 'AB「東京']);
+  });
+
+  it('keeps a tate-chu-yoko cell whole when a forbidden leader takes it back', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前前' }, { text: '12', eastAsianVert: true }, { text: 'ゃ京', ruby: guide }], 'tbRl', null, column(35),
+    );
+    expect(lineTexts(lines)).toEqual(['前前', '12ゃ京']);
+  });
+
+  it('allocates the retained head of a cut Latin run from its natural width', () => {
+    const grid = { ...column(35), docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 } as Partial<SectionProps>;
+    const narrow = { extra: { charScale: 0.6 } };
+    const advances = (runs: readonly Run[]) => {
+      const { lines } = layoutParagraph(runs, 'tbRl', null, grid);
+      return [lineTexts(lines)[0], textPlacements(lines[0]!).map((entry) => entry.advancePt)];
+    };
+    const bold = { extra: { charScale: 0.6, bold: true } };
+    const retracted = advances([{ text: 'X', ...narrow }, { text: 'AB', ...bold }, { text: 'ゃ京', ruby: guide }]);
+    const control = advances([{ text: 'X', ...narrow }, { text: 'A', ...bold }]);
+    expect(retracted[0]).toBe('XA');
+    expect(retracted).toEqual(control);
+  });
+
+  it('finds the font span of each guide letter without rescanning the spans', () => {
+    // Span reads made while a mixed-face horizontal guide is laid out, with
+    // the text service's shapes observed.
+    const visits = (count: number) => {
+      const text = 'Aか'.repeat(count / 2);
+      const fonts = { ascii: 'FaceA', highAnsi: 'FaceA', eastAsia: 'FaceB' };
+      const ruby = { text, fontSizePt: 5, hpsRaisePt: 9, guideRuns: [{ text, fonts }] };
+      const section = {
+        pageWidth: 6000, pageHeight: 800, marginTop: 60, marginRight: 90, marginBottom: 80, marginLeft: 40,
+        headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false,
+      } as SectionProps;
+      const document = {
+        section, body: [paragraphOf([{ text: '漢字', ruby }])],
+        headers: { default: null, first: null, even: null }, footers: { default: null, first: null, even: null },
+        fontFamilyClasses: {},
+      } as unknown as DocxDocumentModel;
+      const services = createLayoutServices(document, { measureContext: makeCtx() });
+      let reads = 0;
+      const observed: typeof services.text = {
+        ...services.text,
+        shape: (request) => {
+          const shape = services.text.shape(request);
+          if (request.text !== text) return shape;
+          return { ...shape, spans: shape.spans.map((span) => new Proxy(span, {
+            get(target, key, receiver) {
+              if (key === 'start' || key === 'end') reads += 1;
+              return Reflect.get(target, key, receiver);
+            },
+          })) };
+        },
+      };
+      const page = layoutDocument(document, { ...services, text: observed }, { currentDateMs: 0 }).pages[0]!;
+      const line = page.layers.body.find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!.lines[0]!;
+      expect(textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps).toHaveLength(count);
+      return reads;
+    };
+    const small = visits(100);
+    expect(small).toBeGreaterThan(0);
+    expect(visits(400)).toBeLessThan(small * 6);
+  });
+});
+
 describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () => {
   // Deterministic generator. Every seed lays out one paragraph of ordinary
   // runs and ruby cells (split base runs, fitText pieces, kinsoku leaders and
@@ -1067,6 +1166,14 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
     'list',
     'bidi',
     'float',
+    // Characters with variation selectors, which no line edge may detach.
+    'graphemes',
+    // fitText regions of ordinary text, some ending with an opener.
+    'fitRegion',
+    // Right-to-left ruby bases in one or two runs.
+    'rtlBase',
+    // Condensed Latin runs of alternating weight on a character grid.
+    'scaledLatin',
   ] as const;
   type Family = typeof FAMILIES[number];
   const SEEDS_PER_FAMILY = 100;
@@ -1087,6 +1194,7 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
   /** One source run of the paragraph, as the document model holds it. */
   type Source = Readonly<{ run: Record<string, unknown>; text: string; sizePt: number }>;
   type Cell = Readonly<{ runs: readonly number[]; guide: string; guideRuns?: readonly GuideRun[] }>;
+  const VARIATION_SELECTOR = '\u{E0100}';
 
   function generate(seed: number) {
     const family: Family = FAMILIES[seed % FAMILIES.length]!;
@@ -1095,12 +1203,14 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
     const pool = [...KANJI];
     const take = () => pool.splice(Math.floor(next() * pool.length), 1)[0]!;
     const direction = family === 'tateChuYoko' ? 'tbRl'
-      : family === 'float' || family === 'bidi' ? undefined : pick([undefined, 'tbRl', 'tbLrV']);
-    const grid = family !== 'raised' && family !== 'float' && next() < 0.3
+      : family === 'float' || family === 'bidi' || family === 'rtlBase' ? undefined : pick([undefined, 'tbRl', 'tbLrV']);
+    const grid = family !== 'raised' && family !== 'float' && (family === 'scaledLatin' || next() < 0.3)
       ? { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0 } as Partial<SectionProps> : {};
     const template = paragraphOf([{ text: '' }]).runs[0] as unknown as Record<string, unknown>;
     const sources: Source[] = [];
     const cells: Cell[] = [];
+    // Runs of ordinary text that are one indivisible unit each (a fitText region).
+    const regions: number[] = [];
     const text = (value: string, extra: Record<string, unknown> = {}) => {
       sources.push({ run: { ...template, text: value, ...extra }, text: value, sizePt: (extra.fontSize as number | undefined) ?? 10 });
       return sources.length - 1;
@@ -1138,9 +1248,22 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           leaderAllowed = false;
           continue;
         }
+        if (family === 'fitRegion' && next() < 0.4) {
+          const value = pick(['AB', 'ABC', 'A']) + (next() < 0.5 ? '「' : '');
+          regions.push(text(value, { fitTextVal: 200 * [...value].length + 40, fitTextId: fitId++ }));
+          leaderAllowed = false;
+          continue;
+        }
+        if (family === 'scaledLatin') {
+          const letters = Array.from({ length: 1 + Math.floor(next() * 3) }, () => pick([...'ABCXYZ'])).join('');
+          text(letters, { charScale: 0.6, bold: next() < 0.5 });
+          leaderAllowed = false;
+          continue;
+        }
         const style = raised();
         const styled = Object.keys(style).length > 0;
-        let value = Array.from({ length: family === 'leaderCell' ? 1 : 1 + Math.floor(next() * 3) }, take).join('');
+        let value = Array.from({ length: family === 'leaderCell' ? 1 : 1 + Math.floor(next() * 3) }, take)
+          .map((char) => char + (family === 'graphemes' && next() < 0.5 ? VARIATION_SELECTOR : '')).join('');
         if (!styled && leaderAllowed && next() < 0.3) value = pick(LEADERS) + value;
         const opener = !styled && next() < 0.25;
         if (opener) value += '「';
@@ -1155,11 +1278,16 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           text(pick(OPENERS), { ...raised(), ...(opener % 2 === 1 ? { fontFamily: 'OtherFace' } : {}) });
         }
       }
-      const leader = (family === 'leaderCell' ? next() < 0.7 : next() < 0.1) ? pick(LEADERS) : '';
+      const rtlBase = family === 'rtlBase' && next() < 0.8;
+      const leader = rtlBase ? ''
+        : (family === 'leaderCell' || family === 'scaledLatin' || family === 'graphemes' ? next() < 0.7 : next() < 0.1)
+          ? pick(LEADERS) : '';
       const tateChuYoko = family === 'tateChuYoko' && next() < 0.7;
-      const pieces = tateChuYoko
-        ? [...(next() < 0.5 ? [leader + take()] : []), pick(['12', '34', '56'])]
-        : [leader + take() + (next() < 0.3 ? 'A' : ''), ...(next() < 0.5 ? [take()] : [])];
+      const pieces = rtlBase
+        ? pick([['אבגד'], ['אב', 'גד'], ['א', 'בגד'], ['אבג', 'ד']])
+        : tateChuYoko
+          ? [...(next() < 0.5 ? [leader + take()] : []), pick(['12', '34', '56'])]
+          : [leader + take() + (next() < 0.3 ? 'A' : ''), ...(next() < 0.5 ? [take()] : [])];
       const length = family === 'guideRuns' ? 12 + Math.floor(next() * 30) : 1 + Math.floor(next() * 6);
       const letters = family === 'guideFaces'
         ? Array.from({ length }, () => (next() < 0.4 ? pick([...'ABC']) : pick([...'あいうえお']))).join('')
@@ -1182,13 +1310,14 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         text: letters, fontSizePt: 5, hpsRaisePt: next() < 0.5 ? 9 : 4, align: pick(ALIGNS),
         ...(guideRuns ? { guideRuns } : {}),
       };
-      const fitPiece = !tateChuYoko && next() < 0.3 ? Math.floor(next() * pieces.length) : -1;
+      const fitPiece = !tateChuYoko && !rtlBase && next() < 0.3 ? Math.floor(next() * pieces.length) : -1;
       const runs = pieces.map((value, piece) => text(value, {
         ...(piece === 0 ? {
           ruby: { text: ruby.text, fontSizePt: ruby.fontSizePt, hpsRaisePt: ruby.hpsRaisePt },
           typographyInput: typographyInput(ruby),
         } : { rubyBaseContinuation: true }),
         ...(tateChuYoko && /^\d+$/.test(value) ? { eastAsianVert: true } : {}),
+        ...(rtlBase ? { rtl: true, bold: piece % 2 === 1 } : {}),
         ...(piece === fitPiece ? { fitTextVal: 200 + Math.floor(next() * 400), fitTextId: fitId++ } : {}),
       }));
       cells.push({ runs, guide: letters, ...(guideRuns ? { guideRuns } : {}) });
@@ -1203,9 +1332,9 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       } : {}),
       ...(family === 'tabs' ? { tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }] } : {}),
     };
-    const lengthPt = (family === 'leaderCell' ? 20 : 25) + Math.floor(next() * 60)
-      + indentPt + (family === 'float' ? 40 : 0);
-    return { family, sources, cells, direction, lengthPt, indentPt, grid, paragraph };
+    const lengthPt = (family === 'leaderCell' ? 20 : family === 'fitRegion' || family === 'rtlBase' ? 45 : 25)
+      + Math.floor(next() * 60) + indentPt + (family === 'float' ? 40 : 0);
+    return { family, sources, cells, regions, direction, lengthPt, indentPt, grid, paragraph };
   }
 
   type Generated = ReturnType<typeof generate>;
@@ -1250,7 +1379,7 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
   it.each(Array.from({ length: FAMILIES.length * SEEDS_PER_FAMILY }, (_, seed) => seed + 1))(
     'keeps every ruby cell whole and every line edge legal (seed %i)', (seed) => {
     const generated = generate(seed);
-    const { family, sources, cells, lengthPt, indentPt } = generated;
+    const { family, sources, cells, regions, lengthPt, indentPt } = generated;
     const runs = sources.map((source) => source.run);
     const lines = layoutRuns(generated, runs);
     const texts = lines.map(lineText);
@@ -1277,6 +1406,24 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       }
     }
 
+    for (const region of regions) {
+      // §17.3.2.14: a fitText region stays on one line.
+      expect(lines.filter((line) => content(line).some((entry) => entry.sourceRunIndex === region)), context).toHaveLength(1);
+    }
+    if (family === 'rtlBase') {
+      // A guide no longer than its base stays over the cell, whichever way
+      // the base runs and however its runs are split.
+      for (const cell of cells) {
+        const pieces = lines.flatMap(content).filter((entry) => cell.runs.includes(entry.sourceRunIndex!));
+        const startPt = Math.min(...pieces.map((entry) => entry.bounds.xPt));
+        const endPt = Math.max(...pieces.map((entry) => entry.bounds.xPt + entry.bounds.widthPt));
+        if ([...cell.guide].length * 5 > endPt - startPt) continue;
+        for (const op of pieces.find((entry) => entry.ruby)!.ruby!.paintOps) {
+          expect(op.origin.xPt, `${cell.guide} of ${context}`).toBeGreaterThanOrEqual(startPt - 1e-6);
+          expect(op.origin.xPt + 5, `${cell.guide} of ${context}`).toBeLessThanOrEqual(endPt + 1e-6);
+        }
+      }
+    }
     const sizeAt = sources.flatMap((source) => source.run.type === 'text'
       ? [...source.text].map(() => source.sizePt) : []);
     const characters = [...texts.join('')];
@@ -1286,19 +1433,39 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       consumed += chars.length;
       // §17.3.1.16: no line starts with a line-start-forbidden character.
       if (index > 0) expect(LINE_START_FORBIDDEN.has(chars[0]!), `${index} of ${context}`).toBe(false);
+      // No line starts inside a grapheme cluster.
+      expect(chars[0], `${index} of ${context}`).not.toBe(VARIATION_SELECTOR);
       if (index === texts.length - 1 || !LINE_END_FORBIDDEN.has(chars.at(-1)!) || family === 'float') return;
-      // A line ends with openers only when they and the unit after them (a
-      // whole ruby cell, a whole Hebrew word, or one character) exceed a
-      // whole line.
+      // A line ends with openers only when they and the unit after them
+      // exceed a whole line. The openers are every trailing opener, with
+      // the whole fitText region one closes; the unit is a whole ruby cell,
+      // fitText region or Hebrew word, or one character with the variation
+      // selector and the forbidden leaders glued to it.
       let openersPt = 0;
-      for (let back = 1; back <= chars.length && LINE_END_FORBIDDEN.has(chars[chars.length - back]!); back++) {
-        openersPt += sizeAt[consumed - back]!;
+      const placed = content(lines[index]!);
+      for (let at = placed.length - 1; at >= 0; at -= 1) {
+        const entry = placed[at]!;
+        const letters = [...entry.text];
+        let trailing = 0;
+        while (trailing < letters.length && LINE_END_FORBIDDEN.has(letters[letters.length - 1 - trailing]!)) trailing += 1;
+        if (trailing === 0) break;
+        if (regions.includes(entry.sourceRunIndex!)) {
+          // Every placed piece of the region.
+          for (; at >= 0 && placed[at]!.sourceRunIndex === entry.sourceRunIndex; at -= 1) openersPt += placed[at]!.advancePt;
+          at += 1;
+          continue;
+        }
+        openersPt += entry.advancePt * trailing / letters.length;
+        if (trailing < letters.length) break;
       }
       const following = content(lines[index + 1]!);
       const cell = cells.find((candidate) => candidate.runs[0] === following[0]?.sourceRunIndex);
-      const unitPt = cell ? following.filter((entry) => cell.runs.includes(entry.sourceRunIndex!))
+      const unit = cell?.runs ?? regions.filter((region) => region === following[0]?.sourceRunIndex);
+      let glued = 1;
+      while (characters[consumed + glued] === VARIATION_SELECTOR || LINE_START_FORBIDDEN.has(characters[consumed + glued]!)) glued += 1;
+      const unitPt = unit.length > 0 ? following.filter((entry) => unit.includes(entry.sourceRunIndex!))
         .reduce((sum, entry) => sum + entry.advancePt, 0)
-        : sizeAt[consumed]! * Math.max(1, /^\p{Script=Hebrew}*/u.exec(characters.slice(consumed).join(''))![0].length);
+        : sizeAt[consumed]! * Math.max(glued, /^\p{Script=Hebrew}*/u.exec(characters.slice(consumed).join(''))![0].length);
       expect(unitPt + openersPt > lengthPt - indentPt, `${index} of ${context}`).toBe(true);
     });
 
@@ -1326,6 +1493,12 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       const laid = lines[index]!;
       expect(laid.advancePt, `${index} of ${context}`).toBeCloseTo(line.advancePt, 6);
       expect(laid.baselinePt - laid.bounds.yPt, `${index} of ${context}`).toBeCloseTo(line.baselinePt - line.bounds.yPt, 6);
+      // On a character grid every piece takes the cells it takes when the
+      // line is broken there explicitly.
+      if (family === 'scaledLatin') {
+        expect(content(laid).map((entry) => entry.advancePt), `${index} of ${context}`)
+          .toEqual(content(line).map((entry) => entry.advancePt));
+      }
     });
   });
 });

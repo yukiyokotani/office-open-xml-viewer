@@ -66,9 +66,12 @@ function horizontalUnits(
 ): GuideUnit[] {
   const units: GuideUnit[] = [];
   let whole: { span: object; index: number } | undefined;
+  // Clusters and font spans both run in text order: one cursor finds each
+  // cluster's span.
+  let spanIndex = 0;
   for (const cluster of shape.clusters ?? []) {
-    const span = shape.spans.find((candidate) =>
-      candidate.start <= cluster.range.start && candidate.end >= cluster.range.end) ?? shape.spans[0];
+    while (spanIndex + 1 < shape.spans.length && shape.spans[spanIndex]!.end <= cluster.range.start) spanIndex += 1;
+    const span = shape.spans[spanIndex];
     if (!span) throw new Error('Ruby shaping produced no selected-face span');
     const kerned = wordArabicTextKerned(span.text);
     const clusterText = text.slice(cluster.range.start, cluster.range.end);

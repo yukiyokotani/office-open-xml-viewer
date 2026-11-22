@@ -3009,8 +3009,10 @@ export function performQueueEmergencyTail(
 }
 
 function kinsokuLine(operationState: PassOperationState): KinsokuLine {
-  const { breakerState, materializeLatinSpaceCompression, strAdvance, addToLine, lineEdgeRules: kinsoku } = operationState;
-  return { breakerState, kinsoku, materializeLatinSpaceCompression, strAdvance, addToLine };
+  const {
+    breakerState, materializeLatinSpaceCompression, strAdvance, strNaturalAdvance, addToLine, lineEdgeRules: kinsoku,
+  } = operationState;
+  return { breakerState, kinsoku, materializeLatinSpaceCompression, strAdvance, strNaturalAdvance, addToLine };
 }
 
 export function performRetractCurrentLineForLeadingKinsoku(

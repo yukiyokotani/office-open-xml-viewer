@@ -41,6 +41,8 @@ export interface KinsokuLine {
     text: string,
     retainTrailingPunctuationCompression?: boolean,
   ) => number;
+  /** The advance of `text` before any character-grid allocation. */
+  readonly strNaturalAdvance: (segment: LayoutTextSeg, text: string) => number;
   /** The pass's one admission (performAddToLine): the head of a split item
    * is admitted again through it. */
   readonly addToLine: (segment: LineItem, width: number, height: number, ascent: number, descent: number) => void;
@@ -59,42 +61,76 @@ type RetractionPoint = LinePoint | 'none' | 'blocked';
 
 const isText = (item: LineItem | undefined): item is LayoutTextSeg => item !== undefined && 'text' in item;
 
-/** The code point ending at `offset` of `text`, and its start. */
-function codePointBefore(text: string, offset: number): { start: number; codePoint: number } {
-  const low = text.charCodeAt(offset - 1);
-  const start = offset >= 2 && low >= 0xdc00 && low <= 0xdfff
-    && text.charCodeAt(offset - 2) >= 0xd800 && text.charCodeAt(offset - 2) <= 0xdbff ? offset - 2 : offset - 1;
-  return { start, codePoint: text.codePointAt(start)! };
+/** The grapheme cluster boundaries of a line item's text (0 and its length
+ * included), computed once per item. */
+const clusterBoundaries = new WeakMap<LayoutTextSeg, readonly number[]>();
+
+function boundariesOf(item: LayoutTextSeg): readonly number[] {
+  let bounds = clusterBoundaries.get(item);
+  if (!bounds) {
+    bounds = [...new Set([0, ...graphemeClusterOffsets(item.text), item.text.length])].sort((left, right) => left - right);
+    clusterBoundaries.set(item, bounds);
+  }
+  return bounds;
 }
 
-/** The boundary one unit before `point`: a code point of ordinary text, a
- * whole ruby cell (WORD_RUBY_ALIGN_PLACEMENT: a cell is indivisible), or an
- * empty text item. Undefined at the line start and before an item that is
- * not text, which no retraction crosses. */
+/** The start of the grapheme cluster of `item` that ends at or spans the
+ * position before `offset`: a retraction never cuts a cluster (a base with
+ * its combining marks or variation selector). */
+function clusterStartBefore(item: LayoutTextSeg, offset: number): number {
+  const bounds = boundariesOf(item);
+  let low = 0;
+  let high = bounds.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >>> 1;
+    if (bounds[middle]! < offset) low = middle;
+    else high = middle - 1;
+  }
+  return bounds[low]!;
+}
+
+/** Items the breaker never divides are one unit of the search each: a ruby
+ * cell (WORD_RUBY_ALIGN_PLACEMENT), a fitText region (§17.3.2.14) and a
+ * tate-chu-yoko cell (§17.3.2.10). */
+function sameUnit(left: LayoutTextSeg, right: LayoutTextSeg): boolean {
+  const cell = rubyCellOf(left);
+  if (cell || rubyCellOf(right)) return cell === rubyCellOf(right);
+  return left.fitTextRegionIndex !== undefined && left.fitTextRegionIndex === right.fitTextRegionIndex;
+}
+
+function indivisible(item: LayoutTextSeg): boolean {
+  return rubyCellOf(item) !== undefined || item.fitTextRegionIndex !== undefined || item.tateChuYoko === true;
+}
+
+/** The boundary one unit before `point`: a grapheme cluster of ordinary
+ * text, a whole indivisible unit, or an empty text item. Undefined at the
+ * line start and before an item that is not text, which no retraction
+ * crosses. */
 function previousPoint(line: readonly LineItem[], point: LinePoint): LinePoint | undefined {
   if (point.offset > 0) {
-    return { index: point.index, offset: codePointBefore((line[point.index] as LayoutTextSeg).text, point.offset).start };
+    return { index: point.index, offset: clusterStartBefore(line[point.index] as LayoutTextSeg, point.offset) };
   }
   const item = line[point.index - 1];
   if (!isText(item)) return undefined;
-  const group = rubyCellOf(item);
-  if (group) {
+  if (indivisible(item)) {
     let start = point.index - 1;
-    while (start > 0 && isText(line[start - 1]) && rubyCellOf(line[start - 1] as LayoutTextSeg) === group) start -= 1;
+    while (start > 0 && isText(line[start - 1]) && sameUnit(line[start - 1] as LayoutTextSeg, item)) start -= 1;
     return { index: start, offset: 0 };
   }
-  return item.text.length === 0
-    ? { index: point.index - 1, offset: 0 }
-    : { index: point.index - 1, offset: codePointBefore(item.text, item.text.length).start };
+  return { index: point.index - 1, offset: item.text.length === 0 ? 0 : clusterStartBefore(item, item.text.length) };
 }
 
-/** The code point that would end the line broken at `point`. */
+/** The character that would end the line broken at `point`: the base code
+ * point of the last cluster before it. */
 function codePointEndingAt(line: readonly LineItem[], point: LinePoint): number | undefined {
-  if (point.offset > 0) return codePointBefore((line[point.index] as LayoutTextSeg).text, point.offset).codePoint;
+  if (point.offset > 0) {
+    const item = line[point.index] as LayoutTextSeg;
+    return item.text.codePointAt(clusterStartBefore(item, point.offset));
+  }
   for (let index = point.index - 1; index >= 0; index -= 1) {
     const item = line[index];
     if (!isText(item)) return undefined;
-    if (item.text.length > 0) return codePointBefore(item.text, item.text.length).codePoint;
+    if (item.text.length > 0) return item.text.codePointAt(clusterStartBefore(item, item.text.length));
   }
   return undefined;
 }
@@ -225,8 +261,10 @@ function retractLineFrom(context: KinsokuLine, point: LinePoint): CrossRunKinsok
   if (point.offset > 0) {
     // The head keeps its first glyph and predecessor, so it keeps the
     // incoming WORD_KERNED_SPACE_PAIRS seam pair (bounded by its own advance).
+    // It is admitted by its natural width: the admission allocates it on
+    // the character grid, in the script block it joins.
     const headText = cut.text.slice(0, point.offset);
-    const headNaturalW = context.strAdvance(cut, headText);
+    const headNaturalW = context.strNaturalAdvance(cut, headText);
     const seamPair = Math.max(cut.leadingWordBoundaryPx ?? 0, -headNaturalW);
     const headW = headNaturalW + seamPair;
     context.addToLine({
