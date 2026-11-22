@@ -156,8 +156,8 @@ export function buildDocxTextLayer(
         `position:absolute;` +
         frame.position(piece.offset, 0) +
         `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
-        // A split piece spans exactly where its clusters are painted (scaled
-        // or fitted glyphs included), in the span's own units.
+        // A span spans exactly where its clusters are painted (scaled or
+        // fitted glyphs included), in the span's own units.
         (piece.width !== undefined
           ? `width:${frame.width(piece.width / (k * tcy))};overflow:hidden;`
           : piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
@@ -186,7 +186,8 @@ interface RunPiece {
   readonly end: number;
   /** Offset of the piece along the run's axis, in CSS px. */
   readonly offset: number;
-  /** Painted length of a split piece along the run's axis, in CSS px. */
+  /** Painted length of the piece along the run's axis, in CSS px, when the
+   * run carries cluster boxes. */
   readonly width?: number;
   readonly hidden: boolean;
 }
@@ -200,13 +201,20 @@ interface RunPiece {
  * that is wholly visible or wholly hidden, or has no cluster boxes, is one
  * piece. */
 function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
-  const whole = (hidden: boolean): readonly RunPiece[] => [{ start: 0, end: run.text.length, offset: 0, hidden }];
+  const boxes = run.clusterBoxes;
+  // A run with cluster boxes spans its painted extent whole as well (scaled
+  // or fitted glyphs), like a split piece.
+  let paintedEnd = -Infinity;
+  for (const box of boxes ?? []) paintedEnd = Math.max(paintedEnd, box.x + box.width);
+  const whole = (hidden: boolean): readonly RunPiece[] => [{
+    start: 0, end: run.text.length, offset: 0, hidden,
+    ...(paintedEnd > 0 ? { width: paintedEnd } : {}),
+  }];
   if (!run.clips) return whole(false);
   if (!clippedBoxVisible(
     { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
     run.clips,
   )) return whole(true);
-  const boxes = run.clusterBoxes;
   if (!boxes || boxes.length === 0) return whole(false);
   // Without a union, a run its clips do not cut has nothing to split; a union
   // can hide a gap inside the run's extent.

@@ -264,6 +264,15 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(await hits([run], 800, [[190, 110], [110, 110]])).toEqual(['BCD', '']);
   });
 
+  it('keeps an unsplit 200%-scaled link reachable across its painted width', async () => {
+    // Four 24px clusters (12px glyphs) from x=100: painted 100-196, unclipped.
+    const run = {
+      ...cellRun('ABCD', 100, 24, undefined),
+      hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
+    };
+    expect(await hits([run], 800, [[190, 110], [205, 110]])).toEqual(['ABCD', '']);
+  });
+
   it('places find highlights by painted clusters, not measured text', async () => {
     const box = await page.evaluate(() => {
       const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
