@@ -1,5 +1,6 @@
 import type { ParagraphBorders, ParaBorderEdge } from '../types.js';
 import type { ParagraphLayoutSource } from './text.js';
+import { WORD_PARAGRAPH_BORDER_FLOW_RESERVATION } from './paint-compatibility.js';
 
 export type ParagraphBorderEdges = Readonly<{
   top: 'top' | 'between' | 'none';
@@ -20,9 +21,27 @@ export interface ParagraphBorderSegment {
   y2: number;
 }
 
-/** Vertical extent reserved below text for a visible bottom paragraph border.
- * ECMA-376 §17.3.1.7 places the centered stroke after `w:space`.
- * `word-paragraph-border-flow-reservation` */
+/** Compound ST_Border styles (§17.18.2) paint several strokes or a relief
+ * whose total thickness is not the authored `w:sz`. Their placement keeps the
+ * earlier centred-stroke geometry until their own Office controls exist. */
+function compoundParagraphBorder(style: string): boolean {
+  return style === 'double' || style === 'triple' || style === 'wave' || style === 'doubleWave'
+    || style === 'threeDEmboss' || style === 'threeDEngrave' || style === 'outset' || style === 'inset'
+    || /^(?:thinThick|thickThin|thinThickThin)(?:Small|Medium|Large)Gap$/.test(style);
+}
+
+/** WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: how far a single-stroke paragraph
+ * border's painted line lies outside the border box (text ± `w:space`). The
+ * whole stroke is outside the box, so the reservation is space + full width;
+ * a compound style keeps the earlier half-width (centred) geometry. */
+export function paragraphBorderStrokeOutsetPt(edge: ParaBorderEdge): number {
+  void WORD_PARAGRAPH_BORDER_FLOW_RESERVATION;
+  const width = Math.max(0, edge.width ?? 0);
+  return compoundParagraphBorder(edge.style) ? width / 2 : width;
+}
+
+/** Vertical extent reserved below text for a visible bottom paragraph border
+ * (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION). */
 export function bottomBorderExtentPt(
   borders: ParagraphBorders | null | undefined,
   merge?: ParagraphBorderMerge,
@@ -30,13 +49,14 @@ export function bottomBorderExtentPt(
   if (!borders || merge?.suppressBottom) return 0;
   const bottom = borders.bottom;
   if (!bottom || bottom.style === 'none') return 0;
-  return (bottom.space ?? 0) + (bottom.width ?? 0) / 2;
+  return (bottom.space ?? 0) + paragraphBorderStrokeOutsetPt(bottom);
 }
 
 /** Reserve the painted outer edge of a visible top paragraph border above its
- * text. ECMA-376 §17.3.1.42 defines w:space as the distance from text to the
- * top stroke; §17.3.4 gives the centered stroke its own width. A grouped
- * paragraph whose top edge is suppressed contributes no top reservation. */
+ * text (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION). A between border separating
+ * two paragraphs of one border group takes its spacing on both sides of the
+ * stroke: the previous paragraph's bottom edge is suppressed in the group.
+ * A grouped paragraph whose top edge is suppressed reserves nothing. */
 export function topBorderExtentPt(
   borders: ParagraphBorders | null | undefined,
   edge: ParagraphBorderEdges['top'],
@@ -44,7 +64,9 @@ export function topBorderExtentPt(
   if (!borders || edge === 'none') return 0;
   const top = borders[edge];
   if (!top || top.style === 'none' || top.style === 'nil') return 0;
-  return (top.space ?? 0) + (top.width ?? 0) / 2;
+  const space = top.space ?? 0;
+  const between = edge === 'between' && !compoundParagraphBorder(top.style);
+  return (between ? 2 * space : space) + paragraphBorderStrokeOutsetPt(top);
 }
 
 function effectiveEdge(edge: ParaBorderEdge | null | undefined): ParaBorderEdge | null {

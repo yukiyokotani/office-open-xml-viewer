@@ -84,10 +84,13 @@ export const WORD_SNAP_TO_CHARS_TERMINAL_UNDERLINE = defineCompatibilityRule({
 export const WORD_PARAGRAPH_BORDER_FLOW_RESERVATION = defineCompatibilityRule({
   id: 'word-paragraph-border-flow-reservation',
   evidence: {
-    kind: 'regression-test',
-    reference: 'packages/docx/src/para-bottom-border-flow.test.ts#a bottom border drops the following paragraph by exactly space + width/2',
+    kind: 'office-observation',
+    syntheticFixtureId: 'paragraph-border-extent-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
   },
-  description: 'Reserve a visible bottom paragraph border through its spacing interval and half stroke width so following flow begins below its painted outer edge. Classification: normative, ECMA-376 §17.3.1.7 bottom border space; Word PDF of a corpus document in PR #847.',
+  description: 'ECMA-376 §17.3.1.42 and §17.3.1.7 place a top or bottom paragraph border w:space from the text but do not say how much flow it takes or where the stroke lies. Windows Word 16.0.20625 controls (pbdr1, Noto Sans 9pt, single borders of w:sz 2, 4, 8, 12, 24 and 48 with w:space 0, 1 and 4 on all four sides, exact 12pt and automatic single lines, compatibility modes 15 and 14) reserve space + the full stroke width above the first line and below the last line, and draw the whole stroke outside the border box (text ± w:space): a 1.5pt top stroke over w:space 1 spans 0-1.5pt above the paragraph top and the text starts 2.5pt below it, likewise below. Thick, dotted and dashed borders of w:sz 12 take the same width; a top-only or bottom-only border reserves only its own side. Space before and space after add to the reservation rather than overlapping it (a 6pt space after a 5.5pt reservation moves the next paragraph 11.5pt). Two paragraphs with identical borders form one box with no reservation between them; a between border takes its w:space on both sides of its stroke (w:sz 4 w:space 1: 2.5pt; w:sz 12 w:space 4: 9.5pt); different borders keep both reservations. A bar border and shading alone reserve nothing, and shading fills the box between the strokes. The library applies the same reservation to body and table-cell paragraphs; frame groups keep their own gap model. Compound styles (double, triple, thin-thick, wave, 3-D, inset and outset) paint strokes whose total thickness differs from w:sz and keep the earlier centred-stroke reservation (space + half width) until their own controls exist. The earlier regression evidence (PR #847, a 1.5pt bottom rule followed by text) measured the rule-to-following-text gap, which the full-width model leaves unchanged because the stroke moves with the reservation.',
 });
 
 export const WORD_TRACK_CHANGE_AUTHOR_COLORS = Object.freeze([

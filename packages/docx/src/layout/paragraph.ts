@@ -127,6 +127,7 @@ import {
 } from './plain-data.js';
 import { retainedBorderTreatment } from './border-treatment.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
+import { paragraphBorderStrokeOutsetPt } from './paragraph-border-adjacency.js';
 import {
   centeredLeaderGlyphOrigins,
   groupedRunBorderFragments,
@@ -7796,8 +7797,11 @@ function projectAcquiredParagraph(
         if (!visibleParagraphBorder(edge)) return [];
         const horizontal = side === 'top' || side === 'between' || side === 'bottom';
         const atEnd = side === 'right' || side === 'bottom';
+        // WORD_PARAGRAPH_BORDER_FLOW_RESERVATION: a top, between or bottom
+        // stroke lies wholly outside the border box, its inner edge on the box.
+        const strokeShiftPt = horizontal ? paragraphBorderStrokeOutsetPt(edge) - edge.width / 2 : 0;
         const coordinate = horizontal
-          ? borderBounds.yPt + (atEnd ? borderBounds.heightPt : 0)
+          ? borderBounds.yPt + (atEnd ? borderBounds.heightPt + strokeShiftPt : -strokeShiftPt)
           : borderBounds.xPt + (atEnd ? borderBounds.widthPt : 0);
         return [{
           edge: side,

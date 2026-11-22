@@ -3,7 +3,7 @@ import type { ParagraphBorders } from '../types.js';
 import { bottomBorderExtentPt, topBorderExtentPt } from './paragraph-border-adjacency.js';
 
 describe('paragraph border flow extent', () => {
-  it('reserves spacing plus half the visible bottom stroke', () => {
+  it('reserves spacing plus the whole visible bottom stroke (WORD_PARAGRAPH_BORDER_FLOW_RESERVATION)', () => {
     const borders = {
       top: null,
       right: null,
@@ -12,7 +12,7 @@ describe('paragraph border flow extent', () => {
       between: null,
     } as ParagraphBorders;
 
-    expect(bottomBorderExtentPt(borders)).toBe(4);
+    expect(bottomBorderExtentPt(borders)).toBe(5);
     expect(bottomBorderExtentPt(borders, { suppressBottom: true })).toBe(0);
     expect(bottomBorderExtentPt({
       ...borders,
@@ -27,8 +27,9 @@ describe('paragraph border flow extent', () => {
       between: { style: 'single', width: 1, space: 2 },
       bottom: null, left: null, right: null,
     } as ParagraphBorders;
-    expect(topBorderExtentPt(borders, 'top')).toBe(4);
-    expect(topBorderExtentPt(borders, 'between')).toBe(2.5);
+    expect(topBorderExtentPt(borders, 'top')).toBe(5);
+    // A between border takes its spacing on both sides of its stroke.
+    expect(topBorderExtentPt(borders, 'between')).toBe(5);
     expect(topBorderExtentPt(borders, 'none')).toBe(0);
     expect(topBorderExtentPt({ ...borders, top: { style: 'nil', width: 2, space: 3 } } as ParagraphBorders, 'top')).toBe(0);
   });
