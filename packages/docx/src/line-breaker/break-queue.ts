@@ -27,6 +27,7 @@ export function prepareBreakQueue(
     // A pass resumed after the anchor's own line starts past that anchor.
     const previous = segIndex > 0 ? segs[segIndex - 1]! : undefined;
     if (previous && isAnchorPlacementSegment(previous) && !isAnchorPlacementSegment(seg)
+      && !('text' in previous && previous.anchorTextOffset)
       && !(startBoundary?.afterAnchorLine === true && startBoundary.segIndex === segIndex)) {
       seg.followsAnchor = true;
     } else if (seg.followsAnchor) {

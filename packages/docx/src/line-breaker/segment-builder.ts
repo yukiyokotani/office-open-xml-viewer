@@ -1013,8 +1013,7 @@ function chartSegment(
  * anchors added afterwards as position-only items. No sequence, join,
  * automatic-spacing or eligibility decision of the content build can see an
  * anchor, so the text of both paragraphs is segmented, shaped and joined
- * identically, apart from the sequence boundary at the anchoring character
- * itself.
+ * identically.
  */
 export function buildSegments(
   runs: readonly ParagraphLayoutRun[],
@@ -1026,22 +1025,8 @@ export function buildSegments(
   // (eligibleNativeSourceText) and is withdrawn for every body band that
   // holds a floating source; its cursor never spans an anchor.
   const sourceIndex: number[] = [];
-  // The anchoring character still separates the text before it from the text
-  // after it: the two are shaped as separate sequences (as around any other
-  // character between them), which also keeps the anchor's exact position in
-  // the line. Content runs that follow a displayed anchor start a sequence.
-  const sequenceBarriers = new Set<number>();
-  let afterAnchor = false;
-  runs.forEach((run, runIndex) => {
-    if (isAnchoringRun(run)) {
-      afterAnchor ||= !runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges);
-      return;
-    }
-    if (afterAnchor) sequenceBarriers.add(sourceIndex.length);
-    afterAnchor = false;
-    sourceIndex.push(runIndex);
-  });
-  const segs = buildContentSegments(content, { ...environment, nativeUnitMinimumBandPt: undefined }, sequenceBarriers);
+  runs.forEach((run, runIndex) => { if (!isAnchoringRun(run)) sourceIndex.push(runIndex); });
+  const segs = buildContentSegments(content, { ...environment, nativeUnitMinimumBandPt: undefined });
   restoreSourceRunIndices(segs, sourceIndex);
   return withAnchorPlacementSegments(segs, runs, environment);
 }
@@ -1125,9 +1110,11 @@ function unavailableDrawingSegment(
 
 /**
  * Add each displayed anchor to the content segments at its source position:
- * before the first segment of the content that follows it. The line breaker
- * never sees these items (prepareBreakQueue), so their place in the array
- * opens no break opportunity and splits no joined unit. One forward sweep.
+ * before the segment that holds or follows that position. An anchor between
+ * two runs of one uninterrupted text sequence lies inside a text piece and
+ * records its offset in that piece (`anchorTextOffset`); the piece itself is
+ * never split. The line breaker never sees these items (prepareBreakQueue),
+ * so they change no break opportunity, glue or shaping. One forward sweep.
  */
 function withAnchorPlacementSegments(
   content: LayoutSeg[],
@@ -1136,27 +1123,53 @@ function withAnchorPlacementSegments(
 ): LayoutSeg[] {
   const result: LayoutSeg[] = [];
   let cursor = 0;
+  // UTF-16 offset of the segment at `cursor` in its text sequence.
+  let sequence: LayoutSeg['sourceTextSequence'];
+  let sequenceOffset = 0;
+  const lengthOf = (segment: LayoutSeg): number =>
+    'text' in segment ? segment.text.length : 'isTab' in segment ? 1 : 0;
+  const enter = (): void => {
+    const members = cursor < content.length ? content[cursor]!.sourceTextSequence : undefined;
+    if (members !== sequence) {
+      sequence = members;
+      sequenceOffset = 0;
+    }
+  };
+  const emit = (): void => {
+    const segment = content[cursor]!;
+    if (sequence) sequenceOffset += lengthOf(segment);
+    result.push(segment);
+    cursor += 1;
+    enter();
+  };
+  enter();
+  /** Where run `runIndex` starts relative to the segment at `cursor`: after
+   * it (`undefined`), or at this UTF-16 offset of it (0: before it). */
+  const offsetInCursor = (runIndex: number): number | undefined => {
+    const segment = content[cursor]!;
+    const owner = segment.sourceRunIndex;
+    if (owner === undefined || owner > runIndex) return 0;
+    if (!sequence || sequence.at(-1)!.runIndex < runIndex) return undefined;
+    // Inside this sequence, where its next member starts.
+    const offset = sequence.find((member) => member.runIndex > runIndex)!.start;
+    return sequenceOffset + lengthOf(segment) <= offset ? undefined : Math.max(0, offset - sequenceOffset);
+  };
   for (const [runIndex, run] of runs.entries()) {
     if (!isAnchoringRun(run) || runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges)) continue;
-    // A text sequence never spans a displayed anchor (sequenceBarriers), so
-    // a segment's first source run orders it against the anchor.
-    while (cursor < content.length && (content[cursor]!.sourceRunIndex ?? runIndex) < runIndex) {
-      result.push(content[cursor]!);
-      cursor += 1;
+    let offset: number | undefined = 0;
+    while (cursor < content.length && (offset = offsetInCursor(runIndex)) === undefined) emit();
+    for (const anchor of anchorPlacementSegments(run, runIndex, environment)) {
+      if (offset && cursor < content.length && 'text' in anchor) anchor.anchorTextOffset = offset;
+      result.push(anchor);
     }
-    result.push(...anchorPlacementSegments(run, runIndex, environment));
   }
-  while (cursor < content.length) {
-    result.push(content[cursor]!);
-    cursor += 1;
-  }
+  while (cursor < content.length) emit();
   return result;
 }
 
 function buildContentSegments(
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
-  sequenceBarriers?: ReadonlySet<number>,
 ): LayoutSeg[] {
   if (environment.layoutServices?.text.libreOfficeLineBoxes === true && environment.wordLineBoxes === undefined
     && keepsWordLineBoxes(runs)) {
@@ -1248,7 +1261,7 @@ function buildContentSegments(
     selectedAverageWidth,
   };
 
-  appendRunsToSegments(runs, environment, segs, segmentBuildContext, selectedMetric, sequenceBarriers);
+  appendRunsToSegments(runs, environment, segs, segmentBuildContext, selectedMetric);
 
   finalizeBuiltSegments(runs, environment, segs);
   assignEastAsianAutoSpace(segs, environment);
@@ -2084,14 +2097,13 @@ function appendRunsToSegments(
   segs: LayoutSeg[],
   segmentBuildContext: SegmentBuildContext,
   selectedMetric: SegmentBuildContext['selectedMetric'],
-  sequenceBarriers?: ReadonlySet<number>,
 ): void {
   // A reserved-separator paragraph holds only text-free metric
   // participants; coalescing them would drop a participant's own properties.
   const sequences = runs.some((run) => run.type === 'text'
     && (run as ParagraphTextBearingRun).noteSeparatorCharacter !== undefined)
     ? new Map<number, never>()
-    : acquireTextSequences(runs, environment, (text, run) => transformedRunText(text, run, environment), sequenceBarriers);
+    : acquireTextSequences(runs, environment, (text, run) => transformedRunText(text, run, environment));
   let sequenceEnd = -1;
   let joinNextVisibleText = false;
   for (const [runIndex, sourceRun] of runs.entries()) {

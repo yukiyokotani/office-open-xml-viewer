@@ -177,6 +177,7 @@ import type { PaintNode } from './layout/types.js';
 import type { BodyElement, DocxDocumentModel } from './types.js';
 import { attachAnchorPlacements } from './line-breaker/model.js';
 import { planLine } from './layout/paragraph.js';
+import { buildSegments } from './line-layout.js';
 
 function documentContext(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -482,5 +483,62 @@ describe('floating anchors are placed in linear work', () => {
     };
     // A search per host reads every content range again for each host.
     expect(reads(400)).toBeLessThan(reads(100) * 5);
+  });
+});
+
+// The break-opportunity set is a property of the text alone: an anchor
+// between any two characters leaves segmentation, glue, soft-hyphen state
+// and therefore every line's content unchanged.
+describe('WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating anchor changes no break opportunity', () => {
+  const texts: readonly (readonly [string, string])[] = [
+    ['a soft hyphen', 'aa bb\u00ADcc dd'],
+    ['a no-break space', 'aa\u00A0bb cc dd ee'],
+    ['zero-width joiners', 'a\u200Db c\u200Dd e\u200Df g'],
+    ['closing punctuation', 'aa bb, cc. (dd) ee; ff!'],
+    ['kinsoku pairs', '\u6f22\u5b57\u3001\u300c\u6f22\u5b57\u300d\u3002\u6f22\u5b57\u3063\u30fc\u6f22'],
+    ['a hyphenated identifier', 'ab-cd ef-12 gh'],
+  ];
+  const anchors: readonly (readonly [string, readonly Run[]])[] = [anchorShapes[0]!, anchorShapes[3]!];
+  /** Segment facts without the run indices an inserted run shifts. */
+  const topology = (runs: readonly Run[]) => JSON.stringify(
+    buildSegments(runs as never, { pageIndex: 0, totalPages: 1 })
+      .filter((segment) => !('text' in segment && segment.anchorHostWithoutMetric)
+        && !('imagePath' in segment && segment.anchor)),
+    (key, value: unknown) => key === 'sourceRunIndex' || key === 'runIndex' ? undefined : value);
+  const lineTexts = (runs: readonly Run[], compatibilityMode: number): string[] =>
+    measure(runs, {}, {}, { compatibilityMode }).lines.map((line) => line.layout.segments
+      .map((segment) => 'text' in segment ? segment.text : '').join(''));
+
+  for (const [name, value] of texts) {
+    it(`around ${name}`, () => {
+      // 20pt per character in the 150pt band.
+      const whole = [text(value, 40)];
+      for (let split = 0; split <= value.length; split += 1) {
+        const runs = [text(value.slice(0, split), 40), text(value.slice(split), 40)].filter((run) =>
+          (run as { text: string }).text !== '');
+        for (const [shapeName, anchor] of anchors) {
+          const anchored = [...runs.slice(0, split === 0 ? 0 : 1), ...anchor, ...runs.slice(split === 0 ? 0 : 1)];
+          expect(topology(anchored), `${shapeName} at ${split}`).toBe(topology(runs));
+          for (const compatibilityMode of [12, 14, 15]) {
+            expect(lineTexts(anchored, compatibilityMode), `${shapeName} at ${split}, mode ${compatibilityMode}`)
+              .toEqual(lineTexts(whole, compatibilityMode));
+          }
+        }
+      }
+    });
+  }
+
+  it('keeps the lines around a soft hyphen in its own run', () => {
+    const runs = [text('aa bb', 40), text('\u00AD', 40), text('cc dd', 40)];
+    const expected = lineTexts(runs, 15);
+    expect(expected).toHaveLength(3);
+    for (const [shapeName, anchor] of anchors) {
+      for (const at of [0, 1, 2, 3]) {
+        for (const compatibilityMode of [12, 14, 15]) {
+          expect(lineTexts([...runs.slice(0, at), ...anchor, ...runs.slice(at)], compatibilityMode),
+            `${shapeName} before run ${at}, mode ${compatibilityMode}`).toEqual(lineTexts(runs, compatibilityMode));
+        }
+      }
+    }
   });
 });

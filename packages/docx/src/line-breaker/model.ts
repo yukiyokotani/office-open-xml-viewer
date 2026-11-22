@@ -122,6 +122,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating-drawing anchor host that keeps
    * only its position; it carries no face or line metrics. */
   anchorHostWithoutMetric?: true;
+  /** An anchor host inside the text piece that follows it in its segment
+   * list: its UTF-16 offset in that piece (absent: directly before it). */
+  anchorTextOffset?: number;
   /** Reserved-separator participant only (rule control or
    * content mark): the bounded selected-face probe whose vertical metrics the
    * metric-only segment keeps. Never display text, glyph ownership, source
@@ -599,10 +602,10 @@ export function isAnchorPlacementSegment(segment: LayoutSeg): boolean {
 /**
  * Place the anchor placement items of `segs` on the finished lines of the
  * paragraph the line breaker laid out without them. A host goes to the line
- * that holds the start of the content following it, directly before that
- * content (a trailing host: the end of the last line), so the anchoring
- * character moves with the unit that follows it. Line metrics, boundaries and
- * the lines' own segments are untouched. A floating payload holds no place
+ * that holds its source position, directly before the piece that holds or
+ * follows that position (a trailing host: the end of the last line), with
+ * its offset inside that piece (`anchorTextOffset`). Line metrics, boundaries
+ * and the lines' own segments are untouched: no piece is split. A floating payload holds no place
  * on a line: it is positioned from its host or on its own.
  */
 export function attachAnchorPlacements(
@@ -611,9 +614,9 @@ export function attachAnchorPlacements(
   startBoundary: LineBoundary | undefined,
 ): LayoutLine[] {
   if (lines.length === 0 || !segs.some(isAnchorPlacementSegment)) return lines;
-  /** Source order of a boundary against the start of segment `segIndex`. */
-  const compare = (boundary: LineBoundary, segIndex: number): number =>
-    boundary.segIndex - segIndex || boundary.charOffset;
+  /** Source order of a boundary against offset `charOffset` of segment `segIndex`. */
+  const compare = (boundary: LineBoundary, segIndex: number, charOffset: number): number =>
+    boundary.segIndex - segIndex || boundary.charOffset - charOffset;
   // Each segment's next content segment, in one backward pass.
   const nextContent = new Array<number>(segs.length);
   for (let index = segs.length - 1, next = segs.length; index >= 0; index -= 1) {
@@ -627,31 +630,43 @@ export function attachAnchorPlacements(
   for (let index = 0; index < segs.length; index += 1) {
     const host = segs[index]!;
     if (!isAnchorPlacementSegment(host) || !('text' in host)) continue;
-    // The host's source position: the start of the content segment `target`.
+    // The host's source position: `offset` of the content segment `target`.
     const target = nextContent[index]!;
+    const offset = target < segs.length ? host.anchorTextOffset ?? 0 : 0;
     // An earlier fragment of the paragraph already holds that position.
     if (startBoundary && target < segs.length) {
-      const order = compare(startBoundary, target);
+      const order = compare(startBoundary, target, offset);
       if (order > 0 || (order === 0 && startBoundary.afterAnchorLine === true)) continue;
     }
     // The first line that ends past the position, or the anchor's own line
     // ending exactly there; hosts are visited in source order.
     while (lineIndex < lines.length - 1) {
       const line = lines[lineIndex]!;
-      const order = line.consumedEnd ? compare(line.consumedEnd, target) : 1;
+      const order = line.consumedEnd ? compare(line.consumedEnd, target, offset) : 1;
       if (order > 0 || (order === 0 && line.anchorLine === true)) break;
       lineIndex += 1;
       at = 0;
     }
     const line = lines[lineIndex]!;
+    // Before the piece that holds or follows the position.
+    let inside = 0;
     while (at < line.segments.length) {
-      const src = line.segments[at]!.src;
-      if (src !== undefined && compare(src, target) >= 0) break;
+      const piece = line.segments[at]!;
+      const src = piece.src;
+      if (src !== undefined) {
+        const order = compare(src, target, offset);
+        if (order >= 0) break;
+        if (src.segIndex === target && 'text' in piece && src.charOffset + piece.text.length > offset) {
+          inside = offset - src.charOffset;
+          break;
+        }
+      }
       at += 1;
     }
     let list = additions.get(lineIndex);
     if (!list) additions.set(lineIndex, list = []);
-    list.push({ at, host: { ...host, src: { segIndex: index, charOffset: 0 }, measuredWidth: 0 } });
+    list.push({ at, host: { ...host, src: { segIndex: index, charOffset: 0 }, measuredWidth: 0,
+      anchorTextOffset: inside > 0 ? inside : undefined } });
   }
   if (additions.size === 0) return lines;
   return lines.map((line, index) => {

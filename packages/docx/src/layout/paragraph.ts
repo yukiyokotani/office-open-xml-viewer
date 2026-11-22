@@ -416,6 +416,9 @@ export interface MeasuredAnchorHostPlanSegment {
    * position-only item (isAnchorPlacementSegment). planLine plans the line
    * without it and places it at the content that follows it. */
   readonly anchorPlacement?: true;
+  /** That host's UTF-16 offset inside the text segment that follows it on
+   * the line (absent: at its leading edge). */
+  readonly textOffset?: number;
   readonly kind: 'anchor-host';
   readonly measuredWidthPt: 0;
   readonly range: import('./types.js').TextRange;
@@ -1581,18 +1584,32 @@ function withAutoSpaceExpansion(
 /**
  * WORD_ANCHOR_HOST_NO_LINE_METRIC by construction: the line is aligned,
  * justified and ordered from its content segments alone, exactly as the same
- * line without floating anchors; each anchor host is then placed at the
- * leading edge of the content that follows it (the line's end when none
- * does). A host takes no cell, gap or bidi position of its own.
+ * line without floating anchors; each anchor host is then placed at its
+ * source position: the leading edge of the content that follows it, the
+ * cluster boundary inside the text that holds it, or the line's end. A host
+ * takes no cell, gap or bidi position of its own and splits no text.
  */
 export function planLine(input: PlanLineInput): LineLayout {
-  const hosts = input.line.segments.filter(isAnchorPlacementPlanSegment);
-  if (hosts.length === 0) return planContentLine(input, hosts);
-  return planContentLine({
-    ...input,
-    line: { ...input.line, segments: input.line.segments.filter((segment) => !isAnchorPlacementPlanSegment(segment)) },
-  }, hosts);
+  if (!input.line.segments.some(isAnchorPlacementPlanSegment)) return planContentLine(input, []);
+  const content: MeasuredLinePlanSegment[] = [];
+  const pending: MeasuredAnchorHostPlanSegment[] = [];
+  const hosts: PlannedAnchorHost[] = [];
+  for (const segment of input.line.segments) {
+    if (isAnchorPlacementPlanSegment(segment)) {
+      pending.push(segment);
+      continue;
+    }
+    // The position is an offset of the content's own text range, which
+    // survives the planner's regrouping of segments.
+    for (const host of pending) hosts.push({ host, at: segment.range.start + (host.textOffset ?? 0) });
+    pending.length = 0;
+    content.push(segment);
+  }
+  for (const host of pending) hosts.push({ host, at: Number.POSITIVE_INFINITY });
+  return planContentLine({ ...input, line: { ...input.line, segments: content } }, hosts);
 }
+
+type PlannedAnchorHost = Readonly<{ host: MeasuredAnchorHostPlanSegment; at: number }>;
 
 function isAnchorPlacementPlanSegment(
   segment: MeasuredLinePlanSegment,
@@ -1602,7 +1619,7 @@ function isAnchorPlacementPlanSegment(
 
 function planContentLine(
   input: PlanLineInput,
-  anchorHosts: readonly MeasuredAnchorHostPlanSegment[],
+  anchorHosts: readonly PlannedAnchorHost[],
 ): LineLayout {
   const { line } = input;
   let segments = line.segments;
@@ -2024,31 +2041,36 @@ function planContentLine(
   }
   const placements: ParagraphPlacement[] = [];
   const terminalDecorationTrims = new Map<number, number>();
-  // Each anchor host stands at the leading edge of the first content segment
-  // at or after its source position; the hosts after all content stand at the
-  // line's logical end.
-  const hostsBefore = new Map<number, MeasuredAnchorHostPlanSegment[]>();
+  // Each anchor host stands at its source position: inside the text segment
+  // that holds it, else at the leading edge of the first content segment at
+  // or after it; the hosts after all content stand at the line's logical end.
   // Hosts arrive in source order, so one forward sweep finds every target.
+  const hostsBefore = new Map<number, PlannedAnchorHost[]>();
+  const hostsInside = new Map<number, PlannedAnchorHost[]>();
   let hostTarget = 0;
-  let hostStart = Number.NEGATIVE_INFINITY;
-  for (const host of anchorHosts) {
-    if (host.range.start < hostStart) hostTarget = 0;
-    hostStart = host.range.start;
-    while (hostTarget < segments.length && segments[hostTarget]!.range.start < hostStart) hostTarget += 1;
-    let bucket = hostsBefore.get(hostTarget);
-    if (!bucket) hostsBefore.set(hostTarget, bucket = []);
-    bucket.push(host);
+  let hostAt = Number.NEGATIVE_INFINITY;
+  for (const planned of anchorHosts) {
+    if (planned.at < hostAt) hostTarget = 0;
+    hostAt = planned.at;
+    while (hostTarget < segments.length && segments[hostTarget]!.range.end <= hostAt
+      && segments[hostTarget]!.range.start < hostAt) hostTarget += 1;
+    const holder = segments[hostTarget];
+    const buckets = holder?.kind === 'text' && holder.range.start < hostAt ? hostsInside : hostsBefore;
+    let bucket = buckets.get(hostTarget);
+    if (!bucket) buckets.set(hostTarget, bucket = []);
+    bucket.push(planned);
   }
+  const placeHost = ({ host }: PlannedAnchorHost, hostXPt: number): void => {
+    placements.push({
+      kind: 'anchor-host', range: host.range,
+      bounds: { xPt: hostXPt, yPt: line.topPt, widthPt: 0, heightPt: line.advancePt },
+      baselinePt: line.baselinePt,
+      ...(host.sourceMetrics ? { sourceMetrics: host.sourceMetrics } : {}),
+      ...(host.anchorOccurrenceId ? { anchorOccurrenceId: host.anchorOccurrenceId } : {}),
+    });
+  };
   const placeHosts = (target: number, hostXPt: number): void => {
-    for (const host of hostsBefore.get(target) ?? []) {
-      placements.push({
-        kind: 'anchor-host', range: host.range,
-        bounds: { xPt: hostXPt, yPt: line.topPt, widthPt: 0, heightPt: line.advancePt },
-        baselinePt: line.baselinePt,
-        ...(host.sourceMetrics ? { sourceMetrics: host.sourceMetrics } : {}),
-        ...(host.anchorOccurrenceId ? { anchorOccurrenceId: host.anchorOccurrenceId } : {}),
-      });
-    }
+    for (const planned of hostsBefore.get(target) ?? []) placeHost(planned, hostXPt);
   };
   // A right-to-left base ends at the line's start-of-pen side.
   if (input.baseRtl) placeHosts(segments.length, xPt);
@@ -2056,6 +2078,7 @@ function planContentLine(
     const segment = segments[segmentIndex];
     if (!segment) continue;
     if (!visual.rtl[segmentIndex]) placeHosts(segmentIndex, xPt);
+    const segmentStartPt = xPt;
     const stretch = stretchByIndex?.get(segmentIndex);
     // Each atomic source-space cell owns its existing positive allocation.
     // Non-space cuts and every legacy/negative path keep their old plan.
@@ -2307,6 +2330,20 @@ function planContentLine(
       placements.push(placed);
     }
     xPt += widthPt;
+    // A host inside this text stands after the clusters that precede it.
+    const inside = hostsInside.get(segmentIndex);
+    const placedText = inside ? placements.at(-1) : undefined;
+    if (inside && placedText?.kind === 'text') {
+      let cluster = 0;
+      let precedingPt = 0;
+      for (const planned of inside) {
+        while (cluster < placedText.clusters.length && placedText.clusters[cluster]!.range.start < planned.at) {
+          precedingPt += placedText.clusters[cluster]!.advancePt;
+          cluster += 1;
+        }
+        placeHost(planned, visual.rtl[segmentIndex] ? xPt - precedingPt : segmentStartPt + precedingPt);
+      }
+    }
     // A right-to-left segment's leading edge is its right edge.
     if (visual.rtl[segmentIndex]) placeHosts(segmentIndex, xPt);
     if (geometryStretch?.trailingGap) xPt += geometryStretch.trailingDelta ?? perGapPt;
@@ -3455,6 +3492,8 @@ function textPlanSegment(
     return {
       kind: 'anchor-host', measuredWidthPt: 0,
       ...(segment.anchorHostWithoutMetric ? { anchorPlacement: true as const } : {}),
+      ...(segment.anchorHostWithoutMetric && segment.anchorTextOffset
+        ? { textOffset: segment.anchorTextOffset } : {}),
       ...(sourceRun?.type === 'text' && (sourceRun.noteRef?.kind === 'footnote' || sourceRun.noteRef?.kind === 'endnote')
         ? { noteReference: { kind: sourceRun.noteRef.kind, id: sourceRun.noteRef.id } } : {}),
       range: { start: sourceOffset, end: sourceOffset },
