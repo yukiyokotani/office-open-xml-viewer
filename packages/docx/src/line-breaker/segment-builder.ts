@@ -1992,9 +1992,12 @@ function appendRunsToSegments(
         }
         continue;
       }
-      if ((run as ParagraphTextBearingRun).noteSeparatorCharacter !== undefined) {
+      if ((run as ParagraphTextBearingRun).noteSeparatorCharacter !== undefined
+        || (run as Readonly<{ __noteSeparatorMarker?: boolean }>).__noteSeparatorMarker === true) {
         // Reserved separator character: the U+0003/U+0004 rule
-        // control or its story's content paragraph mark. Neither has a glyph
+        // control or its story's content paragraph mark, or the marker run of
+        // a listed DOCX separator story (selected-note-separators.ts), whose
+        // inline object carries the rule. None has a glyph
         // here; the rule ink is retained separately. As for a suppressed note
         // mark, a bounded Latin probe resolves the run's own four font slots
         // and selected face through the ordinary text service, and only its

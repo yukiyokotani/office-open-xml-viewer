@@ -338,6 +338,8 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     sectionNoteNumbering?: readonly Readonly<{
       footnote?: InternalNoteNumberingWire;
       endnote?: InternalNoteNumberingWire;
+      /** §17.11.21 w:pos of the section's own footnotePr (§17.11.11). */
+      footnotePosition?: string;
     }>[];
     footnoteSeparator?: NoteSeparatorMark;
     endnoteSeparator?: NoteSeparatorMark;
@@ -586,8 +588,14 @@ function documentNoteLayoutSettingsInput(
     }))
     : undefined;
   return snapshotPlainData({
-    // §17.11.21/.22 defaults when document-wide w:pos is absent.
-    footnotePosition: settings?.footnotePosition ?? 'pageBottom',
+    // §17.11.21/.22 defaults when w:pos is absent. A section's own footnotePr
+    // position (§17.11.11) overrides the document-wide one; the document
+    // reports the first section position other than pageBottom.
+    footnotePosition: settings?.sectionNoteNumbering?.length
+      ? settings.sectionNoteNumbering
+        .map((section) => section.footnotePosition ?? settings.footnotePosition ?? 'pageBottom')
+        .find((position) => position !== 'pageBottom') ?? 'pageBottom'
+      : settings?.footnotePosition ?? 'pageBottom',
     endnotePosition: settings?.endnotePosition ?? 'docEnd',
     footnoteNumbering: noteNumberingInput('footnote', footnoteWire, word),
     endnoteNumbering: noteNumberingInput('endnote', endnoteWire, word),

@@ -314,7 +314,7 @@ it('paints separator text inline before the marker and draws the rule at the mar
   }), false);
   const note = leadingOf(layout, 0);
   expect(note.separator).toEqual([]);
-  expect(note.leading?.paragraph && text(note.leading.paragraph)).toBe('SEPA​');
+  expect(note.leading?.paragraph && text(note.leading.paragraph)).toBe('SEPA');
   expect(note.leading?.rule?.segment.from.xPt).toBeCloseTo(96, 6);
   expect(note.leading?.rule?.segment.to.xPt).toBeCloseTo(240, 6);
   expect(note.leading?.advancePt).toBe(10);

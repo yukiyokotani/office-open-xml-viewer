@@ -1102,6 +1102,10 @@ pub struct SectionNoteNumberingWire {
     pub footnote: Option<NoteNumberingWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote: Option<NoteNumberingWire>,
+    /// §17.11.21 `w:pos` of the section's own footnotePr, which overrides
+    /// the document-wide position ([MS-OI29500] §2.1.309).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_position: Option<String>,
 }
 
 /** Parser-private section placement facts. This wire is deliberately emitted
