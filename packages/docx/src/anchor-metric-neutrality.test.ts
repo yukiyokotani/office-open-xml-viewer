@@ -181,6 +181,7 @@ import { buildSegments } from './line-layout.js';
 import { withAnchorPlacementSegments } from './line-breaker/segment-builder.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { textRunsForPage } from './text-run-projection.js';
+import { hasFollowingInkContent } from './layout/body-paginator.js';
 
 function documentContext(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -714,6 +715,29 @@ describe('several floating anchors inside one text sequence', () => {
     expect(hosts.map((host) => host.bounds.xPt)).toEqual([glyphX(2), glyphX(4)]);
   });
 
+  it('places a host inside justified text at the justified character boundary', () => {
+    // A 51pt band holds eight 6pt ideographs and stretches the first line.
+    const narrow = (runs: readonly Run[]) => {
+      const model = documentModel([bodyParagraph(runs, { alignment: 'both' } as never)], null, { compatibilityMode: 15 });
+      (model.section as { pageWidth: number }).pageWidth = 91;
+      const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+        { currentDateMs: 0 });
+      const paragraph = layout.pages[0]!.layers.body.find((node) => node.kind === 'paragraph');
+      if (paragraph?.kind !== 'paragraph') throw new Error('Expected a paragraph');
+      return paragraph.lines[0]!.placements;
+    };
+    const ideographs = '\u65e5\u672c\u8a9e\u6587\u66f8\u4f5c\u6210\u6cd5\u898f\u5247\u8a66\u9a13';
+    const plain = narrow([word(ideographs)]).find((placement) => placement.kind === 'text');
+    if (plain?.kind !== 'text') throw new Error('Expected text');
+    const boundary = plain.origin.xPt + plain.clusters[2]!.offset.xPt;
+    // The line is stretched: the boundary is not at two natural advances.
+    expect(boundary).toBeGreaterThan(plain.origin.xPt + plain.clusters[0]!.advancePt + plain.clusters[1]!.advancePt + 0.1);
+    const anchored = narrow([word(ideographs.slice(0, 2)), ...anchor(), word(ideographs.slice(2))]);
+    const host = anchored.find((placement) => placement.kind === 'anchor-host');
+    if (host?.kind !== 'anchor-host') throw new Error('Expected a host');
+    expect(host.bounds.xPt).toBeCloseTo(boundary, 9);
+  });
+
   it('keeps consistent ranges around a drawing inside right-to-left text', () => {
     const hebrew = (value: string): Run => word(value, 12, { rtl: true });
     const { texts, hosts } = layOut([hebrew('\u05d0\u05d1'), ...anchor(), hebrew('\u05d2\u05d3')], [word(' xy', 12, { bold: true })]);
@@ -801,6 +825,27 @@ describe('floating anchors take no part in intrinsic sizing', () => {
   });
 });
 
+/** Array entries visited by scans, searches, copies and iteration (spreads
+ * included) while `run` executes. */
+function arrayEntriesVisited<T>(run: () => T): { entries: number; layout: T } {
+  let entries = 0;
+  const names = ['filter', 'find', 'findIndex', 'slice', 'flatMap', 'some', 'every', 'map', Symbol.iterator] as const;
+  const prototype = Array.prototype as unknown as Record<string | symbol, (...args: unknown[]) => unknown>;
+  const originals = names.map((name) => prototype[name]!);
+  names.forEach((name, index) => {
+    prototype[name] = function (this: unknown[], ...args: unknown[]) {
+      entries += this.length;
+      return originals[index]!.apply(this, args);
+    };
+  });
+  try {
+    const layout = run();
+    return { layout, entries };
+  } finally {
+    names.forEach((name, index) => { prototype[name] = originals[index]!; });
+  }
+}
+
 describe('a line with many anchors inside its text is planned in linear work', () => {
   it('scans its segment arrays a bounded number of times', () => {
     // Identically formatted one-letter runs alternating with distinct
@@ -816,25 +861,54 @@ describe('a line with many anchors inside its text is planned in linear work', (
       }
       const model = documentModel([bodyParagraph(runs)], null, { compatibilityMode: 15 });
       (model.section as { pageWidth: number }).pageWidth = 4000;
-      let entries = 0;
-      const names = ['filter', 'find', 'findIndex', 'slice', 'flatMap'] as const;
-      const prototype = Array.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
-      const originals = names.map((name) => prototype[name]!);
-      names.forEach((name, index) => {
-        prototype[name] = function (this: unknown[], ...args: unknown[]) {
-          entries += this.length;
-          return originals[index]!.apply(this, args);
-        };
-      });
-      try {
-        const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
-          { currentDateMs: 0 });
-        expect(layout.pages[0]!.layers.paintOrder.filter((entry) => entry.kind === 'drawing')).toHaveLength(count);
-      } finally {
-        names.forEach((name, index) => { prototype[name] = originals[index]!; });
-      }
+      const { entries, layout } = arrayEntriesVisited(() =>
+        layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }), { currentDateMs: 0 }));
+      expect(layout.pages[0]!.layers.paintOrder.filter((entry) => entry.kind === 'drawing')).toHaveLength(count);
       return entries;
     };
-    expect(visited(200)).toBeLessThan(visited(50) * 6);
+    expect(visited(800)).toBeLessThan(visited(200) * 5);
+  });
+
+  it('looks ahead for ink once across consecutive anchor-only paragraphs', () => {
+    // Anchor-only marks before one text paragraph: a look-ahead from each
+    // mark over the marks after it reads about n * n / 2 paragraphs.
+    const reads = (count: number): number => {
+      let read = 0;
+      const mark = () => ({ kind: 'body-block', block: { kind: 'paragraph',
+        get markOnlyView() { read += 1; return { final: true, markup: true }; } } });
+      const sequence = [...Array.from({ length: count }, mark),
+        { kind: 'body-block', block: { kind: 'paragraph' } }];
+      for (let index = 0; index <= count; index += 1) {
+        expect(hasFollowingInkContent({ sequence } as never, index, false)).toBe(true);
+      }
+      expect(hasFollowingInkContent({ sequence } as never, count + 1, false)).toBe(false);
+      return read;
+    };
+    expect(reads(400)).toBeLessThan(reads(100) * 5);
+  });
+
+  it('ends the ink look-ahead at the boundaries it ended at before', () => {
+    const mark = { kind: 'body-block', block: { kind: 'paragraph', markOnlyView: { final: true, markup: false } } };
+    const ink = { kind: 'body-block', block: { kind: 'paragraph' } };
+    const answers = (sequence: readonly unknown[], view: boolean) =>
+      sequence.map((_, index) => hasFollowingInkContent({ sequence } as never, index, view));
+    const nextPage = { kind: 'begin-section', section: { startType: 'nextPage' } };
+    const continuous = { kind: 'begin-section', section: { startType: 'continuous' } };
+    const pageBreak = { kind: 'authored-break', break: 'page' };
+    const rendered = { kind: 'authored-break', break: 'lastRenderedPageBreak' };
+    const breakBefore = { kind: 'body-block', block: { kind: 'paragraph', pageBreakBefore: true } };
+    const numbered = { kind: 'body-block', block: { kind: 'paragraph', inkless: true, visibleNumbering: true } };
+    const table = { kind: 'adjacent-table-group' };
+    expect(answers([mark, mark, ink], false)).toEqual([true, true, true]);
+    // The markup view displays the mark-only paragraph's revisions as ink.
+    expect(answers([mark, nextPage, ink], true)).toEqual([true, false, true]);
+    expect(answers([mark, nextPage, ink], false)).toEqual([false, false, true]);
+    expect(answers([mark, continuous, rendered, { kind: 'consume-source' }, ink], false))
+      .toEqual([true, true, true, true, true]);
+    expect(answers([mark, pageBreak, ink], false)).toEqual([false, false, true]);
+    expect(answers([mark, breakBefore, ink], false)).toEqual([false, false, true]);
+    expect(answers([mark, numbered], false)).toEqual([true, true]);
+    expect(answers([mark, table], false)).toEqual([true, true]);
+    expect(answers([mark, mark], false)).toEqual([false, false]);
   });
 });

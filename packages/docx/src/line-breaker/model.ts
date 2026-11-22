@@ -592,9 +592,10 @@ export type LayoutSeg = LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutL
  * stream: a floating drawing's anchor host, or a floating picture/chart
  * payload. It marks where the drawing is anchored and nothing else: it has
  * no advance and takes no part in any line metric, leading rule, grid class,
- * position reference or trailing-break state. The line breaker admits it
- * through one path (`performAddToLine`) that touches no metric accumulator,
- * and every reader of a line's segments for metrics skips it by this test. */
+ * position reference or trailing-break state. The break queue leaves it out,
+ * so no metric accumulator sees it; `attachAnchorPlacements` returns it to
+ * its line afterwards, and every reader of a line's segments for metrics
+ * skips it by this test. */
 export function isAnchorPlacementSegment(segment: LayoutSeg): boolean {
   return ('text' in segment && segment.anchorHostWithoutMetric === true)
     || ('imagePath' in segment && segment.anchor === true);

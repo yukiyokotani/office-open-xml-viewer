@@ -2336,13 +2336,21 @@ function planContentLine(
     const inside = hostsInside.get(segmentIndex);
     const placedText = inside ? placements.at(-1) : undefined;
     if (inside && placedText?.kind === 'text') {
+      // The line's gap plan moves each retained cluster by the deltas of the
+      // gaps before it; the host stands at the moved boundary.
+      const natural = segment.kind === 'text' ? segment.clusters : placedText.clusters;
+      const gapDeltaPt = (index: number): number => {
+        const at = Math.min(index, placedText.clusters.length - 1);
+        return at < 0 ? 0 : placedText.clusters[at]!.offset.xPt - (natural[at]?.offset.xPt ?? placedText.clusters[at]!.offset.xPt);
+      };
       let cluster = 0;
-      let precedingPt = 0;
+      let advancedPt = 0;
       for (const planned of inside) {
         while (cluster < placedText.clusters.length && placedText.clusters[cluster]!.range.start < planned.at) {
-          precedingPt += placedText.clusters[cluster]!.advancePt;
+          advancedPt += placedText.clusters[cluster]!.advancePt;
           cluster += 1;
         }
+        const precedingPt = advancedPt + gapDeltaPt(cluster);
         placeHost(planned, visual.rtl[segmentIndex] ? xPt - precedingPt : segmentStartPt + precedingPt);
       }
     }
@@ -7739,6 +7747,7 @@ function projectAcquiredParagraph(
     payloadsByOccurrence.set(run.anchorAcquisitionInput!.occurrenceId, payloads);
   });
   const paragraphOccurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
+  const attachedDrawings = new Map<number, ParagraphPlacement[]>();
   for (const [occurrenceId, payloads] of payloadsByOccurrence) {
     const acquired = acquireAnchorOccurrence(
       occurrenceId,
@@ -7766,18 +7775,24 @@ function projectAcquiredParagraph(
     textBoxes.push(...acquired.textBoxes);
     if (acquired.exclusion) anchorExclusions.push(acquired.exclusion);
     if (acquired.collision) anchorCollisions.push(acquired.collision);
-    const hostLine = lines[acquired.hostLineIndex];
-    if (hostLine) {
-      lines = lines.map((line, lineIndex) => lineIndex === acquired.hostLineIndex ? {
-        ...line,
-        placements: [...line.placements, {
-          kind: 'drawing', range: acquired.hostRange,
-          drawingId: acquired.drawing!.id,
-          bounds: acquired.drawing!.inkBounds,
-          advancePt: 0,
-        }],
-      } : line);
+    if (lines[acquired.hostLineIndex]) {
+      const attached = attachedDrawings.get(acquired.hostLineIndex) ?? [];
+      attached.push({
+        kind: 'drawing', range: acquired.hostRange,
+        drawingId: acquired.drawing.id,
+        bounds: acquired.drawing.inkBounds,
+        advancePt: 0,
+      });
+      attachedDrawings.set(acquired.hostLineIndex, attached);
     }
+  }
+  // Each line takes its drawings once, after every occurrence has resolved
+  // against the same planned lines.
+  if (attachedDrawings.size > 0) {
+    lines = lines.map((line, lineIndex) => {
+      const attached = attachedDrawings.get(lineIndex);
+      return attached ? { ...line, placements: [...line.placements, ...attached] } : line;
+    });
   }
   const firstLineMovedMarkerEdgePx = options.continuesFromPrevious
     ? undefined : measured.lines[0]?.layout.numberingFirstLine?.leadingEdgePx

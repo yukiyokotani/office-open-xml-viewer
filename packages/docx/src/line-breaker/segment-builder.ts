@@ -2402,7 +2402,7 @@ function appendRunsToSegments(
       // Only a list label's metric run (a picture bullet's label font) has
       // this type here: it is not an anchoring run and keeps its metrics. A
       // floating drawing's anchor host never reaches the content build
-      // (anchorPlacementSegments).
+      // (withAnchorPlacementSegments).
       {
         const hostRun = run;
         const eastAsian = hostRun.fontFamilyEastAsia != null;
@@ -2411,7 +2411,7 @@ function appendRunsToSegments(
         const authoredFamily = hostRun.fontFamilyEastAsia ?? hostRun.fontFamily ?? null;
         const weight = bold ? 700 : 400;
         const style = italic ? ('italic' as const) : ('normal' as const);
-        // An anchor host has no glyph of its own. Resolve a script-matched probe
+        // The metric run has no glyph of its own. Resolve a script-matched probe
         // as for an empty paragraph mark, then require selected-face identity and
         // cmap coverage. Empty text would vacuously admit any subset resource.
         const probeText = eastAsian ? 'あ' : 'x';
@@ -2441,15 +2441,13 @@ function appendRunsToSegments(
             && allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
               ?? environment.layoutServices?.text.localMetrics ?? {}), selected)
             // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY covers measured text
-            // spans and paragraph marks only; an anchor host is outside its
+            // spans and paragraph marks only; a label metric run is outside its
             // evidence, so only an exact catalogued tuple lends its geometry.
             ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
               fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
           environment.verticalCJK === true || environment.wordLineBoxes === true))
             : undefined;
         const familyLineMetric = resourceMetric ?? referenceMetric;
-        // A host-only paragraph takes its empty mark's grid-cell class even
-        // though the mark is measured with its ascii face.
         segs.push({
           text: '',
           metricOnly: true,

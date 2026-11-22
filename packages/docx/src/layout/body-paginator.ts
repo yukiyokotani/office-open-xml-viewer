@@ -810,24 +810,38 @@ function paragraphFragmentStartKey(cursor: ParagraphFragmentCursor): string {
     : `paragraph:${cursor.boundary.segIndex}:${cursor.boundary.charOffset}${cursor.boundary.trailingEmptyLine ? ':empty-line' : ''}${cursor.boundary.afterAnchorLine ? ':after-anchor-line' : ''}`;
 }
 
-function hasFollowingInkContent(input: BodyLayoutInput, startIndex: number, showTrackedChanges: boolean | undefined): boolean {
-  for (let index = startIndex; index < input.sequence.length; index += 1) {
-    const entry = input.sequence[index]!;
-    if (entry.kind === 'consume-source') continue;
-    if (entry.kind === 'authored-break') {
-      if (entry.break !== 'lastRenderedPageBreak') return false;
-      continue;
+const followingInkByView = new WeakMap<BodyLayoutInput['sequence'], Map<boolean | undefined, readonly boolean[]>>();
+
+/** Whether ink content follows from `startIndex` before a page or section
+ * boundary. One backward pass per sequence and revision view answers every
+ * start index, so a run of inkless marks is not rescanned from each mark.
+ * @internal */
+export function hasFollowingInkContent(input: Pick<BodyLayoutInput, 'sequence'>, startIndex: number, showTrackedChanges: boolean | undefined): boolean {
+  let views = followingInkByView.get(input.sequence);
+  if (!views) followingInkByView.set(input.sequence, views = new Map());
+  let suffix = views.get(showTrackedChanges);
+  if (!suffix) {
+    const answers = new Array<boolean>(input.sequence.length + 1).fill(false);
+    for (let index = input.sequence.length - 1; index >= 0; index -= 1) {
+      answers[index] = followingInkAt(input.sequence[index]!, answers[index + 1]!, showTrackedChanges);
     }
-    if (entry.kind === 'begin-section') {
-      if (entry.section.startType !== 'continuous') return false;
-      continue;
-    }
-    const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
-    if (block.kind !== 'paragraph') return true;
-    if (block.pageBreakBefore) return false;
-    if (wordBlockHasInk(block, showTrackedChanges)) return true;
+    views.set(showTrackedChanges, suffix = answers);
   }
-  return false;
+  return suffix[Math.min(Math.max(startIndex, 0), input.sequence.length)]!;
+}
+
+function followingInkAt(
+  entry: BodyLayoutInput['sequence'][number],
+  after: boolean,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  if (entry.kind === 'consume-source') return after;
+  if (entry.kind === 'authored-break') return entry.break === 'lastRenderedPageBreak' && after;
+  if (entry.kind === 'begin-section') return entry.section.startType === 'continuous' && after;
+  const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
+  if (block.kind !== 'paragraph') return true;
+  if (block.pageBreakBefore) return false;
+  return wordBlockHasInk(block, showTrackedChanges) || after;
 }
 
 /** An undecorated inkless mark: no line, paint, resource or drawing of its
