@@ -120,14 +120,16 @@ export function buildDocxTextLayer(
     const hidden = visible === null;
     // A partly clipped run keeps hit testing only over its visible part: the
     // clip in the span's own (pre-transform, reference px) frame.
+    // In percentages of the span's own box, so the clip scales with the run
+    // when the page is resized responsively.
     const clipPath = visible && (visible.left > 0 || visible.top > 0
       || visible.right < run.w || visible.bottom < run.h) ? (() => {
-      const sx = k * tcy;
+      const percent = (value: number, extent: number) => `${(value / extent) * 100}%`;
       // Unbounded where the clip does not cut the run.
-      const l = visible.left > 0 ? `${visible.left / sx}px` : '-100vw';
-      const t = visible.top > 0 ? `${visible.top / k}px` : '-100vh';
-      const r = visible.right < run.w ? `${visible.right / sx}px` : '200vw';
-      const b = visible.bottom < run.h ? `${visible.bottom / k}px` : '200vh';
+      const l = visible.left > 0 ? percent(visible.left, run.w) : '-100vw';
+      const t = visible.top > 0 ? percent(visible.top, run.h) : '-100vh';
+      const r = visible.right < run.w ? percent(visible.right, run.w) : '200vw';
+      const b = visible.bottom < run.h ? percent(visible.bottom, run.h) : '200vh';
       return `clip-path:polygon(${l} ${t},${r} ${t},${r} ${b},${l} ${b});`;
     })() : '';
     const link = onHyperlinkClick && !hidden ? run.hyperlink : undefined;

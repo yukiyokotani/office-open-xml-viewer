@@ -45,12 +45,14 @@ const rule = (side: string) => `<w:${side} w:val="single" w:sz="4" w:space="0" w
 
 /** One 216pt cell with 0.5pt rules, 5.4pt side margins and 10pt top/bottom
  * margins, holding the given paragraphs. */
-function docx(paragraphs: string, body?: string): Uint8Array {
+function docx(paragraphs: string, body?: string, rowProperties = '', verticalMarginTwips = 200, rules = true): Uint8Array {
   const table = '<w:tbl><w:tblPr><w:tblW w:w="4320" w:type="dxa"/><w:tblInd w:w="0" w:type="dxa"/>'
-    + `<w:tblBorders>${['top', 'left', 'bottom', 'right'].map(rule).join('')}</w:tblBorders><w:tblLayout w:type="fixed"/>`
-    + '<w:tblCellMar><w:top w:w="200" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="200" w:type="dxa"/>'
+    + (rules ? `<w:tblBorders>${['top', 'left', 'bottom', 'right'].map(rule).join('')}</w:tblBorders>` : '')
+    + '<w:tblLayout w:type="fixed"/>'
+    + `<w:tblCellMar><w:top w:w="${verticalMarginTwips}" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>`
+    + `<w:bottom w:w="${verticalMarginTwips}" w:type="dxa"/>`
     + '<w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="4320"/></w:tblGrid>'
-    + `<w:tr><w:tc><w:tcPr><w:tcW w:w="4320" w:type="dxa"/></w:tcPr>${paragraphs}</w:tc></w:tr></w:tbl>`;
+    + `<w:tr>${rowProperties ? `<w:trPr>${rowProperties}</w:trPr>` : ''}<w:tc><w:tcPr><w:tcW w:w="4320" w:type="dxa"/></w:tcPr>${paragraphs}</w:tc></w:tr></w:tbl>`;
   const document = `<w:document ${NS}><w:body>${body ?? `<w:p/>${table}<w:p/>`}`
     + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" '
     + 'w:header="0" w:footer="0" w:gutter="0"/></w:sectPr></w:body></w:document>';
@@ -95,7 +97,10 @@ type Painted = Readonly<{ bounds: LayoutRect; clips: readonly LayoutRect[] }>;
 /** Paints `table` and returns, in paint order, each painted picture with the
  * clips active when it was painted (in page points; the paint applies only
  * translations), and the number of save and translate calls. */
-function paintTable(table: TableLayout): Readonly<{ painted: Painted[]; saves: number; translates: number }> {
+function paintTable(table: TableLayout): Readonly<{
+  painted: Painted[]; saves: number; translates: number;
+  inks: Array<Readonly<{ xPt: number; clips: number }>>;
+}> {
   let dx = 0;
   let dy = 0;
   let clips: Clip[] = [];
@@ -104,7 +109,13 @@ function paintTable(table: TableLayout): Readonly<{ painted: Painted[]; saves: n
   let translates = 0;
   const stack: Array<Readonly<{ dx: number; dy: number; clips: Clip[] }>> = [];
   const painted: Painted[] = [];
+  // Rule ink (strokes and filled hairlines) with its page x and active clips.
+  const inks: Array<Readonly<{ xPt: number; clips: number }>> = [];
+  let pathX = 0;
   const ctx = new Proxy({
+    moveTo(x: number) { pathX = x + dx; },
+    stroke() { inks.push({ xPt: pathX, clips: clips.length }); },
+    fillRect(x: number) { inks.push({ xPt: x + dx, clips: clips.length }); },
     save() { saves++; stack.push({ dx, dy, clips: [...clips] }); },
     restore() { const top = stack.pop(); if (top) ({ dx, dy, clips } = top); },
     translate(x: number, y: number) { translates++; dx += x; dy += y; },
@@ -131,7 +142,7 @@ function paintTable(table: TableLayout): Readonly<{ painted: Painted[]; saves: n
     },
   };
   paintTableLayout(table, context);
-  return { painted, saves, translates };
+  return { painted, saves, translates, inks };
 }
 
 /** The painted clip is the content clip widened to whole device pixels. */
@@ -217,6 +228,19 @@ describe('word-cell-content-clip', () => {
     expect(legacy - drawing).toBe(1);
   });
 
+  it('keeps a bar tab under the clip when the line holds a VML picture', () => {
+    // A bar tab at 225pt in a 216pt cell, beside a VML picture that escapes.
+    const table = layoutTable('<w:p><w:pPr><w:tabs><w:tab w:val="bar" w:pos="4500"/></w:tabs>'
+      + `<w:spacing w:after="0" w:line="480" w:lineRule="exact"/></w:pPr>${vml(-15)}</w:p>`);
+    const cell = table.rows[0]!.cells[0]!;
+    const right = cell.flowBounds.xPt + cell.flowBounds.widthPt;
+    const { painted, inks } = paintTable(table);
+    expect(painted[0]!.clips).toEqual([]);
+    const bar = inks.filter((ink) => ink.xPt > right + 1);
+    expect(bar.length).toBeGreaterThan(0);
+    expect(bar.every((ink) => ink.clips > 0)).toBe(true);
+  });
+
   it('marks VML pictures as escaping only in table cells', () => {
     const page = layoutPage(docx('', `${exactLine(vml(-15))}<w:p/>`));
     const paragraph = page.layers.body[0];
@@ -292,6 +316,26 @@ describe('clipped text runs in a turned text box', () => {
     expect(hidden?.clipBounds).toBeDefined();
     expect(visibleRunExtent(hidden!)).toBeNull();
     expect(visibleRunExtent(shown!)).not.toBeNull();
+  });
+});
+
+describe('clipped text runs in a zero-height cell', () => {
+  it('report turned text as hidden when the cell clip has no area', () => {
+    const box = '<w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="T"/>'
+      + '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
+      + '<wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm rot="2700000"><a:off x="0" y="0"/><a:ext cx="1270000" cy="635000"/></a:xfrm>'
+      + '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>'
+      + '<w:p><w:r><w:t>Unseen</w:t></w:r></w:p>'
+      + '</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr>'
+      + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    // The single row is exact and zero high.
+    const layout = layoutDocx(docx(`<w:p>${box}</w:p>`, undefined, '<w:trHeight w:val="0" w:hRule="exact"/>', 0, false));
+    const run = textRunsForPage(layout, 0, { scale: 1 }).find((item) => item.text.includes('Unseen'));
+    const table = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
+    expect(table.rows[0]!.cells[0]!.contentClipBounds!.heightPt).toBe(0);
+    expect(run?.transform).toBeDefined();
+    expect(run?.clipBounds).toBeDefined();
+    expect(visibleRunExtent(run!)).toBeNull();
   });
 });
 

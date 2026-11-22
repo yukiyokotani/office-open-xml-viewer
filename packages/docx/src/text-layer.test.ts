@@ -189,7 +189,8 @@ describe('buildDocxTextLayer — clipped runs (word-cell-content-clip)', () => {
       hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
       clipBounds: { x: 40, y: 0, width: 100, height: 12 },
     })], () => {});
-    expect(span!.style['clip-path']).toBe('polygon(30px -100vh,200vw -100vh,200vw 200vh,30px 200vh)');
+    // In percentages of the span, so it scales with responsive resizing.
+    expect(span!.style['clip-path']).toBe('polygon(50% -100vh,200vw -100vh,200vw 200vh,50% 200vh)');
     expect(span!.style['pointer-events']).toBe('all');
     expect(span!.style.cursor).toBe('pointer');
   });

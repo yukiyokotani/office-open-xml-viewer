@@ -218,9 +218,9 @@ function lineFrameMatrix(
   return { a: 1, b: 0, c: 0, d: -1, e: 0, f: 2 * line.bounds.yPt + line.bounds.heightPt };
 }
 
-/** WORD_CELL_CONTENT_CLIP: paints the placements `[start, end)` of a line;
- * the line's bar-tab rules go with the run that starts it. */
-type LinePlacementRun = Readonly<{ start: number; end: number }>;
+/** WORD_CELL_CONTENT_CLIP: paints the placements `[start, end)` of a line,
+ * and its bar-tab rules when `barTabs` is set. */
+type LinePlacementRun = Readonly<{ start: number; end: number; barTabs: boolean }>;
 
 function paintLineContents(
   line: ParagraphLayout['lines'][number],
@@ -228,7 +228,7 @@ function paintLineContents(
   run?: LinePlacementRun,
 ): void {
   const { ctx } = context;
-  if ((run?.start ?? 0) === 0) {
+  if (run?.barTabs ?? true) {
     for (const rule of line.barTabRules ?? []) {
       paintStrokeSegment(rule, context, oneDevicePixelCssWidth(context));
     }
@@ -478,11 +478,15 @@ function paintParagraphContents(node: ParagraphLayout, clipContext: CanvasPaintC
     // order; consecutive clipped runs, across lines too, share one frame.
     const segments: Array<Readonly<{ line: ParagraphLayout['lines'][number]; run: LinePlacementRun; escapes: boolean }>> = [];
     for (const line of node.lines) {
+      // Bar-tab rules are line ink under the clip, never escaping content.
+      if ((line.barTabRules?.length ?? 0) > 0) {
+        segments.push({ line, run: { start: 0, end: 0, barTabs: true }, escapes: false });
+      }
       const escapes = line.placements.map((placement) => placement.kind === 'resource' && placement.escapesCellClip === true);
-      for (let start = 0; start < Math.max(1, escapes.length);) {
+      for (let start = 0; start < escapes.length;) {
         let end = start + 1;
         while (end < escapes.length && escapes[end] === escapes[start]) end++;
-        segments.push({ line, run: { start, end }, escapes: escapes[start] === true });
+        segments.push({ line, run: { start, end, barTabs: false }, escapes: escapes[start] === true });
         start = end;
       }
     }

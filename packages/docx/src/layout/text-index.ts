@@ -497,7 +497,15 @@ function clippedRunBoxExtent(
     }
     points = next;
   }
-  if (points.length === 0) return { left: box.xPt, top: box.yPt, right: box.xPt, bottom: box.yPt };
+  // A clip of no area (a turned zero-height cell) leaves nothing visible,
+  // although its edge may cross the run box.
+  const clippedArea = Math.abs(points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length]!;
+    return sum + point.xPt * next.yPt - next.xPt * point.yPt;
+  }, 0)) / 2;
+  if (points.length < 3 || clippedArea < CLIP_ALIGNMENT_EPSILON_PT) {
+    return { left: box.xPt, top: box.yPt, right: box.xPt, bottom: box.yPt };
+  }
   const xs = points.map((point) => point.xPt);
   const ys = points.map((point) => point.yPt);
   return { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
