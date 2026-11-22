@@ -134,6 +134,18 @@ export interface DocxCompatProfile {
    */
   readonly specifiedTextLineBoxMode15: boolean;
   /**
+   * Compatibility mode 15: a wrapping float beside the trailing grid line
+   * leaves its grid page-edge relief.
+   * @compatRule word-grid-line-content-fit-admission
+   */
+  readonly gridEdgeBesideFloatKeepsRelief: boolean;
+  /**
+   * Compatibility mode 15: a paragraph- or line-relative wrapping float that
+   * would cross the body bottom moves its anchor line to the next page.
+   * @compatRule word-host-float-bottom-margin-deferral
+   */
+  readonly hostFloatBottomMarginDeferral: boolean;
+  /**
    * Compatibility mode 15.
    * @compatRule word-inline-picture-auto-leading
    */
@@ -306,6 +318,8 @@ export function buildDocxCompatProfile(
     specifiedTextLineBoxMode: mode14 || mode15,
     specifiedTextLineBoxMode15: mode15,
     inlinePictureAutoLeading: mode15,
+    gridEdgeBesideFloatKeepsRelief: mode15,
+    hostFloatBottomMarginDeferral: mode15,
     lineEndJustificationBeforeMode15: !mode15,
     thaiDistributeProportionalSpread: preMode15,
     kashidaLineFitMode15: mode15,

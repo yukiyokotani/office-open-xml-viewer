@@ -101,6 +101,7 @@ function docx(
   paragraphCount: number,
   special: Readonly<Record<number, Paragraph>>,
   columns = 1,
+  compatibilityMode?: number,
 ): Uint8Array {
   let nextId = 1;
   const body = Array.from({ length: paragraphCount }, (_, index) => {
@@ -139,6 +140,8 @@ function docx(
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + (compatibilityMode === undefined ? ''
+        : '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>')
       + '</Types>')],
     ['_rels/.rels', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -147,8 +150,14 @@ function docx(
     ['word/_rels/document.xml.rels', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
       + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + '<Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a.png"/>'
+      + (compatibilityMode === undefined ? ''
+        : '<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>')
       + '</Relationships>')],
     ['word/document.xml', encoder.encode(document)],
+    ...(compatibilityMode === undefined ? [] : [['word/settings.xml', encoder.encode('<?xml version="1.0" encoding="UTF-8"?>'
+      + '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:compat>'
+      + `<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${compatibilityMode}"/>`
+      + '</w:compat></w:settings>')] as const]),
     ['word/media/a.png', PNG],
   ]));
 }
@@ -545,5 +554,25 @@ describe('anchor-line deferral proof', () => {
     expect(anchorLineDeferralApplies(proof, ['a'], 1, {
       reads: reads([prescan(0, []), prescan(1, []), table(1)]),
     })).toBe(true);
+  });
+});
+
+describe('WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL', () => {
+  // 27 exact 24pt lines fill the 648pt US Letter body (72-720pt). A 20pt
+  // paragraph-relative float anchored in P025 (top 672pt) at +40pt would end
+  // at 732pt, below the body.
+  const crossing = (mode: number, yPt: number, wrap: 'square' | 'topAndBottom' = 'square') => lines(layout(docx(27, {
+    25: { anchors: [{ wrap, relativeFrom: 'paragraph', yPt, widthPt: 100, heightPt: 20 }] },
+  }, 1, mode)));
+  it.each(['square', 'topAndBottom'] as const)('moves the anchor line of a crossing %s float to the next page in mode 15', (wrap) => {
+    const placed = crossing(15, 40, wrap);
+    expect(placed.get('P025')).toMatchObject({ page: 2, yPt: 72 });
+    expect(placed.get('P024')?.page).toBe(1);
+  });
+  it('keeps the anchor line when the float ends inside the body', () => {
+    expect(crossing(15, 20).get('P025')?.page).toBe(1);
+  });
+  it('lets the float overhang the margin in mode 14', () => {
+    expect(crossing(14, 40).get('P025')?.page).toBe(1);
   });
 });

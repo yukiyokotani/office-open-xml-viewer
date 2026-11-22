@@ -21,6 +21,20 @@ export const WORD_PAGE_ANCHOR_LINE_DEFERRAL = defineCompatibilityRule({
   description: 'ECMA-376 does not say where a page-owned drawing goes when its own wrap exclusion pushes its anchor line off the page. Word tests anchor lines in flow order on each page: with the page-owned anchors already accepted on page N whose lines precede line L, plus the anchors on L, Word lays out N again; if L stays on N (any column of the region) those anchors are accepted and the earlier lines wrap around them. Otherwise page N keeps its layout without them, L starts a later page as if the page ended just above L (keepNext and widow control act as for an overflow; a mid-paragraph anchor line splits its paragraph), and the anchors go to the page where L lands. Counterexamples in the same controls: a line that still fits keeps its picture on N, and the first line of a page stays even when its picture pushes it past the body bottom. Unmeasured: a deferral whose line would otherwise fall in an earlier column of a multi-column page moves to the next page, not the next column.',
 });
 
+/** ECMA-376 §20.4.2.11 and §20.4.3.5 position a paragraph-relative float but
+ * do not say what happens when its box would end below the page's text area. */
+export const WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL = defineCompatibilityRule({
+  id: 'word-host-float-bottom-margin-deferral',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'host-float-bottom-margin',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'In compatibility mode 15 a square or topAndBottom float positioned relative to its paragraph or line moves its anchor line to the next page when its box would end below the bottom of the text area; the float follows the line. Windows Word 16.0.20625 controls (line2 L2b: a 20pt float anchored in the 32nd line of a 20pt-grid page whose last cell overhangs the 776.7pt bottom margin, box bottom at -0.5, +0.5, +3.5 and +20pt from it): with the box ending 0.5pt inside the body the line stays; at +0.5, +3.5 and +20pt it starts the next page, for square and topAndBottom wrap and paragraph- or line-relative positions alike. A wrapNone float, a margin- or page-relative float and every mode-14 control instead stay and let the box overhang the margin. Library scope: the unreserved physical body bottom only (no footnote area or shortened column), square and topAndBottom wrap; a line that already starts its region stays; tight and through wrap and the position of the moved line under its own float are unmeasured and keep the existing placement. Other compatibility modes keep the overhang.',
+});
+
 export const LIBRARY_ANCHOR_LINE_CYCLE_RECOVERY = defineCompatibilityRule({
   id: 'library-anchor-line-cycle-recovery',
   evidence: {

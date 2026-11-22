@@ -1840,7 +1840,8 @@ function measureBodyParagraphEntry(
           // (a float elsewhere on the page does not wrap it), and so does
           // every mark of a model source whose grid lines take whole cells
           // (`plainLineBoxes`, LibreOffice).
-          markGridAfterLeadingPt: !markLineWrapped(layout, measured)
+          markGridAfterLeadingPt: (state.layoutSettings.compat.gridEdgeBesideFloatKeepsRelief
+            || !markLineWrapped(layout, measured))
             && services.text?.plainLineBoxes !== true
             ? measured.markGridAfterLeadingPt ?? 0 : 0,
           ...(measured.markMultipleLeadingPt ? { markMultipleLeadingPt: measured.markMultipleLeadingPt } : {}),

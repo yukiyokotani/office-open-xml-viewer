@@ -88,6 +88,7 @@ import {
   anchorLineFloor,
   anchorLineFloorKey,
   anchorLineDeferralKey,
+  hostFloatCrossingLineIndex,
   anchorLineDeferralsIdentity,
   createAnchorLineDeferralProof,
   pageOwnedAnchorKeysByLine,
@@ -3040,7 +3041,8 @@ function* paginateBodyPassSteps(
           const terminalAdmissionPt = terminalGridParagraph
             ? wordGridLineAdmissionExtentPt(terminalGridParagraph,
               terminalWholeParagraphHasPlacements, terminalLeadExtentPt,
-              unreservedBodyBottomPt, keepSetReservePt, keepSetExtentPt - terminalLeadExtentPt)
+              unreservedBodyBottomPt, keepSetReservePt, keepSetExtentPt - terminalLeadExtentPt,
+              compat.gridEdgeBesideFloatKeepsRelief)
             : terminalLeadExtentPt;
           const keepSetAdmissionPt = keepSetExtentPt
             - (terminalLeadExtentPt - terminalAdmissionPt) + keepSetReservePt;
@@ -3161,7 +3163,17 @@ function* paginateBodyPassSteps(
             markGridAfterLeadingPt: acquired.markGridAfterLeadingPt,
           });
         // A proven anchor-line deferral ends this page just above that line.
-        const anchorLineBreak = deferredAnchorLineIndex(acquired.layout);
+        const provenAnchorLineBreak = deferredAnchorLineIndex(acquired.layout);
+        // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: a host-owned wrapping float
+        // that would cross the unreserved body bottom moves its anchor line
+        // on; a line that already starts its region stays.
+        const hostFloatLineBreak = compat.hostFloatBottomMarginDeferral && unreservedBodyBottomPt !== undefined
+          ? hostFloatCrossingLineIndex(acquired.layout, unreservedBodyBottomPt) : undefined;
+        const admittedHostFloatLineBreak = hostFloatLineBreak !== undefined
+          && (hostFloatLineBreak > 0 || pageCanGainSpaceByRelocating()) ? hostFloatLineBreak : undefined;
+        const anchorLineBreak = provenAnchorLineBreak === undefined ? admittedHostFloatLineBreak
+          : admittedHostFloatLineBreak === undefined ? provenAnchorLineBreak
+            : Math.min(provenAnchorLineBreak, admittedHostFloatLineBreak);
         // Same fresh-region rule as framed paragraphs: a page whose band
         // holds carried note lines is not fresh (pageCanGainSpaceByRelocating).
         const canRelocateParagraph = pageCanGainSpaceByRelocating();
@@ -3196,6 +3208,7 @@ function* paginateBodyPassSteps(
             ...(unreservedBodyBottomPt === undefined ? {} : { unreservedBodyBottomPt }),
             writingMode: activeRegion(state).writingMode,
             ...(anchorLineBreak === undefined ? {} : { lineEndLimit: anchorLineBreak }),
+            besideFloatKeepsGridRelief: compat.gridEdgeBesideFloatKeepsRelief,
           },
           (fragment) => notePlans
             ? notePlans.reservePt(fragment.lines.length)

@@ -1,5 +1,6 @@
 import type { PageAnchorPrescanInput } from './body-layout-kernel.js';
 import type { ParagraphLayout } from './types.js';
+import { WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL } from './anchor-compatibility.js';
 
 /**
  * Anchor-line deferral for page-owned drawings (issue #1615), governed by the
@@ -222,3 +223,30 @@ export function pageOwnedAnchorKeysByLine(layout: ParagraphLayout): readonly (re
     return [anchor.acquisitionOccurrenceId ?? anchor.occurrenceId];
   }));
 }
+
+/** WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: the first line of `layout` that
+ * anchors a paragraph- or line-relative (host-owned) square or topAndBottom
+ * float whose box would end below `bodyBottomPt`, or undefined. */
+export function hostFloatCrossingLineIndex(layout: ParagraphLayout, bodyBottomPt: number): number | undefined {
+  void WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL;
+  if (layout.drawings.length === 0 || layout.exclusions.length === 0) return undefined;
+  const drawings = new Map(layout.drawings.map((drawing) => [drawing.id, drawing]));
+  const crossing = new Set(layout.exclusions
+    .filter((exclusion) => exclusion.verticalOwnership === 'host'
+      && (exclusion.wrap === 'square' || exclusion.wrap === 'topAndBottom')
+      && exclusion.bounds.yPt + exclusion.bounds.heightPt > bodyBottomPt + CROSSING_EPSILON_PT)
+    .map((exclusion) => exclusion.anchorOccurrenceId)
+    .filter((id): id is string => id !== undefined));
+  if (crossing.size === 0) return undefined;
+  const index = layout.lines.findIndex((line) => line.placements.some((placement) => {
+    if (placement.kind !== 'drawing') return false;
+    const anchor = drawings.get(placement.drawingId)?.anchorLayer;
+    return anchor !== undefined && anchor.verticalOwnership === 'host'
+      && (crossing.has(anchor.occurrenceId)
+        || (anchor.acquisitionOccurrenceId !== undefined && crossing.has(anchor.acquisitionOccurrenceId)));
+  }));
+  return index < 0 ? undefined : index;
+}
+
+/** Geometry noise, far below one twip; not a layout tolerance. */
+const CROSSING_EPSILON_PT = 1e-6;

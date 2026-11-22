@@ -40,6 +40,8 @@ function previousGates(s: DocxCompatSettingsInput) {
     specifiedTextLineBoxMode: mode === 14 || mode === 15,
     specifiedTextLineBoxMode15: mode === 15,
     inlinePictureAutoLeading: mode === 15,
+    gridEdgeBesideFloatKeepsRelief: mode === 15,
+    hostFloatBottomMarginDeferral: mode === 15,
     lineEndJustificationBeforeMode15: mode !== 15,
     thaiDistributeProportionalSpread: (mode ?? 0) < 15,
     kashidaLineFitMode15: mode === 15,
