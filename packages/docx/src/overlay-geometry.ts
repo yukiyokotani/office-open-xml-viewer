@@ -24,9 +24,16 @@ import type { DocxClipRegion, DocxTextRunInfo } from './types.js';
  * 3. A run's clips (`clips`) apply on both axes. Text is visible exactly
  *    where a glyph rect has area inside every clip; an advance or a line box
  *    never makes text visible, and never hides it.
- * 4. A rect that marks text (a find highlight, a comment tint) is the glyph
- *    rects of the marked characters cut to the clips: it lies inside the
- *    painted glyphs and the clips, and covers all of both.
+ * 4. A find highlight is the glyph rects of the matched characters cut to
+ *    the clips: it lies inside the painted glyphs and the clips, and covers
+ *    all of both. A comment highlight marks a range of source runs, and
+ *    everything in the range belongs to it: each cluster's glyph rect
+ *    widened along the run to its advance (the tracking, justification or
+ *    elongation after it), and the box of each tab and inline object of the
+ *    range (`inlineContent`), all cut to the clips; a cluster whose glyph
+ *    the clips hide whole marks nothing. A tab takes the extent
+ *    across the run of the marked text it touches. Nothing outside the
+ *    range is marked.
  * 5. Rects join only where they touch or overlap along the run over the
  *    same interval across it (and, between runs, in the same orientation
  *    under the same clips). A gap is never bridged: not tracking, not text
@@ -143,6 +150,27 @@ export function runGlyphRects(run: Run, start = 0, end = run.text.length): RunRe
 /** The advance rects (invariant 2) of the characters `[start, end)` of `run`. */
 export function runAdvanceRects(run: Run, start = 0, end = run.text.length): RunRect[] {
   return clusterRects(run, start, end, false);
+}
+
+/** The range rects (invariant 4) of `run`: each cluster's glyph rect widened
+ * along the run to its advance box, in source order; a run without cluster
+ * boxes has its font box. A cluster whose glyph the run's clips hide whole
+ * has none: what follows a hidden glyph is not marked without it. */
+export function runRangeRects(run: Run): RunRect[] {
+  const boxes = run.clusterBoxes;
+  if (!boxes) return clusterRects(run, 0, run.text.length, true);
+  const across = runFontBox(run);
+  const rects: RunRect[] = [];
+  for (const box of boxes) {
+    const glyph = clusterRect(run, box, true, across);
+    if (glyph && !runRectVisible(run, glyph)) continue;
+    const left = Math.min(box.x, glyph?.x ?? box.x);
+    const right = Math.max(box.x + box.width, glyph ? glyph.x + glyph.width : box.x + box.width);
+    const y = glyph?.y ?? box.glyphY ?? box.y ?? across.y;
+    const height = glyph?.height ?? box.glyphHeight ?? box.height ?? across.height;
+    if (right > left && height > 0) rects.push({ x: left, y, width: right - left, height });
+  }
+  return rects;
 }
 
 /** The page box of `rect` of `run`. */
@@ -312,30 +340,69 @@ export function runOverlayRects(run: Run, start = 0, end = run.text.length): Run
   return mergeRunRects(runGlyphRects(run, start, end).flatMap((rect) => clipRunRect(run, rect)));
 }
 
-/** The boxes that mark the whole text of `runs` on the page: each run's
- * overlay rects, joined between runs of one orientation under the same clips
- * where they touch (invariant 5). A box stands where the first of its runs
- * does in `runs`; boxes of one run are ordered across, then along it. */
+/** The boxes that mark a range of source runs on the page (invariant 4):
+ * the range rects of each run of `runs` and the boxes of its tabs and inline
+ * objects, cut to their clips and joined between runs of one orientation
+ * under the same clips where they touch (invariant 5). A box stands where
+ * the first of its runs does in `runs`; boxes of one run are ordered across,
+ * then along it. */
 export function overlayBoxes(runs: readonly Run[]): OverlayBox[] {
   type Ordered = RunRect & { readonly order: number };
-  const groups = new Map<string, { frame: Run; rects: Ordered[] }>();
-  runs.forEach((run, order) => {
+  const groups = new Map<string, { frame: Run; rects: Ordered[]; tabs: { run: Run; order: number }[] }>();
+  const frameOf = (run: Run) => {
     const [a, b, c, d] = orientation(run.transform);
+    return { along: a * run.x + b * run.y, across: c * run.x + d * run.y };
+  };
+  runs.forEach((run, order) => {
     const key = `${run.transform ?? ''}|${run.clips ? JSON.stringify(run.clips) : ''}`;
     let group = groups.get(key);
     if (!group) {
       // The group's frame: its runs' orientation about the page origin.
-      group = { frame: { ...run, x: 0, y: 0 }, rects: [] };
+      group = { frame: { ...run, x: 0, y: 0 }, rects: [], tabs: [] };
       groups.set(key, group);
     }
-    const along = a * run.x + b * run.y;
-    const across = c * run.x + d * run.y;
-    for (const rect of runOverlayRects(run)) {
+    if (run.inlineContent === 'tab') {
+      group.tabs.push({ run, order });
+      return;
+    }
+    const { along, across } = frameOf(run);
+    const rects = run.inlineContent === 'object'
+      ? [{ x: 0, y: 0, width: run.w, height: run.h }] : runRangeRects(run);
+    for (const rect of rects.flatMap((candidate) => clipRunRect(run, candidate))) {
       group.rects.push({ x: along + rect.x, y: across + rect.y, width: rect.width, height: rect.height, order });
     }
   });
   const boxes: { box: OverlayBox; order: number; index: number }[] = [];
   for (const group of groups.values()) {
+    // A tab is marked over the extent across the run of the marked text it
+    // touches (the text before it first), within its own line box; a tab
+    // that touches none keeps its line box.
+    const place = (tab: { run: Run; order: number }, neighbour: Ordered | undefined): void => {
+      const { along, across } = frameOf(tab.run);
+      const rect = neighbour
+        ? { x: 0, y: neighbour.y - across, width: tab.run.w, height: neighbour.height }
+        : { x: 0, y: 0, width: tab.run.w, height: tab.run.h };
+      for (const part of clipRunRect(tab.run, rect)) {
+        group.rects.push({ x: along + part.x, y: across + part.y, width: part.width, height: part.height, order: tab.order });
+      }
+    };
+    let pending = group.tabs;
+    while (pending.length > 0) {
+      const waiting: typeof pending = [];
+      for (const tab of pending) {
+        const { along, across } = frameOf(tab.run);
+        const neighbour = group.rects
+          .filter((rect) => rect.y >= across - TOUCH && rect.y + rect.height <= across + tab.run.h + TOUCH
+            && (Math.abs(rect.x + rect.width - along) <= TOUCH || Math.abs(along + tab.run.w - rect.x) <= TOUCH))
+          .sort((left, right) => Math.abs(left.order - tab.order) - Math.abs(right.order - tab.order)
+            || left.order - right.order)[0];
+        if (neighbour) place(tab, neighbour);
+        else waiting.push(tab);
+      }
+      // No tab left touches marked text: each keeps its line box.
+      if (waiting.length === pending.length) for (const tab of waiting) place(tab, undefined);
+      pending = waiting.length === pending.length ? [] : waiting;
+    }
     for (const rect of joinRects(group.rects)) {
       boxes.push({ box: placeRunRect(group.frame, rect), order: rect.order, index: boxes.length });
     }

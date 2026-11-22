@@ -514,6 +514,9 @@ export interface TextPlacement {
 export interface TabPlacement {
   readonly kind: 'tab';
   readonly range: TextRange;
+  /** Parsed run occurrence of the tab character, for readers that address
+   * content by source run (comment ranges). */
+  readonly sourceRunIndex?: number;
   readonly bounds?: LayoutRect;
   readonly advancePt: number;
   readonly leader: 'none' | 'dot' | 'hyphen' | 'underscore' | 'heavy' | 'middleDot';

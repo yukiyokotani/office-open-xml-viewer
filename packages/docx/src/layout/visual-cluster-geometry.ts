@@ -56,7 +56,8 @@ export function bidiPlacedOffsets(
 }
 
 type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>
-  & Partial<Pick<TextPlacement, 'advancePt' | 'tateChuYoko' | 'paintOps' | 'highlightBounds' | 'fontSizePt'>>
+  & Partial<Pick<TextPlacement, 'advancePt' | 'tateChuYoko' | 'paintOps' | 'highlightBounds' | 'fontSizePt'
+    | 'ownedTrailingSlackPt'>>
   & Readonly<{ kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[] }>;
 type VisualClusters = Readonly<{
   /** Visual start of each cluster from the left edge of the piece's box. */
@@ -251,6 +252,7 @@ export function clusterBoxes(
   // §17.3.2.10 tate-chu-yoko: the characters stand upright side by side
   // across the run, centred on the paint origin, each over the run's cell.
   const upright = tateChuYokoRow(placement);
+  const slackOwner = (placement.ownedTrailingSlackPt ?? 0) > 0 ? rightmostCluster(placement, visual) : -1;
   for (let index = first; index < last; index += 1) {
     const cluster = placement.clusters[index]!;
     const operation = operationAt(placement, cluster.range.start);
@@ -279,12 +281,15 @@ export function clusterBoxes(
     }
     const startPt = visualClusterStartXPt(placement, index);
     const final = index === placement.clusters.length - 1;
-    const advancePt = visual ? visual.advancesPt[index]!
+    const ownAdvancePt = visual ? visual.advancesPt[index]!
       : final
         ? Math.max(0, placement.bounds.xPt + placement.bounds.widthPt - startPt)
         : tiledAdvancePt(placement, index);
+    // The justification the piece owns after itself lies between its last
+    // painted cluster and the next piece's pen: that cluster's advance.
+    const advancePt = index === slackOwner ? ownAdvancePt + (placement.ownedTrailingSlackPt ?? 0) : ownAdvancePt;
     const odd = visual?.odd[index] === true;
-    const cut = final && (visual ? visual.lastCut : Math.abs(advancePt - cluster.advancePt) > 1e-9);
+    const cut = final && (visual ? visual.lastCut : Math.abs(ownAdvancePt - cluster.advancePt) > 1e-9);
     const xPt = startPt - originXPt;
     const glyph = paintedGlyphPt(placement, cluster, alone, startPt, advancePt, odd);
     const across = operation ? paintedGlyphCrossPt(placement, operation) : null;
@@ -328,6 +333,22 @@ function paintedGlyphCrossPt(
   }
   if (Math.abs(startPt - font.yPt) < 1e-9) return null;
   return { startPt: startPt - placement.bounds.yPt, widthPt: font.heightPt };
+}
+
+/** The cluster whose advance ends at the piece's right edge: the last one
+ * in source order, or in a piece painted in visual order the one placed
+ * furthest right. */
+function rightmostCluster(placement: ClusteredText, visual: VisualClusters | null): number {
+  if (!visual) return placement.clusters.length - 1;
+  let found = -1;
+  let endPt = Number.NEGATIVE_INFINITY;
+  visual.startsPt.forEach((startPt, index) => {
+    if (startPt + visual.advancesPt[index]! > endPt + 1e-9) {
+      endPt = startPt + visual.advancesPt[index]!;
+      found = index;
+    }
+  });
+  return found;
 }
 
 /** Where paint draws one cluster's glyph along the run, in the placement's

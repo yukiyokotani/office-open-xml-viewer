@@ -1662,6 +1662,7 @@ export interface DocxTextRunInfo {
     transform?: string;
     hyperlink?: HyperlinkTarget;
     eastAsianVert?: boolean;
+    inlineContent?: 'tab' | 'object';
     clips?: readonly Readonly<DocxClipRegion>[];
 }
 export interface DocxTextSelectionContext {

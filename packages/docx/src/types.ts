@@ -1933,6 +1933,13 @@ export interface DocxTextRunInfo {
   hyperlink?: HyperlinkTarget;
   /** True for an ECMA-376 §17.3.2.10 tate-chu-yoko run. */
   eastAsianVert?: boolean;
+  /** Set on an entry that stands for inline content without text: a tab
+   *  (`'tab'`) or an inline picture, chart, equation or drawing
+   *  (`'object'`). `text` is empty, `x`/`y`/`w`/`h` are the box it occupies
+   *  on its line, and `sourceRunIndex` its source run, so a reader that marks
+   *  a range of source runs (a comment) covers it with the text around it.
+   *  `font` and `fontSize` carry no meaning. */
+  inlineContent?: 'tab' | 'object';
   /** Every clip the run is painted under (a table cell, an exact-height
    *  row, a text box), outermost first, turned clips included; the run is
    *  visible only where all of them overlap. Each is placed like

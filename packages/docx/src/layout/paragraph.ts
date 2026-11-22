@@ -336,6 +336,7 @@ function retainedTypographyInput(
 export interface MeasuredTabPlanSegment {
   readonly kind: 'tab';
   readonly range: import('./types.js').TextRange;
+  readonly sourceRunIndex?: number;
   readonly measuredWidthPt: number;
   /** WORD_ALIGNED_TAB_CELL_FIT_BACK: gap the tab may still take from the slack. */
   readonly alignedGapLimitPt?: number;
@@ -2055,6 +2056,7 @@ function planContentLine(
         : tabDecorations;
       placements.push({
         kind: 'tab', range: segment.range,
+        ...(segment.sourceRunIndex === undefined ? {} : { sourceRunIndex: segment.sourceRunIndex }),
         bounds,
         advancePt: segment.measuredWidthPt,
         leader: segment.leader,
@@ -4246,6 +4248,7 @@ function planMeasuredLines(
       lineEndOffset = Math.max(lineEndOffset, segmentOffset + occurrenceLength);
       if ('isTab' in segment) {
         const tab = segment as LayoutTabSeg;
+        const tabRunIndex = sequence?.find((member) => (segment.sourceTextOffset ?? 0) < member.end)?.runIndex ?? runIndex;
         const leader = tab.leader ?? 'none';
         let leaderShape: MeasuredTabPlanSegment['leaderShape'];
         let underline: MeasuredTabPlanSegment['underline'];
@@ -4334,6 +4337,9 @@ function planMeasuredLines(
         }
         segments.push({
           kind: 'tab', range: { start: segmentOffset, end: segmentOffset + occurrenceLength },
+          // The run that holds the tab character: the owning member of a
+          // shared text sequence, else the segment's own run.
+          ...(tabRunIndex === undefined ? {} : { sourceRunIndex: tabRunIndex }),
           measuredWidthPt: tab.measuredWidth, leader,
           ...(tab.alignedGapLimit ? { alignedGapLimitPt: tab.alignedGapLimit } : {}),
           fontSizePt: tab.fontSize, bold: tab.bold, italic: tab.italic,
