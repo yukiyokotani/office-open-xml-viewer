@@ -10,7 +10,7 @@ import {
   cellParagraphOwnsNoFlow,
 } from './table-cell-blocks.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { collapsedRowSideRuleWidthsPt, layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
+import { collapsedRowSideRuleWidthsPt, widestSideRulesAlongMergePt, layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
 import { unmeasuredTableMemberDecision, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import { snapshotPlainData } from './plain-data.js';
@@ -677,21 +677,6 @@ export function acquireRetainedTable<State>(
         : [])));
     });
   })();
-  /** The widest side rules along the rows a cell covers: its own row, and
-   * for the cell that opens a vertical merge every row of that merge. */
-  const cellSideRulesPt = (rowIndex: number, columnStart: number, opensMerge: boolean) => {
-    const rules = sideRules();
-    const own = rules[rowIndex]?.get(columnStart);
-    if (!own) return undefined;
-    let { leftPt, rightPt } = own;
-    for (let below = rowIndex + 1; opensMerge && below < rules.length; below += 1) {
-      const continuation = rules[below]!.get(columnStart);
-      if (!continuation?.continues) break;
-      leftPt = Math.max(leftPt, continuation.leftPt);
-      rightPt = Math.max(rightPt, continuation.rightPt);
-    }
-    return { leftPt, rightPt };
-  };
   const rows: TableLayoutInput['rows'] = table.rows.map((row, rowIndex) => {
     const rowFormat = format.rows[rowIndex];
     let columnStart = Math.max(0, Math.min(columnWidthsPt.length, row.gridBefore ?? 0));
@@ -720,13 +705,18 @@ export function acquireRetainedTable<State>(
       );
       const cellBorderInsetsPt = 2 * (member.spacingGeometry?.borderPt ?? 0);
       // WORD_TABLE_CELL_SPACING_GEOMETRY: the part of each half side rule the margin leaves uncovered.
+      let hostInset: Readonly<{ leftPt: number; rightPt: number }> | null | undefined;
       const hostRuleInsetPt = (nestedTable: TableLayoutSource) => {
         if (!dependencies.tableFormat(nestedTable).rows.some((nestedRow) => nestedRow.cellSpacingPt > 0)) return undefined;
-        const rules = cellSideRulesPt(rowIndex, currentColumnStart, cell.vMerge === true);
-        return rules ? {
-          leftPt: Math.max(0, rules.leftPt / 2 - formatMargins.left),
-          rightPt: Math.max(0, rules.rightPt / 2 - formatMargins.right),
-        } : undefined;
+        // Once per host cell, however many nested tables it holds.
+        if (hostInset === undefined) {
+          const rules = widestSideRulesAlongMergePt(sideRules(), rowIndex, currentColumnStart, cell.vMerge === true);
+          hostInset = rules ? {
+            leftPt: Math.max(0, rules.leftPt / 2 - formatMargins.left),
+            rightPt: Math.max(0, rules.rightPt / 2 - formatMargins.right),
+          } : null;
+        }
+        return hostInset ?? undefined;
       };
       const cellPath = [...sourcePath, rowIndex, cellIndex];
       const cellId = `${flowDomainId}:cell:${rowIndex}.${cellIndex}`;

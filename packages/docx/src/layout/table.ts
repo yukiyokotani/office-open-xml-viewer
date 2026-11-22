@@ -605,6 +605,30 @@ export function collapsedRowSideRuleWidthsPt(
   });
 }
 
+/**
+ * The widest side rules along the rows a cell covers: its own row and, for
+ * the cell that opens a vertical merge, every row of that merge. `rules`
+ * holds each row's cells by first grid column
+ * (collapsedRowSideRuleWidthsPt), with `continues` on a continuation.
+ */
+export function widestSideRulesAlongMergePt(
+  rules: readonly ReadonlyMap<number, Readonly<{ leftPt: number; rightPt: number; continues: boolean }>>[],
+  rowIndex: number,
+  columnStart: number,
+  opensMerge: boolean,
+): Readonly<{ leftPt: number; rightPt: number }> | undefined {
+  const own = rules[rowIndex]?.get(columnStart);
+  if (!own) return undefined;
+  let { leftPt, rightPt } = own;
+  for (let below = rowIndex + 1; opensMerge && below < rules.length; below += 1) {
+    const continuation = rules[below]!.get(columnStart);
+    if (!continuation?.continues) break;
+    leftPt = Math.max(leftPt, continuation.leftPt);
+    rightPt = Math.max(rightPt, continuation.rightPt);
+  }
+  return { leftPt, rightPt };
+}
+
 function candidateInput(candidate: BorderCandidate | null): TableBorderInput | null {
   if (!candidate) return null;
   return {

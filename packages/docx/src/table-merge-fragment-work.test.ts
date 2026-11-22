@@ -13,7 +13,7 @@ import { storeZip } from './conformance/generate.js';
 // §17.4.84, §17.4.6): the rows table layout is asked for while paginating,
 // and what the continuation that opens a page asks of its rows.
 
-const counter = vi.hoisted(() => ({ rows: 0 }));
+const counter = vi.hoisted(() => ({ rows: 0, mergeScans: 0 }));
 vi.mock('./layout/table.js', async (original) => {
   const actual = await original<typeof import('./layout/table.js')>();
   return {
@@ -21,6 +21,10 @@ vi.mock('./layout/table.js', async (original) => {
     layoutTable: (...args: Parameters<typeof actual.layoutTable>) => {
       counter.rows += args[0].rows.length;
       return actual.layoutTable(...args);
+    },
+    widestSideRulesAlongMergePt: (...args: Parameters<typeof actual.widestSideRulesAlongMergePt>) => {
+      counter.mergeScans += 1;
+      return actual.widestSideRulesAlongMergePt(...args);
     },
   };
 });
@@ -37,7 +41,7 @@ const BORDERS = '<w:tblBorders>'
 /** 60 lines of one word each in a 108 pt cell: taller than a page. */
 const TALL = Array.from({ length: 60 }, () => 'wwwwww').join(' ');
 
-function docx(table: string): Uint8Array {
+function docx(table: string, mode: number | null = null): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${table}${paragraph('after')}`
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
@@ -47,7 +51,13 @@ function docx(table: string): Uint8Array {
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
       + '<Default Extension="xml" ContentType="application/xml"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
       + '</Types>')],
+    ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rId1" Type="${REL}/settings" Target="settings.xml"/></Relationships>`)],
+    ['word/settings.xml', xml(`<w:settings xmlns:w="${W}"><w:compat>`
+      + (mode === null ? '' : `<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="${mode}"/>`)
+      + '</w:compat></w:settings>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
@@ -84,8 +94,8 @@ function mergedTable(rowCount: number, text: string, continuationProperties = ''
     + `<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>${rows}</w:tbl>`;
 }
 
-function layout(table: string) {
-  const archive = new DocxArchive(docx(table));
+function layout(table: string, mode: number | null = null) {
+  const archive = new DocxArchive(docx(table, mode));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
@@ -116,6 +126,27 @@ describe('a vertical merge over rows cut across pages', () => {
     // the fixed cost of the first and last page.
     expect(laidOut[1]! - laidOut[0]!).toBeLessThanOrEqual(laidOut[0]! * 1.5);
     expect(laidOut[2]! - laidOut[1]!).toBeLessThanOrEqual((laidOut[1]! - laidOut[0]!) * 2.5);
+  });
+
+  it('resolves the side rules along a merge once for the cell that holds nested tables', () => {
+    // Mode 15: the first column is one merge over N rows and its opening
+    // cell holds N small spaced tables.
+    const scans = [8, 16, 32].map((count) => {
+      const nested = Array.from({ length: count }, () => '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>'
+        + `<w:tblCellSpacing w:w="40" w:type="dxa"/>${BORDERS}</w:tblPr><w:tblGrid><w:gridCol w:w="600"/></w:tblGrid>`
+        + `<w:tr><w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/></w:tcPr>${paragraph('n')}</w:tc></w:tr></w:tbl>${paragraph('')}`).join('');
+      const rows = Array.from({ length: count }, (_unused, row) => '<w:tr>'
+        + `<w:tc><w:tcPr><w:tcW w:w="1440" w:type="dxa"/>${row === 0 ? '<w:vMerge w:val="restart"/>' : '<w:vMerge/>'}</w:tcPr>${row === 0 ? nested : ''}${paragraph('')}</w:tc>`
+        + `<w:tc><w:tcPr><w:tcW w:w="2160" w:type="dxa"/></w:tcPr>${paragraph('B')}</w:tc></w:tr>`).join('');
+      counter.mergeScans = 0;
+      layout(`<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>${BORDERS}</w:tblPr><w:tblGrid>`
+        + `<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>${rows}</w:tbl>`, 15);
+      return counter.mergeScans;
+    });
+    // The merge is scanned at all, and no more often with more nested tables.
+    expect(scans[0]).toBeGreaterThan(0);
+    expect(scans[1]).toBe(scans[0]);
+    expect(scans[2]).toBe(scans[0]);
   });
 
   it('keeps every row tall enough for its content when the continuations carry large margins', () => {
