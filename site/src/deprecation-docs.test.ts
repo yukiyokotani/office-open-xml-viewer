@@ -8,10 +8,6 @@ const announcementPage = readFileSync(
   new URL('./pages/announcements/[slug].astro', import.meta.url),
   'utf8',
 );
-const selectionContextMigration = readFileSync(
-  new URL('../../docs/migration-selection-context-0.77.md', import.meta.url),
-  'utf8',
-);
 
 describe('public migration documentation', () => {
   it('keeps release migration history in announcements instead of an API page', () => {
@@ -44,10 +40,10 @@ describe('public migration documentation', () => {
     expect(text).toContain('PptxElementContext');
     expect(text).toContain('DocxSelectionContext');
     expect(text).toContain('XlsxSelectionContext');
-    expect(selectionContextMigration).toContain("context?.kind === 'text'");
-    expect(selectionContextMigration).toContain("context?.kind === 'range'");
-    expect(selectionContextMigration).toContain('DocxTextSelectionContext');
-    expect(selectionContextMigration).toContain('XlsxRangeSelectionContext');
+    expect(text).toContain("context?.kind === 'text'");
+    expect(text).toContain("context?.kind === 'range'");
+    expect(text).toContain('DocxTextSelectionContext');
+    expect(text).toContain('XlsxRangeSelectionContext');
   });
 
   it('documents maxZipEntryBytes directly without linking API details to a release note', () => {

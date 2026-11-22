@@ -1,3 +1,23 @@
+/**
+ * Layout diagnostics and the failure-containment policy (library policy).
+ *
+ * These recoverable cases omit content or keep its authored geometry:
+ * - a drawing the parser cannot size is omitted, and PARSER_DIAGNOSTIC_CONTRACT
+ *   below lists the diagnostics the parser can attach (for example a visible
+ *   picture that needs `wp:extent` and has none);
+ * - an unavailable inline image or chart keeps its authored extent as an
+ *   `unavailable-resource` line segment, painted as a `noop` drawing that owns
+ *   a `MISSING_RESOURCE` warning;
+ * - an unavailable anchored drawing keeps its flow bounds and wrap exclusion
+ *   and paints a `noop` drawing command that owns the `MISSING_RESOURCE`
+ *   warning.
+ * Invalid retained geometry, invalid ownership, non-convergence and broken
+ * invariants are fatal. The retained-layout invariant suite (invariants.ts)
+ * throws `LayoutInvariantError`, and exact-state convergence reports cycles
+ * and exhausted limits as `ExactConvergenceError`, a subclass; other fatal
+ * layout and plain-data checks may throw other classes (for example a plain
+ * `Error` or a `TypeError`).
+ */
 import type {
   LayoutDiagnostic,
   LayoutDiagnosticCode,

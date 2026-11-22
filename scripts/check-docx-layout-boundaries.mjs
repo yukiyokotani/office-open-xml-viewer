@@ -28,11 +28,8 @@ const FLOAT_WRAP = `${LAYOUT_SOURCE}/float-wrap.ts`;
 const MEASUREMENT_ENVIRONMENT = `${LAYOUT_SOURCE}/measurement-environment.ts`;
 const MEASUREMENT_CAPABILITIES = `${LAYOUT_SOURCE}/measurement-capabilities.ts`;
 const SECTION_ORIENTATION = `${LAYOUT_SOURCE}/section-orientation.ts`;
-const LAYOUT_PARSER_MODEL_GATEWAY = `${LAYOUT_SOURCE}/resources.ts`;
 const LAYOUT_AFFINE = `${LAYOUT_SOURCE}/affine.ts`;
 const CONFORMANCE_FIXTURE = 'packages/docx/tests/visual/conformance-fixture.html';
-const LAYOUT_PARSER_MODEL_GATEWAY_IMPORT = '../parser-model.js';
-const LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL = 'normalizeInternalDocumentModel';
 
 const CANONICAL_PAGINATION_PRODUCER = 'paginateBodySteps';
 const CANONICAL_PAGINATION_DRAIN = 'drainPagination';
@@ -1635,84 +1632,6 @@ function assertBodyPaintConsumesRetainedLayout(root) {
   }
 }
 
-function isExactLayoutParserModelGatewayImportEdge(currentRel, edge, dependency, parserModel) {
-  return currentRel === LAYOUT_PARSER_MODEL_GATEWAY
-    && dependency === parserModel
-    && edge.kind === 'import'
-    && edge.specifier === LAYOUT_PARSER_MODEL_GATEWAY_IMPORT
-    && edge.typeOnly === false
-    && edge.aliased === false
-    && edge.bare === false
-    && edge.importedNames?.length === 1
-    && edge.importedNames[0] === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL;
-}
-
-function hasExactLayoutParserModelGatewayProjection(path) {
-  const source = sourceFile(path);
-  let bindingReferences = 0;
-  const countBindingReferences = (node) => {
-    if (ts.isIdentifier(node) && node.text === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL) {
-      bindingReferences += 1;
-    }
-    ts.forEachChild(node, countBindingReferences);
-  };
-  countBindingReferences(source);
-  if (bindingReferences !== 3) return false;
-
-  const projections = source.statements.filter((statement) => (
-    ts.isFunctionDeclaration(statement)
-    && statement.name?.text === 'documentMathOccurrences'
-  ));
-  if (projections.length !== 1) return false;
-  const projection = projections[0];
-  const exported = projection.modifiers?.some((modifier) => (
-    modifier.kind === ts.SyntaxKind.ExportKeyword
-  ));
-  if (!exported || !projection.body || projection.parameters.length !== 1) return false;
-  const parameter = projection.parameters[0];
-  if (!ts.isIdentifier(parameter.name) || projection.body.statements.length !== 1) return false;
-  const returned = projection.body.statements[0];
-  if (!ts.isReturnStatement(returned)
-    || !returned.expression
-    || !ts.isArrayLiteralExpression(returned.expression)
-    || returned.expression.elements.length !== 1) return false;
-  const spread = returned.expression.elements[0];
-  if (!ts.isSpreadElement(spread)
-    || !ts.isPropertyAccessExpression(spread.expression)
-    || spread.expression.name.text !== 'mathOccurrences') return false;
-  const call = spread.expression.expression;
-  const exactMathProjection = ts.isCallExpression(call)
-    && ts.isIdentifier(call.expression)
-    && call.expression.text === LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL
-    && call.arguments.length === 1
-    && ts.isIdentifier(call.arguments[0])
-    && call.arguments[0].text === parameter.name.text;
-  if (!exactMathProjection) return false;
-
-  const productionInputs = source.statements.filter((statement) => (
-    ts.isFunctionDeclaration(statement)
-    && statement.name?.text === 'productionDocumentInput'
-  ));
-  if (productionInputs.length !== 1) return false;
-  const productionInput = productionInputs[0];
-  const productionExported = productionInput.modifiers?.some((modifier) => (
-    modifier.kind === ts.SyntaxKind.ExportKeyword
-  ));
-  if (!productionExported || !productionInput.body || productionInput.parameters.length !== 1
-    || productionInput.body.statements.length !== 1) return false;
-  const productionParameter = productionInput.parameters[0];
-  const productionReturn = productionInput.body.statements[0];
-  if (!ts.isIdentifier(productionParameter.name)
-    || !ts.isReturnStatement(productionReturn)
-    || !productionReturn.expression
-    || !ts.isCallExpression(productionReturn.expression)
-    || !ts.isIdentifier(productionReturn.expression.expression)
-    || productionReturn.expression.expression.text !== LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL
-    || productionReturn.expression.arguments.length !== 1
-    || !ts.isIdentifier(productionReturn.expression.arguments[0])) return false;
-  return productionReturn.expression.arguments[0].text === productionParameter.name.text;
-}
-
 function layoutParserModelBoundaryViolations(root) {
   const graph = dependencyGraph(root);
   const parserModel = resolve(root, PARSER_MODEL);
@@ -1727,7 +1646,6 @@ function layoutParserModelBoundaryViolations(root) {
     const visited = new Set([entry]);
     while (stack.length > 0) {
       const current = stack.pop();
-      const currentRel = posixPath(relative(root, current.path));
       for (const edge of graph.get(current.path) ?? []) {
         if (!edge.literal) {
           nonLiteral.push(current.chain.map((path) => posixPath(relative(root, path))));
@@ -1738,17 +1656,6 @@ function layoutParserModelBoundaryViolations(root) {
         if (!dependency) continue;
         const chain = [...current.chain, dependency];
         if (dependency === parserModel) {
-          // The parser-model gateway permits exactly one projection edge. Only
-          // that edge is terminal; every other resources.ts dependency remains
-          // part of the transitive runtime graph and is inspected normally.
-          if (isExactLayoutParserModelGatewayImportEdge(currentRel, edge, dependency, parserModel)) {
-            if (hasExactLayoutParserModelGatewayProjection(current.path)) continue;
-            violations.push([
-              ...chain.map((path) => posixPath(relative(root, path))),
-              `invalid use of ${LAYOUT_PARSER_MODEL_GATEWAY_SYMBOL}`,
-            ]);
-            continue;
-          }
           violations.push(chain.map((path) => posixPath(relative(root, path))));
           continue;
         }
