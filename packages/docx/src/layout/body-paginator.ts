@@ -3157,6 +3157,7 @@ function* paginateBodyPassSteps(
             followsNextPageSectionBoundary,
             markExtentPt: acquired.blockExtentPt,
             markOnLineGrid: acquired.markOnLineGrid === true,
+            markMultipleLeadingPt: acquired.markMultipleLeadingPt ?? 0,
             markGridAfterLeadingPt: acquired.markGridAfterLeadingPt,
           });
         // A proven anchor-line deferral ends this page just above that line.

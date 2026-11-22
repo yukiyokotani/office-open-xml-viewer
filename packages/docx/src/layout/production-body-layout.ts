@@ -1843,6 +1843,7 @@ function measureBodyParagraphEntry(
           markGridAfterLeadingPt: !markLineWrapped(layout, measured)
             && services.text?.plainLineBoxes !== true
             ? measured.markGridAfterLeadingPt ?? 0 : 0,
+          ...(measured.markMultipleLeadingPt ? { markMultipleLeadingPt: measured.markMultipleLeadingPt } : {}),
         }
       : {}),
     ...(measured.uniformRubyAdvancePt == null

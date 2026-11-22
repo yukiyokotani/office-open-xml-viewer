@@ -37,7 +37,8 @@ function linearCtx(): CanvasRenderingContext2D {
   } as unknown as CanvasRenderingContext2D;
 }
 
-function probePage(roomPt: number, keepNext: boolean, grid: boolean): number {
+function probePage(roomPt: number, keepNext: boolean, grid: boolean,
+  mark: Partial<DocParagraph> = {}): number {
   const section = {
     pageWidth: 400, pageHeight: 72 + 100 + roomPt + 72,
     marginTop: 72, marginRight: 72, marginBottom: 72, marginLeft: 72,
@@ -46,7 +47,7 @@ function probePage(roomPt: number, keepNext: boolean, grid: boolean): number {
   } as SectionProps;
   const model = {
     body: [para('Filler', { lineSpacing: { rule: 'exact', value: 100, explicit: true } }),
-      para('', { keepNext }), para('After'), para('Tail')],
+      para('', { keepNext, ...mark }), para('After'), para('Tail')],
     section,
     headers: { default: null, first: null, even: null },
     footers: { default: null, first: null, even: null },
@@ -55,7 +56,12 @@ function probePage(roomPt: number, keepNext: boolean, grid: boolean): number {
   } as unknown as DocxDocumentModel;
   const pages = layoutDocument(model, createLayoutServices(model, {
     measureContext: linearCtx(),
-    localMetrics: testFontSnapshot([{ family: 'Times New Roman', lineHeightRatio: 1.15 }]),
+    localMetrics: testFontSnapshot([
+      { family: 'Times New Roman', lineHeightRatio: 1.15 },
+      // Word's single lines in the controls: 21.6pt at 16pt, 14.3pt at 11pt.
+      { family: 'Angsana New', lineHeightRatio: 1.35 },
+      { family: 'MS Mincho', lineHeightRatio: 1.3 },
+    ]),
   }), { currentDateMs: 0 }).pages;
   return pages.findIndex((page) => page.layers.body.some((node) => node.source.path[0] === 1));
 }
@@ -81,5 +87,29 @@ describe('empty-mark page-edge admission (Windows Word cells)', () => {
     { roomPt: 16, keepNext: true, grid: true, stays: false },
   ])('$roomPt pt left, keepNext $keepNext, grid $grid: stays $stays', ({ roomPt, keepNext, grid, stays }) => {
     expect(probePage(roomPt, keepNext, grid)).toBe(stays ? 0 : 1);
+  });
+
+  // excess7 (no grid): 0.5pt above and below the full line, 0.6pt below the
+  // baseline. Only an automatic multiple's extra space may hang.
+  const auto = (value: number) => ({ lineSpacing: { rule: 'auto' as const, value, explicit: true } });
+  const exact = (value: number) => ({ lineSpacing: { rule: 'exact' as const, value, explicit: true } });
+  const atLeast = (value: number) => ({ lineSpacing: { rule: 'atLeast' as const, value, explicit: true } });
+  const font = (family: string, size: number) => ({ defaultFontFamily: family, defaultFontSize: size });
+  it.each([
+    ['auto 1.15', auto(1.15), 14.55, 9.8, [true, true, false]],
+    ['auto 1.5', auto(1.5), 18.98, 9.8, [true, true, false]],
+    ['auto 2.0', auto(2), 25.3, 9.8, [true, true, false]],
+    ['exact 12pt', exact(12), 12, 9.6, [true, false, false]],
+    ['exact 20pt', exact(20), 20, 16, [true, false, false]],
+    ['atLeast 12pt', atLeast(12), 12.65, 9.8, [true, false, false]],
+    ['atLeast 20pt', atLeast(20), 20, 17.6, [true, false, false]],
+    ['Angsana New 16pt (Thai), single', font('Angsana New', 16), 21.6, 15.1, [true, false, false]],
+    ['MS Mincho 11pt (CJK), single', font('MS Mincho', 11), 14.3, 11.1, [true, false, false]],
+  ] as const)('%s', (_, mark, linePt, baselinePt, stays) => {
+    const rooms = [linePt + 0.5, linePt - 0.5, baselinePt - 0.6];
+    rooms.forEach((roomPt, index) => {
+      expect(probePage(Math.round(roomPt * 100) / 100, false, false, mark as Partial<DocParagraph>), `room ${roomPt}`)
+        .toBe(stays[index] ? 0 : 1);
+    });
   });
 });

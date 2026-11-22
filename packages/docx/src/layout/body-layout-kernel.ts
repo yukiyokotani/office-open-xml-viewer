@@ -115,6 +115,8 @@ export interface AcquiredParagraphBlock {
   readonly uniformRubyAdvancePt?: number;
   /** True when this mark's line box occupies a §17.6.5 document-grid cell. */
   readonly markOnLineGrid?: boolean;
+  /** Off-grid automatic-multiple extra space below the mark's single line. */
+  readonly markMultipleLeadingPt?: number;
   /** Grid-only leading below a mark's own natural/authored box. */
   readonly markGridAfterLeadingPt?: number;
   readonly flowRegistryDelta?: BodyFlowRegistryDeltaPt;
