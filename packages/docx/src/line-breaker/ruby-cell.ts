@@ -23,6 +23,13 @@ function joinsCursively(text: string): boolean {
   return CURSIVE_JOINING_RE.test(text);
 }
 
+/** One face a shaped guide selects, for the guide's head extent. */
+export interface RubyGuideFaceBox {
+  readonly boxPerEm: number;
+  readonly text: string;
+  readonly farEast: boolean | undefined;
+}
+
 /** Inputs the line breaker resolves for the one geometry of a ruby cell. */
 export interface RubyCellInputs {
   readonly scale: number;
@@ -34,9 +41,11 @@ export interface RubyCellInputs {
   /** The guide baseline above the base baseline: hpsRaise, or the retained
    * ink reserve without it (WORD_RUBY_LINE_ASCENT). */
   readonly reservePx: number;
-  /** The guide's extent past its baseline toward the line head, given the
-   * shaped guide's font box per em (undefined without a shaping service). */
-  readonly headPx: (guideBoxPerEm: number | undefined) => number;
+  /** The guide's extent past its baseline toward the line head, given each
+   * face the shaped guide selects: its font box per em, the text it paints
+   * and its Far East single-line class when its face data is admitted
+   * (undefined faces without a shaping service). */
+  readonly headPx: (guideFaces: readonly RubyGuideFaceBox[] | undefined) => number;
   /** The base is laid out on a vertical line (a vertical section run or an
    * upright frame's): the rightVertical guide axis stands half the guide
    * size nearer the base (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). */
@@ -360,9 +369,13 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
       originPx: spacing.leadPt + offsetPx + index * spacing.gapPt,
     })),
     raisePx: inputs.reservePx - (inputs.verticalLine && ruby.align === 'rightVertical' ? sizePx / 2 : 0),
-    // The guide's own faces bound its extent (the tallest shaped run box).
+    // The guide's own faces bound its extent, each by its own box and class.
     headPx: inputs.headPx(shapes && shapes.length > 0 && sizePx > 0
-      ? Math.max(...shapes.map(({ shape }) => shape.ascentPt + shape.descentPt)) / sizePx
+      ? shapes.flatMap(({ shape }) => shape.spans.map((span): RubyGuideFaceBox => ({
+        boxPerEm: (span.ascentPt + span.descentPt) / sizePx,
+        text: span.text,
+        farEast: group.guideFarEastClass?.(span.font, span.text),
+      })))
       : undefined),
     vertical: cells !== undefined,
   };

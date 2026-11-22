@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   kinsokuAdjustedSplit,
-  crossRunKinsokuRetract,
   resolveKinsokuRules,
   DEFAULT_KINSOKU_RULES,
 } from './index.js';
@@ -153,48 +152,5 @@ describe('resolveKinsokuRules — §17.15.1.59/.60 custom sets REPLACE defaults'
     const rules = resolveKinsokuRules({ noLineBreaksBefore: '' });
     expect(rules.lineStartForbidden.size).toBe(0);
     expect(kinsokuAdjustedSplit(cp('あいの、うえ'), 3, rules)).toBe(3);
-  });
-});
-
-describe('crossRunKinsokuRetract — cross-run 行頭禁則 (追い出し across segments)', () => {
-  const R = DEFAULT_KINSOKU_RULES;
-
-  it('pulls the last grapheme down so the next line does not begin with 、', () => {
-    // current line last segment "…を表", overflowing run begins "、". Pull 表.
-    expect(crossRunKinsokuRetract(cp('を表'), R, 0)).toBe(1);
-  });
-
-  it('does not retract below minKeep (single-char-only segment stays put)', () => {
-    // last segment is "5" alone and is the line's only segment → minKeep 1.
-    expect(crossRunKinsokuRetract(cp('5'), R, 1)).toBe(0);
-  });
-
-  it('may empty a non-final segment (minKeep 0) — pulls its single char', () => {
-    expect(crossRunKinsokuRetract(cp('5'), R, 0)).toBe(1);
-  });
-
-  it('never orphans a whitespace at the next line start — pulls more', () => {
-    // last chars "A " → k=1 would put a space at line start; pull "A " (k=2).
-    expect(crossRunKinsokuRetract(cp('A '), R, 0)).toBe(2);
-  });
-
-  it('keeps pulling past a char that is itself line-start-forbidden', () => {
-    // last char 。 is start-forbidden → leading with it just moves the problem;
-    // pull "あ。" so あ leads the next line.
-    expect(crossRunKinsokuRetract(cp('あ。'), R, 0)).toBe(2);
-  });
-
-  it('does not leave the current line ending on a line-end-forbidden opener', () => {
-    // retracting just "x" would dangle 「 at the current line end → pull "「x".
-    expect(crossRunKinsokuRetract(cp('「x'), R, 0)).toBe(2);
-  });
-
-  it('returns 0 when kinsoku is disabled', () => {
-    expect(crossRunKinsokuRetract(cp('を表'), resolveKinsokuRules({ kinsoku: false }), 0)).toBe(0);
-  });
-
-  it('returns 0 when no legal non-whitespace retraction exists within minKeep', () => {
-    // only a trailing space available and minKeep forbids pulling the rest.
-    expect(crossRunKinsokuRetract(cp('X '), R, 1)).toBe(0);
   });
 });

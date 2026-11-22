@@ -466,6 +466,10 @@ export interface TextPlacement {
   readonly verticalAlign?: 'super' | 'sub';
   readonly tateChuYoko?: boolean;
   readonly tateChuYokoCompress?: boolean;
+  /** A piece of a ruby base (§17.3.3.25): every piece of the cell carries
+   * it, whether or not a guide could be shaped; the first piece also carries
+   * the guide in `ruby`. */
+  readonly rubyBasePiece?: true;
   readonly ruby?: Readonly<{
     text: string;
     advancePt: number;

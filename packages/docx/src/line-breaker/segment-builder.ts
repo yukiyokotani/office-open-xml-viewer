@@ -316,7 +316,11 @@ export function appendTextPiece(
   // belongs to.
   const previousSegment = segs.at(-1);
   const rubyGroup: RubyGroup | undefined = ruby
-    ? { ruby, pieces: [] }
+    ? {
+      ruby,
+      pieces: [],
+      guideFarEastClass: (font, guideText) => faceFarEastClass(environment, selectedMetric, font, guideText),
+    }
     : 'rubyBaseContinuation' in r && r.rubyBaseContinuation && previousSegment && 'text' in previousSegment
       ? rubyCellOf(previousSegment) : undefined;
   const revision = r.revision;
@@ -1874,6 +1878,28 @@ function emitResolvedTextSegment(
   if (rubyGroup) (rubyGroup.pieces as LayoutTextSeg[]).push(segs.at(-1) as LayoutTextSeg);
   emissionState.firstSeg = false;
   emissionState.gluePending = false;
+}
+
+/** The Far East single-line class of the face `font` selected for `text`, as
+ * a run in that face resolves it (`resolvedFarEastLineClass`, and
+ * `resolvedLineHeightRatio` for a face of the other class); undefined when
+ * no line data is admitted for the face. */
+function faceFarEastClass(
+  environment: LineLayoutEnvironment,
+  selectedMetric: SegmentBuildContext['selectedMetric'],
+  font: FontResolution,
+  text: string,
+): boolean | undefined {
+  const { resourceMetric, referenceMetric, lineMetric } = selectedFontLineMetric(font, selectedMetric(font, text),
+    environment.lineSpacing?.rule !== 'exact',
+    allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
+      ?? environment.layoutServices?.text.localMetrics ?? {}), font),
+    environment.layoutServices ? { text: environment.layoutServices.text, probe: text } : undefined,
+    fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+      environment.verticalCJK === true || environment.wordLineBoxes === true),
+    referenceFontFormatOf(environment.layoutServices?.text));
+  if ((resourceMetric?.farEastCodePage ?? referenceMetric?.farEastCodePage) === true) return true;
+  return lineMetric?.lineHeightRatio != null ? false : undefined;
 }
 
 /** ECMA-376 §20.4.2.6: an inline object's line box is its extent widened by

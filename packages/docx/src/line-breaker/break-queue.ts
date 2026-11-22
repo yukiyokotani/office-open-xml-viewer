@@ -178,7 +178,7 @@ export function prepareBreakQueue(
     rubyPieces.set(cell, pieces);
   }
   for (const [source, pieces] of rubyPieces) {
-    const group: RubyGroup = { ruby: source.ruby, pieces };
+    const group: RubyGroup = { ...source, pieces, cell: undefined };
     pieces.forEach((piece, index) => {
       piece.rubyGroup = group;
       piece.rubyPieceIndex = index;

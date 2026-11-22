@@ -692,7 +692,6 @@ export {
   resolveKinsokuRules,
   DEFAULT_KINSOKU_RULES,
   kinsokuAdjustedSplit,
-  crossRunKinsokuRetract,
 } from './text/kinsoku';
 export { isCjkBreakChar, isLatinWordCodePoint } from './text/cjk-ranges';
 export {

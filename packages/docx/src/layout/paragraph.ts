@@ -553,7 +553,7 @@ function thaiProportionalClusterAdvance(
   let thai = false;
   for (const segment of segments) {
     segmentStart.push(codePoints.length);
-    if (segment.kind !== 'text' || segment.fixedPitch || segment.fitText || segment.ruby
+    if (segment.kind !== 'text' || segment.fixedPitch || segment.fitText || segment.rubyBasePiece
       || segment.direction !== 'ltr' || (segment.writingMode ?? 'horizontal-tb') !== 'horizontal-tb'
       || (segment.characterSpacingPt ?? 0) !== 0 || (segment.characterScale ?? 1) !== 1
       || (segment.characterGridDeltaPt ?? 0) !== 0) {
@@ -2808,6 +2808,7 @@ function textPlacement(
     ...(segment.vertAlign ? { verticalAlign: segment.vertAlign } : {}),
     ...(segment.tateChuYoko ? { tateChuYoko: true } : {}),
     ...(segment.tateChuYokoCompress ? { tateChuYokoCompress: true } : {}),
+    ...(rubyCellOf(segment) ? { rubyBasePiece: true as const } : {}),
     ...(segment.ruby && rubyCell ? { ruby: {
       text: segment.ruby.text,
       advancePt: rubyCell.guidePx / rubyScale,

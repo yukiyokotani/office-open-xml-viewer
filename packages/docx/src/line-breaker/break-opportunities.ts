@@ -569,8 +569,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       !breakerState.latinLineFace ||
       !sameLatinSpaceFace(s, breakerState.latinLineFace))
   ) {
-    flush(undefined, false, s.src);
-    breakerState.queue.unshift(s);
+    if (!endLineBefore(context, s, wForFit)) breakerState.queue.unshift(s);
     return;
   }
 

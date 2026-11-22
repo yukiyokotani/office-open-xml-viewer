@@ -59,7 +59,7 @@ export function prepareSourceSpaceCells(parents: readonly MeasuredLinePlanSegmen
         || (op.scaleY !== undefined && op.scaleY !== 1) || op.glyphOrientation !== undefined
         || op.kerning !== (prefix.request.kerning === true ? 'normal' : 'none')) return undefined;
     }
-    if (parent.kind === 'text' && (parent.fixedPitch || parent.fitText || parent.ruby || parent.tateChuYoko
+    if (parent.kind === 'text' && (parent.fixedPitch || parent.fitText || parent.rubyBasePiece || parent.tateChuYoko
       || parent.optionalHyphenGlyph || parent.retainedGeometry?.emphasis
       || (parent.decorations.length > 0 && !parent.retainedGeometry)
       || parent.basePaintOps.some(op => op.writingMode !== 'horizontal-tb'

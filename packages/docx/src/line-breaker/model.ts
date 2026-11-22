@@ -115,6 +115,14 @@ export interface RubyCellGeometry {
 export interface RubyGroup {
   readonly ruby: NonNullable<LayoutTextSeg['ruby']>;
   readonly pieces: readonly LayoutTextSeg[];
+  /** The Far East single-line class of a face the guide selects for `text`,
+   * from the same admitted face data as a base run's
+   * (`resolvedFarEastLineClass` / `resolvedLineHeightRatio`); undefined
+   * when no data is admitted for the face. */
+  readonly guideFarEastClass?: (
+    font: import('../layout/font-service.js').FontResolution,
+    text: string,
+  ) => boolean | undefined;
   cell?: RubyCellGeometry;
 }
 

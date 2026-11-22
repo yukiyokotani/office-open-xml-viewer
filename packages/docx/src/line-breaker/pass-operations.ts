@@ -1768,11 +1768,15 @@ export function performRubyCell(
     },
     reservePx: rubyAscentReservePx(ruby.fontSizePt, ruby.hpsRaisePt, scale, first, ctx, fontFamilyClasses),
     // WORD_VERTICAL_RUBY_UPRIGHT_GUIDE: half the guide's own vertical single
-    // line, from its faces' box; the Far East addition follows the guide text.
-    headPx: (guideBoxPerEm) => verticalLine
-      ? wordVerticalSingleLinePx((guideBoxPerEm ?? verticalDesignBoxPerEm(operationState, first)) * rubyPx, rubyPx,
-        guideBoxPerEm === undefined ? verticalFarEastClass(first) : EAST_ASIAN_RE.test(ruby.text), scale) / 2
-      : rubyPx,
+    // line, the tallest among the faces it selects, each from its own box
+    // and its own Far East class. A face without admitted data takes the
+    // class of the text it paints, as a base run does (verticalFarEastClass).
+    headPx: (guideFaces) => !verticalLine ? rubyPx
+      : guideFaces === undefined || guideFaces.length === 0
+        ? wordVerticalSingleLinePx(verticalDesignBoxPerEm(operationState, first) * rubyPx, rubyPx,
+          verticalFarEastClass(first), scale) / 2
+        : Math.max(...guideFaces.map((face) => wordVerticalSingleLinePx(face.boxPerEm * rubyPx, rubyPx,
+          face.farEast ?? EAST_ASIAN_RE.test(face.text), scale))) / 2,
     verticalLine,
     ...(verticalGlyphMeasurement ? { verticalGlyphMeasurement } : {}),
     ...(first.snapToCharacterGrid !== false && snapPitchPx != null

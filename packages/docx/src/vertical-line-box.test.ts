@@ -5,6 +5,7 @@ import type { LineLayout, ParagraphLayout, TextPlacement } from './layout/types.
 import type { BodyElement, DocParagraph, DocxDocumentModel, SectionProps } from './types.js';
 import { createFontResolver } from './layout/font-service.js';
 import { createTextLayoutService } from './layout/text.js';
+import { testFontSnapshot } from './layout/test-font-snapshot.js';
 import { paragraphMarkLineMetrics } from './line-layout.js';
 import { wordVerticalSingleLinePx } from './layout/line-compatibility.js';
 
@@ -930,6 +931,52 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 8)', () =>
       'tbRl', null, column(40),
     );
     expect(lineTexts(lines)).toEqual(['前前', '「『東京']);
+  });
+
+  it('does not lead a line with the space a forbidden leader pulls down', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '前前A ' }, { text: 'ー後', fontFamily: 'OtherFace' }], 'tbRl', null, column(40),
+    );
+    expect(lineTexts(lines)).toEqual(['前前', 'A ー後']);
+  });
+
+  it('marks every placed piece of a ruby base as a piece of its cell', () => {
+    const line = layoutParagraph([
+      { text: '前' }, { text: '東', ruby: guide }, { text: '京', extra: { rubyBaseContinuation: true } }, { text: '後' },
+    ]).lines[0]!;
+    expect(textPlacements(line).map((entry) => [entry.text, entry.rubyBasePiece === true]))
+      .toEqual([['前', false], ['東', true], ['京', true], ['後', false]]);
+  });
+
+  it('takes the Far East single-line class of a guide from its face, not from its text', () => {
+    // Two faces with admitted line data and the same box: one of the Far
+    // East class, one not.
+    const face = (family: string, farEastCodePage: boolean) => ({
+      ...testFontSnapshot([{ family, lineHeightRatio: 1 }])[family.toLowerCase()]!, farEastCodePage,
+    });
+    const localMetrics = { fareast: face('FarEast', true), western: face('Western', false) };
+    const headOf = (family: string, text: string) => {
+      const fonts = { ascii: family, highAnsi: family, eastAsia: family };
+      const ruby = { text, fontSizePt: 5, hpsRaisePt: 30, guideRuns: [{ text, fonts }] };
+      const section = {
+        pageWidth: 600, pageHeight: 800, marginTop: 60, marginRight: 90, marginBottom: 80, marginLeft: 40,
+        headerDistance: 36, footerDistance: 36, titlePage: false, evenAndOddHeaders: false, textDirection: 'tbRl',
+      } as SectionProps;
+      const document = {
+        section, body: [paragraphOf([{ text: '漢', ruby }])],
+        headers: { default: null, first: null, even: null }, footers: { default: null, first: null, even: null },
+        fontFamilyClasses: {},
+      } as unknown as DocxDocumentModel;
+      const line = (layoutDocument(document, createLayoutServices(document, { measureContext: makeCtx(), localMetrics }),
+        { currentDateMs: 0 }).pages[0]!.layers.body
+        .find((entry): entry is ParagraphLayout => entry.kind === 'paragraph')!).lines[0]!;
+      return line.baselinePt - line.bounds.yPt;
+    };
+    // A Latin letter in the Far East face reserves what a kana does there,
+    // and a kana in the other face what a Latin letter does there.
+    expect(headOf('FarEast', 'A')).toBeCloseTo(headOf('FarEast', 'か'), 6);
+    expect(headOf('Western', 'か')).toBeCloseTo(headOf('Western', 'A'), 6);
+    expect(headOf('FarEast', 'A')).toBeGreaterThan(headOf('Western', 'A') + 0.01);
   });
 
   it('moves earlier openers with an opener of another run that does not fit', () => {
