@@ -30,7 +30,7 @@ export const WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION = defineCompatibilityRu
     version: '16.0.20430',
     platform: 'Windows',
   },
-  description: 'At the unreserved physical body edge, Word admits an undecorated non-terminal empty paragraph mark by its baseline when later ink follows in the same flow and the mark does not occupy a document-grid line cell. Windows Word 16.0.20430 trr3 family D (272 controls: modes 14/15, lines/linesAndChars, 16.4pt pitch, 11pt MS Mincho, zero/one preceding empty mark) instead admits grid marks by their centered natural/authored content box: 15pt remaining moves, 15.5–16.35pt stays, and 16.4pt fully fits. The single-character counterexamples follow the existing plain-text content-box rule too. Grid-only trailing leading may overhang; the complete advance remains retained. Other fonts/pitches use the same resolved metrics, not a measured per-font allowance. Next-page section marks retain their separate blank-page suppression. Evidence: issue #981 / PR #989 and trr3 family D.',
+  description: 'At the unreserved physical body edge, an undecorated non-terminal empty paragraph mark off the document grid is admitted only when its single line fits; an automatic multiple\'s extra space below that line may hang below the bottom margin. Windows Word controls (compatibility mode 14 with useFELayout, an ink paragraph following): on 16.0.20527 a Times New Roman 11pt mark (12.65pt single line) stays with 13.15pt left and moves with 12.15pt and 9.65pt left, although its baseline fits; on 16.0.20625 exact 12pt and 20pt lines, atLeast 12pt and 20pt lines, an Angsana New 16pt (Thai) and an MS Mincho 11pt (CJK) mark at single spacing all move 0.5pt below their full line; automatic 1.15, 1.5 and 2.0 multiples stay 0.5pt below their full line and move 0.6pt below the baseline. The earlier baseline admission (issue #981, inferred from a private document) is withdrawn. On a document grid the mark keeps its centered natural/authored content box inside the body (Windows Word 16.0.20430 trr3 family D, 272 controls: modes 14/15, lines/linesAndChars, 16.4pt pitch, 11pt MS Mincho, zero/one preceding empty mark: 15pt remaining moves, 15.5–16.35pt stays, 16.4pt fully fits; Windows Word 16.0.20527, 20pt pitch, Times New Roman/MS Mincho 11pt marks: 16.0pt moves, 16.25pt moves, 16.5pt stays), so grid-only trailing leading may overhang; the complete advance remains retained. Other fonts/pitches use the same resolved metrics. Next-page section marks retain their separate blank-page suppression.',
 });
 
 export const WORD_SECTION_MARK_BLANK_PAGE_SUPPRESSION = defineCompatibilityRule({
@@ -91,9 +91,9 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   hasFollowingInk: boolean;
   followsNextPageSectionBoundary: boolean;
   markExtentPt: number;
-  markBelowBaselinePt: number;
   markOnLineGrid: boolean;
   markGridAfterLeadingPt?: number;
+  markMultipleLeadingPt?: number;
 }>): number {
   const eligible = !input.hasContinuationBoundary
     && input.inkless
@@ -112,8 +112,22 @@ export function wordTrailingEmptyMarkAdmissionAllowancePt(input: Readonly<{
   if (input.markOnLineGrid) {
     return input.hasFollowingInk ? input.markGridAfterLeadingPt ?? 0 : 0;
   }
-  return input.hasFollowingInk ? input.markBelowBaselinePt : 0;
+  // Off the grid the mark's single line must fit; an automatic multiple's
+  // extra space below it may hang (no baseline allowance).
+  return input.hasFollowingInk ? input.markMultipleLeadingPt ?? 0 : 0;
 }
+
+export const WORD_SECTION_TBRLV_TBLRV_PAGE_FRAME = defineCompatibilityRule({
+  id: 'word-section-tbrlv-tblrv-page-frame',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'vertical-section-tbrlv-frame',
+    application: 'Microsoft Word',
+    version: '16.0.20527',
+    platform: 'Windows',
+  },
+  description: 'Part 4 §14.11.7 names tbRlV as lines flowing from right to left with rotated glyphs. Word lays a section-level tbRlV out exactly as tbLrV (word-section-tblrv-left-page-frame, word-section-tblrv-line-strip): the first line strip starts at the physical left margin, later lines advance rightward, and everything measured for tbLrV holds unchanged. Evidence: Windows Word 16.0.20527 PDFs of ten synthetic A4 documents, each exported once as tbRlV and once as tbLrV with no other difference: glyph facing on a 36pt grid (Latin, brackets, underline, emphasis dots, ruby); an 80-character paragraph, a block table and a paragraph; a 36pt gutter; mirrored margins with a gutter over two pages; a default header and footer; two columns with a column break; an inline 60x40pt picture; underlines, strike-through and emphasis marks; two pages per sheet and book fold on a landscape sheet with a 36pt gutter, two pages each. In every pair each glyph box, each vector path and each picture box of the tbRlV export equals the tbLrV export to 0.1pt, on every page. Outside this evidence: tbRlV on a table cell, which keeps its own handling.',
+});
 
 export const WORD_SECTION_TBLRV_LEFT_PAGE_FRAME = defineCompatibilityRule({
   id: 'word-section-tblrv-left-page-frame',

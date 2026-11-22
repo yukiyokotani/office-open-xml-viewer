@@ -98,6 +98,10 @@ export interface MeasuredParagraph {
   /** LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT: the empty mark line's
    * proportional extra space below its natural line. */
   readonly markPageEdgeOverhangPt?: number;
+  /** WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION: an off-grid empty mark's
+   * automatic-multiple extra space below its single line, which may hang
+   * below the page bottom. */
+  readonly markMultipleLeadingPt?: number;
   /** Selected empty-mark wrap gap, retained for measurement-free shading. */
   readonly markWrapBounds?: { readonly xPt: number; readonly yPt: number; readonly widthPt: number; readonly heightPt: number };
   /** An empty numbered item whose marker leading edge a float moved: that
@@ -355,6 +359,13 @@ export function measureParagraph(
         && environment.verticalPageFrame !== true && !keepsWordLineBoxes(paragraph.runs)
         && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
         ? { markPageEdgeOverhangPt: Math.max(0, markAdvancePt - Math.max(
+          markMetrics.ascentPx + markMetrics.descentPx, markMetrics.intendedSinglePx)) }
+        : {}),
+      // WORD_TRAILING_EMPTY_MARK_BASELINE_ADMISSION: an automatic multiple's
+      // extra space below the mark's single line, off the grid.
+      ...(environment.layoutServices?.text.libreOfficeLineBoxes !== true && !context.lineGrid.active
+        && context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1
+        ? { markMultipleLeadingPt: Math.max(0, markAdvancePt - Math.max(
           markMetrics.ascentPx + markMetrics.descentPx, markMetrics.intendedSinglePx)) }
         : {}),
       placement: recordedPlacement,

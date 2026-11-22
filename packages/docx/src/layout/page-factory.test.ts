@@ -264,7 +264,7 @@ describe('createLayoutPage', () => {
 
   it.each([
     ['tbRl', 'vertical-rl'],
-    ['tbRlV', 'vertical-rl'],
+    ['tbRlV', 'vertical-lr'],
     ['tbLrV', 'vertical-lr'],
     ['btLr', 'vertical-rl'],
   ] as const)('accepts normalized %s section geometry for an upright physical page', (

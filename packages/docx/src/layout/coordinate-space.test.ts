@@ -70,7 +70,7 @@ describe('coordinate-space', () => {
     ['rl', 'vertical-rl'],
     ['rlV', 'vertical-rl'],
     ['tbRl', 'vertical-rl'],
-    ['tbRlV', 'vertical-rl'],
+    ['tbRlV', 'vertical-lr'],
     ['lr', 'vertical-lr'],
     ['lrV', 'vertical-lr'],
     ['tbLrV', 'vertical-lr'],
