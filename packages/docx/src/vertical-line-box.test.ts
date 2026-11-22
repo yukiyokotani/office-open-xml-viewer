@@ -34,7 +34,7 @@ function makeCtx(): CanvasRenderingContext2D {
 };
 
 type Ruby = Readonly<{ text: string; fontSizePt: number; hpsRaisePt: number; align?: string }>;
-type Run = Readonly<{ text: string; ruby?: Ruby }>;
+type Run = Readonly<{ text: string; ruby?: Ruby; position?: number }>;
 
 function typographyInput(ruby: Ruby) {
   const value = <T>(v: T | undefined) => v === undefined
@@ -61,6 +61,7 @@ function layoutParagraph(
       type: 'text', text: run.text, bold: false, italic: false, underline: false, strikethrough: false,
       fontSize: 10, color: null, fontFamily: 'NotInMetrics', isLink: false, background: null,
       vertAlign: null, hyperlink: null,
+      ...(run.position !== undefined ? { position: run.position } : {}),
       ...(run.ruby ? {
         ruby: { text: run.ruby.text, fontSizePt: run.ruby.fontSizePt, hpsRaisePt: run.ruby.hpsRaisePt },
         typographyInput: typographyInput(run.ruby),
@@ -131,6 +132,30 @@ describe('vertical line box (WORD_VERTICAL_LINE_CENTRED_BOX)', () => {
     expect(tbRl.bounds.yPt + tbRl.advancePt - tbRl.baselinePt).toBeCloseTo(single / 2, 6);
     const tbLrV = layoutParagraph([{ text: 'あ' }], 'tbLrV', atLeast).lines[0]!;
     expect(tbLrV.baselinePt - tbLrV.bounds.yPt).toBeCloseTo(single / 2, 6);
+  });
+});
+
+describe('w:position and empty marks in vertical lines (WORD_VERTICAL_LINE_CENTRED_BOX)', () => {
+  const single = () => layoutParagraph([{ text: '\u3042' }], 'tbRl').lines[0]!.advancePt;
+
+  it('moves a positioned run\'s whole box, lengthening the line by the raise', () => {
+    const line = layoutParagraph([{ text: '\u3042' }, { text: '\u3044', position: 3 }], 'tbRl').lines[0]!;
+    expect(line.advancePt).toBeCloseTo(single() + 3, 6);
+    expect(line.baselinePt - line.bounds.yPt).toBeCloseTo(single() / 2 + 3, 6);
+  });
+
+  it('keeps a uniformly positioned line on its axis, growing only by a raise past the tail half', () => {
+    const raised = layoutParagraph([{ text: '\u3042', position: 3 }], 'tbRl').lines[0]!;
+    expect(raised.advancePt).toBeCloseTo(single(), 6);
+    const far = layoutParagraph([{ text: '\u3042', position: 12 }], 'tbRl').lines[0]!;
+    expect(far.advancePt).toBeCloseTo(single() / 2 + 12, 6);
+    expect(far.baselinePt - far.bounds.yPt).toBeCloseTo(single() / 2, 6);
+  });
+
+  it('gives an empty paragraph the vertical single line of its mark', () => {
+    const horizontal = layoutParagraph([]).node;
+    const vertical = layoutParagraph([], 'tbRl').node;
+    expect(vertical.advancePt - horizontal.advancePt).toBeCloseTo(10 / 30, 6);
   });
 });
 

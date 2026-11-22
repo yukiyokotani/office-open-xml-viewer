@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontFormatOf, referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, gridCellsExtent, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS } from '../layout/line-compatibility.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, gridCellsExtent, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS, wordVerticalSingleLineExtraPx } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -340,6 +340,9 @@ export function paragraphMarkLineMetrics(
   // stand-in for a non-empty line (a drop-cap anchor paragraph, an inline
   // object's outer run) and keeps the established hint/document-script routing.
   emptyMark = false,
+  // WORD_VERTICAL_LINE_CENTRED_BOX: the mark line of an upright vertical
+  // section is centred and one vertical single line high.
+  verticalLine = false,
 ): MarkLineMetrics {
   const effectiveMarkShapeInput = markShapeInput;
   // WORD_EMPTY_MARK_ASCII_FACE (`emptyMark` only): §17.3.2.26 selects a font
@@ -494,7 +497,16 @@ export function paragraphMarkLineMetrics(
   // A native Canvas box may set the ordinary automatic-line floor, but it
   // cannot establish the Word Far-East design height used to count grid cells.
   // Keep an untabled mark on the same 1.3em grid fallback as visible text.
-  const intendedSingle = Math.max(designIntendedSingle, (nativeMarkRatio ?? 0) * fs * scale);
+  let intendedSingle = Math.max(designIntendedSingle, (nativeMarkRatio ?? 0) * fs * scale);
+  if (verticalLine) {
+    const farEast = (referenceMarkMetric?.farEastCodePage ?? resolvedLocalFont?.farEastCodePage) === true
+      || (designSides == null && resourceRatio == null && markUsesEastAsianFace);
+    const extraPx = wordVerticalSingleLineExtraPx(fs * scale, farEast);
+    const half = (asc + desc + extraPx) / 2;
+    asc = half;
+    desc = half;
+    if (intendedSingle > 0) intendedSingle += extraPx;
+  }
   const gridCountSingle = eastAsian
     ? Math.max(
         eastAsianGridCountSinglePx(designIntendedSingle, fs * scale),

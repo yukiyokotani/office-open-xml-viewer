@@ -1731,6 +1731,7 @@ function emitResolvedTextSegment(
     ...((resourceFamilyLineMetric?.farEastCodePage
       ?? referenceLineMetric?.farEastCodePage) === true
       ? { resolvedFarEastLineClass: true as const } : {}),
+    ...(environment.verticalFrameLines ? { verticalFrameRun: environment.verticalFrameLines } : {}),
     ...(resourceFamilyLineMetric?.lineHeightRatio != null
       ? {
           resolvedResourceVerticalMetric: true as const,

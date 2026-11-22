@@ -83,7 +83,7 @@ import {
   calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest, LIST_LABEL_PICTURE_INSET_PT,
   replaceTextShapeRequest, sliceTextShapeRequest, sliceSemanticSlotSpans, shapeRunToDocRun,
 } from './text.js';
-import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
+import { eastAsianUprightPaintOps, uprightFrameRuby, uprightFrameSidewaysOffsetPt } from './vertical-glyph-orientation.js';
 import { wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
@@ -4155,7 +4155,8 @@ function planMeasuredLines(
     // minimum before it.
     const atLeastVerticalLine = !specified && context.lineSpacing?.rule === 'atLeast'
       && !context.lineGrid.active
-      && raw.segments.some((segment) => 'text' in segment && (segment.verticalRun === true || segment.tateChuYoko === true));
+      && raw.segments.some((segment) => 'text' in segment && (segment.verticalRun === true || segment.tateChuYoko === true
+      || segment.verticalFrameRun === 'upright'));
     // A model source's fixed or minimum line in LibreOffice's placement
     // (`__lineExtraAbove`; DOCX never sets it): a minimum line puts all extra
     // space above the text, so the baseline sits the text's descent above the
@@ -4185,7 +4186,8 @@ function planMeasuredLines(
     // order. A tbLrV line is reflected across its band at paint, so its extra
     // space moves to the other logical side to stay in that order.
     const verticalExtraSpacePt = blockReflectedLines && !specified
-      && raw.segments.some((segment) => 'text' in segment && (segment.verticalRun === true || segment.tateChuYoko === true))
+      && raw.segments.some((segment) => 'text' in segment && (segment.verticalRun === true || segment.tateChuYoko === true
+      || segment.verticalFrameRun === 'upright'))
       && !context.lineGrid.active
       && ((context.lineSpacing?.rule === 'auto' && context.lineSpacing.value > 1)
         || context.lineSpacing?.rule === 'atLeast')
@@ -5728,7 +5730,7 @@ function orientVerticalTextBoxParagraph(
 ): ParagraphLayout {
   const eastAsianUpright = mode === 'eaVert' || mode === 'mongolianVert';
   const lines = paragraph.lines.map((line) => {
-    const rubyReservePt = mode === 'mongolianVert'
+    const rubyReservePt = mode === 'mongolianVert' && wordArt
       ? line.placements.reduce((reserve, placement) => placement.kind === 'text' && placement.ruby
           ? Math.max(
               reserve,
@@ -5739,10 +5741,15 @@ function orientVerticalTextBoxParagraph(
             )
           : reserve, 0)
       : 0;
-    const mirroredBaselinePt = mode === 'mongolianVert'
-      ? 2 * innerBounds.yPt + innerBounds.heightPt - line.baselinePt
-        + (wordArt ? 0 : insets.bottomPt - insets.leftPt) + rubyReservePt
-      : line.baselinePt;
+    // A mongolianVert story's strips run in the reverse order; outside WordArt
+    // each strip keeps its own arrangement (WORD_VERTICAL_LINE_CENTRED_BOX:
+    // a centred box, its ruby toward the same edge), so the strip moves.
+    const mirroredBaselinePt = mode !== 'mongolianVert'
+      ? line.baselinePt
+      : wordArt
+        ? 2 * innerBounds.yPt + innerBounds.heightPt - line.baselinePt + rubyReservePt
+        : 2 * innerBounds.yPt + innerBounds.heightPt + insets.bottomPt - insets.leftPt
+          - (line.bounds.yPt + line.bounds.heightPt) + (line.baselinePt - line.bounds.yPt);
     const deltaYPt = mirroredBaselinePt - line.baselinePt;
     const mirroredY = line.bounds.yPt + deltaYPt;
     const placements = line.placements.map((placement) => {
@@ -5752,9 +5759,10 @@ function orientVerticalTextBoxParagraph(
           : placement;
       }
       const paintOps = eastAsianUpright
-        ? eastAsianUprightPaintOps(placement, wordArt)
+        ? eastAsianUprightPaintOps(placement, wordArt, wordArt ? 0 : uprightFrameSidewaysOffsetPt(placement))
         : placement.paintOps;
-      return translatePlacementY({ ...placement, paintOps }, deltaYPt);
+      const ruby = eastAsianUpright && !wordArt ? uprightFrameRuby(placement) : placement.ruby;
+      return translatePlacementY({ ...placement, paintOps, ...(ruby ? { ruby } : {}) }, deltaYPt);
     });
     return {
       ...line,
@@ -6002,6 +6010,8 @@ export function acquireShapeTextBoxLayout(
       bounds: innerBounds,
       ...(stackedWordArt ? { quarterTurnMath: true } : {}),
       ...(verticalMode ? { quarterTurned: true } : {}),
+      ...(!stackedWordArt && (verticalMode === 'eaVert' || verticalMode === 'mongolianVert')
+        ? { uprightEastAsian: true } : {}),
       capacity: 'unbounded',
       ...(stackedWordArt && shape.textWrap === 'none' ? { noWrap: true } : {}),
     },

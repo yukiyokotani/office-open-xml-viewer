@@ -100,6 +100,10 @@ export function paragraphMeasurementEnvironment(
     layoutServices: state.layoutServices,
     verticalGlyphMeasurement: state.verticalGlyphMeasurement,
   };
+  if (state.storyContext?.verticalCell || state.storyContext?.quarterTurned === true) {
+    environment.verticalFrameLines = state.storyContext.verticalCell
+      ?? (state.storyContext.uprightFrame ? 'upright' : 'rotated');
+  }
   if (closingPairSourceStory?.story === 'body' && closingPairSourceStory.containers.length === 0) {
     environment.closingPairRootSource = true;
   }

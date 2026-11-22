@@ -256,6 +256,9 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineHeight: 0,
     lineAscent: 0,
     lineDescent: 0,
+    /** Largest descent of the line's items before the zero floor (a vertical
+     * run moved by w:position may reach past the axis). */
+    lineSignedDescent: Number.NEGATIVE_INFINITY,
     lineIntendedSingle: 0,
     lineHasInlinePicture: false,
     linePictureMarkSingle: 0,

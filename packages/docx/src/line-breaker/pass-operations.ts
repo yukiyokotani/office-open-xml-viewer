@@ -361,6 +361,7 @@ function resetPhysicalLineMetrics({ breakerState }: PassOperationState): void {
   breakerState.lineHeight = 0;
   breakerState.lineAscent = 0;
   breakerState.lineDescent = 0;
+  breakerState.lineSignedDescent = Number.NEGATIVE_INFINITY;
   breakerState.lineIntendedSingle = 0;
   breakerState.lineHasInlinePicture = false;
   breakerState.linePictureMarkSingle = 0;
@@ -1130,8 +1131,21 @@ export function performFlush(
   // stable ascent/descent from the effective font size so wrap/baseline math
   // stays consistent with non-empty lines.
   const hasContent = breakerState.lineAscent > 0 || breakerState.lineDescent > 0;
-  const contentAscent = hasContent ? breakerState.lineAscent : contentHeight * scale * 0.8;
-  const desc = hasContent ? breakerState.lineDescent : contentHeight * scale * 0.2;
+  // WORD_VERTICAL_LINE_CENTRED_BOX: a vertical line whose every item shares
+  // one position keeps its glyphs on the unmoved axis; a raise larger than
+  // the tail half extends the tail by the excess, a lowering adds nothing.
+  const verticalUniformPx = linePositionReferencePt !== 0
+    && breakerState.currentLine.some((segment) => 'text' in segment
+      && (segment.verticalRun === true || segment.tateChuYoko === true
+      || segment.verticalFrameRun === 'upright'))
+    ? linePositionReferencePt * scale : 0;
+  const unmovedDescent = breakerState.lineSignedDescent + verticalUniformPx;
+  const contentAscent = hasContent
+    ? Math.max(0, breakerState.lineAscent - verticalUniformPx) : contentHeight * scale * 0.8;
+  const desc = hasContent
+    ? (verticalUniformPx === 0 ? breakerState.lineDescent
+      : Math.max(0, unmovedDescent, verticalUniformPx))
+    : contentHeight * scale * 0.2;
   // A picture-bullet marker metric joins that box (its own or synthesized)
   // as a minimum ascent above the baseline.
   const actualAscent = Math.max(contentAscent, breakerState.lineMarkerAscent);
@@ -1141,10 +1155,10 @@ export function performFlush(
   const asc = actualAscent + objectExtra;
   const physicalIntendedSingle = Math.max(breakerState.lineIntendedSingle, breakerState.lineObjectAdvanceMinimum);
   const h = Math.max(contentHeight, breakerState.lineMarkerHeight);
-  const visibleAscent = breakerState.lineHasVisibleMetrics
+  const visibleAscent = breakerState.lineHasVisibleMetrics && verticalUniformPx === 0
     ? Math.max(breakerState.lineVisibleAscent, breakerState.lineMarkerAscent) + objectExtra
     : asc;
-  const visibleDescent = breakerState.lineHasVisibleMetrics
+  const visibleDescent = breakerState.lineHasVisibleMetrics && verticalUniformPx === 0
     ? breakerState.lineVisibleDescent
     : desc;
   // Keep this explicit even for box-only VML: its larger physical intended
@@ -1173,8 +1187,23 @@ export function performFlush(
   // not reveal hhea descent, and mixed styles cannot share one descent
   // reserve. The rule uses face data, never a family-specific correction.
   const firstPositioned = breakerState.firstPositioned;
-  const uniformPositionAuto =
+  // WORD_VERTICAL_LINE_CENTRED_BOX: the extent a w:position adds to a vertical
+  // line is not multiplied by an automatic multiple; the multiple applies to
+  // the single line.
+  const verticalPositioned = breakerState.currentLine.some((segment) => 'text' in segment
+    && (segment.verticalRun === true || segment.tateChuYoko === true
+      || segment.verticalFrameRun === 'upright')
+    && (segment.position ?? 0) !== 0 && segment.positionExtendsLineBox !== false);
+  const verticalSinglePx = breakerState.lineIntendedSingle;
+  const verticalPositionAuto = verticalPositioned && verticalSinglePx > 0
+    && asc + desc > verticalSinglePx
+    ? { normalSinglePx: verticalSinglePx, positionPx: asc + desc - verticalSinglePx, designDescentPx: 0 }
+    : undefined;
+  const uniformPositionAuto = verticalPositionAuto ?? (
     linePositionReferencePt !== 0 && breakerState.uniformPositionEligible
+    // A vertical run moves its whole centred box (WORD_VERTICAL_LINE_CENTRED_BOX).
+    && !firstPositioned?.verticalRun && !firstPositioned?.tateChuYoko
+    && firstPositioned?.verticalFrameRun !== 'upright'
     && firstPositioned?.resolvedDesignDescentRatio != null
     && (firstPositioned.referenceFontVerticalMetric || firstPositioned.resolvedResourceVerticalMetric)
       ? {
@@ -1186,7 +1215,7 @@ export function performFlush(
           designDescentPx:
             firstPositioned.resolvedDesignDescentRatio * firstPositioned.fontSize * scale,
         }
-      : undefined;
+      : undefined);
   // Admission-only C0 lines have no retained gap-plan consumer. Accepted
   // contraction still rebuilds from the actual closing members (including
   // forced followers/retraction) before the existing overflow clamp.
@@ -1496,6 +1525,7 @@ export function performAddToLine(
   }
   if (asc > breakerState.lineAscent) breakerState.lineAscent = asc;
   if (desc > breakerState.lineDescent) breakerState.lineDescent = desc;
+  if (desc > breakerState.lineSignedDescent) breakerState.lineSignedDescent = desc;
   const paintsInlineInk = !('text' in s) || s.metricOnly !== true;
   if (paintsInlineInk) {
     breakerState.lineHasVisibleMetrics = true;
@@ -1547,7 +1577,7 @@ export function performAddToLine(
           );
     // WORD_VERTICAL_LINE_CENTRED_BOX: a vertical run's single line adds its
     // measured fraction of the em to the horizontal design single line.
-    const verticalExtra = ts.verticalRun || ts.tateChuYoko
+    const verticalExtra = ts.verticalRun || ts.tateChuYoko || ts.verticalFrameRun
       ? wordVerticalSingleLineExtraPx(intendedEm, verticalFarEastClass(ts)) : 0;
     const designIntended = horizontalDesignIntended > 0
       ? horizontalDesignIntended + verticalExtra : 0;
@@ -2390,7 +2420,9 @@ export function performTextSegmentBox(
   const designOwnsSides =
     (!s.ruby || s.ruby.hpsRaisePt != null) &&
     (s.resolvedResourceVerticalMetric || s.referenceFontVerticalMetric) &&
-    (s.position ?? 0) === 0 &&
+    // A quarter-turned frame's positioned run keeps its design box and moves
+    // it (WORD_VERTICAL_LINE_CENTRED_BOX).
+    ((s.position ?? 0) === 0 || s.verticalFrameRun === 'rotated') &&
     s.resolvedDesignAscentRatio != null &&
     s.resolvedDesignDescentRatio != null;
   let ascent = designOwnsSides ? s.resolvedDesignAscentRatio! * metricEmPx : corrected.ascent;
@@ -2398,18 +2430,41 @@ export function performTextSegmentBox(
   // WORD_VERTICAL_LINE_CENTRED_BOX: across an upright vertical line the run's
   // box is centred on the axis the glyphs paint on, one vertical single line
   // high (the horizontal box plus the measured addition).
-  const verticalLineRun = s.verticalRun === true || s.tateChuYoko === true;
+  // A positioned vertical run keeps its face's design box (it moves whole).
+  const verticalLineRun = s.verticalRun === true || s.tateChuYoko === true
+    || s.verticalFrameRun === 'upright';
+  const verticalDesignBox = verticalLineRun
+    && (s.resolvedResourceVerticalMetric || s.referenceFontVerticalMetric)
+    && s.resolvedDesignAscentRatio != null && s.resolvedDesignDescentRatio != null
+    && (!s.ruby || s.ruby.hpsRaisePt != null)
+    ? (s.resolvedDesignAscentRatio + s.resolvedDesignDescentRatio) * metricEmPx
+    : ascent + descent;
   const verticalSingle = verticalLineRun
-    ? ascent + descent + wordVerticalSingleLineExtraPx(metricEmPx, verticalFarEastClass(s))
+    ? verticalDesignBox + wordVerticalSingleLineExtraPx(metricEmPx, verticalFarEastClass(s))
     : 0;
   if (verticalLineRun) {
     ascent = verticalSingle / 2;
     descent = verticalSingle / 2;
-  }
-  if (s.positionExtendsLineBox !== false) {
-    const positionPx = (s.position ?? 0) * scale;
-    if (positionPx > 0) ascent += positionPx;
-    else if (positionPx < 0) descent -= positionPx;
+    // WORD_VERTICAL_LINE_CENTRED_BOX: w:position (§17.3.2.24) moves the whole
+    // centred box across the line (a line positioned uniformly is restored
+    // to its axis when it closes).
+    const positionPx = s.positionExtendsLineBox === false ? 0 : (s.position ?? 0) * scale;
+    ascent += positionPx;
+    descent -= positionPx;
+  } else {
+    if (s.verticalFrameRun === 'rotated') {
+      // WORD_VERTICAL_LINE_CENTRED_BOX: a quarter-turned frame keeps the
+      // horizontal partition and adds the vertical single-line addition
+      // equally to both sides.
+      const extraPx = wordVerticalSingleLineExtraPx(metricEmPx, verticalFarEastClass(s));
+      ascent += extraPx / 2;
+      descent += extraPx / 2;
+    }
+    if (s.positionExtendsLineBox !== false) {
+      const positionPx = (s.position ?? 0) * scale;
+      if (positionPx > 0) ascent += positionPx;
+      else if (positionPx < 0) descent -= positionPx;
+    }
   }
   if (s.ruby && (!s.textBoxLineFloor || s.textBoxVertical)) {
     const reserve = rubyAscentReservePx(

@@ -570,13 +570,12 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     expect(withRuby - plain, `ruby advance ${withRuby} vs plain ${plain}`).toBeCloseTo(9, 5);
   });
 
-  // GT (Word PDF): mongolianVert's first column is the exact MIRROR of the
-  // eaVert first column (sample-53: flow-start-edge → label glyph-box gap is
-  // preserved within 0.5pt). Reflecting only the band ORIGIN keeps the baseline
-  // measured from the band's physical RIGHT edge, so asymmetric leading (line
-  // box taller than the glyph em box) shoves the mongolian line toward the
-  // physical left — the centerline inside the band must be reflected too.
-  it('mongolianVert mirrors the line centerline within its cross-axis band', () => {
+  // GT (Word PDF): mongolianVert's first column mirrors the eaVert first
+  // column (sample-53: flow-start-edge → label glyph-box gap within 0.5pt); a
+  // centred auto line is its own mirror. vert2 controls with exact, ruby and
+  // raised lines show that each strip keeps the eaVert arrangement inside it
+  // (axis toward the same edge), only the strip order is reversed.
+  it('mongolianVert reverses the strip order and keeps the arrangement inside each strip', () => {
     const firstColumnCenterX = (mode: 'eaVert' | 'mongolianVert'): number => {
       const { ctx, glyphs } = makeMatrixCtx();
       const shape = richTextbox([{ text: CJK, fontSizePt: 11, fontFamily: 'NotInMetrics' }], mode);
@@ -594,9 +593,10 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
     };
     const eaX = firstColumnCenterX('eaVert');
     const mongolianX = firstColumnCenterX('mongolianVert');
-    // Equal glyphs have equal cross extents, so mirrored centerlines imply equal
-    // flow-start-edge → glyph-box gaps (box spans x ∈ [0, 200], insets 0).
-    expect(mongolianX, `mongolian centerline ${mongolianX} mirrors eaVert ${eaX}`).toBeCloseTo(200 - eaX, 5);
+    // The strips run in reverse order but each keeps the eaVert arrangement
+    // (WORD_VERTICAL_LINE_CENTRED_BOX): the exact 20pt line's axis stands as
+    // far from the strip's right edge as in the first eaVert strip [180, 200].
+    expect(mongolianX, `mongolian axis ${mongolianX} keeps the eaVert offset ${eaX}`).toBeCloseTo(eaX - 180, 5);
   });
 
   // mongolianVert + ruby: the furigana keeps its orientation side (physical
@@ -687,10 +687,13 @@ describe('§20.1.10.83 textbox <wps:bodyPr vert> — vertical text-box rendering
       fallback.columnAdvance - plain.columnAdvance,
       'absent hpsRaise reserves selected-face base ascent + guide descent',
     ).toBeCloseTo(13.5, 5);
+    // Each strip keeps its own arrangement (WORD_VERTICAL_LINE_CENTRED_BOX), so
+    // the next column follows the ruby line's head extent: the 15pt raise plus
+    // the 7.5pt guide against the 12pt ascent plus the 13.5pt fallback.
     expect(
       raised.columnAdvance - fallback.columnAdvance,
-      'the authored 15pt raise grows from the 13.5pt ink-touching fallback',
-    ).toBeCloseTo(1.5, 5);
+      'the authored 15pt raise and guide replace the ink-touching fallback',
+    ).toBeCloseTo((15 + 7.5) - (12 + 13.5), 5);
     expect(zero.columnAdvance, 'zero hpsRaise adds no column reservation')
       .toBeCloseTo(plain.columnAdvance, 5);
     expect(zero.rubyCrossOffset, 'zero hpsRaise draws ruby on the base centerline').toBeCloseTo(0, 5);

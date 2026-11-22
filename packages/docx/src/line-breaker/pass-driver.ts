@@ -507,8 +507,12 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
       Object.assign(line, metrics);
       line.endsWithBreak = last.endsWithBreak;
       for (const segment of line.segments) {
-        if ('text' in segment) segment.lineRelativePosition =
-          wordUniformRunPositionPaintPt(segment.position ?? 0, positionReference ?? 0);
+        // A vertical line positioned uniformly stays on its axis
+        // (WORD_VERTICAL_LINE_CENTRED_BOX); its runs paint relative to it.
+        if ('text' in segment) segment.lineRelativePosition = segment.verticalRun || segment.tateChuYoko
+          || segment.verticalFrameRun === 'upright'
+          ? (segment.position ?? 0) - (positionReference ?? 0)
+          : wordUniformRunPositionPaintPt(segment.position ?? 0, positionReference ?? 0);
       }
     }
     start = end;

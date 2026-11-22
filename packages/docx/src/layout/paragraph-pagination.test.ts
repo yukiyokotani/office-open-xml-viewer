@@ -230,7 +230,9 @@ describe('paragraph page-local reserve selection', () => {
     )).toThrow(/align with retained lines/i);
   });
 
-  it('admits a vertical-rl final visible baseline when only the retained line box crosses the block end', () => {
+  it('relocates a vertical-rl final text line whose retained line box crosses the block end', () => {
+    // Windows Word does not admit such a column even when its axis and glyph
+    // ink stay inside (WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION).
     const selected = selectParagraphFragment(
       verticalEdgeParagraph('vertical-rl', 17.5),
       { boundary: null }, splittable([{ segIndex: 0, charOffset: 1 }]),
@@ -238,12 +240,10 @@ describe('paragraph page-local reserve selection', () => {
       { keepLines: false, widowControl: false, writingMode: 'vertical-rl' },
     );
 
-    expect(selected.fragment?.lines).toHaveLength(1);
-    expect(selected.fragment?.advancePt).toBe(25);
     expect(selected).toMatchObject({
-      nextCursor: null,
-      requiresFreshFlowRegion: false,
-      admittedBlockExtentPt: 20,
+      fragment: null,
+      nextCursor: { boundary: null },
+      requiresFreshFlowRegion: true,
     });
   });
 

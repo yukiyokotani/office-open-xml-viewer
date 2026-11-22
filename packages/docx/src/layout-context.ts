@@ -92,6 +92,12 @@ export interface StoryContext {
   readonly lineNumberingEligible: boolean;
   /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
   readonly quarterTurned?: boolean;
+  /** The quarter-turned text-box story keeps East Asian glyphs upright. */
+  readonly uprightFrame?: true;
+  /** The story is the content of a table cell whose §17.4.72 textDirection
+   * turns it (WORD_VERTICAL_LINE_CENTRED_BOX frame lines): tbRlV keeps East
+   * Asian glyphs upright, tbRl and btLr turn every glyph. */
+  readonly verticalCell?: 'rotated' | 'upright';
   /** A text-box story whose outermost host is a header or footer
    * (`word-header-footer-off-line-grid`). */
   readonly headerFooterHosted?: true;

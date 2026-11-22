@@ -1717,6 +1717,10 @@ export interface FlowContainer {
   readonly quarterTurnMath?: boolean;
   /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
   readonly quarterTurned?: boolean;
+  /** The quarter-turned story keeps East Asian glyphs upright (eaVert,
+   * mongolianVert): its lines take the centred box of
+   * WORD_VERTICAL_LINE_CENTRED_BOX. */
+  readonly uprightEastAsian?: boolean;
 }
 
 export interface FlowCursor extends PointPt {}

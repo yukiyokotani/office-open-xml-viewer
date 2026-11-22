@@ -144,6 +144,8 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** The admitted resource or reference profile sets an OS/2 Far East
    * code-page bit (Word's 1.3 x usWin single-line class). */
   resolvedFarEastLineClass?: true;
+  /** The run is set in a quarter-turned frame (LineLayoutEnvironment.verticalFrameLines). */
+  verticalFrameRun?: 'rotated' | 'upright';
   resolvedLineHeightRatio?: number;
   /** A selected route supplied this ratio from measured or parsed geometry. */
   resolvedResourceVerticalMetric?: true;
@@ -801,6 +803,10 @@ export interface LineLayoutEnvironment {
   readonly noteNumbering?: NoteNumbering;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
+  /** The paragraph is laid out in a quarter-turned frame (a vertical text box
+   * story or a vertical table cell): its lines take the vertical single line
+   * of WORD_VERTICAL_LINE_CENTRED_BOX in their own horizontal partition. */
+  readonly verticalFrameLines?: 'rotated' | 'upright';
   /** The paragraph keeps Word's line boxes under a LibreOffice producer
    * (keepsWordLineBoxes). */
   readonly wordLineBoxes?: boolean;

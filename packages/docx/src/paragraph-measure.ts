@@ -280,6 +280,7 @@ export function measureParagraph(
       compat.useFeLayout,
       firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
       emptyMark,
+      environment.verticalCJK === true || environment.verticalFrameLines !== undefined,
     );
     const markAdvancePt = markMetrics.advancePx;
     let markWrapBounds: MeasuredParagraph['markWrapBounds'];
