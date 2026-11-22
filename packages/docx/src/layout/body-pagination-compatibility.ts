@@ -167,6 +167,23 @@ const GRID_PLAIN_TYPOGRAPHY_KEYS = new Set([
   'caps', 'smallCaps', 'strike', 'doubleStrike', 'verticalAlign', 'positionPt', 'emphasis',
 ]);
 
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: the placements of a line that belong to
+ * its flow: everything but the position-only hosts of floating drawings and
+ * the drawings placed through them. */
+export function wordFlowPlacements(
+  paragraph: Pick<ParagraphLayout, 'drawings'>,
+  line: Pick<LineLayout, 'placements'>,
+): LineLayout['placements'] {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  if (!line.placements.some((placement) => placement.kind === 'anchor-host' || placement.kind === 'drawing')) {
+    return line.placements;
+  }
+  const floating = new Set(paragraph.drawings.flatMap((drawing) => drawing.anchorLayer ? [drawing.id] : []));
+  return line.placements.filter((placement) => placement.kind === 'anchor-host'
+    ? placement.anchorOccurrenceId === undefined
+    : placement.kind !== 'drawing' || !floating.has(placement.drawingId));
+}
+
 function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout): boolean {
   // Windows Word 16.0.20430, trr3 family C (144 controls): modes 14/15,
   // automatic overflow/hard break/pageBreakBefore, empty/text/break-only,
@@ -176,8 +193,9 @@ function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout)
   // full first-line fit moves the paragraph; glyph-content relief would split
   // it. Only a whole source paragraph with no placements on any acquired line
   // loses relief (break-only/empty-line-only, bookmarks allowed). Placements
-  // include tabs, anchor hosts, resources and drawings as well as text; this
-  // is not a glyph test. Mixed paragraphs are unmeasured and keep v0.89 relief,
+  // include tabs, resources and inline drawings as well as text (floating
+  // drawings and their hosts are not flow placements: wordFlowPlacements);
+  // this is not a glyph test. Mixed paragraphs are unmeasured and keep v0.89 relief,
   // including blank prefixes and blank-only continuations after earlier
   // placements.
   // The caller carries the whole-paragraph fact across slicing/reacquisition.
@@ -185,15 +203,20 @@ function wordGridLineHasPlainPaint(paragraph: ParagraphLayout, line: LineLayout)
   // split when their full advances fit. Metric-only empty paragraph marks
   // have their separate allowance. These endpoint probes do
   // not establish automatic grid pitch, caret-to-line geometry or other faces.
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: floating drawings, their text boxes and
+  // their hosts are not the line's paint (wordFlowPlacements); a float that
+  // wraps text cancels the relief through its exclusion alone.
+  const floatsOnly = paragraph.drawings.every((drawing) => drawing.anchorLayer !== undefined);
   return Object.entries(paragraph).every(([key, value]) => value === undefined
     || GRID_PLAIN_PARAGRAPH_KEYS.has(key)
+    || ((key === 'drawings' || key === 'textBoxes') && floatsOnly)
     || (['borders', 'drawings', 'textBoxes'].includes(key)
       && Array.isArray(value) && value.length === 0))
     && paragraph.lines.every(candidate => (candidate.barTabRules?.length ?? 0) === 0)
     && Object.entries(line).every(([key, value]) => value === undefined
       || GRID_PLAIN_LINE_KEYS.has(key)
       || (key === 'barTabRules' && Array.isArray(value) && value.length === 0))
-    && line.placements.every(placement => placement.kind === 'text'
+    && wordFlowPlacements(paragraph, line).every(placement => placement.kind === 'text'
       && Object.entries(placement).every(([key, value]) => value === undefined
         || GRID_PLAIN_TEXT_KEYS.has(key)
         || ((key === 'paintOps' || key === 'basePaintOps') && Array.isArray(value)

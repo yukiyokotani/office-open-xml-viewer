@@ -103,7 +103,12 @@ export function buildDocxHighlightLayer(
       // §17.3.2.10 縦中横 alone compresses natural extents into the retained
       // one-em cell. Ordinary runs preserve the established natural measurement.
       const k = tateChuYokoOverlayScale(run, measure);
-      const x = pitchedX * k;
+      // A right-to-left run is painted from its right edge: the slice's
+      // logical prefix lies to its right, so its box mirrors within the run.
+      const runCount = countSpacingCharacters(run.text).pitchBearing;
+      const runWidth = sliceHorizontalExtent(run.text, 0, run.text.length, measure).width
+        + Math.max(0, runCount - 1) * pitch;
+      const x = (run.direction === 'rtl' ? Math.max(0, runWidth - pitchedX - pitchedWidth) : pitchedX) * k;
       const width = pitchedWidth * k;
       if (width <= 0) continue;
       const box = document.createElement('div');

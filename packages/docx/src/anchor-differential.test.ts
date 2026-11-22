@@ -1,0 +1,515 @@
+import { describe, expect, it } from 'vitest';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { textRunsForPage } from './text-run-projection.js';
+import { buildDocxHighlightLayer } from './find-highlight-layer.js';
+import { resolveCommentAnchorRuns } from './comments.js';
+import { visualBoundaryXPt, visualClusterStartXPt } from './layout/visual-cluster-geometry.js';
+import type { AnchorAcquisitionInput } from './layout/anchor-input.js';
+import type { ParagraphLayout } from './layout/types.js';
+import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRunInfo } from './types.js';
+
+/**
+ * WORD_ANCHOR_HOST_NO_LINE_METRIC, differentially: a floating drawing anchored
+ * at any source boundary of a paragraph changes nothing but the drawing. For
+ * a generated set of paragraphs, every sampled boundary receives an anchor
+ * and the result is compared with the same paragraph without it:
+ *
+ * - pagination, blocks, line boxes and grid cells;
+ * - cluster positions, paint operations and decorations;
+ * - selection rectangles and their source runs, a find highlight for every
+ *   single character (the per-character extent a caret offset also uses),
+ *   and comment anchors over every run and at every run boundary;
+ * - the host of the drawing, which stands at the visual position of that
+ *   boundary in the anchor-free layout.
+ */
+
+type Run = DocParagraph['runs'][number];
+type RunSpec = readonly [text: string, extra?: object];
+
+function measureContext(): CanvasRenderingContext2D {
+  let font = '10px serif';
+  const size = (): number => Number.parseFloat(/([\d.]+)px/.exec(font)?.[1] ?? '10');
+  return {
+    get font() { return font; },
+    set font(value: string) { font = value; },
+    measureText: (value: string) => ({
+      width: [...value].length * size() * 0.5,
+      fontBoundingBoxAscent: size() * 0.8, fontBoundingBoxDescent: size() * 0.2,
+      actualBoundingBoxAscent: size() * 0.8, actualBoundingBoxDescent: size() * 0.2,
+    } as TextMetrics),
+    save() {}, restore() {}, fillText() {}, strokeText() {}, beginPath() {},
+    moveTo() {}, lineTo() {}, stroke() {}, fillRect() {}, drawImage() {},
+    fillStyle: '#000', strokeStyle: '#000', lineWidth: 1, textAlign: 'left', direction: 'ltr',
+  } as unknown as CanvasRenderingContext2D;
+}
+
+const textRun = (value: string, extra: object = {}): Run => ({
+  type: 'text', text: value, bold: false, italic: false, underline: false, strikethrough: false,
+  fontSize: 12, color: null, fontFamily: 'NotInMetrics', isLink: false, background: null, vertAlign: null,
+  hyperlink: null, ...extra,
+}) as unknown as Run;
+
+const missingEdges = { topPt: null, topStatus: 'missing', rightPt: null, rightStatus: 'missing',
+  bottomPt: null, bottomStatus: 'missing', leftPt: null, leftStatus: 'missing' };
+type AnchorKind = 'page' | 'character';
+/** A wrapNone drawing: positioned from the page, or from its anchoring
+ * character and line with zero offsets. */
+const acquisition = (kind: AnchorKind): AnchorAcquisitionInput => ({
+  occurrenceId: 'subject',
+  simplePosition: { enabled: false, status: 'valid', xPt: 0, xStatus: 'valid', yPt: 0, yStatus: 'valid' },
+  horizontal: { relativeFrom: kind, relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: kind === 'page' ? 150 : 0 } },
+  vertical: { relativeFrom: kind === 'page' ? 'paragraph' : 'line', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } },
+  extent: { widthPt: 5, heightPt: 7, widthStatus: 'valid', heightStatus: 'valid' },
+  parentEffectExtent: missingEdges, anchorDistances: missingEdges,
+  relativeSize: { horizontal: null, vertical: null },
+  wrap: { kind: 'none', authoredKinds: ['wrapNone'], side: null, distances: missingEdges, effectExtent: null, polygon: null },
+  behavior: { behindDoc: false, behindDocStatus: 'valid', relativeHeight: 1, relativeHeightStatus: 'valid',
+    locked: false, lockedStatus: 'valid', allowOverlap: true, allowOverlapStatus: 'valid',
+    layoutInCell: true, layoutInCellStatus: 'valid' },
+  group: null,
+}) as unknown as AnchorAcquisitionInput;
+const anchorRuns = (kind: AnchorKind): Run[] => [
+  { type: 'anchorHost', fontSize: 40, bold: true, __anchorOccurrenceId: 'subject' } as unknown as Run,
+  { type: 'image', imagePath: 'word/media/p.png', mimeType: 'image/png', widthPt: 5, heightPt: 7, anchor: true,
+    anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false,
+    __anchorAcquisition: acquisition(kind) } as unknown as Run,
+];
+
+const paragraph = (runs: readonly Run[], options: object = {}): BodyElement => ({
+  type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0, spaceBefore: 0,
+  spaceAfter: 0, lineSpacing: null, numbering: null, tabStops: [], defaultFontSize: 12,
+  defaultFontFamily: 'NotInMetrics', runs: [...runs], ...options,
+}) as unknown as BodyElement;
+const table = (content: BodyElement[]): BodyElement => ({
+  type: 'table', colWidths: [120], borders: { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null },
+  cellMarginTop: 0, cellMarginRight: 0, cellMarginBottom: 0, cellMarginLeft: 0, jc: 'left', layout: 'fixed',
+  rows: [{ rowHeight: null, rowHeightRule: 'auto', isHeader: false, cells: [{ content, colSpan: 1, vMerge: null,
+    borders: { top: null, right: null, bottom: null, left: null, insideH: null, insideV: null },
+    background: null, vAlign: 'top', widthPt: 120 }] }],
+}) as unknown as BodyElement;
+
+// ── The generated set ───────────────────────────────────────────────────────
+
+const rtl = { rtl: true };
+const scripts: readonly (readonly [name: string, runs: readonly RunSpec[], options?: object])[] = [
+  ['left-to-right', [['ab cd '], ['efgh ij']]],
+  ['two formats', [['ab '], ['cd ', { bold: true }], ['ef']]],
+  ['right-to-left', [['אב גד ', rtl], ['הו', rtl]]],
+  ['right-to-left with digits', [['אב123גד 45', rtl]]],
+  ['mixed directions', [['ab אבג cd']]],
+  ['Arabic joining', [['لام لا با', rtl]]],
+  ['East Asian with automatic spacing', [['漢字ab字12字']], { autoSpaceDE: true, autoSpaceDN: true }],
+  ['East Asian punctuation', [['字字、「字字」字。字字字']]],
+  ['Thai', [['ภาษาไทย คำ']]],
+  ['ligatures', [['office fi ffl']]],
+  ['tabs', [['a\tbc\td']], { tabStops: [{ pos: 30, alignment: 'left', leader: 'none' }] }],
+  ['fitted text', [['abcd', { fitTextVal: 960, fitTextId: 1 }], [' ef']]],
+  ['soft hyphen and no-break space', [['co­op x yz']]],
+];
+const naturalScripts = new Set(['left-to-right', 'two formats', 'right-to-left', 'right-to-left with digits',
+  'mixed directions', 'Arabic joining', 'East Asian punctuation', 'ligatures']);
+const alignments = ['left', 'both'] as const;
+const underlines: readonly object[] = [{}, { underline: true }, { underline: true, underlineStyle: 'dash' }];
+const modes = [12, 14, 15] as const;
+const grids: readonly object[] = [{}, { docGridType: 'lines', docGridLinePitch: 20 }];
+const containers = ['body', 'body near the page end', 'cell', 'header', 'footnote'] as const;
+const directions: readonly (string | null)[] = [null, 'tbRlV'];
+const widths = [200, 100] as const;
+const lineSpacings: readonly (object | null)[] = [null, { rule: 'auto', value: 1.5, explicit: true },
+  { rule: 'exact', value: 14, explicit: true }, { rule: 'atLeast', value: 20, explicit: true }];
+/** Room left under the filler of 'body near the page end': from less than
+ * one line to two. */
+const fillers = [100, 112, 122, 130] as const;
+
+interface Case {
+  readonly name: string;
+  readonly specs: readonly RunSpec[];
+  readonly options: object;
+  readonly settings: object;
+  readonly section: object;
+  readonly container: typeof containers[number];
+  readonly vertical: boolean;
+  readonly filler: number;
+  /** Horizontal body text, unjustified, one cluster per character at its
+   * natural advance: page coordinates are the paragraph's own. */
+  readonly naturalSpacing: boolean;
+}
+
+/** A deterministic sample of the axes: every script meets every value of
+ * every other axis at least once, without the full product. */
+function cases(perScript: number): Case[] {
+  const result: Case[] = [];
+  let state = 12345;
+  const next = (count: number): number => {
+    state = (Math.imul(state, 1103515245) + 12345) & 0x7fffffff;
+    return (state >>> 8) % count;
+  };
+  scripts.forEach(([scriptName, specs, scriptOptions], scriptIndex) => {
+    for (let sample = 0; sample < perScript; sample += 1) {
+      // The first samples walk each axis in turn; the rest are drawn.
+      const pick = <T,>(values: readonly T[], axis: number): T =>
+        values[sample < 6 ? (sample + scriptIndex * (axis + 1) + axis) % values.length : next(values.length)]!;
+      const alignment = pick(alignments, 0);
+      const underline = pick(underlines, 1);
+      const mode = pick(modes, 2);
+      const grid = pick(grids, 3);
+      const useFELayout = pick([false, true], 4);
+      const container = pick(containers, 5);
+      const direction = pick(directions, 6);
+      const width = pick(widths, 7);
+      const lineSpacing = pick(lineSpacings, 8);
+      const filler = pick(fillers, 9);
+      result.push({
+        name: [scriptName, alignment, JSON.stringify(underline), `mode ${mode}`, JSON.stringify(grid),
+          useFELayout ? 'useFELayout' : 'no useFELayout', container, direction ?? 'horizontal', `page ${width}`,
+          `spacing ${JSON.stringify(lineSpacing)}`, `filler ${filler}`].join(', '),
+        specs: specs.map(([value, extra]) => [value, { ...extra, ...underline }] as const),
+        options: { alignment, lineSpacing, ...scriptOptions },
+        filler,
+        settings: { compatibilityMode: mode, ...(useFELayout ? { useFELayout: true } : {}) },
+        section: { ...grid, ...(direction ? { textDirection: direction, pageWidth: 200, pageHeight: width + 60 }
+          : { pageWidth: width, pageHeight: 200 }) },
+        container,
+        vertical: direction !== null,
+        naturalSpacing: direction === null && alignment === 'left' && container.startsWith('body')
+          && naturalScripts.has(scriptName),
+      });
+    }
+  });
+  return result;
+}
+
+/** Source boundaries of the subject text: every code unit that starts a
+ * grapheme, and the end; long texts keep the ends and every second one. */
+function boundaries(specs: readonly RunSpec[]): number[] {
+  const value = specs.map(([part]) => part).join('');
+  const all: number[] = [];
+  for (let index = 0; index <= value.length; index += 1) {
+    if (index < value.length && /\p{M}/u.test(value[index]!)) continue;
+    all.push(index);
+  }
+  return all.length <= 12 ? all : all.filter((_, index) => index % 2 === 0 || index === all.length - 1);
+}
+
+/** The subject runs split at `offset`, with or without the anchor there. */
+function subjectRuns(specs: readonly RunSpec[], offset: number, kind: AnchorKind | null): { runs: Run[]; anchorAt: number } {
+  const runs: Run[] = [];
+  let cursor = 0;
+  let anchorAt = -1;
+  const anchor = (): void => {
+    anchorAt = runs.length;
+    if (kind) runs.push(...anchorRuns(kind));
+  };
+  for (const [value, extra] of specs) {
+    const local = offset - cursor;
+    if (local === 0 && anchorAt < 0) anchor();
+    if (local > 0 && local < value.length) {
+      runs.push(textRun(value.slice(0, local), extra));
+      anchor();
+      runs.push(textRun(value.slice(local), extra));
+    } else {
+      runs.push(textRun(value, extra));
+    }
+    cursor += value.length;
+  }
+  if (anchorAt < 0) anchor();
+  return { runs, anchorAt };
+}
+
+function model(testCase: Case, subject: readonly Run[]): { model: DocxDocumentModel; prefixRuns: number } {
+  const after = paragraph([textRun('zz')]);
+  let body: BodyElement[];
+  let header: BodyElement[] | null = null;
+  let footnotes: unknown[] = [];
+  let prefixRuns = 0;
+  const subjectParagraph = paragraph(subject, testCase.options);
+  switch (testCase.container) {
+    case 'body': body = [subjectParagraph, after]; break;
+    case 'body near the page end':
+      body = [paragraph([textRun('x')], { lineSpacing: { rule: 'exact', value: testCase.filler, explicit: true } }), subjectParagraph, after];
+      break;
+    case 'cell': body = [table([subjectParagraph, paragraph([textRun('y')])]), after]; break;
+    case 'header': body = [after]; header = [subjectParagraph]; break;
+    case 'footnote': {
+      prefixRuns = 1;
+      body = [paragraph([textRun('B'), textRun('1', { noteRef: { kind: 'footnote', id: '1' } })]), after];
+      footnotes = [{ id: '1', content: [paragraph([textRun('', { noteRef: { kind: 'footnote', id: '' } }), ...subject],
+        testCase.options)] }];
+      break;
+    }
+  }
+  return {
+    prefixRuns,
+    model: {
+      section: { pageWidth: 200, pageHeight: 200, marginTop: 40, marginRight: 20, marginBottom: 20, marginLeft: 20,
+        headerDistance: 5, footerDistance: 0, titlePage: false, evenAndOddHeaders: false,
+        sectionStart: 'nextPage', columns: null, ...testCase.section },
+      body, settings: testCase.settings,
+      headers: { default: header ? { body: header } : null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes, endnotes: [], fontFamilyClasses: {},
+    } as unknown as DocxDocumentModel,
+  };
+}
+
+// ── What is compared ────────────────────────────────────────────────────────
+
+const round = (value: number): number => Math.round(value * 1e6) / 1e6;
+/** Keys that name the drawing and its bookkeeping, or source positions the
+ * anchoring character shifts by one unit. */
+const dropped = new Set(['paintOrder', 'capabilities', 'segIndex', 'drawings', 'textBoxes', 'anchorCollisions', 'anchorFrames',
+  'cellContainmentBounds', 'resources', 'events', 'id', 'source', 'sourceRunIndex', 'paragraphId']);
+
+/** Everything a page lays out and paints, without the floating drawing, its
+ * host and source addresses. Ranges keep their lengths. */
+function comparable(value: unknown): unknown {
+  if (typeof value === 'number') return round(value);
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry) => !(entry && typeof entry === 'object'
+        && ((entry as { kind?: string }).kind === 'anchor-host'
+          || ((entry as { kind?: string }).kind === 'drawing' && 'drawingId' in entry))))
+      .map(comparable);
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (dropped.has(key) || entry === undefined) continue;
+    if (key === 'range' && entry && typeof entry === 'object' && 'start' in entry && 'end' in entry) {
+      // A line's own range counts the anchoring character; its content's do not.
+      if ('placements' in value) continue;
+      result.rangeLength = (entry as { end: number }).end - (entry as { start: number }).start;
+      continue;
+    }
+    result[key] = comparable(entry);
+  }
+  return result;
+}
+
+const fakeElement = () => ({ style: { cssText: '' }, children: [] as { style: { cssText: string } }[], innerHTML: '',
+  appendChild(child: { style: { cssText: string } }) { this.children.push(child); } });
+const measureForFont = (font: string) => (value: string): number =>
+  [...value].length * Number.parseFloat(/([\d.]+)px/.exec(font)?.[1] ?? '10') * 0.5;
+
+/** The highlight of every single character of every run. */
+function findHighlights(runs: DocxTextRunInfo[]): string[] {
+  const scope = globalThis as { document?: unknown };
+  const previous = scope.document;
+  scope.document = { createElement: fakeElement };
+  try {
+    const layer = fakeElement();
+    const matches = runs.flatMap((run, runIndex) => Array.from({ length: run.text.length }, (_, start) => ({
+      active: false, slices: [{ runIndex, start, end: start + 1 }],
+    })));
+    buildDocxHighlightLayer(layer as never, runs, matches, 1000, 1000, measureForFont);
+    return layer.children.map((child) => child.style.cssText);
+  } finally {
+    scope.document = previous;
+  }
+}
+
+/** Each character's highlight that does not start where a cluster showing
+ * that character is painted (natural spacing only: a highlight measures the
+ * run's text, not its retained positions). */
+function misplacedHighlights(runs: DocxTextRunInfo[], laidOut: readonly ParagraphLayout[]): string[] {
+  const painted = new Set<string>();
+  for (const subject of laidOut) {
+    for (const line of subject.lines) {
+      for (const placement of line.placements) {
+        if (placement.kind !== 'text') continue;
+        placement.clusters.forEach((cluster, index) => {
+          const shown = placement.text.slice(cluster.range.start - placement.range.start, cluster.range.end - placement.range.start);
+          painted.add(`${shown}@${Math.round(visualClusterStartXPt(placement, index) * 100)}`);
+        });
+      }
+    }
+  }
+  const scope = globalThis as { document?: unknown };
+  const previous = scope.document;
+  scope.document = { createElement: fakeElement };
+  const misplaced: string[] = [];
+  try {
+    runs.forEach((run, runIndex) => {
+      for (let start = 0; start < run.text.length; start += 1) {
+        const layer = fakeElement();
+        buildDocxHighlightLayer(layer as never, runs, [{ active: false, slices: [{ runIndex, start, end: start + 1 }] }],
+          100, 100, measureForFont);
+        const left = /left:([-\d.e]+)%/.exec(layer.children[0]?.style.cssText ?? '')?.[1];
+        if (left === undefined) continue;
+        const key = `${run.text[start]}@${Math.round(Number(left) * 100)}`;
+        if (!painted.has(key)) misplaced.push(`${JSON.stringify(run.text)}[${start}] at ${left}`);
+      }
+    });
+  } finally {
+    scope.document = previous;
+  }
+  return misplaced;
+}
+
+function paragraphs(node: unknown, found: ParagraphLayout[] = []): ParagraphLayout[] {
+  if (!node || typeof node !== 'object') return found;
+  if (Array.isArray(node)) { node.forEach((entry) => paragraphs(entry, found)); return found; }
+  const record = node as Record<string, unknown>;
+  if (record.kind === 'paragraph' && Array.isArray(record.lines)) found.push(record as unknown as ParagraphLayout);
+  for (const [key, entry] of Object.entries(record)) if (key !== 'paintOrder') paragraphs(entry, found);
+  return found;
+}
+
+function observe(testCase: Case, subject: readonly Run[], anchorAt: number, anchored: boolean) {
+  const built = model(testCase, subject);
+  const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
+    { currentDateMs: 0 });
+  void anchorAt;
+  void anchored;
+  const selection: unknown[] = [];
+  const finds: string[][] = [];
+  const comments: unknown[] = [];
+  layout.pages.forEach((_, pageIndex) => {
+    const runs = textRunsForPage(layout, pageIndex, { scale: 1 });
+    // Source runs by their order in their paragraph: the anchoring runs
+    // renumber the runs after them and own no text.
+    const story = (run: Readonly<DocxTextRunInfo>): string => JSON.stringify(run.source);
+    const indices = new Map<string, number[]>();
+    for (const run of runs) {
+      if (run.sourceRunIndex === undefined) continue;
+      const list = indices.get(story(run)) ?? [];
+      if (!list.includes(run.sourceRunIndex)) list.push(run.sourceRunIndex);
+      indices.set(story(run), list.sort((a, b) => a - b));
+    }
+    const geometry = (run: Readonly<DocxTextRunInfo>) => {
+      const { source: _source, sourceRunIndex, paragraphId: _paragraphId, ...rest } = run as DocxTextRunInfo & { paragraphId?: unknown };
+      return { ...comparable(rest) as object, story: run.source?.story,
+        sourceRun: sourceRunIndex === undefined ? null : indices.get(story(run))!.indexOf(sourceRunIndex) };
+    };
+    selection.push(runs.map(geometry));
+    finds.push(findHighlights(runs));
+    // A comment over each source run, and a point comment at every run
+    // position of the paragraph (the anchoring runs' own included: a point
+    // there resolves as at the text that follows).
+    for (const [key, list] of indices) {
+      const sample = runs.find((run) => story(run) === key)!;
+      const resolve = (start: number, end: number) => JSON.stringify(resolveCommentAnchorRuns({
+        commentId: 'c', source: sample.source, startRunIndex: start, endRunIndex: end,
+        reference: { source: sample.source, runIndex: start, affinity: 'following' },
+      } as never, runs).map(geometry));
+      const points: string[] = [];
+      for (let index = list[0]!; index <= list.at(-1)! + 1; index += 1) {
+        const resolved = resolve(index, index);
+        if (points.at(-1) !== resolved) points.push(resolved);
+      }
+      comments.push({ ranges: list.map((index) => resolve(index, index + 1)), points });
+    }
+  });
+  const laidOut = paragraphs(layout.pages.map((page) => page.layers));
+  const misplaced = testCase.naturalSpacing && layout.pages.length === 1
+    ? misplacedHighlights(textRunsForPage(layout, 0, { scale: 1 }), laidOut) : [];
+  const drawings = layout.pages.flatMap((page) => page.layers.paintOrder.flatMap((entry) => entry.kind === 'drawing'
+    ? [[round(entry.node.inkBounds.xPt), round(entry.node.inkBounds.yPt)]] : []));
+  return {
+    drawings, misplaced,
+    pages: layout.pages.map((page) => comparable(page.layers)),
+    selection, finds, comments,
+    paragraphs: laidOut,
+  };
+}
+
+/** Where the source boundary `offset` (in the paragraph's text) is painted
+ * in an anchor-free paragraph: the leading edge of the content that starts
+ * there, or the trailing edge of the text that ends there. `precedingPt` is
+ * the visual start of the character before the boundary on that line. */
+function boundaryPosition(subject: ParagraphLayout, offset: number): { xPt: number; line: number; precedingPt: number | null } | null {
+  let found: { xPt: number; line: number } | null = null;
+  let ending: { xPt: number; line: number } | null = null;
+  for (const [lineIndex, line] of subject.lines.entries()) {
+    for (const placement of line.placements) {
+      if (placement.kind === 'text') {
+        const cluster = placement.clusters.findIndex((entry) => entry.range.start === offset);
+        if (cluster >= 0) found ??= { xPt: visualBoundaryXPt(placement, cluster), line: lineIndex };
+        else if (placement.range.start < offset && offset < placement.range.end) return null;
+        else if (placement.range.end === offset && placement.clusters.length > 0) {
+          ending = { xPt: visualBoundaryXPt(placement, placement.clusters.length), line: lineIndex };
+        }
+      } else if (placement.kind === 'tab' && placement.range.start === offset) {
+        found ??= { xPt: placement.bounds!.xPt, line: lineIndex };
+      }
+    }
+  }
+  // Only the end of the paragraph's content is decided by what precedes it.
+  const last = subject.lines.at(-1)?.placements.filter((placement) => placement.kind === 'text' || placement.kind === 'tab')
+    .reduce((end, placement) => Math.max(end, placement.range.end), 0) ?? 0;
+  const position = found ?? (offset >= last ? ending : null);
+  if (!position) return null;
+  let preceding: { start: number; xPt: number } | null = null;
+  for (const placement of subject.lines[position.line]!.placements) {
+    if (placement.kind !== 'text') continue;
+    placement.clusters.forEach((cluster, index) => {
+      if (cluster.range.start < offset && (!preceding || cluster.range.start > preceding.start)) {
+        preceding = { start: cluster.range.start, xPt: visualClusterStartXPt(placement, index) };
+      }
+    });
+  }
+  return { ...position, precedingPt: (preceding as { xPt: number } | null)?.xPt ?? null };
+}
+
+/** The first place two compared values differ, for a readable failure. */
+function firstDifference(actual: unknown, expected: unknown, path = ''): string | null {
+  if (Object.is(actual, expected)) return null;
+  if (actual && expected && typeof actual === 'object' && typeof expected === 'object') {
+    const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
+    for (const key of keys) {
+      const found = firstDifference((actual as Record<string, unknown>)[key], (expected as Record<string, unknown>)[key],
+        `${path}/${key}`);
+      if (found) return found;
+    }
+    return null;
+  }
+  return `${path}: with the anchor ${JSON.stringify(actual)?.slice(0, 120)}, without ${JSON.stringify(expected)?.slice(0, 120)}`;
+}
+
+const sampled = cases(Number(process.env.ANCHOR_DIFFERENTIAL_SAMPLES ?? 10));
+
+describe('a floating anchor at any source boundary changes nothing but the drawing', () => {
+  for (const testCase of sampled) {
+    it(testCase.name, () => {
+      const offsets = boundaries(testCase.specs);
+      offsets.forEach((offset, order) => {
+        const kind: AnchorKind = order % 2 === 0 ? 'character' : 'page';
+        const plainRuns = subjectRuns(testCase.specs, offset, null);
+        const anchoredRuns = subjectRuns(testCase.specs, offset, kind);
+        const plain = observe(testCase, plainRuns.runs, plainRuns.anchorAt, false);
+        const anchored = observe(testCase, anchoredRuns.runs, anchoredRuns.anchorAt, true);
+        const label = `${kind}-relative anchor at offset ${offset}`;
+        for (const facet of ['pages', 'selection', 'finds', 'comments'] as const) {
+          const difference = firstDifference(anchored[facet], plain[facet]);
+          if (difference) throw new Error(`${label}: ${facet}${difference}`);
+        }
+
+        // A highlight lies over the character it marks, with or without the anchor.
+        expect(plain.misplaced, `${label}: find highlights without the anchor`).toEqual([]);
+        expect(anchored.misplaced, `${label}: find highlights`).toEqual([]);
+
+        // The host: on the line and at the visual position of its boundary.
+        const hostParagraph = anchored.paragraphs.findIndex((candidate) =>
+          candidate.lines.some((line) => line.placements.some((placement) => placement.kind === 'anchor-host')));
+        expect(hostParagraph, label).toBeGreaterThanOrEqual(0);
+        const lines = anchored.paragraphs[hostParagraph]!.lines;
+        const hostLine = lines.findIndex((line) => line.placements.some((placement) => placement.kind === 'anchor-host'));
+        const host = lines[hostLine]!.placements.find((placement) => placement.kind === 'anchor-host')!;
+        const prefix = testCase.container === 'footnote' ? 1 : 0;
+        const expected = boundaryPosition(plain.paragraphs[hostParagraph]!, prefix + offset);
+        if (expected) {
+          expect([hostLine, round(host.bounds!.xPt)], `${label}: host position`).toEqual([expected.line, round(expected.xPt)]);
+          // The drawing itself, positioned from its character and line: at
+          // the boundary on a horizontal line; on a vertical line, at the
+          // start of the character before it (the line start when none).
+          if (kind === 'character' && testCase.container.startsWith('body')) {
+            const line = lines[hostLine]!.bounds;
+            expect(anchored.drawings, `${label}: drawing position`).toEqual([[
+              round(testCase.vertical ? expected.precedingPt ?? line.xPt : expected.xPt), round(line.yPt)]]);
+          }
+        }
+      });
+    });
+  }
+});

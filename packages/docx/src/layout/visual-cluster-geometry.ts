@@ -101,3 +101,11 @@ export function visualBoundaryXPt(placement: ClusteredText, index: number): numb
   const trailing = index >= clusters.length;
   return leadingIsRight !== trailing ? startPt + clusters[at]!.advancePt : startPt;
 }
+
+/** Visual x of the start (left edge) of cluster `index`. */
+export function visualClusterStartXPt(placement: ClusteredText, index: number): number {
+  const visual = visualClusters(placement);
+  return visual
+    ? placement.bounds.xPt + visual.startsPt[index]!
+    : placement.origin.xPt + placement.clusters[index]!.offset.xPt;
+}

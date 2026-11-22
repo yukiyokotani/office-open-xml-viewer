@@ -38,7 +38,7 @@ import { isAnchorPlacementSegment, metricSegments } from '../line-breaker/model.
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
-import { bidiPlacedOffsets, visualBoundaryXPt } from './visual-cluster-geometry.js';
+import { bidiPlacedOffsets, visualBoundaryXPt, visualClusterStartXPt } from './visual-cluster-geometry.js';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
 import {
@@ -1998,8 +1998,9 @@ function planContentLine(
   // that holds it, else at the leading edge of the first content segment at
   // or after it; the hosts after all content stand at the line's logical end.
   // Hosts arrive in source order, so one forward sweep finds every target.
-  const hostsBefore = new Map<number, PlannedAnchorHost[]>();
-  const hostsInside = new Map<number, PlannedAnchorHost[]>();
+  // They are placed once the content is (below).
+  const plannedBefore = new Map<PlannedAnchorHost, number>();
+  const plannedInside = new Map<PlannedAnchorHost, number>();
   let hostTarget = 0;
   let hostAt = Number.NEGATIVE_INFINITY;
   for (const planned of anchorHosts) {
@@ -2008,30 +2009,16 @@ function planContentLine(
     while (hostTarget < segments.length && segments[hostTarget]!.range.end <= hostAt
       && segments[hostTarget]!.range.start < hostAt) hostTarget += 1;
     const holder = segments[hostTarget];
-    const buckets = holder?.kind === 'text' && holder.range.start < hostAt ? hostsInside : hostsBefore;
-    let bucket = buckets.get(hostTarget);
-    if (!bucket) buckets.set(hostTarget, bucket = []);
-    bucket.push(planned);
+    (holder?.kind === 'text' && holder.range.start < hostAt ? plannedInside : plannedBefore).set(planned, hostTarget);
   }
-  const placeHost = ({ host }: PlannedAnchorHost, hostXPt: number): void => {
-    placements.push({
-      kind: 'anchor-host', range: host.range,
-      bounds: { xPt: hostXPt, yPt: line.topPt, widthPt: 0, heightPt: line.advancePt },
-      baselinePt: line.baselinePt,
-      ...(host.sourceMetrics ? { sourceMetrics: host.sourceMetrics } : {}),
-      ...(host.anchorOccurrenceId ? { anchorOccurrenceId: host.anchorOccurrenceId } : {}),
-    });
-  };
-  const placeHosts = (target: number, hostXPt: number): void => {
-    for (const planned of hostsBefore.get(target) ?? []) placeHost(planned, hostXPt);
-  };
-  // A right-to-left base ends at the line's start-of-pen side.
-  if (input.baseRtl) placeHosts(segments.length, xPt);
+  const lineStartXPt = xPt;
+  /** Where each segment was placed: its inline box, and its text placement. */
+  const segmentBoxes = new Map<number, Readonly<{ startPt: number; endPt: number; text?: number }>>();
   for (const segmentIndex of visual.order) {
     const segment = segments[segmentIndex];
     if (!segment) continue;
-    if (!visual.rtl[segmentIndex]) placeHosts(segmentIndex, xPt);
     const segmentStartPt = xPt;
+    const placedBefore = placements.length;
     const stretch = stretchByIndex?.get(segmentIndex);
     // Each atomic source-space cell owns its existing positive allocation.
     // Non-space cuts and every legacy/negative path keep their old plan.
@@ -2283,25 +2270,13 @@ function planContentLine(
       placements.push(placed);
     }
     xPt += widthPt;
-    // A host inside this text stands after the clusters that precede it.
-    const inside = hostsInside.get(segmentIndex);
-    const placedText = inside ? placements.at(-1) : undefined;
-    if (inside && placedText?.kind === 'text') {
-      // The host stands at the visual position of its logical boundary in
-      // the piece's retained clusters (visualBoundaryXPt), so every
-      // adjustment and reordering the piece's clusters carry is the host's.
-      const clusters = placedText.clusters;
-      let cluster = 0;
-      for (const planned of inside) {
-        while (cluster < clusters.length && clusters[cluster]!.range.start < planned.at) cluster += 1;
-        placeHost(planned, visualBoundaryXPt(placedText, cluster));
-      }
-    }
-    // A right-to-left segment's leading edge is its right edge.
-    if (visual.rtl[segmentIndex]) placeHosts(segmentIndex, xPt);
+    segmentBoxes.set(segmentIndex, {
+      startPt: segmentStartPt, endPt: xPt,
+      ...(placements.length > placedBefore && placements.at(-1)!.kind === 'text' ? { text: placements.length - 1 } : {}),
+    });
     if (geometryStretch?.trailingGap) xPt += geometryStretch.trailingDelta ?? perGapPt;
   }
-  if (!input.baseRtl) placeHosts(segments.length, xPt);
+  const lineEndXPt = xPt;
   // WORD_LINE_END_SPACE_HANGS: no decoration over the hanging line-end
   // spaces; with ulTrailSpace (§17.15.3.8) they keep every decoration up to
   // the line's band edge. A snapToChars underline keeps
@@ -2362,6 +2337,64 @@ function planContentLine(
     start = end;
   }
   coalesceAdjacentDecorations(placements, input.underlineOverSide === true);
+  // The hosts are position-only: they follow the line's content, so no
+  // adjacency rule above sees them, and each takes its position from the
+  // finished geometry of the content at its source boundary.
+  if (anchorHosts.length > 0) {
+    const textOf = (segmentIndex: number): TextPlacement | undefined => {
+      const index = segmentBoxes.get(segmentIndex)?.text;
+      const placed = index === undefined ? undefined : placements[index];
+      return placed?.kind === 'text' ? placed : undefined;
+    };
+    // The last text segment at or before each segment, in source order.
+    const textAtOrBefore: number[] = [];
+    let lastText = -1;
+    for (let index = 0; index < segments.length; index += 1) {
+      if ((textOf(index)?.clusters.length ?? 0) > 0) lastText = index;
+      textAtOrBefore.push(lastText);
+    }
+    const hostPlacements: ParagraphPlacement[] = [];
+    const place = ({ host }: PlannedAnchorHost, hostXPt: number, precedingStartPt: number | null): void => {
+      const placed: ParagraphPlacement = {
+        kind: 'anchor-host', range: host.range,
+        bounds: { xPt: hostXPt, yPt: line.topPt, widthPt: 0, heightPt: line.advancePt },
+        baselinePt: line.baselinePt,
+        ...(host.sourceMetrics ? { sourceMetrics: host.sourceMetrics } : {}),
+        ...(host.anchorOccurrenceId ? { anchorOccurrenceId: host.anchorOccurrenceId } : {}),
+      };
+      precedingCharacterStarts.set(placed, precedingStartPt);
+      hostPlacements.push(placed);
+    };
+    const lastClusterStartPt = (segmentIndex: number): number | null => {
+      const text = segmentIndex >= 0 ? textOf(textAtOrBefore[segmentIndex]!) : undefined;
+      return text ? visualClusterStartXPt(text, text.clusters.length - 1) : null;
+    };
+    const cursors = new Map<number, number>();
+    for (const planned of anchorHosts) {
+      const inside = plannedInside.get(planned);
+      const target = inside ?? plannedBefore.get(planned)!;
+      const text = textOf(target);
+      if (inside !== undefined && text) {
+        // Hosts of one piece arrive in source order: one forward sweep.
+        let cluster = cursors.get(target) ?? 0;
+        while (cluster < text.clusters.length && text.clusters[cluster]!.range.start < planned.at) cluster += 1;
+        cursors.set(target, cluster);
+        place(planned, visualBoundaryXPt(text, cluster),
+          cluster > 0 ? visualClusterStartXPt(text, cluster - 1) : lastClusterStartPt(target - 1));
+        continue;
+      }
+      const box = segmentBoxes.get(target);
+      // After all content: the trailing edge of the text that ends the line
+      // in source order, else the line's logical end.
+      const ending = target >= segments.length ? textOf(segments.length - 1) : undefined;
+      const hostXPt = ending && ending.clusters.length > 0 ? visualBoundaryXPt(ending, ending.clusters.length)
+        : target >= segments.length || !box ? (input.baseRtl ? lineStartXPt : lineEndXPt)
+        : text && text.clusters.length > 0 ? visualBoundaryXPt(text, 0)
+          : visual.rtl[target] ? box.endPt : box.startPt;
+      place(planned, hostXPt, lastClusterStartPt(Math.min(target, segments.length) - 1));
+    }
+    placements.push(...hostPlacements);
+  }
   // The slack distribution (with its widening of automatic East Asian gaps)
   // and kashida elongation; natural advances, seams and tab advances excluded.
   const justificationExpansionPt = distributedWidthPt + kashidaAppliedPt;
@@ -6525,6 +6558,10 @@ function precedingCharacterStartPt(
   line: LineLayout,
   host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>,
 ): number {
+  // The line planner records the source-preceding character of each host it
+  // places; the search below serves hosts planned elsewhere.
+  const recorded = precedingCharacterStarts.get(host);
+  if (recorded !== undefined) return recorded ?? line.bounds.xPt;
   // The line's clusters by ascending end, indexed once per placement list:
   // every host of the line searches the same list.
   let ends = clusterEndsByLine.get(line.placements);
@@ -6552,6 +6589,9 @@ function precedingCharacterStartPt(
   return low === 0 ? line.bounds.xPt : ends[low - 1]!.start;
 }
 
+/** Visual start of the character that precedes a host in source order on
+ * its line (null: none), recorded where the host is placed. */
+const precedingCharacterStarts = new WeakMap<ParagraphPlacement, number | null>();
 const clusterEndsByLine = new WeakMap<LineLayout['placements'], readonly Readonly<{ end: number; start: number }>[]>();
 
 function wordMode14ColumnOriginApplies(
