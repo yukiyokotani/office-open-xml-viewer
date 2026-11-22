@@ -56,7 +56,7 @@ export function bidiPlacedOffsets(
 }
 
 type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>
-  & Partial<Pick<TextPlacement, 'advancePt' | 'tateChuYoko' | 'paintOps'>>
+  & Partial<Pick<TextPlacement, 'advancePt' | 'tateChuYoko' | 'paintOps' | 'highlightBounds' | 'fontSizePt'>>
   & Readonly<{ kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[] }>;
 type VisualClusters = Readonly<{
   /** Visual start of each cluster from the left edge of the piece's box. */
@@ -201,11 +201,10 @@ export function visuallyContiguousGroups(placement: ClusteredText, from: number,
 /** Where one cluster is painted, for readers that address text by offset.
  * A cluster has two intervals along the run, both from the listing's
  * origin: its advance box, from its pen to the next pen (its tracking
- * included), and its glyph box, where paint draws its glyph: from its pen
- * over its natural advance (for a glyph whose advance floors to nothing as
- * well). Readers that ask what is painted (find highlights, clip visibility)
- * use the glyph box; readers that place the caret or size a selection use
- * the advance box. */
+ * included), and its glyph box, where its paint operation draws its glyph
+ * (paintedGlyphPt). Readers that ask what is painted (find highlights,
+ * comment tints, clip visibility) use the glyph box; readers that place the
+ * caret or size a selection use the advance box. */
 export interface ClusterBox {
   /** UTF-16 offsets of the cluster in the text the boxes are listed for. */
   readonly start: number;
@@ -225,9 +224,14 @@ export interface ClusterBox {
   /** A tate-chu-yoko cluster stands upright across the run: `xPt`/`widthPt`
    * (and its glyph box along the run) span the run's cell along it; these
    * place its advance box across the run, from the top of the listing's
-   * box, and `glyphCrossPt`/`glyphCrossWidthPt` its glyph. */
+   * box. */
   readonly crossPt?: number;
   readonly crossWidthPt?: number;
+  /** Where the glyph is painted across the run, from the top of the
+   * listing's box, when that is not the run's font box: a tate-chu-yoko
+   * character's own interval, or the font box of a vertical-text cell where
+   * its operation draws it (centred on the column, or on its shifted
+   * baseline). */
   readonly glyphCrossPt?: number;
   readonly glyphCrossWidthPt?: number;
 }
@@ -247,25 +251,24 @@ export function clusterBoxes(
   // §17.3.2.10 tate-chu-yoko: the characters stand upright side by side
   // across the run, centred on the paint origin, each over the run's cell.
   const upright = tateChuYokoRow(placement);
-  const drawn = flooredDrawnAdvancesPt(placement);
   for (let index = first; index < last; index += 1) {
     const cluster = placement.clusters[index]!;
-    // What paint draws the glyph at, from its pen (never derived from the
-    // advance): its retained glyph advance, or a floored cluster's drawn one.
-    const glyphPt = cluster.glyphAdvancePt ?? drawn?.get(cluster.range.start);
+    const operation = operationAt(placement, cluster.range.start);
+    const alone = operation && operation.range.start === cluster.range.start
+      && operation.range.end === cluster.range.end ? operation : undefined;
     if (upright) {
       const fromPt = cluster.offset.xPt - upright.originPt;
       // The row reads toward the run's top edge (it is turned back upright):
       // a character's glyph lies at the far end of its advance.
       const crossPt = upright.endPt - fromPt - cluster.advancePt - placement.bounds.yPt;
-      const naturalPt = Math.max(0, glyphPt ?? cluster.advancePt);
+      const naturalPt = Math.max(0, alone?.naturalAdvancePt ?? cluster.glyphAdvancePt ?? cluster.advancePt);
       boxes.push({
         start: Math.max(cluster.range.start, textStart) - textStart,
         end: Math.min(cluster.range.end, textEnd) - textStart,
         xPt: placement.bounds.xPt - originXPt,
         widthPt: placement.bounds.widthPt,
-        glyphXPt: placement.bounds.xPt - originXPt,
-        glyphWidthPt: placement.bounds.widthPt,
+        glyphXPt: (upright.glyph?.startPt ?? placement.bounds.xPt) - originXPt,
+        glyphWidthPt: upright.glyph?.widthPt ?? placement.bounds.widthPt,
         rtl: false,
         crossPt,
         crossWidthPt: cluster.advancePt,
@@ -282,23 +285,90 @@ export function clusterBoxes(
         : tiledAdvancePt(placement, index);
     const odd = visual?.odd[index] === true;
     const cut = final && (visual ? visual.lastCut : Math.abs(advancePt - cluster.advancePt) > 1e-9);
-    // Without a retained glyph advance the glyph fills its advance.
-    const naturalPt = Math.max(0, glyphPt ?? advancePt);
     const xPt = startPt - originXPt;
+    const glyph = paintedGlyphPt(placement, cluster, alone, startPt, advancePt, odd);
+    const across = operation ? paintedGlyphCrossPt(placement, operation) : null;
     boxes.push({
       start: Math.max(cluster.range.start, textStart) - textStart,
       end: Math.min(cluster.range.end, textEnd) - textStart,
       xPt,
       widthPt: advancePt,
-      // From the pen: the left edge, or the right edge of a right-to-left
-      // cluster, whose tracking lies on its left.
-      glyphXPt: odd ? xPt + advancePt - naturalPt : xPt,
-      glyphWidthPt: naturalPt,
+      glyphXPt: glyph.startPt - originXPt,
+      glyphWidthPt: glyph.widthPt,
       rtl: odd,
       ...(cut ? { trackingExcluded: true as const } : {}),
+      ...(across ? { glyphCrossPt: across.startPt, glyphCrossWidthPt: across.widthPt } : {}),
     });
   }
   return boxes;
+}
+
+/** Where paint draws a vertical-text cell's glyph across the run, from the
+ * top of the placement's box, when that is not its font box: the font box's
+ * extent where the operation centres the glyph (an upright or rotated cell,
+ * drawn on its middle baseline at its origin and glyph offset), or moved
+ * with the baseline by the glyph offset of a sideways cell (the font box
+ * already follows the operation's own baseline offset). Null for an
+ * operation of horizontal text, which is drawn in the font box. */
+function paintedGlyphCrossPt(
+  placement: ClusteredText,
+  operation: NonNullable<ClusteredText['paintOps']>[number],
+): Readonly<{ startPt: number; widthPt: number }> | null {
+  if (operation.glyphOrientation === undefined) return null;
+  const font = placement.highlightBounds ?? placement.bounds;
+  let startPt: number;
+  if (operation.glyphOrientation === 'sideways') {
+    startPt = font.yPt + (operation.glyphOffsetPt?.yPt ?? 0);
+  } else {
+    // Turned back by a quarter, an upright glyph's inline offset points
+    // against the block axis.
+    const centrePt = placement.origin.yPt + operation.offset.yPt + (operation.glyphOrientation === 'upright'
+      ? -(operation.glyphOffsetPt?.xPt ?? 0) : operation.glyphOffsetPt?.yPt ?? 0);
+    startPt = centrePt - font.heightPt / 2;
+  }
+  if (Math.abs(startPt - font.yPt) < 1e-9) return null;
+  return { startPt: startPt - placement.bounds.yPt, widthPt: font.heightPt };
+}
+
+/** Where paint draws one cluster's glyph along the run, in the placement's
+ * coordinates, read from the operation that draws it:
+ *
+ * - an operation that draws this cluster alone, centred on its origin (an
+ *   upright or rotated cell of vertical text): its drawn advance, centred on
+ *   the operation's origin and glyph offset, wherever the cell's pen and
+ *   tracking lie;
+ * - an operation that draws this cluster alone from its own origin with a
+ *   retained drawn advance (a floored condensed cluster): that advance, the
+ *   width of the glyph shaped in isolation, from the operation's origin;
+ * - any other operation (several clusters shaped together, or one cluster on
+ *   its pen): the cluster's retained glyph advance (its contextual advance
+ *   in that operation) from its pen, the left edge, or the right edge of a
+ *   right-to-left cluster, whose tracking lies on its left. Without a
+ *   retained glyph advance the glyph fills its advance. */
+function paintedGlyphPt(
+  placement: ClusteredText,
+  cluster: ClusteredText['clusters'][number],
+  alone: NonNullable<ClusteredText['paintOps']>[number] | undefined,
+  startPt: number,
+  advancePt: number,
+  odd: boolean,
+): Readonly<{ startPt: number; widthPt: number }> {
+  const originPt = placement.origin.xPt;
+  if (alone && (alone.glyphOrientation === 'upright' || alone.glyphOrientation === 'rotate')) {
+    const widthPt = Math.max(0, alone.naturalAdvancePt ?? cluster.glyphAdvancePt ?? advancePt);
+    // An upright glyph is drawn turned back by a quarter: its glyph-local
+    // block offset lies along the run.
+    const offsetPt = alone.glyphOrientation === 'upright' ? alone.glyphOffsetPt?.yPt : alone.glyphOffsetPt?.xPt;
+    return { startPt: originPt + alone.offset.xPt + (offsetPt ?? 0) - widthPt / 2, widthPt };
+  }
+  if (alone?.naturalAdvancePt !== undefined) {
+    return {
+      startPt: originPt + alone.offset.xPt + (alone.glyphOffsetPt?.xPt ?? 0),
+      widthPt: Math.max(0, alone.naturalAdvancePt),
+    };
+  }
+  const widthPt = Math.max(0, cluster.glyphAdvancePt ?? advancePt);
+  return { startPt: odd ? startPt + advancePt - widthPt : startPt, widthPt };
 }
 
 /** Cluster `index`'s advance from its pen to the next cluster's pen, so
@@ -313,9 +383,17 @@ function tiledAdvancePt(placement: ClusteredText, index: number): number {
 
 /** A tate-chu-yoko run paints its characters upright in one row across the
  * run, at their natural advances and centred on its paint origin (the
- * operation's text is centred there): the row's far end across the run and
- * the natural origin its advances count from; null for any other run. */
-function tateChuYokoRow(placement: ClusteredText): Readonly<{ endPt: number; originPt: number }> | null {
+ * operation's text is centred there): the row's far end across the run, the
+ * natural origin its advances count from, and where the row's glyphs stand
+ * along the run (the em of the run's font as the operation scales it,
+ * centred on the operation's origin on the middle baseline; absent without
+ * the font size, when the row spans the run's cell). Null for any other
+ * run. */
+function tateChuYokoRow(placement: ClusteredText): Readonly<{
+  endPt: number;
+  originPt: number;
+  glyph?: Readonly<{ startPt: number; widthPt: number }>;
+}> | null {
   if (!placement.tateChuYoko || placement.clusters.length === 0) return null;
   let start = Number.POSITIVE_INFINITY;
   let end = Number.NEGATIVE_INFINITY;
@@ -323,26 +401,46 @@ function tateChuYokoRow(placement: ClusteredText): Readonly<{ endPt: number; ori
     start = Math.min(start, cluster.offset.xPt);
     end = Math.max(end, cluster.offset.xPt + cluster.advancePt);
   }
-  const centrePt = placement.origin.yPt + (placement.paintOps?.[0]?.offset.yPt ?? 0);
-  return { endPt: centrePt + (end - start) / 2, originPt: start };
+  const operation = placement.paintOps?.[0];
+  const centrePt = placement.origin.yPt + (operation?.offset.yPt ?? 0);
+  const row = { endPt: centrePt + (end - start) / 2, originPt: start };
+  if (!operation || placement.fontSizePt === undefined) return row;
+  // Turned back by a quarter, the glyph-local block axis lies along the run,
+  // scaled as paint scales it.
+  const scale = operation.scaleX !== 1 || operation.scaleY !== undefined
+    ? operation.writingMode === 'vertical-rl' ? operation.scaleX : operation.scaleY ?? 1 : 1;
+  const widthPt = placement.fontSizePt * scale;
+  return {
+    ...row,
+    glyph: {
+      startPt: placement.origin.xPt + operation.offset.xPt + (operation.glyphOffsetPt?.yPt ?? 0) * scale - widthPt / 2,
+      widthPt,
+    },
+  };
 }
 
-/** The drawn glyph advance of each floored cluster, by its start: condensed
- * spacing floors its pen advance, while its own paint operation draws the
- * glyph at its natural advance. Null when no operation is floored. Built
- * once per piece's operations, however many owners list its boxes. */
-const flooredDrawnByOperations = new WeakMap<object, ReadonlyMap<number, number> | null>();
-function flooredDrawnAdvancesPt(placement: ClusteredText): ReadonlyMap<number, number> | null {
+/** The paint operation that draws the character at source offset `offset`
+ * of a piece; undefined without operations. The operations are ordered once
+ * per piece, however many owners list its boxes. */
+const orderedOperations = new WeakMap<object, readonly NonNullable<ClusteredText['paintOps']>[number][]>();
+function operationAt(
+  placement: ClusteredText,
+  offset: number,
+): NonNullable<ClusteredText['paintOps']>[number] | undefined {
   const operations = placement.paintOps;
-  if (!operations) return null;
-  const cached = flooredDrawnByOperations.get(operations);
-  if (cached !== undefined) return cached;
-  let drawn: Map<number, number> | null = null;
-  for (const operation of operations) {
-    if (operation.naturalAdvancePt === undefined) continue;
-    drawn ??= new Map();
-    drawn.set(operation.range.start, operation.naturalAdvancePt);
+  if (!operations) return undefined;
+  let ordered = orderedOperations.get(operations);
+  if (!ordered) {
+    ordered = [...operations].sort((left, right) => left.range.start - right.range.start);
+    orderedOperations.set(operations, ordered);
   }
-  flooredDrawnByOperations.set(operations, drawn);
-  return drawn;
+  let low = 0;
+  let high = ordered.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (ordered[middle]!.range.end <= offset) low = middle + 1;
+    else high = middle;
+  }
+  const found = ordered[low];
+  return found && found.range.start <= offset ? found : undefined;
 }

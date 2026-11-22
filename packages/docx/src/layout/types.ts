@@ -418,6 +418,11 @@ export interface RetainedRunTypographyFacts {
 }
 
 export interface TextPlacement {
+  /** The kashida plan's tatweel insertions (code point index into `text`,
+   * count) this piece paints: its one paint operation holds them while the
+   * retained clusters keep their natural advances. Geometry derived from the
+   * piece reads them (visual-cluster-geometry). */
+  readonly kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[];
   readonly kind: 'text';
   /** Authored discretionary '-' ink has an empty logical source owner.
    * Paint still consumes text/paintOps; copy and find consume the typed owner. */

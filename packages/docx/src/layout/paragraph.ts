@@ -266,6 +266,9 @@ export type MeasuredTextPlanSegment = Readonly<
     /** A list label emitted as leading runs (`LayoutSegSource.listLabel`):
      * its spaces take no justification. */
     listLabel?: true;
+    /** The kashida plan's tatweel insertions (code point index, count) the
+     * line applied to this segment's paint text. */
+    kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[];
     /** Acquisition-only authority used to shape the final contextual kashida string. */
     textLayoutService?: import('./text.js').TextLayoutService;
     textShapeRequest?: import('./text.js').TextShapeRequest;
@@ -1754,6 +1757,7 @@ export function planLine(input: PlanLineInput): LineLayout {
           nativeBaseDirection: undefined,
           nativeVisiblePrefix: undefined,
           measuredWidthPt: segment.measuredWidthPt + plan.advanceDeltaPx,
+          kashidaInsertions: plan.insertions,
           basePaintOps: [{ ...base, text: plan.text, sourceMapping: 'kashida' }],
         };
       });
@@ -2204,6 +2208,7 @@ export function planLine(input: PlanLineInput): LineLayout {
         highlightBounds,
         advancePt: widthPt,
         clusters: textGeometry.clusters,
+        ...(segment.kashidaInsertions ? { kashidaInsertions: segment.kashidaInsertions } : {}),
         paintOps,
         decorations,
         ...(emphasis ? { emphasis } : {}),

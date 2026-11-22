@@ -1907,15 +1907,19 @@ export interface DocxTextRunInfo {
    * reads right to left. Each cluster has two intervals along the run, in
    * CSS px from `x`: its advance box `x`/`width`, from its pen to the next
    * pen (tracking included), for the caret, hit testing and selection; and
-   * its glyph box `glyphX`/`glyphWidth`, where its glyph is painted (its
-   * natural advance from the pen, a floored condensed glyph included), for
-   * find highlights and clip visibility. The glyph box is listed only where
-   * it differs from the advance box. The run's final cluster carries
-   * `trackingExcluded` when its box already leaves out the tracking after it
-   * (a fitted run). A tate-chu-yoko character stands upright across the run:
-   * both boxes span the run's cell along it, and `y`/`height` (advance) and
-   * `glyphY`/`glyphHeight` (glyph, where it differs) place it across the run
-   * from the run's top, in CSS px. Overlays use these instead of measuring
+   * its glyph box `glyphX`/`glyphWidth`, where its paint operation draws its
+   * glyph (its drawn advance, a floored condensed glyph and a centred
+   * vertical-text cell included), for find highlights, comment highlights
+   * and clip visibility. The glyph box is listed only where it differs from
+   * the advance box. The run's final cluster carries `trackingExcluded` when
+   * its box already leaves out the tracking after it (a fitted run). Across
+   * the run a glyph is painted in the run's font box
+   * ({@link highlightBounds}) unless the cluster carries
+   * `glyphY`/`glyphHeight`, its own interval across the run from the run's
+   * top, in CSS px: a vertical-text cell drawn centred on its column, or a
+   * tate-chu-yoko character. A tate-chu-yoko character stands upright across
+   * the run: both boxes span the run's cell along it, and `y`/`height` place
+   * its advance box across the run. Overlays use these instead of measuring
    * text. */
   clusterBoxes?: readonly Readonly<{
     start: number; end: number; x: number; width: number; rtl: boolean; trackingExcluded?: true;

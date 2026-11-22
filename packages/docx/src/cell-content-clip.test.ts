@@ -413,7 +413,8 @@ describe('overlay clip containers', () => {
       expect([container.style.left, container.style.top, container.style.width, container.style.height])
         .toEqual(['20%', '10%', '40%', '30%']);
       const [whole, partial] = container.children;
-      expect([whole!.style.left, whole!.style.top, whole!.style.width]).toEqual(['25%', '33.33333333333333%', '75%']);
+      // The whole run's box is cut where the clip ends, 20px down the run.
+      expect([whole!.style.left, whole!.style.top, whole!.style.width]).toEqual(['25%', '33.33333333333333%', '50%']);
       expect(whole!.style.transform).toBe('matrix(0, 1, -1, 0, 0, 0)');
       // A slice 10px into the run advances down the turned run, not across.
       expect([partial!.style.left, partial!.style.top]).toEqual(['25%', '66.66666666666666%']);

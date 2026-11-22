@@ -1,0 +1,330 @@
+import { describe, expect, it } from 'vitest';
+import { resolveDocxCommentThreads } from './comments.js';
+import { buildDocxHighlightLayer } from './find-highlight-layer.js';
+import {
+  overlayBoxes, placeRunRect, runAdvanceRects, runOverlayRects, runTextVisible,
+} from './overlay-geometry.js';
+import {
+  fakeElement, intersect, layerBoxes, pageBoxOf, paintedDocument, withFakeDocument, type PageBox, type PaintedGlyph,
+} from './test-support/painted-glyphs.test-support.js';
+import type { DocxTextRunInfo } from './types.js';
+
+/**
+ * The overlay invariants (overlay-geometry.ts), checked against what is
+ * painted: generated paragraphs are laid out, painted on a recording canvas
+ * that reports the box of every drawn character under its clip, and every
+ * overlay rect is compared with those boxes. Each generated page draws a
+ * character at most once (spaces aside), so a drawn character identifies
+ * its source character.
+ */
+
+/** Deterministic generator (mulberry32). */
+function random(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const POOLS = {
+  latin: [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'],
+  digit: [...'0123456789'],
+  hebrew: [...'אבגדהוזחטיכלמנסעפצקרשת'],
+  arabic: [...'بتثجحخسشصضطظعغفقكلمنهي'],
+  cjk: Array.from({ length: 200 }, (_, index) => String.fromCodePoint(0x4e00 + index * 7)),
+} as const;
+type Script = keyof typeof POOLS;
+
+interface Case {
+  readonly name: string;
+  readonly body: string;
+  readonly vertical: boolean;
+  readonly section: string;
+  /** Source run indices of each paragraph a comment covers: `[paragraph, first, end)`. */
+  readonly commented: readonly (readonly [number, number, number])[];
+}
+
+const TRACKINGS = [-110, -30, 0, 0, 40, 160] as const;
+
+/** One generated document: a few paragraphs of runs, each with its own
+ * script, tracking and fitting, in one of the page arrangements. */
+function generate(seed: number): Case {
+  const next = random(seed);
+  const pick = <T>(values: readonly T[]): T => values[Math.floor(next() * values.length)]!;
+  const pools: Record<Script, string[]> = {
+    latin: [...POOLS.latin], digit: [...POOLS.digit], hebrew: [...POOLS.hebrew], arabic: [...POOLS.arabic], cjk: [...POOLS.cjk],
+  };
+  const draw = (script: Script, count: number): string => {
+    let text = '';
+    for (let index = 0; index < count && pools[script].length > 0; index += 1) {
+      text += pools[script].splice(Math.floor(next() * pools[script].length), 1)[0]!;
+    }
+    return text;
+  };
+  const arrangement = pick(['plain', 'plain', 'rtl', 'mixed', 'kashida', 'grid', 'vertical', 'tate-chu-yoko', 'exact-row', 'cell'] as const);
+  const vertical = arrangement === 'vertical' || arrangement === 'tate-chu-yoko';
+  const section = arrangement === 'grid' ? '<w:docGrid w:type="snapToChars" w:linePitch="360" w:charSpace="2048"/>' : '';
+  const commented: [number, number, number][] = [];
+  const paragraphs: string[] = [];
+  const count = 1 + Math.floor(next() * 3);
+  for (let paragraph = 0; paragraph < count; paragraph += 1) {
+    const rtl = arrangement === 'rtl' || arrangement === 'kashida' || (arrangement === 'mixed' && next() < 0.5);
+    const alignment = arrangement === 'kashida' ? 'lowKashida'
+      : pick(['left', 'left', 'both', 'distribute', 'center', 'right'] as const);
+    const runs: string[] = [];
+    const runCount = 1 + Math.floor(next() * 4);
+    for (let run = 0; run < runCount; run += 1) {
+      const script: Script = arrangement === 'kashida' ? 'arabic'
+        : arrangement === 'vertical' ? pick(['cjk', 'cjk', 'latin'] as const)
+          : arrangement === 'tate-chu-yoko' ? pick(['cjk', 'digit'] as const)
+            : arrangement === 'grid' ? pick(['cjk', 'latin'] as const)
+              : arrangement === 'rtl' ? pick(['hebrew', 'hebrew', 'digit'] as const)
+                : arrangement === 'mixed' ? pick(['hebrew', 'latin', 'digit'] as const)
+                  : pick(['latin', 'latin', 'cjk', 'digit'] as const);
+      const tateChuYoko = arrangement === 'tate-chu-yoko' && script === 'digit';
+      const length = tateChuYoko ? 2 : 1 + Math.floor(next() * 5);
+      let text = draw(script, length);
+      if (text === '') continue;
+      // Words, so justification and distribution have gaps to widen.
+      if (!tateChuYoko && next() < 0.5) text += ' ';
+      const tracking = arrangement === 'kashida' ? 0 : pick(TRACKINGS);
+      const fitted = !vertical && !rtl && arrangement !== 'grid' && script === 'latin' && next() < 0.2;
+      const scale = !vertical && next() < 0.15 ? pick([66, 150]) : 100;
+      // Off the line's baseline, or at another size.
+      const raised = next() < 0.2 ? pick(['<w:position w:val="8"/>', '<w:position w:val="-6"/>',
+        '<w:vertAlign w:val="superscript"/>', '<w:vertAlign w:val="subscript"/>']) : '';
+      const size = !tateChuYoko && arrangement !== 'grid' && next() < 0.15 ? pick([16, 36]) : 24;
+      runs.push('<w:r><w:rPr>'
+        + (script === 'hebrew' || script === 'arabic' ? '<w:rtl/>' : '')
+        + (scale !== 100 ? `<w:w w:val="${scale}"/>` : '')
+        + (tracking !== 0 ? `<w:spacing w:val="${tracking}"/>` : '')
+        + raised + `<w:sz w:val="${size}"/><w:szCs w:val="${size}"/>`
+        + (fitted ? `<w:fitText w:val="${pick([400, 1200])}" w:id="${seed * 100 + paragraph * 10 + run + 1}"/>` : '')
+        + (tateChuYoko ? '<w:eastAsianLayout w:id="1" w:vert="1"/>' : '')
+        + `</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`);
+    }
+    if (runs.length === 0) continue;
+    if (runs.length > 1 && next() < 0.7) {
+      const first = Math.floor(next() * runs.length);
+      commented.push([paragraphs.length, first, first + 1 + Math.floor(next() * (runs.length - first))]);
+    }
+    // A narrow measure wraps the paragraph, so justified lines exist.
+    const narrow = alignment === 'both' || alignment === 'distribute' || arrangement === 'kashida';
+    const exact = arrangement === 'exact-row' ? `<w:spacing w:before="0" w:after="0" w:line="${pick([240, 360, 800])}" w:lineRule="exact"/>` : '';
+    // In a cell, some paragraphs start before the cell's edge.
+    const outdent = (arrangement === 'cell' || arrangement === 'exact-row') && next() < 0.5 ? pick([-70, -150, -290]) : 0;
+    const indent = narrow ? `<w:ind w:right="${vertical ? 9000 : 7200}"/>`
+      : outdent !== 0 ? `<w:ind w:${rtl ? 'right' : 'left'}="${outdent}"/>` : '';
+    paragraphs.push(`<w:p><w:pPr>${rtl ? '<w:bidi/>' : ''}${exact}<w:jc w:val="${alignment}"/>${indent}</w:pPr>`
+      + `${runs.join('')}</w:p>`);
+  }
+  const content = paragraphs.join('');
+  const body = arrangement === 'exact-row' || arrangement === 'cell'
+    ? '<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>'
+      + `<w:tr>${arrangement === 'exact-row' ? `<w:trPr><w:trHeight w:val="${pick([200, 300, 500])}" w:hRule="exact"/></w:trPr>` : ''}`
+      + `<w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr>${content || '<w:p/>'}</w:tc></w:tr></w:tbl><w:p/>`
+    : content;
+  return { name: `${arrangement} #${seed}`, body, vertical, section, commented };
+}
+
+const EPSILON = 1e-6;
+const sameBox = (left: PageBox, right: PageBox): boolean => Math.abs(left.left - right.left) < EPSILON
+  && Math.abs(left.top - right.top) < EPSILON && Math.abs(left.right - right.right) < EPSILON
+  && Math.abs(left.bottom - right.bottom) < EPSILON;
+const show = (box: PageBox | null): string => (box
+  ? `[${box.left.toFixed(3)}, ${box.top.toFixed(3)} .. ${box.right.toFixed(3)}, ${box.bottom.toFixed(3)}]` : 'nothing');
+
+/** Whether two sets of boxes cover the same region of the page. */
+function regionDifference(left: readonly PageBox[], right: readonly PageBox[]): string | null {
+  const snap = (value: number): number => Math.round(value / EPSILON) * EPSILON;
+  const xs = [...new Set([...left, ...right].flatMap((box) => [snap(box.left), snap(box.right)]))].sort((a, b) => a - b);
+  const ys = [...new Set([...left, ...right].flatMap((box) => [snap(box.top), snap(box.bottom)]))].sort((a, b) => a - b);
+  const covers = (boxes: readonly PageBox[], x: number, y: number): boolean => boxes.some((box) => (
+    snap(box.left) <= x && x < snap(box.right) && snap(box.top) <= y && y < snap(box.bottom)));
+  for (let column = 0; column < xs.length - 1; column += 1) {
+    if (xs[column + 1]! - xs[column]! <= 2 * EPSILON) continue;
+    for (let row = 0; row < ys.length - 1; row += 1) {
+      if (ys[row + 1]! - ys[row]! <= 2 * EPSILON) continue;
+      const x = (xs[column]! + xs[column + 1]!) / 2;
+      const y = (ys[row]! + ys[row + 1]!) / 2;
+      if (covers(left, x, y) !== covers(right, x, y)) {
+        return `(${x.toFixed(3)}, ${y.toFixed(3)}) is ${covers(left, x, y) ? 'marked but not painted' : 'painted but not marked'}`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Every violation of the invariants on one generated page. */
+function violations(testCase: Case, runs: readonly DocxTextRunInfo[], glyphs: readonly PaintedGlyph[]): string[] {
+  const found: string[] = [];
+  const painted = new Map<string, PaintedGlyph[]>();
+  for (const glyph of glyphs) painted.set(glyph.character, [...(painted.get(glyph.character) ?? []), glyph]);
+  const visibleOf = (character: string): PageBox | null | undefined => {
+    const drawn = painted.get(character);
+    if (!drawn || drawn.length !== 1) return undefined;
+    return intersect(drawn[0]!.box, drawn[0]!.clip);
+  };
+  for (const run of runs) {
+    for (let index = 0; index < run.text.length; index += 1) {
+      const character = run.text[index]!;
+      if (character === ' ') continue;
+      const expected = visibleOf(character);
+      if (expected === undefined) {
+        found.push(`${JSON.stringify(character)} of ${JSON.stringify(run.text)} is drawn ${painted.get(character)?.length ?? 0} times`);
+        continue;
+      }
+      // Invariants 1, 3 and 4: the rects that mark a character are its
+      // painted glyph inside its clips, exactly.
+      const rects = runOverlayRects(run, index, index + 1).map((rect) => pageBoxOf(placeRunRect(run, rect)));
+      const marked = rects.length === 1 ? rects[0]! : null;
+      if (rects.length > 1 || (marked === null) !== (expected === null) || (marked && expected && !sameBox(marked, expected))) {
+        found.push(`${JSON.stringify(character)} of ${JSON.stringify(run.text)}: marked ${rects.map(show).join(' ') || 'nothing'}, painted ${show(expected)}`);
+      }
+      if (runTextVisible(run, index, index + 1) !== (expected !== null)) {
+        found.push(`${JSON.stringify(character)} of ${JSON.stringify(run.text)}: visibility ${runTextVisible(run, index, index + 1)}, painted ${show(expected)}`);
+      }
+    }
+    // Invariant 2: advance rects run from pen to pen without overlap.
+    if (!run.eastAsianVert) {
+      const advances = runAdvanceRects(run).sort((left, right) => left.x - right.x);
+      for (let index = 1; index < advances.length; index += 1) {
+        const previous = advances[index - 1]!;
+        if (advances[index]!.x < previous.x + previous.width - EPSILON) {
+          found.push(`advances of ${JSON.stringify(run.text)} overlap at ${advances[index]!.x.toFixed(3)}`);
+        }
+      }
+    }
+  }
+  // Invariants 4 and 5: a comment over some runs of a paragraph marks
+  // exactly their painted glyphs inside the clips, never anything else.
+  const paragraphs = [...new Set(runs.map((run) => JSON.stringify(run.source?.path)))];
+  for (const [paragraph, first, end] of testCase.commented) {
+    const anchored = runs.filter((run) => JSON.stringify(run.source?.path) === paragraphs[paragraph]
+      && run.sourceRunIndex !== undefined && run.sourceRunIndex >= first && run.sourceRunIndex < end);
+    const expected = anchored.flatMap((run) => [...run.text].flatMap((character, index) => {
+      if (character !== ' ') {
+        const box = visibleOf(character);
+        return box ? [box] : [];
+      }
+      // A space is drawn many times: its own rect stands for it.
+      return runOverlayRects(run, index, index + 1).map((rect) => pageBoxOf(placeRunRect(run, rect)));
+    }));
+    const boxes = overlayBoxes(anchored).map(pageBoxOf);
+    const difference = regionDifference(boxes, expected);
+    if (difference) found.push(`comment on runs [${first}, ${end}) of paragraph ${paragraph}: ${difference}`);
+    // Joined boxes are disjoint: nothing is tinted twice.
+    for (const [index, box] of boxes.entries()) {
+      if (boxes.slice(index + 1).some((other) => intersect(box, other) !== null)) found.push(`comment boxes overlap at ${show(box)}`);
+    }
+  }
+  return found;
+}
+
+describe('overlay rects are the painted glyphs inside their clips', () => {
+  const seeds = Array.from({ length: 300 }, (_, index) => index + 1);
+  it.each(seeds.map((seed) => [generate(seed).name, seed] as const))('%s', async (_name, seed) => {
+    const testCase = generate(seed);
+    const { runs, glyphs } = await paintedDocument(testCase.body, { vertical: testCase.vertical, section: testCase.section });
+    expect(runs.length).toBeGreaterThan(0);
+    expect(violations(testCase, runs, glyphs)).toEqual([]);
+  });
+});
+
+/** The find highlight boxes of `text` on a painted page, as the viewer's
+ * layer draws them. */
+function findBoxes(runs: DocxTextRunInfo[], text: string): PageBox[] {
+  const runIndex = runs.findIndex((run) => run.text.includes(text));
+  const start = runs[runIndex]!.text.indexOf(text);
+  return withFakeDocument(() => {
+    const layer = fakeElement();
+    buildDocxHighlightLayer(layer as never, runs, [{ active: false, slices: [{ runIndex, start, end: start + text.length }] }],
+      612, 792, () => () => { throw new Error('a projected run is never measured'); });
+    return layerBoxes(layer, 612, 792);
+  });
+}
+
+/** Where the characters of `text` are painted inside their clips. */
+function paintedBoxes(glyphs: readonly PaintedGlyph[], text: string): PageBox[] {
+  return [...text].flatMap((character) => glyphs.filter((glyph) => glyph.character === character)
+    .flatMap((glyph) => intersect(glyph.box, glyph.clip) ?? []));
+}
+
+const exactRowCell = (rowTwips: number, paragraph: string): string => (
+  '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/><w:tblLayout w:type="fixed"/>'
+  + '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>'
+  + `<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="${rowTwips}" w:hRule="exact"/></w:trPr>`
+  + `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${paragraph}</w:tc></w:tr></w:tbl><w:p/>`);
+
+describe('find highlights are the painted glyphs inside their clips', () => {
+  it('gives no highlight to a line painted below an exact-height row', async () => {
+    const { runs, glyphs } = await paintedDocument(exactRowCell(240,
+      '<w:p><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Visible</w:t><w:br/><w:t>Secret</w:t></w:r></w:p>'));
+    expect(paintedBoxes(glyphs, 'Vs')).toHaveLength(2);
+    expect(paintedBoxes(glyphs, 'S')).toEqual([]);
+    expect(findBoxes(runs, 'Secret')).toEqual([]);
+    expect(regionDifference(findBoxes(runs, 'Visible'), paintedBoxes(glyphs, 'Visble'))).toBeNull();
+  });
+
+  it('covers only the part of the font box a partially visible exact-height row shows', async () => {
+    // 12pt text on a 40pt exact line in a 25pt exact row: the font box
+    // starts below the row top and is cut at the row bottom.
+    const { runs, glyphs } = await paintedDocument(exactRowCell(500,
+      '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="800" w:lineRule="exact"/></w:pPr>'
+      + '<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Sample</w:t></w:r></w:p>'));
+    const painted = paintedBoxes(glyphs, 'Sample');
+    const found = findBoxes(runs, 'Sample');
+    expect(found).toHaveLength(1);
+    expect(regionDifference(found, painted)).toBeNull();
+    // Blank leading above the font box is not highlighted.
+    const run = runs.find((candidate) => candidate.text === 'Sample')!;
+    expect(found[0]!.top).toBeGreaterThan(run.y + 1);
+    expect(found[0]!.bottom - found[0]!.top).toBeLessThan(12);
+  });
+
+  it('centres an upright vertical glyph where its operation paints it, whatever its tracking', async () => {
+    const { runs, glyphs } = await paintedDocument(
+      '<w:p><w:r><w:rPr><w:spacing w:val="160"/><w:sz w:val="24"/></w:rPr><w:t>漢字</w:t></w:r></w:p>', { vertical: true });
+    for (const character of '漢字') {
+      const [found] = findBoxes(runs, character);
+      const [painted] = paintedBoxes(glyphs, character);
+      expect(found).toBeDefined();
+      expect(regionDifference([found!], [painted!])).toBeNull();
+    }
+  });
+
+  it('gives a glyph painted in its own operation the width it is drawn at alone', async () => {
+    // Condensed past its advance, the `o` floors and is painted alone; shaped
+    // with its neighbours it is kerned, alone it is not.
+    const { runs, glyphs } = await paintedDocument(
+      '<w:p><w:r><w:rPr><w:kern w:val="2"/><w:spacing w:val="-110"/><w:sz w:val="24"/></w:rPr><w:t>ToT</w:t></w:r></w:p>',
+      { kerning: { To: 0.07, oT: 0.07 } });
+    const [painted] = paintedBoxes(glyphs, 'o');
+    const [found] = findBoxes(runs, 'o');
+    expect(painted!.right - painted!.left).toBeCloseTo(6, 9);
+    expect(regionDifference([found!], [painted!])).toBeNull();
+  });
+});
+
+describe('comment highlights are the painted glyphs of the commented runs', () => {
+  it('leaves uncommented digits between two parts of a right-to-left run untinted', async () => {
+    const run = (text: string, rtl: boolean) => `<w:r><w:rPr>${rtl ? '<w:rtl/>' : ''}<w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr><w:t>${text}</w:t></w:r>`;
+    const { runs, glyphs } = await paintedDocument(
+      `<w:p><w:pPr><w:bidi/></w:pPr>${run('אב', true)}${run('12', false)}${run('34', false)}${run('גד', true)}</w:p>`);
+    const source = runs[0]!.source!;
+    const anchor = {
+      commentId: '1', source, startRunIndex: 0, endRunIndex: 2,
+      reference: { source, runIndex: 2, affinity: 'preceding' as const },
+    };
+    const [thread] = resolveDocxCommentThreads([{ id: '1', author: 'A', text: 'c' }], [anchor], runs);
+    const rects = thread!.anchors[0]!.rects.map(pageBoxOf);
+    expect(regionDifference(rects, paintedBoxes(glyphs, 'אב12'))).toBeNull();
+    for (const other of paintedBoxes(glyphs, '34גד')) {
+      expect(rects.some((rect) => intersect(rect, other) !== null)).toBe(false);
+    }
+  });
+});

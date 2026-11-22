@@ -94,21 +94,25 @@ describe('resolvePageCommentAnchors', () => {
     expect(laterPage.margin.children).toHaveLength(0);
   });
 
-  it('merges the tints of a cell line across a tab into one tint in the shared clip container', () => {
+  it('joins the tints of touching runs of a cell line in the shared clip container, and bridges no gap', () => {
     installDom();
     const comments = [{ id: 'cell', author: 'Ada', text: 'In a cell' }];
     const clips = [{ x: 0, y: 0, width: 300, height: 100 }];
-    // Two runs of one comment either side of a tab, in the same cell clip.
-    const runs: DocxTextRunInfo[] = [
-      { ...run([1]), x: 10, w: 40, clips },
-      { ...run([1]), x: 90, w: 40, clips },
-    ];
-    const tint = makeEl('div');
-    buildDocxCommentMargin(tint as unknown as HTMLDivElement, null, runs,
-      { comments, anchors: [{ ...anchor('cell', [1]), endRunIndex: 1 }] }, 600, 800, null, () => undefined, 1, 260, false);
-    expect(tint.children).toHaveLength(1);
-    const [container] = tint.children;
-    expect(container!.children).toHaveLength(1);
+    const tints = (secondX: number) => {
+      const runs: DocxTextRunInfo[] = [
+        { ...run([1]), x: 10, w: 40, clips },
+        { ...run([1]), x: secondX, w: 40, clips },
+      ];
+      const tint = makeEl('div');
+      buildDocxCommentMargin(tint as unknown as HTMLDivElement, null, runs,
+        { comments, anchors: [{ ...anchor('cell', [1]), endRunIndex: 1 }] }, 600, 800, null, () => undefined, 1, 260, false);
+      expect(tint.children).toHaveLength(1);
+      return tint.children[0]!.children.length;
+    };
+    // Two runs of one comment painted one after the other: one tint.
+    expect(tints(50)).toBe(1);
+    // Either side of a tab: whatever is painted between them is not tinted.
+    expect(tints(90)).toBe(2);
   });
 
   it('uses the same font box and clips for the tint as the comment API', () => {
@@ -151,7 +155,9 @@ describe('resolvePageCommentAnchors', () => {
     };
     // Two columns side by side at the same page y: two tints.
     expect(tints([turned(200, 100), turned(150, 100)])).toBe(2);
-    // One column, consecutive runs down its line: one tint.
-    expect(tints([turned(200, 100), turned(200, 150)])).toBe(1);
+    // One column, runs painted one after the other down its line: one tint.
+    expect(tints([turned(200, 100), turned(200, 140)])).toBe(1);
+    // A gap down the line is not tinted.
+    expect(tints([turned(200, 100), turned(200, 150)])).toBe(2);
   });
 });

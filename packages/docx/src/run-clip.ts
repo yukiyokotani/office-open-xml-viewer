@@ -7,7 +7,7 @@ type Affine = readonly [number, number, number, number, number, number];
 
 const IDENTITY: Affine = [1, 0, 0, 1, 0, 0];
 
-type Point = Readonly<{ x: number; y: number }>;
+export type Point = Readonly<{ x: number; y: number }>;
 
 /** The page polygon of a box placed like DocxTextRunInfo.highlightBounds. */
 function placedPolygon(x: number, y: number, width: number, height: number, transform: string | undefined): Point[] {
@@ -129,7 +129,7 @@ function boundingPolygon(polygons: readonly Point[][]): Point[] {
  * union of its rectangles; identical pieces are kept once. The cap applies
  * after each union is reduced (clipRegions), so duplicate or nested
  * rectangles never trigger the bounding-box superset. */
-function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): Point[][] {
+export function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): Point[][] {
   let pieces: Point[][] = [placedPolygon(box.x, box.y, box.width, box.height, box.transform)];
   for (const clip of clips ?? []) {
     let regions = clipRegions(clip, pieces);
@@ -150,7 +150,7 @@ function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>[] | un
   return pieces;
 }
 
-/** WORD_CELL_CONTENT_CLIP: whether any of a box placed like
+/** Whether any of a box placed like
  * DocxTextRunInfo.highlightBounds survives `clips` (each a union of its
  * rectangles with area; an empty union hides everything). */
 export function clippedBoxVisible(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): boolean {
@@ -169,89 +169,9 @@ export function clippedBoxBounds(
   return { x: corner!.x, y: corner!.y, width: opposite!.x - corner!.x, height: opposite!.y - corner!.y };
 }
 
-/** The comment highlight of a run, shared by the comment API and the
- * viewer's tint: the run's font box (highlightBounds, else its box) with its
- * orientation and clips; null when the clips leave none of it visible. */
-export function runHighlightRect(run: Readonly<DocxTextRunInfo>): Readonly<{
-  x: number; y: number; width: number; height: number;
-  transform?: string; clips?: readonly Readonly<DocxClipRegion>[];
-}> | null {
-  const bounds = run.highlightBounds;
-  const rect = {
-    x: bounds?.x ?? run.x,
-    y: bounds?.y ?? run.y,
-    width: bounds?.width ?? run.w,
-    height: bounds?.height ?? run.h,
-    ...(run.transform ? { transform: run.transform } : {}),
-  };
-  if (!(rect.width > 0 && rect.height > 0)) return null;
-  if (run.clips && !runGlyphsVisible(run)) return null;
-  return run.clips ? { ...rect, clips: run.clips } : rect;
-}
-
-/** WORD_CELL_CONTENT_CLIP: whether any glyph of `run` is painted inside its
- * clips: a glyph box (DocxTextRunInfo.clusterBoxes) along the run, the font
- * box across it; tracking after a glyph paints nothing. A run without
- * cluster boxes is judged by its font box. */
-export function runGlyphsVisible(run: Readonly<DocxTextRunInfo>): boolean {
-  const boxes = run.clusterBoxes;
-  if (!boxes || boxes.length === 0) return runPartVisible(run, 0, run.highlightBounds?.width ?? run.w);
-  return boxes.some((box) => {
-    const width = box.glyphWidth ?? box.width;
-    return width > 0 && runPartVisible(run, box.glyphX ?? box.x, width);
-  });
-}
-
-/** The painted box of the part of `run` from `offset` along its own axis
- * (from the run's origin), `length` long: across the run it spans the run's
- * font box (highlightBounds), where its glyphs are painted, not the line
- * height that additional line spacing adds. */
-export function runPaintedPart(
-  run: Readonly<DocxTextRunInfo>,
-  offset: number,
-  length: number,
-): Readonly<{ x: number; y: number; width: number; height: number; transform?: string }> {
-  const [a, b, c, d] = orientation(run.transform);
-  const font = run.highlightBounds;
-  // The font box's position across the run, from the run's origin.
-  const across = font ? c * (font.x - run.x) + d * (font.y - run.y) : 0;
-  return {
-    x: run.x + a * offset + c * across, y: run.y + b * offset + d * across, width: length,
-    height: font?.height ?? run.h,
-    ...(run.transform ? { transform: run.transform } : {}),
-  };
-}
-
-/** Whether anything painted in the part of `run` from `offset` along its own
- * axis, `length` long, survives its clips (runPaintedPart). */
-export function runPartVisible(run: Readonly<DocxTextRunInfo>, offset: number, length: number): boolean {
-  return clippedBoxVisible(runPaintedPart(run, offset, length), run.clips);
-}
-
-/** Two highlight boxes (placed like DocxTextRunInfo.highlightBounds) of one
- * rendered line, joined across the gap between them: they must share their
- * orientation, height and position across the line, measured in their own
- * frame, so a turned line joins along its own axis and two turned columns
- * never join. Returns the joined box's origin and length, or null. */
-export function joinLineBoxes(
-  previous: Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>,
-  next: Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>,
-): Readonly<{ x: number; y: number; width: number }> | null {
-  if (previous.transform !== next.transform || previous.height !== next.height) return null;
-  const [a, b, c, d] = orientation(previous.transform);
-  // Orientations are rotations or reflections: the inverse is the transpose.
-  const along = (x: number, y: number) => a * x + b * y;
-  const across = (x: number, y: number) => c * x + d * y;
-  const line = across(previous.x, previous.y);
-  if (Math.abs(line - across(next.x, next.y)) > 1e-9) return null;
-  const start = Math.min(along(previous.x, previous.y), along(next.x, next.y));
-  const end = Math.max(along(previous.x, previous.y) + previous.width, along(next.x, next.y) + next.width);
-  return { x: a * start + c * line, y: b * start + d * line, width: end - start };
-}
-
 /** The linear part of an orientation transform as text-run-projection emits
  * it (`rotate(±90deg)` or `matrix(a, b, c, d, 0, 0)`); identity when absent. */
-function orientation(transform: string | undefined): readonly [number, number, number, number] {
+export function orientation(transform: string | undefined): readonly [number, number, number, number] {
   if (!transform) return [1, 0, 0, 1];
   if (transform === 'rotate(90deg)') return [0, 1, -1, 0];
   if (transform === 'rotate(-90deg)') return [0, -1, 1, 0];
@@ -310,7 +230,7 @@ export interface OverlayPlacement {
   readonly orientation: string;
 }
 
-/** WORD_CELL_CONTENT_CLIP: overlay elements of clipped runs are placed in
+/** Overlay elements of clipped runs are placed in
  * nested clipping (`overflow:clip`) containers, one per clip in DocxTextRunInfo.clips,
  * each positioned, sized and oriented to its clip in percentages of its
  * parent, so the browser clips hit testing, selection and highlights for any
@@ -326,9 +246,9 @@ export class OverlayClipFrames {
     private readonly cssHeight: number,
   ) {}
 
-  /** The placement of an element of `run`, added after every element placed
-   * before it. */
-  place(run: Readonly<DocxTextRunInfo>): OverlayPlacement {
+  /** The placement of an element of `run` (or of a box placed like one),
+   * added after every element placed before it. */
+  place(run: Readonly<Pick<DocxTextRunInfo, 'x' | 'y' | 'transform' | 'clips'>>): OverlayPlacement {
     const clips = run.clips ?? [];
     let shared = 0;
     while (shared < clips.length && shared < this.open.length

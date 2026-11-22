@@ -1,4 +1,5 @@
-import { OverlayClipFrames, runPartVisible } from './run-clip.js';
+import { OverlayClipFrames } from './run-clip.js';
+import { runClusterVisibility, runTextVisible } from './overlay-geometry.js';
 import { countSpacingCharacters } from './character-spacing.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
@@ -225,17 +226,16 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
   }];
   if (!run.clips) return whole(false);
   // A run without cluster boxes is judged by its painted (font) box.
-  if (!boxes || boxes.length === 0) return whole(!runPartVisible(run, 0, run.w));
-  // Otherwise by where its glyphs are painted (glyph boxes, across the run
-  // its font box), not by its advances or line box: tracking after a glyph
-  // paints nothing, and a condensed run can paint glyphs past its advances.
+  if (!boxes || boxes.length === 0) return whole(!runTextVisible(run));
+  // Otherwise by where its glyphs are painted (overlay-geometry.ts: glyph
+  // rects inside the clips), not by its advances or line box: tracking after
+  // a glyph paints nothing, and a condensed run can paint glyphs past its
+  // advances.
   const groups: Array<{ first: number; last: number; hidden: boolean }> = [];
-  for (const [index, box] of boxes.entries()) {
+  for (const [index, visible] of runClusterVisibility(run).entries()) {
     const previous = groups.at(-1);
-    const glyphX = box.glyphX ?? box.x;
-    const glyphWidth = box.glyphWidth ?? box.width;
     // A cluster that paints nothing goes with the one before it.
-    const hidden = glyphWidth > 0 ? !runPartVisible(run, glyphX, glyphWidth) : previous?.hidden ?? false;
+    const hidden = visible === null ? previous?.hidden ?? false : !visible;
     if (previous && previous.hidden === hidden) previous.last = index;
     else groups.push({ first: index, last: index, hidden });
   }

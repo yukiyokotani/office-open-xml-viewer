@@ -134,8 +134,11 @@ function projectTextRun(
           ? { glyphX: box.glyphXPt * inlineScale, glyphWidth: box.glyphWidthPt * inlineScale } : {}),
         ...(box.crossPt !== undefined && box.crossWidthPt !== undefined
           ? { y: box.crossPt * blockScale, height: box.crossWidthPt * blockScale } : {}),
+        // The glyph's interval across the run, where it is neither the
+        // advance box's nor the run's font box.
         ...(box.glyphCrossPt !== undefined && box.glyphCrossWidthPt !== undefined
-          && (Math.abs(box.glyphCrossPt - box.crossPt!) > 1e-9 || Math.abs(box.glyphCrossWidthPt - box.crossWidthPt!) > 1e-9)
+          && (box.crossPt === undefined || Math.abs(box.glyphCrossPt - box.crossPt) > 1e-9
+            || Math.abs(box.glyphCrossWidthPt - box.crossWidthPt!) > 1e-9)
           ? { glyphY: box.glyphCrossPt * blockScale, glyphHeight: box.glyphCrossWidthPt * blockScale } : {}),
       })),
     }),

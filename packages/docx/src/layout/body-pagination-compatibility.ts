@@ -154,6 +154,8 @@ const GRID_PLAIN_TEXT_KEYS = new Set([
   'trailingSpaceCompressionPt', 'color', 'fontRoute', 'fontSizePt',
   'fontWeight', 'fontStyle', 'direction', 'writingMode', 'characterSpacingPt',
   'characterScale', 'fitText', 'kerning', 'ownedTrailingSlackPt', 'hyperlink',
+  // Position data for readers of the piece's geometry, not paint.
+  'kashidaInsertions',
 ]);
 // Acquisition may still carry basePaintOps beside the final glyph operations.
 // Both contain glyph paint only; a future effect must opt in explicitly.

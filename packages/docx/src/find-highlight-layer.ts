@@ -1,5 +1,6 @@
 import { countSpacingCharacters } from './character-spacing.js';
-import { OverlayClipFrames, runPartVisible } from './run-clip.js';
+import { OverlayClipFrames } from './run-clip.js';
+import { clipRunRect, runFontBox, runOverlayRects, type RunRect } from './overlay-geometry.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -12,11 +13,12 @@ import { OverlayClipFrames, runPartVisible } from './run-clip.js';
  * approach the selection / hyperlink overlay uses, so highlights compose with
  * them and survive re-render the same way.
  *
- * The horizontal extent of a slice (its x offset + width within the run) is the
- * shared core `sliceHorizontalExtent`, measured against the run's font via a
- * caller-supplied `measure` primed with `ctx.font = run.font` — the same
- * measureText↔fillText correspondence the selection overlay relies on. The
- * vertical extent is the run's line box (`y` … `y + h`), owned here.
+ * A slice's boxes come from the overlay geometry pipeline
+ * (overlay-geometry.ts): the glyph rects of the slice's characters, cut to
+ * the run's clips and joined where they touch. Only a run without cluster
+ * boxes (one not projected from a layout) is measured, with the shared core
+ * `sliceHorizontalExtent` against the run's font via a caller-supplied
+ * `measure` primed with `ctx.font = run.font`.
  *
  * The active match (the one `findNext`/`findPrev` last landed on) is drawn in a
  * distinct emphasis colour so the user can tell it apart from the other hits,
@@ -24,7 +26,6 @@ import { OverlayClipFrames, runPartVisible } from './run-clip.js';
  */
 import {
   sliceHorizontalExtent,
-  overlayPercent,
   type FindHighlightColors,
   type MatchRunSlice,
 } from '@silurus/ooxml-core';
@@ -89,20 +90,15 @@ export function buildDocxHighlightLayer(
       if (!run) continue;
       const start = Math.max(0, Math.min(slice.start, run.text.length));
       const end = Math.max(start, Math.min(slice.end, run.text.length));
-      const pitch = run.letterSpacingPx ?? 0;
-      // A projected run carries where its clusters are painted: the slice
-      // covers one box per painted interval, and nothing is measured.
-      const intervals: { x: number; width: number; y?: number; height?: number }[] = run.clusterBoxes
-        ? clusterSliceIntervals(run.clusterBoxes, start, end)
-        : [measuredSliceInterval(run, start, end, pitch, measureForFont)];
-      for (const { x, width, y, height } of intervals) {
-        if (width <= 0) continue;
-        // WORD_CELL_CONTENT_CLIP: a highlight only where its glyphs are
-        // painted inside the clips (the glyph box along the run, the font box
-        // across it), as the text layer decides what is selectable.
-        if (run.clips && !runPartVisible(run, x, width)) continue;
-        // WORD_CELL_CONTENT_CLIP: a clipped run's box lies in a container sized
-        // to its clip, which cuts it like the glyphs.
+      // The slice's glyphs where they are painted inside the run's clips
+      // (overlay-geometry.ts). A run without cluster boxes (not projected
+      // from a layout) is measured along the run and cut the same way.
+      const rects = run.clusterBoxes
+        ? runOverlayRects(run, start, end)
+        : measuredSliceRects(run, start, end, measureForFont);
+      for (const rect of rects) {
+        // A clipped run's box also lies in containers sized to its clips,
+        // which cut it like the glyphs at any angle.
         const frame = clipFrames.place(run);
         const box = document.createElement('div');
         // A vertical (tbRl) page reports the run at its physical top-left and
@@ -113,15 +109,12 @@ export function buildDocxHighlightLayer(
           ? `transform:${frame.orientation};transform-origin:top left;`
           : '';
         // Positioned as a % of the page's intended CSS box so the box scales with
-        // the container under external CSS scaling. A vertical (tbRl) run's
-        // transform is about `top left`, so the %-placed origin rotates into the
-        // column exactly as before at 1× scale.
+        // the container under external CSS scaling. The rect's offsets run
+        // along the run's own axes, turned with the run.
         box.style.cssText =
           `position:absolute;` +
-          // The slice offset runs along the run's own axis.
-          // A tate-chu-yoko character is placed across the run as well.
-          frame.position(x, y ?? 0) +
-          `width:${frame.width(width)};height:${frame.height(height ?? run.h)};` +
+          frame.position(rect.x, rect.y) +
+          `width:${frame.width(rect.width)};height:${frame.height(rect.height)};` +
           transform +
           `background:${fill};pointer-events:none;`;
         frame.parent.appendChild(box);
@@ -130,58 +123,17 @@ export function buildDocxHighlightLayer(
   }
 }
 
-type ClusterBoxes = NonNullable<DocxTextRunInfo['clusterBoxes']>;
-
-/** Where the characters `[start, end)` of a run are painted, from the glyph
- * boxes of the run's retained clusters (where each glyph is drawn: its
- * natural advance from its pen, without the tracking after it, a floored
- * glyph included): adjacent or overlapping boxes merged into one interval,
- * the tracking between glyphs left uncovered. A slice that covers part of a
- * cluster takes that share of its glyph box. */
-function clusterSliceIntervals(
-  clusters: ClusterBoxes,
+/** The rects of a slice of a run that carries no cluster boxes: its measured
+ * extent along the run over the run's font box, cut to the run's clips. */
+function measuredSliceRects(
+  run: DocxTextRunInfo,
   start: number,
   end: number,
-): { x: number; width: number; y?: number; height?: number }[] {
-  // Clusters are listed in source order: the first one that ends after `start`.
-  let low = 0;
-  let high = clusters.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (clusters[middle]!.end <= start) low = middle + 1;
-    else high = middle;
-  }
-  const boxes: { x: number; width: number; y?: number; height?: number }[] = [];
-  for (let index = low; index < clusters.length && clusters[index]!.start < end; index += 1) {
-    const cluster = clusters[index]!;
-    const length = Math.max(1, cluster.end - cluster.start);
-    const from = (Math.max(start, cluster.start) - cluster.start) / length;
-    const to = (Math.min(end, cluster.end) - cluster.start) / length;
-    const glyphX = cluster.glyphX ?? cluster.x;
-    const glyphWidth = cluster.glyphWidth ?? cluster.width;
-    const y = cluster.glyphY ?? cluster.y;
-    const height = cluster.glyphHeight ?? cluster.height;
-    boxes.push({
-      x: glyphX + glyphWidth * (cluster.rtl ? 1 - to : from),
-      width: glyphWidth * (to - from),
-      ...(y !== undefined && height !== undefined ? { y, height } : {}),
-    });
-  }
-  const merged: { x: number; width: number; y?: number; height?: number }[] = [];
-  for (const box of boxes.filter((candidate) => candidate.width > 0).sort((left, right) => left.x - right.x)) {
-    // A character placed across the run (tate-chu-yoko) keeps its own box.
-    if (box.y !== undefined) {
-      merged.push({ x: box.x, width: box.width, y: box.y, height: box.height! });
-      continue;
-    }
-    const last = merged.at(-1);
-    // Adjacent or overlapping boxes (a floored glyph drawn over its
-    // neighbour) form one interval.
-    if (last && last.y === undefined && box.x <= last.x + last.width + 1e-6) {
-      last.width = Math.max(last.width, box.x + box.width - last.x);
-    } else merged.push({ x: box.x, width: box.width });
-  }
-  return merged;
+  measureForFont: (font: string) => (s: string) => number,
+): RunRect[] {
+  const { x, width } = measuredSliceInterval(run, start, end, run.letterSpacingPx ?? 0, measureForFont);
+  const across = runFontBox(run);
+  return clipRunRect(run, { x, y: across.y, width, height: across.height });
 }
 
 /** The extent of a slice of a run that carries no cluster boxes (a run not

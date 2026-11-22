@@ -6,7 +6,7 @@ import {
   translationAffine,
 } from './affine.js';
 import { sourceKey } from './source-key.js';
-import { clusterBoxes, type ClusterBox } from './visual-cluster-geometry.js';
+import type { ClusterBox } from './visual-cluster-geometry.js';
 import { lineFrameTransform } from './line-frame.js';
 import type {
   DocumentLayout,
@@ -532,10 +532,7 @@ function visitParagraph(
               placement,
               pointToPage: linePointToPage,
               clips: clippedProjection.clips,
-              // The piece's paint operations place floored and tate-chu-yoko
-              // glyphs (their ranges are the paragraph's, as the clusters').
-              clusterBoxes: clusterBoxes({ ...placement, paintOps: retained.paintOps }, 0, placement.clusters.length,
-                placement.range.start, placement.range.end, placement.bounds.xPt),
+              clusterBoxes: placement.clusterBoxes,
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }
