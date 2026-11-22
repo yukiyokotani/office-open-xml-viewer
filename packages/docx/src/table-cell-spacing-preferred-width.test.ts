@@ -47,10 +47,11 @@ const twoColumns = (tableProperties: string, widths: readonly [number, number] =
   tableXml(tableProperties, widths, ['1', '2'].map((row) =>
     cell(widths[0], `A${row}`) + cell(widths[1], `B${row}`)));
 
-function docx(table: string, direction: string | null): Uint8Array {
+function docx(table: string, direction: string | null, columns = 1): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${paragraph('before')}${table}${paragraph('after')}`
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
+    + (columns > 1 ? `<w:cols w:num="${columns}" w:space="400"/>` : '')
     + (direction ? `<w:textDirection w:val="${direction}"/>` : '')
     + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
@@ -87,8 +88,8 @@ function measureContext(): CanvasRenderingContext2D {
 
 /** The laid-out table: its left edge, overall width, the widths of the first
  * row's cell boxes and its horizontal rules as "y:x0-x1". */
-function tableOf(table: string, direction: string | null = null) {
-  const archive = new DocxArchive(docx(table, direction));
+function tableOf(table: string, direction: string | null = null, columns = 1) {
+  const archive = new DocxArchive(docx(table, direction, columns));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
@@ -135,6 +136,23 @@ function nestedCells(table: string): { widths: number[]; firstCellXPt: number } 
     widths: inner.rows[0]!.cells.map((box) => Math.round(box.flowBounds.widthPt * 1e6) / 1e6),
     firstCellXPt: inner.rows[0]!.cells[0]!.flowBounds.xPt,
   };
+}
+
+/** The table fragments of every page, in page order. */
+function tablePages(table: string) {
+  const archive = new DocxArchive(docx(table, null));
+  let model: DocxDocumentModel;
+  try {
+    model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+  const layout = layoutDocument(
+    model,
+    createLayoutServices(model, { measureContext: measureContext() }),
+    { currentDateMs: 0 },
+  );
+  return layout.pages.flatMap((page) => page.layers.body.flatMap((node) => node.kind === 'table' ? [node] : []));
 }
 
 const tableWidths = (spacingPt: number, tableWidth: string, direction: string | null = null) => {
@@ -251,6 +269,53 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     // From the cell's content box: the half rule its margin leaves
     // uncovered, then the gap.
     expect(firstCellXPt).toBeCloseTo(Math.max(0, 0.25 - marginPt) + 4, 6);
+  });
+
+  it('draws the box of a vertically merged cell on every page it continues on', () => {
+    // 60 rows of one line each pass the first page; the first column is one
+    // merged cell. Each page draws the left and right rule of its piece.
+    const rows = Array.from({ length: 60 }, (_unused, row) =>
+      cell(1440, row === 0 ? 'A' : '', `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>`) + cell(2160, `B${row}`));
+    const pages = tablePages(tableXml(AUTO + spacing(2), [1440, 2160], rows));
+    expect(pages.length).toBeGreaterThan(1);
+    for (const page of pages) {
+      const firstColumnRules = page.borders.filter((border) =>
+        border.from.xPt === border.to.xPt && border.from.xPt < page.flowBounds.xPt + 4 + 72 + 1
+        && border.from.xPt > page.flowBounds.xPt + 2);
+      expect(firstColumnRules.map((border) => Math.round((border.from.xPt - page.flowBounds.xPt) * 100) / 100).sort())
+        .toEqual([4.25, 75.75]);
+      // One box: the rules run the height of the piece between its gaps.
+      for (const rule of firstColumnRules) {
+        expect(Math.abs(rule.to.yPt - rule.from.yPt)).toBeGreaterThan(page.flowBounds.heightPt - 12);
+      }
+    }
+  });
+
+  it('keeps the growth of a cell without a preferred width when the table fits', () => {
+    // The second cell has no tcW and holds 21 characters (210 pt with its
+    // margins aside). Spacing adds the gaps; the content-sized box also
+    // holds its own two 0.5 pt rules.
+    const text = 'aaaa bbbb cccc dddd e';
+    const mixed = (extra: string) => tableXml(AUTO + extra, [1440, 2160], [
+      cell(1440, 'A1') + `<w:tc><w:tcPr/>${paragraph(text)}</w:tc>`,
+    ]);
+    const plain = tableOf(mixed(''));
+    const spaced = tableOf(mixed(spacing(2)));
+    expect(spaced.cells[0]).toBeCloseTo(plain.cells[0]!, 6);
+    expect(plain.cells[1]).toBeGreaterThan(200);
+    expect(spaced.cells[1]).toBeCloseTo(plain.cells[1]! + 1, 6);
+    expect(spaced.table).toBeCloseTo(plain.table + 12 + 1, 6);
+  });
+
+  it('holds a table in a two-column section to its column', () => {
+    // Two 222.65 pt columns 20 pt apart. 72 + 108 pt cells keep their
+    // widths; 220 + 240 pt cells are resolved in the column.
+    expect(tableOf(twoColumns(AUTO + spacing(2)), null, 2).table).toBeCloseTo(192, 6);
+    const held = tableOf(twoColumns(AUTO + spacing(2), [4400, 4800]), null, 2);
+    expect(held.table).toBeCloseTo(222.65 - 0.5, 6);
+    // With an indent the table keeps the geometry it has without this rule.
+    const indented = tableOf(twoColumns(AUTO + '<w:tblInd w:w="800" w:type="dxa"/>' + spacing(2), [4400, 4800]), null, 2);
+    expect(indented.table).toBeCloseTo(222.65, 6);
   });
 
   it('applies both forms to the upright block table of a tbRl section', () => {

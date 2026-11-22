@@ -928,10 +928,13 @@ function materializeBorders(
     input.rows.forEach((row, rowIndex) => {
       const spacing = rowSpacingInsets(input.rows, rowIndex);
       for (const cell of row.cells) {
-        // A vertically merged cell is one box from its first row to its last.
-        if (cell.verticalMerge === 'continue') continue;
+        // A vertically merged cell is one box from its first row here to
+        // its last; after a page break its first row is a continuation.
+        const mergedAbove = cell.verticalMerge === 'continue' && (input.rows[rowIndex - 1]?.cells.some((above) =>
+          above.columnStart === cell.columnStart && above.verticalMerge !== 'none') ?? false);
+        if (mergedAbove) continue;
         let lastRowIndex = rowIndex;
-        if (cell.verticalMerge === 'restart') {
+        if (cell.verticalMerge !== 'none') {
           while (input.rows[lastRowIndex + 1]?.cells.some((below) =>
             below.columnStart === cell.columnStart && below.verticalMerge === 'continue')) lastRowIndex += 1;
         }
