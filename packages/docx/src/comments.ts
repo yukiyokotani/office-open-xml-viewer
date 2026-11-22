@@ -518,12 +518,16 @@ export function resolveDocxCommentThreads(
     if (!mayResolve) continue;
     const resolvedRuns = resolveCommentAnchorRuns(anchor, runs);
     if (resolvedRuns.length === 0) continue;
+    // An anchor whose content the page hides whole (clipped away) is not
+    // visible on it: it has no highlight, and is no anchor of the page.
+    const rects = highlightRects(resolvedRuns);
+    if (rects.length === 0) continue;
     const resolved = resolvedByRoot.get(rootId) ?? [];
     if (!resolvedByRoot.has(rootId)) resolvedByRoot.set(rootId, resolved);
     resolved.push(Object.freeze({
       anchor,
       kind: resolvedAnchorKind(anchor, resolvedRuns),
-      rects: highlightRects(resolvedRuns),
+      rects,
     }));
   }
 

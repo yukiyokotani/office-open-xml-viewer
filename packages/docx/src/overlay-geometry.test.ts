@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { resolveDocxCommentThreads } from './comments.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
 import {
-  clipRunRect, overlayBoxes, placeRunRect, runAdvanceRects, runGlyphRects, runOverlayRects, runTextVisible,
+  clipRunRect, overlayBoxes, overlayRectsExamined, placeRunRect, runAdvanceRects, runGlyphRects, runOverlayRects, runTextVisible,
 } from './overlay-geometry.js';
 import { DocxFindController } from './find.js';
 import { textRunSourceIndexForDocument } from './layout/text-index.js';
@@ -477,6 +477,33 @@ describe('a comment on inline content that is not text', () => {
     expect(regionDifference(rectsOf(runs, 0, 1), [shown])).toBeNull();
   });
 
+  it('marks nothing for a picture its line hides whole, and none of the text after it', async () => {
+    // A 15pt picture lowered 24pt on an exact 12pt line: the line shows none of it.
+    const { layout, runs, pictures } = await paintedDocument(
+      '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>'
+      + `${inlinePictureRun(30, 15, '<w:position w:val="-48"/>')}${letters('Uncommented')}</w:p>`, PICTURE_PART);
+    expect(pictures.every((picture) => intersect(picture.box, picture.clip) === null)).toBe(true);
+    // The picture keeps its source run: a comment on it needs no fallback.
+    const picture = runs.find((run) => run.inlineContent === 'object');
+    expect(picture?.sourceRunIndex).toBe(0);
+    expect([...textRunSourceIndexForDocument(layout).values()].some((indices) => indices.has(0))).toBe(true);
+    expect(rectsOf(runs, 0, 1)).toEqual([]);
+  });
+
+  it('keeps the line-box height of a tab that touches only a picture of the range', async () => {
+    // A tab before a 5pt-high picture, both commented; the text is not.
+    const { runs, pictures } = await paintedDocument(
+      '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="1440"/></w:tabs></w:pPr>'
+      + `<w:r><w:rPr><w:sz w:val="32"/></w:rPr><w:tab/></w:r>${inlinePictureRun(30, 5)}`
+      + '<w:r><w:rPr><w:sz w:val="32"/></w:rPr><w:t>after</w:t></w:r></w:p>', PICTURE_PART);
+    const tab = runs.find((run) => run.inlineContent === 'tab')!;
+    const picture = intersect(pictures[0]!.box, pictures[0]!.clip)!;
+    expect(regionDifference(rectsOf(runs, 0, 2), [
+      { left: tab.x, top: tab.y, right: tab.x + tab.w, bottom: tab.y + tab.h }, picture,
+    ])).toBeNull();
+    expect(tab.h).toBeGreaterThan(5 + 1);
+  });
+
   it('gives a comment on a paragraph that holds only a tab its own geometry, not the next text', async () => {
     const comments = '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
       + '<w:comment w:id="1" w:author="A"><w:p><w:r><w:t>c</w:t></w:r></w:p></w:comment></w:comments>';
@@ -513,5 +540,78 @@ describe('a comment on inline content that is not text', () => {
       expect(rect.bottom - rect.top).toBeCloseTo(index % 2 === 0 ? 12 : 8, 6);
       expect(rect.left).toBeCloseTo(72, 6);
     });
+  });
+});
+
+describe('the work of marking a commented paragraph of many tabbed lines', () => {
+  /** `lines` lines of `a<tab>b`, all runs of one comment. */
+  const tabbedLines = (lines: number): DocxTextRunInfo[] => Array.from({ length: lines }, (_, line) => {
+    const base = { y: line * 14, h: 12, fontSize: 12, font: '12px serif', sourceRunIndex: line };
+    return [
+      { ...base, text: 'a', x: 0, w: 6 },
+      { ...base, text: '', inlineContent: 'tab' as const, x: 6, w: 138 },
+      { ...base, text: 'b', x: 144, w: 6 },
+    ];
+  }).flat();
+  /** Rects the tab lookup examines while marking `lines` lines. */
+  const examined = (lines: number): number => {
+    const runs = tabbedLines(lines);
+    const before = overlayRectsExamined();
+    expect(overlayBoxes(runs)).toHaveLength(lines);
+    return overlayRectsExamined() - before;
+  };
+
+  it('grows with the number of lines, not with its square', () => {
+    // Four times the lines: a tab that looked at every line's rects would
+    // examine sixteen times as many.
+    const small = examined(60);
+    const large = examined(240);
+    expect(small).toBeGreaterThan(0);
+    expect(large / small).toBeLessThan(6);
+  });
+});
+
+describe('a comment on text its clips hide whole', () => {
+  it('is no thread of the page', async () => {
+    const { runs } = await paintedDocument(exactRowCell(240,
+      '<w:p><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Visible</w:t></w:r>'
+      + '<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:br/><w:br/><w:t>Hidden</w:t></w:r></w:p>'));
+    const hidden = runs.find((run) => run.text === 'Hidden')!;
+    const shown = runs.find((run) => run.text === 'Visible')!;
+    const threads = (run: DocxTextRunInfo) => resolveDocxCommentThreads([{ id: '1', author: 'A', text: 'c' }], [{
+      commentId: '1', source: run.source!, startRunIndex: run.sourceRunIndex!, endRunIndex: run.sourceRunIndex! + 1,
+      reference: { source: run.source!, runIndex: run.sourceRunIndex! + 1, affinity: 'preceding' as const },
+    }], runs);
+    expect(threads(hidden)).toEqual([]);
+    expect(threads(shown)).toHaveLength(1);
+  });
+});
+
+describe('the work of covering overlapping marks once', () => {
+  /** `lines` lines of 60 single-character runs, every other one raised by
+   * 2px: neighbours touch without overlapping, and no two join. */
+  const staggered = (lines: number): DocxTextRunInfo[] => Array.from({ length: lines }, (_, line) => (
+    Array.from({ length: 60 }, (_run, index) => ({
+      text: 'x', x: index * 6, y: line * 20 - (index % 2) * 2, w: 6, h: 12, fontSize: 12, font: '12px serif',
+      sourceRunIndex: line * 60 + index,
+    })))).flat();
+  const comparisons = (lines: number): number => {
+    const runs = staggered(lines);
+    const counted = vi.spyOn(Math, 'min');
+    try {
+      expect(overlayBoxes(runs)).toHaveLength(lines * 60);
+      return counted.mock.calls.length;
+    } finally {
+      counted.mockRestore();
+    }
+  };
+
+  it('grows with the number of lines, not with its square', () => {
+    // Four times the lines: comparing every pair of rects would take sixteen
+    // times the comparisons.
+    const small = comparisons(10);
+    const large = comparisons(40);
+    expect(small).toBeGreaterThan(0);
+    expect(large / small).toBeLessThan(6);
   });
 });

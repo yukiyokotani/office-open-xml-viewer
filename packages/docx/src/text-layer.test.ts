@@ -262,3 +262,19 @@ describe('buildDocxTextLayer — without a measurer', () => {
     expect(layer.children[0]!.style.width).toBe('48%');
   });
 });
+
+describe('buildDocxTextLayer — inline content without text', () => {
+  it('gives a tab no span and leaves the runs around it their indices', () => {
+    vi.stubGlobal('document', { createElement: (tag: string) => makeEl(tag) });
+    const layer = makeEl('div') as FakeEl & { dataset?: Record<string, string> };
+    const withData = (tag: string) => Object.assign(makeEl(tag), { dataset: {} as Record<string, string> });
+    vi.stubGlobal('document', { createElement: withData });
+    buildDocxTextLayer(Object.assign(layer, { dataset: {} }) as unknown as HTMLDivElement, [
+      run({ text: 'A', x: 0, w: 6 }),
+      run({ text: '', inlineContent: 'tab', x: 6, w: 60 }),
+      run({ text: 'B', x: 66, w: 6 }),
+    ], 100, 100);
+    expect(layer.children.map((span) => span.textContent)).toEqual(['A', 'B']);
+    expect(layer.children.map((span) => (span as unknown as { dataset: Record<string, string> }).dataset.runIndex)).toEqual(['0', '2']);
+  });
+});

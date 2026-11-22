@@ -2657,6 +2657,21 @@ function fieldDependency(run: Extract<DocRun, { type: 'field' }>): TextPlacement
   return 'document';
 }
 
+/** The run of a shared text sequence that holds the character at `offset`.
+ * Lines ask in rising offsets, so the last answer of each sequence is where
+ * the next search starts: the work over a paragraph is linear. */
+const sequenceMemberCursors = new WeakMap<object, number>();
+function sequenceMemberRunIndex(
+  sequence: readonly Readonly<{ runIndex: number; start: number; end: number }>[],
+  offset: number,
+): number | undefined {
+  let member = sequenceMemberCursors.get(sequence) ?? 0;
+  if ((sequence[member]?.start ?? 0) > offset) member = 0;
+  while (member < sequence.length - 1 && sequence[member]!.end <= offset) member += 1;
+  sequenceMemberCursors.set(sequence, member);
+  return sequence[member]?.runIndex;
+}
+
 function sourceRunIndex(segment: { sourceRunIndex?: number }): number | undefined {
   return segment.sourceRunIndex;
 }
@@ -4150,7 +4165,7 @@ function planMeasuredLines(
       lineEndOffset = Math.max(lineEndOffset, segmentOffset + occurrenceLength);
       if ('isTab' in segment) {
         const tab = segment as LayoutTabSeg;
-        const tabRunIndex = sequence?.find((member) => (segment.sourceTextOffset ?? 0) < member.end)?.runIndex ?? runIndex;
+        const tabRunIndex = sequence ? sequenceMemberRunIndex(sequence, segment.sourceTextOffset ?? 0) : runIndex;
         const leader = tab.leader ?? 'none';
         let leaderShape: MeasuredTabPlanSegment['leaderShape'];
         let underline: MeasuredTabPlanSegment['underline'];
