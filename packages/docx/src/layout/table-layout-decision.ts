@@ -445,7 +445,7 @@ export function decideLogicalTable(
     && (environment.singleColumn || preferredSized)
     // The upright block table of a vertical section is measured for fixed
     // and preferred-sized tables only.
-    && (!environment.inTableCell || preferredSized) && (!vertical || (environment.uprightTable === true && !contentSized))
+    && (!environment.inTableCell || preferredSized) && (!vertical || (environment.uprightTable === true && !contentSized && environment.singleColumn))
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
     // ECMA-376 §17.4.43 puts trPr spacing inside text margins; §17.4.45

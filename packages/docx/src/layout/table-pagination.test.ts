@@ -438,9 +438,15 @@ describe('retained table pagination', () => {
         mergedRow(4, [mergedCell(4, 0, 'none'), mergedCell(4, 1, 'none')]),
       ];
       expect(completedPartialRowWindowEnd(rows[0]!, rows, 0, 1)).toBe(2);
-      // Any window that opens with a continuation does: a page fragment
-      // below a merge's restart is one, with or without the segment fact.
-      expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(2);
+      // Without the segment fact the window is not extended: a fragment's
+      // continuation holds no content, and following it from every row of a
+      // long merge would lay out the merge's rest again for each of them.
+      expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(0);
+      const long = Array.from({ length: 200 }, (_unused, index) =>
+        mergedRow(index, [mergedCell(index, 0, 'none'), mergedCell(index, 1, index === 0 ? 'restart' : 'continue')]));
+      const followed = long.slice(1).reduce((sum, row, index) =>
+        sum + completedPartialRowWindowEnd(row, long, index + 1) - (index + 1), 0);
+      expect(followed).toBe(0);
     });
   });
 

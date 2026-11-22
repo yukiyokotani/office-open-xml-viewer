@@ -540,6 +540,28 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     });
   });
 
+  it('gives a continued merge the shading and side rules of the cell that opens it', () => {
+    // Shading on the restart only; the continuations carry an 8 pt right
+    // rule the merge never shows. Later pages keep the restart's.
+    const rows = Array.from({ length: 140 }, (_unused, row) => cell(1440, row === 0 ? 'A' : '', row === 0
+      ? '<w:vMerge w:val="restart"/><w:shd w:val="clear" w:fill="FF0000"/>'
+      : '<w:vMerge/><w:tcBorders><w:right w:val="single" w:sz="64"/></w:tcBorders>') + cell(2160, `B${row}`));
+    for (const spacingPt of [0, 2]) {
+      const pages = tablePages(tableXml(AUTO + spacing(spacingPt), [1440, 2160], rows));
+      expect(pages.length).toBeGreaterThan(1);
+      for (const page of pages) {
+        const owner = page.rows[0]!.cells[0]! as { background?: { color: string } };
+        expect(owner.background?.color.toLowerCase()).toContain('ff0000');
+        expect(page.borders.every((border) => border.widthPt === 0.5)).toBe(true);
+      }
+    }
+  });
+
+  it('keeps the upright table of a two-column vertical section on its previous geometry', () => {
+    expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 2).table).toBeCloseTo(180, 6);
+    expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 1).table).toBeCloseTo(192, 6);
+  });
+
   it('paints a continued merge as one box on the later page', () => {
     // No header: the first row of the second page opens the merge there.
     const rows = Array.from({ length: 60 }, (_unused, row) =>

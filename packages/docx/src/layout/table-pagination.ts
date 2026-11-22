@@ -22,6 +22,7 @@ import { adjustForWidowOrphan } from '../line-fit-policy.js';
 import type { StoryPageFrames } from './story-page-frames.js';
 import { sliceParagraphLayout } from './paragraph.js';
 import {
+  continuesMergeFromAbove,
   laidOutTableTracks,
   layoutTable,
   measureTableCellBlockFlowHeightPt,
@@ -320,6 +321,37 @@ function sourceRowFor(
   return source.input.rows[inputRowIndexOf(source, logicalRowIndex)];
 }
 
+const mergeOpenersBySource = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, TableCellLayoutInput>>();
+
+/** For every continuation cell of the source, by id, the cell that opens its
+ * vertical merge: one pass over the rows, carried column by column. */
+function mergeOpeners(source: RetainedTableAcquisition): ReadonlyMap<string, TableCellLayoutInput> {
+  const cached = mergeOpenersBySource.get(source);
+  if (cached) return cached;
+  const openers = new Map<string, TableCellLayoutInput>();
+  const open = new Map<string, TableCellLayoutInput>();
+  source.input.rows.forEach((row, rowIndex) => {
+    const above = source.input.rows[rowIndex - 1];
+    const next = new Map<string, TableCellLayoutInput>();
+    for (const cell of row.cells) {
+      const key = `${cell.columnStart}:${cell.columnSpan}`;
+      if (cell.verticalMerge === 'restart') next.set(key, cell);
+      else if (cell.verticalMerge === 'continue'
+        && continuesMergeFromAbove(above, row, cell.columnStart, cell.columnSpan)) {
+        const opener = open.get(key);
+        if (opener) {
+          next.set(key, opener);
+          openers.set(cell.id, opener);
+        }
+      }
+    }
+    open.clear();
+    for (const [key, opener] of next) open.set(key, opener);
+  });
+  mergeOpenersBySource.set(source, openers);
+  return openers;
+}
+
 function leadingHeaderCount(input: TableLayoutInput): number {
   let count = 0;
   while (input.rows[count]?.repeatedHeader === true) count += 1;
@@ -496,7 +528,12 @@ export function completedPartialRowWindowEnd(
     const scanned = scan === rowIndex ? row : sourceRows[scan]!;
     const above = scan === rowIndex ? undefined : scan === rowIndex + 1 ? row : sourceRows[scan - 1];
     for (const cell of scanned.cells) {
-      if (projectedMergeRole(segmentOpeningLogicalRowIndex, above, scanned, cell) !== 'restart') continue;
+      // A continuation that opens the window without being a segment's
+      // opening row holds no content: its interval is not followed, so the
+      // window stays bounded by the authored merges (library policy).
+      const opens = cell.verticalMerge === 'restart' || (scanned.logicalRowIndex === segmentOpeningLogicalRowIndex
+        && projectedMergeRole(segmentOpeningLogicalRowIndex, above, scanned, cell) === 'restart');
+      if (!opens) continue;
       windowEnd = Math.max(
         windowEnd,
         mergeEndRow(sourceRows, scan, cell.columnStart, cell.columnSpan),
@@ -2132,10 +2169,30 @@ function materializeFragment(
   selected: readonly SelectedRow[],
   context: TableFragmentContext,
 ): TableFragmentLayout {
+  const openers = mergeOpeners(source);
   const fragmentInput: TableLayoutInput = {
     ...source.input,
     id: `${source.input.id}:fragment:${context.page.occurrenceId}`,
-    rows: selected.map((row) => row.input),
+    rows: selected.map((row, rowIndex) => {
+      // A continuation that opens its merge in this fragment (table.ts
+      // gridMergeRole) stands for the cell that opened it in the source: it
+      // carries that cell's shading and side rules, which the content beside
+      // the merge was acquired against.
+      const above = selected[rowIndex - 1]?.input;
+      let cells: TableCellLayoutInput[] | undefined;
+      row.input.cells.forEach((cell, cellIndex) => {
+        const opener = cell.verticalMerge === 'continue' ? openers.get(cell.id) : undefined;
+        if (!opener || continuesMergeFromAbove(above, row.input, cell.columnStart, cell.columnSpan)) return;
+        cells ??= [...row.input.cells];
+        const { background: _own, ...rest } = cell;
+        cells[cellIndex] = {
+          ...rest,
+          ...(opener.background ? { background: opener.background } : {}),
+          borders: { ...cell.borders, left: opener.borders.left, right: opener.borders.right, insideV: opener.borders.insideV },
+        };
+      });
+      return cells ? { ...row.input, cells } : row.input;
+    }),
   };
   const laidOut = layoutTableFragment(source, fragmentInput, context.placement, context.services).layout;
   const rows = laidOut.rows.map((row, rowIndex): TableRowFragmentLayout => {
