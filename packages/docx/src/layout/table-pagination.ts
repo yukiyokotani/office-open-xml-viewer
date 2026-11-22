@@ -324,7 +324,13 @@ function sourceRowFor(
 type MergeOpener = Readonly<{ cell: TableCellLayoutInput; row: TableRowLayoutInput }>;
 const mergeOpenersBySource = new WeakMap<RetainedTableAcquisition, ReadonlyMap<string, MergeOpener>>();
 
-/** For every continuation cell of the source, by id, the cell that opens its
+/** A cell's place in the source: its row and grid columns, which every
+ * fragment of the row keeps. */
+function mergePlaceKey(row: TableRowLayoutInput, cell: TableCellLayoutInput): string {
+  return `${row.logicalRowIndex}:${cell.columnStart}:${cell.columnSpan}`;
+}
+
+/** For every continuation cell of the source, by its place, the cell that opens its
  * vertical merge and that cell's row: one pass over the rows, carried column by column. */
 function mergeOpeners(source: RetainedTableAcquisition): ReadonlyMap<string, MergeOpener> {
   const cached = mergeOpenersBySource.get(source);
@@ -342,7 +348,7 @@ function mergeOpeners(source: RetainedTableAcquisition): ReadonlyMap<string, Mer
         const opener = open.get(key);
         if (opener) {
           next.set(key, opener);
-          openers.set(cell.id, opener);
+          openers.set(mergePlaceKey(row, cell), opener);
         }
       }
     }
@@ -2182,7 +2188,9 @@ function materializeFragment(
       const above = selected[rowIndex - 1]?.input;
       let cells: TableCellLayoutInput[] | undefined;
       row.input.cells.forEach((cell, cellIndex) => {
-        const opener = cell.verticalMerge === 'continue' ? openers.get(cell.id) : undefined;
+        // A row cut across pages gives its cells fragment ids: the merge is
+        // found by the cell's place in the source.
+        const opener = cell.verticalMerge === 'continue' ? openers.get(mergePlaceKey(row.input, cell)) : undefined;
         if (!opener || continuesMergeFromAbove(above, row.input, cell.columnStart, cell.columnSpan)) return;
         cells ??= [...row.input.cells];
         const { background: _own, ...rest } = cell;

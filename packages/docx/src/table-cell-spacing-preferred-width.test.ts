@@ -667,6 +667,30 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     expect(frame('<w:bidiVisual/>')).toEqual(['#0000ff', '#ff0000']);
   });
 
+  it('keeps the shading and side rules of a merge on every page of a row cut across pages', () => {
+    // Two rows; the first column is one merge whose opening cell is shaded
+    // and has a 6 pt right rule; the second row's other cell holds 240
+    // paragraphs, so that row is cut across pages.
+    const many = Array.from({ length: 240 }, (_unused, index) => paragraph(`p${index}`)).join('');
+    for (const spacingPt of [0, 2]) {
+      const table = `<w:tbl><w:tblPr>${AUTO}${spacing(spacingPt)}${BORDERS}</w:tblPr><w:tblGrid>`
+        + '<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>'
+        + `<w:tr>${cell(1440, 'A', '<w:vMerge w:val="restart"/>'
+          + (spacingPt === 0 ? '<w:tcBorders><w:right w:val="single" w:sz="48"/></w:tcBorders>' : '')
+          + '<w:shd w:val="clear" w:fill="FF0000"/>')}${cell(2160, 'B1')}</w:tr>`
+        + `<w:tr>${cell(1440, '', '<w:vMerge/>')}<w:tc><w:tcPr><w:tcW w:w="2160" w:type="dxa"/></w:tcPr>${many}</w:tc></w:tr></w:tbl>`;
+      const pages = tablePages(table, 15);
+      expect(pages.length).toBeGreaterThan(2);
+      for (const page of pages) {
+        const owner = page.rows[0]!.cells[0]! as { background?: { color: string } };
+        expect(owner.background?.color.toLowerCase()).toContain('ff0000');
+        if (spacingPt === 0) {
+          expect(page.borders.some((border) => border.from.xPt === border.to.xPt && border.widthPt === 6)).toBe(true);
+        }
+      }
+    }
+  });
+
   it('keeps the upright table of a two-column vertical section on its previous geometry', () => {
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 2).table).toBeCloseTo(180, 6);
     expect(tableOf(twoColumns(AUTO + spacing(2)), 'tbRl', 1).table).toBeCloseTo(192, 6);
