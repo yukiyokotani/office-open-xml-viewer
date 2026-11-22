@@ -79,7 +79,10 @@ export function buildSectionedNoteNumbers(
       const page = referencePage?.(ref.id);
       const restart = previous === undefined
         || (rule.restart === 'eachSect' && sectionIndex !== previousSection)
-        || (rule.restart === 'eachPage' && page !== undefined && page !== previousPage);
+        // An eachPage section also restarts where it begins, even on a page
+        // it shares with the previous section (word-section-note-numbering).
+        || (rule.restart === 'eachPage' && (sectionIndex !== previousSection
+          || (page !== undefined && page !== previousPage)));
       const value = restart ? rule.start : previous! + 1;
       values.set(ref.id, value);
       formats.set(ref.id, rule.format);
