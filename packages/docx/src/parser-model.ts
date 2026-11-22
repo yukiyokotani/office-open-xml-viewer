@@ -164,6 +164,7 @@ function isListLabel(value: unknown): value is 'start' | 'end' | 'center' {
 
 interface InternalNoBreakHyphenWire {
   readonly __optionalHyphen?: boolean;
+  readonly __rubyBaseContinuation?: boolean;
   /** Explicit advance (pt) of each U+0020, from producers other than DOCX. */
   readonly __spaceAdvancePt?: number;
   /** The run belongs to a list label emitted as leading runs by producers
@@ -2033,6 +2034,7 @@ export function paragraphAcquisitionInput(
         __noBreakAfter: noBreakAfter,
         __noBreakHyphenOffsets: noBreakHyphenOffsets,
         __optionalHyphen: optionalHyphen,
+        __rubyBaseContinuation: rubyBaseContinuation,
         __spaceAdvancePt: spaceAdvancePt,
         __listLabel: listLabel,
         ...publicRun
@@ -2047,6 +2049,7 @@ export function paragraphAcquisitionInput(
       return Object.freeze({
         ...structuredClone(publicRun),
         ...(optionalHyphen === true && run.type === 'text' ? { optionalHyphen: true } : {}),
+        ...(rubyBaseContinuation === true && run.type === 'text' ? { rubyBaseContinuation: true } : {}),
         ...(run.type === 'text' && typeof spaceAdvancePt === 'number'
           && Number.isFinite(spaceAdvancePt) && spaceAdvancePt >= 0 ? { spaceAdvancePt } : {}),
         ...(run.type === 'text' && isListLabel(listLabel) ? { listLabel } : {}),

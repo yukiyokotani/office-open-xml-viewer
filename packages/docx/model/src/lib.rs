@@ -3135,6 +3135,14 @@ pub struct TextRun {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub optional_hyphen: bool,
+    /// A §17.3.3.25 w:rubyBase run after the first: it belongs to the ruby
+    /// annotation the first base run carries, so every base run forms one
+    /// ruby cell.
+    #[serde(
+        rename = "__rubyBaseContinuation",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub ruby_base_continuation: bool,
     /// An explicit advance in points for every U+0020 in this run, replacing
     /// the space glyph's own advance as a width that horizontal scaling does
     /// not change (character spacing still applies). DOCX never sets it; other producers set it

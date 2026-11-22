@@ -66,6 +66,7 @@ import {
   performExplicitTextSplit,
   performQueueEmergencyTail,
   performRetractCurrentLineForLeadingKinsoku,
+  performProspectiveCellAdvance,
   performKeepLeadingKinsokuWithCurrentLine,
 } from './pass-operations.js';
 import type { PassOperationState } from './pass-operations.js';
@@ -221,6 +222,9 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
 
   const prospectiveSnapAdvance = (s: LayoutTextSeg, naturalWidth: number): number =>
     performProspectiveSnapAdvance(operationState, s, naturalWidth);
+  const prospectiveCellAdvance = (
+    pieces: readonly Readonly<{ segment: LayoutTextSeg; naturalPx: number }>[],
+  ): number => performProspectiveCellAdvance(operationState, pieces);
 
   const addToLine = (
     s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
@@ -431,6 +435,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     bidiIntervalPx,
     flush,
     prospectiveSnapAdvance,
+    prospectiveCellAdvance,
     addToLine,
     admitLineMetric,
     measurement,

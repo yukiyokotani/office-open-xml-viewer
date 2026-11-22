@@ -110,6 +110,7 @@ export interface PassOperationState extends LineBreakerPassInput {
   readonly bidiIntervalPx: number;
   readonly flush: (forceHeight?: number, brTerminated?: boolean, nextStart?: LineBoundary) => void;
   readonly prospectiveSnapAdvance: (s: LayoutTextSeg, naturalWidth: number) => number;
+  readonly prospectiveCellAdvance: (pieces: readonly Readonly<{ segment: LayoutTextSeg; naturalPx: number }>[]) => number;
   readonly addToLine: (
     s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
     w: number,
@@ -1336,6 +1337,41 @@ function rubyCellWidened(operationState: PassOperationState, s: LayoutTextSeg): 
   return cell !== undefined && cell.advancePx > cell.basePx;
 }
 
+/** WORD_RUBY_ALIGN_PLACEMENT: the advance the pieces of an unwidened ruby
+ * cell commit together, each placed in the snapToChars script block it
+ * joins, exactly as performAddToLine allocates them; without a character
+ * grid, their natural advances. */
+export function performProspectiveCellAdvance(
+  operationState: PassOperationState,
+  pieces: readonly Readonly<{ segment: LayoutTextSeg; naturalPx: number }>[],
+): number {
+  const { breakerState, snapPitchPx, eastAsianSnapCellCount, characterGrid } = operationState;
+  let block = breakerState.snapBlock
+    ? { kind: breakerState.snapBlock.kind, naturalPx: breakerState.snapBlock.naturalWidthPx,
+      allocatedPx: breakerState.snapBlock.allocatedWidthPx }
+    : null;
+  let total = 0;
+  for (const { segment, naturalPx } of pieces) {
+    const kind = snapPitchPx == null ? null : snapToCharsClass(segment, characterGrid);
+    if (!kind || snapPitchPx == null) {
+      total += naturalPx;
+      block = null;
+    } else if (kind === 'eastAsia') {
+      total += snapToCharsAllocatedWidthPx(naturalPx, kind, snapPitchPx, eastAsianSnapCellCount(segment));
+      block = null;
+    } else if (block?.kind === kind) {
+      const allocatedPx = snapToCharsAllocatedWidthPx(block.naturalPx + naturalPx, kind, snapPitchPx);
+      total += allocatedPx - block.allocatedPx;
+      block = { kind, naturalPx: block.naturalPx + naturalPx, allocatedPx };
+    } else {
+      const allocatedPx = snapToCharsAllocatedWidthPx(naturalPx, kind, snapPitchPx);
+      total += allocatedPx;
+      block = { kind, naturalPx, allocatedPx };
+    }
+  }
+  return total;
+}
+
 export function performProspectiveSnapAdvance(
   operationState: PassOperationState,
   s: LayoutTextSeg,
@@ -1732,9 +1768,11 @@ export function performRubyCell(
       }
     },
     reservePx: rubyAscentReservePx(ruby.fontSizePt, ruby.hpsRaisePt, scale, first, ctx, fontFamilyClasses),
-    headPx: verticalLine
-      ? wordVerticalSingleLinePx(verticalDesignBoxPerEm(operationState, first) * rubyPx, rubyPx,
-        verticalFarEastClass(first), scale) / 2
+    // WORD_VERTICAL_RUBY_UPRIGHT_GUIDE: half the guide's own vertical single
+    // line, from its faces' box; the Far East addition follows the guide text.
+    headPx: (guideBoxPerEm) => verticalLine
+      ? wordVerticalSingleLinePx((guideBoxPerEm ?? verticalDesignBoxPerEm(operationState, first)) * rubyPx, rubyPx,
+        guideBoxPerEm === undefined ? verticalFarEastClass(first) : EAST_ASIAN_RE.test(ruby.text), scale) / 2
       : rubyPx,
     verticalLine,
     ...(verticalGlyphMeasurement ? { verticalGlyphMeasurement } : {}),

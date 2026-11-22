@@ -24,11 +24,13 @@ function makeCtx(): CanvasRenderingContext2D {
     measureText: (text: string) => {
       measuredCharacters += text.length;
       const size = px();
+      // A face named TallFace has a two-em box.
+      const box = font.includes('TallFace') ? 2 : 1;
       return {
         // One em per character; the pair "AV" kerns 0.2 em tighter.
         width: [...text].length * size - (text.match(/AV/g)?.length ?? 0) * size * 0.2,
-        fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2,
-        actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2,
+        fontBoundingBoxAscent: size * 0.8 * box, fontBoundingBoxDescent: size * 0.2 * box,
+        actualBoundingBoxAscent: size * 0.8 * box, actualBoundingBoxDescent: size * 0.2 * box,
       } as TextMetrics;
     },
     save() {}, restore() {}, fillText() {}, strokeText() {}, beginPath() {},
@@ -742,5 +744,75 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 5)', () =>
     // inside the 45pt cell; 後 follows the cell directly.
     expect(at('後').origin.xPt + at('後').paintOps[0]!.offset.xPt - cellStart - (direction ? 5 : 0)).toBeCloseTo(45, 6);
     expect(glyph('A') - glyph('東') - (direction ? -5 : 0)).toBeCloseTo(10 + 2.5, 6);
+  });
+});
+
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 6)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+
+  it.each([undefined, 'tbRl'])('forms one cell from every authored base run (%s)', (direction) => {
+    const ruby = { text: 'とうきょう', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const { lines } = layoutParagraph([
+      { text: '前' }, { text: '東', ruby }, { text: '京', extra: { bold: true, rubyBaseContinuation: true } },
+    ], direction, null, direction ? { pageHeight: 60 + 80 + 37 } : { pageWidth: 40 + 90 + 37 });
+    expect(lineTexts(lines)).toEqual(['前東京']);
+    const placements = textPlacements(lines[0]!);
+    const east = placements.find((entry) => entry.text === '東')!;
+    const capital = placements.find((entry) => entry.text === '京')!;
+    // The two base runs share one 25pt cell under the 25pt guide.
+    expect(capital.origin.xPt + capital.advancePt - east.origin.xPt).toBeCloseTo(25, 6);
+    expect(placements.filter((entry) => entry.ruby)).toHaveLength(1);
+  });
+
+  it.each([undefined, 'tbRl'])('shapes identically formatted guide runs as one text (%s)', (direction) => {
+    const fonts = { ascii: 'GuideFace', highAnsi: 'GuideFace', eastAsia: 'GuideFace', complexScript: 'GuideFace' };
+    const ruby = {
+      text: 'سلام', fontSizePt: 5, hpsRaisePt: 9,
+      guideRuns: [{ text: 'سل', fonts }, { text: 'ام', fonts }],
+    };
+    const line = layoutParagraph([{ text: '漢字', ruby }], direction).lines[0]!;
+    const ops = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps;
+    expect(ops.map((op) => op.text)).toEqual(['سلام']);
+  });
+
+  it.each(['tbRl', 'tbLrV'])('retracts a whole split ruby cell ahead of a forbidden head (%s)', (direction) => {
+    const ruby = { text: 'か', fontSizePt: 5, hpsRaisePt: 9 };
+    const { lines } = layoutParagraph(
+      [{ text: '前' }, { text: '東A', ruby }, { text: 'ゃ', ruby }], direction, null, { pageHeight: 60 + 80 + 40 },
+    );
+    expect(lineTexts(lines)).toEqual(['前', '東Aゃ']);
+  });
+
+  it('admits an unwidened split Latin ruby base by its shared grid block', () => {
+    const grid = { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0, pageWidth: 40 + 90 + 20 } as Partial<SectionProps>;
+    const ruby = { text: 'か', fontSizePt: 3.5, hpsRaisePt: 9, align: 'center' };
+    const narrow = { smallCaps: true, charScale: 0.4 };
+    const annotated = layoutParagraph([{ text: 'I' }, { text: 'aB', ruby, extra: narrow }], undefined, null, grid).lines;
+    const plain = layoutParagraph([{ text: 'I' }, { text: 'aB', extra: narrow }], undefined, null, grid).lines;
+    expect(plain).toHaveLength(1);
+    expect(lineTexts(annotated)).toEqual(lineTexts(plain));
+  });
+
+  it('keeps the mark extent of the column after a ruby paragraph\'s trailing break', () => {
+    const ruby = { text: 'か', fontSizePt: 5, hpsRaisePt: 18 };
+    const annotated = paragraphOf([{ text: '漢', ruby }]);
+    const lineBreak = { type: 'break', breakType: 'line' };
+    const withBreak = { ...annotated, runs: [...annotated.runs, lineBreak] } as unknown as DocParagraph & BodyElement;
+    const page = layoutBody([withBreak, paragraphOf([])], 'tbRl');
+    const [broken, empty] = page.layers.body.filter((entry): entry is ParagraphLayout => entry.kind === 'paragraph');
+    expect(broken!.lines).toHaveLength(2);
+    expect(broken!.lines.at(-1)!.advancePt).toBeCloseTo(empty!.advancePt, 6);
+  });
+
+  it('reserves a vertical guide\'s head extent from the guide\'s own face', () => {
+    const headOf = (face: string) => {
+      const fonts = { ascii: face, highAnsi: face, eastAsia: face };
+      const ruby = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, guideRuns: [{ text: 'か', fonts }] };
+      const line = layoutParagraph([{ text: '漢', ruby }], 'tbRl').lines[0]!;
+      return line.baselinePt - line.bounds.yPt;
+    };
+    // A two-em guide box reserves half an em of the 5pt guide more.
+    expect(headOf('TallFace') - headOf('NotInMetrics')).toBeCloseTo(2.5, 1);
   });
 });

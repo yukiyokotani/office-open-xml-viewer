@@ -1,6 +1,7 @@
 import { candidateUnitIsSingleton } from './line-gaps.js';
 import { advanceLineBoundary } from './source-cursor.js';
 import { isInklessLineItem } from './break-queue.js';
+import { queueRetraction } from './kinsoku.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix, rtlLineEndSpaceInside } from './optional-hyphens.js';
 import {
@@ -87,6 +88,8 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'measurement'
   | 'textSegmentBox'
   | 'prospectiveSnapAdvance'
+  | 'prospectiveCellAdvance'
+  | 'segNaturalAdvance'
   | 'segAdvance'
   | 'strAdvance'
   | 'justifiedCompression'
@@ -1600,10 +1603,23 @@ function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitF
   const group = s.rubyGroup!;
   if ((s.rubyPieceIndex ?? 0) === 0) {
     // The first piece is admitted by the whole cell, its later pieces with it.
-    let unitWidth = wForFit;
+    // An unwidened cell's pieces share the character grid's script blocks
+    // with their neighbours, as placement allocates them; a widened cell is
+    // its own whole cells.
+    const followers: LayoutTextSeg[] = [];
     for (const follower of breakerState.queue) {
       if (!('text' in follower) || follower.rubyGroup !== group) break;
-      unitWidth += segAdvance(follower);
+      followers.push(follower);
+    }
+    let unitWidth = wForFit;
+    if (context.characterGrid?.type === 'snapToChars' && group.cell !== undefined
+      && !(group.cell.advancePx > group.cell.basePx)) {
+      unitWidth = context.prospectiveCellAdvance([
+        { segment: s, naturalPx: w },
+        ...followers.map((follower) => ({ segment: follower, naturalPx: context.segNaturalAdvance(follower) })),
+      ]) - (context.prospectiveSnapAdvance(s, w) - wForFit);
+    } else {
+      for (const follower of followers) unitWidth += segAdvance(follower);
     }
     if (fitsMeasuredWidth(breakerState.currentWidth + unitWidth, availW())) {
       s.measuredWidth = w;
@@ -1622,7 +1638,7 @@ function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitF
       const retraction = context.retractCurrentLineForLeadingKinsoku(s);
       flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
       breakerState.queue.unshift(s);
-      if (retraction.kind === 'retracted') breakerState.queue.unshift(retraction.tail);
+      if (retraction.kind === 'retracted') queueRetraction(breakerState.queue, retraction);
       return;
     }
     context.forcedPlacement(unitWidth);
@@ -2097,7 +2113,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
     }
     flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
     breakerState.queue.unshift(s);
-    if (retraction.kind === 'retracted') breakerState.queue.unshift(retraction.tail);
+    if (retraction.kind === 'retracted') queueRetraction(breakerState.queue, retraction);
   } else {
     // Empty line and not even one char fits — force-fit one char to guarantee progress
     const forcedChars = [...s.text];
@@ -2245,7 +2261,7 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
     }
     flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
     breakerState.queue.unshift(s);
-    if (retraction.kind === 'retracted') breakerState.queue.unshift(retraction.tail);
+    if (retraction.kind === 'retracted') queueRetraction(breakerState.queue, retraction);
   } else {
     // Empty line and the first dictionary word is wider than the whole
     // column: emergency GRAPHEME-safe split (a code-point split would tear a

@@ -22,6 +22,7 @@ import {
 } from './parser-model.js';
 import { requestedFamily, shapeRunToDocRun, type TextFontSlots } from './layout/text.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
+import type { InternalRunTypographyWire } from './layout/typography-input.js';
 
 type InternalRenderedFontAxes = Readonly<InternalRunSlotMetadata>;
 
@@ -210,6 +211,27 @@ function* runUsages(run: DocRun, collection: FontCollection): Generator<DocxRend
   if (run.type === 'text') {
     const text = run as DocxTextRun & InternalRenderedFontAxes;
     yield* textResultUsages(run.text, run.fontFamily, text, run.bold, run.italic, collection);
+    // §17.3.3.24: each w:rt run of a ruby guide is shaped in its own faces
+    // (ruby-cell.ts guideShapes), so they are demanded with the guide text.
+    const guideRuns = (run as { __typographyAcquisition?: InternalRunTypographyWire })
+      .__typographyAcquisition?.ruby?.guideRuns;
+    for (const guide of run.ruby ? guideRuns ?? [] : []) {
+      const fonts = guide.fonts;
+      if (!fonts) continue;
+      yield {
+        text: guide.text,
+        eastAsiaLanguage: text.langEastAsia,
+        fontFamilies: [fonts.ascii ?? run.fontFamily, fonts.highAnsi ?? text.fontFamilyHighAnsi,
+          fonts.eastAsia ?? text.fontFamilyEastAsia],
+        latinFontFamily: fonts.ascii ?? fonts.highAnsi ?? run.fontFamily ?? null,
+        bold: guide.bold,
+        italic: guide.italic,
+      };
+      if (fonts.complexScript) {
+        yield { text: guide.text, eastAsiaLanguage: text.langEastAsia,
+          fontFamilies: [fonts.complexScript], bold: guide.bold, italic: guide.italic };
+      }
+    }
   } else if (run.type === 'field') {
     const field = run as FieldRun & InternalRenderedFontAxes;
     yield* textResultUsages(field.fallbackText, field.fontFamily, field, field.bold, field.italic, collection);

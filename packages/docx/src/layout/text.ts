@@ -181,6 +181,9 @@ type ParagraphTextFacts = Readonly<{
   /** Authored discretionary opportunity with its own conditional glyph style.
    * Its source run is otherwise empty, independent of dictionary hyphenation. */
   optionalHyphen?: boolean;
+  /** A §17.3.3.25 w:rubyBase run after the first: part of the ruby cell the
+   * preceding annotated run opens. */
+  rubyBaseContinuation?: true;
   /** Explicit advance (pt) of every U+0020 in the run, replacing the space
    * glyph's advance as a width horizontal scaling does not change; character
    * spacing still applies. Producers other than DOCX set it where their format fixes it. */

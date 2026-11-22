@@ -7,7 +7,7 @@ import {
   wordRubyBaseOffset,
   wordRubyGuideSpacing,
 } from '../layout/line-compatibility.js';
-import type { LayoutTextSeg, RubyCellGeometry, RubyGuideUnit } from './model.js';
+import type { LayoutTextSeg, RubyCellGeometry, RubyGuideRunFace, RubyGuideUnit } from './model.js';
 
 /** Scripts whose letters join cursively: a guide run of them is one unit,
  * shaped and painted whole, or its joining forms would be lost. */
@@ -28,8 +28,9 @@ export interface RubyCellInputs {
   /** The guide baseline above the base baseline: hpsRaise, or the retained
    * ink reserve without it (WORD_RUBY_LINE_ASCENT). */
   readonly reservePx: number;
-  /** The guide's extent past its baseline toward the line head. */
-  readonly headPx: number;
+  /** The guide's extent past its baseline toward the line head, given the
+   * shaped guide's font box per em (undefined without a shaping service). */
+  readonly headPx: (guideBoxPerEm: number | undefined) => number;
   /** The base is laid out on a vertical line (a vertical section run or an
    * upright frame's): the rightVertical guide axis stands half the guide
    * size nearer the base (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). */
@@ -177,7 +178,7 @@ function guideShapes(
   const service = first.textLayoutService;
   const request = first.textShapeRequest;
   if (!service || !request) return undefined;
-  const runs = ruby.guideRuns ?? [{ text: ruby.text }];
+  const runs = ruby.guideRuns ? mergedGuideRuns(ruby.guideRuns) : [{ text: ruby.text }];
   let start = 0;
   return runs.map((run) => {
     const own = 'fonts' in run ? run : undefined;
@@ -202,6 +203,23 @@ function guideShapes(
     start += run.text.length;
     return entry;
   });
+}
+
+/** Adjacent w:rt runs that select the same faces shape as one text, so a
+ * run seam inside a word keeps its contextual (joining, kerned) forms. */
+function mergedGuideRuns(runs: readonly RubyGuideRunFace[]): RubyGuideRunFace[] {
+  const merged: RubyGuideRunFace[] = [];
+  const slots = ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const;
+  for (const run of runs) {
+    const previous = merged.at(-1);
+    if (previous && previous.bold === run.bold && previous.italic === run.italic
+      && slots.every((slot) => (previous.fonts[slot] ?? null) === (run.fonts[slot] ?? null))) {
+      merged[merged.length - 1] = { ...previous, text: previous.text + run.text };
+    } else {
+      merged.push(run);
+    }
+  }
+  return merged;
 }
 
 /** A vertical guide is planned, and so painted, without kerning. */
@@ -292,7 +310,10 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
       originPx: spacing.leadPt + offsetPx + index * spacing.gapPt,
     })),
     raisePx: inputs.reservePx - (inputs.verticalLine && ruby.align === 'rightVertical' ? sizePx / 2 : 0),
-    headPx: inputs.headPx,
+    // The guide's own faces bound its extent (the tallest shaped run box).
+    headPx: inputs.headPx(shapes && shapes.length > 0 && sizePx > 0
+      ? Math.max(...shapes.map(({ shape }) => shape.ascentPt + shape.descentPt)) / sizePx
+      : undefined),
     vertical: cells !== undefined,
   };
   group.cell = cell;

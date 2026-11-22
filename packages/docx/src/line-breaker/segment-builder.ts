@@ -556,10 +556,10 @@ export function finalizeBuiltSegments(
   // boundaries use the complete displayed text, irrespective of font/run seams.
   // This acquires opportunities, without splitting or merging shaped segments.
   // Atomic cells and external-link syntax have their own owners below.
-  const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && segment.ruby)
+  const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && segment.rubyPiece)
     .map(segment => segment.sourceRunIndex));
-  // WORD_RUBY_ALIGN_PLACEMENT: the pieces of a ruby run whose base was split
-  // (by script slot or case) share one group, and so one cell; they are one
+  // WORD_RUBY_ALIGN_PLACEMENT: the pieces of a ruby base, split by authored
+  // runs, script slot or case, share one group, and so one cell; they are one
   // indivisible unit for wrapping.
   for (let index = 0; index < segs.length; index++) {
     const first = segs[index]!;
@@ -567,8 +567,9 @@ export function finalizeBuiltSegments(
     const pieces: LayoutTextSeg[] = [first];
     while (index + 1 < segs.length) {
       const next = segs[index + 1]!;
-      if (!('text' in next) || !next.rubyPiece || next.ruby
-        || next.sourceRunIndex !== first.sourceRunIndex) break;
+      // §17.3.3.25: every w:rubyBase run (rubyBaseContinuation) and every
+      // piece emitted from them belong to the cell the first one opens.
+      if (!('text' in next) || !next.rubyPiece || next.ruby) break;
       next.joinPrev = true;
       next.hardJoinPrev = true;
       pieces.push(next);
@@ -1818,7 +1819,7 @@ function emitResolvedTextSegment(
     ruby: emissionState.firstSeg && ruby
       ? { ...ruby, baseText: 'text' in r ? r.text : text }
       : undefined,
-    ...(ruby ? { rubyPiece: true as const } : {}),
+    ...(ruby || ('rubyBaseContinuation' in r && r.rubyBaseContinuation) ? { rubyPiece: true as const } : {}),
     revision,
     ...(revision && environment.showTrackedChanges === true
       ? {

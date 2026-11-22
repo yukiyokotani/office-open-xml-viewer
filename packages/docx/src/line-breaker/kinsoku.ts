@@ -11,7 +11,21 @@ import { rebaseSeaBreaks } from './text-runs.js';
 export type CrossRunKinsokuRetraction =
   | { readonly kind: 'none' }
   | { readonly kind: 'blocked' }
-  | { readonly kind: 'retracted'; readonly tail: LayoutTextSeg };
+  | {
+    readonly kind: 'retracted';
+    readonly tail: LayoutTextSeg;
+    /** A retracted ruby cell's later pieces, in order after `tail`. */
+    readonly followers?: readonly LayoutTextSeg[];
+  };
+
+/** Queue a retraction ahead of the segment that caused it. */
+export function queueRetraction(
+  queue: { unshift(segment: LayoutTextSeg): void },
+  retraction: Extract<CrossRunKinsokuRetraction, { kind: 'retracted' }>,
+): void {
+  for (const follower of [...(retraction.followers ?? [])].reverse()) queue.unshift(follower);
+  queue.unshift(retraction.tail);
+}
 
 
 /** Retract one legal suffix without cutting a protected source seam. */
@@ -40,20 +54,37 @@ export function retractLeadingKinsoku(
   }
 
   const lastText = lastSeg as LayoutTextSeg;
+  // WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is indivisible. It moves whole,
+  // every piece of it, unless it alone holds the line or is glued to what
+  // precedes it.
+  if (lastText.rubyGroup !== undefined) {
+    const line = breakerState.currentLine;
+    let start = line.length - 1;
+    while (start > 0) {
+      const before = line[start - 1]!;
+      if (!('text' in before) || before.rubyGroup !== lastText.rubyGroup) break;
+      start -= 1;
+    }
+    const pieces = line.slice(start) as LayoutTextSeg[];
+    if (start === 0 || pieces[0]!.hardJoinPrev === true) return { kind: 'blocked' };
+    materializeLatinSpaceCompression();
+    breakerState.latinLineHomogeneous = false;
+    for (let index = pieces.length - 1; index >= 0; index -= 1) {
+      breakerState.currentWidth -= pieces[index]!.measuredWidth;
+      popMixedLineItem(breakerState);
+    }
+    return { kind: 'retracted', tail: pieces[0]!, followers: pieces.slice(1) };
+  }
   const chars = [...lastText.text];
   const minKeep = breakerState.currentLine.length > 1 ? 0 : 1;
   const retractCount = crossRunKinsokuRetract(chars, kinsoku, minKeep);
   if (retractCount <= 0) return { kind: 'none' };
 
-  // WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is indivisible; it moves whole,
-  // and not when it alone holds the line.
-  const rubyCell = lastText.rubyGroup !== undefined;
-  const headText = rubyCell ? '' : chars.slice(0, chars.length - retractCount).join('');
+  const headText = chars.slice(0, chars.length - retractCount).join('');
   const split = headText.length;
   // Moving the whole segment would cut the hard source seam immediately
   // before it. A protected no-break edge is equally indivisible.
   if (
-    (rubyCell && breakerState.currentLine.length === 1) ||
     (split === 0 && lastText.hardJoinPrev === true) ||
     protectedNoBreakOffsets(lastText).has(split)
   ) {

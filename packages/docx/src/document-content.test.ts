@@ -17,6 +17,21 @@ describe('docx rendered text inventory', () => {
     footers: { default: null, first: null, even: null },
   }) as unknown as DocxDocumentModel;
 
+  it('demands a face authored only on a ruby guide run', () => {
+    const fonts = { ascii: 'GuideOnly', highAnsi: 'GuideOnly', eastAsia: 'GuideOnly', complexScript: null };
+    const doc = documentWithRun({
+      type: 'text', text: '漢', fontSize: 10, fontFamily: 'BaseFace',
+      ruby: { text: 'かん', fontSizePt: 5 },
+      __typographyAcquisition: { ruby: { guideRuns: [{
+        text: 'かん', fontFamily: 'GuideOnly', fonts, fontSizePt: 5, bold: false, italic: false, color: null, language: null,
+      }] } },
+    });
+    for (const collection of ['font-demand', 'native-preflight'] as const) {
+      expect([...docxRenderedTextUsages(doc, collection)].flatMap((usage) => usage.fontFamilies)).toContain('GuideOnly');
+    }
+    expect(docxFontPreloadNames(doc)).toContain('GuideOnly');
+  });
+
   it('preloads an inline drawing run face even when its text box has no text', () => {
     const doc = documentWithRun({ type: 'shape', inline: true, textBlocks: [],
       __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Courier New', bold: true } });

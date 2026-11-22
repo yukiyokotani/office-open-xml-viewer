@@ -766,7 +766,9 @@ export function measureParagraph(
   }
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
-  if (trailingMark && !context.hasRuby) {
+  // The mark line holds no ruby: it keeps its own extent in a ruby paragraph
+  // too (word-ruby-paragraph-uniform-line-advance spans the text lines).
+  if (trailingMark) {
     allocations[allocations.length - 1] = { layout: finalLine, advancePt: trailingMark.advancePx };
   }
   const measuredLines: MeasuredLine[] = [];
