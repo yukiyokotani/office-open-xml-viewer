@@ -131,6 +131,8 @@ export interface TableSourceAcquisitionInput {
 export interface CellIntrinsicWidths {
   readonly minWidthPt: number;
   readonly maxWidthPt: number;
+  /** The side insets the widths include, when they differ from the margins. */
+  readonly horizontalInsetPt?: number;
 }
 
 type TableLexicalWidth = Readonly<{
@@ -407,8 +409,8 @@ export function projectTableColumnLayoutInput(
           const horizontalSpacingPt = spacingGeometry ? 2 * spacingGeometry.borderPt
             : spacingInsets.startPt + spacingInsets.endPt;
           const margins = input.format.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
-          const horizontalMarginsPt = Math.max(0, margins?.left ?? 0)
-            + Math.max(0, margins?.right ?? 0);
+          const horizontalMarginsPt = intrinsic.horizontalInsetPt ?? (Math.max(0, margins?.left ?? 0)
+            + Math.max(0, margins?.right ?? 0));
           const result = {
             columnStart,
             columnSpan: span,

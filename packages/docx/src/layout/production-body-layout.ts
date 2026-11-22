@@ -3660,6 +3660,11 @@ function acquireTableColumnInput(
     contentResolution: decision.contentResolution,
     ...(decision.contentResolution && state.layoutSettings.compat.tableMode15Geometry
       ? { contentResolutionCeilingInsetPt: outerHalfRulesPt(table) } : {}),
+    // A leading left-to-right table of mode 15 keeps an absolute tblW past
+    // its ceiling.
+    ...(decision.contentResolution && state.layoutSettings.compat.tableMode15Geometry && table.bidiVisual !== true
+      && !tableDecisionEnvironment(state).inTableCell && (table.jc == null || table.jc === 'left' || table.jc === 'start')
+      ? { contentResolutionAbsoluteWidthUnbounded: true } : {}),
     // The ceiling an automatic table is held to is measured for the leading
     // indent band and, in mode 15, for an unindented or nested table.
     contentResolutionCeilingEstablished: decision.usesLeadingIndentBand

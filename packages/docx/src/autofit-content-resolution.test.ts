@@ -355,6 +355,32 @@ describe('AutoFit column widths from content and preferred widths', () => {
     });
   });
 
+  describe('a width that cannot be met', () => {
+    const noWrap = (text: string, width: Width = null) => cell(text, width, '<w:noWrap/>');
+
+    it('lets content that does not fit share the text width, each cell keeping its sides', () => {
+      // A noWrap cell asks for its text on one line (1569.75 pt); the half
+      // points beside each text stay, and the texts share the rest.
+      const widths = columns(table(AUTO, [72, 108], [noWrap(LONG) + cell(TWO)])).outer;
+      const content = 465.3 - 0.5 - 2;
+      expectWidths(widths, [1 + content * 1569.75 / 1580.25, 1 + content * 10.5 / 1580.25]);
+      // Word draws 460.8 and 4.1 pt.
+      expectWidths(widths, [460.8, 4.1]);
+    });
+
+    it('keeps a noWrap cell with a preferred width on that width', () => {
+      // Four short words (79.75 pt on one line) in a 72 pt cell.
+      expectWidths(columns(table(AUTO, [72, 108], [noWrap(SHORT, 72) + cell(TWO, 108)])).outer, [72, 108]);
+    });
+
+    it('keeps an absolute table width past the text width', () => {
+      expectWidths(columns(row(dxa(600), [TWO, 72], [TWO, 108])).outer, [240, 360]);
+      // A share of the text width is held to it.
+      const band = 465.3 - 0.5;
+      expectWidths(columns(row(pct(150), [TWO, 72], [TWO, 108])).outer, [band * 0.4, band * 0.6]);
+    });
+  });
+
   describe('outside the rule', () => {
     const below = row(dxa(150), [TWO, 72], [TWO, 108]);
 

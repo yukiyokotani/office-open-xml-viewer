@@ -182,7 +182,7 @@ describe('table intrinsic content widths', () => {
         },
         nestedTable: () => ({ minWidthPt: 0, maxWidthPt: 0 }),
       },
-    )).toEqual({ minWidthPt: 10.8, maxWidthPt: 10.8 });
+    )).toEqual({ minWidthPt: 10.8, maxWidthPt: 10.8, horizontalInsetPt: 10.8 });
     expect(measured).toEqual([]);
   });
 
@@ -195,7 +195,7 @@ describe('table intrinsic content widths', () => {
         paragraph: () => ({ minWidthPt: 15.8, maxWidthPt: 15.8 }),
         nestedTable: () => ({ minWidthPt: 0, maxWidthPt: 0 }),
       },
-    )).toEqual({ minWidthPt: 26.6, maxWidthPt: 26.6 });
+    )).toEqual({ minWidthPt: 26.6, maxWidthPt: 26.6, horizontalInsetPt: 10.8 });
   });
 
   it('uses full unbroken content as the AutoFit minimum for auto-width noWrap cells', () => {
@@ -210,13 +210,13 @@ describe('table intrinsic content widths', () => {
       { left: 5, right: 5 },
       dependencies,
       'autofit',
-    )).toEqual({ minWidthPt: 90, maxWidthPt: 110 });
+    )).toEqual({ minWidthPt: 90, maxWidthPt: 110, horizontalInsetPt: 10 });
     expect(measureTableCellIntrinsicWidths(
       content,
       { left: 5, right: 5 },
       dependencies,
       'fixed',
-    )).toEqual({ minWidthPt: 30, maxWidthPt: 110 });
+    )).toEqual({ minWidthPt: 30, maxWidthPt: 110, horizontalInsetPt: 10 });
   });
 
   it('measures an omitted-tcW noWrap minimum beyond the available band', () => {
@@ -375,7 +375,7 @@ describe('table intrinsic content widths', () => {
         },
         nestedTable: () => ({ minWidthPt: 0, maxWidthPt: 0 }),
       },
-    )).toEqual({ minWidthPt: 26.6, maxWidthPt: 26.6 });
+    )).toEqual({ minWidthPt: 26.6, maxWidthPt: 26.6, horizontalInsetPt: 10.8 });
     expect(measured).toEqual([source]);
   });
 

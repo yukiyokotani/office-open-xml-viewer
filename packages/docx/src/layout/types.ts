@@ -1494,6 +1494,8 @@ export interface TableColumnLayoutInput {
   /** Whether the ceiling of an automatic table is a measured one; a table
    * that would bind another ceiling is outside the rule. */
   readonly contentResolutionCeilingEstablished?: boolean;
+  /** An absolute preferred table width is not held to the ceiling. */
+  readonly contentResolutionAbsoluteWidthUnbounded?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
   /** The text band the intrinsic maxima were capped at; a 'nonbinding'
