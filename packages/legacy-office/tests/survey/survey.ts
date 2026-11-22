@@ -1,4 +1,13 @@
 // Shared helpers of the local-only legacy corpus surveys (Office PDFs).
+//
+// Fidelity method: the visual reference is Office opening the actual legacy
+// file and exporting a PDF (tools/legacy-office-export.applescript). A legacy
+// file paired with its original OOXML, or Office's upgraded OOXML, helps map
+// binary records to XML but is not an oracle: saving to or from the old format
+// can change or drop features, so a down-saved corpus member is not a lossless
+// copy. Loading without an error is a smoke test, not reader completion. Keep
+// renderer self-regression against the previous renderer separate from this
+// Office comparison. The corpus stays local and is not redistributed.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { basename, dirname, posix, resolve } from 'node:path';

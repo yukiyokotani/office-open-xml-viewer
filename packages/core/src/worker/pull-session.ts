@@ -1,3 +1,9 @@
+// Correlated pull protocol used by the DOCX, PPTX and XLSX pull clients and
+// workers: request, session, operation and generation identities; pull with a
+// byte credit, ack, lease release, cancel and close commands; and optional
+// usage snapshots on responses. Format payloads stay opaque (`TPayload`);
+// there is deliberately no common page/slide/row chunk type, because unit
+// boundaries and readiness barriers belong to each format.
 import type { WorkerBridgeTransport, WorkerRequestOptions } from './bridge.js';
 import type { OoxmlResourceUsageSnapshot } from '../errors/ooxml-error.js';
 import {
