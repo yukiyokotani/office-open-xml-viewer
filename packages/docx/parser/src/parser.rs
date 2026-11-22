@@ -2021,7 +2021,7 @@ fn finish_document(
     let footnotes_path =
         find_internal_rel_target_by_types(&environment.rels_xml, FOOTNOTES_RELATIONSHIP_TYPES)
             .and_then(|target| resolve_part_name(DOCUMENT_PART, &target));
-    let (footnotes, footnote_stories) = footnotes_path
+    let (footnotes, mut footnote_stories) = footnotes_path
         .map(|path| {
             parse_notes(
                 zip,
@@ -2038,7 +2038,7 @@ fn finish_document(
     let endnotes_path =
         find_internal_rel_target_by_types(&environment.rels_xml, ENDNOTES_RELATIONSHIP_TYPES)
             .and_then(|target| resolve_part_name(DOCUMENT_PART, &target));
-    let (endnotes, endnote_stories) = endnotes_path
+    let (endnotes, mut endnote_stories) = endnotes_path
         .map(|path| {
             parse_notes(
                 zip,
@@ -2052,6 +2052,34 @@ fn finish_document(
             )
         })
         .unwrap_or_default();
+    let mut note_shapes = std::mem::take(&mut footnote_stories.note_shapes);
+    note_shapes.append(&mut endnote_stories.note_shapes);
+    if !note_shapes.is_empty() {
+        // word-note-vml-host-paragraph: one empty Normal paragraph at the end
+        // of the main story hosts the shapes.
+        if let Ok(doc) = parse_guarded(&format!(
+            r#"<w:p xmlns:w="{}"/>"#,
+            ooxml_common::ns::wordprocessingml::TRANSITIONAL
+        )) {
+            let mut host = parse_paragraph_with_diagnostics(
+                doc.root_element(),
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.media_map,
+                &environment.chart_map,
+                &environment.rel_map,
+                &environment.theme,
+                None,
+                &mut FieldState::default(),
+                &mut Vec::new(),
+            );
+            host.runs = note_shapes;
+            environment
+                .note_layout_settings
+                .get_or_insert_with(Default::default)
+                .note_shape_host_paragraph = Some(Box::new(host));
+        }
+    }
     // A retained paragraph always has its mark, so marks decide presence.
     if footnote_stories.separator.is_some()
         || endnote_stories.separator.is_some()
@@ -2482,15 +2510,89 @@ fn parse_notes(
             StoryFlow::Fixed,
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
+        let mut content = content;
+        take_note_vml_shapes(&mut content, &mut selected_stories.note_shapes);
         out.push(crate::types::DocxNote { id, content });
     }
     (out, selected_stories)
+}
+
+/// Whether a run is an absolutely positioned VML drawing (shape, picture or
+/// group): its anchor acquisition comes from the VML style.
+fn is_absolute_vml_drawing(run: &DocRun) -> bool {
+    let acquisition = match run {
+        DocRun::Shape(shape) if !shape.inline => shape.anchor_acquisition.as_ref(),
+        DocRun::Image(image) if image.anchor => image.anchor_acquisition.as_ref(),
+        _ => None,
+    };
+    acquisition.is_some_and(|facts| facts.occurrence_id.starts_with("vml-anchor-"))
+}
+
+/// word-note-vml-host-paragraph: move every absolutely positioned VML
+/// drawing of a note (with the anchor host character emitted before it) out
+/// of the note's paragraphs, table cells included.
+fn take_note_vml_shapes(content: &mut [BodyElement], taken: &mut Vec<DocRun>) {
+    fn take_runs(runs: &mut Vec<DocRun>, taken: &mut Vec<DocRun>) {
+        if !runs.iter().any(is_absolute_vml_drawing) {
+            return;
+        }
+        let mut kept = Vec::with_capacity(runs.len());
+        let mut pending_host: Option<DocRun> = None;
+        for run in runs.drain(..) {
+            if matches!(run, DocRun::AnchorHost(_)) {
+                if let Some(host) = pending_host.replace(run) {
+                    kept.push(host);
+                }
+                continue;
+            }
+            if is_absolute_vml_drawing(&run) {
+                // The host paragraph's line is its Normal mark's: the moved
+                // anchor character keeps no East Asian face of the note run.
+                if let Some(DocRun::AnchorHost(mut host)) = pending_host.take() {
+                    host.font_family_east_asia = None;
+                    taken.push(DocRun::AnchorHost(host));
+                }
+                taken.push(run);
+                continue;
+            }
+            if let Some(host) = pending_host.take() {
+                kept.push(host);
+            }
+            kept.push(run);
+        }
+        if let Some(host) = pending_host {
+            kept.push(host);
+        }
+        *runs = kept;
+    }
+    fn take_cells(table: &mut DocTable, taken: &mut Vec<DocRun>) {
+        for row in &mut table.rows {
+            for cell in &mut row.cells {
+                for element in &mut cell.content {
+                    match element {
+                        CellElement::Paragraph(paragraph) => take_runs(&mut paragraph.runs, taken),
+                        CellElement::Table(table) => take_cells(table, taken),
+                    }
+                }
+            }
+        }
+    }
+    for element in content {
+        match element {
+            BodyElement::Paragraph(paragraph) => take_runs(&mut paragraph.runs, taken),
+            BodyElement::Table(table) => take_cells(table, taken),
+            _ => {}
+        }
+    }
 }
 
 /// Selected special story facts of one note part. A supported single
 /// paragraph is retained even when all its properties are inherited.
 #[derive(Default)]
 struct SelectedNoteSeparators {
+    /// word-note-vml-host-paragraph: absolutely positioned VML shapes taken
+    /// out of the part's notes, with their anchor host characters.
+    note_shapes: Vec<DocRun>,
     separator: Option<crate::types::NoteSeparatorMark>,
     continuation_separator: Option<crate::types::NoteSeparatorMark>,
     separator_paragraph: Option<Box<DocParagraph>>,
@@ -3413,6 +3515,7 @@ fn parse_note_layout_settings(
         endnote_separator: None,
         endnote_continuation_separator: None,
         footnote_continuation_separator: None,
+        note_shape_host_paragraph: None,
         footnote_separator_paragraph: None,
         footnote_continuation_separator_paragraph: None,
         endnote_separator_paragraph: None,

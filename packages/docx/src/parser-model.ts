@@ -333,6 +333,9 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     footnoteContinuationSeparator?: NoteSeparatorMark;
     /** Ordinary DOCX producer only: effective paragraphs of listed separator
      * stories; see SelectedNoteSeparatorParagraphsInput. */
+    /** word-note-vml-host-paragraph: the empty Normal paragraph appended to
+     * the main story with the VML shapes taken out of the notes. */
+    noteShapeHostParagraph?: DocParagraph;
     footnoteSeparatorParagraph?: DocParagraph;
     footnoteContinuationSeparatorParagraph?: DocParagraph;
     endnoteSeparatorParagraph?: DocParagraph;
@@ -2204,10 +2207,26 @@ function cellFlowAutoSpacingNeighbourhoods(
     : automaticSpacingNeighbourhood(participants, position, CELL_AUTO_SPACING_EDGES)));
 }
 
+/** word-note-vml-host-paragraph: append the parser's host paragraph of the
+ * notes' absolutely positioned VML shapes to the end of the main story, once
+ * (the settings no longer carry it afterwards). */
+function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
+  const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
+  const host = settings?.noteShapeHostParagraph;
+  if (!settings || !host) return doc;
+  const { noteShapeHostParagraph: _host, ...retained } = settings;
+  return {
+    ...doc,
+    body: [...doc.body, { ...host, type: 'paragraph' } as BodyElement],
+    __noteLayoutSettings: retained,
+  } as DocxDocumentModel;
+}
+
 function normalizeInternalDocumentModelWithOwnership(
   doc: DocxDocumentModel,
   consumeOwned: boolean,
 ): NormalizedDocumentInput {
+  doc = withNoteShapeHostParagraph(doc);
   const occurrences: MathOccurrence[] = [];
   const normalizeElement = (
     element: BodyElement,

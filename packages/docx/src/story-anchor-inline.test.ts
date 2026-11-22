@@ -230,6 +230,15 @@ function storyDrawingBoxes(story: Story, placement: Placement): Array<{ xPt: num
   return [...new Map(boxes.map((box) => [`${box.xPt},${box.yPt}`, box])).values()];
 }
 
+/** Page boxes of the anchored drawings of the body's own paragraphs. */
+function bodyHostDrawingBoxes(story: Story, placement: Placement): Array<{ xPt: number; yPt: number }> {
+  const boxes = layOut(story, placement).layers.body.flatMap((node) => node.kind === 'paragraph'
+    ? node.drawings.filter((drawing) => drawing.anchorLayer && drawing.flowBounds.widthPt === 40)
+      .map((drawing) => ({ xPt: drawing.flowBounds.xPt, yPt: drawing.flowBounds.yPt }))
+    : []);
+  return [...new Map(boxes.map((box) => [`${box.xPt},${box.yPt}`, box])).values()];
+}
+
 describe('word-story-vml-page-position', () => {
   it.each(['drawingml-textbox', 'vml-textbox'] as const)('places a %s VML shape from the page origin', (story) => {
     // Text/text square: x = margin-left, y held at the 36pt top margin.
@@ -241,7 +250,22 @@ describe('word-story-vml-page-position', () => {
   });
 
   it.each(['footnote', 'endnote'] as const)('places a %s VML shape at its page offsets', (story) => {
-    expect(storyDrawingBoxes(story, 'vml-text-square')).toEqual([{ xPt: 300, yPt: 0 }]);
-    expect(storyDrawingBoxes(story, 'vml-text-square-mt50')).toEqual([{ xPt: 300, yPt: 50 }]);
+    // word-note-vml-host-paragraph: the shape leaves its note for an empty
+    // Normal paragraph appended to the body, which hosts it at its page offsets.
+    expect(storyDrawingBoxes(story, 'vml-text-square')).toEqual([]);
+    expect(bodyHostDrawingBoxes(story, 'vml-text-square')).toEqual([{ xPt: 300, yPt: 0 }]);
+    expect(bodyHostDrawingBoxes(story, 'vml-text-square-mt50')).toEqual([{ xPt: 300, yPt: 50 }]);
+  });
+
+  it.each(['footnote', 'endnote'] as const)('appends one Normal host paragraph for the %s shapes', (story) => {
+    const page = layOut(story, 'vml-text-square');
+    const body = page.layers.body.filter((node) => node.kind === 'paragraph');
+    // BODY, then the appended host paragraph; the note keeps its text.
+    expect(body).toHaveLength(2);
+    const host = body[1]!;
+    expect(host.kind === 'paragraph' && host.drawings.some((drawing) => drawing.anchorLayer)).toBe(true);
+    expect(JSON.stringify(page.layers.notes)).toContain('MEND');
+    // An inline picture stays in its note: no host paragraph.
+    expect(layOut(story, 'inline').layers.body.filter((node) => node.kind === 'paragraph')).toHaveLength(1);
   });
 });

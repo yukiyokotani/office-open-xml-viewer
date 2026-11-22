@@ -241,6 +241,18 @@ export const WORD_STORY_VML_PAGE_POSITION = defineCompatibilityRule({
   description: 'ECMA-376 Part 4 §19.1.2.19 positions an absolute VML shape against its mso-position-horizontal-relative / mso-position-vertical-relative frames. Inside a text box story (w:txbxContent of a wps:txbx or a VML v:textbox) and inside a footnote or endnote story, Word ignores those frames and places the shape at its margin-left / margin-top offsets from the page origin: the text box position, the host paragraph, the story position and the left margin do not move it. In a text box story a shape whose vertical frame is text or line and which wraps text (square, tight, through, topAndBottom) is held at or below the top page margin; margin- or page-relative and wrapNone shapes are not. Evidence: Windows Word 16.0.20625 PDF exports of a 40x20pt VML rect and VML pictures in DrawingML and VML text boxes (61 controls: margin-left 200/300, margin-top -20 to 100, every horizontal and vertical frame, every wrap type, text box offsets, host paragraph and story positions, top margins 36/72pt, left margins 72/144pt) and in footnotes and endnotes (24 controls with the same factors, none held at the margin).',
 });
 
+export const WORD_NOTE_VML_HOST_PARAGRAPH = defineCompatibilityRule({
+  id: 'word-note-vml-host-paragraph',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'note-vml-host-paragraph',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 Part 4 §19.1.2.19 anchors an absolutely positioned VML shape at the run that holds it. Word does not keep such a shape in a footnote or endnote: it takes every absolutely positioned VML shape, picture or group out of the notes and hosts them in one empty paragraph in the Normal style that it appends to the end of the main story, so the body ends one Normal paragraph later (endnotes start one Normal line plus its spacing lower) and the shapes are tagged after that paragraph. Body text after the reference does not move; the paragraph takes neither the note paragraph nor the reference paragraph formatting; two shapes in one note or in two notes share the one paragraph; an inline VML picture stays in its note. Evidence: Windows Word 16.0.20625 PDF exports and their tagged structure trees, 20 controls (footnotes and endnotes: text after the reference paragraph, two shapes in one note, two notes with one shape each, a 20pt note paragraph with 12pt after, Normal with 12pt after, a 20pt reference paragraph, an absolute and an inline VML picture, a VML group), with the 22 VML-rect note controls of the story position rule.',
+});
+
 export const WORD_OVERLAPPING_LAYOUT_IN_CELL_OVERLAY = defineCompatibilityRule({
   id: 'word-overlapping-layout-in-cell-overlay',
   evidence: {

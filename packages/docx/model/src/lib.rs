@@ -415,6 +415,11 @@ pub struct NoteLayoutSettingsWire {
     /// matching Short/Full/None mark above. Layout measures inherited and
     /// authored spacing and line facts (§17.3.1.33); no pPr does not mean zero
     /// or a fixed gap. Missing and unsupported stories retain the fallback.
+    /// word-note-vml-host-paragraph: an empty Normal paragraph Word appends
+    /// to the end of the main story to hold the absolutely positioned VML
+    /// shapes of every footnote and endnote, which leave their notes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_shape_host_paragraph: Option<Box<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub footnote_separator_paragraph: Option<Box<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
