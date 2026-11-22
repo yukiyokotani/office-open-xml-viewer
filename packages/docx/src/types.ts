@@ -1920,7 +1920,12 @@ export interface DocxTextRunInfo {
    *  to whole device pixels. An overlay that nests one `overflow:hidden`
    *  container per clip (cut to `rects` where present), as the viewer's
    *  text, find and comment layers do, has the browser clip the run exactly
-   *  for any transform or responsive resize. Absent for an unclipped run. */
+   *  for any transform or responsive resize. Positions and lengths are
+   *  written in percentages of the page, so an overlay must be resized with
+   *  the page's aspect ratio, as the page itself is: scale the canvas and its
+   *  overlay layer uniformly (for example a CSS width with `height:auto`);
+   *  scaling one axis alone distorts a turned clip. Absent for an unclipped
+   *  run. */
   clips?: readonly Readonly<DocxClipRegion>[];
 }
 

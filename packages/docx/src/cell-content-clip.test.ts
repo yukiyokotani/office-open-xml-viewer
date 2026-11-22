@@ -473,3 +473,45 @@ describe('a VML text box union with a degenerate rectangle', () => {
     expect(JSON.stringify(threads)).not.toContain('"width"');
   });
 });
+
+describe('clip unions at scale', () => {
+  const box = { x: 40, y: 10, width: 10, height: 10 };
+
+  it('handles a union of 35,000 rectangles without spreading them onto the stack', () => {
+    const rects = Array.from({ length: 35_000 }, (_, index) => ({ x: (index % 100) * 2, y: 0, width: 1, height: 100 }));
+    expect(() => clippedBoxVisible(box, [{ x: 0, y: 0, width: 200, height: 100, rects }])).not.toThrow();
+    expect(clippedBoxVisible(box, [{ x: 0, y: 0, width: 200, height: 100, rects }])).toBe(true);
+  });
+
+  it('keeps a box in the gap of a union hidden however often its rectangles repeat', () => {
+    // textboxrect="0,0,200,1000;800,0,1000,1000" on a 100pt box: a gap at 20-80.
+    const left = { x: 0, y: 0, width: 20, height: 100 };
+    const right = { x: 80, y: 0, width: 20, height: 100 };
+    const clip = (rects: Array<typeof left>) => [{ x: 0, y: 0, width: 100, height: 100, rects }];
+    expect(clippedBoxVisible(box, clip([left, right]))).toBe(false);
+    expect(clippedBoxVisible(box, clip([...Array.from({ length: 64 }, () => left), right]))).toBe(false);
+    // Rectangles nested in another count as that one.
+    expect(clippedBoxVisible(box, clip([left, { x: 2, y: 2, width: 10, height: 10 }, right]))).toBe(false);
+  });
+});
+
+describe('rotated exact-height cells', () => {
+  it('clip to the cell edges, not across the page', () => {
+    const lines = Array.from({ length: 14 }, (_, index) => `<w:p><w:r><w:t>L${index}</w:t></w:r></w:p>`).join('');
+    const table = '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/><w:tblInd w:w="1000" w:type="dxa"/>'
+      + '<w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>'
+      + '<w:tr><w:trPr><w:trHeight w:val="600" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/>'
+      + `<w:textDirection w:val="tbRl"/></w:tcPr>${lines}</w:tc></w:tr></w:tbl><w:p/>`;
+    const layout = layoutDocx(docx('', table));
+    const laid = layout.pages[0]!.layers.body.find((node) => node.kind === 'table') as TableLayout;
+    const cell = laid.rows[0]!.cells[0]!;
+    expect(cell.verticalText).toBeDefined();
+    expect(cell.clipBounds!.xPt).toBeCloseTo(cell.flowBounds.xPt, 9);
+    expect(cell.clipBounds!.widthPt).toBeCloseTo(cell.flowBounds.widthPt, 9);
+    // Text runs in it carry the same box as their clip.
+    const run = textRunsForPage(layout, 0, { scale: 1 }).find((item) => item.text === 'L0');
+    expect(run?.clips?.at(-1)).toMatchObject({
+      x: expect.closeTo(cell.flowBounds.xPt, 9), width: expect.closeTo(cell.flowBounds.widthPt, 9),
+    });
+  });
+});

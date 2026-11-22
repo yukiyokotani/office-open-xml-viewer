@@ -56,32 +56,83 @@ const MAX_CLIP_PIECES = 64;
 
 type Box = Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>;
 
-/** The rectangles of a clip that have area; an empty list clips everything. */
-function clipRegions(clip: Readonly<DocxClipRegion>): Point[][] {
+type LocalRect = Readonly<{ x: number; y: number; width: number; height: number }>;
+
+/** Unions with more rectangles than this skip the pairwise containment pass. */
+const MAX_CONTAINMENT_RECTS = 512;
+
+/** A clip's rectangles reduced to those that matter for `near` (page
+ * polygons being cut): rectangles without area, outside the polygons'
+ * extent, duplicated or inside another rectangle are dropped. An empty
+ * result clips everything. Returned as page polygons. */
+function clipRegions(clip: Readonly<DocxClipRegion>, near: readonly Point[][]): Point[][] {
   const [a, b, c, d] = orientation(clip.transform);
-  return (clip.rects ?? [{ x: 0, y: 0, width: clip.width, height: clip.height }])
-    .filter((rect) => rect.width > 0 && rect.height > 0)
-    .map((rect) => placedPolygon(
-      clip.x + a * rect.x + c * rect.y, clip.y + b * rect.x + d * rect.y, rect.width, rect.height, clip.transform,
-    ));
+  const det = a * d - b * c;
+  // The extent of `near` in the clip's own frame.
+  let minU = Infinity;
+  let minV = Infinity;
+  let maxU = -Infinity;
+  let maxV = -Infinity;
+  for (const polygon of near) {
+    for (const point of polygon) {
+      const dx = point.x - clip.x;
+      const dy = point.y - clip.y;
+      const u = (d * dx - c * dy) / det;
+      const v = (-b * dx + a * dy) / det;
+      minU = Math.min(minU, u);
+      minV = Math.min(minV, v);
+      maxU = Math.max(maxU, u);
+      maxV = Math.max(maxV, v);
+    }
+  }
+  const seen = new Set<string>();
+  let rects: LocalRect[] = [];
+  for (const rect of clip.rects ?? [{ x: 0, y: 0, width: clip.width, height: clip.height }]) {
+    if (!(rect.width > 0 && rect.height > 0)) continue;
+    if (rect.x >= maxU || rect.y >= maxV || rect.x + rect.width <= minU || rect.y + rect.height <= minV) continue;
+    const key = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rects.push(rect);
+  }
+  if (rects.length > 1 && rects.length <= MAX_CONTAINMENT_RECTS) {
+    const kept: LocalRect[] = [];
+    for (const rect of [...rects].sort((left, right) => right.width * right.height - left.width * left.height)) {
+      const inside = kept.some((outer) => rect.x >= outer.x && rect.y >= outer.y
+        && rect.x + rect.width <= outer.x + outer.width && rect.y + rect.height <= outer.y + outer.height);
+      if (!inside) kept.push(rect);
+    }
+    rects = kept;
+  }
+  return rects.map((rect) => placedPolygon(
+    clip.x + a * rect.x + c * rect.y, clip.y + b * rect.x + d * rect.y, rect.width, rect.height, clip.transform,
+  ));
 }
 
 function boundingPolygon(polygons: readonly Point[][]): Point[] {
-  const xs = polygons.flatMap((polygon) => polygon.map((point) => point.x));
-  const ys = polygons.flatMap((polygon) => polygon.map((point) => point.y));
-  const left = Math.min(...xs);
-  const top = Math.min(...ys);
-  const right = Math.max(...xs);
-  const bottom = Math.max(...ys);
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const polygon of polygons) {
+    for (const point of polygon) {
+      left = Math.min(left, point.x);
+      top = Math.min(top, point.y);
+      right = Math.max(right, point.x);
+      bottom = Math.max(bottom, point.y);
+    }
+  }
   return [{ x: left, y: top }, { x: right, y: top }, { x: right, y: bottom }, { x: left, y: bottom }];
 }
 
 /** The visible pieces (convex page polygons) of `box` under `clips`, each a
- * union of its rectangles; identical pieces are kept once. */
+ * union of its rectangles; identical pieces are kept once. The cap applies
+ * after each union is reduced (clipRegions), so duplicate or nested
+ * rectangles never trigger the bounding-box superset. */
 function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): Point[][] {
   let pieces: Point[][] = [placedPolygon(box.x, box.y, box.width, box.height, box.transform)];
   for (const clip of clips ?? []) {
-    let regions = clipRegions(clip);
+    let regions = clipRegions(clip, pieces);
     if (regions.length === 0) return [];
     // Past the cap a union is cut as its bounding box, a superset.
     if (pieces.length * regions.length > MAX_CLIP_PIECES) regions = [boundingPolygon(regions)];

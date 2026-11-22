@@ -1404,9 +1404,14 @@ function rotatedCellLayout(
         : -Math.min(0, flow.inkTopPt);
   const transform = verticalCellTransform(verticalText.mode, physicalContent);
   // Rotated lines can exceed the physical cell on either axis; clip them to
-  // the cell like an exact row so they never paint over neighbours.
-  const clipBounds = exactOwnedSpan
+  // the cell so they never paint over neighbours. An exact row bounds the
+  // block axis; the cell edges bound the inline axis, as for any cell
+  // (WORD_CELL_CONTENT_CLIP: Word cuts a tbRl cell at its edges).
+  const exactClip = exactOwnedSpan
     ? wordExactRowVerticalClipBounds({ ...cellFlowBounds, heightPt: exactClipHeightPt }, placement.availableBounds)
+    : undefined;
+  const clipBounds = exactClip
+    ? { ...exactClip, xPt: cellFlowBounds.xPt, widthPt: cellFlowBounds.widthPt }
     : cellFlowBounds;
   return {
     kind: 'table-cell',

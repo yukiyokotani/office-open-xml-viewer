@@ -167,5 +167,7 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     // Inside the turned clip, a run placed there is reachable.
     const inside = [link({ x: 590, y: 310, w: 30, text: 'M', transform: 'rotate(90deg)', clips: [box] })];
     expect(await hits(inside, 800, [[580, 320]])).toEqual(['M']);
+    // A uniform resize (the page keeps its aspect ratio) keeps the live area.
+    expect(await hits(inside, 400, [[290, 160]])).toEqual(['M']);
   });
 });
