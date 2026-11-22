@@ -58,6 +58,8 @@ export interface RubyGuideUnit {
   /** Paint origin along the run from the cell start, with the alignment
    * spacing applied (an upright vertical cell's origin is its centre). */
   readonly originPx: number;
+  /** The unit's pen along the guide before any alignment spacing. */
+  readonly penPx: number;
   /** The unit's own advance along the run. */
   readonly advancePx: number;
   readonly fontRoute: CanvasFontRoute;

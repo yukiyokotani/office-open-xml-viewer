@@ -40,7 +40,7 @@ export interface RubyCellInputs {
   readonly snapPitchPx?: number;
 }
 
-type GuideUnit = Omit<RubyGuideUnit, 'originPx'> & Readonly<{ offsetPx: number }>;
+type GuideUnit = Omit<RubyGuideUnit, 'originPx' | 'penPx'> & Readonly<{ offsetPx: number }>;
 
 /** Horizontal guide units: graphemes at their contextual offsets; a joining
  * or pair-kerned span (WORD_ARABIC_PAIR_KERNING) is one unit. */
@@ -246,6 +246,7 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     baseOffsetPx,
     units: units.map(({ offsetPx, ...unit }, index) => ({
       ...unit,
+      penPx: offsetPx,
       originPx: spacing.leadPt + offsetPx + index * spacing.gapPt,
     })),
     raisePx: inputs.reservePx - (inputs.verticalLine && ruby.align === 'rightVertical' ? sizePx / 2 : 0),
@@ -266,6 +267,28 @@ export function rubyPieceWideningPx(s: LayoutTextSeg, cell: RubyCellGeometry | u
   const isLast = index === group.pieces.length - 1;
   return (isFirst ? cell.baseOffsetPx : 0)
     + (isLast ? cell.advancePx - cell.basePx - cell.baseOffsetPx : 0);
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT: the paint origins of the guide units of the
+ * ruby run placed as `pieces` (its first piece first), from the cell start. A widened cell is
+ * its own allocation and keeps the origins it was planned with. An
+ * unwidened base shares its snapToChars script block, whose allocation is
+ * settled only once the block is complete, so its guide is aligned on the
+ * base as placed: from the first piece's glyph start (after an automatic
+ * East Asian gap and a Latin block's leading pad) to the last piece's glyph
+ * end (before a Latin block's trailing pad). East Asian cells centre their
+ * glyphs in whole cells, so their box is the whole share. */
+export function rubyGuideOriginsPx(pieces: readonly LayoutTextSeg[], cell: RubyCellGeometry): readonly number[] {
+  const first = pieces[0];
+  const group = first?.rubyGroup;
+  if (!first || !group || cell.advancePx > cell.basePx) return cell.units.map((unit) => unit.originPx);
+  const last = pieces.at(-1)!;
+  const startPx = (first.autoSpaceLeadingPx ?? 0)
+    + (first.snapGridClass === 'latin' ? first.snapGridLeadingPadPx ?? 0 : 0);
+  const endPx = pieces.reduce((sum, piece) => sum + piece.measuredWidth, 0)
+    - (last.snapGridClass === 'latin' ? last.snapGridTrailingPadPx ?? 0 : 0);
+  const spacing = wordRubyGuideSpacing(group.ruby.align, endPx - startPx - cell.guidePx, cell.units.length);
+  return cell.units.map((unit, index) => startPx + spacing.leadPt + unit.penPx + index * spacing.gapPt);
 }
 
 /** The base's offset inside its cell, applied to the first piece's glyphs. */

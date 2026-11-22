@@ -596,6 +596,21 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 4)', () =>
     expect(lineOf(lines, '後')).toBe(0);
   });
 
+  it('centres an unwidened guide on its base as placed in the snapToChars block', () => {
+    const grid = { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0, pageWidth: 40 + 90 + 35 } as Partial<SectionProps>;
+    const ruby = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const narrow = { charScale: 0.4 };
+    const line = layoutParagraph([
+      { text: 'I' }, { text: 'i', ruby, extra: narrow }, { text: 'i', extra: narrow }, { text: '後' },
+    ], undefined, null, grid).lines[0]!;
+    const annotated = textPlacements(line).find((entry) => entry.ruby)!;
+    const base = annotated.paintOps.find((op) => op.text === 'i')!;
+    // The 40%-wide i is 4pt; the 5pt guide centres on it.
+    const baseCentre = annotated.origin.xPt + base.offset.xPt + 2;
+    const guide = annotated.ruby!.paintOps[0]!;
+    expect(guide.origin.xPt + 2.5).toBeCloseTo(baseCentre, 6);
+  });
+
   it.each(['tbRl', 'tbLrV'])('retracts a character ahead of a ruby cell led by a forbidden kana (%s)', (direction) => {
     const ruby = { text: 'かきくけ', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
     const { lines } = layoutParagraph(

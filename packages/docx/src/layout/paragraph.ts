@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { rubyBaseOffsetPx, rubyPieceWideningPx } from '../line-breaker/ruby-cell.js';
+import { rubyBaseOffsetPx, rubyGuideOriginsPx, rubyPieceWideningPx } from '../line-breaker/ruby-cell.js';
 import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
@@ -2706,6 +2706,8 @@ function textPlacement(
   baselinePt: number,
   topPt: number,
   heightPt: number,
+  /** The line's pieces of the ruby run `segment` starts, as placed. */
+  rubyPieces?: readonly LayoutTextSeg[],
 ): TextPlacement | import('./types.js').AnchorHostPlacement {
   const runIndex = sourceRunIndex(segment);
   const run = runIndex === undefined ? undefined : paragraph.runs[runIndex];
@@ -2739,10 +2741,11 @@ function textPlacement(
   const rubyCell = segment.ruby && segment.textLayoutService && segment.textShapeRequest
     ? segment.rubyGroup?.cell : undefined;
   const rubyScale = rubyCell?.scale ?? 1;
+  const rubyOriginsPx = rubyCell ? rubyGuideOriginsPx(rubyPieces ?? [segment], rubyCell) : [];
   const rubyPaintOps: RetainedGlyphPaintOperation[] = rubyCell
-    ? rubyCell.units.map((unit) => ({
+    ? rubyCell.units.map((unit, index) => ({
         text: unit.text,
-        origin: { xPt: unit.originPx / rubyScale, yPt: -rubyCell.raisePx / rubyScale },
+        origin: { xPt: rubyOriginsPx[index]! / rubyScale, yPt: -rubyCell.raisePx / rubyScale },
         advancePt: unit.advancePx / rubyScale,
         fontRoute: unit.fontRoute,
         fontSizePt: segment.ruby!.fontSizePt,
@@ -3355,6 +3358,7 @@ function textPlanSegment(
   }>,
   verticalGlyphMeasurement?: VerticalGlyphMeasurementService,
   sourceRuns?: TextPlacement['sourceRuns'],
+  rubyPieces?: readonly LayoutTextSeg[],
 ): MeasuredTextPlanSegment | MeasuredAnchorHostPlanSegment {
   if (segment.metricOnly) {
     const sourceMetrics = selectedFaceSourceMetrics(segment);
@@ -3369,7 +3373,7 @@ function textPlanSegment(
         : {}),
     };
   }
-  const horizontalProjection = textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0);
+  const horizontalProjection = textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0, rubyPieces);
   if (horizontalProjection.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
   // A vertical run's ruby guide was planned with its cell
   // (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE).
@@ -4356,12 +4360,19 @@ function planMeasuredLines(
           }
           sourceRuns = owners;
         }
+        const textSegment = segment as LayoutTextSeg;
+        // WORD_RUBY_ALIGN_PLACEMENT: the guide aligns on its pieces as placed.
+        const rubyPieces = textSegment.ruby && textSegment.rubyGroup
+          ? raw.segments.filter((candidate): candidate is LayoutTextSeg =>
+            'text' in candidate && candidate.rubyGroup === textSegment.rubyGroup)
+          : undefined;
         segments.push(textPlanSegment(
-          segment as LayoutTextSeg, paragraph, segmentOffset,
+          textSegment, paragraph, segmentOffset,
           paragraphCharacterGrid(context),
           sourceRun,
           verticalGlyphMeasurement,
           sourceRuns,
+          rubyPieces,
         ));
       }
       sourceOffset = Math.max(sourceOffset, segmentOffset + occurrenceLength);

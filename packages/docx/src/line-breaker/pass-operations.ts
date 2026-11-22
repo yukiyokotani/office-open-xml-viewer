@@ -1449,6 +1449,8 @@ export function performAddToLine(
         breakerState.snapBlock.first.snapGridLeadingPadPx = leading;
         breakerState.snapBlock.first.measuredWidth += leading;
         breakerState.snapBlock.last.measuredWidth -= previousTrailing;
+        // The block's trailing pad moves to its new last member.
+        breakerState.snapBlock.last.snapGridTrailingPadPx = 0;
         s.snapGridLeadingPadPx = 0;
         s.snapGridTrailingPadPx = trailing;
         s.measuredWidth = naturalWidth + trailing;
