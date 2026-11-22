@@ -61,11 +61,14 @@ const FENCED_BLOCK = /^[ \t]*```[^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$/gm;
 function markdownLinks(text) {
   const body = text
     .replace(FENCED_BLOCK, '')
-    // An indented code block: lines indented four or more columns after a
-    // blank line that follows a paragraph starting in the first column.
-    .replace(/(^\S[^\n]*\n(?:[ \t]*\n)+)((?: {4,}|\t)[^\n]*(?:\n|$)(?:(?: {4,}|\t)[^\n]*(?:\n|$)|[ \t]*\n)*)/gm, (block, lead) =>
-      /^(?:[-*+]|\d+[.)])\s/.test(lead) ? block : lead,
-    )
+    // An indented code block: lines indented four or more columns at the
+    // start of the file or after a blank line. Under a list item, whose
+    // continuation text is itself indented, six or more columns.
+    .replace(/(^|^\S[^\n]*\n(?:[ \t]*\n)+)((?:(?: {4,}|\t)[^\n]*(?:\n|$)|[ \t]*\n)+)/gm, (block, lead, code, offset) => {
+      if (lead === '' && offset !== 0) return block;
+      if (!/^(?:[-*+]|\d+[.)])\s/.test(lead)) return lead;
+      return /^(?: {6,}|\t\t)/.test(code) ? lead : block;
+    })
     .replace(/<!--[\s\S]*?-->/g, '')
     // A code span may wrap across lines.
     .replace(/`[^`]*`/g, '');
@@ -78,7 +81,7 @@ function markdownLinks(text) {
   const targets = [
     ...[...prose.matchAll(/\[[^\]]*\]\(<?([^)\s>]+)>?(?:\s+"[^"]*")?\)/g)].map((match) => match[1]),
     // Raw HTML: <img src="…">, <a href="…">.
-    ...[...prose.matchAll(/<(?:img|a|source|video)\b[^>]*?\b(?:src|href)=["']([^"']+)["']/gi)].map((match) => match[1]),
+    ...[...prose.matchAll(/<(?:img|a|source|video)\b[^>]*?(?<![\w-])(?:src|href)=["']([^"']+)["']/gi)].map((match) => match[1]),
     // Autolinks: <https://…>.
     ...[...prose.matchAll(/<([a-z][a-z0-9+.-]*:\/\/[^\s<>]+)>/gi)].map((match) => match[1]),
   ];
@@ -143,6 +146,9 @@ test('Markdown links are the destinations a reader can follow', () => {
   assert.deepEqual(markdownLinks('See <https://example.org/docs/a.md> and <span>text</span>.'), ['https://example.org/docs/a.md']);
   assert.deepEqual(markdownLinks('Example:\n\n    [unused](docs/orphan.md)\n\nAfter [a](a.md).\n'), ['a.md']);
   assert.deepEqual(markdownLinks('- item\n\n    continued [b](b.md)\n'), ['b.md']);
+  assert.deepEqual(markdownLinks('    [start](docs/orphan.md)\n\nText [c](c.md).\n'), ['c.md']);
+  assert.deepEqual(markdownLinks('- item\n\n      [code](docs/orphan.md)\n'), []);
+  assert.deepEqual(markdownLinks('<a data-href="docs/orphan.md">x</a> <a href="d.md">d</a>'), ['d.md']);
   assert.deepEqual(markdownLinks('Prose ](docs/missing.md) and ![alt](a.png).'), ['a.png']);
   assert.deepEqual(markdownLinks('Example: `wrapped\n[fake](docs/missing.md)` end.'), []);
   assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);

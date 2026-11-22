@@ -1156,9 +1156,9 @@ if (context?.kind === 'text') {
           'Use ooxml_get_active_context for the active OOXML preview and its current text, range or element context. This replaces the earlier active-selection tool name and keeps one routing entry point for all three formats.',
         ],
         bullets: [
-          'Replace xlsx_get_sheet_names with xlsx_parse.',
+          'Replace xlsx_get_sheet_names with xlsx_parse, and read the names from sheets[].name in its result instead of a string array.',
           'Replace docx_get_paragraph with docx_get_body_element.',
-          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element. Rename the shape_index argument to element_index; for the old text-only tool, read textBody from the element result when the element has text.',
+          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element. Rename the shape_index argument to element_index; the result names the index elementIndex instead of shapeIndex. For the old text-only tool, read textBody from the element result when the element has text.',
           'docx_get_body_element keeps the path and index arguments of docx_get_paragraph; the indexed body item is not always a paragraph (it can be a table or a break), so check its type before reading paragraph fields.',
           'Replace ooxml_get_active_selection with ooxml_get_active_context.',
         ],

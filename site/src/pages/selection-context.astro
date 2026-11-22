@@ -313,9 +313,11 @@ const contextMenuSnippet = `const viewer = new XlsxViewer(container, {
         and the extension hands it only to the environment of the MCP server definition that VS Code
         launches. Stopping the bridge discards the token, so a later start uses a new one.
         Re-rendering a preview starts a new selection session and clears its selection; selection and
-        location messages from an obsolete page session are ignored. <code>context: null</code> means there is no active
-        OOXML preview. A non-null context can still have <code>selection: null</code> when the active
-        preview has no selection.
+        location messages from an obsolete page session are ignored. Check <code>available</code> first: when it is
+        <code>true</code>, <code>context: null</code> means there is no active OOXML preview, and a
+        non-null context can still have <code>selection: null</code> when the active preview has no
+        selection. When it is <code>false</code>, <code>context</code> is also <code>null</code>, but
+        because the bridge could not be reached.
         <code>available: false</code> means the bridge is unavailable; inspect <code>reason</code> to
         distinguish an unconnected standalone server from a bridge error. Remote VS Code documents
         expose only a document name and no local <code>document.path</code>, so path-based file tools

@@ -223,9 +223,9 @@ export interface LoadOptions {
    * content first (pages, slides, sheets, images and media are read lazily, so
    * the report emitted at load is too early), then read
    * `largestInflatedEntryBytes` (for `maxArchiveEntryBytes`) and
-   * `distinctInflatedBytes` (for `maxTotalInflatedBytes`) from
-   * `getResourceMetrics().usage`, add headroom, and confirm on the
-   * lowest-memory device supported.
+   * `distinctInflatedBytes` (for `maxTotalInflatedBytes`) from the `usage` of
+   * the report that `await getResourceMetrics()` resolves to, add headroom, and
+   * confirm on the lowest-memory device supported.
    */
   resourceLimits?: OoxmlResourceLimits;
   /**

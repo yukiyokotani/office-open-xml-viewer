@@ -62,7 +62,7 @@ viewers.
 | recording a decision, or writing, moving or deleting docs | [`docs/workflow/documentation.md`](docs/workflow/documentation.md) |
 | preparing a release or patch release | [`docs/workflow/release.md`](docs/workflow/release.md) |
 | looking for design contracts and guides | [`docs/README.md`](docs/README.md) (index of all docs) |
-| editing one package | that package's `AGENTS.md` |
+| editing one package | that package's `AGENTS.md`, where it has one |
 
 ## How the knowledge is organized
 

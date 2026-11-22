@@ -27,7 +27,7 @@ How work moves from a branch to `main`, and what may be committed.
 ## Worktrees and Parallel Sessions
 
 - Before editing, make sure `spec` exists in the worktree and read the
-  `AGENTS.md` of each package you will edit.
+  `AGENTS.md` of each package you will edit, where it has one.
 - A task scoped to one format edits that format's package. Reading other
   packages is fine. Edit `packages/core`, `packages/ooxml-common`, or another
   format only for a coherent fix described in Cross-Package Integration, or
