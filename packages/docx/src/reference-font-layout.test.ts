@@ -509,6 +509,45 @@ describe('native reference font vertical layout', () => {
     expect(referenceFontLineMetrics('BIZ UDMincho', 400, 'italic')).toBeUndefined();
   });
 
+  it('takes Noto Sans and Noto Sans JP single lines from their pinned profiles', () => {
+    const line = (family: string, text: string) => layoutLines(context, buildSegments([{
+      type: 'text', text, fontFamily: family, fontFamilyEastAsia: family,
+      fontSize: 9, bold: false, italic: false, underline: false, strikethrough: false,
+    }] as DocRun[], {
+      pageIndex: 0, totalPages: 1, layoutServices: verifiedReferenceServices([{ family }]),
+    }), 400, 0, 1)[0]!;
+    // hhea 1069/-293 per 1000; the Far East class takes 1.3 x usWin 1160/288.
+    const latin = line('Noto Sans', 'Ab');
+    expect(latin.ascent).toBeCloseTo(9 * 1.069, 8);
+    expect(latin.descent).toBeCloseTo(9 * 0.293, 8);
+    expect(line('Noto Sans JP', '確認します。').intendedSingle).toBeCloseTo(9 * 1.3 * 1.448, 8);
+  });
+
+  it('counts whole grid cells for an empty mark from its design single line (WORD_EMPTY_MARK_DESIGN_GRID_CELLS)', () => {
+    const height = (family: string, sizePt: number, pitchPt: number, emptyMark = true) => {
+      const paragraph = {
+        type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
+        spaceBefore: 0, spaceAfter: 0, lineSpacing: { rule: 'auto', value: 1, explicit: true },
+        numbering: null, tabStops: [], runs: [], widowControl: false,
+        defaultFontSize: sizePt, defaultFontFamily: family,
+      } as unknown as DocParagraph;
+      return paragraphMarkLineMetrics(paragraph, 1, { type: 'lines', linePitchPt: pitchPt }, false,
+        false, context, {}, paragraph.lineSpacing, {}, verifiedReferenceServices([{ family }]).text,
+        undefined, false, 0, emptyMark).advancePx;
+    };
+    // Noto Sans 1.362 em: 16.34pt fits one cell, 24.52pt takes two.
+    expect(height('Noto Sans', 12, 20)).toBe(20);
+    expect(height('Noto Sans', 18, 20)).toBe(40);
+    expect(height('Noto Sans', 18, 18)).toBe(36);
+    // Noto Sans JP 1.882 em: a 10pt mark (18.82pt) takes two 18pt cells.
+    expect(height('Noto Sans JP', 10, 18)).toBe(36);
+    expect(height('Noto Sans JP', 13, 20)).toBe(40);
+    // A non-empty stand-in keeps its natural height above the one-cell floor.
+    expect(height('Noto Sans', 18, 20, false)).toBeCloseTo(18 * 1.362, 8);
+    // A face without an admitted design line keeps the floor.
+    expect(height('Uncatalogued Face', 18, 20)).toBe(20);
+  });
+
   it('treats a family installed in another tuple as present (synthesized bold)', () => {
     // Only the regular BIZ UDMincho face is installed; a bold run still paints
     // that installed family through CSS font matching, so the family is

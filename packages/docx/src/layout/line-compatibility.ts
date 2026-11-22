@@ -1658,6 +1658,20 @@ export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
   description: 'An empty paragraph has no character from which ECMA-376 §17.3.2.26 could select a font slot. Windows Word 16.0.20527 controls (368 rows: three empty paragraphs per case, mark ascii Century/Times New Roman/Arial x eastAsia MS Mincho/Yu Mincho x 10.5/12pt x eastAsia language ja-JP or en-US x hint eastAsia or none, documents with and without East Asian text, with and without a lines docGrid, compatibility modes omitted and 15) give every off-grid empty line the single-line height of the ascii face (1.15 em for Times New Roman/Arial, 1.2 em for Century), never the East Asian face, whatever the hint, language or document scripts; under a lines docGrid every case takes the grid pitch. A separate 24-case Windows page-edge matrix in modes 14 and 15 (11pt marks, 16.4pt pitch; ascii/eastAsia Times New Roman/MS Mincho, Arial/Yu Mincho and MS Mincho/Arial; 15, 15.5, 16.35 and 16.4pt remaining) shows that the ascii face also owns the content box used for grid page-edge admission: only the MS Mincho ascii mark with 15pt remaining moves to the next page; swapping MS Mincho into the eastAsia slot does not. A Windows Word export of a real off-grid mode-15 document agrees for SimSun/zh-CN marks with hint eastAsia, including empty table-cell paragraphs and the empty paragraph after a table. The real 20pt-grid document that once appeared to contradict the page-edge matrix does not: its Times New Roman mark box fits only because a preceding vertically merged table row ends about 0.5pt higher than in Word (an unrelated table-height difference); with Word\'s position the same box no longer fits. Inline object runs are outside this rule.',
 });
 
+/** ECMA-376 §17.6.5 and §17.3.1.32 define a line grid's pitch but not how
+ * many cells an empty paragraph mark taller than one pitch takes. */
+export const WORD_EMPTY_MARK_DESIGN_GRID_CELLS = defineCompatibilityRule({
+  id: 'word-empty-mark-design-grid-cells',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'empty-mark-grid-cells',
+    application: 'Microsoft Word',
+    version: '16.0.20527 and 16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'On a lines docGrid an empty paragraph mark with single automatic spacing takes the smallest whole number of cells that holds the single line of its ascii face (WORD_EMPTY_MARK_ASCII_FACE): ceil(single line / pitch) pitches, at least one. Windows Word controls, two empty marks per case, compatibility mode 15: Noto Sans marks (1.362 em, hhea 1069/-293) of 12pt (16.34pt) take one cell of an 18pt and of a 20pt pitch, and 18pt marks (24.5pt) take two cells of either pitch; Noto Sans JP marks, whose OS/2 Far East code-page class gives a 1.3 x usWin single line of 1.882 em, take two cells at 10, 11, 12 and 18pt on an 18pt pitch and at 12 and 13pt on a 20pt pitch; a hint eastAsia Noto Sans/Noto Sans JP 12pt mark keeps the ascii face and one 18pt cell. The same marks off the grid are exactly one single line high (11, 12 and 13pt Noto Sans JP: 20.7, 22.55 and 24.47pt). Word for Mac exports of the same files agree. Library scope: the face must supply an admitted design single line (a parsed resource or a reference profile); a Canvas-measured box cannot establish the design height and keeps the established one-cell floor, as for visible text (WORD_LATIN_DESIGN_GRID_CELLS). Marks on the East Asian grid path (word-east-asian-grid-line-allocation) and picture-bullet marks keep their own counting. A mark whose paragraph holds only an anchored drawing is outside this rule: Word gave such a 12pt Noto Sans JP mark two 18pt cells like its empty neighbour, but the library lays that paragraph out as an anchor-host line sized by the drawing run (9pt there), and whether Word sizes it by the mark alone or by the larger of mark and run is not measured.',
+});
+
 /** Observed outer-run leading selection is bounded to mode-15 box-only body
  * paragraphs. The caller additionally admits only horizontal off-grid root
  * body flow; other stories, mixed text and legacy modes keep their old route. */

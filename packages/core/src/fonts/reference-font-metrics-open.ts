@@ -40,6 +40,28 @@ import type { ReferenceFontMetricProfile } from './reference-font-metrics.js';
  * The installed macOS asset faces carry only the English names, so a local()
  * probe still needs the English/PostScript aliases listed first. The
  * proportional BIZ UDP* families are distinct fonts and are not aliased here.
+ *
+ * Noto Sans 2.015: notofonts/notofonts.github.io at
+ * 28b15b4b43b7bed62b5cf6e6b0b5ff5846270535, fonts/NotoSans/hinted/ttf/.
+ * Regular SHA-256: 478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823
+ * Bold SHA-256: 1df075a380fc7cb898acf64c1f7b3b4dd780de3caa860178bf929de35817a913
+ * Italic SHA-256: 467e3f89eeca4108bb8710a2b9e0cf2281ac56d5b0609211a83776d0505eecb5
+ * BoldItalic SHA-256: 1b602a9d6353be42c91df097a4857b69fa2696f26703d7a33b54a15d87c2622c
+ * All four have OS/2 ulCodePageRange1=0x0000019f (no Far East bit),
+ * unitsPerEm=1000, hhea=(1069, -293, 0), OS/2 usWin=(1124, 395), and
+ * fsSelection USE_TYPO_METRICS with typo=(1069, -293, 0); the files' only
+ * names are "Noto Sans" and the PostScript names below. The installed macOS
+ * copies have the same hashes. Decoration and PANOSE are not recorded here.
+ *
+ * Noto Sans JP 2.004: notofonts/noto-cjk at
+ * 165c01b46ea533872e002e0785ff17e44f6d97d8, Sans/SubsetOTF/JP/.
+ * Regular SHA-256: dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073
+ * Bold SHA-256: 1b0edfb500b73a4fa8a4fcaae1bbbd403994e08e73e3e0da37e70d3853f42c5f
+ * Both have OS/2 ulCodePageRange1=0x60060107 (Far East bits 17 and 18 set),
+ * unitsPerEm=1000, hhea=(1160, -288, 0) and OS/2 usWin=(1160, 288), without
+ * USE_TYPO_METRICS; the only names are "Noto Sans JP" and the PostScript
+ * names below. The installed macOS copies have the same hashes. Decoration,
+ * PANOSE and GSUB vert coverage are not recorded here.
  */
 export const OPEN_FONT_REFERENCE_PROFILES: readonly ReferenceFontMetricProfile[] = [
   {
@@ -66,4 +88,22 @@ export const OPEN_FONT_REFERENCE_PROFILES: readonly ReferenceFontMetricProfile[]
     weight: 700, style: 'normal', unitsPerEm: 2048,
     hhea: [1802, -246, 0], win: [1802, 246], farEastCodePage: true, xAvgCharWidth: 1963,
   },
+  ...([
+    ['NotoSans-Regular', 400, 'normal', 577],
+    ['NotoSans-Bold', 700, 'normal', 618],
+    ['NotoSans-Italic', 400, 'italic', 550],
+    ['NotoSans-BoldItalic', 700, 'italic', 592],
+  ] as const).map(([postscript, weight, style, xAvgCharWidth]): ReferenceFontMetricProfile => ({
+    source: 'published-open-font', family: 'Noto Sans', aliases: ['Noto Sans', postscript],
+    weight, style, unitsPerEm: 1000, xAvgCharWidth,
+    hhea: [1069, -293, 0], win: [1124, 395], typoMetrics: [1069, -293, 0], farEastCodePage: false,
+  })),
+  ...([
+    ['NotoSansJP-Regular', 400, 982],
+    ['NotoSansJP-Bold', 700, 983],
+  ] as const).map(([postscript, weight, xAvgCharWidth]): ReferenceFontMetricProfile => ({
+    source: 'published-open-font', family: 'Noto Sans JP', aliases: ['Noto Sans JP', postscript],
+    weight, style: 'normal', unitsPerEm: 1000, xAvgCharWidth,
+    hhea: [1160, -288, 0], win: [1160, 288], farEastCodePage: true,
+  })),
 ];

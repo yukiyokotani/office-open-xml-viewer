@@ -5,7 +5,7 @@ import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
 import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, WORD_EMPTY_MARK_ASCII_FACE } from '../layout/line-compatibility.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -501,6 +501,12 @@ export function paragraphMarkLineMetrics(
         minimumAscentPx > 0 ? asc + desc : 0,
       )
     : undefined;
+  // WORD_EMPTY_MARK_DESIGN_GRID_CELLS: off the East Asian grid path an empty
+  // mark counts whole cells from its face's admitted design single line, of
+  // either code-page class. A Canvas-only box keeps the one-cell floor.
+  void WORD_EMPTY_MARK_DESIGN_GRID_CELLS;
+  const markGridCountSingle = emptyMark && !eastAsian && minimumAscentPx <= 0
+    ? designIntendedSingle : 0;
   const ordinaryAdvancePx = lineBoxHeight(
     effectiveLineSpacing,
     asc,
@@ -511,6 +517,10 @@ export function paragraphMarkLineMetrics(
     intendedSingle,
     eastAsian,
     gridCountSingle,
+    undefined,
+    undefined,
+    0,
+    markGridCountSingle,
   );
   const gridAllocationActive = useFeLayout && eastAsian && isGridLineRule(grid);
   const allocatedGridAdvancePx = gridAllocationActive
