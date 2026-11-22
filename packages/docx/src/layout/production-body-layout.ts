@@ -1874,9 +1874,8 @@ function measureBodyParagraphEntry(
   // `word-vertical-section-upright-block-table`: the drawings whose
   // exclusion was registered when the page started (the registry already
   // holds them), with the geometry this acquisition gives them.
-  const uprightDrawingPins = request.continuation.boundary !== null || collisionEntries.length === 0
-    || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)
-    ? [] : registeredDrawingPins(sessionState, layout, collisionEntries);
+  const uprightDrawingPins = collisionEntries.length === 0 || !state.registeredDrawings?.size
+    ? [] : registeredDrawingPins(state.registeredDrawings, layout, collisionEntries);
   return Object.freeze({
     layout,
     ...(uprightDrawingPins.length > 0 ? { uprightDrawingPins: Object.freeze(uprightDrawingPins) } : {}),
@@ -2917,6 +2916,15 @@ function prescanBodyPageAnchors(
     ];
   });
   publicParagraphs.forEach((paragraph) => state.pageAnchorPrescanned?.add(paragraph));
+  // What each drawing is registered with, by occurrence, for its paragraph
+  // to compare with what it acquires (registeredDrawingPins).
+  if (state.verticalPhys && uprightBlockPaginates(state.verticalPhys)) {
+    const registered = state.registeredDrawings ?? (state.registeredDrawings = new Map());
+    for (let at = 0; at < entries.length; at += 1) {
+      const entry = entries[at]!;
+      if (entry.kind === 'shape') registered.set(entry.occurrenceId, entry);
+    }
+  }
   if (entries.length === 0) return null;
   return Object.freeze({
     floats: Object.freeze({
@@ -2975,6 +2983,7 @@ function resetBodyPageAcquisition(
   state.pageAnchorPrescanned = new Set();
   state.frozenAnchorFrames = new Map();
   state.pinnedAnchorFrames = new Map();
+  state.registeredDrawings = new Map();
   state.uprightBlockIndex = emptyUprightBlockPageIndex();
   sessionState.floatRegistry = Object.freeze({
     coordinateSpace: 'logical-page-points' as const,
@@ -3224,16 +3233,19 @@ function acquirePublicParagraphFloats(
   onlyOccurrenceIds?: ReadonlySet<string>,
   paragraphId = sessionState.floatRegistry.nextParagraphId,
 ): readonly FloatRegistryEntryPt[] {
-  const committedOccurrenceIds = new Set(
+  // Read for the first bridged run only: a paragraph without one does not
+  // read the page's registry.
+  let committedOccurrenceIds: Set<string> | undefined;
+  const committed = (occurrenceId: string): boolean => (committedOccurrenceIds ??= new Set(
     sessionState.floatRegistry.entries.map((entry) => entry.occurrenceId),
-  );
+  )).has(occurrenceId);
   const publicRuns = paragraph.runs.flatMap((run, runIndex) => {
     if (run.type !== 'shape' && run.type !== 'image' && run.type !== 'chart') return [];
     const bridge = publicAnchorBridge(source, runIndex);
     if (
       !bridge ||
       (onlyOccurrenceIds && !onlyOccurrenceIds.has(bridge.occurrenceId)) ||
-      committedOccurrenceIds.has(bridge.occurrenceId) ||
+      committed(bridge.occurrenceId) ||
       (bridge.pageOwned && candidate.pageAnchorPrescanned?.has(paragraph))
     )
       return [];
@@ -3289,35 +3301,35 @@ function acquirePublicParagraphFloats(
   );
 }
 
-/** The wrapped drawings of `layout` that the float registry already holds
- * (registered when the page started), with the frame, text exclusion and
+/** The wrapped drawings of `layout` that were registered when the page
+ * started (`registered`, by occurrence), with the frame, text exclusion and
  * wrap polygon the acquisition gave them, and whether the registered frame
- * or exclusion differs from those (AcquiredParagraphBlock.uprightDrawingPins). */
+ * or exclusion differs from those (AcquiredParagraphBlock.uprightDrawingPins).
+ * Only the paragraph's own drawings are looked up. */
 function registeredDrawingPins(
-  sessionState: BodySessionDependencies['sessionState'],
+  registered: ReadonlyMap<string, Readonly<{ bounds: LayoutRect; exclusionBounds: LayoutRect }>>,
   layout: ParagraphLayout,
   collisions: readonly DrawingMLCollisionEntryPt[],
 ): ReadonlyArray<Readonly<{ occurrenceId: string; pin: UprightDrawingPin; differs: boolean }>> {
-  const owned = new Set<string>();
-  for (let at = 0; at < collisions.length; at += 1) owned.add(collisions[at]!.occurrenceId);
-  const registered = new Map<string, FloatRegistryEntryPt>();
-  const entries = sessionState.floatRegistry.entries;
-  for (let at = 0; at < entries.length; at += 1) {
-    const entry = entries[at]!;
-    if (entry.kind === 'shape' && owned.has(entry.occurrenceId)) registered.set(entry.occurrenceId, entry);
-  }
-  if (registered.size === 0) return [];
   const differ = (first: LayoutRect, second: LayoutRect) =>
     Math.abs(first.xPt - second.xPt) > 1e-6 || Math.abs(first.yPt - second.yPt) > 1e-6
     || Math.abs(first.widthPt - second.widthPt) > 1e-6 || Math.abs(first.heightPt - second.heightPt) > 1e-6;
-  const frames = new Map((layout.anchorFrames ?? []).flatMap((frame) =>
-    frame.status === 'resolved' ? [[frame.occurrenceId, frame] as const] : []));
-  return collisions.flatMap((collision) => {
+  let frames: Map<string, Extract<NonNullable<ParagraphLayout['anchorFrames']>[number], { status: 'resolved' }>> | null = null;
+  const pins: Array<Readonly<{ occurrenceId: string; pin: UprightDrawingPin; differs: boolean }>> = [];
+  for (let at = 0; at < collisions.length; at += 1) {
+    const collision = collisions[at]!;
     const entry = registered.get(collision.occurrenceId);
+    if (!entry) continue;
+    if (!frames) {
+      frames = new Map();
+      for (const frame of layout.anchorFrames ?? []) {
+        if (frame.status === 'resolved') frames.set(frame.occurrenceId, frame);
+      }
+    }
     const frame = frames.get(collision.occurrenceId);
-    if (!entry || !frame || !frame.geometry.wrapBounds || frame.geometry.wrap.kind === 'none') return [];
+    if (!frame || !frame.geometry.wrapBounds || frame.geometry.wrap.kind === 'none') continue;
     const exclusionBounds = frame.geometry.wrapBounds;
-    return [Object.freeze({
+    pins.push(Object.freeze({
       occurrenceId: collision.occurrenceId,
       pin: Object.freeze({
         bounds: collision.bounds,
@@ -3325,8 +3337,9 @@ function registeredDrawingPins(
         ...(frame.geometry.wrap.polygon ? { wrapPolygon: frame.geometry.wrap.polygon.points } : {}),
       }),
       differs: differ(entry.bounds, collision.bounds) || differ(entry.exclusionBounds, exclusionBounds),
-    })];
-  });
+    }));
+  }
+  return pins;
 }
 
 function retainedBodyParagraphFloatEntries(

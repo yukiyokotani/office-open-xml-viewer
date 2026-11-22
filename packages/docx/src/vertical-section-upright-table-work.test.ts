@@ -74,6 +74,8 @@ vi.mock('./layout/acquisition-state.js', async (importOriginal) => {
 type Counts = {
   boxes: number; exclusions: number; slots: number; registryEntries: number; rows: number; history: number;
   members: number; drawings: number;
+  /** Float registry entries of wrapped drawings. */
+  floats: number;
   /** Elements an insertion into or removal from an array of drawings moves. */
   drawingShifts: number;
 };
@@ -81,7 +83,7 @@ type Counts = {
 /** Lays `run` out while counting the visits described above. */
 function counting<Result>(run: () => Result): Readonly<{ result: Result; counts: Counts }> {
   const counts: Counts = {
-    boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0, drawings: 0,
+    boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0, drawings: 0, floats: 0,
     drawingShifts: 0,
   };
   const visit = (value: unknown): void => {
@@ -93,6 +95,7 @@ function counting<Result>(run: () => Result): Readonly<{ result: Result; counts:
     else if ('table' in value && 'sourceIndex' in value) counts.members += 1;
     else if ('anchorIndex' in value && 'frame' in value) counts.drawings += 1;
     else if ('kind' in value && value.kind === 'table-row') counts.rows += 1;
+    else if ('kind' in value && value.kind === 'shape' && 'exclusionBounds' in value) counts.floats += 1;
     else if ('occurrenceId' in value && typeof value.occurrenceId === 'string'
       && value.occurrenceId.includes('upright-table')) counts.registryEntries += 1;
   };
@@ -335,6 +338,24 @@ describe('upright block table placement work', () => {
     const large = measure(8);
     expect(large.layouts).toBe(small.layouts);
     expect(large.drawings).toBeLessThanOrEqual(2 * small.drawings + 16);
+  }, 300_000);
+
+  it('compares each drawing registered at the page start with its own registration only', () => {
+    // A table, then paragraphs each anchoring a small rectangle positioned
+    // on the page, clear of one another: every rectangle is registered when
+    // the page starts and none moves. A paragraph looks up what its own
+    // drawing was registered with; it does not read the page's registry.
+    const measure = (count: number) => {
+      const body = [table(2), ...Array.from({ length: count }, (_, at) =>
+        P.replace('</w:p>', `${anchoredRectangle(45 + 30 * at, 500, 12, 18)}</w:p>`))];
+      const { result, counts } = counting(() => layOutPages('tbLrV', body));
+      expect(result).toHaveLength(1);
+      expect(result[0]!.drawings).toHaveLength(count);
+      return counts.floats;
+    };
+    const small = measure(8);
+    const large = measure(16);
+    expect(large).toBeLessThanOrEqual(2 * small + 16);
   }, 300_000);
 
   it('reads no placed table for a drawing that lies clear of the tables', () => {

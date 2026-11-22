@@ -87,6 +87,10 @@ export interface AnchorFloatRegistrationState extends FloatRegistrationState {
    * pinned for this layout of the page, keyed by anchor occurrence; the
    * anchor paragraph places each exactly there. */
   pinnedAnchorFrames?: Map<string, LayoutRect>;
+  /** `word-vertical-section-upright-block-table`: the frame and text
+   * exclusion of each wrapped drawing registered when this page started,
+   * keyed by anchor occurrence, as registered. */
+  registeredDrawings?: Map<string, Readonly<{ bounds: LayoutRect; exclusionBounds: LayoutRect }>>;
   verticalCJK?: boolean;
   verticalAllRotated?: boolean;
   verticalPhys?: PhysicalAnchorFrame;
