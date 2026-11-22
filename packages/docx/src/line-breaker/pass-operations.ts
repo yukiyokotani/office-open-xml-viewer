@@ -2265,7 +2265,6 @@ export function performTextSegmentBox(
   ascent: number;
   descent: number;
 }> {
-  if (s.lineMetricNeutral) return { width: 0, height: 0, ascent: 0, descent: 0 };
   const {
     measurement,
     effectiveFontPx,

@@ -112,9 +112,6 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Zero-advance anchor-character placeholder: contributes run metrics to the
    * line box but paints no glyph. */
   metricOnly?: true;
-  /** A metric-only anchor placeholder that attaches its anchors to the line
-   * but lends it no box at all (a carried note shape's anchor character). */
-  lineMetricNeutral?: true;
   /** Reserved-separator participant only (rule control or
    * content mark): the bounded selected-face probe whose vertical metrics the
    * metric-only segment keeps. Never display text, glyph ownership, source

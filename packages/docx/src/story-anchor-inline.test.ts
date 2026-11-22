@@ -659,38 +659,51 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
     }
   });
 
-  it('leaves out a deleted shape of a table-only body rather than placing it below the note area', () => {
-    // A table-only body with the live reference in its last cell; the shape
-    // sits at the bottom of the margin frame, above the note area.
-    const rect = '<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:0;width:40pt;height:20pt;'
-      + 'mso-position-vertical:bottom;mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin" '
-      + 'fillcolor="black" stroked="f"><w10:wrap type="square"/></v:rect></w:pict></w:r>';
-    const table = '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>'
+  it('carries a deleted shape of a table-final body without changing the table', () => {
+    const body = '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>'
       + '<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>BODY</w:t></w:r>'
-      + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p></w:tc></w:tr></w:tbl>';
-    const body = table;
-    const shapeTops = (storyRuns: string) => {
+      + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>'
+      + '<w:p><w:pPr><w:rPr><w:sz w:val="52"/></w:rPr></w:pPr></w:p></w:tc></w:tr></w:tbl>';
+    const deleted = `<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:del>`;
+    const table = (storyRuns: string) => {
       variant = { body, storyRuns, markup: true };
       const page = layOutDocument('footnote', 'vml-text-square').pages[0]!;
-      const tops: number[] = [];
-      const visit = (node: unknown) => {
-        const block = node as Readonly<{ kind: string; drawings?: readonly Readonly<{ flowBounds: { yPt: number; widthPt: number } }>[];
-          rows?: readonly Readonly<{ cells: readonly Readonly<{ blocks: readonly Readonly<{ layout?: unknown }>[] }>[] }>[] }>;
-        for (const drawing of block.drawings ?? []) if (drawing.flowBounds.widthPt === 40) tops.push(drawing.flowBounds.yPt);
-        for (const row of block.rows ?? []) for (const cell of row.cells) cell.blocks.forEach((entry) => visit(entry.layout ?? entry));
+      const node = page.layers.body.find((block) => block.kind === 'table');
+      const drawings: number[] = [];
+      const visit = (block: unknown) => {
+        const entry = block as Readonly<{ drawings?: readonly Readonly<{ flowBounds: { widthPt: number } }>[];
+          rows?: readonly Readonly<{ cells: readonly Readonly<{ blocks: readonly Readonly<{ layout: unknown; advancePt: number }>[] }>[] }>[] }>;
+        for (const drawing of entry.drawings ?? []) if (drawing.flowBounds.widthPt === 40) drawings.push(1);
+        for (const row of entry.rows ?? []) for (const cell of row.cells) cell.blocks.forEach((child) => visit(child.layout));
       };
-      page.layers.body.forEach(visit);
-      const noteTop = Math.min(...page.layers.notes.map((note) => note.flowBounds.yPt));
-      return { tops: [...new Set(tops)], noteTop };
+      visit(node);
+      const rows = node?.kind === 'table' ? node.rows.map((row) => ({ heightPt: row.heightPt,
+        blocks: row.cells.flatMap((cell) => cell.blocks.map((child) => child.advancePt)) })) : [];
+      return { rows, drawings: drawings.length };
     };
     try {
-      const live = shapeTops(rect);
-      const deleted = shapeTops(`<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${rect}</w:del>`);
-      expect(live.tops).toHaveLength(1);
-      expect(live.tops[0]! + 20).toBeLessThanOrEqual(live.noteTop);
-      // A body ending without a paragraph has no carrier: the markup-only
-      // shape is left out rather than placed below the note area.
-      expect(deleted.tops).toEqual([]);
+      const plain = table('');
+      const carried = table(deleted);
+      expect(carried.rows).toEqual(plain.rows);
+      expect(carried.drawings).toBe(1);
+    } finally {
+      variant = {};
+    }
+  });
+
+  it('keeps an empty-result field paragraph on its mark line beside a carried deleted shape', () => {
+    const body = '<w:p><w:pPr><w:spacing w:line="14000" w:lineRule="exact"/></w:pPr><w:r><w:t>BODY</w:t></w:r>'
+      + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="1"/></w:r></w:p>'
+      + '<w:p><w:pPr><w:rPr><w:sz w:val="52"/></w:rPr></w:pPr><w:fldSimple w:instr=" MERGEFIELD MiddleName "><w:r><w:t/></w:r></w:fldSimple></w:p>';
+    const deleted = `<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:del>`;
+    const lastParagraph = (storyRuns: string) => {
+      variant = { body, storyRuns, markup: true };
+      const pages = layOutDocument('endnote', 'vml-text-square').pages;
+      return pages.flatMap((page, pageIndex) => page.layers.body
+        .filter((node) => node.kind === 'paragraph').map((node) => ({ pageIndex, heightPt: node.flowBounds.heightPt }))).at(-1);
+    };
+    try {
+      expect(lastParagraph(deleted)).toEqual(lastParagraph(''));
     } finally {
       variant = {};
     }

@@ -2268,39 +2268,47 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
   if (!host || runs.length === 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
   if (!visible) {
     // Every shape is deleted (or its note's references are): the markup view
-    // shows them marked deleted and the final view omits them. They ride the
-    // body's last paragraph with inline content, so neither view gains flow
-    // for them. A body
-    // ending without a paragraph (Word always ends one with a paragraph) has
-    // no carrier whose page frame bounds them: they are left out, never
-    // placed inside a table cell laid out before its page's note area.
-    // The carried anchor characters attach their shapes to the carrier's
-    // last line but lend it no metrics: they were sized for a host paragraph.
-    const carried = (): DocRun[] => runs.map((run) => (run.type === 'anchorHost'
-      ? { ...run, __metricNeutral: true } as unknown as DocRun : run));
-    // The carrier is the last paragraph with inline content of its own: an
-    // empty paragraph keeps its paragraph-mark line, which a carried anchor
-    // would otherwise turn into an anchor-only line.
-    const holdsInlineContent = (element: BodyElement) => element.type === 'paragraph'
-      && element.runs.some((run) => {
-        if (run.type === 'text') return run.text.length > 0;
-        if (run.type === 'image' || run.type === 'shape' || run.type === 'chart') {
-          return (run as Readonly<{ anchor?: boolean; inline?: boolean }>).anchor !== true
-            && (run.type !== 'shape' || (run as Readonly<{ inline?: boolean }>).inline === true);
+    // shows them marked deleted and the final view omits them. They are
+    // carried by the story's last paragraph in document order (inside a table
+    // cell when the body ends with a table) as trailing runs that layout
+    // attaches only after that paragraph is laid out (`__carriedAnchorCount`,
+    // see layout/paragraph.ts): they form no segment, so the carrier's lines,
+    // mark and pagination are those of the paragraph without them.
+    const appendToLast = (blocks: readonly unknown[]): unknown[] | undefined => {
+      for (let index = blocks.length - 1; index >= 0; index -= 1) {
+        const element = blocks[index] as BodyElement;
+        if (element.type === 'paragraph') {
+          const last = element as DocParagraph & Readonly<{ __carriedAnchorCount?: number }>;
+          const next = [...blocks];
+          next[index] = {
+            ...last,
+            runs: [...last.runs, ...runs],
+            __carriedAnchorCount: (last.__carriedAnchorCount ?? 0) + runs.length,
+            ...withRevisions(element, last.runs.length, (last as InternalDocParagraph).__runRevisions ?? []),
+          };
+          return next;
         }
-        return run.type === 'field' || run.type === 'math';
-      });
-    let lastIndex = doc.body.length - 1;
-    while (lastIndex >= 0 && !holdsInlineContent(doc.body[lastIndex]!)) lastIndex -= 1;
-    if (lastIndex < 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
-    const last = doc.body[lastIndex] as DocParagraph;
-    const body = [...doc.body];
-    body[lastIndex] = {
-      ...last,
-      runs: [...last.runs, ...carried()],
-      ...withRevisions(body[lastIndex]!, last.runs.length, (last as InternalDocParagraph).__runRevisions ?? []),
-    } as unknown as BodyElement;
-    return { ...doc, body, __noteLayoutSettings: retained } as DocxDocumentModel;
+        if (element.type === 'table') {
+          for (let row = element.rows.length - 1; row >= 0; row -= 1) {
+            const cells = element.rows[row]!.cells;
+            for (let cell = cells.length - 1; cell >= 0; cell -= 1) {
+              const content = appendToLast(cells[cell]!.content);
+              if (!content) continue;
+              const rows = [...element.rows];
+              const nextCells = [...cells];
+              nextCells[cell] = { ...cells[cell]!, content: content as typeof cells[number]['content'] };
+              rows[row] = { ...rows[row]!, cells: nextCells };
+              const next = [...blocks];
+              next[index] = { ...element, rows };
+              return next;
+            }
+          }
+        }
+      }
+      return undefined;
+    };
+    const body = appendToLast(doc.body) as BodyElement[] | undefined;
+    return { ...doc, ...(body ? { body } : {}), __noteLayoutSettings: retained } as DocxDocumentModel;
   }
   return {
     ...doc,

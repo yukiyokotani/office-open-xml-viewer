@@ -6925,11 +6925,114 @@ function immutableMeasuredLine(
 }
 
 /** @internal Acquires the measurement and retained layout as one final candidate. */
+/** The paragraph without its carried trailing anchor runs, one object per
+ * source paragraph so the acquisition caches keep their identity. */
+const carrierParagraphs = new WeakMap<ParagraphAcquisitionInput, ParagraphAcquisitionInput>();
+
+function carriedAnchorCount(paragraph: ParagraphAcquisitionInput): number {
+  const count = (paragraph as Readonly<{ __carriedAnchorCount?: number }>).__carriedAnchorCount;
+  return typeof count === 'number' && count > 0 ? Math.min(count, paragraph.runs.length) : 0;
+}
+
+/**
+ * Note shapes carried by this paragraph (parser-model withNoteShapeHostParagraph):
+ * trailing runs that take no part in its layout. The paragraph is acquired
+ * without them, then each visible carried occurrence is placed against the
+ * last line (or, for a mark-only paragraph, the paragraph mark's box) and
+ * recorded with its drawing; it adds no anchor frame, exclusion, collision
+ * or line metric to the flow.
+ */
+function withCarriedAnchors(
+  acquired: AcquiredParagraphResult,
+  paragraph: ParagraphAcquisitionInput,
+  carriedFrom: number,
+  options: ParagraphAcquisitionOptions,
+): AcquiredParagraphResult {
+  const payloadsByOccurrence = new Map<string, Array<Readonly<{ run: AnchoredPayloadRun; runIndex: number }>>>();
+  paragraph.runs.forEach((run, runIndex) => {
+    if (runIndex < carriedFrom || !anchoredPayloadRun(run)) return;
+    const kind = (run as Readonly<{ revision?: Readonly<{ kind?: string }> }>).revision?.kind;
+    if (revisionIsOmitted(kind, options.environment.showTrackedChanges)) return;
+    const payloads = payloadsByOccurrence.get(run.anchorAcquisitionInput!.occurrenceId) ?? [];
+    payloads.push({ run, runIndex });
+    payloadsByOccurrence.set(run.anchorAcquisitionInput!.occurrenceId, payloads);
+  });
+  if (payloadsByOccurrence.size === 0) return acquired;
+  const { layout, measured } = acquired;
+  const lastLine = layout.lines.at(-1);
+  const markBounds = layout.paragraphMark?.bounds;
+  const hostLine: LineLayout | undefined = lastLine ?? (markBounds ? {
+    range: { start: 0, end: 0 },
+    bounds: markBounds,
+    baselinePt: markBounds.yPt + markBounds.heightPt,
+    advancePt: markBounds.heightPt,
+    placements: [],
+  } as unknown as LineLayout : undefined);
+  if (!hostLine) return acquired;
+  const hostEnd = hostLine.range.end;
+  const drawings = [...layout.drawings];
+  const textBoxes = [...layout.textBoxes];
+  const drawingPlacements: ParagraphPlacement[] = [];
+  const occurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
+  for (const [occurrenceId, payloads] of payloadsByOccurrence) {
+    const host: Extract<ParagraphPlacement, { kind: 'anchor-host' }> = {
+      kind: 'anchor-host',
+      range: { start: hostEnd, end: hostEnd },
+      bounds: {
+        xPt: hostLine.bounds.xPt + hostLine.bounds.widthPt, yPt: hostLine.bounds.yPt,
+        widthPt: 0, heightPt: hostLine.bounds.heightPt,
+      },
+      baselinePt: hostLine.baselinePt,
+      anchorOccurrenceId: occurrenceId,
+    };
+    const placed = acquireAnchorOccurrence(
+      occurrenceId,
+      payloads,
+      [{ ...hostLine, placements: [...hostLine.placements, host] }],
+      paragraph,
+      options,
+      measured.contentEndYPt - options.placement.startYPt,
+      options.exclusions,
+      [],
+      options.anchorCollisions ?? [],
+      [],
+      occurrenceIds,
+      options.placement.startYPt + (options.placement.suppressSpaceBefore ? 0 : measured.requestedSpaceBeforePt),
+    );
+    if (!placed?.drawing) continue;
+    drawings.push(placed.drawing);
+    textBoxes.push(...placed.textBoxes);
+    drawingPlacements.push({
+      kind: 'drawing', range: placed.hostRange, drawingId: placed.drawing.id,
+      bounds: placed.drawing.inkBounds, advancePt: 0,
+    });
+  }
+  const lines = lastLine && drawingPlacements.length > 0
+    ? [...layout.lines.slice(0, -1), { ...lastLine, placements: [...lastLine.placements, ...drawingPlacements] }]
+    : layout.lines;
+  return Object.freeze({
+    measured,
+    layout: Object.freeze({ ...layout, lines, drawings, textBoxes }),
+  });
+}
+
 export function acquireParagraphResult(
   paragraph: ParagraphAcquisitionInput,
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  const carried = carriedAnchorCount(paragraph);
+  if (carried > 0) {
+    const carriedFrom = paragraph.runs.length - carried;
+    let carrier = carrierParagraphs.get(paragraph);
+    if (!carrier) {
+      const { __carriedAnchorCount: _carried, ...rest } = paragraph as ParagraphAcquisitionInput
+        & Readonly<{ __carriedAnchorCount?: number }>;
+      carrier = Object.freeze({ ...rest, runs: paragraph.runs.slice(0, carriedFrom) }) as ParagraphAcquisitionInput;
+      carrierParagraphs.set(paragraph, carrier);
+    }
+    return withCarriedAnchors(acquireParagraphResult(carrier, options, continuation), paragraph, carriedFrom, options);
+  }
   if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
     options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
   }
