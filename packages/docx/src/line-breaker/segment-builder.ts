@@ -1115,8 +1115,9 @@ function unavailableDrawingSegment(
  * records its offset in that piece (`anchorTextOffset`); the piece itself is
  * never split. The line breaker never sees these items (prepareBreakQueue),
  * so they change no break opportunity, glue or shaping. One forward sweep.
+ * @internal Exported for its work-scaling test.
  */
-function withAnchorPlacementSegments(
+export function withAnchorPlacementSegments(
   content: LayoutSeg[],
   runs: readonly ParagraphLayoutRun[],
   environment: LineLayoutEnvironment,
@@ -1126,6 +1127,9 @@ function withAnchorPlacementSegments(
   // UTF-16 offset of the segment at `cursor` in its text sequence.
   let sequence: LayoutSeg['sourceTextSequence'];
   let sequenceOffset = 0;
+  // First member of that sequence not yet known to precede the next anchor:
+  // anchors arrive in source order, so it only moves forward.
+  let sequenceMember = 0;
   const lengthOf = (segment: LayoutSeg): number =>
     'text' in segment ? segment.text.length : 'isTab' in segment ? 1 : 0;
   const enter = (): void => {
@@ -1133,6 +1137,7 @@ function withAnchorPlacementSegments(
     if (members !== sequence) {
       sequence = members;
       sequenceOffset = 0;
+      sequenceMember = 0;
     }
   };
   const emit = (): void => {
@@ -1151,7 +1156,8 @@ function withAnchorPlacementSegments(
     if (owner === undefined || owner > runIndex) return 0;
     if (!sequence || sequence.at(-1)!.runIndex < runIndex) return undefined;
     // Inside this sequence, where its next member starts.
-    const offset = sequence.find((member) => member.runIndex > runIndex)!.start;
+    while (sequence[sequenceMember]!.runIndex < runIndex) sequenceMember += 1;
+    const offset = sequence[sequenceMember]!.start;
     return sequenceOffset + lengthOf(segment) <= offset ? undefined : Math.max(0, offset - sequenceOffset);
   };
   for (const [runIndex, run] of runs.entries()) {

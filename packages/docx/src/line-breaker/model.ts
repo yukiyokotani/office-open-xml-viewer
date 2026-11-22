@@ -122,8 +122,9 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** WORD_ANCHOR_HOST_NO_LINE_METRIC: a floating-drawing anchor host that keeps
    * only its position; it carries no face or line metrics. */
   anchorHostWithoutMetric?: true;
-  /** An anchor host inside the text piece that follows it in its segment
-   * list: its UTF-16 offset in that piece (absent: directly before it). */
+  /** An anchor host inside the text piece that follows it in the built
+   * segment array: its UTF-16 offset in that piece (absent: directly before
+   * it). attachAnchorPlacements selects the host's line by it. */
   anchorTextOffset?: number;
   /** Reserved-separator participant only (rule control or
    * content mark): the bounded selected-face probe whose vertical metrics the
@@ -603,9 +604,10 @@ export function isAnchorPlacementSegment(segment: LayoutSeg): boolean {
  * Place the anchor placement items of `segs` on the finished lines of the
  * paragraph the line breaker laid out without them. A host goes to the line
  * that holds its source position, directly before the piece that holds or
- * follows that position (a trailing host: the end of the last line), with
- * its offset inside that piece (`anchorTextOffset`). Line metrics, boundaries
- * and the lines' own segments are untouched: no piece is split. A floating payload holds no place
+ * follows that position (a trailing host: the end of the last line). Line
+ * metrics, boundaries and the lines' own segments are untouched: no piece is
+ * split; line planning places the host inside the piece by its offset in
+ * the paragraph's occurrence domain. A floating payload holds no place
  * on a line: it is positioned from its host or on its own.
  */
 export function attachAnchorPlacements(
@@ -649,24 +651,19 @@ export function attachAnchorPlacements(
     }
     const line = lines[lineIndex]!;
     // Before the piece that holds or follows the position.
-    let inside = 0;
     while (at < line.segments.length) {
       const piece = line.segments[at]!;
       const src = piece.src;
       if (src !== undefined) {
         const order = compare(src, target, offset);
         if (order >= 0) break;
-        if (src.segIndex === target && 'text' in piece && src.charOffset + piece.text.length > offset) {
-          inside = offset - src.charOffset;
-          break;
-        }
+        if (src.segIndex === target && 'text' in piece && src.charOffset + piece.text.length > offset) break;
       }
       at += 1;
     }
     let list = additions.get(lineIndex);
     if (!list) additions.set(lineIndex, list = []);
-    list.push({ at, host: { ...host, src: { segIndex: index, charOffset: 0 }, measuredWidth: 0,
-      anchorTextOffset: inside > 0 ? inside : undefined } });
+    list.push({ at, host: { ...host, src: { segIndex: index, charOffset: 0 }, measuredWidth: 0 } });
   }
   if (additions.size === 0) return lines;
   return lines.map((line, index) => {

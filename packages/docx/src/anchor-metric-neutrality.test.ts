@@ -178,6 +178,7 @@ import type { BodyElement, DocxDocumentModel } from './types.js';
 import { attachAnchorPlacements } from './line-breaker/model.js';
 import { planLine } from './layout/paragraph.js';
 import { buildSegments } from './line-layout.js';
+import { withAnchorPlacementSegments } from './line-breaker/segment-builder.js';
 import { textRunsForPage } from './text-run-projection.js';
 
 function documentContext(): CanvasRenderingContext2D {
@@ -642,4 +643,89 @@ describe('text ranges around a floating anchor', () => {
       expect(after.y).toBe(plainAfter.y);
     });
   }
+});
+
+describe('several floating anchors inside one text sequence', () => {
+  const anchor = documentAnchorShapes[0]![1];
+  const layOut = (runs: readonly Run[], after: readonly Run[] = []) => {
+    const model = documentModel([bodyParagraph([...runs, ...after])], null, { compatibilityMode: 15 });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+      { currentDateMs: 0 });
+    const paragraph = layout.pages[0]!.layers.body.find((node) => node.kind === 'paragraph');
+    if (paragraph?.kind !== 'paragraph') throw new Error('Expected a paragraph');
+    const placements = paragraph.lines.flatMap((line) => line.placements);
+    return {
+      texts: placements.flatMap((placement) => placement.kind === 'text' ? [placement] : []),
+      hosts: placements.flatMap((placement) => placement.kind === 'anchor-host' ? [placement] : []),
+    };
+  };
+
+  it('places each host at its own character, after the units of the drawings before it', () => {
+    const plain = layOut([word('abcdef')]).texts[0]!;
+    const glyphX = (index: number) => plain.origin.xPt + plain.clusters[index]!.offset.xPt;
+    const { texts, hosts } = layOut([word('ab'), ...anchor(), word('cd'), ...anchor(), word('ef')]);
+    expect(texts.map((placement) => [placement.text, placement.range.start, placement.range.end]))
+      .toEqual([['ab', 0, 2], ['cd', 3, 5], ['ef', 6, 8]]);
+    expect(hosts.map((host) => host.range.start)).toEqual([2, 5]);
+    expect(hosts.map((host) => host.bounds.xPt)).toEqual([glyphX(2), glyphX(4)]);
+  });
+
+  it('keeps consistent ranges around a drawing inside right-to-left text that is not divided', () => {
+    const hebrew = (value: string): Run => word(value, 12, { rtl: true });
+    const { texts, hosts } = layOut([hebrew('\u05d0\u05d1'), ...anchor(), hebrew('\u05d2\u05d3')], [word(' xy', 12, { bold: true })]);
+    // Every text range and every owner range is contiguous inside its
+    // placement; placements do not overlap; the drawing's one unit follows
+    // the undivided piece, and its host stands inside that piece.
+    const ordered = [...texts].sort((a, b) => a.range.start - b.range.start);
+    let cursor = 0;
+    let holes = 0;
+    for (const placement of ordered) {
+      expect(placement.range.start).toBeGreaterThanOrEqual(cursor);
+      holes += placement.range.start - cursor;
+      expect(placement.range.end - placement.range.start).toBe(placement.text.length);
+      let owned = placement.range.start;
+      for (const owner of placement.sourceRuns ?? []) {
+        expect(owner.range.start).toBe(owned);
+        owned = owner.range.end;
+      }
+      if (placement.sourceRuns) expect(owned).toBe(placement.range.end);
+      cursor = placement.range.end;
+    }
+    expect(holes).toBe(1);
+    expect(ordered.map((placement) => placement.text).join('')).toBe('\u05d0\u05d1\u05d2\u05d3 xy');
+    const piece = ordered.find((placement) => placement.text.includes('\u05d2'))!;
+    expect(hosts).toHaveLength(1);
+    const host = hosts[0]!;
+    // No text placement holds the host's range position.
+    expect(ordered.some((placement) => placement.range.start < host.range.start
+      && host.range.start < placement.range.end)).toBe(false);
+    expect(ordered.some((placement) => placement.range.start === host.range.start + 1)).toBe(true);
+    if (piece.text.length === 4) {
+      // Undivided: the host stands between the second and third letter.
+      expect(host.range.start).toBe(piece.range.end);
+      expect(host.bounds.xPt).toBeCloseTo(piece.bounds.xPt + piece.bounds.widthPt / 2, 6);
+    }
+  });
+
+  it('finds every anchor of a long sequence in one forward sweep', () => {
+    const reads = (count: number): number => {
+      const memberReads = { count: 0 };
+      // `count` text members of one sequence with an anchor between each pair.
+      const members = new Proxy(Array.from({ length: count }, (_, index) =>
+        ({ runIndex: index * 2, start: index, end: index + 1 })), {
+        get(target, key, receiver) {
+          if (typeof key === 'string' && /^\d+$/.test(key)) memberReads.count += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+      const content = [{ text: 'x'.repeat(count), sourceRunIndex: 0, sourceTextSequence: members, measuredWidth: 0 }];
+      const runs = Array.from({ length: count * 2 - 1 }, (_, index) => index % 2 === 0
+        ? word('x') : { type: 'anchorHost', fontSize: 12 } as unknown as Run);
+      const segments = withAnchorPlacementSegments(content as never, runs as never, { pageIndex: 0, totalPages: 1 });
+      expect(segments).toHaveLength(count);
+      return memberReads.count;
+    };
+    // A search from the first member per anchor reads about n * n / 2 members.
+    expect(reads(4000)).toBeLessThan(reads(1000) * 5);
+  });
 });

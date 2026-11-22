@@ -416,9 +416,10 @@ export interface MeasuredAnchorHostPlanSegment {
    * position-only item (isAnchorPlacementSegment). planLine plans the line
    * without it and places it at the content that follows it. */
   readonly anchorPlacement?: true;
-  /** That host's UTF-16 offset inside the text segment that follows it on
-   * the line (absent: at its leading edge). */
-  readonly textOffset?: number;
+  /** Where that host stands among the line's content ranges when it is not
+   * its own `range.start`: inside a text piece that could not be divided at
+   * the drawing (planMeasuredLines), whose range the host then follows. */
+  readonly placeAt?: number;
   readonly kind: 'anchor-host';
   readonly measuredWidthPt: 0;
   readonly range: import('./types.js').TextRange;
@@ -1599,9 +1600,10 @@ export function planLine(input: PlanLineInput): LineLayout {
       pending.push(segment);
       continue;
     }
-    // The position is an offset of the content's own text range, which
-    // survives the planner's regrouping of segments.
-    for (const host of pending) hosts.push({ host, at: segment.range.start + (host.textOffset ?? 0) });
+    // A host's position is its own offset in the paragraph's occurrence
+    // domain, which the content ranges share and which survives the
+    // planner's regrouping of segments.
+    for (const host of pending) hosts.push({ host, at: host.placeAt ?? host.range.start });
     pending.length = 0;
     content.push(segment);
   }
@@ -3492,8 +3494,6 @@ function textPlanSegment(
     return {
       kind: 'anchor-host', measuredWidthPt: 0,
       ...(segment.anchorHostWithoutMetric ? { anchorPlacement: true as const } : {}),
-      ...(segment.anchorHostWithoutMetric && segment.anchorTextOffset
-        ? { textOffset: segment.anchorTextOffset } : {}),
       ...(sourceRun?.type === 'text' && (sourceRun.noteRef?.kind === 'footnote' || sourceRun.noteRef?.kind === 'endnote')
         ? { noteReference: { kind: sourceRun.noteRef.kind, id: sourceRun.noteRef.id } } : {}),
       range: { start: sourceOffset, end: sourceOffset },
@@ -4580,25 +4580,53 @@ function planMeasuredLines(
           // it spans: the drawing keeps its unit of the occurrence domain.
           const localEnd = sequenceStart + occurrenceLength;
           let consumed = 0;
+          // Units of drawings inside a part that could not be divided, and
+          // their positions (in the occurrence domain, and in that part).
+          let undividedShift = 0;
+          const undivided: { from: number; to: number; offset: number }[] = [];
+          // A drawing inside an undivided part follows the part in the
+          // occurrence domain: the part keeps one contiguous range, its
+          // hosts take the range position after it and keep their place
+          // inside it for layout.
+          const closePart = (part: MeasuredTextPlanSegment): void => {
+            for (const { from, to, offset } of undivided) {
+              for (let index = 0; index < segments.length; index += 1) {
+                const host = segments[index]!;
+                if (!isAnchorPlacementPlanSegment(host) || host.range.start < from || host.range.start >= to) continue;
+                segments[index] = { ...host, range: { start: part.range.end, end: part.range.end },
+                  placeAt: part.range.start + offset };
+              }
+            }
+            undivided.length = 0;
+          };
           for (let member = sequenceOwner; member + 1 < sequence.length
             && sequence[member + 1]!.start < localEnd; member += 1) {
             const before = sequence[member]!;
             const after = sequence[member + 1]!;
-            const shift = (occurrences.runStarts[after.runIndex] ?? 0) - (occurrences.runStarts[before.runIndex] ?? 0)
-              - (after.start - before.start);
+            const afterStart = occurrences.runStarts[after.runIndex] ?? 0;
+            const shift = afterStart - (occurrences.runStarts[before.runIndex] ?? 0) - (after.start - before.start);
             if (shift <= 0 || after.start <= sequenceStart + consumed) continue;
+            const offset = after.start - sequenceStart - consumed;
             const parts: ReturnType<typeof splitTextPlanSegment> = splitTextPlanSegment(
-              plannedText, after.start - sequenceStart - consumed, shift);
-            if (!parts) continue;
+              plannedText, offset, shift + undividedShift);
+            if (!parts) {
+              undivided.push({ from: afterStart - shift, to: afterStart, offset });
+              undividedShift += shift;
+              continue;
+            }
             gapSplits.push({
               index: segments.filter((planned) => !isAnchorPlacementPlanSegment(planned)).length,
               codePoints: [...parts[0].text].length,
             });
+            closePart(parts[0]);
             segments.push(parts[0]);
             consumed += parts[0].text.length;
-            occurrenceShift += shift;
+            occurrenceShift += shift + undividedShift;
+            undividedShift = 0;
             plannedText = parts[1];
           }
+          closePart(plannedText);
+          occurrenceShift += undividedShift;
         }
         segments.push(plannedText);
         lineEndOffset = Math.max(lineEndOffset, segmentOffset + occurrenceLength + occurrenceShift);
