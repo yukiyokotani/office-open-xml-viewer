@@ -545,17 +545,33 @@ function visitParagraph(
           }];
         }))
     : [];
-  // Both anchored and inline drawings retain their paragraph run index as the
-  // terminal SourceRef path component. That is the one comparable source-order
-  // domain; anchor stacking ordinals and drawings-array indexes are not mixed.
   for (const { drawing } of drawingsInSourceOrder) {
     for (const id of drawing.textBoxIds ?? []) ownedTextBoxIds.add(id);
   }
-  const elementsInSourceOrder = [
-    ...drawingsInSourceOrder.map((entry) => ({ kind: 'drawing' as const, ...entry })),
+  // Element index order is paint order (paint/canvas-text.ts
+  // paintParagraphContents), so a reverse hit test meets the topmost element
+  // first: behind-text
+  // anchored drawings, the lines' inline resources, inline drawings (and
+  // the stories they own), then the other anchored drawings, each anchor
+  // layer in stacking order.
+  const stacking = (left: DrawingLayout, right: DrawingLayout) =>
+    left.anchorLayer!.relativeHeight - right.anchorLayer!.relativeHeight
+      || left.anchorLayer!.sourceOrder - right.anchorLayer!.sourceOrder;
+  const anchored = paragraph.drawings.filter((drawing) => drawing.anchorLayer);
+  // Text runs keep reading (source) order, whatever the stacking.
+  const elementsInPaintOrder = !context.collectDrawings ? [
+    ...drawingsInSourceOrder.map(({ drawing, runIndex, index }) => ({ kind: 'drawing' as const, drawing, runIndex, index })),
     ...inlineResourcesInSourceOrder.map((entry) => ({ kind: 'resource' as const, ...entry })),
-  ].sort((left, right) => left.runIndex - right.runIndex || left.index - right.index);
-  for (const entry of elementsInSourceOrder) {
+  ].sort((left, right) => left.runIndex - right.runIndex || left.index - right.index) : [
+    ...anchored.filter((drawing) => drawing.anchorLayer!.behindDoc).sort(stacking)
+      .map((drawing) => ({ kind: 'drawing' as const, drawing })),
+    ...inlineResourcesInSourceOrder.map((entry) => ({ kind: 'resource' as const, ...entry })),
+    ...paragraph.drawings.filter((drawing) => !drawing.anchorLayer)
+      .map((drawing) => ({ kind: 'drawing' as const, drawing })),
+    ...anchored.filter((drawing) => !drawing.anchorLayer!.behindDoc).sort(stacking)
+      .map((drawing) => ({ kind: 'drawing' as const, drawing })),
+  ];
+  for (const entry of elementsInPaintOrder) {
     if (entry.kind === 'drawing') {
       if (context.hostFrameDrawings.has(entry.drawing.id)) continue;
       visitDrawing(textBoxesById, entry.drawing, inlineDrawingProjection(entry.drawing), context);

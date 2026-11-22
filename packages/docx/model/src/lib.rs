@@ -383,6 +383,14 @@ pub struct NoteShapeGroupWire {
     /// The note's `@w:id`.
     pub id: String,
     pub runs: Vec<DocRun>,
+    /// Each moved run's revision, aligned with `runs` (empty when none has
+    /// one), carried into the host paragraph's run revisions.
+    #[serde(
+        rename = "__runRevisions",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub run_revisions: Vec<Option<RunRevision>>,
 }
 
 #[derive(Serialize, Debug, Clone, Default)]

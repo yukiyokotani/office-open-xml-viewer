@@ -645,6 +645,11 @@ function acquireBodyParagraphAtLocation(
             sourceRangeStart: continuation.sourceRangeStart,
           }),
       anchorFrames: bodyAnchorReferenceFrames(state),
+      ...(paragraph.runs.some((run) => (run as Readonly<{
+        anchorAcquisitionInput?: Readonly<{ storyPagePosition?: boolean }>;
+      }>).anchorAcquisitionInput?.storyPagePosition === true)
+        ? { storyAnchorMarginBottomPt: location.availableBounds.yPt + location.availableBounds.heightPt }
+        : {}),
       acquireCompleteStory: completeTextBoxStoryAcquirerFor(state),
       // Body paragraphs are acquired at their page position.
       hostFlowPageTranslationPt: BODY_HOST_FLOW_PAGE_TRANSLATION,
@@ -1282,7 +1287,11 @@ function layoutBodyStory(
         ),
         continuesFromPrevious: continuing,
         ...(continuation?.sourceRangeStart === undefined ? {} : { sourceRangeStart: continuation.sourceRangeStart }),
-        anchorFrames: bodyAnchorReferenceFrames(candidate),
+        // A story laid out without a page bottom (a text box or note band)
+        // still places its page-positioned shapes against the real page
+        // (WORD_STORY_VML_PAGE_POSITION alignment and percentages).
+        anchorFrames: bodyAnchorReferenceFrames(candidate.pageH === Number.MAX_SAFE_INTEGER
+          ? { ...candidate, pageH: request.section.geometry.pageHeight } : candidate),
         // Nested text boxes in this story take the story's own section,
         // page and frame, not the body's current location.
         acquireCompleteStory: completeTextBoxStoryAcquirerFor(candidate),

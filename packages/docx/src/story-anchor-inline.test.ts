@@ -47,6 +47,8 @@ let variant: Readonly<{
   defaultStyleHalfPoints?: number;
   /** Runs replacing the story's object paragraph content. */
   storyRuns?: string;
+  /** The whole body, replacing the story-specific one. */
+  body?: string;
 }> = {};
 
 const encoder = new TextEncoder();
@@ -118,6 +120,7 @@ function docx(story: Story, placement: Placement): Uint8Array {
       + `filled="f" stroked="f"><v:textbox inset="0,0,0,0"><w:txbxContent>${content}</w:txbxContent></v:textbox>`
       + '</v:shape></w:pict></w:r></w:p>';
   }
+  if (variant.body !== undefined) body = variant.body;
   const document = `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}" xmlns:a="${A}" `
     + `xmlns:pic="${PIC}" xmlns:wps="${WPS}" xmlns:v="${V}" xmlns:w10="${W10}"><w:body>${body}`
     + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="1440" w:bottom="720" '
@@ -384,9 +387,11 @@ describe('word-story-vml-page-position in tables, rotated boxes and aligned shap
     }
   });
 
-  it.each(['drawingml-textbox', 'vml-textbox'] as const)('takes the numeric offsets of an aligned %s shape', (story) => {
-    expect(storyDrawingBoxes(story, 'vml-aligned')).toEqual([{ xPt: 300, yPt: 36 }]);
-    expect(paintedFills(story, 'vml-aligned')).toEqual(expected);
+  it.each(['drawingml-textbox', 'vml-textbox'] as const)('aligns a %s shape in its authored frames', (story) => {
+    // Centred in the column; a bottom alignment against the text frame takes
+    // the page top (WORD_STORY_VML_PAGE_POSITION).
+    expect(storyDrawingBoxes(story, 'vml-aligned')).toEqual([{ xPt: 286, yPt: 0 }]);
+    expect(paintedFills(story, 'vml-aligned')).toEqual([{ xPt: 286, yPt: 0, clipped: false }]);
   });
 
   it('paints a direct story shape once, outside the text clip', () => {
@@ -528,5 +533,75 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
     };
     expect(order(picture('inline') + rect('front', 1))).toEqual(['inline', 'front']);
     expect(order(rect('front', 1) + rect('behind', -1))).toEqual(['behind', 'front']);
+  });
+
+  it('hits a story shape painted over an image that follows its inline text box', () => {
+    const inlineBox = (story: string) => `<w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">`
+      + `<wp:extent cx="${100 * EMU}" cy="${20 * EMU}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="7" name="tb"/>`
+      + `<a:graphic><a:graphicData uri="${WPS}"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/>`
+      + `<a:ext cx="${100 * EMU}" cy="${20 * EMU}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr>`
+      + `<wps:txbx><w:txbxContent><w:p>${story}</w:p></w:txbxContent></wps:txbx>`
+      + '<wps:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0" anchor="t"><a:noAutofit/></wps:bodyPr>'
+      + '</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    const entriesFor = (story: string) => {
+      variant = { body: `<w:p>${inlineBox(story)}${picture('inline')}</w:p>` };
+      try {
+        return elementGeometryForPage(layOutDocument('body', 'inline'), 0);
+      } finally {
+        variant = {};
+      }
+    };
+    const image = entriesFor('').find((entry): entry is Extract<typeof entry, { placement: unknown }> => 'placement' in entry)!;
+    const origin = { x: image.pointToPage.e + image.placement.bounds.xPt, y: image.pointToPage.f + image.placement.bounds.yPt };
+    const rect = `<w:r><w:pict><v:rect style="position:absolute;margin-left:${origin.x}pt;margin-top:${origin.y}pt;`
+      + 'width:40pt;height:20pt;z-index:1;mso-position-horizontal-relative:page;mso-position-vertical-relative:page" '
+      + 'fillcolor="black" stroked="f"><w10:wrap type="none"/></v:rect></w:pict></w:r>';
+    const order = entriesFor(rect).flatMap((entry) => 'drawing' in entry
+      ? entry.drawing.anchorLayer ? ['rect'] : [] : ['image']);
+    // Canvas paints the image, then the box and its story's shape.
+    expect(order).toEqual(['image', 'rect']);
+  });
+
+  it('aligns story shapes in their authored margin and page frames (excess14 reductions)', () => {
+    const rect = (position: string) => '<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:50pt;'
+      + `width:40pt;height:20pt;${position}" fillcolor="black" stroked="f"><w10:wrap type="none"/></v:rect></w:pict></w:r>`;
+    const place = (story: Story, position: string) => {
+      variant = { storyRuns: rect(position) };
+      try {
+        return story === 'drawingml-textbox' ? storyDrawingBoxes(story, 'inline') : bodyHostDrawingBoxes(story, 'inline');
+      } finally {
+        variant = {};
+      }
+    };
+    const frames = (h: string, v: string) => `mso-position-horizontal-relative:${h};mso-position-vertical-relative:${v};`;
+    // Letter page, 72pt side margins, 36pt top and bottom margins.
+    expect(place('drawingml-textbox', `mso-position-horizontal:right;${frames('margin', 'margin')}`)).toEqual([{ xPt: 500, yPt: 50 }]);
+    expect(place('drawingml-textbox', `mso-position-horizontal:outside;${frames('page', 'margin')}`)).toEqual([{ xPt: 572, yPt: 50 }]);
+    expect(place('drawingml-textbox', `mso-position-vertical:bottom;${frames('margin', 'page')}`)).toEqual([{ xPt: 300, yPt: 772 }]);
+    expect(place('drawingml-textbox', `mso-position-vertical:center;${frames('margin', 'margin')}`)).toEqual([{ xPt: 300, yPt: 386 }]);
+    expect(place('drawingml-textbox', `mso-top-percent:200;${frames('margin', 'page')}`)).toEqual([{ xPt: 300, yPt: 158.4 }]);
+    // A note shape's margin frame ends at the page's note area.
+    variant = { storyRuns: rect(`mso-position-vertical:bottom;${frames('margin', 'margin')}`) };
+    try {
+      const page = layOut('footnote', 'inline');
+      const noteTop = Math.min(...page.layers.notes.map((note) => note.flowBounds.yPt));
+      expect(bodyHostDrawingBoxes('footnote', 'inline')).toEqual([{ xPt: 300, yPt: noteTop - 20 }]);
+    } finally {
+      variant = {};
+    }
+  });
+
+  it('keeps a deleted note shape deleted in the final view', () => {
+    const rect = '<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:0;width:40pt;height:20pt;'
+      + 'mso-position-horizontal-relative:text;mso-position-vertical-relative:text" fillcolor="black" stroked="f">'
+      + '<w10:wrap type="none"/></v:rect></w:pict></w:r>';
+    variant = { storyRuns: `<w:del w:id="9" w:author="a" w:date="2026-01-01T00:00:00Z">${rect}</w:del>` };
+    try {
+      expect(bodyHostDrawingBoxes('footnote', 'inline')).toEqual([]);
+      // The note keeps its following text.
+      expect(JSON.stringify(layOut('footnote', 'inline').layers.notes)).toContain('Ab');
+    } finally {
+      variant = {};
+    }
   });
 });

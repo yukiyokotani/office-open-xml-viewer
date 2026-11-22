@@ -2541,15 +2541,22 @@ fn parse_notes(
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
         let mut content = content;
-        let mut runs = Vec::new();
-        take_note_vml_shapes(&mut content, element_name, &mut runs);
-        if !runs.is_empty() {
+        let mut taken = Vec::new();
+        take_note_vml_shapes(&mut content, element_name, &mut taken);
+        if !taken.is_empty() {
+            let (runs, revisions): (Vec<_>, Vec<_>) = taken.into_iter().unzip();
+            let run_revisions = if revisions.iter().any(Option::is_some) {
+                revisions
+            } else {
+                Vec::new()
+            };
             selected_stories
                 .note_shapes
                 .push(crate::types::NoteShapeGroupWire {
                     kind: element_name.to_string(),
                     id: id.clone(),
                     runs,
+                    run_revisions,
                 });
         }
         out.push(crate::types::DocxNote { id, content });
@@ -2573,7 +2580,11 @@ fn is_absolute_vml_drawing(run: &DocRun) -> bool {
 /// of the note's paragraphs, table cells included. The moved occurrence ids
 /// name the note part, so shapes at the same offset of the footnote and
 /// endnote parts stay distinct in their one host paragraph.
-fn take_note_vml_shapes(content: &mut [BodyElement], part: &str, taken: &mut Vec<DocRun>) {
+fn take_note_vml_shapes(
+    content: &mut [BodyElement],
+    part: &str,
+    taken: &mut Vec<(DocRun, Option<RunRevision>)>,
+) {
     fn part_id(id: &str, part: &str) -> String {
         match id.strip_prefix("vml-anchor-") {
             Some(rest) => format!("vml-anchor-{part}-{rest}"),
@@ -2600,51 +2611,70 @@ fn take_note_vml_shapes(content: &mut [BodyElement], part: &str, taken: &mut Vec
             _ => {}
         }
     }
-    fn take_runs(runs: &mut Vec<DocRun>, part: &str, taken: &mut Vec<DocRun>) {
-        if !runs.iter().any(is_absolute_vml_drawing) {
+    /// Moves the paragraph's absolute VML drawings (with the anchor host
+    /// character right before each) into `taken`, with their run revisions,
+    /// and re-indexes the run-indexed ranges left behind (comment marks,
+    /// complex-field boundaries, run revisions) onto the remaining runs.
+    fn take_runs(paragraph: &mut DocParagraph, part: &str, taken: &mut Vec<(DocRun, Option<RunRevision>)>) {
+        if !paragraph.runs.iter().any(is_absolute_vml_drawing) {
             return;
         }
-        let mut kept = Vec::with_capacity(runs.len());
-        let mut pending_host: Option<DocRun> = None;
-        for run in runs.drain(..) {
-            if matches!(run, DocRun::AnchorHost(_)) {
-                if let Some(host) = pending_host.replace(run) {
-                    kept.push(host);
+        let runs = std::mem::take(&mut paragraph.runs);
+        let mut moved = vec![false; runs.len()];
+        for (index, run) in runs.iter().enumerate() {
+            if is_absolute_vml_drawing(run) {
+                moved[index] = true;
+                if index > 0 && matches!(runs[index - 1], DocRun::AnchorHost(_)) {
+                    moved[index - 1] = true;
                 }
-                continue;
             }
-            if is_absolute_vml_drawing(&run) {
-                // The host paragraph's line is its Normal mark's: the moved
-                // anchor character keeps no East Asian face of the note run.
-                if let Some(DocRun::AnchorHost(mut host)) = pending_host.take() {
-                    host.font_family_east_asia = None;
-                    let mut host = DocRun::AnchorHost(host);
-                    rename(&mut host, part);
-                    taken.push(host);
-                }
+        }
+        // kept_before[p]: the remaining runs before old run position p.
+        let mut kept_before = Vec::with_capacity(runs.len() + 1);
+        let mut count = 0usize;
+        for flag in &moved {
+            kept_before.push(count);
+            if !flag {
+                count += 1;
+            }
+        }
+        kept_before.push(count);
+        let revisions = std::mem::take(&mut paragraph.run_revisions);
+        let had_revisions = !revisions.is_empty();
+        let mut kept_revisions = Vec::new();
+        for (index, run) in runs.into_iter().enumerate() {
+            let revision = revisions.get(index).cloned().flatten();
+            if moved[index] {
                 let mut run = run;
+                if let DocRun::AnchorHost(host) = &mut run {
+                    // The host paragraph's line is its Normal mark's: the
+                    // moved anchor character keeps no East Asian face.
+                    host.font_family_east_asia = None;
+                }
                 rename(&mut run, part);
-                taken.push(run);
-                continue;
+                taken.push((run, revision));
+            } else {
+                paragraph.runs.push(run);
+                kept_revisions.push(revision);
             }
-            if let Some(host) = pending_host.take() {
-                kept.push(host);
-            }
-            kept.push(run);
         }
-        if let Some(host) = pending_host {
-            kept.push(host);
+        if had_revisions {
+            paragraph.run_revisions = kept_revisions;
         }
-        *runs = kept;
+        let remap = |index: usize| kept_before[index.min(kept_before.len() - 1)];
+        for mark in &mut paragraph.comment_marks {
+            mark.run_index = remap(mark.run_index as usize) as u32;
+        }
+        for boundary in &mut paragraph.complex_field_boundaries {
+            boundary.run_index = remap(boundary.run_index);
+        }
     }
-    fn take_cells(table: &mut DocTable, part: &str, taken: &mut Vec<DocRun>) {
+    fn take_cells(table: &mut DocTable, part: &str, taken: &mut Vec<(DocRun, Option<RunRevision>)>) {
         for row in &mut table.rows {
             for cell in &mut row.cells {
                 for element in &mut cell.content {
                     match element {
-                        CellElement::Paragraph(paragraph) => {
-                            take_runs(&mut paragraph.runs, part, taken)
-                        }
+                        CellElement::Paragraph(paragraph) => take_runs(paragraph, part, taken),
                         CellElement::Table(table) => take_cells(table, part, taken),
                     }
                 }
@@ -2653,7 +2683,7 @@ fn take_note_vml_shapes(content: &mut [BodyElement], part: &str, taken: &mut Vec
     }
     for element in content {
         match element {
-            BodyElement::Paragraph(paragraph) => take_runs(&mut paragraph.runs, part, taken),
+            BodyElement::Paragraph(paragraph) => take_runs(paragraph, part, taken),
             BodyElement::Table(table) => take_cells(table, part, taken),
             _ => {}
         }
@@ -2894,6 +2924,32 @@ mod note_separator_tests {
             writer.finish().unwrap();
         }
         parse_from_bytes(&bytes).expect("note package parses")
+    }
+
+    #[test]
+    fn moved_note_shapes_keep_revisions_and_remap_ranges() {
+        let rect = r#"<w:r><w:pict><v:rect xmlns:v="urn:schemas-microsoft-com:vml" style="position:absolute;margin-left:300pt;margin-top:0;width:40pt;height:20pt;mso-position-horizontal-relative:text;mso-position-vertical-relative:text" fillcolor="black" stroked="f"/></w:pict></w:r>"#;
+        let story = format!(
+            r#"<w:footnote w:type="separator" w:id="42"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:del w:id="9" w:author="a">{rect}</w:del><w:commentRangeStart w:id="5"/><w:r><w:t>After</w:t></w:r><w:commentRangeEnd w:id="5"/></w:p></w:footnote>"#
+        );
+        let document = selected_note_package(None, crate::xml_util::W_NS, "42", Some(&story));
+        let note = document.footnotes.iter().find(|note| note.id == "2").expect("note 2");
+        let BodyElement::Paragraph(paragraph) = &note.content[0] else {
+            panic!("note paragraph");
+        };
+        assert!(matches!(paragraph.runs.as_slice(), [DocRun::Text(text)] if text.text == "After"));
+        // The remaining run keeps no revision of the moved shape.
+        assert!(paragraph.run_revisions.iter().all(Option::is_none));
+        let marks: Vec<_> = paragraph
+            .comment_marks
+            .iter()
+            .map(|mark| (mark.kind.as_str(), mark.run_index))
+            .collect();
+        assert_eq!(marks, [("rangeStart", 0), ("rangeEnd", 1)]);
+        let shapes = document.note_layout_settings.unwrap().note_shapes;
+        let group = shapes.iter().find(|group| group.id == "2").expect("moved shapes");
+        assert_eq!(group.run_revisions.len(), group.runs.len());
+        assert!(group.run_revisions.iter().any(Option::is_some), "the deletion moves with the shape");
     }
 
     #[test]
@@ -14831,9 +14887,12 @@ fn vml_hosting_story(node: roxmltree::Node) -> Option<VmlHostingStory> {
 
 /// word-story-vml-page-position: an absolutely positioned VML shape of a
 /// text box or note story is placed by its numeric offsets from the page
-/// origin; its `mso-position-*-relative` frames, alignment and percentage
-/// positions do not apply. In a text box story a text- or line-relative
-/// shape that wraps text is held at the top margin.
+/// origin, whatever its `mso-position-*-relative` frames. An alignment or a
+/// percentage position keeps its authored frame (page, margin, or the column
+/// for a text frame); a vertical alignment or percentage against a text or
+/// line frame places the shape at the page top. In a text box story a text-
+/// or line-relative shape placed by numeric offsets that wraps text is held
+/// at the top margin.
 fn apply_vml_story_page_position(
     shape: roxmltree::Node,
     style: &str,
@@ -14847,24 +14906,44 @@ fn apply_vml_story_page_position(
         relative_from_status: AnchorValueStatusWire::Valid,
         choice: AnchorAxisChoiceWire::Missing,
     };
+    let positioned = |axis: &AnchorAxisWire| {
+        matches!(
+            axis.choice,
+            AnchorAxisChoiceWire::Align { .. } | AnchorAxisChoiceWire::Percent { .. }
+        )
+    };
+    let vertical_numeric = !positioned(&acquisition.vertical);
     let floor = story == VmlHostingStory::TextBox
+        && vertical_numeric
         && matches!(
             acquisition.vertical.relative_from.as_deref(),
             Some("paragraph" | "line")
         )
         && !matches!(acquisition.wrap.kind, AnchorWrapKindWire::None);
-    acquisition.horizontal = AnchorAxisWire {
-        choice: AnchorAxisChoiceWire::Offset {
-            value_pt: vml_numeric_offset_pt(style, "left", "margin-left"),
-        },
-        ..page()
-    };
-    acquisition.vertical = AnchorAxisWire {
-        choice: AnchorAxisChoiceWire::Offset {
-            value_pt: vml_numeric_offset_pt(style, "top", "margin-top"),
-        },
-        ..page()
-    };
+    if !positioned(&acquisition.horizontal) {
+        acquisition.horizontal = AnchorAxisWire {
+            choice: AnchorAxisChoiceWire::Offset {
+                value_pt: vml_numeric_offset_pt(style, "left", "margin-left"),
+            },
+            ..page()
+        };
+    }
+    if vertical_numeric {
+        acquisition.vertical = AnchorAxisWire {
+            choice: AnchorAxisChoiceWire::Offset {
+                value_pt: vml_numeric_offset_pt(style, "top", "margin-top"),
+            },
+            ..page()
+        };
+    } else if matches!(
+        acquisition.vertical.relative_from.as_deref(),
+        Some("paragraph" | "line")
+    ) {
+        acquisition.vertical = AnchorAxisWire {
+            choice: AnchorAxisChoiceWire::Offset { value_pt: 0.0 },
+            ..page()
+        };
+    }
     acquisition.story_top_margin_floor = floor;
     acquisition.story_page_position = true;
     // The page origin is the frame, so a table cell of the story does not
@@ -15220,12 +15299,15 @@ fn parse_vml_pict_image(
     // <v:group> (grouped geometry is in group units, handled elsewhere).
     // A picture inside the pict's own text box story belongs to that story's
     // run, not to this pict (whose shape is then the text box).
+    // Only a group inside this pict counts: a text box story's own pict
+    // inside an outer group is a pict of its own.
     let shape = story_bounded_descendants(pict).find(|n| {
         is_shape(n)
             && n.children()
                 .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
             && !n
                 .ancestors()
+                .take_while(|a| *a != pict)
                 .any(|a| a.is_element() && a.tag_name().name() == "group")
     })?;
 
@@ -25576,6 +25658,26 @@ mod anchor_image_relative_from_tests {
     /// (DrawingML or VML text box) is parsed as an inline object of its run;
     /// the same anchor in the body keeps its floating acquisition.
     #[test]
+    fn grouped_vml_text_box_keeps_its_story_picture() {
+        const NS: &str = r#"xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let picture = r#"<w:r><w:pict><v:shape id="vi" style="width:40pt;height:20pt"><v:imagedata r:id="rIdPng"/></v:shape></w:pict></w:r>"#;
+        let text_box = format!(
+            r#"<v:shape id="vtb" style="position:absolute;left:0;top:0;width:468;height:200"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p>{picture}<w:r><w:t>G</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"#
+        );
+        let standalone = format!(r#"<w:p {NS}><w:r><w:pict>{}</w:pict></w:r></w:p>"#,
+            text_box.replace("left:0;top:0;width:468;height:200", "position:absolute;width:468pt;height:200pt"));
+        let grouped = format!(
+            r#"<w:p {NS}><w:r><w:pict><v:group id="g" style="position:absolute;width:468pt;height:200pt" coordsize="468,200">{text_box}</v:group></w:pict></w:r></w:p>"#
+        );
+        for body in [standalone, grouped] {
+            let doc = parse_from_bytes(&build_docx(&body)).expect("text box parses");
+            let json = serde_json::to_string(&doc.body).unwrap();
+            assert!(json.contains("word/media/"), "the story picture survives: {body}");
+            assert!(json.contains(r#""text":"G""#), "{body}");
+        }
+    }
+
+    #[test]
     fn text_box_story_anchors_flow_inline() {
         const NS: &str = r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -31593,21 +31695,6 @@ mod inline_wps_shape_tests {
             ("footnote", text, "square", false, true),
             ("endnote", text, "topAndBottom", false, true),
             ("body", text, "square", false, false),
-            // Alignment and percentage positions take the numeric offsets.
-            (
-                "txbx",
-                "mso-position-horizontal:center;mso-position-vertical:bottom;mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin",
-                "none",
-                false,
-                false,
-            ),
-            (
-                "footnote",
-                "mso-left-percent:500;mso-top-percent:200;mso-position-horizontal-relative:page;mso-position-vertical-relative:page",
-                "none",
-                false,
-                true,
-            ),
         ] {
             let run = rect(frames, wrap);
             let xml = match host {
@@ -31667,6 +31754,46 @@ mod inline_wps_shape_tests {
                 note || wrap == "none",
                 "{case}"
             );
+        }
+    }
+
+    /// word-story-vml-page-position: alignment and percentage positions keep
+    /// their authored frames; a vertical alignment against the text frame
+    /// takes the page top.
+    #[test]
+    fn story_vml_alignment_keeps_its_frames() {
+        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w10="urn:schemas-microsoft-com:office:word""#;
+        let acquire = |host: &str, position: &str| {
+            let run = format!(
+                r#"<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:50pt;width:40pt;height:20pt;{position}" fillcolor="black" stroked="f"><w10:wrap type="none"/></v:rect></w:pict></w:r>"#
+            );
+            let xml = if host == "txbx" {
+                format!(r#"<w:root {NS}><w:txbxContent><w:p>{run}</w:p></w:txbxContent></w:root>"#)
+            } else {
+                format!(r#"<w:root {NS}><w:footnote w:id="1"><w:p>{run}</w:p></w:footnote></w:root>"#)
+            };
+            let doc = roxmltree::Document::parse(&xml).expect("fixture");
+            let shape = doc.descendants().find(|node| node.tag_name().name() == "rect").unwrap();
+            vml_word_anchor_acquisition(shape, None, shape.attribute("style").unwrap(), 40.0, 20.0)
+        };
+        for host in ["txbx", "footnote"] {
+            let aligned = acquire(host, "mso-position-horizontal:center;mso-position-vertical:bottom;mso-position-horizontal-relative:margin;mso-position-vertical-relative:page");
+            assert_eq!(aligned.horizontal.relative_from.as_deref(), Some("margin"));
+            assert!(matches!(&aligned.horizontal.choice, AnchorAxisChoiceWire::Align { value } if value == "center"));
+            assert_eq!(aligned.vertical.relative_from.as_deref(), Some("page"));
+            assert!(matches!(&aligned.vertical.choice, AnchorAxisChoiceWire::Align { value } if value == "bottom"));
+            let percent = acquire(host, "mso-left-percent:500;mso-top-percent:200;mso-position-horizontal-relative:page;mso-position-vertical-relative:margin");
+            assert!(matches!(percent.horizontal.choice, AnchorAxisChoiceWire::Percent { .. }));
+            assert_eq!(percent.vertical.relative_from.as_deref(), Some("margin"));
+            let text = acquire(host, "mso-position-horizontal:center;mso-position-vertical:bottom;mso-position-horizontal-relative:text;mso-position-vertical-relative:text");
+            assert_eq!(text.horizontal.relative_from.as_deref(), Some("column"));
+            assert_eq!(text.vertical.relative_from.as_deref(), Some("page"));
+            assert!(matches!(text.vertical.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 0.0));
+            // Numeric offsets keep the page origin.
+            let numeric = acquire(host, "mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin");
+            assert_eq!(numeric.vertical.relative_from.as_deref(), Some("page"));
+            assert!(matches!(numeric.vertical.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 50.0));
         }
     }
 

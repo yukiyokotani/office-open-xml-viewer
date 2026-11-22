@@ -337,7 +337,11 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
      * the main story with the VML shapes taken out of the notes. */
     noteShapeHostParagraph?: DocParagraph;
     /** The shapes each note gives up to that paragraph, by note. */
-    noteShapes?: readonly Readonly<{ kind: 'footnote' | 'endnote'; id: string; runs: readonly DocRun[] }>[];
+    noteShapes?: readonly Readonly<{
+      kind: 'footnote' | 'endnote'; id: string; runs: readonly DocRun[];
+      /** Each moved run's revision, aligned with runs. */
+      __runRevisions?: readonly unknown[];
+    }>[];
     footnoteSeparatorParagraph?: DocParagraph;
     footnoteContinuationSeparatorParagraph?: DocParagraph;
     endnoteSeparatorParagraph?: DocParagraph;
@@ -2224,12 +2228,18 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
     footnote: new Set(noteReferenceIdsInDocumentOrder(doc.body, 'footnote')),
     endnote: new Set(noteReferenceIdsInDocumentOrder(doc.body, 'endnote')),
   };
-  const runs = (noteShapes ?? []).filter((group) => referenced[group.kind]?.has(group.id))
-    .flatMap((group) => group.runs);
+  const groups = (noteShapes ?? []).filter((group) => referenced[group.kind]?.has(group.id));
+  const runs = groups.flatMap((group) => group.runs);
+  // The moved runs keep their tracked-change revisions.
+  const revisions = groups.flatMap((group) => group.runs.map((_, index) => group.__runRevisions?.[index] ?? null));
   return {
     ...doc,
     body: host && runs.length > 0
-      ? [...doc.body, { ...host, type: 'paragraph', runs } as BodyElement] : doc.body,
+      ? [...doc.body, {
+          ...host, type: 'paragraph', runs,
+          ...(revisions.some((revision) => revision !== null) ? { __runRevisions: revisions } : {}),
+        } as BodyElement]
+      : doc.body,
     __noteLayoutSettings: retained,
   } as DocxDocumentModel;
 }

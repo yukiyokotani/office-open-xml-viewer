@@ -2546,6 +2546,10 @@ export interface ParagraphAcquisitionOptions {
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
   /** Present only while acquiring a paragraph hosted by a table cell. */
   readonly anchorCellBounds?: LayoutRect;
+  /** WORD_STORY_VML_PAGE_POSITION: the bottom of the body text area above
+   * the page's notes, the bottom of the margin frame of a page-positioned
+   * note shape. Present only for a body paragraph hosting one. */
+  readonly storyAnchorMarginBottomPt?: number;
   /** Effective enclosing fill, retained only for automatic text-color resolution. */
   readonly containerShading?: string | null;
   /** Layout-owned §17.3.1.7 edge selection for adjacent/sliced border boxes. */
@@ -5030,7 +5034,20 @@ function acquireAnchorOccurrence(
         options.environment.pageWritingMode,
         physicalPage,
       );
-  const baseFrames = options.anchorFrames;
+  // WORD_STORY_VML_PAGE_POSITION: a page-positioned note shape aligns in the
+  // margin frame above the page's notes.
+  const storyMarginBottomPt = outer.run.anchorAcquisitionInput.storyPagePosition === true
+    ? options.storyAnchorMarginBottomPt : undefined;
+  const baseFrames = storyMarginBottomPt !== undefined && options.anchorFrames?.margin
+    ? {
+        ...options.anchorFrames,
+        margin: {
+          ...options.anchorFrames.margin,
+          heightPt: Math.max(0, Math.min(options.anchorFrames.margin.heightPt,
+            storyMarginBottomPt - options.anchorFrames.margin.yPt)),
+        },
+      }
+    : options.anchorFrames;
   const behavior = outer.run.anchorAcquisitionInput.behavior;
   const layoutInCellFrame = behavior.layoutInCellStatus === 'valid'
     && behavior.layoutInCell === true
@@ -6741,6 +6758,7 @@ function paragraphAcquisitionKey(
     lineOnly ? null : options.containerShading ?? null,
     options.continuesFromPrevious ?? null,
     lineOnly ? null : options.sourceRangeStart ?? null,
+    lineOnly ? null : options.storyAnchorMarginBottomPt ?? null,
     lineOnly ? null : anchorFrames ? [
       anchorFrames.page
         ? [
