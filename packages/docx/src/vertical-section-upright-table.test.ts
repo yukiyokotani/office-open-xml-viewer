@@ -271,13 +271,13 @@ describe('upright block table of a vertical section', () => {
     expect(strips[1]![0]!.block).toBeCloseTo(TABLE_W + RULE + 7.14 + PITCH, 6);
   });
 
-  it('stacks a later table below the rows a table continues with on the next page', () => {
-    const pages = layOutPages('tbRl', [table(80), P, T, P]);
+  it.each(['tbRl', 'tbLrV'] as const)('stacks a later table below the rows a %s table continues with on the next page', (direction) => {
+    const pages = layOutPages(direction, [table(80), P, T, P]);
     expect(pages).toHaveLength(2);
     const [rest, later] = pages[1]!.tables as [Page['tables'][number], Page['tables'][number]];
     expect(rest.top).toBeCloseTo(MARGIN.top, 6);
     expect(later.top).toBeCloseTo(rest.bottom, 6);
-    expect(later.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+    expect(later.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
     // Both strips meet the continued rows and the later table.
     expect(pages[1]!.strips).toEqual([
       [{ block: 0, inlineStart: later.bottom }],
@@ -332,11 +332,11 @@ describe('upright block table of a vertical section', () => {
       expect(tall!.bottom).toBeLessThanOrEqual(COLUMN_END);
     });
 
-    it('keeps a table taller than the page whole and raises it to the page top', () => {
-      const pages = layOutPages('tbRl', [P, table(80), P], 2);
+    it.each(['tbRl', 'tbLrV'] as const)('keeps a %s table taller than the page whole and raises it to the page top', (direction) => {
+      const pages = layOutPages(direction, [P, table(80), P], 2);
       expect(pages).toHaveLength(1);
       expect(pages[0]!.tables).toHaveLength(1);
-      expect(pages[0]!.tables[0]!.left).toBeCloseTo(tableLeft('tbRl', PITCH), 6);
+      expect(pages[0]!.tables[0]!.left).toBeCloseTo(tableLeft(direction, PITCH), 6);
       expect(pages[0]!.tables[0]!.top).toBe(0);
     });
   });
