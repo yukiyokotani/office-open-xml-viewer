@@ -155,6 +155,10 @@ export interface BodyParagraphSourceInput {
   readonly inkless?: boolean;
   /** Parser-established text/line-break-only content, including an empty mark; excludes objects. */
   readonly onlyTextualContent?: boolean;
+  /** WORD_ANCHOR_HOST_NO_LINE_METRIC (isAnchorOnlyParagraph): the paragraph
+   * displays only floating drawings, in the final view and in the markup
+   * view; pagination treats it as its empty mark (inklessMarkBlock). */
+  readonly anchorOnly?: Readonly<{ final: boolean; markup: boolean }>;
   /** Mutually exclusive Word/LibreOffice section-mark spacing interop role. */
   readonly continuousSectionRole?:
     | 'suppress-before'

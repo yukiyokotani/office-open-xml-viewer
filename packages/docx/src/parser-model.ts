@@ -104,7 +104,7 @@ import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/c
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
-import { isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { isAnchorOnlyParagraph, isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
 import {
   wordHiddenParagraphRetainedBreaks,
   type WordHiddenParagraphRunFact,
@@ -1144,6 +1144,7 @@ function acquiredBodyParagraph(paragraph: DocParagraph, source: SourceRef) {
     onlyTextualContent: !paragraphHasUnavailableDrawing(paragraph)
       && paragraph.runs.every((run) => run.type === 'text'
         || (run.type === 'break' && run.breakType === 'line')),
+    ...anchorOnlyFact(paragraphRunsWithUnavailableDrawings(paragraph)),
     ...(pageOwnedAnchorOccurrenceIds.length === 0 ? {} : { pageOwnedAnchorOccurrenceIds }),
   });
 }
@@ -1187,6 +1188,17 @@ function paragraphFrameFact(
   if (!paragraph.framePr) return {};
   const dropCap = paragraph.framePr.dropCap;
   return { framed: dropCap === 'drop' || dropCap === 'margin' ? 'drop-cap' : 'frame' };
+}
+
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether the paragraph displays only
+ * floating drawings, per revision view (isAnchorOnlyParagraph). */
+function anchorOnlyFact(
+  runs: readonly Readonly<DocRun | UnavailableDrawingRunWire>[],
+): Readonly<{ anchorOnly?: Readonly<{ final: boolean; markup: boolean }> }> {
+  const facts = runs as unknown as Parameters<typeof isAnchorOnlyParagraph>[0];
+  const final = isAnchorOnlyParagraph(facts, false);
+  const markup = isAnchorOnlyParagraph(facts, true);
+  return final || markup ? { anchorOnly: Object.freeze({ final, markup }) } : {};
 }
 
 /** A vanished, inkless body paragraph acquires no block: body flow consumes

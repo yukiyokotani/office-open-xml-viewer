@@ -231,6 +231,34 @@ describe('LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT', () => {
       }
     });
 
+  // One classification for every pagination decision: the numbered and the
+  // page-top cases judge an anchor-only paragraph exactly as its empty one.
+  const anchorHostRun = { type: 'anchorHost', fontSize: 12, fontFamily: 'Gap Face', bold: false, italic: false } as
+    unknown as DocParagraph['runs'][number];
+  it('paginates a numbered anchor-only item as its numbered empty item', () => {
+    const numbering = { numbering: { numId: 1, level: 0, format: 'decimal', text: '1.', indentLeft: 36, tab: 36,
+      suff: 'tab', fontFamily: 'Gap Face', fontFacts: { fontSize: 12, fontFamily: 'Gap Face' } },
+    indentLeft: 36, indentFirst: -36 };
+    const layout = (room: number, runs: DocParagraph['runs']) => layoutBodyModel(
+      [filler(160 - room), para(runs, auto(2), numbering), para([run('After')])],
+      section(), linearCtx(), {}, undefined, { 'gap face': GAP_FACE }).pages
+      .map((page) => page.layers.body.filter((node) => node.kind === 'paragraph').length);
+    for (const room of [15.5, 15.65, 23.5, 24, 24.5, 31.15, 31.25]) {
+      expect(layout(room, [anchorHostRun]), `room ${room}`).toEqual(layout(room, []));
+    }
+  });
+
+  it('suppresses page-top space before for an anchor-only paragraph as for its empty one', () => {
+    const top = (runs: DocParagraph['runs']) => {
+      const pages = layoutBodyModel([filler(160), para(runs, null, { spaceBefore: 6 }), para([run('After')])],
+        section(), linearCtx(), {}, undefined, { 'gap face': GAP_FACE }).pages;
+      const probe = pages[1]!.layers.body.find((node) => node.kind === 'paragraph') as ParagraphLayout;
+      return probe.paragraphMark?.bounds.yPt ?? probe.lines[0]!.bounds.yPt;
+    };
+    expect(top([anchorHostRun])).toBe(top([]));
+    expect(top([])).toBe(20);
+  });
+
   it('lets the extra space hang into a footnote area as into the margin', () => {
     // The note band (6 pt separator band and one 15.6 pt note line) starts
     // at 158.4 pt. Next carries the reference: it stays when its natural

@@ -916,20 +916,6 @@ export function keepsWordLineBoxes(runs: readonly ParagraphLayoutRun[]): boolean
   return runs.some((run) => (run as { textBoxVertical?: boolean }).textBoxVertical === true);
 }
 
-/** WORD_ANCHOR_HOST_NO_LINE_METRIC: whether a paragraph emitted line
- * geometry besides anchor hosts and floating drawings. A zero-width marker
- * (an unselected optional hyphen) is no geometry. */
-export function segmentsHaveLineGeometry(segs: readonly LayoutSeg[]): boolean {
-  return segs.some((segment) => {
-    if ('imagePath' in segment) return !segment.anchor;
-    if ('text' in segment) {
-      if (segment.anchorHostWithoutMetric) return false;
-      return segment.metricOnly === true || segment.text.replace(/\u00AD/g, '') !== '';
-    }
-    return true;
-  });
-}
-
 type ImageSegmentSource = Readonly<{
   imagePath: string;
   mimeType: string;

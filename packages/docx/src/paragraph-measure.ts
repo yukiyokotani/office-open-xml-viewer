@@ -15,7 +15,6 @@ import {
   lineBelowBaselinePx,
   lineBoxHeight,
   paragraphMarkLineMetrics,
-  segmentsHaveLineGeometry,
   type DocGridCtx,
   type LineBoundary,
   type LayoutLine,
@@ -27,6 +26,7 @@ import type { ParagraphLayoutSource, ParagraphShapeRun, ParagraphImageRun } from
 import type { WrapOracle } from './layout/float-wrap-oracle.js';
 import type { NumberingMarkerShapeInput, WritingMode } from './layout/types.js';
 import { wordEmptyMarkMinimumStartWidthPx } from './layout/compatibility.js';
+import { isAnchorOnlyParagraph } from './layout/paragraph-visibility.js';
 import { compatOf } from './layout/compat-profile.js';
 import {
   wordAnchorHostLineMetricApplies,
@@ -385,11 +385,11 @@ export function measureParagraph(
     autoSpaceDN: paragraph.autoSpaceDN,
   });
   if (segments.length === 0) return measureMarkOnly(true);
-  // WORD_ANCHOR_HOST_NO_LINE_METRIC: a line holding only anchors (no other
-  // emitted line geometry) takes the empty paragraph mark's own line, from the
-  // same mark metric path; its anchors stay on the line.
-  const anchorOnlyLine = wordAnchorHostLineMetricApplies() && !segmentsHaveLineGeometry(segments)
-    && segments.some((segment) => 'text' in segment && segment.anchorHostWithoutMetric);
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: a paragraph displaying only floating
+  // drawings is its empty paragraph mark (isAnchorOnlyParagraph, the same
+  // classification pagination uses); its anchors stay on the mark's line.
+  const anchorOnlyLine = wordAnchorHostLineMetricApplies()
+    && isAnchorOnlyParagraph(paragraph.runs, environment.showTrackedChanges);
   const pictureMarkerHeightPt = firstLinePictureMarkerHeightPt;
   if (pictureMarkerSegmentHeightPt !== undefined) {
     // WORD_PICTURE_BULLET_LINE_PARTICIPATION: a picture bullet takes part in

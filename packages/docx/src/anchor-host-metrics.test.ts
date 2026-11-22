@@ -4,12 +4,12 @@ import { createLayoutServices } from './layout-runtime.js';
 import {
   buildSegments,
   layoutLines,
-  segmentsHaveLineGeometry,
   lineBoxHeight,
   type LayoutSeg,
   type LayoutTextSeg,
 } from './line-layout.js';
 import type { DocRun, DocxDocumentModel } from './types.js';
+import { isAnchorOnlyParagraph } from './layout/paragraph-visibility.js';
 
 function metricServices(unicodeRanges: readonly (readonly [number, number])[]) {
   const empty = { default: null, first: null, even: null };
@@ -231,17 +231,18 @@ describe('floating drawing anchor-host metrics', () => {
       expect(reads).toBeLessThan(runs.length * 50);
     });
 
-    it('counts only emitted line geometry as other content', () => {
+    it('classifies a paragraph displaying only floating drawings (isAnchorOnlyParagraph)', () => {
       const deleted = { ...textRun('Gone'), revision: { kind: 'deletion', author: 'A' } } as DocRun;
       const softHyphen = textRun('\u00AD');
       const floating = { ...picture, anchor: true } as DocRun;
       for (const runs of [[anchorHost()], [anchorHost(), deleted], [anchorHost(), softHyphen], [anchorHost(), floating]]) {
-        expect(segmentsHaveLineGeometry(buildSegments(runs, { pageIndex: 0, totalPages: 1, anchorHostsWithoutMetric: true })))
-          .toBe(false);
+        expect(isAnchorOnlyParagraph(runs as never, false)).toBe(true);
       }
-      for (const runs of [[anchorHost(), textRun('x')], [anchorHost(), picture], [anchorHost(), textRun(' ')]]) {
-        expect(segmentsHaveLineGeometry(buildSegments(runs, { pageIndex: 0, totalPages: 1, anchorHostsWithoutMetric: true })))
-          .toBe(true);
+      // Markup view shows the deletion; a list label's metric run is content.
+      expect(isAnchorOnlyParagraph([anchorHost(), deleted] as never, true)).toBe(false);
+      expect(isAnchorOnlyParagraph([{ ...anchorHost(), listLabel: 'start' }] as never, false)).toBe(false);
+      for (const runs of [[anchorHost(), textRun('x')], [anchorHost(), picture], [anchorHost(), textRun(' ')], []]) {
+        expect(isAnchorOnlyParagraph(runs as never, false)).toBe(false);
       }
     });
   });

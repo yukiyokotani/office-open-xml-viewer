@@ -4,6 +4,7 @@ import type {
   BodyParagraphSourceInput,
 } from './body-layout-input.js';
 import { defineCompatibilityRule } from './compatibility.js';
+import { WORD_ANCHOR_HOST_NO_LINE_METRIC } from './line-compatibility.js';
 import type { DocxCompatProfile } from './compat-profile.js';
 import type {
   LineLayout,
@@ -496,6 +497,27 @@ export function wordEmptyKeepNextBridgesSuccessor(input: Readonly<{
   return input.keepNext && input.inkless && input.undecoratedMark;
 }
 
+type InklessMarkBlockFacts = Readonly<{
+  inkless?: boolean;
+  anchorOnly?: Readonly<{ final: boolean; markup: boolean }>;
+}>;
+
+/** WORD_ANCHOR_HOST_NO_LINE_METRIC: the paragraph displays only floating
+ * drawings in the given revision view (isAnchorOnlyParagraph). */
+export function wordAnchorOnlyBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
+  void WORD_ANCHOR_HOST_NO_LINE_METRIC;
+  const anchorOnly = block.anchorOnly;
+  return anchorOnly !== undefined && (showTrackedChanges === true ? anchorOnly.markup : anchorOnly.final);
+}
+
+/** The one classification every pagination decision about a paragraph's mark
+ * uses: an empty paragraph, or one displaying only floating drawings, which
+ * Windows Word paginates as its empty mark (spacing suppression, keepNext
+ * bridging, following-ink look-ahead, trailing-mark admission). */
+export function wordInklessMarkBlock(block: InklessMarkBlockFacts, showTrackedChanges: boolean | undefined): boolean {
+  return block.inkless === true || wordAnchorOnlyBlock(block, showTrackedChanges);
+}
+
 /** Compatibility projection governed by {@link WORD_CONTINUOUS_SECTION_MARK_SPACING}. */
 export function wordContinuousSectionRole(
   sequence: readonly BodyLayoutSequenceEntryFor<Readonly<{ startType: string }>>[],
@@ -505,15 +527,15 @@ export function wordContinuousSectionRole(
   if (entry?.kind !== 'body-block' || entry.block.kind !== 'paragraph') return undefined;
   const next = sequence[index + 1];
   const afterNext = sequence[index + 2];
-  const suppressBefore = entry.block.inkless === true
+  const suppressBefore = wordInklessMarkBlock(entry.block, false)
     && next?.kind === 'begin-section'
     && next.section.startType === 'continuous';
   if (suppressBefore && entry.block.spaceBeforePt === 0) return 'collapse-mark';
   if (suppressBefore) return 'suppress-before';
-  return entry.block.inkless === true
+  return wordInklessMarkBlock(entry.block, false)
     && next?.kind === 'body-block'
     && next.block.kind === 'paragraph'
-    && next.block.inkless === true
+    && wordInklessMarkBlock(next.block, false)
     && next.block.spaceBeforePt === 0
     && afterNext?.kind === 'begin-section'
     && afterNext.section.startType === 'continuous'
