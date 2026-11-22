@@ -39,6 +39,7 @@ import type {
   DrawingMLCollisionRegistrySnapshotPt,
   LayoutServices,
   FloatRegistryEntryPt,
+  LayoutRect,
   FloatRegistrySnapshotPt,
   DrawingMLCollisionEntryPt,
   SectionFlow,
@@ -2198,6 +2199,73 @@ function acquireSelectedNoteSeparatorBand(
   });
 }
 
+/** The location at which the flow reaches a block after the keep set
+ * before it: `request.precedingBlockExtentPt` further along the block axis. */
+function locationAfterKeepSet(
+  request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
+): BodyAcquisitionLocation {
+  const precedingPt = request.precedingBlockExtentPt ?? 0;
+  if (precedingPt === 0) return request.location;
+  const reachedYPt = request.location.cursorPt.yPt + precedingPt;
+  const leftPt = Math.max(0, request.location.availableBounds.heightPt - precedingPt);
+  return Object.freeze({
+    ...request.location,
+    cursorPt: Object.freeze({ ...request.location.cursorPt, yPt: reachedYPt }),
+    availableBounds: Object.freeze({ ...request.location.availableBounds, yPt: reachedYPt, heightPt: leftPt }),
+  });
+}
+
+/**
+ * `word-vertical-section-upright-block-table`: the wrapped drawings a
+ * keepNext paragraph after the first of its keep set anchors
+ * (uprightPrecedingDrawings), resolved where the keep set places it: past
+ * the paragraphs before it, with its own lines, so a drawing positioned
+ * relative to its paragraph, line or character lies where the placement
+ * of the table after the keep set meets it. `layout` is the paragraph as
+ * measured for the keep set's extents, at the keep set's start; where the
+ * paragraph starts further on and anchors drawings in an upright vertical
+ * section, it is acquired again there for them.
+ */
+function keptParagraphDrawings(
+  context: BodySessionDependencies,
+  request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
+  paragraph: LayoutParagraphBlock,
+  layout: ParagraphLayout,
+  publicFloats: readonly FloatRegistryEntryPt[],
+): LayoutRect[] {
+  const { services, state, sessionState, publicAnchorBridge } = context;
+  const atStart = () => uprightPrecedingDrawings(
+    [...publicFloats, ...retainedBodyParagraphFloatEntries(sessionState, layout)], layout,
+  );
+  if (layout.drawings.length === 0 || !(request.precedingBlockExtentPt! > 0)
+    || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return atStart();
+  const reached = locationAfterKeepSet(request);
+  const candidate: BodyAcquisitionState = {
+    ...state,
+    floats: [...state.floats],
+    pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
+    retainedTablesBySourceIndex: new Map(state.retainedTablesBySourceIndex),
+  };
+  applyBodyAcquisitionLocationTo(services, candidate, reached);
+  addUprightBlockExclusionFloats(candidate, reached, paragraph);
+  const reachedFloats = acquirePublicParagraphFloats(
+    sessionState, publicAnchorBridge, paragraph, request.input.source, candidate,
+  );
+  const placed = acquireBodyParagraphAtLocation(
+    candidate,
+    paragraph,
+    request.input.source,
+    reached,
+    request.availableInlineExtentPt,
+    false,
+    undefined,
+    sessionState.drawingCollisionRegistry.entries,
+  ).layout;
+  return uprightPrecedingDrawings(
+    [...reachedFloats, ...retainedBodyParagraphFloatEntries(sessionState, placed)], placed,
+  );
+}
+
 function measureFollowingBodyBlock(
   context: BodySessionDependencies,
   request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
@@ -2227,18 +2295,12 @@ function measureFollowingBodyBlock(
     // the page to clear an earlier table), and the keep set then has to
     // start there with it. The placement itself decides
     // (bodyUprightBlockLookAhead).
-    const precedingPt = request.precedingBlockExtentPt ?? 0;
-    const reachedYPt = request.location.cursorPt.yPt + precedingPt;
-    const leftPt = Math.max(0, request.location.availableBounds.heightPt - precedingPt);
+    const reached = locationAfterKeepSet(request);
     const upright = bodyUprightBlockLookAhead(context, {
       input: request.input,
-      location: Object.freeze({
-        ...request.location,
-        cursorPt: Object.freeze({ ...request.location.cursorPt, yPt: reachedYPt }),
-        availableBounds: Object.freeze({ ...request.location.availableBounds, yPt: reachedYPt, heightPt: leftPt }),
-      }),
+      location: reached,
       availableInlineExtentPt: request.availableInlineExtentPt,
-      availableBlockExtentPt: leftPt,
+      availableBlockExtentPt: reached.availableBounds.heightPt,
       freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
       pageHasContent: true,
       ...(request.lastColumnOfPage === undefined ? {} : { lastColumnOfPage: request.lastColumnOfPage }),
@@ -2367,9 +2429,7 @@ function measureFollowingBodyBlock(
       leadFootnoteReferenceIds: firstLine ? footnoteIdsInRetainedLines([firstLine]) : [],
       pageOwnedAnchorKeysByLine: pageOwnedAnchorKeysByLine(layout),
       ...(() => {
-        const precedingDrawings = uprightPrecedingDrawings(
-          [...publicFloats, ...retainedBodyParagraphFloatEntries(sessionState, layout)], layout,
-        );
+        const precedingDrawings = keptParagraphDrawings(context, request, element, layout, publicFloats);
         return precedingDrawings.length > 0 ? { precedingDrawings: Object.freeze(precedingDrawings) } : {};
       })(),
     });

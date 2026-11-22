@@ -435,4 +435,20 @@ describe('upright block table placement work', () => {
     const large = measure(64);
     expect(large).toBeLessThanOrEqual(Math.max(16, 4.5 * small));
   }, 300_000);
+  it('moves drawings ending at the same inline position below a table without shifting the others', () => {
+    // Narrow rectangles side by side over a table, anchored after it: all
+    // move below the table, from cells they share, to cells they share.
+    const measure = (count: number) => {
+      const body = [P, T, P.replace('</w:p>', `${Array.from({ length: count }, (_, at) =>
+        anchoredRectangle(383 + 0.5 * at, 62, 0.45, 5)).join('')}</w:p>`), P];
+      const { result, counts } = counting(() => layOutPages('tbRl', body));
+      const [page] = result;
+      expect(page!.drawings).toHaveLength(count);
+      for (const drawing of page!.drawings) expect(drawing.top).toBeCloseTo(page!.tables[0]!.bottom, 6);
+      return counts.drawingShifts;
+    };
+    const small = measure(16);
+    const large = measure(128);
+    expect(large).toBeLessThanOrEqual(Math.max(16, 9 * small));
+  }, 300_000);
 });

@@ -41,14 +41,16 @@ export const T = table(2);
 
 /** A paragraph run anchoring a square-wrapped rectangle at page position
  * (x, y), `width` x `height` pt; `verticalFrom` 'paragraph' makes y relative
- * to the anchoring paragraph instead. */
+ * to the anchoring paragraph instead, and `horizontalFrom` 'character' makes
+ * x relative to the anchor's character. */
 export const anchoredRectangle = (
   x: number, y: number, width: number, height: number, verticalFrom: 'page' | 'paragraph' = 'page',
+  horizontalFrom: 'page' | 'character' = 'page',
 ) =>
   '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
   + ' distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">'
   + '<wp:simplePos x="0" y="0"/>'
-  + `<wp:positionH relativeFrom="page"><wp:posOffset>${Math.round(x * 12700)}</wp:posOffset></wp:positionH>`
+  + `<wp:positionH relativeFrom="${horizontalFrom}"><wp:posOffset>${Math.round(x * 12700)}</wp:posOffset></wp:positionH>`
   + `<wp:positionV relativeFrom="${verticalFrom}"><wp:posOffset>${Math.round(y * 12700)}</wp:posOffset></wp:positionV>`
   + `<wp:extent cx="${width * 12700}" cy="${height * 12700}"/><wp:wrapSquare wrapText="bothSides"/>`
   + '<wp:docPr id="1" name="Rect"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'

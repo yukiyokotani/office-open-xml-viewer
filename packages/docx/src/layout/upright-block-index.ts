@@ -64,14 +64,12 @@ export interface UprightBlockPageIndex {
   /** Number of boxes in `tableBuckets`. */
   tableCount: number;
   /** The page's wrapped anchored drawings by `${block bucket}:${inline
-   * bucket}`, each cell ordered by inline end, furthest first; those
+   * bucket}`, each cell a max-heap on inline end (UprightDrawingCell); those
    * covering more than MAX_EXCLUSION_CELLS cells; and how many of the
    * page's wrap rectangles have been looked at for them
    * (syncUprightDrawings). */
-  readonly drawingCells: Map<string, UprightPageDrawing[]>;
+  readonly drawingCells: Map<string, UprightDrawingCell>;
   readonly wideDrawings: UprightPageDrawing[];
-  /** Drawings inserted into the cells so far; numbers their insertions. */
-  drawingInsertions: number;
   drawingsSeen: number;
   /** Identifies the boxes of `tableBuckets` in registration order: equal for
    * two pages (or two layouts of one page) exactly when they hold the same
@@ -141,8 +139,6 @@ export type UprightPageDrawing = {
   /** The frame as the page's wrap rectangles hold it, which the text laid
    * out so far wraps around. */
   readonly registeredFrame: LayoutRect;
-  /** The ordinal of its last insertion into the cells (insertDrawing). */
-  insertion?: number;
 };
 
 /** What accepting upright blocks adds to the page: at most one box for the
@@ -186,7 +182,6 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     tableBoxesVersion: 0,
     drawingCells: new Map(),
     wideDrawings: [],
-    drawingInsertions: 0,
     drawingsSeen: 0,
     exclusionCells: new Map(),
     wideExclusions: [],
@@ -427,8 +422,7 @@ function drawingExtent(drawing: UprightPageDrawing): Readonly<{
   return { blockStartPt, blockEndPt, inlineStartPt, inlineEndPt };
 }
 
-/** Inline end of a recorded drawing's extent: the drawings of a cell are
- * ordered by it, furthest first. */
+/** Inline end of a recorded drawing's extent: each cell is a max-heap on it. */
 const drawingInlineEndPt = (drawing: UprightPageDrawing) => drawingExtent(drawing).inlineEndPt;
 
 /** The cells a recorded drawing is kept in, by block and inline bucket, or
@@ -447,20 +441,53 @@ function drawingCells(drawing: UprightPageDrawing): Readonly<{
   return { firstBlock, lastBlock, firstInline, lastInline };
 }
 
-/** Position in `drawings` (ordered by inline end, furthest first, and by
- * insertion among equal ends) of the first drawing after a drawing ending at
- * `endPt` inserted `insertion`-th: binary search on that order. */
-function positionAfter(drawings: readonly UprightPageDrawing[], endPt: number, insertion: number): number {
-  let low = 0;
-  let high = drawings.length;
-  while (low < high) {
-    const middle = (low + high) >>> 1;
-    const other = drawings[middle]!;
-    const otherEndPt = drawingInlineEndPt(other);
-    if (otherEndPt > endPt || (otherEndPt === endPt && other.insertion! < insertion)) low = middle + 1;
-    else high = middle;
+/** The drawings of one cell: a binary max-heap on inline end, with each
+ * drawing's place in it. Insertion and removal take O(log n) swaps; the
+ * drawings ending past a position are enumerated by descending from the
+ * root and stopping at every one that does not, so a query reads at most
+ * twice as many drawings as it returns, plus one. */
+export type UprightDrawingCell = {
+  readonly heap: UprightPageDrawing[];
+  readonly at: Map<UprightPageDrawing, number>;
+};
+
+function placeInHeap(cell: UprightDrawingCell, drawing: UprightPageDrawing, at: number): void {
+  cell.heap[at] = drawing;
+  cell.at.set(drawing, at);
+}
+
+/** Moves the drawing at `from` up to its place; returns that place. */
+function siftUp(cell: UprightDrawingCell, from: number): number {
+  const drawing = cell.heap[from]!;
+  const endPt = drawingInlineEndPt(drawing);
+  let at = from;
+  while (at > 0) {
+    const parent = (at - 1) >>> 1;
+    const above = cell.heap[parent]!;
+    if (!(drawingInlineEndPt(above) < endPt)) break;
+    placeInHeap(cell, above, at);
+    at = parent;
   }
-  return low;
+  placeInHeap(cell, drawing, at);
+  return at;
+}
+
+function siftDown(cell: UprightDrawingCell, from: number): void {
+  const drawing = cell.heap[from]!;
+  const endPt = drawingInlineEndPt(drawing);
+  let at = from;
+  for (;;) {
+    const left = 2 * at + 1;
+    if (left >= cell.heap.length) break;
+    const right = left + 1;
+    const child = right < cell.heap.length
+      && drawingInlineEndPt(cell.heap[right]!) > drawingInlineEndPt(cell.heap[left]!) ? right : left;
+    const below = cell.heap[child]!;
+    if (!(drawingInlineEndPt(below) > endPt)) break;
+    placeInHeap(cell, below, at);
+    at = child;
+  }
+  placeInHeap(cell, drawing, at);
 }
 
 function insertDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
@@ -469,21 +496,13 @@ function insertDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing
     index.wideDrawings.push(drawing);
     return;
   }
-  // The latest insertion goes after every drawing of the same end, so a
-  // run of drawings ending alike is appended, not shifted.
-  drawing.insertion = index.drawingInsertions;
-  index.drawingInsertions += 1;
-  const endPt = drawingInlineEndPt(drawing);
   for (let block = cells.firstBlock; block <= cells.lastBlock; block += 1) {
     for (let inline = cells.firstInline; inline <= cells.lastInline; inline += 1) {
       const key = `${block}:${inline}`;
-      const drawings = index.drawingCells.get(key);
-      if (!drawings) index.drawingCells.set(key, [drawing]);
-      else {
-        const at = positionAfter(drawings, endPt, drawing.insertion);
-        if (at === drawings.length) drawings.push(drawing);
-        else drawings.splice(at, 0, drawing);
-      }
+      let cell = index.drawingCells.get(key);
+      if (!cell) index.drawingCells.set(key, cell = { heap: [], at: new Map() });
+      cell.heap.push(drawing);
+      siftUp(cell, cell.heap.length - 1);
     }
   }
 }
@@ -494,13 +513,15 @@ function removeDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing
     index.wideDrawings.splice(index.wideDrawings.indexOf(drawing), 1);
     return;
   }
-  const endPt = drawingInlineEndPt(drawing);
   for (let block = cells.firstBlock; block <= cells.lastBlock; block += 1) {
     for (let inline = cells.firstInline; inline <= cells.lastInline; inline += 1) {
-      const drawings = index.drawingCells.get(`${block}:${inline}`)!;
-      const at = positionAfter(drawings, endPt, drawing.insertion!);
-      if (drawings[at] !== drawing) throw new Error('A recorded drawing is missing from its cell');
-      drawings.splice(at, 1);
+      const cell = index.drawingCells.get(`${block}:${inline}`)!;
+      const at = cell.at.get(drawing)!;
+      cell.at.delete(drawing);
+      const last = cell.heap.pop()!;
+      if (last === drawing) continue;
+      placeInHeap(cell, last, at);
+      if (siftUp(cell, at) === at) siftDown(cell, at);
     }
   }
 }
@@ -509,19 +530,15 @@ function removeDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing
  * the upright tables already placed for tables before its paragraph
  * (inlineShiftBelowUprightTablesPt). */
 export function addUprightPageDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
+  shiftDrawing(drawing, inlineShiftBelowUprightTablesPt(index, drawing.anchorIndex, drawing.frame));
   insertDrawing(index, drawing);
-  moveUprightPageDrawingBelowTables(index, drawing);
 }
 
-/** Moves a recorded drawing along the inline axis below the tables placed for
- * tables before its paragraph that it would cover. */
-function moveUprightPageDrawingBelowTables(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
-  const shiftPt = inlineShiftBelowUprightTablesPt(index, drawing.anchorIndex, drawing.frame);
+/** Moves a drawing's exclusion and frame `shiftPt` along the inline axis. */
+function shiftDrawing(drawing: UprightPageDrawing, shiftPt: number): void {
   if (shiftPt === 0) return;
-  removeDrawing(index, drawing);
   drawing.exclusion = Object.freeze({ ...drawing.exclusion, xPt: drawing.exclusion.xPt + shiftPt });
   drawing.frame = Object.freeze({ ...drawing.frame, xPt: drawing.frame.xPt + shiftPt });
-  insertDrawing(index, drawing);
 }
 
 /**
@@ -529,27 +546,35 @@ function moveUprightPageDrawingBelowTables(index: UprightBlockPageIndex, drawing
  * after a table lies below it. When the box of tables ending at body index
  * `sourceIndex` is placed, the recorded drawings of paragraphs after them
  * that it covers move below it here, before any later table is placed
- * against them, as their paragraphs' own acquisition places them.
+ * against them, as their paragraphs' own acquisition places them. Each move
+ * takes the drawing out of its cells and puts it into its new ones, in
+ * O(log n) per cell.
  */
 export function moveUprightPageDrawingsBelowTableBox(index: UprightBlockPageIndex, table: UprightTableBox): void {
   const { box } = table;
-  const covered: UprightPageDrawing[] = [];
+  const moves: Array<Readonly<{ drawing: UprightPageDrawing; shiftPt: number }>> = [];
   for (const drawing of uprightPageDrawingsNear(index, box.yPt, box.yPt + box.heightPt, box.xPt, box.xPt + box.widthPt)) {
     const { frame } = drawing;
     if (drawing.anchorIndex > table.sourceIndex
       && frame.xPt < box.xPt + box.widthPt && box.xPt < frame.xPt + frame.widthPt
-      && frame.yPt < box.yPt + box.heightPt && box.yPt < frame.yPt + frame.heightPt) covered.push(drawing);
+      && frame.yPt < box.yPt + box.heightPt && box.yPt < frame.yPt + frame.heightPt) {
+      const shiftPt = inlineShiftBelowUprightTablesPt(index, drawing.anchorIndex, frame);
+      if (shiftPt !== 0) moves.push({ drawing, shiftPt });
+    }
   }
-  for (const drawing of covered) moveUprightPageDrawingBelowTables(index, drawing);
+  for (const { drawing, shiftPt } of moves) {
+    removeDrawing(index, drawing);
+    shiftDrawing(drawing, shiftPt);
+    insertDrawing(index, drawing);
+  }
 }
 
 /** The recorded drawings whose extent (exclusion, frame or registered
  * frame) can lie in the block range [`blockStartPt`, `blockEndPt`] and the
- * inline range (`inlineFromPt`, `inlineToPt`), each once. Only the cells
- * of that range are read, and in each only the drawings reaching past
- * `inlineFromPt` (a cell keeps them ordered by inline end): a drawing beside
- * the range along either axis is looked at only when it shares a cell with
- * its edge. */
+ * inline range (`inlineFromPt`, `inlineToPt`), each once. Only the cells of
+ * that range are read, and in each only the drawings reaching past
+ * `inlineFromPt` (UprightDrawingCell): a drawing beside the range along
+ * either axis is looked at only when it shares a cell with its edge. */
 export function uprightPageDrawingsNear(
   index: UprightBlockPageIndex,
   blockStartPt: number,
@@ -568,13 +593,19 @@ export function uprightPageDrawingsNear(
   const lastBlock = bucketOf(blockEndPt);
   const firstInline = bucketOf(inlineFromPt);
   const lastInline = bucketOf(inlineToPt);
+  const pending: number[] = [];
   for (let block = firstBlock; block <= lastBlock; block += 1) {
     for (let inline = firstInline; inline <= lastInline; inline += 1) {
-      const drawings = index.drawingCells.get(`${block}:${inline}`);
-      if (!drawings) continue;
-      for (let at = 0; at < drawings.length; at += 1) {
-        const drawing = drawings[at]!;
-        if (!(drawingInlineEndPt(drawing) > inlineFromPt)) break;
+      const cell = index.drawingCells.get(`${block}:${inline}`);
+      if (!cell || cell.heap.length === 0) continue;
+      pending.length = 0;
+      pending.push(0);
+      while (pending.length > 0) {
+        const at = pending.pop()!;
+        const drawing = cell.heap[at]!;
+        if (!(drawingInlineEndPt(drawing) > inlineFromPt)) continue;
+        if (2 * at + 1 < cell.heap.length) pending.push(2 * at + 1);
+        if (2 * at + 2 < cell.heap.length) pending.push(2 * at + 2);
         // A drawing kept in several cells is taken from the first of them
         // that this query reads.
         const cells = drawingCells(drawing)!;
