@@ -29,6 +29,9 @@ export interface UprightBlockPageIndex {
   /** Boxes spanning more buckets than MAX_BUCKET_SPAN; every query reads them. */
   readonly wide: LayoutRect[];
   readonly slots: Map<number, UprightBlockSlot>;
+  /** The owner segments pinned when the page's layout started, by segment
+   * key (uprightSegmentKey): a pinned segment takes these bounds. */
+  readonly segmentPins: Map<string, LayoutRect>;
   /** The table placed last (UprightBlockTail). */
   tail: UprightBlockTail | null;
   /** The boxes of the placed top-level tables with the body index of the
@@ -113,6 +116,14 @@ export interface UprightBlockRegistration {
    * `box` and `tail` give none: an owner segment's, which a drawing anchored
    * after its table lies below. */
   readonly tableBox?: UprightTableBox;
+  /** An owner segment placed for good at `bounds` (a page pin). */
+  readonly segmentPin?: Readonly<{ key: string; bounds: LayoutRect }>;
+}
+
+/** Identity of one owner segment of the table at body index `sourceIndex`,
+ * by the fragment-start key of its first row. */
+export function uprightSegmentKey(sourceIndex: number, fragmentStartKey: string): string {
+  return `${sourceIndex}|${fragmentStartKey}`;
 }
 
 const BUCKET_PT = 72;
@@ -124,6 +135,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     buckets: new Map(),
     wide: [],
     slots: new Map(),
+    segmentPins: new Map(),
     tail: null,
     tableBuckets: new Map(),
     tableCount: 0,

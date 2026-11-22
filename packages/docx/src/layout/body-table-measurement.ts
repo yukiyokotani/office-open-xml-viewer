@@ -66,6 +66,7 @@ import {
   emptyUprightBlockPageIndex,
   uprightBlockBoxesMet,
   uprightPageDrawingsNear,
+  uprightSegmentKey,
   type UprightBlockPageIndex,
   type UprightBlockRegistration,
   type UprightBlockSlot,
@@ -2732,32 +2733,44 @@ function measureUprightOwnerSegment(
     }
     // An ordinary segment is an upright block of its own (library policy): it
     // stays at the flow's block position and clears the blocks it meets
-    // along the inline axis.
+    // along the inline axis, unless it was pinned when the page's layout
+    // started, in which case it is where the pin has it.
     const edges = uprightBlockEdgeOverhangsPt(local.layout, gridWidthPt, physical);
     const boxExtentPt = edges.nearPt + gridWidthPt + edges.farPt;
-    const found = searchUprightBlock(
-      syncUprightDrawings(context.state, request.input.source), physical, request, false,
-      local.layout.advancePt, boxExtentPt,
-    );
-    const bounds: LayoutRect = Object.freeze({
-      xPt: found.inlineStartPt, yPt: found.blockStartPt, widthPt: local.layout.advancePt, heightPt: boxExtentPt,
-    });
+    const segmentIndex = syncUprightDrawings(context.state, request.input.source);
+    const fragmentStartKey = tableFragmentStartKey(request.cursor);
+    const segmentKey = uprightSegmentKey(request.input.source.path[0]!, fragmentStartKey);
+    const pinned = segmentIndex.segmentPins.get(segmentKey);
+    const bounds: LayoutRect = pinned ?? (() => {
+      const found = searchUprightBlock(
+        segmentIndex, physical, request, false, local.layout.advancePt, boxExtentPt,
+      );
+      return Object.freeze({
+        xPt: found.inlineStartPt, yPt: found.blockStartPt, widthPt: local.layout.advancePt, heightPt: boxExtentPt,
+      });
+    })();
     const origin = uprightBlockGridOrigin(physical, bounds, gridWidthPt, edges);
     const layout = takeUprightTableFragment(
       context, request, operations, local, uprightBlockTranslationPt(origin, local.layout), acquisitionOwner,
     );
-    const registered = uprightBlockRegistrationOf(bounds, [], [
-      uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), bounds),
-    ]);
     // A wrapped drawing anchored after the table lies below the segment
-    // too: its box enters the history of placed tables, and where the
-    // drawing was registered when the page's layout started the box is
-    // pinned there, so the drawing is placed below it from the start.
+    // too, so its box enters the history of placed tables. Where such a
+    // drawing was registered when the page's layout started, the segment is
+    // pinned: its box, exclusion and place are registered from the start of
+    // the page's next layout, in which the drawing and its exclusion lie
+    // below it and the segment takes the same place again.
     const tableBox = Object.freeze({ sourceIndex: request.input.source.path[0]!, box: bounds });
-    const segmentRegistration = {
-      ...(registered ? { uprightBlocks: Object.freeze({ ...registered, tableBox }) } : {}),
-      ...(registered && uprightBlockCoversLaterDrawing(context.state, request.input.source, bounds)
-        ? { uprightPagePin: Object.freeze({ box: null, slots: Object.freeze([]), exclusions: Object.freeze([]), tableBox }) }
+    const registered = pinned ? null : uprightBlockRegistrationOf(bounds, [], [
+      uprightBlockExclusion(request.input.source, fragmentStartKey, bounds),
+    ]);
+    const segmentRegistration = !registered ? {} : {
+      uprightBlocks: Object.freeze({ ...registered, tableBox }),
+      ...(uprightBlockCoversLaterDrawing(context.state, request.input.source, bounds)
+        ? {
+            uprightPagePin: Object.freeze({
+              ...registered, tableBox, segmentPin: Object.freeze({ key: segmentKey, bounds }),
+            }),
+          }
         : {}),
     };
     return Object.freeze({

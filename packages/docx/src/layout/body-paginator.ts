@@ -1563,11 +1563,14 @@ function* paginateBodyPassSteps(
   // page is laid out again without it, the table is placed where the flow
   // reaches it and only the text after it flows around it.
   //
-  // Termination: a table is pinned at most once and released at most once
-  // per pass, and each further layout of a page does at least one of the
+  // Termination: a table (or owner segment) is pinned at most once and a
+  // table released at most once per pass, and each further layout of a page does at least one of the
   // two, so a page is laid out at most twice per table on it, plus once;
   // tables whose pins one layout finds share the next.
-  type UprightPagePin = { registration: UprightBlockRegistration; consumed: boolean };
+  // Pins are kept by table source key and fragment start, so each owner
+  // segment of a table has its own.
+  type UprightPagePin = { tableKey: string; registration: UprightBlockRegistration; consumed: boolean };
+  const uprightPinKey = (tableKey: string, fragmentStartKey: string): string => `${tableKey}|${fragmentStartKey}`;
   let uprightPinPage = -1;
   let uprightPins = new Map<string, UprightPagePin>();
   /** This layout of the live page found pins that are not registered yet. */
@@ -1586,7 +1589,8 @@ function* paginateBodyPassSteps(
    * page's start as a pin: every table in its slot for good. */
   const retainUprightPlan = (tableKey: string, registration: UprightBlockRegistration): void => {
     if (!canRecoverOnPage) return;
-    uprightPinsOf(state.flow.pageIndex).set(tableKey, {
+    uprightPinsOf(state.flow.pageIndex).set(uprightPinKey(tableKey, tableFragmentStartKey(undefined)), {
+      tableKey,
       registration: Object.freeze({
         ...registration,
         slots: Object.freeze(registration.slots.map((slot) =>
@@ -1602,10 +1606,10 @@ function* paginateBodyPassSteps(
   const settleUprightPinsBeforePageClose = (): void => {
     if (!canRecoverOnPage || uprightPinPage !== state.flow.pageIndex) return;
     let replay = uprightReplayPending;
-    for (const [tableKey, pin] of uprightPins) {
+    for (const [pinKey, pin] of uprightPins) {
       if (pin.consumed) continue;
-      uprightPins.delete(tableKey);
-      uprightForwardOnly.add(tableKey);
+      uprightPins.delete(pinKey);
+      uprightForwardOnly.add(pin.tableKey);
       replay = true;
     }
     uprightReplayPending = false;
@@ -3528,10 +3532,11 @@ function* paginateBodyPassSteps(
           // when the page's layout started. Pin it; the page is laid out
           // again when it closes, with every pin this layout of it found.
           const tableKey = sourceKey(block.source);
-          if (!uprightPinnedOnce.has(tableKey) && !uprightForwardOnly.has(tableKey)) {
-            uprightPinnedOnce.add(tableKey);
-            uprightPinsOf(state.flow.pageIndex).set(tableKey, {
-              registration: acquired.uprightPagePin, consumed: false,
+          const pinKey = uprightPinKey(tableKey, fragmentStartKey);
+          if (!uprightPinnedOnce.has(pinKey) && !uprightForwardOnly.has(tableKey)) {
+            uprightPinnedOnce.add(pinKey);
+            uprightPinsOf(state.flow.pageIndex).set(pinKey, {
+              tableKey, registration: acquired.uprightPagePin, consumed: false,
             });
             uprightReplayPending = true;
           }
@@ -3724,7 +3729,7 @@ function* paginateBodyPassSteps(
         // `word-vertical-section-upright-block-table`
         if (acquired.uprightBlocks) session.commitUprightBlocks?.(acquired.uprightBlocks);
         if (uprightPinPage === state.flow.pageIndex) {
-          const pin = uprightPins.get(sourceKey(block.source));
+          const pin = uprightPins.get(uprightPinKey(sourceKey(block.source), fragmentStartKey));
           if (pin) pin.consumed = true;
         }
         cursor = acquired.nextCursor ?? undefined;

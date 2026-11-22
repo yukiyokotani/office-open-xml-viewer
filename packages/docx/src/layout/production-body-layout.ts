@@ -2929,6 +2929,7 @@ function commitBodyUprightBlocks(
   const index = state.uprightBlockIndex ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
   if (registration.box) addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
   for (const slot of registration.slots) index.slots.set(slot.sourceIndex, slot);
+  if (registration.segmentPin) index.segmentPins.set(registration.segmentPin.key, registration.segmentPin.bounds);
   for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
   if (registration.tail) {
     index.tail = registration.tail;

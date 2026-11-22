@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
+  anchoredRectangle,
   COLUMN_END,
   MARGIN,
   P,
@@ -936,6 +937,65 @@ describe('upright block table of a vertical section', () => {
     expect(page!.drawings).toHaveLength(1);
     expect(page!.drawings[0]!.top).toBeCloseTo(ordinary.bottom, 6);
     expect(page!.drawings[0]!.left).toBeCloseTo(400, 6);
+  });
+
+  describe('drawings anchored after a table split around a cell-owned frame row', () => {
+    const framePr = '<w:framePr w:w="2000" w:hSpace="141" w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="4000" w:y="6000"/>';
+    /** Three rows: an ordinary one, a host at page (200, 300), an ordinary one. */
+    const split = (() => {
+      const rows = table(3).split('<w:tr>');
+      rows[2] = rows[2]!.replace('<w:p><w:pPr>', `<w:p><w:pPr>${framePr}`);
+      return rows.join('<w:tr>');
+    })();
+    /** Block range of a drawing `width` wide whose physical left is `left`, in tbRl. */
+    const blockRange = (left: number, width: number) =>
+      [PAGE_W - MARGIN.right - left - width, PAGE_W - MARGIN.right - left] as const;
+
+    it('moves the drawing over each ordinary row, and its text exclusion, below the rows', () => {
+      // Both ordinary rows stack at the column top, each covered by one of
+      // two rectangles the paragraph after the table anchors. Both lie below
+      // the rows, and the strips in each one's block range start below it:
+      // their exclusions moved with them.
+      const upper = anchoredRectangle(440, 62, 30, 6);
+      const lower = anchoredRectangle(360, 74, 30, 6);
+      const [page] = layOutPages('tbRl', [
+        P, split, P.replace('</w:p>', `${upper}${lower}</w:p>`), ...Array.from({ length: 8 }, () => P),
+      ]);
+      const ordinary = page!.tables.filter((placed) => placed.top < 200);
+      expect(ordinary).toHaveLength(2);
+      const rowsEnd = Math.max(...ordinary.map((placed) => placed.bottom));
+      expect(page!.drawings).toHaveLength(2);
+      for (const drawing of page!.drawings) expect(drawing.top).toBeCloseTo(rowsEnd, 6);
+      const lines = page!.strips.slice(1).flat();
+      for (const left of [440, 360]) {
+        const [start, end] = blockRange(left, 30);
+        const beside = lines.filter((line) => line.block < end && line.block + PITCH > start);
+        expect(beside.length, `strips beside the rectangle at ${left}`).toBeGreaterThan(0);
+        for (const line of beside) expect(line.inlineStart).toBeCloseTo(rowsEnd + 6, 6);
+      }
+    });
+
+    it('keeps a pinned row where the drawing was placed below it when the text before it changes', () => {
+      // The rectangle is authored over the first strip as well as the row:
+      // at that place it shortens the full-length strip before the table,
+      // which then takes a second strip, so the row starts two strips in.
+      // Once the rectangle lies below the row the strip fits again, but the
+      // row is pinned: it stays where the rectangle was placed below it.
+      const full = paragraph('長'.repeat(66));
+      const wide = anchoredRectangle(440, 62, 60, 6);
+      const [page] = layOutPages('tbRl', [full, split, P.replace('</w:p>', `${wide}</w:p>`), P]);
+      const ordinary = page!.tables.filter((placed) => placed.top < 200);
+      const rowsEnd = Math.max(...ordinary.map((placed) => placed.bottom));
+      expect(page!.drawings).toHaveLength(1);
+      expect(page!.drawings[0]!.top).toBeCloseTo(rowsEnd, 6);
+      // The drawing covers no row as painted.
+      for (const placed of page!.tables) {
+        const apart = page!.drawings[0]!.top >= placed.bottom - 1e-6
+          || page!.drawings[0]!.top + 6 <= placed.top + 1e-6
+          || 440 >= placed.paintedRight - 1e-6 || 500 <= placed.paintedLeft + 1e-6;
+        expect(apart).toBe(true);
+      }
+    });
   });
 
   it.each(['tbRl', 'tbLrV'] as const)('moves a wrapped drawing anchored after a %s table below the table', (direction) => {
