@@ -1,4 +1,5 @@
 import type { DocParagraph } from '../types.js';
+import type { ParagraphLayout } from './types.js';
 import { anchorFreeRuns, hasVisibleAnchoringRun, metricVisibleRuns } from './metric-visible-runs.js';
 
 /**
@@ -8,8 +9,9 @@ import { anchorFreeRuns, hasVisibleAnchoringRun, metricVisibleRuns } from './met
  * and their anchoring characters are no flow content
  * (WORD_ANCHOR_HOST_NO_LINE_METRIC): such a paragraph joins as its empty
  * counterpart does, its drawings still acquired (hasVisibleAnchoringRun).
- * Retained layout sources carry unavailable drawings as runs, which count as
- * ink here.
+ * Retained layout sources carry unavailable drawings as runs: an inline one
+ * is ink here, a floating one (its anchored placeholder) is a floating
+ * drawing like any other.
  */
 export function isSwallowedHiddenParagraph(
   paragraph: Readonly<{ markVanish?: boolean; runs?: readonly Readonly<{ type: string; text?: string; anchor?: boolean }>[] }>,
@@ -71,4 +73,21 @@ export function isAnchorOnlyParagraph(
   showTrackedChanges: boolean | undefined,
 ): boolean {
   return hasVisibleAnchoringRun(runs, showTrackedChanges) && displaysOnlyParagraphMark(runs, showTrackedChanges);
+}
+
+/** The layout of a paragraph that takes no flow (a vanished or collapsed
+ * mark that displays nothing but floating drawings), as it is retained:
+ * nothing painted of its own (no list marker, border, shading or line
+ * number), like the empty paragraph it stands for. Its lines keep only the
+ * positions its drawings are anchored at; the drawings stay. */
+export function withoutParagraphDecoration(layout: ParagraphLayout): ParagraphLayout {
+  const { shading: _shading, lineNumbers: _lineNumbers, ...markless } = layout;
+  return Object.freeze({
+    ...markless,
+    lines: Object.freeze(markless.lines.map((line) => Object.freeze({
+      ...line,
+      placements: Object.freeze(line.placements.filter((placement) => placement.kind === 'anchor-host')),
+    }))),
+    borders: Object.freeze([]),
+  });
 }

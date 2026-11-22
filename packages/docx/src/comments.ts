@@ -1,8 +1,9 @@
 import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import { sourceKey } from './layout/source-key.js';
+import { overlayBoxes } from './overlay-geometry.js';
 import type { SourceRef } from './layout/types.js';
 import { decimalReviewIdKey } from './review-id.js';
-import type { DocComment, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
+import type { DocComment, DocxClipRegion, DocxCommentMark, DocxStorySource, DocxTextRunInfo } from './types.js';
 import type { ReviewAnchorProjectionOptions } from './review-projection.js';
 
 export interface CommentAnchorRange {
@@ -37,13 +38,21 @@ export interface CommentAnchorGeometryFallback {
 
 export type DocxCommentAnchorKind = 'range' | 'point' | 'fallback';
 
-/** UI-neutral rectangle for one continuous highlighted line segment. */
+/** UI-neutral rectangle for one continuous highlighted line segment: text
+ * painted without a gap on one line. */
 export interface DocxCommentHighlightRect {
   readonly x: number;
   readonly y: number;
   readonly width: number;
   readonly height: number;
   readonly transform?: string;
+  /** The clips of the highlighted text (DocxTextRunInfo.clips). The
+   *  rectangle is where the text's glyphs are painted inside them (across
+   *  the line, the text's font box); text that the clips hide wholly yields
+   *  no rectangle. For a clip turned against the text the rectangle bounds
+   *  the visible part, and a host cuts the drawn highlight to the clips, for
+   *  example with nested `overflow:hidden` containers. */
+  readonly clips?: readonly Readonly<DocxClipRegion>[];
 }
 
 /** One authored anchor resolved against the text geometry supplied for a page. */
@@ -451,45 +460,16 @@ function resolvedAnchorKind(
 function highlightRects(
   runs: readonly Readonly<DocxTextRunInfo>[],
 ): readonly Readonly<DocxCommentHighlightRect>[] {
-  const rects = runs
-    .map((run): DocxCommentHighlightRect => {
-      const bounds = run.highlightBounds;
-      return {
-        x: bounds?.x ?? run.x,
-        y: bounds?.y ?? run.y,
-        width: bounds?.width ?? run.w,
-        height: bounds?.height ?? run.h,
-        ...(run.transform ? { transform: run.transform } : {}),
-      };
-    })
-    .filter(({ width, height }) => width > 0 && height > 0)
-    .sort((left, right) => left.y - right.y || left.x - right.x);
-  const merged: DocxCommentHighlightRect[] = [];
-  for (const rect of rects) {
-    const previous = merged.at(-1);
-    if (
-      previous
-      && previous.y === rect.y
-      && previous.height === rect.height
-      && previous.transform === rect.transform
-    ) {
-      const left = Math.min(previous.x, rect.x);
-      const right = Math.max(previous.x + previous.width, rect.x + rect.width);
-      merged[merged.length - 1] = Object.freeze({
-        ...previous,
-        x: left,
-        width: right - left,
-      });
-    } else {
-      merged.push(Object.freeze({ ...rect }));
-    }
-  }
-  return Object.freeze(merged);
+  // The same boxes as the viewer's tint (overlay-geometry.ts): the glyphs of
+  // the anchored runs inside their clips, joined only where they touch.
+  return Object.freeze(overlayBoxes(runs)
+    .sort((left, right) => left.y - right.y || left.x - right.x)
+    .map((box) => Object.freeze(box)));
 }
 
 /** Resolve page-visible DOCX comments into UI-neutral threads and continuous
  * highlight rectangles. This absorbs thread ancestry, anchor joining, Word's
- * text-highlight bounds, and same-line run merging without owning any DOM,
+ * text-highlight bounds, and the joining of touching highlights without owning any DOM,
  * selection state, styling, or framework lifecycle. Invalid orphan/cyclic
  * replies are not promoted to roots. */
 export function resolveDocxCommentThreads(

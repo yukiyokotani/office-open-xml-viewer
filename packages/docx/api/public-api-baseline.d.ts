@@ -1339,6 +1339,19 @@ export interface DocTableRow {
     isHeader: boolean;
     cantSplit?: boolean;
 }
+export interface DocxClipRegion {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+    readonly transform?: string;
+    readonly rects?: readonly Readonly<{
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    }>[];
+}
 export type DocxCommentAnchorKind = 'range' | 'point' | 'fallback';
 export interface DocxCommentHighlightRect {
     readonly x: number;
@@ -1346,6 +1359,7 @@ export interface DocxCommentHighlightRect {
     readonly width: number;
     readonly height: number;
     readonly transform?: string;
+    readonly clips?: readonly Readonly<DocxClipRegion>[];
 }
 export interface DocxCommentMark {
     id: string;
@@ -1648,6 +1662,7 @@ export interface DocxTextRunInfo {
     transform?: string;
     hyperlink?: HyperlinkTarget;
     eastAsianVert?: boolean;
+    clips?: readonly Readonly<DocxClipRegion>[];
 }
 export interface DocxTextSelectionContext {
     readonly format: 'docx';

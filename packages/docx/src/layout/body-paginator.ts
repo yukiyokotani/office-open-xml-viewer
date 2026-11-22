@@ -1,3 +1,4 @@
+import { withoutParagraphDecoration } from './paragraph-visibility.js';
 import {
   NoteOverflowPolicy, NoteOverflowRecoveryRequired, attachNoteOverflowPolicy,
   noteOverflowPolicyOf, noteOverflowAllowed,
@@ -2450,7 +2451,8 @@ function* paginateBodyPassSteps(
   /** WORD_ANCHOR_HOST_NO_LINE_METRIC: acquire the floating drawings of a
    * paragraph that takes no flow (a collapsed or hidden mark holding only
    * them): no flow extent, spacing or page content, and nothing painted of
-   * its own (no border, shading or line number), as its empty counterpart. */
+   * its own (no list marker, border, shading or line number), as its empty
+   * counterpart. */
   const acquireAnchorsWithoutFlow = (block: BodyParagraphSourceInput): void => {
     const location = acquisitionLocation(state);
     const acquired = session.measureParagraph({
@@ -2461,13 +2463,12 @@ function* paginateBodyPassSteps(
       continuation: Object.freeze({ boundary: null }),
     });
     const pageHadContent = state.flow.pageHasContent;
-    // Its mark takes no flow and paints nothing of its own (no
-    // border, shading or line number, as its empty counterpart): the
-    // node holds only the drawings.
-    const { shading: _shading, lineNumbers: _lineNumbers, ...markless } = acquired.layout;
+    // Its mark takes no flow and paints nothing of its own (no list marker,
+    // border, shading or line number, as its empty counterpart): the node
+    // holds only the drawings, and its lines only where they are anchored.
     const accepted = acceptPageNode(
       state,
-      Object.freeze({ ...markless, borders: Object.freeze([]), ordinaryFlow: false }),
+      Object.freeze({ ...withoutParagraphDecoration(acquired.layout), ordinaryFlow: false }),
       block.source,
       0,
       paragraphFragmentStartKey(Object.freeze({ boundary: null })),

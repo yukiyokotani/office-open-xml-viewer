@@ -8,7 +8,9 @@ import type { TableLayoutSource } from './table-source-acquisition.js';
 import {
   acquireTableCellBlocks,
   cellParagraphOwnsNoFlow,
+  isSwallowedHiddenCellParagraph,
 } from './table-cell-blocks.js';
+import { withoutParagraphDecoration } from './paragraph-visibility.js';
 import type { ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { layoutTable, measureTableCellBlockFlowHeightPt, tableRowRuleInsetsPt } from './table.js';
 import { tableCellHorizontalSpacingInsets } from './table-columns.js';
@@ -840,7 +842,11 @@ export function acquireRetainedTable<State>(
             && dependencies.tableFormat(sourceElement).ordinaryFlow === false
           ) return [];
           return [{
-            layout,
+            // WORD_HIDDEN_CELL_PARAGRAPH_JOINS_NEXT: a paragraph joined into
+            // the next block lays out nothing of its own; the floating
+            // drawings it anchors stay (WORD_ANCHOR_HOST_NO_LINE_METRIC).
+            layout: layout.kind === 'paragraph' && isSwallowedHiddenCellParagraph(cell.content, sourceBlockIndex)
+              ? withoutParagraphDecoration(layout) : layout,
             sourceBlockIndex,
             ...(sourceElement?.type === 'paragraph' ? {
               keepLines: sourceElement.keepLines === true,

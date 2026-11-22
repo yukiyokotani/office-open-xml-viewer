@@ -35,6 +35,7 @@ function projectTextRun(
   geometry: TextRunGeometry,
   pointToCss: Matrix2DData,
   textAdvances: TextAdvanceLookup | undefined,
+  displayScale: Matrix2DData,
 ): DocxTextRunInfo {
   const { placement } = geometry;
   const origin = mapAffinePoint(pointToCss, placement.bounds);
@@ -44,6 +45,30 @@ function projectTextRun(
   const inlineScale = Math.hypot(pointToCss.a, pointToCss.b);
   const blockScale = Math.hypot(pointToCss.c, pointToCss.d);
   const transform = cssTransformFor(pointToCss);
+  // Every paint clip, placed like highlightBounds with its own orientation.
+  const clips = geometry.clips.map((paintClip) => {
+    const clipToCss = composeAffine(displayScale, paintClip.pointToPage);
+    const clipCorner = mapAffinePoint(clipToCss, paintClip.bounds);
+    const clipTransform = cssTransformFor(clipToCss);
+    const clipInline = Math.hypot(clipToCss.a, clipToCss.b);
+    const clipBlock = Math.hypot(clipToCss.c, clipToCss.d);
+    return Object.freeze({
+      x: clipCorner.xPt,
+      y: clipCorner.yPt,
+      width: paintClip.bounds.widthPt * clipInline,
+      height: paintClip.bounds.heightPt * clipBlock,
+      ...(clipTransform ? { transform: clipTransform } : {}),
+      // A union clip's rectangles, as offsets along its axes from its corner.
+      ...(paintClip.rects ? {
+        rects: Object.freeze(paintClip.rects.map((rect) => Object.freeze({
+          x: (rect.xPt - paintClip.bounds.xPt) * clipInline,
+          y: (rect.yPt - paintClip.bounds.yPt) * clipBlock,
+          width: rect.widthPt * clipInline,
+          height: rect.heightPt * clipBlock,
+        }))),
+      } : {}),
+    });
+  });
   const letterSpacingPt = placement.letterSpacingPt;
   const font = canvasFontString(
     placement.fontRoute,
@@ -101,7 +126,7 @@ function projectTextRun(
       ? { letterSpacingPx: letterSpacingPt * inlineScale }
       : {}),
     ...(placement.optionalHyphenGlyph ? {} : {
-      clusterBoxes: placement.clusterBoxes.map((box) => ({
+      clusterBoxes: geometry.clusterBoxes.map((box) => ({
         start: box.start, end: box.end, x: box.xPt * inlineScale, width: box.widthPt * inlineScale, rtl: box.rtl,
         ...(box.trackingExcluded ? { trackingExcluded: true as const } : {}),
         // The glyph box, where it is not the advance box.
@@ -109,14 +134,18 @@ function projectTextRun(
           ? { glyphX: box.glyphXPt * inlineScale, glyphWidth: box.glyphWidthPt * inlineScale } : {}),
         ...(box.crossPt !== undefined && box.crossWidthPt !== undefined
           ? { y: box.crossPt * blockScale, height: box.crossWidthPt * blockScale } : {}),
+        // The glyph's interval across the run, where it is neither the
+        // advance box's nor the run's font box.
         ...(box.glyphCrossPt !== undefined && box.glyphCrossWidthPt !== undefined
-          && (Math.abs(box.glyphCrossPt - box.crossPt!) > 1e-9 || Math.abs(box.glyphCrossWidthPt - box.crossWidthPt!) > 1e-9)
+          && (box.crossPt === undefined || Math.abs(box.glyphCrossPt - box.crossPt) > 1e-9
+            || Math.abs(box.glyphCrossWidthPt - box.crossWidthPt!) > 1e-9)
           ? { glyphY: box.glyphCrossPt * blockScale, glyphHeight: box.glyphCrossWidthPt * blockScale } : {}),
       })),
     }),
     ...(transform ? { transform } : {}),
     ...(placement.hyperlink ? { hyperlink: placement.hyperlink } : {}),
     ...(placement.tateChuYoko ? { eastAsianVert: true } : {}),
+    ...(clips.length > 0 ? { clips: Object.freeze(clips) } : {}),
   };
 }
 
@@ -134,6 +163,7 @@ export function textRunsForPage(
       geometry,
       composeAffine(displayScale, geometry.pointToPage),
       options.textAdvances,
+      displayScale,
     )
   ));
 }

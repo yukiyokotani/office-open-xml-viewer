@@ -5,6 +5,7 @@ import {
   translationAffine,
 } from './affine.js';
 import { sourceKey } from './source-key.js';
+import type { ClusterBox } from './visual-cluster-geometry.js';
 import { lineFrameTransform } from './line-frame.js';
 import type {
   DocumentLayout,
@@ -27,7 +28,13 @@ import type {
 
 export interface TextRunGeometry {
   readonly placement: SourceOwnedTextGeometry;
+  /** Where each cluster of the run is painted, from `placement.bounds.xPt`,
+   * by offset in its text (visual-cluster-geometry.ts). */
+  readonly clusterBoxes: readonly ClusterBox[];
   readonly pointToPage: Matrix2DData;
+  /** Every ancestor paint clip of the run, outermost first, in its retained
+   * local space (turned clips included): overlays clip with them. */
+  readonly clips: readonly ElementClipGeometry[];
   /** Canonical structural source of the owning paragraph. */
   readonly source: ParagraphLayout['source'];
   /** Source `w14:paraId` of the owning paragraph, when authored. */
@@ -38,6 +45,9 @@ export interface TextRunGeometry {
 export interface ElementClipGeometry {
   readonly bounds: LayoutRect;
   readonly pointToPage: Matrix2DData;
+  /** A clip that is a union of rectangles (a VML text box's textboxrect
+   * regions), in the space of `bounds`, which is their bounding box. */
+  readonly rects?: readonly LayoutRect[];
 }
 
 /** Retained DrawingML occurrence projected into physical page points. */
@@ -463,6 +473,8 @@ function visitParagraph(
             context.runs.push(Object.freeze({
               placement,
               pointToPage: linePointToPage,
+              clips: paragraphProjection.clips,
+              clusterBoxes: placement.clusterBoxes,
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }

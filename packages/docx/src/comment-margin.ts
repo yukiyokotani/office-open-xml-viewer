@@ -1,3 +1,5 @@
+import { clippedBoxBounds, OverlayClipFrames } from './run-clip.js';
+import { overlayBoxes, type OverlayBox } from './overlay-geometry.js';
 import {
   overlayPercent,
   type ViewerCommentsOptions,
@@ -116,60 +118,26 @@ function toMessage(comment: DocComment, occurrenceKey: string, index: number): R
 
 function createTint(
   layer: HTMLDivElement,
-  run: Readonly<DocxTextRunInfo>,
-  cssWidth: number,
-  cssHeight: number,
+  box: OverlayBox,
   active: boolean,
   accent: string,
+  clipFrames: OverlayClipFrames,
 ): HTMLDivElement {
+  // A clipped box also lies in containers of its clips, which cut it like
+  // the glyphs at any angle.
+  const frame = clipFrames.place(box);
   const tint = layer.ownerDocument.createElement('div');
   tint.style.cssText =
     `--ooxml-comment-author-accent:${accent};` +
-    `left:${overlayPercent(run.x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-    `width:${overlayPercent(run.w, cssWidth)};height:${overlayPercent(run.h, cssHeight)};`;
+    frame.position(0, 0) +
+    `width:${frame.width(box.width)};height:${frame.height(box.height)};`;
   tint.dataset.ooxmlCommentHighlight = '';
   tint.dataset.active = String(active);
-  if (run.transform) {
-    tint.style.transform = run.transform;
+  if (frame.orientation) {
+    tint.style.transform = frame.orientation;
   }
-  layer.appendChild(tint);
+  frame.parent.appendChild(tint);
   return tint;
-}
-
-function wordHighlightRun(run: Readonly<DocxTextRunInfo>): DocxTextRunInfo {
-  const bounds = run.highlightBounds;
-  return {
-    ...run,
-    x: bounds?.x ?? run.x,
-    y: bounds?.y ?? run.y,
-    w: bounds?.width ?? run.w,
-    h: bounds?.height ?? run.h,
-  };
-}
-
-/** Fill the whitespace between consecutive anchor runs on one rendered line.
- * Exact line geometry and transform equality are the boundary: this never uses
- * a proximity threshold and never joins different baselines or transforms. */
-function mergeSameLineRuns(
-  runs: readonly Readonly<DocxTextRunInfo>[],
-): Readonly<DocxTextRunInfo>[] {
-  const merged: DocxTextRunInfo[] = [];
-  for (const run of runs) {
-    const previous = merged.at(-1);
-    if (
-      previous &&
-      previous.y === run.y &&
-      previous.h === run.h &&
-      previous.transform === run.transform
-    ) {
-      const left = Math.min(previous.x, run.x);
-      const right = Math.max(previous.x + previous.w, run.x + run.w);
-      merged[merged.length - 1] = { ...previous, x: left, w: right - left };
-      continue;
-    }
-    merged.push({ ...run });
-  }
-  return merged;
 }
 
 /** Build one page's range tint and authored-order margin cards. A thread card is
@@ -214,29 +182,37 @@ export function buildDocxCommentMargin(
     direction?: 'ltr' | 'rtl';
   }>>();
   const surface = tintLayer.parentElement;
+  const clipFrames = new OverlayClipFrames(tintLayer, cssWidth, cssHeight);
   for (const { anchor, runs: anchorRuns } of resolvedPageAnchors) {
     if (!visibleThreadIds.has(anchor.commentId)) continue;
     const active = activeId === anchor.commentId;
-    for (const run of mergeSameLineRuns(anchorRuns.map(wordHighlightRun))) {
+    // The glyphs of the anchored runs inside their clips, joined only where
+    // they touch (overlay-geometry.ts), as the comment API reports them.
+    for (const box of overlayBoxes(anchorRuns)) {
       const tint = createTint(
         tintLayer,
-        run,
-        cssWidth,
-        cssHeight,
+        box,
         active,
         accentById.get(anchor.commentId) ?? readOnlyCommentAuthorAccent(undefined),
+        clipFrames,
       );
-      const rect = run.transform && surface
-        ? relativeElementRect(tint, surface)
-        : Object.freeze({ x: run.x, y: run.y, width: run.w, height: run.h });
+      const plain = Object.freeze({ x: box.x, y: box.y, width: box.width, height: box.height });
+      // A clipped box anchors its marker to its visible part.
+      const visible = box.clips ? clippedBoxBounds(box, box.clips) : undefined;
+      const rect = visible
+        ? Object.freeze(visible)
+        : box.transform && surface
+          ? relativeElementRect(tint, surface)
+          : plain;
       const list = anchorRects.get(anchor.commentId) ?? [];
       if (!anchorRects.has(anchor.commentId)) anchorRects.set(anchor.commentId, list);
-      const resolvedRect = rect ?? Object.freeze({ x: run.x, y: run.y, width: run.w, height: run.h });
+      const resolvedRect = rect ?? plain;
       list.push(resolvedRect);
       if (!markerAnchorById.has(anchor.commentId)) {
+        const direction = anchorRuns[0]?.direction;
         markerAnchorById.set(anchor.commentId, Object.freeze({
           rect: resolvedRect,
-          ...(run.direction ? { direction: run.direction } : {}),
+          ...(direction ? { direction } : {}),
         }));
       }
     }

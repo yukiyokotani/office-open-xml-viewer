@@ -1209,10 +1209,23 @@ function markOnlyViewFact(
 
 /** A vanished, inkless body paragraph acquires no block: body flow consumes
  * its source (WORD_HIDDEN_PARAGRAPH_UNJOINABLE_PAGE_BREAK owns its break).
- * Model paragraphs keep unavailable drawings in a sidecar, so they are checked
- * here beside layout's isSwallowedHiddenParagraph. */
+ * Model paragraphs keep unavailable drawings in a sidecar, so the paragraph
+ * is classified over its runs with them: an inline unavailable drawing is
+ * ink, a floating one is no flow content, like any floating drawing
+ * (isSwallowedHiddenParagraph). */
 function isSwallowedHiddenBodyParagraph(paragraph: Readonly<DocParagraph>): boolean {
-  return !paragraphHasUnavailableDrawing(paragraph) && isSwallowedHiddenParagraph(paragraph);
+  if (!paragraphHasUnavailableDrawing(paragraph)) return isSwallowedHiddenParagraph(paragraph);
+  return isSwallowedHiddenParagraph({
+    markVanish: paragraph.markVanish,
+    runs: paragraphRunsWithUnavailableDrawings(paragraph) as Parameters<typeof isSwallowedHiddenParagraph>[0]['runs'],
+  });
+}
+
+/** Whether a paragraph anchors a floating drawing, an unavailable one
+ * included. */
+function anchorsFloatingDrawing(paragraph: Readonly<DocParagraph>): boolean {
+  const runs = paragraphRunsWithUnavailableDrawings(paragraph) as Parameters<typeof anchorFreeRuns>[0];
+  return anchorFreeRuns(runs) !== runs;
 }
 
 function bodyLayoutSequenceInput(
@@ -1253,7 +1266,7 @@ function bodyLayoutSequenceInput(
         ...paragraphFrameFact(element),
         // WORD_ANCHOR_HOST_NO_LINE_METRIC: the floating drawings it anchors
         // are still acquired, without flow (body-paginator).
-        ...(element.runs && anchorFreeRuns(element.runs) !== element.runs
+        ...(element.runs && anchorsFloatingDrawing(element)
           ? { anchors: acquiredBodyParagraph(element, source) } : {}),
       });
     }

@@ -5,8 +5,13 @@ import { textRunsForPage } from './text-run-projection.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
 import { resolveCommentAnchorRuns } from './comments.js';
 import { visualBoundaryXPt, visualClusterStartXPt } from './layout/visual-cluster-geometry.js';
+import { paintLayoutPageContent } from './paint/canvas-page.js';
+import {
+  fakeElement as fakeLayer, glyphRecordingCanvas, intersect, layerBoxes, oracleMeasureContext, withAdvances, withFakeDocument,
+  type PageBox,
+} from './test-support/painted-glyphs.test-support.js';
 import type { AnchorAcquisitionInput } from './layout/anchor-input.js';
-import type { ParagraphLayout } from './layout/types.js';
+import type { DocumentLayout, ParagraphLayout } from './layout/types.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRunInfo } from './types.js';
 
 /**
@@ -339,50 +344,44 @@ function findHighlights(runs: DocxTextRunInfo[]): string[] {
   }
 }
 
-/** Each character's highlight that is not the glyph box of a cluster showing
- * that character: where paint draws the glyph, from its pen (the left edge,
- * or the leading right edge of a right-to-left cluster), at its own drawn
- * advance (the retained glyph advance, or a floored glyph's drawn one). */
-function misplacedHighlights(runs: DocxTextRunInfo[], laidOut: readonly ParagraphLayout[]): string[] {
-  const painted = new Map<string, Array<readonly [number, number]>>();
-  for (const subject of laidOut) {
-    for (const line of subject.lines) {
-      for (const placement of line.placements) {
-        if (placement.kind !== 'text') continue;
-        placement.clusters.forEach((cluster, index) => {
-          const shown = placement.text.slice(cluster.range.start - placement.range.start, cluster.range.end - placement.range.start);
-          const floored = placement.paintOps.find((operation) => operation.range.start === cluster.range.start
-            && operation.naturalAdvancePt !== undefined)?.naturalAdvancePt;
-          const glyph = cluster.glyphAdvancePt ?? floored ?? cluster.advancePt;
-          painted.set(shown, [...(painted.get(shown) ?? []),
-            [visualClusterStartXPt(placement, index), glyph], [visualBoundaryXPt(placement, index) - glyph, glyph]]);
-        });
-      }
-    }
+/** Each character's highlight that is not, on all four sides, the box a
+ * glyph of that character is painted in (inside its clip): the page is
+ * painted on the recording canvas, and every single-character highlight the
+ * find layer draws is compared with what the canvas drew. */
+function misplacedHighlights(runs: DocxTextRunInfo[], page: DocumentLayout['pages'][number]): string[] {
+  const { canvas, glyphs } = glyphRecordingCanvas();
+  paintLayoutPageContent(page, {
+    ctx: canvas.getContext('2d') as CanvasRenderingContext2D, scale: 1, dpr: 1, resources: { paint() {} } as never,
+  });
+  const painted = new Map<string, PageBox[]>();
+  for (const glyph of glyphs) {
+    const visible = intersect(glyph.box, glyph.clip);
+    if (visible) painted.set(glyph.character, [...(painted.get(glyph.character) ?? []), visible]);
   }
-  const scope = globalThis as { document?: unknown };
-  const previous = scope.document;
-  scope.document = { createElement: fakeElement };
+  const { widthPt, heightPt } = page.geometry;
   const misplaced: string[] = [];
-  try {
+  withFakeDocument(() => {
     runs.forEach((run, runIndex) => {
       for (let start = 0; start < run.text.length; start += 1) {
-        const layer = fakeElement();
+        const layer = fakeLayer();
         buildDocxHighlightLayer(layer as never, runs, [{ active: false, slices: [{ runIndex, start, end: start + 1 }] }],
-          100, 100, measureForFont);
-        const css = layer.children[0]?.style.cssText ?? '';
-        const left = /left:([-\d.e]+)%/.exec(css)?.[1];
-        const width = /width:([-\d.e]+)%/.exec(css)?.[1];
-        if (left === undefined || width === undefined) continue;
-        if (!(painted.get(run.text[start]!) ?? []).some(([xPt, widthPt]) =>
-          Math.abs(xPt - Number(left)) < 1e-6 && Math.abs(widthPt - Number(width)) < 1e-6)) {
-          misplaced.push(`${JSON.stringify(run.text)}[${start}] at ${left} width ${width}`);
+          widthPt, heightPt, measureForFont);
+        for (const box of layerBoxes(layer, widthPt, heightPt)) {
+          // Whitespace an operation leaves out (trailing spaces of
+          // right-to-left paint) is drawn nowhere: its highlight is its own
+          // advance, over no painted glyph.
+          if (run.text[start] === ' ' && ![...painted.values()].flat().some((glyph) => intersect(glyph, {
+            left: box.left + 1e-6, top: box.top + 1e-6, right: box.right - 1e-6, bottom: box.bottom - 1e-6,
+          }) !== null)) continue;
+          if (!(painted.get(run.text[start]!) ?? []).some((glyph) => Math.abs(glyph.left - box.left) < 1e-6
+            && Math.abs(glyph.top - box.top) < 1e-6 && Math.abs(glyph.right - box.right) < 1e-6
+            && Math.abs(glyph.bottom - box.bottom) < 1e-6)) {
+            misplaced.push(`${JSON.stringify(run.text)}[${start}] at [${box.left}, ${box.top} .. ${box.right}, ${box.bottom}]`);
+          }
         }
       }
     });
-  } finally {
-    scope.document = previous;
-  }
+  });
   return misplaced;
 }
 
@@ -398,8 +397,12 @@ function paragraphs(node: unknown, found: ParagraphLayout[] = []): ParagraphLayo
 function observe(testCase: Case, subject: readonly Run[], anchorAt: number, anchored: boolean) {
   const measuredBefore = measuredUnits;
   const built = model(testCase, subject);
-  const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
-    { currentDateMs: 0 });
+  // The recording canvas' own metrics, so what it paints is what was measured.
+  return withAdvances(() => 0.5, () => observeLayout(testCase, layoutDocument(built.model,
+    createLayoutServices(built.model, { measureContext: oracleMeasureContext() }), { currentDateMs: 0 }), measuredBefore, anchorAt, anchored));
+}
+
+function observeLayout(testCase: Case, layout: DocumentLayout, measuredBefore: number, anchorAt: number, anchored: boolean) {
   void anchorAt;
   void anchored;
   const selection: unknown[] = [];
@@ -443,7 +446,7 @@ function observe(testCase: Case, subject: readonly Run[], anchorAt: number, anch
   });
   const laidOut = paragraphs(layout.pages.map((page) => page.layers));
   const misplaced = testCase.naturalSpacing && layout.pages.length === 1
-    ? misplacedHighlights(textRunsForPage(layout, 0, { scale: 1 }), laidOut) : [];
+    ? misplacedHighlights(textRunsForPage(layout, 0, { scale: 1 }), layout.pages[0]!) : [];
   // Selection rectangles of one line cover disjoint intervals.
   const overlapping: string[] = [];
   if (testCase.naturalSpacing) {
