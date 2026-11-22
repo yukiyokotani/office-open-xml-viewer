@@ -62,7 +62,8 @@ function markdownLinks(text) {
   const body = text
     .replace(FENCED_BLOCK, '')
     .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/`[^`\n]*`/g, '');
+    // A code span may wrap across lines.
+    .replace(/`[^`]*`/g, '');
   const label = (raw) => raw.trim().replace(/\s+/g, ' ').toLowerCase();
   const definitions = new Map();
   const prose = body.replace(/^ {0,3}\[([^\]]+)\]:[ \t]*<?(\S+?)>?(?:[ \t]+.*)?$/gm, (_, name, target) => {
@@ -135,6 +136,7 @@ test('Markdown links are the destinations a reader can follow', () => {
   ]);
   assert.deepEqual(markdownLinks('<img src="docs/images/icon.png" width="80" alt="icon" />'), ['docs/images/icon.png']);
   assert.deepEqual(markdownLinks('See <https://example.org/docs/a.md> and <span>text</span>.'), ['https://example.org/docs/a.md']);
+  assert.deepEqual(markdownLinks('Example: `wrapped\n[fake](docs/missing.md)` end.'), []);
   assert.deepEqual(markdownLinks('<!-- [hidden](h.md) -->\n`[code](c.md)`\n\n[unused]: u.md\n'), []);
   assert.deepEqual(markdownLinks('```\n[fenced](f.md)\n```\n[guide][g]\n\n[g]: missing.md\n'), ['missing.md']);
   assert.deepEqual(markdownLinks('1. Run:\n\n   ```bash\n   echo "[guide](docs/example.md)"\n   ```\n'), []);
@@ -274,7 +276,7 @@ const withoutComments = (text) =>
 
 // Shipped source of a package or the site: not a test, story, bench or
 // test-support module.
-const isShippedSource = (path) => !/\.(test|spec|stories|test-support|bench)\.[cm]?[jt]sx?$/.test(path);
+const isShippedSource = (path) => !/(\.(test|spec|stories|test-support|bench)|-test-dom)\.[cm]?[jt]sx?$/.test(path);
 
 // Repository paths of the docs/ pages a consumer-facing file links to.
 // Markdown: inline and reference link destinations, relative or the page's
@@ -323,6 +325,16 @@ function linkedDocs(path, text, blobUrl, renderedProperties = new Set()) {
 const renderedLinkProperties = (text) =>
   new Set([...withoutComments(text).matchAll(/href=\{\s*[\w$]+(?:\?)?\.([\w$]+)\s*\}/g)].map((match) => match[1]));
 
+// A module's name as an import specifier ends with it: file name without extension.
+const moduleName = (path) => path.split('/').at(-1).replace(/\.[cm]?[jt]sx?$|\.astro$/, '');
+// Names of the modules a source text imports.
+const importedModuleNames = (text) =>
+  new Set(
+    [...withoutComments(text).matchAll(/\bfrom\s+["']([^"']+)["']/g)].map((match) =>
+      moduleName(match[1].split('/').at(-1)),
+    ),
+  );
+
 // Guides that no consumer surface links to and no supported release retains.
 const guidesToDelete = (guides, linked, retained) =>
   guides.filter((guide) => !linked.has(guide) && !retained.has(guide));
@@ -356,8 +368,14 @@ test('a consumer link to a guide is a real link destination, not incidental text
     ['detailsHref', 'url'],
   );
   assert.deepEqual([...renderedLinkProperties('<!-- <a href={o.detailsHref}>d</a> -->')], []);
+  assert.deepEqual(
+    [...importedModuleNames("import { A } from '../lib/api-reference';\nimport b from './b.js';\n// import c from './c';")],
+    ['api-reference', 'b'],
+  );
+  assert.equal(moduleName('site/src/lib/api-reference.ts'), 'api-reference');
   assert.equal(isShippedSource('packages/docx/src/test-support/tab-fitting.test-support.ts'), false);
   assert.equal(isShippedSource('packages/docx/src/a.test.ts'), false);
+  assert.equal(isShippedSource('packages/xlsx/src/viewer-destroy-test-dom.ts'), false);
   assert.equal(isShippedSource('packages/core/src/fonts/deprecations.ts'), true);
   assert.deepEqual(links('README.md', 'See <https://github.com/o/r/blob/main/docs/example.md>.'), ['docs/example.md']);
   assert.deepEqual(links('site/src/pages/a.astro', '<!-- https://github.com/o/r/blob/main/docs/example.md -->'), []);
@@ -408,13 +426,15 @@ test('docs/ holds only procedures, the core beliefs, linked user guides and thei
       (/^packages\/[^/]+\/src\/.*\.[cm]?[jt]s$/.test(path) && isShippedSource(path)),
   );
   const texts = new Map(surfaces.map((surface) => [surface, read(join(ROOT, surface))]));
-  const rendered = new Set(
-    [...texts].filter(([surface]) => surface.startsWith('site/')).flatMap(([, text]) => [...renderedLinkProperties(text)]),
-  );
+  const siteTexts = [...texts].filter(([surface]) => surface.startsWith('site/'));
+  const rendered = new Set(siteTexts.flatMap(([, text]) => [...renderedLinkProperties(text)]));
+  // Data properties count only in a module that another site file imports.
+  const imported = new Set(siteTexts.flatMap(([, text]) => [...importedModuleNames(text)]));
   const linked = new Set();
   for (const [surface, text] of texts) {
     if (!text.includes('docs/')) continue;
-    for (const target of linkedDocs(surface, text, MAIN_BLOB_URL, rendered)) linked.add(target);
+    const properties = imported.has(moduleName(surface)) ? rendered : new Set();
+    for (const target of linkedDocs(surface, text, MAIN_BLOB_URL, properties)) linked.add(target);
   }
   const guides = files.filter((path) => /^docs\/[^/]+\.md$/.test(path) && path !== 'docs/README.md');
   assert.deepEqual(

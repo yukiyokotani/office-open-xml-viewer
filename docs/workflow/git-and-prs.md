@@ -41,8 +41,8 @@ How work moves from a branch to `main`, and what may be committed.
 - Open every PR with `gh pr create --draft`. Keep it draft, including through
   rebases, until the adversarial review has passed and the VRT is done.
 - Merge gate, one PR at a time in dependency order: adversarial review rounds
-  until PASS → one scoped VRT against the head of the PR's base branch, which
-  is the latest `main` except for a backport ([VRT](vrt.md)) →
+  until PASS → one scoped VRT against the baseline that
+  [VRT](vrt.md#choosing-the-baseline) selects for the PR →
   `gh pr ready` → CI green on the current head → merge with
   `gh pr merge <n> --merge --match-head-commit <full sha>`. Copy SHAs from
   `gh pr view <n> --json headRefOid` output; never retype or expand one.

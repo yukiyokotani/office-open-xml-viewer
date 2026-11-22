@@ -13,8 +13,8 @@
 //! The directory must not exist yet. `--used` keeps only images referenced by
 //! explicitly owned plain picture objects (`inspect_xls_pictures`). A catalog
 //! entry is not proof that an image is displayed. Extracted images can hold
-//! private document content and must stay local. The `inspection` feature is
-//! excluded from wasm32 builds.
+//! private document content and must stay local. The inspection APIs are
+//! available only on native targets.
 mod support;
 use std::io::Write;
 
