@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Public API compatibility is proved by comparing the declaration surface
+// generated from the build with the committed baseline, not by reading a
+// subset of source files.
 
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';

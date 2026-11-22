@@ -1,3 +1,12 @@
+// Comments and change history are separate review features with different
+// OOXML source models. They are never merged into one cross-format
+// `ReviewItem` union, and their record and geometry types stay
+// format-specific. Revision records are exposed only where a persisted source
+// model is parsed (DOCX `document.revisions`); XLSX and PPTX expose no
+// placeholder method, because an empty array would read as "no changes"
+// rather than "not implemented". Comparing two presentations is a separate
+// operation, not a revision record of one presentation.
+
 /** Visibility policy shared by the built-in read-only comment UIs. */
 export interface ViewerCommentsOptions {
   /** Include resolved or closed threads. DOCX/PPTX default false; XLSX default true. */

@@ -211,6 +211,10 @@ export interface LoadOptions {
    * use the library defaults. A positive safe integer overrides a default;
    * `null` disables that configurable limit only. Limits are admission policy,
    * not guarantees of exact browser-process memory use.
+   *
+   * Limits apply per package session. A Viewer reload keeps the previous
+   * engine until the new load succeeds, so two sessions coexist during that
+   * window and their combined peak is not bounded by these limits.
    */
   resourceLimits?: OoxmlResourceLimits;
   /**

@@ -5,8 +5,10 @@ evidence-backed findings with an exact code reference or a reproducible command.
 
 ## Workflow
 
-1. Read `AGENTS.md`, the [core beliefs](../design-docs/core-beliefs.md) and
-   [`docx-layout-engine-redesign.md`](../docx-layout-engine-redesign.md) completely.
+1. Read `AGENTS.md` and the [core beliefs](../design-docs/core-beliefs.md)
+   completely. The layout architecture is stated by the modules under
+   `packages/docx/src/layout/` and `packages/docx/src/paint/`, their header
+   comments, and the checkers this audit runs.
 2. Inspect the complete change against `main`; do not limit review to the latest
    commit. Read the owning modules and focused tests, not only the diff.
 3. Consult the relevant local `spec/` material before judging OOXML behavior.

@@ -1,5 +1,18 @@
 -- Local verification only. Never shipped with the legacy readers.
 -- The caller must provide a disposable copy and a fresh output path.
+--
+--   osascript packages/legacy-office/tools/legacy-office-export.applescript \
+--     doc|xls|ppt disposable-copy.doc fresh-output.pdf
+--
+-- Opens the copy in installed Microsoft Office for macOS and exports a PDF,
+-- the visual reference for the legacy survey. Requires macOS automation
+-- permission for each Office application. Runs are sequential, and an Office
+-- failure stops the run rather than leaving documents or dialogs open.
+-- Each application must report its automation security and confirm that
+-- macros are disabled before a document is opened; Word and Excel link
+-- updates are disabled too. A build that cannot report the setting is
+-- refused. Do not weaken this guard to get a passing run. Originals and
+-- existing references are never changed; PDFs and page images stay local.
 on sameLocalFile(actualPath, expectedPath)
     -- Office can return a different symbolic-link spelling of the same path.
     -- Resolve both existing files outside the application's terminology scope.

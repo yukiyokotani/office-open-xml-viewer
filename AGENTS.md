@@ -20,8 +20,11 @@ viewers.
 ## Invariants
 
 1. Knowledge that is not in this repository does not exist for other agents.
-   Settle rules in `docs/` or beside the implementing source, not in chat,
-   handoff notes or private agent memory.
+   Express a decision in source code first, then in a comment beside the
+   source, then in the issue or PR. Do not add design documents, plans or
+   audits; `docs/` holds procedures, policy and user guides only. A change
+   that makes a documented statement false corrects or deletes it in the same
+   PR ([documentation](docs/workflow/documentation.md)).
 2. A browser library cannot carry Office's fonts, so its rendering never
    matches Office exactly, and exact match is not the goal. Aim for
    reasonable rendering whose layout does not break
@@ -55,7 +58,7 @@ viewers.
 | finishing a feature or fix | [`docs/workflow/adversarial-review.md`](docs/workflow/adversarial-review.md) |
 | changing DOCX layout architecture | [`docs/workflow/docx-architecture-audit.md`](docs/workflow/docx-architecture-audit.md) |
 | needing Office ground truth (controls, PDF exports) | [`docs/workflow/office-reference-export.md`](docs/workflow/office-reference-export.md) |
-| writing docs, README text or release notes | [`docs/workflow/documentation-style.md`](docs/workflow/documentation-style.md) |
+| recording a decision, or writing, moving or deleting docs | [`docs/workflow/documentation.md`](docs/workflow/documentation.md) |
 | preparing a release or patch release | [`docs/workflow/release.md`](docs/workflow/release.md) |
 | looking for design contracts and guides | [`docs/README.md`](docs/README.md) (index of all docs) |
 | editing one package | that package's `AGENTS.md` |
@@ -64,9 +67,13 @@ viewers.
 
 - `AGENTS.md` (this file) and `packages/<name>/AGENTS.md` — short maps. A
   package file adds package-specific facts and does not repeat this one.
-- `docs/design-docs/` — beliefs and policy; the other design contracts stay at
-  the top of `docs/`.
-- `docs/workflow/` — procedures and the rules that govern them.
+- Source code and the comments beside it — every design decision and its
+  rationale. There are no design documents.
+- `docs/design-docs/core-beliefs.md` — the policy every change is reviewed
+  against.
+- `docs/workflow/` — repeated procedures and the rules that govern them.
+- `docs/*.md` — guides for library users that a README, the site or shipped
+  code links to.
 - `docs/README.md` — the index; every document in `docs/` is listed there.
 - `.agents/skills/<name>/SKILL.md` — thin pointers that load a
   `docs/workflow/` page on demand. Codex reads `.agents/skills/`; Claude Code
@@ -74,10 +81,11 @@ viewers.
   `../../.agents/skills/<name>`. Skills hold no content of their own.
 - `.claude/CLAUDE.md` and `packages/<name>/CLAUDE.md` — one-line imports of
   the matching `AGENTS.md` for Claude Code.
+- `ast-grep/` — lint rules (`rules/`), shared matchers (`utils/`) and rule
+  tests (`tests/`), configured by `sgconfig.yml`.
 
-Add knowledge to `docs/`, list it in `docs/README.md`, and link it from here
-only if an agent needs to find it from the entry point. Do not add
-tool-specific rule files. `scripts/check-agent-instructions.test.mjs` (part of
-`pnpm test`) checks the line and byte limits of every `AGENTS.md`, that every
-document is indexed, that relative links resolve, and that every skill is a
-linked pointer.
+Do not add tool-specific rule files. `scripts/check-agent-instructions.test.mjs`
+(part of `pnpm test`) checks the limits of every `AGENTS.md`, the index, links,
+named paths and scripts, the allowed document locations and the skills;
+[documentation](docs/workflow/documentation.md) lists the checks and the
+gardening pass that covers what they cannot.

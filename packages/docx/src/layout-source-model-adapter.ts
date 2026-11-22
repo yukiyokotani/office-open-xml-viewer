@@ -46,6 +46,11 @@ import type { SourceRef } from './layout/types.js';
 import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
 import { defaultSectionGeometry } from './layout/context.js';
 
+/** The public compatibility model and the sealed layout source are separate
+ * ownership graphs, so mutating the public model can never change retained
+ * layout. Caller-owned input is detached one logical block at a time (at most
+ * one table copied at once); exclusively owned input is consumed in place.
+ * Neither path makes a whole-document deep copy. */
 export interface LayoutSourceModelAdapter {
   /** Stable public compatibility model, intentionally outside the source graph. */
   readonly document: DocxDocumentModel;

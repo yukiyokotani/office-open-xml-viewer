@@ -2,7 +2,15 @@
 // Extracts ECMA-376 preset shape definitions from LibreOffice's
 // presetShapeDefinitions.xml into a compact JSON the runtime engine consumes.
 //
-// Usage: node scripts/extract-presets.mjs <input.xml> <output.json>
+// Input: scripts/preset-shape-definitions.xml, a verbatim copy of LibreOffice's
+// oox/source/drawingml/customshapes/presetShapeDefinitions.xml (MPLv2;
+// https://github.com/LibreOffice/core). It transcribes the ECMA-376 Part 1
+// §20.1.9 preset geometry (avLst, gdLst, pathLst). The XML stays in the tree so
+// the generated JSON can be regenerated and audited against it.
+//
+// Usage (from packages/pptx):
+//   node scripts/extract-presets.mjs scripts/preset-shape-definitions.xml \
+//     ../core/src/shape/preset-geometry/presets.json
 
 import fs from 'node:fs';
 

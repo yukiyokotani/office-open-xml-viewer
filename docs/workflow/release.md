@@ -36,7 +36,8 @@ there.
 
 1. Update README screenshots in `docs/images/{pptx,docx,xlsx}.png` with
    `pnpm screenshots:readme`.
-2. Review README against the current implementation:
+2. Run the gardening pass in [documentation](documentation.md#gardening-pass)
+   for a minor release, and review README against the current implementation:
    - ESM-only package format,
    - install/import examples,
    - feature support table,
@@ -84,12 +85,12 @@ there.
 10. Create the GitHub Release with notes based on the changelog and a full
     changelog comparison link.
 
-Reference images under `tests/visual/references/` are outside the release
+Reference images under `packages/*/tests/visual/references/` are outside the release
 checklist unless the user explicitly asks to update them.
 
 ## Release notes
 
-Follow the [documentation style](documentation-style.md): lead with the
+Follow the [documentation style](documentation.md#style): lead with the
 visible outcome, say whether migration is required, and put any technical
 qualification in a final `Technical note` section.
 

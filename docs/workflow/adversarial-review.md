@@ -46,7 +46,11 @@ reproducible command.
 - **Regression evidence:** run focused behavioral tests plus the broadest
   proportionate cross-package checks. For renderer changes, use the previous
   renderer as the self-VRT oracle and keep Office-reference fidelity
-  evaluation separate. Investigate every unexplained difference.
+  evaluation separate. Investigate every unexplained difference. For DOCX
+  layout, normalized geometry (page count, line ranges, coordinates, table
+  continuations, page layers) is the primary gate and pixel VRT is
+  supplementary; cross-browser checks compare authored geometry only, not
+  natively shaped text coordinates.
 - **DOCX architecture:** after major DOCX layout, pagination, measurement,
   paint, parser-model, worker, or compatibility changes, also run the
   [DOCX architecture audit](docx-architecture-audit.md).

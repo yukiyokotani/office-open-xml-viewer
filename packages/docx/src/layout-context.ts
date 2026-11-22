@@ -86,6 +86,11 @@ export type StoryKind =
 
 export type ContainerFrame = { readonly kind: 'tableCell' };
 
+/** Story and container are orthogonal. `story` names the WordprocessingML
+ * content source; `containers` is the stack of nested layout environments
+ * inside it. A table cell is a container within a body, header, footer, note
+ * or text-box story, never a story of its own, so nested tables push frames
+ * instead of changing the story. */
 export interface StoryContext {
   readonly story: StoryKind;
   readonly containers: readonly ContainerFrame[];

@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { breakDrawingMlText, type DrawingMlInputRun } from './index.js';
 
 // Synthetic advances keep the test independent of the host Canvas fonts. The
-// assertions are the line choices in the matched Office wrap controls (C00–C11).
+// assertions are the line choices in the matched Office wrap controls (C00–C11):
+// identical `a:txBody` runs, explicit insets, `wrap="square"` and `noAutofit`
+// in a PowerPoint shape and an Excel `xdr:oneCellAnchor` shape of the same
+// size, exported to PDF by Office for Mac 16.113.2. Both hosts produced the
+// same line sets. PDF text extraction cannot show trailing spaces (C05–C07) or
+// tell NBSP from a space (C10), so those cases assert line partitions only.
+// C08 records one run-seam result; it is not a general kinsoku override.
 const measure = (value: string): number =>
   [...value].reduce((width, ch) => width + (/\p{Script=Han}/u.test(ch) || ch === '、' ? 20 : 10), 0);
 

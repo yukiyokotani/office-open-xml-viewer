@@ -1,6 +1,14 @@
 type RuntimeState = 'uninitialized' | 'ready' | 'poisoned';
 
-/** Environment-neutral realm initialization, generation, and poison fan-out. */
+/**
+ * Environment-neutral realm initialization, generation, and poison fan-out.
+ *
+ * wasm-bindgen keeps one module instance per JavaScript realm, so sessions
+ * never reinitialize WASM themselves. A trap poisons the whole generation:
+ * every live session registered through `onPoison` fails, and the next
+ * `ensureReady()` performs the single reinitialization. Sessions from the old
+ * generation stay failed; only sessions opened afterwards use the new one.
+ */
 export class RuntimeGeneration<TFailure extends Error> {
   private state: RuntimeState = 'uninitialized';
   private generationValue = 0;

@@ -4,6 +4,13 @@
  * anchor projection (DOCX text ranges, PPTX slide coordinates); this module
  * owns the deliberately plain, themeable card list. Applications that need a
  * different structure use the format packages' comment and geometry APIs.
+ *
+ * The public styling contract is the `.ooxml-comment-*` classes, the
+ * `data-active`/`data-focused` card states, and the CSS custom properties.
+ * Other `data-ooxml-comment-*` attributes exist for Viewer behaviour and tests
+ * and are not a styling or DOM-structure contract. There is deliberately no
+ * card-mount callback or framework adapter: such a hook would still constrain
+ * component ownership and duplicate framework lifecycle rules.
  */
 
 export {

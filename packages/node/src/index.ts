@@ -1,3 +1,7 @@
+// Node entry: every parse goes through an owned asynchronous session
+// (`open*`) or an asynchronous materializer built on that same session. There
+// is deliberately no synchronous wrapper; Worker threads and `Atomics.wait`
+// must not be used to imitate one.
 export {
   materializePptxPresentation,
   openPptxPresentation,

@@ -1,3 +1,8 @@
+// Correlated pull protocol shared by every format: correlation, session,
+// operation and generation identities, byte credit, acknowledgement,
+// cancellation, usage and close. Format payloads stay opaque (`TPayload`);
+// there is deliberately no common page/slide/row chunk type, because unit
+// boundaries and readiness barriers belong to each format.
 import type { WorkerBridgeTransport, WorkerRequestOptions } from './bridge.js';
 import type { OoxmlResourceUsageSnapshot } from '../errors/ooxml-error.js';
 import {

@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+// Reports per-format archive entry counts (maximum, p95) for one or more
+// corpus roots, without recording filenames or document content. Use it to
+// re-check the `maxArchiveEntries` default in
+// packages/ooxml-common/resource-policy.json: the default should leave large
+// headroom over observed corpora and stay independent of (stricter than) the
+// non-disableable hard ceiling in the same file.
+//
+// Usage: pnpm measure:archive-entries -- <corpus-root> [more-roots...]
 
 import { readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';

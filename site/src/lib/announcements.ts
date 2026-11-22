@@ -1157,7 +1157,8 @@ if (context?.kind === 'text') {
         bullets: [
           'Replace xlsx_get_sheet_names with xlsx_parse.',
           'Replace docx_get_paragraph with docx_get_body_element.',
-          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element.',
+          'Replace pptx_get_shape and pptx_get_shape_text with pptx_get_element. Rename the shape_index argument to element_index; for the old text-only tool, read textBody from the element result.',
+          'docx_get_body_element keeps the path and index arguments of docx_get_paragraph; the indexed body item can be a paragraph or a table.',
           'Replace ooxml_get_active_selection with ooxml_get_active_context.',
         ],
       },
@@ -1315,7 +1316,7 @@ try {
       {
         title: 'Render one XLSX sheet into a canvas',
         paragraphs: [
-          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs, footer controls or a native scrollbar.',
+          'XlsxSheetViewer mounts one active worksheet viewport into a caller-owned canvas and includes sheet navigation, logical viewport, selection, search and zoom APIs without workbook tabs or footer controls. Native worksheet scrollbars are shown by default; set showScrollbars: false only when the host provides its own viewport navigation.',
           'This is an XLSX-specific Viewer boundary. A worksheet is not treated as equivalent to a DOCX page or PPTX slide; each format keeps the Viewer split that matches its own document model.',
           'fromWorkbook() does not materialize an arbitrary first worksheet. The first goToSheet(index) materializes only the requested sheet, which keeps parse-once multi-window integrations efficient. The full XlsxViewer still starts its initial sheet display immediately.',
         ],

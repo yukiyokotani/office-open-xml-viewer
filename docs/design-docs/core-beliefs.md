@@ -83,7 +83,7 @@ it for removal.
 ## Packaging and resources
 
 - Admit input by actual work only: the parser's per-entry and aggregate
-  inflation accounting (`docs/ooxml-resource-governance-design.md`). Never add
+  inflation accounting (`packages/ooxml-common/src/resource.rs`). Never add
   checks on compressed or file size.
 - Classic charts ship by default; ChartEx is an opt-in TypeScript module. Keep
   one WASM module per format; do not split parsers into extra lazily loaded
@@ -135,6 +135,8 @@ presets.
   `packages/core`) where possible. Do not duplicate pure parsing predicates or
   common type definitions unless the format truly diverges.
 - Avoid false abstraction. Renderer logic tightly coupled to a package's
-  layout model may stay local.
+  layout model may stay local. A new shared type in `core` or `ooxml-common`
+  names its common normative owner (the ECMA-376 section) and at least two
+  format consumers; matching field names alone are not a reason to share.
 - Cross-package fixes may touch `core` / `ooxml-common` and multiple packages
   in one PR when that is the coherent unit of work.

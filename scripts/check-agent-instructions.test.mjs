@@ -9,8 +9,14 @@
 // Codex finds them) are thin pointers into docs/workflow/; Claude Code reaches
 // each one through a relative link in .claude/skills, so the link works in
 // every checkout and worktree.
+//
+// The same suite keeps the documentation from accumulating: docs/ may hold
+// only procedures, the core beliefs and user guides something consumer-facing
+// links to, Markdown may not appear elsewhere under other names, and the
+// paths and scripts a page names must exist (docs/workflow/documentation.md).
 
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -134,4 +140,114 @@ test('every repository skill is a linked pointer into docs/', () => {
     if (!names.includes(name)) problems.push(`.claude/skills/${name}: no matching .agents/skills/${name}`);
   }
   assert.deepEqual(problems, []);
+});
+
+// Tracked files only, so local scratch files and other worktrees do not count.
+const tracked = () =>
+  execFileSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8' }).split('\0').filter(Boolean);
+
+test('Markdown exists only under the allowed names and places', () => {
+  const allowedNames = new Set([
+    'README.md',
+    'AGENTS.md',
+    'CLAUDE.md',
+    'SKILL.md',
+    'CHANGELOG.md',
+    'CODE_OF_CONDUCT.md',
+    'THIRD_PARTY_NOTICES.md',
+  ]);
+  const stray = tracked().filter((path) => {
+    if (!/\.mdx?$/.test(path)) return false;
+    if (path.startsWith('docs/')) return false;
+    if (path === '.storybook/Introduction.mdx') return false; // the Storybook landing page
+    return !allowedNames.has(path.split('/').at(-1));
+  });
+  assert.deepEqual(stray, [], 'record the knowledge in source, a script header or docs/ (docs/workflow/documentation.md)');
+});
+
+test('docs/ holds only procedures, the core beliefs and linked user guides', () => {
+  const files = tracked().filter((path) => path.startsWith('docs/') && path.endsWith('.md'));
+  const misplaced = files.filter(
+    (path) =>
+      path !== 'docs/README.md' &&
+      path !== 'docs/design-docs/core-beliefs.md' &&
+      !/^docs\/workflow\/[^/]+\.md$/.test(path) &&
+      !/^docs\/[^/]+\.md$/.test(path),
+  );
+  assert.deepEqual(misplaced, [], 'docs/ has no other directories; design rationale belongs beside the source');
+
+  // A user guide earns its place by being linked from something a library
+  // consumer reads: a README, the site, or a string in shipped source.
+  const surfaces = tracked().filter(
+    (path) =>
+      path === 'README.md' ||
+      /^packages\/[^/]+\/README\.md$/.test(path) ||
+      (/^site\/src\//.test(path) && !/\.test\.[cm]?[jt]s$/.test(path)) ||
+      (/^packages\/[^/]+\/src\/.*\.[cm]?[jt]s$/.test(path) && !/\.test\.[cm]?[jt]s$/.test(path)),
+  );
+  const guides = files.filter((path) => /^docs\/[^/]+\.md$/.test(path) && path !== 'docs/README.md');
+  const unlinked = new Set(guides);
+  for (const surface of surfaces) {
+    if (unlinked.size === 0) break;
+    const text = readFileSync(join(ROOT, surface), 'utf8');
+    for (const guide of [...unlinked]) if (text.includes(guide)) unlinked.delete(guide);
+  }
+  assert.deepEqual(
+    [...unlinked],
+    [],
+    'no README, site page or shipped source links this guide: delete it, or move design rationale beside the source',
+  );
+});
+
+test('docs/ carries no task lists', () => {
+  const found = [];
+  for (const file of docsFiles()) {
+    const lines = readFileSync(file, 'utf8').replace(/^```[\s\S]*?^```/gm, '').split('\n');
+    if (lines.some((line) => /^\s*[-*] \[[ xX]\] /.test(line))) found.push(rel(file));
+  }
+  assert.deepEqual(found, [], 'plans and trackers are GitHub issues, not documents');
+});
+
+test('paths and pnpm scripts named in agent knowledge exist', () => {
+  const sources = [
+    ...agentsFiles(),
+    ...walk(join(ROOT, 'docs', 'workflow'), (name) => name.endsWith('.md')),
+    ...walk(join(ROOT, 'docs', 'design-docs'), (name) => name.endsWith('.md')),
+    ...walk(join(ROOT, '.agents'), (name) => name === 'SKILL.md'),
+  ];
+  const scripts = new Map();
+  const scriptsOf = (dir) => {
+    if (!scripts.has(dir)) {
+      const manifest = join(dir, 'package.json');
+      scripts.set(dir, existsSync(manifest) ? Object.keys(JSON.parse(readFileSync(manifest, 'utf8')).scripts ?? {}) : []);
+    }
+    return scripts.get(dir);
+  };
+  const packageDirs = readdirSync(join(ROOT, 'packages')).map((name) => join(ROOT, 'packages', name));
+  const everyScript = () => new Set([ROOT, ...packageDirs].flatMap(scriptsOf));
+  const pnpmBuiltins = new Set(['install', 'exec', 'add', 'run', 'dlx', 'why', 'pack', 'publish']);
+  // Generated, git-ignored or local-only locations a page may legitimately name.
+  const localOnly = [/^spec(\/|$)/, /(^|\/)src\/wasm(\/|$)/, /\/public\/private(\/|$)/, /^node_modules\//, /(^|\/)dist(\/|$)/, /^\/?tmp\//];
+  const missing = [];
+  for (const file of sources) {
+    const text = readFileSync(file, 'utf8');
+    for (const [, span] of text.matchAll(/`([^`\n]+)`/g)) {
+      // A repository path: at least one slash, no spaces, placeholders or globs.
+      if (/^\.?[\w@.-]+(\/[\w@.-]+)+\/?$/.test(span) && !/^(https?:|@silurus\/|origin\/|refs\/)/.test(span)) {
+        if (localOnly.some((pattern) => pattern.test(span))) continue;
+        // Slash-separated identifiers (`lIns/tIns`) are not paths: only a span
+        // whose first segment exists is treated as one.
+        const first = span.replace(/^\.\//, '').split('/')[0];
+        const bases = [ROOT, dirname(file)].filter((base) => existsSync(join(base, first)));
+        if (bases.length > 0 && !bases.some((base) => existsSync(join(base, span)))) {
+          missing.push(`${rel(file)}: ${span}`);
+        }
+      }
+    }
+    for (const [, name] of text.matchAll(/\bpnpm (?:--filter \S+ )?(?:run )?([a-z][\w:.-]*)/g)) {
+      if (pnpmBuiltins.has(name)) continue;
+      if (!everyScript().has(name)) missing.push(`${rel(file)}: pnpm ${name}`);
+    }
+  }
+  assert.deepEqual(missing, [], 'the page names something that no longer exists: update or delete the statement');
 });

@@ -329,9 +329,7 @@ The Region Map renderer is deterministic and network-free. It uses a pinned
 Natural Earth country dataset, supports authored world projections and
 two/three-stop value ramps, and fails closed for cached identities or
 sub-country/view-specific layouts that the bounded offline model cannot yet
-represent safely. The specification/Office evidence boundary for automatic
-chart behavior is documented in
-[Chart compatibility evidence and scope](docs/chart-compatibility-evidence.md).
+represent safely.
 
 The bounded TIFF 6.0 codec decodes the first IFD/page of stripped, top-left
 images in the bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK classes,
@@ -535,7 +533,7 @@ element provenance is limited to `master | layout | slide`; editor tree indexes,
 archive paths, save/round-trip handles, and mutation APIs are deliberately absent.
 When switching on `kind`, retain a default branch so a future read-only focus kind
 can be added without changing the transport envelope.
-See the [selection-context guide](docs/selection-context.md) for the complete
+See the [selection-context guide](https://ooxml.silurus.dev/selection-context/) for the complete
 contract, resource bounds, PPTX hit-testing semantics, and extension policy.
 
 **Hyperlinks.** For DOCX/PPTX the link hit regions live on the text-selection
@@ -1126,7 +1124,7 @@ file without uploading it.
 
 - **[`packages/markdown/`](packages/markdown/)** — internal workspace adapter and `ooxml-md` development CLI for the same GitHub-flavoured Markdown projection exposed by each format model's `toMarkdown()` method.
 - **[`packages/node/`](packages/node/)** — the implementation behind the public Node-only `@silurus/ooxml/node` subpath. Its canonical APIs are the explicitly owned, bounded `openPptxPresentation`, `openDocxDocument`, and `openXlsxWorkbook` sessions. Async `materializePptxPresentation`, `materializeDocxDocument`, `materializeXlsxWorkbookIndex`, `materializeXlsxWorksheet`, and `materializeXlsxWorkbook` are provided when a complete caller-owned graph is actually needed. Each `open*` call returns an explicit, idempotent `close()`-able session; PPTX streams `slides()`, DOCX completes format-required sequential pagination before streaming `pages()`, and XLSX parses its workbook index once before sequential `worksheetRows(sheetIndex)` streams reuse the retained archive. All three sessions read the bytes of a picture named by the model through `getImage(path, mimeType)`, including the reader-owned paths of the opt-in DOC, XLS, PPT and OpenDocument sources; this charges the session's resource limits and rejects after `close()`. Useful for CI checks and headless rendering pipelines; canvas rendering accepts a user-supplied backend such as `skia-canvas` without making it a runtime dependency.
-  See the [0.75 to 0.76 migration guide](docs/migration-0.76.md) for every removed synchronous helper and its replacement.
+  See the [0.75 to 0.76 migration guide](https://ooxml.silurus.dev/announcements/v076-migration-guide/) for every removed synchronous helper and its replacement.
 - **[`packages/vscode-extension/`](packages/vscode-extension/)** — VS Code extension (`ooxml-viewer`) that registers `CustomEditorProvider`s for `.docx`, `.xlsx`, and `.pptx`, and (opt-in) auto-installs and registers the `ooxml-mcp-server` for GitHub Copilot Chat in Agent mode, including active Viewer selection. Claude Code and Codex can configure the same binary separately for path-based file tools, but do not receive the active selection bridge. The preview is offline by default; an opt-in `ooxmlViewer.useGoogleFonts` setting (off, and force-disabled in untrusted workspaces) loads optional webfont substitutes and script fallbacks, widening the webview CSP to the Google Fonts CDN only while enabled.
 - **[`packages/mcp-server/`](packages/mcp-server/)** — Rust MCP server (`ooxml-mcp-server`) exposing the parsers as tools for AI agents (Claude, Copilot, Codex, etc.). Provides structured queries (`docx_get_structure`, `xlsx_get_cell_range`, `pptx_get_slide_structure`, …) so agents can inspect OOXML files without shelling out to `unzip`. Prebuilt binaries are attached to each [GitHub Release](https://github.com/yukiyokotani/office-open-xml-viewer/releases) for macOS / Linux / Windows; the VS Code extension downloads them on demand.
 

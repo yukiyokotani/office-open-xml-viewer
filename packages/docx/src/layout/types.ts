@@ -36,6 +36,13 @@ export type DeepReadonly<T> =
   : T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
   : T;
 
+/* Retained-geometry primitives (`PointPt`, `LayoutRect`, `Matrix2DData`,
+ * `ClipPathData`) stay DOCX-local on purpose. They describe a
+ * structured-clone-safe page result in points at scale 1, unlike the authored
+ * EMU values in core/src/types/common.ts, and `Matrix2DData` is a serialized
+ * affine result, not the DrawingML group-transform parser in ooxml-common.
+ * XLSX and PPTX have no retained-scene contract of this kind; move them to core
+ * only when another format adopts one. */
 export interface PointPt {
   readonly xPt: number;
   readonly yPt: number;

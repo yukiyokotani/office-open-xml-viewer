@@ -2760,7 +2760,12 @@ class XlsxViewerEngine implements ZoomableViewer {
 }
 
 /** Workbook viewer mounted into a container with scrollable grid, sheet tabs,
- * outline gutters, and optional zoom chrome. */
+ * outline gutters, and optional zoom chrome.
+ *
+ * It is the XLSX counterpart of `DocxScrollViewer`/`PptxScrollViewer` in
+ * mount and lifecycle only. There is deliberately no `XlsxScrollViewer`
+ * alias: this is a workbook viewer with sheet tabs over one scrollable cell
+ * grid, not a scrolling list of whole sheets. */
 export class XlsxViewer extends XlsxViewerEngine {
   /**
    * Create a workbook Viewer that borrows an already-loaded workbook.
@@ -3058,6 +3063,14 @@ export class XlsxSheetViewer implements ZoomableViewer {
     return this.lastMetrics;
   }
 
+  /**
+   * Permanently close this Viewer and restore the caller's canvas. Idempotent.
+   * Afterwards, Promise-returning mutations reject and synchronous mutations
+   * throw `Error("XlsxSheetViewer is destroyed")`; `getCellAt()` and
+   * `getCellViewportRect()` return `null`. The last sheet index, count and
+   * names, viewport offset, selection state, scale, hidden-sheet mode and
+   * visible count, last resource metrics, and `canvasElement` stay readable.
+   */
   destroy(): void {
     if (this.destroyed) return;
     this.captureSnapshot();
