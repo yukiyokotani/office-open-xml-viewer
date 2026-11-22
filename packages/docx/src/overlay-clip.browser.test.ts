@@ -254,6 +254,39 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(result.truncated).toBe(false);
   });
 
+  it('keeps a split link reachable across its painted, 200%-scaled width', async () => {
+    // Four clusters painted 24px wide each (twice the 12px monospace glyph);
+    // the clip hides the first, so 'BCD' is a split piece painted at 124-196.
+    const run = {
+      ...cellRun('ABCD', 100, 24, [{ x: 124, y: 90, width: 300, height: 40 }]),
+      hyperlink: { kind: 'external', url: 'https://example.com' } as DocxTextRunInfo['hyperlink'],
+    };
+    expect(await hits([run], 800, [[190, 110], [110, 110]])).toEqual(['BCD', '']);
+  });
+
+  it('places find highlights by painted clusters, not measured text', async () => {
+    const box = await page.evaluate(() => {
+      const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
+      const layer = document.getElementById('layer') as HTMLDivElement;
+      layer.style.width = '800px';
+      layer.style.height = '600px';
+      layer.replaceChildren();
+      const canvas = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D;
+      const measureForFont = (font: string) => (text: string) => { canvas.font = font; return canvas.measureText(text).width; };
+      // 200% scaled clusters: 'C' is painted at 148-172, its natural prefix ends at 124.
+      const run = {
+        text: 'ABCD', x: 100, y: 100, w: 96, h: 20, fontSize: 20, font: '20px monospace',
+        clusterBoxes: [0, 1, 2, 3].map((index) => ({ start: index, end: index + 1, x: index * 24, width: 24, rtl: false })),
+      };
+      api.buildDocxHighlightLayer(layer, [run], [{ slices: [{ runIndex: 0, start: 2, end: 3 }], active: false }], 800, 600, measureForFont);
+      const rect = (layer.firstElementChild as HTMLElement).getBoundingClientRect();
+      const origin = layer.getBoundingClientRect();
+      return { left: rect.left - origin.left, width: rect.width };
+    });
+    expect(box.left).toBeCloseTo(148, 3);
+    expect(box.width).toBeCloseTo(24, 3);
+  });
+
   it('splits a long run without measuring text', async () => {
     const text = 'x'.repeat(10_000);
     const result = await selectAll([cellRun(text, 0, 0.05, [{ x: 250, y: 90, width: 400, height: 40 }])]);

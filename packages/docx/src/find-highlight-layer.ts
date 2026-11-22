@@ -87,50 +87,118 @@ export function buildDocxHighlightLayer(
     for (const slice of match.slices) {
       const run = runs[slice.runIndex];
       if (!run) continue;
-      // Measure the way the run was laid out and drawn (its reference-em font
-      // scaled onto the run when projected with one).
-      const measure = runOverlayMeasure(run, measureForFont);
-      const extent = sliceHorizontalExtent(run.text, slice.start, slice.end, measure);
-      // Match offsets are UTF-16; count tracking with the same rendered-
-      // character rule as layout. Marks and unselected SHY add no run pitch.
-      // Exclude the pitch following the slice's final rendered character.
-      const pitch = run.letterSpacingPx ?? 0;
       const start = Math.max(0, Math.min(slice.start, run.text.length));
       const end = Math.max(start, Math.min(slice.end, run.text.length));
-      const sliceCount = countSpacingCharacters(run.text.slice(start, end)).pitchBearing;
-      const prefixCount = countSpacingCharacters(run.text.slice(0, start)).pitchBearing;
-      const pitchedX = extent.x + prefixCount * pitch;
-      // Keep main's multiply-before-add order for ordinary slices as well.
-      const pitchedWidth = extent.width + Math.max(0, sliceCount - 1) * pitch;
-      // §17.3.2.10 縦中横 alone compresses natural extents into the retained
-      // one-em cell. Ordinary runs preserve the established natural measurement.
-      const k = tateChuYokoOverlayScale(run, measure);
-      const x = pitchedX * k;
-      const width = pitchedWidth * k;
-      if (width <= 0) continue;
-      // WORD_CELL_CONTENT_CLIP: a clipped run's box lies in a container sized
-      // to its clip, which cuts it like the glyphs.
-      const frame = clipFrames.place(run);
-      const box = document.createElement('div');
-      // A vertical (tbRl) page reports the run at its physical top-left and
-      // carries a rotate transform; apply the same transform (about the box's
-      // top-left) so the highlight lies along the rotated glyph run, exactly as
-      // the selection span does.
-      const transform = frame.orientation
-        ? `transform:${frame.orientation};transform-origin:top left;`
-        : '';
-      // Positioned as a % of the page's intended CSS box so the box scales with
-      // the container under external CSS scaling. A vertical (tbRl) run's
-      // transform is about `top left`, so the %-placed origin rotates into the
-      // column exactly as before at 1× scale.
-      box.style.cssText =
-        `position:absolute;` +
-        // The slice offset runs along the run's own axis.
-        frame.position(x, 0) +
-        `width:${frame.width(width)};height:${frame.height(run.h)};` +
-        transform +
-        `background:${fill};pointer-events:none;`;
-      frame.parent.appendChild(box);
+      const pitch = run.letterSpacingPx ?? 0;
+      // A projected run carries where its clusters are painted: the slice
+      // covers one box per painted interval, and nothing is measured.
+      const intervals = run.clusterBoxes
+        ? clusterSliceIntervals(run.clusterBoxes, start, end, pitch)
+        : [measuredSliceInterval(run, start, end, pitch, measureForFont)];
+      for (const { x, width } of intervals) {
+        if (width <= 0) continue;
+        // WORD_CELL_CONTENT_CLIP: a clipped run's box lies in a container sized
+        // to its clip, which cuts it like the glyphs.
+        const frame = clipFrames.place(run);
+        const box = document.createElement('div');
+        // A vertical (tbRl) page reports the run at its physical top-left and
+        // carries a rotate transform; apply the same transform (about the box's
+        // top-left) so the highlight lies along the rotated glyph run, exactly as
+        // the selection span does.
+        const transform = frame.orientation
+          ? `transform:${frame.orientation};transform-origin:top left;`
+          : '';
+        // Positioned as a % of the page's intended CSS box so the box scales with
+        // the container under external CSS scaling. A vertical (tbRl) run's
+        // transform is about `top left`, so the %-placed origin rotates into the
+        // column exactly as before at 1× scale.
+        box.style.cssText =
+          `position:absolute;` +
+          // The slice offset runs along the run's own axis.
+          frame.position(x, 0) +
+          `width:${frame.width(width)};height:${frame.height(run.h)};` +
+          transform +
+          `background:${fill};pointer-events:none;`;
+        frame.parent.appendChild(box);
+      }
     }
   }
+}
+
+type ClusterBoxes = NonNullable<DocxTextRunInfo['clusterBoxes']>;
+
+/** Where the characters `[start, end)` of a run are painted, from the run's
+ * retained cluster boxes: adjacent boxes merged into one interval. A slice
+ * that covers part of a cluster takes that share of its box. The tracking
+ * that follows the slice's final rendered cluster is left out, on the side
+ * that cluster ends on. */
+function clusterSliceIntervals(
+  clusters: ClusterBoxes,
+  start: number,
+  end: number,
+  pitch: number,
+): { x: number; width: number }[] {
+  // Clusters are listed in source order: the first one that ends after `start`.
+  let low = 0;
+  let high = clusters.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (clusters[middle]!.end <= start) low = middle + 1;
+    else high = middle;
+  }
+  const boxes: { x: number; width: number; rtl: boolean }[] = [];
+  for (let index = low; index < clusters.length && clusters[index]!.start < end; index += 1) {
+    const cluster = clusters[index]!;
+    const length = Math.max(1, cluster.end - cluster.start);
+    const from = (Math.max(start, cluster.start) - cluster.start) / length;
+    const to = (Math.min(end, cluster.end) - cluster.start) / length;
+    boxes.push({
+      x: cluster.x + cluster.width * (cluster.rtl ? 1 - to : from),
+      width: cluster.width * (to - from),
+      rtl: cluster.rtl,
+    });
+  }
+  let final = boxes.length - 1;
+  while (final >= 0 && !(boxes[final]!.width > 0)) final -= 1;
+  if (final >= 0 && pitch !== 0) {
+    const box = boxes[final]!;
+    const trimmed = Math.min(pitch, box.width);
+    box.width -= trimmed;
+    if (box.rtl) box.x += trimmed;
+  }
+  const merged: { x: number; width: number }[] = [];
+  for (const box of boxes.filter((candidate) => candidate.width > 0).sort((left, right) => left.x - right.x)) {
+    const last = merged.at(-1);
+    if (last && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
+    else merged.push({ x: box.x, width: box.width });
+  }
+  return merged;
+}
+
+/** The extent of a slice of a run that carries no cluster boxes (a run not
+ * projected from a layout): measured as a prefix of the run's text, from
+ * its left edge. */
+function measuredSliceInterval(
+  run: DocxTextRunInfo,
+  start: number,
+  end: number,
+  pitch: number,
+  measureForFont: (font: string) => (s: string) => number,
+): { x: number; width: number } {
+  // Measure the way the run was laid out and drawn (its reference-em font
+  // scaled onto the run when projected with one).
+  const measure = runOverlayMeasure(run, measureForFont);
+  const extent = sliceHorizontalExtent(run.text, start, end, measure);
+  // Match offsets are UTF-16; count tracking with the same rendered-
+  // character rule as layout. Marks and unselected SHY add no run pitch.
+  // Exclude the pitch following the slice's final rendered character.
+  const sliceCount = countSpacingCharacters(run.text.slice(start, end)).pitchBearing;
+  const prefixCount = countSpacingCharacters(run.text.slice(0, start)).pitchBearing;
+  const pitchedX = extent.x + prefixCount * pitch;
+  // Keep main's multiply-before-add order for ordinary slices as well.
+  const pitchedWidth = extent.width + Math.max(0, sliceCount - 1) * pitch;
+  // §17.3.2.10 縦中横 alone compresses natural extents into the retained
+  // one-em cell. Ordinary runs preserve the established natural measurement.
+  const k = tateChuYokoOverlayScale(run, measure);
+  return { x: pitchedX * k, width: pitchedWidth * k };
 }

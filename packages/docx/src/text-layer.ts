@@ -156,8 +156,12 @@ export function buildDocxTextLayer(
         `position:absolute;` +
         frame.position(piece.offset, 0) +
         `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
-        (piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
-          ? `width:${frame.width((run.w - piece.offset) / k)};overflow:hidden;` : '') +
+        // A split piece spans exactly where its clusters are painted (scaled
+        // or fitted glyphs included), in the span's own units.
+        (piece.width !== undefined
+          ? `width:${frame.width(piece.width / (k * tcy))};overflow:hidden;`
+          : piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
+            ? `width:${frame.width((run.w - piece.offset) / k)};overflow:hidden;` : '') +
         transform +
         `white-space:pre;color:transparent;cursor:${pieceLink ? 'pointer' : 'text'};pointer-events:all;` +
         (piece.hidden ? 'user-select:none;-webkit-user-select:none;' : '');
@@ -182,6 +186,8 @@ interface RunPiece {
   readonly end: number;
   /** Offset of the piece along the run's axis, in CSS px. */
   readonly offset: number;
+  /** Painted length of a split piece along the run's axis, in CSS px. */
+  readonly width?: number;
   readonly hidden: boolean;
 }
 
@@ -216,8 +222,13 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
   if (groups.length <= 1) return whole(groups[0]?.hidden ?? false);
   return groups.map((group, index) => {
     let offset = Infinity;
-    for (let member = group.first; member <= group.last; member++) offset = Math.min(offset, boxes[member]!.x);
+    let right = -Infinity;
+    for (let member = group.first; member <= group.last; member++) {
+      offset = Math.min(offset, boxes[member]!.x);
+      right = Math.max(right, boxes[member]!.x + boxes[member]!.width);
+    }
     return {
+      width: Math.max(0, right - offset),
       start: index === 0 ? 0 : boxes[group.first]!.start,
       end: index === groups.length - 1 ? run.text.length : boxes[groups[index + 1]!.first]!.start,
       offset,
