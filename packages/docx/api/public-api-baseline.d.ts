@@ -1645,6 +1645,13 @@ export interface DocxTextRunInfo {
         scale: number;
     }>;
     letterSpacingPx?: number;
+    clusterBoxes?: readonly Readonly<{
+        start: number;
+        end: number;
+        x: number;
+        width: number;
+        rtl: boolean;
+    }>[];
     transform?: string;
     hyperlink?: HyperlinkTarget;
     eastAsianVert?: boolean;

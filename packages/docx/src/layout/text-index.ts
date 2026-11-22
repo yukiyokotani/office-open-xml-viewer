@@ -6,6 +6,7 @@ import {
   translationAffine,
 } from './affine.js';
 import { sourceKey } from './source-key.js';
+import { clusterBoxes, type ClusterBox } from './visual-cluster-geometry.js';
 import { lineFrameTransform } from './line-frame.js';
 import type {
   DocumentLayout,
@@ -28,6 +29,9 @@ import type {
 
 export interface TextRunGeometry {
   readonly placement: SourceOwnedTextGeometry;
+  /** Where each cluster of the run is painted, from `placement.bounds.xPt`,
+   * by offset in its text (visual-cluster-geometry.ts). */
+  readonly clusterBoxes: readonly ClusterBox[];
   readonly pointToPage: Matrix2DData;
   /** Every ancestor paint clip of the run, outermost first, in its retained
    * local space (turned clips included): overlays clip with them. */
@@ -528,6 +532,8 @@ function visitParagraph(
               placement,
               pointToPage: linePointToPage,
               clips: clippedProjection.clips,
+              clusterBoxes: clusterBoxes(placement, 0, placement.clusters.length,
+                placement.range.start, placement.range.end, placement.bounds.xPt),
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
                 ? { paragraphId: paragraph.paragraphId }

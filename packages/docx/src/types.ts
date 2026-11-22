@@ -1902,6 +1902,12 @@ export interface DocxTextRunInfo {
   referenceFont?: Readonly<{ font: string; scale: number }>;
   /** Native Canvas tracking pitch in CSS px for horizontal text. */
   letterSpacingPx?: number;
+  /** Where each glyph cluster of `text` is painted, from the layout's
+   * retained geometry: UTF-16 offsets `[start, end)` in `text`, the left
+   * edge from `x` and the painted width in CSS px along the run, and whether
+   * the cluster reads right to left. Overlays that address part of the run
+   * (find highlights) use these instead of measuring text. */
+  clusterBoxes?: readonly Readonly<{ start: number; end: number; x: number; width: number; rtl: boolean }>[];
   /** CSS transform used by the overlay for vertical-page text. */
   transform?: string;
   /** Resolved external or internal hyperlink target. */

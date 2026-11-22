@@ -1,5 +1,4 @@
 import { clippedBoxVisible, OverlayClipFrames, runPartVisible, runStraddlesClip } from './run-clip.js';
-import { countSpacingCharacters } from './character-spacing.js';
 import type { DocxTextRunInfo } from './renderer';
 import { overlayPercent, type HyperlinkTarget } from '@silurus/ooxml-core';
 import { tateChuYokoOverlayScale } from './tate-chu-yoko-overlay';
@@ -82,9 +81,9 @@ export function buildDocxTextLayer(
     // WORD_CELL_CONTENT_CLIP: text its clips hide is not selectable. A run
     // hidden wholly becomes one unselectable span that
     // readDocxTextSelectionContext skips; a run straddling a clip edge is
-    // split at the edge, by its drawn character advances, into visible and
-    // hidden spans. Other runs keep one span.
-    const pieces = runPieces(run, measureForFont);
+    // split at the edge, by its painted clusters, into visible and hidden
+    // spans. Other runs keep one span.
+    const pieces = runPieces(run);
     // The `font` shorthand must precede `line-height` because the shorthand
     // resets `line-height` to `normal`. Reset `letter-spacing` so a parent
     // CSS rule cannot drift the trailing edge of the selection. Kerning /
@@ -187,42 +186,42 @@ interface RunPiece {
 }
 
 /** WORD_CELL_CONTENT_CLIP: the visible and hidden pieces of `run`'s text under
- * its clips. Characters are placed by the run's drawn advances (measured as
- * the find overlay measures them, with its tracking); a run that is wholly
- * visible or wholly hidden, or has no measurer, is one piece. */
-function runPieces(
-  run: Readonly<DocxTextRunInfo>,
-  measureForFont: ((font: string) => (s: string) => number) | undefined,
-): readonly RunPiece[] {
+ * its clips, in source order. Each of the run's painted clusters
+ * (DocxTextRunInfo.clusterBoxes, the layout's own geometry, so right-to-left
+ * order, character scaling and fitted text are as painted) is tested against
+ * the clips, union gaps included, and consecutive clusters with the same
+ * visibility form a piece; no text is measured, and the work is linear. A run
+ * that is wholly visible or wholly hidden, or has no cluster boxes, is one
+ * piece. */
+function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
   const whole = (hidden: boolean): readonly RunPiece[] => [{ start: 0, end: run.text.length, offset: 0, hidden }];
   if (!run.clips) return whole(false);
   if (!clippedBoxVisible(
     { x: run.x, y: run.y, width: run.w, height: run.h, ...(run.transform ? { transform: run.transform } : {}) },
     run.clips,
   )) return whole(true);
-  if (!measureForFont || !runStraddlesClip(run)) return whole(false);
-  const measure = runOverlayMeasure(run as DocxTextRunInfo, measureForFont);
-  const tcy = run.eastAsianVert ? tateChuYokoOverlayScale(run as DocxTextRunInfo, measure) : 1;
-  const pitch = run.letterSpacingPx ?? 0;
-  // Code-point boundaries and their offsets along the run.
-  const boundaries: number[] = [0];
-  for (const character of run.text) boundaries.push(boundaries.at(-1)! + character.length);
-  const offsetAt = (index: number): number => {
-    const prefix = run.text.slice(0, index);
-    return (measure(prefix) + countSpacingCharacters(prefix).pitchBearing * pitch) * tcy;
-  };
-  const offsets = boundaries.map(offsetAt);
-  const pieces: RunPiece[] = [];
-  for (let index = 0; index + 1 < boundaries.length; index++) {
-    const width = offsets[index + 1]! - offsets[index]!;
-    const previous = pieces.at(-1);
-    // A character without advance goes with the one before it.
-    const hidden = width > 0 ? !runPartVisible(run, offsets[index]!, width) : previous?.hidden ?? false;
-    if (previous && previous.hidden === hidden) {
-      pieces[pieces.length - 1] = { ...previous, end: boundaries[index + 1]! };
-    } else {
-      pieces.push({ start: boundaries[index]!, end: boundaries[index + 1]!, offset: offsets[index]!, hidden });
-    }
+  const boxes = run.clusterBoxes;
+  if (!boxes || boxes.length === 0) return whole(false);
+  // Without a union, a run its clips do not cut has nothing to split; a union
+  // can hide a gap inside the run's extent.
+  if (!run.clips.some((clip) => clip.rects) && !runStraddlesClip(run)) return whole(false);
+  const groups: Array<{ first: number; last: number; hidden: boolean }> = [];
+  for (const [index, box] of boxes.entries()) {
+    const previous = groups.at(-1);
+    // A cluster without width goes with the one before it.
+    const hidden = box.width > 0 ? !runPartVisible(run, box.x, box.width) : previous?.hidden ?? false;
+    if (previous && previous.hidden === hidden) previous.last = index;
+    else groups.push({ first: index, last: index, hidden });
   }
-  return pieces.length > 0 ? pieces : whole(false);
+  if (groups.length <= 1) return whole(groups[0]?.hidden ?? false);
+  return groups.map((group, index) => {
+    let offset = Infinity;
+    for (let member = group.first; member <= group.last; member++) offset = Math.min(offset, boxes[member]!.x);
+    return {
+      start: index === 0 ? 0 : boxes[group.first]!.start,
+      end: index === groups.length - 1 ? run.text.length : boxes[groups[index + 1]!.first]!.start,
+      offset,
+      hidden: group.hidden,
+    };
+  });
 }

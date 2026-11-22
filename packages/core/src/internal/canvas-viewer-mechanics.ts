@@ -92,7 +92,13 @@ export function readBoundedNativeTextSelection<TLocator>(
   root: HTMLElement,
   selection: Selection | null,
   locatorForRun: (run: HTMLElement) => TLocator | null,
-  options: Readonly<{ maxChars?: number; maxLocators?: number }> = {},
+  options: Readonly<{
+    maxChars?: number;
+    maxLocators?: number;
+    /** Identity of a locator: elements whose locators share a key (pieces of
+     * one run) count once against `maxLocators` and are reported once. */
+    locatorKey?: (locator: TLocator) => string;
+  }> = {},
 ): BoundedNativeTextSelection<TLocator> | null {
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
   const selectionSurfaces = [
@@ -117,6 +123,7 @@ export function readBoundedNativeTextSelection<TLocator>(
     options.maxLocators, MAX_NATIVE_TEXT_SELECTION_LOCATORS, 'maxRunLocators',
   );
   const locators: TLocator[] = [];
+  const seenLocatorKeys = new Set<string>();
   let locatorOverflow = false;
   // Keep at most two look-ahead code units: one proves overflow and the second
   // lets safeUtf16Prefix observe a surrogate pair at the public boundary.
@@ -130,8 +137,14 @@ export function readBoundedNativeTextSelection<TLocator>(
     if (!selected) continue;
     const locator = locatorForRun(candidate);
     if (locator === null) continue;
-    if (locators.length >= maxLocators) locatorOverflow = true;
-    else locators.push(structuredClone(locator));
+    const key = options.locatorKey?.(locator);
+    if (key !== undefined && seenLocatorKeys.has(key)) {
+      // Another piece of a located run: its text only.
+    } else if (locators.length >= maxLocators) locatorOverflow = true;
+    else {
+      if (key !== undefined) seenLocatorKeys.add(key);
+      locators.push(structuredClone(locator));
+    }
     if (retainedTextLength < retainThrough) {
       retainedTextLength = appendSelectedRunText(
         textChunks, retainedTextLength, candidate, ranges, retainThrough,

@@ -177,36 +177,88 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(result.native).not.toContain('Hidden');
   });
 
-  it('leaves the hidden part of a run straddling its cell edge out of a drag selection', async () => {
-    const result = await page.evaluate(() => {
+  /** Builds the text layer for `runs`, selects all of it and returns the
+   * selection context and the native selection text. */
+  const selectAll = (runs: DocxTextRunInfo[], options: { maxRunLocators?: number } = {}) => page.evaluate(
+    ({ runs, options }) => {
       const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
       const layer = document.getElementById('layer') as HTMLDivElement;
       layer.style.width = '800px';
       layer.style.height = '600px';
+      let measured = 0;
       const canvas = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D;
-      const measureForFont = (font: string) => (text: string) => { canvas.font = font; return canvas.measureText(text).width; };
-      const font = '20px monospace';
-      const advance = measureForFont(font)('M');
-      // 'HIDDEN' lies left of the cell edge, 'visible' right of it.
-      const cell = { x: 100 + 6 * advance, y: 90, width: 300, height: 40 };
-      const runs = [{
-        text: 'HIDDENvisible', x: 100, y: 100, w: 13 * advance, h: 20, fontSize: 20, font, clips: [cell],
-      }];
+      const measureForFont = (font: string) => (text: string) => {
+        measured += text.length;
+        canvas.font = font;
+        return canvas.measureText(text).width;
+      };
       api.buildDocxTextLayer(layer, runs, 800, 600, undefined, measureForFont, 0);
       const range = document.createRange();
       range.selectNodeContents(layer);
       const selection = window.getSelection()!;
       selection.removeAllRanges();
       selection.addRange(range);
-      const context = api.readDocxTextSelectionContext(layer, selection);
+      const context = api.readDocxTextSelectionContext(layer, selection, options);
       const native = selection.toString();
       selection.removeAllRanges();
-      return { text: context?.text ?? '', runs: context?.runs.length ?? 0, native, spans: layer.querySelectorAll('span').length };
-    });
+      return {
+        text: context?.text ?? '', runs: context?.runs.map((item) => item.runIndex) ?? [],
+        truncated: context?.truncated ?? false, native, measured,
+      };
+    },
+    { runs, options },
+  );
+  const boxesOf = (text: string, width: number, rtl = false) => [...text].map((_, index, all) => ({
+    start: index, end: index + 1, width, rtl, x: (rtl ? all.length - 1 - index : index) * width,
+  }));
+  const cellRun = (text: string, x: number, width: number, clips: DocxTextRunInfo['clips'], rtl = false): DocxTextRunInfo => ({
+    text, x, y: 100, w: text.length * width, h: 20, fontSize: 20, font: '20px monospace',
+    clusterBoxes: boxesOf(text, width, rtl), clips, ...(rtl ? { direction: 'rtl' as const } : {}),
+  });
+
+  it('leaves the hidden part of a run straddling its cell edge out of a drag selection', async () => {
+    const result = await selectAll([cellRun('HIDDENvisible', 100, 12, [{ x: 172, y: 90, width: 300, height: 40 }])]);
     expect(result.text).toBe('visible');
-    expect(result.runs).toBe(1);
+    expect(result.runs).toEqual([0]);
     expect(result.native).not.toContain('HIDDEN');
-    expect(result.spans).toBe(2);
+  });
+
+  it('splits a right-to-left run by where its clusters are painted', async () => {
+    // Logical 0 is painted rightmost; the clip shows the leftmost two glyphs.
+    const result = await selectAll([cellRun('אבגד', 100, 10, [{ x: 100, y: 90, width: 20, height: 40 }], true)]);
+    expect(result.text).toBe('גד');
+  });
+
+  it('splits a run with scaled characters by its painted advances', async () => {
+    // 50% character scaling: six 5px clusters; the clip shows the first 20px.
+    const result = await selectAll([cellRun('ABCDEF', 100, 5, [{ x: 100, y: 90, width: 20, height: 40 }])]);
+    expect(result.text).toBe('ABCD');
+  });
+
+  it('leaves text in a gap of a clip union out of the selection', async () => {
+    const union = { x: 100, y: 90, width: 30, height: 40, rects: [
+      { x: 0, y: 0, width: 10, height: 40 }, { x: 20, y: 0, width: 10, height: 40 },
+    ] };
+    const result = await selectAll([cellRun('ABC', 100, 10, [union])]);
+    expect(result.text).toBe('AC');
+  });
+
+  it('counts a split run once against the run locator limit', async () => {
+    const union = { x: 100, y: 90, width: 40, height: 40, rects: [
+      { x: 0, y: 0, width: 10, height: 40 }, { x: 20, y: 0, width: 10, height: 40 },
+    ] };
+    const result = await selectAll([cellRun('ABCD', 100, 10, [union]), { ...cellRun('E', 300, 10, undefined), clips: undefined }],
+      { maxRunLocators: 2 });
+    expect(result.text).toBe('ACE');
+    expect(result.runs).toEqual([0, 1]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('splits a long run without measuring text', async () => {
+    const text = 'x'.repeat(10_000);
+    const result = await selectAll([cellRun(text, 0, 0.05, [{ x: 250, y: 90, width: 400, height: 40 }])]);
+    expect(result.measured).toBe(0);
+    expect(result.text.length).toBe(5_000);
   });
 
   it('keeps a link out of reach under an empty clip union', async () => {
