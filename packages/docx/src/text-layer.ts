@@ -163,7 +163,7 @@ export function buildDocxTextLayer(
       span.style.cssText =
         `position:absolute;` +
         frame.position(piece.offset, 0) +
-        `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${letterSpacing};` +
+        `font:${pageFont(k !== 1 && reference ? reference.font : run.font)};line-height:${pageLength(run.h / k)};letter-spacing:${piece.untracked ? '0' : letterSpacing};` +
         (piece.width !== undefined && paintScale === undefined
           ? `width:${frame.width(piece.width / (k * tcy))};overflow:hidden;overflow:clip;`
           : piece.width === undefined && piece.end === run.text.length && run.trailingSpaceCompressionPx !== undefined
@@ -201,6 +201,8 @@ interface RunPiece {
   readonly last?: number;
   /** Horizontal scale fitting the piece's natural text to its painted width. */
   readonly scale?: number;
+  /** The piece is laid out without the run's tracking (see scaledPieces). */
+  readonly untracked?: true;
 }
 
 /** WORD_CELL_CONTENT_CLIP: the visible and hidden pieces of `run`'s text under
@@ -261,6 +263,10 @@ function runPieces(run: Readonly<DocxTextRunInfo>): readonly RunPiece[] {
 /** Relative difference of cluster scales within one span. */
 const UNIFORM_SCALE_TOLERANCE = 0.02;
 
+/** Scale of a span whose clusters paint no width: it keeps its text in the
+ * DOM but takes (almost) no room. */
+const DEGENERATE_SCALE = 1e-3;
+
 /** Fit each piece's spans to where its clusters are painted. A span is
  * scaled along the run so its glyph advances, and with them native
  * selection, the caret and the hit box, match the paint. One scale fits a
@@ -284,27 +290,30 @@ function scaledPieces(
   const natural = (text: string) => measure(text) + countSpacingCharacters(text).pitchBearing * pitch;
   return pieces.flatMap((piece): RunPiece[] => {
     if (piece.width === undefined || piece.first === undefined || piece.last === undefined) return [piece];
+    if (!(piece.width > 0)) return [piece];
     const whole = natural(run.text.slice(piece.start, piece.end));
-    if (!(whole > 0) || !(piece.width > 0)) return [piece];
-    const ratio = piece.width / whole;
-    if (Math.abs(ratio - 1) <= 1e-3) return [{ ...piece, scale: 1 }];
-    // Per-cluster scales, grouped while they stay uniform.
-    const groups: Array<{ first: number; last: number; natural: number; scale: number | null }> = [];
+    if (whole > 0 && Math.abs(piece.width / whole - 1) <= 1e-3) return [{ ...piece, scale: 1 }];
+    // Per-cluster scales, grouped while they stay uniform. A cluster whose
+    // tracked advance is not positive (condensed past its glyph: CSS would
+    // lay its text backwards) or that paints no width is fitted untracked,
+    // in groups of its own kind.
+    const groups: Array<{ first: number; last: number; natural: number; scale: number; untracked: boolean }> = [];
     for (let index = piece.first; index <= piece.last; index++) {
       const box = boxes[index]!;
-      const own = natural(run.text.slice(box.start, box.end));
-      const scale = own > 0 && box.width > 0 ? box.width / own : null;
+      const text = run.text.slice(box.start, box.end);
+      const tracked = natural(text);
+      const untracked = !(tracked > 0 && box.width > 0);
+      const own = untracked ? measure(text) : tracked;
+      const scale = box.width > 0 && own > 0 ? box.width / own : DEGENERATE_SCALE;
       const previous = groups.at(-1);
-      if (previous && (scale === null || previous.scale === null
-        || Math.abs(scale / previous.scale - 1) <= UNIFORM_SCALE_TOLERANCE)) {
+      if (previous && previous.untracked === untracked
+        && Math.abs(scale / previous.scale - 1) <= UNIFORM_SCALE_TOLERANCE) {
         previous.last = index;
         previous.natural += own;
-        previous.scale ??= scale;
       } else {
-        groups.push({ first: index, last: index, natural: own, scale });
+        groups.push({ first: index, last: index, natural: own, scale, untracked });
       }
     }
-    if (groups.length <= 1) return [{ ...piece, scale: ratio }];
     return groups.map((group, index) => {
       let offset = Infinity;
       let right = -Infinity;
@@ -321,7 +330,8 @@ function scaledPieces(
         hidden: piece.hidden,
         first: group.first,
         last: group.last,
-        ...(group.natural > 0 && width > 0 ? { scale: width / group.natural } : {}),
+        scale: group.natural > 0 && width > 0 ? width / group.natural : DEGENERATE_SCALE,
+        ...(group.untracked ? { untracked: true as const } : {}),
       };
     });
   });

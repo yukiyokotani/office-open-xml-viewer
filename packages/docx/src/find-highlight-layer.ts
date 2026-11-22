@@ -92,10 +92,10 @@ export function buildDocxHighlightLayer(
       const pitch = run.letterSpacingPx ?? 0;
       // A projected run carries where its clusters are painted: the slice
       // covers one box per painted interval, and nothing is measured.
-      const intervals = run.clusterBoxes
+      const intervals: { x: number; width: number; y?: number; height?: number }[] = run.clusterBoxes
         ? clusterSliceIntervals(run.clusterBoxes, start, end, pitch)
         : [measuredSliceInterval(run, start, end, pitch, measureForFont)];
-      for (const { x, width } of intervals) {
+      for (const { x, width, y, height } of intervals) {
         if (width <= 0) continue;
         // WORD_CELL_CONTENT_CLIP: a clipped run's box lies in a container sized
         // to its clip, which cuts it like the glyphs.
@@ -115,8 +115,9 @@ export function buildDocxHighlightLayer(
         box.style.cssText =
           `position:absolute;` +
           // The slice offset runs along the run's own axis.
-          frame.position(x, 0) +
-          `width:${frame.width(width)};height:${frame.height(run.h)};` +
+          // A tate-chu-yoko character is placed across the run as well.
+          frame.position(x, y ?? 0) +
+          `width:${frame.width(width)};height:${frame.height(height ?? run.h)};` +
           transform +
           `background:${fill};pointer-events:none;`;
         frame.parent.appendChild(box);
@@ -138,7 +139,7 @@ function clusterSliceIntervals(
   start: number,
   end: number,
   pitch: number,
-): { x: number; width: number }[] {
+): { x: number; width: number; y?: number; height?: number }[] {
   // Clusters are listed in source order: the first one that ends after `start`.
   let low = 0;
   let high = clusters.length;
@@ -147,7 +148,7 @@ function clusterSliceIntervals(
     if (clusters[middle]!.end <= start) low = middle + 1;
     else high = middle;
   }
-  const boxes: { x: number; width: number; rtl: boolean; trackingExcluded: boolean }[] = [];
+  const boxes: { x: number; width: number; rtl: boolean; trackingExcluded: boolean; y?: number; height?: number }[] = [];
   for (let index = low; index < clusters.length && clusters[index]!.start < end; index += 1) {
     const cluster = clusters[index]!;
     const length = Math.max(1, cluster.end - cluster.start);
@@ -158,6 +159,7 @@ function clusterSliceIntervals(
       width: cluster.width * (to - from),
       rtl: cluster.rtl,
       trackingExcluded: cluster.trackingExcluded === true,
+      ...(cluster.y !== undefined && cluster.height !== undefined ? { y: cluster.y, height: cluster.height } : {}),
     });
   }
   let final = boxes.length - 1;
@@ -170,10 +172,15 @@ function clusterSliceIntervals(
     box.width -= trimmed;
     if (box.rtl) box.x += trimmed;
   }
-  const merged: { x: number; width: number }[] = [];
+  const merged: { x: number; width: number; y?: number; height?: number }[] = [];
   for (const box of boxes.filter((candidate) => candidate.width > 0).sort((left, right) => left.x - right.x)) {
+    // A character placed across the run (tate-chu-yoko) keeps its own box.
+    if (box.y !== undefined) {
+      merged.push({ x: box.x, width: box.width, y: box.y, height: box.height! });
+      continue;
+    }
     const last = merged.at(-1);
-    if (last && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
+    if (last && last.y === undefined && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
     else merged.push({ x: box.x, width: box.width });
   }
   return merged;

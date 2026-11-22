@@ -351,6 +351,30 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(await carets([run], [[endOfW - 2, 110], [endOfW + 2, 110]])).toEqual([4, 4]);
   });
 
+  it('places the caret in a condensed run whose floored glyphs still paint', async () => {
+    // 'WiiiiM', 20px serif, -9px tracking: the four i advances floor to zero,
+    // each still drawn at its natural advance from the pen after W, where M
+    // starts as well.
+    const font = '20px serif';
+    const [w, i, m] = await page.evaluate((font) => {
+      const canvas = document.createElement('canvas').getContext('2d') as CanvasRenderingContext2D;
+      canvas.font = font;
+      return [canvas.measureText('W').width, canvas.measureText('i').width, canvas.measureText('M').width];
+    }, font);
+    const pen = w - 9;
+    const run: DocxTextRunInfo = {
+      text: 'WiiiiM', x: 100, y: 100, w: pen + m - 9, h: 20, fontSize: 20, font, letterSpacingPx: -9,
+      clusterBoxes: [
+        { start: 0, end: 1, x: 0, width: pen, rtl: false },
+        ...[1, 2, 3, 4].map((index) => ({ start: index, end: index + 1, x: pen, width: i, rtl: false })),
+        { start: 5, end: 6, x: pen, width: m - 9, rtl: false },
+      ],
+    };
+    const mStart = 100 + pen;
+    const quarter = (m - 9) / 4;
+    expect(await carets([run], [[mStart + quarter, 110], [mStart + 3 * quarter, 110]])).toEqual([5, 6]);
+  });
+
   it('keeps a clipped link on its painted text after browser find', async () => {
     const run = {
       ...cellRun('LINKtailtoken', 100, 12, [{ x: 100, y: 90, width: 40, height: 40 }]),

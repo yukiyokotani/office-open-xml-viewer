@@ -129,6 +129,8 @@ function projectTextRun(
       clusterBoxes: geometry.clusterBoxes.map((box) => ({
         start: box.start, end: box.end, x: box.xPt * inlineScale, width: box.widthPt * inlineScale, rtl: box.rtl,
         ...(box.trackingExcluded ? { trackingExcluded: true as const } : {}),
+        ...(box.crossPt !== undefined && box.crossWidthPt !== undefined
+          ? { y: box.crossPt * blockScale, height: box.crossWidthPt * blockScale } : {}),
       })),
     }),
     ...(transform ? { transform } : {}),

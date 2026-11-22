@@ -532,7 +532,9 @@ function visitParagraph(
               placement,
               pointToPage: linePointToPage,
               clips: clippedProjection.clips,
-              clusterBoxes: clusterBoxes(placement, 0, placement.clusters.length,
+              // The piece's paint operations place floored and tate-chu-yoko
+              // glyphs (their ranges are the paragraph's, as the clusters').
+              clusterBoxes: clusterBoxes({ ...placement, paintOps: retained.paintOps }, 0, placement.clusters.length,
                 placement.range.start, placement.range.end, placement.bounds.xPt),
               source: paragraph.source,
               ...(paragraph.paragraphId !== undefined
