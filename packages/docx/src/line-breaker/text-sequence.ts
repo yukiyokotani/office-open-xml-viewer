@@ -98,20 +98,39 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, lan
 
 let graphemeSegmenter: Intl.Segmenter | null | undefined;
 
-/** Whether `next` only continues the last grapheme cluster of `previous`
- * (UAX #29), e.g. a variation selector or combining mark authored in a
- * separate run. */
-function continuesGrapheme(previous: string, next: string): boolean {
-  if (previous.length === 0 || next.length === 0) return false;
-  graphemeSegmenter ??= typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
-    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
-  if (!graphemeSegmenter) return false;
-  // A cluster is bounded in practice; a tail of the previous text is enough
-  // context to place the seam (a longer cluster only declines the join).
-  const tail = previous.slice(-32);
-  let lastStart = 0;
-  for (const part of graphemeSegmenter.segment(tail + next)) lastStart = part.index;
-  return lastStart < tail.length;
+/** UAX #29 grapheme clusters of one sequence's displayed text, judged at its
+ * run seams. Segmentation restarts at the start of the last cluster already
+ * found (a true boundary), so the work over a sequence stays linear. */
+class SequenceGraphemes {
+  private text = '';
+  private boundary = 0;
+
+  reset(): void { this.text = ''; this.boundary = 0; }
+
+  append(display: string): void { this.text += display; }
+
+  /** Whether `next` begins inside the sequence's last grapheme cluster. A
+   * boundary before that cluster depends only on text before it (UAX #29
+   * rules look back, never ahead, across it), so it stays the restart point. */
+  continuedBy(next: string): boolean {
+    if (this.text.length === 0 || next.length === 0) return false;
+    graphemeSegmenter ??= typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+      ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+    if (!graphemeSegmenter) return false;
+    const seam = this.text.length - this.boundary;
+    let lastStart = 0;
+    let crossing = false;
+    for (const part of graphemeSegmenter.segment(this.text.slice(this.boundary) + next)) {
+      if (part.index >= seam) break;
+      lastStart = part.index;
+      if (part.index + part.segment.length > seam) {
+        crossing = true;
+        break;
+      }
+    }
+    this.boundary += lastStart;
+    return crossing;
+  }
 }
 
 /**
@@ -136,7 +155,7 @@ export function acquireTextSequences(
   let start = -1;
   let key: string | undefined;
   let languageFreeKey: string | undefined;
-  let lastDisplay = '';
+  const graphemes = new SequenceGraphemes();
   let first: SequenceRun | undefined;
   let texts: string[] = [];
   let sources: TextSequenceSource[] = [];
@@ -161,6 +180,7 @@ export function acquireTextSequences(
     sources = [];
     optionalHyphens = [];
     offset = 0;
+    graphemes.reset();
   };
   for (const [runIndex, run] of runs.entries()) {
     // ECMA-376 §17.13.5: deleted/moved-away content has no final-view glyphs or breaks.
@@ -193,12 +213,14 @@ export function acquireTextSequences(
     const nextKey = visible ? JSON.stringify([formattingKey(visible, environment), scope]) : undefined;
     const display = visible ? displayText(visible.text, visible) : '';
     // §17.3.2.20 languages delimit sequences, except inside one grapheme
-    // cluster: a run that only continues the previous cluster belongs to it
-    // and takes its language. Splitting there would separate a base from its
-    // variation selector or combining mark and change the cluster's glyph.
+    // cluster: splitting there would separate a base from its variation
+    // selector, combining mark or ZWJ continuation and change the cluster's
+    // glyph. A run that begins inside the sequence's last cluster joins the
+    // sequence. A sequence carries one run's formatting, so all of the joined
+    // run's text takes the sequence's language; source ranges stay per run.
     const clusterContinuation = visible !== undefined && first !== undefined && nextKey !== key
       && languageFreeKey === JSON.stringify([formattingKey(visible, environment, false), scope])
-      && continuesGrapheme(lastDisplay, display);
+      && graphemes.continuedBy(display);
     if (!clusterContinuation) {
       if (!visible || nextKey !== key) finish();
       key = nextKey;
@@ -208,7 +230,7 @@ export function acquireTextSequences(
     if (!visible) continue;
     if (!first) { start = runIndex; first = visible; }
     texts.push(visible.text);
-    lastDisplay = display;
+    graphemes.append(display);
     sources.push(Object.freeze({ runIndex, start: offset, end: offset + display.length }));
     offset += display.length;
   }

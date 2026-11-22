@@ -248,7 +248,10 @@ export class LineMeasurementAdapter {
       || l.weight !== r.weight || l.style !== r.style || l.kerning !== r.kerning
       || charScaleFactor(left) !== charScaleFactor(right)
       || left.sourceRunIndex === undefined || left.sourceRunIndex !== right.sourceRunIndex
-      || left.sourceTextSequence !== right.sourceTextSequence) return 0;
+      || left.sourceTextSequence !== right.sourceTextSequence
+      // The joined probe shapes in one language state; both sides must have
+      // been measured in it.
+      || left.lang !== right.lang || l.canvasLanguageWithheld !== r.canvasLanguageWithheld) return 0;
     // The slot and native-unit checks walk spans and slice source text, so
     // they run after the field comparisons.
     const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);

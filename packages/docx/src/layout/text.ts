@@ -376,6 +376,9 @@ export interface TextShapeRequest {
   readonly language?: string;
   /** Resolved w:lang@bidi (§17.3.2.20): language of complex-script text. */
   readonly complexScriptLanguage?: string;
+  /** The source piece this request derives from was shaped without its slot
+   * language (no named face draws all of it); derived requests keep that. */
+  readonly canvasLanguageWithheld?: true;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
@@ -512,6 +515,25 @@ export function independentTextShapeRequest(
 ): TextShapeRequest {
   return { ...request, text, baseDirection: undefined, joinRegisteredGrapheme: undefined, joinRegisteredLatinSlots: undefined,
     registeredLatinPieceText: undefined, substituteContext: { text, offset: 0 } };
+}
+
+/** The shape request of a ruby guide over `base`: independent text in the
+ * guide's own languages (`w:rubyPr/w:lid` for every slot, the guide runs'
+ * `w:lang/@w:val` for Latin text), else the base run's. Its Canvas language
+ * is proved for the guide itself. Line metrics and paint both use it. */
+export function rubyGuideShapeRequest(
+  base: Readonly<TextShapeRequest>,
+  text: string,
+  languages: Readonly<{ guide?: string; latin?: string }> | undefined,
+): TextShapeRequest {
+  const request = { ...independentTextShapeRequest(base, text), canvasLanguageWithheld: undefined };
+  if (!languages) return request;
+  const { guide, latin } = languages;
+  return {
+    ...request,
+    ...(latin ?? guide ? { language: latin ?? guide } : {}),
+    ...(guide ? { eastAsiaLanguage: guide, complexScriptLanguage: guide } : {}),
+  };
 }
 
 /** Transform this range in its run (e.g. inserting justification kashidas),
@@ -1721,8 +1743,10 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       ...(scopeDescriptor !== undefined ? [scopeDescriptor] : []),
     ];
     if (request.baseDirection !== undefined) shapeParts.push(['baseDirection', request.baseDirection]);
-    if (request.language !== undefined || request.complexScriptLanguage !== undefined) {
-      shapeParts.push(['lang', request.language ?? null, request.complexScriptLanguage ?? null]);
+    if (request.language !== undefined || request.complexScriptLanguage !== undefined
+      || request.canvasLanguageWithheld === true) {
+      shapeParts.push(['lang', request.language ?? null, request.complexScriptLanguage ?? null,
+        request.canvasLanguageWithheld === true]);
     }
     const shapeKey = JSON.stringify(shapeParts);
     const retainedShape = cached(shapeCache, shapeKey);
@@ -1880,7 +1904,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // §5.1/§5.4), so a language there would change the face, its advances
       // and weights rather than select forms (locl) within the face.
       const slotLang = scriptSlotLanguage(request, group.script);
-      const lang = slotLang !== undefined && input.measurer.namedFamiliesDraw?.({
+      const lang = slotLang !== undefined && request.canvasLanguageWithheld !== true
+        && input.measurer.namedFamiliesDraw?.({
         text: group.text, fontRoute: font.route, weight: font.weight, style: font.style,
       }) === true ? slotLang : undefined;
       const measurement = request.measure === false ? {

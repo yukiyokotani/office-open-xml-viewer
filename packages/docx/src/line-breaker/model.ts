@@ -246,7 +246,7 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box) around the text. */
   border?: DocxRunBorder | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
-  ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number };
+  ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number; languages?: RubyGuideLanguages };
   /** Every piece of a ruby-annotated run (only the first carries `ruby`):
    * none takes a WORD_KERNED_SPACE_PAIRS seam pair. */
   rubyPiece?: true;
@@ -816,4 +816,12 @@ export interface LineLayoutEnvironment {
    * the authored frame height remains authoritative even when glyph paint is
    * lowered beyond it. Folded into retained text segments during acquisition. */
   readonly positionExtendsLineBox?: boolean;
+}
+
+/** §17.3.2.20 languages of a ruby guide (independent text, not the base's):
+ * `w:rubyPr/w:lid` names the phonetic guide's language; the guide runs'
+ * own `w:lang/@w:val`, when they all agree, governs its Latin text. */
+export interface RubyGuideLanguages {
+  readonly guide?: string;
+  readonly latin?: string;
 }

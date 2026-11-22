@@ -38,7 +38,7 @@
  * in the decision; it is a probe of the measuring context itself.
  */
 
-import { saveCanvasState } from '../internal/canvas-language.js';
+import { restoreCanvasLanguage, saveCanvasState, selectCanvasLanguage } from '../internal/canvas-language.js';
 
 /**
  * Reference em in CSS px. Embedded bitmap strikes are indexed by a uint8 ppem
@@ -183,6 +183,9 @@ export function createTextAdvancePlanner(
     const previousFont = context.font;
     const previousSpacing = context.letterSpacing;
     const previousKerning = context.fontKerning;
+    // The decision is per font, shared by text of every language: probe with
+    // the untagged language whatever run language the caller has selected.
+    const previousLang = selectCanvasLanguage(context, 'inherit');
     try {
       if (typeof previousSpacing === 'string') context.letterSpacing = '0px';
       if (previousKerning !== undefined) context.fontKerning = 'none';
@@ -216,6 +219,7 @@ export function createTextAdvancePlanner(
       context.font = previousFont;
       if (typeof previousSpacing === 'string') context.letterSpacing = previousSpacing;
       if (previousKerning !== undefined) context.fontKerning = previousKerning;
+      restoreCanvasLanguage(context, previousLang);
     }
   };
   const resolve = (font: string, probeMissing: boolean): ReferenceTextFont | null | undefined => {

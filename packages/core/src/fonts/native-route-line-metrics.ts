@@ -1,6 +1,7 @@
 import type { CanvasFontBoxProbeContext } from './canvas-font-box.js';
 import { quoteCssFontFamily } from '../internal/css-font-family.js';
 import { getGraphemeSegmenter } from '../text/sea-break.js';
+import { scratchCanvas, type SymbolProbeCanvasFactory } from './symbol-face.js';
 import {
   PROBE_EM, SENTINELS, SENTINEL_FAMILIES, SENTINEL_UPM, parseFamilyList, sentinelsWork, type FamilyEntry,
 } from './route-sentinels.js';
@@ -301,10 +302,20 @@ const SENTINEL_ONLY_FONTS = [
   `${PROBE_EM}px ${quoteCssFontFamily(SENTINEL_FAMILIES[1])}`,
 ] as const;
 
-const ownershipContexts: (CanvasFontBoxProbeContext | null)[] = [];
-const ownershipFonts: (string | undefined)[] = [];
-/** Route-independent control results, bounded like the per-route caches. */
-const sentinelControls = new Map<string, boolean>();
+/** Two probe contexts of one font set, the shorthand each currently holds,
+ * and that set's route-independent control results. */
+interface OwnershipProbe {
+  readonly create: () => CanvasFontBoxProbeContext | null;
+  readonly contexts: (CanvasFontBoxProbeContext | null | undefined)[];
+  readonly fonts: (string | undefined)[];
+  readonly controls: Map<string, boolean>;
+}
+
+const ownershipProbe = (create: () => CanvasFontBoxProbeContext | null): OwnershipProbe =>
+  ({ create, contexts: [], fonts: [], controls: new Map() });
+
+/** The realm's own font set (no owner canvas). */
+const realmProbe = ownershipProbe(() => newProbeContext());
 
 /** Advance and ink extents. A sentinel glyph is an ink bar 11 em (A) or
  * 13 em (B) tall; wherever a shaper places it (a zero-advance mark over a
@@ -318,15 +329,21 @@ function geometry(context: CanvasFontBoxProbeContext, text: string): readonly nu
   ];
 }
 
-function measurePair(fonts: readonly [string, string], cluster: string): (readonly number[])[] | undefined {
+function probeContext(probe: OwnershipProbe, index: number): CanvasFontBoxProbeContext | null {
+  if (probe.contexts[index] === undefined) probe.contexts[index] = probe.create();
+  return probe.contexts[index] ?? null;
+}
+
+function measurePair(
+  fonts: readonly [string, string], cluster: string, probe: OwnershipProbe = realmProbe,
+): (readonly number[])[] | undefined {
   const results: (readonly number[])[] = [];
   for (let index = 0; index < 2; index += 1) {
-    ownershipContexts[index] ??= newProbeContext();
-    const context = ownershipContexts[index];
+    const context = probeContext(probe, index);
     if (!context) return undefined;
-    if (ownershipFonts[index] !== fonts[index]) {
+    if (probe.fonts[index] !== fonts[index]) {
       context.font = fonts[index]!;
-      ownershipFonts[index] = fonts[index];
+      probe.fonts[index] = fonts[index];
     }
     results.push(geometry(context, cluster));
   }
@@ -339,11 +356,12 @@ const sameGeometry = (a: readonly number[], b: readonly number[]) =>
 /** Scalars for which CSS Fonts 4 §5.4 lets an engine choose a face outside
  * the family-list order: emoji presentation (Extended_Pictographic, emoji
  * modifiers, regional indicators, keycap and tag sequences, ZWJ sequences)
- * and variation selectors. Any part of such a cluster may bypass both
+ * and variation selectors (every Variation_Selector, Mongolian free variation
+ * selectors included). Any part of such a cluster may bypass both
  * sentinels through presentation-based system fallback, which no sentinel
  * can observe, so these clusters are outside the evidence boundary. */
 const PRESENTATION_SELECTED =
-  /[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\u20e3\ufe00-\ufe0f\u{e0020}-\u{e007f}\u{e0100}-\u{e01ef}]/u;
+  /[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\p{Variation_Selector}\u200d\u20e3\u{e0020}-\u{e007f}]/u;
 
 /** Whether the route's first available family (or an absent family before
  * it) draws every part of `cluster`; undefined when the realm cannot judge.
@@ -357,19 +375,19 @@ const PRESENTATION_SELECTED =
  * Canvas box). Each sentinel has its own private context, so a font string
  * is parsed only when the route changes. */
 export function nativeRouteClusterOwned(
-  fonts: readonly [string, string], cluster: string,
+  fonts: readonly [string, string], cluster: string, probe: OwnershipProbe = realmProbe,
 ): boolean | undefined {
   if (PRESENTATION_SELECTED.test(cluster)) return false;
-  let routed = sentinelControls.get(cluster);
+  let routed = probe.controls.get(cluster);
   if (routed === undefined) {
-    const control = measurePair(SENTINEL_ONLY_FONTS, cluster);
+    const control = measurePair(SENTINEL_ONLY_FONTS, cluster, probe);
     if (!control) return undefined;
     routed = !sameGeometry(control[0]!, control[1]!);
-    if (sentinelControls.size >= 4096) sentinelControls.delete(sentinelControls.keys().next().value!);
-    sentinelControls.set(cluster, routed);
+    if (probe.controls.size >= 4096) probe.controls.delete(probe.controls.keys().next().value!);
+    probe.controls.set(cluster, routed);
   }
   if (!routed) return false;
-  const measured = measurePair(fonts, cluster);
+  const measured = measurePair(fonts, cluster, probe);
   if (!measured) return undefined;
   // Equal geometry proves no sentinel glyph only while the cluster's own ink
   // could not mask one: an ink box at least as tall as sentinel A's bar
@@ -378,52 +396,93 @@ export function nativeRouteClusterOwned(
   return sameGeometry(measured[0]!, measured[1]!) && ascent! + descent! < SENTINEL_A_INK_PX;
 }
 
-/** Whether a NAMED family of `familyList` draws every grapheme cluster of
- * `text` (route sentinels, {@link nativeRouteClusterOwned}); false when the
- * realm cannot judge.
+/** Bound on the clusters a {@link NamedFamilyOracle} remembers. */
+const NAMED_FAMILY_CACHE_LIMIT = 8192;
+
+/** Judges whether NAMED families of a Canvas route draw text, in the font
+ * set of the canvas that measures and paints it. */
+export interface NamedFamilyOracle {
+  /** Whether a named family of `familyList` draws every grapheme cluster of
+   * `text`; false when this font set cannot judge. */
+  draws(familyList: string, weight: number, style: 'normal' | 'italic', text: string): boolean;
+}
+
+/**
+ * An oracle over the font set of `owner` (the measuring 2D context; its
+ * canvas's document, else the realm), proving with the route sentinels
+ * ({@link nativeRouteClusterOwned}) which family draws each cluster.
  *
- * The family list is cut at its first generic keyword: a generic always
- * resolves to a face, so nothing after it is reached, and the face it and
- * the engine's last-resort fallback select depend on the content language
- * (CSS Fonts 4 §5.1, §5.4). Named families are matched in list order
- * whatever the language. Text drawn entirely by named families therefore
- * keeps its faces, advances and available weights under any Canvas `lang`,
- * and a language can only select forms inside those faces.
+ * Only named families are judged: the list is cut at its first generic
+ * keyword. A generic resolves to faces chosen per content language (CSS
+ * Fonts 4 §5.1), and so does the engine's last-resort fallback (§5.4); a
+ * named family is matched in list order whatever the language. Families
+ * after a generic could still be reached when it lacks a glyph, so the cut
+ * is a conservative evidence boundary, not a claim that they never draw.
+ * Text drawn entirely by named families keeps its faces, advances and
+ * available weights under any Canvas `lang`, which can then only select
+ * forms (locl) inside those faces.
  *
- * `cache` holds per-cluster results for one font snapshot; its owner discards
- * it with that snapshot (faces registered or released change the answer). */
-export function namedFamiliesDrawText(
-  familyList: string, weight: number, style: 'normal' | 'italic', text: string,
-  cache?: Map<string, boolean>,
-): boolean {
-  if (text.length === 0) return false;
-  const entries = parseFamilyList(familyList);
-  if (!entries) return false;
-  const firstGeneric = entries.findIndex((entry) => entry.generic);
-  const named = (firstGeneric < 0 ? entries : entries.slice(0, firstGeneric)).map((entry) => entry.text);
-  if (named.length === 0) return false;
-  const fonts = nativeRouteOwnershipFonts(named.join(', '), weight, style);
-  const segmenter = getGraphemeSegmenter();
-  const clusters = segmenter ? Array.from(segmenter.segment(text), (part) => part.segment) : Array.from(text);
-  // Sentinels are refcounted per realm; an unloaded sentinel would let a
-  // fallback face pass as owned, so they are verified before new evidence.
-  let sentinelsVerified = false;
-  for (const cluster of clusters) {
-    const key = `${fonts[0]}\u0000${cluster}`;
-    let owned = cache?.get(key);
-    if (owned === undefined) {
-      if (!sentinelsVerified) {
-        if (!nativeRouteSentinelsWork()) return false;
-        sentinelsVerified = true;
-      }
-      const judged = nativeRouteClusterOwned(fonts, cluster);
-      if (judged === undefined) return false;
-      owned = judged;
-      cache?.set(key, owned);
+ * Results are remembered per cluster up to a bound; the oracle lives as long
+ * as its owner's font snapshot (faces registered or released change them).
+ */
+export function createNamedFamilyOracle(
+  owner?: unknown, factory?: SymbolProbeCanvasFactory,
+): NamedFamilyOracle {
+  const probe = ownershipProbe(() => {
+    try {
+      return (scratchCanvas(owner, factory, 1)?.getContext('2d') as CanvasFontBoxProbeContext | null | undefined) ?? null;
+    } catch {
+      return null;
     }
-    if (!owned) return false;
-  }
-  return true;
+  });
+  const listIds = new Map<string, number>();
+  const results = new Map<string, boolean>();
+  return {
+    draws(familyList, weight, style, text) {
+      if (text.length === 0) return false;
+      const entries = parseFamilyList(familyList);
+      if (!entries) return false;
+      const firstGeneric = entries.findIndex((entry) => entry.generic);
+      const named = (firstGeneric < 0 ? entries : entries.slice(0, firstGeneric)).map((entry) => entry.text);
+      if (named.length === 0) return false;
+      const fonts = nativeRouteOwnershipFonts(named.join(', '), weight, style);
+      let listId = listIds.get(fonts[0]);
+      if (listId === undefined) {
+        if (listIds.size >= NAMED_FAMILY_CACHE_LIMIT) {
+          listIds.clear();
+          results.clear();
+        }
+        listId = listIds.size;
+        listIds.set(fonts[0], listId);
+      }
+      const segmenter = getGraphemeSegmenter();
+      const clusters: Iterable<string> = segmenter
+        ? { *[Symbol.iterator]() { for (const part of segmenter.segment(text)) yield part.segment; } }
+        : text;
+      // Sentinels are refcounted; an unloaded one would let a fallback face
+      // pass as owned, so they are verified before any new evidence.
+      let verified = false;
+      for (const cluster of clusters) {
+        const key = `${listId}\u0000${cluster}`;
+        let owned = results.get(key);
+        if (owned === undefined) {
+          if (!verified) {
+            const context = probeContext(probe, 0);
+            if (!context || !sentinelsWork(context)) return false;
+            probe.fonts[0] = undefined;
+            verified = true;
+          }
+          const judged = nativeRouteClusterOwned(fonts, cluster, probe);
+          if (judged === undefined) return false;
+          owned = judged;
+          if (results.size >= NAMED_FAMILY_CACHE_LIMIT) results.delete(results.keys().next().value!);
+          results.set(key, owned);
+        }
+        if (!owned) return false;
+      }
+      return true;
+    },
+  };
 }
 
 /** The sentinels are registered and applied in this realm (once per prepared

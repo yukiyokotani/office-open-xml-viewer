@@ -3,12 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 // Node has no Canvas realm to run the route sentinels in; production judges
 // named-family ownership there (core namedFamiliesDrawText). Rendering tests
 // below use faces their recording canvas draws itself.
+// 'ж' stands for text only a generic fallback draws.
 vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
-  namedFamiliesDrawText: () => true,
+  createNamedFamilyOracle: () => ({ draws: (_list: string, _w: number, _s: string, text: string) => !text.includes('ж') }),
 }));
 import { createFontResolver } from './layout/font-service.js';
-import { createTextLayoutService, type GlyphMeasureRequest } from './layout/text.js';
+import { createTextLayoutService, rubyGuideShapeRequest, sliceTextShapeRequest, type GlyphMeasureRequest } from './layout/text.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, NumberingInfo, SectionProps } from './types';
 
@@ -79,6 +80,24 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     });
     const shaped = unjudged.shape({ text: 'б', fontSizePt: 10, fonts, language: 'sr-rs', clusterGeometry: false });
     expect('lang' in shaped.spans[0]!).toBe(false);
+  });
+
+  it('keeps a withheld piece language withheld in every derived request', () => {
+    const request = { text: 'бгд', fontSizePt: 10, fonts, language: 'sr-rs', clusterGeometry: false as const,
+      canvasLanguageWithheld: true as const };
+    expect('lang' in service.shape(request).spans[0]!).toBe(false);
+    expect('lang' in service.shape(sliceTextShapeRequest(request, 0, 1)).spans[0]!).toBe(false);
+  });
+
+  it('shapes a ruby guide in its own languages', () => {
+    const base = { text: '漢', fontSizePt: 10, fonts, language: 'en-us', eastAsiaLanguage: 'zh-cn',
+      canvasLanguageWithheld: true as const };
+    const guide = rubyGuideShapeRequest(base, 'かん', { guide: 'ja-jp', latin: 'en-gb' });
+    expect([guide.language, guide.eastAsiaLanguage, guide.complexScriptLanguage, guide.canvasLanguageWithheld])
+      .toEqual(['en-gb', 'ja-jp', 'ja-jp', undefined]);
+    const inherited = rubyGuideShapeRequest(base, 'かん', undefined);
+    expect([inherited.language, inherited.eastAsiaLanguage, inherited.canvasLanguageWithheld])
+      .toEqual(['en-us', 'zh-cn', undefined]);
   });
 
   it('keeps independent languages when scoped Arabic shares a physical face across slots', () => {
@@ -217,6 +236,35 @@ describe('Canvas lang at measure and paint', () => {
       .toEqual([['\u25fc\ufe0e', 'fr-ch']]);
     expect(draws.filter(draw => draw.text.includes('ab')).map(draw => [draw.text, draw.lang]))
       .toEqual([['ab', 'en-us']]);
+  });
+
+  it('keeps a ZWJ sequence and a continuing accent whole across language-only seams', async () => {
+    const { canvas, draws } = recordingCanvas();
+    await renderDocumentToCanvas(documentOf([
+      run('\u{1f469}', { lang: 'fr-ch' }),
+      run('\u200d', { lang: 'en-us' }),
+      run('\u{1f467} ', { lang: 'de-de' }),
+      run('a', { lang: 'sr-rs' }),
+      run('\u0301b', { lang: 'en-us' }),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    // The recording canvas draws one grapheme at a time; what matters is the
+    // language each continuation is drawn in: the base's, not its own run's.
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([
+      ['\u{1f469}', 'inherit'], ['\u200d', 'fr-ch'], ['\u{1f467}', 'inherit'], [' ', 'fr-ch'],
+      ['a', 'sr-rs'], ['\u0301', 'sr-rs'], ['b', 'sr-rs'],
+    ]);
+  });
+
+  it('measures every fragment of a wrapped piece in the language it is painted with', async () => {
+    const { canvas, draws, measures } = recordingCanvas();
+    // The piece contains text no named family draws, so it is untagged as a
+    // whole; its fragments must not regain the language when re-measured.
+    await renderDocumentToCanvas(documentOf([
+      run('гдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдегдеж', { lang: 'sr-rs' }),
+    ]), canvas, 0, { dpr: 1, width: 200 });
+    expect(draws.length).toBeGreaterThan(1);
+    expect(new Set(draws.map(draw => draw.lang))).toEqual(new Set(['inherit']));
+    expect(measures.filter(measure => measure.text.includes('г')).every(measure => measure.lang === 'inherit')).toBe(true);
   });
 
   it('keeps the measured language on text drawn inside a save/restore pair', async () => {

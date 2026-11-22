@@ -9,8 +9,9 @@ import {
   activeFontSet,
   canvasFontString,
   createSymbolFaceOracle,
+  createNamedFamilyOracle,
   fontFaceWeightCovers,
-  namedFamiliesDrawText,
+  type NamedFamilyOracle,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { FontSubstituteScript, OfficeFontFallbackRoute } from '@silurus/ooxml-core';
@@ -506,16 +507,18 @@ export function createProductionTextLayoutService(
       // fingerprint, independently of source occurrence or cache history.
       // v6/v3: a shorthand the context grid-fits at its own size is measured
       // at the reference em (core reference-advances.ts).
-      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v6'
-        : context ? 'canvas-text-metrics-v3' : 'deterministic-text-metrics-v1',
+      // v7/v4: run languages reach Canvas only for named-family text.
+      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v7'
+        : context ? 'canvas-text-metrics-v4' : 'deterministic-text-metrics-v1',
       ...(context ? {
         sameGlyphRaster,
         ownsGlyphs,
-        // Results per cluster live as long as this service's font snapshot.
-        namedFamiliesDraw: ((cache: Map<string, boolean>) =>
-          (request: Readonly<import('./text.js').NamedFamilyDrawRequest>) => namedFamiliesDrawText(
-            request.fontRoute.familyList, request.weight, request.style, request.text, cache,
-          ))(new Map()),
+        // Judged in the font set of the canvas that measures and paints (the
+        // symbol oracle's owner); results live with this service's snapshot.
+        namedFamiliesDraw: ((oracle: NamedFamilyOracle) =>
+          (request: Readonly<import('./text.js').NamedFamilyDrawRequest>) => oracle.draws(
+            request.fontRoute.familyList, request.weight, request.style, request.text,
+          ))(createNamedFamilyOracle(options.symbolProbeOwner ?? context, options.symbolProbeCanvas)),
       } : {}),
       measure,
       ...(supportsDirectedContext ? { measureDirected: measure, supportsDirectedAuxiliaries: true as const } : {}),

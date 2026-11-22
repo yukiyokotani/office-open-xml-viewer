@@ -1,3 +1,5 @@
+import { restoreCanvasLanguage, selectCanvasLanguage } from '../internal/canvas-language.js';
+
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 interface ProbeState {
@@ -287,7 +289,9 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
   const doc = target.ownerDocument ?? document;
   const state = probeState(doc);
   const sourceFeature = sourceFeatureSettings(target);
-  const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}`;
+  // The language in effect selects forms (locl) the probe must judge too.
+  const lang = 'lang' in ctx && typeof ctx.lang === 'string' ? ctx.lang : '';
+  const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${lang}:${cp}`;
   const cached = state.cache.get(key);
   if (cached !== undefined) return cached;
 
@@ -299,6 +303,7 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
   const probe = state.canvas.getContext('2d', { willReadFrequently: true });
   if (probe !== null) {
     const previousFeature = state.canvas.style.fontFeatureSettings;
+    const previousLang = lang ? selectCanvasLanguage(probe, lang) : undefined;
     try {
       probe.font = replaceFontSize(ctx.font, `${PROBE_FONT_PX}px`);
       probe.fillStyle = '#000';
@@ -320,6 +325,7 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
       supported = false;
     } finally {
       state.canvas.style.fontFeatureSettings = previousFeature;
+      restoreCanvasLanguage(probe, previousLang);
       probe.font = probe.font;
       probe.clearRect(0, 0, state.canvas.width, state.canvas.height);
       if (!wasAttached) state.canvas.remove();

@@ -862,8 +862,9 @@ export {
 } from './fonts/local-line-metrics';
 export { loadNativeRouteSentinels } from './fonts/route-sentinels';
 export {
+  createNamedFamilyOracle,
   measureNativeRouteNormalLines,
-  namedFamiliesDrawText,
+  type NamedFamilyOracle,
   verifyNativeRouteNormalLines,
   type NativeRouteLineRequest,
   type NativeRouteNormalLine,

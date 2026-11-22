@@ -30,7 +30,7 @@ import type {
   TextShapeRequest,
   TextShapeSpan,
 } from '../layout/text.js';
-import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate } from '../layout/text.js';
+import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage } from '../layout/text.js';
 import {
   referenceFontAverageWidthRatio,
   referenceFontLineMetrics,
@@ -287,11 +287,20 @@ export function appendTextPiece(
   // Splitting on word boundaries would lose the association, so attach
   // the annotation only to the first emitted segment.
   const baseRuby = r.ruby;
+  const rubyLanguages = (() => {
+    const input = acquiredTypography?.ruby;
+    if (!input) return undefined;
+    const lid = input.language.status === 'valid' && input.language.value ? input.language.value.toLowerCase() : undefined;
+    const runLanguages = new Set(input.guideRuns.map((guideRun) => guideRun.language));
+    const latin = runLanguages.size === 1 ? [...runLanguages][0] ?? undefined : undefined;
+    return lid || latin ? { ...(lid ? { guide: lid } : {}), ...(latin ? { latin } : {}) } : undefined;
+  })();
   const ruby = baseRuby
     ? {
         text: baseRuby.text,
         fontSizePt: baseRuby.fontSizePt,
         ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
+        ...(rubyLanguages ? { languages: rubyLanguages } : {}),
       }
     : undefined;
   const revision = r.revision;
@@ -1178,7 +1187,8 @@ interface SegmentEmissionState {
   readonly effectiveCharacterScale: number | undefined;
   readonly effectiveKerningThreshold: number | undefined;
   readonly effectiveSnapToGrid: boolean | undefined;
-  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number } | undefined;
+  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number;
+    languages?: import('./model.js').RubyGuideLanguages } | undefined;
   readonly revision:
     | {
         readonly kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
@@ -1753,7 +1763,14 @@ function emitResolvedTextSegment(
     vertAlign: effectiveVertAlign,
     measuredWidth: 0,
     textLayoutService: environment.layoutServices?.text,
-    textShapeRequest,
+    // The piece's Canvas language is decided once, here: a piece whose slot
+    // language was withheld (no named-family proof) keeps it withheld in
+    // every fragment, fit and pair probe derived from this request, so they
+    // measure exactly what paint draws (segment `lang`).
+    textShapeRequest: resolvedSpan && resolvedSpan.lang === undefined
+      && scriptSlotLanguage(textShapeRequest, resolvedSpan.script) !== undefined
+      ? Object.freeze({ ...textShapeRequest, canvasLanguageWithheld: true as const })
+      : textShapeRequest,
     ...(resolvedSpan?.substituteScope !== undefined
       ? { substituteScope: resolvedSpan.substituteScope } : {}),
     breakBefore: resolvedSpan?.breakBefore ?? authoritativeSpan?.breakBefore ?? true,

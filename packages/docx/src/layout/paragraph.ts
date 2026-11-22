@@ -80,7 +80,7 @@ import {
   widthBalanceSpaceAdjustmentForTextPt,
 } from '../line-layout.js';
 import {
-  calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest, LIST_LABEL_PICTURE_INSET_PT,
+  calcEffectiveFontPx, EAST_ASIAN_RE, independentTextShapeRequest, LIST_LABEL_PICTURE_INSET_PT, rubyGuideShapeRequest,
   replaceTextShapeRequest, sliceTextShapeRequest, sliceSemanticSlotSpans, shapeRunToDocRun,
 } from './text.js';
 import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
@@ -2736,7 +2736,7 @@ function textPlacement(
     : undefined;
   const rubyShape = segment.ruby && segment.textLayoutService && segment.textShapeRequest
     ? segment.textLayoutService.shape({
-        ...independentTextShapeRequest(segment.textShapeRequest, segment.ruby.text),
+        ...rubyGuideShapeRequest(segment.textShapeRequest, segment.ruby.text, segment.ruby.languages),
         fontSizePt: segment.ruby.fontSizePt,
         measure: true,
       })
