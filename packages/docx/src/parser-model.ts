@@ -2269,43 +2269,33 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
   if (!visible) {
     // Every shape is deleted (or its note's references are): the markup view
     // shows them marked deleted and the final view omits them. They ride the
-    // story's last paragraph in document order (inside a table cell when the
-    // body ends with a table), so neither view gains flow for them. A body
-    // without any paragraph has no carrier: the shapes are left out.
-    const appendToLast = (blocks: readonly unknown[]): unknown[] | undefined => {
-      for (let index = blocks.length - 1; index >= 0; index -= 1) {
-        const element = blocks[index] as BodyElement;
-        if (element.type === 'paragraph') {
-          const last = element as DocParagraph;
-          const next = [...blocks];
-          next[index] = {
-            ...last,
-            runs: [...last.runs, ...runs],
-            ...withRevisions(element, last.runs.length, (last as InternalDocParagraph).__runRevisions ?? []),
-          };
-          return next;
-        }
-        if (element.type === 'table') {
-          for (let row = element.rows.length - 1; row >= 0; row -= 1) {
-            const cells = element.rows[row]!.cells;
-            for (let cell = cells.length - 1; cell >= 0; cell -= 1) {
-              const content = appendToLast(cells[cell]!.content);
-              if (!content) continue;
-              const rows = [...element.rows];
-              const nextCells = [...cells];
-              nextCells[cell] = { ...cells[cell]!, content: content as typeof cells[number]['content'] };
-              rows[row] = { ...rows[row]!, cells: nextCells };
-              const next = [...blocks];
-              next[index] = { ...element, rows };
-              return next;
-            }
-          }
-        }
-      }
-      return undefined;
+    // body's last paragraph, so neither view gains flow for them. A body
+    // ending without a paragraph (Word always ends one with a paragraph) has
+    // no carrier whose page frame bounds them: they are left out, never
+    // placed inside a table cell laid out before its page's note area.
+    // The carried anchor characters take the carrier's own text metrics
+    // (its last text run, else its paragraph mark), so they lend its line
+    // no height of their own; they were sized for a host paragraph.
+    const carried = (carrier: DocParagraph): DocRun[] => {
+      const text = [...carrier.runs].reverse().find((run) => run.type === 'text' && run.text.length > 0) as
+        Extract<DocRun, { type: 'text' }> | undefined;
+      const metrics = text
+        ? { fontSize: text.fontSize, fontFamily: text.fontFamily ?? null,
+            fontFamilyEastAsia: text.fontFamilyEastAsia ?? null, bold: text.bold, italic: text.italic }
+        : { fontSize: carrier.defaultFontSize ?? 10, fontFamily: carrier.defaultFontFamily ?? null,
+            fontFamilyEastAsia: null, bold: false, italic: false };
+      return runs.map((run) => (run.type === 'anchorHost' ? { ...run, ...metrics } : run));
     };
-    const body = appendToLast(doc.body) as BodyElement[] | undefined;
-    return { ...doc, ...(body ? { body } : {}), __noteLayoutSettings: retained } as DocxDocumentModel;
+    const lastIndex = doc.body.map((element) => element.type).lastIndexOf('paragraph');
+    if (lastIndex < 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
+    const last = doc.body[lastIndex] as DocParagraph;
+    const body = [...doc.body];
+    body[lastIndex] = {
+      ...last,
+      runs: [...last.runs, ...carried(last)],
+      ...withRevisions(body[lastIndex]!, last.runs.length, (last as InternalDocParagraph).__runRevisions ?? []),
+    } as unknown as BodyElement;
+    return { ...doc, body, __noteLayoutSettings: retained } as DocxDocumentModel;
   }
   return {
     ...doc,
