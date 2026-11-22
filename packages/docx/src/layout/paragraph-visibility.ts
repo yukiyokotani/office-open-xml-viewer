@@ -31,6 +31,7 @@ type MarkOnlyRunFacts = Readonly<{
   anchorAcquisitionInput?: unknown;
   __anchorAcquisition?: unknown;
   revision?: Readonly<{ kind?: string }> | null;
+  noteRef?: Readonly<{ customMarkFollows?: boolean }> | null;
 }>;
 
 /** WORD_ANCHOR_HOST_NO_LINE_METRIC: the paragraph displays nothing but its
@@ -39,13 +40,15 @@ type MarkOnlyRunFacts = Readonly<{
  * inkless exactly as isInklessParagraph defines for a source paragraph. Such
  * a paragraph is laid out and paginated as that empty paragraph, whether or
  * not it anchors floating drawings. A picture list label's metric run is
- * content. The single classification for layout (paragraph-measure) and
- * pagination. */
+ * content, and so is an automatic note reference mark (§17.11): its run's
+ * source text is empty or an id, and layout substitutes the note's number.
+ * The single classification for layout (paragraph-measure) and pagination. */
 export function displaysOnlyParagraphMark(
   runs: readonly MarkOnlyRunFacts[],
   showTrackedChanges: boolean | undefined,
 ): boolean {
-  return metricVisibleRuns(runs, showTrackedChanges).every((run) => run.type === 'text' && (run.text ?? '') === '');
+  return metricVisibleRuns(runs, showTrackedChanges).every((run) => run.type === 'text' && (run.text ?? '') === ''
+    && (run.noteRef == null || run.noteRef.customMarkFollows === true));
 }
 
 /** A list marker (text or picture bullet) is painted: visible ink that no

@@ -531,6 +531,44 @@ export function wordBlockHasInk(
   return !wordInklessMarkBlock(block, showTrackedChanges) || block.visibleNumbering === true;
 }
 
+type InkLookaheadSequence = readonly BodyLayoutSequenceEntryFor<Readonly<{ startType: string }>>[];
+const followingInkByView = new WeakMap<InkLookaheadSequence, Map<boolean | undefined, readonly boolean[]>>();
+
+/** Whether ink content follows from `startIndex` before a page or section
+ * boundary. One backward pass per sequence and revision view answers every
+ * start index, so a run of inkless marks is not rescanned from each mark. */
+export function wordFollowingInkContent(
+  sequence: InkLookaheadSequence,
+  startIndex: number,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  let views = followingInkByView.get(sequence);
+  if (!views) followingInkByView.set(sequence, views = new Map());
+  let suffix = views.get(showTrackedChanges);
+  if (!suffix) {
+    const answers = new Array<boolean>(sequence.length + 1).fill(false);
+    for (let index = sequence.length - 1; index >= 0; index -= 1) {
+      answers[index] = followingInkAt(sequence[index]!, answers[index + 1]!, showTrackedChanges);
+    }
+    views.set(showTrackedChanges, suffix = answers);
+  }
+  return suffix[Math.min(Math.max(startIndex, 0), sequence.length)]!;
+}
+
+function followingInkAt(
+  entry: InkLookaheadSequence[number],
+  after: boolean,
+  showTrackedChanges: boolean | undefined,
+): boolean {
+  if (entry.kind === 'consume-source') return after;
+  if (entry.kind === 'authored-break') return entry.break === 'lastRenderedPageBreak' && after;
+  if (entry.kind === 'begin-section') return entry.section.startType === 'continuous' && after;
+  const block = entry.kind === 'adjacent-table-group' ? entry : entry.block;
+  if (block.kind !== 'paragraph') return true;
+  if (block.pageBreakBefore) return false;
+  return wordBlockHasInk(block, showTrackedChanges) || after;
+}
+
 function continuousRoleMark(block: Readonly<{ inkless?: boolean; visibleNumbering?: true }>): boolean {
   return block.inkless === true && block.visibleNumbering !== true;
 }

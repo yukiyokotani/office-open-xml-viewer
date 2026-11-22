@@ -181,7 +181,7 @@ import { buildSegments } from './line-layout.js';
 import { withAnchorPlacementSegments } from './line-breaker/segment-builder.js';
 import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
 import { textRunsForPage } from './text-run-projection.js';
-import { hasFollowingInkContent } from './layout/body-paginator.js';
+import { wordFollowingInkContent } from './layout/body-pagination-compatibility.js';
 
 function documentContext(): CanvasRenderingContext2D {
   let font = '10px serif';
@@ -423,6 +423,39 @@ describe('a hideMark cell whose final paragraph holds only floating anchors', ()
     expect(rowHeight(anchor(), numbered)).toBe(rowHeight([], numbered));
     expect(rowHeight(anchor())).toBe(rowHeight([]));
     expect(rowHeight([])).toBeLessThan(12);
+  });
+
+  it('keeps the row of an automatic note mark that is the only content of the cell', () => {
+    // The in-note reference placeholder has empty source text; layout
+    // substitutes the note's number, which is ink.
+    const noteRows = (cellRuns: readonly Run[]): number[] => {
+      const model = documentModel([bodyParagraph([word('Body'),
+        word('1', 12, { noteRef: { kind: 'footnote', id: '1' } })])], null, { compatibilityMode: 15 });
+      (model as { footnotes: unknown }).footnotes = [{ id: '1',
+        content: [tableOf([bodyParagraph(cellRuns)], { hideMark: true })] }];
+      const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+        { currentDateMs: 0 });
+      const heights: number[] = [];
+      const visit = (node: unknown): void => {
+        if (!node || typeof node !== 'object') return;
+        if (Array.isArray(node)) { node.forEach(visit); return; }
+        const record = node as Record<string, unknown>;
+        if (record.kind === 'table' && Array.isArray(record.rows)) {
+          heights.push(...(record.rows as { heightPt: number }[]).map((row) => row.heightPt));
+        }
+        Object.values(record).forEach(visit);
+      };
+      visit(layout.pages[0]!.layers);
+      return heights;
+    };
+    const mark = word('', 12, { noteRef: { kind: 'footnote', id: '' } });
+    const [empty] = noteRows([]);
+    const [marked] = noteRows([mark]);
+    expect(empty).toBeLessThan(12);
+    expect(marked).toBeGreaterThanOrEqual(12);
+    expect(noteRows([...anchor(), mark])[0]).toBe(marked);
+    // A custom mark suppresses the automatic one: nothing but the cell mark.
+    expect(noteRows([word('', 12, { noteRef: { kind: 'footnote', id: '', customMarkFollows: true } })])[0]).toBe(empty);
   });
 
   it('classifies the mark in the active revision view', () => {
@@ -738,6 +771,28 @@ describe('several floating anchors inside one text sequence', () => {
     expect(host.bounds.xPt).toBeCloseTo(boundary, 9);
   });
 
+  it('places a host at the retained boundary after East Asian automatic spacing', () => {
+    // The space between the ideograph and the Latin letters is part of the
+    // retained cluster positions; the host after "ab" stands at "c".
+    const spaced = (runs: readonly Run[]) => {
+      const model = documentModel([bodyParagraph(runs, { autoSpaceDE: true } as never)], null, { compatibilityMode: 15 });
+      const layout = layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }),
+        { currentDateMs: 0 });
+      const paragraph = layout.pages[0]!.layers.body.find((node) => node.kind === 'paragraph');
+      if (paragraph?.kind !== 'paragraph') throw new Error('Expected a paragraph');
+      return paragraph.lines[0]!.placements;
+    };
+    const plain = spaced([word('\u6f22abcd')]).filter((placement) => placement.kind === 'text');
+    const boundaries = plain.flatMap((placement) => placement.kind === 'text'
+      ? placement.clusters.map((cluster) => [cluster.range.start, placement.origin.xPt + cluster.offset.xPt] as const) : []);
+    const boundary = boundaries.find(([start]) => start === 3)![1];
+    // Automatic spacing is present: "c" starts beyond three natural advances.
+    expect(boundary).toBeGreaterThan(20 + 3 * 6 + 0.5);
+    const host = spaced([word('\u6f22ab'), ...anchor(), word('cd')]).find((placement) => placement.kind === 'anchor-host');
+    if (host?.kind !== 'anchor-host') throw new Error('Expected a host');
+    expect(host.bounds.xPt).toBeCloseTo(boundary, 9);
+  });
+
   it('keeps consistent ranges around a drawing inside right-to-left text', () => {
     const hebrew = (value: string): Run => word(value, 12, { rtl: true });
     const { texts, hosts } = layOut([hebrew('\u05d0\u05d1'), ...anchor(), hebrew('\u05d2\u05d3')], [word(' xy', 12, { bold: true })]);
@@ -869,6 +924,31 @@ describe('a line with many anchors inside its text is planned in linear work', (
     expect(visited(800)).toBeLessThan(visited(200) * 5);
   });
 
+  it('finds the character before each host of a vertical line in bounded work', () => {
+    // One vertical line of ideographs alternating with distinct floating
+    // pictures: a scan of the line's clusters per host reads n * n of them.
+    const visited = (count: number): number => {
+      const runs: Run[] = [];
+      for (let index = 0; index < count; index += 1) {
+        runs.push(word('\u5b57', 4));
+        runs.push({ type: 'anchorHost', fontSize: 4, __anchorOccurrenceId: `p${index}` } as unknown as Run);
+        runs.push(picture({ anchor: true, widthPt: 3, heightPt: 5, imagePath: 'word/media/p.png',
+          __anchorAcquisition: { ...pageAnchor(`p${index}`),
+            vertical: { relativeFrom: 'line', relativeFromStatus: 'valid', choice: { kind: 'offset', valuePt: 0 } } } }));
+      }
+      const model = documentModel([bodyParagraph(runs)], null, { compatibilityMode: 15 });
+      Object.assign(model.section, { pageWidth: 400, pageHeight: 8000, textDirection: 'tbRlV' });
+      const { layout, entries } = arrayEntriesVisited(() =>
+        layoutDocument(model, createLayoutServices(model, { measureContext: documentContext() }), { currentDateMs: 0 }));
+      const paragraph = layout.pages[0]!.layers.body.find((node) => node.kind === 'paragraph');
+      if (paragraph?.kind !== 'paragraph') throw new Error('Expected a paragraph');
+      expect(paragraph.lines).toHaveLength(1);
+      expect(layout.pages[0]!.layers.paintOrder.filter((entry) => entry.kind === 'drawing')).toHaveLength(count);
+      return entries;
+    };
+    expect(visited(800)).toBeLessThan(visited(100) * 10);
+  });
+
   it('looks ahead for ink once across consecutive anchor-only paragraphs', () => {
     // Anchor-only marks before one text paragraph: a look-ahead from each
     // mark over the marks after it reads about n * n / 2 paragraphs.
@@ -879,9 +959,9 @@ describe('a line with many anchors inside its text is planned in linear work', (
       const sequence = [...Array.from({ length: count }, mark),
         { kind: 'body-block', block: { kind: 'paragraph' } }];
       for (let index = 0; index <= count; index += 1) {
-        expect(hasFollowingInkContent({ sequence } as never, index, false)).toBe(true);
+        expect(wordFollowingInkContent(sequence as never, index, false)).toBe(true);
       }
-      expect(hasFollowingInkContent({ sequence } as never, count + 1, false)).toBe(false);
+      expect(wordFollowingInkContent(sequence as never, count + 1, false)).toBe(false);
       return read;
     };
     expect(reads(400)).toBeLessThan(reads(100) * 5);
@@ -891,7 +971,7 @@ describe('a line with many anchors inside its text is planned in linear work', (
     const mark = { kind: 'body-block', block: { kind: 'paragraph', markOnlyView: { final: true, markup: false } } };
     const ink = { kind: 'body-block', block: { kind: 'paragraph' } };
     const answers = (sequence: readonly unknown[], view: boolean) =>
-      sequence.map((_, index) => hasFollowingInkContent({ sequence } as never, index, view));
+      sequence.map((_, index) => wordFollowingInkContent(sequence as never, index, view));
     const nextPage = { kind: 'begin-section', section: { startType: 'nextPage' } };
     const continuous = { kind: 'begin-section', section: { startType: 'continuous' } };
     const pageBreak = { kind: 'authored-break', break: 'page' };

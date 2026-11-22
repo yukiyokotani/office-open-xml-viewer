@@ -2336,22 +2336,23 @@ function planContentLine(
     const inside = hostsInside.get(segmentIndex);
     const placedText = inside ? placements.at(-1) : undefined;
     if (inside && placedText?.kind === 'text') {
-      // The line's gap plan moves each retained cluster by the deltas of the
-      // gaps before it; the host stands at the moved boundary.
-      const natural = segment.kind === 'text' ? segment.clusters : placedText.clusters;
-      const gapDeltaPt = (index: number): number => {
-        const at = Math.min(index, placedText.clusters.length - 1);
-        return at < 0 ? 0 : placedText.clusters[at]!.offset.xPt - (natural[at]?.offset.xPt ?? placedText.clusters[at]!.offset.xPt);
-      };
+      // The host stands at the retained position of the cluster it precedes
+      // (after the last one, at the piece's end), so every adjustment the
+      // piece's clusters carry is the host's as well.
+      const clusters = placedText.clusters;
+      const first = clusters[0];
+      const last = clusters.at(-1);
+      /** Pen position before cluster `index`, from the piece's logical start. */
+      const penPt = (index: number): number => !first || !last ? 0
+        : index < clusters.length
+          ? clusters[index]!.offset.xPt - first.offset.xPt
+          : last.offset.xPt + last.advancePt - first.offset.xPt;
       let cluster = 0;
-      let advancedPt = 0;
       for (const planned of inside) {
-        while (cluster < placedText.clusters.length && placedText.clusters[cluster]!.range.start < planned.at) {
-          advancedPt += placedText.clusters[cluster]!.advancePt;
-          cluster += 1;
-        }
-        const precedingPt = advancedPt + gapDeltaPt(cluster);
-        placeHost(planned, visual.rtl[segmentIndex] ? xPt - precedingPt : segmentStartPt + precedingPt);
+        while (cluster < clusters.length && clusters[cluster]!.range.start < planned.at) cluster += 1;
+        placeHost(planned, visual.rtl[segmentIndex]
+          ? xPt - penPt(cluster)
+          : placedText.origin.xPt + (first?.offset.xPt ?? 0) + penPt(cluster));
       }
     }
     // A right-to-left segment's leading edge is its right edge.
@@ -6582,22 +6583,34 @@ function precedingCharacterStartPt(
   line: LineLayout,
   host: Extract<ParagraphPlacement, { kind: 'anchor-host' }>,
 ): number {
-  const hostPt = host.bounds.xPt;
-  let bestEnd = -Infinity;
-  let bestStart = line.bounds.xPt;
-  for (const placement of line.placements) {
-    if (placement.kind !== 'text') continue;
-    for (const cluster of placement.clusters) {
-      const start = placement.origin.xPt + cluster.offset.xPt;
-      const end = start + cluster.advancePt;
-      if (end <= hostPt + 1e-6 && end > bestEnd) {
-        bestEnd = end;
-        bestStart = start;
+  // The line's clusters by ascending end, indexed once per placement list:
+  // every host of the line searches the same list.
+  let ends = clusterEndsByLine.get(line.placements);
+  if (!ends) {
+    const all: { end: number; start: number }[] = [];
+    for (const placement of line.placements) {
+      if (placement.kind !== 'text') continue;
+      for (const cluster of placement.clusters) {
+        const start = placement.origin.xPt + cluster.offset.xPt;
+        all.push({ end: start + cluster.advancePt, start });
       }
     }
+    // Stable: of clusters that end together, the first placed is kept.
+    all.sort((a, b) => a.end - b.end);
+    clusterEndsByLine.set(line.placements, ends = all.filter((entry, index) => index === 0 || entry.end > all[index - 1]!.end));
   }
-  return bestStart;
+  const limit = host.bounds.xPt + 1e-6;
+  let low = 0;
+  let high = ends.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (ends[middle]!.end <= limit) low = middle + 1;
+    else high = middle;
+  }
+  return low === 0 ? line.bounds.xPt : ends[low - 1]!.start;
 }
+
+const clusterEndsByLine = new WeakMap<LineLayout['placements'], readonly Readonly<{ end: number; start: number }>[]>();
 
 function wordMode14ColumnOriginApplies(
   acquisition: AnchorAcquisitionInput,
