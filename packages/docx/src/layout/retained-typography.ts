@@ -9,7 +9,6 @@ import type {
   TextDecorationLayout,
 } from './types.js';
 import { retainedBorderTreatment } from './border-treatment.js';
-import { wordRubyGuideSpacing } from './line-compatibility.js';
 import type { GlyphInkBounds, GlyphMeasurement } from './text.js';
 
 export interface ShapedLeaderInput extends Omit<RetainedGlyphPaintOperation, 'text' | 'origin'> {
@@ -41,51 +40,6 @@ export function centeredLeaderGlyphOrigins(
     fontWeight: input.fontWeight,
     fontStyle: input.fontStyle,
     color: input.color,
-  }));
-}
-
-export interface RubyGuideSpanInput extends Omit<RetainedGlyphPaintOperation, 'origin'> {
-  readonly offsetPt: number;
-}
-
-export function rubyPaintOperations(input: Readonly<{
-  baseOrigin: PointPt;
-  baseAdvancePt: number;
-  guideAdvancePt: number;
-  /** Valid authored ST_RubyAlign (WORD_RUBY_ALIGN_PLACEMENT); centred when absent. */
-  align?: string;
-  raisePt?: number;
-  /** Used only for the specification-independent touching-ink fallback. */
-  baseInkTopPt?: number;
-  guideInkBottomFromBaselinePt?: number;
-  spans: readonly RubyGuideSpanInput[];
-}>): readonly RetainedGlyphPaintOperation[] {
-  let baselinePt: number;
-  if (input.raisePt !== undefined) {
-    baselinePt = input.baseOrigin.yPt - input.raisePt;
-  } else if (
-    input.baseInkTopPt !== undefined
-    && input.guideInkBottomFromBaselinePt !== undefined
-  ) {
-    baselinePt = input.baseInkTopPt - input.guideInkBottomFromBaselinePt;
-  } else {
-    throw new Error(
-      'Ruby geometry requires authored w:hpsRaise or retained base/guide ink bounds',
-    );
-  }
-  const spacing = wordRubyGuideSpacing(
-    input.align, input.baseAdvancePt - input.guideAdvancePt, input.spans.length,
-  );
-  const startXPt = input.baseOrigin.xPt + spacing.leadPt;
-  return input.spans.map((span, index) => ({
-    text: span.text,
-    origin: { xPt: startXPt + span.offsetPt + index * spacing.gapPt, yPt: baselinePt },
-    fontRoute: span.fontRoute,
-    fontSizePt: span.fontSizePt,
-    fontWeight: span.fontWeight,
-    fontStyle: span.fontStyle,
-    color: span.color,
-    ...(span.kerning ? { kerning: span.kerning } : {}),
   }));
 }
 

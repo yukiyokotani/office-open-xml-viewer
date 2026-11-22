@@ -30,6 +30,7 @@ import {
   type LayoutTabSeg,
   type LayoutTextSeg,
   type LineBoundary,
+  type RubyCellGeometry,
   type WrapLayoutCtx,
 } from './model.js';
 import { createLineBreakerState, isInklessLineItem, type GapTransaction, type GapWindow } from './break-queue.js';
@@ -70,7 +71,8 @@ import {
   segmentEastAsiaFloorSingleLinePx,
   segmentIntendedSingleLinePx,
 } from './font-routes.js';
-import { rubyAscentReservePx, rubyCellGeometryPx } from './ruby-metrics.js';
+import { rubyAscentReservePx } from './ruby-metrics.js';
+import { rubyBaseOffsetPx, rubyCellGeometry, rubyPieceWideningPx } from './ruby-cell.js';
 import { fitCJKPrefix, fitsLineWidth, hasEastAsianVisiblePredecessor } from './fit-search.js';
 import { rebaseSeaBreaks, hasCJKBreakOpportunity } from './text-runs.js';
 import {
@@ -281,7 +283,7 @@ function minimalLegalTextPrefix(operationState: PassOperationState, segment: Lay
   const { lineEdgeRules: kinsoku } = operationState;
   const text = segment.text;
   let end = text.length;
-  if (segment.fitTextRegionIndex === undefined && !segment.ruby && !segment.tateChuYoko) {
+  if (segment.fitTextRegionIndex === undefined && !segment.ruby && !segment.rubyGroup && !segment.tateChuYoko) {
     const protectedOffsets = protectedNoBreakOffsets(segment);
     if (segment.hardJoinPrev === true) {
       end = hardJoinPrefixEnd(segment) ?? text.length;
@@ -1334,6 +1336,8 @@ export function performProspectiveSnapAdvance(
 
   const kind = snapToCharsClass(s, characterGrid);
   if (!kind || snapPitchPx == null) return naturalWidth;
+  // A ruby cell is its own allocation (WORD_RUBY_ALIGN_PLACEMENT).
+  if (s.rubyGroup) return performStandaloneSnapAdvance(operationState, s, naturalWidth);
   if (kind === 'eastAsia') {
     const cells = eastAsianSnapCellCount(s);
     return snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx, cells);
@@ -1404,7 +1408,20 @@ export function performAddToLine(
       s.snapGridClass = kind;
       s.snapGridNaturalWidthPx = naturalWidth;
       s.snapGridCellPitchPx = snapPitchPx;
-      if (kind === 'eastAsia') {
+      if (s.rubyGroup) {
+        // WORD_RUBY_ALIGN_PLACEMENT: a ruby piece takes its own allocation
+        // plus its share of the cell's widening, which is whole cells.
+        const share = rubyPieceWideningPx(s, performRubyCell(operationState, s));
+        const baseNatural = naturalWidth - share;
+        const allocated = snapToCharsAllocatedWidthPx(baseNatural, kind, snapPitchPx,
+          kind === 'eastAsia' ? eastAsianSnapCellCount(s) : 1);
+        const leading = kind === 'latin' ? (allocated - baseNatural) / 2 : 0;
+        committedWidth = allocated + share;
+        s.snapGridLeadingPadPx = leading;
+        s.snapGridTrailingPadPx = committedWidth - baseNatural - leading - rubyBaseOffsetPx(s);
+        s.measuredWidth = committedWidth;
+        breakerState.snapBlock = null;
+      } else if (kind === 'eastAsia') {
         const cellCount = eastAsianSnapCellCount(s);
         committedWidth = snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx, cellCount);
         s.snapGridLeadingPadPx = 0;
@@ -1646,7 +1663,79 @@ export function performSegNaturalAdvance(
     characterGrid,
     scale,
     condensedNaturalClusters(operationState, s, s.text),
-  ) + leadingAutoSpacePx(operationState, s);
+  ) + leadingAutoSpacePx(operationState, s)
+    + rubyPieceWideningPx(s, performRubyCell(operationState, s));
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT: the one cell geometry of the ruby run `s` is a
+ * piece of, computed once from the base pieces' laid-out advances, the
+ * guide's units, the raise and the guide's head extent. */
+export function performRubyCell(
+  operationState: PassOperationState,
+  s: LayoutTextSeg,
+): RubyCellGeometry | undefined {
+  const group = s.rubyGroup;
+  if (!group) return undefined;
+  const {
+    scale, ctx, fontFamilyClasses, characterGrid, measureText, verticalInkExtra,
+    snapPitchPx, eastAsianSnapCellCount, verticalGlyphMeasurement,
+  } = operationState;
+  if (group.cell?.scale === scale) return group.cell;
+  const first = group.pieces[0]!;
+  const ruby = group.ruby;
+  const rubyPx = ruby.fontSizePt * scale;
+  const verticalLine = first.verticalRun === true || first.tateChuYoko === true
+    || first.verticalFrameRun === 'upright';
+  const naturalBasePx = (piece: LayoutTextSeg) => segAdvanceWidth(
+    piece,
+    measureText(piece).width + verticalInkExtra(piece, piece.text),
+    characterGrid,
+    scale,
+    condensedNaturalClusters(operationState, piece, piece.text),
+  );
+  const snapKind = (piece: LayoutTextSeg) => snapPitchPx != null && piece.text.length > 0
+    ? snapToCharsClass(piece, characterGrid) : null;
+  return rubyCellGeometry(s, {
+    scale,
+    baseAdvancePx: (piece) => {
+      const natural = naturalBasePx(piece);
+      const kind = snapKind(piece);
+      return kind ? snapToCharsAllocatedWidthPx(natural, kind, snapPitchPx!,
+        kind === 'eastAsia' ? eastAsianSnapCellCount(piece) : 1) : natural;
+    },
+    fallbackGuideAdvancePx: (text) => {
+      const previousFont = ctx.font;
+      try {
+        ctx.font = buildFont(first.bold, first.italic, rubyPx,
+          first.fontFamily, fontFamilyClasses, first.fontRoute);
+        return ctx.measureText(text).width;
+      } finally {
+        ctx.font = previousFont;
+      }
+    },
+    reservePx: rubyAscentReservePx(ruby.fontSizePt, ruby.hpsRaisePt, scale, first, ctx, fontFamilyClasses),
+    headPx: verticalLine
+      ? wordVerticalSingleLinePx(verticalDesignBoxPerEm(operationState, first) * rubyPx, rubyPx,
+        verticalFarEastClass(first), scale) / 2
+      : rubyPx,
+    verticalLine,
+    ...(verticalGlyphMeasurement ? { verticalGlyphMeasurement } : {}),
+    ...(first.snapToCharacterGrid !== false && snapPitchPx != null
+      && group.pieces.some((piece) => snapKind(piece) !== null) ? { snapPitchPx } : {}),
+  });
+}
+
+/** WORD_VERTICAL_LINE_CENTRED_BOX: the base box (per em) a vertical line run
+ * is centred on: its admitted design box, else its measured box. */
+function verticalDesignBoxPerEm(operationState: PassOperationState, s: LayoutTextSeg): number {
+  const emPx = operationState.effectiveFontPx(s);
+  if ((s.resolvedResourceVerticalMetric || s.referenceFontVerticalMetric)
+    && s.resolvedDesignAscentRatio != null && s.resolvedDesignDescentRatio != null
+    && (!s.ruby || s.ruby.hpsRaisePt != null)) {
+    return s.resolvedDesignAscentRatio + s.resolvedDesignDescentRatio;
+  }
+  const corrected = measuredLineMetrics(operationState.measureText(s), s.fontSize * operationState.scale);
+  return emPx > 0 ? (corrected.ascent + corrected.descent) / emPx : 0;
 }
 
 /** WORD_CONDENSED_SPACING_ADVANCE_FLOOR units for `text` (a slice of `s` at
@@ -1695,12 +1784,14 @@ export function performStandaloneSnapAdvance(
 
   const kind = snapToCharsClass(s, characterGrid);
   if (!kind || snapPitchPx == null || s.text.length === 0) return naturalWidth;
+  // A ruby piece's share of its cell's widening is already whole cells.
+  const rubyShare = rubyPieceWideningPx(s, performRubyCell(operationState, s));
   return snapToCharsAllocatedWidthPx(
-    naturalWidth,
+    naturalWidth - rubyShare,
     kind,
     snapPitchPx,
     kind === 'eastAsia' ? eastAsianSnapCellCount(s) : 1,
-  );
+  ) + rubyShare;
 }
 
 export function performSegAdvance(operationState: PassOperationState, s: LayoutTextSeg): number {
@@ -2344,30 +2435,10 @@ export function performTextSegmentBox(
     scale,
     condensedNaturalClusters(operationState, s, s.text),
   ) + leadingAutoSpacePx(operationState, s);
-  // WORD_RUBY_ALIGN_PLACEMENT: a guide longer than its whole base widens the
-  // run; the base sits inside it by the authored alignment.
-  // Measured only for authored alignments; a split base widens its first
-  // piece by the base offset and its last piece by the rest.
-  s.rubyBaseOffsetPx = undefined;
-  s.rubyCellAdvancePx = undefined;
-  // An unsplit base uses its own laid-out advance (grid, spacing included).
-  const ownBasePx = s.rubyGroupEnd !== undefined && s.ruby !== undefined ? width : undefined;
-  const rubyCell = (ruby: NonNullable<LayoutTextSeg['ruby']>) => {
-    const cell = rubyCellGeometryPx(s, ruby, scale, ctx, fontFamilyClasses, ownBasePx);
-    return cell;
-  };
-  if (s.ruby?.align) {
-    const cell = rubyCell(s.ruby);
-    s.rubyCellAdvancePx = Math.max(cell.basePx, cell.guidePx);
-    if (cell.baseOffsetPx > 0) {
-      s.rubyBaseOffsetPx = cell.baseOffsetPx;
-      width += cell.baseOffsetPx;
-    }
-  }
-  if (s.rubyGroupEnd?.align) {
-    const cell = rubyCell(s.rubyGroupEnd);
-    width += cell.overhangPx - cell.baseOffsetPx;
-  }
+  // WORD_RUBY_ALIGN_PLACEMENT: the run's one cell geometry; a piece advances
+  // by its share of the widening to a longer guide.
+  const rubyCell = performRubyCell(operationState, s);
+  width += rubyPieceWideningPx(s, rubyCell);
   s.snapGridNaturalWidthPx = width;
   // The seam pair with the preceding piece (WORD_KERNED_SPACE_PAIRS; for
   // max-content also the separator pair of registered physical units, whose
@@ -2487,33 +2558,20 @@ export function performTextSegmentBox(
       else if (positionPx < 0) descent -= positionPx;
     }
   }
-  if (s.ruby && (!s.textBoxLineFloor || s.textBoxVertical)) {
-    const reserve = rubyAscentReservePx(
-      s.ruby.fontSizePt,
-      s.ruby.hpsRaisePt,
-      scale,
-      s,
-      ctx,
-      fontFamilyClasses,
-    );
+  if (s.ruby && rubyCell && (!s.textBoxLineFloor || s.textBoxVertical)) {
     void WORD_RUBY_LINE_ASCENT;
     // WORD_RUBY_LINE_ASCENT: with an authored hpsRaise the guide's em box
     // stands that far above the base baseline, and the line's ascent is the
     // larger of the base ascent and the guide's top. Without hpsRaise the
     // retained ink-derived reserve keeps its established additive form.
-    // In a vertical line the guide is centred hpsRaise from the axis and
-    // reserves half of its own vertical single line toward the head
-    // (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE).
-    const rubyPx = s.ruby.fontSizePt * scale;
-    const farEast = verticalFarEastClass(s);
-    const guideHeadPx = verticalLineRun
-      ? wordVerticalSingleLinePx(verticalDesignBox / metricEmPx * rubyPx, rubyPx, farEast, scale) / 2
-        // The rightVertical guide stands half its size nearer the base.
-        - (s.ruby.align === 'rightVertical' ? rubyPx / 2 : 0)
-      : rubyPx;
+    // In a vertical line the guide is centred on its axis and reserves half
+    // of its own vertical single line toward the head
+    // (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). The guide stands on its own base,
+    // which w:position moves (§17.3.2.24).
+    const basePositionPx = s.positionExtendsLineBox === false ? 0 : (s.position ?? 0) * scale;
     ascent = s.ruby.hpsRaisePt != null
-      ? Math.max(ascent, reserve + guideHeadPx)
-      : ascent + reserve;
+      ? Math.max(ascent, basePositionPx + rubyCell.raisePx + rubyCell.headPx)
+      : ascent + rubyCell.raisePx;
   }
   return { width, height: s.fontSize, ascent, descent };
 }

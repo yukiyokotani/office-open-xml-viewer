@@ -47,11 +47,14 @@ export function eastAsianUprightPaintOps(
 
 /** WORD_VERTICAL_LINE_CENTRED_BOX: in an upright frame (eaVert,
  * mongolianVert, a tbRlV cell) a turned run keeps its baseline half its font
- * box's (ascent - descent) tailward of the line axis, as in a vertical
- * section; the run's font box gives that offset. */
+ * box's (ascent - descent) tailward of its own axis, as in a vertical
+ * section; the run's font box gives that offset. The box already carries the
+ * run's baseline displacement (w:position, vertAlign), which its clusters
+ * apply themselves, so the offset leaves it out. */
 export function uprightFrameSidewaysOffsetPt(placement: TextPlacement): number {
   const box = placement.highlightBounds;
-  return box ? placement.origin.yPt - (box.yPt + box.heightPt / 2) : 0;
+  const displacementPt = placement.clusters[0]?.offset.yPt ?? 0;
+  return box ? placement.origin.yPt + displacementPt - (box.yPt + box.heightPt / 2) : 0;
 }
 
 /** WORD_VERTICAL_RUBY_UPRIGHT_GUIDE in an upright frame: the guide's East
@@ -62,14 +65,14 @@ export function uprightFrameRuby(placement: TextPlacement): TextPlacement['ruby'
   const ruby = placement.ruby;
   if (!ruby || ruby.paintOps.length === 0) return ruby;
   const ops = ruby.paintOps;
-  const start = ops[0]!.origin.xPt;
-  const end = start + ruby.advancePt;
   const baseOffset = uprightFrameSidewaysOffsetPt(placement);
   return {
     ...ruby,
-    paintOps: ops.map((op, index) => {
+    paintOps: ops.map((op) => {
       if (op.glyphOrientation) return op;
-      const advance = (ops[index + 1]?.origin.xPt ?? end) - op.origin.xPt;
+      // Each unit's own advance from the ruby cell (WORD_RUBY_ALIGN_PLACEMENT),
+      // not the gap to the next origin, which holds the alignment spacing.
+      const advance = op.advancePt ?? 0;
       if (EAST_ASIAN_RE.test(op.text)) {
         return { ...op, origin: { xPt: op.origin.xPt + advance / 2, yPt: op.origin.yPt }, glyphOrientation: 'upright' as const };
       }

@@ -5,7 +5,6 @@ import {
   groupedRunBorderFragments,
   retainedEmphasisGlyphs,
   retainedTextDecorations,
-  rubyPaintOperations,
 } from './retained-typography.js';
 
 const fontRoute = {
@@ -158,29 +157,6 @@ describe('retained typography geometry', () => {
       expect.objectContaining({ text: '.', origin: { xPt: 21.5, yPt: 14 } }),
       expect.objectContaining({ text: '.', origin: { xPt: 26.5, yPt: 14 } }),
     ]);
-  });
-
-  it('retains authored hpsRaise and rich shaped guide-span origins for ruby', () => {
-    expect(rubyPaintOperations({
-      baseOrigin: { xPt: 20, yPt: 30 },
-      baseAdvancePt: 20,
-      raisePt: 6,
-      guideAdvancePt: 12,
-      spans: [
-        { text: 'ふ', offsetPt: 0, fontRoute, fontSizePt: 5, fontWeight: 400, fontStyle: 'normal', color: { kind: 'explicit', color: '#111111' } },
-        { text: 'り', offsetPt: 6, fontRoute, fontSizePt: 6, fontWeight: 700, fontStyle: 'italic', color: { kind: 'explicit', color: '#222222' } },
-      ],
-    })).toEqual([
-      expect.objectContaining({ text: 'ふ', origin: { xPt: 24, yPt: 24 }, fontSizePt: 5 }),
-      expect.objectContaining({ text: 'り', origin: { xPt: 30, yPt: 24 }, fontWeight: 700, fontStyle: 'italic' }),
-    ]);
-  });
-
-  it('fails explicitly when ruby has neither authored raise nor retained ink geometry', () => {
-    expect(() => rubyPaintOperations({
-      baseOrigin: { xPt: 20, yPt: 30 }, baseAdvancePt: 20,
-      guideAdvancePt: 12, spans: [],
-    })).toThrow(/ruby geometry/i);
   });
 
   it('groups visually adjacent equal run borders and includes owned justification slack', () => {

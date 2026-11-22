@@ -139,7 +139,7 @@ export function measureJoinedTextUnit(
     if (!('text' in f)) break;
     const wholeWordSeam = preferWholeWord && f.explicitBreakBefore && f.hyperlink?.kind !== 'external';
     if ((!f.joinPrev && !wholeWordSeam) || atLineStart && f.fitTextRegionStart) break;
-    const fixedCell = f.ruby !== undefined || f.tateChuYoko === true;
+    const fixedCell = f.ruby !== undefined || f.rubyGroup !== undefined || f.tateChuYoko === true;
     // Hard-seam acquisition scans the entire follower to find its first legal
     // grapheme. Charge that scan before allocation, not just its short result.
     if (f.hardJoinPrev) measurement.reservePrefixWork(f.text.length);

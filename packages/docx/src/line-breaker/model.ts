@@ -47,6 +47,59 @@ export interface LayoutSegSource {
 }
 
 
+/** One placed unit of a ruby guide (WORD_RUBY_ALIGN_PLACEMENT): a grapheme,
+ * a contextual span that paints whole (a joining or pair-kerned script), or a
+ * planned vertical cell (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). */
+export interface RubyGuideUnit {
+  readonly text: string;
+  /** UTF-16 range in the guide text. */
+  readonly start: number;
+  readonly end: number;
+  /** Paint origin along the run from the cell start, with the alignment
+   * spacing applied (an upright vertical cell's origin is its centre). */
+  readonly originPx: number;
+  /** The unit's own advance along the run. */
+  readonly advancePx: number;
+  readonly fontRoute: CanvasFontRoute;
+  readonly fontWeight: number;
+  readonly fontStyle: 'normal' | 'italic';
+  readonly kerning?: 'normal';
+  readonly orientation?: 'upright' | 'rotate' | 'sideways';
+  readonly verticalFeature?: true;
+  readonly drawOffsetPx?: Readonly<{ xPt: number; yPt: number }>;
+}
+
+/** The single geometry of a ruby run's cell, at the layout scale it was
+ * computed for (WORD_RUBY_ALIGN_PLACEMENT, WORD_RUBY_LINE_ASCENT,
+ * WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). */
+export interface RubyCellGeometry {
+  readonly scale: number;
+  /** The whole base's laid-out advance (all pieces). */
+  readonly basePx: number;
+  /** The guide's advance in its own orientation. */
+  readonly guidePx: number;
+  /** The cell: the base widened to a longer guide under an authored
+   * alignment. */
+  readonly advancePx: number;
+  /** The base's offset inside the cell. */
+  readonly baseOffsetPx: number;
+  /** Guide units in paint order; empty without a shaping service. */
+  readonly units: readonly RubyGuideUnit[];
+  /** The guide baseline (vertical: its axis) above the base baseline. */
+  readonly raisePx: number;
+  /** The guide's extent past its baseline toward the line head. */
+  readonly headPx: number;
+  /** The guide units are planned as a vertical run. */
+  readonly vertical: boolean;
+}
+
+/** A ruby-annotated source run: every emitted piece shares this object. */
+export interface RubyGroup {
+  readonly ruby: NonNullable<LayoutTextSeg['ruby']>;
+  readonly pieces: readonly LayoutTextSeg[];
+  cell?: RubyCellGeometry;
+}
+
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
   /** An authored zero-advance discretionary boundary. The retained glyph
@@ -258,14 +311,12 @@ export interface LayoutTextSeg extends LayoutSegSource {
     /** The run's complete base text, of which this is the first piece. */
     baseText?: string;
   };
-  /** The last piece of a ruby run: the run's guide (WORD_RUBY_ALIGN_PLACEMENT). */
-  rubyGroupEnd?: LayoutTextSeg['ruby'];
-  /** WORD_RUBY_ALIGN_PLACEMENT: the advance of the ruby run's cell, from the
-   * first piece's start (the larger of the whole base and the guide). */
-  rubyCellAdvancePx?: number;
-  /** WORD_RUBY_ALIGN_PLACEMENT: offset of the base text inside a ruby run
-   * widened to a longer guide. */
-  rubyBaseOffsetPx?: number;
+  /** The ruby run this segment is a piece of, shared by every piece (the
+   * first also carries `ruby`). Its cell geometry is computed once and read
+   * by measurement, wrapping, grids, fitText and paint. */
+  rubyGroup?: RubyGroup;
+  /** This piece's index in {@link rubyGroup}'s pieces. */
+  rubyPieceIndex?: number;
   /** Every piece of a ruby-annotated run (only the first carries `ruby`):
    * none takes a WORD_KERNED_SPACE_PAIRS seam pair. */
   rubyPiece?: true;

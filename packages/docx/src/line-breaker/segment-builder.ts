@@ -48,7 +48,7 @@ import {
   wordInlineDrawingTurnsFootprint,
   wordInlinePictureClipsToLine,
 } from '../layout/line-compatibility.js';
-import { type LayoutImageSeg, type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
+import { type LayoutImageSeg, type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment, type RubyGroup } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
 import { assignEastAsianAutoSpace } from './east-asian-autospace.js';
 import {
@@ -545,21 +545,27 @@ export function finalizeBuiltSegments(
   // Atomic cells and external-link syntax have their own owners below.
   const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && segment.ruby)
     .map(segment => segment.sourceRunIndex));
-  // WORD_RUBY_ALIGN_PLACEMENT: the last piece of a ruby run whose base was
-  // split (by script slot or case) carries the run's guide so it can close the
-  // widened cell.
+  // WORD_RUBY_ALIGN_PLACEMENT: the pieces of a ruby run whose base was split
+  // (by script slot or case) share one group, and so one cell; they are one
+  // indivisible unit for wrapping.
   for (let index = 0; index < segs.length; index++) {
     const first = segs[index]!;
     if (!('text' in first) || !first.ruby) continue;
-    let last = index;
-    while (last + 1 < segs.length) {
-      const next = segs[last + 1]!;
+    const pieces: LayoutTextSeg[] = [first];
+    while (index + 1 < segs.length) {
+      const next = segs[index + 1]!;
       if (!('text' in next) || !next.rubyPiece || next.ruby
         || next.sourceRunIndex !== first.sourceRunIndex) break;
-      last++;
+      next.joinPrev = true;
+      next.hardJoinPrev = true;
+      pieces.push(next);
+      index++;
     }
-    (segs[last] as LayoutTextSeg).rubyGroupEnd = first.ruby;
-    index = last;
+    const group: RubyGroup = { ruby: first.ruby, pieces };
+    pieces.forEach((piece, pieceIndex) => {
+      piece.rubyGroup = group;
+      piece.rubyPieceIndex = pieceIndex;
+    });
   }
   for (let start = 0; start < segs.length;) {
     const ordinary = (s: LayoutSeg): s is LayoutTextSeg => 'text' in s

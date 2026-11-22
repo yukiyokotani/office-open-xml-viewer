@@ -3,7 +3,7 @@ import { createMixedSpaceState } from './mixed-space-fit.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
 import { containsSeaScript, seaMixedBreakOffsets } from '@silurus/ooxml-core';
-import { type LayoutImageSeg, type LayoutLine, type LayoutMathSeg, type LayoutSeg, type LayoutTabSeg, type LayoutTextSeg, type LineBoundary, type WrapLayoutCtx } from './model.js';
+import { type LayoutImageSeg, type LayoutLine, type LayoutMathSeg, type LayoutSeg, type LayoutTabSeg, type LayoutTextSeg, type LineBoundary, type RubyGroup, type WrapLayoutCtx } from './model.js';
 import { protectedNoBreakOffsets, slicedTextMetadata } from './advance.js';
 import { rebaseSeaBreaks } from './text-runs.js';
 import { resolveFitTextSegments } from './segment-builder.js';
@@ -153,6 +153,24 @@ export function prepareBreakQueue(
       measurement.measureSegment(segment).width +
       measurement.verticalInkExtra(segment, segment.text),
   );
+
+  // WORD_RUBY_ALIGN_PLACEMENT: each pass owns its ruby groups, over the
+  // segments it measures (fitText allocation above included), so a ruby
+  // cell is computed once per pass at this scale.
+  const rubyPieces = new Map<RubyGroup, LayoutTextSeg[]>();
+  for (const segment of queue) {
+    if (!('text' in segment) || !segment.rubyGroup) continue;
+    const pieces = rubyPieces.get(segment.rubyGroup) ?? [];
+    pieces.push(segment);
+    rubyPieces.set(segment.rubyGroup, pieces);
+  }
+  for (const [source, pieces] of rubyPieces) {
+    const group: RubyGroup = { ruby: source.ruby, pieces };
+    pieces.forEach((piece, index) => {
+      piece.rubyGroup = group;
+      piece.rubyPieceIndex = index;
+    });
+  }
 
   return queue;
 }

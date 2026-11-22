@@ -316,6 +316,8 @@ export interface RetainedGlyphPaintOperation {
   readonly glyphOrientation?: 'sideways' | 'upright' | 'rotate';
   readonly verticalFeature?: true;
   readonly glyphOffsetPt?: PointPt;
+  /** A ruby guide unit's own advance along the run (WORD_RUBY_ALIGN_PLACEMENT). */
+  readonly advancePt?: number;
 }
 
 export type RetainedMarkPath = Readonly<{

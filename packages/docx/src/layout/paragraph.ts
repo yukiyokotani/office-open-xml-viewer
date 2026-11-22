@@ -2,7 +2,8 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, WORD_VERTICAL_RUBY_UPRIGHT_GUIDE, wordRubyGuideSpacing, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
+import { rubyBaseOffsetPx, rubyPieceWideningPx } from '../line-breaker/ruby-cell.js';
+import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -134,7 +135,6 @@ import {
   retainedTextDecorations,
   retainedWavePath,
   retainedWavePhase,
-  rubyPaintOperations,
   type RetainedEmphasisClusterInk,
   type RetainedEmphasisMarkInput,
 } from './retained-typography.js';
@@ -228,6 +228,7 @@ import type {
   ParagraphLayout,
   ParagraphPlacement,
   PointPt,
+  RetainedGlyphPaintOperation,
   SourceRef,
   StoryLayout,
   FlowContainer,
@@ -2730,67 +2731,31 @@ function textPlacement(
     segment.fontFamily ? quoteCssFontFamily(segment.fontFamily) : 'sans-serif',
     segment.fontFamily ? 'native' : 'generic',
   );
-  const baseShape = segment.ruby && segment.textLayoutService && segment.textShapeRequest
-    ? segment.textLayoutService.shape({
-        ...segment.textShapeRequest,
-        measure: true,
-      })
-    : undefined;
-  const rubyShape = segment.ruby && segment.textLayoutService && segment.textShapeRequest
-    ? segment.textLayoutService.shape({
-        ...independentTextShapeRequest(segment.textShapeRequest, segment.ruby.text),
-        fontSizePt: segment.ruby.fontSizePt,
-        measure: true,
-      })
-    : undefined;
-  // Guide graphemes paint alone at their contextual prefix offsets. A
-  // pair-kerned span (WORD_ARABIC_PAIR_KERNING) paints whole instead: a prefix
-  // excludes the pair adjustment with its following glyph, and Arabic joins
-  // across graphemes, so only the contextual span reproduces its acquisition.
-  const rubySpans = segment.ruby && rubyShape
-    ? (() => {
-        const ruby = segment.ruby!;
-        const contextual = new Set<object>();
-        return (rubyShape.clusters ?? []).flatMap((cluster) => {
-          const span = rubyShape.spans.find((candidate) =>
-            candidate.start <= cluster.range.start && candidate.end >= cluster.range.end)
-            ?? rubyShape.spans[0];
-          if (!span) throw new Error('Ruby shaping produced no selected-face span');
-          const kerned = wordArabicTextKerned(span.text);
-          if (kerned && contextual.has(span)) return [];
-          if (kerned) contextual.add(span);
-          return [{
-            text: kerned ? ruby.text.slice(span.start, span.end)
-              : ruby.text.slice(cluster.range.start, cluster.range.end),
-            offsetPt: cluster.offsetPt,
-            fontRoute: span.fontRoute,
-            fontSizePt: ruby.fontSizePt,
-            fontWeight: span.font.weight,
-            fontStyle: span.font.style,
-            color,
-            ...(kerned ? { kerning: 'normal' as const } : {}),
-          }];
-        });
-      })()
-    : [];
   const rubyRaisePt = typography?.ruby?.raisePt.status === 'valid'
     ? typography.ruby.raisePt.value ?? undefined
     : segment.ruby?.hpsRaisePt;
-  const rubyPaintOps = segment.ruby && rubyShape
-    ? rubyPaintOperations({
-        baseOrigin: { xPt: 0, yPt: 0 },
-        // WORD_RUBY_ALIGN_PLACEMENT: the run's whole cell, also when its base
-        // is split into pieces.
-        baseAdvancePt: segment.rubyCellAdvancePx ?? segment.measuredWidth,
-        guideAdvancePt: rubyShape.advancePt,
-        ...(segment.ruby.align ? { align: segment.ruby.align } : {}),
-        ...(rubyRaisePt === undefined ? {} : { raisePt: rubyRaisePt }),
-        ...(baseShape?.inkBounds && rubyShape.inkBounds ? {
-          baseInkTopPt: -baseShape.inkBounds.ascentPt,
-          guideInkBottomFromBaselinePt: rubyShape.inkBounds.descentPt,
-        } : {}),
-        spans: rubySpans,
-      })
+  // WORD_RUBY_ALIGN_PLACEMENT: the guide paints from the ruby run's one cell
+  // geometry, the same units and raise its line measured.
+  const rubyCell = segment.ruby && segment.textLayoutService && segment.textShapeRequest
+    ? segment.rubyGroup?.cell : undefined;
+  const rubyScale = rubyCell?.scale ?? 1;
+  const rubyPaintOps: RetainedGlyphPaintOperation[] = rubyCell
+    ? rubyCell.units.map((unit) => ({
+        text: unit.text,
+        origin: { xPt: unit.originPx / rubyScale, yPt: -rubyCell.raisePx / rubyScale },
+        advancePt: unit.advancePx / rubyScale,
+        fontRoute: unit.fontRoute,
+        fontSizePt: segment.ruby!.fontSizePt,
+        fontWeight: unit.fontWeight,
+        fontStyle: unit.fontStyle,
+        color,
+        ...(unit.kerning ? { kerning: unit.kerning } : {}),
+        ...(unit.orientation ? { glyphOrientation: unit.orientation } : {}),
+        ...(unit.verticalFeature ? { verticalFeature: true as const } : {}),
+        ...(unit.drawOffsetPx ? { glyphOffsetPt: {
+          xPt: unit.drawOffsetPx.xPt / rubyScale, yPt: unit.drawOffsetPx.yPt / rubyScale,
+        } } : {}),
+      }))
     : [];
   const baselineOffsetPt = retainedBaselineOffsetPt(segment);
   const sourceEnd = sourceOffset + logicalTextSegmentLength(segment);
@@ -2837,9 +2802,9 @@ function textPlacement(
     ...(segment.vertAlign ? { verticalAlign: segment.vertAlign } : {}),
     ...(segment.tateChuYoko ? { tateChuYoko: true } : {}),
     ...(segment.tateChuYokoCompress ? { tateChuYokoCompress: true } : {}),
-    ...(segment.ruby && rubyShape ? { ruby: {
+    ...(segment.ruby && rubyCell ? { ruby: {
       text: segment.ruby.text,
-      advancePt: rubyShape.advancePt,
+      advancePt: rubyCell.guidePx / rubyScale,
       authored: {
         ...(typography?.ruby?.align.status === 'valid' && typography.ruby.align.value
           ? { align: typography.ruby.align.value } : {}),
@@ -3380,71 +3345,6 @@ function retainedGeometryPlan(
   };
 }
 
-/** WORD_VERTICAL_RUBY_UPRIGHT_GUIDE: plan the guide of a vertical ruby run as
- * a vertical run of its own size, so its glyphs face as base text would, and
- * align the planned cells along the run (WORD_RUBY_ALIGN_PLACEMENT). */
-function verticalRubyGuide(
-  segment: LayoutTextSeg,
-  ruby: NonNullable<TextPlacement['ruby']>,
-  verticalGlyphMeasurement: VerticalGlyphMeasurementService,
-  writingMode: import('./types.js').WritingMode | undefined,
-): NonNullable<TextPlacement['ruby']> {
-  const first = ruby.paintOps[0];
-  if (!first || !segment.ruby) return ruby;
-  void WORD_VERTICAL_RUBY_UPRIGHT_GUIDE;
-  const plan = (text: string) => verticalGlyphMeasurement.planRun({
-    text,
-    font: canvasFontString(first.fontRoute, first.fontSizePt, first.fontWeight, first.fontStyle),
-    fontKerning: 'none',
-    fontSizePt: first.fontSizePt,
-    letterSpacingPt: 0,
-    charScale: 1,
-    growTrRotateInk: false,
-    writingMode: writingMode ?? 'vertical-rl',
-  });
-  // Alignment spaces letters, so a turned cell of several letters is planned
-  // letter by letter.
-  const cells = plan(segment.ruby.text).flatMap((cell) => {
-    const bounds = cell.orientation === 'sideways'
-      ? [...new Set([0, ...graphemeClusterOffsets(cell.text), cell.text.length])].sort((a, b) => a - b)
-      : [];
-    if (bounds.length <= 2) return [cell];
-    let penPt = cell.originPt;
-    return bounds.slice(0, -1).flatMap((start, index) => {
-      const end = bounds[index + 1]!;
-      return plan(cell.text.slice(start, end)).map((letter) => {
-        const placed = { ...letter, originPt: penPt + letter.originPt };
-        penPt += letter.advancePt;
-        return placed;
-      });
-    });
-  });
-  const guideAdvancePt = cells.reduce((sum, cell) => sum + cell.advancePt, 0);
-  const spacing = wordRubyGuideSpacing(
-    segment.ruby.align, (segment.rubyCellAdvancePx ?? segment.measuredWidth) - guideAdvancePt, cells.length,
-  );
-  // The authored rightVertical guide stands half its size nearer the base.
-  const axisYPt = first.origin.yPt
-    + (segment.ruby.align === 'rightVertical' ? first.fontSizePt / 2 : 0);
-  return {
-    ...ruby,
-    advancePt: guideAdvancePt,
-    paintOps: cells.map((cell, index) => ({
-      text: cell.text,
-      origin: { xPt: spacing.leadPt + cell.originPt + index * spacing.gapPt, yPt: axisYPt },
-      fontRoute: first.fontRoute,
-      fontSizePt: first.fontSizePt,
-      fontWeight: first.fontWeight,
-      fontStyle: first.fontStyle,
-      color: first.color,
-      glyphOrientation: cell.orientation,
-      ...(cell.verticalFeature ? { verticalFeature: true as const } : {}),
-      ...(cell.drawOffsetPt.xPt !== 0 || cell.drawOffsetPt.yPt !== 0
-        ? { glyphOffsetPt: cell.drawOffsetPt } : {}),
-    })),
-  };
-}
-
 function textPlanSegment(
   segment: LayoutTextSeg,
   paragraph: ParagraphLayoutSource,
@@ -3471,12 +3371,10 @@ function textPlanSegment(
   }
   const horizontalProjection = textPlacement(segment, paragraph, sourceOffset, 0, 0, 0, 0);
   if (horizontalProjection.kind !== 'text') throw new Error('Visible text segment projected as anchor host');
+  // A vertical run's ruby guide was planned with its cell
+  // (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE).
   const projected = {
     ...horizontalProjection,
-    ...((segment.verticalRun || segment.tateChuYoko) && verticalGlyphMeasurement && horizontalProjection.ruby
-      ? { ruby: verticalRubyGuide(segment, horizontalProjection.ruby, verticalGlyphMeasurement,
-        horizontalProjection.paintOps[0]?.writingMode) }
-      : {}),
     ...(sourceRuns ? { sourceRuns } : {}),
   };
   const pitchPt = segLetterSpacingPx(segment, characterGrid, 1);
@@ -3549,7 +3447,7 @@ function textPlanSegment(
           cluster.offsetPt * scaleX
           + (segment.leadingWordBoundaryPx ?? 0)
           + (segment.autoSpaceLeadingPx ?? 0)
-          + (segment.rubyBaseOffsetPx ?? 0)
+          + rubyBaseOffsetPx(segment)
           + prefixSpacingPt
           + precedingWidthBalanceAdjustment
           + precedingPunctuationCompression,
@@ -3817,7 +3715,10 @@ function textPlanSegment(
       ? paintOps.map((operation) => ({
           ...operation,
           offset: {
-            xPt: operation.offset.xPt + segment.measuredWidth / 2,
+            // Centred on its own base: the ruby cell's widening is outside
+            // it, and the base offset applies once below.
+            xPt: operation.offset.xPt
+              + (segment.measuredWidth - rubyPieceWideningPx(segment, segment.rubyGroup?.cell)) / 2,
             yPt: operation.offset.yPt,
           },
           glyphOrientation: 'upright' as const,
@@ -3938,7 +3839,7 @@ function textPlanSegment(
         xPt: clusterOriginPaintOps
           ? operation.offset.xPt
           : operation.offset.xPt + (segment.leadingWordBoundaryPx ?? 0)
-            + (segment.autoSpaceLeadingPx ?? 0) + (segment.rubyBaseOffsetPx ?? 0) },
+            + (segment.autoSpaceLeadingPx ?? 0) + rubyBaseOffsetPx(segment) },
       // Measurement resolves w:spacing, docGrid character pitch, and w:fitText
       // into one authoritative per-scalar pitch. A planned vertical upright or
       // rotate cell already owns that pitch in its retained origin and advance;
