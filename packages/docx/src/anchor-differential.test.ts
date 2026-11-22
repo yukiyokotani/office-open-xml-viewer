@@ -120,7 +120,9 @@ const scripts: readonly (readonly [name: string, runs: readonly RunSpec[], optio
 ];
 const naturalScripts = new Set(['left-to-right', 'two formats', 'right-to-left', 'right-to-left with digits',
   'mixed directions', 'Arabic joining', 'East Asian punctuation', 'ligatures', 'digits inside one right-to-left run',
-  'a Latin word inside one right-to-left run', 'digits inside one unflagged run']);
+  'a Latin word inside one right-to-left run', 'digits inside one unflagged run', 'fitted text',
+  'East Asian with automatic spacing', 'Arabic under highKashida', 'Arabic under lowKashida',
+  'Arabic under mediumKashida', 'distributed text']);
 const alignments = ['left', 'both'] as const;
 const underlines: readonly object[] = [{}, { underline: true }, { underline: true, underlineStyle: 'dash' }];
 const modes = [12, 14, 15] as const;
@@ -143,8 +145,8 @@ interface Case {
   readonly container: typeof containers[number];
   readonly vertical: boolean;
   readonly filler: number;
-  /** Horizontal body text, unjustified, one cluster per character at its
-   * natural advance: page coordinates are the paragraph's own. */
+  /** Horizontal body text with one cluster per character: page coordinates
+   * are the paragraph's own. */
   readonly naturalSpacing: boolean;
 }
 
@@ -184,8 +186,7 @@ function cases(perScript: number): Case[] {
           : { pageWidth: width, pageHeight: 200 }) },
         container,
         vertical: direction !== null,
-        naturalSpacing: direction === null && alignment === 'left' && container.startsWith('body')
-          && naturalScripts.has(scriptName),
+        naturalSpacing: direction === null && container.startsWith('body') && naturalScripts.has(scriptName),
       });
     }
   });
@@ -309,8 +310,12 @@ function comparable(value: unknown): unknown {
 
 const fakeElement = () => ({ style: { cssText: '' }, children: [] as { style: { cssText: string } }[], innerHTML: '',
   appendChild(child: { style: { cssText: string } }) { this.children.push(child); } });
-const measureForFont = (font: string) => (value: string): number =>
-  [...value].length * Number.parseFloat(/([\d.]+)px/.exec(font)?.[1] ?? '10') * 0.5;
+/** UTF-16 units handed to the find overlay's measurer. */
+let measuredUnits = 0;
+const measureForFont = (font: string) => (value: string): number => {
+  measuredUnits += value.length;
+  return [...value].length * Number.parseFloat(/([\d.]+)px/.exec(font)?.[1] ?? '10') * 0.5;
+};
 
 /** The highlight of every single character of every run. */
 function findHighlights(runs: DocxTextRunInfo[]): string[] {
@@ -330,17 +335,16 @@ function findHighlights(runs: DocxTextRunInfo[]): string[] {
 }
 
 /** Each character's highlight that does not start where a cluster showing
- * that character is painted (natural spacing only: a highlight measures the
- * run's text, not its retained positions). */
+ * that character is painted. */
 function misplacedHighlights(runs: DocxTextRunInfo[], laidOut: readonly ParagraphLayout[]): string[] {
-  const painted = new Set<string>();
+  const painted = new Map<string, number[]>();
   for (const subject of laidOut) {
     for (const line of subject.lines) {
       for (const placement of line.placements) {
         if (placement.kind !== 'text') continue;
         placement.clusters.forEach((cluster, index) => {
           const shown = placement.text.slice(cluster.range.start - placement.range.start, cluster.range.end - placement.range.start);
-          painted.add(`${shown}@${Math.round(visualClusterStartXPt(placement, index) * 100)}`);
+          painted.set(shown, [...(painted.get(shown) ?? []), visualClusterStartXPt(placement, index)]);
         });
       }
     }
@@ -357,8 +361,9 @@ function misplacedHighlights(runs: DocxTextRunInfo[], laidOut: readonly Paragrap
           100, 100, measureForFont);
         const left = /left:([-\d.e]+)%/.exec(layer.children[0]?.style.cssText ?? '')?.[1];
         if (left === undefined) continue;
-        const key = `${run.text[start]}@${Math.round(Number(left) * 100)}`;
-        if (!painted.has(key)) misplaced.push(`${JSON.stringify(run.text)}[${start}] at ${left}`);
+        if (!(painted.get(run.text[start]!) ?? []).some((xPt) => Math.abs(xPt - Number(left)) < 1e-6)) {
+          misplaced.push(`${JSON.stringify(run.text)}[${start}] at ${left}`);
+        }
       }
     });
   } finally {
@@ -377,6 +382,7 @@ function paragraphs(node: unknown, found: ParagraphLayout[] = []): ParagraphLayo
 }
 
 function observe(testCase: Case, subject: readonly Run[], anchorAt: number, anchored: boolean) {
+  const measuredBefore = measuredUnits;
   const built = model(testCase, subject);
   const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
     { currentDateMs: 0 });
@@ -440,6 +446,8 @@ function observe(testCase: Case, subject: readonly Run[], anchorAt: number, anch
     ? [[round(entry.node.inkBounds.xPt), round(entry.node.inkBounds.yPt)]] : []));
   return {
     drawings, misplaced, overlapping,
+    // Find reads the runs' retained cluster boxes: it measures no text.
+    measured: measuredUnits - measuredBefore,
     pages: layout.pages.map((page) => comparable(page.layers)),
     selection, finds, comments,
     paragraphs: laidOut,
@@ -520,6 +528,7 @@ describe('a floating anchor at any source boundary changes nothing but the drawi
         // A highlight lies over the character it marks, with or without the anchor.
         expect(plain.misplaced, `${label}: find highlights without the anchor`).toEqual([]);
         expect(anchored.misplaced, `${label}: find highlights`).toEqual([]);
+        expect([plain.measured, anchored.measured], `${label}: text measured by find`).toEqual([0, 0]);
         expect(plain.overlapping, `${label}: selection rectangles without the anchor`).toEqual([]);
         expect(anchored.overlapping, `${label}: selection rectangles`).toEqual([]);
 
@@ -621,6 +630,105 @@ describe('a character-relative anchor in kashida-justified text', () => {
       }
       expect(elongated).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('find highlights and hosts in pieces whose paint differs from their source order', () => {
+  const lay = (runs: readonly Run[], options: object, pageWidth = 200) => {
+    const built = model({ ...cases(1)[0]!, container: 'body', vertical: false, options,
+      settings: { compatibilityMode: 15 }, section: { pageWidth, pageHeight: 200 } }, runs);
+    const layout = layoutDocument(built.model, createLayoutServices(built.model, { measureContext: measureContext() }),
+      { currentDateMs: 0 });
+    const subject = paragraphs(layout.pages.map((page) => page.layers))[0]!;
+    return { layout, subject, placements: subject.lines.flatMap((line) => line.placements) };
+  };
+  /** Left edge and width of the highlight of each match of `needle`, by run text. */
+  const highlights = (layout: Parameters<typeof textRunsForPage>[0], needle: string): [string, number, number][] => {
+    const runs = textRunsForPage(layout, 0, { scale: 1 });
+    const scope = globalThis as { document?: unknown };
+    const previous = scope.document;
+    scope.document = { createElement: fakeElement };
+    try {
+      return runs.flatMap((run, runIndex) => [...run.text].flatMap((character, start) => {
+        if (character !== needle) return [];
+        const layer = fakeElement();
+        buildDocxHighlightLayer(layer as never, runs, [{ active: false, slices: [{ runIndex, start, end: start + 1 }] }],
+          100, 100, measureForFont);
+        return layer.children.map((child) =>
+          [run.text, round(Number(/left:([-\d.e]+)%/.exec(child.style.cssText)![1])),
+            round(Number(/width:([-\d.e]+)%/.exec(child.style.cssText)![1]))] as [string, number, number]);
+      }));
+    } finally {
+      scope.document = previous;
+    }
+  };
+
+  it('keeps a host before a fitted right-to-left run at the fitted edge of the run', () => {
+    // Four 6pt letters fitted to 48pt: the run starts at its right edge,
+    // and the tracking after its last letter is outside the fitted width.
+    const fitted = textRun('\u05d0\u05d1\u05d2\u05d3', { rtl: true, fitTextVal: 960, fitTextId: 1 });
+    const { placements } = lay([...anchorRuns('character'), fitted], { bidi: true });
+    const piece = placements.find((placement) => placement.kind === 'text')!;
+    const host = placements.find((placement) => placement.kind === 'anchor-host')!;
+    expect(piece.bounds!.widthPt).toBe(48);
+    expect(round(host.bounds!.xPt)).toBe(round(piece.bounds!.xPt + 48));
+  });
+
+  it('highlights a Latin letter inside one mixed-direction piece where it is painted', () => {
+    // alef a - b bet, two same-format runs around a float. Painted left to
+    // right: bet, a, hyphen, b, alef (6pt each); "b" is the fourth.
+    const rtlRun = (value: string) => textRun(value, { rtl: true });
+    const { layout, placements } = lay([rtlRun('\u05d0a'), ...anchorRuns('page'), rtlRun('-b\u05d1')], { bidi: true });
+    const texts = placements.filter((placement) => placement.kind === 'text');
+    expect(texts.map((placement) => placement.kind === 'text' ? placement.text : '')).toEqual(['\u05d0a-b\u05d1']);
+    const left = texts[0]!.bounds!.xPt;
+    expect(highlights(layout, 'b').map(([, x]) => x)).toEqual([round(left + 18)]);
+    expect(highlights(layout, '-').map(([, x]) => x)).toEqual([round(left + 12)]);
+    expect(highlights(layout, 'a').map(([, x]) => x)).toEqual([round(left + 6)]);
+    expect(highlights(layout, '\u05d0').map(([, x]) => x)).toEqual([round(left + 24)]);
+  });
+
+  it('highlights letters of kashida-justified text where the elongated text paints them', () => {
+    // A 90pt band, a float after the first two letters. Each highlight of
+    // beh is checked against the painted text (6pt per painted character,
+    // inserted tatweels included, from the piece's right edge): it starts at
+    // the letter's right edge and covers the letter with its elongation.
+    const rtlRun = (value: string) => textRun(value, { rtl: true });
+    const { layout, subject } = lay([rtlRun(kashidaText.slice(0, 2)), ...anchorRuns('page'), rtlRun(kashidaText.slice(2))],
+      { bidi: true, alignment: 'highKashida' }, 130);
+    const expected: number[] = [];
+    let elongated = 0;
+    for (const line of subject.lines) {
+      for (const piece of line.placements) {
+        if (piece.kind !== 'text') continue;
+        const painted = [...(piece.paintOps[0]?.text ?? piece.text)];
+        if (piece.paintOps[0]?.sourceMapping === 'kashida') elongated += 1;
+        const source = [...piece.text];
+        let prefix = 0;
+        source.forEach((character, index) => {
+          // Tatweels inserted before a character precede it.
+          while (prefix < painted.length && painted[prefix] !== character) prefix += 1;
+          if (character === '\u0628') expected.push(round(piece.bounds.xPt + piece.bounds.widthPt - prefix * 6));
+          prefix += 1;
+          void index;
+        });
+      }
+    }
+    expect(elongated).toBeGreaterThan(0);
+    const found = highlights(layout, '\u0628');
+    expect(found.map(([, x, width]) => round(x + width)).sort((a, b) => a - b)).toEqual(expected.sort((a, b) => a - b));
+    // An elongated letter's highlight is wider than the letter.
+    expect(found.some(([, , width]) => width > 6)).toBe(true);
+  });
+
+  it('measures no text to highlight the last letter of a long right-to-left run', () => {
+    const measured = (length: number): number => {
+      const { layout } = lay([textRun('\u05d0'.repeat(length - 1) + '\u05d1', { rtl: true })], { bidi: true }, 4000);
+      const before = measuredUnits;
+      expect(highlights(layout, '\u05d1')).toHaveLength(1);
+      return measuredUnits - before;
+    };
+    expect([measured(50), measured(200)]).toEqual([0, 0]);
   });
 });
 

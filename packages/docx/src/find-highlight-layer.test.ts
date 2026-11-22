@@ -257,6 +257,16 @@ describe('highlights in right-to-left runs', () => {
     expect(boxes([ltr], [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }])).toEqual([[9, 7]]);
   });
 
+  it('subtracts no tracking from a final cluster whose box already leaves it out', () => {
+    // A fitted run: its final cluster box is cut to the fitted width.
+    const boxesOf = (trackingExcluded: boolean) => boxes([run({ text: 'ab', letterSpacingPx: 2, w: 16,
+      clusterBoxes: [{ start: 0, end: 1, x: 0, width: 9, rtl: false },
+        { start: 1, end: 2, x: 9, width: 7, rtl: false, ...(trackingExcluded ? { trackingExcluded: true as const } : {}) }] })],
+    [{ slices: [{ runIndex: 0, start: 1, end: 2 }], active: false }]);
+    expect(boxesOf(true)).toEqual([[9, 7]]);
+    expect(boxesOf(false)).toEqual([[9, 5]]);
+  });
+
   it('measures nothing for a run that carries its cluster boxes', () => {
     let measured = 0;
     const measure = () => (value: string) => { measured += value.length; return value.length * W; };

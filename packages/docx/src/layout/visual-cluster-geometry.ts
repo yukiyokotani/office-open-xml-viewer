@@ -56,13 +56,17 @@ export function bidiPlacedOffsets(
 }
 
 type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>
-  & Partial<Pick<TextPlacement, 'advancePt' | 'kashidaInsertions'>>;
+  & Partial<Pick<TextPlacement, 'advancePt'>>
+  & Readonly<{ kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[] }>;
 type VisualClusters = Readonly<{
   /** Visual start of each cluster from the left edge of the piece's box. */
   startsPt: readonly number[];
   /** Painted advance of each cluster (kashida elongation included). */
   advancesPt: readonly number[];
   odd: readonly boolean[];
+  /** The last cluster's advance was cut to the piece's box (the tracking
+   * after the final character of a fitted run lies outside it). */
+  lastCut: boolean;
 }>;
 const visualClustersByPlacement = new WeakMap<object, VisualClusters | null>();
 /** Extra advance each cluster is painted with under kashida justification.
@@ -129,6 +133,7 @@ export function visualClusters(placement: ClusteredText): VisualClusters | null 
     const overflowPt = last.xPt + last.advancePt - logical[0]!.xPt - placement.bounds.widthPt;
     if (overflowPt > 1e-9) last.advancePt = Math.max(0, last.advancePt - overflowPt);
     result = {
+      lastCut: overflowPt > 1e-9,
       startsPt: bidiPlacedOffsets(logical),
       advancesPt: logical.map((item) => item.advancePt),
       odd: logical.map((item) => item.level % 2 === 1),
@@ -193,6 +198,9 @@ export interface ClusterBox {
   readonly widthPt: number;
   /** The cluster reads right to left: it starts at its right edge. */
   readonly rtl: boolean;
+  /** The run's final cluster, cut to the run's box: the tracking after it is
+   * already outside its width (a fitted run). */
+  readonly trackingExcluded?: true;
 }
 
 /** The painted boxes of `clusters[first, last)`, with text offsets from
@@ -210,16 +218,19 @@ export function clusterBoxes(
   for (let index = first; index < last; index += 1) {
     const cluster = placement.clusters[index]!;
     const startPt = visualClusterStartXPt(placement, index);
+    const final = index === placement.clusters.length - 1;
     const widthPt = visual ? visual.advancesPt[index]!
-      : index === placement.clusters.length - 1
+      : final
         ? Math.max(0, Math.min(cluster.advancePt, placement.bounds.xPt + placement.bounds.widthPt - startPt))
         : cluster.advancePt;
+    const cut = final && (visual ? visual.lastCut : widthPt < cluster.advancePt - 1e-9);
     boxes.push({
       start: Math.max(cluster.range.start, textStart) - textStart,
       end: Math.min(cluster.range.end, textEnd) - textStart,
       xPt: startPt - originXPt,
       widthPt,
       rtl: visual?.odd[index] === true,
+      ...(cut ? { trackingExcluded: true as const } : {}),
     });
   }
   return boxes;

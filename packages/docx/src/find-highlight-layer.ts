@@ -125,7 +125,8 @@ type ClusterBoxes = NonNullable<DocxTextRunInfo['clusterBoxes']>;
  * retained cluster boxes: adjacent boxes merged into one interval. A slice
  * that covers part of a cluster takes that share of its box. The tracking
  * that follows the slice's final rendered cluster is left out, on the side
- * that cluster ends on. */
+ * that cluster ends on, unless its box already leaves it out
+ * (`trackingExcluded`, a fitted run's final cluster). */
 function clusterSliceIntervals(
   clusters: ClusterBoxes,
   start: number,
@@ -140,7 +141,7 @@ function clusterSliceIntervals(
     if (clusters[middle]!.end <= start) low = middle + 1;
     else high = middle;
   }
-  const boxes: { x: number; width: number; rtl: boolean }[] = [];
+  const boxes: { x: number; width: number; rtl: boolean; trackingExcluded: boolean }[] = [];
   for (let index = low; index < clusters.length && clusters[index]!.start < end; index += 1) {
     const cluster = clusters[index]!;
     const length = Math.max(1, cluster.end - cluster.start);
@@ -150,11 +151,14 @@ function clusterSliceIntervals(
       x: cluster.x + cluster.width * (cluster.rtl ? 1 - to : from),
       width: cluster.width * (to - from),
       rtl: cluster.rtl,
+      trackingExcluded: cluster.trackingExcluded === true,
     });
   }
   let final = boxes.length - 1;
   while (final >= 0 && !(boxes[final]!.width > 0)) final -= 1;
-  if (final >= 0 && pitch !== 0) {
+  // A fitted run's final cluster box already leaves out the tracking after
+  // its last character.
+  if (final >= 0 && pitch !== 0 && !boxes[final]!.trackingExcluded) {
     const box = boxes[final]!;
     const trimmed = Math.min(pitch, box.width);
     box.width -= trimmed;
