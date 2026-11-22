@@ -41,7 +41,7 @@ async function runsOf(body: string): Promise<DocxTextRunInfo[]> {
   return textRunsForPage(layout, 0, { scale: 1 });
 }
 
-type Api = typeof import('./text-layer') & typeof import('./find-highlight-layer');
+type Api = typeof import('./text-layer') & typeof import('./find-highlight-layer') & typeof import('./comment-margin');
 
 /** WORD_CELL_CONTENT_CLIP in Chromium: the overlay clip containers clip hit
  * testing and highlights after a responsive resize and inside turned clips. */
@@ -69,7 +69,8 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     await page.addScriptTag({ type: 'module', content: `
       import * as text from '/src/text-layer.ts';
       import * as find from '/src/find-highlight-layer.ts';
-      window.overlayClipTest = { ...text, ...find };
+      import * as margin from '/src/comment-margin.ts';
+      window.overlayClipTest = { ...text, ...find, ...margin };
     ` });
     await page.waitForFunction(() => 'overlayClipTest' in window);
   }, 60_000);
@@ -124,6 +125,38 @@ describe.skipIf(!existsSync(chromium.executablePath()))('DOCX overlay clip conta
     expect(run?.clips?.at(-1)?.rects).toBeDefined();
     const point: [number, number] = [run!.x + run!.w / 2, run!.y + run!.h / 2];
     expect(await hits(runs, 800, [point])).toEqual(['Link']);
+  });
+
+  it('keeps a link out of reach under an empty clip union', async () => {
+    const box = { x: 50, y: 50, width: 400, height: 200, rects: [] };
+    expect(await hits([link({ clips: [box] })], 800, [[150, 110]])).toEqual(['']);
+  });
+
+  it('places a comment marker after the visible part of a clipped run', async () => {
+    const left = await page.evaluate(() => {
+      const api = (window as unknown as { overlayClipTest: Api }).overlayClipTest;
+      const layer = document.getElementById('layer') as HTMLDivElement;
+      layer.style.width = '800px';
+      layer.style.height = '600px';
+      const tint = document.createElement('div');
+      tint.style.cssText = 'position:absolute;inset:0';
+      layer.replaceChildren(tint);
+      const source = { story: 'body' as const, storyInstance: 'body', path: [1] };
+      // A 200px run in a 100px cell that starts at x=72: it is cut at x=172.
+      api.buildDocxCommentMargin(tint, null, [{
+        source, sourceRunIndex: 0, text: 'commented', x: 72, y: 100, w: 200, h: 20, fontSize: 20, font: '20px serif',
+        clips: [{ x: 72, y: 90, width: 100, height: 40 }],
+      }], {
+        comments: [{ id: 'c', author: 'Ada', text: 'Note' }] as never,
+        anchors: [{ commentId: 'c', source, startRunIndex: 0, endRunIndex: 1,
+          reference: { source, runIndex: 1, affinity: 'preceding' } }],
+      }, 800, 600, null, () => undefined, 1, 260, true);
+      const marker = tint.querySelector('[data-ooxml-comment-marker]') as HTMLElement;
+      return marker.getBoundingClientRect().left;
+    });
+    // The marker sits just after x=172, not after the hidden end at x=272.
+    expect(left).toBeGreaterThan(172);
+    expect(left).toBeLessThan(200);
   });
 
   it('keeps a link out of reach when a turned clip hides it', async () => {

@@ -282,7 +282,24 @@ function withClip(
   bounds: LayoutRect | undefined,
   rects?: readonly LayoutRect[],
 ): NodeProjection {
-  if (rects && rects.length > 0) {
+  if (rects) {
+    // A union clip keeps only its rectangles with area; with none left it
+    // clips everything, as the Canvas clip does.
+    const regions = rects.filter((rect) => rect.widthPt > 0 && rect.heightPt > 0);
+    if (regions.length === 0) {
+      return {
+        ...projection,
+        clips: Object.freeze([
+          ...projection.clips,
+          Object.freeze({
+            bounds: Object.freeze({ xPt: bounds?.xPt ?? 0, yPt: bounds?.yPt ?? 0, widthPt: 0, heightPt: 0 }),
+            pointToPage: projection.pointToPage,
+            rects: Object.freeze([]),
+          }),
+        ]),
+      };
+    }
+    rects = regions;
     const left = Math.min(...rects.map((rect) => rect.xPt));
     const top = Math.min(...rects.map((rect) => rect.yPt));
     const right = Math.max(...rects.map((rect) => rect.xPt + rect.widthPt));

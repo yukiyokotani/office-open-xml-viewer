@@ -49,24 +49,73 @@ function cutPolygon(subject: readonly Point[], clip: readonly Point[]): Point[] 
   return points;
 }
 
-/** WORD_CELL_CONTENT_CLIP: whether any of a box placed like
- * DocxTextRunInfo.highlightBounds survives `clips` (each a union of its
- * rectangles); empty overlaps (zero area) count as hidden. */
-export function clippedBoxVisible(
-  box: Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>,
-  clips: readonly Readonly<DocxClipRegion>[] | undefined,
-): boolean {
+/** At most this many polygon pieces are tracked while cutting a box by
+ * nested union clips; past it a union is replaced by its bounding box, a
+ * superset that keeps the work linear in the number of clips. */
+const MAX_CLIP_PIECES = 64;
+
+type Box = Readonly<{ x: number; y: number; width: number; height: number; transform?: string }>;
+
+/** The rectangles of a clip that have area; an empty list clips everything. */
+function clipRegions(clip: Readonly<DocxClipRegion>): Point[][] {
+  const [a, b, c, d] = orientation(clip.transform);
+  return (clip.rects ?? [{ x: 0, y: 0, width: clip.width, height: clip.height }])
+    .filter((rect) => rect.width > 0 && rect.height > 0)
+    .map((rect) => placedPolygon(
+      clip.x + a * rect.x + c * rect.y, clip.y + b * rect.x + d * rect.y, rect.width, rect.height, clip.transform,
+    ));
+}
+
+function boundingPolygon(polygons: readonly Point[][]): Point[] {
+  const xs = polygons.flatMap((polygon) => polygon.map((point) => point.x));
+  const ys = polygons.flatMap((polygon) => polygon.map((point) => point.y));
+  const left = Math.min(...xs);
+  const top = Math.min(...ys);
+  const right = Math.max(...xs);
+  const bottom = Math.max(...ys);
+  return [{ x: left, y: top }, { x: right, y: top }, { x: right, y: bottom }, { x: left, y: bottom }];
+}
+
+/** The visible pieces (convex page polygons) of `box` under `clips`, each a
+ * union of its rectangles; identical pieces are kept once. */
+function visiblePieces(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): Point[][] {
   let pieces: Point[][] = [placedPolygon(box.x, box.y, box.width, box.height, box.transform)];
   for (const clip of clips ?? []) {
-    const regions = (clip.rects ?? [{ x: 0, y: 0, width: clip.width, height: clip.height }]).map((rect) => {
-      const [a, b, c, d] = orientation(clip.transform);
-      return placedPolygon(clip.x + a * rect.x + c * rect.y, clip.y + b * rect.x + d * rect.y, rect.width, rect.height, clip.transform);
-    });
+    let regions = clipRegions(clip);
+    if (regions.length === 0) return [];
+    // Past the cap a union is cut as its bounding box, a superset.
+    if (pieces.length * regions.length > MAX_CLIP_PIECES) regions = [boundingPolygon(regions)];
+    const seen = new Set<string>();
     pieces = pieces.flatMap((piece) => regions.map((region) => cutPolygon(piece, region)))
-      .filter((piece) => piece.length >= 3 && Math.abs(area(piece)) > 1e-9);
-    if (pieces.length === 0) return false;
+      .filter((piece) => {
+        if (piece.length < 3 || !(Math.abs(area(piece)) > 1e-9)) return false;
+        const key = piece.map((point) => `${point.x.toFixed(6)},${point.y.toFixed(6)}`).join(';');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    if (pieces.length === 0) return [];
   }
-  return pieces.length > 0;
+  return pieces;
+}
+
+/** WORD_CELL_CONTENT_CLIP: whether any of a box placed like
+ * DocxTextRunInfo.highlightBounds survives `clips` (each a union of its
+ * rectangles with area; an empty union hides everything). */
+export function clippedBoxVisible(box: Box, clips: readonly Readonly<DocxClipRegion>[] | undefined): boolean {
+  return visiblePieces(box, clips).length > 0;
+}
+
+/** The page bounding box of the visible part of `box` under `clips`, in the
+ * box's CSS px space; null when nothing is visible. */
+export function clippedBoxBounds(
+  box: Box,
+  clips: readonly Readonly<DocxClipRegion>[] | undefined,
+): Readonly<{ x: number; y: number; width: number; height: number }> | null {
+  const pieces = visiblePieces(box, clips);
+  if (pieces.length === 0) return null;
+  const [corner, , opposite] = boundingPolygon(pieces);
+  return { x: corner!.x, y: corner!.y, width: opposite!.x - corner!.x, height: opposite!.y - corner!.y };
 }
 
 /** The comment highlight of a run, shared by the comment API and the
@@ -223,10 +272,13 @@ function clipKey(clip: RunClip): string {
  * container: each rectangle is traced from a common start point and joined
  * by zero-width bridges, so only the rectangles are inside. */
 function unionClipPath(clip: RunClip, width: number, height: number): string {
-  if (!clip.rects || clip.rects.length === 0) return '';
+  if (!clip.rects) return '';
+  const rects = clip.rects.filter((rect) => rect.width > 0 && rect.height > 0);
+  // An empty union clips everything, as the Canvas clip does.
+  if (rects.length === 0) return 'clip-path:polygon(0% 0%,0% 0%,0% 0%);';
   const point = (x: number, y: number) => `${overlayPercent(x, width)} ${overlayPercent(y, height)}`;
   const parts: string[] = [point(0, 0)];
-  for (const rect of clip.rects) {
+  for (const rect of rects) {
     const right = rect.x + rect.width;
     const bottom = rect.y + rect.height;
     parts.push(point(rect.x, rect.y), point(right, rect.y), point(right, bottom), point(rect.x, bottom),

@@ -12,7 +12,7 @@ import { hitTestDocxElementContext } from './element-context.js';
 import { createPaintResourceRegistry } from './layout/paint-resources.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
-import { clippedBoxVisible } from './run-clip.js';
+import { clippedBoxBounds, clippedBoxVisible } from './run-clip.js';
 import { resolveDocxCommentThreads } from './comments.js';
 import type { LayoutRect, ParagraphLayout, TableLayout } from './layout/types.js';
 import type { CanvasPaintContext, PaintCanvas2D } from './paint/types.js';
@@ -429,5 +429,47 @@ describe('overlay clip containers', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('clippedBoxVisible', () => {
+  const box = { x: 10, y: 10, width: 20, height: 10 };
+
+  it('stays linear for nested unions of overlapping rectangles', () => {
+    // 30 clips of 4 rectangles each covering the box: a cross product would
+    // hold 4^30 pieces.
+    const union = { x: 0, y: 0, width: 100, height: 100, rects: [0, 1, 2, 3].map((index) => (
+      { x: index, y: index, width: 90, height: 90 })) };
+    const clips = Array.from({ length: 30 }, () => union);
+    expect(clippedBoxVisible(box, clips)).toBe(true);
+    expect(clippedBoxBounds(box, clips)).toEqual({ x: 10, y: 10, width: 20, height: 10 });
+  });
+
+  it('ignores rectangles without area and hides a box under an empty union', () => {
+    const union = { x: 0, y: 0, width: 100, height: 100, rects: [
+      { x: 0, y: 0, width: 0, height: 0 }, { x: 70, y: 60, width: 30, height: 40 },
+    ] };
+    expect(clippedBoxVisible(box, [union])).toBe(false);
+    expect(clippedBoxVisible(box, [{ ...union, rects: [] }])).toBe(false);
+    expect(clippedBoxVisible({ ...box, x: 75, y: 65 }, [union])).toBe(true);
+  });
+});
+
+describe('a VML text box union with a degenerate rectangle', () => {
+  it('gives no comment highlight to text only the degenerate rectangle covers', () => {
+    const box = '<w:p><w:r><w:pict><v:group style="width:120pt;height:80pt" coordsize="120,80">'
+      + '<v:shapetype id="box" coordsize="1000,1000"/><v:shape type="#box" style="width:100;height:60" filled="f" stroked="f">'
+      + '<v:path textboxrect="0,0,0,0;700,600,1000,1000"/><v:textbox inset="0,0,0,0"><w:txbxContent>'
+      + '<w:p><w:r><w:t>Hid</w:t></w:r></w:p>'
+      + '</w:txbxContent></v:textbox></v:shape></v:group></w:pict></w:r></w:p>';
+    const layout = layoutDocx(docx('', box));
+    const runs = textRunsForPage(layout, 0, { scale: 1 });
+    const hid = runs.find((run) => run.text === 'Hid')!;
+    expect(hid.clips?.at(-1)?.rects).toHaveLength(1);
+    const threads = resolveDocxCommentThreads([{ id: 'c', author: 'A', text: 'x' }] as never, [{
+      commentId: 'c', source: hid.source!, startRunIndex: hid.sourceRunIndex!, endRunIndex: hid.sourceRunIndex! + 1,
+      reference: { source: hid.source!, runIndex: hid.sourceRunIndex! + 1, affinity: 'preceding' },
+    }] as never, runs);
+    expect(JSON.stringify(threads)).not.toContain('"width"');
   });
 });

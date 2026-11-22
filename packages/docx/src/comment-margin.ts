@@ -1,4 +1,4 @@
-import { OverlayClipFrames, runHighlightRect } from './run-clip.js';
+import { clippedBoxBounds, OverlayClipFrames, runHighlightRect } from './run-clip.js';
 import {
   overlayPercent,
   type ViewerCommentsOptions,
@@ -235,9 +235,15 @@ export function buildDocxCommentMargin(
         accentById.get(anchor.commentId) ?? readOnlyCommentAuthorAccent(undefined),
         clipFrames,
       );
-      const rect = run.transform && surface
-        ? relativeElementRect(tint, surface)
-        : Object.freeze({ x: run.x, y: run.y, width: run.w, height: run.h });
+      // A clipped run anchors its marker to the visible part of its tint.
+      const visible = run.clips
+        ? clippedBoxBounds({ x: run.x, y: run.y, width: run.w, height: run.h, transform: run.transform }, run.clips)
+        : undefined;
+      const rect = visible
+        ? Object.freeze(visible)
+        : run.transform && surface
+          ? relativeElementRect(tint, surface)
+          : Object.freeze({ x: run.x, y: run.y, width: run.w, height: run.h });
       const list = anchorRects.get(anchor.commentId) ?? [];
       if (!anchorRects.has(anchor.commentId)) anchorRects.set(anchor.commentId, list);
       const resolvedRect = rect ?? Object.freeze({ x: run.x, y: run.y, width: run.w, height: run.h });
