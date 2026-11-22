@@ -249,14 +249,15 @@ export const PICTURE_PART = {
   contentTypes: '<Default Extension="png" ContentType="image/png"/>',
 } as const;
 
-/** A run holding an inline DrawingML picture of `widthPt` by `heightPt`. */
-export function inlinePictureRun(widthPt: number, heightPt: number, properties = ''): string {
+/** A run holding an inline DrawingML picture of `widthPt` by `heightPt`,
+ * turned clockwise by `rotationDeg`. */
+export function inlinePictureRun(widthPt: number, heightPt: number, properties = '', rotationDeg = 0): string {
   const extent = `cx="${widthPt * 12700}" cy="${heightPt * 12700}"`;
   return `<w:r><w:rPr>${properties}</w:rPr><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent ${extent}/>`
     + '<wp:docPr id="1" name="Picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
     + '<pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Picture"/><pic:cNvPicPr/></pic:nvPicPr>'
     + '<pic:blipFill><a:blip r:embed="rIdP"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>'
-    + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext ${extent}/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`
+    + `<pic:spPr><a:xfrm${rotationDeg ? ` rot="${rotationDeg * 60000}"` : ''}><a:off x="0" y="0"/><a:ext ${extent}/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`
     + '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
 }
 const encode = (text: string) => new TextEncoder().encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${text}`);

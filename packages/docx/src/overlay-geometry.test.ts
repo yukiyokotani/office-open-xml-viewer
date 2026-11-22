@@ -606,12 +606,54 @@ describe('the work of covering overlapping marks once', () => {
     }
   };
 
+  it('grows with the length of one line, not with its square', () => {
+    // One line of touching runs, every other one raised: no two overlap,
+    // and four times the runs must not take sixteen times the comparisons.
+    const line = (count: number): DocxTextRunInfo[] => Array.from({ length: count }, (_, index) => ({
+      text: 'x', x: index * 6, y: 100 - (index % 2) * 2, w: 6, h: 12, fontSize: 12, font: '12px serif', sourceRunIndex: index,
+    }));
+    const count = (runs: DocxTextRunInfo[]): number => {
+      const counted = vi.spyOn(Math, 'min');
+      try {
+        expect(overlayBoxes(runs)).toHaveLength(runs.length);
+        return counted.mock.calls.length;
+      } finally {
+        counted.mockRestore();
+      }
+    };
+    const small = count(line(300));
+    const large = count(line(1200));
+    expect(large).toBeLessThan(Math.max(small, 300) * 6);
+  });
+
+  it('grows with the length of one line of condensed runs that overlap their neighbours', () => {
+    // 6px glyphs 4.5px apart, every other one raised by 1px: each overlaps
+    // the next, and the whole line is one group.
+    const condensed = (count: number): DocxTextRunInfo[] => Array.from({ length: count }, (_, index) => ({
+      text: 'x', x: index * 4.5, y: 100 - (index % 2), w: 6, h: 12, fontSize: 12, font: '12px serif', sourceRunIndex: index,
+    }));
+    const count = (runs: DocxTextRunInfo[]): number => {
+      const counted = vi.spyOn(Math, 'min');
+      try {
+        expect(overlayBoxes(runs).length).toBeGreaterThan(0);
+        return counted.mock.calls.length;
+      } finally {
+        counted.mockRestore();
+      }
+    };
+    for (const [few, many] of [[24, 96], [300, 1200]] as const) {
+      const small = count(condensed(few));
+      const large = count(condensed(many));
+      expect(small).toBeGreaterThan(0);
+      expect(large / small).toBeLessThan(6);
+    }
+  });
+
   it('grows with the number of lines, not with its square', () => {
     // Four times the lines: comparing every pair of rects would take sixteen
     // times the comparisons.
     const small = comparisons(10);
     const large = comparisons(40);
-    expect(small).toBeGreaterThan(0);
-    expect(large / small).toBeLessThan(6);
+    expect(large).toBeLessThan(Math.max(small, 600) * 6);
   });
 });

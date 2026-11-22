@@ -38,11 +38,16 @@ export interface DocxCommentMarginModel {
 interface ResolvedPageCommentAnchor {
   readonly anchor: Readonly<CommentAnchorRange>;
   readonly runs: readonly Readonly<DocxTextRunInfo>[];
+  /** What the page shows of the anchor (overlay-geometry.ts): never empty. */
+  readonly boxes: readonly OverlayBox[];
 }
 
 /** Resolve only anchors whose authored, reference, or final-state fallback
  * source occurs in this page's projected runs. A mounted page must not pay the
- * `anchors × runs` join cost for comments belonging to every other page. */
+ * `anchors × runs` join cost for comments belonging to every other page. An
+ * anchor whose content the page hides whole (clipped away) has nothing to
+ * show on it and is not resolved, as in the comment API: it gets no tint, no
+ * marker and no card. */
 export function resolvePageCommentAnchors(
   anchors: readonly Readonly<CommentAnchorRange>[],
   runs: readonly Readonly<DocxTextRunInfo>[],
@@ -60,7 +65,9 @@ export function resolvePageCommentAnchors(
         pageSources.has(sourceKey(anchor.geometryFallback.source)));
     if (!mayResolve) continue;
     const resolved = resolveCommentAnchorRuns(anchor, runs);
-    if (resolved.length > 0) pageAnchors.push({ anchor, runs: resolved });
+    if (resolved.length === 0) continue;
+    const boxes = overlayBoxes(resolved);
+    if (boxes.length > 0) pageAnchors.push({ anchor, runs: resolved, boxes });
   }
   return pageAnchors;
 }
@@ -183,12 +190,12 @@ export function buildDocxCommentMargin(
   }>>();
   const surface = tintLayer.parentElement;
   const clipFrames = new OverlayClipFrames(tintLayer, cssWidth, cssHeight);
-  for (const { anchor, runs: anchorRuns } of resolvedPageAnchors) {
+  for (const { anchor, runs: anchorRuns, boxes } of resolvedPageAnchors) {
     if (!visibleThreadIds.has(anchor.commentId)) continue;
     const active = activeId === anchor.commentId;
     // The glyphs of the anchored runs inside their clips, joined only where
     // they touch (overlay-geometry.ts), as the comment API reports them.
-    for (const box of overlayBoxes(anchorRuns)) {
+    for (const box of boxes) {
       const tint = createTint(
         tintLayer,
         box,

@@ -495,13 +495,16 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   }
   const finalLine = input.paragraph.lines.at(-1);
   if (!finalLine) return input.logicalLineBoxExtentPt;
-  const hasUnprovedTransformedInk = finalLine.placements.some((placement) =>
+  // WORD_ANCHOR_HOST_NO_LINE_METRIC: the line's ink is its flow content; a
+  // floating drawing and its host take no part in the line's admission.
+  const flowPlacements = wordFlowPlacements(input.paragraph, finalLine);
+  const hasUnprovedTransformedInk = flowPlacements.some((placement) =>
     placement.kind === 'text'
     && (placement.paintOps ?? []).some((operation) =>
       operation.glyphOrientation !== undefined
       && operation.blockAxisInkBounds === undefined));
   if (hasUnprovedTransformedInk) return input.logicalLineBoxExtentPt;
-  const visibleEnds = finalLine.placements.flatMap((placement) => {
+  const visibleEnds = flowPlacements.flatMap((placement) => {
     const endPt = placementVisibleBlockEndPt(placement);
     return endPt === null ? [] : [endPt];
   });
