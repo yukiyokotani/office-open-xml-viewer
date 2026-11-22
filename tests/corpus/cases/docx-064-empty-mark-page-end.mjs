@@ -8,14 +8,14 @@ import { p, r, spacing } from '../lib/wml.mjs';
 // margin; then the empty mark, then a marker paragraph. The marker shows
 // where the mark went: on the first line of the next page when the mark
 // stayed, on the second when the mark moved.
-//   The mark is 9 pt Noto Sans unless noted (a single line of about
-//   12.3 pt), or 9 pt Noto Sans JP (about 13 pt) in case G.
+//   The mark is 9 pt Noto Sans (a single line of about 12.3 pt), or 9 pt
+//   Noto Sans JP in case G (Word gives it a line of about 17 pt).
 //   A1/A2: single (auto 240), room 13 pt / 11 pt.
 //   B, C, D: auto 276, 360 and 480, room 13 pt: only the first line has to
 //     fit; the extra leading may hang past the margin.
 //   E1/E2: exact 12 pt, room 13 pt / 11 pt.
 //   F1/F2: at least 12 pt, room 13 pt / 11 pt.
-//   G1/G2: single, Noto Sans JP mark, room 13.5 pt / 12.5 pt.
+//   G1/G2: single, Noto Sans JP mark, room 18 pt / 16 pt.
 const { LINE, LINES } = DOCX;
 const JA = `<w:rFonts w:ascii="${FONT.eastAsia}" w:eastAsia="${FONT.eastAsia}" w:hAnsi="${FONT.eastAsia}"/>`;
 const FILL = 58;
@@ -31,8 +31,8 @@ const CASES = [
   ['E2', spacing(240, 'exact'), '', 220],
   ['F1', spacing(240, 'atLeast'), '', 260],
   ['F2', spacing(240, 'atLeast'), '', 220],
-  ['G1', spacing(240, 'auto'), `<w:rPr>${JA}</w:rPr>`, 270],
-  ['G2', spacing(240, 'auto'), `<w:rPr>${JA}</w:rPr>`, 250],
+  ['G1', spacing(240, 'auto'), `<w:rPr>${JA}</w:rPr>`, 360],
+  ['G2', spacing(240, 'auto'), `<w:rPr>${JA}</w:rPr>`, 320],
 ];
 const label = (spc) => spc.match(/w:line="(\d+)" w:lineRule="(\w+)"/).slice(1).join(' ');
 
@@ -61,9 +61,9 @@ export default {
       id: 'docx-064',
       title: 'Empty mark at the page end',
       verify: [
-        'Verify: each marker is on line 1 of the next page when',
-        'the empty mark fits its first line in the room left',
-        '(A1, B-D, E1, F1, G1), else on line 2. Compare the PDF.',
+        'Verify: a marker on line 1 of the next page means the',
+        'empty mark stayed (its first line fitted the room);',
+        'on line 2, it moved. Compare the PDF.',
       ],
     }),
     { kind: 'p', style: 'caption', lines: ['One case per page, no document grid.'], at: DOCX.rowLine(2) },

@@ -495,6 +495,22 @@
     "source": "04681e6da3a154db9e846b0bc2d9cff59d59ee2aa739e75d0b48942e6c7932f1",
     "pdf": "5048f214e8adfe7140d38b0d09a1117b1b1a1ca2f4cb0e9ea4722e9be8b3bbc2"
   },
+  "docx-063-section-tbrlv.mac.pdf": {
+    "source": "e1bfac9ce8c039b4b7c181ce95fac7e4b9497a85a02ab2ce126c7800370badef",
+    "pdf": "8ac51cf69087547731eade39c766fbda08441451e152634874880789bd252a74"
+  },
+  "docx-063-section-tbrlv.win.pdf": {
+    "source": "e1bfac9ce8c039b4b7c181ce95fac7e4b9497a85a02ab2ce126c7800370badef",
+    "pdf": "79de2cb9d17692f477dad128fa1d9b251dde4d265783e1fccbd81ff01d1dd028"
+  },
+  "docx-064-empty-mark-page-end.mac.pdf": {
+    "source": "cd36d1c1cc1c64a3434f8e8abd6efdf23adc152c50a3a4481ca7700dc7c07b72",
+    "pdf": "15ddc256a28a8f75b605d221e64bd89b6e8fa61a76cd4b5dd1acb1b661315f57"
+  },
+  "docx-064-empty-mark-page-end.win.pdf": {
+    "source": "cd36d1c1cc1c64a3434f8e8abd6efdf23adc152c50a3a4481ca7700dc7c07b72",
+    "pdf": "f7aafffbefbf67db72f43c7c2e5da1a54b7637d57f37234c4e2e4eef56120d36"
+  },
   "pptx-001-paragraph-levels.mac.pdf": {
     "source": "9a98a374282cfc4e5c9246e36287f9f8974ade19652f0e33a066c0786c77df7d",
     "pdf": "683ae01f7021c4caf144b2bccbe1da518ee113d848aa307092ecc2eec3fe6126"
