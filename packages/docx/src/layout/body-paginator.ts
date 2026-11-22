@@ -6024,15 +6024,40 @@ function composeBodyPaginationResult(
     input.pageBackground?.story ?? null,
   );
   // pageBottom and beneathText (WORD_FOOTNOTE_BENEATH_TEXT) are laid out;
-  // beneathText in per-column note bands is not. Each page's footnotes take
-  // the position of the section that places them (its last region).
+  // beneathText in per-column note bands is not. Each retained footnote is
+  // diagnosed with the position of the section holding its reference (a
+  // continued note keeps its reference's section from an earlier page).
   const positions = sessionFootnotePositions.get(pass.session);
+  const referenceSections = new Map<string, string>();
+  for (const page of pageStories.pages) {
+    const regionOf = (flowDomainId: string) => page.sectionRegions
+      .find((region) => region.flowDomainIds.includes(flowDomainId))?.sectionOccurrenceId;
+    const visit = (node: PaintNode, sectionOccurrenceId: string | undefined) => {
+      if (node.kind === 'paragraph') {
+        for (const line of node.lines) {
+          for (const placement of line.placements) {
+            const reference = 'noteReference' in placement ? placement.noteReference : undefined;
+            if (reference?.kind === 'footnote' && sectionOccurrenceId !== undefined && !referenceSections.has(reference.id)) {
+              referenceSections.set(reference.id, sectionOccurrenceId);
+            }
+          }
+        }
+      } else if (node.kind === 'table') {
+        for (const row of node.rows) for (const cell of row.cells) {
+          for (const block of cell.blocks) visit(block.layout, sectionOccurrenceId);
+        }
+      }
+    };
+    for (const node of page.layers.body) visit(node, regionOf(node.flowDomainId));
+  }
   const unsupportedPositions = new Set<string>();
   for (const page of pageStories.pages) {
-    if (!page.layers.notes.some((note) => note.source.story === 'footnote')) continue;
-    const region = page.sectionRegions.at(-1);
-    const position = (region && positions?.get(region.sectionOccurrenceId)) ?? noteLayoutSettings.footnotePosition;
-    if (position !== 'pageBottom' && position !== 'beneathText') unsupportedPositions.add(position);
+    for (const note of page.layers.notes) {
+      if (note.kind !== 'note' || note.source.story !== 'footnote') continue;
+      const section = referenceSections.get(note.source.storyInstance) ?? page.sectionRegions.at(-1)?.sectionOccurrenceId;
+      const position = (section && positions?.get(section)) ?? noteLayoutSettings.footnotePosition;
+      if (position !== 'pageBottom' && position !== 'beneathText') unsupportedPositions.add(position);
+    }
   }
   if (beneathTextColumnBandFallbacks.has(pass.session)) unsupportedPositions.add('beneathText');
   const composed = [...unsupportedPositions].reduce((layout, position) =>

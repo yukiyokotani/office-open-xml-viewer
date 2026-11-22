@@ -40,17 +40,21 @@ interface Control {
   readonly sectionPr?: readonly [string, string];
   /** Omit the optional body-level sectPr of the final section. */
   readonly omitFinalSectPr?: boolean;
+  /** The second section holds no note references. */
+  readonly secondWithoutReferences?: boolean;
+  /** Settings compatibility mode 15. */
+  readonly mode15?: boolean;
 }
 
 /** Two sections, each with two references; notes 1-4. */
-function control({ kind, documentPr = '', sectionPr = ['', ''], omitFinalSectPr = false }: Control): DocxDocumentModel {
+function control({ kind, documentPr = '', sectionPr = ['', ''], omitFinalSectPr = false, secondWithoutReferences = false, mode15 = false }: Control): DocxDocumentModel {
   const ref = (id: number) => `<w:r><w:${kind}Reference w:id="${id}"/></w:r>`;
   const pr = (children: string) => children ? `<w:${kind}Pr>${children}</w:${kind}Pr>` : '';
   const sect = (children: string, type = '') => `<w:sectPr>${pr(children)}${type}<w:pgSz w:w="12240" w:h="15840"/>`
     + '<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr>';
   const body = `<w:p><w:r><w:t>A</w:t></w:r>${ref(1)}${ref(2)}</w:p>`
     + `<w:p><w:pPr>${sect(sectionPr[0], '<w:type w:val="continuous"/>')}</w:pPr></w:p>`
-    + `<w:p><w:r><w:t>B</w:t></w:r>${ref(3)}${ref(4)}</w:p>`
+    + `<w:p><w:r><w:t>B</w:t></w:r>${secondWithoutReferences ? '' : ref(3) + ref(4)}</w:p>`
     + (omitFinalSectPr ? '' : sect(sectionPr[1], '<w:type w:val="continuous"/>'));
   const notes = [1, 2, 3, 4].map((id) => `<w:${kind} w:id="${id}"><w:p><w:r><w:t>N${id}</w:t></w:r></w:p></w:${kind}>`).join('');
   const parts = new Map<string, string>([
@@ -63,7 +67,9 @@ function control({ kind, documentPr = '', sectionPr = ['', ''], omitFinalSectPr 
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
     ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="n" Type="${R}/${kind}s" Target="${kind}s.xml"/><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/></Relationships>`],
-    ['word/settings.xml', `<w:settings xmlns:w="${W}" xmlns:mc="${MC}" xmlns:w14="${W14}">${pr(documentPr)}</w:settings>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}" xmlns:mc="${MC}" xmlns:w14="${W14}">${pr(documentPr)}`
+      + (mode15 ? '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>' : '')
+      + '</w:settings>'],
     ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:mc="${MC}" xmlns:w14="${W14}"><w:body>${body}</w:body></w:document>`],
     [`word/${kind}s.xml`, `<w:${kind}s xmlns:w="${W}">${notes}</w:${kind}s>`],
   ]);
@@ -179,6 +185,13 @@ describe('section-aware note numbering', () => {
     expect(unsupported(['<w:pos w:val="beneathText"/>', '<w:pos w:val="sectEnd"/>'])).toEqual([message('sectEnd')]);
     expect(unsupported(['<w:pos w:val="sectEnd"/>', '<w:pos w:val="docEnd"/>'])).toEqual([message('sectEnd'), message('docEnd')]);
     expect(unsupported(['<w:pos w:val="beneathText"/>', ''])).toEqual([]);
+    // A continuous section on the same page that holds no references does
+    // not hide the position of the section whose notes the page carries.
+    const model = control({ kind: 'footnote', sectionPr: ['<w:pos w:val="sectEnd"/>', ''], secondWithoutReferences: true, mode15: true });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.diagnostics.filter((diagnostic) => diagnostic.message.includes('footnote position'))
+      .map((diagnostic) => diagnostic.message)).toEqual([message('sectEnd')]);
   });
 
   it.each(['footnote', 'endnote'] as const)('keeps %s notes whose number format is none', (kind) => {
