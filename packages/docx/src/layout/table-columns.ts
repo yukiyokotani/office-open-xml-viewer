@@ -641,13 +641,13 @@ function fitToAvailableWidth(
 }
 
 /** WORD_TABLE_CELL_SPACING_GEOMETRY, AutoFit tables with a preferred table
- * or cell width: the cell boxes are the widths the table resolves to without
- * spacing. Without a preferred table width they keep those widths and the
- * gaps widen the table, up to its width ceiling; with one, or past the
- * ceiling, the gaps are carved out of them proportionally, as for a fixed
- * table. Returns null for a content-sized table (its own class below), and
- * when a carved box is narrower than its content (binding fits are not
- * established). */
+ * or cell width. The gaps are not part of what AutoFit distributes: the cell
+ * boxes are the widths the table resolves to in the width that is left for
+ * them. Without a preferred table width that is whatever they resolve to,
+ * the gaps widening the table, unless its border box would pass the width
+ * ceiling; then, and with a preferred table width, the boxes are resolved in
+ * that width less the gaps. Returns null for a content-sized table (its own
+ * class below) and when the gaps leave no width. */
 function spacedAutoFitPreferredBoxesPt(
   input: TableColumnLayoutInput,
   columnCount: number,
@@ -656,18 +656,27 @@ function spacedAutoFitPreferredBoxesPt(
   const preferred = input.tablePreferredWidthPt !== null || input.rows.some((row) =>
     row.before !== null || row.after !== null || row.cells.some((cell) => cell.preferredWidth !== null));
   if (!preferred) return null;
-  const resolved = solveTableColumnWidths({ ...input, separatedCellSpacingPt: undefined });
-  const totalPt = resolved.reduce((sum, width) => sum + width, 0);
+  const cellInput = { ...input, separatedCellSpacingPt: undefined, separatedBorderPt: undefined };
   const gapBudgetPt = (columnCount + 1) * 2 * spacingPt;
-  const ceilingPt = finiteNonNegative(input.availableWidthPt);
-  if (input.tablePreferredWidthPt === null && totalPt + gapBudgetPt <= ceilingPt + EPSILON_PT) {
-    return resolved;
+  // The table's border box, half a rule past the grid on either side, is
+  // held to the ceiling.
+  const ceilingPt = input.availableWidthPt === null
+    ? null : finiteNonNegative(input.availableWidthPt) - finiteNonNegative(input.separatedBorderPt);
+  if (input.tablePreferredWidthPt === null) {
+    const resolved = solveTableColumnWidths(cellInput);
+    const totalPt = resolved.reduce((sum, width) => sum + width, 0);
+    if (ceilingPt === null || totalPt + gapBudgetPt <= ceilingPt + EPSILON_PT) return resolved;
   }
-  const targetPt = input.tablePreferredWidthPt === null ? ceilingPt : totalPt;
-  if (targetPt <= gapBudgetPt || totalPt <= EPSILON_PT) return null;
-  const boxes = resolved.map((width) => width * (targetPt - gapBudgetPt) / totalPt);
-  const { minimums } = singleColumnBounds(input.rows, columnCount, totalPt);
-  return boxes.every((width, column) => width + EPSILON_PT >= (minimums[column] ?? 0)) ? boxes : null;
+  const targetPt = Math.min(input.tablePreferredWidthPt ?? Number.POSITIVE_INFINITY,
+    ceilingPt ?? Number.POSITIVE_INFINITY) - gapBudgetPt;
+  if (!Number.isFinite(targetPt) || targetPt <= EPSILON_PT) return null;
+  return solveTableColumnWidths({
+    ...cellInput,
+    tablePreferredWidthPt: targetPt,
+    availableWidthPt: targetPt,
+    ...(input.contentBandPt === undefined
+      ? {} : { contentBandPt: Math.max(0, input.contentBandPt - gapBudgetPt) }),
+  });
 }
 
 /** WORD_TABLE_CELL_SPACING_GEOMETRY establishes only nonbinding content fits.

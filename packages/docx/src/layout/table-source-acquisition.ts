@@ -352,7 +352,10 @@ export function projectTableColumnLayoutInput(
   );
   return {
     layout: layoutKind === 'fixed' ? 'fixed' : 'autofit',
-    ...(spacingGeometry ? { separatedCellSpacingPt: spacingGeometry.spacingPt } : {}),
+    ...(spacingGeometry ? {
+      separatedCellSpacingPt: spacingGeometry.spacingPt,
+      separatedBorderPt: spacingGeometry.borderPt,
+    } : {}),
     availableWidthPt: maximumWidthPt === null ? null : Math.max(0, maximumWidthPt),
     gridWidthsPt,
     gridWidthKeys,

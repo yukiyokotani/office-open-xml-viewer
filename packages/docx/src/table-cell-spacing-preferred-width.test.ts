@@ -111,6 +111,28 @@ function tableOf(table: string, direction: string | null = null) {
   };
 }
 
+/** Cell box widths of the table nested in the first cell of `table`. */
+function nestedCellWidths(table: string): number[] {
+  const archive = new DocxArchive(docx(table, null));
+  let model: DocxDocumentModel;
+  try {
+    model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+  const layout = layoutDocument(
+    model,
+    createLayoutServices(model, { measureContext: measureContext() }),
+    { currentDateMs: 0 },
+  );
+  const outer = layout.pages[0]!.layers.body.find((node) => node.kind === 'table');
+  if (outer?.kind !== 'table') throw new Error('expected a table');
+  const inner = outer.rows[0]!.cells[0]!.blocks.map((block) => block.layout)
+    .find((block) => block.kind === 'table');
+  if (inner?.kind !== 'table') throw new Error('expected a nested table');
+  return inner.rows[0]!.cells.map((box) => Math.round(box.flowBounds.widthPt * 1e6) / 1e6);
+}
+
 const tableWidths = (spacingPt: number, tableWidth: string, direction: string | null = null) => {
   const { table, cells } = tableOf(twoColumns(tableWidth + spacing(spacingPt)), direction);
   return { table, cells };
@@ -162,11 +184,13 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
   });
 
   it('carves the spacing out of a table that would pass the text width', () => {
-    // 220 + 240 pt cells and 12 pt of gaps are 472 pt in 465.3 pt.
+    // 220 + 240 pt cells and 12 pt of gaps are 472 pt in 465.3 pt. The
+    // table's border box, half a 0.5 pt rule past the grid on either side,
+    // is held to the text width.
     const widths = tableOf(twoColumns(AUTO + spacing(2), [4400, 4800]));
-    expect(widths.table).toBeCloseTo(465.3, 6);
-    expect(widths.cells[0]).toBeCloseTo((465.3 - 12) * 220 / 460, 6);
-    expect(widths.cells[1]).toBeCloseTo((465.3 - 12) * 240 / 460, 6);
+    expect(widths.table).toBeCloseTo(465.3 - 0.5, 6);
+    expect(widths.cells[0]).toBeCloseTo((465.3 - 0.5 - 12) * 220 / 460, 6);
+    expect(widths.cells[1]).toBeCloseTo((465.3 - 0.5 - 12) * 240 / 460, 6);
   });
 
   it('keeps the interior gap inside a spanning cell', () => {
@@ -199,6 +223,24 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     const widths = tableOf(onRows);
     expect(widths.table).toBeCloseTo(192, 6);
     expect(widths.cells[0]).toBeCloseTo(72, 6);
+  });
+
+  it.each([
+    // [outer cell, nested tblW, width of each nested cell box]
+    [144, AUTO, 30],
+    [144, '<w:tblW w:w="5000" w:type="pct"/>', (144 - 0.5 - 12) / 2],
+    [72, AUTO, (72 - 0.5 - 12) / 2],
+  ])('gives a spaced table nested in a %d pt cell the same two forms', (outerPt, nestedWidth, boxPt) => {
+    // A 30 + 30 pt table with 2 pt spacing wants 72 pt. It keeps that in a
+    // wider cell, takes the cell's width when asked for 100%, and is held to
+    // a 72 pt cell by its own border box.
+    const nested = tableXml(nestedWidth + spacing(2), [600, 600], [cell(600, 'n1') + cell(600, 'n2')]);
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="${outerPt * 20}"/><w:gridCol w:w="2160"/></w:tblGrid><w:tr>`
+      + `<w:tc><w:tcPr><w:tcW w:w="${outerPt * 20}" w:type="dxa"/></w:tcPr>${nested}${paragraph('A1')}</w:tc>`
+      + `${cell(2160, 'B1')}</w:tr></w:tbl>`;
+    expect(nestedCellWidths(outer)).toEqual([boxPt, boxPt].map((width) => Math.round(width * 1e6) / 1e6));
   });
 
   it('applies both forms to the upright block table of a tbRl section', () => {

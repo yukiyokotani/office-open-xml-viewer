@@ -1487,6 +1487,8 @@ export interface TableColumnLayoutInput {
   readonly growUnpreferredColumns?: boolean | 'nonbinding';
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
+  /** Width of the uniform table border rule of the spaced geometry. */
+  readonly separatedBorderPt?: number;
   /** The text band the intrinsic maxima were capped at; a 'nonbinding'
    * fit must stay strictly inside it, so no maximum was capped. */
   readonly contentBandPt?: number;

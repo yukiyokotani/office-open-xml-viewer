@@ -410,12 +410,14 @@ export function decideLogicalTable(
   const uniformBorderPt = spacingPt > 0 ? wordUniformSpacedTableBorderPt(table, preferredSized) : null;
   const vertical = isVerticalTextDirection(environment.textDirection);
   let spacingGeometry = spacingPt > 0 && uniformBorderPt !== null
-    && singleTable && commonFrame && commonGrid && topLevelBody
-    // Measured in a two-column section for the preferred-sized form only.
+    && singleTable && commonFrame && commonGrid
+    // Measured in a two-column section and nested in a body table cell for
+    // the preferred-sized form only.
+    && (topLevelBody || (preferredSized && environment.story === 'body' && environment.tableCellDepth === 1))
     && (environment.singleColumn || preferredSized)
     // The upright block table of a vertical section is measured for fixed
     // and preferred-sized tables only.
-    && !environment.inTableCell && (!vertical || (environment.uprightTable === true && !contentSized))
+    && (!environment.inTableCell || preferredSized) && (!vertical || (environment.uprightTable === true && !contentSized))
     && environment.quarterTurnedStory !== true && format.ordinaryFlow && format.positioning == null
     && format.outerEdgeIndent !== true && !rowOverrides && !gridSkips
     // ECMA-376 §17.4.43 puts trPr spacing inside text margins; §17.4.45
