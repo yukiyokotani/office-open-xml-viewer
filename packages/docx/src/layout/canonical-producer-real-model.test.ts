@@ -825,8 +825,8 @@ describe('canonical producer with a real document model', () => {
 
     expect(layout.pages.flatMap((page) => page.layers.notes).map((note) => note.source.story))
       .toEqual(['endnote', 'footnote']);
+    // beneathText is laid out (WORD_FOOTNOTE_BENEATH_TEXT); sectEnd is not.
     expect(layout.diagnostics.map((diagnostic) => diagnostic.message)).toEqual([
-      expect.stringContaining('Unsupported footnote position "beneathText"'),
       expect.stringContaining('Unsupported endnote position "sectEnd"'),
     ]);
   });

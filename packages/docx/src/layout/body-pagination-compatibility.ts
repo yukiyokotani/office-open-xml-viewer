@@ -810,6 +810,18 @@ export function wordFootnoteLookaheadBoundary(entry: BodyLayoutInput['sequence']
     || (entry.kind === 'body-block' && entry.block.kind === 'paragraph' && entry.block.pageBreakBefore);
 }
 
+export const WORD_FOOTNOTE_BENEATH_TEXT = defineCompatibilityRule({
+  id: 'word-footnote-beneath-text',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'footnote-beneath-text',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.11.21 places beneathText footnotes "immediately below the last line of text on the page". Word reads the position from the section\'s own footnotePr only: beneathText in settings.xml alone leaves the footnotes at the page bottom, a section beneathText wins over settings pageBottom, and a section pageBottom wins over settings beneathText. The footnote area (separator band, then the notes) starts at the bottom of the last body line of the page, including a paragraph that holds a page break, and a page whose text reaches the bottom keeps the pagination of pageBottom with the notes right below its last line. A section that follows on the next page keeps its own position. In two compatibility-mode-15 columns the page-wide note area starts below the deeper column and flows through the columns. Evidence: Windows Word 16.0.20625 PDF exports, 9 controls (settings only, section only, section over settings both ways, a full page, a page ending in a page break, one note per page, beneathText then pageBottom sections, two columns).',
+});
+
 export const WORD_PER_COLUMN_FOOTNOTE_BANDS = defineCompatibilityRule({
   id: 'word-per-column-footnote-bands',
   evidence: {

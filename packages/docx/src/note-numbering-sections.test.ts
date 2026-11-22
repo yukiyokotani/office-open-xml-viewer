@@ -148,11 +148,21 @@ describe('section-aware note numbering', () => {
     expect(render({ kind: 'footnote', sectionPr: [zero, zero] })).toEqual(['0', '1', '2', '3']);
   });
 
-  it('takes the footnote position of the section over settings.xml ([MS-OI29500] §2.1.309)', () => {
-    const model = control({ kind: 'footnote', sectionPr: ['<w:pos w:val="beneathText"/>', '<w:pos w:val="beneathText"/>'] });
-    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
-    expect(layout.diagnostics.map((diagnostic) => diagnostic.message))
-      .toContainEqual(expect.stringContaining('footnote position "beneathText"'));
+  it('places footnotes beneath the text from the section position only (word-footnote-beneath-text)', () => {
+    const noteTop = (documentPr: string, sectionPr: string) => {
+      const model = control({ kind: 'footnote', documentPr, sectionPr: [sectionPr, sectionPr] });
+      const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+      const page = layout.pages[0]!;
+      const bodyBottom = Math.max(...page.layers.body.map((node) => node.flowBounds.yPt + node.flowBounds.heightPt));
+      const top = Math.min(...page.layers.notes.map((note) => note.flowBounds.yPt));
+      return { beneath: Math.abs(top - bodyBottom) < 0.01,
+        unsupported: layout.diagnostics.some((diagnostic) => diagnostic.message.includes('footnote position')) };
+    };
+    const beneath = '<w:pos w:val="beneathText"/>';
+    expect(noteTop('', beneath)).toEqual({ beneath: true, unsupported: false });
+    expect(noteTop(beneath, '')).toEqual({ beneath: false, unsupported: false });
+    expect(noteTop('<w:pos w:val="pageBottom"/>', beneath)).toEqual({ beneath: true, unsupported: false });
+    expect(noteTop(beneath, '<w:pos w:val="pageBottom"/>')).toEqual({ beneath: false, unsupported: false });
   });
 
   it('gives a final section without its own sectPr the default numbering', () => {

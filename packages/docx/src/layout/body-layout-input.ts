@@ -274,6 +274,9 @@ export interface BodyLayoutInput {
   readonly repeatedFootnoteLastEntries?: readonly Readonly<{ id: string; entryIndex: number }>[];
   readonly noteLayoutSettings?: Readonly<{
     footnotePosition: string;
+    /** §17.11.21 footnote position of each body section, in section order
+     * (WORD_FOOTNOTE_BENEATH_TEXT). */
+    sectionFootnotePositions?: readonly string[];
     endnotePosition: string;
     footnoteNumbering?: NoteNumberingInput;
     endnoteNumbering?: NoteNumberingInput;
@@ -326,6 +329,7 @@ export interface BodyLayoutAcquisitionInput {
   readonly repeatedFootnoteLastEntries?: readonly Readonly<{ id: string; entryIndex: number }>[];
   readonly noteLayoutSettings: Readonly<{
     footnotePosition: string;
+    sectionFootnotePositions?: readonly string[];
     endnotePosition: string;
     footnoteNumbering?: NoteNumberingInput;
     endnoteNumbering?: NoteNumberingInput;
