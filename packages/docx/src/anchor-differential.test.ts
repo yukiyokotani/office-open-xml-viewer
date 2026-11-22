@@ -795,14 +795,14 @@ describe('find highlights and hosts in pieces whose paint differs from their sou
 describe('a float-only mark that ends a section before a continuous break', () => {
   /** The top of the next section's text and the drawings painted, for a
    * section-ending mark holding `mark` with `spaceBeforePt` before it. */
-  const observe = (mark: readonly Run[], spaceBeforePt: number) => {
+  const observe = (mark: readonly Run[], spaceBeforePt: number, markOptions: object = {}) => {
     const section = { pageWidth: 200, pageHeight: 400, marginTop: 40, marginRight: 20, marginBottom: 20, marginLeft: 20,
       headerDistance: 5, footerDistance: 0, titlePage: false, evenAndOddHeaders: false, columns: null };
     const built = {
       section: { ...section, sectionStart: 'continuous' },
       body: [
         paragraph([textRun('A')]),
-        paragraph(mark, { spaceBefore: spaceBeforePt }),
+        paragraph(mark, { spaceBefore: spaceBeforePt, ...markOptions }),
         { type: 'sectionBreak', kind: 'continuous', geom: { ...section, sectionStart: 'nextPage' } },
         paragraph([textRun('B')], { spaceBefore: 10 }),
       ],
@@ -815,6 +815,8 @@ describe('a float-only mark that ends a section before a continuous break', () =
     return {
       top: round(runs.find((run) => run.text === 'B')!.y),
       drawings: layout.pages.flatMap((page) => page.layers.paintOrder.filter((entry) => entry.kind === 'drawing')).length,
+      borders: paragraphs(layout.pages.map((page) => page.layers)).flatMap((laidOut) => laidOut.borders).length,
+      shaded: paragraphs(layout.pages.map((page) => page.layers)).filter((laidOut) => laidOut.shading !== undefined).length,
     };
   };
 
@@ -826,6 +828,15 @@ describe('a float-only mark that ends a section before a continuous break', () =
   it('collapses, as its empty counterpart does, and still paints its drawing', () => {
     const empty = observe([], 0);
     expect(observe(anchorRuns('page'), 0)).toEqual({ ...empty, drawings: 1 });
+  });
+
+  it('paints no border or shading of its own when it collapses, only its drawing', () => {
+    // A 1pt bottom border and a fill on the collapsed mark.
+    const decorated = { borders: { bottom: { style: 'single', color: '000000', width: 1, space: 1 } },
+      shading: 'FFFF00' };
+    const empty = observe([], 0, decorated);
+    expect(empty.borders).toBe(0);
+    expect(observe(anchorRuns('page'), 0, decorated)).toEqual({ ...empty, drawings: 1 });
   });
 });
 

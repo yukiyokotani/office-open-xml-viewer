@@ -19,7 +19,7 @@ describe('cluster boxes', () => {
     expect(boxes.map((box) => [box.xPt, box.widthPt, box.crossPt, box.crossWidthPt])).toEqual([[0, 8, 8, 6], [0, 8, 2, 6]]);
   });
 
-  it('give a floored, condensed glyph the box it is drawn in', () => {
+  it('give a floored, condensed glyph the glyph box it is drawn in', () => {
     // 'abc' condensed so that 'b' floors to no advance; its own operation
     // draws it at its 6pt natural advance.
     const placement = {
@@ -37,7 +37,9 @@ describe('cluster boxes', () => {
       ],
     };
     const boxes = clusterBoxes(placement as never, 0, 3, 0, 3, 0);
-    expect(boxes.map((box) => [box.xPt, box.widthPt])).toEqual([[0, 4], [4, 6], [4, 4]]);
+    // Advance boxes from pen to pen; b's glyph box is the drawn glyph.
+    expect(boxes.map((box) => [box.xPt, box.widthPt])).toEqual([[0, 4], [4, 0], [4, 4]]);
+    expect(boxes.map((box) => [box.glyphXPt, box.glyphWidthPt])).toEqual([[0, 4], [4, 6], [4, 4]]);
   });
 
   it('end a compressed right-to-left fitted run at its box\'s right edge', () => {

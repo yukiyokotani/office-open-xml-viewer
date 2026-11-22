@@ -2809,10 +2809,13 @@ function* paginateBodyPassSteps(
             continuation: Object.freeze({ boundary: null }),
           });
           const pageHadContent = state.flow.pageHasContent;
-          // Its mark takes no flow: the node holds only the drawings.
+          // Its mark takes no flow and paints nothing of its own (no
+          // border, shading or line number, as its empty counterpart): the
+          // node holds only the drawings.
+          const { shading: _shading, lineNumbers: _lineNumbers, ...markless } = acquired.layout;
           const accepted = acceptPageNode(
             state,
-            Object.freeze({ ...acquired.layout, ordinaryFlow: false }),
+            Object.freeze({ ...markless, borders: Object.freeze([]), ordinaryFlow: false }),
             block.source,
             0,
             paragraphFragmentStartKey(Object.freeze({ boundary: null })),

@@ -104,8 +104,14 @@ function projectTextRun(
       clusterBoxes: placement.clusterBoxes.map((box) => ({
         start: box.start, end: box.end, x: box.xPt * inlineScale, width: box.widthPt * inlineScale, rtl: box.rtl,
         ...(box.trackingExcluded ? { trackingExcluded: true as const } : {}),
+        // The glyph box, where it is not the advance box.
+        ...(Math.abs(box.glyphXPt - box.xPt) > 1e-9 || Math.abs(box.glyphWidthPt - box.widthPt) > 1e-9
+          ? { glyphX: box.glyphXPt * inlineScale, glyphWidth: box.glyphWidthPt * inlineScale } : {}),
         ...(box.crossPt !== undefined && box.crossWidthPt !== undefined
           ? { y: box.crossPt * blockScale, height: box.crossWidthPt * blockScale } : {}),
+        ...(box.glyphCrossPt !== undefined && box.glyphCrossWidthPt !== undefined
+          && (Math.abs(box.glyphCrossPt - box.crossPt!) > 1e-9 || Math.abs(box.glyphCrossWidthPt - box.crossWidthPt!) > 1e-9)
+          ? { glyphY: box.glyphCrossPt * blockScale, glyphHeight: box.glyphCrossWidthPt * blockScale } : {}),
       })),
     }),
     ...(transform ? { transform } : {}),

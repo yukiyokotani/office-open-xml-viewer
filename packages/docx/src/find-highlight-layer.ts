@@ -124,11 +124,12 @@ export function buildDocxHighlightLayer(
 
 type ClusterBoxes = NonNullable<DocxTextRunInfo['clusterBoxes']>;
 
-/** Where the characters `[start, end)` of a run are painted, from the run's
- * retained cluster boxes: adjacent or overlapping boxes merged into one
- * interval. A slice that covers part of a cluster takes that share of its
- * box. The boxes are final (painted glyphs with their tracking, fitted and
- * floored glyphs as drawn), so no tracking is added or taken off. */
+/** Where the characters `[start, end)` of a run are painted, from the glyph
+ * boxes of the run's retained clusters (where each glyph is drawn: its
+ * natural advance from its pen, without the tracking after it, a floored
+ * glyph included): adjacent or overlapping boxes merged into one interval,
+ * the tracking between glyphs left uncovered. A slice that covers part of a
+ * cluster takes that share of its glyph box. */
 function clusterSliceIntervals(
   clusters: ClusterBoxes,
   start: number,
@@ -148,10 +149,14 @@ function clusterSliceIntervals(
     const length = Math.max(1, cluster.end - cluster.start);
     const from = (Math.max(start, cluster.start) - cluster.start) / length;
     const to = (Math.min(end, cluster.end) - cluster.start) / length;
+    const glyphX = cluster.glyphX ?? cluster.x;
+    const glyphWidth = cluster.glyphWidth ?? cluster.width;
+    const y = cluster.glyphY ?? cluster.y;
+    const height = cluster.glyphHeight ?? cluster.height;
     boxes.push({
-      x: cluster.x + cluster.width * (cluster.rtl ? 1 - to : from),
-      width: cluster.width * (to - from),
-      ...(cluster.y !== undefined && cluster.height !== undefined ? { y: cluster.y, height: cluster.height } : {}),
+      x: glyphX + glyphWidth * (cluster.rtl ? 1 - to : from),
+      width: glyphWidth * (to - from),
+      ...(y !== undefined && height !== undefined ? { y, height } : {}),
     });
   }
   const merged: { x: number; width: number; y?: number; height?: number }[] = [];
