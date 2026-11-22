@@ -209,6 +209,7 @@ interface GuideSpan {
   readonly face: string | undefined;
   readonly bold: boolean;
   readonly italic: boolean;
+  readonly rtl: boolean;
   readonly complexScript: boolean;
   readonly fontHint: RubyGuideRunFace['fontHint'];
   readonly fonts: Record<FontSlot, string | null | undefined>;
@@ -217,7 +218,34 @@ interface GuideSpan {
 
 /** A guide run as it is shaped: its text, and the weight and slant its
  * text takes. */
-type ShapedGuideRun = Pick<RubyGuideRunFace, 'text' | 'fonts' | 'bold' | 'italic' | 'complexScript' | 'fontHint'>;
+type ShapedGuideRun = Pick<RubyGuideRunFace, 'text' | 'fonts' | 'bold' | 'italic' | 'rtl' | 'complexScript' | 'fontHint'>;
+
+/** UAX #9 rule L2 over whole runs: the order, from the start of the line, in
+ * which runs of the given directions stand in a paragraph of the given base
+ * direction. A right-to-left run is at level 1; a left-to-right run at
+ * level 0, or 2 inside a right-to-left paragraph. */
+function displayOrder(rtl: readonly boolean[], baseRtl: boolean): number[] {
+  const levels = rtl.map((run) => (run ? 1 : baseRtl ? 2 : 0));
+  const order = levels.map((_, index) => index);
+  for (let level = Math.max(0, ...levels); level >= 1; level -= 1) {
+    for (let start = 0; start < order.length;) {
+      let end = start;
+      while (end < order.length && levels[order[end]!]! >= level) end += 1;
+      if (end > start) order.splice(start, end - start, ...order.slice(start, end).reverse());
+      start = Math.max(end, start + 1);
+    }
+  }
+  return order;
+}
+
+/** Each position's rank among `offsets`, from the start of the line. */
+function ranksOf(offsets: readonly number[]): number[] {
+  const ranks = new Array<number>(offsets.length);
+  offsets.map((offset, index) => [offset, index] as const)
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1])
+    .forEach(([, index], rank) => { ranks[index] = rank; });
+  return ranks;
+}
 
 /** The guide runs whose text is shaped together, none parting a grapheme
  * cluster (UAX #29) and each with one weight and slant.
@@ -284,7 +312,7 @@ function guideShapes(
   ruby: NonNullable<LayoutTextSeg['ruby']>,
   sizePx: number,
   vertical: boolean,
-): readonly Readonly<{ start: number; text: string; shape: GuideShape }>[] | undefined {
+): readonly Readonly<{ start: number; text: string; shape: GuideShape; rtl: boolean }>[] | undefined {
   const service = first.textLayoutService;
   const request = first.textShapeRequest;
   if (!service || !request) return undefined;
@@ -310,7 +338,7 @@ function guideShapes(
       // its faces are read from the shape.
       ...(vertical || !measure ? { clusterGeometry: false } : {}),
     });
-  if (!ruby.guideRuns) return [{ start: 0, text: ruby.text, shape: shapeText(ruby.text) }];
+  if (!ruby.guideRuns) return [{ start: 0, text: ruby.text, shape: shapeText(ruby.text), rtl: false }];
   const faceOf = (shape: GuideShape): string | undefined => {
     const keys = new Set(shape.spans.map((span) => `${span.fontRoute.fingerprint}|${span.font.weight}|${span.font.style}`));
     return keys.size === 1 ? [...keys][0] : undefined;
@@ -326,12 +354,16 @@ function guideShapes(
   let start = 0;
   for (const run of runs) {
     const fonts = fontsOf(run);
-    const controls = { bold: run.bold, italic: run.italic, complexScript: run.complexScript, fontHint: run.fontHint };
+    const controls = {
+      bold: run.bold, italic: run.italic, rtl: run.rtl, complexScript: run.complexScript, fontHint: run.fontHint,
+    };
     const shape = shapeText(run.text, { fonts, ...controls });
     const face = faceOf(shape);
     const used = slotsOf(shape);
     const previous = spans.at(-1);
-    if (previous && face !== undefined && previous.face === face
+    // Direction is not a control that only selects a face: runs of opposite
+    // direction stand apart on the line.
+    if (previous && face !== undefined && previous.face === face && previous.rtl === run.rtl
       && [...used].every((slot) => !previous.used.has(slot) || previous.fonts[slot] === fonts[slot])) {
       previous.texts.push(run.text);
       previous.shapes.push(shape);
@@ -350,11 +382,11 @@ function guideShapes(
       const joined = shapeText(text, span);
       // Characters are classified in context: joined runs that no longer
       // select their one face stay apart.
-      if (faceOf(joined) === span.face) return [{ start: span.start, text, shape: joined }];
+      if (faceOf(joined) === span.face) return [{ start: span.start, text, shape: joined, rtl: span.rtl }];
     }
     let runStart = span.start;
     return span.shapes.map((shape, index) => {
-      const entry = { start: runStart, text: span.texts[index]!, shape };
+      const entry = { start: runStart, text: span.texts[index]!, shape, rtl: span.rtl };
       runStart += entry.text.length;
       return entry;
     });
@@ -447,14 +479,21 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     spanPenPx += spanCells.reduce((sum, { cell }) => sum + cell.advancePt, 0);
     return spanCells;
   })) : undefined;
+  // A horizontal guide's shaped runs stand in bidirectional order (UAX #9
+  // L2): right-to-left runs of different formatting are separate shapes,
+  // and the later one stands before the earlier one on the line.
   let runPenPx = 0;
-  const horizontal = !cells && shapes ? shapes.flatMap(({ shape, start, text }) => {
-    const penPx = runPenPx;
-    runPenPx += shape.advancePt;
-    return horizontalUnits(shape, text).map((unit) => ({
-      ...unit, start: start + unit.start, end: start + unit.end, offsetPx: penPx + unit.offsetPx,
-    }));
-  }) : undefined;
+  const shapePenPx = new Map<number, number>();
+  if (!cells && shapes) {
+    for (const index of displayOrder(shapes.map((entry) => entry.rtl), group.baseRtl === true)) {
+      shapePenPx.set(index, runPenPx);
+      runPenPx += shapes[index]!.shape.advancePt;
+    }
+  }
+  const horizontal = !cells && shapes ? shapes.flatMap(({ shape, start, text }, index) =>
+    horizontalUnits(shape, text).map((unit) => ({
+      ...unit, start: start + unit.start, end: start + unit.end, offsetPx: shapePenPx.get(index)! + unit.offsetPx,
+    }))) : undefined;
   const guidePx = cells
     ? spanPenPx
     : shapes ? runPenPx : inputs.fallbackGuideAdvancePx(ruby.text);
@@ -473,16 +512,19 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   const overhangPx = widenedPx - basePx;
   const baseOffsetPx = wordRubyBaseOffset(ruby.align, overhangPx);
   const spacing = wordRubyGuideSpacing(ruby.align, widenedPx - guidePx, units.length);
+  const unitRanks = ranksOf(units.map((unit) => unit.offsetPx));
   const cell: RubyCellGeometry = {
     scale: inputs.scale,
     basePx,
     guidePx,
     advancePx,
     baseOffsetPx,
+    // Units are kept in guide order; the alignment's gaps open between
+    // them in the order they stand on the line.
     units: units.map(({ offsetPx, ...unit }, index) => ({
       ...unit,
       penPx: offsetPx,
-      originPx: spacing.leadPt + offsetPx + index * spacing.gapPt,
+      originPx: spacing.leadPt + offsetPx + unitRanks[index]! * spacing.gapPt,
     })),
     raisePx: inputs.reservePx - (inputs.verticalLine && ruby.align === 'rightVertical' ? sizePx / 2 : 0),
     // The guide's own faces bound its extent, each by its own box and class.
@@ -499,13 +541,13 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   return cell;
 }
 
-/** The pieces of the cell that stand first and last on the line. A base of
- * right-to-left runs places its later pieces before its earlier ones, so
- * its last piece in source order leads the cell. */
+/** The pieces of the cell that stand first and last on the line. The
+ * base's runs are reordered by direction (UAX #9 L2) like any text: in a
+ * left-to-right paragraph consecutive right-to-left pieces stand in reverse,
+ * so the last of them leads, while a left-to-right piece keeps its place. */
 function edgePieces(group: RubyGroup): Readonly<{ leading: number; trailing: number }> {
-  const last = group.pieces.length - 1;
-  return last > 0 && group.pieces.every((piece) => piece.rtl === true)
-    ? { leading: last, trailing: 0 } : { leading: 0, trailing: last };
+  const order = displayOrder(group.pieces.map((piece) => piece.rtl === true), group.baseRtl === true);
+  return { leading: order[0] ?? 0, trailing: order.at(-1) ?? 0 };
 }
 
 /** The share of the cell's widening this piece advances by: the base offset
@@ -539,7 +581,8 @@ export function rubyGuideOriginsPx(pieces: readonly LayoutTextSeg[], cell: RubyC
   const endPx = pieces.reduce((sum, piece) => sum + piece.measuredWidth, 0)
     - (last.snapGridClass === 'latin' ? last.snapGridTrailingPadPx ?? 0 : 0);
   const spacing = wordRubyGuideSpacing(group.ruby.align, endPx - startPx - cell.guidePx, cell.units.length);
-  return cell.units.map((unit, index) => startPx + spacing.leadPt + unit.penPx + index * spacing.gapPt);
+  const ranks = ranksOf(cell.units.map((unit) => unit.penPx));
+  return cell.units.map((unit, index) => startPx + spacing.leadPt + unit.penPx + ranks[index]! * spacing.gapPt);
 }
 
 /** The base's offset inside its cell, applied to the glyphs of the piece

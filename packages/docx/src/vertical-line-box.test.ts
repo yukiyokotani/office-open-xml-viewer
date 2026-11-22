@@ -1308,6 +1308,58 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 12)', () =
   });
 });
 
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 13)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+
+  it('judges the rest of a cluster by its character-grid cells', () => {
+    const flag = ['\u{1F1EF}', '\u{1F1F5}'];
+    for (const direction of [undefined, 'tbRl']) {
+      const section = {
+        ...(direction ? { pageHeight: 60 + 80 + 29 } : { pageWidth: 40 + 90 + 29 }),
+        docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0,
+      } as Partial<SectionProps>;
+      const { lines } = layoutParagraph(
+        [{ text: '前' }, { text: flag[0]!, fontSize: 7 }, { text: flag[1]!, fontSize: 7, extra: { bold: true } }],
+        direction, null, section,
+      );
+      expect(lineTexts(lines), direction).toEqual(['前', flag.join('')]);
+    }
+  });
+
+  it('pads a widened base of mixed direction around the base as it stands on the line', () => {
+    const ruby = { text: 'abcdefghijklmno', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const line = layoutParagraph([
+      { text: '前' },
+      { text: 'אב', ruby, extra: { rtl: true } },
+      { text: 'גד', extra: { rtl: true, rubyBaseContinuation: true, bold: true } },
+      { text: 'XY', extra: { rubyBaseContinuation: true } },
+      { text: '後' },
+    ]).lines[0]!;
+    const inks = textPlacements(line).filter((entry) => entry.rubyBasePiece)
+      .map((entry) => [entry.text, entry.origin.xPt + (entry.paintOps[0]?.offset?.xPt ?? 0)] as const)
+      .sort((left, right) => left[1] - right[1]);
+    // Bidirectional order on the line, with no gap between the pieces.
+    expect(inks.map(([text]) => text)).toEqual(['גד', 'אב', 'XY']);
+    expect(inks[1]![1] - inks[0]![1]).toBeCloseTo(20, 6);
+    expect(inks[2]![1] - inks[1]![1]).toBeCloseTo(20, 6);
+  });
+
+  it('lays right-to-left guide runs of different formatting out in visual order', () => {
+    const fonts = { ascii: 'Latin', highAnsi: 'Latin', eastAsia: 'East', complexScript: 'Complex' };
+    const ruby = {
+      text: 'سلام', fontSizePt: 5, hpsRaisePt: 9,
+      guideRuns: [{ text: 'سل', fonts, rtl: true }, { text: 'ام', fonts, rtl: true, boldCs: true }],
+    };
+    const line = layoutParagraph([{ text: '漢字漢字', ruby }]).lines[0]!;
+    const ops = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps;
+    const xOf = (text: string) => ops.find((op) => op.text === text)!.origin.xPt;
+    // The later run stands to the left of the earlier one.
+    expect(xOf('ام')).toBeLessThan(xOf('سل'));
+    expect(xOf('سل') - xOf('ام')).toBeCloseTo(10, 6);
+  });
+});
+
 describe('grapheme clusters at kinsoku breaks (§17.3.1.16, UAX #29)', () => {
   const lineTexts = (lines: readonly LineLayout[]) =>
     lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
@@ -1416,8 +1468,13 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
     // ruby cell that shares it.
     const regions: number[][] = [];
 
-    const text = (value: string, extra: Record<string, unknown> = {}) => {
-      sources.push({ run: { ...template, text: value, ...extra }, text: value, sizePt: (extra.fontSize as number | undefined) ?? 10 });
+    // `advancePt`: the advance of one character when it is not the run's size
+    // (a character-grid cell).
+    const text = (value: string, extra: Record<string, unknown> = {}, advancePt?: number) => {
+      sources.push({
+        run: { ...template, text: value, ...extra }, text: value,
+        sizePt: advancePt ?? (extra.fontSize as number | undefined) ?? 10,
+      });
       return sources.length - 1;
     };
     const raised = () => family === 'raised' && next() < 0.5
@@ -1473,8 +1530,11 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
             // A flag: two regional indicators, each with an advance.
             [FLAG[0]!, FLAG[1]!],
           ]);
-          text(head!);
-          text(tail!, { bold: true });
+          // On a character grid a smaller cluster still takes whole cells:
+          // its natural width fits where its cells do not.
+          const small = grid.docGridType !== undefined && next() < 0.6 ? { fontSize: 7 } : {};
+          text(head!, small, 10);
+          text(tail!, { ...small, bold: true }, 10);
           leaderAllowed = false;
           continue;
         }
@@ -1510,12 +1570,13 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           ? pick(LEADERS) : '';
       const tateChuYoko = family === 'tateChuYoko' && next() < 0.7;
       const pieces = rtlBase
-        ? pick([['אבגד'], ['אב', 'גד'], ['א', 'בגד'], ['אבג', 'ד']])
+        // Right-to-left runs, some followed or preceded by a left-to-right one.
+        ? pick([['אבגד'], ['אב', 'גד'], ['א', 'בגד'], ['אבג', 'ד'], ['אב', 'גד', 'XY'], ['XY', 'אב', 'גד'], ['אב', 'XY', 'גד']])
         : tateChuYoko
           ? [...(next() < 0.5 ? [leader + take()] : []), pick(['12', '34', '56'])]
           : [leader + take() + (next() < 0.3 ? 'A' : ''), ...(next() < 0.5 ? [take()] : [])];
       const length = family === 'guideRuns' ? 12 + Math.floor(next() * 30)
-        : 1 + Math.floor(next() * (rtlBase ? 10 : 6));
+        : 1 + Math.floor(next() * (rtlBase ? 16 : 6));
       const letters = family === 'guideFaces'
         ? Array.from({ length }, () => (next() < 0.4 ? pick([...'ABC']) : next() < 0.3 ? pick([...'سلم']) : pick([...'あいうえお']))).join('')
         : family === 'guideRuns' ? 'a'.repeat(length)
@@ -1525,7 +1586,7 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
             : family === 'tateChuYoko'
               // Punctuation, which a vertical guide paints in its vertical forms.
               ? Array.from({ length }, () => pick([...'あいう「」、A'])).join('')
-              : 'あいうえおかきくけこ'.slice(0, length);
+              : 'あいうえおかきくけこさしすせそたち'.slice(0, length);
       const guideRuns: GuideRun[] | undefined = family === 'guideFaces'
         ? [...letters].reduce<GuideRun[]>((runs, letter) => {
           // One to three letters per run, each run with its own slots.
@@ -1569,7 +1630,7 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           typographyInput: typographyInput(ruby),
         } : { rubyBaseContinuation: true }),
         ...(tateChuYoko && /^\d+$/.test(value) ? { eastAsianVert: true } : {}),
-        ...(rtlBase ? { rtl: true, bold: piece % 2 === 1 } : {}),
+        ...(rtlBase ? { ...(/\p{Script=Hebrew}/u.test(value) ? { rtl: true } : {}), bold: piece % 2 === 1 } : {}),
         ...(piece === fitPiece ? { fitTextVal: 200 + Math.floor(next() * 400), fitTextId: fitId++ } : {}),
         ...(sharedRegion?.fit ?? {}),
       }));
@@ -1676,6 +1737,19 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         offset += face.letter.length;
         return base;
       });
+      // UAX #9: consecutive right-to-left guide runs painted apart stand in
+      // reverse on a horizontal line.
+      if (!generated.direction) {
+        const ops = guides[0]!.ruby!.paintOps;
+        let letter = 0;
+        ops.forEach((op, index) => {
+          const previous = ops[index - 1];
+          if (previous && faceAt[letter]!.rtl && faceAt[letter - 1]!.rtl) {
+            expect(op.origin.xPt, `${cell.guide} order ${index} of ${context}`).toBeLessThan(previous.origin.xPt);
+          }
+          letter += [...op.text].length;
+        });
+      }
       let at = 0;
       let seam = 0;
       for (const op of guides[0]!.ruby!.paintOps) {
@@ -1709,13 +1783,13 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         const pieces = lines.flatMap(content).filter((entry) => cell.runs.includes(entry.sourceRunIndex!));
         const startPt = Math.min(...pieces.map((entry) => entry.bounds.xPt));
         const endPt = Math.max(...pieces.map((entry) => entry.bounds.xPt + entry.bounds.widthPt));
-        // A guide that widens a right-to-left cell leaves no gap inside the
-        // base: each piece's glyphs follow those of the piece before it on
-        // the line.
+        // A guide that widens a cell with right-to-left runs leaves no gap
+        // inside the base: each piece's glyphs follow those of the piece
+        // before it on the line, in whatever order the directions put them.
         const inks = pieces.map((entry) => ({
           startPt: entry.origin.xPt + (entry.paintOps[0]?.offset?.xPt ?? 0), widthPt: [...entry.text].length * 10,
         })).sort((left, right) => left.startPt - right.startPt);
-        if (pieces.every((entry) => entry.direction === 'rtl')) {
+        if (pieces.some((entry) => entry.direction === 'rtl')) {
           inks.slice(1).forEach((ink, at) =>
             expect(ink.startPt, `${cell.guide} of ${context}`).toBeCloseTo(inks[at]!.startPt + inks[at]!.widthPt, 6));
         }

@@ -303,10 +303,19 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     if (continuation > 0 && (whole || !fitsLineWidth(breakerState.currentWidth + prospectiveWidth, availW()))) {
       const head = s.text.slice(0, continuation);
       const headWidth = whole ? w : context.strNaturalAdvance(s, head);
+      const headSegment: LayoutTextSeg = whole ? s : {
+        ...s,
+        ...RESET_SLICED_TEXT_MEASUREMENT,
+        text: head,
+        measuredWidth: headWidth,
+        ...slicedTextMetadata(s, 0, continuation),
+      };
       // The rest of the cluster does not fit beside its first character: the
       // line ends at the legal break before the cluster, which moves down
       // whole. Only when nothing before it can stay does it overflow here.
-      if (!fitsLineWidth(breakerState.currentWidth + headWidth, availW())) {
+      // It is judged by the advance placement commits, character-grid cells
+      // included (prospectiveSnapAdvance).
+      if (!fitsLineWidth(breakerState.currentWidth + prospectiveSnapAdvance(headSegment, headWidth), availW())) {
         const retraction = context.retractLineEndForbidden(s, () => true);
         if (retraction.kind === 'retracted') {
           flush(undefined, false, retraction.tail.src);
@@ -320,13 +329,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
         addToLine(s, w, h, asc, desc);
         return;
       }
-      addToLine({
-        ...s,
-        ...RESET_SLICED_TEXT_MEASUREMENT,
-        text: head,
-        measuredWidth: headWidth,
-        ...slicedTextMetadata(s, 0, continuation),
-      }, headWidth, h, asc, desc);
+      addToLine(headSegment, headWidth, h, asc, desc);
       context.queueEmergencyTail(s, continuation);
       return;
     }

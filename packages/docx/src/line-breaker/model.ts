@@ -62,6 +62,8 @@ export interface RubyGuideRunFace {
    * complex-script text. */
   readonly boldCs: boolean;
   readonly italicCs: boolean;
+  /** §17.3.2.30 rtl: the run's text runs right to left. */
+  readonly rtl: boolean;
   /** The run's own script controls, which select among its slots: complex
    * script (§17.3.2.30 rtl or §17.3.2.7 cs) and §17.3.2.26 rFonts@hint. */
   readonly complexScript: boolean;
@@ -128,6 +130,9 @@ export interface PlacedUnit {
 export interface RubyGroup {
   readonly ruby: NonNullable<LayoutTextSeg['ruby']>;
   readonly pieces: readonly LayoutTextSeg[];
+  /** The paragraph's base direction is right to left (§17.3.1.6): the
+   * embedding the cell's runs, and its guide's, are reordered in. */
+  readonly baseRtl?: boolean;
   /** The Far East single-line class of a face the guide selects for `text`,
    * from the same admitted face data as a base run's
    * (`resolvedFarEastLineClass` / `resolvedLineHeightRatio`); undefined

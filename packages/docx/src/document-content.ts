@@ -97,6 +97,8 @@ export interface DocxRenderedTextUsage {
   latinFontFamily?: string | null;
   bold?: boolean;
   italic?: boolean;
+  /** The usage of a ruby guide run (§17.3.3.24). */
+  rubyGuide?: true;
 }
 
 function* shapeTextUsages(shape: ShapeRun, collection: FontCollection): Generator<DocxRenderedTextUsage> {
@@ -116,6 +118,13 @@ function* shapeTextUsages(shape: ShapeRun, collection: FontCollection): Generato
   }
   for (const block of shape.textBlocks ?? []) {
     yield* shapeBlockUsages(block, collection, content === undefined);
+  }
+  // The flattened blocks carry no ruby guide runs. A guide's faces can be
+  // authored on its w:rt runs alone, so they are taken from the story.
+  if (content !== undefined) {
+    for (const usage of bodyUsages(content as BodyElement[], collection)) {
+      if (usage.rubyGuide) yield usage;
+    }
   }
 }
 
@@ -226,13 +235,15 @@ function* runUsages(run: DocRun, collection: FontCollection): Generator<DocxRend
         latinFontFamily: fonts.ascii ?? fonts.highAnsi ?? run.fontFamily ?? null,
         bold: guide.bold,
         italic: guide.italic,
+        rubyGuide: true,
       };
       if (fonts.complexScript) {
         // §17.3.2.2 / §17.3.2.17: the guide's complex-script text is shaped
         // with bCs and iCs (ruby-cell.ts shapedGuideRuns), independent of
         // b and i, so its face is demanded in that variant.
         yield { text: guide.text, eastAsiaLanguage: text.langEastAsia,
-          fontFamilies: [fonts.complexScript], bold: guide.boldCs === true, italic: guide.italicCs === true };
+          fontFamilies: [fonts.complexScript], bold: guide.boldCs === true, italic: guide.italicCs === true,
+          rubyGuide: true };
       }
     }
   } else if (run.type === 'field') {

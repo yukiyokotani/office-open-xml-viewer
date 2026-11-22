@@ -50,6 +50,28 @@ describe('docx rendered text inventory', () => {
     }
   });
 
+  it('demands a ruby guide run\'s face inside a text box story in every collection', () => {
+    // The flattened text-box blocks carry no guide runs; the story does.
+    const fonts = { ascii: null, highAnsi: null, eastAsia: null, complexScript: 'BoxGuide' };
+    const ruby = {
+      type: 'text', text: '漢', fontSize: 10, fontFamily: 'BaseFace',
+      ruby: { text: 'سلام', fontSizePt: 5 },
+      __typographyAcquisition: { ruby: { guideRuns: [{
+        text: 'سلام', fontFamily: null, fonts, fontSizePt: 5, bold: false, italic: false,
+        boldCs: true, italicCs: true, rtl: true, cs: false, fontHint: null, color: null, language: null,
+      }] } },
+    };
+    const doc = documentWithRun({
+      type: 'shape', inline: true,
+      textBlocks: [{ text: '漢', fontFamily: 'BaseFace', runs: [{ text: '漢', fontFamily: 'BaseFace' }] }],
+      textBoxContent: [{ type: 'paragraph', runs: [ruby] }],
+    });
+    for (const collection of ['font-demand', 'native-preflight'] as const) {
+      const usages = [...docxRenderedTextUsages(doc, collection)].filter((usage) => usage.fontFamilies.includes('BoxGuide'));
+      expect(usages.map((usage) => [usage.bold, usage.italic]), collection).toEqual([[true, true]]);
+    }
+  });
+
   it('preloads an inline drawing run face even when its text box has no text', () => {
     const doc = documentWithRun({ type: 'shape', inline: true, textBlocks: [],
       __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Courier New', bold: true } });

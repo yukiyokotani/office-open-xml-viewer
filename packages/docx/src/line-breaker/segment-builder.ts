@@ -301,6 +301,7 @@ export function appendTextPiece(
         italic: guideRun.italic,
         boldCs: guideRun.boldCs === true,
         italicCs: guideRun.italicCs === true,
+        rtl: guideRun.rtl === true,
         // §17.3.2.30 / §17.3.2.7: either makes the run complex script, as
         // for a base run.
         complexScript: guideRun.rtl === true || guideRun.cs === true,
@@ -326,6 +327,7 @@ export function appendTextPiece(
     ? {
       ruby,
       pieces: [],
+      ...(environment.paragraphRtl === true ? { baseRtl: true } : {}),
       guideFarEastClass: (font, guideText) => faceFarEastClass(environment, selectedMetric, font, guideText),
     }
     : 'rubyBaseContinuation' in r && r.rubyBaseContinuation && previousSegment && 'text' in previousSegment
