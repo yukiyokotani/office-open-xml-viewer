@@ -40,6 +40,22 @@ export function wordShortNoteSeparatorLengthPt(areaWidthPt: number): number {
  * role is full (a Word footnote continuation uses the separator role). Another producer keeps the library policy: the rule starts
  * at the column's left edge, the ordinary mark is a third of the column and
  * a story-less continuation spans it. */
+/** The note area a separator lays out in: the note container, or under Word
+ * geometry the page-wide area across every column of the section. */
+export function noteSeparatorArea(input: Readonly<{
+  word: boolean;
+  pageWide: boolean;
+  container: Readonly<{ xPt: number; widthPt: number }>;
+  columns: readonly Readonly<{ xPt: number; wPt: number }>[];
+}>): Readonly<{ xPt: number; widthPt: number }> {
+  if (!input.word || !input.pageWide || input.columns.length <= 1) {
+    return { xPt: input.container.xPt, widthPt: input.container.widthPt };
+  }
+  const left = Math.min(...input.columns.map((column) => column.xPt));
+  const right = Math.max(...input.columns.map((column) => column.xPt + column.wPt));
+  return { xPt: left, widthPt: Math.max(0, right - left) };
+}
+
 export function noteSeparatorRuleSpan(input: Readonly<{
   word: boolean;
   kind: 'footnote' | 'endnote';
@@ -56,12 +72,10 @@ export function noteSeparatorRuleSpan(input: Readonly<{
     const length = full ? input.container.widthPt : input.container.widthPt / 3;
     return { fromXPt: input.container.xPt, toXPt: input.container.xPt + length };
   }
-  const pageWide = input.pageWide && input.columns.length > 1;
-  const left = pageWide ? Math.min(...input.columns.map((column) => column.xPt)) : input.container.xPt;
-  const right = pageWide
-    ? Math.max(...input.columns.map((column) => column.xPt + column.wPt))
-    : input.container.xPt + input.container.widthPt;
-  const width = Math.max(0, right - left);
+  const area = noteSeparatorArea(input);
+  const left = area.xPt;
+  const right = area.xPt + area.widthPt;
+  const width = area.widthPt;
   const full = input.mode === 'full' || (storyless && input.continuing);
   const length = full ? width : wordShortNoteSeparatorLengthPt(width);
   return input.rtl

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   attachBodyLayoutKernel,
   attachDocumentLayoutRuntime,
@@ -119,6 +119,24 @@ describe('document layout runtime state', () => {
       .not.toBe(paragraphAcquisitionCacheOf(firstScope));
     expect(paragraphAcquisitionCacheOf(services)).toBeUndefined();
     expect(Object.keys(firstScope)).toEqual(['text', 'images', 'math']);
+  });
+
+  it('keys note numbering once per pair of maps, by exact value', () => {
+    const services = {
+      text: {}, images: {}, math: {},
+    } as unknown as LayoutServices;
+    attachUnusedKernel(services);
+    const cache = paragraphAcquisitionCacheOf(createParagraphAcquisitionCacheServicesView(services))!;
+    const numbers = new Map(Array.from({ length: 40 }, (_, index) => [`footnote:${index}`, index + 1] as const));
+    const formats = new Map([...numbers.keys()].map((key) => [key, 'custom:001'] as const));
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const first = cache.noteNumberingKey(numbers, formats);
+    for (let index = 0; index < 40; index += 1) expect(cache.noteNumberingKey(numbers, formats)).toBe(first);
+    expect(stringify).toHaveBeenCalledTimes(1);
+    stringify.mockRestore();
+    // Equal values in other maps share the ordinal; a different value does not.
+    expect(cache.noteNumberingKey(new Map(numbers), new Map(formats))).toBe(first);
+    expect(cache.noteNumberingKey(new Map([...numbers, ['footnote:0', 9]]), formats)).not.toBe(first);
   });
 
   it('shares one acquisition-miss budget across field convergence views', () => {

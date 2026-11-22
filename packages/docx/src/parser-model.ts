@@ -2196,13 +2196,14 @@ export function selectedNoteSeparatorParagraphAcquisitionInput(
     if (index !== markerIndex) return [run];
     const fillsLine = mark === 'full';
     return [
-      ...(fillsLine && index > 0 ? [lineBreak] : []),
-      { ...run, text: '\u200b' } as DocRun,
+      ...(fillsLine && index > 0 && authored[index - 1]?.type !== 'break' ? [lineBreak] : []),
       {
         type: 'shape', inline: true, widthPt: noteSeparatorMarkerAdvancePt(mark), heightPt: 0,
         subpaths: [], fill: null, stroke: null, wrapMode: null,
       } as unknown as DocRun,
-      ...(fillsLine && index < authored.length - 1 ? [lineBreak] : []),
+      // Glued to the marker object so it shares the object's line.
+      { ...run, text: '\u200b', noBreakBefore: true } as unknown as DocRun,
+      ...(fillsLine && index < authored.length - 1 && authored[index + 1]?.type !== 'break' ? [lineBreak] : []),
     ];
   });
   return paragraphAcquisitionInput({

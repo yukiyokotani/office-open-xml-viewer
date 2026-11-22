@@ -98,6 +98,10 @@ export interface ParagraphAcquisitionRuntimeCache {
   /** Ordinal of the rule set's exact value (enabled flag plus sorted
    * forbidden code points); equal values share one ordinal. */
   kinsokuKey(rules: KinsokuRules): number;
+  /** Ordinal of one session's exact note number map and per-note formats;
+   * equal values share one ordinal. Computed once per pair of maps, so
+   * paragraph keys do not re-serialize every note. */
+  noteNumberingKey(numbers: ReadonlyMap<string, number>, formats: ReadonlyMap<string, string> | undefined): number;
   get(input: object, key: string): unknown;
   set(input: object, key: string, value: unknown): void;
   getLineBreaking(input: object, key: string): unknown;
@@ -132,6 +136,8 @@ function createParagraphAcquisitionRuntimeCache(workBudget: PaginationWorkBudget
   const lineBreaks = new WeakMap<object, Map<string, unknown>>();
   const kinsokuKeys = new WeakMap<KinsokuRules, number>();
   const kinsokuOrdinals = new Map<string, number>();
+  const noteNumberingKeys = new WeakMap<object, WeakMap<object, number> & { none?: number }>();
+  const noteNumberingOrdinals = new Map<string, number>();
   // Service fingerprints are exact canonical identities, so they grow with the
   // data they identify: the text-service fingerprint embeds the document's
   // complete font-metric snapshot (tens of KB). Spelling it into every
@@ -180,6 +186,27 @@ function createParagraphAcquisitionRuntimeCache(workBudget: PaginationWorkBudget
         }
         kinsokuKeys.set(rules, key);
       }
+      return key;
+    },
+    noteNumberingKey(numbers: ReadonlyMap<string, number>, formats: ReadonlyMap<string, string> | undefined): number {
+      let byFormats = noteNumberingKeys.get(numbers);
+      if (!byFormats) {
+        byFormats = new WeakMap() as WeakMap<object, number> & { none?: number };
+        noteNumberingKeys.set(numbers, byFormats);
+      }
+      const retained = formats ? byFormats.get(formats) : byFormats.none;
+      if (retained !== undefined) return retained;
+      const value = JSON.stringify([
+        [...numbers.entries()].sort(([left], [right]) => left.localeCompare(right)),
+        formats ? [...formats.entries()].sort(([left], [right]) => left.localeCompare(right)) : null,
+      ]);
+      let key = noteNumberingOrdinals.get(value);
+      if (key === undefined) {
+        key = noteNumberingOrdinals.size;
+        noteNumberingOrdinals.set(value, key);
+      }
+      if (formats) byFormats.set(formats, key);
+      else byFormats.none = key;
       return key;
     },
     get(input: object, key: string): unknown {

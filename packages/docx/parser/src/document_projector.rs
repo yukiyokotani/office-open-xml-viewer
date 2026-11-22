@@ -1007,10 +1007,23 @@ impl<R: BufRead> DocumentBodyProjector<R> {
     ) -> Result<ChoiceSupport, String> {
         use ooxml_common::mce::ChoiceRequiresClassification;
 
+        // Note numbering properties (§17.11.4/.11) read a WordprocessingML
+        // 2010 numFmt Choice, as their settings.xml reader does.
+        let in_note_properties = self.frames.iter().rev().nth(1).is_some_and(|frame| {
+            matches!(
+                &frame.kind,
+                ProcessedElementKind::Retained { namespace, local_name, .. }
+                    if is_w_ns(namespace.as_deref())
+                        && matches!(local_name.as_str(), "footnotePr" | "endnotePr")
+            )
+        });
         let classification = bounded_xml::classify_bounded_mce_choice_requires(
             choice,
             context,
-            &docx_understands_namespace,
+            &|namespace| {
+                docx_understands_namespace(namespace)
+                    || (in_note_properties && namespace == crate::xml_util::W14_NS)
+            },
             STREAMED_XML_CONTEXT_BYTES,
             "document",
         )

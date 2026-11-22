@@ -2039,9 +2039,10 @@ function appendRunsToSegments(
         // CT_FtnEdnRef/@customMarkFollows suppresses the automatic glyph, not
         // the note relationship. Keep an immutable zero-width host so a note
         // remains attached to the physical line/page of this reference.
-        // Number 0 is the acquisition map's custom-note sentinel; the note's
-        // own automatic *Ref placeholder is suppressed by the same contract.
-        if (t.noteRef.customMarkFollows === true || noteText === 0) {
+        // A negative number is the acquisition map's custom-note sentinel
+        // (CUSTOM_NOTE_MARK); the note's own automatic *Ref placeholder is
+        // suppressed by the same contract.
+        if (t.noteRef.customMarkFollows === true || (noteText !== undefined && noteText < 0)) {
           // As for an empty/anchor-only mark, a bounded Latin probe resolves
           // the four font slots and selected-face metrics through the ordinary
           // text service. Discard its ink/text, never its font authority.

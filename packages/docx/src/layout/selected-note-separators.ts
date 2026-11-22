@@ -118,9 +118,11 @@ export function normalizeSelectedNoteSeparators(
 export const NOTE_SEPARATOR_MARKER_TEXT = '\ufffc';
 
 /** Parser wire of a separator story paragraph holding its marker in place:
- * text runs only, exactly one of them the marker sentinel. */
+ * text runs and line breaks only, exactly one text run the marker sentinel. */
 export function isNoteSeparatorMarkerRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
-  return runs.length > 0 && runs.every((run) => run.type === 'text')
+  return runs.length > 0
+    && runs.every((run) => run.type === 'text'
+      || (run.type === 'break' && (run as Readonly<{ breakType?: string }>).breakType === 'line'))
     && runs.filter((run) => (run as Readonly<{ text?: string }>).text === NOTE_SEPARATOR_MARKER_TEXT).length === 1;
 }
 
