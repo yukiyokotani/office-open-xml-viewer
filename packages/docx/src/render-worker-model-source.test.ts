@@ -30,6 +30,7 @@ const workerMocks = vi.hoisted(() => ({
   verticalFallback: vi.fn(() => false),
   carriesLanguage: vi.fn(() => false),
   oracleAvailable: vi.fn(() => true),
+  createServices: vi.fn((..._args: unknown[]) => ({})),
 }));
 vi.mock('@silurus/ooxml-core', async importOriginal => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
@@ -61,7 +62,9 @@ vi.mock('./renderer.js', () => ({ prepareMathRuns: vi.fn(), renderLayoutSourceTo
 vi.mock('./vertical-render-capability.js', () => ({
   documentRequiresDomVerticalGlyphLayout: workerMocks.verticalFallback,
 }));
-vi.mock('./layout-runtime.js', () => ({ createLayoutServices: () => ({}), nativeRouteLineRequests: () => [] }));
+vi.mock('./layout-runtime.js', () => ({
+  createLayoutServices: (...args: unknown[]) => workerMocks.createServices(...args), nativeRouteLineRequests: () => [],
+}));
 vi.mock('./render-worker-layout.js', () => ({
   retainRenderWorkerDocumentLayout: () => ({
     defaultCurrentDateMs: 0, layoutServices: {},
@@ -114,6 +117,7 @@ beforeEach(() => {
   workerMocks.carriesLanguage.mockReturnValue(false);
   workerMocks.oracleAvailable.mockReset();
   workerMocks.oracleAvailable.mockReturnValue(true);
+  workerMocks.createServices.mockClear();
 });
 
 describe('DOCX render worker with a model source', () => {
@@ -204,17 +208,19 @@ describe('DOCX render worker with a model source', () => {
   });
 
   it.each([
-    ['tagged, judging realm', true, true, true, 'parsedMeta'],
-    ['tagged, no Canvas lang or sentinels applied', true, false, true, 'mainThreadVerticalFallback'],
-    ['tagged, no measuring context', true, true, false, 'mainThreadVerticalFallback'],
-    ['untagged, realm that cannot judge', false, false, true, 'parsedMeta'],
+    ['tagged, judging realm', true, true, 'lang', 'parsedMeta'],
+    ['tagged, Canvas lang but sentinels not applied', true, false, 'lang', 'mainThreadVerticalFallback'],
+    ['tagged, engine without Canvas lang (no realm applies tags)', true, false, 'no-lang', 'parsedMeta'],
+    ['tagged, no measuring context', true, true, 'none', 'mainThreadVerticalFallback'],
+    ['untagged, realm that cannot judge', false, false, 'lang', 'parsedMeta'],
   ] as const)('admits a run-language document to the worker only where it can judge it: %s', async (
     _label, tagged, available, offscreen, published,
   ) => {
     workerMocks.carriesLanguage.mockReturnValue(tagged);
     workerMocks.oracleAvailable.mockReturnValue(available);
-    if (offscreen) {
-      vi.stubGlobal('OffscreenCanvas', class { getContext() { return {}; } });
+    if (offscreen !== 'none') {
+      const context = offscreen === 'lang' ? { lang: 'inherit' } : {};
+      vi.stubGlobal('OffscreenCanvas', class { getContext() { return context; } });
     } else {
       vi.stubGlobal('OffscreenCanvas', undefined);
     }
@@ -223,6 +229,13 @@ describe('DOCX render worker with a model source', () => {
       workerMocks.opens.push(async () => modelSource({}).opened);
       await dispatch({ data: parseRequest(30) } as MessageEvent);
       expect(posted(posts, published, 30)).toHaveLength(1);
+      // A tagged document laid out here uses the admission's context and
+      // oracle in its text service (one capability, one fingerprint).
+      if (tagged && published === 'parsedMeta') {
+        const options = workerMocks.createServices.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+        expect(options.namedFamilyOracle).toBeDefined();
+        expect(options.measureContext).toBeDefined();
+      }
       // Untagged documents never consult the capability.
       if (!tagged) expect(workerMocks.oracleAvailable).not.toHaveBeenCalled();
     } finally {

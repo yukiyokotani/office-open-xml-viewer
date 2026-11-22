@@ -16,26 +16,40 @@ function fakeOwner(options: { lang?: boolean; sentinels?: boolean } = {}) {
       fontBoundingBoxAscent: sentinel.ascent * scale, fontBoundingBoxDescent: sentinel.descent * scale,
     } as TextMetrics;
   };
-  const context: Record<string, unknown> = {
-    font: '10px serif',
-    measureText(text: string) {
-      calls.push(text);
-      const font = context.font as string;
-      const sentinel = SENTINELS.findIndex((candidate) => font.includes(candidate.family));
-      if (sentinel < 0 || options.sentinels === false) {
-        return { width: 0, actualBoundingBoxLeft: 0, actualBoundingBoxRight: 0, actualBoundingBoxAscent: 0,
-          actualBoundingBoxDescent: 0, fontBoundingBoxAscent: 0, fontBoundingBoxDescent: 0 } as TextMetrics;
-      }
-      const covered = font.includes('Covering') && !text.includes('ж');
-      return covered
-        ? { width: 500, actualBoundingBoxLeft: 0, actualBoundingBoxRight: 500, actualBoundingBoxAscent: 700,
-          actualBoundingBoxDescent: 200, fontBoundingBoxAscent: 800, fontBoundingBoxDescent: 200 } as TextMetrics
-        : sentinelMetrics(sentinel);
-    },
+  // Each canvas gets its own context, as in a browser.
+  const makeContext = (): Record<string, unknown> => {
+    const context: Record<string, unknown> = {
+      font: '10px serif',
+      measureText(text: string) {
+        calls.push(text);
+        const font = context.font as string;
+        const sentinel = SENTINELS.findIndex((candidate) => font.includes(candidate.family));
+        if (sentinel < 0 || options.sentinels === false) {
+          return { width: 0, actualBoundingBoxLeft: 0, actualBoundingBoxRight: 0, actualBoundingBoxAscent: 0,
+            actualBoundingBoxDescent: 0, fontBoundingBoxAscent: 0, fontBoundingBoxDescent: 0 } as TextMetrics;
+        }
+        const covered = font.includes('Covering') && !text.includes('ж');
+        return covered
+          ? { width: 500, actualBoundingBoxLeft: 0, actualBoundingBoxRight: 500, actualBoundingBoxAscent: 700,
+            actualBoundingBoxDescent: 200, fontBoundingBoxAscent: 800, fontBoundingBoxDescent: 200 } as TextMetrics
+          : sentinelMetrics(sentinel);
+      },
+    };
+    if (options.lang !== false) context.lang = 'inherit';
+    return context;
   };
-  if (options.lang !== false) context.lang = 'inherit';
-  const factory = () => ({ getContext: () => context }) as unknown as HTMLCanvasElement;
-  return { factory, calls, owner: context };
+  const context = makeContext();
+  let fontAssignments = 0;
+  const factory = () => {
+    const created = makeContext();
+    let font = created.font as string;
+    Object.defineProperty(created, 'font', {
+      get: () => font,
+      set: (value: string) => { fontAssignments += 1; font = value; },
+    });
+    return { getContext: () => created } as unknown as HTMLCanvasElement;
+  };
+  return { factory, calls, owner: context, fontAssignments: () => fontAssignments };
 }
 
 describe('named-family oracle (Canvas lang admission)', () => {
@@ -50,6 +64,18 @@ describe('named-family oracle (Canvas lang admission)', () => {
     // Presentation-selected clusters are never admitted.
     expect(oracle.draws('"Covering"', 400, 'normal', '◼︎')).toBe(false);
     expect(oracle.draws('"Covering"', 400, 'normal', 'ᠠ᠋')).toBe(false);
+  });
+
+  it('assigns each proof context its font once over many cold clusters of one route', () => {
+    const { factory, owner, fontAssignments } = fakeOwner();
+    const oracle = createNamedFamilyOracle(owner, factory);
+    expect(oracle.available).toBe(true);
+    const before = fontAssignments();
+    for (let code = 0x4e00; code < 0x4e00 + 9000; code += 1) {
+      expect(oracle.draws('"Covering"', 400, 'normal', String.fromCodePoint(code))).toBe(true);
+    }
+    // Two route contexts and two control contexts, each set once.
+    expect(fontAssignments() - before).toBeLessThanOrEqual(4);
   });
 
   it('cannot judge without Canvas lang or working sentinels', () => {

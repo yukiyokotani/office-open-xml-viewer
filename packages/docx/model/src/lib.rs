@@ -2961,7 +2961,11 @@ pub struct RubyGuideRunTypographyWire {
     pub bold: bool,
     pub italic: bool,
     pub color: Option<String>,
+    /// ECMA-376 §17.3.2.20 w:lang of the guide run (resolved through its
+    /// style and direct formatting), lower-cased: w:val, w:eastAsia, w:bidi.
     pub language: Option<String>,
+    pub east_asia_language: Option<String>,
+    pub bidi_language: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]

@@ -819,12 +819,12 @@ export interface LineLayoutEnvironment {
   readonly positionExtendsLineBox?: boolean;
 }
 
-/** §17.3.2.20 languages of a ruby guide (independent text, not the base's):
- * `w:rubyPr/w:lid` names the phonetic guide's language; the guide runs' own
- * `w:lang/@w:val` governs its Latin text when they all agree, and `null`
- * records that they disagree (the guide then has no run language of its own
- * and must not take the base run's; layout/text.ts rubyGuideShapeRequest). */
+/** §17.3.2.20 languages of a ruby guide, independent text whose languages
+ * are not the base's, per axis: the guide runs' own (style and direct
+ * formatting resolved) when they agree, else w:rubyPr/w:lid; null when the
+ * guide runs disagree and no w:lid names one; absent to keep the base's. */
 export interface RubyGuideLanguages {
-  readonly guide?: string;
   readonly latin?: string | null;
+  readonly eastAsia?: string | null;
+  readonly complexScript?: string | null;
 }

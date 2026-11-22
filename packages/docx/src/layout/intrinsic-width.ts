@@ -29,7 +29,7 @@ import type {
   TextMeasurer,
 } from '../paragraph-measure.js';
 import { paragraphCharacterGrid } from '../paragraph-measure.js';
-import { calcEffectiveFontPx, sliceTextShapeRequest } from './text.js';
+import { calcEffectiveFontPx, canvasLanguageTag, sliceTextShapeRequest } from './text.js';
 import { wordSnapToCharsEastAsianCellCount } from './line-compatibility.js';
 import type { ParagraphLayoutSource, TextFontSlots } from './text.js';
 import { projectEffectiveCellPreferredWidth, type TableLayoutSource } from './table-source-acquisition.js';
@@ -153,8 +153,10 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
       // Authored §17.3.2.20 languages delimit text sequences, so production
       // shapes pieces of different languages apart even when neither is
       // admitted to Canvas; an untagged key is unchanged.
-      ...(request.language !== undefined || request.complexScriptLanguage !== undefined
-        ? [['lang', request.language ?? null, request.complexScriptLanguage ?? null]] : []),
+      ...(canvasLanguageTag(request.language) !== undefined
+        || canvasLanguageTag(request.complexScriptLanguage) !== undefined
+        ? [['lang', canvasLanguageTag(request.language) ?? null,
+          canvasLanguageTag(request.complexScriptLanguage) ?? null]] : []),
     ] : null,
     segment.bold,
     segment.italic,

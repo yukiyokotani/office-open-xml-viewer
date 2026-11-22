@@ -4,6 +4,7 @@ import {
   bindMetafileFontFamilies,
   activeFontSet,
   createNamedFamilyOracle,
+  type NamedFamilyOracle,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   type NativeRouteNormalLine,
@@ -346,21 +347,24 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         throw new Error('render-worker parse was superseded');
       }
       // A document naming a run language (run-language-capability.ts) is
-      // laid out here only where this realm's measuring context can judge
-      // its languages exactly as the text service will (core
-      // createNamedFamilyOracle `available`: sentinels applied, Canvas
-      // `lang`, grapheme segmentation); otherwise tags would be withheld
-      // here while the main realm may apply them, so it continues there.
+      // laid out here only where this realm judges its languages as the main
+      // realm would. The measuring context and oracle made here are the ones
+      // the text service uses below (one capability; its fingerprint records
+      // it). Canvas `lang` is an engine feature: where it is missing, no realm
+      // applies a tag and the document stays here. Where it exists, the
+      // sentinels must apply and graphemes segment (`available`), else the
+      // main realm may apply tags this one would withhold.
       // Untagged documents keep the admission they had before languages.
+      let languageMeasuring: { context: OffscreenCanvasRenderingContext2D; oracle: NamedFamilyOracle } | undefined;
       if (nativeSentinels && documentCarriesRunLanguage(pulledModels.document)) {
-        // The same oracle the text service builds on this realm's measuring
-        // context (an OffscreenCanvas here): tagged text is laid out here
-        // only where it can judge, else on the main thread.
-        const measuring = typeof OffscreenCanvas !== 'undefined'
+        const context = typeof OffscreenCanvas !== 'undefined'
           ? new OffscreenCanvas(1, 1).getContext('2d') : null;
-        if (!measuring || !createNamedFamilyOracle(measuring).available) {
+        const oracle = context ? createNamedFamilyOracle(context) : undefined;
+        if (!context || !oracle || ('lang' in context && !oracle.available)) {
           unloadOfficeFontFallbacks(nativeSentinels);
           nativeSentinels = null;
+        } else {
+          languageMeasuring = { context, oracle };
         }
       }
       if (!nativeSentinels || documentRequiresDomVerticalGlyphLayout(pulledModels.document)) {
@@ -472,6 +476,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           : undefined;
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         const serviceOptions = {
+          ...(languageMeasuring
+            ? { measureContext: languageMeasuring.context, namedFamilyOracle: languageMeasuring.oracle } : {}),
           allowFootnoteContinuation: req.allowFootnoteContinuation === true,
           fontMetrics: embeddedFonts.metrics,
           fontSubstitutes: declaredFontSubstitutions(fontSources),

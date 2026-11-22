@@ -7963,10 +7963,11 @@ fn ruby_typography_wire(
             if let Some(properties) = rpr {
                 apply_direct_run(&mut fmt, &parse_run_fmt(properties));
             }
-            let language = rpr
-                .and_then(|properties| child_w(properties, "lang"))
-                .and_then(|lang| attr_w(lang, "val"))
-                .map(|value| value.to_lowercase());
+            // §17.3.2.20 languages of the guide run, through its style and
+            // direct formatting (each attribute on its own, as for runs).
+            let language = fmt.lang.clone();
+            let east_asia_language = fmt.lang_east_asia.clone();
+            let bidi_language = fmt.lang_bidi.clone();
             let east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
             Some(RubyGuideRunTypographyWire {
                 text,
@@ -7978,6 +7979,8 @@ fn ruby_typography_wire(
                 italic: fmt.italic.unwrap_or(false),
                 color: fmt.color.clone(),
                 language,
+                east_asia_language,
+                bidi_language,
             })
         })
         .collect();

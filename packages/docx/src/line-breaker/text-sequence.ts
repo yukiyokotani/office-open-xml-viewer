@@ -1,5 +1,5 @@
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
-import type { ParagraphLayoutRun, ParagraphTextBearingRun } from '../layout/text.js';
+import { canvasLanguageTag, type ParagraphLayoutRun, type ParagraphTextBearingRun } from '../layout/text.js';
 import type { LineLayoutEnvironment } from './model.js';
 import { resolveFieldText } from './text-runs.js';
 import type { FieldRun } from '../types.js';
@@ -57,7 +57,10 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, wes
     fontFamilyCs: run.fontFamilyCs, fontSlots: run.fontSlots, fontHint: run.fontHint,
     fontSizeCs: run.fontSizeCs, bold: run.bold, italic: run.italic,
     boldCs: run.boldCs, italicCs: run.italicCs, rtl: run.rtl, cs: run.cs,
-    langBidi: run.langBidi, langEastAsia: run.langEastAsia, ...(westernLanguage ? { lang: run.lang } : {}),
+    // The effective w:val (canvasLanguageTag): x-none, ill-formed and absent
+    // tags are one state and never delimit a sequence.
+    langBidi: run.langBidi, langEastAsia: run.langEastAsia,
+    ...(westernLanguage ? { lang: canvasLanguageTag(run.lang) } : {}),
     vertAlign: effective(input?.verticalAlign, run.vertAlign ?? undefined),
     position: effective(input?.positionPt, run.position),
     charSpacing: input?.characterSpacingPt ?? run.charSpacing,
@@ -305,7 +308,7 @@ export function acquireTextSequences(
     // range in effect: a third run may carry the cluster's language again
     // while its seam with the second still differs in w:val.
     if (visible && first && last && (join
-      ? visible.lang !== (languages ? languages.at(-1)!.lang : first.lang)
+      ? canvasLanguageTag(visible.lang) !== (languages ? languages.at(-1)!.lang : canvasLanguageTag(first.lang))
       : scope === lastScope
         && formattingKey(visible, environment, false) === formattingKey(last, environment, false))) {
       crossing = tail.crossing(display);
@@ -315,10 +318,10 @@ export function acquireTextSequences(
     key = nextKey;
     if (!visible) continue;
     if (!first) { start = runIndex; first = visible; }
-    else if (!languages && crossing > 0) languages = [{ end: offset, lang: first.lang }];
+    else if (!languages && crossing > 0) languages = [{ end: offset, lang: canvasLanguageTag(first.lang) }];
     if (languages) {
       if (crossing > 0) extendLanguage(offset + crossing, languageAt(offset - tail.clusterLength));
-      if (display.length > crossing) extendLanguage(offset + display.length, visible.lang);
+      if (display.length > crossing) extendLanguage(offset + display.length, canvasLanguageTag(visible.lang));
     }
     last = visible;
     lastScope = scope;

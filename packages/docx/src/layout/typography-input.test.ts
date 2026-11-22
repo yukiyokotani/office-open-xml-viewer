@@ -64,6 +64,8 @@ const runWire: InternalRunTypographyWire = {
       italic: false,
       color: '112233',
       language: 'ja-jp',
+      eastAsiaLanguage: 'ja-jp',
+      bidiLanguage: null,
     }],
   },
   revision: {

@@ -390,6 +390,10 @@ export interface TextShapeRequest {
    * draws vertical presentation forms in place of some characters: a
    * language is admitted only when named families draw those forms too. */
   readonly verticalForms?: true;
+  /** Canvas language of East Asian text when it differs from the regional
+   * font-selection input {@link eastAsiaLanguage} (a ruby guide's own
+   * language); null names none. */
+  readonly canvasEastAsiaLanguage?: string | null;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
@@ -533,26 +537,24 @@ export function independentTextShapeRequest(
     registeredLatinPieceText: undefined, substituteContext: { text, offset: 0 } };
 }
 
-/** The shape request of a ruby guide over `base`: independent text in the
- * guide's own languages. `w:rubyPr/w:lid` names the guide's language for
- * every slot. The guide runs' `w:lang/@w:val` governs its Latin text when
- * they agree; when they disagree (`latin: null`) no single run language
- * exists, so the Latin text takes `w:lid` when authored and otherwise none:
- * never the base run's. Without guide facts the base run's languages apply.
- * Its route language is proved for the guide itself. Line metrics and paint
- * both use this request. */
+/** The shape request of a ruby guide over `base`: independent text shaped in
+ * the guide's own languages (RubyGuideLanguages), its Canvas language proved
+ * for the guide itself. Regional font selection keeps the base's
+ * w:eastAsia input: the guide's East Asian language reaches Canvas only
+ * (canvasEastAsiaLanguage). Line metrics and paint both use this request. */
 export function rubyGuideShapeRequest(
   base: Readonly<TextShapeRequest>,
   text: string,
-  languages: Readonly<{ guide?: string; latin?: string | null }> | undefined,
+  languages: Readonly<{ latin?: string | null; eastAsia?: string | null; complexScript?: string | null }> | undefined,
 ): TextShapeRequest {
-  const request = { ...independentTextShapeRequest(base, text), canvasLanguagePin: undefined };
+  const request: TextShapeRequest = { ...independentTextShapeRequest(base, text), canvasLanguagePin: undefined };
   if (!languages) return request;
-  const { guide, latin } = languages;
+  const { latin, eastAsia, complexScript } = languages;
   return {
     ...request,
-    ...(latin === null ? { language: guide } : latin ?? guide ? { language: latin ?? guide } : {}),
-    ...(guide ? { eastAsiaLanguage: guide, complexScriptLanguage: guide } : {}),
+    ...(latin !== undefined ? { language: latin ?? undefined } : {}),
+    ...(complexScript !== undefined ? { complexScriptLanguage: complexScript ?? undefined } : {}),
+    ...(eastAsia !== undefined ? { canvasEastAsiaLanguage: eastAsia } : {}),
   };
 }
 
@@ -612,6 +614,9 @@ const GRANDFATHERED_TAGS = new Set([
 ]);
 /** RFC 5646 §2.1 privateuse: "x" 1*("-" (1*8alphanum)). */
 const PRIVATE_USE_TAG = /^x(?:-[a-z0-9]{1,8})+$/u;
+/** RFC 5646 §2.2.2 extlang (one is permitted; two more are reserved): a
+ * primary language followed by a 3-letter extended language subtag. */
+const EXTLANG_TAG = /^[a-z]{2,3}-([a-z]{3})(-.+)?$/u;
 
 /** `tag` as a lower-case BCP 47 tag, or undefined when it names no language:
  * Word's `x-none`, the Canvas keyword `inherit`, or an ill-formed (RFC 5646
@@ -625,12 +630,20 @@ export function canvasLanguageTag(tag: string | undefined): string | undefined {
   if (GRANDFATHERED_TAGS.has(lower) || PRIVATE_USE_TAG.test(lower)) return lower;
   let canonical = canonicalTags.get(lower);
   if (canonical === undefined) {
-    try {
-      canonical = typeof Intl !== 'undefined' && typeof Intl.getCanonicalLocales === 'function'
-        ? Intl.getCanonicalLocales(lower)[0]?.toLowerCase() ?? null : null;
-    } catch {
-      canonical = null;
-    }
+    const canonicalize = (candidate: string): string | null => {
+      try {
+        return typeof Intl !== 'undefined' && typeof Intl.getCanonicalLocales === 'function'
+          ? Intl.getCanonicalLocales(candidate)[0]?.toLowerCase() ?? null : null;
+      } catch {
+        return null;
+      }
+    };
+    canonical = canonicalize(lower);
+    // ECMA-402's grammar has no extlang. RFC 5646 §4.5 makes the extlang
+    // form equivalent to the extended language as primary subtag
+    // (zh-cmn-Hans-CN ≡ cmn-Hans-CN), which it does accept.
+    const extlang = canonical === null ? EXTLANG_TAG.exec(lower) : null;
+    if (extlang) canonical = canonicalize(`${extlang[1]}${extlang[2] ?? ''}`);
     if (canonicalTags.size >= 256) canonicalTags.clear();
     canonicalTags.set(lower, canonical);
   }
@@ -641,10 +654,12 @@ export function canvasLanguageTag(tag: string | undefined): string | undefined {
  * slot: the same classification that selects the slot's face selects its
  * language ({@link canvasLanguageTag}). */
 export function scriptSlotLanguage(
-  request: Readonly<Pick<TextShapeRequest, 'language' | 'eastAsiaLanguage' | 'complexScriptLanguage'>>,
+  request: Readonly<Pick<TextShapeRequest, 'language' | 'eastAsiaLanguage' | 'complexScriptLanguage'
+    | 'canvasEastAsiaLanguage'>>,
   slot: FontScriptSlot,
 ): string | undefined {
-  return canvasLanguageTag(slot === 'eastAsia' ? request.eastAsiaLanguage
+  return canvasLanguageTag(slot === 'eastAsia'
+    ? request.canvasEastAsiaLanguage !== undefined ? request.canvasEastAsiaLanguage ?? undefined : request.eastAsiaLanguage
     : slot === 'complexScript' ? request.complexScriptLanguage : request.language);
 }
 
@@ -1833,9 +1848,10 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     ];
     if (request.baseDirection !== undefined) shapeParts.push(['baseDirection', request.baseDirection]);
     if (request.language !== undefined || request.complexScriptLanguage !== undefined
-      || request.canvasLanguagePin !== undefined) {
+      || request.canvasLanguagePin !== undefined || request.canvasEastAsiaLanguage !== undefined) {
       shapeParts.push(['lang', canvasLanguageTag(request.language) ?? null,
         canvasLanguageTag(request.complexScriptLanguage) ?? null,
+        request.canvasEastAsiaLanguage === undefined ? 'base' : canvasLanguageTag(request.canvasEastAsiaLanguage ?? undefined) ?? null,
         request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.lang ?? null]);
     }
     // Vertical forms join the language proof only for text that has a language.

@@ -30,7 +30,7 @@ import type {
   TextShapeRequest,
   TextShapeSpan,
 } from '../layout/text.js';
-import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage, languageSlotGroup } from '../layout/text.js';
+import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage, languageSlotGroup, canvasLanguageTag } from '../layout/text.js';
 import {
   referenceFontAverageWidthRatio,
   referenceFontLineMetrics,
@@ -291,12 +291,22 @@ export function appendTextPiece(
     const input = acquiredTypography?.ruby;
     if (!input) return undefined;
     const lid = input.language.status === 'valid' && input.language.value ? input.language.value.toLowerCase() : undefined;
-    const runLanguages = new Set(input.guideRuns.map((guideRun) => guideRun.language));
-    // Guide runs that disagree on w:lang/@w:val have no single run language:
-    // an explicit conflict (null), so the guide never takes the base run's.
-    const latin = runLanguages.size > 1 ? null : [...runLanguages][0] ?? undefined;
-    return lid || latin !== undefined
-      ? { ...(lid ? { guide: lid } : {}), ...(latin !== undefined ? { latin } : {}) } : undefined;
+    // Per axis: the guide runs' language when they agree; else the guide's
+    // declared w:lid; guide runs that disagree without one give an explicit
+    // null (no language, never the base run's).
+    const axis = (pick: (guideRun: NonNullable<typeof input>['guideRuns'][number]) => string | null) => {
+      const values = new Set(input.guideRuns.map(pick));
+      if (values.size > 1) return lid ?? null;
+      return [...values][0] ?? lid;
+    };
+    const latin = axis((guideRun) => guideRun.language);
+    const eastAsia = axis((guideRun) => guideRun.eastAsiaLanguage);
+    const complexScript = axis((guideRun) => guideRun.bidiLanguage);
+    return latin === undefined && eastAsia === undefined && complexScript === undefined ? undefined : {
+      ...(latin !== undefined ? { latin } : {}),
+      ...(eastAsia !== undefined ? { eastAsia } : {}),
+      ...(complexScript !== undefined ? { complexScript } : {}),
+    };
   })();
   const ruby = baseRuby
     ? {
@@ -729,9 +739,12 @@ export function finalizeBuiltSegments(
         // the acquired route decision of its slot group when the request
         // retains one, else by that slot's §17.3.2.20 axis. Keys of requests
         // without a language are unchanged.
-        ...(request.language !== undefined || request.eastAsiaLanguage !== undefined
+        // w:val enters as its effective tag (x-none and ill-formed tags shape
+        // as untagged); w:eastAsia stays raw, as regional font resolution
+        // reads it.
+        ...(canvasLanguageTag(request.language) !== undefined || request.eastAsiaLanguage !== undefined
           || request.canvasLanguagePin !== undefined
-          ? [JSON.stringify([request.language ?? null, request.eastAsiaLanguage ?? null,
+          ? [JSON.stringify([canvasLanguageTag(request.language) ?? null, request.eastAsiaLanguage ?? null,
             request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.lang ?? null])]
           : []),
       ].join('|');

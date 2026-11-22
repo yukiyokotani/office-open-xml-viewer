@@ -70,6 +70,8 @@ export interface ProductionLayoutServiceOptions {
   /** The 2D context behind {@link measureContext}: symbol-face colour probes
    * draw on a scratch canvas of its realm (core symbol-face.ts). */
   readonly symbolProbeOwner?: unknown;
+  /** Run-language oracle built on the measuring context by the caller. */
+  readonly namedFamilyOracle?: import('@silurus/ooxml-core').NamedFamilyOracle;
   /** The canvas factory of the measuring/painting backend, for those
    * probes (a Node session's canvas factory). */
   readonly symbolProbeCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
@@ -336,7 +338,8 @@ export function createProductionTextLayoutService(
   // Only a document that names a run language ever judges one; any other
   // keeps the untagged measurer identity and does no capability work.
   const namedFamilyOracle = context && source.carriesRunLanguage !== false
-    ? createNamedFamilyOracle(options.symbolProbeOwner ?? context, options.symbolProbeCanvas)
+    ? options.namedFamilyOracle
+      ?? createNamedFamilyOracle(options.symbolProbeOwner ?? context, options.symbolProbeCanvas)
     : undefined;
   const measure = (request: Readonly<GlyphMeasureRequest>) => {
     if (!context) return {

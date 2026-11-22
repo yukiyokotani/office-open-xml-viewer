@@ -131,16 +131,15 @@ describe('text service: §17.3.2.20 language per font slot', () => {
   it('shapes a ruby guide in its own languages', () => {
     const base = { text: '漢', fontSizePt: 10, fonts, language: 'en-us', eastAsiaLanguage: 'zh-cn',
       canvasLanguagePin: { group: 'eastAsia' as const, lang: null } };
-    const guide = rubyGuideShapeRequest(base, 'かん', { guide: 'ja-jp', latin: 'en-gb' });
-    expect([guide.language, guide.eastAsiaLanguage, guide.complexScriptLanguage, guide.canvasLanguagePin])
-      .toEqual(['en-gb', 'ja-jp', 'ja-jp', undefined]);
+    const guide = rubyGuideShapeRequest(base, 'かん', { latin: 'en-gb', eastAsia: 'ja-jp', complexScript: 'ar-eg' });
+    // The guide's East Asian language reaches Canvas only: regional font
+    // selection keeps the base's w:eastAsia.
+    expect([guide.language, guide.eastAsiaLanguage, guide.canvasEastAsiaLanguage, guide.complexScriptLanguage,
+      guide.canvasLanguagePin]).toEqual(['en-gb', 'zh-cn', 'ja-jp', 'ar-eg', undefined]);
+    expect(service.shape({ ...guide, clusterGeometry: false }).spans[0]!.fontRoute.lang).toBe('ja-jp');
     const inherited = rubyGuideShapeRequest(base, 'かん', undefined);
     expect([inherited.language, inherited.eastAsiaLanguage, inherited.canvasLanguagePin])
       .toEqual(['en-us', 'zh-cn', undefined]);
-    // Guide runs that disagree on w:val: an authored w:lid governs; without
-    // one the guide has no western language, never the base run's.
-    const lid = rubyGuideShapeRequest(base, 'ab', { guide: 'ja-jp', latin: null });
-    expect([lid.language, lid.eastAsiaLanguage]).toEqual(['ja-jp', 'ja-jp']);
     const conflict = rubyGuideShapeRequest(base, 'ab', { latin: null });
     expect('language' in conflict).toBe(true);
     expect([conflict.language, conflict.eastAsiaLanguage]).toEqual([undefined, 'zh-cn']);
@@ -350,10 +349,22 @@ describe('Canvas lang at measure and paint', () => {
   });
 
   it('admits only well-formed BCP 47 tags', () => {
-    expect(['sr-Latn-RS', 'i-klingon', 'zh-min-nan', 'x-private', 'iw'].map(canvasLanguageTag))
-      .toEqual(['sr-latn-rs', 'i-klingon', 'zh-min-nan', 'x-private', 'he']);
+    expect(['sr-Latn-RS', 'i-klingon', 'zh-min-nan', 'x-private', 'iw', 'zh-cmn-Hans-CN', 'zh-yue-HK'].map(canvasLanguageTag))
+      .toEqual(['sr-latn-rs', 'i-klingon', 'zh-min-nan', 'x-private', 'he', 'zh-hans-cn', 'yue-hk']);
     expect(['en-a', 'en-us-gb', 'x-none', 'inherit', '', `en-${'a'.repeat(70)}`].map(canvasLanguageTag))
       .toEqual([undefined, undefined, undefined, undefined, undefined, undefined]);
+  });
+
+  it('shapes x-none and ill-formed tags exactly as untagged text', async () => {
+    const drawn = async (lang?: string) => {
+      const { canvas, draws } = recordingCanvas();
+      await renderDocumentToCanvas(documentOf([run('f'), run('i', lang ? { lang } : {})]), canvas, 0, { dpr: 1, width: 600 });
+      return draws.map(draw => [draw.text, draw.x, draw.lang]);
+    };
+    const untagged = await drawn();
+    expect(untagged).toEqual([['fi', 0, 'inherit']]);
+    expect(await drawn('x-none')).toEqual(untagged);
+    expect(await drawn('en-a')).toEqual(untagged);
   });
 
   it('measures overlay slices in the run language', () => {
@@ -483,6 +494,7 @@ describe('Canvas lang at measure and paint', () => {
           align: value(null), baseFontSizePt: value(null), raisePt: value(null), language: value(lid),
           guideRuns: guideRunLanguages.map((language, index) => ({
             text: 'гд'[index]!, fontFamily: null, fontSizePt: null, bold: false, italic: false, color: null, language,
+            eastAsiaLanguage: null, bidiLanguage: null,
           })),
         } },
       })]), canvas, 0, { dpr: 1, width: 600 });

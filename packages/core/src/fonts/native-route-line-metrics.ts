@@ -339,16 +339,20 @@ function probeContext(probe: OwnershipProbe, index: number): CanvasFontBoxProbeC
   return probe.contexts[index] ?? null;
 }
 
+/** Measure `cluster` under both shorthands. `slot` 0 is the route pair and
+ * 1 the sentinel-only control pair: each keeps its own two contexts, so a
+ * run of cold clusters judged against one route assigns no font per cluster. */
 function measurePair(
-  fonts: readonly [string, string], cluster: string, probe: OwnershipProbe = realmProbe,
+  fonts: readonly [string, string], cluster: string, probe: OwnershipProbe = realmProbe, slot = 0,
 ): (readonly number[])[] | undefined {
   const results: (readonly number[])[] = [];
-  for (let index = 0; index < 2; index += 1) {
+  for (let pair = 0; pair < 2; pair += 1) {
+    const index = slot * 2 + pair;
     const context = probeContext(probe, index);
     if (!context) return undefined;
-    if (probe.fonts[index] !== fonts[index]) {
-      context.font = fonts[index]!;
-      probe.fonts[index] = fonts[index];
+    if (probe.fonts[index] !== fonts[pair]) {
+      context.font = fonts[pair]!;
+      probe.fonts[index] = fonts[pair];
     }
     results.push(geometry(context, cluster));
   }
@@ -387,7 +391,7 @@ export function nativeRouteClusterOwned(
   const cacheable = cluster.length <= OWNERSHIP_CACHED_CLUSTER_UNITS;
   let routed = cacheable ? probe.controls.get(cluster) : undefined;
   if (routed === undefined) {
-    const control = measurePair(SENTINEL_ONLY_FONTS, cluster, probe);
+    const control = measurePair(SENTINEL_ONLY_FONTS, cluster, probe, 1);
     if (!control) return undefined;
     routed = !sameGeometry(control[0]!, control[1]!);
     if (cacheable) {
@@ -475,7 +479,8 @@ export function createNamedFamilyOracle(
     }
     // The proof contexts keep the sentinel shorthand: measurePair assigns
     // each route before measuring (their recorded shorthand is still unset).
-    return [0, 1].every((index) => {
+    // All four proof contexts: the route pair and the control pair.
+    return [0, 1, 2, 3].every((index) => {
       const proof = probeContext(probe, index);
       return proof !== null && sentinelsWork(proof);
     });

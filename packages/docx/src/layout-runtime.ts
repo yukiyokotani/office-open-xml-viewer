@@ -120,6 +120,10 @@ export function createLayoutServices(
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    /** The run-language oracle already built on {@link measureContext} (a
+     * render worker decides admission with it); otherwise the text service
+     * builds its own. */
+    readonly namedFamilyOracle?: import('@silurus/ooxml-core').NamedFamilyOracle;
     /** The factory that made {@link measureContext}'s canvas, when the caller
      * owns one (a Node session): symbol colour probes allocate their scratch
      * canvas through it, on the backend that measures and paints. */
@@ -265,6 +269,7 @@ export function createLayoutServices(
     measureContext: context,
     ...(advancePlanner ? { textAdvancePlanner: advancePlanner } : {}),
     symbolProbeOwner: canvasContext,
+    ...(options.namedFamilyOracle ? { namedFamilyOracle: options.namedFamilyOracle } : {}),
     ...(options.createCanvas ? { symbolProbeCanvas: options.createCanvas } : {}),
     // A caller canvas may belong to a popup/iframe. CSS face admission must
     // inspect the FontFaceSet that also shapes this context's glyphs.
