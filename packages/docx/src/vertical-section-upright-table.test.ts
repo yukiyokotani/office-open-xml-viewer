@@ -330,6 +330,18 @@ describe('upright block table of a vertical section', () => {
     expect(pages[1]!.tables).toHaveLength(1);
   });
 
+  it('moves a keepNext paragraph with a table whose border rules pass the block extent left', () => {
+    // After fifteen strips 195.3 pt are left: the 195 pt grid fits, the
+    // 198 pt box does not, so the fifteenth strip goes with the table.
+    const wide = T.replaceAll('w:sz="4"', 'w:sz="24"').replaceAll('"2160"', '"2460"');
+    const keepNext = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+    const pages = layOutPages('tbRl', [...Array.from({ length: 14 }, () => P), keepNext, wide, P]);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]!.strips).toHaveLength(14);
+    expect(pages[1]!.tables).toHaveLength(1);
+    expect(pages[1]!.strips[0]![0]!.block).toBe(0);
+  });
+
   it('takes the box from the outermost painted rules under cell spacing', () => {
     // No table borders, 6 pt cell rules and 2 pt cell spacing.
     const cellRules = '<w:tcBorders>' + ['top', 'left', 'bottom', 'right']
@@ -407,6 +419,25 @@ describe('upright block table of a vertical section', () => {
       expect(second.top).toBeCloseTo(first.bottom, 6);
       // Together they are taller than the page, so the pair starts at its top.
       expect(first.top).toBe(0);
+    });
+
+    it('keeps a tall table below a short one it directly follows', () => {
+      // The 20 pt table is raised with the 830 pt one that runs on from it;
+      // the tall one starts where the short one ends.
+      const pages = layOutPages('tbRl', [table(1, 20), table(1, 830)], 2);
+      const [short, tall] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(short.top).toBe(0);
+      expect(tall.left).toBeCloseTo(short.left, 6);
+      expect(tall.top).toBeCloseTo(short.bottom, 6);
+    });
+
+    it('stacks a long run of directly following tables in order', () => {
+      const pages = layOutPages('tbRl', Array.from({ length: 48 }, () => T), 2);
+      const tables = pages.flatMap((page) => page.tables);
+      expect(tables).toHaveLength(48);
+      tables.slice(1).forEach((next, index) => {
+        expect(next.top).toBeCloseTo(tables[index]!.bottom, 6);
+      });
     });
 
     it('does not move a keepNext paragraph and a tall table to the second column', () => {

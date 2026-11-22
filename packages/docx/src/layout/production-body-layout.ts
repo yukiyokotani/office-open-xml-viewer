@@ -108,6 +108,7 @@ import { measureTableIntrinsicWidths, resolveTableColumnWidths, spacedAutoFitCon
 import { decideLogicalTable, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import {
   bodyTableAcquisitionState,
+  uprightBlockBoxExtentPt,
   uprightBlockPaginates,
   measureBodyTableEntry,
   ownerSegmentedFlowExtents,
@@ -2322,7 +2323,7 @@ function measureFollowingBodyBlock(
       > physical.pageHeight - physical.marginBottom - request.location.cursorPt.xPt;
     const neededPt = multiColumn ? 0
       : tooTall ? request.location.availableBounds.heightPt
-        : layout.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+        : uprightBlockBoxExtentPt(layout, physical);
     return Object.freeze({
       fullExtentPt: neededPt,
       leadContentExtentPt: neededPt,

@@ -984,7 +984,7 @@ interface FloatRegistryEntryCorePt {
    * `planned` marks the page-start registration of a pin of the pagination
    * round's plan, which earlier lines of the page wrap around; the table in
    * column `tableFlowDomainId` takes its block position and registers its own
-   * exclusion again when the flow reaches it. */
+   * exclusion again when the flow reaches it, under that column too. */
   readonly uprightBlockTable?: Readonly<{
     key: string;
     planned: boolean;

@@ -246,8 +246,7 @@ export function measureBodyTableEntry(
     const wholeEdges = uprightBlockEdgeOverhangsPt(retained.layout, tableWidthPt, physical);
     if (
       !request.cursor && (singleColumn || !paginates) &&
-      tableWidthPt + (paginates ? wholeEdges.nearPt + wholeEdges.farPt : 0)
-        > request.availableBlockExtentPt &&
+      uprightBlockBoxExtentPt(retained.layout, physical) > request.availableBlockExtentPt &&
       request.availableBlockExtentPt < request.freshPageBlockExtentPt
     ) {
       return freshRegion(false);
@@ -256,14 +255,21 @@ export function measureBodyTableEntry(
     // The upright tables that follow this one with nothing between them run
     // on from it as one block; a multi-column section raises that whole
     // block from the bottom page edge.
+    // Only the first table of such a run is raised; the others stay below it.
+    const uprightTableAt = (index: number) => {
+      const element = dependencies.source.blocks.body[index];
+      return element?.type === 'table'
+        && bodyTableAcquisitionState(state, element, effectiveTablePositioning).uprightPhysicalTable === true
+        ? element : null;
+    };
     let runOnExtentPt = 0;
-    if (paginates && !singleColumn && !request.cursor) {
+    if (paginates && !singleColumn && !request.cursor && !uprightTableAt(sourceIndex - 1)) {
       for (let next = sourceIndex + 1; ; next += 1) {
-        const following = dependencies.source.blocks.body[next];
-        if (following?.type !== 'table') break;
-        const followingState = bodyTableAcquisitionState(state, following, effectiveTablePositioning);
-        if (followingState.uprightPhysicalTable !== true) break;
-        operations.computeTablePtLayout(followingState, following, request.availableInlineExtentPt, next);
+        const following = uprightTableAt(next);
+        if (!following) break;
+        operations.computeTablePtLayout(
+          { ...state, uprightPhysicalTable: true }, following, request.availableInlineExtentPt, next,
+        );
         runOnExtentPt += retainedTableRecord(state, next).acquisition.layout.advancePt;
       }
     }
@@ -431,28 +437,46 @@ function uprightBlockTranslationPt(
  * on its near and far block edges. */
 type UprightBlockEdges = Readonly<{ nearPt: number; farPt: number }>;
 
-/** {@link UprightBlockEdges} of a table or table fragment: the outermost
- * edges of its vertical rules against the grid of physical width
- * `physicalWidthPt`. A rule centred on a grid edge reaches half its width
- * past it; with cell spacing the outer cell rules can reach further than the
- * table's own. The near edge is the physical right in the clockwise frame and
- * the physical left in the vertical-lr frame. */
+/** {@link UprightBlockEdges} of a table: the outermost edges of its vertical
+ * rules against the grid of physical width `physicalWidthPt`. A rule centred
+ * on a grid edge reaches half its width past it; with cell spacing the outer
+ * cell rules can reach further than the table's own. The near edge is the
+ * physical right in the clockwise frame and the physical left in the
+ * vertical-lr frame. Every fragment of a table uses the whole table's edges,
+ * so the scan of its rules is kept with the retained layout. */
+const uprightBlockEdgeCache = new WeakMap<TableLayout, Readonly<{ leftPt: number; rightPt: number }>>();
 function uprightBlockEdgeOverhangsPt(
   table: TableLayout,
   physicalWidthPt: number,
   physical: PhysicalAnchorFrame,
 ): UprightBlockEdges {
-  const gridLeftPt = table.flowBounds.xPt;
-  const gridRightPt = gridLeftPt + physicalWidthPt;
-  let leftPt = 0;
-  let rightPt = 0;
-  for (const border of table.borders) {
-    if (border.from.xPt !== border.to.xPt) continue;
-    leftPt = Math.max(leftPt, gridLeftPt - (border.from.xPt - border.widthPt / 2));
-    rightPt = Math.max(rightPt, border.from.xPt + border.widthPt / 2 - gridRightPt);
+  let sides = uprightBlockEdgeCache.get(table);
+  if (!sides) {
+    const gridLeftPt = table.flowBounds.xPt;
+    const gridRightPt = gridLeftPt + physicalWidthPt;
+    let leftPt = 0;
+    let rightPt = 0;
+    for (const border of table.borders) {
+      if (border.from.xPt !== border.to.xPt) continue;
+      leftPt = Math.max(leftPt, gridLeftPt - (border.from.xPt - border.widthPt / 2));
+      rightPt = Math.max(rightPt, border.from.xPt + border.widthPt / 2 - gridRightPt);
+    }
+    sides = Object.freeze({ leftPt, rightPt });
+    uprightBlockEdgeCache.set(table, sides);
   }
   return physical.writingMode === 'vertical-lr'
-    ? { nearPt: leftPt, farPt: rightPt } : { nearPt: rightPt, farPt: leftPt };
+    ? { nearPt: sides.leftPt, farPt: sides.rightPt } : { nearPt: sides.rightPt, farPt: sides.leftPt };
+}
+
+/** Block extent of an upright table's box under
+ * `word-vertical-section-upright-block-table`: its grid and what its border
+ * rules reach past it. Placement and keep-with-next look-ahead both fit this
+ * box against the block extent left. */
+export function uprightBlockBoxExtentPt(table: TableLayout, physical: PhysicalAnchorFrame): number {
+  const gridWidthPt = table.columnWidthsPt.reduce((sum, width) => sum + width, 0);
+  if (!uprightBlockPaginates(physical)) return gridWidthPt;
+  const edges = uprightBlockEdgeOverhangsPt(table, gridWidthPt, physical);
+  return edges.nearPt + gridWidthPt + edges.farPt;
 }
 
 /**
@@ -523,6 +547,7 @@ function uprightBlockPlacement(
   const pin = role !== 'first' ? undefined : registry.entries.find((entry) =>
     entry.occurrenceId === uprightBlockTablePrescanKey(key, request.location.pageIndex)
     && entry.uprightBlockTable?.tableFlowDomainId === request.location.flowDomainId);
+  const multiColumn = request.location.section.columns.length > 1;
   const columnEndPt = cursorPt.xPt + request.availableInlineExtentPt;
   const bandEndPt = physical.pageHeight - physical.marginBottom;
   // The blocks placed in this pass; a planned registration is a pin, also of
@@ -531,19 +556,36 @@ function uprightBlockPlacement(
   // near rule starts at the block position, so the grid starts half that
   // rule further on, and the far rule adds half its width past the grid.
   const boxBlockExtentPt = edges.nearPt + blockExtentPt + edges.farPt;
+  // Blocks of this column, wherever a run or a raise has taken them, and
+  // blocks of other columns that reach into this column's inline band.
   const placed = registry.entries.flatMap((entry) => {
     if (entry.uprightBlockTable?.planned !== false) return [];
     const box = entry.bounds;
-    return box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt ? [box] : [];
+    const sameColumn = entry.uprightBlockTable.tableFlowDomainId === request.location.flowDomainId;
+    return sameColumn || (box.xPt < columnEndPt && box.xPt + box.widthPt > cursorPt.xPt)
+      ? [{ ...box, sameColumn }] : [];
   });
-  const multiColumn = request.location.section.columns.length > 1;
   let blockStartPt = pin ? pin.bounds.yPt : cursorPt.yPt;
-  let inlineStartPt = cursorPt.xPt;
+  // A multi-column section never splits or moves the block: one that would
+  // pass the page's bottom edge from the column top is raised to end there,
+  // no higher than the page top, together with the blocks that run on from
+  // it. The search below starts from that raised position, so the block is
+  // never raised into an earlier one.
+  // A block the flow reaches at the block position of an earlier one, with
+  // nothing between them, runs on from that block: it starts where the run
+  // so far ends and is not moved along the block axis.
+  const runEndPt = role !== 'first' ? null : placed.reduce<number | null>((end, box) => (
+    box.sameColumn && box.yPt === blockStartPt
+      ? Math.max(end ?? box.xPt + box.widthPt, box.xPt + box.widthPt) : end), null);
+  const inlineOriginPt = runEndPt ?? (multiColumn
+    ? Math.max(0, Math.min(cursorPt.xPt, physical.pageHeight - inlineExtentPt - runOnExtentPt))
+    : cursorPt.xPt);
+  let inlineStartPt = inlineOriginPt;
   for (;;) {
     // An earlier block is met up to the clearance past its far edge.
     const met = placed.filter((box) => box.yPt <= blockStartPt + boxBlockExtentPt
       && blockStartPt < box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
-    inlineStartPt = cursorPt.xPt;
+    inlineStartPt = inlineOriginPt;
     // Every move adopts the inline end of a box it leaves behind for good.
     for (let moved = true; moved;) {
       moved = false;
@@ -558,25 +600,13 @@ function uprightBlockPlacement(
     // A block that does not fit below the blocks it meets clears the nearest
     // of them along the block axis instead. In a one-column section that
     // holds for a block that fits the band from the column top (a taller one
-    // paginates); a multi-column section never splits the block and lets it
-    // run to the bottom page edge. Each move leaves at least that block behind.
+    // paginates); a multi-column section lets it run to the bottom page
+    // edge. Each move leaves at least that block behind.
     const fitsBelow = inlineStartPt + inlineExtentPt <= (multiColumn ? physical.pageHeight : bandEndPt);
-    // A block the flow reaches at the block position of an earlier one, with
-    // nothing between them, continues that block and stays below it.
-    const continues = met.some((box) => box.yPt === blockStartPt);
-    if (pin || role !== 'first' || met.length === 0 || fitsBelow || continues
+    if (pin || role !== 'first' || inlineStartPt === inlineOriginPt || fitsBelow || runEndPt !== null
       || (!multiColumn && cursorPt.xPt + inlineExtentPt > bandEndPt)) break;
     blockStartPt = Math.min(...met.map((box) =>
       box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT));
-  }
-  if (multiColumn && inlineStartPt === cursorPt.xPt) {
-    // A multi-column section never splits or moves the block: one that
-    // would pass the page's bottom edge from the column top is raised to end
-    // there, no higher than the page top, together with the blocks that run
-    // on from it. A block below others it meets is not raised into them.
-    inlineStartPt = Math.max(
-      0, Math.min(inlineStartPt, physical.pageHeight - inlineExtentPt - runOnExtentPt),
-    );
   }
   const leavesBlockExtent = blockStartPt !== cursorPt.yPt && !pin
     && blockStartPt + boxBlockExtentPt
@@ -624,7 +654,9 @@ function uprightBlockPlacement(
     exclusionMode: 'square' as const,
     bounds,
     exclusionBounds,
-    uprightBlockTable: Object.freeze({ key, planned: false }),
+    uprightBlockTable: Object.freeze({
+      key, planned: false, tableFlowDomainId: request.location.flowDomainId,
+    }),
   });
   return Object.freeze({
     originPt,
