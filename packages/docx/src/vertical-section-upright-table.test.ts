@@ -344,9 +344,9 @@ describe('upright block table of a vertical section', () => {
     expect(table!.exclusionBlockExtent).toBeCloseTo(table!.paintedRight - table!.paintedLeft + 7.14, 6);
   });
 
-  it('gives a continued fragment the border rules of its own rows', () => {
+  it('keeps a continued fragment at the offset of the whole table\'s border rules', () => {
     // Forty 20 pt rows without table borders; only the first row's first cell
-    // has a 3 pt left rule, which the rows continued on page 2 do not carry.
+    // has a 3 pt left rule. The rows continued on page 2 keep its offset.
     const row = (index: number) => '<w:tr><w:trPr><w:trHeight w:val="400" w:hRule="atLeast"/></w:trPr>'
       + '<w:tc><w:tcPr><w:tcW w:w="3600" w:type="dxa"/>'
       + (index === 0 ? '<w:tcBorders><w:left w:val="single" w:sz="24"/></w:tcBorders>' : '')
@@ -356,7 +356,7 @@ describe('upright block table of a vertical section', () => {
     const pages = layOutPages('tbLrV', [long]);
     expect(pages).toHaveLength(2);
     expect(pages[0]!.tables[0]!.left).toBeCloseTo(MARGIN.left + 1.5, 6);
-    expect(pages[1]!.tables[0]!.left).toBeCloseTo(MARGIN.left, 6);
+    expect(pages[1]!.tables[0]!.left).toBeCloseTo(MARGIN.left + 1.5, 6);
   });
 
   describe('in a two-column section', () => {
@@ -384,16 +384,26 @@ describe('upright block table of a vertical section', () => {
       expect(tall!.bottom).toBeLessThanOrEqual(COLUMN_END);
     });
 
-    it('moves a second tall table past the first instead of raising it over it', () => {
-      // Two tables of one 800 pt row each: both are raised to end at the
-      // bottom page edge, the second clear of the first along the block axis.
+    it('moves a tall table that meets an earlier one past it, then raises it', () => {
+      // The 75-row table would pass the page edge below the 2-row table it
+      // meets: it clears that table along the block axis and is raised.
+      const pages = layOutPages('tbRl', [P, T, P, table(75), P], 2);
+      expect(pages).toHaveLength(1);
+      const [short, tall] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
+      expect(short.top).toBeCloseTo(MARGIN.top, 6);
+      expect(tall.left).toBeCloseTo(tableLeft('tbRl', PITCH + TABLE_W + RULE + 14.28), 6);
+      expect(tall.top).toBeLessThan(MARGIN.top);
+      expect(tall.bottom).toBeCloseTo(16838 / 20, 6);
+    });
+
+    it('keeps a table that directly follows another below it', () => {
+      // Two tables of one 800 pt row each with nothing between them continue
+      // one another: the second is neither moved aside nor raised over the first.
       const pages = layOutPages('tbRl', [table(1, 800), table(1, 800)], 2);
       expect(pages).toHaveLength(1);
       const [first, second] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
-      expect(first.left).toBeCloseTo(tableLeft('tbRl', 0), 6);
-      expect(second.left).toBeCloseTo(tableLeft('tbRl', TABLE_W + RULE + 14.28), 6);
-      expect(second.top).toBeCloseTo(first.top, 6);
-      expect(first.top).toBeLessThan(MARGIN.top);
+      expect(second.left).toBeCloseTo(first.left, 6);
+      expect(second.top).toBeCloseTo(first.bottom, 6);
     });
 
     it('does not move a keepNext paragraph and a tall table to the second column', () => {

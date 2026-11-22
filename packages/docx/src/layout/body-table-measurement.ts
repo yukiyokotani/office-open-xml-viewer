@@ -296,16 +296,10 @@ export function measureBodyTableEntry(
           : null,
       };
     };
-    let laidOut = layOutWith(wholeEdges);
+    // Every fragment keeps the box edges of the whole table: rows continued
+    // on a later page stay offset by a rule only earlier rows carry.
+    const laidOut = layOutWith(wholeEdges);
     if (laidOut === null) return freshRegion(true);
-    // The rows of this fragment decide its border rules: a rule only earlier
-    // or later rows carry is not part of its box. Which rows fit does not
-    // depend on the block position, so one correction settles it.
-    const fragmentEdges = uprightBlockEdgeOverhangsPt(laidOut.upright, tableWidthPt, physical);
-    if (fragmentEdges.nearPt !== wholeEdges.nearPt || fragmentEdges.farPt !== wholeEdges.farPt) {
-      laidOut = layOutWith(fragmentEdges);
-      if (laidOut === null) return freshRegion(true);
-    }
     const { upright, block, nextCursor } = laidOut;
     return Object.freeze({
       layout: upright,
@@ -550,7 +544,10 @@ function uprightBlockPlacement(
     // paginates); a multi-column section never splits the block and lets it
     // run to the bottom page edge. Each move leaves at least that block behind.
     const fitsBelow = inlineStartPt + inlineExtentPt <= (multiColumn ? physical.pageHeight : bandEndPt);
-    if (pin || role !== 'first' || met.length === 0 || fitsBelow
+    // A block the flow reaches at the block position of an earlier one, with
+    // nothing between them, continues that block and stays below it.
+    const continues = met.some((box) => box.yPt === blockStartPt);
+    if (pin || role !== 'first' || met.length === 0 || fitsBelow || continues
       || (!multiColumn && cursorPt.xPt + inlineExtentPt > bandEndPt)) break;
     blockStartPt = Math.min(...met.map((box) =>
       box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT));
