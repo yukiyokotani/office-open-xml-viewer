@@ -49,13 +49,17 @@ interface Control {
   readonly sectExtra?: string;
   /** Paragraph properties of the Normal style. */
   readonly normalPPr?: string;
+  /** A numbering part (its w:abstractNum and w:num children). */
+  readonly numbering?: string;
+  /** The numbered note's paragraphs, replacing its plain lines. */
+  readonly noteParagraphs?: string;
 }
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const encode = (xml: string) => new TextEncoder().encode(xml);
 
-function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints, separatorParagraph, continuationParagraph, sectExtra = '', normalPPr }: Control): DocxDocumentModel {
+function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints, separatorParagraph, continuationParagraph, sectExtra = '', normalPPr, numbering, noteParagraphs }: Control): DocxDocumentModel {
   const rPr = markHalfPoints ? `<w:rPr><w:sz w:val="${markHalfPoints}"/></w:rPr>` : '';
   const runRPr = markerRunHalfPoints ? `<w:rPr><w:sz w:val="${markerRunHalfPoints}"/></w:rPr>` : rPr;
   const special = (role: string, id: number, mark: string) => `<w:${kind} w:type="${role}" w:id="${id}">`
@@ -64,7 +68,7 @@ function control({ kind, listed = false, markHalfPoints, noSeparatorStories = fa
       : `<w:p><w:pPr>${rPr}</w:pPr><w:r>${runRPr}<w:${mark}/></w:r></w:p>`) + `</w:${kind}>`;
   const stories = noSeparatorStories ? ''
     : special('separator', -1, 'separator') + special('continuationSeparator', 0, 'continuationSeparator');
-  const lines = Array.from({ length: noteLines }, (_, index) => `<w:p><w:r><w:t>N${index}</w:t></w:r></w:p>`).join('');
+  const lines = noteParagraphs ?? Array.from({ length: noteLines }, (_, index) => `<w:p><w:r><w:t>N${index}</w:t></w:r></w:p>`).join('');
   const right = Math.round((612 - 72 - textWidthPt) * 20);
   const parts = new Map<string, string>([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -73,11 +77,15 @@ function control({ kind, listed = false, markHalfPoints, noSeparatorStories = fa
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
       + `<Override PartName="/word/${kind}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}s+xml"/>`
       + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
-      + '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>'],
+      + '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+      + (numbering ? '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>' : '')
+      + '</Types>'],
     ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
     ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="n" Type="${R}/${kind}s" Target="${kind}s.xml"/><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/>`
-      + `<Relationship Id="t" Type="${R}/styles" Target="styles.xml"/></Relationships>`],
+      + `<Relationship Id="t" Type="${R}/styles" Target="styles.xml"/>`
+      + (numbering ? `<Relationship Id="u" Type="${R}/numbering" Target="numbering.xml"/>` : '') + '</Relationships>'],
+    ...(numbering ? [['word/numbering.xml', `<w:numbering xmlns:w="${W}">${numbering}</w:numbering>`] as [string, string]] : []),
     ['word/styles.xml', `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>`
       + '<w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
       + '</w:pPrDefault></w:docDefaults>'
@@ -355,6 +363,39 @@ describe('word-note-separator-geometry', () => {
       + '<w:r><w:separator/></w:r></w:p>');
     expect(bare.leading?.paragraph?.kind === 'paragraph' && bare.leading.paragraph.borders.length).toBeGreaterThan(0);
     expect(bare.leading?.rule).toBeDefined();
+  });
+
+  it('keeps separator parsing out of the notes\' list counters', () => {
+    const numbering = '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+      + '<w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>';
+    const numbered = (text: string) => `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const layout = render(control({ kind: 'footnote', listed: true, numbering,
+      separatorParagraph: '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:separator/></w:r></w:p>',
+      noteParagraphs: numbered('A') + numbered('B') }));
+    const note = leadingOf(layout);
+    const labels = note.story.blocks.map((block) => block.kind === 'paragraph'
+      ? block.lines[0]!.placements.flatMap((placement) => placement.kind === 'text' ? [placement.text] : []).join('') : '');
+    expect(labels.map((label) => label.replace(/\s+/gu, ''))).toEqual(['1.A', '2.B']);
+  });
+
+  it('drops a hidden marker and keeps the visible separator text', () => {
+    const note = separatorOf('<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:separator/></w:r><w:r><w:t>Sources</w:t></w:r></w:p>');
+    expect(paragraphTexts(note)).toEqual(['Sources']);
+    expect(ruleOf(note)).toBeUndefined();
+  });
+
+  it('evaluates a complex field that spans separator paragraphs', () => {
+    const note = separatorOf('<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+      + '<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p><w:r><w:t>9</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>'
+      + '<w:r><w:separator/></w:r></w:p>');
+    expect(clean(paragraphTexts(note)).join('')).not.toContain('9');
+    expect(clean(paragraphTexts(note)).join('')).toContain('1');
+  });
+
+  it('sizes an rtl marker rule from its complex-script size', () => {
+    const note = separatorOf('<w:p><w:r><w:rPr><w:rtl/><w:sz w:val="20"/><w:szCs w:val="40"/></w:rPr><w:separator/></w:r></w:p>');
+    const rule = ruleOf(note)!;
+    expect(rule.widthPt).toBe(1);
   });
 
   it('positions a marker-only separator by its paragraph indent', () => {

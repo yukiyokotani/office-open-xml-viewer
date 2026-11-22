@@ -2601,6 +2601,29 @@ thread_local! {
     /// Set while a listed separator story is parsed: only there does a
     /// §17.11.23/§17.11.1 marker become a marker run.
     static PARSING_SEPARATOR_STORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Marker elements of hidden (§17.3.2.41 vanish) runs met while a
+    /// separator story is parsed: the run parser skips them, so they are no
+    /// markers of the story.
+    static HIDDEN_SEPARATOR_MARKERS: std::cell::RefCell<Vec<roxmltree::NodeId>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record the marker children of a hidden run while a separator story is
+/// parsed (see `HIDDEN_SEPARATOR_MARKERS`).
+fn note_hidden_separator_markers(run: roxmltree::Node<'_, '_>) {
+    if !PARSING_SEPARATOR_STORY.with(std::cell::Cell::get) {
+        return;
+    }
+    HIDDEN_SEPARATOR_MARKERS.with(|hidden| {
+        hidden.borrow_mut().extend(
+            run.children()
+                .filter(|child| {
+                    is_w_ns(child.tag_name().namespace())
+                        && matches!(child.tag_name().name(), "separator" | "continuationSeparator")
+                })
+                .map(|child| child.id()),
+        );
+    });
 }
 
 /// The closed class of a listed story (§17.11.3/.9): one or more `w:p`
@@ -2733,35 +2756,26 @@ fn selected_note_separator_story(
     if !supported {
         return None;
     }
-    // The story shows its final content (§17.13.5): a marker in a deleted or
-    // moved-away run is no marker of it, so a tracked replacement of the
-    // marker keeps exactly the surviving one.
-    let markers: Vec<_> = note
-        .descendants()
-        .filter(|node| {
-            (is_w(*node, "separator") || is_w(*node, "continuationSeparator"))
-                && !node
-                    .ancestors()
-                    .take_while(|ancestor| *ancestor != note)
-                    .any(|ancestor| is_w(ancestor, "del") || is_w(ancestor, "moveFrom"))
-        })
-        .collect();
-    if markers.len() > 1 {
-        return None;
-    }
+    // The story is parsed against scratch list counters (an unsupported
+    // story falls back and must not advance the notes' lists; a supported
+    // one holds no numbered paragraph) and one field state, since a complex
+    // field (§17.16.18) may span its paragraphs.
+    let mut scratch_numbering = num_map.clone();
+    let mut field = FieldState::default();
+    HIDDEN_SEPARATOR_MARKERS.with(|hidden| hidden.borrow_mut().clear());
     let mut paragraphs = Vec::with_capacity(blocks.len());
     for paragraph in &blocks {
         PARSING_SEPARATOR_STORY.with(|flag| flag.set(true));
         let parsed = parse_paragraph_with_diagnostics(
             *paragraph,
             style_map,
-            num_map,
+            &mut scratch_numbering,
             media_map,
             chart_map,
             rel_map,
             theme,
             None,
-            &mut FieldState::default(),
+            &mut field,
             &mut Vec::new(),
         );
         PARSING_SEPARATOR_STORY.with(|flag| flag.set(false));
@@ -2803,6 +2817,24 @@ fn selected_note_separator_story(
             return None;
         }
         paragraphs.push(parsed);
+    }
+    // Markers of the final, visible content only: a marker in a deleted or
+    // moved-away run (§17.13.5) or in a hidden run is no marker of the
+    // story, so a tracked replacement keeps exactly the surviving marker.
+    let hidden = HIDDEN_SEPARATOR_MARKERS.with(|hidden| std::mem::take(&mut *hidden.borrow_mut()));
+    let markers: Vec<_> = note
+        .descendants()
+        .filter(|node| {
+            (is_w(*node, "separator") || is_w(*node, "continuationSeparator"))
+                && !hidden.contains(&node.id())
+                && !node
+                    .ancestors()
+                    .take_while(|ancestor| *ancestor != note)
+                    .any(|ancestor| is_w(ancestor, "del") || is_w(ancestor, "moveFrom"))
+        })
+        .collect();
+    if markers.len() > 1 {
+        return None;
     }
     let marked = paragraphs
         .iter()
@@ -8757,7 +8789,10 @@ fn parse_run_inner(
     let (rpr_node, mut fmt) = match segment {
         // A hidden run is skipped below before any copy is needed; check the
         // shared formatting first so hidden segments cost nothing.
-        Some(segment) if segment.fmt.vanish.unwrap_or(false) => return,
+        Some(segment) if segment.fmt.vanish.unwrap_or(false) => {
+            note_hidden_separator_markers(node);
+            return;
+        }
         Some(segment) => (segment.rpr, segment.fmt.clone()),
         None => {
             let rpr_node = child_w(node, "rPr");
@@ -8767,6 +8802,7 @@ fn parse_run_inner(
 
     // Skip hidden runs entirely
     if fmt.vanish.unwrap_or(false) {
+        note_hidden_separator_markers(node);
         return;
     }
     if collect_run_diagnostics {
