@@ -162,6 +162,7 @@ import {
   emptyUprightBlockPageIndex,
   inlineShiftBelowUprightTablesPt,
   moveUprightPageDrawingsBelowTableBox,
+  uprightRegistrationTableBox,
   uprightPrecedingDrawings,
   uprightBlockExclusionsAhead,
   type UprightBlockExclusion,
@@ -608,6 +609,7 @@ function acquireBodyParagraphAtLocation(
     boundary: null,
   }),
   retainedAnchorCollisions?: readonly DrawingMLCollisionEntryPt[],
+  plannedUprightTableBoxes?: readonly LayoutRect[],
 ) {
   const edges = bodyParagraphBorderEdgesFor(paragraph) ?? {
     top: 'top' as const,
@@ -650,10 +652,20 @@ function acquireBodyParagraphAtLocation(
       exclusions,
       anchorCollisions: retainedAnchorCollisions ?? paragraphAnchorCollisions(state.floats),
       // `word-vertical-section-upright-block-table`: a wrapped drawing lies
-      // below the upright tables before its paragraph.
-      ...(source.path.length === 1 && state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0
+      // below the upright tables in place when its paragraph is laid out.
+      // Every body paragraph of a section that lays block tables out
+      // upright resolves its drawings the same bounded way, also where no
+      // table is in place yet (UprightDrawingMoves).
+      ...(source.path.length === 1
+        && ((state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0) || plannedUprightTableBoxes
+          || (state.verticalPhys && uprightBlockPaginates(state.verticalPhys)))
         && paragraph.runs.some((run) => run.type === 'anchorHost')
-        ? { uprightTables: { index: state.uprightBlockIndex, beforeSourceIndex: source.path[0]! } }
+        ? {
+            uprightTables: {
+              index: state.uprightBlockIndex,
+              ...(plannedUprightTableBoxes ? { planned: plannedUprightTableBoxes } : {}),
+            },
+          }
         : {}),
       containerShading: state.containerShading,
       paragraphBorderEdges: edges,
@@ -1816,6 +1828,8 @@ function measureBodyParagraphEntry(
     pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
   };
   addUprightBlockExclusionFloats(candidate, request.location, paragraph, request.besideUprightBlocks);
+  const plannedTableBox = request.besideUprightBlocks ? uprightRegistrationTableBox(request.besideUprightBlocks) : null;
+  const plannedTableBoxes = plannedTableBox ? Object.freeze([plannedTableBox.box]) : undefined;
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
   const publicFloats =
     request.continuation.boundary === null
@@ -1836,6 +1850,7 @@ function measureBodyParagraphEntry(
     request.suppressSpaceBefore,
     request.continuation,
     sessionState.drawingCollisionRegistry.entries,
+    plannedTableBoxes,
   );
   const { measured, layout } = acquired;
   const markOnLineGrid =
@@ -2547,20 +2562,28 @@ function prescanBodyPageAnchors(
       const { carry } = anchor;
       if (!state.frozenAnchorFrames) state.frozenAnchorFrames = new Map();
       state.frozenAnchorFrames.set(anchor.occurrenceId, Object.freeze({ ...carry.bounds }));
+      // `word-vertical-section-upright-block-table`: from that frame the
+      // drawing lies below the upright tables in place, as its paragraph's
+      // own acquisition places it (paragraph.ts).
+      const shiftPt = anchor.paragraphSource.path.length === 1
+        ? inlineShiftBelowUprightTablesPt(state.uprightBlockIndex, Number.POSITIVE_INFINITY, carry.bounds)
+        : 0;
+      const shifted = <Rect extends { xPt: number }>(rect: Rect): Rect =>
+        shiftPt === 0 ? rect : Object.freeze({ ...rect, xPt: rect.xPt + shiftPt });
       return [
         Object.freeze({
           kind: 'shape' as const,
           occurrenceId: anchor.occurrenceId,
           exclusionId: anchor.occurrenceId,
           paragraphId: paragraphIdFor(anchor.paragraphSource),
-          bounds: carry.bounds,
-          exclusionBounds: carry.exclusionBounds,
+          bounds: shifted(carry.bounds),
+          exclusionBounds: shifted(carry.exclusionBounds),
           ...(carry.horizontalOwnership ? { horizontalOwnership: carry.horizontalOwnership } : {}),
           ...(carry.verticalOwnership ? { verticalOwnership: carry.verticalOwnership } : {}),
           wrap: carry.wrap,
           wrapSide: carry.wrapSide ?? null,
           ...(carry.wrapDistances ? { wrapDistances: carry.wrapDistances } : {}),
-          ...(carry.wrapPolygon ? { wrapPolygon: carry.wrapPolygon } : {}),
+          ...(carry.wrapPolygon ? { wrapPolygon: Object.freeze(carry.wrapPolygon.map(shifted)) } : {}),
           ...(carry.topEdgeInclusiveFromYPt === undefined
             ? {} : { topEdgeInclusiveFromYPt: carry.topEdgeInclusiveFromYPt }),
           ...(carry.anchorLineExemptTopPt === undefined
@@ -2727,11 +2750,11 @@ function prescanBodyPageAnchors(
       return [];
     }
     // `word-vertical-section-upright-block-table`: the drawing lies below
-    // the upright tables pinned for tables before its paragraph, as its
-    // paragraph's own acquisition places it (paragraph.ts).
+    // the upright tables in place (the page's pins), as its paragraph's own
+    // acquisition places it (paragraph.ts).
     const shiftPt = anchor.paragraphSource.path.length === 1
       ? inlineShiftBelowUprightTablesPt(
-          state.uprightBlockIndex, anchor.paragraphSource.path[0]!, retainedResult.geometry.objectFrame,
+          state.uprightBlockIndex, Number.POSITIVE_INFINITY, retainedResult.geometry.objectFrame,
         )
       : 0;
     const shifted = <Rect extends { xPt: number }>(rect: Rect): Rect =>
@@ -3011,9 +3034,7 @@ function commitBodyUprightBlocks(
   if (registration.tail) {
     index.tail = registration.tail;
   }
-  const tableBox = registration.tableBox
-    ?? (registration.tail && registration.box
-      ? { sourceIndex: registration.tail.sourceIndex, box: registration.box } : null);
+  const tableBox = uprightRegistrationTableBox(registration);
   if (tableBox) {
     let versions = uprightTableBoxVersionsByServices.get(context.services);
     if (!versions) uprightTableBoxVersionsByServices.set(context.services, versions = new Map());

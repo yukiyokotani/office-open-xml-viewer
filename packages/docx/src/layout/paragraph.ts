@@ -2546,11 +2546,18 @@ export interface ParagraphAcquisitionOptions {
   /** Effective prior DrawingML objects in this flow domain. */
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
   /** `word-vertical-section-upright-block-table`: the page's upright block
-   * tables and this paragraph's body index. A wrapped drawing the paragraph
-   * anchors is moved along the inline axis to lie below the tables placed
-   * for tables before it that it would cover
-   * (inlineShiftBelowUprightTablesPt). */
-  readonly uprightTables?: Readonly<{ index: UprightBlockPageIndex; beforeSourceIndex: number }>;
+   * tables, and the boxes of tables planned after this paragraph that its
+   * drawings have to clear as well. A wrapped drawing the paragraph anchors
+   * is moved along the inline axis to lie below every such box it would
+   * cover (inlineShiftBelowUprightTablesPt); how that move and the
+   * paragraph's own anchor reflow are resolved together is stated at
+   * UprightDrawingMoves. */
+  readonly uprightTables?: Readonly<{
+    index: UprightBlockPageIndex | undefined;
+    planned?: readonly LayoutRect[];
+  }>;
+  /** Set by acquireParagraphResult only, for one reflow pass. */
+  readonly uprightDrawingMoves?: UprightDrawingMoves;
   /** Present only while acquiring a paragraph hosted by a table cell. */
   readonly anchorCellBounds?: LayoutRect;
   /** Effective enclosing fill, retained only for automatic text-color resolution. */
@@ -5295,14 +5302,32 @@ function acquireAnchorOccurrence(
       if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
     }
     // `word-vertical-section-upright-block-table`: a wrapped drawing does not
-    // cover an upright block table placed for a table before its paragraph;
-    // it lies directly below it. A carried drawing keeps its frame.
-    if (!frozenFrame && options.uprightTables
+    // cover an upright block table in place when its paragraph is laid out;
+    // it lies directly below it, a carried drawing from the frame it keeps.
+    if (options.uprightTables
       && placedResult.geometry.wrapBounds && placedResult.geometry.wrap.kind !== 'none') {
-      const shiftPt = inlineShiftBelowUprightTablesPt(
-        options.uprightTables.index, options.uprightTables.beforeSourceIndex, placedRect,
-      );
-      if (shiftPt !== 0) translateAnchor({ xPt: shiftPt, yPt: 0 });
+      const moves = options.uprightDrawingMoves;
+      const held = moves?.held.get(occurrenceId);
+      if (held && moves!.exact) {
+        // The hold pass: the drawing lies where the last pass left it.
+        translateAnchor({ xPt: held.xPt - placedRect.xPt, yPt: held.yPt - placedRect.yPt });
+      } else {
+        // A drawing that a table has moved does not move back, along either
+        // axis, when its own text wraps differently in a later pass.
+        if (held && (held.xPt > placedRect.xPt || held.yPt > placedRect.yPt)) {
+          translateAnchor({
+            xPt: Math.max(0, held.xPt - placedRect.xPt),
+            yPt: Math.max(0, held.yPt - placedRect.yPt),
+          });
+        }
+        const shiftPt = inlineShiftBelowUprightTablesPt(
+          options.uprightTables.index, Number.POSITIVE_INFINITY, placedRect, options.uprightTables.planned,
+        );
+        if (shiftPt !== 0) translateAnchor({ xPt: shiftPt, yPt: 0 });
+        moves?.placed.set(occurrenceId, Object.freeze({
+          xPt: placedRect.xPt, yPt: placedRect.yPt, moved: held !== undefined || shiftPt !== 0,
+        }));
+      }
     }
     return Object.freeze({
       acquiredShapeTextBoxes,
@@ -6193,6 +6218,48 @@ export function acquireShapeTextBoxLayout(
   }
 }
 
+/**
+ * `word-vertical-section-upright-block-table`: how the move of a wrapped
+ * drawing below upright block tables and the anchor reflow of its paragraph
+ * are resolved together (acquireParagraphResult). Library policy.
+ *
+ * Each reflow pass lays the paragraph's lines out against the drawings
+ * where the pass before left them, then places every drawing from those
+ * lines. A drawing positioned relative to its character or line follows its
+ * text, and one that a table has moved lies in other text than the one it
+ * was positioned from, so the two can feed each other. The rule that
+ * breaks the loop: a drawing that a table has moved never moves back. From
+ * the pass in which a table first moves it, it takes, along each axis, the
+ * farther of the position its text gives it and the position it had after
+ * the pass before (`held`), and is then moved below the tables it covers
+ * there.
+ *
+ * Convergence. The passes end at the first one that leaves every drawing
+ * where the pass before left it; its lines are then laid out against the
+ * drawings exactly where they lie. The set of drawings a table has moved
+ * only grows, and their positions only grow along both axes, so no pass
+ * returns such a drawing to an earlier position: a table move cannot make
+ * the passes repeat. What can still keep them from ending is the anchor
+ * reflow of the drawings no table moved, or positions that keep growing
+ * past the pass limit. Either ends in the hold pass (`exact`): one more
+ * pass lays the lines out against the drawings of the last pass and places
+ * every wrapped drawing where that pass left it, whatever its text now
+ * gives. That pass depends on no further one, so a paragraph beside
+ * upright block tables takes at most the pass limit plus one passes and
+ * always lays out; every position a pass leaves is clear of the tables, so
+ * the held ones are too.
+ */
+export type UprightDrawingMoves = Readonly<{
+  /** Where each drawing lay after the pass before, by occurrence: those a
+   * table has moved, or in the hold pass every wrapped drawing. */
+  held: ReadonlyMap<string, Readonly<{ xPt: number; yPt: number }>>;
+  /** The hold pass: a drawing lies exactly at its `held` position. */
+  exact: boolean;
+  /** Written by the pass: where each wrapped drawing lies after it, and
+   * whether a table has moved it in this pass or an earlier one. */
+  placed: Map<string, Readonly<{ xPt: number; yPt: number; moved: boolean }>>;
+}>;
+
 /** Single acquisition seam from public/parser paragraph input to retained geometry.
  * Existing `measureParagraph` remains the sole segment and line-break owner. */
 class ParagraphAnchorReflowNonConvergenceError extends LayoutInvariantError {
@@ -6750,8 +6817,8 @@ function paragraphAcquisitionKey(
     // content: a later pass that places the same tables reuses the
     // acquisition.
     ...(lineOnly || !hasAnchoredPayload || !options.uprightTables ? [null, null] : [
-      options.uprightTables.index.tableBoxesVersion,
-      options.uprightTables.beforeSourceIndex,
+      options.uprightTables.index?.tableBoxesVersion ?? 0,
+      options.uprightTables.planned ? JSON.stringify(options.uprightTables.planned) : null,
     ]),
     lineOnly || !hasAnchoredPayload ? null : options.paragraphAnchorReferenceDeltaPt ?? null,
     lineOnly || !hasAnchoredPayload || !options.frozenAnchorFrames?.size
@@ -7025,10 +7092,19 @@ export function acquireParagraphResult(
   // WORD_MODE14_TIGHT_ANCHOR_LINE_REWRAP: decided once from the pass that laid
   // every host line out without its own objects.
   let anchorLineExemptions: ReadonlyMap<string, number> | undefined;
+  // UprightDrawingMoves: the drawings a table has moved so far, where the
+  // last pass left them; the last pass with every drawing's place; and
+  // whether the pass being run is the hold pass.
+  let uprightHeld: UprightDrawingMoves['held'] = new Map();
+  let lastPass: Readonly<{ pass: Pass; placed: UprightDrawingMoves['placed'] }> | undefined;
+  let holdPass = false;
+  let reflowPass!: (previous: Pass | null) => Pass;
   try {
-    const result = convergeExactState<Pass>({
+    const converged = (): Pass => convergeExactState<Pass>({
       seedState: exclusionSetState(initialExclusions),
-      step: (previous) => {
+      step: reflowPass = (previous) => {
+        const uprightDrawingMoves: UprightDrawingMoves | undefined = options.uprightTables
+          ? { held: uprightHeld, exact: holdPass, placed: new Map() } : undefined;
         const effectiveExclusions = mergeParagraphExclusions(
           options.exclusions,
           previous?.ownedExclusions ?? initialOwnedExclusions,
@@ -7036,8 +7112,13 @@ export function acquireParagraphResult(
         const measured = lineTemplate
           ? placeCachedLineBreaking(lineTemplate, options.placement)
           : measureWithExclusions(effectiveExclusions);
-        const projectionOptions = anchorLineExemptions && anchorLineExemptions.size > 0
-          ? { ...acquisitionOptions, anchorLineExemptions } : acquisitionOptions;
+        const projectionOptions = (anchorLineExemptions && anchorLineExemptions.size > 0) || uprightDrawingMoves
+          ? {
+              ...acquisitionOptions,
+              ...(anchorLineExemptions && anchorLineExemptions.size > 0 ? { anchorLineExemptions } : {}),
+              ...(uprightDrawingMoves ? { uprightDrawingMoves } : {}),
+            }
+          : acquisitionOptions;
         let layout = projectAcquiredParagraph(
           paragraph, projectionOptions, measured, lineReferences,
         );
@@ -7151,7 +7232,16 @@ export function acquireParagraphResult(
         if (exclusionSetState(layout.exclusions) !== state) {
           throw new Error('Paragraph retained exclusions differ from the measured exclusion authority');
         }
-        return Object.freeze({ measured, layout, ownedExclusions, state });
+        const pass = Object.freeze({ measured, layout, ownedExclusions, state });
+        if (uprightDrawingMoves && !holdPass) {
+          const held = new Map(uprightHeld);
+          for (const [occurrenceId, place] of uprightDrawingMoves.placed) {
+            if (place.moved) held.set(occurrenceId, place);
+          }
+          uprightHeld = held;
+          lastPass = { pass, placed: uprightDrawingMoves.placed };
+        }
+        return pass;
       },
       stateOf: (pass) => pass.state,
       // Operational fail-closed resource guard. The exact-state/cycle checks
@@ -7159,6 +7249,16 @@ export function acquireParagraphResult(
       // geometry orbit from consuming unbounded work.
       limit: 16,
     }).value;
+    let result: Pass;
+    try {
+      result = converged();
+    } catch (error) {
+      if (!(error instanceof ExactConvergenceError) || !lastPass) throw error;
+      // The hold pass (UprightDrawingMoves).
+      holdPass = true;
+      uprightHeld = lastPass.placed;
+      result = reflowPass(lastPass.pass);
+    }
     // A cache hit may cross convergence passes. Retain an immutable measurement
     // envelope without recursively freezing caller-owned capabilities such as
     // the wrap oracle referenced by placement.

@@ -1276,54 +1276,193 @@ describe('upright block table of a vertical section', () => {
       expect(collisions(pages)).toEqual([]);
     });
 
+    /** A paragraph of `characters` characters whose last runs anchor `rectangles`. */
+    const anchoring = (characters: number, ...rectangles: string[]) =>
+      paragraph('あ'.repeat(characters)).replace('</w:p>', `${rectangles.join('')}</w:p>`);
+
+    it('lays out a drawing that follows its character where a table has moved it into its own text', () => {
+      // Both rectangles lie over the 45-row table before their paragraphs
+      // and move below it, into the text of the second paragraph. The second
+      // is positioned along the block axis from its character, which its
+      // own exclusion moves from strip to strip: it keeps the farthest
+      // position it has reached and the paragraph lays out.
+      let pages: Page[] = [];
+      expect(() => {
+        pages = layOutPages('tbLrV', [
+          table(45),
+          anchoring(35, anchoredRectangle(70, 170, 200, 50, 'paragraph')),
+          anchoring(90, anchoredRectangle(-20, 170, 200, 150, 'paragraph', 'character')),
+        ]);
+      }).not.toThrow();
+      expect(pages).toHaveLength(1);
+      const [placed] = pages[0]!.tables;
+      expect(pages[0]!.drawings).toHaveLength(2);
+      for (const drawing of pages[0]!.drawings) expect(drawing.top).toBeCloseTo(placed!.bottom, 6);
+      expect(collisions(pages)).toEqual([]);
+    });
+
+    it('keeps a drawing of the strip before a table clear of the table when wrapping the strip moves it', () => {
+      // The rectangle follows its character, the last of the strip before
+      // the table. Laid out without the table it is clear of the table's
+      // place; wrapped around the table the strip's last characters, and
+      // the rectangle with them, move to the strip past the table, where
+      // it would lie over the table. The table keeps its place and the
+      // rectangle lies directly below it.
+      const pages = layOutPages('tbRl', [
+        anchoring(35, anchoredRectangle(45, 0, 38, 50, 'paragraph', 'character')), table(1, 400),
+      ], 2);
+      expect(pages).toHaveLength(1);
+      const [placed] = pages[0]!.tables;
+      expect(placed).toEqual(layOutPages('tbRl', [anchoring(35), table(1, 400)], 2)[0]!.tables[0]);
+      const [drawing] = pages[0]!.drawings;
+      expect(shared(drawing!.left, drawing!.left + drawing!.width, placed!.paintedLeft, placed!.paintedRight)).toBe(true);
+      expect(drawing!.top).toBeCloseTo(placed!.bottom, 6);
+      expect(collisions(pages)).toEqual([]);
+    });
+
+    it.each([
+      ['one drawing positioned from its line and character', 'tbRl', 1,
+        [anchoring(140, anchoredRectangle(40, 8, 340, 1, 'line', 'character'))]],
+      ['two drawings positioned from their character', 'tbLrV', 2,
+        [anchoring(66, anchoredRectangle(19, 119, 340, 150, 'paragraph', 'character'),
+          anchoredRectangle(-50, 207, 200, 50, 'line', 'character'))]],
+    ] as const)('lays out a paragraph whose own drawings keep moving its text: %s', (_name, direction, columns, body) => {
+      // The drawings follow characters that their own exclusions move, and
+      // no position of them repeats from one reflow pass to the next. The
+      // paragraph is laid out against the drawings where the last pass left
+      // them, the same way every time.
+      let pages: Page[] = [];
+      expect(() => { pages = layOutPages(direction, body, columns); }).not.toThrow();
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.drawings).toHaveLength(body[0]!.split('<w:drawing>').length - 1);
+      expect(layOutPages(direction, body, columns)).toEqual(pages);
+    });
+
+    it('moves a drawing carried from an earlier layout of its page below the table it would cover', () => {
+      // The last-but-one paragraph's rectangle lies over strips of earlier
+      // paragraphs, so the page is laid out again with the rectangle
+      // registered from its start at the frame it had; the tables are
+      // placed differently in that layout, and the rectangle lies below
+      // the table it would then cover.
+      const pages = layOutPages('tbLrV', [
+        anchoring(5), anchoring(35, anchoredRectangle(-55, 325, 20, 10, 'page', 'character')),
+        table(1, 800), table(6),
+        anchoring(90, anchoredRectangle(21, 80, 60, 1, 'paragraph', 'character')),
+        anchoring(20, anchoredRectangle(-36, 73, 60, 150, 'paragraph', 'character')),
+        anchoring(90, anchoredRectangle(105, 142, 200, 1, 'line', 'page')), table(6),
+      ], 2);
+      expect(pages[0]!.tables).toHaveLength(3);
+      expect(pages[0]!.drawings).toHaveLength(4);
+      expect(collisions(pages)).toEqual([]);
+    });
+
     it('lays out generated sequences of tables, continued tables and drawings without overlap', () => {
-      // A fixed pseudo-random stream (mulberry32) of paragraphs, some
-      // anchoring square-wrapped rectangles at page or paragraph-relative
-      // positions over the band, column breaks, runs of directly following
-      // tables and tables continued over pages, in one and two columns of
-      // both directions. Every sequence has to lay out with no table box
-      // sharing an area with another table or a drawing of its page.
-      let seed = 0x2b12;
-      const random = () => {
-        seed = (seed + 0x6d2b79f5) | 0;
-        let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-        value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
-        return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+      // Fixed pseudo-random streams (mulberry32) of paragraphs, some
+      // anchoring square-wrapped rectangles, column breaks, runs of directly
+      // following tables and tables continued over pages, in one and two
+      // columns of both directions. Every sequence has to lay out with no
+      // table box sharing an area with another table or a drawing of its
+      // page.
+      const stream = (start: number) => {
+        let seed = start;
+        return () => {
+          seed = (seed + 0x6d2b79f5) | 0;
+          let value = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+          value = (value + Math.imul(value ^ (value >>> 7), 61 | value)) ^ value;
+          return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+        };
       };
-      const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
       const columnBreak = '<w:p><w:r><w:br w:type="column"/></w:r></w:p>';
-      const tables = [T, T, table(1), table(6), table(30), table(70), table(1, 400), table(1, 800)];
-      const drawing = () => {
-        const width = pick([20, 60, 80, 340]);
-        const height = pick([1, 10, 20, 40]);
-        const paragraphRelative = random() < 0.25;
-        return anchoredRectangle(
-          40 + Math.floor(random() * (PAGE_W - 80 - width)),
-          paragraphRelative ? Math.floor(random() * 40) : 40 + Math.floor(random() * 700),
-          width, height, paragraphRelative ? 'paragraph' : 'page',
-        );
+      const check = (direction: Direction, columns: number, body: readonly string[], context: string) => {
+        let pages: Page[] = [];
+        expect(() => { pages = layOutPages(direction, body, columns); }, context).not.toThrow();
+        expect(collisions(pages), context).toEqual([]);
       };
-      for (const direction of ['tbRl', 'tbLrV'] as const) {
-        for (const columns of [1, 2]) {
-          for (let sample = 0; sample < 12; sample += 1) {
-            const body: string[] = [];
-            const length = 3 + Math.floor(random() * 10);
-            for (let at = 0; at < length; at += 1) {
-              const kind = random();
-              if (kind < 0.4) {
-                for (let run = random() < 0.25 ? 2 : 1; run > 0; run -= 1) body.push(pick(tables));
-              } else if (kind < 0.45 && columns > 1) {
-                body.push(columnBreak);
-              } else {
-                for (let run = 1 + Math.floor(random() * 4); run > 0; run -= 1) {
-                  body.push(random() < 0.5 ? P.replace('</w:p>', `${drawing()}</w:p>`) : P);
+
+      // One-strip paragraphs with rectangles at page positions or at
+      // paragraph-relative positions over the band.
+      {
+        const random = stream(0x2b12);
+        const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
+        const tables = [T, T, table(1), table(6), table(30), table(70), table(1, 400), table(1, 800)];
+        const drawing = () => {
+          const width = pick([20, 60, 80, 340]);
+          const height = pick([1, 10, 20, 40]);
+          const paragraphRelative = random() < 0.25;
+          return anchoredRectangle(
+            40 + Math.floor(random() * (PAGE_W - 80 - width)),
+            paragraphRelative ? Math.floor(random() * 40) : 40 + Math.floor(random() * 700),
+            width, height, paragraphRelative ? 'paragraph' : 'page',
+          );
+        };
+        for (const direction of ['tbRl', 'tbLrV'] as const) {
+          for (const columns of [1, 2]) {
+            for (let sample = 0; sample < 12; sample += 1) {
+              const body: string[] = [];
+              const length = 3 + Math.floor(random() * 10);
+              for (let at = 0; at < length; at += 1) {
+                const kind = random();
+                if (kind < 0.4) {
+                  for (let run = random() < 0.25 ? 2 : 1; run > 0; run -= 1) body.push(pick(tables));
+                } else if (kind < 0.45 && columns > 1) {
+                  body.push(columnBreak);
+                } else {
+                  for (let run = 1 + Math.floor(random() * 4); run > 0; run -= 1) {
+                    body.push(random() < 0.5 ? P.replace('</w:p>', `${drawing()}</w:p>`) : P);
+                  }
                 }
               }
+              check(direction, columns, body, `${direction} ${columns} column(s) sample ${sample}`);
             }
-            const context = `${direction} ${columns} column(s) sample ${sample}`;
-            let pages: Page[] = [];
-            expect(() => { pages = layOutPages(direction, body, columns); }, context).not.toThrow();
-            expect(collisions(pages), context).toEqual([]);
+          }
+        }
+      }
+
+      // Paragraphs of one to several strips whose rectangles are positioned
+      // from the page, the paragraph, the line or the character along either
+      // axis, so that a rectangle follows text that its own exclusion, a
+      // table or another rectangle moves; anchored before tables, after
+      // them, and by the paragraph directly before a table.
+      for (const start of [0x51c3, 0x0a17, 0x7e2d]) {
+        const random = stream(start);
+        const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
+        const tables = [T, T, table(1), table(6), table(30), table(45), table(70), table(1, 400), table(1, 800)];
+        const drawing = () => {
+          const width = pick([20, 38, 60, 80, 200, 340]);
+          const height = pick([1, 10, 20, 50, 150]);
+          const horizontalFrom = random() < 0.5 ? 'character' : 'page';
+          const verticalFrom = pick(['page', 'paragraph', 'paragraph', 'line'] as const);
+          return anchoredRectangle(
+            horizontalFrom === 'character'
+              ? -60 + Math.floor(random() * 120) : 40 + Math.floor(random() * (PAGE_W - 80 - width)),
+            verticalFrom === 'page' ? 40 + Math.floor(random() * 700) : Math.floor(random() * 300),
+            width, height, verticalFrom, horizontalFrom,
+          );
+        };
+        const text = () => {
+          const characters = random() < 0.5 ? 5 : pick([20, 35, 66, 90, 140]);
+          if (random() < 0.5) return anchoring(characters);
+          return anchoring(characters, drawing(), ...(random() < 0.2 ? [drawing()] : []));
+        };
+        for (const direction of ['tbRl', 'tbLrV'] as const) {
+          for (const columns of [1, 2]) {
+            for (let sample = 0; sample < 40; sample += 1) {
+              const body: string[] = [];
+              const length = 2 + Math.floor(random() * 8);
+              for (let at = 0; at < length; at += 1) {
+                const kind = random();
+                if (kind < 0.3) {
+                  for (let run = random() < 0.25 ? 2 : 1; run > 0; run -= 1) body.push(pick(tables));
+                } else if (kind < 0.45) {
+                  body.push(anchoring(pick([5, 35, 66, 90]), drawing()), pick(tables));
+                } else if (kind < 0.5 && columns > 1) {
+                  body.push(columnBreak);
+                } else {
+                  for (let run = 1 + Math.floor(random() * 3); run > 0; run -= 1) body.push(text());
+                }
+              }
+              check(direction, columns, body, `stream ${start} ${direction} ${columns} column(s) sample ${sample}`);
+            }
           }
         }
       }

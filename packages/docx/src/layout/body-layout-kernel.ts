@@ -66,7 +66,8 @@ export interface BodyParagraphAcquisitionInput {
   /** `word-vertical-section-upright-table-rewrapped-strip`: upright blocks
    * planned after this fragment (BodyLayoutSession.planUprightBlocks) whose
    * text exclusions this acquisition wraps around although they are not
-   * registered yet. */
+   * registered yet, and below whose box the wrapped drawings it anchors
+   * lie, as below a registered one. */
   readonly besideUprightBlocks?: UprightBlockRegistration;
 }
 

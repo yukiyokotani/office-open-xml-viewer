@@ -22,7 +22,13 @@ import type {
   PageAnchorPrescanInput,
 } from './body-layout-kernel.js';
 import { NoteCapacityExceededError, noteBandKey } from './body-layout-kernel.js';
-import { uprightPrecedingDrawings, type UprightBlockRegistration } from './upright-block-index.js';
+import {
+  uprightDrawingFrames,
+  uprightPrecedingDrawings,
+  uprightRectsShareArea,
+  uprightRegistrationTableBox,
+  type UprightBlockRegistration,
+} from './upright-block-index.js';
 import { NoteStack } from './note-stack.js';
 import { PageNoteController, PageNoteReplay } from './page-note-controller.js';
 import { acquireNoteColumnPartition as acquireNoteColumnPartitionBase, destinationOwnedNote } from './note-column-acquisition.js';
@@ -3415,7 +3421,8 @@ function* paginateBodyPassSteps(
             }),
           });
           // The wrapped drawings this fragment anchors are committed with it,
-          // after the plan: the plan meets them as they will lie.
+          // after the plan: the plan meets them where the fragment laid out
+          // without the tables has them.
           const precedingDrawings = uprightPrecedingDrawings(
             acquired.flowRegistryDelta?.floats?.entries, selected.fragment,
           );
@@ -3430,20 +3437,37 @@ function* paginateBodyPassSteps(
             lastColumnOfPage: inLastColumn(state),
           });
           if (planned) {
+            // Wrapping the fragment around the planned tables can move a
+            // drawing positioned relative to its character or line. The
+            // tables do not follow it: the fragment is laid out with its
+            // drawings below the planned box, as below a table in place
+            // (UprightDrawingMoves), so the planning is one plan and one
+            // layout however the drawings move. The plan is accepted only
+            // when the drawings of that fragment, the one committed, leave
+            // its box clear. One that does not (a drawing the paragraph's
+            // acquisition does not place) drops the plan: the fragment is
+            // committed as laid out without the tables, and each table
+            // meets its drawings on the page when the flow reaches it.
             const wrapped = session.measureParagraph({ ...paragraphRequest, besideUprightBlocks: planned });
             const wrappedChoice = wrapped.placement ? null : selectFragment(wrapped);
             if (wrappedChoice?.selected.fragment && wrappedChoice.selected.nextCursor === null
               && !wrappedChoice.selected.requiresFreshFlowRegion) {
-              acquired = wrapped;
-              ({ selected, notePlans } = wrappedChoice);
-              uprightBlocks = planned;
-              uprightBlocksFor = sourceKey(tableAfter.source);
-              uprightBlocksIndex = tableAfter.source.path[0]!;
+              const plannedBox = uprightRegistrationTableBox(planned)?.box;
+              const coversPlan = plannedBox !== undefined && uprightDrawingFrames(
+                wrapped.flowRegistryDelta?.floats?.entries, wrappedChoice.selected.fragment,
+              ).some((frame) => uprightRectsShareArea(frame, plannedBox));
+              if (!coversPlan) {
+                acquired = wrapped;
+                ({ selected, notePlans } = wrappedChoice);
+                uprightBlocks = planned;
+                uprightBlocksFor = sourceKey(tableAfter.source);
+                uprightBlocksIndex = tableAfter.source.path[0]!;
+              }
             } else if (canRecoverOnPage) {
               // The paragraph no longer ends here beside the tables: it is
               // paginated again as any paragraph beside an exclusion (its
               // lines move to the next column or page as they must), and the
-              // tables keep their place.
+              // tables keep their place; its drawings lie below them.
               // The flow can reach them in another column. They are not
               // page pins yet: a table raised over an earlier column still
               // asks for one when the flow reaches it.
@@ -3879,7 +3903,7 @@ function* paginateBodyPassSteps(
       session.resetPageAcquisition(acquisitionLocation(state));
       // The page's upright block pins hold for every layout of it, and are
       // registered first: a drawing placed when the page's layout starts
-      // lies below the pinned tables before it.
+      // lies below the pinned tables.
       uprightReplayPending = false;
       for (const pin of uprightPinsOf(state.flow.pageIndex).values()) {
         pin.consumed = false;

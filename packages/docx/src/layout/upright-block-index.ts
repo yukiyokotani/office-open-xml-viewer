@@ -29,6 +29,18 @@ import type { FloatRegistryEntryPt, LayoutRect, ParagraphLayout } from './types.
  *   drawing anchored after a table lies below it: when a table box is
  *   placed, the drawings it covers move below it here before any later
  *   table is placed against them.
+ * - Drawings move past tables. A wrapped drawing laid out while a table
+ *   box is in place never covers it: it moves along the inline axis to lie
+ *   below it (inlineShiftBelowUprightTablesPt), whichever of the two comes
+ *   first in the body. That is a drawing anchored after the table; one
+ *   anchored before a table placed ahead of the flow (a pin, or the tables
+ *   planned with the paragraph fragment before them, whose plan is accepted
+ *   only when the drawings of the fragment that is committed leave its box
+ *   clear, body-paginator.ts); and one carried from an earlier layout of
+ *   its page, from the frame it keeps. Tables never move for a drawing laid
+ *   out after them and a drawing a table has moved never moves back, so the
+ *   two cannot chase each other; how that holds for a drawing that follows
+ *   its own text is stated at UprightDrawingMoves (paragraph.ts).
  * - What a box obstructs. A table box obstructs only the fragments after
  *   it in body order (`boxOrders`). A box of a later fragment is on the
  *   page early only as a pin, and the layout that pinned it placed the
@@ -363,42 +375,65 @@ export function addUprightTableBox(
 
 /**
  * `word-vertical-section-upright-block-table`: how far along the inline axis
- * (x) a wrapped drawing with frame `rect`, anchored by the paragraph at body
- * index `beforeSourceIndex`, moves to lie below the upright block tables
- * placed for tables before that paragraph: past the inline end of each such
- * box it would cover, taken in inline order so that a box reached by the
- * move is cleared too. Zero when it covers none. Only the boxes in the
- * drawing's block range are read.
+ * (x) a wrapped drawing with frame `rect` moves to lie below the upright
+ * block tables it would cover: past the inline end of each such box, taken
+ * in inline order so that a box reached by the move is cleared too. Zero
+ * when it covers none. Only the boxes in the drawing's block range are read.
+ *
+ * The boxes are those placed for tables before body index
+ * `beforeSourceIndex`, and `planned`. A paragraph's own acquisition passes
+ * no limit (Number.POSITIVE_INFINITY): every box on the page when the
+ * paragraph is laid out is in place for good, also one of a later table
+ * placed ahead of the flow, and the drawing moves past it
+ * (UprightBlockPageIndex, "Drawings move past tables").
  */
 export function inlineShiftBelowUprightTablesPt(
   index: UprightBlockPageIndex | undefined,
   beforeSourceIndex: number,
   rect: LayoutRect,
+  planned?: readonly LayoutRect[],
 ): number {
-  if (!index || index.tableCount === 0) return 0;
   const blockEndPt = rect.yPt + rect.heightPt;
-  const first = bucketOf(rect.yPt);
-  const last = bucketOf(blockEndPt);
-  let met: UprightTableBox[] | null = null;
-  for (let bucket = first; bucket <= last; bucket += 1) {
-    const entries = index.tableBuckets.get(bucket);
-    if (!entries) continue;
-    for (const entry of entries) {
-      const { box } = entry;
-      // A box registered in several buckets is taken from the first of them
-      // that this query reads.
-      if (entry.sourceIndex < beforeSourceIndex
-        && bucket === Math.max(first, bucketOf(box.yPt))
-        && box.yPt < blockEndPt && rect.yPt < box.yPt + box.heightPt) (met ??= []).push(entry);
+  const inRange = (box: LayoutRect) => box.yPt < blockEndPt && rect.yPt < box.yPt + box.heightPt;
+  let met: LayoutRect[] | null = null;
+  if (planned) for (const box of planned) if (inRange(box)) (met ??= []).push(box);
+  if (index && index.tableCount > 0) {
+    const first = bucketOf(rect.yPt);
+    const last = bucketOf(blockEndPt);
+    for (let bucket = first; bucket <= last; bucket += 1) {
+      const entries = index.tableBuckets.get(bucket);
+      if (!entries) continue;
+      for (const entry of entries) {
+        const { box } = entry;
+        // A box registered in several buckets is taken from the first of them
+        // that this query reads.
+        if (entry.sourceIndex < beforeSourceIndex
+          && bucket === Math.max(first, bucketOf(box.yPt)) && inRange(box)) (met ??= []).push(box);
+      }
     }
   }
   if (!met) return 0;
-  met.sort((left, right) => left.box.xPt - right.box.xPt);
+  met.sort((left, right) => left.xPt - right.xPt);
   let startPt = rect.xPt;
-  for (const { box } of met) {
+  for (const box of met) {
     if (box.xPt < startPt + rect.widthPt && startPt < box.xPt + box.widthPt) startPt = box.xPt + box.widthPt;
   }
   return startPt - rect.xPt;
+}
+
+/** The box a registration adds to the history of placed tables
+ * (addUprightTableBox), or null when it adds none. */
+export function uprightRegistrationTableBox(registration: UprightBlockRegistration): UprightTableBox | null {
+  return registration.tableBox
+    ?? (registration.tail && registration.box
+      ? { sourceIndex: registration.tail.sourceIndex, box: registration.box } : null);
+}
+
+/** Whether two rectangles share an area: more than a common edge, within
+ * the tolerance line bands use (1e-6 pt). */
+export function uprightRectsShareArea(first: LayoutRect, second: LayoutRect): boolean {
+  return Math.min(first.xPt + first.widthPt, second.xPt + second.widthPt) - Math.max(first.xPt, second.xPt) > 1e-6
+    && Math.min(first.yPt + first.heightPt, second.yPt + second.heightPt) - Math.max(first.yPt, second.yPt) > 1e-6;
 }
 
 /** The extent of what a recorded drawing places or was registered with: its
@@ -630,17 +665,28 @@ export function uprightPrecedingDrawings(
   entries: readonly FloatRegistryEntryPt[] | undefined,
   fragment: ParagraphLayout,
 ): LayoutRect[] {
+  return fragmentDrawingEntries(entries, fragment).map((entry) => entry.exclusionBounds);
+}
+
+/** The frames of those drawings: what has to leave the box of a plan clear
+ * for the plan to be accepted (body-paginator.ts). */
+export function uprightDrawingFrames(
+  entries: readonly FloatRegistryEntryPt[] | undefined,
+  fragment: ParagraphLayout,
+): LayoutRect[] {
+  return fragmentDrawingEntries(entries, fragment).map((entry) => entry.bounds);
+}
+
+function fragmentDrawingEntries(
+  entries: readonly FloatRegistryEntryPt[] | undefined,
+  fragment: ParagraphLayout,
+): FloatRegistryEntryPt[] {
   if (!entries || entries.length === 0) return [];
   const anchored = new Set<string>();
   for (const drawing of fragment.drawings) {
     const occurrenceId = drawing.anchorLayer?.acquisitionOccurrenceId ?? drawing.anchorLayer?.occurrenceId;
     if (occurrenceId !== undefined) anchored.add(occurrenceId);
   }
-  const drawings: LayoutRect[] = [];
-  for (const entry of entries) {
-    if (entry.kind === 'shape' && entry.wrap !== undefined && anchored.has(entry.occurrenceId)) {
-      drawings.push(entry.exclusionBounds);
-    }
-  }
-  return drawings;
+  return entries.filter((entry) =>
+    entry.kind === 'shape' && entry.wrap !== undefined && anchored.has(entry.occurrenceId));
 }

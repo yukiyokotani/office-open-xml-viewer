@@ -40,11 +40,11 @@ export const table = (rows: number, rowHeightPt?: number) => '<w:tbl><w:tblPr><w
 export const T = table(2);
 
 /** A paragraph run anchoring a square-wrapped rectangle at page position
- * (x, y), `width` x `height` pt; `verticalFrom` 'paragraph' makes y relative
- * to the anchoring paragraph instead, and `horizontalFrom` 'character' makes
- * x relative to the anchor's character. */
+ * (x, y), `width` x `height` pt; `verticalFrom` 'paragraph' or 'line' makes
+ * y relative to the anchoring paragraph or the anchor's line instead, and
+ * `horizontalFrom` 'character' makes x relative to the anchor's character. */
 export const anchoredRectangle = (
-  x: number, y: number, width: number, height: number, verticalFrom: 'page' | 'paragraph' = 'page',
+  x: number, y: number, width: number, height: number, verticalFrom: 'page' | 'paragraph' | 'line' = 'page',
   horizontalFrom: 'page' | 'character' = 'page',
 ) =>
   '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
