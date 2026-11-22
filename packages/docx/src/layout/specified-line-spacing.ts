@@ -5,6 +5,7 @@ import type { ParagraphLayoutSource, ParagraphTextBearingRun } from './text.js';
 import type { ParagraphLayoutContext } from '../layout-context.js';
 import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
 import { wordSpecifiedTextLineMetrics } from './line-compatibility.js';
+import { sameRouteFaces } from '../line-breaker/font-routes.js';
 
 function referenceSourceAdmitted(segment: LayoutTextSeg): boolean {
   return segment.fontSource === 'native'
@@ -113,7 +114,9 @@ export function specifiedTextLineMetrics(
     first ??= segment;
     if ((segment.authoredFontFamily ?? segment.fontFamily) !== (first.authoredFontFamily ?? first.fontFamily)
       || segment.fontSize !== first.fontSize
-      || segment.fontRoute?.fingerprint !== first.fontRoute?.fingerprint) return null;
+      // One face, whatever language each piece shapes in: the rule reads
+      // the face's line geometry.
+      || !sameRouteFaces(segment.fontRoute, first.fontRoute)) return null;
   }
   // Body acquisition retains the full mark axes on the source paragraph;
   // shape-text callers may also supply an explicit acquisition input. The

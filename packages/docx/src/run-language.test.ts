@@ -1,17 +1,32 @@
 import { describe, expect, it, vi } from 'vitest';
 
 // Node has no Canvas realm to run the route sentinels in; production judges
-// named-family ownership there (core namedFamiliesDrawText). Rendering tests
+// named-family ownership there (core createNamedFamilyOracle). Rendering tests
 // below use faces their recording canvas draws itself.
 // 'ж' stands for text only a generic fallback draws.
+const sentinels = vi.hoisted(() => ({
+  load: vi.fn(async (_fontSet: unknown): Promise<unknown[] | null> => null),
+  unload: vi.fn((_faces: unknown) => undefined),
+}));
 vi.mock('@silurus/ooxml-core', async (importOriginal) => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
+  loadNativeRouteSentinels: sentinels.load,
+  unloadOfficeFontFallbacks: sentinels.unload,
   createNamedFamilyOracle: () => ({
+    sentinelsApply: true,
     available: true,
-    draws: (_list: string, _w: number, _s: string, text: string) => !text.includes('ж'),
+    // U+0640 (a generated justification kashida) is drawn by named families
+    // of "Kashida Face" only.
+    // '〓' likewise stands for East Asian text only a fallback draws.
+    draws: (list: string, _w: number, _s: string, text: string) => !/[ж〓]/u.test(text)
+      && (!text.includes('\u0640') || list.includes('Kashida Face')),
   }),
 }));
+import { compatProfile } from './test-support/compat-environment.test-support.js';
 import { createFontResolver } from './layout/font-service.js';
+import { measureParagraphIntrinsicWidths } from './layout/intrinsic-width.js';
+import { createLayoutServices } from './layout-runtime.js';
+import type { ParagraphLayoutContext } from './layout-context.js';
 import { createTextLayoutService, rubyGuideShapeRequest, sliceTextShapeRequest, type GlyphMeasureRequest } from './layout/text.js';
 import { renderDocumentToCanvas } from './renderer.js';
 import type { BodyElement, DocParagraph, DocxDocumentModel, DocxTextRun, NumberingInfo, SectionProps } from './types';
@@ -36,7 +51,7 @@ describe('text service: §17.3.2.20 language per font slot', () => {
       measure: (request) => {
         measured.push(request);
         // A language-sensitive face: Serbian forms are narrower.
-        const em = request.lang?.startsWith('sr') ? 4 : 5;
+        const em = request.fontRoute.lang?.startsWith('sr') ? 4 : 5;
         return { advancePt: [...request.text].length * em, ascentPt: 8, descentPt: 2 };
       },
     },
@@ -52,50 +67,67 @@ describe('text service: §17.3.2.20 language per font slot', () => {
       text: 'بa', fontSizePt: 10, fonts, clusterGeometry: false, complexScript: true, ...languages,
     });
     const kana = service.shape({ text: 'か', fontSizePt: 10, fonts, clusterGeometry: false, ...languages });
-    expect([...mixed.spans, ...cs.spans, ...kana.spans].map((span) => [span.script, span.lang])).toEqual([
+    expect([...mixed.spans, ...cs.spans, ...kana.spans].map((span) => [span.script, span.fontRoute.lang])).toEqual([
       // Generic fallback draws '中': its language would choose the face.
       ['highAnsi', 'sr-latn-rs'], ['eastAsia', undefined], ['complexScript', 'ar-sa'], ['eastAsia', 'ja-jp'],
     ]);
-    expect(measured.map((request) => [request.text, request.lang])).toEqual([
+    expect(measured.map((request) => [request.text, request.fontRoute.lang])).toEqual([
       ['ж', 'sr-latn-rs'], ['中', undefined], ['بa', 'ar-sa'], ['か', 'ja-jp'],
     ]);
-    expect('lang' in mixed.spans[1]!).toBe(false);
+    // A span without a language keeps the resolved route itself, so its
+    // identity, cache keys and output are those of untagged text.
+    expect(mixed.spans[1]!.fontRoute).toBe(mixed.spans[1]!.font.route);
+    expect('lang' in mixed.spans[1]!.fontRoute).toBe(false);
+    // An admitted language is part of the route identity; the resolved faces
+    // (font.route, the line-metric identity) are unchanged.
+    expect(mixed.spans[0]!.fontRoute.fingerprint).toBe(`${mixed.spans[0]!.font.route.fingerprint}:lang:sr-latn-rs`);
+    expect(mixed.spans[0]!.fontRoute.familyList).toBe(mixed.spans[0]!.font.route.familyList);
+    expect(kana.spans[0]!.font.route.fingerprint).toBe(mixed.spans[1]!.fontRoute.fingerprint);
+    expect(kana.spans[0]!.fontRoute.fingerprint).not.toBe(mixed.spans[1]!.fontRoute.fingerprint);
   });
 
-  it('keys measurement by language only when one is set', () => {
+  it('keys measurement by the route, whose identity has a language only when one is set', () => {
     measured.length = 0;
     const serbian = service.shape({ text: 'бгд', fontSizePt: 10, fonts, language: 'sr-rs', clusterGeometry: false });
     const plain = service.shape({ text: 'бгд', fontSizePt: 10, fonts, clusterGeometry: false });
     // Word's "x-none" names no language: same measurement as untagged text.
     const none = service.shape({ text: 'бгд', fontSizePt: 10, fonts, language: 'x-none', clusterGeometry: false });
     expect([serbian.advancePt, plain.advancePt, none.advancePt]).toEqual([12, 15, 15]);
-    expect(measured.map((request) => 'lang' in request ? request.lang : 'absent')).toEqual(['sr-rs', 'absent']);
-    expect('lang' in plain.spans[0]!).toBe(false);
+    expect(measured.map((request) => request.fontRoute.lang ?? 'absent')).toEqual(['sr-rs', 'absent']);
+    expect(plain.spans[0]!.fontRoute).toBe(none.spans[0]!.fontRoute);
+    expect(serbian.spans[0]!.fontRoute.fingerprint).not.toBe(plain.spans[0]!.fontRoute.fingerprint);
+    // Not a language tag (and Canvas's own keyword): no language either.
+    for (const language of ['inherit', 'not a tag', 'x'.repeat(200)]) {
+      expect(service.shape({ text: 'бгд', fontSizePt: 10, fonts, language, clusterGeometry: false }).spans[0]!.fontRoute)
+        .toBe(plain.spans[0]!.fontRoute);
+    }
   });
 
   it('sets no language without named-family ownership evidence', () => {
     const unjudged = createTextLayoutService({
       fonts: createFontResolver([{ requestedFamily: 'Face', resolvedFamily: 'Face', source: 'local' }]),
       measurer: { fingerprint: 'unjudged', measure: request => {
-        expect('lang' in request).toBe(false);
+        expect(request.fontRoute.lang).toBeUndefined();
         return { advancePt: 5, ascentPt: 8, descentPt: 2 };
       } },
     });
     const shaped = unjudged.shape({ text: 'б', fontSizePt: 10, fonts, language: 'sr-rs', clusterGeometry: false });
-    expect('lang' in shaped.spans[0]!).toBe(false);
+    expect(shaped.spans[0]!.fontRoute.lang).toBeUndefined();
   });
 
-  it('reuses a piece\'s pinned language in every derived request of that slot group', () => {
+  it('reuses a piece\'s acquired route language in every derived request of that slot group', () => {
     const withheld = { text: 'бгд', fontSizePt: 10, fonts, language: 'sr-rs', clusterGeometry: false as const,
       canvasLanguagePin: { group: 'latin' as const, lang: null } };
-    expect('lang' in service.shape(withheld).spans[0]!).toBe(false);
-    expect('lang' in service.shape(sliceTextShapeRequest(withheld, 0, 1)).spans[0]!).toBe(false);
-    // An accepted language holds for derived text the proof would refuse
-    // (a kashida or probe glyph drawn by fallback): paint draws it that way.
-    const accepted = { ...withheld, text: 'бж', canvasLanguagePin: { group: 'latin' as const, lang: 'sr-rs' } };
-    expect(service.shape(accepted).spans.map(span => span.lang)).toEqual(['sr-rs']);
+    expect(service.shape(withheld).spans[0]!.fontRoute.lang).toBeUndefined();
+    expect(service.shape(sliceTextShapeRequest(withheld, 0, 1)).spans[0]!.fontRoute.lang).toBeUndefined();
+    // A fragment of an accepted piece shapes through the piece's route: the
+    // retained decision is not judged again for a slice of the same text.
+    const accepted = { ...withheld, canvasLanguagePin: { group: 'latin' as const, lang: 'sr-rs' } };
+    const whole = service.shape(accepted).spans[0]!.fontRoute;
+    expect(whole.lang).toBe('sr-rs');
+    expect(service.shape(sliceTextShapeRequest(accepted, 1, 3)).spans[0]!.fontRoute).toBe(whole);
     // Another slot group is decided on its own.
-    expect(service.shape({ ...accepted, text: 'か', eastAsiaLanguage: 'ja-jp' }).spans.map(span => span.lang))
+    expect(service.shape({ ...accepted, text: 'か', eastAsiaLanguage: 'ja-jp' }).spans.map(span => span.fontRoute.lang))
       .toEqual(['ja-jp']);
   });
 
@@ -108,6 +140,16 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     const inherited = rubyGuideShapeRequest(base, 'かん', undefined);
     expect([inherited.language, inherited.eastAsiaLanguage, inherited.canvasLanguagePin])
       .toEqual(['en-us', 'zh-cn', undefined]);
+    // Guide runs that disagree on w:val: an authored w:lid governs; without
+    // one the guide has no western language, never the base run's.
+    const lid = rubyGuideShapeRequest(base, 'ab', { guide: 'ja-jp', latin: null });
+    expect([lid.language, lid.eastAsiaLanguage]).toEqual(['ja-jp', 'ja-jp']);
+    const conflict = rubyGuideShapeRequest(base, 'ab', { latin: null });
+    expect('language' in conflict).toBe(true);
+    expect([conflict.language, conflict.eastAsiaLanguage]).toEqual([undefined, 'zh-cn']);
+    expect(service.shape({ ...conflict, clusterGeometry: false }).spans[0]!.fontRoute.lang).toBeUndefined();
+    expect(service.shape({ ...rubyGuideShapeRequest(base, 'ab', undefined), clusterGeometry: false }).spans[0]!.fontRoute.lang)
+      .toBe('en-us');
   });
 
   it('keeps independent languages when scoped Arabic shares a physical face across slots', () => {
@@ -116,7 +158,7 @@ describe('text service: §17.3.2.20 language per font slot', () => {
         { requestedFamily: 'Scoped Face', resolvedFamily: 'Arabic Substitute', source: 'substitute', script: 'arabic' },
       ], { scriptScopedFamilies: { 'scoped face': { script: 'arabic', substituteFamilies: ['Arabic Substitute'] } } }),
       measurer: { fingerprint: 'scoped-language', namedFamiliesDraw: () => true, measure: request => ({
-        advancePt: [...request.text].length * (request.lang === 'ar' ? 4 : 5), ascentPt: 8, descentPt: 2,
+        advancePt: [...request.text].length * (request.fontRoute.lang === 'ar' ? 4 : 5), ascentPt: 8, descentPt: 2,
       }) },
     });
     const request = {
@@ -127,7 +169,7 @@ describe('text service: §17.3.2.20 language per font slot', () => {
       language: 'ar', eastAsiaLanguage: 'ur',
     };
     const split = scoped.shape(request);
-    expect(split.spans.map(span => [span.text, span.lang])).toEqual([['ا', 'ar'], ['\u{1EE00}', 'ur']]);
+    expect(split.spans.map(span => [span.text, span.fontRoute.lang])).toEqual([['ا', 'ar'], ['\u{1EE00}', 'ur']]);
     expect(split.advancePt).toBe(9);
     // Equal languages retain the existing joining-safe physical shape.
     expect(scoped.shape({ ...request, eastAsiaLanguage: 'ar' }).spans.map(span => span.text))
@@ -236,19 +278,49 @@ describe('Canvas lang at measure and paint', () => {
   it('keeps a grapheme cluster whole across a language-only run seam', async () => {
     const { canvas, draws } = recordingCanvas();
     // A base and its variation selector authored in runs that differ only in
-    // w:val stay one cluster; disagreeing, they carry no language.
+    // w:val stay one cluster, drawn once in the language of the cluster's
+    // first unit; the rest of the second run keeps its own language.
     await renderDocumentToCanvas(documentOf([
       run('\u25fc', { lang: 'fr-ch' }),
       run('\ufe0e', { lang: 'en-us' }),
       run('ab', { lang: 'en-us' }),
     ]), canvas, 0, { dpr: 1, width: 600 });
-    expect(draws.filter(draw => draw.text.includes('\u25fc')).map(draw => [draw.text, draw.lang]))
-      .toEqual([['\u25fc\ufe0e', 'inherit']]);
-    expect(draws.filter(draw => draw.text.includes('ab')).map(draw => [draw.text, draw.lang]))
-      .toEqual([['ab', 'en-us']]);
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['\u25fc\ufe0e', 'fr-ch'], ['ab', 'en-us']]);
   });
 
-  it('joins runs differing only in w:val inside a grapheme cluster and gives them no language', async () => {
+  it('transfers only the crossing cluster to its base language', async () => {
+    const { canvas, draws } = recordingCanvas();
+    // 'я' + U+0301 share one font slot and route: the cluster is one draw, in
+    // Serbian (its base), and every other cluster keeps its own run language.
+    await renderDocumentToCanvas(documentOf([
+      run('гя', { lang: 'sr-rs' }),
+      run('\u0301бв', { lang: 'en-us' }),
+      run('г', { lang: 'en-us' }),
+      run('д', { lang: 'sr-rs' }),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([
+      ['гя\u0301', 'sr-rs'], ['бвг', 'en-us'], ['д', 'sr-rs'],
+    ]);
+    // Each piece starts where the previous one, measured in its own
+    // language, ends (Serbian forms are narrower).
+    expect(draws[1]!.x - draws[0]!.x).toBeCloseTo(3 * 0.4 * FONT_PX, 6);
+    expect(draws[2]!.x - draws[1]!.x).toBeCloseTo(3 * 0.5 * FONT_PX, 6);
+
+    // The language seam inside the word is no line-break opportunity: a word
+    // that does not fit after 'гггг ' moves to the next line whole.
+    const wrapped = recordingCanvas();
+    const narrow = documentOf([
+      run('гггг гя', { lang: 'sr-rs' }),
+      run('\u0301бв', { lang: 'en-us' }),
+    ]);
+    (narrow.section as SectionProps).pageWidth = 70;
+    await renderDocumentToCanvas(narrow, wrapped.canvas, 0, { dpr: 1, width: 70 });
+    expect(wrapped.draws.filter(draw => draw.text.trim())
+      .map(draw => [draw.text.trim(), Math.round(draw.x * 1e6) / 1e6, draw.lang]))
+      .toEqual([['гггг', 0, 'sr-rs'], ['гя\u0301', 0, 'sr-rs'], ['бв', 24, 'en-us']]);
+  });
+
+  it('confines the language transfer to the cluster in emoji and multi-run sequences', async () => {
     const { canvas, draws } = recordingCanvas();
     await renderDocumentToCanvas(documentOf([
       run('\u{1f469}', { lang: 'fr-ch' }),
@@ -259,13 +331,14 @@ describe('Canvas lang at measure and paint', () => {
       run('\u0301b', { lang: 'en-us' }),
       run('c', { lang: 'en-us' }),
     ]), canvas, 0, { dpr: 1, width: 600 });
-    // The recording canvas draws one grapheme at a time. Runs joined to keep
-    // a cluster whole disagree on w:val, so none of them is drawn in another
-    // run's language; the next run keeps its own.
+    // §17.3.2.26 font slots still delimit shaped spans (an emoji is East
+    // Asian text, which these runs give no language; U+0301 is not in the
+    // slot of its ASCII base), exactly as inside one run. The western
+    // language of every unit of a crossing cluster is its base run's; the
+    // text after the cluster keeps its own.
     expect(draws.map(draw => [draw.text, draw.lang])).toEqual([
-      ['\u{1f469}', 'inherit'], ['\u200d', 'inherit'], ['\u{1f467}', 'inherit'], [' ', 'inherit'],
-      // 'x' and 'a' share a run language but join the accent's sequence.
-      ['xa', 'inherit'], ['\u0301', 'inherit'], ['b', 'inherit'], ['c', 'en-us'],
+      ['\u{1f469}', 'inherit'], ['\u200d', 'fr-ch'], ['\u{1f467}', 'inherit'], [' ', 'de-de'],
+      ['xa', 'sr-rs'], ['\u0301', 'sr-rs'], ['bc', 'en-us'],
     ]);
   });
 
@@ -294,5 +367,146 @@ describe('Canvas lang at measure and paint', () => {
     // Scaled glyphs are drawn one by one, each inside its own save/restore.
     expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['г', 'sr-rs'], ['д', 'sr-rs'], ['е', 'sr-rs']]);
     expect(ctx.lang).toBe('inherit');
+  });
+  it('does not merge AutoFit intrinsic pieces painted in different language states', () => {
+    const context: ParagraphLayoutContext = {
+      lineGrid: { active: false, pitchPt: null },
+      characterGrid: { active: false, kind: null, pitchPt: null, deltaPt: 0 },
+      rightIndentGrid: { pitchPt: null, paragraphAllowsAdjustment: true },
+      physicalIndentLeftPt: 0, physicalIndentRightPt: 0, firstIndentPt: 0,
+      lineSpacing: null, spaceBeforePt: 0, spaceAfterPt: 0, baseRtl: false,
+      isJustified: false, stretchLastLine: false, tabStops: [], hasRuby: false, hasEastAsianText: false,
+      kinsoku: { enabled: true, lineStartForbidden: new Set(), lineEndForbidden: new Set() }, defaultTabPt: 36,
+    };
+    const maxContent = (runs: DocxTextRun[]) => {
+      const { ctx } = recordingCanvas();
+      const document = documentOf(runs);
+      return measureParagraphIntrinsicWidths(
+        document.body[0] as unknown as Parameters<typeof measureParagraphIntrinsicWidths>[0], context, 1000,
+        { context: ctx as unknown as CanvasRenderingContext2D, fontFamilyClasses: {} }, {
+          pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb',
+          documentHasEastAsianText: false, compat: compatProfile({ compatibilityMode: 15 }),
+          layoutServices: createLayoutServices(document, { measureContext: ctx as unknown as CanvasRenderingContext2D }),
+        },
+      ).maxWidthPt;
+    };
+    const serbian = 0.4 * FONT_PX;
+    const other = 0.5 * FONT_PX;
+    // One language: one merged string, as before.
+    expect(maxContent([run('гдегде', { lang: 'sr-rs' }), run('гдегде', { lang: 'sr-rs' })])).toBeCloseTo(12 * serbian, 6);
+    // Serbian then Russian: each piece is measured in the language it paints in.
+    expect(maxContent([run('гдегде', { lang: 'sr-rs' }), run('гдегде', { lang: 'ru-ru' })]))
+      .toBeCloseTo(6 * serbian + 6 * other, 6);
+    // Accepted then withheld (text no named family draws) in one language.
+    expect(maxContent([run('гдегде', { lang: 'sr-rs', bold: true }), run('гдеж', { lang: 'sr-rs' })]))
+      .toBeCloseTo(6 * serbian + 4 * other, 6);
+    // Tagged-but-withheld next to untagged text is one state: still merged.
+    expect(maxContent([run('гдеж', { lang: 'sr-rs' }), run('гдеж')])).toBeCloseTo(8 * other, 6);
+  });
+
+  it('declines a kashida whose elongated text the route language was not admitted for', async () => {
+    const beh = '\u0628';
+    const paragraphOf = (extra: Record<string, unknown>) => {
+      const document = documentOf([run(`${beh.repeat(4)} ${beh.repeat(4)} ${'w'.repeat(28)}`, { italic: false, ...extra })]);
+      (document.body[0] as DocParagraph).alignment = 'lowKashida' as DocParagraph['alignment'];
+      (document.section as SectionProps).pageWidth = 30 * 0.5 * FONT_PX;
+      return document;
+    };
+    const tatweels = async (extra: Record<string, unknown>) => {
+      const { canvas, draws } = recordingCanvas();
+      await renderDocumentToCanvas(paragraphOf(extra), canvas, 0, { dpr: 1, width: 30 * 0.5 * FONT_PX });
+      return draws.filter(draw => draw.text.includes('\u0640')).map(draw => draw.lang);
+    };
+    // Untagged text is elongated as before.
+    expect((await tatweels({})).length).toBeGreaterThan(0);
+    // The language was admitted for the authored text. Named families of this
+    // route do not draw U+0640, so the elongation is declined rather than
+    // drawn by a fallback face in that language.
+    expect(await tatweels({ lang: 'ar-sa' })).toEqual([]);
+    // Where they draw it, the elongated text keeps the piece's language.
+    const kept = await tatweels({ lang: 'ar-sa', fontFamily: 'Kashida Face' });
+    expect(kept.length).toBeGreaterThan(0);
+    expect(new Set(kept)).toEqual(new Set(['ar-sa']));
+  });
+
+  it('keeps a mixed-language ruby guide out of the base run language', async () => {
+    const guideLanguages = async (lid: string | null, guideRunLanguages: (string | null)[]) => {
+      const { canvas, draws } = recordingCanvas();
+      const value = <T,>(v: T | null) => ({ status: v === null ? 'absent' : 'valid', raw: null, value: v });
+      await renderDocumentToCanvas(documentOf([run('ab', {
+        lang: 'sr-rs',
+        ruby: { text: 'гд', fontSizePt: FONT_PX / 2 },
+        typographyInput: { ruby: {
+          align: value(null), baseFontSizePt: value(null), raisePt: value(null), language: value(lid),
+          guideRuns: guideRunLanguages.map((language, index) => ({
+            text: 'гд'[index]!, fontFamily: null, fontSizePt: null, bold: false, italic: false, color: null, language,
+          })),
+        } },
+      })]), canvas, 0, { dpr: 1, width: 600 });
+      expect(draws.filter(draw => draw.text === 'ab').map(draw => draw.lang)).toEqual(['sr-rs']);
+      return [...new Set(draws.filter(draw => /[гд]/u.test(draw.text)).map(draw => draw.lang))];
+    };
+    // Agreeing guide runs keep their language; no guide language at all
+    // leaves the base run's.
+    expect(await guideLanguages(null, ['ru-ru', 'ru-ru'])).toEqual(['ru-ru']);
+    expect(await guideLanguages(null, [null, null])).toEqual(['sr-rs']);
+    // Disagreeing guide runs: no run language, so w:lid when authored, else none.
+    expect(await guideLanguages(null, ['ru-ru', 'bg-bg'])).toEqual(['inherit']);
+    expect(await guideLanguages('mk-mk', ['ru-ru', 'bg-bg'])).toEqual(['mk-mk']);
+  });
+  it('probes punctuation compression and width balance in the acquired language state', async () => {
+    const settings = { characterSpacingControl: 'compressPunctuation', balanceSingleByteDoubleByteWidth: true };
+    const rendered = async (runs: DocxTextRun[]) => {
+      const { canvas, measures, draws } = recordingCanvas();
+      const document = documentOf(runs);
+      (document as unknown as { settings: unknown }).settings = settings;
+      await renderDocumentToCanvas(document, canvas, 0, { dpr: 1, width: 600 });
+      return { measures, draws };
+    };
+    // The piece is withheld as a whole ('〓'): its punctuation, which a named
+    // family does draw, is not probed in the language on its own.
+    const withheld = await rendered([run('漢、〓', { langEastAsia: 'ja-jp' })]);
+    expect(withheld.measures.filter(measure => measure.lang !== 'inherit')).toEqual([]);
+    expect(new Set(withheld.draws.map(draw => draw.lang))).toEqual(new Set(['inherit']));
+    // An admitted piece probes it in the piece's language.
+    const admitted = await rendered([run('漢、漢', { langEastAsia: 'ja-jp' })]);
+    expect(new Set(admitted.measures.filter(measure => measure.text === '、').map(measure => measure.lang)))
+      .toEqual(new Set(['ja-jp']));
+    // Width balance: the half ideographic cell of a space sequence is probed
+    // in the run's own East Asian language, whatever an earlier run cached.
+    const gap = (draws: Array<{ text: string; x: number }>, from: string, to: string) =>
+      draws.find(draw => draw.text.startsWith(to))!.x - draws.find(draw => draw.text.startsWith(from))!.x;
+    const alone = await rendered([run('c  d', { langEastAsia: 'ru-ru' })]);
+    const after = await rendered([run('a  b ', { langEastAsia: 'sr-rs' }), run('c  d', { langEastAsia: 'ru-ru' })]);
+    expect(gap(after.draws, 'a', 'b')).not.toBeCloseTo(gap(alone.draws, 'c', 'd'), 6);
+    expect(gap(after.draws, 'c', 'd')).toBeCloseTo(gap(alone.draws, 'c', 'd'), 6);
+  });
+  it('registers the route sentinels in the realm a standalone render measures in', async () => {
+    // A canvas owned by another document (an iframe): its FontFaceSet shapes
+    // the text, so the sentinels are registered there for the render.
+    class OwnerCanvas {}
+    const fonts = { owner: 'iframe' };
+    const { canvas, draws } = recordingCanvas();
+    const element = Object.assign(Object.create(OwnerCanvas.prototype) as object, canvas, {
+      nodeType: 1, localName: 'canvas',
+      ownerDocument: { defaultView: { HTMLCanvasElement: OwnerCanvas }, fonts },
+    }) as unknown as HTMLCanvasElement;
+    const faces = [{ family: 'sentinel' }];
+    sentinels.load.mockClear().mockResolvedValueOnce(faces);
+    sentinels.unload.mockClear();
+    vi.stubGlobal('FontFace', class {});
+    try {
+      await renderDocumentToCanvas(documentOf([run('где', { lang: 'sr-rs' })]), element, 0, { dpr: 1, width: 600 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(sentinels.load.mock.calls).toEqual([[fonts]]);
+    // Kept until the page is painted, then released.
+    expect(draws.map(draw => draw.lang)).toEqual(['sr-rs']);
+    expect(sentinels.unload.mock.calls).toEqual([[faces]]);
+    // A realm without font registration is not made to wait or register.
+    sentinels.load.mockClear();
+    await renderDocumentToCanvas(documentOf([run('где')]), recordingCanvas().canvas, 0, { dpr: 1, width: 600 });
+    expect(sentinels.load).not.toHaveBeenCalled();
   });
 });

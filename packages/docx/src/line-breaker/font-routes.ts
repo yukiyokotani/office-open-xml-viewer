@@ -7,7 +7,7 @@ import {
 } from '@silurus/ooxml-core/internal/font-stack';
 import type { DocxTextRun, FieldRun } from '../types';
 import type { CanvasFontRoute } from '@silurus/ooxml-core';
-import { classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, classifyFontGeneric, normalizeFontMetricFamily, canvasFontString } from '@silurus/ooxml-core';
+import { classifyCjkFont, cjkFallbackChain, NON_CJK_SANS_FALLBACKS, NON_CJK_SERIF_FALLBACKS, classifyFontGeneric, normalizeFontMetricFamily, canvasFontRouteFaces, canvasFontString } from '@silurus/ooxml-core';
 import type { ParagraphLayoutSource } from '../layout/text.js';
 import { type LayoutTextSeg } from './model.js';
 
@@ -398,4 +398,17 @@ export function getDefaultFontFamily(
   }
   if (eastAsian && para.defaultFontFamilyEastAsia) return para.defaultFontFamilyEastAsia;
   return para.defaultFontFamily ?? null;
+}
+
+/** Whether two segments' routes resolve to the same faces, whatever language
+ * each shapes in (core canvasFontRouteFaces). The rules that read a face's
+ * own metrics (line geometry, the average-width space floor) compare faces;
+ * every measured or shaped comparison uses the route fingerprint itself. */
+export function sameRouteFaces(
+  left: Readonly<CanvasFontRoute> | undefined,
+  right: Readonly<CanvasFontRoute> | undefined,
+): boolean {
+  return left === right
+    || (left !== undefined && right !== undefined
+      && canvasFontRouteFaces(left).fingerprint === canvasFontRouteFaces(right).fingerprint);
 }

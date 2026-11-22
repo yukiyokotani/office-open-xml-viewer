@@ -1,4 +1,6 @@
 import { fillTextAtReference } from '@silurus/ooxml-core';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
+import type { TextPlacement } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 
 /** `fillText` with the em layout measured `font` at: a shorthand layout
@@ -15,4 +17,20 @@ export function fillRetainedText(
   const reference = context.textAdvances?.planned(font);
   if (reference) fillTextAtReference(context.ctx, reference, text, x, y);
   else context.ctx.fillText(text, x, y);
+}
+
+/** {@link fillRetainedText} of one string painted through `route`, in the
+ * route's language (the state layout measured it in), restoring the
+ * context's own. `font` is the route's shorthand, already assigned. */
+export function fillRetainedRouteText(
+  context: CanvasPaintContext,
+  route: TextPlacement['fontRoute'],
+  font: string,
+  text: string,
+  x: number,
+  y: number,
+): void {
+  const previousLang = selectCanvasLanguage(context.ctx, route.lang);
+  fillRetainedText(context, font, text, x, y);
+  restoreCanvasLanguage(context.ctx, previousLang);
 }

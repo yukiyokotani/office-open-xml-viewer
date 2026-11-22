@@ -114,7 +114,7 @@ function paintRetainedGlyph(
   ctx.font = font;
   const previousKerning = ctx.fontKerning;
   if (operation.kerning) ctx.fontKerning = operation.kerning;
-  const previousLang = selectCanvasLanguage(ctx, operation.lang);
+  const previousLang = selectCanvasLanguage(ctx, operation.fontRoute.lang);
   if (upright) {
     saveCanvasState(ctx);
     ctx.translate(operation.origin.xPt, operation.origin.yPt);
@@ -319,8 +319,8 @@ function paintLineContents(
     ctx.textBaseline = 'alphabetic';
     const previousLetterSpacing = ctx.letterSpacing;
     const previousKerning = ctx.fontKerning;
-    // Measured with this language (TextShapeSpan.lang); draw with it too.
-    const previousLang = selectCanvasLanguage(ctx, placement.lang);
+    // The route's language is part of what layout measured; draw in it too.
+    const previousLang = selectCanvasLanguage(ctx, placement.fontRoute.lang);
     for (const op of placement.paintOps) {
       // §17.3.3.29: an unselected optional hyphen must not affect display.
       // Strip only the paint string, preserving all retained UTF-16 source

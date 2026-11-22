@@ -155,7 +155,13 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     segment.italic,
     calcEffectiveFontPx(segment, 1),
     segment.fontFamily,
-    segment.fontRoute ? [segment.fontRoute.familyList, segment.fontRoute.scope] : null,
+    // The route identity includes its language (CanvasFontRoute.lang): pieces
+    // painted in different language states never merge, and a merged probe
+    // shapes through the route both were acquired with. The key of a route
+    // without a language is unchanged.
+    segment.fontRoute ? segment.fontRoute.lang === undefined
+      ? [segment.fontRoute.familyList, segment.fontRoute.scope]
+      : [segment.fontRoute.familyList, segment.fontRoute.scope, segment.fontRoute.lang] : null,
     segment.charScale ?? 1,
     segment.charSpacing ?? 0,
     segment.fitTextPerGapPx ?? null,

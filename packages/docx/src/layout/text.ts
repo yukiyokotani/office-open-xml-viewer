@@ -20,7 +20,7 @@ import type {
   FontResolver,
   FontStyle,
 } from './font-service.js';
-import type { CanvasFontRoute } from '@silurus/ooxml-core';
+import { canvasFontRouteWithLanguage, type CanvasFontRoute } from '@silurus/ooxml-core';
 export type { ResolvedFontMetric, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
 import type {
@@ -376,10 +376,13 @@ export interface TextShapeRequest {
   readonly language?: string;
   /** Resolved w:lang@bidi (§17.3.2.20): language of complex-script text. */
   readonly complexScriptLanguage?: string;
-  /** The Canvas language decided for the source piece this request derives
-   * from (one slot language group; null: none). Every fragment, fit, pair or
-   * generated probe of that piece reuses it for text of that group, so each
-   * measures in the language paint draws the piece with. */
+  /** The route language acquired for the source piece this request derives
+   * from (one slot language group; null: withheld). A request re-resolves its
+   * route from run facts on every shape, and the language is the one part of
+   * that route which depends on the acquired piece's text (named-family
+   * coverage), so derived requests (fragments, fits, pair or generated
+   * probes) retain the decision: text of that group shapes through the same
+   * route, language included, that the piece is painted through. */
   readonly canvasLanguagePin?: CanvasLanguagePin;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
@@ -510,7 +513,12 @@ export function sliceTextShapeRequest(
 /** A generated probe or ruby guide is independent text, even when its glyphs
  * happen to occur in the base run. It inherits neither that run's Arabic proof
  * nor its explicit native base. A caller establishing a new directed probe
- * must request that authority independently. */
+ * must request that authority independently.
+ *
+ * It keeps the piece's retained route language (canvasLanguagePin): a metric
+ * probe stands in for the piece and is measured in the piece's state.
+ * Generated text that is painted on its own (a ruby guide, an emphasis mark)
+ * clears it, so its language is proved for its own text. */
 export function independentTextShapeRequest(
   request: Readonly<TextShapeRequest>,
   text: string,
@@ -520,20 +528,24 @@ export function independentTextShapeRequest(
 }
 
 /** The shape request of a ruby guide over `base`: independent text in the
- * guide's own languages (`w:rubyPr/w:lid` for every slot, the guide runs'
- * `w:lang/@w:val` for Latin text), else the base run's. Its Canvas language
- * is proved for the guide itself. Line metrics and paint both use it. */
+ * guide's own languages. `w:rubyPr/w:lid` names the guide's language for
+ * every slot. The guide runs' `w:lang/@w:val` governs its Latin text when
+ * they agree; when they disagree (`latin: null`) no single run language
+ * exists, so the Latin text takes `w:lid` when authored and otherwise none:
+ * never the base run's. Without guide facts the base run's languages apply.
+ * Its route language is proved for the guide itself. Line metrics and paint
+ * both use this request. */
 export function rubyGuideShapeRequest(
   base: Readonly<TextShapeRequest>,
   text: string,
-  languages: Readonly<{ guide?: string; latin?: string }> | undefined,
+  languages: Readonly<{ guide?: string; latin?: string | null }> | undefined,
 ): TextShapeRequest {
   const request = { ...independentTextShapeRequest(base, text), canvasLanguagePin: undefined };
   if (!languages) return request;
   const { guide, latin } = languages;
   return {
     ...request,
-    ...(latin ?? guide ? { language: latin ?? guide } : {}),
+    ...(latin === null ? { language: guide } : latin ?? guide ? { language: latin ?? guide } : {}),
     ...(guide ? { eastAsiaLanguage: guide, complexScriptLanguage: guide } : {}),
   };
 }
@@ -563,16 +575,23 @@ export const languageSlotGroup = (slot: FontScriptSlot): LanguageSlotGroup =>
 
 export type CanvasLanguagePin = Readonly<{ group: LanguageSlotGroup; lang: string | null }>;
 
+/** A well-formed BCP 47 language tag (RFC 5646 §2.1 shape: an alphabetic
+ * primary subtag, then alphanumeric subtags of at most eight characters),
+ * bounded in length. Canvas `lang` takes such a tag; anything else names no
+ * language and never enters a route identity or cache key. */
+const LANGUAGE_TAG = /^[a-z]{2,8}(?:-[a-z0-9]{1,8}){0,8}$/i;
+
 /** The §17.3.2.20 w:lang attribute that governs text of one §17.3.2.26 font
  * slot: the same classification that selects the slot's face selects its
- * language. Word's `x-none` names no language. */
+ * language. Word's `x-none` names no language (it is not a well-formed tag),
+ * nor does the Canvas keyword `inherit`. */
 export function scriptSlotLanguage(
   request: Readonly<Pick<TextShapeRequest, 'language' | 'eastAsiaLanguage' | 'complexScriptLanguage'>>,
   slot: FontScriptSlot,
 ): string | undefined {
   const tag = slot === 'eastAsia' ? request.eastAsiaLanguage
     : slot === 'complexScript' ? request.complexScriptLanguage : request.language;
-  return tag && tag.toLowerCase() !== 'x-none' ? tag : undefined;
+  return tag && LANGUAGE_TAG.test(tag) && tag.toLowerCase() !== 'inherit' ? tag : undefined;
 }
 
 export interface TextFontResolveRequest {
@@ -602,9 +621,6 @@ export interface GlyphMeasureRequest {
   readonly style: FontStyle;
   readonly letterSpacingPt: number;
   readonly kerning?: boolean;
-  /** BCP 47 language of the measured text (Canvas `lang`), selecting its
-   * language-specific OpenType forms. Absent leaves the context's language. */
-  readonly lang?: string;
 }
 
 export interface GlyphMeasurement {
@@ -639,8 +655,6 @@ export interface GlyphRasterComparisonRequest {
   readonly route: CanvasFontRoute;
   /** Single private family of one loaded exact face; the comparison route. */
   readonly faceFamily: string;
-  /** Language the certified text is measured and painted in (Canvas `lang`). */
-  readonly lang?: string;
 }
 
 export interface GlyphMeasurer {
@@ -658,7 +672,7 @@ export interface GlyphMeasurer {
    * through the size-adjust:0% family, i.e. that exact source owns it. */
   ownsGlyphs?(request: Readonly<GlyphOwnershipRequest>): boolean;
   /** True only when NAMED families of the route (before any generic) draw
-   * every grapheme of `text` (core namedFamiliesDrawText). Absent or unable
+   * every grapheme of `text` (core createNamedFamilyOracle). Absent or unable
    * to judge → false. */
   namedFamiliesDraw?(request: Readonly<NamedFamilyDrawRequest>): boolean;
 }
@@ -678,7 +692,8 @@ export interface GlyphOwnershipRequest {
   readonly weight: number;
   readonly style: FontStyle;
   readonly coverageProbeFamily: string;
-  /** Language the certified text is measured and painted in (Canvas `lang`). */
+  /** Language of the route the certified text is measured and painted
+   * through ({@link CanvasFontRoute.lang}); the probe family is no route. */
   readonly lang?: string;
 }
 
@@ -698,9 +713,11 @@ export interface TextShapeSpan extends GlyphMeasurement {
   /** False when this scalar span continues the preceding grapheme cluster. */
   readonly breakBefore: boolean;
   readonly font: FontResolution;
+  /** The route the span was measured through and is painted through. It
+   * carries the span's language ({@link CanvasFontRoute.lang}) when a
+   * §17.3.2.20 language was admitted; `font.route` is the same route without
+   * one (the identity of the resolved faces and their line metrics). */
   readonly fontRoute: CanvasFontRoute;
-  /** Language this span was measured with; paint must draw it with the same. */
-  readonly lang?: string;
 }
 
 export interface TextShapeResult extends GlyphMeasurement {
@@ -722,7 +739,7 @@ export interface TextShapeResult extends GlyphMeasurement {
  * numerical outline precision is in final point space, independent of DPR. */
 export interface GlyphContourRequest {
   readonly baseDirection?: NativeBaseDirection;
-  readonly spans: readonly Readonly<{ text: string; advancePt: number; fontRoute: CanvasFontRoute; font: Pick<FontResolution, 'weight' | 'style'>; lang?: string }>[];
+  readonly spans: readonly Readonly<{ text: string; advancePt: number; fontRoute: CanvasFontRoute; font: Pick<FontResolution, 'weight' | 'style'> }>[];
   readonly fontSizePt: number;
   readonly ink: Readonly<{ xMinPt: number; xMaxPt: number; ascentPt: number; descentPt: number }>;
   readonly maximumScale: number;
@@ -819,6 +836,10 @@ export interface TextLayoutService {
   exactLocalFaces?(requestedFamily: string): readonly Readonly<{ resolvedFamily: string; weight: number; style: FontStyle; coverageProbeFamily?: string }>[];
   /** {@link GlyphMeasurer.ownsGlyphs} of this service's measurer. */
   ownsGlyphs?(request: Readonly<GlyphOwnershipRequest>): boolean;
+  /** {@link GlyphMeasurer.namedFamiliesDraw} of this service's measurer:
+   * generated text that joins an acquired piece (a justification kashida)
+   * must pass it before it may shape through that piece's route language. */
+  namedFamiliesDraw?(request: Readonly<NamedFamilyDrawRequest>): boolean;
   /** Symbol-encoded text (core symbol-font.ts) as the faces this service
    * selects draw it: each scalar takes its §17.3.2.26 slot, exactly as
    * {@link shape} does, and only a symbol-font slot family is judged (see
@@ -1204,7 +1225,6 @@ function contextualPrefixReader(
         letterSpacingPt: request.letterSpacingPt ?? 0,
         kerning: wordArabicTextKerned(span.text) ? true : request.kerning,
         ...(request.baseDirection !== undefined ? { baseDirection: request.baseDirection } : {}),
-        ...(span.lang !== undefined ? { lang: span.lang } : {}),
       };
       const measuredPrefix = measureContextualPrefix(prefixRequest);
       advancePt += measuredPrefix.advancePt;
@@ -1404,8 +1424,6 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     // Preserve ordinary cache keys byte-for-byte; no per-character work or
     // source occurrence IDs are introduced for callers without an explicit base.
     if (request.baseDirection !== undefined) parts.push(request.baseDirection);
-    // Keys of text without a language are unchanged.
-    if (request.lang !== undefined) parts.push(['lang', request.lang]);
     const key = JSON.stringify(parts);
     const retained = cached(measurementCache, key);
     if (retained) return retained;
@@ -1446,7 +1464,6 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         const parts: unknown[] = [request.route.fingerprint, request.faceFamily,
           request.weight, request.style, request.text];
         if (request.baseDirection !== undefined) parts.push(request.baseDirection);
-        if (request.lang !== undefined) parts.push(['lang', request.lang]);
         const key = JSON.stringify(parts);
         const retained = rasterProofs.get(key);
         if (retained !== undefined) return retained;
@@ -1530,6 +1547,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         if (request.baseDirection !== undefined && !directedCapable) throw new TypeError('Directed glyph ownership is unsupported');
         return input.measurer.ownsGlyphs!(request);
       } } : {}),
+    ...(input.measurer.namedFamiliesDraw
+      ? { namedFamiliesDraw: (request: Readonly<NamedFamilyDrawRequest>) => input.measurer.namedFamiliesDraw!(request) }
+      : {}),
     ...(input.fonts.exactLocalFaces
       ? { exactLocalFaces: (family: string) => input.fonts.exactLocalFaces!(family) } : {}),
     scalarFamily(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) {
@@ -1918,6 +1938,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // last-resort fallback face is chosen per content language (CSS Fonts 4
       // §5.1/§5.4), so a language there would change the face, its advances
       // and weights rather than select forms (locl) within the face.
+      // An admitted language becomes part of the span's route: the route
+      // measures the span here, and every later consumer compares, caches and
+      // paints by that route.
       const slotLang = scriptSlotLanguage(request, group.script);
       const pin = request.canvasLanguagePin;
       const lang = slotLang === undefined ? undefined
@@ -1925,24 +1948,23 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
           : input.measurer.namedFamiliesDraw?.({
             text: group.text, fontRoute: font.route, weight: font.weight, style: font.style,
           }) === true ? slotLang : undefined;
+      const fontRoute = canvasFontRouteWithLanguage(font.route, lang);
       const measurement = request.measure === false ? {
         advancePt: 0,
         ascentPt: 0,
         descentPt: 0,
       } : measureGlyph({
         text: group.text,
-        fontRoute: font.route,
+        fontRoute,
         fontSizePt: request.fontSizePt,
         weight: font.weight,
         style: font.style,
         letterSpacingPt: request.letterSpacingPt ?? 0,
         kerning: wordArabicTextKerned(group.text) ? true : request.kerning,
         ...(request.baseDirection !== undefined ? { baseDirection: request.baseDirection } : {}),
-        ...(lang !== undefined ? { lang } : {}),
       });
       return Object.freeze({
-        ...group, ...measurement, font, fontRoute: font.route,
-        ...(lang !== undefined ? { lang } : {}),
+        ...group, ...measurement, font, fontRoute,
         // Excluded spans also depend on the full run: a mark attached to a
         // Latin base must not become Arabic proof when measured in isolation.
         ...(scopeDescriptor !== undefined ? { substituteScope: substituteScript } : {}),

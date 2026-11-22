@@ -347,7 +347,8 @@ export function createProductionTextLayoutService(
     const previousKerning = context.fontKerning;
     const previousDirection = request.baseDirection !== undefined ? context.direction : undefined;
     const previousTextAlign = request.baseDirection !== undefined ? context.textAlign : undefined;
-    const previousLang = selectCanvasLanguage(context, request.lang);
+    // The route's language is part of what it measures (CanvasFontRoute.lang).
+    const previousLang = selectCanvasLanguage(context, request.fontRoute.lang);
     try {
       if (request.baseDirection !== undefined) {
         context.direction = request.baseDirection;

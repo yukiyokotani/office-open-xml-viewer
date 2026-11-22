@@ -3,6 +3,7 @@ import { wordCompressedAutoSpaceFloorPt, wordCompressedSpaceFloor } from '../lay
 import { COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION } from '../line-breaker/text-runs.js';
 import type { LayoutSeg, LayoutTextSeg } from '../line-breaker/model.js';
 import type { PassOperationState } from '../line-breaker/pass-operations.js';
+import { sameRouteFaces } from '../line-breaker/font-routes.js';
 
 interface LineTail { tailPx: number; coreLast: string | undefined }
 const EMPTY_TAIL: LineTail = { tailPx: 0, coreLast: undefined };
@@ -16,7 +17,7 @@ type MixedSpaceMeasure = (segment: LayoutTextSeg, text: string) => number;
 function sameSpaceFace(candidate: LayoutTextSeg, reference: LayoutTextSeg): boolean {
   return (
     candidate.mixedSpaceAverageWidthRatio === reference.mixedSpaceAverageWidthRatio &&
-    candidate.fontRoute?.fingerprint === reference.fontRoute?.fingerprint &&
+    sameRouteFaces(candidate.fontRoute, reference.fontRoute) &&
     candidate.fontFamily === reference.fontFamily &&
     candidate.fontSize === reference.fontSize &&
     candidate.bold === reference.bold &&

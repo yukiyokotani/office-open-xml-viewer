@@ -3,6 +3,7 @@ import {
   bindMetafileFontDemand,
   bindMetafileFontFamilies,
   activeFontSet,
+  createNamedFamilyOracle,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   type NativeRouteNormalLine,
@@ -338,10 +339,24 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       // at all, embedded or local, and declines every measured line as main
       // mode in that host does; it keeps laying out here.
       const workerFontSet = activeFontSet();
-      const nativeSentinels = workerFontSet ? await loadNativeRouteSentinels(workerFontSet) : [];
+      let nativeSentinels = workerFontSet ? await loadNativeRouteSentinels(workerFontSet) : [];
       if (requestedGeneration !== parseGeneration) {
         if (nativeSentinels) unloadOfficeFontFallbacks(nativeSentinels);
         throw new Error('render-worker parse was superseded');
+      }
+      // Registration is not application. The main realm lays out with
+      // sentinels its measuring context applies; this realm continues only
+      // where its own measuring context (the one createLayoutServices makes
+      // here) applies them too, judged by the oracle whose capability the
+      // text service's fingerprint records (core createNamedFamilyOracle).
+      // Otherwise glyph ownership, symbol codes and run languages would be
+      // judged here and declined there.
+      if (nativeSentinels && nativeSentinels.length > 0 && typeof OffscreenCanvas !== 'undefined') {
+        const measuring = new OffscreenCanvas(1, 1).getContext('2d');
+        if (measuring && !createNamedFamilyOracle(measuring).sentinelsApply) {
+          unloadOfficeFontFallbacks(nativeSentinels);
+          nativeSentinels = null;
+        }
       }
       if (!nativeSentinels || documentRequiresDomVerticalGlyphLayout(pulledModels.document)) {
         if (nativeSentinels) unloadOfficeFontFallbacks(nativeSentinels);

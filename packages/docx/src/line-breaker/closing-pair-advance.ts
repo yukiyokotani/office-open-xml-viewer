@@ -200,21 +200,22 @@ export function retainClosingPairAdvances(runs: readonly ParagraphLayoutSource['
         || !span.font.resourceIdentity?.startsWith('office-local:')) continue;
       const face = plans[i]!.faces![spanIndex]!.find(f => f.resolvedFamily === span.font.resolvedFamily
         && f.weight === span.font.weight && f.style === span.font.style);
-      // Both proofs certify the text in the language it is measured and painted in.
-      const lang = span.lang !== undefined ? { lang: span.lang } : {};
+      // Both proofs certify the text in the language of the route it is
+      // measured and painted through (the probe family is no route).
+      const lang = span.fontRoute.lang !== undefined ? { lang: span.fontRoute.lang } : {};
       if (!face?.coverageProbeFamily || !service.ownsGlyphs({ text: pair + '一', weight: span.font.weight,
         style: span.font.style, coverageProbeFamily: face.coverageProbeFamily, ...lang })
         || !service.sameGlyphRaster({ text: pair + '一', route: span.fontRoute, faceFamily: face.resolvedFamily,
-          weight: span.font.weight, style: span.font.style, ...lang })) continue;
+          weight: span.font.weight, style: span.font.style })) continue;
       const acquire = (r: typeof request) => service.shape({ ...r, measure: true, clusterGeometry: false });
       const a = acquire(sliceTextShapeRequest(request, range.start, range.end));
       const c = acquire({ ...independentTextShapeRequest(request, '一'), fontHint: 'eastAsia' });
       const p = acquire(range.end < request.text.length ? sliceTextShapeRequest(request, range.start, range.end + 1)
         : independentTextShapeRequest(request, pair));
       const b = acquire(independentTextShapeRequest(request, pair[1]!));
-      // Every comparand must be shaped in the span's language state.
+      // Every comparand must be shaped through the span's route, whose
+      // identity includes its language.
       const same = (shape: TextShapeResult) => shape.spans.length === 1
-        && shape.spans[0]!.lang === span.lang
         && shape.spans[0]!.fontRoute.fingerprint === span.fontRoute.fingerprint
         && shape.spans[0]!.font.resourceIdentity === span.font.resourceIdentity
         && shape.spans[0]!.font.weight === span.font.weight && shape.spans[0]!.font.style === span.font.style;

@@ -302,6 +302,11 @@ const SENTINEL_ONLY_FONTS = [
   `${PROBE_EM}px ${quoteCssFontFamily(SENTINEL_FAMILIES[1])}`,
 ] as const;
 
+/** UTF-16 units of the longest grapheme cluster an ownership cache keeps
+ * (the control results here and a {@link NamedFamilyOracle}'s results): a
+ * longer cluster is proved on every request and never retained. */
+const OWNERSHIP_CACHED_CLUSTER_UNITS = 16;
+
 /** Two probe contexts of one font set, the shorthand each currently holds,
  * and that set's route-independent control results. */
 interface OwnershipProbe {
@@ -378,13 +383,17 @@ export function nativeRouteClusterOwned(
   fonts: readonly [string, string], cluster: string, probe: OwnershipProbe = realmProbe,
 ): boolean | undefined {
   if (PRESENTATION_SELECTED.test(cluster)) return false;
-  let routed = probe.controls.get(cluster);
+  // Oversized clusters are judged each time: neither cache retains their text.
+  const cacheable = cluster.length <= OWNERSHIP_CACHED_CLUSTER_UNITS;
+  let routed = cacheable ? probe.controls.get(cluster) : undefined;
   if (routed === undefined) {
     const control = measurePair(SENTINEL_ONLY_FONTS, cluster, probe);
     if (!control) return undefined;
     routed = !sameGeometry(control[0]!, control[1]!);
-    if (probe.controls.size >= 4096) probe.controls.delete(probe.controls.keys().next().value!);
-    probe.controls.set(cluster, routed);
+    if (cacheable) {
+      if (probe.controls.size >= 4096) probe.controls.delete(probe.controls.keys().next().value!);
+      probe.controls.set(cluster, routed);
+    }
   }
   if (!routed) return false;
   const measured = measurePair(fonts, cluster, probe);
@@ -396,18 +405,22 @@ export function nativeRouteClusterOwned(
   return sameGeometry(measured[0]!, measured[1]!) && ascent! + descent! < SENTINEL_A_INK_PX;
 }
 
-/** Bounds on what a {@link NamedFamilyOracle} remembers: results, the
- * family lists they refer to (in UTF-16 units), and the cluster length
- * cached (longer clusters are proved but not remembered). */
+/** Bounds on what a {@link NamedFamilyOracle} remembers: results and the
+ * family lists they refer to (in UTF-16 units; a longer list is judged
+ * without being remembered). */
 const NAMED_FAMILY_RESULT_LIMIT = 8192;
 const NAMED_FAMILY_LIST_UNITS = 65536;
-const NAMED_FAMILY_CLUSTER_UNITS = 16;
 
 /** Judges whether NAMED families of a Canvas route draw text, in the font
  * set of the canvas that measures and paints it. */
 export interface NamedFamilyOracle {
-  /** Whether this font set can judge at all: Canvas `lang` exists and the
-   * route sentinels are registered and applied. Fixed for the oracle's life. */
+  /** Whether the route sentinels are registered AND applied in this font
+   * set: to the measuring context and to the two contexts that perform the
+   * proof. Judged on first use and fixed for the oracle's life. */
+  readonly sentinelsApply: boolean;
+  /** Whether this font set can judge a run language: Canvas `lang` exists
+   * and {@link sentinelsApply}. Judged on first use and fixed for the
+   * oracle's life. */
   readonly available: boolean;
   /** Whether a named family of `familyList` draws every grapheme cluster of
    * `text`; false when this font set cannot judge. */
@@ -431,9 +444,11 @@ export interface NamedFamilyOracle {
  * positioning inside those faces, which may change advances; measurement and
  * paint both apply it.
  *
- * The sentinels are verified once, on the owner's context: the oracle belongs
- * to one font snapshot of a layout session, which retains its sentinel
- * registrations for its life.
+ * The capability is judged once, by this oracle, and shared by every consumer: a
+ * worker admits a document only where `sentinelsApply` holds (as it does in
+ * the main realm, which retains its registrations), and the text service's
+ * fingerprint records `available`. The oracle belongs to one font snapshot of
+ * a layout session, which retains its sentinel registrations for its life.
  */
 export function createNamedFamilyOracle(
   owner?: unknown, factory?: SymbolProbeCanvasFactory,
@@ -445,34 +460,47 @@ export function createNamedFamilyOracle(
       return null;
     }
   });
-  // Judged once on the owner's own context (no canvas is allocated until a
-  // draw is judged); its font is restored.
-  const available = (() => {
-    const context = owner as Partial<CanvasFontBoxProbeContext> | null | undefined;
-    if (!context || typeof context.measureText !== 'function' || typeof context.font !== 'string'
-      || !('lang' in context)) return false;
+  const measuring = owner as Partial<CanvasFontBoxProbeContext> | null | undefined;
+  // Judged on first use, once: a context that has no Canvas `lang` is never
+  // measured for a run language, and no proof canvas exists before then.
+  let applied: boolean | undefined;
+  const sentinelsApply = (): boolean => applied ??= (() => {
+    const context = measuring;
+    if (!context || typeof context.measureText !== 'function' || typeof context.font !== 'string') return false;
     const previous = context.font;
     try {
-      return sentinelsWork(context as CanvasFontBoxProbeContext);
+      if (!sentinelsWork(context as CanvasFontBoxProbeContext)) return false;
     } finally {
       context.font = previous;
     }
+    // The proof contexts keep the sentinel shorthand: measurePair assigns
+    // each route before measuring (their recorded shorthand is still unset).
+    return [0, 1].every((index) => {
+      const proof = probeContext(probe, index);
+      return proof !== null && sentinelsWork(proof);
+    });
   })();
+  let admits: boolean | undefined;
+  const available = (): boolean => admits ??= !!measuring && typeof measuring === 'object'
+    && 'lang' in measuring && sentinelsApply();
   const listIds = new Map<string, number>();
   let listUnits = 0;
   const results = new Map<string, boolean>();
   return {
-    available,
+    get sentinelsApply() { return sentinelsApply(); },
+    get available() { return available(); },
     draws(familyList, weight, style, text) {
-      if (!available || text.length === 0) return false;
+      if (text.length === 0 || !available()) return false;
       const entries = parseFamilyList(familyList);
       if (!entries) return false;
       const firstGeneric = entries.findIndex((entry) => entry.generic);
       const named = (firstGeneric < 0 ? entries : entries.slice(0, firstGeneric)).map((entry) => entry.text);
       if (named.length === 0) return false;
       const fonts = nativeRouteOwnershipFonts(named.join(', '), weight, style);
-      let listId = listIds.get(fonts[0]);
-      if (listId === undefined) {
+      // A list longer than the whole budget is never interned: its clusters
+      // are judged without result caching.
+      let listId = fonts[0].length > NAMED_FAMILY_LIST_UNITS ? undefined : listIds.get(fonts[0]);
+      if (listId === undefined && fonts[0].length <= NAMED_FAMILY_LIST_UNITS) {
         if (listIds.size >= NAMED_FAMILY_RESULT_LIMIT || listUnits + fonts[0].length > NAMED_FAMILY_LIST_UNITS) {
           listIds.clear();
           results.clear();
@@ -487,14 +515,14 @@ export function createNamedFamilyOracle(
         ? { *[Symbol.iterator]() { for (const part of segmenter.segment(text)) yield part.segment; } }
         : text;
       for (const cluster of clusters) {
-        const cacheable = cluster.length <= NAMED_FAMILY_CLUSTER_UNITS;
-        const key = `${listId}\u0000${cluster}`;
-        let owned = cacheable ? results.get(key) : undefined;
+        const key = listId !== undefined && cluster.length <= OWNERSHIP_CACHED_CLUSTER_UNITS
+          ? `${listId}\u0000${cluster}` : undefined;
+        let owned = key !== undefined ? results.get(key) : undefined;
         if (owned === undefined) {
           const judged = nativeRouteClusterOwned(fonts, cluster, probe);
           if (judged === undefined) return false;
           owned = judged;
-          if (cacheable) {
+          if (key !== undefined) {
             if (results.size >= NAMED_FAMILY_RESULT_LIMIT) results.delete(results.keys().next().value!);
             results.set(key, owned);
           }

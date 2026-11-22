@@ -61,22 +61,101 @@ describe('named-family oracle (Canvas lang admission)', () => {
     expect(broken.draws('"Covering"', 400, 'normal', 'где')).toBe(false);
   });
 
-  it('remembers short clusters only, and stays bounded over high-cardinality text', () => {
+  it('verifies the sentinels on the measuring context and on both proof contexts', () => {
+    // Registered and applied where layout measures, but not where the proof
+    // runs: the capability is absent, for a run language and for a worker.
+    const measuring = fakeOwner();
+    const broken = fakeOwner({ sentinels: false });
+    const split = createNamedFamilyOracle(measuring.owner, broken.factory);
+    expect([split.sentinelsApply, split.available]).toEqual([false, false]);
+    expect(split.draws('"Covering"', 400, 'normal', 'где')).toBe(false);
+    // Sentinels applied without Canvas `lang`: the realm can prove ownership
+    // (so a worker may proceed) and no run language is admitted.
+    const noLang = fakeOwner({ lang: false });
+    const oracle = createNamedFamilyOracle(noLang.owner, noLang.factory);
+    expect([oracle.sentinelsApply, oracle.available]).toEqual([true, false]);
+    // The measuring context's own font is restored.
+    expect(createNamedFamilyOracle(measuring.owner, fakeOwner().factory).available).toBe(true);
+    expect(measuring.owner.font).toBe('10px serif');
+  });
+
+  it('remembers short clusters only: native probes per request and per cache state', () => {
     const { factory, calls, owner } = fakeOwner();
     const oracle = createNamedFamilyOracle(owner, factory);
-    expect(oracle.draws('"Covering"', 400, 'normal', 'г')).toBe(true);
-    const afterFirst = calls.length;
-    expect(oracle.draws('"Covering"', 400, 'normal', 'г')).toBe(true);
-    expect(calls.length).toBe(afterFirst);
-    // A cluster longer than the cached bound is proved again each time.
-    const long = `a${'́'.repeat(40)}`;
-    expect(oracle.draws('"Covering"', 400, 'normal', long)).toBe(true);
-    const afterLong = calls.length;
-    expect(oracle.draws('"Covering"', 400, 'normal', long)).toBe(true);
-    expect(calls.length).toBeGreaterThan(afterLong);
-    // Twenty thousand distinct ideographs: every one is still judged.
-    for (let code = 0x4e00; code < 0x4e00 + 20000; code += 1) {
-      expect(oracle.draws('"Covering"', 400, 'normal', String.fromCodePoint(code))).toBe(true);
-    }
+    // The capability is judged on first use (six sentinel measurements).
+    expect(oracle.available).toBe(true);
+    const probes = (text: string, list = '"Covering"') => {
+      const before = calls.length;
+      expect(oracle.draws(list, 400, 'normal', text)).toBe(!text.includes('ж'));
+      return calls.length - before;
+    };
+    // A cold cluster costs the sentinel-only control pair and the route pair.
+    expect(probes('г')).toBe(4);
+    expect(probes('г')).toBe(0);
+    // Another route reuses the control result: only its own pair.
+    expect(probes('г', '"Covering", "Other"')).toBe(2);
+    // A cluster longer than the cached bound is proved again each time, in
+    // full: neither its result nor its control is retained.
+    const long = `a${'\u0301'.repeat(40)}`;
+    expect(probes(long)).toBe(4);
+    expect(probes(long)).toBe(4);
+    expect(probes(`${long}г`)).toBe(4);
+    // A rejected cluster ends the request: later clusters are not probed.
+    expect(probes('жд')).toBe(4);
+    expect(probes('жд')).toBe(0);
+    expect(probes('д')).toBe(4);
+  });
+
+  it('evicts instead of growing over high-cardinality text', () => {
+    const { factory, calls, owner } = fakeOwner();
+    const oracle = createNamedFamilyOracle(owner, factory);
+    // The capability is judged on first use (six sentinel measurements).
+    expect(oracle.available).toBe(true);
+    const probes = (text: string, list = '"Covering"') => {
+      const before = calls.length;
+      expect(oracle.draws(list, 400, 'normal', text)).toBe(true);
+      return calls.length - before;
+    };
+    const ideograph = (index: number) => String.fromCodePoint(0x4e00 + index);
+    // Twenty thousand distinct ideographs: each is judged exactly once.
+    let cold = 0;
+    for (let index = 0; index < 20000; index += 1) cold += probes(ideograph(index));
+    expect(cold).toBe(20000 * 4);
+    // The newest results are still held; the oldest were evicted (8192
+    // results, 4096 controls) and are proved again.
+    expect(probes(ideograph(19999))).toBe(0);
+    expect(probes(ideograph(20000 - 8192))).toBe(0);
+    expect(probes(ideograph(20000 - 8193))).toBe(4);
+    expect(probes(ideograph(0))).toBe(4);
+    // Evicted result, control still held: only the route pair.
+    expect(probes(ideograph(20000 - 4000), '"Covering", "Second"')).toBe(2);
+  });
+
+  it('never interns a family list larger than the whole list budget', () => {
+    const { factory, calls, owner } = fakeOwner();
+    const oracle = createNamedFamilyOracle(owner, factory);
+    // The capability is judged on first use (six sentinel measurements).
+    expect(oracle.available).toBe(true);
+    const probes = (list: string, text: string) => {
+      const before = calls.length;
+      expect(oracle.draws(list, 400, 'normal', text)).toBe(true);
+      return calls.length - before;
+    };
+    expect(probes('"Covering"', 'г')).toBe(4);
+    const oversized = `"Covering", ${Array.from({ length: 9000 }, (_, index) => `"Family ${index}"`).join(', ')}`;
+    expect(oversized.length).toBeGreaterThan(65536);
+    // Judged (the control is shared), never remembered, and the lists and
+    // results already interned survive it.
+    expect(probes(oversized, 'г')).toBe(2);
+    expect(probes(oversized, 'г')).toBe(2);
+    expect(probes('"Covering"', 'г')).toBe(0);
+    // Lists that fit are interned until their total reaches the budget; the
+    // table then starts over (results with it), never exceeding it.
+    const list = (index: number) => `"Covering", "${`Family ${index} `.repeat(400)}"`;
+    expect(probes(list(0), 'г')).toBe(2);
+    expect(probes(list(0), 'г')).toBe(0);
+    for (let index = 1; index < 24; index += 1) probes(list(index), 'г');
+    expect(probes(list(23), 'г')).toBe(0);
+    expect(probes(list(0), 'г')).toBe(2);
   });
 });

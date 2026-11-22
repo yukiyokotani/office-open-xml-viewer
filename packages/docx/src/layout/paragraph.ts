@@ -869,6 +869,23 @@ function contextualTextFloors(segment: MeasuredTextPlanSegment, text: string): b
   ) > 0);
 }
 
+/** Whether elongated `text` may shape in `segment`'s retained state. A
+ * route language was admitted for the piece's own text (named families draw
+ * all of it; core createNamedFamilyOracle). The elongation adds U+0640, so
+ * the generated text must pass the same proof: otherwise a fallback face
+ * chosen per language (CSS Fonts 4 §5.1/§5.4) would draw it, and the piece
+ * keeps its text instead. Text without a route language needs no proof. */
+function elongationKeepsRouteLanguage(segment: MeasuredTextPlanSegment, text: string): boolean {
+  const service = segment.textLayoutService;
+  const request = segment.textShapeRequest;
+  if (!service || !request || !request.canvasLanguagePin?.lang) return true;
+  return service.shape({ ...replaceTextShapeRequest(request, text), measure: false })
+    .spans.every((span) => span.fontRoute.lang === undefined
+      || service.namedFamiliesDraw?.({
+        text: span.text, fontRoute: span.fontRoute, weight: span.font.weight, style: span.font.style,
+      }) === true);
+}
+
 function contextualAdvance(segment: MeasuredTextPlanSegment, text: string): number {
   if (!segment.textLayoutService || !segment.textShapeRequest) {
     throw new Error('Kashida acquisition requires the retained TextLayoutService authority');
@@ -1704,9 +1721,11 @@ export function planLine(input: PlanLineInput): LineLayout {
   let kashidaAppliedPt = 0;
   if (kashida && lineSlackPt + rtlJustifySlackBonusPt > 0) {
     // Kashida rewrites one contextual paint operation. A segment already split
-    // into cluster-origin operations, or whose elongated text would reach the
-    // WORD_CONDENSED_SPACING_ADVANCE_FLOOR, offers no elongation point; the
-    // slack is redistributed over the remaining segments.
+    // into cluster-origin operations, whose elongated text would reach the
+    // WORD_CONDENSED_SPACING_ADVANCE_FLOOR, or whose elongated text fails the
+    // proof its route language rests on (elongationKeepsRouteLanguage),
+    // offers no elongation point; the slack is redistributed over the
+    // remaining segments.
     const excluded = new Set<number>();
     const distribute = () => computeKashidaDistribution(
       segments.map((segment, segmentIndex) => segment.kind === 'text'
@@ -1729,7 +1748,8 @@ export function planLine(input: PlanLineInput): LineLayout {
       const floored = [...(distribution?.perSeg ?? [])]
         .filter(([segmentIndex, plan]) => {
           const segment = segments[segmentIndex];
-          return segment?.kind === 'text' && contextualTextFloors(segment, plan.text);
+          return segment?.kind === 'text' && (contextualTextFloors(segment, plan.text)
+            || !elongationKeepsRouteLanguage(segment, plan.text));
         });
       if (floored.length === 0) break;
       for (const [segmentIndex] of floored) excluded.add(segmentIndex);
@@ -2762,7 +2782,6 @@ function textPlacement(
               : ruby.text.slice(cluster.range.start, cluster.range.end),
             offsetPt: cluster.offsetPt,
             fontRoute: span.fontRoute,
-            ...(span.lang !== undefined ? { lang: span.lang } : {}),
             fontSizePt: ruby.fontSizePt,
             fontWeight: span.font.weight,
             fontStyle: span.font.style,
@@ -2815,7 +2834,6 @@ function textPlacement(
     }],
     color,
     fontRoute,
-    ...(segment.lang !== undefined ? { lang: segment.lang } : {}),
     fontSizePt: calcEffectiveFontPx(segment, 1),
     fontWeight: segment.bold ? 700 : 400,
     fontStyle: segment.italic ? 'italic' : 'normal',
@@ -3157,7 +3175,6 @@ function numberingMarkerPlacements(
         writingMode: 'horizontal-tb',
       }],
       color, fontRoute: span.fontRoute,
-      ...(span.lang !== undefined ? { lang: span.lang } : {}),
       fontSizePt: paragraph.numberingMarkerShapeInput?.fontSizePt ?? span.ascentPt + span.descentPt,
       fontWeight: span.font.weight, fontStyle: span.font.style,
       direction: context.baseRtl ? 'rtl' : 'ltr', decorations: [],
@@ -3330,7 +3347,12 @@ function retainedGeometryPlan(
   } : undefined;
   const emphasis = segment.emphasisMark ? (() => {
     const glyph = emphasisGlyph(segment.emphasisMark);
-    const markShape = shapeProbe(glyph);
+    // The mark is generated text that is painted: its route language is
+    // proved for the mark itself (named families must draw it), not taken
+    // from the base piece's retained decision.
+    const markShape = service.shape({
+      ...independentTextShapeRequest(request, glyph), canvasLanguagePin: undefined, measure: true,
+    });
     const markSpan = markShape.spans[0];
     if (!markSpan) throw new Error('Emphasis shaping produced no selected-face span');
     // §17.3.2.12 positions w:em against each base cluster's ink. Its font
@@ -3354,7 +3376,6 @@ function retainedGeometryPlan(
       mark: {
         inkBounds: completeInkBounds(markShape),
         fontRoute: markSpan.fontRoute,
-        ...(markSpan.lang !== undefined ? { lang: markSpan.lang } : {}),
         fontSizePt: request.fontSizePt,
         fontWeight: markSpan.font.weight,
         fontStyle: markSpan.font.style,
@@ -3540,7 +3561,7 @@ function textPlanSegment(
           projected.fontStyle,
         ),
         fontKerning: projected.paintOps[0]!.kerning,
-        ...(projected.lang !== undefined ? { lang: projected.lang } : {}),
+        ...(projected.fontRoute.lang !== undefined ? { lang: projected.fontRoute.lang } : {}),
         fontSizePt: projected.fontSizePt,
         letterSpacingPt: pitchPt,
         characterGridDeltaPt: gridPt,
@@ -3564,7 +3585,7 @@ function textPlanSegment(
         projected.fontStyle,
       ),
       fontKerning: projected.paintOps[0]!.kerning,
-      ...(projected.lang !== undefined ? { lang: projected.lang } : {}),
+      ...(projected.fontRoute.lang !== undefined ? { lang: projected.fontRoute.lang } : {}),
       fontSizePt: projected.fontSizePt,
       letterSpacingPt: pitchPt,
       characterGridDeltaPt: gridPt,
@@ -4214,7 +4235,6 @@ function planMeasuredLines(
             glyph,
             advancePt: shape.advancePt,
             fontRoute: span.fontRoute,
-            ...(span.lang !== undefined ? { lang: span.lang } : {}),
             fontSizePt: tab.fontSize,
             fontWeight: span.font.weight,
             fontStyle: span.font.style,

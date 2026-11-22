@@ -66,6 +66,7 @@ import {
 } from './advance.js';
 import {
   buildFont,
+  sameRouteFaces,
   segmentEastAsiaFloorSingleLinePx,
   segmentIntendedSingleLinePx,
 } from './font-routes.js';
@@ -181,7 +182,7 @@ export function performSameLatinSpaceFace(
     !candidate.tateChuYoko &&
     !reference.tateChuYoko &&
     candidate.latinSpaceAverageWidthRatio === reference.latinSpaceAverageWidthRatio &&
-    candidate.fontRoute?.fingerprint === reference.fontRoute?.fingerprint &&
+    sameRouteFaces(candidate.fontRoute, reference.fontRoute) &&
     candidate.fontFamily === reference.fontFamily &&
     candidate.fontSize === reference.fontSize &&
     candidate.bold === reference.bold &&
@@ -1105,7 +1106,7 @@ export function performFlush(
       && segment.positionExtendsLineBox !== false
       && segment.position === first.position
       && segment.fontFamily === first.fontFamily
-      && segment.fontRoute?.fingerprint === first.fontRoute?.fingerprint
+      && sameRouteFaces(segment.fontRoute, first.fontRoute)
       && segment.bold === first.bold && segment.italic === first.italic
       && segment.fontSize === first.fontSize
       && segment.resolvedDesignDescentRatio === first.resolvedDesignDescentRatio

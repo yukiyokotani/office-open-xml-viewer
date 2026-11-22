@@ -61,7 +61,6 @@ export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSe
     && (left.script === 'ascii' || left.script === 'highAnsi')
     && (right.script === 'ascii' || right.script === 'highAnsi')
     && !!left.fontRoute && left.fontRoute.fingerprint === right.fontRoute?.fingerprint
-    && left.lang === right.lang
     && calcEffectiveFontPx(left, scale) === calcEffectiveFontPx(right, scale)
     && left.bold === right.bold && left.italic === right.italic
     && l.weight === r.weight && l.style === r.style
@@ -130,15 +129,13 @@ export class LineMeasurementAdapter {
     }
   }
 
-  /** Direct Canvas measurement of a segment's text uses the language its
-   * shaped span was measured and is painted with (TextShapeSpan.lang). */
-  private withSegmentLanguage<T>(segment: LayoutTextSeg, measure: () => T): T {
-    const previous = selectCanvasLanguage(this.context, segment.lang);
-    try {
-      return measure();
-    } finally {
-      restoreCanvasLanguage(this.context, previous);
-    }
+  /** Direct Canvas measurement of a segment's text applies its route's
+   * language with the route's shorthand (CanvasFontRoute.lang): the state
+   * its shaped span was measured in and is painted in. Returns what
+   * {@link restoreCanvasLanguage} takes; a route without a language leaves
+   * the context untouched. */
+  private selectSegmentLanguage(segment: LayoutTextSeg): string | undefined {
+    return selectCanvasLanguage(this.context, segment.fontRoute?.lang);
   }
 
   withSegmentKerning<T>(segment: LayoutTextSeg, measure: () => T): T {
@@ -207,9 +204,11 @@ export class LineMeasurementAdapter {
     }
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
+    const previousLang = this.selectSegmentLanguage(segment);
     try {
       return this.context.measureText(segment.text);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.restoreKerning(previous);
     }
   }
@@ -248,11 +247,7 @@ export class LineMeasurementAdapter {
       || l.weight !== r.weight || l.style !== r.style || l.kerning !== r.kerning
       || charScaleFactor(left) !== charScaleFactor(right)
       || left.sourceRunIndex === undefined || left.sourceRunIndex !== right.sourceRunIndex
-      || left.sourceTextSequence !== right.sourceTextSequence
-      // The joined probe shapes in one language state; both sides must have
-      // been measured in it.
-      || left.lang !== right.lang || l.canvasLanguagePin?.group !== r.canvasLanguagePin?.group
-      || l.canvasLanguagePin?.lang !== r.canvasLanguagePin?.lang) return 0;
+      || left.sourceTextSequence !== right.sourceTextSequence) return 0;
     // The slot and native-unit checks walk spans and slice source text, so
     // they run after the field comparisons.
     const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
@@ -301,23 +296,26 @@ export class LineMeasurementAdapter {
     const font = this.fontForSegment(left);
     // One pass keeps one Canvas state apart from the font and kerning set
     // here, so the pair of a face and two clusters is measured once per pass.
-    // Language-specific forms can change the pair; untagged keys are unchanged.
-    const key = left.lang === undefined
+    // The route's language can change the pair (a shorthand cannot carry
+    // it); keys of routes without one are unchanged.
+    const lang = left.fontRoute?.lang;
+    const key = lang === undefined
       ? `${font}\u0000${before}\u0000${after}`
-      : `${font}\u0000${before}\u0000${after}\u0000${left.lang}`;
+      : `${font}\u0000${before}\u0000${after}\u0000${lang}`;
     const cached = this.kernedSeamPairs.get(key);
     if (cached !== undefined) return cached * charScaleFactor(right);
     const previousFont = this.selectedFont ?? this.initialFont;
     const previousKerning = this.context.fontKerning;
     this.setFont(font);
     this.context.fontKerning = 'normal';
+    const previousLang = this.selectSegmentLanguage(left);
     try {
       const width = (text: string) => this.context.measureText(text).width;
-      const pair = this.withSegmentLanguage(left, () =>
-        width(before + after) - width(before) - width(after));
+      const pair = width(before + after) - width(before) - width(after);
       this.kernedSeamPairs.set(key, pair);
       return pair * charScaleFactor(right);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.context.font = previousFont;
       this.selectedFont = previousFont;
       this.context.fontKerning = previousKerning;
@@ -355,10 +353,9 @@ export class LineMeasurementAdapter {
       // routing probes plus bounded-context sideways graphemes.
       reserveWork(VERTICAL_PLAN_WORK_PER_UNIT * text.length);
       const gridPx = segmentCharacterGridDeltaPx(segment, grid, this.scale);
-      const verticalGlyphMeasurement = this.verticalGlyphMeasurement;
-      const cells = verticalGlyphMeasurement.planRun({
+      const cells = this.verticalGlyphMeasurement.planRun({
         text,
-        ...(segment.lang !== undefined ? { lang: segment.lang } : {}),
+        ...(segment.fontRoute?.lang !== undefined ? { lang: segment.fontRoute.lang } : {}),
         font: this.fontForSegment(segment),
         fontKerning: this.segmentKerning(segment),
         fontSizePt: calcEffectiveFontPx(segment, this.scale),
@@ -423,9 +420,11 @@ export class LineMeasurementAdapter {
   measureRunText(segment: LayoutTextSeg, text: string): TextMetrics {
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
+    const previousLang = this.selectSegmentLanguage(segment);
     try {
-      return this.withSegmentLanguage(segment, () => this.context.measureText(text));
+      return this.context.measureText(text);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.restoreKerning(previous);
     }
   }
@@ -452,11 +451,11 @@ export class LineMeasurementAdapter {
     }
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
-    const verticalGlyphMeasurement = this.verticalGlyphMeasurement;
+    const previousLang = this.selectSegmentLanguage(segment);
     try {
-      return this.withSegmentLanguage(segment, () =>
-        verticalRunInkExtra(text, true, verticalGlyphMeasurement));
+      return verticalRunInkExtra(text, true, this.verticalGlyphMeasurement);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.restoreKerning(previous);
     }
   }

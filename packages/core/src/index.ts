@@ -190,7 +190,7 @@ export {
   type OfficeFontFallbackRoute,
   type LoadedOfficeFontFallbacks,
 } from './fonts/office-fallback';
-export { canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
+export { canvasFontRouteFaces, canvasFontRouteWithLanguage, canvasFontString, createCanvasFontRoute, type CanvasFontRoute } from './fonts/canvas-route';
 // Size-proportional Canvas advances: a shorthand the host grid-fits at its own
 // size is measured and painted at a reference em under a linear scale.
 export {

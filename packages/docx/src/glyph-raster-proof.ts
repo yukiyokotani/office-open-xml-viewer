@@ -42,7 +42,7 @@ function sharedContext(width: number, height: number): RasterContext | null {
   return shared.context;
 }
 
-/** Run `action` in the language of the certified text, restoring the
+/** Run `action` in the language of the certified text's route, restoring the
  * surface's own (a resize resets Canvas state, so set it per operation). */
 function withLanguage<T>(context: RasterContext, lang: string | undefined, action: () => T): T {
   const previous = selectCanvasLanguage(context, lang);
@@ -100,7 +100,7 @@ export function sameGlyphRaster(request: Readonly<GlyphRasterComparisonRequest>)
   if (!measure) return false;
   const width = (font: string) => {
     measure.font = font;
-    return withLanguage(measure, request.lang, () =>
+    return withLanguage(measure, request.route.lang, () =>
       withDirection(measure, request.baseDirection, () => measure.measureText(probe).width));
   };
   const nativeWidth = width(nativeFont);
@@ -111,8 +111,8 @@ export function sameGlyphRaster(request: Readonly<GlyphRasterComparisonRequest>)
   const context = sharedContext(rasterWidth, height);
   if (!context) return false;
   try {
-    const native = rasterize(context, nativeFont, probe, rasterWidth, height, request.baseDirection, request.lang);
-    const face = rasterize(context, faceFont, probe, rasterWidth, height, request.baseDirection, request.lang);
+    const native = rasterize(context, nativeFont, probe, rasterWidth, height, request.baseDirection, request.route.lang);
+    const face = rasterize(context, faceFont, probe, rasterWidth, height, request.baseDirection, request.route.lang);
     let ink = false;
     for (let index = 0; index < native.length; index++) {
       if (native[index] !== face[index]) return false;

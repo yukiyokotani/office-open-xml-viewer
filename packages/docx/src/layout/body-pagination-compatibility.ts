@@ -151,7 +151,7 @@ const GRID_PLAIN_LINE_KEYS = new Set([
 const GRID_PLAIN_TEXT_KEYS = new Set([
   'kind', 'text', 'optionalHyphenGlyph', 'semanticSlotSpans', 'sourceRunIndex',
   'range', 'origin', 'bounds', 'highlightBounds', 'advancePt', 'clusters',
-  'trailingSpaceCompressionPt', 'color', 'fontRoute', 'lang', 'fontSizePt',
+  'trailingSpaceCompressionPt', 'color', 'fontRoute', 'fontSizePt',
   'fontWeight', 'fontStyle', 'direction', 'writingMode', 'characterSpacingPt',
   'characterScale', 'fitText', 'kerning', 'ownedTrailingSlackPt', 'hyperlink',
 ]);

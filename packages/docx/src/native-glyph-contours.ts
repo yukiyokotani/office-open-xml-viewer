@@ -51,7 +51,7 @@ export function acquireCanvasGlyphContours(
       for (const span of request.spans) {
         const font = canvasFontString(span.fontRoute, request.fontSizePt, span.font.weight, span.font.style);
         ctx.font = font;
-        const previousLang = selectCanvasLanguage(ctx, span.lang);
+        const previousLang = selectCanvasLanguage(ctx, span.fontRoute.lang);
         // Shape with the em layout measured the span at (core
         // reference-advances.ts) so contour glyphs sit on retained advances.
         const reference = advances?.plan(font);

@@ -135,9 +135,10 @@ export interface LayoutTextSeg extends LayoutSegSource {
   fontSize: number;  // pt
   color: string | null;
   fontFamily: string | null;
+  /** The selected span's route, the identity every later consumer compares,
+   * caches and paints by; it carries the span's admitted §17.3.2.20 language
+   * (CanvasFontRoute.lang). */
   fontRoute?: CanvasFontRoute;
-  /** Language the selected span was measured with (Canvas `lang`). */
-  lang?: string;
   /** Selected-route line ratio. It may come from parsed font bytes or a bounded
    * Canvas measurement; the latter does not reveal OpenType table identity. */
   /** Admitted reference profile has no Far East code-page bits; its Latin
@@ -819,9 +820,11 @@ export interface LineLayoutEnvironment {
 }
 
 /** §17.3.2.20 languages of a ruby guide (independent text, not the base's):
- * `w:rubyPr/w:lid` names the phonetic guide's language; the guide runs'
- * own `w:lang/@w:val`, when they all agree, governs its Latin text. */
+ * `w:rubyPr/w:lid` names the phonetic guide's language; the guide runs' own
+ * `w:lang/@w:val` governs its Latin text when they all agree, and `null`
+ * records that they disagree (the guide then has no run language of its own
+ * and must not take the base run's; layout/text.ts rubyGuideShapeRequest). */
 export interface RubyGuideLanguages {
   readonly guide?: string;
-  readonly latin?: string;
+  readonly latin?: string | null;
 }
