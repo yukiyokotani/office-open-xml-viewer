@@ -63,7 +63,7 @@ export interface RubyGuideUnit {
   readonly fontRoute: CanvasFontRoute;
   readonly fontWeight: number;
   readonly fontStyle: 'normal' | 'italic';
-  readonly kerning?: 'normal';
+  readonly kerning?: 'normal' | 'none';
   readonly orientation?: 'upright' | 'rotate' | 'sideways';
   readonly verticalFeature?: true;
   readonly drawOffsetPx?: Readonly<{ xPt: number; yPt: number }>;

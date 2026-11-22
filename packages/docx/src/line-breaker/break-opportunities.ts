@@ -1607,8 +1607,14 @@ function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitF
         && breakerState.currentLine.every(isListLabelItem))
       || (breakerState.currentLine.every(isInklessLineItem) && overlongAnchorLineInScope(context, unitWidth));
     if (!startsLine) {
-      flush(undefined, false, s.src);
+      // §17.3.1.16: a cell led by a line-start-forbidden character pulls the
+      // current line's last characters down with it (cross-run 追い出し), as
+      // the CJK overflow path does. When nothing can be retracted the cell
+      // still moves whole: it is never split or hung past the line end.
+      const retraction = context.retractCurrentLineForLeadingKinsoku(s);
+      flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
       breakerState.queue.unshift(s);
+      if (retraction.kind === 'retracted') breakerState.queue.unshift(retraction.tail);
       return;
     }
     context.forcedPlacement(unitWidth);

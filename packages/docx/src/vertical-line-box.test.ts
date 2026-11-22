@@ -580,3 +580,49 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 3)', () =>
     expect(lineOf(lines, '漢字')).toBe(lineOf(lines, 'ゃ'));
   });
 });
+
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 4)', () => {
+  const lineOf = (lines: readonly LineLayout[], text: string) =>
+    lines.findIndex((line) => textPlacements(line).some((entry) => entry.text.includes(text)));
+
+  it('keeps an unwidened ruby base in its snapToChars script block', () => {
+    const grid = { docGridType: 'snapToChars', docGridLinePitch: 18, docGridCharSpace: 0, pageWidth: 40 + 90 + 35 } as Partial<SectionProps>;
+    const ruby = { text: 'か', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const narrow = { charScale: 0.4 };
+    const { lines } = layoutParagraph([
+      { text: 'I' }, { text: 'i', ruby, extra: narrow }, { text: 'i', extra: narrow }, { text: '後' },
+    ], undefined, null, grid);
+    // The 18pt Latin block takes two 10pt cells, leaving room for 後.
+    expect(lineOf(lines, '後')).toBe(0);
+  });
+
+  it.each(['tbRl', 'tbLrV'])('retracts a character ahead of a ruby cell led by a forbidden kana (%s)', (direction) => {
+    const ruby = { text: 'かきくけ', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const { lines } = layoutParagraph(
+      [{ text: '前前' }, { text: 'ゃ漢', ruby }], direction, null, { pageHeight: 60 + 80 + 30 },
+    );
+    const texts = lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+    expect(texts).toEqual(['前', '前ゃ漢']);
+  });
+
+  it('plans each font slot of a vertical guide in its own face', () => {
+    const ruby = { text: 'ABか', fontSizePt: 5, hpsRaisePt: 9 };
+    const line = layoutParagraph([{
+      text: '漢字', ruby, fontFamily: 'AsciiFace', extra: { fontFamilyEastAsia: 'EastFace' },
+    }], 'tbRl').lines[0]!;
+    const ops = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps;
+    const faces = ops.map((op) => [op.text, JSON.stringify(op.fontRoute)]);
+    expect(faces.map(([text]) => text)).toEqual(['AB', 'か']);
+    expect(faces[0]![1]).toContain('AsciiFace');
+    expect(faces[1]![1]).toContain('EastFace');
+  });
+
+  it('paints a turned guide cell with the kerning it was planned with', () => {
+    const ruby = { text: 'AVか', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const line = layoutParagraph([{ text: '漢字', ruby }], 'tbRl').lines[0]!;
+    const ops = textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps;
+    const turned = ops.find((op) => op.glyphOrientation === 'sideways')!;
+    expect(turned.text).toBe('AV');
+    expect(turned.kerning).toBe('none');
+  });
+});

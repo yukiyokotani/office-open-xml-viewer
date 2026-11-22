@@ -301,9 +301,11 @@ export interface RetainedGlyphPaintOperation {
   readonly fontStyle: 'normal' | 'italic';
   readonly color: TextColorPolicy;
   /** Present when the operation paints a contextual span whose acquisition
-   * was pair-kerned (WORD_ARABIC_PAIR_KERNING); absent operations paint one
-   * grapheme, which has no pair to kern. */
-  readonly kerning?: 'normal';
+   * set the kerning: 'normal' when it was pair-kerned
+   * (WORD_ARABIC_PAIR_KERNING), 'none' for a planned vertical ruby guide
+   * (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). Absent operations paint one grapheme
+   * or keep the context's kerning. */
+  readonly kerning?: 'normal' | 'none';
   /** Tight selected-face ink relative to this operation's baseline origin. */
   readonly inkBounds?: Readonly<{
     xMinPt: number;

@@ -1327,6 +1327,15 @@ export function performFlush(
   startLine(lineHeadRequirement(nextStart));
 }
 
+/** WORD_RUBY_ALIGN_PLACEMENT: only a cell its guide widens leaves the
+ * snapToChars script block; an unwidened ruby base is ordinary text of its
+ * script and shares its block's allocation. */
+function rubyCellWidened(operationState: PassOperationState, s: LayoutTextSeg): boolean {
+  if (!s.rubyGroup) return false;
+  const cell = performRubyCell(operationState, s);
+  return cell !== undefined && cell.advancePx > cell.basePx;
+}
+
 export function performProspectiveSnapAdvance(
   operationState: PassOperationState,
   s: LayoutTextSeg,
@@ -1336,8 +1345,8 @@ export function performProspectiveSnapAdvance(
 
   const kind = snapToCharsClass(s, characterGrid);
   if (!kind || snapPitchPx == null) return naturalWidth;
-  // A ruby cell is its own allocation (WORD_RUBY_ALIGN_PLACEMENT).
-  if (s.rubyGroup) return performStandaloneSnapAdvance(operationState, s, naturalWidth);
+  // A widened ruby cell is its own allocation (WORD_RUBY_ALIGN_PLACEMENT).
+  if (rubyCellWidened(operationState, s)) return performStandaloneSnapAdvance(operationState, s, naturalWidth);
   if (kind === 'eastAsia') {
     const cells = eastAsianSnapCellCount(s);
     return snapToCharsAllocatedWidthPx(naturalWidth, kind, snapPitchPx, cells);
@@ -1408,8 +1417,8 @@ export function performAddToLine(
       s.snapGridClass = kind;
       s.snapGridNaturalWidthPx = naturalWidth;
       s.snapGridCellPitchPx = snapPitchPx;
-      if (s.rubyGroup) {
-        // WORD_RUBY_ALIGN_PLACEMENT: a ruby piece takes its own allocation
+      if (rubyCellWidened(operationState, s)) {
+        // WORD_RUBY_ALIGN_PLACEMENT: a widened ruby piece takes its own allocation
         // plus its share of the cell's widening, which is whole cells.
         const share = rubyPieceWideningPx(s, performRubyCell(operationState, s));
         const baseNatural = naturalWidth - share;
