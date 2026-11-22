@@ -103,6 +103,9 @@ export interface AnchorAcquisitionInput {
       readonly flipV: boolean;
     };
   } | null;
+  /** WORD_STORY_VML_PAGE_POSITION: a text-box story's text- or line-relative
+   * wrapping VML shape stays at or below the page's top margin. */
+  readonly storyTopMarginFloor?: boolean;
 }
 
 export interface InternalAnchorRunWire {

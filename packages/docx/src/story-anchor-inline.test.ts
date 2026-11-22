@@ -33,13 +33,26 @@ const PNG = Uint8Array.from([
 ]);
 
 type Story = 'body' | 'drawingml-textbox' | 'vml-textbox' | 'footnote' | 'endnote';
-type Placement = 'inline' | 'wrapNone' | 'wrapSquare' | 'wrapTopAndBottom' | 'behindDoc' | 'page';
+type Placement = 'inline' | 'wrapNone' | 'wrapSquare' | 'wrapTopAndBottom' | 'behindDoc' | 'page'
+  | 'vml-text-square' | 'vml-text-square-mt50' | 'vml-margin' | 'vml-text-none';
 
 const encoder = new TextEncoder();
 const xml = (body: string) => encoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>${body}`);
 const text = (value: string) => `<w:p><w:r><w:t>${value}</w:t></w:r></w:p>`;
 
+const W10 = 'urn:schemas-microsoft-com:office:word';
+
+function vmlRect(placement: Placement): string {
+  const frames = placement === 'vml-margin' ? 'margin' : 'text';
+  const top = placement === 'vml-text-square-mt50' ? 50 : 0;
+  const wrap = placement === 'vml-text-none' ? 'none' : 'square';
+  return `<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:${top}pt;width:40pt;height:20pt;`
+    + `mso-position-horizontal-relative:${frames};mso-position-vertical-relative:${frames === 'text' ? 'text' : 'margin'}" `
+    + `fillcolor="black" stroked="f"><w10:wrap type="${wrap}"/></v:rect></w:pict></w:r>`;
+}
+
 function picture(placement: Placement): string {
+  if (placement.startsWith('vml-')) return vmlRect(placement);
   const extent = `<wp:extent cx="${40 * EMU}" cy="${20 * EMU}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>`;
   const graphic = `<a:graphic><a:graphicData uri="${PIC}"><pic:pic><pic:nvPicPr><pic:cNvPr id="2" name="p.png"/>`
     + '<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdImg"/><a:stretch><a:fillRect/></a:stretch>'
@@ -87,7 +100,7 @@ function docx(story: Story, placement: Placement): Uint8Array {
       + '</v:shape></w:pict></w:r></w:p>';
   }
   const document = `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}" xmlns:a="${A}" `
-    + `xmlns:pic="${PIC}" xmlns:wps="${WPS}" xmlns:v="${V}"><w:body>${body}`
+    + `xmlns:pic="${PIC}" xmlns:wps="${WPS}" xmlns:v="${V}" xmlns:w10="${W10}"><w:body>${body}`
     + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="1440" w:bottom="720" '
     + 'w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr></w:body></w:document>';
   const styles = `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr>`
@@ -96,7 +109,8 @@ function docx(story: Story, placement: Placement): Uint8Array {
   const settings = `<w:settings xmlns:w="${W}"><w:compat><w:compatSetting w:name="compatibilityMode" `
     + 'w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>';
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-  const namespaces = `xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:pic="${PIC}"`;
+  const namespaces = `xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:pic="${PIC}" `
+    + `xmlns:v="${V}" xmlns:w10="${W10}"`;
   const noteParts: Array<[string, Uint8Array]> = notes ? [
     [`word/${story}s.xml`, xml(`<w:${story}s ${namespaces}>`
       + `<w:${story} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${story}>`
@@ -192,5 +206,42 @@ describe('word-story-anchor-inline', () => {
   it('keeps body anchors floating', () => {
     expect(JSON.stringify(layOut('body', 'wrapSquare').layers))
       .not.toBe(JSON.stringify(layOut('body', 'inline').layers));
+  });
+
+});
+
+/** Page boxes of the anchored drawings laid out inside the page's stories. */
+function storyDrawingBoxes(story: Story, placement: Placement): Array<{ xPt: number; yPt: number }> {
+  const boxes: Array<{ xPt: number; yPt: number }> = [];
+  const visit = (node: unknown, inStory: boolean): void => {
+    if (!node || typeof node !== 'object') return;
+    const record = node as Record<string, unknown>;
+    if (inStory && record.kind === 'drawing' && record.anchorLayer && record.flowBounds) {
+      const bounds = record.flowBounds as { xPt: number; yPt: number; widthPt: number };
+      if (bounds.widthPt === 40) boxes.push({ xPt: bounds.xPt, yPt: bounds.yPt });
+    }
+    for (const [key, value] of Object.entries(record)) {
+      if (key === 'source' || key === 'paintOrder') continue;
+      visit(value, inStory || key === 'story');
+    }
+  };
+  visit(layOut(story, placement).layers, false);
+  // A drawing is retained both on its paragraph and in its line placements.
+  return [...new Map(boxes.map((box) => [`${box.xPt},${box.yPt}`, box])).values()];
+}
+
+describe('word-story-vml-page-position', () => {
+  it.each(['drawingml-textbox', 'vml-textbox'] as const)('places a %s VML shape from the page origin', (story) => {
+    // Text/text square: x = margin-left, y held at the 36pt top margin.
+    expect(storyDrawingBoxes(story, 'vml-text-square')).toEqual([{ xPt: 300, yPt: 36 }]);
+    expect(storyDrawingBoxes(story, 'vml-text-square-mt50')).toEqual([{ xPt: 300, yPt: 50 }]);
+    // Margin frames and wrapNone: the offsets alone, no top-margin floor.
+    expect(storyDrawingBoxes(story, 'vml-margin')).toEqual([{ xPt: 300, yPt: 0 }]);
+    expect(storyDrawingBoxes(story, 'vml-text-none')).toEqual([{ xPt: 300, yPt: 0 }]);
+  });
+
+  it.each(['footnote', 'endnote'] as const)('places a %s VML shape at its page offsets', (story) => {
+    expect(storyDrawingBoxes(story, 'vml-text-square')).toEqual([{ xPt: 300, yPt: 0 }]);
+    expect(storyDrawingBoxes(story, 'vml-text-square-mt50')).toEqual([{ xPt: 300, yPt: 50 }]);
   });
 });

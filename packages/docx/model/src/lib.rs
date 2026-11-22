@@ -2166,6 +2166,11 @@ pub struct AnchorAcquisitionWire {
     pub wrap: AnchorWrapWire,
     pub behavior: AnchorBehaviorWire,
     pub group: Option<AnchorGroupWire>,
+    /// word-story-vml-page-position: a text-box story's text- or
+    /// line-relative wrapping VML shape stays at or below the page's top
+    /// margin. Serialized only when set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub story_top_margin_floor: bool,
 }
 
 /// VML §19.1.2.18 facts. Absolute offsets remain points; fractional offsets

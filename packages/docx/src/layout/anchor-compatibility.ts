@@ -229,6 +229,18 @@ export const WORD_STORY_ANCHOR_INLINE = defineCompatibilityRule({
   description: 'ECMA-376 §20.4.2.3 positions a wp:anchor drawing on the page. Inside a text box story (w:txbxContent of a wps:txbx or a VML v:textbox) and inside a footnote or endnote story, Word instead lays the anchored drawing out inline at its run, like a wp:inline of the same wp:extent: its positionH/positionV offsets (column, paragraph or page relative), wrap mode (none, square, topAndBottom, tight) and behindDoc layer are ignored, the line grows to the object height, and the following text starts after the object. Evidence: Windows Word 16.0.20625 PDF exports of a 40x20pt picture (wrapNone, wrapSquare, wrapTopAndBottom, wrapTight, behindDoc, page-relative square) and a 60x30pt chart anchored 300pt from the column, each inside a DrawingML text box, a VML text box, a footnote and an endnote (28 controls). Word does not open documents with WordprocessingShape or WordprocessingGroup drawings in these stories (6 note and 4 text box controls), so no Office reference exists for them; they take the same inline route. VML shapes in these stories (w:pict) keep their own floating placement and are outside this rule.',
 });
 
+export const WORD_STORY_VML_PAGE_POSITION = defineCompatibilityRule({
+  id: 'word-story-vml-page-position',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'story-vml-page-position',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 Part 4 §19.1.2.19 positions an absolute VML shape against its mso-position-horizontal-relative / mso-position-vertical-relative frames. Inside a text box story (w:txbxContent of a wps:txbx or a VML v:textbox) and inside a footnote or endnote story, Word ignores those frames and places the shape at its margin-left / margin-top offsets from the page origin: the text box position, the host paragraph, the story position and the left margin do not move it. In a text box story a shape whose vertical frame is text or line and which wraps text (square, tight, through, topAndBottom) is held at or below the top page margin; margin- or page-relative and wrapNone shapes are not. Evidence: Windows Word 16.0.20625 PDF exports of a 40x20pt VML rect and VML pictures in DrawingML and VML text boxes (61 controls: margin-left 200/300, margin-top -20 to 100, every horizontal and vertical frame, every wrap type, text box offsets, host paragraph and story positions, top margins 36/72pt, left margins 72/144pt) and in footnotes and endnotes (24 controls with the same factors, none held at the margin).',
+});
+
 export const WORD_OVERLAPPING_LAYOUT_IN_CELL_OVERLAY = defineCompatibilityRule({
   id: 'word-overlapping-layout-in-cell-overlay',
   evidence: {

@@ -10979,6 +10979,7 @@ fn parse_anchor_acquisition_wire(container: &roxmltree::Node) -> AnchorAcquisiti
             layout_in_cell_status: anchor_value_status(layout_in_cell_raw, layout_in_cell),
         },
         group: None,
+        story_top_margin_floor: false,
     }
 }
 
@@ -14293,6 +14294,11 @@ fn vml_word_anchor_reference(shape: roxmltree::Node, style: &str, axis: &str) ->
 /// shapes stay on the legacy compatibility path because manufacturing the
 /// defaults changes their anchor-line behavior and pagination.
 fn vml_word_has_complete_anchor_reference(shape: roxmltree::Node, style: &str) -> bool {
+    // A text box or note story places the shape from the page origin
+    // (word-story-vml-page-position); its authored frames are not consulted.
+    if vml_hosting_story(shape).is_some() {
+        return true;
+    }
     let wrap = shape
         .children()
         .find(|child| child.is_element() && child.tag_name().name() == "wrap");
@@ -14623,7 +14629,84 @@ fn vml_word_z_order(style: &str) -> (bool, Option<u32>, AnchorValueStatusWire) {
     )
 }
 
+/// The story kind hosting a VML drawing, when it is not the main, header or
+/// footer story: the nearest `w:txbxContent` (§17.17.1.1) or `w:footnote` /
+/// `w:endnote` (§17.11.10 / §17.11.2) ancestor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VmlHostingStory {
+    TextBox,
+    Note,
+}
+
+fn vml_hosting_story(node: roxmltree::Node) -> Option<VmlHostingStory> {
+    node.ancestors().skip(1).find_map(|ancestor| {
+        if !ancestor.is_element() || !is_w_ns(ancestor.tag_name().namespace()) {
+            return None;
+        }
+        match ancestor.tag_name().name() {
+            "txbxContent" => Some(VmlHostingStory::TextBox),
+            "footnote" | "endnote" => Some(VmlHostingStory::Note),
+            _ => None,
+        }
+    })
+}
+
+/// word-story-vml-page-position: Word places an absolutely positioned VML
+/// shape of a text box or note story by its offsets from the page origin,
+/// whatever its `mso-position-*-relative` frames. In a text box story a text-
+/// or line-relative shape that wraps text stays at or below the top margin.
+fn apply_vml_story_page_position(shape: roxmltree::Node, acquisition: &mut AnchorAcquisitionWire) {
+    let Some(story) = vml_hosting_story(shape) else {
+        return;
+    };
+    let page = || AnchorAxisWire {
+        relative_from: Some("page".to_string()),
+        relative_from_status: AnchorValueStatusWire::Valid,
+        choice: AnchorAxisChoiceWire::Missing,
+    };
+    let floor = story == VmlHostingStory::TextBox
+        && matches!(
+            acquisition.vertical.relative_from.as_deref(),
+            Some("paragraph" | "line")
+        )
+        && !matches!(acquisition.wrap.kind, AnchorWrapKindWire::None);
+    let horizontal_choice = std::mem::take(&mut acquisition.horizontal.choice);
+    let vertical_choice = std::mem::take(&mut acquisition.vertical.choice);
+    acquisition.horizontal = AnchorAxisWire {
+        choice: horizontal_choice,
+        ..page()
+    };
+    acquisition.vertical = AnchorAxisWire {
+        choice: vertical_choice,
+        ..page()
+    };
+    acquisition.story_top_margin_floor = floor;
+    if story == VmlHostingStory::Note {
+        // Library policy: a note story is laid out before its page-final
+        // position is known, so a page-positioned shape cannot exclude note
+        // lines consistently. Word's note controls never move a note line
+        // for these shapes (square, tight, topAndBottom, none); overlapping
+        // placements were not measured.
+        acquisition.wrap.kind = AnchorWrapKindWire::None;
+        acquisition.wrap.side = None;
+        acquisition.wrap.polygon = None;
+    }
+}
+
 fn vml_word_anchor_acquisition(
+    shape: roxmltree::Node,
+    definition: Option<roxmltree::Node>,
+    style: &str,
+    width_pt: f64,
+    height_pt: f64,
+) -> AnchorAcquisitionWire {
+    let mut acquisition =
+        vml_word_anchor_acquisition_in_frames(shape, definition, style, width_pt, height_pt);
+    apply_vml_story_page_position(shape, &mut acquisition);
+    acquisition
+}
+
+fn vml_word_anchor_acquisition_in_frames(
     shape: roxmltree::Node,
     definition: Option<roxmltree::Node>,
     style: &str,
@@ -31298,6 +31381,81 @@ mod inline_wps_shape_tests {
             "a nested drawing cannot replace its containing inline shape"
         );
         assert!(outer.text_blocks[0].text.starts_with("OUTER"));
+    }
+
+    /// word-story-vml-page-position: an absolute VML shape in a text box or
+    /// note story is placed from the page origin; text box text/line frames
+    /// that wrap keep the top-margin floor; note shapes do not wrap.
+    #[test]
+    fn story_vml_shapes_take_page_positions() {
+        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w10="urn:schemas-microsoft-com:office:word""#;
+        let rect = |frames: &str, wrap: &str| {
+            format!(
+                r#"<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:0;width:40pt;height:20pt;{frames}" fillcolor="black" stroked="f"><w10:wrap type="{wrap}"/></v:rect></w:pict></w:r>"#
+            )
+        };
+        let text = "mso-position-horizontal-relative:text;mso-position-vertical-relative:text";
+        let margin =
+            "mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin";
+        for (host, frames, wrap, floor, note) in [
+            ("txbx", text, "square", true, false),
+            ("txbx", margin, "square", false, false),
+            ("txbx", text, "none", false, false),
+            ("footnote", text, "square", false, true),
+            ("endnote", text, "topAndBottom", false, true),
+            ("body", text, "square", false, false),
+        ] {
+            let run = rect(frames, wrap);
+            let xml = match host {
+                "txbx" => format!(
+                    r#"<w:root {NS}><w:txbxContent><w:p>{run}</w:p></w:txbxContent></w:root>"#
+                ),
+                "body" => format!(r#"<w:root {NS}><w:p>{run}</w:p></w:root>"#),
+                note => format!(
+                    r#"<w:root {NS}><w:{note} w:id="1"><w:p>{run}</w:p></w:{note}></w:root>"#
+                ),
+            };
+            let doc = roxmltree::Document::parse(&xml).expect("fixture");
+            let shape = doc
+                .descendants()
+                .find(|node| node.tag_name().name() == "rect")
+                .expect("rect");
+            let acquisition = vml_word_anchor_acquisition(
+                shape,
+                None,
+                shape.attribute("style").unwrap(),
+                40.0,
+                20.0,
+            );
+            let case = format!("{host} {frames} {wrap}");
+            let expected_frames = if host == "body" {
+                (Some("column"), Some("paragraph"))
+            } else {
+                (Some("page"), Some("page"))
+            };
+            assert_eq!(
+                (
+                    acquisition.horizontal.relative_from.as_deref(),
+                    acquisition.vertical.relative_from.as_deref()
+                ),
+                expected_frames,
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    acquisition.horizontal.choice,
+                    AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 300.0
+                ),
+                "{case}"
+            );
+            assert_eq!(acquisition.story_top_margin_floor, floor, "{case}");
+            assert_eq!(
+                matches!(acquisition.wrap.kind, AnchorWrapKindWire::None),
+                note || wrap == "none",
+                "{case}"
+            );
+        }
     }
 
     /// word-story-anchor-inline: an anchored picture in a footnote or endnote

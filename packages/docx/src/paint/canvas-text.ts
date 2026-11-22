@@ -509,10 +509,11 @@ export function paintParagraphLayout(node: ParagraphLayout, context: CanvasPaint
 /** Paints an acquired text box. All line partitioning, glyph shaping and point
  * geometry are owned by acquisition; this function only traverses paint data. */
 export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintContext): void {
-  const paintStory = (storyContext: CanvasPaintContext): void => {
+  const paintStory = (storyContext: CanvasPaintContext, omitParagraphAnchors = false): void => {
     for (const block of node.story.blocks) {
       if (block.kind === 'paragraph') {
-        paintParagraphLayout(block, storyContext);
+        paintParagraphLayout(block, omitParagraphAnchors
+          ? { ...storyContext, omitAnchoredDrawings: true } : storyContext);
       } else if (block.kind === 'table') {
         paintTableLayout(block, storyContext, block.resolvedFloatingTables ?? []);
       } else {
@@ -562,9 +563,28 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
     defaultTextColor: node.defaultTextColor ?? documentDefaultTextColor,
     ...(node.verticalMode ? { textBoxVerticalMode: node.verticalMode } : {}),
   };
+  // WORD_STORY_VML_PAGE_POSITION: the floats left in a text-box story (VML
+  // shapes; DrawingML anchors lay out inline there) sit at page positions and
+  // are not cut by the box's text clip. Behind-text ones paint first.
+  const paintStoryAnchors = (behindDoc: boolean): void => {
+    if (storyContext.omitAnchoredDrawings) return;
+    for (const block of node.story.blocks) {
+      if (block.kind !== 'paragraph') continue;
+      const drawings = block.drawings
+        .filter((drawing) => drawing.anchorLayer && (drawing.anchorLayer.behindDoc === true) === behindDoc)
+        .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
+          || a.anchorLayer!.sourceOrder - b.anchorLayer!.sourceOrder);
+      for (const drawing of drawings) paintParagraphDrawingLayout(block, drawing, storyContext);
+    }
+  };
   transformFrame(() => {
-    if (clipFrame) clipFrame(() => paintStory(storyContext))();
-    else paintStory(storyContext);
+    if (clipFrame) {
+      paintStoryAnchors(true);
+      clipFrame(() => paintStory(storyContext, true))();
+      paintStoryAnchors(false);
+    } else {
+      paintStory(storyContext);
+    }
   })();
 }
 
