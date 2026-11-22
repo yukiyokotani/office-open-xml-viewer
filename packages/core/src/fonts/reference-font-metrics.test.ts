@@ -61,6 +61,20 @@ describe('findReferenceFontMetrics', () => {
     }
   });
 
+  it('returns a format-restricted profile only to lookups for that format', () => {
+    for (const family of ['Noto Sans', 'Noto Sans JP']) {
+      expect(findReferenceFontMetrics(family)).toHaveLength(0);
+      expect(findReferenceFontMetrics(family, { format: 'pptx' })).toHaveLength(0);
+      expect(findReferenceFontMetrics(family, { format: 'xlsx', weight: 400, style: 'normal' })).toHaveLength(0);
+      const docx = findReferenceFontMetrics(family, { format: 'docx', weight: 400, style: 'normal' });
+      expect(docx).toHaveLength(1);
+      expect(docx[0]!.evidencedFormats).toEqual(['docx']);
+    }
+    // Unrestricted profiles answer every lookup.
+    expect(findReferenceFontMetrics('Arial', { format: 'pptx', weight: 400, style: 'normal', source: 'office-mac' }))
+      .toEqual(findReferenceFontMetrics('Arial', { weight: 400, style: 'normal', source: 'office-mac' }));
+  });
+
   it('does not let callers mutate shared generated profiles', () => {
     const matches = findReferenceFontMetrics('Times New Roman');
     const filtered = findReferenceFontMetrics('Times New Roman', { source: 'office-mac' });

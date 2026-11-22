@@ -62,6 +62,10 @@ import type { ReferenceFontMetricProfile } from './reference-font-metrics.js';
  * USE_TYPO_METRICS; the only names are "Noto Sans JP" and the PostScript
  * names below. The installed macOS copies have the same hashes. Decoration,
  * PANOSE and GSUB vert coverage are not recorded here.
+ *
+ * Both Noto families were admitted with Word evidence only (DOCX line boxes
+ * and grid cells), so `evidencedFormats` keeps them out of PowerPoint and
+ * Excel font selection, requests and line boxes.
  */
 export const OPEN_FONT_REFERENCE_PROFILES: readonly ReferenceFontMetricProfile[] = [
   {
@@ -97,6 +101,7 @@ export const OPEN_FONT_REFERENCE_PROFILES: readonly ReferenceFontMetricProfile[]
     source: 'published-open-font', family: 'Noto Sans', aliases: ['Noto Sans', postscript],
     weight, style, unitsPerEm: 1000, xAvgCharWidth,
     hhea: [1069, -293, 0], win: [1124, 395], typoMetrics: [1069, -293, 0], farEastCodePage: false,
+    evidencedFormats: ['docx'],
   })),
   ...([
     ['NotoSansJP-Regular', 400, 982],
@@ -105,5 +110,6 @@ export const OPEN_FONT_REFERENCE_PROFILES: readonly ReferenceFontMetricProfile[]
     source: 'published-open-font', family: 'Noto Sans JP', aliases: ['Noto Sans JP', postscript],
     weight, style: 'normal', unitsPerEm: 1000, xAvgCharWidth,
     hhea: [1160, -288, 0], win: [1160, 288], farEastCodePage: true,
+    evidencedFormats: ['docx'],
   })),
 ];

@@ -66,7 +66,7 @@ export function measuredMetric(
   line: LocalFontNormalLine | null | undefined, ownership: ServedFaceLine,
 ): Omit<ResolvedFontMetric, 'family' | 'weight' | 'style' | 'sourceIdentity'> | undefined {
   if (!line) return undefined;
-  if (findReferenceFontMetrics(served).some((profile) => profile.farEastCodePage !== false)) return undefined;
+  if (findReferenceFontMetrics(served, { format: 'docx' }).some((profile) => profile.farEastCodePage !== false)) return undefined;
   const ascent = line.ascentRatio + line.lineGapRatio;
   const descent = line.descentRatio;
   if (!(Number.isFinite(ascent) && Number.isFinite(descent) && ascent >= 0 && descent >= 0 && ascent + descent > 0)) return undefined;

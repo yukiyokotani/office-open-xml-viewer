@@ -60,7 +60,7 @@ function preferredProfiles(
   let result = NO_PROFILES;
   for (const sources of sourceGroups) {
     const profiles = sources.flatMap((source) =>
-      findReferenceFontMetrics(family, { source, weight, style }));
+      findReferenceFontMetrics(family, { source, weight, style, format: 'docx' }));
     if (profiles.length > 0) {
       result = Object.freeze(profiles);
       break;

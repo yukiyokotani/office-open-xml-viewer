@@ -31,7 +31,7 @@ export function hostFontLineMetric(
 ): ResolvedFontMetric {
   if (route.metric.lineHeightRatio != null || !measured) return route.metric;
   const profiles = findReferenceFontMetrics(route.requestedFamily, {
-    weight: route.weight, style: route.style,
+    weight: route.weight, style: route.style, format: 'docx',
   });
   if (route.source !== 'substitute'
     && profiles.some((profile) => profile.farEastCodePage !== false)) return route.metric;
@@ -67,7 +67,7 @@ export interface HostFontLineMeasurement {
 function probeEm(route: OfficeFontFallbackRoute): number | undefined {
   if (route.metric.lineHeightRatio != null) return undefined;
   const profiles = findReferenceFontMetrics(route.requestedFamily, {
-    weight: route.weight, style: route.style,
+    weight: route.weight, style: route.style, format: 'docx',
   });
   return route.source === 'substitute' || profiles.every(profile => profile.farEastCodePage === false)
     ? profiles[0]?.unitsPerEm : undefined;
@@ -89,7 +89,7 @@ export async function measureHostFontLines(
 
 function synthesizesStyledFaces(route: OfficeFontFallbackRoute): boolean {
   if (route.source !== 'local' || route.weight !== 400 || route.style !== 'normal') return false;
-  const faces = findReferenceFontMetrics(route.requestedFamily);
+  const faces = findReferenceFontMetrics(route.requestedFamily, { format: 'docx' });
   return !faces.some((face) => face.weight >= 600 && face.style === 'normal')
     || !faces.some((face) => face.style === 'italic');
 }
@@ -171,6 +171,9 @@ export async function prepareDocxHostFontMetrics(
 export async function loadDocxOfficeFontFallbacks(
   ...args: Parameters<typeof loadOfficeFontFallbacks>
 ): ReturnType<typeof loadOfficeFontFallbacks> {
-  const loaded = await loadOfficeFontFallbacks(...args);
+  const [requests, ...rest] = args;
+  // DOCX requests see the catalog profiles admitted with Word evidence.
+  const loaded = await loadOfficeFontFallbacks(
+    requests.map((request) => ({ ...request, format: 'docx' as const })), ...rest);
   return prepareDocxHostFontMetrics(loaded, args[1] === undefined ? activeFontSet() : args[1]);
 }

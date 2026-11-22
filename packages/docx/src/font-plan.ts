@@ -59,8 +59,8 @@ export function docxOfficeFontFallbackRequests(
     const weight = request.weight ?? 400;
     const style = request.style ?? 'normal';
     if (weight === 400 && style === 'normal') continue;
-    if (findReferenceFontMetrics(request.family, { weight, style }).length > 0) continue;
-    if (findReferenceFontMetrics(request.family, { weight: 400, style: 'normal' }).length === 0) continue;
+    if (findReferenceFontMetrics(request.family, { weight, style, format: 'docx' }).length > 0) continue;
+    if (findReferenceFontMetrics(request.family, { weight: 400, style: 'normal', format: 'docx' }).length === 0) continue;
     add(request.family);
   }
   // Every authored family is checked for installation as a family, independent

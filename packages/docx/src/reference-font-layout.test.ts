@@ -524,17 +524,26 @@ describe('native reference font vertical layout', () => {
   });
 
   it('counts whole grid cells for an empty mark from its design single line (WORD_EMPTY_MARK_DESIGN_GRID_CELLS)', () => {
-    const height = (family: string, sizePt: number, pitchPt: number, emptyMark = true) => {
+    const height = (family: string, sizePt: number, pitchPt: number, emptyMark = true,
+      lineSpacing: unknown = { rule: 'auto', value: 1, explicit: true }, eastAsian = false) => {
       const paragraph = {
         type: 'paragraph', alignment: 'left', indentLeft: 0, indentRight: 0, indentFirst: 0,
-        spaceBefore: 0, spaceAfter: 0, lineSpacing: { rule: 'auto', value: 1, explicit: true },
+        spaceBefore: 0, spaceAfter: 0, lineSpacing,
         numbering: null, tabStops: [], runs: [], widowControl: false,
         defaultFontSize: sizePt, defaultFontFamily: family,
       } as unknown as DocParagraph;
       return paragraphMarkLineMetrics(paragraph, 1, { type: 'lines', linePitchPt: pitchPt }, false,
-        false, context, {}, paragraph.lineSpacing, {}, verifiedReferenceServices([{ family }]).text,
+        eastAsian, context, {}, paragraph.lineSpacing, {}, verifiedReferenceServices([{ family }]).text,
         undefined, false, 0, emptyMark).advancePx;
     };
+    // A single line exactly one pitch high takes one cell despite binary
+    // rounding (25pt x 1.362 = 34.050000000000004), on both grid paths.
+    expect(height('Noto Sans', 25, 34.05)).toBeCloseTo(34.05, 9);
+    expect(height('Noto Sans', 25, 34.05, true, undefined, true)).toBeCloseTo(34.05, 9);
+    // Only automatic single spacing counts design cells: an inherited atLeast
+    // minimum keeps the natural line (24pt Calibri, 1.2207 em, 18pt pitch).
+    expect(height('Calibri', 24, 18, true, { rule: 'atLeast', value: 10, explicit: false }))
+      .toBeCloseTo(24 * 2500 / 2048, 9);
     // Noto Sans 1.362 em: 16.34pt fits one cell, 24.52pt takes two.
     expect(height('Noto Sans', 12, 20)).toBe(20);
     expect(height('Noto Sans', 18, 20)).toBe(40);

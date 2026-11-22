@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -4045,9 +4045,6 @@ function planMeasuredLines(
           paragraphMarkShapeInput,
           markerAscentPt === undefined ? undefined : Math.max(markerAscentPt, raw.ascent) + raw.descent)
       : null;
-    // WORD_EXACT_LINE_BASELINE: every exact line keeps its baseline four
-    // fifths down the line, whatever its text, ruby, objects or position.
-    const exactBaselinePt = wordExactLineBaselineOffsetPt(context.lineSpacing);
     // WORD_INLINE_OBJECT_EXACT_LINE: an exact line holding an inline picture or
     // drawing shape keeps the same four-fifths baseline; the object (moved by
     // its run's position) stands on that baseline instead of lowering it, and
@@ -4061,13 +4058,21 @@ function planMeasuredLines(
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
     const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
+    // WORD_EXACT_LINE_BASELINE: an exact line's baseline sits four fifths down
+    // the line, whatever its text, ruby, objects or position. Fixed lines of a
+    // LibreOffice producer (`libreOfficeLineBoxes`) take their own placement
+    // (`__lineExtraAbove` below, else the centred box); only their
+    // inline-object lines retain WORD_INLINE_OBJECT_EXACT_LINE.
+    const wordLineBoxes = textService?.libreOfficeLineBoxes !== true
+      || keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
+    const exactBaselinePt = wordLineBoxes || exactObjectClass
+      ? wordExactLineBaselineOffsetPt(context.lineSpacing) : undefined;
     // In a vertical section the upright object hangs from the exact line's
     // top instead of standing on its baseline.
     const exactObjectHangs = wordInlineObjectExactLineHangsFromTop(exactObjectClass, verticalPageFrame);
-    // Windows Word 16.0 #1885 ruby controls (atLeast 18pt; Latin and MS
-    // Mincho base text; 3-10pt guides raised 0-19pt): under atLeast the added
-    // leading falls before the line, which keeps its own descent above the
-    // bottom.
+    // WORD_RUBY_LINE_ASCENT: under atLeast a ruby line's added leading falls
+    // before the line, which keeps its own descent above the bottom.
+    void WORD_RUBY_LINE_ASCENT;
     const atLeastRubyLine = !specified && measuredRubyLine(raw)
       && context.lineSpacing?.rule === 'atLeast'
       && compat.specifiedTextLineBoxMode15

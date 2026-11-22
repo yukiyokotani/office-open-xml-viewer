@@ -23,6 +23,12 @@ describe('PowerPoint application default faces', () => {
     expect(isEastAsianFace('Tahoma')).toBe(false);
   });
 
+  it('does not take DOCX-only catalog faces as installed PowerPoint faces', () => {
+    // Noto Sans JP is catalogued with Word evidence only (evidencedFormats).
+    expect(isEastAsianFace('Noto Sans JP')).toBe(false);
+    expect(eastAsianDefaultFaces('Noto Sans JP', '日本語')[0]).toBe('MS Gothic');
+  });
+
   it('uses the first tier face that covers the whole East Asian text', () => {
     expect(eastAsianDefaultFaces('Perpetua', '日本語かな')[0]).toBe('MS Mincho');
     expect(eastAsianDefaultFaces('Perpetua', '繁體中文')[0]).toBe('MS Mincho');

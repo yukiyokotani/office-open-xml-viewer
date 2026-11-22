@@ -36,6 +36,7 @@ import {
   wordInlineDrawingRunLeadingApplies,
   isInlineDrawingRun,
   wordExactLineBaselineOffsetPt,
+  wholeGridCells,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -162,8 +163,7 @@ function snapParagraphLineToGrid(heightPt: number, grid: DocGridCtx): number {
   if (!isGridLineRule(grid)) return heightPt;
   const pitchPt = grid.linePitchPt!;
   if (pitchPt <= 0) return heightPt;
-  if (heightPt <= pitchPt) return pitchPt;
-  return Math.ceil(heightPt / pitchPt) * pitchPt;
+  return wholeGridCells(heightPt, pitchPt) * pitchPt;
 }
 
 export function measureParagraph(
@@ -334,7 +334,10 @@ export function measureParagraph(
     // (WORD_AUTO_MULTIPLE_BASELINE_PIN). This is draw-only; pagination keeps
     // the centred trailing-mark metric below.
     const lineSpacing = context.lineSpacing;
-    const exactMarkBaselinePt = wordExactLineBaselineOffsetPt(lineSpacing);
+    // WORD_EXACT_LINE_BASELINE covers Word documents' mark lines; another
+    // producer's line boxes (`libreOfficeLineBoxes`) keep their own split.
+    const exactMarkBaselinePt = environment.layoutServices?.text.libreOfficeLineBoxes === true
+      && !keepsWordLineBoxes(paragraph.runs) ? undefined : wordExactLineBaselineOffsetPt(lineSpacing);
     const markPictureBaselineOffsetPt = firstLinePictureMarkerHeightPt !== undefined
       && lineSpacing?.rule === 'auto' && lineSpacing.value > 1
       && !context.hasRuby && !context.lineGrid.active

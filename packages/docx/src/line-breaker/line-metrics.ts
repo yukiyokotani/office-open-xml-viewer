@@ -505,7 +505,12 @@ export function paragraphMarkLineMetrics(
   // mark counts whole cells from its face's admitted design single line, of
   // either code-page class. A Canvas-only box keeps the one-cell floor.
   void WORD_EMPTY_MARK_DESIGN_GRID_CELLS;
-  const markGridCountSingle = emptyMark && !eastAsian && minimumAscentPx <= 0
+  // The controls are automatic single lines (authored or omitted spacing);
+  // atLeast minima and other multiples keep their own grid allocation.
+  const singleSpacing = effectiveLineSpacing == null
+    || (effectiveLineSpacing.rule === 'auto' && effectiveLineSpacing.value === 1)
+    || wordDegenerateLineSpacingIsSingle(effectiveLineSpacing.rule, effectiveLineSpacing.value);
+  const markGridCountSingle = emptyMark && singleSpacing && !eastAsian && minimumAscentPx <= 0
     ? designIntendedSingle : 0;
   const ordinaryAdvancePx = lineBoxHeight(
     effectiveLineSpacing,

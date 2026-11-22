@@ -1756,11 +1756,22 @@ export function wordOpenTypeAutoLineRatios(metrics: Readonly<{
   return officeOpenTypeAutoLineRatios(metrics);
 }
 
+const GRID_CELL_TOLERANCE = 1e-9;
+
+/** Whole line-grid cells (§17.6.5) that hold `heightPx`, at least one. A
+ * height equal to a whole number of pitches takes exactly that many: the
+ * product of a design ratio and a font size carries binary rounding (25pt x
+ * 1.362 = 34.050000000000004 against a 34.05pt pitch), so the quotient is
+ * compared with a tolerance far below one twip of any real pitch. */
+export function wholeGridCells(heightPx: number, pitchPx: number): number {
+  return pitchPx > 0 ? Math.max(1, Math.ceil(heightPx / pitchPx - GRID_CELL_TOLERANCE)) : 1;
+}
+
 export function wordEastAsianGridLineCells(
   naturalHeightPx: number,
   pitchPx: number,
 ): number {
-  return pitchPx > 0 ? Math.max(1, Math.ceil(naturalHeightPx / pitchPx)) : 1;
+  return wholeGridCells(naturalHeightPx, pitchPx);
 }
 
 export function wordFarEastSingleLinePx(
@@ -1801,7 +1812,7 @@ export const WORD_LATIN_DESIGN_GRID_CELLS = defineCompatibilityRule({
   id: 'word-latin-design-grid-cells',
   evidence: { kind: 'office-observation', syntheticFixtureId: 'float-grid-picture-origin',
     application: 'Microsoft Word', version: '16.113.2', platform: 'macOS 27.0' },
-  description: 'Issue #1674 modes 14/15 controls reserve 20/40/40pt for 10/20/30pt Arial single lines on a 20pt grid, including a preceding 20pt line. No-grid and snap-off controls retain natural advances. Apply whole-cell counting only to visible text with an admitted non-Far-East reference design profile. Far-East reference faces, native fallback boxes, empty marks, ruby, explicit multiples and exact/atLeast spacing retain their established paths. Later independent-font and anchor-free controls established WORD_SPECIFIED_TEXT_LINE_BOX for its separately gated ordinary Latin class; every other exact/atLeast class retains the established placement. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
+  description: 'Issue #1674 modes 14/15 controls reserve 20/40/40pt for 10/20/30pt Arial single lines on a 20pt grid, including a preceding 20pt line. No-grid and snap-off controls retain natural advances. Apply whole-cell counting only to visible text with an admitted non-Far-East reference design profile. Far-East reference faces, native fallback boxes, ruby, explicit multiples and atLeast spacing retain their established paths; empty marks count cells under WORD_EMPTY_MARK_DESIGN_GRID_CELLS, exact lines do not snap and take WORD_EXACT_LINE_BASELINE, and WORD_SPECIFIED_TEXT_LINE_BOX owns the atLeast and grid auto=1 boxes of its gated ordinary Latin class. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
 export function wordLatinDesignGridSingleHeight(natural: number, pitch: number, admittedDesign: number): number {
@@ -1809,7 +1820,7 @@ export function wordLatinDesignGridSingleHeight(natural: number, pitch: number, 
   // inline objects and baseline displacements still own their natural extent
   // (§17.3.1.33); admission of one run must not shrink any peer's line box.
   return Math.max(natural, admittedDesign > 0
-    ? Math.max(1, Math.ceil(admittedDesign / pitch)) * pitch : pitch);
+    ? wholeGridCells(admittedDesign, pitch) * pitch : pitch);
 }
 
 export const WORD_SPECIFIED_TEXT_LINE_BOX = defineCompatibilityRule({
@@ -1838,7 +1849,7 @@ export function wordSpecifiedTextLineMetrics(input: Readonly<{
 }>): Readonly<{ advancePt: number; baselineOffsetPt: number }> {
   void WORD_SPECIFIED_TEXT_LINE_BOX;
   const normalPt = input.pitchPt !== null && input.pitchPt > 0
-    ? Math.ceil(input.singlePt / input.pitchPt) * input.pitchPt
+    ? wholeGridCells(input.singlePt, input.pitchPt) * input.pitchPt
     : input.singlePt;
   const advancePt = input.rule === 'atLeast' ? Math.max(input.value, normalPt) : normalPt;
   return {

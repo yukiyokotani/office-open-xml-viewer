@@ -41,7 +41,7 @@ import type { DocxDocumentModel } from './types.js';
  * same reason. A declined route keeps the v0.88 Canvas-box behaviour.
  */
 export function docxNativeRoutePrimaryAdmitted(primaryFamily: string): boolean {
-  const profiles = findReferenceFontMetrics(primaryFamily);
+  const profiles = findReferenceFontMetrics(primaryFamily, { format: 'docx' });
   return profiles.length > 0 && profiles.every((profile) => profile.farEastCodePage === false);
 }
 

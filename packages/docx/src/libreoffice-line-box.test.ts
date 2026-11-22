@@ -182,6 +182,18 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
     expect(lines!.map((line) => line.baselinePt)).toEqual([20 + 9.6, 20 + 31.2 + 9.6].map((v) => expect.closeTo(v, 6)));
   });
 
+  it('keeps another producer\'s fixed line off the Word exact baseline (WORD_EXACT_LINE_BASELINE)', () => {
+    const exact30 = { rule: 'exact', value: 30, explicit: true } as LineSpacing;
+    // A Word document: four fifths of the 30pt line.
+    const [word] = pages([para([run('Fixed')], exact30)]);
+    expect(word![0]!.baselinePt).toBeCloseTo(20 + 24, 6);
+    // A LibreOffice-producer line without its own fixed-line placement
+    // (`__lineExtraAbove`, as for vertical ODT pages) keeps the centred box.
+    const [other] = pages([para([run('Fixed')], exact30)], LIBREOFFICE);
+    expect(other![0]!.advancePt).toBe(30);
+    expect(other![0]!.baselinePt).toBeCloseTo(20 + (30 - 12) / 2 + 9.6, 6);
+  });
+
   it('places a proportional line below 100% as a fixed line of its height', () => {
     const [lines] = pages([para([run('Low')], auto(0.8), { __lineExtraAbove: true })], LIBREOFFICE);
     expect(lines![0]!.advancePt).toBeCloseTo(12.48, 6);

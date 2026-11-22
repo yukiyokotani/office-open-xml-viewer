@@ -4,6 +4,8 @@ import { normalizeReferenceFontFamilyName } from './reference-font-name.js';
 
 export type ReferenceFontSource = 'office-mac' | 'macos-system' | 'macos-supplemental' | 'published-open-font';
 export type ReferenceFontStyle = 'normal' | 'italic';
+/** The Office formats whose layout consumes catalog profiles. */
+export type ReferenceFontFormat = 'docx' | 'pptx' | 'xlsx';
 export interface ReferenceFontMetricProfile {
   readonly source: ReferenceFontSource;
   readonly family: string;
@@ -42,12 +44,20 @@ export interface ReferenceFontMetricProfile {
     strikeoutPosition: number,
     strikeoutSize: number,
   ] | null;
+  /** When present, only lookups for these formats see the profile. A face
+   * added with one format's Office evidence must not change another format's
+   * font selection, requests or line boxes until that format's own evidence
+   * admits it; absent means every format. */
+  readonly evidencedFormats?: readonly ReferenceFontFormat[];
 }
 
 export interface FindReferenceFontMetricsOptions {
   readonly source?: ReferenceFontSource;
   readonly weight?: number;
   readonly style?: ReferenceFontStyle;
+  /** The consuming format. Profiles restricted by `evidencedFormats` are
+   * returned only when it is listed; omitted, they are never returned. */
+  readonly format?: ReferenceFontFormat;
 }
 
 function freezeProfile(profile: ReferenceFontMetricProfile): ReferenceFontMetricProfile {
@@ -57,6 +67,7 @@ function freezeProfile(profile: ReferenceFontMetricProfile): ReferenceFontMetric
   if (profile.typoMetrics) Object.freeze(profile.typoMetrics);
   if (profile.panose) Object.freeze(profile.panose);
   if (profile.decoration) Object.freeze(profile.decoration);
+  if (profile.evidencedFormats) Object.freeze(profile.evidencedFormats);
   return Object.freeze(profile);
 }
 
@@ -81,6 +92,8 @@ let aliasProfiles: ReadonlyMap<string, readonly ReferenceFontMetricProfile[]> | 
 // families, so first paint no longer pays for the whole catalogue's buckets.
 const aliasBuckets = new Map<string, OptionBuckets>();
 const EMPTY_RESULTS = Object.freeze([]) as readonly ReferenceFontMetricProfile[];
+// Format-filtered views of buckets that hold format-restricted profiles.
+const formatBuckets = new Map<string, readonly ReferenceFontMetricProfile[]>();
 
 const normalizeFamilyName = normalizeReferenceFontFamilyName;
 
@@ -142,5 +155,17 @@ export function findReferenceFontMetrics(
 ): readonly ReferenceFontMetricProfile[] {
   const query = normalizeFamilyName(familyOrAlias);
   if (!query) return EMPTY_RESULTS;
-  return getOptionBuckets(query)?.get(optionKey(options)) ?? EMPTY_RESULTS;
+  const bucket = getOptionBuckets(query)?.get(optionKey(options)) ?? EMPTY_RESULTS;
+  if (!bucket.some((profile) => profile.evidencedFormats)) return bucket;
+  const key = `${query}|${optionKey(options)}|${options.format ?? '*'}`;
+  let filtered = formatBuckets.get(key);
+  if (filtered === undefined) {
+    const format = options.format;
+    const admitted = bucket.filter((profile) => !profile.evidencedFormats
+      || (format !== undefined && profile.evidencedFormats.includes(format)));
+    filtered = admitted.length === 0 ? EMPTY_RESULTS : Object.freeze(admitted);
+    // Bounded like aliasBuckets: only catalogued aliases reach this point.
+    formatBuckets.set(key, filtered);
+  }
+  return filtered;
 }
