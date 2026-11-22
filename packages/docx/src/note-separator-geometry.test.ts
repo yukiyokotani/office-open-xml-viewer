@@ -8,6 +8,7 @@ import { layoutDocument } from './document-layout.js';
 import type { DocxDocumentModel } from './types.js';
 import type { DocumentLayout, NoteLayout } from './layout/types.js';
 import { textRunGeometryForPage } from './layout/text-index.js';
+import { layoutSourceStore } from './layout-source-model-adapter.js';
 import {
   noteSeparatorRuleSpan, wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt, wordShortNoteSeparatorLengthPt,
 } from './layout/body-pagination-compatibility.js';
@@ -53,13 +54,16 @@ interface Control {
   readonly numbering?: string;
   /** The numbered note's paragraphs, replacing its plain lines. */
   readonly noteParagraphs?: string;
+  /** Ship a 1x1 PNG as relationship `img` of the notes part. */
+  readonly noteImage?: boolean;
 }
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const encode = (xml: string) => new TextEncoder().encode(xml);
+const PNG_1X1 = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0));
 
-function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints, separatorParagraph, continuationParagraph, sectExtra = '', normalPPr, numbering, noteParagraphs }: Control): DocxDocumentModel {
+function control({ kind, listed = false, markHalfPoints, noSeparatorStories = false, textWidthPt = 468, noteLines = 2, markerRunHalfPoints, separatorParagraph, continuationParagraph, sectExtra = '', normalPPr, numbering, noteParagraphs, noteImage = false }: Control): DocxDocumentModel {
   const rPr = markHalfPoints ? `<w:rPr><w:sz w:val="${markHalfPoints}"/></w:rPr>` : '';
   const runRPr = markerRunHalfPoints ? `<w:rPr><w:sz w:val="${markerRunHalfPoints}"/></w:rPr>` : rPr;
   const special = (role: string, id: number, mark: string) => `<w:${kind} w:type="${role}" w:id="${id}">`
@@ -73,7 +77,7 @@ function control({ kind, listed = false, markHalfPoints, noSeparatorStories = fa
   const parts = new Map<string, string>([
     ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/>'
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
       + `<Override PartName="/word/${kind}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}s+xml"/>`
       + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
@@ -99,7 +103,13 @@ function control({ kind, listed = false, markHalfPoints, noSeparatorStories = fa
       + `<w:pgMar w:top="720" w:right="${right}" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr></w:body></w:document>`],
     [`word/${kind}s.xml`, `<w:${kind}s xmlns:w="${W}">${stories}<w:${kind} w:id="1">${lines}</w:${kind}></w:${kind}s>`],
   ]);
-  const archive = new DocxArchive(storeZip(new Map([...parts].map(([name, xml]) => [name, encode(xml)]))));
+  if (noteImage) {
+    parts.set(`word/_rels/${kind}s.xml.rels`, '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="img" Type="${R}/image" Target="media/p.png"/></Relationships>`);
+  }
+  const entries = new Map([...parts].map(([name, xml]) => [name, encode(xml)]));
+  if (noteImage) entries.set('word/media/p.png', PNG_1X1);
+  const archive = new DocxArchive(storeZip(entries));
   try {
     return normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
   } finally {
@@ -390,6 +400,34 @@ describe('word-note-separator-geometry', () => {
       + '<w:r><w:separator/></w:r></w:p>');
     expect(clean(paragraphTexts(note)).join('')).not.toContain('9');
     expect(clean(paragraphTexts(note)).join('')).toContain('1');
+  });
+
+  it('keeps an inline picture and the text of a separator story', () => {
+    const EMU = 12700;
+    const picture = '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
+      + `<wp:extent cx="${12 * EMU}" cy="${8 * EMU}"/><wp:docPr id="5" name="p"/>`
+      + '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+      + '<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="5" name="p.png"/><pic:cNvPicPr/></pic:nvPicPr>'
+      + `<pic:blipFill><a:blip xmlns:r="${R}" r:embed="img"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>`
+      + `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${12 * EMU}" cy="${8 * EMU}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>`
+      + '</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+    const model = control({ kind: 'footnote', listed: true, noteImage: true,
+      separatorParagraph: `<w:p>${picture}<w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r></w:p>` });
+    const note = leadingOf(render(model));
+    expect(clean(paragraphTexts(note))).toEqual(['Sources']);
+    const placements = note.leading?.paragraph?.kind === 'paragraph'
+      ? note.leading.paragraph.lines.flatMap((line) => line.placements) : [];
+    const picturePlacement = placements.find((placement) => placement.kind === 'resource');
+    expect(picturePlacement).toBeDefined();
+    // Paint resolves it from the same source-keyed registry.
+    expect(layoutSourceStore(model).paintResources.keys)
+      .toContain(picturePlacement?.kind === 'resource' ? picturePlacement.resourceKey : '');
+    expect(note.leading?.rule).toBeDefined();
+  });
+
+  it('draws the rule in the marker run colour', () => {
+    expect(ruleOf(separatorOf('<w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:separator/></w:r></w:p>'))!.color).toBe('#FF0000');
+    expect(ruleOf(separatorOf('<w:p><w:r><w:rPr><w:color w:val="auto"/></w:rPr><w:separator/></w:r></w:p>'))!.color).toBe('#000000');
   });
 
   it('sizes an rtl marker rule from its complex-script size', () => {

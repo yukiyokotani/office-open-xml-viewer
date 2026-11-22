@@ -190,6 +190,13 @@ describe('section-aware note numbering', () => {
     expect(referenceLabels(layout)).toEqual([]);
   });
 
+  it('numbers notes with Chicago symbols and cycles Korean jamo', () => {
+    const chicago = '<w:numFmt w:val="chicago"/>';
+    expect(render({ kind: 'footnote', sectionPr: [chicago, chicago] })).toEqual(['*', '\u2020', '\u2021', '\u00A7']);
+    const chosung = '<w:numFmt w:val="chosung"/><w:numStart w:val="14"/>';
+    expect(render({ kind: 'footnote', sectionPr: [chosung, chosung] })).toEqual(['\u314E', '\u3131', '\u3134', '\u3137']);
+  });
+
   it('gives a final section without its own sectPr the default numbering', () => {
     expect(render({ kind: 'footnote', sectionPr: ['<w:numFmt w:val="upperLetter"/>', ''], omitFinalSectPr: true }))
       .toEqual(['A', 'B', '3', '4']);

@@ -201,12 +201,16 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       ['thaiLetters', [
         [1, 'ก'], [41, 'ฮ'], [42, 'กก'],
       ]],
-      // chosung / ganada (14-jamo/syllable sets, repeat).
+      // chosung / ganada (14-jamo/syllable sets): Word cycles, one glyph per value.
       ['chosung', [
-        [1, 'ㄱ'], [14, 'ㅎ'], [15, 'ㄱㄱ'],
+        [1, 'ㄱ'], [14, 'ㅎ'], [15, 'ㄱ'], [16, 'ㄴ'], [29, 'ㄱ'],
       ]],
       ['ganada', [
-        [1, '가'], [14, '하'], [15, '가가'],
+        [1, '가'], [14, '하'], [15, '가'], [16, '나'],
+      ]],
+      // chicago (4 reference symbols, repeat).
+      ['chicago', [
+        [1, '*'], [2, '\u2020'], [3, '\u2021'], [4, '\u00A7'], [5, '**'], [8, '\u00A7\u00A7'], [9, '***'],
       ]],
       // hindiVowels (37) / hindiConsonants (18) sets, repeat.
       ['hindiVowels', [

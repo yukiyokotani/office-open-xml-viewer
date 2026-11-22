@@ -2061,7 +2061,8 @@ function layoutBodyNotes(
             edge: 'top' as const,
             from: Object.freeze({ xPt: ruleSpan.fromXPt, yPt: ruleYPt }),
             to: Object.freeze({ xPt: ruleSpan.toXPt, yPt: ruleYPt }),
-            color: '#000000',
+            // The marker run's resolved colour (§17.3.2.6); automatic is black.
+            color: selectedBand?.ruleColor ?? '#000000',
             widthPt: selectedBand ? wordNoteSeparatorRuleWidthPt(selectedBand.markFontSizePt) : 0.5,
             authoredStyle: 'single',
             style: 'solid' as const,
@@ -2215,6 +2216,8 @@ function acquireSelectedNoteSeparatorBand(
   bidi: boolean;
   /** The marker laid out in place (text around it). */
   marker?: Readonly<{ xPt: number; widthPt: number }>;
+  /** The marker run's authored colour as `#RRGGBB`; absent when automatic. */
+  ruleColor?: string;
   /** The story's paragraphs, when it paints text. */
   paragraphs?: readonly ParagraphLayout[];
 }> {
@@ -2290,17 +2293,19 @@ function acquireSelectedNoteSeparatorBand(
   }
   // The size its line is laid out with: the complex-script size (§17.3.2.39
   // szCs) for an rtl or cs marker run, as for any such run's text.
-  const markerSizes = markerRun as Readonly<{ fontSize?: number; fontSizeCs?: number; rtl?: boolean; cs?: boolean }>;
+  const markerSizes = markerRun as Readonly<{ fontSize?: number; fontSizeCs?: number; rtl?: boolean; cs?: boolean; color?: string | null }>;
+  const authoredColor = typeof markerSizes.color === 'string' ? markerSizes.color.replace(/^#/u, '') : '';
+  const ruleColor = /^[0-9A-Fa-f]{6}$/u.test(authoredColor) ? `#${authoredColor.toUpperCase()}` : undefined;
   const markFontSizePt = (markerSizes.rtl === true || markerSizes.cs === true
     ? markerSizes.fontSizeCs ?? markerSizes.fontSize : markerSizes.fontSize) ?? 10;
   const box = marker.line.bounds;
   // Content beside the marker paints with the story: text (symbols
-  // included), a field (its result or computed value), or paragraph borders
-  // and shading. Line breaks, empty text and the marker's own inline object
+  // included), a field (its result or computed value), an inline picture, or
+  // paragraph borders and shading. Line breaks, empty text and the marker's own inline object
   // only shape the lines.
   const hasText = paragraphs.length > 1
     || paragraphs.some((laid) => laid.borders.length > 0 || laid.shading !== undefined)
-    || source.runs.some((run) => run.type === 'field'
+    || source.runs.some((run) => run.type === 'field' || run.type === 'image'
     || (run.type === 'text' && !isNoteSeparatorMarkerRun(run)
       && ((run as Readonly<{ text?: string }>).text ?? '').length > 0));
   return Object.freeze({
@@ -2310,6 +2315,7 @@ function acquireSelectedNoteSeparatorBand(
     markFontSizePt,
     bidi,
     marker: Object.freeze({ xPt: marker.xPt, widthPt: marker.widthPt }),
+    ...(ruleColor ? { ruleColor } : {}),
     ...(hasText ? { paragraphs } : {}),
   });
 }

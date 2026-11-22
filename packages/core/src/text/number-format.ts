@@ -68,6 +68,7 @@ export type NumberFormat =
   | 'thaiLetters'
   | 'chosung'
   | 'ganada'
+  | 'chicago'
   | 'hindiVowels'
   | 'hindiConsonants'
   // Enclosed decimals + katakana a-i-u-e-o sequences (§17.18.59).
@@ -136,7 +137,8 @@ function toUpperRoman(n: number): string {
 
 // ── Repeat-letter alphabets ─────────────────────────────────────────────────
 // §17.18.59 upperLetter/lowerLetter/arabicAlpha/arabicAbjad/russian*/
-// thaiLetters/chosung/ganada/hindiVowels/hindiConsonants all share ONE scheme:
+// thaiLetters/hindiVowels/hindiConsonants (and chicago) share ONE scheme
+// (chosung/ganada cycle instead, see cycleAlphabet):
 // a fixed ordered character set of size N; the value maps into 1..N, and for
 // values > N the SAME character is REPEATED once per full N subtracted (§17.18.59
 // "written once and then repeated for each time the size of the set was
@@ -213,6 +215,18 @@ const THAI_LETTERS: readonly string[] = [
   'ล',
   ...rangeChars(0x0E27, 0x0E2E),
 ];
+
+/** Cycle a fixed ordered set: past its size the sequence starts over with
+ * the first glyph, one glyph per value (Word's Korean chosung and ganada
+ * numbering: …, ㅍ, ㅎ, ㄱ, ㄴ, …). Caller guarantees n ≥ 1. */
+function cycleAlphabet(n: number, glyphs: readonly string[]): string {
+  return glyphs[(n - 1) % glyphs.length]!;
+}
+
+// §17.18.59 chicago "Chicago Manual of Style": the reference symbols *, †,
+// ‡, §, then each written once more per full set subtracted (**, ††, …), the
+// same repeat scheme as the letter alphabets.
+const CHICAGO: readonly string[] = ['*', '\u2020', '\u2021', '\u00A7'];
 
 // §17.18.59 chosung "Korean Chosung" — positions 1–14 (spec list of jamo).
 const KOREAN_CHOSUNG: readonly string[] = [
@@ -396,9 +410,11 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
     case 'thaiLetters':
       return n >= 1 ? repeatAlphabet(n, THAI_LETTERS) : String(n);
     case 'chosung':
-      return n >= 1 ? repeatAlphabet(n, KOREAN_CHOSUNG) : String(n);
+      return n >= 1 ? cycleAlphabet(n, KOREAN_CHOSUNG) : String(n);
     case 'ganada':
-      return n >= 1 ? repeatAlphabet(n, KOREAN_GANADA) : String(n);
+      return n >= 1 ? cycleAlphabet(n, KOREAN_GANADA) : String(n);
+    case 'chicago':
+      return n >= 1 ? repeatAlphabet(n, CHICAGO) : String(n);
     case 'hindiVowels':
       return n >= 1 ? repeatAlphabet(n, HINDI_VOWELS) : String(n);
     case 'hindiConsonants':
