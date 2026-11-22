@@ -92,7 +92,7 @@ import {
   type PageSheetOrientation,
 } from './layout/context.js';
 import { normalizeAdjacentTables, type AdjacentTableSequenceInput } from './layout/adjacent-tables.js';
-import { noteReferenceIdsInDocumentOrder, repeatedFootnoteLastReferenceIndexes } from './layout/note-reference-ownership.js';
+import { repeatedFootnoteLastReferenceIndexes } from './layout/note-reference-ownership.js';
 import { isWrapFloat } from './float-layout.js';
 import type {
   BodyLayoutAcquisitionInput,
@@ -2224,14 +2224,39 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
   const host = settings?.noteShapeHostParagraph;
   if (!settings || (!host && settings.noteShapes === undefined)) return doc;
   const { noteShapeHostParagraph: _host, noteShapes, ...retained } = settings;
-  const referenced = {
-    footnote: new Set(noteReferenceIdsInDocumentOrder(doc.body, 'footnote')),
-    endnote: new Set(noteReferenceIdsInDocumentOrder(doc.body, 'endnote')),
+  // Each referenced note's references, with the revision of each: a
+  // reference deleted or moved away is gone from the final view.
+  const references = new Map<string, unknown[]>();
+  const visitReferences = (blocks: readonly BodyElement[] | readonly unknown[]) => {
+    for (const element of blocks as readonly BodyElement[]) {
+      if (element.type === 'paragraph') {
+        const revisions = (element as InternalDocParagraph).__runRevisions ?? [];
+        element.runs.forEach((run, index) => {
+          if (run.type !== 'text' || !run.noteRef || run.noteRef.id.length === 0) return;
+          const key = `${run.noteRef.kind}:${run.noteRef.id}`;
+          references.set(key, [...(references.get(key) ?? []), revisions[index] ?? null]);
+        });
+      } else if (element.type === 'table') {
+        for (const row of element.rows) for (const cell of row.cells) visitReferences(cell.content);
+      }
+    }
   };
-  const groups = (noteShapes ?? []).filter((group) => referenced[group.kind]?.has(group.id));
-  const runs = groups.flatMap((group) => group.runs);
-  // The moved runs keep their tracked-change revisions.
-  const revisions = groups.flatMap((group) => group.runs.map((_, index) => group.__runRevisions?.[index] ?? null));
+  visitReferences(doc.body);
+  const omitted = (revision: unknown) => {
+    const kind = (revision as Readonly<{ kind?: string }> | null)?.kind;
+    return kind === 'deletion' || kind === 'moveFrom';
+  };
+  const groups = (noteShapes ?? []).filter((group) => references.has(`${group.kind}:${group.id}`));
+  // A note whose every reference is deleted gives up its shapes with that
+  // deletion, so the final view omits them as it omits the note; a host
+  // paragraph is appended only for a note that some reference keeps.
+  const visible = groups.some((group) => references.get(`${group.kind}:${group.id}`)!.some((revision) => !omitted(revision)));
+  const runs = visible ? groups.flatMap((group) => group.runs) : [];
+  const revisions = groups.flatMap((group) => {
+    const own = references.get(`${group.kind}:${group.id}`)!;
+    const deletion = own.every(omitted) ? own[0] : null;
+    return group.runs.map((_, index) => group.__runRevisions?.[index] ?? deletion ?? null);
+  });
   return {
     ...doc,
     body: host && runs.length > 0

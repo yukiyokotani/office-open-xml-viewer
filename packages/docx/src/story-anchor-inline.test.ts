@@ -604,4 +604,35 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
       variant = {};
     }
   });
+
+  it('aligns a story shape in a text box table against the real page and the enclosing column', () => {
+    const rect = (position: string) => '<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:50pt;'
+      + `width:40pt;height:20pt;${position}" fillcolor="black" stroked="f"><w10:wrap type="none"/></v:rect></w:pict></w:r>`;
+    const place = (position: string) => {
+      variant = { table: true, storyRuns: rect(position) };
+      try {
+        return storyDrawingBoxes('drawingml-textbox', 'inline');
+      } finally {
+        variant = {};
+      }
+    };
+    expect(place('mso-position-vertical:bottom;mso-position-horizontal-relative:margin;mso-position-vertical-relative:page'))
+      .toEqual([{ xPt: 300, yPt: 772 }]);
+    expect(place('mso-position-horizontal:center;mso-position-horizontal-relative:text;mso-position-vertical-relative:margin'))
+      .toEqual([{ xPt: 286, yPt: 50 }]);
+  });
+
+  it('hosts no shape of a note whose only reference is deleted', () => {
+    const body = '<w:p><w:r><w:t>BODY</w:t></w:r><w:del w:id="9" w:author="a" w:date="2026-01-01T00:00:00Z">'
+      + '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:del></w:p>';
+    variant = { body };
+    try {
+      const document = layOutDocument('footnote', 'vml-text-square');
+      expect(document.pages).toHaveLength(1);
+      expect(document.pages[0]!.layers.body.filter((node) => node.kind === 'paragraph')).toHaveLength(1);
+      expect(bodyHostDrawingBoxes('footnote', 'vml-text-square')).toEqual([]);
+    } finally {
+      variant = {};
+    }
+  });
 });

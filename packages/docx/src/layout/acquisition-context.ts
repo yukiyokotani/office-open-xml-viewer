@@ -142,6 +142,10 @@ export interface BodyAcquisitionState extends AnchorFloatRegistrationState {
    * axes keep and the translation its flow receives to reach them
    * (story-page-frames.ts storyAnchorPageFrames); null when its box carries
    * no page band into it. Absent outside text box stories. */
+  /** The column of the story enclosing this table cell (outermost cell
+   * first), in story coordinates: the text frame of the cell's
+   * page-positioned story shapes (WORD_STORY_VML_PAGE_POSITION). */
+  storyColumnFrame?: Readonly<{ xPt: number; widthPt: number }>;
   textBoxStoryHostFrames?: Readonly<{
     frames: Readonly<{ page: LayoutRect; margin: LayoutRect }>;
     flowPt: Readonly<{ xPt: number; yPt: number }>;
