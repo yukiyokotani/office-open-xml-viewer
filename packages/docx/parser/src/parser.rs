@@ -9709,15 +9709,19 @@ fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
 /// Whether a `wp:inline` / `wp:anchor` drawing container lays out as an
 /// inline object (ECMA-376 §20.4.2.8). A `wp:anchor` (§20.4.2.3) inside a text
 /// box story (`w:txbxContent`, §17.17.1.1, reached through `wps:txbx` or
-/// `v:textbox`) is laid out inline too: Word ignores its position, wrap and
-/// layer there and places the object at its run like a `wp:inline` of the same
-/// `wp:extent` (word-text-box-anchor-inline).
+/// `v:textbox`) or a footnote/endnote story (`w:footnote` / `w:endnote`,
+/// §17.11.10 / §17.11.2) is laid out inline too: Word ignores its position,
+/// wrap and layer there and places the object at its run like a `wp:inline`
+/// of the same `wp:extent` (word-story-anchor-inline).
 fn drawing_container_flows_inline(container: roxmltree::Node) -> bool {
     match container.tag_name().name() {
         "inline" => true,
         "anchor" => container.ancestors().skip(1).any(|node| {
             node.is_element()
-                && node.tag_name().name() == "txbxContent"
+                && matches!(
+                    node.tag_name().name(),
+                    "txbxContent" | "footnote" | "endnote"
+                )
                 && is_w_ns(node.tag_name().namespace())
         }),
         _ => false,
@@ -24944,7 +24948,7 @@ mod anchor_image_relative_from_tests {
         assert_eq!(after.text, "After image");
         assert_eq!(image.image_path, "word/media/image1.png");
         assert_eq!((image.width_pt, image.height_pt), (20.0, 10.0));
-        // word-text-box-anchor-inline: an anchored picture in the text box
+        // word-story-anchor-inline: an anchored picture in the text box
         // story is the story's inline object, whatever its own container.
         assert!(!image.anchor);
         assert!(image.anchor_acquisition.is_none());
@@ -25297,7 +25301,7 @@ mod anchor_image_relative_from_tests {
         }
     }
 
-    /// word-text-box-anchor-inline: a `wp:anchor` inside a text box story
+    /// word-story-anchor-inline: a `wp:anchor` inside a text box story
     /// (DrawingML or VML text box) is parsed as an inline object of its run;
     /// the same anchor in the body keeps its floating acquisition.
     #[test]
@@ -31296,6 +31300,63 @@ mod inline_wps_shape_tests {
         assert!(outer.text_blocks[0].text.starts_with("OUTER"));
     }
 
+    /// word-story-anchor-inline: an anchored picture in a footnote or endnote
+    /// story is the story's inline object; outside those stories (a header
+    /// here) the anchor keeps floating.
+    #[test]
+    fn note_story_anchors_flow_inline() {
+        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let drawing = r#"<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">
+            <wp:simplePos x="0" y="0"/>
+            <wp:positionH relativeFrom="column"><wp:posOffset>3810000</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+            <wp:extent cx="508000" cy="254000"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="d"/>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="p"/><pic:cNvPicPr/></pic:nvPicPr>
+              <pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill>
+              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic>
+            </a:graphicData></a:graphic></wp:anchor></w:drawing>"#;
+        let media = HashMap::from([("rIdImg".into(), "word/media/p.png".into())]);
+        for (root, story, inline) in [
+            ("footnotes", "footnote", true),
+            ("endnotes", "endnote", true),
+            ("hdr", "p", false),
+        ] {
+            let xml = if story == "p" {
+                format!(r#"<w:{root} {NS}><w:p><w:r>{drawing}</w:r></w:p></w:{root}>"#)
+            } else {
+                format!(
+                    r#"<w:{root} {NS}><w:{story} w:id="1"><w:p><w:r>{drawing}</w:r></w:p></w:{story}></w:{root}>"#
+                )
+            };
+            let doc = roxmltree::Document::parse(&xml).expect("story fixture");
+            let node = doc
+                .descendants()
+                .find(|node| node.has_tag_name((W_NS, "drawing")))
+                .expect("drawing");
+            let runs = parse_inline_drawing_impl(
+                &StyleMap::default(),
+                &mut NumberingMap::default(),
+                node,
+                &media,
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                DepthGuard::root(),
+            );
+            let [DocRun::Image(image)] = runs.as_slice() else {
+                panic!("{root}: one picture, got {runs:?}")
+            };
+            assert_eq!(image.anchor, !inline, "{root}");
+            assert_eq!(image.anchor_acquisition.is_none(), inline, "{root}");
+            assert_eq!((image.width_pt, image.height_pt), (40.0, 20.0), "{root}");
+        }
+    }
+
     /// ECMA-376 §17.3.3.9 / §20.4.2.3 / §20.4.2.8 — `wp:inline` and `wp:anchor`
     /// are children of `w:drawing`. A drawing nested in a text box story owns
     /// its own container, so it must not decide whether the containing drawing
@@ -31400,7 +31461,7 @@ mod inline_wps_shape_tests {
                 let [inner] = images.as_slice() else {
                     panic!("{case}: nested picture missing")
                 };
-                // word-text-box-anchor-inline: a text box story lays either
+                // word-story-anchor-inline: a text box story lays either
                 // container out inline.
                 assert!(!inner.anchor, "{case}: inner container");
                 assert_eq!((inner.width_pt, inner.height_pt), (50.0, 25.0), "{case}");

@@ -217,16 +217,16 @@ export const WORD_TEXTBOX_VISIBLE_ANCHOR_EXTENT = defineCompatibilityRule({
   description: 'For DrawingML middle and bottom text anchoring, derive the positioned extent through the last visible retained block while preserving structural trailing empty paragraphs and terminal paragraph spacing in the complete story.',
 });
 
-export const WORD_TEXT_BOX_ANCHOR_INLINE = defineCompatibilityRule({
-  id: 'word-text-box-anchor-inline',
+export const WORD_STORY_ANCHOR_INLINE = defineCompatibilityRule({
+  id: 'word-story-anchor-inline',
   evidence: {
     kind: 'office-observation',
-    syntheticFixtureId: 'text-box-anchor-inline',
+    syntheticFixtureId: 'story-anchor-inline',
     application: 'Microsoft Word',
     version: '16.0.20625',
     platform: 'Windows',
   },
-  description: 'ECMA-376 §20.4.2.3 positions a wp:anchor drawing on the page. Inside a text box story (w:txbxContent of a wps:txbx or a VML v:textbox), Word instead lays the anchored drawing out inline at its run, like a wp:inline of the same wp:extent: its positionH/positionV offsets (column, paragraph or page relative), wrap mode (none, square, topAndBottom, tight) and behindDoc layer are ignored, the line grows to the object height, and the following text starts after the object. Evidence: Windows Word 16.0.20625 PDF exports of a 40x20pt picture (wrapNone, wrapSquare, wrapTopAndBottom, wrapTight, behindDoc, page-relative square) and a 60x30pt chart anchored 300pt from the column, each inside a DrawingML text box and inside a VML text box (16 controls). VML shapes in a text box (w:pict) keep their own floating placement and are outside this rule.',
+  description: 'ECMA-376 §20.4.2.3 positions a wp:anchor drawing on the page. Inside a text box story (w:txbxContent of a wps:txbx or a VML v:textbox) and inside a footnote or endnote story, Word instead lays the anchored drawing out inline at its run, like a wp:inline of the same wp:extent: its positionH/positionV offsets (column, paragraph or page relative), wrap mode (none, square, topAndBottom, tight) and behindDoc layer are ignored, the line grows to the object height, and the following text starts after the object. Evidence: Windows Word 16.0.20625 PDF exports of a 40x20pt picture (wrapNone, wrapSquare, wrapTopAndBottom, wrapTight, behindDoc, page-relative square) and a 60x30pt chart anchored 300pt from the column, each inside a DrawingML text box, a VML text box, a footnote and an endnote (28 controls). Word does not open documents with WordprocessingShape or WordprocessingGroup drawings in these stories (6 note and 4 text box controls), so no Office reference exists for them; they take the same inline route. VML shapes in these stories (w:pict) keep their own floating placement and are outside this rule.',
 });
 
 export const WORD_OVERLAPPING_LAYOUT_IN_CELL_OVERLAY = defineCompatibilityRule({

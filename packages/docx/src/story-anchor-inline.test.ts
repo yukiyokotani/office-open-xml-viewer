@@ -9,11 +9,12 @@ import { createLayoutServices } from './layout-runtime.js';
 import { layoutDocument } from './document-layout.js';
 import { storeZip } from './conformance/generate.js';
 
-// word-text-box-anchor-inline: Windows Word 16.0.20625 lays a wp:anchor inside
-// a text box story out exactly like a wp:inline of the same extent, whatever
-// its wrap, layer or relative frame. Synthetic reductions of those controls:
-// a DrawingML or VML text box holding M01, a 40x20pt picture anchored 300pt
-// from the column followed by Ab, and MEND.
+// word-story-anchor-inline: Windows Word 16.0.20625 lays a wp:anchor inside a
+// text box, footnote or endnote story out exactly like a wp:inline of the same
+// extent, whatever its wrap, layer or relative frame. Synthetic reductions of
+// those controls: a DrawingML or VML text box, a footnote or an endnote
+// holding M01, a 40x20pt picture anchored 300pt from the column followed by
+// Ab, and MEND.
 
 const EMU = 12700;
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -31,7 +32,7 @@ const PNG = Uint8Array.from([
   0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ]);
 
-type Story = 'body' | 'drawingml-textbox' | 'vml-textbox';
+type Story = 'body' | 'drawingml-textbox' | 'vml-textbox' | 'footnote' | 'endnote';
 type Placement = 'inline' | 'wrapNone' | 'wrapSquare' | 'wrapTopAndBottom' | 'behindDoc' | 'page';
 
 const encoder = new TextEncoder();
@@ -62,7 +63,10 @@ function picture(placement: Placement): string {
 function docx(story: Story, placement: Placement): Uint8Array {
   const content = text('M01') + `<w:p>${picture(placement)}<w:r><w:t>Ab</w:t></w:r></w:p>` + text('MEND');
   let body = text('BODY');
-  if (story === 'body') {
+  const notes = story === 'footnote' || story === 'endnote';
+  if (notes) {
+    body = `<w:p><w:r><w:t>BODY</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:${story}Reference w:id="1"/></w:r></w:p>`;
+  } else if (story === 'body') {
     body += content;
   } else if (story === 'drawingml-textbox') {
     body += '<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
@@ -92,6 +96,15 @@ function docx(story: Story, placement: Placement): Uint8Array {
   const settings = `<w:settings xmlns:w="${W}"><w:compat><w:compatSetting w:name="compatibilityMode" `
     + 'w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>';
   const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const namespaces = `xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="${WP}" xmlns:a="${A}" xmlns:pic="${PIC}"`;
+  const noteParts: Array<[string, Uint8Array]> = notes ? [
+    [`word/${story}s.xml`, xml(`<w:${story}s ${namespaces}>`
+      + `<w:${story} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${story}>`
+      + `<w:${story} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${story}>`
+      + `<w:${story} w:id="1">${content}</w:${story}></w:${story}s>`)],
+    [`word/_rels/${story}s.xml.rels`, xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="rIdImg" Type="${rel}/image" Target="media/p.png"/></Relationships>`)],
+  ] : [];
   return storeZip(new Map([
     ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
       + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
@@ -99,17 +112,21 @@ function docx(story: Story, placement: Placement): Uint8Array {
       + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
       + '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
       + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>'
+      + (notes ? `<Override PartName="/word/${story}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${story}s+xml"/>` : '')
       + '</Types>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rIdStyles" Type="${rel}/styles" Target="styles.xml"/>`
       + `<Relationship Id="rIdSettings" Type="${rel}/settings" Target="settings.xml"/>`
-      + `<Relationship Id="rIdImg" Type="${rel}/image" Target="media/p.png"/></Relationships>`)],
+      + `<Relationship Id="rIdImg" Type="${rel}/image" Target="media/p.png"/>`
+      + (notes ? `<Relationship Id="rIdNotes" Type="${rel}/${story}s" Target="${story}s.xml"/>` : '')
+      + '</Relationships>')],
     ['word/document.xml', xml(document)],
     ['word/styles.xml', xml(styles)],
     ['word/settings.xml', xml(settings)],
     ['word/media/p.png', PNG],
+    ...noteParts,
   ]));
 }
 
@@ -154,8 +171,8 @@ beforeAll(async () => {
   await init({ module_or_path: await readFile(new URL('./wasm/docx_parser_bg.wasm', import.meta.url)) });
 });
 
-describe('word-text-box-anchor-inline', () => {
-  for (const story of ['drawingml-textbox', 'vml-textbox'] as const) {
+describe('word-story-anchor-inline', () => {
+  for (const story of ['drawingml-textbox', 'vml-textbox', 'footnote', 'endnote'] as const) {
     for (const placement of ['wrapNone', 'wrapSquare', 'wrapTopAndBottom', 'behindDoc', 'page'] as const) {
       it(`${story}: a ${placement} anchor lays out like the inline picture`, () => {
         expect(JSON.stringify(layOut(story, placement).layers))
@@ -163,6 +180,14 @@ describe('word-text-box-anchor-inline', () => {
       });
     }
   }
+
+  it('lays the note content out (the comparison is not vacuous)', () => {
+    for (const story of ['footnote', 'endnote'] as const) {
+      const layers = JSON.stringify(layOut(story, 'inline').layers);
+      expect(layers).toContain('MEND');
+      expect(layers).toContain('p.png');
+    }
+  });
 
   it('keeps body anchors floating', () => {
     expect(JSON.stringify(layOut('body', 'wrapSquare').layers))
