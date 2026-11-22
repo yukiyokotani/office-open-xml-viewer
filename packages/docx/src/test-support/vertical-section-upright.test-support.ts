@@ -56,12 +56,13 @@ export const anchoredRectangle = (x: number, y: number, width: number, height: n
   + '</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
 
 /** A one-row table, one 12 pt wide column, whose cell holds `paragraphs`
- * paragraphs of a PAGE field in roman numerals: one character to a line, so
- * the cell's text is as many lines long as the page number has characters.
- * `rowPt` is the row's minimum height. */
-export const romanPageTable = (paragraphs: number, rowPt: number) => {
+ * paragraphs of a PAGE field, in roman numerals unless `format` says
+ * otherwise: one character to a line, so the cell's text is as many lines
+ * long as the page number has characters. `rowPt` is the row's minimum
+ * height. */
+export const romanPageTable = (paragraphs: number, rowPt: number, format: 'Roman' | 'Arabic' = 'Roman') => {
   const field = `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr>`
-    + '<w:fldSimple w:instr=" PAGE \\* Roman "><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>I</w:t></w:r></w:fldSimple></w:p>';
+    + `<w:fldSimple w:instr=" PAGE \\* ${format} "><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p>`;
   return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/></w:tblPr>'
     + '<w:tblGrid><w:gridCol w:w="240"/></w:tblGrid>'
     + `<w:tr><w:trPr><w:trHeight w:val="${rowPt * 20}" w:hRule="atLeast"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="240" w:type="dxa"/>`

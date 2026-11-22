@@ -2914,11 +2914,12 @@ const uprightTableBoxVersionsByServices = new WeakMap<object, UprightTableBoxVer
 /**
  * BodyLayoutSession.commitUprightBlocks. Upright blocks are kept beside the
  * float registry, not in it: a registration appends one box to the page's
- * upright block index, its slots, and its text exclusions, each in constant
- * time however many blocks the page already holds. Floating
- * tables and anchored drawings therefore do not avoid upright block tables
- * (library policy; no control combines them), while every line laid out
- * afterwards wraps around them (addUprightBlockExclusionFloats).
+ * upright block index, its slots, its text exclusions and its entry in the
+ * history of placed tables, each in constant time however many blocks the
+ * page already holds. Every line laid out afterwards wraps around them
+ * (addUprightBlockExclusionFloats), and a wrapped drawing anchored after a
+ * table lies below it (inlineShiftBelowUprightTablesPt). Positioned tables
+ * read the float registry and do not avoid upright block tables.
  */
 function commitBodyUprightBlocks(
   context: BodySessionDependencies,
@@ -2931,11 +2932,14 @@ function commitBodyUprightBlocks(
   for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
   if (registration.tail) {
     index.tail = registration.tail;
-    if (registration.box) {
-      let versions = uprightTableBoxVersionsByServices.get(context.services);
-      if (!versions) uprightTableBoxVersionsByServices.set(context.services, versions = new Map());
-      addUprightTableBox(index, registration.tail.sourceIndex, registration.box, versions);
-    }
+  }
+  const tableBox = registration.tableBox
+    ?? (registration.tail && registration.box
+      ? { sourceIndex: registration.tail.sourceIndex, box: registration.box } : null);
+  if (tableBox) {
+    let versions = uprightTableBoxVersionsByServices.get(context.services);
+    if (!versions) uprightTableBoxVersionsByServices.set(context.services, versions = new Map());
+    addUprightTableBox(index, tableBox.sourceIndex, tableBox.box, versions);
   }
 }
 

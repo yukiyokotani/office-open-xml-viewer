@@ -62,8 +62,10 @@ import {
   uprightBlockTableKey,
 } from './source-key.js';
 import {
+  addUprightPageDrawing,
   emptyUprightBlockPageIndex,
   uprightBlockBoxesMet,
+  uprightPageDrawingsNear,
   type UprightBlockPageIndex,
   type UprightBlockRegistration,
   type UprightBlockSlot,
@@ -484,28 +486,57 @@ function uprightBlockRegistrationOf(
   });
 }
 
-/** The wrapped anchored drawings of the page that a paragraph before the
- * table anchors, as boxes in the same section-logical page points: an upright
- * block table meets them as it meets a table placed before it, without the
- * table clearance, and stacks below them
- * (`word-vertical-section-upright-block-table`). A drawing anchored after
- * the table is not met: it is the drawing that lies below the table
- * (uprightBlockCoversLaterDrawing). Positioned tables are not met: a vertical
- * section lays them out in its rotated frame, not upright (the rule records
- * what is not implemented). */
-function uprightBlockObstacles(state: BodyAcquisitionState, table: SourceRef): LayoutRect[] {
-  const obstacles: LayoutRect[] = [];
-  const tableIndex = table.path[0]!;
-  for (const float of state.floats) {
-    // A wrapNone drawing excludes no text (paragraphWrapExclusions).
-    if (float.kind !== 'shape' || !float.anchorOccurrenceId || float.authoredWrap === undefined) continue;
-    const anchorIndex = anchorOccurrenceBlockIndex(float.anchorOccurrenceId, table);
-    if (anchorIndex === null || anchorIndex >= tableIndex) continue;
-    obstacles.push({
-      xPt: float.xLeft, yPt: float.yTop, widthPt: float.xRight - float.xLeft, heightPt: float.yBottom - float.yTop,
-    });
+/** Brings the page's index of wrapped anchored drawings up to date with its
+ * wrap rectangles, which only grow while a page is laid out: each is looked
+ * at once. A wrapNone drawing excludes no text and is not recorded
+ * (paragraphWrapExclusions); neither is a positioned table, which a vertical
+ * section lays out in its rotated frame, not upright. */
+function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): UprightBlockPageIndex {
+  const index = uprightBlockIndexOf(state);
+  const floats = state.floats;
+  if (index.drawingsSeen > floats.length) {
+    // The rectangles were replaced, not extended: start over.
+    index.drawingBuckets.clear();
+    index.drawingsSeen = 0;
   }
-  return obstacles;
+  for (let at = index.drawingsSeen; at < floats.length; at += 1) {
+    const float = floats[at]!;
+    if (float.kind !== 'shape' || !float.anchorOccurrenceId || float.authoredWrap === undefined) continue;
+    const anchorIndex = anchorOccurrenceBlockIndex(float.anchorOccurrenceId, story);
+    if (anchorIndex === null) continue;
+    addUprightPageDrawing(index, Object.freeze({
+      anchorIndex,
+      exclusion: Object.freeze({
+        xPt: float.xLeft, yPt: float.yTop, widthPt: float.xRight - float.xLeft, heightPt: float.yBottom - float.yTop,
+      }),
+      frame: Object.freeze({ xPt: float.imageX, yPt: float.imageY, widthPt: float.imageW, heightPt: float.imageH }),
+    }));
+  }
+  index.drawingsSeen = floats.length;
+  return index;
+}
+
+/** The exclusions of the wrapped drawings anchored by a paragraph before the
+ * table that a block spanning [`blockStartPt`, `blockEndPt`] meets: their
+ * block range overlaps the block's. An upright block table meets them as it
+ * meets a table placed before it, without the table clearance, and stacks
+ * below them (`word-vertical-section-upright-block-table`). A drawing
+ * anchored after the table is not met: it is the drawing that lies below the
+ * table (uprightBlockCoversLaterDrawing). */
+function uprightBlockObstaclesMet(
+  index: UprightBlockPageIndex,
+  tableIndex: number,
+  blockStartPt: number,
+  blockEndPt: number,
+): LayoutRect[] {
+  const met: LayoutRect[] = [];
+  for (const drawing of uprightPageDrawingsNear(index, blockStartPt, blockEndPt)) {
+    const box = drawing.exclusion;
+    if (drawing.anchorIndex < tableIndex && box.yPt < blockEndPt && blockStartPt < box.yPt + box.heightPt) {
+      met.push(box);
+    }
+  }
+  return met;
 }
 
 /**
@@ -518,8 +549,8 @@ function uprightBlockObstacles(state: BodyAcquisitionState, table: SourceRef): L
  * takes the first position from the column top at which its box clears the
  * boxes it meets (an earlier box is met up to
  * WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT past its far edge), so overlapping
- * tables stack. Wrapped drawings anchored before the table (`obstacles`) are
- * met where their block range overlaps the block's.
+ * tables stack. Wrapped drawings anchored before the table are met where
+ * their block range overlaps the block's (uprightBlockObstaclesMet).
  * A multi-column section never splits or moves a block: one that would pass
  * the page's bottom edge from the column top is first raised to end there,
  * no higher than the page top, and the search starts from that raised
@@ -542,7 +573,6 @@ function uprightBlockObstacles(state: BodyAcquisitionState, table: SourceRef): L
  */
 function searchUprightBlock(
   index: UprightBlockPageIndex,
-  obstacles: readonly LayoutRect[],
   physical: PhysicalAnchorFrame,
   request: BodyTableRequest,
   first: boolean,
@@ -575,14 +605,12 @@ function searchUprightBlock(
     for (const box of met) {
       nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt + WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
     }
-    let metObstacle = false;
+    const obstacles = uprightBlockObstaclesMet(index, request.input.source.path[0]!, blockStartPt, blockEndPt);
     for (const box of obstacles) {
-      if (!(box.yPt < blockEndPt && blockStartPt < box.yPt + box.heightPt)) continue;
       met.push(box);
-      metObstacle = true;
       nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt);
     }
-    if (metObstacle) met.sort((left, right) => left.xPt - right.xPt);
+    if (obstacles.length > 0) met.sort((left, right) => left.xPt - right.xPt);
     // The met boxes are ordered by inline start, so one pass leaves the
     // block clear of all of them: a box passed without overlap ends at or
     // before the block's start, which only grows.
@@ -926,12 +954,12 @@ function planUprightRun(
   physical: PhysicalAnchorFrame,
   leader: UprightRunMember,
   reserving: boolean,
-  /** The plan is made again after tables of the run measured differently. */
-  retried = false,
+  /** Body indices of the run's tables already measured on this page for
+   * this plan (replanIfStale). */
+  checked: Set<number> = new Set(),
 ): UprightRunPlan {
   const { state } = context;
-  const index = uprightBlockIndexOf(state);
-  const obstacles = uprightBlockObstacles(state, request.input.source);
+  const index = syncUprightDrawings(state, request.input.source);
   const flowDomainId = request.location.flowDomainId;
   const multiColumn = request.location.section.columns.length > 1;
   const pageHasContent = request.pageHasContent === true;
@@ -940,21 +968,25 @@ function planUprightRun(
   const boxBlockExtentPt = run.boxBlockExtentPt;
   const totalInlinePt = run.suffixInlinePt[at]!;
   // The tables a plan places on this page have to measure here as the run
-  // recorded them. Each is measured once on its page, so the checks grow with
-  // the tables, not with their square. Where one differs its record is
-  // replaced and the plan made anew, once.
+  // recorded them. Where one differs its record is replaced and the plan
+  // made anew, which can admit tables the first plan did not hold; those are
+  // checked in turn. Each table is measured once on its page (`checked`), so
+  // the checks grow with the tables, not their square, and the plan is made
+  // at most once more per table it places.
   const replanIfStale = (plan: UprightRunPlan): UprightRunPlan => {
-    if (plan.kind !== 'placed' || retried) return plan;
+    if (plan.kind !== 'placed') return plan;
     let changed = false;
     for (let offset = 1; offset < plan.slots.length; offset += 1) {
       const recorded = members[at + offset]!;
+      if (checked.has(recorded.sourceIndex)) continue;
+      checked.add(recorded.sourceIndex);
       const current = uprightUnitAt(context, request, operations, physical, recorded.sourceIndex);
       if (!current) throw new Error('Upright block table run member is no longer an upright table');
       if (uprightRunMemberHolds(recorded, current)) continue;
       refreshUprightRunMember(run, at + offset, current, at);
       changed = true;
     }
-    return changed ? planUprightRun(context, request, operations, physical, leader, reserving, true) : plan;
+    return changed ? planUprightRun(context, request, operations, physical, leader, reserving, checked) : plan;
   };
   // `wholeCount` tables from this one placed whole from `inlineStartPt`,
   // then at most one cut by rows.
@@ -997,7 +1029,7 @@ function planUprightRun(
     && tail.flowDomainId === flowDomainId;
   if (uprightBlockTooWide(request, boxBlockExtentPt)) return Object.freeze({ kind: 'fresh-region', freshPage: false });
   const found = searchUprightBlock(
-    index, obstacles, physical, request, !continuing, totalInlinePt, boxBlockExtentPt,
+    index, physical, request, !continuing, totalInlinePt, boxBlockExtentPt,
     continuing ? { blockStartPt: tail.bounds.yPt, inlineStartPt: tail.bounds.xPt + tail.bounds.widthPt } : undefined,
   );
   if (found.leavesBlockExtent && pageHasContent) return Object.freeze({ kind: 'fresh-region', freshPage: true });
@@ -1068,12 +1100,11 @@ function uprightBlockReachesEarlierColumn(request: BodyTableRequest, box: Layout
  * honour once the table's box is known when the page's layout starts. */
 function uprightBlockCoversLaterDrawing(state: BodyAcquisitionState, table: SourceRef, box: LayoutRect): boolean {
   const tableIndex = table.path[0]!;
-  for (const float of state.floats) {
-    if (float.kind !== 'shape' || !float.anchorOccurrenceId || float.authoredWrap === undefined) continue;
-    const anchorIndex = anchorOccurrenceBlockIndex(float.anchorOccurrenceId, table);
-    if (anchorIndex === null || anchorIndex <= tableIndex) continue;
-    if (float.imageX < box.xPt + box.widthPt && box.xPt < float.imageX + float.imageW
-      && float.imageY < box.yPt + box.heightPt && box.yPt < float.imageY + float.imageH) return true;
+  const index = syncUprightDrawings(state, table);
+  for (const { anchorIndex, frame } of uprightPageDrawingsNear(index, box.yPt, box.yPt + box.heightPt)) {
+    if (anchorIndex > tableIndex
+      && frame.xPt < box.xPt + box.widthPt && box.xPt < frame.xPt + frame.widthPt
+      && frame.yPt < box.yPt + box.heightPt && box.yPt < frame.yPt + frame.heightPt) return true;
   }
   return false;
 }
@@ -1355,7 +1386,7 @@ function measureUprightBlockTable(
   // Rows continued on a later page stay at the flow's block position and
   // clear the blocks they meet along the inline axis (library policy).
   return rowsAt(searchUprightBlock(
-    index, uprightBlockObstacles(context.state, request.input.source), physical, request, false,
+    syncUprightDrawings(context.state, request.input.source), physical, request, false,
     leader.inlineExtentPt, run.boxBlockExtentPt,
   ));
 }
@@ -2705,7 +2736,7 @@ function measureUprightOwnerSegment(
     const edges = uprightBlockEdgeOverhangsPt(local.layout, gridWidthPt, physical);
     const boxExtentPt = edges.nearPt + gridWidthPt + edges.farPt;
     const found = searchUprightBlock(
-      uprightBlockIndexOf(context.state), uprightBlockObstacles(context.state, request.input.source), physical, request, false,
+      syncUprightDrawings(context.state, request.input.source), physical, request, false,
       local.layout.advancePt, boxExtentPt,
     );
     const bounds: LayoutRect = Object.freeze({
@@ -2718,7 +2749,17 @@ function measureUprightOwnerSegment(
     const registered = uprightBlockRegistrationOf(bounds, [], [
       uprightBlockExclusion(request.input.source, tableFragmentStartKey(request.cursor), bounds),
     ]);
-    const segmentRegistration = registered ? { uprightBlocks: registered } : {};
+    // A wrapped drawing anchored after the table lies below the segment
+    // too: its box enters the history of placed tables, and where the
+    // drawing was registered when the page's layout started the box is
+    // pinned there, so the drawing is placed below it from the start.
+    const tableBox = Object.freeze({ sourceIndex: request.input.source.path[0]!, box: bounds });
+    const segmentRegistration = {
+      ...(registered ? { uprightBlocks: Object.freeze({ ...registered, tableBox }) } : {}),
+      ...(registered && uprightBlockCoversLaterDrawing(context.state, request.input.source, bounds)
+        ? { uprightPagePin: Object.freeze({ box: null, slots: Object.freeze([]), exclusions: Object.freeze([]), tableBox }) }
+        : {}),
+    };
     return Object.freeze({
       layout,
       blockExtentPt: 0,

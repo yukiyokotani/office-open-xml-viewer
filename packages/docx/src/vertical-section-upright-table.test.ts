@@ -10,6 +10,7 @@ import {
   layOutPages,
   loadParser,
   paragraph,
+  romanPageTable,
   table,
   type Direction,
   type Page,
@@ -532,6 +533,31 @@ describe('upright block table of a vertical section', () => {
       expect(follower.top).toBeCloseTo(z.bottom, 6);
     });
 
+    it('measures every table a new plan admits on the page that places it', () => {
+      // Eight pages of text, then seven tables with nothing between them.
+      // The first (700 pt) fills page 9. On page 10 the roman PAGE fields of
+      // two of the others are one character shorter than on page 9 ("X" for
+      // "IX"), which makes room for the table of arabic PAGE fields behind
+      // them, and that one is a character longer ("10" for "9"): it has to
+      // be measured on page 10 before it is placed, or it runs over the
+      // table after it.
+      const pageBreak = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+      const pages = layOutPages('tbRl', [
+        ...Array.from({ length: 8 }, () => [P, pageBreak]).flat(),
+        table(1, 700), table(1, 200), table(1, 100),
+        romanPageTable(10, 1), romanPageTable(15, 1), romanPageTable(10, 1, 'Arabic'), table(1, 30),
+      ]);
+      expect(pages.length).toBeGreaterThanOrEqual(10);
+      expect(pages.slice(8).flatMap((page) => page.tables).length).toBeGreaterThanOrEqual(7);
+      expect(overlapping(pages)).toEqual([]);
+      for (const page of pages) {
+        page.tables.forEach((placed, at) => {
+          expect(placed.bottom).toBeLessThanOrEqual(COLUMN_END + 1e-6);
+          if (at > 0) expect(placed.top).toBeCloseTo(page.tables[at - 1]!.bottom, 6);
+        });
+      }
+    });
+
     it('lays out generated table and paragraph sequences without overlapping tables', () => {
       // A fixed pseudo-random stream (mulberry32) of short and full-length
       // paragraphs, column breaks and tables from two rows to taller than the
@@ -896,6 +922,20 @@ describe('upright block table of a vertical section', () => {
     // axis and the strip uses the room above the table.
     expect(page!.strips[1]![0]!.inlineStart)
       .toBeCloseTo(direction === 'tbRl' ? placed.bottom : MARGIN.top, 6);
+  });
+
+  it('moves a wrapped drawing anchored after a table below its ordinary row beside a cell-owned frame row', () => {
+    // The table's first cell opens with a framed paragraph: that row is a
+    // host at its page position and the other row an upright block at the
+    // column top, which the rectangle anchored after the table would cover.
+    const framed = T.replace('<w:p><w:pPr>', '<w:p><w:pPr><w:framePr w:w="2000" w:hSpace="141"'
+      + ' w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="4000" w:y="6000"/>');
+    const [page] = layOutPages('tbRl', [P, framed, P.replace('</w:p>', `${rectangleAt(400)}</w:p>`)]);
+    const ordinary = page!.tables.find((placed) => Math.abs(placed.top - MARGIN.top) < 1e-6)!;
+    expect(ordinary).toBeDefined();
+    expect(page!.drawings).toHaveLength(1);
+    expect(page!.drawings[0]!.top).toBeCloseTo(ordinary.bottom, 6);
+    expect(page!.drawings[0]!.left).toBeCloseTo(400, 6);
   });
 
   it.each(['tbRl', 'tbLrV'] as const)('moves a wrapped drawing anchored after a %s table below the table', (direction) => {

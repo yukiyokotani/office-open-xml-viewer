@@ -36,6 +36,11 @@ export interface UprightBlockPageIndex {
   readonly tableBuckets: Map<number, UprightTableBox[]>;
   /** Number of boxes in `tableBuckets`. */
   tableCount: number;
+  /** The page's wrapped anchored drawings, bucketed along the block axis,
+   * and how many of the page's wrap rectangles have been looked at for them
+   * (syncUprightDrawings). */
+  readonly drawingBuckets: Map<number, UprightPageDrawing[]>;
+  drawingsSeen: number;
   /** Identifies the boxes of `tableBuckets` in registration order: equal for
    * two pages (or two layouts of one page) exactly when they hold the same
    * boxes for the same tables, so a result that depends on them can be keyed
@@ -91,6 +96,11 @@ export interface UprightBlockSlot {
  * table that directly follows it in the body continues from there. */
 export type UprightBlockTail = Readonly<{ sourceIndex: number; flowDomainId: string; bounds: LayoutRect }>;
 
+/** A wrapped anchored drawing of the page: the body index of the paragraph
+ * that anchors it, its text exclusion and its frame, in section-logical page
+ * points. */
+export type UprightPageDrawing = Readonly<{ anchorIndex: number; exclusion: LayoutRect; frame: LayoutRect }>;
+
 /** What accepting upright blocks adds to the page: at most one box for the
  * index, the slots of tables placed ahead of the flow, the text exclusions
  * of the blocks placed now, and the new tail. */
@@ -99,6 +109,10 @@ export interface UprightBlockRegistration {
   readonly slots: readonly UprightBlockSlot[];
   readonly exclusions: readonly UprightBlockExclusion[];
   readonly tail?: UprightBlockTail;
+  /** A box for the history of placed tables only (addUprightTableBox), where
+   * `box` and `tail` give none: an owner segment's, which a drawing anchored
+   * after its table lies below. */
+  readonly tableBox?: UprightTableBox;
 }
 
 const BUCKET_PT = 72;
@@ -114,6 +128,8 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     tableBuckets: new Map(),
     tableCount: 0,
     tableBoxesVersion: 0,
+    drawingBuckets: new Map(),
+    drawingsSeen: 0,
     exclusionCells: new Map(),
     wideExclusions: [],
     lastExclusionBucket: Number.NEGATIVE_INFINITY,
@@ -321,4 +337,41 @@ export function inlineShiftBelowUprightTablesPt(
     if (box.xPt < startPt + rect.widthPt && startPt < box.xPt + box.widthPt) startPt = box.xPt + box.widthPt;
   }
   return startPt - rect.xPt;
+}
+
+/** Records a wrapped anchored drawing of the page. */
+export function addUprightPageDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing): void {
+  const startPt = Math.min(drawing.exclusion.yPt, drawing.frame.yPt);
+  const endPt = Math.max(
+    drawing.exclusion.yPt + drawing.exclusion.heightPt, drawing.frame.yPt + drawing.frame.heightPt,
+  );
+  const first = bucketOf(startPt);
+  const last = Math.min(bucketOf(endPt), first + MAX_BUCKET_SPAN);
+  for (let bucket = first; bucket <= last; bucket += 1) {
+    const drawings = index.drawingBuckets.get(bucket);
+    if (drawings) drawings.push(drawing);
+    else index.drawingBuckets.set(bucket, [drawing]);
+  }
+}
+
+/** The recorded drawings whose exclusion or frame can lie in the block range
+ * [`blockStartPt`, `blockEndPt`], each once: only the drawings near that
+ * range are read. */
+export function uprightPageDrawingsNear(
+  index: UprightBlockPageIndex,
+  blockStartPt: number,
+  blockEndPt: number,
+): UprightPageDrawing[] {
+  const near: UprightPageDrawing[] = [];
+  const first = bucketOf(blockStartPt);
+  const last = bucketOf(blockEndPt);
+  for (let bucket = first; bucket <= last; bucket += 1) {
+    const drawings = index.drawingBuckets.get(bucket);
+    if (!drawings) continue;
+    for (const drawing of drawings) {
+      const startPt = Math.min(drawing.exclusion.yPt, drawing.frame.yPt);
+      if (bucket === Math.max(first, bucketOf(startPt))) near.push(drawing);
+    }
+  }
+  return near;
 }

@@ -22,6 +22,7 @@ import {
 //   upright block (there are none: the blocks are kept beside that registry),
 // - an entry of the page's history of placed table boxes,
 // - a member of a logical table as it is handed to its acquisition,
+// - an entry of the page's index of wrapped anchored drawings,
 // - a retained row of a table.
 // Reads of a table's retained record are counted by a second passthrough.
 // These are the collections whose rescans made earlier revisions quadratic.
@@ -55,13 +56,13 @@ vi.mock('./layout/acquisition-state.js', async (importOriginal) => {
 
 type Counts = {
   boxes: number; exclusions: number; slots: number; registryEntries: number; rows: number; history: number;
-  members: number;
+  members: number; drawings: number;
 };
 
 /** Lays `run` out while counting the visits described above. */
 function counting<Result>(run: () => Result): Readonly<{ result: Result; counts: Counts }> {
   const counts: Counts = {
-    boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0,
+    boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0, drawings: 0,
   };
   const visit = (value: unknown): void => {
     if (value === null || typeof value !== 'object') return;
@@ -70,6 +71,7 @@ function counting<Result>(run: () => Result): Readonly<{ result: Result; counts:
     else if ('reserved' in value && 'sourceIndex' in value) counts.slots += 1;
     else if ('box' in value && 'sourceIndex' in value) counts.history += 1;
     else if ('table' in value && 'sourceIndex' in value) counts.members += 1;
+    else if ('anchorIndex' in value && 'frame' in value) counts.drawings += 1;
     else if ('kind' in value && value.kind === 'table-row') counts.rows += 1;
     else if ('occurrenceId' in value && typeof value.occurrenceId === 'string'
       && value.occurrenceId.includes('upright-table')) counts.registryEntries += 1;
@@ -303,5 +305,23 @@ describe('upright block table placement work', () => {
     const large = measure(16);
     expect(small).toBeGreaterThan(0);
     expect(large).toBeLessThanOrEqual(2.6 * small);
+  }, 300_000);
+
+  it('places tables without reading the drawings that lie clear of them', () => {
+    // Tables alternating with paragraphs that anchor a small wrapped drawing
+    // in the page margin, far from every table along the block axis: placing
+    // a table reads the drawings near its block range only, so none here.
+    const measure = (count: number) => {
+      const body = Array.from({ length: count }, () => [
+        table(1), P.replace('</w:p>', `${anchoredRectangle(2, 2, 5, 5)}</w:p>`),
+      ]).flat();
+      const { result, counts } = counting(() => layOutPages('tbRl', body, 2, 240));
+      expect(result.flatMap((page) => page.tables)).toHaveLength(count);
+      expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
+      return counts.drawings;
+    };
+    const small = measure(4);
+    const large = measure(8);
+    expect(large).toBeLessThanOrEqual(Math.max(8, 2.6 * small));
   }, 300_000);
 });
