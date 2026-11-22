@@ -14,21 +14,38 @@ import type { LayoutRect } from './types.js';
  *   box, their bounding rectangle;
  * - `slots`, the tables placed ahead of the flow (the tables of a run after
  *   its first, and tables placed with the paragraph before them), by
- *   top-level body index. A table with a slot takes it.
+ *   top-level body index. A table with a slot takes it;
+ * - `exclusions`, the text exclusions of the placed blocks. A paragraph is
+ *   laid out against those that can meet its lines only
+ *   (uprightBlockExclusionsAhead), not against every block of the page.
  *
- * `boxes` is bucketed along the block axis, so a registration touches a
- * bounded number of buckets and a query reads only the boxes near its block
- * range. The bucket size is a performance parameter; results do not depend
- * on it.
+ * `boxes` is bucketed along the block axis and `exclusions` along both axes,
+ * so a registration touches a bounded number of buckets and a query reads
+ * only the rectangles near its range. The bucket size is a performance
+ * parameter; results do not depend on it.
  */
 export interface UprightBlockPageIndex {
   readonly buckets: Map<number, LayoutRect[]>;
   /** Boxes spanning more buckets than MAX_BUCKET_SPAN; every query reads them. */
   readonly wide: LayoutRect[];
   readonly slots: Map<number, UprightBlockSlot>;
+  /** Text exclusions by `${block bucket}:${inline bucket}`. */
+  readonly exclusionCells: Map<string, UprightBlockExclusionEntry[]>;
+  /** Exclusions covering more cells than MAX_EXCLUSION_CELLS; every query reads them. */
+  readonly wideExclusions: UprightBlockExclusionEntry[];
+  /** Highest block bucket holding an exclusion. */
+  lastExclusionBucket: number;
   /** Text exclusions registered so far; numbers their float identities. */
   exclusionCount: number;
 }
+
+/** A text exclusion of an upright block: its section-logical rectangle (the
+ * block's box extended by the text clearance past its far edge) under a
+ * page-unique identity. */
+export type UprightBlockExclusion = Readonly<{ id: string; bounds: LayoutRect }>;
+
+/** A registered exclusion with its registration ordinal on the page. */
+export type UprightBlockExclusionEntry = Readonly<{ exclusion: UprightBlockExclusion; ordinal: number }>;
 
 /** A table placed ahead of the flow reaching it. */
 export interface UprightBlockSlot {
@@ -48,14 +65,93 @@ export interface UprightBlockSlot {
 export interface UprightBlockRegistration {
   readonly box: LayoutRect | null;
   readonly slots: readonly UprightBlockSlot[];
-  readonly exclusions: readonly Readonly<{ id: string; bounds: LayoutRect }>[];
+  readonly exclusions: readonly UprightBlockExclusion[];
 }
 
 const BUCKET_PT = 72;
 const MAX_BUCKET_SPAN = 32;
+const MAX_EXCLUSION_CELLS = 256;
 
 export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
-  return { buckets: new Map(), wide: [], slots: new Map(), exclusionCount: 0 };
+  return {
+    buckets: new Map(),
+    wide: [],
+    slots: new Map(),
+    exclusionCells: new Map(),
+    wideExclusions: [],
+    lastExclusionBucket: Number.NEGATIVE_INFINITY,
+    exclusionCount: 0,
+  };
+}
+
+const bucketOf = (pt: number) => Math.floor(pt / BUCKET_PT);
+
+/** Registers a text exclusion and returns its entry. */
+export function addUprightBlockExclusion(
+  index: UprightBlockPageIndex,
+  exclusion: UprightBlockExclusion,
+): UprightBlockExclusionEntry {
+  const entry = Object.freeze({ exclusion, ordinal: index.exclusionCount });
+  index.exclusionCount += 1;
+  const { xPt, yPt, widthPt, heightPt } = exclusion.bounds;
+  const firstBlock = bucketOf(yPt);
+  const lastBlock = bucketOf(yPt + heightPt);
+  const firstInline = bucketOf(xPt);
+  const lastInline = bucketOf(xPt + widthPt);
+  if (!((lastBlock - firstBlock + 1) * (lastInline - firstInline + 1) <= MAX_EXCLUSION_CELLS)) {
+    index.wideExclusions.push(entry);
+    return entry;
+  }
+  for (let block = firstBlock; block <= lastBlock; block += 1) {
+    for (let inline = firstInline; inline <= lastInline; inline += 1) {
+      const key = `${block}:${inline}`;
+      const cell = index.exclusionCells.get(key);
+      if (cell) cell.push(entry);
+      else index.exclusionCells.set(key, [entry]);
+    }
+  }
+  index.lastExclusionBucket = Math.max(index.lastExclusionBucket, lastBlock);
+  return entry;
+}
+
+/**
+ * The registered exclusions that lines laid out from block position
+ * `blockFromPt` on, in the inline band [`inlineStartPt`, `inlineEndPt`], can
+ * meet: those ending past `blockFromPt` whose inline extent touches the band.
+ * A line never lies before the block position its paragraph starts at, so an
+ * exclusion that ends at or before it is out of reach, as is one beside the
+ * band (a table of another column that does not reach into this one). In
+ * registration order.
+ */
+export function uprightBlockExclusionsAhead(
+  index: UprightBlockPageIndex,
+  blockFromPt: number,
+  inlineStartPt: number,
+  inlineEndPt: number,
+): UprightBlockExclusionEntry[] {
+  const ahead: UprightBlockExclusionEntry[] = [];
+  const reaches = ({ exclusion: { bounds } }: UprightBlockExclusionEntry) =>
+    bounds.yPt + bounds.heightPt > blockFromPt
+    && bounds.xPt <= inlineEndPt && bounds.xPt + bounds.widthPt >= inlineStartPt;
+  for (const entry of index.wideExclusions) if (reaches(entry)) ahead.push(entry);
+  const firstBlock = bucketOf(blockFromPt);
+  const firstInline = bucketOf(inlineStartPt);
+  const lastInline = bucketOf(inlineEndPt);
+  for (let block = firstBlock; block <= index.lastExclusionBucket; block += 1) {
+    for (let inline = firstInline; inline <= lastInline; inline += 1) {
+      const cell = index.exclusionCells.get(`${block}:${inline}`);
+      if (!cell) continue;
+      for (const entry of cell) {
+        // An exclusion registered in several cells is taken from the first
+        // of them that this query reads.
+        const { bounds } = entry.exclusion;
+        if (block === Math.max(firstBlock, bucketOf(bounds.yPt))
+          && inline === Math.max(firstInline, bucketOf(bounds.xPt))
+          && reaches(entry)) ahead.push(entry);
+      }
+    }
+  }
+  return ahead.sort((left, right) => left.ordinal - right.ordinal);
 }
 
 /** Registers `box`, met along the block axis up to `reachPt` past its far edge. */

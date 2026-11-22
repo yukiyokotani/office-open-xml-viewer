@@ -265,6 +265,12 @@ export interface FollowingBodyBlockMeasurementInput {
     | BodyTableAcquisitionInput['input'];
   readonly location: BodyAcquisitionLocation;
   readonly availableInlineExtentPt: number;
+  /** Block extent of the keep set between `location` and this block: where
+   * the flow reaches the block. Read for a block whose placement depends on
+   * it (`word-vertical-section-upright-block-table`). */
+  readonly precedingBlockExtentPt?: number;
+  /** Block extent of a fresh page, as given to measureTable. */
+  readonly freshPageBlockExtentPt?: number;
 }
 
 export interface FollowingBodyBlockMeasurement {

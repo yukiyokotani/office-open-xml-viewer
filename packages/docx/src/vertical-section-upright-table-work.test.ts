@@ -136,6 +136,10 @@ describe('upright block table placement work', () => {
     // box placed so far would read sixteen times as many).
     expect(small.boxes).toBeGreaterThan(0);
     expect(large.boxes).toBeLessThanOrEqual(6 * small.boxes);
+    // A paragraph is laid out against the exclusions its lines can meet,
+    // not against those of every table of the page.
+    expect(small.exclusions).toBeGreaterThan(0);
+    expect(large.exclusions).toBeLessThanOrEqual(6 * small.exclusions);
   }, 120_000);
 
   it('places a table on each page in work that does not grow with the pages before it', () => {

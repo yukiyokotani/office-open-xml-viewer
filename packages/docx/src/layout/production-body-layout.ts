@@ -108,8 +108,8 @@ import { measureTableIntrinsicWidths, resolveTableColumnWidths, spacedAutoFitCon
 import { decideLogicalTable, type LogicalTableDecision, type TableMemberDecision } from './table-layout-decision.js';
 import {
   bodyTableAcquisitionState,
-  uprightBlockBoxExtentPt,
   uprightBlockPaginates,
+  bodyUprightBlockStartsHere,
   measureBodyTableEntry,
   ownerSegmentedFlowExtents,
   planBodyUprightBlocks,
@@ -156,7 +156,10 @@ import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
 import {
   addUprightBlockBox,
+  addUprightBlockExclusion,
   emptyUprightBlockPageIndex,
+  uprightBlockExclusionsAhead,
+  type UprightBlockExclusion,
   type UprightBlockRegistration,
 } from './upright-block-index.js';
 import { ownedParagraphAnchorCollisions, inheritedParagraphAuthorityForReacquisition, TRANSIENT_TABLE_FINAL_FRAME_EXCLUSION_PREFIX } from './paragraph-wrap-registry.js';
@@ -1800,12 +1803,7 @@ function measureBodyParagraphEntry(
     floats: [...state.floats],
     pageAnchorPrescanned: new Set(state.pageAnchorPrescanned),
   };
-  // `word-vertical-section-upright-table-rewrapped-strip`: the upright blocks
-  // planned after this fragment exclude its text as registered ones do.
-  const planned = state.uprightBlockIndex?.exclusionCount ?? 0;
-  request.besideUprightBlocks?.exclusions.forEach((exclusion, at) => {
-    candidate.floats.push(uprightBlockExclusionFloat(exclusion, planned + at));
-  });
+  addUprightBlockExclusionFloats(candidate, request.location, request.besideUprightBlocks);
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
   const publicFloats =
     request.continuation.boundary === null
@@ -2192,6 +2190,7 @@ function acquireSelectedNoteSeparatorBand(
 function measureFollowingBodyBlock(
   context: BodySessionDependencies,
   request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
+  tableOperations: Parameters<typeof measureBodyTableEntry>[2],
 ): ReturnType<NonNullable<BodyLayoutSession['measureFollowingBlock']>> {
   const {
     dependencies,
@@ -2205,6 +2204,7 @@ function measureFollowingBodyBlock(
     floats: [...state.floats],
     retainedTablesBySourceIndex: new Map(state.retainedTablesBySourceIndex),
   };
+  addUprightBlockExclusionFloats(candidate, request.location);
   applyBodyAcquisitionLocationTo(services, candidate, request.location);
   if (request.input.kind === 'adjacent-table-group') {
     const records = computeAdjacentTablePtLayouts(candidate, request.input.tables.map((tableInput) => {
@@ -2326,16 +2326,28 @@ function measureFollowingBodyBlock(
   if (tableState.uprightPhysicalTable === true && physical && uprightBlockPaginates(physical)
     && !ownerExtents) {
     // `word-vertical-section-upright-block-table`: what the table needs of
-    // the block axis to start here. A table too tall for the inline extent
-    // below the column top starts a fresh page whenever content precedes it,
-    // so it needs more than is left; otherwise it needs its physical width.
-    // In a multi-column section it never moves and needs nothing.
-    const multiColumn = request.location.section.columns.length > 1;
-    const tooTall = layout.advancePt
-      > physical.pageHeight - physical.marginBottom - request.location.cursorPt.xPt;
-    const neededPt = multiColumn ? 0
-      : tooTall ? request.location.availableBounds.heightPt
-        : uprightBlockBoxExtentPt(layout, physical);
+    // the block axis to start after the keep set before it. The table adds
+    // no flow advance, so it needs nothing where its placement leaves it on
+    // this page, and more than is left where its placement starts a fresh
+    // region: too wide for the block extent left, too tall for the inline
+    // extent below its start, or moved past the page to clear an earlier
+    // table. The placement itself decides (bodyUprightBlockStartsHere).
+    const precedingPt = request.precedingBlockExtentPt ?? 0;
+    const reachedYPt = request.location.cursorPt.yPt + precedingPt;
+    const leftPt = Math.max(0, request.location.availableBounds.heightPt - precedingPt);
+    const startsHere = bodyUprightBlockStartsHere(context, {
+      input: request.input,
+      location: Object.freeze({
+        ...request.location,
+        cursorPt: Object.freeze({ ...request.location.cursorPt, yPt: reachedYPt }),
+        availableBounds: Object.freeze({ ...request.location.availableBounds, yPt: reachedYPt, heightPt: leftPt }),
+      }),
+      availableInlineExtentPt: request.availableInlineExtentPt,
+      availableBlockExtentPt: leftPt,
+      freshPageBlockExtentPt: request.freshPageBlockExtentPt ?? Number.POSITIVE_INFINITY,
+      pageHasContent: true,
+    }, tableOperations);
+    const neededPt = startsHere === false ? request.location.availableBounds.heightPt : 0;
     return Object.freeze({
       fullExtentPt: neededPt,
       leadContentExtentPt: neededPt,
@@ -2842,7 +2854,7 @@ function commitBodyFlowRegistryDelta(
  * the page's upright exclusions; it gives each its own float paragraph id, so
  * the same-paragraph overlap rule never pairs it with another float. */
 function uprightBlockExclusionFloat(
-  exclusion: UprightBlockRegistration['exclusions'][number],
+  exclusion: UprightBlockExclusion,
   ordinal: number,
 ): FloatRect {
   const { xPt, yPt, widthPt, heightPt } = exclusion.bounds;
@@ -2871,11 +2883,11 @@ function uprightBlockExclusionFloat(
 /**
  * BodyLayoutSession.commitUprightBlocks. Upright blocks are kept beside the
  * float registry, not in it: a registration appends one box to the page's
- * upright block index, its slots, and one wrap rectangle per exclusion, each
- * in constant time however many blocks the page already holds. Floating
+ * upright block index, its slots, and its text exclusions, each in constant
+ * time however many blocks the page already holds. Floating
  * tables and anchored drawings therefore do not avoid upright block tables
  * (library policy; no control combines them), while every line laid out
- * afterwards wraps around them.
+ * afterwards wraps around them (addUprightBlockExclusionFloats).
  */
 function commitBodyUprightBlocks(
   context: BodySessionDependencies,
@@ -2885,10 +2897,34 @@ function commitBodyUprightBlocks(
   const index = state.uprightBlockIndex ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
   if (registration.box) addUprightBlockBox(index, registration.box, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT);
   for (const slot of registration.slots) index.slots.set(slot.sourceIndex, slot);
-  for (const exclusion of registration.exclusions) {
-    state.floats.push(uprightBlockExclusionFloat(exclusion, index.exclusionCount));
-    index.exclusionCount += 1;
+  for (const exclusion of registration.exclusions) addUprightBlockExclusion(index, exclusion);
+}
+
+/**
+ * Adds to `candidate.floats`, the wrap rectangles one paragraph is laid out
+ * against, the upright block exclusions its lines can meet from `location`
+ * on (uprightBlockExclusionsAhead), and those of `planned` blocks
+ * (`word-vertical-section-upright-table-rewrapped-strip`: the upright blocks
+ * planned after a fragment exclude its text as registered ones do). The
+ * page's exclusions are not part of `state.floats`, so a paragraph neither
+ * copies nor scans the exclusions of blocks it cannot reach.
+ */
+function addUprightBlockExclusionFloats(
+  candidate: BodyAcquisitionState,
+  location: BodyAcquisitionLocation,
+  planned?: UprightBlockRegistration,
+): void {
+  const index = candidate.uprightBlockIndex;
+  if (index && index.exclusionCount > 0) {
+    const band = location.availableBounds;
+    for (const entry of uprightBlockExclusionsAhead(
+      index, location.cursorPt.yPt, band.xPt, band.xPt + band.widthPt,
+    )) candidate.floats.push(uprightBlockExclusionFloat(entry.exclusion, entry.ordinal));
   }
+  const ordinal = index?.exclusionCount ?? 0;
+  planned?.exclusions.forEach((exclusion, at) => {
+    candidate.floats.push(uprightBlockExclusionFloat(exclusion, ordinal + at));
+  });
 }
 
 function acquirePublicParagraphFloats(
@@ -3327,7 +3363,7 @@ function openConcreteBodyLayoutSession(
     measureFollowingBlock(
       request: Parameters<NonNullable<BodyLayoutSession['measureFollowingBlock']>>[0],
     ): ReturnType<NonNullable<BodyLayoutSession['measureFollowingBlock']>> {
-      return measureFollowingBodyBlock(sessionDependencies, request);
+      return measureFollowingBodyBlock(sessionDependencies, request, tableOperations);
     },
     prescanPageAnchors(
       request: Parameters<NonNullable<BodyLayoutSession['prescanPageAnchors']>>[0],

@@ -197,6 +197,30 @@ describe('upright block table of a vertical section', () => {
     expect(pages[1]!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
   });
 
+  it('moves a keepNext paragraph with a table that clearing an earlier table moves to the next page', () => {
+    // A 300 pt wide table with a 500 pt row, fifteen strips, then a table
+    // with a 350 pt row: its 180 pt box fits the 195.3 pt left, but it meets
+    // the first table, does not fit below it and has no room past it on the
+    // page. Look-ahead places it as placement does, so the strip kept with it
+    // goes along.
+    const first = table(1, 500).replaceAll('"1440"', '"2400"').replaceAll('"2160"', '"3600"');
+    const keepNext = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+    const pages = layOutPages('tbRl', [first, ...Array.from({ length: 14 }, () => P), keepNext, table(1, 350), P]);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]!.tables).toHaveLength(1);
+    expect(pages[0]!.strips).toHaveLength(14);
+    expect(pages[1]!.tables).toHaveLength(1);
+    expect(pages[1]!.strips.map(([line]) => line!.block)).toEqual([0, PITCH]);
+  });
+
+  it.each(['tbRl', 'tbLrV'] as const)('wraps the strip before a %s table on a line grid of a fractional pitch', (direction) => {
+    // A 15.15 pt pitch: the strip's end and the table's start are the same
+    // block position computed two ways, equal only to within rounding.
+    const [page] = layOutPages(direction, [P, T, P], 1, 303);
+    const placed = page!.tables[0]!;
+    expect(page!.strips.map(([line]) => line!.inlineStart)).toEqual([placed.bottom, placed.bottom]);
+  });
+
   it('moves a table whose border rules pass the block extent left to the next page', () => {
     // Fifteen strips leave 195.3 pt. The 195 pt grid fits; its box with two
     // 3 pt side rules is 198 pt wide and does not.

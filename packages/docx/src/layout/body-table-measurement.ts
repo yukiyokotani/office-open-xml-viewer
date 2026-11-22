@@ -391,17 +391,6 @@ function uprightBlockEdgeOverhangsPt(
     ? { nearPt: sides.leftPt, farPt: sides.rightPt } : { nearPt: sides.rightPt, farPt: sides.leftPt };
 }
 
-/** Block extent of an upright table's box under
- * `word-vertical-section-upright-block-table`: its grid and what its border
- * rules reach past it. Placement and keep-with-next look-ahead both fit this
- * box against the block extent left. */
-export function uprightBlockBoxExtentPt(table: TableLayout, physical: PhysicalAnchorFrame): number {
-  const gridWidthPt = table.columnWidthsPt.reduce((sum, width) => sum + width, 0);
-  if (!uprightBlockPaginates(physical)) return gridWidthPt;
-  const edges = uprightBlockEdgeOverhangsPt(table, gridWidthPt, physical);
-  return edges.nearPt + gridWidthPt + edges.farPt;
-}
-
 function uprightBlockIndexOf(state: BodyAcquisitionState): UprightBlockPageIndex {
   return state.uprightBlockIndex ?? (state.uprightBlockIndex = emptyUprightBlockPageIndex());
 }
@@ -738,6 +727,33 @@ function uprightBlockLeader(
   const retained = retainedTableRecord(state, sourceIndex).acquisition;
   if (retained.input.rows.length === 0 || tableOwnerSegments(retained.input)) return null;
   return { leader: uprightRunMember(physical, request.input.source, retained), physical };
+}
+
+/**
+ * Keep-with-next look-ahead for an upright block table
+ * (`word-vertical-section-upright-block-table`): whether the table of
+ * `request` starts on this page if the flow reaches it at the request's
+ * location, decided by the placement itself (planUprightRun) against the
+ * blocks already on the page, so a table that placement moves to a fresh
+ * page to clear an earlier one is not promised to the paragraph kept with
+ * it. Null when the table is not such a block. Changes nothing.
+ */
+export function bodyUprightBlockStartsHere(
+  context: BodyTableMeasurementContext,
+  request: BodyTableRequest,
+  operations: BodyTableMeasurementOperations,
+): boolean | null {
+  const { services, state, sessionState } = context;
+  const restore = sessionState.location;
+  operations.setBodyAcquisitionLocation(services, state, sessionState, request.location);
+  try {
+    const found = uprightBlockLeader(context, request, operations);
+    if (!found) return null;
+    return planUprightRun(context, request, operations, found.physical, found.leader, false).kind
+      !== 'fresh-region';
+  } finally {
+    operations.setBodyAcquisitionLocation(services, state, sessionState, restore);
+  }
 }
 
 /**

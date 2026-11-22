@@ -707,19 +707,28 @@ function tightEdgeTouch(
   return null;
 }
 
+/** How far before a `bandStartInclusive` rectangle's block start a line band
+ * may end and still meet it. The band's end and the rectangle's start are
+ * the same block position reached by different sums (line advances against
+ * a flow cursor), which agree only to within floating-point rounding; this
+ * is far wider than that rounding and far narrower than any line. */
+const BAND_START_TOLERANCE_PT = 1e-6;
+
 /** Whether the line band [exactTop, exactBottom] meets a square rectangle's
  * block interval: a strict overlap, or for a `bandStartInclusive` rectangle a
- * band ending exactly at its top as well. */
+ * band ending at its top (within BAND_START_TOLERANCE_PT) as well. */
 function bandMeetsRectY(
   rect: Readonly<FloatRect>,
   exactTop: ExactRational,
   exactBottom: ExactRational,
 ): boolean {
-  const fromTop = compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop));
   const fromBottom = compareExactRational(exactTop, unreducedExactFromNumber(rect.yBottom));
-  return rect.bandStartInclusive === true && rect.mode === 'square'
-    ? fromTop >= 0 && fromBottom < 0
-    : fromTop > 0 && fromBottom < 0;
+  if (rect.bandStartInclusive === true && rect.mode === 'square') {
+    return fromBottom < 0 && compareExactRational(
+      exactBottom, unreducedExactFromNumber(rect.yTop - BAND_START_TOLERANCE_PT),
+    ) >= 0;
+  }
+  return fromBottom < 0 && compareExactRational(exactBottom, unreducedExactFromNumber(rect.yTop)) > 0;
 }
 
 /**

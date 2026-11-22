@@ -2999,6 +2999,8 @@ function* paginateBodyPassSteps(
               input: nextBlock,
               location,
               availableInlineExtentPt: location.availableBounds.widthPt,
+              precedingBlockExtentPt: keepSetExtentPt,
+              freshPageBlockExtentPt: freshPageExtent(state),
             });
             const continues = nextBlock.kind === 'paragraph'
               && (nextBlock.keepNext || bridgeSuccessor);

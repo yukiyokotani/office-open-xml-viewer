@@ -41,12 +41,12 @@ export const T = table(2);
 
 export type Direction = 'tbRl' | 'tbLrV';
 
-function docx(direction: Direction, body: readonly string[], columns = 1): Uint8Array {
+function docx(direction: Direction, body: readonly string[], columns = 1, linePitch = 360): Uint8Array {
   const document = `<w:document xmlns:w="${W}"><w:body>${body.join('')}`
     + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
     + '<w:pgMar w:top="1200" w:right="1800" w:bottom="1600" w:left="800" w:header="720" w:footer="720" w:gutter="0"/>'
     + (columns > 1 ? `<w:cols w:num="${columns}" w:space="425"/>` : '')
-    + `<w:textDirection w:val="${direction}"/><w:docGrid w:type="lines" w:linePitch="360"/>`
+    + `<w:textDirection w:val="${direction}"/><w:docGrid w:type="lines" w:linePitch="${linePitch}"/>`
     + '</w:sectPr></w:body></w:document>';
   return storeZip(new Map([
     ['[Content_Types].xml', xml('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -96,8 +96,14 @@ export interface Page {
   readonly strips: Array<Array<Readonly<{ block: number; inlineStart: number }>>>;
 }
 
-export function layOutPages(direction: Direction, body: readonly string[], columns = 1): Page[] {
-  const archive = new DocxArchive(docx(direction, body, columns));
+/** `linePitch`: the section's line grid pitch in twentieths of a point. */
+export function layOutPages(
+  direction: Direction,
+  body: readonly string[],
+  columns = 1,
+  linePitch = 360,
+): Page[] {
+  const archive = new DocxArchive(docx(direction, body, columns, linePitch));
   let model: DocxDocumentModel;
   try {
     model = normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
