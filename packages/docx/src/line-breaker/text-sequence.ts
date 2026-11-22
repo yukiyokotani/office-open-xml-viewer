@@ -42,7 +42,7 @@ type SequenceRun = Extract<ParagraphTextBearingRun, { type: 'text' }> & Readonly
   typographyInput?: RunTypographyAcquisitionInput;
 }>;
 
-function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, languages = true): string {
+function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, westernLanguage = true): string {
   const input = run.typographyInput;
   const effective = <T>(value: TypographyValueInput<T> | undefined, fallback: T | undefined) =>
     value?.status === 'valid' && value.value !== null ? value.value : fallback;
@@ -57,7 +57,7 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, lan
     fontFamilyCs: run.fontFamilyCs, fontSlots: run.fontSlots, fontHint: run.fontHint,
     fontSizeCs: run.fontSizeCs, bold: run.bold, italic: run.italic,
     boldCs: run.boldCs, italicCs: run.italicCs, rtl: run.rtl, cs: run.cs,
-    ...(languages ? { langBidi: run.langBidi, langEastAsia: run.langEastAsia, lang: run.lang } : {}),
+    langBidi: run.langBidi, langEastAsia: run.langEastAsia, ...(westernLanguage ? { lang: run.lang } : {}),
     vertAlign: effective(input?.verticalAlign, run.vertAlign ?? undefined),
     position: effective(input?.positionPt, run.position),
     charSpacing: input?.characterSpacingPt ?? run.charSpacing,
@@ -97,6 +97,7 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, lan
 }
 
 let graphemeSegmenter: Intl.Segmenter | null | undefined;
+const MAX_JOINED_CLUSTER_UNITS = 64;
 
 /** UAX #29 grapheme clusters of one sequence's displayed text, judged at its
  * run seams. Segmentation restarts at the start of the last cluster already
@@ -118,6 +119,9 @@ class SequenceGraphemes {
       ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
     if (!graphemeSegmenter) return false;
     const seam = this.text.length - this.boundary;
+    // A cluster longer than any real one (a long run of marks) declines the
+    // join, bounding the text segmented again at each seam.
+    if (seam > MAX_JOINED_CLUSTER_UNITS) return false;
     let lastStart = 0;
     let crossing = false;
     for (const part of graphemeSegmenter.segment(this.text.slice(this.boundary) + next)) {
@@ -156,6 +160,7 @@ export function acquireTextSequences(
   let key: string | undefined;
   let languageFreeKey: string | undefined;
   const graphemes = new SequenceGraphemes();
+  let westernLanguageConflict = false;
   let first: SequenceRun | undefined;
   let texts: string[] = [];
   let sources: TextSequenceSource[] = [];
@@ -166,6 +171,9 @@ export function acquireTextSequences(
       const text = texts.join('');
       sequences.set(start, {
         run: Object.freeze({ ...first, text,
+          // Runs joined only to keep a cluster whole disagree on w:val: the
+          // sequence carries none rather than paint one run in another's.
+          ...(westernLanguageConflict ? { lang: undefined } : {}),
           ...(first.typographyInput ? { typographyInput: Object.freeze({
             ...first.typographyInput, sourceText: text,
           }) } : {}),
@@ -181,6 +189,7 @@ export function acquireTextSequences(
     optionalHyphens = [];
     offset = 0;
     graphemes.reset();
+    westernLanguageConflict = false;
   };
   for (const [runIndex, run] of runs.entries()) {
     // ECMA-376 §17.13.5: deleted/moved-away content has no final-view glyphs or breaks.
@@ -212,16 +221,18 @@ export function acquireTextSequences(
     const scope = scopeKey === 'mixed' ? runIndex : scopeKey ?? null;
     const nextKey = visible ? JSON.stringify([formattingKey(visible, environment), scope]) : undefined;
     const display = visible ? displayText(visible.text, visible) : '';
-    // §17.3.2.20 languages delimit sequences, except inside one grapheme
-    // cluster: splitting there would separate a base from its variation
-    // selector, combining mark or ZWJ continuation and change the cluster's
-    // glyph. A run that begins inside the sequence's last cluster joins the
-    // sequence. A sequence carries one run's formatting, so all of the joined
-    // run's text takes the sequence's language; source ranges stay per run.
+    // §17.3.2.20 languages delimit sequences, except a seam inside one
+    // grapheme cluster that differs only in w:val: splitting there would
+    // separate a base from its variation selector, combining mark or ZWJ
+    // continuation and change the cluster's glyph. The run then joins the
+    // sequence, which carries no western language (its runs disagree); source
+    // ranges stay per run. w:eastAsia and w:bidi also select regional faces,
+    // so their seams keep delimiting sequences.
     const clusterContinuation = visible !== undefined && first !== undefined && nextKey !== key
       && languageFreeKey === JSON.stringify([formattingKey(visible, environment, false), scope])
       && graphemes.continuedBy(display);
-    if (!clusterContinuation) {
+    if (clusterContinuation) westernLanguageConflict = true;
+    else {
       if (!visible || nextKey !== key) finish();
       key = nextKey;
       languageFreeKey = visible

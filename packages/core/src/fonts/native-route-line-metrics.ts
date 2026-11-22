@@ -396,12 +396,19 @@ export function nativeRouteClusterOwned(
   return sameGeometry(measured[0]!, measured[1]!) && ascent! + descent! < SENTINEL_A_INK_PX;
 }
 
-/** Bound on the clusters a {@link NamedFamilyOracle} remembers. */
-const NAMED_FAMILY_CACHE_LIMIT = 8192;
+/** Bounds on what a {@link NamedFamilyOracle} remembers: results, the
+ * family lists they refer to (in UTF-16 units), and the cluster length
+ * cached (longer clusters are proved but not remembered). */
+const NAMED_FAMILY_RESULT_LIMIT = 8192;
+const NAMED_FAMILY_LIST_UNITS = 65536;
+const NAMED_FAMILY_CLUSTER_UNITS = 16;
 
 /** Judges whether NAMED families of a Canvas route draw text, in the font
  * set of the canvas that measures and paints it. */
 export interface NamedFamilyOracle {
+  /** Whether this font set can judge at all: Canvas `lang` exists and the
+   * route sentinels are registered and applied. Fixed for the oracle's life. */
+  readonly available: boolean;
   /** Whether a named family of `familyList` draws every grapheme cluster of
    * `text`; false when this font set cannot judge. */
   draws(familyList: string, weight: number, style: 'normal' | 'italic', text: string): boolean;
@@ -418,12 +425,15 @@ export interface NamedFamilyOracle {
  * named family is matched in list order whatever the language. Families
  * after a generic could still be reached when it lacks a glyph, so the cut
  * is a conservative evidence boundary, not a claim that they never draw.
- * Text drawn entirely by named families keeps its faces, advances and
- * available weights under any Canvas `lang`, which can then only select
- * forms (locl) inside those faces.
+ * Text drawn entirely by named families keeps its faces under any Canvas
+ * `lang`: the language cannot replace a face by a fallback one (with other
+ * advances, line metrics or weights). It can still select forms (locl) and
+ * positioning inside those faces, which may change advances; measurement and
+ * paint both apply it.
  *
- * Results are remembered per cluster up to a bound; the oracle lives as long
- * as its owner's font snapshot (faces registered or released change them).
+ * The sentinels are verified once, on the owner's context: the oracle belongs
+ * to one font snapshot of a layout session, which retains its sentinel
+ * registrations for its life.
  */
 export function createNamedFamilyOracle(
   owner?: unknown, factory?: SymbolProbeCanvasFactory,
@@ -435,11 +445,26 @@ export function createNamedFamilyOracle(
       return null;
     }
   });
+  // Judged once on the owner's own context (no canvas is allocated until a
+  // draw is judged); its font is restored.
+  const available = (() => {
+    const context = owner as Partial<CanvasFontBoxProbeContext> | null | undefined;
+    if (!context || typeof context.measureText !== 'function' || typeof context.font !== 'string'
+      || !('lang' in context)) return false;
+    const previous = context.font;
+    try {
+      return sentinelsWork(context as CanvasFontBoxProbeContext);
+    } finally {
+      context.font = previous;
+    }
+  })();
   const listIds = new Map<string, number>();
+  let listUnits = 0;
   const results = new Map<string, boolean>();
   return {
+    available,
     draws(familyList, weight, style, text) {
-      if (text.length === 0) return false;
+      if (!available || text.length === 0) return false;
       const entries = parseFamilyList(familyList);
       if (!entries) return false;
       const firstGeneric = entries.findIndex((entry) => entry.generic);
@@ -448,35 +473,31 @@ export function createNamedFamilyOracle(
       const fonts = nativeRouteOwnershipFonts(named.join(', '), weight, style);
       let listId = listIds.get(fonts[0]);
       if (listId === undefined) {
-        if (listIds.size >= NAMED_FAMILY_CACHE_LIMIT) {
+        if (listIds.size >= NAMED_FAMILY_RESULT_LIMIT || listUnits + fonts[0].length > NAMED_FAMILY_LIST_UNITS) {
           listIds.clear();
           results.clear();
+          listUnits = 0;
         }
         listId = listIds.size;
         listIds.set(fonts[0], listId);
+        listUnits += fonts[0].length;
       }
       const segmenter = getGraphemeSegmenter();
       const clusters: Iterable<string> = segmenter
         ? { *[Symbol.iterator]() { for (const part of segmenter.segment(text)) yield part.segment; } }
         : text;
-      // Sentinels are refcounted; an unloaded one would let a fallback face
-      // pass as owned, so they are verified before any new evidence.
-      let verified = false;
       for (const cluster of clusters) {
+        const cacheable = cluster.length <= NAMED_FAMILY_CLUSTER_UNITS;
         const key = `${listId}\u0000${cluster}`;
-        let owned = results.get(key);
+        let owned = cacheable ? results.get(key) : undefined;
         if (owned === undefined) {
-          if (!verified) {
-            const context = probeContext(probe, 0);
-            if (!context || !sentinelsWork(context)) return false;
-            probe.fonts[0] = undefined;
-            verified = true;
-          }
           const judged = nativeRouteClusterOwned(fonts, cluster, probe);
           if (judged === undefined) return false;
           owned = judged;
-          if (results.size >= NAMED_FAMILY_CACHE_LIMIT) results.delete(results.keys().next().value!);
-          results.set(key, owned);
+          if (cacheable) {
+            if (results.size >= NAMED_FAMILY_RESULT_LIMIT) results.delete(results.keys().next().value!);
+            results.set(key, owned);
+          }
         }
         if (!owned) return false;
       }

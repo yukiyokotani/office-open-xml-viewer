@@ -281,12 +281,13 @@ mod private_typography_wire_tests {
 
     #[test]
     fn western_language_resolves_cascade_independently_of_other_slots() {
-        // ECMA-376 §17.3.2.20 inherits the w:lang element and leaves an
-        // omitted attribute to automatic determination. Word instead keeps
-        // three independent run properties (MS-DOC 2.6.1 sprmCRgLid0_80,
-        // sprmCRgLid1_80, sprmCLidBi), each inherited through §17.7
-        // docDefaults → paragraph style → character style → direct formatting
-        // on its own; w:eastAsia and w:bidi already follow that model here.
+        // Renderer policy, not an ECMA-376 rule: §17.3.2.20 leaves an omitted
+        // attribute to automatic determination. Each w:lang attribute is
+        // inherited through §17.7 docDefaults → paragraph style → character
+        // style → direct formatting on its own, the model this parser already
+        // uses for w:eastAsia and w:bidi and the shape of Word's own three
+        // run language properties (MS-DOC 2.6.1). How Word imports an omitted
+        // DOCX attribute is not established by an Office control.
         let styles = StyleMap::parse(&format!(
             r#"<w:styles xmlns:w="{W_NS}">
           <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="en-US" w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults>

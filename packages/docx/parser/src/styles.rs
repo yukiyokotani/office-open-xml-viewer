@@ -1544,11 +1544,11 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.lang_east_asia.is_some() {
         dst.lang_east_asia = src.lang_east_asia.clone();
     }
-    // §17.3.2.20 w:lang attributes cascade independently, as Word's three run
-    // language properties do (MS-DOC 2.6.1 sprmCRgLid0_80 / sprmCRgLid1_80 /
-    // sprmCLidBi): a lower level naming only one axis keeps the others. The
-    // standard's "automatic determination" of an omitted attribute is not
-    // what Word stores.
+    // Renderer policy for §17.3.2.20 (not established by an Office control):
+    // each w:lang attribute cascades on its own, as w:eastAsia and w:bidi
+    // already do here and as Word's three run language properties are
+    // stored (MS-DOC 2.6.1); a lower level naming one axis keeps the others
+    // instead of the standard's automatic determination.
     if src.lang.is_some() {
         dst.lang = src.lang.clone();
     }

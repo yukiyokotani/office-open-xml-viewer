@@ -376,9 +376,11 @@ export interface TextShapeRequest {
   readonly language?: string;
   /** Resolved w:lang@bidi (§17.3.2.20): language of complex-script text. */
   readonly complexScriptLanguage?: string;
-  /** The source piece this request derives from was shaped without its slot
-   * language (no named face draws all of it); derived requests keep that. */
-  readonly canvasLanguageWithheld?: true;
+  /** The Canvas language decided for the source piece this request derives
+   * from (one slot language group; null: none). Every fragment, fit, pair or
+   * generated probe of that piece reuses it for text of that group, so each
+   * measures in the language paint draws the piece with. */
+  readonly canvasLanguagePin?: CanvasLanguagePin;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
@@ -526,7 +528,7 @@ export function rubyGuideShapeRequest(
   text: string,
   languages: Readonly<{ guide?: string; latin?: string }> | undefined,
 ): TextShapeRequest {
-  const request = { ...independentTextShapeRequest(base, text), canvasLanguageWithheld: undefined };
+  const request = { ...independentTextShapeRequest(base, text), canvasLanguagePin: undefined };
   if (!languages) return request;
   const { guide, latin } = languages;
   return {
@@ -552,6 +554,14 @@ export function replaceTextShapeRequest(
     offset: context.offset,
   } };
 }
+
+/** §17.3.2.20 language axes: w:val (ascii/highAnsi), w:eastAsia, w:bidi. */
+export type LanguageSlotGroup = 'latin' | 'eastAsia' | 'complexScript';
+
+export const languageSlotGroup = (slot: FontScriptSlot): LanguageSlotGroup =>
+  slot === 'eastAsia' || slot === 'complexScript' ? slot : 'latin';
+
+export type CanvasLanguagePin = Readonly<{ group: LanguageSlotGroup; lang: string | null }>;
 
 /** The §17.3.2.20 w:lang attribute that governs text of one §17.3.2.26 font
  * slot: the same classification that selects the slot's face selects its
@@ -629,6 +639,8 @@ export interface GlyphRasterComparisonRequest {
   readonly route: CanvasFontRoute;
   /** Single private family of one loaded exact face; the comparison route. */
   readonly faceFamily: string;
+  /** Language the certified text is measured and painted in (Canvas `lang`). */
+  readonly lang?: string;
 }
 
 export interface GlyphMeasurer {
@@ -666,6 +678,8 @@ export interface GlyphOwnershipRequest {
   readonly weight: number;
   readonly style: FontStyle;
   readonly coverageProbeFamily: string;
+  /** Language the certified text is measured and painted in (Canvas `lang`). */
+  readonly lang?: string;
 }
 
 export interface TextShapeSpan extends GlyphMeasurement {
@@ -1432,6 +1446,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         const parts: unknown[] = [request.route.fingerprint, request.faceFamily,
           request.weight, request.style, request.text];
         if (request.baseDirection !== undefined) parts.push(request.baseDirection);
+        if (request.lang !== undefined) parts.push(['lang', request.lang]);
         const key = JSON.stringify(parts);
         const retained = rasterProofs.get(key);
         if (retained !== undefined) return retained;
@@ -1744,9 +1759,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     ];
     if (request.baseDirection !== undefined) shapeParts.push(['baseDirection', request.baseDirection]);
     if (request.language !== undefined || request.complexScriptLanguage !== undefined
-      || request.canvasLanguageWithheld === true) {
+      || request.canvasLanguagePin !== undefined) {
       shapeParts.push(['lang', request.language ?? null, request.complexScriptLanguage ?? null,
-        request.canvasLanguageWithheld === true]);
+        request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.lang ?? null]);
     }
     const shapeKey = JSON.stringify(shapeParts);
     const retainedShape = cached(shapeCache, shapeKey);
@@ -1904,10 +1919,12 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // §5.1/§5.4), so a language there would change the face, its advances
       // and weights rather than select forms (locl) within the face.
       const slotLang = scriptSlotLanguage(request, group.script);
-      const lang = slotLang !== undefined && request.canvasLanguageWithheld !== true
-        && input.measurer.namedFamiliesDraw?.({
-        text: group.text, fontRoute: font.route, weight: font.weight, style: font.style,
-      }) === true ? slotLang : undefined;
+      const pin = request.canvasLanguagePin;
+      const lang = slotLang === undefined ? undefined
+        : pin !== undefined && pin.group === languageSlotGroup(group.script) ? pin.lang ?? undefined
+          : input.measurer.namedFamiliesDraw?.({
+            text: group.text, fontRoute: font.route, weight: font.weight, style: font.style,
+          }) === true ? slotLang : undefined;
       const measurement = request.measure === false ? {
         advancePt: 0,
         ascentPt: 0,

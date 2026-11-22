@@ -30,7 +30,7 @@ import type {
   TextShapeRequest,
   TextShapeSpan,
 } from '../layout/text.js';
-import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage } from '../layout/text.js';
+import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage, languageSlotGroup } from '../layout/text.js';
 import {
   referenceFontAverageWidthRatio,
   referenceFontLineMetrics,
@@ -1763,13 +1763,13 @@ function emitResolvedTextSegment(
     vertAlign: effectiveVertAlign,
     measuredWidth: 0,
     textLayoutService: environment.layoutServices?.text,
-    // The piece's Canvas language is decided once, here: a piece whose slot
-    // language was withheld (no named-family proof) keeps it withheld in
-    // every fragment, fit and pair probe derived from this request, so they
-    // measure exactly what paint draws (segment `lang`).
-    textShapeRequest: resolvedSpan && resolvedSpan.lang === undefined
-      && scriptSlotLanguage(textShapeRequest, resolvedSpan.script) !== undefined
-      ? Object.freeze({ ...textShapeRequest, canvasLanguageWithheld: true as const })
+    // The piece's Canvas language is decided once, here, and pinned: every
+    // fragment, fit, kashida and pair probe derived from this request
+    // measures in the language paint draws the piece with (segment `lang`).
+    textShapeRequest: resolvedSpan && scriptSlotLanguage(textShapeRequest, resolvedSpan.script) !== undefined
+      ? Object.freeze({ ...textShapeRequest, canvasLanguagePin: Object.freeze({
+        group: languageSlotGroup(resolvedSpan.script), lang: resolvedSpan.lang ?? null,
+      }) })
       : textShapeRequest,
     ...(resolvedSpan?.substituteScope !== undefined
       ? { substituteScope: resolvedSpan.substituteScope } : {}),

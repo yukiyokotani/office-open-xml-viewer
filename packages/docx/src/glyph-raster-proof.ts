@@ -1,4 +1,5 @@
 import { canvasFontString } from '@silurus/ooxml-core';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
 import type { GlyphOwnershipRequest, GlyphRasterComparisonRequest } from './layout/text.js';
 
@@ -41,6 +42,17 @@ function sharedContext(width: number, height: number): RasterContext | null {
   return shared.context;
 }
 
+/** Run `action` in the language of the certified text, restoring the
+ * surface's own (a resize resets Canvas state, so set it per operation). */
+function withLanguage<T>(context: RasterContext, lang: string | undefined, action: () => T): T {
+  const previous = selectCanvasLanguage(context, lang);
+  try {
+    return action();
+  } finally {
+    restoreCanvasLanguage(context, previous);
+  }
+}
+
 /** Owned scratch surfaces may be resized between calls (which resets Canvas
  * state). Set/read/restore the requested base for each actual native operation. */
 function withDirection<T>(context: RasterContext, base: 'ltr' | 'rtl' | undefined, action: () => T): T {
@@ -57,12 +69,13 @@ function withDirection<T>(context: RasterContext, base: 'ltr' | 'rtl' | undefine
   } finally { context.direction = previous; context.textAlign = previousAlign; }
 }
 
-function rasterize(context: RasterContext, font: string, text: string, width: number, height: number, base?: 'ltr' | 'rtl'): Uint8ClampedArray {
+function rasterize(context: RasterContext, font: string, text: string, width: number, height: number, base?: 'ltr' | 'rtl', lang?: string): Uint8ClampedArray {
   context.clearRect(0, 0, width, height);
   context.font = font;
   context.textBaseline = 'alphabetic';
   context.fillStyle = '#000';
-  withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7)));
+  withLanguage(context, lang, () =>
+    withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7))));
   return context.getImageData(0, 0, width, height).data;
 }
 
@@ -85,18 +98,21 @@ export function sameGlyphRaster(request: Readonly<GlyphRasterComparisonRequest>)
   const faceFont = `${request.style} ${request.weight} ${PROBE_EM_PX}px ${quoteCssFontFamily(request.faceFamily)}`;
   const measure = sharedContext(1, PROBE_EM_PX * 2);
   if (!measure) return false;
-  measure.font = nativeFont;
-  const nativeWidth = withDirection(measure, request.baseDirection, () => measure.measureText(probe).width);
-  measure.font = faceFont;
-  const faceWidth = withDirection(measure, request.baseDirection, () => measure.measureText(probe).width);
+  const width = (font: string) => {
+    measure.font = font;
+    return withLanguage(measure, request.lang, () =>
+      withDirection(measure, request.baseDirection, () => measure.measureText(probe).width));
+  };
+  const nativeWidth = width(nativeFont);
+  const faceWidth = width(faceFont);
   if (!(Number.isFinite(nativeWidth) && nativeWidth > 0) || nativeWidth !== faceWidth) return false;
-  const width = Math.ceil(nativeWidth + PROBE_EM_PX);
+  const rasterWidth = Math.ceil(nativeWidth + PROBE_EM_PX);
   const height = PROBE_EM_PX * 2;
-  const context = sharedContext(width, height);
+  const context = sharedContext(rasterWidth, height);
   if (!context) return false;
   try {
-    const native = rasterize(context, nativeFont, probe, width, height, request.baseDirection);
-    const face = rasterize(context, faceFont, probe, width, height, request.baseDirection);
+    const native = rasterize(context, nativeFont, probe, rasterWidth, height, request.baseDirection, request.lang);
+    const face = rasterize(context, faceFont, probe, rasterWidth, height, request.baseDirection, request.lang);
     let ink = false;
     for (let index = 0; index < native.length; index++) {
       if (native[index] !== face[index]) return false;
@@ -137,8 +153,8 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
   const font = `${request.style} ${request.weight} 100px ${quoteCssFontFamily(request.coverageProbeFamily)}`;
   let context: RasterContext | null | undefined;
   for (const part of parts) {
-    const key = request.baseDirection === undefined ? `${font}\u0000${part}`
-      : `directed\u0000${JSON.stringify([font, part, request.baseDirection])}`;
+    const key = request.baseDirection === undefined && request.lang === undefined ? `${font}\u0000${part}`
+      : `directed\u0000${JSON.stringify([font, part, request.baseDirection ?? null, request.lang ?? null])}`;
     let owned = ownership.get(key);
     if (owned === undefined) {
       context ??= sharedContext(1, PROBE_EM_PX * 2);
@@ -146,9 +162,9 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
       context.font = font;
       // Owned glyphs keep zero advance AND zero ink (the outlines scale too);
       // a fallback, even a zero-advance combining mark, keeps positive ink.
-      const metrics = request.baseDirection === undefined
-        ? context.measureText(part)
-        : withDirection(context, request.baseDirection, () => context!.measureText(part));
+      const metrics = withLanguage(context, request.lang, () => request.baseDirection === undefined
+        ? context!.measureText(part)
+        : withDirection(context!, request.baseDirection, () => context!.measureText(part)));
       const inkWidth = (metrics.actualBoundingBoxLeft ?? 0) + (metrics.actualBoundingBoxRight ?? 0);
       const inkHeight = (metrics.actualBoundingBoxAscent ?? 0) + (metrics.actualBoundingBoxDescent ?? 0);
       owned = metrics.width === 0 && Number.isFinite(inkWidth) && Number.isFinite(inkHeight)

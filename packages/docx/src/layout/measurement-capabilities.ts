@@ -35,6 +35,8 @@ export interface VerticalGlyphMeasurementService {
     charScale: number;
     growTrRotateInk: boolean;
     writingMode: WritingMode;
+    /** Language the run is measured and painted in (Canvas `lang`). */
+    lang?: string;
     /** Punctuation compression and width balance of a source range, floored
      * with the cell (WORD_CONDENSED_SPACING_ADVANCE_FLOOR); when supplied,
      * reported advances include it. */

@@ -11,7 +11,6 @@ import {
   createSymbolFaceOracle,
   createNamedFamilyOracle,
   fontFaceWeightCovers,
-  type NamedFamilyOracle,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import type { FontSubstituteScript, OfficeFontFallbackRoute } from '@silurus/ooxml-core';
@@ -334,6 +333,9 @@ export function createProductionTextLayoutService(
   const supportsDirectedContext = context !== null
     && ['ltr', 'rtl', 'inherit'].includes(context.direction ?? '')
     && ['start', 'end', 'left', 'right', 'center'].includes(context.textAlign ?? '');
+  const namedFamilyOracle = context
+    ? createNamedFamilyOracle(options.symbolProbeOwner ?? context, options.symbolProbeCanvas)
+    : undefined;
   const measure = (request: Readonly<GlyphMeasureRequest>) => {
     if (!context) return {
       advancePt: [...request.text].length * request.fontSizePt * 0.5,
@@ -507,18 +509,18 @@ export function createProductionTextLayoutService(
       // fingerprint, independently of source occurrence or cache history.
       // v6/v3: a shorthand the context grid-fits at its own size is measured
       // at the reference em (core reference-advances.ts).
-      // v7/v4: run languages reach Canvas only for named-family text.
-      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v7'
-        : context ? 'canvas-text-metrics-v4' : 'deterministic-text-metrics-v1',
+      // v7/v4: run languages reach Canvas only for named-family text, and
+      // only in a font set that can prove it (named-family-lang).
+      fingerprint: (supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v7'
+        : context ? 'canvas-text-metrics-v4' : 'deterministic-text-metrics-v1')
+        + (namedFamilyOracle?.available ? '+named-family-lang' : ''),
       ...(context ? {
         sameGlyphRaster,
         ownsGlyphs,
         // Judged in the font set of the canvas that measures and paints (the
         // symbol oracle's owner); results live with this service's snapshot.
-        namedFamiliesDraw: ((oracle: NamedFamilyOracle) =>
-          (request: Readonly<import('./text.js').NamedFamilyDrawRequest>) => oracle.draws(
-            request.fontRoute.familyList, request.weight, request.style, request.text,
-          ))(createNamedFamilyOracle(options.symbolProbeOwner ?? context, options.symbolProbeCanvas)),
+        namedFamiliesDraw: (request: Readonly<import('./text.js').NamedFamilyDrawRequest>) =>
+          namedFamilyOracle!.draws(request.fontRoute.familyList, request.weight, request.style, request.text),
       } : {}),
       measure,
       ...(supportsDirectedContext ? { measureDirected: measure, supportsDirectedAuxiliaries: true as const } : {}),

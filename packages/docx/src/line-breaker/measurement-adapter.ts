@@ -251,7 +251,8 @@ export class LineMeasurementAdapter {
       || left.sourceTextSequence !== right.sourceTextSequence
       // The joined probe shapes in one language state; both sides must have
       // been measured in it.
-      || left.lang !== right.lang || l.canvasLanguageWithheld !== r.canvasLanguageWithheld) return 0;
+      || left.lang !== right.lang || l.canvasLanguagePin?.group !== r.canvasLanguagePin?.group
+      || l.canvasLanguagePin?.lang !== r.canvasLanguagePin?.lang) return 0;
     // The slot and native-unit checks walk spans and slice source text, so
     // they run after the field comparisons.
     const physicalUnit = hasLiveSlotSeam(left) || hasLiveSlotSeam(right);
@@ -355,8 +356,9 @@ export class LineMeasurementAdapter {
       reserveWork(VERTICAL_PLAN_WORK_PER_UNIT * text.length);
       const gridPx = segmentCharacterGridDeltaPx(segment, grid, this.scale);
       const verticalGlyphMeasurement = this.verticalGlyphMeasurement;
-      const cells = this.withSegmentLanguage(segment, () => verticalGlyphMeasurement.planRun({
+      const cells = verticalGlyphMeasurement.planRun({
         text,
+        ...(segment.lang !== undefined ? { lang: segment.lang } : {}),
         font: this.fontForSegment(segment),
         fontKerning: this.segmentKerning(segment),
         fontSizePt: calcEffectiveFontPx(segment, this.scale),
@@ -366,7 +368,7 @@ export class LineMeasurementAdapter {
         growTrRotateInk: true,
         writingMode: 'vertical-rl',
         characterAdjustmentPt: (from: number, to: number) => adjustmentPx(start + from, start + to),
-      }));
+      });
       return {
         kind: 'vertical-cells',
         cells: cells.map((cell) => ({

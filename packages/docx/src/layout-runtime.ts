@@ -1,3 +1,4 @@
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { classifyCjkFont, type CjkLang, type NativeRouteLineRequest, type OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import {
   activeFontSet,
@@ -228,6 +229,7 @@ export function createLayoutServices(
         const previousKerning = canvasContext.fontKerning;
         view.font = input.font;
         canvasContext.fontKerning = input.fontKerning;
+        const previousLang = selectCanvasLanguage(canvasContext, input.lang);
         try {
           return planVerticalRunWithCapability(
             view,
@@ -242,6 +244,7 @@ export function createLayoutServices(
             input.characterAdjustmentPt,
           );
         } finally {
+          restoreCanvasLanguage(canvasContext, previousLang);
           view.font = previousFont;
           canvasContext.fontKerning = previousKerning;
         }
