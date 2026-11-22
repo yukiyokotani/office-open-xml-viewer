@@ -3462,6 +3462,11 @@ function renderWarpedText(
     // naturalWidth/arcLength via `followPathUScale`, and paragraph alignment
     // chooses where that compact segment sits on the path. Paired-edge presets
     // return scale 1 (they stretch the flat ink box to fill the envelope width).
+    // Known limit: with hScale fixed at 1 and followPathUScale clamped to the
+    // full path, single-edge text longer than its path keeps natural glyph size
+    // while its glyph positions are compressed onto the path; glyphs are not
+    // shrunk one by one. How PowerPoint fits overlength Follow Path text is not
+    // reproduced and remains an unresolved difference.
     const inkH = maxA + maxD > 0 ? maxA + maxD : maxSize;
     const baselineFrac = env.singleEdge ? 0.8 : inkH > 0 ? maxA / inkH : 0.8;
     const hScale = env.singleEdge ? 1 : boxW / totalW;

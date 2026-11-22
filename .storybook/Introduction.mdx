@@ -124,53 +124,14 @@ import pptxImg from '../docs/images/pptx.png';
   </div>
 </div>
 
-## Quick start
+## Documentation
 
-```bash
-npm install @silurus/ooxml
-```
+- [Site and guides](https://ooxml.silurus.dev/): installation, framework integration, fonts, errors and the optional add-ons.
+- [README](https://github.com/yukiyokotani/office-open-xml-viewer#readme): API overview and the feature support table.
 
-```typescript
-import { PptxViewer } from '@silurus/ooxml/pptx';
-
-const canvas = document.getElementById('pptx-canvas') as HTMLCanvasElement;
-const viewer = new PptxViewer(canvas);
-const buf = await fetch('/deck.pptx').then(r => r.arrayBuffer());
-await viewer.load(buf);
-viewer.nextSlide();
-```
-
-Each format also exposes a headless engine — `DocxDocument` / `XlsxWorkbook` / `PptxPresentation` —
-that renders into any caller-supplied canvas, so you can compose scroll views,
-thumbnail grids, or master-detail panes freely. See the **Layouts** stories under each viewer.
-
-## Responsive rendering
-
-`autoResize` observes an element and re-runs the render callback on every size
-change, coalesced to one call per animation frame. It is framework-agnostic —
-call it from React `useEffect`, Vue `onMounted`, Svelte `onMount`, etc., and
-invoke the returned disposer in the matching teardown hook.
-
-```typescript
-import { PptxPresentation, autoResize } from '@silurus/ooxml/pptx';
-
-const pres = await PptxPresentation.load('/deck.pptx');
-const detach = autoResize(
-  (width) => pres.renderSlide(canvas, 0, { width }),
-  canvas.parentElement as HTMLElement, // observe the container so canvas can fill it
-);
-
-// teardown
-detach();
-pres.destroy();
-```
-
-## Highlights
-
-- **Canvas-only rendering.** No HTML/script from the source file is ever executed or injected into the DOM.
-- **Zip-bomb safe.** Each ZIP entry is capped at 512 MiB of uncompressed output.
-- **No network by default.** Web fonts are opt-in through `fonts`, for example `fonts: [googleFonts()]` (DOCX, XLSX and PPTX).
-- **Tree-shakable.** Import a single format (e.g. `@silurus/ooxml/pptx`) and the other two are dropped entirely.
+Each viewer's **Examples** group shows the viewer and offscreen rendering; the DOCX
+and PPTX groups also compose the headless `DocxDocument` / `PptxPresentation` engines
+into scroll, thumbnail-grid and master-detail layouts.
 
 ## License
 
