@@ -379,13 +379,22 @@ export type UprightDrawingLimits = Readonly<{ inlineEndPt: number; blockEndPt: n
 
 /**
  * `word-vertical-section-upright-block-table`: how far a wrapped drawing
- * with frame `rect` moves so that it covers no upright block table: along
- * the inline axis (x) to lie directly below the tables it covers, or, where
- * that would take it past the page's inline end, along the block axis (y)
- * past their far edge. Zero when it covers none. Null when no such place
- * lies on the page: the drawing then keeps its place, over the table, and
- * stays visible. Library policy where no control exists (the measured case
- * is a drawing with room below its table).
+ * with frame `rect` moves so that it covers no upright block table. Zero
+ * when it covers none. Null when no place tried lies on the page: the
+ * drawing then keeps its place, over the table, and stays visible. Library
+ * policy where no control exists (the measured case is a drawing with room
+ * below its table).
+ *
+ * Two routes are tried from the drawing's own position, in this order, and
+ * the first that ends clear is taken:
+ * 1. below: along the inline axis (x) to lie directly below what it covers,
+ *    and, where that would pass the page's inline end, along the block axis
+ *    (y) past the far edge instead;
+ * 2. past: along the block axis past the far edge of what it covers, and,
+ *    where that would pass the page's block end, along the inline axis
+ *    instead.
+ * A route ends without a place when neither move stays before the page's
+ * ends.
  *
  * The tables are those placed for tables before body index
  * `beforeSourceIndex`, and `planned`. A paragraph's own acquisition passes
@@ -396,15 +405,14 @@ export type UprightDrawingLimits = Readonly<{ inlineEndPt: number; blockEndPt: n
  *
  * `blockers` are rectangles the drawing may not cover either: the drawings
  * it collides with (ECMA-376 §20.4.2.3, allowOverlap false). They are
- * cleared in the same search, in the direction that collision resolution
- * takes on its own (axis-aligned-overlap.ts), so the place found is clear
- * of the tables and of the blockers at once.
+ * cleared in the same search, so the place found is clear of the tables and
+ * of the blockers at once.
  *
- * The search ends: each step moves the drawing past every rectangle it
+ * Each route ends: a step moves the drawing past every rectangle it
  * covers, along one axis, and it never moves back along either, so a
- * rectangle left behind is not met again and there are at most as many
- * steps as rectangles. Only the table boxes in the drawing's current block
- * range are read.
+ * rectangle left behind is not met again and a route takes at most as many
+ * steps as there are rectangles. Only the table boxes in the drawing's
+ * current block range are read.
  */
 export function uprightDrawingMovePt(
   index: UprightBlockPageIndex | undefined,
@@ -414,35 +422,42 @@ export function uprightDrawingMovePt(
   planned?: readonly LayoutRect[],
   blockers?: readonly LayoutRect[],
 ): Readonly<{ xPt: number; yPt: number }> | null {
-  let xPt = rect.xPt;
-  let yPt = rect.yPt;
-  for (;;) {
-    const endXPt = xPt + rect.widthPt;
-    const endYPt = yPt + rect.heightPt;
-    let nextXPt = Number.NEGATIVE_INFINITY;
-    let nextYPt = Number.NEGATIVE_INFINITY;
-    const meet = (box: LayoutRect) => {
-      if (box.xPt < endXPt && xPt < box.xPt + box.widthPt && box.yPt < endYPt && yPt < box.yPt + box.heightPt) {
-        nextXPt = Math.max(nextXPt, box.xPt + box.widthPt);
-        nextYPt = Math.max(nextYPt, box.yPt + box.heightPt);
+  const route = (inlineFirst: boolean): Readonly<{ xPt: number; yPt: number }> | null => {
+    let xPt = rect.xPt;
+    let yPt = rect.yPt;
+    for (;;) {
+      const endXPt = xPt + rect.widthPt;
+      const endYPt = yPt + rect.heightPt;
+      let nextXPt = Number.NEGATIVE_INFINITY;
+      let nextYPt = Number.NEGATIVE_INFINITY;
+      const meet = (box: LayoutRect) => {
+        if (box.xPt < endXPt && xPt < box.xPt + box.widthPt && box.yPt < endYPt && yPt < box.yPt + box.heightPt) {
+          nextXPt = Math.max(nextXPt, box.xPt + box.widthPt);
+          nextYPt = Math.max(nextYPt, box.yPt + box.heightPt);
+        }
+      };
+      if (planned) for (const box of planned) meet(box);
+      if (blockers) for (const box of blockers) meet(box);
+      if (index && index.tableCount > 0) {
+        const first = bucketOf(yPt);
+        const last = bucketOf(endYPt);
+        for (let bucket = first; bucket <= last; bucket += 1) {
+          const entries = index.tableBuckets.get(bucket);
+          if (!entries) continue;
+          for (const entry of entries) if (entry.sourceIndex < beforeSourceIndex) meet(entry.box);
+        }
       }
-    };
-    if (planned) for (const box of planned) meet(box);
-    if (blockers) for (const box of blockers) meet(box);
-    if (index && index.tableCount > 0) {
-      const first = bucketOf(yPt);
-      const last = bucketOf(endYPt);
-      for (let bucket = first; bucket <= last; bucket += 1) {
-        const entries = index.tableBuckets.get(bucket);
-        if (!entries) continue;
-        for (const entry of entries) if (entry.sourceIndex < beforeSourceIndex) meet(entry.box);
-      }
+      if (nextXPt === Number.NEGATIVE_INFINITY) return { xPt: xPt - rect.xPt, yPt: yPt - rect.yPt };
+      const inlineFits = nextXPt + rect.widthPt <= limits.inlineEndPt;
+      const blockFits = nextYPt + rect.heightPt <= limits.blockEndPt;
+      if (inlineFits && (inlineFirst || !blockFits)) xPt = nextXPt;
+      else if (blockFits) yPt = nextYPt;
+      else return null;
     }
-    if (nextXPt === Number.NEGATIVE_INFINITY) return { xPt: xPt - rect.xPt, yPt: yPt - rect.yPt };
-    if (nextXPt + rect.widthPt <= limits.inlineEndPt) xPt = nextXPt;
-    else if (nextYPt + rect.heightPt <= limits.blockEndPt) yPt = nextYPt;
-    else return null;
-  }
+  };
+  const below = route(true);
+  // A drawing that covers nothing, or has a place below, takes it.
+  return below ?? route(false);
 }
 
 /** The box a registration adds to the history of placed tables

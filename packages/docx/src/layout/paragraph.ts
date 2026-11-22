@@ -4953,7 +4953,7 @@ function resizeResolvedAnchorGeometry(
 }
 
 
-function anchorAxisOwnership(
+export function anchorAxisOwnership(
   result: Extract<AnchorFrameResult, { status: 'resolved' }>,
   axis: 'horizontal' | 'vertical',
   layoutInCell = false,
@@ -4975,6 +4975,97 @@ function anchorAxisOwnership(
     || diagnostic.referenceFrame === 'character'
     ? 'host'
     : 'page';
+}
+
+/**
+ * How far an anchored drawing resolved at `rect` moves for what it may not
+ * cover: the drawings it collides with (ECMA-376 §20.4.2.3, `allowOverlap`
+ * false) and, for a wrapped drawing where upright block tables are in place
+ * (`uprightTables`), those tables. The paragraph's own acquisition and the
+ * page-start prescan of a page-positioned drawing both place it with this,
+ * so the exclusion registered when the page starts is where the drawing
+ * lies.
+ *
+ * `word-vertical-section-upright-block-table`: the tables and the drawings
+ * are cleared in one search (uprightDrawingMovePt), so clearing one never
+ * leaves the drawing over the other. Where no place it tries is on the
+ * page, the drawing takes its place among the drawings alone, as where no
+ * table is, if that place is on the page, and otherwise keeps its position:
+ * no move takes a drawing off its page. `clearOfTables`: the search moved
+ * it.
+ */
+export function anchorObstacleMove(input: Readonly<{
+  occurrenceId: string;
+  /** The drawing's frame and text exclusion as resolved, and whether its
+   * block axis follows the page or its host (anchorAxisOwnership). */
+  rect: LayoutRect;
+  exclusionBounds: LayoutRect;
+  verticalOwnership: 'page' | 'host';
+  allowOverlap: boolean;
+  relativeHeight: number;
+  externalCollisions: readonly DrawingMLCollisionEntryPt[];
+  sameParagraphCollisions: readonly DrawingMLCollisionEntryPt[];
+  /** The inline end of the drawing's page or cell, and the block end of its page. */
+  inlineEndPt: number;
+  blockEndPt: number;
+  uprightTables?: Readonly<{ index: UprightBlockPageIndex | undefined; planned?: readonly LayoutRect[] }>;
+}>): Readonly<{ xPt: number; yPt: number; clearOfTables: boolean }> {
+  const { occurrenceId, rect } = input;
+  let blockers: FloatPlacementParticipant[] = [];
+  if (!input.allowOverlap) {
+    // §20.4.2.3 object collision is independent of text wrapping. An
+    // allowOverlap=true object keeps its resolved position: Word controls
+    // (issue #1623) never move such a picture away from pictures anchored in
+    // other paragraphs, in either compatibility mode, wrap kind, or reference.
+    // ECMA-376 §20.4.2.3 requires displacement for every existing object
+    // whose allowOverlap behavior makes it a collision participant.
+    // Word has one narrower composition exception: a source-later page-owned
+    // member below the already-authored layers in this SAME anchor paragraph
+    // retains its authored position. Cross-paragraph entries remain blockers.
+    const sameParagraphBlockers = input.sameParagraphCollisions.filter((entry) =>
+      // `word-lower-layer-same-paragraph-anchor-composition`
+      !wordPreservesLowerLayerSameParagraphComposition(
+        input.verticalOwnership,
+        input.relativeHeight,
+        entry.relativeHeight,
+      ));
+    blockers = [...input.externalCollisions, ...sameParagraphBlockers]
+      .filter((entry) => entry.occurrenceId !== occurrenceId)
+      .map((entry) => ({
+        occurrenceId: entry.occurrenceId,
+        kind: 'drawingml',
+        paragraphId: 0,
+        bounds: entry.bounds,
+        exclusionBounds: entry.bounds,
+      }));
+  }
+  if (input.uprightTables) {
+    const move = uprightDrawingMovePt(
+      input.uprightTables.index, Number.POSITIVE_INFINITY, rect,
+      { inlineEndPt: input.inlineEndPt, blockEndPt: input.blockEndPt },
+      input.uprightTables.planned, blockers.map((blocker) => blocker.bounds),
+    );
+    if (move) return { ...move, clearOfTables: move.xPt !== 0 || move.yPt !== 0 };
+  }
+  const none = { xPt: 0, yPt: 0, clearOfTables: false };
+  if (blockers.length === 0) return none;
+  const { displacement } = resolveFloatPlacement({
+    moving: {
+      occurrenceId,
+      kind: 'drawingml',
+      paragraphId: 1,
+      bounds: rect,
+      exclusionBounds: input.exclusionBounds,
+    },
+    blockers,
+    avoidance: { kind: 'drawingml-normative' },
+    rightBoundaryPt: input.inlineEndPt,
+  });
+  // Where upright tables are in place, a place among the drawings alone is
+  // taken only on the page; past its end the drawing keeps its position.
+  if (input.uprightTables && (rect.xPt + displacement.xPt + rect.widthPt > input.inlineEndPt
+    || rect.yPt + displacement.yPt + rect.heightPt > input.blockEndPt)) return none;
+  return { xPt: displacement.xPt, yPt: displacement.yPt, clearOfTables: false };
 }
 
 interface AnchorLineReference {
@@ -5246,104 +5337,45 @@ function acquireAnchorOccurrence(
       const delta = { xPt: frozenFrame.xPt - placedRect.xPt, yPt: frozenFrame.yPt - placedRect.yPt };
       if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
     }
-    const normativeCollision = !allowOverlap;
-    // The drawings this one may not cover, and the inline end of its page or cell.
-    let collisionBlockers: FloatPlacementParticipant[] = [];
     const page = options.anchorFrames?.page;
-    const rightBoundary = layoutInCell
-      && options.anchorCellBounds
-      ? options.anchorCellBounds.xPt + options.anchorCellBounds.widthPt
-      : page
-        ? page.xPt + page.widthPt
-        : Number.POSITIVE_INFINITY;
-    if (normativeCollision) {
-      // §20.4.2.3 object collision is independent of text wrapping. An
-      // allowOverlap=true object keeps its resolved position: Word controls
-      // (issue #1623) never move such a picture away from pictures anchored in
-      // other paragraphs, in either compatibility mode, wrap kind, or reference.
-      // ECMA-376 §20.4.2.3 requires displacement for every existing object
-      // whose allowOverlap behavior makes it a collision participant.
-      // Word has one narrower composition exception: a source-later page-owned
-      // member below the already-authored layers in this SAME anchor paragraph
-      // retains its authored position. Cross-paragraph entries remain blockers.
-      const movingVerticalOwnership = anchorAxisOwnership(
-        placedResult,
-        'vertical',
-        layoutInCell && options.anchorCellBounds !== undefined,
-      );
-      const sameParagraphBlockers = sameParagraphCollisions.filter((entry) =>
-        // `word-lower-layer-same-paragraph-anchor-composition`
-        !wordPreservesLowerLayerSameParagraphComposition(
-          movingVerticalOwnership,
-          behavior.relativeHeight!,
-          entry.relativeHeight,
-        ));
-      collisionBlockers = [...externalCollisions, ...sameParagraphBlockers]
-        .filter((entry) => entry.occurrenceId !== occurrenceId)
-        .map((entry) => ({
-          occurrenceId: entry.occurrenceId,
-          kind: 'drawingml',
-          paragraphId: 0,
-          bounds: entry.bounds,
-          exclusionBounds: entry.bounds,
-        }));
-    }
-    // ECMA-376 §20.4.2.3 collision resolution among the drawings alone.
-    const resolveCollisions = (): void => {
-      if (collisionBlockers.length === 0) return;
-      const displaced = resolveFloatPlacement({
-        moving: {
-          occurrenceId,
-          kind: 'drawingml',
-          paragraphId: 1,
-          bounds: placedRect,
-          exclusionBounds: placedResult.geometry.wrapBounds ?? placedRect,
-        },
-        blockers: collisionBlockers,
-        avoidance: { kind: 'drawingml-normative' },
-        rightBoundaryPt: rightBoundary,
-      });
-      const delta = displaced.displacement;
-      if (delta.xPt !== 0 || delta.yPt !== 0) translateAnchor(delta);
-    };
     const wrapped = placedResult.geometry.wrapBounds !== null && placedResult.geometry.wrap.kind !== 'none';
     const moves = wrapped ? options.anchorReflowMoves : undefined;
     const held = moves?.held.get(occurrenceId);
     if (held && moves!.exact) {
       // The hold pass: the drawing lies where the last pass left it.
       translateAnchor({ xPt: held.xPt - placedRect.xPt, yPt: held.yPt - placedRect.yPt });
-    } else if (wrapped && options.uprightTables) {
-      // `word-vertical-section-upright-block-table`: a wrapped drawing does
-      // not cover an upright block table in place when its paragraph is laid
-      // out; it lies directly below it, or past it where the page ends, a
-      // carried drawing from the frame it keeps. The tables and the
-      // drawings it may not cover are cleared in one search
-      // (uprightDrawingMovePt), so clearing one never leaves it over the
-      // other.
+    } else {
+      const uprightTables = wrapped ? options.uprightTables : undefined;
       // A drawing that a table has moved does not move back, along either
       // axis, when its own text wraps differently in a later pass.
-      if (held && (held.xPt > placedRect.xPt || held.yPt > placedRect.yPt)) {
+      if (uprightTables && held && (held.xPt > placedRect.xPt || held.yPt > placedRect.yPt)) {
         translateAnchor({
           xPt: Math.max(0, held.xPt - placedRect.xPt),
           yPt: Math.max(0, held.yPt - placedRect.yPt),
         });
       }
-      const move = uprightDrawingMovePt(
-        options.uprightTables.index, Number.POSITIVE_INFINITY, placedRect,
-        { inlineEndPt: rightBoundary, blockEndPt: page ? page.yPt + page.heightPt : Number.POSITIVE_INFINITY },
-        options.uprightTables.planned, collisionBlockers.map((blocker) => blocker.bounds),
-      );
-      // No place on the page clear of the tables: the drawing keeps its
-      // place among the drawings, as where no table is.
-      if (!move) resolveCollisions();
-      else if (move.xPt !== 0 || move.yPt !== 0) translateAnchor(move);
+      const move = anchorObstacleMove({
+        occurrenceId,
+        rect: placedRect,
+        exclusionBounds: placedResult.geometry.wrapBounds ?? placedRect,
+        verticalOwnership: anchorAxisOwnership(
+          placedResult, 'vertical', layoutInCell && options.anchorCellBounds !== undefined,
+        ),
+        allowOverlap,
+        relativeHeight: behavior.relativeHeight!,
+        externalCollisions,
+        sameParagraphCollisions,
+        inlineEndPt: layoutInCell && options.anchorCellBounds
+          ? options.anchorCellBounds.xPt + options.anchorCellBounds.widthPt
+          : page ? page.xPt + page.widthPt : Number.POSITIVE_INFINITY,
+        blockEndPt: page ? page.yPt + page.heightPt : Number.POSITIVE_INFINITY,
+        ...(uprightTables ? { uprightTables } : {}),
+      });
+      if (move.xPt !== 0 || move.yPt !== 0) translateAnchor(move);
       moves?.placed.set(occurrenceId, Object.freeze({
         xPt: placedRect.xPt, yPt: placedRect.yPt,
-        moved: held !== undefined || (move !== null && (move.xPt !== 0 || move.yPt !== 0)),
+        moved: uprightTables !== undefined && (held !== undefined || move.clearOfTables),
       }));
-    } else {
-      resolveCollisions();
-      moves?.placed.set(occurrenceId, Object.freeze({ xPt: placedRect.xPt, yPt: placedRect.yPt, moved: false }));
     }
     return Object.freeze({
       acquiredShapeTextBoxes,

@@ -151,7 +151,7 @@ import {
 } from './table-pagination.js';
 import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
-import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
+import { acquireParagraphResult, acquireRetainedFrameGroup, anchorAxisOwnership, anchorObstacleMove, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
 import { WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
@@ -161,7 +161,6 @@ import {
   addUprightBlockExclusion,
   addUprightTableBox,
   emptyUprightBlockPageIndex,
-  uprightDrawingMovePt,
   moveUprightPageDrawingsBelowTableBox,
   uprightRegistrationTableBox,
   uprightPrecedingDrawings,
@@ -655,8 +654,12 @@ function acquireBodyParagraphAtLocation(
       // `word-vertical-section-upright-block-table`: a wrapped drawing lies
       // below the upright tables in place when its paragraph is laid out
       // (AnchorReflowMoves).
+      // In a section that lays block tables out upright every body
+      // paragraph places its drawings this way, also where no table is in
+      // place yet, as the page-start prescan does (prescanBodyPageAnchors).
       ...(source.path.length === 1
-        && ((state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0) || plannedUprightTableBoxes)
+        && ((state.uprightBlockIndex && state.uprightBlockIndex.tableCount > 0) || plannedUprightTableBoxes
+          || (state.verticalPhys && uprightBlockPaginates(state.verticalPhys)))
         && paragraph.runs.some((run) => run.type === 'anchorHost')
         ? {
             uprightTables: {
@@ -2534,6 +2537,61 @@ function prescanBodyPageAnchors(
     }
     return paragraphIds.get(key)!;
   };
+  // `word-vertical-section-upright-block-table`: in a section that lays
+  // block tables out upright, a drawing registered when the page starts is
+  // placed here as its paragraph's own acquisition places it
+  // (anchorObstacleMove): clear of the upright tables in place (the page's
+  // pins) and of the drawings it may not overlap, in one search. Those
+  // drawings are the ones accepted on the page so far and the ones this
+  // prescan placed before it for the same or an earlier paragraph; a drawing
+  // of an earlier paragraph that is positioned from its text is not known
+  // yet. Null outside such a section.
+  const placedHere: Array<Readonly<{ paragraphIndex: number; collision: DrawingMLCollisionEntryPt }>> = [];
+  const placeAmongObstacles = (
+    anchor: Readonly<{ occurrenceId: string; paragraphSource: SourceRef }>,
+    drawing: Readonly<{
+      rect: LayoutRect;
+      exclusionBounds: LayoutRect;
+      horizontalOwnership: 'page' | 'host';
+      verticalOwnership: 'page' | 'host';
+      wrapped: boolean;
+      behavior: Readonly<{ allowOverlap: boolean | null; relativeHeight: number | null }>;
+    }>,
+  ): Readonly<{ xPt: number; yPt: number }> | null => {
+    if (anchor.paragraphSource.path.length !== 1 || isPageObjectSource(anchor.paragraphSource)
+      || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return null;
+    const paragraphIndex = anchor.paragraphSource.path[0]!;
+    const { allowOverlap, relativeHeight } = drawing.behavior;
+    const move = allowOverlap === null || relativeHeight === null ? null : anchorObstacleMove({
+      occurrenceId: anchor.occurrenceId,
+      rect: drawing.rect,
+      exclusionBounds: drawing.exclusionBounds,
+      verticalOwnership: drawing.verticalOwnership,
+      allowOverlap,
+      relativeHeight,
+      externalCollisions: [
+        ...sessionState.drawingCollisionRegistry.entries,
+        ...placedHere.flatMap((placed) => placed.paragraphIndex < paragraphIndex ? [placed.collision] : []),
+      ],
+      sameParagraphCollisions: placedHere.flatMap((placed) =>
+        placed.paragraphIndex === paragraphIndex ? [placed.collision] : []),
+      ...uprightDrawingLimits(state),
+      ...(drawing.wrapped ? { uprightTables: { index: state.uprightBlockIndex } } : {}),
+    });
+    placedHere.push({
+      paragraphIndex,
+      collision: Object.freeze({
+        occurrenceId: anchor.occurrenceId,
+        bounds: move && (move.xPt !== 0 || move.yPt !== 0)
+          ? Object.freeze({ ...drawing.rect, xPt: drawing.rect.xPt + move.xPt, yPt: drawing.rect.yPt + move.yPt })
+          : drawing.rect,
+        horizontalOwnership: drawing.horizontalOwnership,
+        verticalOwnership: drawing.verticalOwnership,
+        ...(relativeHeight === null ? {} : { relativeHeight }),
+      }),
+    });
+    return move;
+  };
   const entries = request.anchors.flatMap((anchor): readonly FloatRegistryEntryPt[] => {
     if (anchor.kind === 'frame') {
       // WORD_TEXT_FRAME_PRECEDING_TEXT_PUSH: earlier text of the page wraps
@@ -2563,11 +2621,18 @@ function prescanBodyPageAnchors(
       // `word-vertical-section-upright-block-table`: from that frame the
       // drawing lies below the upright tables in place, as its paragraph's
       // own acquisition places it (paragraph.ts).
-      const move = anchor.paragraphSource.path.length === 1
-        ? uprightDrawingMovePt(
-            state.uprightBlockIndex, Number.POSITIVE_INFINITY, carry.bounds, uprightDrawingLimits(state),
-          )
-        : null;
+      const carrier = sourceElement(dependencies.source, anchor.paragraphSource);
+      const behavior = carrier.type !== 'paragraph' ? undefined : carrier.runs.flatMap((run) =>
+        'anchorAcquisitionInput' in run && run.anchorAcquisitionInput?.occurrenceId === anchor.occurrenceId
+          ? [run.anchorAcquisitionInput.behavior] : [])[0];
+      const move = !behavior ? null : placeAmongObstacles(anchor, {
+        rect: carry.bounds,
+        exclusionBounds: carry.exclusionBounds,
+        horizontalOwnership: carry.horizontalOwnership ?? 'host',
+        verticalOwnership: carry.verticalOwnership ?? 'host',
+        wrapped: true,
+        behavior,
+      });
       const shifted = <Rect extends { xPt: number; yPt: number }>(rect: Rect): Rect =>
         !move || (move.xPt === 0 && move.yPt === 0) ? rect
           : Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });
@@ -2747,18 +2812,18 @@ function prescanBodyPageAnchors(
       ? projectPhysicalAnchorResult(result, verticalSpace.physicalToLogical)
       : result;
     const resolvedWrapBounds = retainedResult.geometry.wrapBounds;
-    if (resolvedWrapBounds === null || retainedResult.geometry.wrap.kind === 'none') {
+    const wrapped = resolvedWrapBounds !== null && retainedResult.geometry.wrap.kind !== 'none';
+    const move = verticalSpace === undefined ? null : placeAmongObstacles(anchor, {
+      rect: retainedResult.geometry.objectFrame,
+      exclusionBounds: resolvedWrapBounds ?? retainedResult.geometry.objectFrame,
+      horizontalOwnership: anchorAxisOwnership(retainedResult, 'horizontal'),
+      verticalOwnership: anchorAxisOwnership(retainedResult, 'vertical'),
+      wrapped,
+      behavior: payloads[0]!.run.anchorAcquisitionInput.behavior,
+    });
+    if (resolvedWrapBounds === null || !wrapped) {
       return [];
     }
-    // `word-vertical-section-upright-block-table`: the drawing lies below
-    // the upright tables in place (the page's pins), as its paragraph's own
-    // acquisition places it (paragraph.ts).
-    const move = anchor.paragraphSource.path.length === 1
-      ? uprightDrawingMovePt(
-          state.uprightBlockIndex, Number.POSITIVE_INFINITY, retainedResult.geometry.objectFrame,
-          uprightDrawingLimits(state),
-        )
-      : null;
     const shifted = <Rect extends { xPt: number; yPt: number }>(rect: Rect): Rect =>
       !move || (move.xPt === 0 && move.yPt === 0) ? rect
         : Object.freeze({ ...rect, xPt: rect.xPt + move.xPt, yPt: rect.yPt + move.yPt });

@@ -172,6 +172,8 @@ export interface Page {
   /** Anchored drawings, in source order: the physical left, top, width and
    * height of their frame. */
   readonly drawings: Array<Readonly<{ left: number; top: number; width: number; height: number }>>;
+  /** For each of `drawings`, the body index of the paragraph that anchors it. */
+  readonly drawingParagraphs: number[];
 }
 
 /** `linePitch`: the section's line grid pitch in twentieths of a point.
@@ -204,7 +206,7 @@ export function layOutPages(
   const blockOrigin = direction === 'tbRl' ? MARGIN.right : MARGIN.left;
   // Each column's strips restart at the block origin.
   return layout.pages.map((laidOut) => {
-  const page: Page = { tables: [], strips: [], drawings: [] };
+  const page: Page = { tables: [], strips: [], drawings: [], drawingParagraphs: [] };
   for (const node of laidOut.layers.body) {
     if (node.kind === 'table') {
       const rules = node.borders.filter((border) => border.from.xPt === border.to.xPt);
@@ -221,6 +223,7 @@ export function layOutPages(
         inlineStart: line.bounds.xPt,
       })));
       for (const drawing of node.drawings) {
+        page.drawingParagraphs.push(node.source.path[0]!);
         // Section-logical frame: x inline (physical y), y block.
         page.drawings.push({
           left: direction === 'tbRl'
