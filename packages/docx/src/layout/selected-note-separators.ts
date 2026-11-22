@@ -131,10 +131,10 @@ export function isNoteSeparatorMarkerRun(run: Readonly<{ type: string }>): boole
   return run.type === 'text' && (run as Readonly<{ __noteSeparatorMarker?: boolean }>).__noteSeparatorMarker === true;
 }
 
-/** Parser wire of one separator story paragraph: text runs and line breaks
- * only, at most one of them the marker run. */
+/** Parser wire of one separator story paragraph: text and field runs and
+ * line breaks only, at most one of them the marker run. */
 export function isNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
-  return runs.every((run) => run.type === 'text'
+  return runs.every((run) => run.type === 'text' || run.type === 'field'
       || (run.type === 'break' && (run as Readonly<{ breakType?: string }>).breakType === 'line'))
     && runs.filter(isNoteSeparatorMarkerRun).length <= 1;
 }
@@ -143,7 +143,7 @@ export function isNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string 
  * most one inline object that lays the marker out. */
 export function isAcquiredNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
   return runs.filter((run) => run.type === 'shape').length <= 1
-    && runs.every((run) => run.type === 'text' || run.type === 'shape' || run.type === 'break');
+    && runs.every((run) => run.type === 'text' || run.type === 'field' || run.type === 'shape' || run.type === 'break');
 }
 
 /** Inline advance of the separator marker object: the ordinary mark's 144pt

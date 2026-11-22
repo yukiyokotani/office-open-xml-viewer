@@ -1315,12 +1315,16 @@ function* paginateBodyPassSteps(
   };
   if (notePolicy) sessionNotePolicies.set(session, notePolicy);
   // WORD_FOOTNOTE_BENEATH_TEXT: the sections whose footnotes follow the text.
+  // A document position (another producer) applies to every section.
   const sectionFootnotePositions = input.noteLayoutSettings?.sectionFootnotePositions;
-  if (sectionFootnotePositions) {
+  const documentBeneathText = sectionFootnotePositions === undefined
+    && input.noteLayoutSettings?.footnotePosition === 'beneathText';
+  if (sectionFootnotePositions || documentBeneathText) {
     const sections = [input.initialSection, ...input.sequence.flatMap((entry) =>
       entry.kind === 'begin-section' ? [entry.section] : [])];
     sessionBeneathTextSections.set(session, new Set(sections.flatMap((section, index) =>
-      sectionFootnotePositions[index] === 'beneathText' ? [section.sectionOccurrenceId] : [])));
+      documentBeneathText || sectionFootnotePositions?.[index] === 'beneathText'
+        ? [section.sectionOccurrenceId] : [])));
   }
   reserveSession = session;
   const recoveredFreshReserves = new Map<string, HeaderFooterReserve>();
@@ -3869,6 +3873,9 @@ function layoutBandStory(
  */
 const sessionNotePolicies = new WeakMap<BodyLayoutSession, NoteOverflowPolicy>();
 const sessionBeneathTextSections = new WeakMap<BodyLayoutSession, ReadonlySet<string>>();
+/** Sessions that kept beneathText footnotes in per-column bands at the page
+ * bottom (not laid out beneath the text). */
+const beneathTextColumnBandFallbacks = new WeakSet<BodyLayoutSession>();
 
 /** WORD_FOOTNOTE_BENEATH_TEXT: whether the page's footnotes follow its text
  * (the section of the page's last region places them). */
@@ -3882,6 +3889,8 @@ function footnoteStack(
   notes: readonly NoteLayout[],
   policy?: NoteOverflowPolicy,
   beneathText = false,
+  /** The page's endnotes: document-end text that beneathText footnotes follow. */
+  endnotes: readonly NoteLayout[] = [],
 ): Readonly<{ advancePt: number; targetTopPt: number; topsPt: readonly number[] }> {
   // ECMA-376 §17.11.21 defaults footnotes to the current page's bottom.
   const blockEndPt = page.sectionRegions.at(-1)?.blockEndPt
@@ -3908,6 +3917,7 @@ function footnoteStack(
     ...page.layers.body.filter(node => node.ordinaryFlow)
       .map(node => Math.max(node.flowBounds.yPt + node.flowBounds.heightPt,
         node.flowBounds.heightPt === 0 ? node.inkBounds.yPt + node.inkBounds.heightPt : 0)),
+    ...endnotes.map(note => note.flowBounds.yPt + note.flowBounds.heightPt),
   );
   if (notes.some(note => note.pageArea !== undefined)) {
     const heightPt = notes[0]!.pageArea!.heightPt;
@@ -3987,9 +3997,10 @@ function footnoteBandPlan(
   hostShifts: ReadonlyMap<string, number> | undefined,
   policy?: NoteOverflowPolicy,
   beneathText = false,
+  endnotes: readonly NoteLayout[] = [],
 ): Readonly<Record<string, number>> | undefined {
   if (!notes.some((note) => note.story.bandDependent)) return undefined;
-  const { topsPt } = footnoteStack(page, notes, policy, beneathText);
+  const { topsPt } = footnoteStack(page, notes, policy, beneathText, endnotes);
   // ast-grep-ignore: no-plain-object-string-map -- keys are library-generated note band keys.
   const plan: Record<string, number> = {};
   notes.forEach((note, index) => {
@@ -4081,6 +4092,7 @@ function headerFooterReserves(
       pass.footnoteHostShiftsByPage.get(page.pageIndex),
       sessionNotePolicies.get(pass.session),
       footnotesBeneathText(page, pass.session),
+      pass.endnoteLayoutsByPage.get(page.pageIndex) ?? [],
     );
     const context = pass.pageStoryContexts[pageIndex]!;
     return Object.freeze({
@@ -4291,8 +4303,12 @@ function composePageStories(
     });
     const retainedNotes = footnotesByPage.get(page.pageIndex) ?? [];
     const noteRegion = page.sectionRegions.at(-1);
-    const noteStack = footnoteStack(page, retainedNotes, sessionNotePolicies.get(session),
-      footnotesBeneathText(page, session));
+    const beneathText = footnotesBeneathText(page, session);
+    if (beneathText && retainedNotes.some((note) => note.flowDomainId.includes(':band:') && note.pageArea === undefined)) {
+      beneathTextColumnBandFallbacks.add(session);
+    }
+    const noteStack = footnoteStack(page, retainedNotes, sessionNotePolicies.get(session), beneathText,
+      endnotesByPage.get(page.pageIndex) ?? []);
     const noteAdvancePt = noteStack.advancePt;
     const noteTargetTopPt = noteStack.targetTopPt;
     const notes = [
@@ -5999,9 +6015,10 @@ function composeBodyPaginationResult(
   );
   const hasRetainedFootnotes = pageStories.pages.some((page) =>
     page.layers.notes.some((note) => note.source.story === 'footnote'));
-  // pageBottom and beneathText (WORD_FOOTNOTE_BENEATH_TEXT) are laid out.
-  const composed = hasRetainedFootnotes && noteLayoutSettings.footnotePosition !== 'pageBottom'
-    && noteLayoutSettings.footnotePosition !== 'beneathText'
+  // pageBottom and beneathText (WORD_FOOTNOTE_BENEATH_TEXT) are laid out;
+  // beneathText in per-column note bands is not.
+  const composed = hasRetainedFootnotes && ((noteLayoutSettings.footnotePosition !== 'pageBottom'
+    && noteLayoutSettings.footnotePosition !== 'beneathText') || beneathTextColumnBandFallbacks.has(pass.session))
     ? appendUnsupportedNotePositionDiagnostic(
         pageStories,
         'footnote',

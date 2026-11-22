@@ -139,6 +139,9 @@ describe('section-aware note numbering', () => {
     expect([26, 27, 28, 29].map((value) => formatCustomNoteNumber(value, 'A'))).toEqual(['Z', 'AA', 'AB', 'AC']);
     expect(formatCustomNoteNumber(28, 'a')).toBe('ab');
     expect(formatCustomNoteNumber(3, '(1), (2), ...')).toBe('(3)');
+    expect(formatCustomNoteNumber(9, '2')).toBe('9');
+    expect(formatCustomNoteNumber(3, '(1-1)')).toBe('(3)');
+    expect(formatCustomNoteNumber(3, '𝟏')).toBe('𝟑');
     const arabic = '<w:numFmt w:val="custom" w:format="&#x660;&#x660;&#x661;"/><w:numStart w:val="3"/>';
     expect(render({ kind: 'footnote', sectionPr: [arabic, arabic] })).toEqual(['٠٠٣', '٠٠٤', '٠٠٥', '٠٠٦']);
   });

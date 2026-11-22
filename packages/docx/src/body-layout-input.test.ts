@@ -133,9 +133,8 @@ describe('canonical body layout input', () => {
     } as unknown as DocxDocumentModel;
 
     expect(createBodyLayoutInput(document).noteLayoutSettings).toEqual({
-      // A document-wide footnote position does not place footnotes
-      // (WORD_FOOTNOTE_BENEATH_TEXT); only a section's own one does.
-      footnotePosition: 'pageBottom',
+      // A producer's document position (the DOCX parser emits none).
+      footnotePosition: 'beneathText',
       endnotePosition: 'sectEnd',
       footnoteNumbering: { format: 'upperLetter', start: 4, restart: 'continuous' },
       endnoteNumbering: { format: 'lowerRoman', start: 1, restart: 'continuous' },
