@@ -355,6 +355,56 @@ export const WORD_EXACT_ROW_VERTICAL_CLIP_ONLY = defineCompatibilityRule({
   description: 'Preserve the established exact-row overflow behavior that clips the owned vertical interval without clipping nested table ink horizontally to the cell box. Library policy, no Office measurement: vertical-only clipping of exact-height rows; [MS-OI29500] §2.1.180(d) covers only the exact height.',
 });
 
+export const WORD_CELL_CONTENT_CLIP = defineCompatibilityRule({
+  id: 'word-cell-content-clip',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'cell-content-clip-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.4 defines no clipping of cell content; an exact line (§17.3.1.33) or a run position (§17.3.2.24) can push an inline object past the cell. Windows Word 16.0.20625 controls (compatibility modes omitted, 12, 14 and 15; 40x30pt DrawingML pictures raised 5pt or lowered 10/15pt in exact 24pt lines; table borders none, 0.5pt and 3pt; cell margins 0 or 10pt top/bottom, table-level and tcMar; paragraph spacing 12pt before/after; atLeast 100pt rows with vAlign top/center/bottom; one, three and wrapped exact lines; a short cell beside a taller one; vertically merged, gridSpan and cell-spacing cells; exact 30/48pt rows; a row split across pages; a table in the header and in a text box; tbRl and bidiVisual cells) clip the paragraphs of each cell to one box: horizontally the cell from its left rule to its right edge (left and right margins included; a 300pt picture in a 144pt cell is cut at the cell edge, on the trailing side in a bidiVisual table too), vertically from below the top rule and top margin to above the bottom margin (paragraph spacing and vAlign slack included). The box is the cell, not the line: a picture overlapping a neighbouring line inside the cell is drawn whole, and one crossing the cell edge is cut there whichever line holds it. The same box clips text, DrawingML pictures (a 60pt picture in a 24pt line), WPS shapes, a merged cell over its whole span, a row fragment at its page top, and an exact row (to the row box). VML pictures are not clipped and overlap the table rules; floating wrapNone pictures (layoutInCell on or off) are not clipped; a nested table wider than its cell is painted whole, its own cells clipping their content. Library scope: the left edge is the cell grid edge, because this layout paints a cell rule centred on that edge rather than inside the cell; an exact row keeps its established vertical clip (word-exact-row-vertical-clip-only) and gains the horizontal cell edges; rotated cells keep their whole-cell clip; VML shapes, VML text boxes and picture bullets were not measured and follow the clip (only VML pictures escape).',
+});
+
+/** WORD_CELL_CONTENT_CLIP: the box clipping a cell's paragraphs. `cell` is the
+ * cell box (grid edges, top below any cell spacing); `insets` are its top and
+ * bottom rules plus margins. */
+export function wordCellContentClipBounds(input: Readonly<{
+  cell: LayoutRect;
+  topInsetPt: number;
+  bottomInsetPt: number;
+  exactVerticalClip?: LayoutRect;
+}>): LayoutRect {
+  void WORD_CELL_CONTENT_CLIP;
+  const { cell } = input;
+  if (input.exactVerticalClip) {
+    return Object.freeze({
+      xPt: cell.xPt,
+      yPt: input.exactVerticalClip.yPt,
+      widthPt: cell.widthPt,
+      heightPt: input.exactVerticalClip.heightPt,
+    });
+  }
+  return Object.freeze({
+    xPt: cell.xPt,
+    yPt: cell.yPt + input.topInsetPt,
+    widthPt: cell.widthPt,
+    heightPt: Math.max(0, cell.heightPt - input.topInsetPt - input.bottomInsetPt),
+  });
+}
+
+/** WORD_CELL_CONTENT_CLIP: a VML inline picture (an image run without
+ * DrawingML provenance) is painted outside the cell clip. */
+export function wordCellContentClipEscapesInlinePicture(input: Readonly<{
+  chart: boolean;
+  listLabel: boolean;
+  inlineObjectOrigin: 'drawingml' | 'vmlStaticTextbox' | undefined;
+}>): boolean {
+  void WORD_CELL_CONTENT_CLIP;
+  return !input.chart && !input.listLabel && input.inlineObjectOrigin === undefined;
+}
+
 export const WORD_OVER_PAGE_CANT_SPLIT_CLIP = defineCompatibilityRule({
   id: 'word-over-page-cant-split-clip',
   evidence: {

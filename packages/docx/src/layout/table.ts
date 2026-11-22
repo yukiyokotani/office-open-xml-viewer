@@ -9,6 +9,7 @@ import {
   wordAlignedTableOriginPt,
   wordCollapsedBorderRowTrackFootprintPt,
   wordExactRowFloorPt,
+  wordCellContentClipBounds,
   wordExactRowVerticalClipBounds,
   wordSpacedCellInsideBorderOverridesTable,
   wordVerticalMergeInteriorBorderPt,
@@ -1662,6 +1663,13 @@ function materializeTableRow(
           placement.availableBounds,
         )
       : undefined;
+    // WORD_CELL_CONTENT_CLIP
+    const contentClipBounds = cell.verticalMerge === 'continue' ? undefined : wordCellContentClipBounds({
+      cell: cellFlowBounds,
+      topInsetPt: margins.topPt,
+      bottomInsetPt: margins.bottomPt,
+      ...(clipBounds ? { exactVerticalClip: clipBounds } : {}),
+    });
     const blocks = cell.verticalMerge === 'continue'
       ? []
       : flow.blocks.map((block) => ({
@@ -1683,6 +1691,7 @@ function materializeTableRow(
       inkBounds: cellInkBounds,
       ...(clipBounds ? { clipBounds } : {}),
       contentBounds,
+      ...(contentClipBounds ? { contentClipBounds } : {}),
       advancePt: cellHeightPt,
       verticalMerge: cell.verticalMerge,
       vAlign: cell.vAlign,

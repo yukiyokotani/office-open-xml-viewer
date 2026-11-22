@@ -174,22 +174,48 @@ function paintTableContents(
           cell.flowBounds.heightPt,
         );
       }
+      const placeBlock = (block: (typeof cell.blocks)[number]) => ({
+        // Paragraphs are normalized to the cell content origin. A nested
+        // table's own flowBounds additionally retain jc/tblInd placement
+        // within that band, so translate its coordinate space by the outer
+        // content origin without erasing that local offset.
+        xPt: cell.contentBounds.xPt
+          + (block.layout.kind === 'table' ? block.layout.flowBounds.xPt : 0),
+        yPt: cell.flowBounds.yPt + block.offsetPt
+          + (block.layout.kind === 'table' ? block.layout.flowBounds.yPt : 0),
+      });
+      // WORD_CELL_CONTENT_CLIP: the cell's paragraphs paint under its content
+      // clip; their anchored drawings and VML pictures paint outside it in
+      // passes before and after, and a nested table is not clipped by it.
+      const contentClip = cell.contentClipBounds;
+      const paintParagraphPass = (
+        blockContext: CanvasPaintContext,
+        cellClipPass: 'behind' | 'front',
+      ): void => {
+        for (const block of cell.blocks) {
+          if (block.layout.kind !== 'paragraph') continue;
+          paintPlacedChild(block.layout, placeBlock(block), { ...blockContext, cellClipPass });
+        }
+      };
       const paintBlocks = (
         blockContext: CanvasPaintContext,
         paintDirectNestedTableBorders = true,
       ): void => {
+        if (contentClip) paintParagraphPass(blockContext, 'behind');
         for (const block of cell.blocks) {
-          paintPlacedChild(block.layout, {
-            // Paragraphs are normalized to the cell content origin. A nested
-            // table's own flowBounds additionally retain jc/tblInd placement
-            // within that band, so translate its coordinate space by the outer
-            // content origin without erasing that local offset.
-            xPt: cell.contentBounds.xPt
-              + (block.layout.kind === 'table' ? block.layout.flowBounds.xPt : 0),
-            yPt: cell.flowBounds.yPt + block.offsetPt
-              + (block.layout.kind === 'table' ? block.layout.flowBounds.yPt : 0),
-          }, blockContext, block.layout.kind !== 'table' || paintDirectNestedTableBorders);
+          if (block.layout.kind === 'table' || !contentClip) {
+            paintPlacedChild(block.layout, placeBlock(block), blockContext,
+              block.layout.kind !== 'table' || paintDirectNestedTableBorders);
+            continue;
+          }
+          const layout = block.layout;
+          canvasPaintFrame(context.ctx, () => {
+            context.ctx.beginPath();
+            context.ctx.rect(contentClip.xPt, contentClip.yPt, contentClip.widthPt, contentClip.heightPt);
+            context.ctx.clip();
+          })(() => paintPlacedChild(layout, placeBlock(block), { ...blockContext, cellClipPass: 'clipped' }))();
         }
+        if (contentClip) paintParagraphPass(blockContext, 'front');
       };
       if (cell.verticalText) {
         // ECMA-376 §17.4.72: blocks are in the rotated local frame. Clip to

@@ -609,6 +609,9 @@ export interface ResourcePlacement {
    * testing and element bounds use its turned, line-clipped outline
    * (`resourcePlacementOutline` in resource-outline.ts). */
   readonly rotationDeg?: number;
+  /** WORD_CELL_CONTENT_CLIP: a VML picture, painted outside its table cell's
+   * content clip. */
+  readonly escapesCellClip?: true;
   readonly advancePt: number;
 }
 
@@ -631,6 +634,9 @@ export interface DrawingPlacement {
    * picture (ResourcePlacement.lineClip): top and bottom of the line box
    * relative to `bounds.yPt`. */
   readonly lineClip?: Readonly<{ topPt: number; bottomPt: number }>;
+  /** WORD_CELL_CONTENT_CLIP: the placeholder of a VML picture escapes the cell
+   * content clip like that picture. */
+  readonly escapesCellClip?: true;
   readonly advancePt: number;
 }
 
@@ -869,6 +875,11 @@ export interface TableCellLayout extends LayoutNodeBase {
   readonly vAlign: 'top' | 'center' | 'bottom';
   readonly background?: FillPaint;
   readonly blocks: readonly TableCellBlockLayout[];
+  /** WORD_CELL_CONTENT_CLIP: the box that clips the cell's own paragraphs
+   * (nested tables, anchored drawings and VML pictures are outside it).
+   * Absent for rotated cells, which clip all their blocks to the cell, and for
+   * suppressed merge continuations. */
+  readonly contentClipBounds?: LayoutRect;
   /** Present for rotated cell text: blocks are in the local frame. */
   readonly verticalText?: TableCellVerticalTextLayout;
 }

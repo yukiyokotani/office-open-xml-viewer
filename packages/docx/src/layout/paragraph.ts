@@ -38,6 +38,7 @@ import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
 import { specifiedTextLineMetrics, specifiedTextParagraphIsHomogeneous } from './specified-line-spacing.js';
 import { wordTextBoxVerticalMode } from './compatibility.js';
+import { wordCellContentClipEscapesInlinePicture } from './table-compatibility.js';
 import {
   autoContrastColor,
   canvasFontString,
@@ -84,7 +85,7 @@ import {
   replaceTextShapeRequest, sliceTextShapeRequest, sliceSemanticSlotSpans, shapeRunToDocRun,
 } from './text.js';
 import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
-import { wordTrackChangeDecoration } from './paint-compatibility.js';
+import { wordTextBoxContentClipBounds, wordTrackChangeDecoration } from './paint-compatibility.js';
 import type { DocRun, ShapeRun } from '../types.js';
 import {
   computeLineVisualOrder,
@@ -375,6 +376,8 @@ export interface MeasuredResourcePlanSegment {
   /** WORD_INLINE_ROTATED_PICTURE_LINE_CLIP: paint clipped to the line box's
    * vertical extent. */
   readonly clipToLine?: true;
+  /** WORD_CELL_CONTENT_CLIP: a VML picture is painted outside the cell clip. */
+  readonly escapesCellClip?: true;
   /** Clockwise turn (degrees) the resource paints with about its box centre. */
   readonly rotationDeg?: number;
 }
@@ -392,6 +395,8 @@ export interface MeasuredUnavailableResourcePlanSegment {
   /** WORD_INLINE_OBJECT_EXACT_LINE: the placeholder is clipped to its line
    * like the picture it stands for. */
   readonly clipToLine?: true;
+  /** WORD_CELL_CONTENT_CLIP: as the VML picture it stands for. */
+  readonly escapesCellClip?: true;
   readonly drawingId: string;
 }
 
@@ -2055,6 +2060,7 @@ export function planLine(input: PlanLineInput): LineLayout {
           topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
           bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
         } } : {}),
+        ...(segment.escapesCellClip ? { escapesCellClip: true as const } : {}),
         advancePt: segment.measuredWidthPt,
       });
     } else if (segment.kind === 'unavailable-resource' || segment.kind === 'inline-drawing') {
@@ -2072,6 +2078,8 @@ export function planLine(input: PlanLineInput): LineLayout {
           topPt: line.topPt - (line.baselinePt + segment.topOffsetPt),
           bottomPt: line.topPt + line.advancePt - (line.baselinePt + segment.topOffsetPt),
         } } : {}),
+        ...(segment.kind === 'unavailable-resource' && segment.escapesCellClip
+          ? { escapesCellClip: true as const } : {}),
         advancePt: segment.measuredWidthPt,
       });
     } else if (segment.kind === 'anchor-host') {
@@ -4261,10 +4269,16 @@ function planMeasuredLines(
           ) / 2;
         // Exact-line clipping (and its tbLrV placement) is decided apart from a
         // rotated picture's own clip to the line.
+        const inlineObjectOrigin = (sourceRun as {
+          readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox';
+        } | undefined)?.inlineObjectOrigin;
         const exactClipped = !image.chart && exactObjectClips
-          && wordInlineObjectExactLineClips(
-            (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
-              ?.inlineObjectOrigin);
+          && wordInlineObjectExactLineClips(inlineObjectOrigin);
+        const escapesCellClip = wordCellContentClipEscapesInlinePicture({
+          chart: Boolean(image.chart),
+          listLabel: image.listLabel !== undefined,
+          inlineObjectOrigin,
+        });
         const topOffsetPt = labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
           : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt;
         const clipToLine = !image.chart && (image.clipToLine || exactClipped);
@@ -4278,6 +4292,7 @@ function planMeasuredLines(
             heightPt: objectHeightPt,
             topOffsetPt,
             ...(clipToLine ? { clipToLine: true as const } : {}),
+            ...(escapesCellClip ? { escapesCellClip: true as const } : {}),
             ...(effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
             drawingId: unavailableDrawingId(source, runIndex ?? 0),
           });
@@ -4296,6 +4311,7 @@ function planMeasuredLines(
             : effectLeftPt ? { leftOffsetPt: effectLeftPt } : {}),
           ...(resourceOrientation ? { orientation: resourceOrientation } : {}),
           ...(clipToLine ? { clipToLine: true as const } : {}),
+          ...(escapesCellClip ? { escapesCellClip: true as const } : {}),
           ...(!image.chart && image.rotation && image.rotation % 360 !== 0 ? { rotationDeg: image.rotation } : {}),
         });
       } else if ('math' in segment) {
@@ -6122,7 +6138,11 @@ export function acquireShapeTextBoxLayout(
       } : {}),
       // Word issue #1668 controls retain overflow in fixed stacked WordArt
       // boxes (wrap square/none and multi-paragraph cases); do not add a body clip.
-      ...((shape.vmlTextRects?.length || shape.textAutofit === 'none') && !stackedWordArt ? { clipBounds: effectiveInnerBounds } : {}),
+      ...((shape.vmlTextRects?.length || shape.textAutofit === 'none') && !stackedWordArt ? {
+        clipBounds: !verticalMode && !shape.vmlTextRects?.length
+          ? wordTextBoxContentClipBounds(effectiveContentBounds, effectiveInnerBounds)
+          : effectiveInnerBounds,
+      } : {}),
       ...(regions?.length ? { clipRects: regions.map(r => ({
         xPt: effectiveContentBounds.xPt+r[0]*effectiveContentBounds.widthPt,
         yPt: effectiveContentBounds.yPt+r[1]*effectiveContentBounds.heightPt,
