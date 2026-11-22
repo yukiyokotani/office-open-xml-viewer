@@ -1898,9 +1898,12 @@ export interface DocxTextRunInfo {
    * the cluster reads right to left. Overlays that address part of the run
    * (find highlights) use these instead of measuring text. The run's final
    * cluster carries `trackingExcluded` when its box already leaves out the
-   * tracking after it (a fitted run). */
+   * tracking after it (a fitted run). A tate-chu-yoko character stands
+   * upright across the run: `x`/`width` span the run's cell and `y`/`height`
+   * place it across the run from the run's top, in CSS px. */
   clusterBoxes?: readonly Readonly<{
     start: number; end: number; x: number; width: number; rtl: boolean; trackingExcluded?: true;
+    y?: number; height?: number;
   }>[];
   /** CSS transform used by the overlay for vertical-page text. */
   transform?: string;

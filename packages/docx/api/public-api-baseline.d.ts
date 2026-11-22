@@ -1638,6 +1638,8 @@ export interface DocxTextRunInfo {
         width: number;
         rtl: boolean;
         trackingExcluded?: true;
+        y?: number;
+        height?: number;
     }>[];
     transform?: string;
     hyperlink?: HyperlinkTarget;

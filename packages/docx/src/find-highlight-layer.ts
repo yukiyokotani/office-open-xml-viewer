@@ -90,10 +90,10 @@ export function buildDocxHighlightLayer(
       const pitch = run.letterSpacingPx ?? 0;
       // A projected run carries where its clusters are painted: the slice
       // covers one box per painted interval, and nothing is measured.
-      const intervals = run.clusterBoxes
+      const intervals: { x: number; width: number; y?: number; height?: number }[] = run.clusterBoxes
         ? clusterSliceIntervals(run.clusterBoxes, start, end, pitch)
         : [measuredSliceInterval(run, start, end, pitch, measureForFont)];
-      for (const { x, width } of intervals) {
+      for (const { x, width, y, height } of intervals) {
       if (width <= 0) continue;
       const box = document.createElement('div');
       // A vertical (tbRl) page reports the run at its physical top-left and
@@ -109,8 +109,11 @@ export function buildDocxHighlightLayer(
       // column exactly as before at 1× scale.
       box.style.cssText =
         `position:absolute;` +
-        `left:${overlayPercent(run.x + x, cssWidth)};top:${overlayPercent(run.y, cssHeight)};` +
-        `width:${overlayPercent(width, cssWidth)};height:${overlayPercent(run.h, cssHeight)};` +
+        // The offsets run along the run's own axes (a tate-chu-yoko character
+        // across it as well), turned with the run.
+        `left:${overlayPercent(placeAlongRun(run, x, y ?? 0).x, cssWidth)};`
+        + `top:${overlayPercent(placeAlongRun(run, x, y ?? 0).y, cssHeight)};` +
+        `width:${overlayPercent(width, cssWidth)};height:${overlayPercent(height ?? run.h, cssHeight)};` +
         transform +
         `background:${fill};pointer-events:none;`;
       layer.appendChild(box);
@@ -132,7 +135,7 @@ function clusterSliceIntervals(
   start: number,
   end: number,
   pitch: number,
-): { x: number; width: number }[] {
+): { x: number; width: number; y?: number; height?: number }[] {
   // Clusters are listed in source order: the first one that ends after `start`.
   let low = 0;
   let high = clusters.length;
@@ -141,7 +144,7 @@ function clusterSliceIntervals(
     if (clusters[middle]!.end <= start) low = middle + 1;
     else high = middle;
   }
-  const boxes: { x: number; width: number; rtl: boolean; trackingExcluded: boolean }[] = [];
+  const boxes: { x: number; width: number; rtl: boolean; trackingExcluded: boolean; y?: number; height?: number }[] = [];
   for (let index = low; index < clusters.length && clusters[index]!.start < end; index += 1) {
     const cluster = clusters[index]!;
     const length = Math.max(1, cluster.end - cluster.start);
@@ -152,6 +155,7 @@ function clusterSliceIntervals(
       width: cluster.width * (to - from),
       rtl: cluster.rtl,
       trackingExcluded: cluster.trackingExcluded === true,
+      ...(cluster.y !== undefined && cluster.height !== undefined ? { y: cluster.y, height: cluster.height } : {}),
     });
   }
   let final = boxes.length - 1;
@@ -164,10 +168,15 @@ function clusterSliceIntervals(
     box.width -= trimmed;
     if (box.rtl) box.x += trimmed;
   }
-  const merged: { x: number; width: number }[] = [];
+  const merged: { x: number; width: number; y?: number; height?: number }[] = [];
   for (const box of boxes.filter((candidate) => candidate.width > 0).sort((left, right) => left.x - right.x)) {
+    // A character placed across the run (tate-chu-yoko) keeps its own box.
+    if (box.y !== undefined) {
+      merged.push({ x: box.x, width: box.width, y: box.y, height: box.height! });
+      continue;
+    }
     const last = merged.at(-1);
-    if (last && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
+    if (last && last.y === undefined && Math.abs(last.x + last.width - box.x) < 1e-6) last.width += box.width;
     else merged.push({ x: box.x, width: box.width });
   }
   return merged;
@@ -199,4 +208,18 @@ function measuredSliceInterval(
   // one-em cell. Ordinary runs preserve the established natural measurement.
   const k = tateChuYokoOverlayScale(run, measure);
   return { x: pitchedX * k, width: pitchedWidth * k };
+}
+
+/** The page position of the point `dx` along and `dy` across `run` from its
+ * origin: its orientation transform (`rotate(±90deg)` or a matrix, as
+ * text-run-projection emits it) turns the offsets with the run. */
+function placeAlongRun(run: DocxTextRunInfo, dx: number, dy: number): { x: number; y: number } {
+  let [a, b, c, d] = [1, 0, 0, 1];
+  if (run.transform === 'rotate(90deg)') [a, b, c, d] = [0, 1, -1, 0];
+  else if (run.transform === 'rotate(-90deg)') [a, b, c, d] = [0, -1, 1, 0];
+  else if (run.transform) {
+    const values = /^matrix\(([^,]+),([^,]+),([^,]+),([^,]+),/u.exec(run.transform)?.slice(1, 5).map(Number);
+    if (values && values.every(Number.isFinite)) [a, b, c, d] = values as [number, number, number, number];
+  }
+  return { x: run.x + a * dx + c * dy, y: run.y + b * dx + d * dy };
 }

@@ -56,7 +56,7 @@ export function bidiPlacedOffsets(
 }
 
 type ClusteredText = Pick<TextPlacement, 'text' | 'range' | 'clusters' | 'direction' | 'origin' | 'bounds'>
-  & Partial<Pick<TextPlacement, 'advancePt' | 'tateChuYoko'>>
+  & Partial<Pick<TextPlacement, 'advancePt' | 'tateChuYoko' | 'paintOps'>>
   & Readonly<{ kashidaInsertions?: readonly Readonly<{ beforeCp: number; count: number }>[] }>;
 type VisualClusters = Readonly<{
   /** Visual start of each cluster from the left edge of the piece's box. */
@@ -64,8 +64,10 @@ type VisualClusters = Readonly<{
   /** Painted advance of each cluster (kashida elongation included). */
   advancesPt: readonly number[];
   odd: readonly boolean[];
-  /** The last cluster's advance was cut to the piece's box (the tracking
-   * after the final character of a fitted run lies outside it). */
+  /** The last cluster's advance was set to end at the piece's box: cut when
+   * the tracking after the final character of a fitted run lies outside it,
+   * extended when a compressed fitted run paints its final glyph past its
+   * pitch. */
   lastCut: boolean;
 }>;
 const visualClustersByPlacement = new WeakMap<object, VisualClusters | null>();
@@ -128,12 +130,16 @@ export function visualClusters(placement: ClusteredText): VisualClusters | null 
       return item;
     });
     // The piece's box ends its last cluster: tracking after the final
-    // character of a fitted run lies outside the fitted width.
+    // character of a widened fitted run lies outside the fitted width, and
+    // the final glyph of a compressed one paints past its pitch to the box
+    // edge.
     const last = logical.at(-1)!;
     const overflowPt = last.xPt + last.advancePt - logical[0]!.xPt - placement.bounds.widthPt;
-    if (overflowPt > 1e-9) last.advancePt = Math.max(0, last.advancePt - overflowPt);
+    const fitted = Math.abs(overflowPt) > 1e-9 && last.advancePt - overflowPt >= 0;
+    if (fitted) last.advancePt -= overflowPt;
+    else if (overflowPt > 1e-9) last.advancePt = 0;
     result = {
-      lastCut: overflowPt > 1e-9,
+      lastCut: Math.abs(overflowPt) > 1e-9,
       startsPt: bidiPlacedOffsets(logical),
       advancesPt: logical.map((item) => item.advancePt),
       odd: logical.map((item) => item.level % 2 === 1),
@@ -198,9 +204,14 @@ export interface ClusterBox {
   readonly widthPt: number;
   /** The cluster reads right to left: it starts at its right edge. */
   readonly rtl: boolean;
-  /** The run's final cluster, cut to the run's box: the tracking after it is
-   * already outside its width (a fitted run). */
+  /** The run's final cluster, set to end at the run's box: the tracking
+   * after it is already outside its width (a fitted run). */
   readonly trackingExcluded?: true;
+  /** A tate-chu-yoko cluster stands upright across the run: `xPt`/`widthPt`
+   * span the run's cell along it, and these place the character across it,
+   * from the top of the listing's box. */
+  readonly crossPt?: number;
+  readonly crossWidthPt?: number;
 }
 
 /** The painted boxes of `clusters[first, last)`, with text offsets from
@@ -215,45 +226,55 @@ export function clusterBoxes(
 ): ClusterBox[] {
   const visual = visualClusters(placement);
   const boxes: ClusterBox[] = [];
-  // §17.3.2.10 tate-chu-yoko: the characters are compressed together into
-  // the run's one-em cell, so each takes its natural share of the cell.
-  const cell = tateChuYokoCell(placement);
+  // §17.3.2.10 tate-chu-yoko: the characters stand upright side by side
+  // across the run, centred on the paint origin, each over the run's cell.
+  const upright = tateChuYokoRow(placement);
+  const drawn = flooredDrawnAdvancesPt(placement);
   for (let index = first; index < last; index += 1) {
     const cluster = placement.clusters[index]!;
-    if (cell) {
+    if (upright) {
+      const fromPt = cluster.offset.xPt - upright.originPt;
       boxes.push({
         start: Math.max(cluster.range.start, textStart) - textStart,
         end: Math.min(cluster.range.end, textEnd) - textStart,
-        xPt: placement.bounds.xPt + (cluster.offset.xPt - cell.originPt) * cell.compression - originXPt,
-        widthPt: cluster.advancePt * cell.compression,
+        xPt: placement.bounds.xPt - originXPt,
+        widthPt: placement.bounds.widthPt,
         rtl: false,
+        // The row reads toward the run's top edge (it is turned back upright).
+        crossPt: upright.endPt - fromPt - cluster.advancePt - placement.bounds.yPt,
+        crossWidthPt: cluster.advancePt,
       });
       continue;
     }
     const startPt = visualClusterStartXPt(placement, index);
     const final = index === placement.clusters.length - 1;
-    const widthPt = visual ? visual.advancesPt[index]!
+    // A floored cluster (condensed past its glyph) still paints its glyph:
+    // its box is the drawn glyph, from its pen on the side its text starts.
+    const drawnPt = drawn?.get(cluster.range.start);
+    const advancePt = visual ? visual.advancesPt[index]!
       : final
-        ? Math.max(0, Math.min(cluster.advancePt, placement.bounds.xPt + placement.bounds.widthPt - startPt))
+        ? Math.max(0, placement.bounds.xPt + placement.bounds.widthPt - startPt)
         : cluster.advancePt;
-    const cut = final && (visual ? visual.lastCut : widthPt < cluster.advancePt - 1e-9);
+    const widthPt = drawnPt !== undefined ? Math.max(advancePt, drawnPt) : advancePt;
+    const odd = visual?.odd[index] === true;
+    const cut = final && (visual ? visual.lastCut : Math.abs(advancePt - cluster.advancePt) > 1e-9);
     boxes.push({
       start: Math.max(cluster.range.start, textStart) - textStart,
       end: Math.min(cluster.range.end, textEnd) - textStart,
-      xPt: startPt - originXPt,
+      xPt: startPt - originXPt - (odd ? widthPt - advancePt : 0),
       widthPt,
-      rtl: visual?.odd[index] === true,
+      rtl: odd,
       ...(cut ? { trackingExcluded: true as const } : {}),
     });
   }
   return boxes;
 }
 
-/** A tate-chu-yoko run's clusters keep their natural advances while the run
- * paints them compressed into its one-em cell: the ratio of that
- * compression and the natural origin it applies from; null for any other
- * run, or one whose characters already fit their cell. */
-function tateChuYokoCell(placement: ClusteredText): Readonly<{ compression: number; originPt: number }> | null {
+/** A tate-chu-yoko run paints its characters upright in one row across the
+ * run, at their natural advances and centred on its paint origin (the
+ * operation's text is centred there): the row's far end across the run and
+ * the natural origin its advances count from; null for any other run. */
+function tateChuYokoRow(placement: ClusteredText): Readonly<{ endPt: number; originPt: number }> | null {
   if (!placement.tateChuYoko || placement.clusters.length === 0) return null;
   let start = Number.POSITIVE_INFINITY;
   let end = Number.NEGATIVE_INFINITY;
@@ -261,7 +282,19 @@ function tateChuYokoCell(placement: ClusteredText): Readonly<{ compression: numb
     start = Math.min(start, cluster.offset.xPt);
     end = Math.max(end, cluster.offset.xPt + cluster.advancePt);
   }
-  const natural = end - start;
-  if (!(natural > placement.bounds.widthPt + 1e-9) || !(placement.bounds.widthPt > 0)) return null;
-  return { compression: placement.bounds.widthPt / natural, originPt: start };
+  const centrePt = placement.origin.yPt + (placement.paintOps?.[0]?.offset.yPt ?? 0);
+  return { endPt: centrePt + (end - start) / 2, originPt: start };
+}
+
+/** The drawn glyph advance of each floored cluster, by its start: condensed
+ * spacing floors its pen advance, while its own paint operation draws the
+ * glyph at its natural advance. Null when no operation is floored. */
+function flooredDrawnAdvancesPt(placement: ClusteredText): ReadonlyMap<number, number> | null {
+  let drawn: Map<number, number> | null = null;
+  for (const operation of placement.paintOps ?? []) {
+    if (operation.naturalAdvancePt === undefined) continue;
+    drawn ??= new Map();
+    drawn.set(operation.range.start, operation.naturalAdvancePt);
+  }
+  return drawn;
 }

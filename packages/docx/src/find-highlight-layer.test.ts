@@ -281,3 +281,26 @@ describe('highlights in right-to-left runs', () => {
     expect(measured).toBe(0);
   });
 });
+
+describe('tate-chu-yoko highlights', () => {
+  it('places the characters side by side across the turned run', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    // A tbRl run turned 90deg at (100, 50): '２' and '９' stand side by side
+    // across its 8px cell.
+    const runs = [run({
+      text: '２９', x: 100, y: 50, w: 8, h: 10, fontSize: 8, transform: 'rotate(90deg)', eastAsianVert: true,
+      clusterBoxes: [
+        { start: 0, end: 1, x: 0, width: 8, rtl: false, y: 8, height: 6 },
+        { start: 1, end: 2, x: 0, width: 8, rtl: false, y: 2, height: 6 },
+      ],
+    })];
+    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs,
+      [{ slices: [{ runIndex: 0, start: 0, end: 1 }, { runIndex: 0, start: 1, end: 2 }], active: false }],
+      200, 200, measureForFont);
+    const [two, nine] = layer.children;
+    expect([two!.style.left, two!.style.top]).toEqual(['46%', '25%']);
+    expect([nine!.style.left, nine!.style.top]).toEqual(['49%', '25%']);
+    expect([two!.style.width, two!.style.height]).toEqual(['4%', '3%']);
+  });
+});

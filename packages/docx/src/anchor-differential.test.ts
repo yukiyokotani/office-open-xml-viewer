@@ -674,6 +674,31 @@ describe('find highlights and hosts in pieces whose paint differs from their sou
     expect(round(host.bounds!.xPt)).toBe(round(piece.bounds!.xPt + 48));
   });
 
+  it('keeps a host before a compressed fitted right-to-left run at the run\'s right edge', () => {
+    // Four 6pt letters fitted to 12pt: each advances 2pt, the final glyph
+    // paints past its pitch to the fitted edge, and the run starts at its
+    // right edge, where the highlight of its first letter ends as well.
+    const fitted = textRun('\u05d0\u05d1\u05d2\u05d3', { rtl: true, fitTextVal: 240, fitTextId: 1 });
+    const { layout, placements } = lay([...anchorRuns('character'), fitted], { bidi: true });
+    const piece = placements.find((placement) => placement.kind === 'text')!;
+    const host = placements.find((placement) => placement.kind === 'anchor-host')!;
+    expect(piece.bounds!.widthPt).toBe(12);
+    expect(round(host.bounds!.xPt)).toBe(round(piece.bounds!.xPt + 12));
+    const [[, x, width]] = highlights(layout, '\u05d0') as [[string, number, number]];
+    expect(round(x + width)).toBe(round(piece.bounds!.xPt + 12));
+  });
+
+  it('highlights a condensed letter whose advance floors to nothing where it is painted', () => {
+    // 'abc' at 12pt condensed by 8pt: b's advance floors to zero while its
+    // own operation still draws it at its 6pt natural advance.
+    const { layout, placements } = lay([textRun('abc', { charSpacing: -8 })], {});
+    const piece = placements.find((placement) => placement.kind === 'text')!;
+    expect(piece.kind === 'text' && piece.paintOps.some((operation) => operation.naturalAdvancePt !== undefined)).toBe(true);
+    const found = highlights(layout, 'b');
+    expect(found).toHaveLength(1);
+    expect(found[0]![2]).toBeGreaterThan(0);
+  });
+
   it('highlights a Latin letter inside one mixed-direction piece where it is painted', () => {
     // alef a - b bet, two same-format runs around a float. Painted left to
     // right: bet, a, hyphen, b, alef (6pt each); "b" is the fourth.
