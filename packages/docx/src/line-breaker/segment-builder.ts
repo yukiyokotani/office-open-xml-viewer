@@ -299,6 +299,8 @@ export function appendTextPiece(
         fonts: guideRun.fonts ?? {},
         bold: guideRun.bold,
         italic: guideRun.italic,
+        boldCs: guideRun.boldCs === true,
+        italicCs: guideRun.italicCs === true,
         // §17.3.2.30 / §17.3.2.7: either makes the run complex script, as
         // for a base run.
         complexScript: guideRun.rtl === true || guideRun.cs === true,

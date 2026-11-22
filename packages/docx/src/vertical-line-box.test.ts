@@ -13,6 +13,9 @@ import { wordVerticalSingleLinePx } from './layout/line-compatibility.js';
 // WORD_RUBY_ALIGN_PLACEMENT over a stub face (0.8/0.2 em box, one em per
 // spacing character) that no metric table describes.
 
+/** What follows a cluster's first character without an advance of its own. */
+const JOINED_RE = /\p{Mn}|\u200d\p{Extended_Pictographic}?/gu;
+
 /** Characters every stub context has measured (a work counter). */
 let measuredCharacters = 0;
 
@@ -28,9 +31,10 @@ function makeCtx(): CanvasRenderingContext2D {
       // A face named TallFace has a two-em box.
       const box = font.includes('TallFace') ? 2 : 1;
       return {
-        // One em per character (a nonspacing mark or variation selector has
-        // no advance); the pair "AV" kerns 0.2 em tighter.
-        width: [...text.replace(/\p{Mn}/gu, '')].length * size - (text.match(/AV/g)?.length ?? 0) * size * 0.2,
+        // One em per character (a nonspacing mark, a variation selector and
+        // the rest of an emoji joiner sequence have no advance); the pair
+        // "AV" kerns 0.2 em tighter.
+        width: [...text.replace(JOINED_RE, '')].length * size - (text.match(/AV/g)?.length ?? 0) * size * 0.2,
         fontBoundingBoxAscent: size * 0.8 * box, fontBoundingBoxDescent: size * 0.2 * box,
         actualBoundingBoxAscent: size * 0.8 * box, actualBoundingBoxDescent: size * 0.2 * box,
       } as TextMetrics;
@@ -48,6 +52,7 @@ function makeCtx(): CanvasRenderingContext2D {
 
 type GuideRun = Readonly<{
   text: string; fonts: Readonly<Record<string, string>>; rtl?: boolean; cs?: boolean; fontHint?: string;
+  bold?: boolean; italic?: boolean; boldCs?: boolean; italicCs?: boolean;
 }>;
 type Ruby = Readonly<{ text: string; fontSizePt: number; hpsRaisePt: number; align?: string; guideRuns?: readonly GuideRun[] }>;
 type Run = Readonly<{ text: string; ruby?: Ruby; position?: number; fontFamily?: string; eastAsianVert?: boolean; fontSize?: number; extra?: Record<string, unknown> }>;
@@ -62,7 +67,8 @@ function typographyInput(ruby: Ruby) {
       raisePt: value(ruby.hpsRaisePt), language: value(undefined),
       guideRuns: (ruby.guideRuns ?? []).map((run) => ({
         text: run.text, fontFamily: run.fonts.ascii ?? null, fontSizePt: ruby.fontSizePt,
-        bold: false, italic: false, color: null, language: null,
+        bold: run.bold ?? false, italic: run.italic ?? false,
+        boldCs: run.boldCs ?? false, italicCs: run.italicCs ?? false, color: null, language: null,
         fonts: { ascii: null, highAnsi: null, eastAsia: null, complexScript: null, ...run.fonts },
         rtl: run.rtl ?? false, cs: run.cs ?? false, fontHint: run.fontHint ?? null,
       })),
@@ -1221,6 +1227,83 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 10)', () =
   });
 });
 
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 11)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+  const column = (pt: number) => ({ pageHeight: 60 + 80 + pt });
+  const guideOps = (ruby: Ruby, direction?: string) => {
+    const line = layoutParagraph([{ text: '漢字', ruby }], direction).lines[0]!;
+    return textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps;
+  };
+
+  it('keeps the selector that opens a run of other formatting with its base', () => {
+    const { lines } = layoutParagraph(
+      [{ text: '辻' }, { text: '\u{E0100}京', extra: { bold: true } }], 'tbRl', null, column(10),
+    );
+    expect(lineTexts(lines)).toEqual(['辻\u{E0100}', '京']);
+  });
+
+  it('paints a mark in a guide run of its own with its base, in the base\'s face', () => {
+    const run = (text: string, eastAsia: string) => ({ text, fonts: { ascii: 'Latin', highAnsi: 'Latin', eastAsia } });
+    const ruby = { text: 'か\u3099き', fontSizePt: 5, hpsRaisePt: 9, guideRuns: [run('か', 'FaceA'), run('\u3099き', 'FaceB')] };
+    for (const direction of [undefined, 'tbRl']) {
+      const ops = guideOps(ruby, direction);
+      expect(ops.map((op) => op.text), direction).toEqual(['か\u3099', 'き']);
+      expect(JSON.stringify(ops[0]!.fontRoute), direction).toContain('FaceA');
+      expect(JSON.stringify(ops[1]!.fontRoute), direction).toContain('FaceB');
+    }
+  });
+
+  it('joins guide runs that select one face whatever hint only one of them carries', () => {
+    const fonts = { ascii: 'Latin', highAnsi: 'Latin', eastAsia: 'East', complexScript: 'Complex' };
+    const ops = guideOps({
+      text: 'سلام', fontSizePt: 5, hpsRaisePt: 9,
+      guideRuns: [{ text: 'س', fonts, rtl: true, fontHint: 'eastAsia' }, { text: 'لام', fonts, rtl: true }],
+    });
+    expect(ops.map((op) => op.text)).toEqual(['سلام']);
+  });
+
+  it('gives a complex-script guide run its complex-script bold and italic', () => {
+    const fonts = { ascii: 'Latin', highAnsi: 'Latin', eastAsia: 'East', complexScript: 'Complex' };
+    const styleOf = (run: Partial<GuideRun>) => {
+      const op = guideOps({ text: 'سلام', fontSizePt: 5, hpsRaisePt: 9, guideRuns: [{ text: 'سلام', fonts, ...run }] })[0]!;
+      return [op.fontWeight, op.fontStyle];
+    };
+    expect(styleOf({ rtl: true, boldCs: true, italicCs: true })).toEqual([700, 'italic']);
+    // The Latin axes do not style complex-script text.
+    expect(styleOf({ rtl: true, bold: true, italic: true })).toEqual([400, 'normal']);
+  });
+
+  it('plans a vertical guide by extended grapheme clusters', () => {
+    const emoji = '\u{1F469}\u200D\u{1F4BB}';
+    const ops = guideOps({ text: `${emoji}か`, fontSizePt: 5, hpsRaisePt: 9 }, 'tbRl');
+    expect(ops.map((op) => op.text)).toEqual([emoji, 'か']);
+  });
+});
+
+describe('grapheme clusters at kinsoku breaks (§17.3.1.16, UAX #29)', () => {
+  const lineTexts = (lines: readonly LineLayout[]) =>
+    lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
+  const column = (pt: number) => ({ pageHeight: 60 + 80 + pt });
+
+  it('breaks text with zero-advance marks exactly as the same text without them', () => {
+    // A variation selector or a combining mark adds no advance and no break
+    // opportunity: the kinsoku retraction counts a character with its marks
+    // as one, so it never lands inside the cluster and moves on from there.
+    const texts = ['前前「辻ー後', '前「辻ー後', '前前前ゃー後', '前「「辻ー」後', '「辻ー後前', '前前辻ゃ「後'];
+    for (const mark of ['\u{E0100}', '\u3099']) {
+      for (const plain of texts) {
+        for (const lengthPt of [25, 35, 45, 55]) {
+          const marked = plain.replace(/[辻ゃ]/gu, (char) => char + mark);
+          const linesOf = (text: string) => lineTexts(layoutParagraph([{ text }], 'tbRl', null, column(lengthPt)).lines)
+            .map((line) => line.replaceAll(mark, ''));
+          expect(linesOf(marked), `${plain} ${lengthPt}pt ${mark.codePointAt(0)!.toString(16)}`).toEqual(linesOf(plain));
+        }
+      }
+    }
+  });
+});
+
 describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () => {
   // Deterministic generator. Every seed lays out one paragraph of ordinary
   // runs and ruby cells (split base runs, fitText pieces, kinsoku leaders and
@@ -1273,6 +1356,12 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
   type Source = Readonly<{ run: Record<string, unknown>; text: string; sizePt: number }>;
   type Cell = Readonly<{ runs: readonly number[]; guide: string; guideRuns?: readonly GuideRun[] }>;
   const VARIATION_SELECTOR = '\u{E0100}';
+  // An emoji joiner sequence: one cluster of three characters.
+  const EMOJI = '\u{1F469}\u200D\u{1F4BB}';
+  /** The UTF-16 offsets at which `value` may be divided between clusters. */
+  const clusterBoundaries = (value: string) => new Set([
+    0, ...[...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value)].map((part) => part.index), value.length,
+  ]);
 
   function generate(seed: number) {
     const family: Family = FAMILIES[seed % FAMILIES.length]!;
@@ -1341,9 +1430,13 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           if (!shared) continue;
           sharedRegion = { runs, fit };
         } else if (family === 'graphemes' && next() < 0.3) {
-          // A character and its variation selector in runs of their own.
-          text(take());
-          text(VARIATION_SELECTOR, { bold: true });
+          // A cluster divided between runs of different formatting: a
+          // selector alone, a selector opening a run, an emoji sequence.
+          const [head, tail] = pick([
+            [take(), VARIATION_SELECTOR], [take(), VARIATION_SELECTOR + take()], ['\u{1F469}', '\u200D\u{1F4BB}'],
+          ]);
+          text(head!);
+          text(tail!, { bold: true });
           leaderAllowed = false;
           continue;
         }
@@ -1390,7 +1483,7 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         : family === 'guideRuns' ? 'a'.repeat(length)
           : family === 'graphemes'
             // Kana with a combining voiced mark, kanji with a variation selector.
-            ? Array.from({ length: Math.min(length, 3) }, () => pick(['か\u3099', 'き', '辻' + VARIATION_SELECTOR, 'く\u3099'])).join('')
+            ? Array.from({ length: Math.min(length, 3) }, () => pick(['か\u3099', 'き', '辻' + VARIATION_SELECTOR, 'く\u3099', EMOJI])).join('')
             : 'あいうえおかきくけこ'.slice(0, length);
       const guideRuns: GuideRun[] | undefined = family === 'guideFaces'
         ? [...letters].reduce<GuideRun[]>((runs, letter) => {
@@ -1402,7 +1495,9 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
             runs.push({
               text: letter,
               fonts: { ascii, highAnsi: ascii, eastAsia: pick(GUIDE_FACES), complexScript: pick(GUIDE_FACES) },
-              ...(arabic ? { rtl: true } : {}),
+              // Each axis styles only its own text (bCs / iCs for complex script).
+              bold: next() < 0.3, italic: next() < 0.3, boldCs: next() < 0.3, italicCs: next() < 0.3,
+              ...(arabic ? { rtl: true, ...(next() < 0.3 ? { fontHint: 'eastAsia' } : {}) } : {}),
             });
           } else {
             runs[runs.length - 1] = { ...runs.at(-1)!, text: runs.at(-1)!.text + letter };
@@ -1411,7 +1506,17 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         }, [])
         : family === 'guideRuns'
           ? [...letters].map((letter, at) => ({ text: letter, fonts: { ascii: 'FaceA', highAnsi: 'FaceA', eastAsia: `Unused${at}` } }))
-          : undefined;
+          : family === 'graphemes' && next() < 0.6
+            // Run seams anywhere, between a base and its mark too.
+            ? [...letters].reduce<GuideRun[]>((runs, letter) => {
+              if (runs.length === 0 || next() < 0.5) {
+                runs.push({ text: letter, fonts: { ascii: 'FaceA', highAnsi: 'FaceA', eastAsia: pick(GUIDE_FACES) } });
+              } else {
+                runs[runs.length - 1] = { ...runs.at(-1)!, text: runs.at(-1)!.text + letter };
+              }
+              return runs;
+            }, [])
+            : undefined;
       const ruby: Ruby = {
         text: letters, fontSizePt: 5, hpsRaisePt: next() < 0.5 ? 9 : 4, align: pick(ALIGNS),
         ...(guideRuns ? { guideRuns } : {}),
@@ -1500,20 +1605,50 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       expect(holding, context).toHaveLength(1);
       const guides = content(holding[0]!).filter((entry) => entry.ruby && cell.runs.includes(entry.sourceRunIndex!));
       expect(guides.map((entry) => entry.ruby!.paintOps.map((op) => op.text).join('')), context).toEqual([cell.guide]);
-      // A guide's combining marks and variation selectors are painted with
-      // their bases.
-      for (const op of guides[0]!.ruby!.paintOps) expect(op.text, context).not.toMatch(/^\p{M}/u);
+      // UAX #29: no paint operation of a guide parts a grapheme cluster (a
+      // combining mark, a variation selector, an emoji sequence).
+      const guideBoundaries = clusterBoundaries(cell.guide);
+      let painted = 0;
+      for (const op of guides[0]!.ruby!.paintOps) {
+        expect(guideBoundaries.has(painted), `${cell.guide} ${painted} of ${context}`).toBe(true);
+        painted += op.text.length;
+      }
       if (!cell.guideRuns) continue;
       // §17.3.3.24: every guide letter is painted in the font its own run
-      // names for the letter's slot.
-      const fontAt = cell.guideRuns.flatMap((run) => [...run.text].map((letter) =>
-        run.rtl ? run.fonts.complexScript! : /[A-Za-z]/.test(letter) ? run.fonts.ascii! : run.fonts.eastAsia!));
+      // names for the letter's slot, with the weight and slant of its axis
+      // (bCs / iCs for complex script). A cluster follows its first letter.
+      const letterFaces = cell.guideRuns.flatMap((run) => [...run.text].map((letter) => ({
+        letter,
+        font: run.rtl ? run.fonts.complexScript! : /[A-Za-z]/.test(letter) ? run.fonts.ascii! : run.fonts.eastAsia!,
+        weight: (run.rtl ? run.boldCs : run.bold) ? 700 : 400,
+        style: (run.rtl ? run.italicCs : run.italic) ? 'italic' : 'normal',
+        rtl: run.rtl === true,
+      })));
+      let offset = 0;
+      let base = letterFaces[0]!;
+      const faceAt = letterFaces.map((face) => {
+        if (guideBoundaries.has(offset)) base = face;
+        offset += face.letter.length;
+        return base;
+      });
       let at = 0;
+      let seam = 0;
       for (const op of guides[0]!.ruby!.paintOps) {
-        for (const _letter of op.text) {
-          expect(JSON.stringify(op.fontRoute), `${cell.guide} ${at} of ${context}`).toContain(`\\"${fontAt[at]}\\"`);
+        // Letters of consecutive right-to-left runs that select one face
+        // are shaped together: no operation begins between them.
+        if (at > 0 && faceAt[at]!.rtl && faceAt[at - 1]!.rtl) {
+          const same = (['font', 'weight', 'style'] as const).every((key) => faceAt[at]![key] === faceAt[at - 1]![key]);
+          expect(same, `${cell.guide} seam ${seam} of ${context}`).toBe(false);
+        }
+        for (const letter of op.text) {
+          // The stub face has no emoji, which fall back to another face.
+          if (!/\p{Extended_Pictographic}|\u200d/u.test(letter)) {
+            expect(JSON.stringify(op.fontRoute), `${cell.guide} ${at} of ${context}`).toContain(`\\"${faceAt[at]!.font}\\"`);
+            expect([op.fontWeight, op.fontStyle], `${cell.guide} ${at} of ${context}`).toEqual([faceAt[at]!.weight, faceAt[at]!.style]);
+          }
           at += 1;
         }
+        seam += op.text.length;
       }
     }
 
@@ -1547,16 +1682,20 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       }
     }
     const sizeAt = sources.flatMap((source) => source.run.type === 'text'
-      ? [...source.text].map((char) => (char === VARIATION_SELECTOR ? 0 : source.sizePt)) : []);
+      ? [...source.text].map((char, at, all) =>
+        (JOINED_RE.test(char) || all[at - 1] === '\u200d' ? 0 : source.sizePt)) : []);
     const characters = [...texts.join('')];
     let consumed = 0;
+    const lineStarts = clusterBoundaries(texts.join(''));
+    let startOffset = 0;
     texts.forEach((text, index) => {
       const chars = [...text];
       consumed += chars.length;
       // §17.3.1.16: no line starts with a line-start-forbidden character.
       if (index > 0) expect(LINE_START_FORBIDDEN.has(chars[0]!), `${index} of ${context}`).toBe(false);
       // No line starts inside a grapheme cluster.
-      expect(chars[0], `${index} of ${context}`).not.toBe(VARIATION_SELECTOR);
+      if (index > 0) expect(lineStarts.has(startOffset), `${index} of ${context}`).toBe(true);
+      startOffset += text.length;
       if (index === texts.length - 1 || !LINE_END_FORBIDDEN.has(chars.at(-1)!) || family === 'float') return;
       // A line ends with openers only when they and the unit after them
       // exceed a whole line. The openers are every trailing opener, with
@@ -1585,8 +1724,8 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       const cell = cells.find((candidate) => candidate.runs[0] === following[0]?.sourceRunIndex);
       const unit = regions.find((region) => region.includes(following[0]?.sourceRunIndex ?? -1)) ?? cell?.runs ?? [];
       let glued = 1;
-      for (let at = consumed + 1; characters[at] === VARIATION_SELECTOR || LINE_START_FORBIDDEN.has(characters[at]!); at += 1) {
-        if (characters[at] !== VARIATION_SELECTOR) glued += 1;
+      for (let at = consumed + 1; sizeAt[at] === 0 || LINE_START_FORBIDDEN.has(characters[at]!); at += 1) {
+        if (sizeAt[at] !== 0) glued += 1;
       }
       const unitPt = unit.length > 0 ? following.filter((entry) => unit.includes(entry.sourceRunIndex!))
         .reduce((sum, entry) => sum + entry.advancePt, 0)

@@ -2,7 +2,7 @@ import { candidateUnitIsSingleton } from './line-gaps.js';
 import { advanceLineBoundary } from './source-cursor.js';
 import { isInklessLineItem } from './break-queue.js';
 import { placedUnitOf } from './ruby-cell.js';
-import { completesLineCluster, queueRetraction } from './kinsoku.js';
+import { lineClusterContinuation, queueRetraction } from './kinsoku.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix, rtlLineEndSpaceInside } from './optional-hyphens.js';
 import {
@@ -291,14 +291,32 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const h = segmentBox.height;
   const asc = segmentBox.ascent;
   const desc = segmentBox.descent;
-  // UAX #29: marks in a run of their own complete the cluster of the line's
-  // last character. They are placed with it, before any unit after them is
-  // judged, and never start a line.
-  if (placedUnitOf(s) === undefined && s.fitTextRegionIndex === undefined
-    && completesLineCluster(breakerState.currentLine, s)) {
-    s.measuredWidth = w;
-    addToLine(s, w, h, asc, desc);
-    return;
+  // UAX #29: text that opens a segment inside the cluster of the line's
+  // last character (marks, a variation selector, the rest of an emoji
+  // sequence, in a run of other formatting) is placed with that character
+  // before anything after it is judged, and never starts a line.
+  if (placedUnitOf(s) === undefined && s.fitTextRegionIndex === undefined && !s.tateChuYoko) {
+    const continuation = lineClusterContinuation(breakerState.currentLine, s);
+    if (continuation >= s.text.length && continuation > 0) {
+      s.measuredWidth = w;
+      addToLine(s, w, h, asc, desc);
+      return;
+    }
+    // A segment that goes on past the cluster and fits is placed whole as
+    // it is; one that does not fit leaves the rest of the cluster here.
+    if (continuation > 0 && !fitsLineWidth(breakerState.currentWidth + prospectiveWidth, availW())) {
+      const head = s.text.slice(0, continuation);
+      const headWidth = context.strNaturalAdvance(s, head);
+      addToLine({
+        ...s,
+        ...RESET_SLICED_TEXT_MEASUREMENT,
+        text: head,
+        measuredWidth: headWidth,
+        ...slicedTextMetadata(s, 0, continuation),
+      }, headWidth, h, asc, desc);
+      context.queueEmergencyTail(s, continuation);
+      return;
+    }
   }
   const paragraphFinalIdeographicSpaceTail = s.paragraphFinalIdeographicSpaceTail === true;
   const paragraphFinalIdeographicSpaceCount = s.paragraphFinalIdeographicSpaceCount ?? 0;
@@ -1911,6 +1929,25 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
   // at the O(1) gate before any candidate text is built.
   const allChars = [...s.text];
   const minSplit = breakerState.currentLine.length > 0 ? 0 : 1;
+  // §17.3.1.16 over grapheme clusters (UAX #29): a character with its
+  // combining marks or variation selector is one character of the retraction.
+  // Counting code points would let it stop between a base and its mark, where
+  // the source-protection step then moves the break to the cluster start
+  // without the line edge being checked again. Text whose every code point
+  // is a cluster of its own takes the code-point path unchanged.
+  const clusterStarts = [0, ...graphemeClusterOffsets(s.text)];
+  const clusters = clusterStarts.length === allChars.length ? undefined
+    : clusterStarts.map((start, index) => s.text.slice(start, clusterStarts[index + 1]));
+  // Code points before each cluster, and after the last.
+  const codePointsBefore = clusters ? [0] : undefined;
+  for (const cluster of clusters ?? []) codePointsBefore!.push(codePointsBefore!.at(-1)! + [...cluster].length);
+  const kinsokuSplit = (split: number, minimum: number): number => {
+    if (!clusters || !codePointsBefore) return kinsokuAdjustedSplit(allChars, split, kinsoku, minimum);
+    // The clusters that end at or before the split.
+    let whole = 0;
+    while (whole < clusters.length && codePointsBefore[whole + 1]! <= split) whole += 1;
+    return codePointsBefore[kinsokuAdjustedSplit(clusters, whole, kinsoku, minimum)]!;
+  };
   const proposedPrefixFor = (split: number, extensions: boolean): string => {
     const hangingSplit =
       extensions &&
@@ -1942,7 +1979,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       )
         ? split + 1
         : null;
-    const adjusted = hangingSplit ?? kinsokuAdjustedSplit(allChars, split, kinsoku, minSplit);
+    const adjusted = hangingSplit ?? kinsokuSplit(split, minSplit);
     const proposedSplit = extensions
       ? extendThroughTrailingIdeographicSpaces(
           allChars,
@@ -2100,7 +2137,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
   if (breakerState.currentLine.length === 0) {
     // minSplit keeps progress on an empty line even when no legal prefix
     // fits; that retained prefix is forced unless a legal one exists.
-    const legalSplit = kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, 0);
+    const legalSplit = kinsokuSplit(rawSplit, 0);
     const legalUtf16 = allChars.slice(0, legalSplit).join('').length;
     if (legalTextSplitAtOrBefore(s, legalUtf16, 1) === 0 || placedAdvanceExceeds(context, s, prefix)) {
       context.forcedPlacement(context.minimalLegalTextWidth(s));

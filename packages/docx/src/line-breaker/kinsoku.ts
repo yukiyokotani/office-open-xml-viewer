@@ -151,19 +151,48 @@ function clusterLeadingAt(line: readonly LineItem[], point: LinePoint, next: str
   return next.slice(0, end);
 }
 
-/** `segment` is nothing but the rest of the grapheme cluster that ends the
- * line: marks or a variation selector in a run of their own (UAX #29). It
- * belongs to the line's last character, not to the word after it. */
-export function completesLineCluster(line: readonly LineItem[], segment: LayoutTextSeg): boolean {
-  if (segment.text === '' || !/^\p{M}/u.test(segment.text)) return false;
-  for (let index = line.length - 1; index >= 0; index -= 1) {
-    const item = line[index];
-    if (!isText(item)) return false;
-    if (item.text.length === 0) continue;
-    const before = item.text.slice(clusterStartBefore(item, item.text.length));
-    return graphemeClusterOffsets(before + segment.text).length === 0;
+/** The end of the line's text before item `index`, through as many text
+ * items as it takes: enough of it to hold the cluster that ends there, which
+ * may itself lie in several items (an emoji sequence whose joiner is a
+ * segment of its own). */
+function textBefore(line: readonly LineItem[], index: number): string {
+  let text = '';
+  for (let at = index - 1; at >= 0 && text.length < CLUSTER_CONTEXT_UNITS; at -= 1) {
+    const item = line[at];
+    if (!isText(item)) break;
+    text = item.text.slice(-CLUSTER_CONTEXT_UNITS) + text;
   }
-  return false;
+  return text;
+}
+
+/** UTF-16 units of context that decide whether text continues a cluster:
+ * longer than any cluster of ordinary text (an emoji joiner sequence, a base
+ * with its marks). */
+const CLUSTER_CONTEXT_UNITS = 64;
+
+/** How far into `after` the grapheme cluster that ends `before` reaches
+ * (UAX #29): 0 when `after` opens a cluster of its own. */
+function clusterContinuation(before: () => string, after: string): number {
+  // Nothing below U+0300 continues a cluster (CR LF apart, which no segment
+  // seam divides), so ordinary Latin text never asks for the line's text.
+  if (after === '' || after.charCodeAt(0) < 0x300) return 0;
+  return continuationOf(before(), after);
+}
+
+function continuationOf(before: string, after: string): number {
+  if (before === '') return 0;
+  const head = after.slice(0, CLUSTER_CONTEXT_UNITS);
+  const end = graphemeClusterOffsets(before + head).find((bound) => bound >= before.length)
+    ?? before.length + head.length;
+  return end - before.length;
+}
+
+/** The length of the prefix of `segment` that belongs to the grapheme
+ * cluster ending the line: combining marks, a variation selector or the
+ * rest of an emoji sequence that open a run of other formatting. That
+ * prefix belongs to the line's last character, not to the text after it. */
+export function lineClusterContinuation(line: readonly LineItem[], segment: LayoutTextSeg): number {
+  return clusterContinuation(() => textBefore(line, line.length), segment.text);
 }
 
 /** A boundary between two items lies inside a grapheme cluster when the
@@ -171,15 +200,8 @@ export function completesLineCluster(line: readonly LineItem[], segment: LayoutT
  * combining mark in a run of its own stays with its base. Boundaries inside
  * an item are that item's cluster boundaries already. */
 function splitsCluster(line: readonly LineItem[], point: LinePoint, lead: string | undefined): boolean {
-  if (point.offset > 0 || lead === undefined || lead === '') return false;
-  for (let index = point.index - 1; index >= 0; index -= 1) {
-    const item = line[index];
-    if (!isText(item)) return false;
-    if (item.text.length === 0) continue;
-    const before = item.text.slice(clusterStartBefore(item, item.text.length));
-    return !graphemeClusterOffsets(before + lead).includes(before.length);
-  }
-  return false;
+  if (point.offset > 0 || lead === undefined) return false;
+  return clusterContinuation(() => textBefore(line, point.index), lead) > 0;
 }
 
 const WHITESPACE_RE = /\s/u;

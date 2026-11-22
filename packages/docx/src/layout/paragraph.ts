@@ -4405,11 +4405,9 @@ function planMeasuredLines(
         }
         const textSegment = segment as LayoutTextSeg;
         // WORD_RUBY_ALIGN_PLACEMENT: the guide aligns on its pieces as placed.
-        const rubyCell = textSegment.ruby ? rubyCellOf(textSegment) : undefined;
-        const rubyPieces = rubyCell
-          ? raw.segments.filter((candidate): candidate is LayoutTextSeg =>
-            'text' in candidate && rubyCellOf(candidate) === rubyCell)
-          : undefined;
+        // A cell is whole on its line, so they are the cell's own pieces;
+        // no search of the line is needed.
+        const rubyPieces = textSegment.ruby ? rubyCellOf(textSegment)?.pieces : undefined;
         segments.push(textPlanSegment(
           textSegment, paragraph, segmentOffset,
           paragraphCharacterGrid(context),

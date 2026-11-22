@@ -78,6 +78,9 @@ export interface InternalRunTypographyWire {
       fontHint?: string | null;
       rtl?: boolean;
       cs?: boolean;
+      /** §17.3.2.2 bCs / §17.3.2.17 iCs (absent from older wires). */
+      boldCs?: boolean;
+      italicCs?: boolean;
     }>[];
   }>;
   readonly revision?: Readonly<{

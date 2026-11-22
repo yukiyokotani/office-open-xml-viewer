@@ -670,6 +670,29 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn ruby_guide_runs_carry_complex_script_bold_and_italic() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:ruby>
+              <w:rubyPr><w:hps w:val="12"/></w:rubyPr>
+              <w:rt>
+                <w:r><w:rPr><w:bCs/><w:iCs/><w:rtl/></w:rPr><w:t>س</w:t></w:r>
+                <w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>a</w:t></w:r>
+              </w:rt>
+              <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r>"#,
+            &styles,
+        );
+        let runs = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["ruby"]["guideRuns"];
+        assert_eq!(runs[0]["boldCs"], true);
+        assert_eq!(runs[0]["italicCs"], true);
+        assert_eq!(runs[0]["bold"], false);
+        assert_eq!(runs[1]["boldCs"], false);
+        assert_eq!(runs[1]["italicCs"], false);
+        assert_eq!(runs[1]["bold"], true);
+    }
+
+    #[test]
     fn invalid_hps_measure_lexemes_remain_invalid_in_private_ruby_wire() {
         let styles = StyleMap::parse("");
         for invalid in ["-0", "-0pt", "1.5", "1e2", "+12pt"] {
@@ -7976,6 +7999,8 @@ fn ruby_typography_wire(
                 font_hint: own.font_hint.clone(),
                 rtl: own.rtl.unwrap_or(false),
                 cs: own.cs_toggle.unwrap_or(false),
+                bold_cs: fmt.bold_cs.unwrap_or(false),
+                italic_cs: fmt.italic_cs.unwrap_or(false),
             })
         })
         .collect();

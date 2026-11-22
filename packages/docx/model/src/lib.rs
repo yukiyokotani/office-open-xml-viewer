@@ -2972,6 +2972,10 @@ pub struct RubyGuideRunTypographyWire {
     pub font_hint: Option<String>,
     pub rtl: bool,
     pub cs: bool,
+    /// §17.3.2.2 bCs and §17.3.2.17 iCs: the weight and slant of the run's
+    /// complex-script text, independent of `bold` and `italic`.
+    pub bold_cs: bool,
+    pub italic_cs: bool,
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]

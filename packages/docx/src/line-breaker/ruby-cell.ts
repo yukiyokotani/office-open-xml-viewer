@@ -1,4 +1,5 @@
 import { canvasFontString, graphemeClusterOffsets } from '@silurus/ooxml-core';
+import { verticalDrawMode } from '../vertical-text.js';
 import type { VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
 import { independentTextShapeRequest } from '../layout/text.js';
 import {
@@ -214,16 +215,69 @@ interface GuideSpan {
   readonly used: Set<FontSlot>;
 }
 
+/** A guide run as it is shaped: its text, and the weight and slant its
+ * text takes. */
+type ShapedGuideRun = Pick<RubyGuideRunFace, 'text' | 'fonts' | 'bold' | 'italic' | 'complexScript' | 'fontHint'>;
+
+/** The guide runs whose text is shaped together, none parting a grapheme
+ * cluster (UAX #29) and each with one weight and slant.
+ *
+ * §17.3.2.2 / §17.3.2.17: complex-script text takes bCs and iCs, other text
+ * b and i. A run that is complex script as a whole (§17.3.2.30 rtl,
+ * §17.3.2.7 cs) takes the complex-script axes; a run whose two pairs differ
+ * is divided where its text changes between the complex-script slot and the
+ * others, as a base run is divided into pieces.
+ *
+ * A cluster belongs to the run of its first character: a combining mark or
+ * variation selector, or the rest of an emoji sequence, in a later w:rt run
+ * moves to the run of its base and takes that run's faces. */
+function shapedGuideRuns(
+  ruby: NonNullable<LayoutTextSeg['ruby']>,
+  slotsOf: (run: ShapedGuideRun) => readonly Readonly<{ start: number; end: number; complexScript: boolean }>[],
+): readonly ShapedGuideRun[] {
+  const byAxes = (ruby.guideRuns ?? []).flatMap((run): ShapedGuideRun[] => {
+    const cs = { ...run, bold: run.boldCs, italic: run.italicCs };
+    if (run.complexScript) return [cs];
+    if (run.boldCs === run.bold && run.italicCs === run.italic) return [run];
+    const pieces: ShapedGuideRun[] = [];
+    let complexScript: boolean | undefined;
+    for (const span of slotsOf(run)) {
+      const text = run.text.slice(span.start, span.end);
+      if (span.complexScript === complexScript) pieces[pieces.length - 1] = { ...pieces.at(-1)!, text: pieces.at(-1)!.text + text };
+      else pieces.push({ ...(span.complexScript ? cs : run), text });
+      complexScript = span.complexScript;
+    }
+    return pieces;
+  });
+  // Each run starts at the first cluster boundary at or after its start.
+  const boundaries = [0, ...graphemeClusterOffsets(ruby.text), ruby.text.length];
+  let boundary = 0;
+  let offset = 0;
+  const starts = byAxes.map((run) => {
+    while (boundaries[boundary]! < offset) boundary += 1;
+    offset += run.text.length;
+    return boundaries[boundary]!;
+  });
+  return byAxes.flatMap((run, index) => {
+    const text = ruby.text.slice(starts[index]!, starts[index + 1] ?? ruby.text.length);
+    return text === '' ? [] : [{ ...run, text }];
+  });
+}
+
 /** The guide's w:rt runs (§17.3.3.24) shaped at the guide size, each with
  * its own faces over the base run's request: the authored runs when they
- * spell the guide, else the whole guide in the base run's faces.
+ * spell the guide (shapedGuideRuns), else the whole guide in the base run's
+ * faces.
  *
- * Adjacent runs whose characters select the same face are shaped as one
- * text, so a run seam inside a word keeps its contextual (joining, kerned)
- * forms. Each character keeps the font of its own run's slot: runs join only
- * when, for every slot the characters of either use, they name the same
- * font, so the joined text is shaped with one font per slot. A slot no
- * character uses does not separate runs. Each run is shaped once to learn
+ * Adjacent runs whose characters select the same face (family, weight and
+ * slant) are shaped as one text, so a run seam inside a word keeps its
+ * contextual (joining, kerned) forms. Each character keeps the font of its
+ * own run's slot: runs join only when, for every slot the characters of
+ * either use, they name the same font, so the joined text is shaped with one
+ * font per slot. Nothing else separates runs: a slot no character uses, or a
+ * script control that changes no character's face, does not. The joined
+ * text is shaped with the first run's controls and kept only if every
+ * character still selects the one face. Each run is shaped once to learn
  * its face and slots, and each joined text once: linear in the guide. */
 function guideShapes(
   first: LayoutTextSeg,
@@ -234,7 +288,13 @@ function guideShapes(
   const service = first.textLayoutService;
   const request = first.textShapeRequest;
   if (!service || !request) return undefined;
-  const shapeText = (text: string, face?: Pick<GuideSpan, 'fonts' | 'bold' | 'italic' | 'complexScript' | 'fontHint'>): GuideShape =>
+  const fontsOf = (run: ShapedGuideRun) =>
+    Object.fromEntries(FONT_SLOTS.map((slot) => [slot, run.fonts[slot] ?? request.fonts[slot]])) as GuideSpan['fonts'];
+  const shapeText = (
+    text: string,
+    face?: Pick<GuideSpan, 'fonts' | 'bold' | 'italic' | 'complexScript' | 'fontHint'>,
+    measure = true,
+  ): GuideShape =>
     service.shape({
       ...independentTextShapeRequest(request, text),
       // The guide run's faces are resolved, theme references included, and
@@ -245,10 +305,10 @@ function guideShapes(
         complexScript: face.complexScript, fontHint: face.fontHint,
       } : {}),
       fontSizePt: sizePx,
-      measure: true,
+      measure,
       // A vertical guide takes its geometry from its planned cells; only
       // its faces are read from the shape.
-      ...(vertical ? { clusterGeometry: false } : {}),
+      ...(vertical || !measure ? { clusterGeometry: false } : {}),
     });
   if (!ruby.guideRuns) return [{ start: 0, text: ruby.text, shape: shapeText(ruby.text) }];
   const faceOf = (shape: GuideShape): string | undefined => {
@@ -257,18 +317,21 @@ function guideShapes(
   };
   const slotsOf = (shape: GuideShape): Set<FontSlot> => new Set(shape.spans.flatMap((span) =>
     [span.script, ...(span.semanticSlotSpans ?? []).map((slot) => slot.script)]));
+  const runs = shapedGuideRuns(ruby, (run) =>
+    shapeText(run.text, { ...run, fonts: fontsOf(run), fontHint: run.fontHint }, false).spans.flatMap((span) =>
+      (span.semanticSlotSpans ?? [span]).map((slot) => ({
+        start: slot.start, end: slot.end, complexScript: slot.script === 'complexScript',
+      }))));
   const spans: GuideSpan[] = [];
   let start = 0;
-  for (const run of ruby.guideRuns) {
-    const fonts = Object.fromEntries(FONT_SLOTS.map((slot) => [slot, run.fonts[slot] ?? request.fonts[slot]])) as GuideSpan['fonts'];
+  for (const run of runs) {
+    const fonts = fontsOf(run);
     const controls = { bold: run.bold, italic: run.italic, complexScript: run.complexScript, fontHint: run.fontHint };
     const shape = shapeText(run.text, { fonts, ...controls });
     const face = faceOf(shape);
     const used = slotsOf(shape);
     const previous = spans.at(-1);
     if (previous && face !== undefined && previous.face === face
-      && previous.bold === run.bold && previous.italic === run.italic
-      && previous.complexScript === run.complexScript && previous.fontHint === run.fontHint
       && [...used].every((slot) => !previous.used.has(slot) || previous.fonts[slot] === fonts[slot])) {
       previous.texts.push(run.text);
       previous.shapes.push(shape);
@@ -298,17 +361,6 @@ function guideShapes(
   });
 }
 
-/** Nonspacing and enclosing marks (variation selectors among them), which a
- * vertical guide paints with their base. */
-const CLUSTER_MARK_RE = /[\p{Mn}\p{Me}]/u;
-
-/** `text` without the marks that follow a base. */
-function withoutClusterMarks(text: string): string {
-  let out = '';
-  for (const char of text) if (out === '' || !CLUSTER_MARK_RE.test(char)) out += char;
-  return out;
-}
-
 /** A vertical guide is planned, and so painted, without kerning. */
 const GUIDE_PLAN_KERNING = 'none' as const;
 
@@ -332,14 +384,17 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
   }
   // Each font span (its rFonts slot) is planned in its own face.
   let spanPenPx = 0;
-  // A combining mark or variation selector takes no cell of its own: the
-  // guide is planned by its cluster bases, and each mark is painted with the
-  // cell of its base, in the base's face, whichever font span or run holds it.
+  // The guide is planned by extended grapheme clusters (UAX #29). A cluster
+  // that stands upright or is rotated is one glyph cell: it is planned by
+  // its first character and painted whole (its combining marks, variation
+  // selector or the rest of an emoji sequence with it), in that character's
+  // face, whichever font span or run holds the rest. Clusters laid sideways
+  // are planned as the text they are, shaped in context.
   const clusterStarts = vertical ? new Set([0, ...graphemeClusterOffsets(ruby.text)]) : undefined;
   let lastCell: { cell: { range: { start: number; end: number }; text: string } } | undefined;
   const cells = vertical && shapes ? shapes.flatMap(({ shape, start }) => shape.spans.flatMap((span): SpanGuideCell[] => {
     const plan = (part: string) => service!.planRun({
-      text: withoutClusterMarks(part),
+      text: part,
       font: canvasFontString(span.fontRoute, sizePx, span.font.weight, span.font.style),
       fontKerning: GUIDE_PLAN_KERNING,
       fontSizePt: sizePx,
@@ -352,35 +407,31 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     const face = { fontRoute: span.fontRoute, fontWeight: span.font.weight, fontStyle: span.font.style };
     const originPx = spanPenPx;
     const spanStart = start + span.start;
-    // The span's cluster bases, and where each UTF-16 unit of them lies in
-    // the guide.
-    let bases = '';
+    // The text the span is planned by, and where each UTF-16 unit of it
+    // lies in the guide.
+    let planned = '';
     const offsets: number[] = [];
+    let keep = !lastCell;
     for (let offset = 0; offset < span.text.length;) {
       const char = String.fromCodePoint(span.text.codePointAt(offset)!);
-      if (clusterStarts!.has(spanStart + offset) || !CLUSTER_MARK_RE.test(char) || (bases === '' && !lastCell)) {
+      // A cluster's first character decides; the rest of it follows.
+      const opensCluster = clusterStarts!.has(spanStart + offset);
+      if (opensCluster) keep = true;
+      if (keep) {
         for (let unit = 0; unit < char.length; unit += 1) offsets.push(spanStart + offset + unit);
-        bases += char;
+        planned += char;
       }
+      if (opensCluster) keep = verticalDrawMode(char.codePointAt(0)!) === 'sideways';
       offset += char.length;
     }
     const spanEnd = spanStart + span.text.length;
-    // Marks that open the span belong to the cell before it.
+    // What opens the span inside a cluster belongs to the cell before it.
     const firstBase = offsets[0] ?? spanEnd;
     if (lastCell && firstBase > spanStart) {
       lastCell.cell.range.end = firstBase;
       lastCell.cell.text = ruby.text.slice(lastCell.cell.range.start, firstBase);
     }
-    const planned = (bases === '' ? [] : service!.planRun({
-      text: bases,
-      font: canvasFontString(span.fontRoute, sizePx, span.font.weight, span.font.style),
-      fontKerning: GUIDE_PLAN_KERNING,
-      fontSizePt: sizePx,
-      letterSpacingPt: 0,
-      charScale: 1,
-      growTrRotateInk: false,
-      writingMode: 'vertical-rl',
-    })).map((cell): SpanGuideCell => {
+    const spanCells = (planned === '' ? [] : plan(planned)).map((cell): SpanGuideCell => {
       const range = { start: offsets[cell.range.start]!, end: offsets[cell.range.end] ?? spanEnd };
       return {
         cell: { ...cell, range, text: ruby.text.slice(range.start, range.end), originPt: originPx + cell.originPt },
@@ -388,9 +439,9 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
         advanceOf,
       };
     });
-    lastCell = planned.at(-1) ?? lastCell;
-    spanPenPx += planned.reduce((sum, { cell }) => sum + cell.advancePt, 0);
-    return planned;
+    lastCell = spanCells.at(-1) ?? lastCell;
+    spanPenPx += spanCells.reduce((sum, { cell }) => sum + cell.advancePt, 0);
+    return spanCells;
   })) : undefined;
   let runPenPx = 0;
   const horizontal = !cells && shapes ? shapes.flatMap(({ shape, start, text }) => {

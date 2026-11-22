@@ -58,6 +58,10 @@ export interface RubyGuideRunFace {
   }>;
   readonly bold: boolean;
   readonly italic: boolean;
+  /** §17.3.2.2 bCs / §17.3.2.17 iCs: the weight and slant of the run's
+   * complex-script text. */
+  readonly boldCs: boolean;
+  readonly italicCs: boolean;
   /** The run's own script controls, which select among its slots: complex
    * script (§17.3.2.30 rtl or §17.3.2.7 cs) and §17.3.2.26 rFonts@hint. */
   readonly complexScript: boolean;
