@@ -422,7 +422,7 @@ function resolveRowTrack(
       merge.cell,
       flowOf(merge.cell),
       { topPt: merge.topInsetPt, bottomPt: spacing.bottomPt },
-    );
+    ) + 2 * (row.spacingGeometry?.borderPt ?? 0);
     store.raiseContentHeight(merge.start, requiredPt);
     const deficitPt = requiredPt - store.sum(merge.start, rowIndex);
     if (deficitPt <= 0) continue;
@@ -930,12 +930,17 @@ function materializeBorders(
       for (const cell of row.cells) {
         // A vertically merged cell is one box from its first row here to
         // its last; after a page break its first row is a continuation.
-        const mergedAbove = cell.verticalMerge === 'continue' && (input.rows[rowIndex - 1]?.cells.some((above) =>
-          above.columnStart === cell.columnStart && above.verticalMerge !== 'none') ?? false);
+        // Rows of one merge follow each other in the source; a repeated
+        // header row and the body row after it do not.
+        const follows = (upper: number): boolean =>
+          input.rows[upper + 1]?.logicalRowIndex === input.rows[upper]!.logicalRowIndex + 1;
+        const mergedAbove = cell.verticalMerge === 'continue' && rowIndex > 0 && follows(rowIndex - 1)
+          && input.rows[rowIndex - 1]!.cells.some((above) =>
+            above.columnStart === cell.columnStart && above.verticalMerge !== 'none');
         if (mergedAbove) continue;
         let lastRowIndex = rowIndex;
         if (cell.verticalMerge !== 'none') {
-          while (input.rows[lastRowIndex + 1]?.cells.some((below) =>
+          while (follows(lastRowIndex) && input.rows[lastRowIndex + 1]!.cells.some((below) =>
             below.columnStart === cell.columnStart && below.verticalMerge === 'continue')) lastRowIndex += 1;
         }
         const lastSpacing = lastRowIndex === rowIndex ? spacing : rowSpacingInsets(input.rows, lastRowIndex);

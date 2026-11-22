@@ -267,7 +267,9 @@ function memberContext(
         // The center/right controls retain the leading band's width in mode
         // 14, but use the full text band in mode 15. This is a width rule;
         // origin translation is acquired separately under WORD_TABLE_ORIGIN_COMPATIBILITY.
-        return leading || outerCellMarginsHangOutsideBand ? contentWPt - indentPt : contentWPt;
+        // A spaced table gains nothing from a negative indent (unmeasured).
+        const bandIndentPt = spacingGeometry ? Math.max(0, indentPt) : indentPt;
+        return leading || outerCellMarginsHangOutsideBand ? contentWPt - bandIndentPt : contentWPt;
       })))
     // WORD_TABLE_CELL_SPACING_GEOMETRY: an automatic spaced table ends with
     // its column wherever the leading-indent band is not established.

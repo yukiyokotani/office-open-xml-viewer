@@ -211,8 +211,11 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     // is held to the text width.
     const widths = tableOf(twoColumns(AUTO + spacing(2), [4400, 4800]));
     expect(widths.table).toBeCloseTo(465.3 - 0.5, 6);
-    expect(widths.cells[0]).toBeCloseTo((465.3 - 0.5 - 12) * 220 / 460, 6);
-    expect(widths.cells[1]).toBeCloseTo((465.3 - 0.5 - 12) * 240 / 460, 6);
+    // The cells give way as in an unspaced table that wide: from 220 and
+    // 240 pt toward their content (two characters and two 0.5 pt rules).
+    const fraction = (465.3 - 0.5 - 12 - 2 * 22) / (460 - 2 * 22);
+    expect(widths.cells[0]).toBeCloseTo(22 + (220 - 22) * fraction, 6);
+    expect(widths.cells[1]).toBeCloseTo(22 + (240 - 22) * fraction, 6);
   });
 
   it('keeps the interior gap inside a spanning cell', () => {
@@ -326,12 +329,76 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     [1, 40, [4400, 4800], AUTO, 465.3 - 40 - 0.5],
     [1, 40, [1440, 2160], DXA_180, 180],
     [1, 40, [1440, 2160], '<w:tblW w:w="5000" w:type="pct"/>', 465.3 - 0.5],
+    // A negative indent does not raise the ceiling.
+    [1, -40, [4400, 4800], AUTO, 465.3 - 0.5],
   ] as const)('holds an indented automatic table to what the indent leaves of its column (%d columns, %d pt, %j)', (columnCount, indentPt, widths, tableWidth, expected) => {
     // An automatic table ends with its column; a preferred width is kept
     // and moves with the indent.
     const indented = tableOf(twoColumns(`${tableWidth}<w:tblInd w:w="${indentPt * 20}" w:type="dxa"/>${spacing(2)}`,
       widths as unknown as [number, number]), null, columnCount);
     expect(indented.table).toBeCloseTo(expected, 6);
+  });
+
+  it('resolves a held automatic table like the same table in the band the gaps leave', () => {
+    // 72 pt beside a cell without a preferred width holding 60 characters:
+    // the table is held to the text width, the 72 pt cell keeps its width
+    // and the other takes the rest.
+    const text = Array.from({ length: 12 }, () => 'aaaa').join(' ');
+    const held = tableOf(tableXml(AUTO + spacing(2), [1440, 2160], [
+      cell(1440, 'A1') + `<w:tc><w:tcPr/>${paragraph(text)}</w:tc>`,
+    ]));
+    expect(held.table).toBeCloseTo(465.3 - 0.5, 6);
+    expect(held.cells[0]).toBeCloseTo(72, 6);
+    expect(held.cells[1]).toBeCloseTo(465.3 - 0.5 - 12 - 72, 6);
+  });
+
+  it('gives a vertically merged cell room for its own rules', () => {
+    // One 10.5 pt line in a cell merged over two rows, 6 pt rules: the box
+    // holds both rules and the line.
+    const sz48 = BORDERS.replaceAll('w:sz="4"', 'w:sz="48"');
+    const merged = `<w:tbl><w:tblPr>${AUTO}${spacing(2)}${sz48}</w:tblPr><w:tblGrid><w:gridCol w:w="1440"/></w:tblGrid>`
+      + `<w:tr>${cell(1440, 'A', '<w:vMerge w:val="restart"/>')}</w:tr>`
+      + `<w:tr><w:tc><w:tcPr><w:tcW w:w="1440" w:type="dxa"/><w:vMerge/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>`;
+    const laidOut = tablePages(merged)[0]!;
+    const rules = laidOut.borders.filter((border) => border.from.yPt === border.to.yPt
+      && border.from.xPt > laidOut.flowBounds.xPt + 1).map((border) => border.from.yPt).sort((a, b) => a - b);
+    expect(rules.length).toBe(2);
+    // Between the inner edges of the two 6 pt rules.
+    expect(rules[1]! - rules[0]! - 6).toBeGreaterThanOrEqual(10.5);
+  });
+
+  it('keeps a repeated header merge apart from a body merge continuing below it', () => {
+    const header = (row: number) => `<w:tr><w:trPr><w:tblHeader/></w:trPr>`
+      + cell(1440, row === 0 ? 'H' : '', `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>`) + cell(2160, `H${row}`) + '</w:tr>';
+    const body = Array.from({ length: 70 }, (_unused, row) => '<w:tr>'
+      + cell(1440, row === 0 ? 'A' : '', `<w:vMerge${row === 0 ? ' w:val="restart"' : ''}/>`) + cell(2160, `B${row}`) + '</w:tr>').join('');
+    const pages = tablePages(`<w:tbl><w:tblPr>${AUTO}${spacing(2)}${BORDERS}</w:tblPr><w:tblGrid>`
+      + `<w:gridCol w:w="1440"/><w:gridCol w:w="2160"/></w:tblGrid>${header(0)}${header(1)}${body}</w:tbl>`);
+    expect(pages.length).toBeGreaterThan(1);
+    for (const page of pages) {
+      // The first column holds two boxes: the header merge and the body merge.
+      const leftRules = page.borders.filter((border) => border.from.xPt === border.to.xPt
+        && Math.abs(border.from.xPt - page.flowBounds.xPt - 4.25) < 0.01);
+      expect(leftRules.length).toBe(2);
+    }
+  });
+
+  it('keeps a nested table inside the rule a vertical merge beside it starts with', () => {
+    // The merged first column opens with a 6 pt right rule; its second row
+    // has no override. The nested table of the second row starts inside it.
+    const noMargins = '<w:tblCellMar><w:left w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar>';
+    const nested = tableXml('<w:tblW w:w="5000" w:type="pct"/>' + spacing(2), [600, 600], [cell(600, 'n1') + cell(600, 'n2')]);
+    const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
+      + '<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>'
+      + `<w:tr>${cell(1440, 'A', '<w:vMerge w:val="restart"/><w:tcBorders><w:right w:val="single" w:sz="48"/></w:tcBorders>')}${cell(2880, 'B1')}</w:tr>`
+      + `<w:tr>${cell(1440, '', '<w:vMerge/>')}<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${nested}${paragraph('B2')}</w:tc></w:tr></w:tbl>`;
+    const inner = tablePages(outer)[0]!.rows[1]!.cells.at(-1)!.blocks.map((block) => block.layout)
+      .find((block) => block.kind === 'table');
+    if (inner?.kind !== 'table') throw new Error('expected a nested table');
+    const boxes = inner.rows[0]!.cells.map((box) => box.flowBounds);
+    // Half the 6 pt rule on the left, half the 0.5 pt table rule on the right.
+    expect(boxes[0]!.xPt).toBeCloseTo(3 + 4, 6);
+    expect(boxes[0]!.widthPt).toBeCloseTo((144 - 3 - 0.25 - 0.5 - 12) / 2, 6);
   });
 
   it('applies both forms to the upright block table of a tbRl section', () => {

@@ -672,7 +672,8 @@ function spacedAutoFitPreferredBoxesPt(
   if (!Number.isFinite(targetPt) || targetPt <= EPSILON_PT) return null;
   return solveTableColumnWidths({
     ...cellInput,
-    tablePreferredWidthPt: targetPt,
+    // A held automatic table stays automatic in the band the gaps leave.
+    tablePreferredWidthPt: input.tablePreferredWidthPt === null ? null : targetPt,
     availableWidthPt: targetPt,
     ...(input.contentBandPt === undefined
       ? {} : { contentBandPt: Math.max(0, input.contentBandPt - gapBudgetPt) }),

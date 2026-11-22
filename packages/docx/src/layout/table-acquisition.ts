@@ -653,7 +653,19 @@ export function acquireRetainedTable<State>(
         const start = ruleColumnStart;
         const span = Math.min(Math.max(1, cell.colSpan), Math.max(0, columnWidthsPt.length - start));
         ruleColumnStart += span;
-        return { borders: retainedEdges(cell.borders), columnStart: start, columnSpan: span };
+        // The cell that opens a vertical merge owns the side rules of all its rows.
+        let owner = cell;
+        for (let above = rowIndex - 1; owner.vMerge === false && above >= 0; above -= 1) {
+          let aboveStart = Math.max(0, table.rows[above]!.gridBefore ?? 0);
+          const match = table.rows[above]!.cells.find((candidate) => {
+            const found = aboveStart === start;
+            aboveStart += Math.max(1, candidate.colSpan);
+            return found;
+          });
+          if (!match || match.vMerge == null) break;
+          owner = match;
+        }
+        return { borders: retainedEdges(owner.borders), columnStart: start, columnSpan: span };
       }),
       retainedEdges(table.borders),
       rowFormat?.exception?.borders ? retainedEdges(rowFormat.exception.borders) : null,
