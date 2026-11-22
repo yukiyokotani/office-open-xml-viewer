@@ -945,16 +945,37 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       }
     });
 
-    it('keeps an inline chart line on its established placement in an exact line', () => {
-      // WORD_INLINE_OBJECT_EXACT_LINE library scope: charts keep their placement.
-      const chart = { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } } as unknown as DocParagraph['runs'][number];
-      const node = measureInlineParagraph([chart], 1, { exactPt: 24 });
-      const line = node.lines[0]!;
-      expect(line.advancePt).toBeCloseTo(24, 10);
-      // Centred box, not four fifths: the 30pt chart rises 3pt above the line top.
-      expect(line.baselinePt).not.toBeCloseTo(line.bounds.yPt + 19.2, 6);
-      const placement = node.lines[0]!.placements.find((candidate) => candidate.kind === 'resource')!;
-      expect(placement.bounds.yPt).toBeCloseTo(line.bounds.yPt - 3, 6);
+    it('stands an inline chart on the four-fifths baseline of an exact line, moved by its run (WORD_INLINE_OBJECT_EXACT_LINE)', () => {
+      const chart = (heightPt: number, positionPt: number) => ({
+        type: 'chart', widthPt: 40, heightPt, anchor: false, chart: { plotArea: {} },
+        ...(positionPt ? { __inlinePosition: positionPt } : {}),
+      }) as unknown as DocParagraph['runs'][number];
+      const cell = { story: 'body', storyInstance: 'body', path: [3, 0, 0, 0] } as never;
+      for (const exactPt of [12, 24, 48]) {
+        for (const [heightPt, positionPt] of [[16, 0], [30, -5], [30, 5]] as const) {
+          for (const runs of [[chart(heightPt, positionPt)], [paragraph.runs[0]!, chart(heightPt, positionPt)]]) {
+            for (const [story, clips] of [[undefined, true], [cell, false]] as const) {
+              const node = measureInlineParagraph(runs, 1, { exactPt, ...(story ? { source: story } : {}) });
+              const line = node.lines[0]!;
+              expect(line.advancePt).toBeCloseTo(exactPt, 10);
+              expect(line.baselinePt).toBeCloseTo(line.bounds.yPt + exactPt * 0.8, 10);
+              const placement = resource(node);
+              expect(placement.kind === 'resource' && placement.resourceKind).toBe('chart');
+              expect(placement.bounds.yPt + placement.bounds.heightPt).toBeCloseTo(line.baselinePt - positionPt, 10);
+              const clip = placement.kind === 'resource' ? placement.lineClip : undefined;
+              expect(clip !== undefined).toBe(clips);
+              if (clip) {
+                expect(placement.bounds.yPt + clip.topPt).toBeCloseTo(line.bounds.yPt, 10);
+                expect(placement.bounds.yPt + clip.bottomPt).toBeCloseTo(line.bounds.yPt + exactPt, 10);
+              }
+            }
+          }
+        }
+      }
+      // Outside exact lines the chart keeps its unpositioned box on the baseline.
+      const single = measureInlineParagraph([paragraph.runs[0]!, chart(16, -5)]);
+      const placement = resource(single);
+      expect(placement.bounds.yPt + placement.bounds.heightPt).toBeCloseTo(single.lines[0]!.baselinePt, 10);
     });
 
     it('keeps the picture rule for an exact line that also holds a chart', () => {
@@ -1008,11 +1029,11 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
       const facts = { __inlineObjectFontFacts: { fontSize: 10, fontFamily: 'Test Sans' } };
       const subject = (kind: 'picture' | 'chart', available: boolean, positionPt: number,
         orientation: Readonly<{ rotation?: number; flipH?: boolean; flipV?: boolean }> = {}) => {
-        // The parser records a run position on pictures only (charts keep
-        // their established placement), for the picture and its placeholder,
-        // and the picture's a:xfrm orientation on both.
-        const position = kind === 'picture' && positionPt ? { __inlinePosition: positionPt, ...orientation }
-          : kind === 'picture' ? orientation : {};
+        // The parser records a run position on pictures and charts, for the
+        // resource and its placeholder, and the picture's a:xfrm orientation
+        // on both.
+        const position = { ...(positionPt ? { __inlinePosition: positionPt } : {}),
+          ...(kind === 'picture' ? orientation : {}) };
         if (kind === 'picture') {
           return (available
             ? { type: 'image', imagePath: 'inline.png', mimeType: 'image/png', widthPt: 20, heightPt: 30,
@@ -1022,8 +1043,8 @@ describe('paragraphLayoutFromMeasurement retained authorities', () => {
           ) as unknown as DocParagraph['runs'][number];
         }
         return (available
-          ? { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} } }
-          : { type: 'unavailableDrawing', resourceKind: 'chart', widthPt: 40, heightPt: 30 }
+          ? { type: 'chart', widthPt: 40, heightPt: 30, anchor: false, chart: { plotArea: {} }, ...position }
+          : { type: 'unavailableDrawing', resourceKind: 'chart', widthPt: 40, heightPt: 30, ...position }
         ) as unknown as DocParagraph['runs'][number];
       };
       const box = (node: ReturnType<typeof measureInlineParagraph>) => {

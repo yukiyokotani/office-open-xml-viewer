@@ -1017,6 +1017,7 @@ function chartSegment(
   chartRun: Readonly<{
     widthPt: number; heightPt: number; anchor?: boolean; anchorXPt?: number; anchorYPt?: number;
     anchorXFromMargin?: boolean; anchorYFromPara?: boolean; resourceKey?: string;
+    inlinePositionPt?: number;
   }>,
   environment: LineLayoutEnvironment,
 ): LayoutImageSeg {
@@ -1039,6 +1040,7 @@ function chartSegment(
     anchorYFromPara: chartRun.anchorYFromPara ?? false,
     chart: true,
     ...(chartRun.resourceKey === undefined ? {} : { chartResourceKey: chartRun.resourceKey }),
+    ...(!chartRun.anchor && chartRun.inlinePositionPt ? { chartPositionPt: chartRun.inlinePositionPt } : {}),
     measuredWidth: 0,
   };
 }
@@ -2225,7 +2227,10 @@ function appendRunsToSegments(
       const anchored = 'anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined;
       segs.push({
         ...(run.resourceKind === 'chart'
-          ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
+          ? chartSegment({
+              widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
+              ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
+            }, environment)
           : imageSegment({
               imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
               ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),

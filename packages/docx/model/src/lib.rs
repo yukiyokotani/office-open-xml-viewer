@@ -3821,7 +3821,8 @@ pub struct UnavailableDrawingRun {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flip_v: bool,
     /// Parser-private §17.3.2.24 position of the hosting run of an inline
-    /// picture placeholder, as on the available picture (`ImageRun`).
+    /// picture or chart placeholder, as on the available resource
+    /// (`ImageRun`, `ChartRun`).
     #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
     pub inline_position: Option<f64>,
     /// Parser-private font facts of the hosting run of an inline picture
@@ -3951,6 +3952,11 @@ pub struct ChartRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub anchor_acquisition: Option<AnchorAcquisitionWire>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline chart, as on `ImageRun`. Parser-private; absent for
+    /// anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
