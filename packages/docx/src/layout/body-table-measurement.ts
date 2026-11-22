@@ -253,9 +253,24 @@ export function measureBodyTableEntry(
       return freshRegion(false);
     }
     const role = request.cursor ? 'continuation' as const : 'first' as const;
+    // The upright tables that follow this one with nothing between them run
+    // on from it as one block; a multi-column section raises that whole
+    // block from the bottom page edge.
+    let runOnExtentPt = 0;
+    if (paginates && !singleColumn && !request.cursor) {
+      for (let next = sourceIndex + 1; ; next += 1) {
+        const following = dependencies.source.blocks.body[next];
+        if (following?.type !== 'table') break;
+        const followingState = bodyTableAcquisitionState(state, following, effectiveTablePositioning);
+        if (followingState.uprightPhysicalTable !== true) break;
+        operations.computeTablePtLayout(followingState, following, request.availableInlineExtentPt, next);
+        runOnExtentPt += retainedTableRecord(state, next).acquisition.layout.advancePt;
+      }
+    }
     const layOutWith = (edges: UprightBlockEdges) => {
       const whole = uprightBlockPlacement(
         context, request, physical, role, tableWidthPt, retained.layout.advancePt, edges,
+        runOnExtentPt,
       );
       if (whole.leavesBlockExtent && request.pageHasContent === true) return null;
       if (whole.inlineRoomPt === null || !singleColumn
@@ -476,6 +491,8 @@ function uprightBlockPlacement(
   blockExtentPt: number,
   inlineExtentPt: number,
   edges: UprightBlockEdges,
+  /** Inline extent of the upright blocks that run on from this one. */
+  runOnExtentPt = 0,
 ): Readonly<{
   originPt: Readonly<{ xPt: number; yPt: number }>;
   /** Inline extent from the block's inline start to the end of the page's
@@ -555,9 +572,11 @@ function uprightBlockPlacement(
   if (multiColumn && inlineStartPt === cursorPt.xPt) {
     // A multi-column section never splits or moves the block: one that
     // would pass the page's bottom edge from the column top is raised to end
-    // there, no higher than the page top. A block below others it meets is
-    // not raised into them.
-    inlineStartPt = Math.max(0, Math.min(inlineStartPt, physical.pageHeight - inlineExtentPt));
+    // there, no higher than the page top, together with the blocks that run
+    // on from it. A block below others it meets is not raised into them.
+    inlineStartPt = Math.max(
+      0, Math.min(inlineStartPt, physical.pageHeight - inlineExtentPt - runOnExtentPt),
+    );
   }
   const leavesBlockExtent = blockStartPt !== cursorPt.yPt && !pin
     && blockStartPt + boxBlockExtentPt

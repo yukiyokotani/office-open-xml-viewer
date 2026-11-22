@@ -397,13 +397,16 @@ describe('upright block table of a vertical section', () => {
     });
 
     it('keeps a table that directly follows another below it', () => {
-      // Two tables of one 800 pt row each with nothing between them continue
-      // one another: the second is neither moved aside nor raised over the first.
+      // Two tables of one 800 pt row each with nothing between them run on as
+      // one block: the second is neither moved aside nor raised over the
+      // first, and the block is raised by its whole height.
       const pages = layOutPages('tbRl', [table(1, 800), table(1, 800)], 2);
       expect(pages).toHaveLength(1);
       const [first, second] = pages[0]!.tables as [Page['tables'][number], Page['tables'][number]];
       expect(second.left).toBeCloseTo(first.left, 6);
       expect(second.top).toBeCloseTo(first.bottom, 6);
+      // Together they are taller than the page, so the pair starts at its top.
+      expect(first.top).toBe(0);
     });
 
     it('does not move a keepNext paragraph and a tall table to the second column', () => {
