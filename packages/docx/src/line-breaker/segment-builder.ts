@@ -2,7 +2,7 @@ import { compatOf } from '../layout/compat-profile.js';
 import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
-import { revisionIsOmitted } from '../layout/revision-visibility.js';
+import { runIsOmitted } from '../layout/revision-visibility.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
 import { acquireTextSequences } from './text-sequence.js';
@@ -1956,8 +1956,7 @@ function appendRunsToSegments(
     // (`showTrackedChanges`) keeps every revision run visible so it can be
     // decorated. Insertions/moveTo render in both views, and revision metadata
     // remains available through the parsed model for consumer-owned review UI.
-    const runRevisionKind = (run as { revision?: { kind?: string } }).revision?.kind;
-    if (revisionIsOmitted(runRevisionKind, environment.showTrackedChanges)) {
+    if (runIsOmitted(run as { revision?: { kind?: string } }, environment.showTrackedChanges)) {
       continue;
     }
     const joinFromPreviousNoBreakHyphen = joinNextVisibleText;

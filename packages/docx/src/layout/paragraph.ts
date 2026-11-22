@@ -32,7 +32,7 @@ import { referenceFontDecorationMetrics } from '../reference-font-line-metrics.j
 import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
-import { revisionIsOmitted } from './revision-visibility.js';
+import { runIsOmitted } from './revision-visibility.js';
 import { wordArabicTextKerned, wordEastAsianAutoSpaceJustifiedMaximumPt, wordKerningApplies, wordLineEndSpaceHangs, wordRtlLineEndSpaceHangs, wordSoftLineJustifiesAtSpacesOnly } from './line-compatibility.js';
 import type { LineGapPlan } from '../line-breaker/line-gaps.js';
 import { distributeLineSlack as distributeProportionalSlack, enumerateGaps, graphemeClusterOffsets, isSeaGraphemeExtend, type LineGap } from '@silurus/ooxml-core';
@@ -3948,8 +3948,7 @@ function logicalOccurrenceMap(
     // Canonical sequence offsets cover displayed text only. Falling back to
     // omitted source lengths would shift a later real-format sequence when
     // the preceding visible text is partitioned into different source runs.
-    const kind = (run as { revision?: { kind?: string } }).revision?.kind;
-    if (revisionIsOmitted(kind, showTrackedChanges)) return 0;
+    if (runIsOmitted(run as { revision?: { kind?: string } }, showTrackedChanges)) return 0;
     const measuredLength = measuredLengths.get(runIndex);
     if (measuredLength !== undefined) return measuredLength;
     if (run.type === 'text') return run.text.length;

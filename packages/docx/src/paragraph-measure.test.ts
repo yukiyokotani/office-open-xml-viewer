@@ -1929,6 +1929,16 @@ describe('WORD_ANCHOR_HOST_NO_LINE_METRIC empty equivalent ignores hidden conten
     );
     return measured.contentEndYPt - measured.contentStartYPt;
   };
+  it.each([
+    ['inline picture', { type: 'image', imagePath: 'p.png', mimeType: 'image/png', widthPt: 20, heightPt: 30,
+      anchor: false, anchorXPt: 0, anchorYPt: 0, anchorXFromMargin: false, anchorYFromPara: false }],
+    ['line break', { type: 'break', breakType: 'line' }],
+    ['math', { type: 'math', nodes: [{ kind: 'run', text: 'x' }], display: false, fontSize: 30 }],
+  ])('measures an anchor beside a deleted %s as the empty mark in the final view', (_, run) => {
+    const deletedRun = { ...run, revision: { kind: 'deletion', author: 'A' } } as unknown as DocParagraph['runs'][number];
+    expect(advance([host, deletedRun], 20)).toBe(advance([], 20));
+  });
+
   it('measures an anchor beside deleted larger text as the empty mark in the final view', () => {
     expect(advance([host, deleted('Big', 40)], 11)).toBe(advance([], 11));
   });

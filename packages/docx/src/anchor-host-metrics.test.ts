@@ -231,6 +231,39 @@ describe('floating drawing anchor-host metrics', () => {
       expect(reads).toBeLessThan(runs.length * 50);
     });
 
+    // The classification and the segment builder share runIsOmitted: a run
+    // the view omits emits nothing and is no content, whatever its type.
+    describe('revision-omitted runs of every type', () => {
+      const deletion = { revision: { kind: 'deletion', author: 'A' } };
+      const insertion = { revision: { kind: 'insertion', author: 'A' } };
+      const nonText: readonly [string, DocRun][] = [
+        ['inline picture', picture],
+        ['field', { type: 'field', fieldType: 'page', instruction: 'PAGE', fallbackText: '9', fontSize: 10,
+          fontFamily: 'Arial', bold: false, italic: false, underline: false, strikethrough: false, color: null,
+          vertAlign: null } as unknown as DocRun],
+        ['math', { type: 'math', nodes: [{ kind: 'run', text: 'x' }], display: false, fontSize: 10 } as unknown as DocRun],
+        ['line break', { type: 'break', breakType: 'line' } as DocRun],
+        ['text', textRun('Gone')],
+      ];
+      it.each(nonText)('omits a deleted %s in the final view and keeps it in the markup view', (_, run) => {
+        const deleted = { ...run, ...deletion } as DocRun;
+        const final = buildSegments([deleted], { pageIndex: 0, totalPages: 1, showTrackedChanges: false });
+        const markup = buildSegments([deleted], { pageIndex: 0, totalPages: 1, showTrackedChanges: true });
+        expect(final).toHaveLength(0);
+        expect(markup.length).toBeGreaterThan(0);
+        expect(isAnchorOnlyParagraph([anchorHost(), deleted] as never, false)).toBe(true);
+        expect(isAnchorOnlyParagraph([anchorHost(), deleted] as never, true)).toBe(false);
+      });
+      it.each(nonText)('keeps an inserted %s in both views', (_, run) => {
+        const inserted = { ...run, ...insertion } as DocRun;
+        for (const view of [false, true]) {
+          expect(buildSegments([inserted], { pageIndex: 0, totalPages: 1, showTrackedChanges: view }).length)
+            .toBeGreaterThan(0);
+          expect(isAnchorOnlyParagraph([anchorHost(), inserted] as never, view)).toBe(false);
+        }
+      });
+    });
+
     it('classifies a paragraph displaying only floating drawings (isAnchorOnlyParagraph)', () => {
       const deleted = { ...textRun('Gone'), revision: { kind: 'deletion', author: 'A' } } as DocRun;
       const softHyphen = textRun('\u00AD');

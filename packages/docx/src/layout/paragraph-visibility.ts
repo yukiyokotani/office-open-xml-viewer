@@ -1,5 +1,5 @@
 import type { DocParagraph } from '../types.js';
-import { revisionIsOmitted } from './revision-visibility.js';
+import { runIsOmitted } from './revision-visibility.js';
 
 /**
  * A paragraph whose mark is vanished (ECMA-376 §17.3.2.41 on the paragraph
@@ -44,6 +44,9 @@ export function isAnchorOnlyParagraph(
 ): boolean {
   let anchored = false;
   for (const run of runs) {
+    // A run the view omits emits nothing, whatever its type (the segment
+    // builder's own predicate).
+    if (runIsOmitted(run, showTrackedChanges)) continue;
     if (run.type === 'anchorHost') {
       if (run.listLabel !== undefined || run.__listLabel !== undefined) return false;
       anchored = true;
@@ -53,10 +56,7 @@ export function isAnchorOnlyParagraph(
     if (run.type === 'shape' && run.inline !== true) continue;
     if (run.type === 'unavailableDrawing'
       && (run.anchorAcquisitionInput !== undefined || run.__anchorAcquisition !== undefined)) continue;
-    if (run.type === 'text') {
-      if (revisionIsOmitted(run.revision?.kind, showTrackedChanges)) continue;
-      if ((run.text ?? '').replace(/\u00AD/g, '') === '') continue;
-    }
+    if (run.type === 'text' && (run.text ?? '').replace(/\u00AD/g, '') === '') continue;
     return false;
   }
   return anchored;
