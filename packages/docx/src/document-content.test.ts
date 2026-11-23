@@ -72,6 +72,25 @@ describe('docx rendered text inventory', () => {
     }
   });
 
+  it('demands the complex-script face a ruby guide run inherits from its base, in the guide\'s variant', () => {
+    // The guide run names no faces: it is shaped in the base run's
+    // complex-script face, with its own bCs.
+    const none = { ascii: null, highAnsi: null, eastAsia: null, complexScript: null };
+    const doc = documentWithRun({
+      type: 'text', text: '漢', fontSize: 10, fontFamily: 'BaseFace', fontFamilyCs: 'BaseComplex',
+      ruby: { text: 'سلام', fontSizePt: 5 },
+      __typographyAcquisition: { ruby: { guideRuns: [{
+        text: 'سلام', fontFamily: null, fonts: none, fontSizePt: 5, bold: false, italic: false,
+        boldCs: true, italicCs: false, rtl: true, cs: false, fontHint: null, color: null, language: null,
+      }] } },
+    });
+    for (const collection of ['font-demand', 'native-preflight'] as const) {
+      const usages = [...docxRenderedTextUsages(doc, collection)]
+        .filter((usage) => usage.rubyGuide && usage.fontFamilies.includes('BaseComplex'));
+      expect(usages.map((usage) => [usage.bold, usage.italic]), collection).toEqual([[true, false]]);
+    }
+  });
+
   it('preloads an inline drawing run face even when its text box has no text', () => {
     const doc = documentWithRun({ type: 'shape', inline: true, textBlocks: [],
       __inlineObjectFontFacts: { fontSize: 30, fontFamily: 'Courier New', bold: true } });

@@ -1638,11 +1638,19 @@ export function planLine(input: PlanLineInput): LineLayout {
     const hasTerminalSpace = hasLogicalTailSpace(segments);
     if (!hasTerminalSpace || terminalBudgetKnown) preparedSourceCells = prepareSourceSpaceCells(segments);
   }
-  const descriptors = segments.map(segment => segment.kind === 'tab'
-    ? { isTab: true }
-    : segment.kind === 'text'
-      ? { text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN }
-      : {});
+  // WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is one unit of the line's
+  // reordering (bidi-line.ts withRubyCellIsolates). Its pieces follow one
+  // another from the piece that carries the guide.
+  let rubyCell = 0;
+  const descriptors = segments.map(segment => {
+    if (segment.kind === 'tab') return { isTab: true };
+    if (segment.kind !== 'text') return {};
+    if (segment.ruby || !segment.rubyBasePiece) rubyCell += 1;
+    return {
+      text: segment.text, rtl: segment.rtl, digitsAsAN: segment.digitsAsAN,
+      ...(segment.rubyBasePiece ? { rubyCell } : {}),
+    };
+  });
   const hasChargedNativeSpace = chargedNativeUnits
     && segments.some(segment => segment.kind === 'text' && segment.text.includes(' '));
   if (hasChargedNativeSpace && !preparedSourceCells) {

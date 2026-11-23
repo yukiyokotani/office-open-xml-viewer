@@ -61,9 +61,95 @@ export const resolveNativeSourceLevelUnits = (segments: readonly unknown[], base
 export const lineOrderPolicy = (model: LineOrderModel): SegmentLineBidiOptions =>
   model === 'word' ? authoredOptions : options;
 
+/** The order, from the start of the line, in which consecutive runs stand
+ * on their own: a ruby cell's base runs, or a ruby guide's shaped runs.
+ * It is the line's own resolution (UAX #9 over the characters of the joined
+ * text, with the run overrides of §17.3.2.30), so European digits keep
+ * their direction in a right-to-left run and run seams matter only where
+ * direction does. The runs are resolved by themselves, in the paragraph's
+ * base direction, whatever stands beside them on the line. */
+export function runDisplayOrder(
+  runs: readonly Readonly<{ text: string; rtl?: boolean; digitsAsAN?: boolean }>[],
+  baseRtl: boolean,
+): readonly number[] {
+  if (runs.length <= 1) return runs.map((_, index) => index);
+  // Only the facts of direction: a base run's cell identity must not make
+  // the cell an isolate of itself.
+  return computeSegmentLineVisualOrder(
+    runs.map((run) => ({ text: run.text, rtl: run.rtl === true, digitsAsAN: run.digitsAsAN === true })),
+    baseRtl, options,
+  ).order;
+}
+
+/** The ruby cell a line item belongs to: the breaker's cell, or the cell
+ * identity a placement descriptor carries (`rubyCell`). */
+const rubyCellOfItem = (segment: unknown): unknown =>
+  (segment as { rubyGroup?: unknown; rubyCell?: unknown }).rubyGroup
+    ?? (segment as { rubyCell?: unknown }).rubyCell;
+
+/** WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is one unit of its line, so it is
+ * one unit of the line's reordering too. A cell whose runs are all of one
+ * direction stays together under UAX #9 as it is. A cell of mixed direction
+ * would be parted when right-to-left text beside it joined its
+ * right-to-left runs, so it is reordered as an isolate: an object
+ * (U+FFFC) in the line, placed by the text around it, with its own runs in
+ * their order inside it (runDisplayOrder, the order its widening is padded by).
+ * Library policy: the specification does not say how a ruby base takes part
+ * in bidirectional reordering. */
+function withRubyCellIsolates(
+  segments: readonly unknown[],
+  baseRtl: boolean,
+  compute: (segments: readonly unknown[]) => LineVisualOrder,
+): LineVisualOrder {
+  // Lines without ruby, nearly all of them, are resolved as they are.
+  let hasCell = false;
+  for (let index = 0; index < segments.length && !hasCell; index += 1) {
+    hasCell = rubyCellOfItem(segments[index]) !== undefined;
+  }
+  if (!hasCell) return compute(segments);
+  const isRtl = (segment: unknown) => (segment as { rtl?: unknown }).rtl === true;
+  // Each reduced item: the original indexes it stands for.
+  const groups: number[][] = [];
+  let isolated = false;
+  for (let index = 0; index < segments.length;) {
+    const cell = rubyCellOfItem(segments[index]);
+    let end = index + 1;
+    while (cell !== undefined && end < segments.length && rubyCellOfItem(segments[end]) === cell) end += 1;
+    const mixed = end - index > 1
+      && segments.slice(index, end).some((segment) => isRtl(segment) !== isRtl(segments[index]));
+    if (mixed) {
+      groups.push(Array.from({ length: end - index }, (_, offset) => index + offset));
+      isolated = true;
+    } else {
+      for (let at = index; at < end; at += 1) groups.push([at]);
+    }
+    index = end;
+  }
+  if (!isolated) return compute(segments);
+  const reduced = groups.map((group) => (group.length === 1 ? segments[group[0]!] : { text: '\uFFFC' }));
+  const visual = compute(reduced);
+  const order: number[] = [];
+  const rtl: boolean[] = new Array<boolean>(segments.length);
+  visual.rtl.forEach((value, reducedIndex) => {
+    const group = groups[reducedIndex]!;
+    if (group.length === 1) rtl[group[0]!] = value;
+    else for (const index of group) rtl[index] = isRtl(segments[index]);
+  });
+  for (const reducedIndex of visual.order) {
+    const group = groups[reducedIndex]!;
+    if (group.length === 1) order.push(group[0]!);
+    else {
+      const pieces = group.map((index) => segments[index] as { text: string; rtl?: boolean; digitsAsAN?: boolean });
+      for (const at of runDisplayOrder(pieces, baseRtl)) order.push(group[at]!);
+    }
+  }
+  return { order, rtl };
+}
+
 export const computeLineVisualOrder = (
   segments: readonly unknown[], baseRtl: boolean, model: LineOrderModel = 'line-level',
-): LineVisualOrder => computeSegmentLineVisualOrder(segments, baseRtl, lineOrderPolicy(model));
+): LineVisualOrder => withRubyCellIsolates(segments, baseRtl, (items) =>
+  computeSegmentLineVisualOrder(items, baseRtl, lineOrderPolicy(model)));
 
 /** Final acquired source cells only; acquisition's coarse memo and decimal
  * anchors keep their established API/lifetime and native certificates. The
@@ -87,6 +173,8 @@ export type LineOrderResolver = (
 type OrderSegmentFacts = Readonly<{
   text: string | undefined; tab: boolean; rtl: boolean; digits: boolean;
   isolate: 'ltr' | 'rtl' | undefined;
+  /** The ruby cell the segment is a piece of (withRubyCellIsolates). */
+  cell: unknown;
 }>;
 const orderText = (segment: unknown): string | undefined => {
   const text = (segment as { text?: unknown }).text;
@@ -130,7 +218,8 @@ export function createLineOrderResolver(): LineOrderResolver {
         return fact.text === orderText(segment) && fact.tab === (policy.isTab?.(segment) === true)
           && fact.rtl === (policy.isRtlMarked?.(segment) === true)
           && fact.digits === (policy.digitsAsAN?.(segment) === true)
-          && fact.isolate === policy.isolateDirection?.(segment);
+          && fact.isolate === policy.isolateDirection?.(segment)
+          && fact.cell === rubyCellOfItem(segment);
       })) return entry.visual;
     entry = undefined;
     // These new primitive snapshots never escape this closure or get mutated.
@@ -139,9 +228,11 @@ export function createLineOrderResolver(): LineOrderResolver {
       text: orderText(segment), tab: policy.isTab?.(segment) === true,
       rtl: policy.isRtlMarked?.(segment) === true, digits: policy.digitsAsAN?.(segment) === true,
       isolate: policy.isolateDirection?.(segment),
+      cell: rubyCellOfItem(segment),
     }));
-    const computed = certifyNativeSegmentLineOrder(segments, baseRtl, policy)
-      ?? computeLineVisualOrder(segments, baseRtl, model);
+    const computed = withRubyCellIsolates(segments, baseRtl, (items) =>
+      certifyNativeSegmentLineOrder(items, baseRtl, policy)
+        ?? computeSegmentLineVisualOrder(items, baseRtl, policy));
     // Copy before freezing: a third-party engine may own its returned array.
     const visual = Object.freeze({ order: Object.freeze([...computed.order]), rtl: Object.freeze([...computed.rtl]) });
     entry = sameEngineState(active, lineOrderEngineIdentity())

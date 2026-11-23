@@ -1360,6 +1360,62 @@ describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 13)', () =
   });
 });
 
+describe('ruby cells in bidirectional lines (WORD_RUBY_ALIGN_PLACEMENT)', () => {
+  it('keeps a ruby base of mixed direction together beside right-to-left text', () => {
+    const ruby = { text: 'かきくけ', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    for (const [before, after] of [[true, false], [false, true], [true, true]]) {
+      const line = layoutParagraph([
+        { text: '前' },
+        ...(before ? [{ text: 'שלום', extra: { rtl: true } }] : []),
+        { text: 'אב', ruby, extra: { rtl: true } },
+        { text: 'XY', extra: { rubyBaseContinuation: true } },
+        ...(after ? [{ text: 'עברית', extra: { rtl: true } }] : []),
+        { text: '後' },
+      ]).lines[0]!;
+      const placed = textPlacements(line).sort((left, right) => left.origin.xPt - right.origin.xPt);
+      const cell = placed.map((entry, index) => (entry.rubyBasePiece ? index : -1)).filter((index) => index >= 0);
+      // The two pieces stand side by side, nothing between them.
+      expect(cell, `${before} ${after}`).toHaveLength(2);
+      expect(cell[1]! - cell[0]!, `${before} ${after}`).toBe(1);
+      // The guide stays over them.
+      const pieces = placed.filter((entry) => entry.rubyBasePiece);
+      const startPt = Math.min(...pieces.map((entry) => entry.bounds.xPt));
+      const endPt = Math.max(...pieces.map((entry) => entry.bounds.xPt + entry.bounds.widthPt));
+      for (const op of pieces.find((entry) => entry.ruby)!.ruby!.paintOps) {
+        expect(op.origin.xPt, `${before} ${after}`).toBeGreaterThanOrEqual(startPt - 1e-6);
+        expect(op.origin.xPt + 5, `${before} ${after}`).toBeLessThanOrEqual(endPt + 1e-6);
+      }
+    }
+  });
+});
+
+describe('ruby cell geometry (WORD_RUBY_ALIGN_PLACEMENT, review round 14)', () => {
+  it('keeps a right-to-left letter before a mixed ruby base out of the base', () => {
+    const ruby = { text: 'abcdefghijklmno', fontSizePt: 5, hpsRaisePt: 9, align: 'center' };
+    const line = layoutParagraph([
+      { text: 'ק', extra: { rtl: true } },
+      { text: 'אב', ruby, extra: { rtl: true } },
+      { text: 'XY', extra: { rubyBaseContinuation: true } },
+    ]).lines[0]!;
+    const order = textPlacements(line).sort((left, right) => left.origin.xPt - right.origin.xPt).map((entry) => entry.text);
+    expect(order).toEqual(['ק', 'אב', 'XY']);
+  });
+
+  it('orders a right-to-left guide by its characters, whatever formatting divides it', () => {
+    const fonts = { ascii: 'Latin', highAnsi: 'Latin', eastAsia: 'East', complexScript: 'Complex' };
+    const read = (guideRuns: readonly GuideRun[]) => {
+      const ruby = { text: guideRuns.map((run) => run.text).join(''), fontSizePt: 5, hpsRaisePt: 9, guideRuns };
+      const line = layoutParagraph([{ text: '漢字漢字', ruby }]).lines[0]!;
+      return [...textPlacements(line).find((entry) => entry.ruby)!.ruby!.paintOps]
+        .sort((left, right) => left.origin.xPt - right.origin.xPt).map((op) => op.text).join('');
+    };
+    // §17.3.2.30: European digits keep their direction in a right-to-left run.
+    expect(read([{ text: '12', fonts, rtl: true }, { text: '34', fonts, rtl: true, boldCs: true }])).toBe('1234');
+    // Letters of two right-to-left runs still stand in reverse.
+    expect(read([{ text: 'سل', fonts, rtl: true }, { text: 'ام', fonts, rtl: true, boldCs: true }])).toBe('امسل');
+  });
+});
+
 describe('grapheme clusters at kinsoku breaks (§17.3.1.16, UAX #29)', () => {
   const lineTexts = (lines: readonly LineLayout[]) =>
     lines.map((line) => textPlacements(line).map((entry) => entry.text).join(''));
@@ -1507,7 +1563,9 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
           sources.push({ run: { type: 'tab' }, text: '\t', sizePt: 0 });
           leaderAllowed = false;
         }
-        if (family === 'bidi' && next() < 0.4) {
+        // Right-to-left text beside the cells: in the rtlBase family it
+        // would join a cell's right-to-left runs when the line is reordered.
+        if ((family === 'bidi' || family === 'rtlBase') && next() < 0.4) {
           text(pick(['שלום', 'עברית', 'אב']), { rtl: true });
           leaderAllowed = false;
           continue;
@@ -1578,7 +1636,8 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
       const length = family === 'guideRuns' ? 12 + Math.floor(next() * 30)
         : 1 + Math.floor(next() * (rtlBase ? 16 : 6));
       const letters = family === 'guideFaces'
-        ? Array.from({ length }, () => (next() < 0.4 ? pick([...'ABC']) : next() < 0.3 ? pick([...'سلم']) : pick([...'あいうえお']))).join('')
+        // Latin, kana, and Arabic letters and digits (in right-to-left runs).
+        ? Array.from({ length }, () => (next() < 0.4 ? pick([...'ABC']) : next() < 0.4 ? pick([...'سلم1234']) : pick([...'あいうえお']))).join('')
         : family === 'guideRuns' ? 'a'.repeat(length)
           : family === 'graphemes'
             // Kana with a combining voiced mark, kanji with a variation selector.
@@ -1591,7 +1650,7 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         ? [...letters].reduce<GuideRun[]>((runs, letter) => {
           // One to three letters per run, each run with its own slots.
           // An Arabic letter is in a right-to-left run of its own controls.
-          const arabic = /\p{Script=Arabic}/u.test(letter);
+          const arabic = /\p{Script=Arabic}|\d/u.test(letter);
           if (runs.length === 0 || next() < 0.6 || arabic !== (runs.at(-1)!.rtl === true)) {
             const ascii = pick(GUIDE_FACES);
             runs.push({
@@ -1745,7 +1804,14 @@ describe('ruby cells in generated paragraphs (WORD_RUBY_ALIGN_PLACEMENT)', () =>
         ops.forEach((op, index) => {
           const previous = ops[index - 1];
           if (previous && faceAt[letter]!.rtl && faceAt[letter - 1]!.rtl) {
-            expect(op.origin.xPt, `${cell.guide} order ${index} of ${context}`).toBeLessThan(previous.origin.xPt);
+            // §17.3.2.30: digits keep their direction, so two groups of
+            // digits stand in reading order; letters stand in reverse.
+            const digits = [previous, op].map((entry) => /^\d+$/.test(entry.text));
+            if (digits[0] && digits[1]) {
+              expect(op.origin.xPt, `${cell.guide} digits ${index} of ${context}`).toBeGreaterThan(previous.origin.xPt);
+            } else if (!digits[0] && !digits[1]) {
+              expect(op.origin.xPt, `${cell.guide} order ${index} of ${context}`).toBeLessThan(previous.origin.xPt);
+            }
           }
           letter += [...op.text].length;
         });

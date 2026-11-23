@@ -1,5 +1,6 @@
 import { canvasFontString, graphemeClusterOffsets } from '@silurus/ooxml-core';
 import { verticalDrawMode } from '../vertical-text.js';
+import { runDisplayOrder } from '../bidi-line.js';
 import type { VerticalGlyphMeasurementService } from '../layout/measurement-capabilities.js';
 import { independentTextShapeRequest } from '../layout/text.js';
 import {
@@ -219,24 +220,6 @@ interface GuideSpan {
 /** A guide run as it is shaped: its text, and the weight and slant its
  * text takes. */
 type ShapedGuideRun = Pick<RubyGuideRunFace, 'text' | 'fonts' | 'bold' | 'italic' | 'rtl' | 'complexScript' | 'fontHint'>;
-
-/** UAX #9 rule L2 over whole runs: the order, from the start of the line, in
- * which runs of the given directions stand in a paragraph of the given base
- * direction. A right-to-left run is at level 1; a left-to-right run at
- * level 0, or 2 inside a right-to-left paragraph. */
-function displayOrder(rtl: readonly boolean[], baseRtl: boolean): number[] {
-  const levels = rtl.map((run) => (run ? 1 : baseRtl ? 2 : 0));
-  const order = levels.map((_, index) => index);
-  for (let level = Math.max(0, ...levels); level >= 1; level -= 1) {
-    for (let start = 0; start < order.length;) {
-      let end = start;
-      while (end < order.length && levels[order[end]!]! >= level) end += 1;
-      if (end > start) order.splice(start, end - start, ...order.slice(start, end).reverse());
-      start = Math.max(end, start + 1);
-    }
-  }
-  return order;
-}
 
 /** Each position's rank among `offsets`, from the start of the line. */
 function ranksOf(offsets: readonly number[]): number[] {
@@ -479,13 +462,15 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
     spanPenPx += spanCells.reduce((sum, { cell }) => sum + cell.advancePt, 0);
     return spanCells;
   })) : undefined;
-  // A horizontal guide's shaped runs stand in bidirectional order (UAX #9
-  // L2): right-to-left runs of different formatting are separate shapes,
-  // and the later one stands before the earlier one on the line.
+  // A horizontal guide's shaped runs stand in bidirectional order
+  // (runDisplayOrder, resolved over the guide's characters): right-to-left
+  // letters in runs of different formatting are separate shapes, and the
+  // later one stands before the earlier one on the line, while digits keep
+  // their order.
   let runPenPx = 0;
   const shapePenPx = new Map<number, number>();
   if (!cells && shapes) {
-    for (const index of displayOrder(shapes.map((entry) => entry.rtl), group.baseRtl === true)) {
+    for (const index of runDisplayOrder(shapes, group.baseRtl === true)) {
       shapePenPx.set(index, runPenPx);
       runPenPx += shapes[index]!.shape.advancePt;
     }
@@ -542,13 +527,23 @@ export function rubyCellGeometry(s: LayoutTextSeg, inputs: RubyCellInputs): Ruby
 }
 
 /** The pieces of the cell that stand first and last on the line. The
- * base's runs are reordered by direction (UAX #9 L2) like any text: in a
- * left-to-right paragraph consecutive right-to-left pieces stand in reverse,
- * so the last of them leads, while a left-to-right piece keeps its place. */
+ * base's runs are reordered by direction like any text (runDisplayOrder):
+ * in a left-to-right paragraph consecutive right-to-left pieces stand in
+ * reverse, so the last of them leads, while a left-to-right piece or a
+ * number keeps its place. */
 function edgePieces(group: RubyGroup): Readonly<{ leading: number; trailing: number }> {
-  const order = displayOrder(group.pieces.map((piece) => piece.rtl === true), group.baseRtl === true);
-  return { leading: order[0] ?? 0, trailing: order.at(-1) ?? 0 };
+  let edges = cellEdges.get(group);
+  if (!edges) {
+    const order = runDisplayOrder(group.pieces, group.baseRtl === true);
+    edges = { leading: order[0] ?? 0, trailing: order.at(-1) ?? 0 };
+    cellEdges.set(group, edges);
+  }
+  return edges;
 }
+
+/** A cell's pieces are fixed once its pass has formed it (prepareBreakQueue),
+ * so their order is resolved once per cell, not per measurement. */
+const cellEdges = new WeakMap<RubyGroup, Readonly<{ leading: number; trailing: number }>>();
 
 /** The share of the cell's widening this piece advances by: the base offset
  * before the piece that leads the cell on the line, the rest after the piece

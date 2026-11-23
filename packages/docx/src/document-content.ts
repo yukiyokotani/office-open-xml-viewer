@@ -237,12 +237,17 @@ function* runUsages(run: DocRun, collection: FontCollection): Generator<DocxRend
         italic: guide.italic,
         rubyGuide: true,
       };
-      if (fonts.complexScript) {
+      // A slot the guide run leaves unnamed is the base run's (ruby-cell.ts
+      // guideShapes): a complex-script guide run without rFonts is shaped in
+      // the base's complex-script face.
+      const complexScript = fonts.complexScript
+        ?? (guide.rtl === true || guide.cs === true ? text.fontFamilyCs : undefined);
+      if (complexScript) {
         // §17.3.2.2 / §17.3.2.17: the guide's complex-script text is shaped
         // with bCs and iCs (ruby-cell.ts shapedGuideRuns), independent of
         // b and i, so its face is demanded in that variant.
         yield { text: guide.text, eastAsiaLanguage: text.langEastAsia,
-          fontFamilies: [fonts.complexScript], bold: guide.boldCs === true, italic: guide.italicCs === true,
+          fontFamilies: [complexScript], bold: guide.boldCs === true, italic: guide.italicCs === true,
           rubyGuide: true };
       }
     }
