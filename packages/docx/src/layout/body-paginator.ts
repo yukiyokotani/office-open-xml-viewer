@@ -2846,6 +2846,10 @@ function* paginateBodyPassSteps(
       // Space after left inside the last fragment's flow charge, when the
       // region bottom cut part of it (LIBREOFFICE_PROPORTIONAL_LINE_PAGE_FIT).
       let cutSpaceAfterPt = 0;
+      // WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL: the paragraph's last accepted
+      // line starts its region and keeps a crossing float, so the page ends
+      // after it, before the next block.
+      let hostFloatRegionEndsAfterParagraph = false;
       while (cursor) {
         const fragmentStartKey = paragraphFragmentStartKey(cursor);
         let location = acquisitionLocation(state);
@@ -3150,8 +3154,9 @@ function* paginateBodyPassSteps(
         // when it then stays below its anchor line; otherwise its anchor line
         // moves on, and the lines left behind are acquired again without the
         // moved floats. A line that starts its region stays, its crossing
-        // floats lose their text wrap, and the region ends after it.
+        // floats lose their text wrap, and the page ends after it.
         let hostFloatLineBreak: number | undefined;
+        let hostFloatKeptAtRegionStart = false;
         if (hostFloatDeferralRegion && acquired.hostFloatsByLine) {
           const firstLineMayMove = pageCanGainSpaceByRelocating();
           const initial = acquired;
@@ -3206,6 +3211,7 @@ function* paginateBodyPassSteps(
             if (!changed) break;
             acquired = reacquire();
           }
+          hostFloatKeptAtRegionStart = stuck.size > 0;
           if (stuck.size > 0 && acquired.layout.lines.length > 1) {
             hostFloatLineBreak = Math.min(hostFloatLineBreak ?? 1, 1);
           }
@@ -3341,9 +3347,12 @@ function* paginateBodyPassSteps(
           if (acceptedDelta) session.commitFlowRegistryDelta(acceptedDelta);
         }
         cursor = selected.nextCursor;
+        hostFloatRegionEndsAfterParagraph = hostFloatKeptAtRegionStart && cursor === null;
         if (cursor) {
           yield* commitTransition(
-            advanceColumnOrPage(state.flow, 'overflow'),
+            hostFloatKeptAtRegionStart
+              ? advanceToPage(state.flow, state.flow.section, 'overflow')
+              : advanceColumnOrPage(state.flow, 'overflow'),
             entryIndex,
           );
         }
@@ -3354,6 +3363,15 @@ function* paginateBodyPassSteps(
         previousParagraph = cutSpaceAfterPt > 0
           ? Object.freeze({ ...block, spaceAfterPt: Math.max(0, block.spaceAfterPt - cutSpaceAfterPt) })
           : block;
+      }
+      if (hostFloatRegionEndsAfterParagraph) {
+        let nextIndex = entryIndex + 1;
+        while (input.sequence[nextIndex]?.kind === 'consume-source') nextIndex += 1;
+        const next = input.sequence[nextIndex];
+        // An authored break or a new section ends the region anyway.
+        if (next?.kind === 'body-block' || next?.kind === 'adjacent-table-group') {
+          yield* commitTransition(advanceToPage(state.flow, state.flow.section, 'overflow'), entryIndex + 1);
+        }
       }
     } else {
       previousParagraph = null;

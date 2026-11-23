@@ -695,6 +695,19 @@ describe('WORD_HOST_FLOAT_BOTTOM_MARGIN_DEFERRAL', () => {
     expect(placed.get('P000.2')).toMatchObject({ page: 2, yPt: 72 });
     expect(placed.get('P001')?.page).toBe(2);
   });
+  it('ends the page after a one-line page-top paragraph that keeps its crossing float', () => {
+    const at = (mode: number, columns = 1) => paginate({
+      0: { anchors: [{ wrap: 'square', relativeFrom: 'paragraph', yPt: 1, widthPt: 100, heightPt: 680 }] },
+    }, { count: 3, mode, columns });
+    const placed = at(15);
+    expect(placed.get('P000')).toMatchObject({ page: 1, xPt: 72 });
+    expect(placed.get('P001')).toMatchObject({ page: 2, yPt: 72 });
+    expect(placed.get('P002')).toMatchObject({ page: 2, yPt: 96 });
+    // In two columns the next block still starts the next page, not column 2.
+    expect(at(15, 2).get('P001')).toMatchObject({ page: 2, yPt: 72, xPt: 72 });
+    // Mode 14 keeps the following paragraph beside the overhanging float.
+    expect(at(14).get('P001')).toMatchObject({ page: 1, yPt: 96, xPt: 172 });
+  });
 });
 
 describe('hostFloatBottomMarginPlan', () => {
