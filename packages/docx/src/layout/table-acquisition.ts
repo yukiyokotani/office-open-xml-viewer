@@ -706,7 +706,9 @@ export function acquireRetainedTable<State>(
         bottom: cell.marginBottom ?? table.cellMarginBottom,
         left: cell.marginLeft ?? table.cellMarginLeft,
       };
-      const insetRules = member.contentInset === true ? sideRules()[rowIndex]?.get(columnStart) : undefined;
+      // A spaced cell has no collapsed rule: its own rules are inside it.
+      const insetRules = member.contentInset === true
+        ? sideRules()[rowIndex]?.get(columnStart) ?? { leftPt: 0, rightPt: 0 } : undefined;
       const omittedPt = rowFormat?.cells[cellIndex]?.horizontalMarginsOmitted === true ? 0.5 : 0;
       const formatMargins = insetRules ? {
         ...authoredMargins,
@@ -956,7 +958,7 @@ export function acquireRetainedTable<State>(
       exceptionBorders: rowFormat?.exception?.borders
         ? retainedEdges(rowFormat.exception.borders)
         : null,
-      alignment: physicalAlignment(rowFormat?.justification ?? table.jc, bidiVisual),
+      alignment: physicalAlignment(member.contentResolution === true ? table.jc : rowFormat?.justification ?? table.jc, bidiVisual),
       // Carry one signed leading-axis translation into the sole table layout
       // algorithm. End alignment uses each row's first margin; leading alignment
       // keeps the first-row anchor even when subsequent margins differ.

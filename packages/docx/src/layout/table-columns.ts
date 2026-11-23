@@ -379,9 +379,14 @@ export function measureTableIntrinsicWidths(
     // The nested table holds its content at least and, unconstrained, the
     // width it resolves to; a percentage of its container asks for nothing.
     const minWidthPt = resolved.minimums.reduce((sum, width) => sum + width, 0);
-    return Object.freeze({ minWidthPt, maxWidthPt: Math.max(minWidthPt,
-      input.tablePreferredWidthRelative === true ? contentResolutionDesiredWidthPt(resolved)
-        : input.tablePreferredWidthPt ?? contentResolutionDesiredWidthPt(resolved)) });
+    // An absolute preferred width is the table's width, whatever its cell:
+    // it does not shrink into it.
+    if (input.tablePreferredWidthPt !== null && input.tablePreferredWidthRelative !== true) {
+      const widthPt = Math.max(minWidthPt, input.tablePreferredWidthPt);
+      return Object.freeze({ minWidthPt: widthPt, maxWidthPt: widthPt });
+    }
+    const desiredPt = contentResolutionDesiredWidthPt(resolved);
+    return Object.freeze({ minWidthPt, maxWidthPt: Number.isFinite(desiredPt) ? Math.max(minWidthPt, desiredPt) : minWidthPt });
   }
   const minimums = new Array<number>(columnCount).fill(0);
   const maximums = new Array<number>(columnCount).fill(0);
@@ -659,15 +664,14 @@ interface ContentResolutionColumns {
   readonly fractions: readonly number[];
   /** What each column's minimum holds beside its content. */
   readonly insets: readonly number[];
-  /** A column with a noWrap cell of preferred dxa width (§17.4.29). */
-  readonly protectedColumns: boolean;
+  /** The least table width its spanning cells over percentage columns ask for. */
+  readonly floorPt: number;
 }
 
 /**
  * WORD_AUTOFIT_CONTENT_RESOLUTION (table-compatibility.ts): the column
- * facts, or null for a structure outside the rule (skipped grid columns,
- * noWrap cells, percentage spans, percentages that leave nothing for the
- * other columns).
+ * facts, or null for a structure outside the rule (a spanning cell over
+ * percentage and other columns together).
  */
 function contentResolutionColumns(
   input: TableColumnLayoutInput,
@@ -679,64 +683,74 @@ function contentResolutionColumns(
   const dxa = new Array<number | null>(columnCount).fill(null);
   const fractions = new Array<number>(columnCount).fill(0);
   const insets = new Array<number>(columnCount).fill(0);
-  let protectedColumns = false;
   const spans: TableColumnCellConstraint[] = [];
+  // Skipped grid columns and rows of fewer cells constrain nothing: the
+  // cells that are there decide.
   for (const row of input.rows) {
-    if (row.before !== null || row.after !== null) return null;
-    // A row that leaves grid columns without a cell is outside the rule.
-    if (row.cells.reduce((sum, cell) => sum + cell.columnSpan, 0) !== columnCount) return null;
     for (const cell of row.cells) {
       if (cell.columnStart < 0 || cell.columnStart + cell.columnSpan > columnCount) return null;
-      // A noWrap cell without a dxa width already carries its unbroken
-      // content as its minimum; with one, §17.4.29 protects that width.
-      if (cell.noWrap === true && cell.preferredWidth?.kind === 'dxa') protectedColumns = true;
       if (cell.columnSpan !== 1) {
-        if (cell.preferredWidth?.kind === 'pct' || cell.noWrap === true) return null;
         spans.push(cell);
         continue;
       }
       const column = cell.columnStart;
-      const minimumPt = finiteNonNegative(cell.minContentWidthPt);
+      const preferredPt = cell.preferredWidth?.kind === 'dxa' ? finiteNonNegative(cell.preferredWidth.value) : null;
+      // §17.4.29: a noWrap cell keeps a dxa width; without one its minimum
+      // already is its content on one line.
+      const minimumPt = Math.max(finiteNonNegative(cell.minContentWidthPt),
+        cell.noWrap === true && preferredPt !== null ? preferredPt : 0);
       insets[column] = Math.max(insets[column]!, finiteNonNegative(cell.horizontalMarginsPt));
       minimums[column] = Math.max(minimums[column]!, minimumPt);
       contentMaximums[column] = Math.max(contentMaximums[column]!, minimumPt, finiteNonNegative(cell.maxContentWidthPt));
-      if (cell.preferredWidth?.kind === 'dxa') {
-        dxa[column] = Math.max(dxa[column] ?? 0, finiteNonNegative(cell.preferredWidth.value));
-      } else if (cell.preferredWidth?.kind === 'pct') {
+      if (preferredPt !== null) dxa[column] = Math.max(dxa[column] ?? 0, preferredPt);
+      else if (cell.preferredWidth?.kind === 'pct') {
         fractions[column] = Math.max(fractions[column]!, finiteNonNegative(cell.preferredWidth.value));
       }
     }
   }
-  const kinds = dxa.map((width, column) => (width !== null ? 'dxa' : fractions[column]! > 0 ? 'pct' : 'auto'));
+  // A percentage in any row makes the column a percentage column.
+  const kinds = dxa.map((width, column) => (fractions[column]! > 0 ? 'pct' : width !== null ? 'dxa' : 'auto'));
   const maximums = kinds.map((kind, column) => (kind === 'dxa'
     ? Math.max(dxa[column]!, minimums[column]!)
     : contentMaximums[column]!));
-  kinds.forEach((kind, column) => { if (kind !== 'pct') fractions[column] = 0; });
+  let floorPt = 0;
   spans.sort((left, right) => left.columnSpan - right.columnSpan);
   for (const cell of spans) {
     const start = cell.columnStart;
     const end = start + cell.columnSpan;
-    if (kinds.slice(start, end).includes('pct')) return null;
-    // A preferred width beyond the spanned columns goes to the last of them.
+    const requiredPt = finiteNonNegative(cell.minContentWidthPt);
+    const spanned = kinds.slice(start, end);
+    if (spanned.includes('pct')) {
+      // Over percentage columns the content asks the table for the width
+      // at which their shares hold it.
+      if (spanned.some((kind) => kind !== 'pct')) return null;
+      floorPt = Math.max(floorPt, requiredPt / spanSum(fractions, start, cell.columnSpan));
+      continue;
+    }
+    const share = (values: number[], targetPt: number, weights: readonly number[]): void => {
+      const weightPt = spanSum(weights, start, cell.columnSpan);
+      for (let column = start; column < end; column += 1) {
+        values[column] = Math.max(values[column]!, weightPt > EPSILON_PT
+          ? targetPt * weights[column]! / weightPt
+          : targetPt / cell.columnSpan);
+      }
+    };
+    // Content beyond the spanned columns is shared by minimum plus maximum.
+    if (requiredPt > spanSum(minimums, start, cell.columnSpan) + EPSILON_PT) {
+      share(minimums, requiredPt, minimums.map((minimum, column) => minimum + maximums[column]!));
+      for (let column = start; column < end; column += 1) maximums[column] = Math.max(maximums[column]!, minimums[column]!);
+    }
     if (cell.preferredWidth?.kind === 'dxa') {
+      // A preferred width beyond the spanned columns goes to the last of them.
       const excessPt = finiteNonNegative(cell.preferredWidth.value) - spanSum(maximums, start, cell.columnSpan);
       if (excessPt > EPSILON_PT) maximums[end - 1] = maximums[end - 1]! + excessPt;
-    }
-    // Content beyond the spanned columns is shared by minimum plus maximum.
-    const requiredPt = finiteNonNegative(cell.minContentWidthPt);
-    if (requiredPt > spanSum(minimums, start, cell.columnSpan) + EPSILON_PT) {
-      let weightPt = 0;
-      for (let column = start; column < end; column += 1) weightPt += minimums[column]! + maximums[column]!;
-      for (let column = start; column < end; column += 1) {
-        const sharePt = weightPt > EPSILON_PT
-          ? requiredPt * (minimums[column]! + maximums[column]!) / weightPt
-          : requiredPt / cell.columnSpan;
-        minimums[column] = Math.max(minimums[column]!, sharePt);
-        maximums[column] = Math.max(maximums[column]!, minimums[column]!);
-      }
+    } else {
+      // Without one, its one-line content beyond them is shared by maximum.
+      const contentPt = Math.max(requiredPt, finiteNonNegative(cell.maxContentWidthPt));
+      if (contentPt > spanSum(maximums, start, cell.columnSpan) + EPSILON_PT) share(maximums, contentPt, [...maximums]);
     }
   }
-  return { kinds, minimums, maximums, fractions, insets, protectedColumns };
+  return { kinds, minimums, maximums, fractions, insets, floorPt };
 }
 
 /** The width the table takes when nothing constrains it: every percentage
@@ -746,7 +760,7 @@ function contentResolutionDesiredWidthPt(columns: ContentResolutionColumns): num
   const { kinds, maximums, fractions } = columns;
   const fractionTotal = fractions.reduce((sum, fraction) => sum + fraction, 0);
   let otherPt = 0;
-  let desiredPt = 0;
+  let desiredPt = columns.floorPt;
   kinds.forEach((kind, column) => {
     if (kind === 'pct') desiredPt = Math.max(desiredPt, maximums[column]! / fractions[column]!);
     else otherPt += maximums[column]!;
@@ -783,12 +797,17 @@ function contentResolutionWidthsPt(input: TableColumnLayoutInput, columnCount: n
   const minimumPt = minimums.reduce((sum, width) => sum + width, 0);
   const ceilingPt = input.availableWidthPt === null ? Infinity
     : Math.max(0, finiteNonNegative(input.availableWidthPt) - finiteNonNegative(input.contentResolutionCeilingInsetPt));
-  const binds = minimumPt > ceilingPt + EPSILON_PT || (input.tablePreferredWidthPt === null
-    && contentResolutionDesiredWidthPt(columns) > ceilingPt + EPSILON_PT);
-  if (binds && input.contentResolutionCeilingEstablished === false) return null;
-  if (minimumPt > ceilingPt + EPSILON_PT) {
-    // The minima do not fit the ceiling: every column keeps what stands
-    // beside its content, and the content shares the rest in proportion.
+  // A preferred table width is kept whatever the ceiling; the ceiling holds
+  // an automatic table, and content that asks for more than either.
+  const preferredPt = input.tablePreferredWidthPt;
+  const wantedPt = Math.max(preferredPt ?? contentResolutionDesiredWidthPt(columns), columns.floorPt);
+  // The ceiling decides only when an automatic table wants more, or when
+  // the content alone asks for more than the preferred width and it.
+  const heldPt = preferredPt === null ? wantedPt : minimumPt > preferredPt + EPSILON_PT ? minimumPt : 0;
+  if (heldPt > ceilingPt + EPSILON_PT && input.contentResolutionCeilingEstablished === false) return null;
+  if (minimumPt > Math.max(ceilingPt, preferredPt ?? 0) + EPSILON_PT) {
+    // The content cannot fit: every column keeps what stands beside its
+    // content, and the content shares the rest in proportion.
     const insetPt = columns.insets.reduce((sum, width, column) => sum + Math.min(width, minimums[column]!), 0);
     const contentPt = minimumPt - insetPt;
     if (contentPt <= EPSILON_PT || ceilingPt <= insetPt) {
@@ -799,15 +818,9 @@ function contentResolutionWidthsPt(input: TableColumnLayoutInput, columnCount: n
       return inset + (ceilingPt - insetPt) * (width - inset) / contentPt;
     }));
   }
-  // An absolute preferred width is kept past the ceiling where that was
-  // measured; a share of the container and an automatic width are held.
-  const preferredPt = input.tablePreferredWidthPt;
-  const tableWidthPt = preferredPt !== null && input.tablePreferredWidthRelative !== true
-    && input.contentResolutionAbsoluteWidthUnbounded === true
-    ? Math.max(minimumPt, preferredPt)
-    : Math.max(minimumPt, Math.min(ceilingPt, preferredPt ?? contentResolutionDesiredWidthPt(columns)));
-  // §17.4.29: a protected width is the previous solver's to shrink.
-  if (columns.protectedColumns && tableWidthPt < maximums.reduce((sum, width) => sum + width, 0) - EPSILON_PT) return null;
+  const tableWidthPt = preferredPt !== null
+    ? Math.max(preferredPt, minimumPt)
+    : Math.max(minimumPt, Math.min(ceilingPt, wantedPt));
   if (!Number.isFinite(tableWidthPt)) return null;
   const widths = new Array<number>(columnCount).fill(0);
   const percentages = kinds.flatMap((kind, column) => (kind === 'pct' ? [column] : []));

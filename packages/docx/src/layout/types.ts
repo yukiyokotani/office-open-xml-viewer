@@ -1502,8 +1502,6 @@ export interface TableColumnLayoutInput {
   /** Whether the ceiling of an automatic table is a measured one; a table
    * that would bind another ceiling is outside the rule. */
   readonly contentResolutionCeilingEstablished?: boolean;
-  /** An absolute preferred table width is not held to the ceiling. */
-  readonly contentResolutionAbsoluteWidthUnbounded?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
   /** Width of the uniform table border rule of the spaced geometry. */
@@ -1572,6 +1570,10 @@ export interface TableRowFormatInput {
     /** True only when parser provenance shows that every layer authors its
      * horizontal margins, if at all, as dxa legacy left/right elements. */
     readonly dxaHorizontalMarginsOnly?: boolean;
+    /** True only when parser provenance shows that every layer authors its
+     * horizontal margins, if at all, as dxa lengths: legacy left/right or
+     * logical start/end. */
+    readonly lengthHorizontalMarginsOnly?: boolean;
   }[];
 }
 

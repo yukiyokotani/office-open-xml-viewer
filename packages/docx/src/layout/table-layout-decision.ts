@@ -83,12 +83,14 @@ interface MemberScopeExtensions {
   readonly spacingGeometry: SpacingGeometry | null;
   /** WORD_AUTOFIT_CONTENT_RESOLUTION. */
   readonly contentResolution: boolean;
+  /** WORD_TABLE_CELL_CONTENT_INSET. */
+  readonly contentInset: boolean;
 }
 /** `hostRuleInsetPt` narrows the width ceiling of a nested table. */
 type SpacingGeometry = Readonly<{ spacingPt: number; borderPt: number; hostRuleInsetPt?: number }>;
 const NO_SCOPE_EXTENSIONS: MemberScopeExtensions = Object.freeze({
   marginHang: 'none', nestedNegativeIndentIgnored: false, contentFitted: false, spacingGeometry: null,
-  contentResolution: false,
+  contentResolution: false, contentInset: false,
 });
 
 /** All compatibility selection lives at this boundary. A member receives facts
@@ -147,26 +149,50 @@ function memberContext(
       ? measuredOrigin || (omittedMarginEndOrigin && justification === 'end')
       : measuredRow(justification) || nonleadingIndentIgnored, justification,
     indentPt: rowIndent(justification, indentPt, inherited) });
+  // WORD_AUTOFIT_CONTENT_RESOLUTION: a justification on a row alone does
+  // not move that row of an AutoFit table; the table's own places every row.
+  const rowJustification = (row: { readonly justification: string | null }): string | null | undefined =>
+    (extensions.contentResolution ? table.jc : row.justification ?? table.jc);
   const rowIndentPts = format.rows.map((row) => {
     const ownException = !logicalProperties && row.exception?.indentAuthored === true;
-    return widthIndent(row.justification ?? table.jc,
+    return widthIndent(rowJustification(row),
       ownException ? (row.exception?.indentPt ?? 0) : baseIndentPt,
       !ownException && baseIndentInherited);
   });
+  // WORD_TABLE_CELL_CONTENT_INSET: the border box, half an outer rule
+  // beyond the grid, starts where the table is placed: at the content edge
+  // of the cell around it, and in mode 15 at the text edge. Earlier modes
+  // put the grid of a top-level table there.
+  const outerRulePt = (side: 'left' | 'right'): number => {
+    const border = table.borders[side];
+    return border && border.style !== 'nil' && border.style !== 'none' ? Math.max(0, border.width) : 0;
+  };
+  const borderBoxShiftPt = (justification: string | null | undefined): number => {
+    if (!extensions.contentInset || !(state.inTableCell || state.compat.tableMode15Geometry)) return 0;
+    if (justification === 'center') return 0;
+    const bidi = table.bidiVisual === true;
+    const trailing = justification === 'right' || justification === 'end';
+    // The side the table is placed against: right for a trailing
+    // left-to-right table and for a leading right-to-left one.
+    const againstRight = trailing !== bidi;
+    const halfPt = outerRulePt(againstRight ? 'right' : 'left') / 2;
+    // Translations run toward the text end of the table's own direction.
+    return trailing ? -halfPt : halfPt;
+  };
   const rowTranslationsPt = format.rows.map((row) => spacingGeometry ? wordSpacedTableTranslationPt({
-    compat: state.compat, justification: row.justification ?? table.jc, bidi: table.bidiVisual === true,
+    compat: state.compat, justification: rowJustification(row), bidi: table.bidiVisual === true,
     indentPt: tableIndentPt, indentAuthored: origin.indentAuthored, ...spacingGeometry,
     hostRuleInsetPt: state.hostCellRuleInsetPt,
     leadingMarginPt: table.bidiVisual ? row.cells[0]?.marginsPt.right ?? 0 : row.cells[0]?.marginsPt.left ?? 0,
     trailingMarginPt: table.bidiVisual ? row.cells.at(-1)?.marginsPt.left ?? 0 : row.cells.at(-1)?.marginsPt.right ?? 0,
   }) : wordTableOriginTranslationPt({
-    compat: state.compat, measured: measuredRow(row.justification ?? table.jc), justification: row.justification ?? table.jc,
-    indentPt: rowIndent(row.justification ?? table.jc, tableIndentPt, tableIndentInherited),
+    compat: state.compat, measured: measuredRow(rowJustification(row)), justification: rowJustification(row),
+    indentPt: rowIndent(rowJustification(row), tableIndentPt, tableIndentInherited),
     indentAuthored: logicalProperties ? origin.indentAuthored : firstRowException?.indentAuthored || table.tblInd != null,
     firstLeftMarginPt: origin.firstLeftMarginPt,
     rowLeftMarginPt: row.cells[0]?.originLeftMarginPt ?? 0,
     nonleadingIndentIgnored,
-  }));
+  }) + borderBoxShiftPt(rowJustification(row)));
   const effectiveLayout: 'fixed' | 'autofit' = logicalProperties ? origin.effectiveLayout
     : firstRowException?.layout === 'fixed' || table.layout === 'fixed' ? 'fixed' : 'autofit';
   // §17.18.87 lets AutoFit override its preferred width up to the page width.
@@ -197,7 +223,7 @@ function memberContext(
   const rowPlacements = format.rows.length === 0
     ? [{ justification: table.jc, indentPt: widthIndent(table.jc, baseIndentPt) }]
     : format.rows.map((row, rowIndex) => ({
-        justification: row.justification ?? table.jc,
+        justification: rowJustification(row),
         indentPt: rowIndentPts[rowIndex] ?? baseIndentPt,
       }));
   const bidiVisual = table.bidiVisual === true;
@@ -363,8 +389,7 @@ function memberContext(
     rowTranslationsPt: Object.freeze(rowTranslationsPt), maximumTableWidthPt,
     isFixedNestedTable, usesLeadingIndentBand, contentGrowth, forcedFitOuterMarginsPt,
     percentWidthBasePt, spacingGeometry, contentResolution,
-    // The mode 15 side inset of cell content that belongs to the rule.
-    contentInset: contentResolution && state.compat.tableMode15Geometry });
+    contentInset: extensions.contentInset, indentAuthored: origin.indentAuthored });
 }
 
 export type TableMemberDecision = ReturnType<typeof memberContext>;
@@ -441,7 +466,7 @@ export function decideLogicalTable(
     && singleTable && commonFrame && commonGrid
     // The preferred-sized form is also in scope nested in a body table cell
     // and in a multi-column section.
-    && (topLevelBody || (preferredSized && environment.story === 'body' && environment.tableCellDepth === 1
+    && (topLevelBody || (preferredSized && environment.story === 'body' && (environment.tableCellDepth ?? 0) >= 1
       // Nested: leading, left-to-right, unindented, mode 15 only.
       && environment.compat.tableMode15Geometry && table.bidiVisual !== true && origin.tableIndentPt === 0
       && (table.jc == null || table.jc === 'left' || table.jc === 'start')))
@@ -534,21 +559,32 @@ export function decideLogicalTable(
     rowOverrides,
     gridSkips,
   });
-  // WORD_AUTOFIT_CONTENT_RESOLUTION: one AutoFit table of a single-column
-  // body, or nested once in a body table cell.
+  // Legacy or logical side margins given as lengths, or none at all.
+  const lengthMargins = format.rows.every((row) => row.cells.every((cell) =>
+    cell.dxaHorizontalMarginsOnly === true || cell.lengthHorizontalMarginsOnly === true));
+  // A row exception or row property that only justifies the row.
+  const onlyRowJustification = format.firstRowException == null && format.rows.every((row) => row.exception == null
+    || (!row.exception.preferredWidthAuthored && row.exception.layout == null && !row.exception.indentAuthored
+      && row.exception.borders == null && source.lexical.rows.every(({ row: lexical }) =>
+        lexical?.exception?.cellSpacing == null && lexical?.exception?.cellMargins == null)));
+  const horizontalOrUpright = !isVerticalTextDirection(environment.textDirection) || environment.uprightTable === true;
+  // WORD_AUTOFIT_CONTENT_RESOLUTION: one AutoFit table of the body or a page
+  // header, at any depth of nesting.
   const contentResolution = input.layout !== 'fixed' && singleTable && commonFrame && commonGrid
-    && environment.compat.tableOriginPlacementMode && environment.story === 'body'
-    && ((environment.topLevel && environment.singleColumn)
-      // Nested: mode 15, leading, left-to-right and unindented only.
-      || (environment.tableCellDepth === 1 && environment.compat.tableMode15Geometry && table.bidiVisual !== true
-        && (table.jc == null || table.jc === 'left' || table.jc === 'start') && origin.tableIndentPt === 0))
+    && environment.compat.tableOriginPlacementMode
+    && (environment.story === 'body' || environment.story === 'header')
+    && horizontalOrUpright && environment.quarterTurnedStory !== true
+    && format.outerEdgeIndent !== true && onlyRowJustification && lengthMargins
+    && format.rows.every((row) => row.cellSpacingPt === 0 || spacingGeometry !== null);
+  // WORD_TABLE_CELL_CONTENT_INSET: fixed and AutoFit body tables alike.
+  const contentInset = environment.compat.tableOriginPlacementMode
+    && (environment.story === 'body' || environment.story === 'header')
     && !isVerticalTextDirection(environment.textDirection) && environment.quarterTurnedStory !== true
-    && format.ordinaryFlow && format.positioning == null && format.outerEdgeIndent !== true
-    && !rowOverrides && !gridSkips
-    && format.rows.every((row) => row.cellSpacingPt === 0
-      && row.cells.every((cell) => cell.dxaHorizontalMarginsOnly === true));
-  const extensions: MemberScopeExtensions = Object.freeze({ marginHang, nestedNegativeIndentIgnored, contentFitted, spacingGeometry,
-    spacedPreferredSized: preferredSized, contentResolution });
+    && format.outerEdgeIndent !== true && lengthMargins;
+  const extensions: MemberScopeExtensions = Object.freeze({ marginHang,
+    // A nested table in the content resolution starts at its cell's content edge whatever its negative indent.
+    nestedNegativeIndentIgnored: nestedNegativeIndentIgnored || (contentResolution && environment.inTableCell),
+    contentFitted, spacingGeometry, spacedPreferredSized: preferredSized, contentResolution, contentInset });
   const logical = memberContext(table, source, origin, measuredOrigin, contentWidthPt, environment,
     usesLogicalProperties, omittedMarginEndOrigin, nonleadingIndentIgnored, extensions);
   return Object.freeze({ measuredOrigin, usesLogicalProperties, dropsUnusedLeadingGrid, logical,
