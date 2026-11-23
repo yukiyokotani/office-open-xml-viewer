@@ -278,3 +278,31 @@ describe('buildDocxTextLayer — inline content without text', () => {
     expect(layer.children.map((span) => (span as unknown as { dataset: Record<string, string> }).dataset.runIndex)).toEqual(['0', '2']);
   });
 });
+
+describe('buildDocxTextLayer — text its clips hide whole', () => {
+  it('is hidden from assistive technology, and visible text is not', () => {
+    const attributes = new Map<object, Record<string, string>>();
+    const withAttributes = (tag: string) => {
+      const element = Object.assign(makeEl(tag), {
+        dataset: {} as Record<string, string>,
+        setAttribute(name: string, value: string) { attributes.set(element, { ...attributes.get(element), [name]: value }); },
+      });
+      return element;
+    };
+    vi.stubGlobal('document', { createElement: withAttributes });
+    const layer = withAttributes('div');
+    const clips = [{ x: 0, y: 0, width: 100, height: 12 }];
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [
+      run({ text: 'Visible', x: 0, y: 0, w: 42, clips }),
+      run({ text: 'Hidden', x: 0, y: 40, w: 36, clips }),
+    ], 100, 100);
+    const spans: FakeEl[] = [];
+    const collect = (element: FakeEl): void => {
+      if (element.textContent) spans.push(element);
+      element.children.forEach(collect);
+    };
+    collect(layer);
+    expect(spans.map((span) => span.textContent)).toEqual(['Visible', 'Hidden']);
+    expect(spans.map((span) => attributes.get(span)?.['aria-hidden'])).toEqual([undefined, 'true']);
+  });
+});

@@ -151,7 +151,12 @@ export function buildDocxTextLayer(
       const span = ownerDocument.createElement('span');
       setSelectionData(span, 'ooxmlSelectionRun', 'docx');
       setSelectionData(span, 'runIndex', String(runIndex));
-      if (piece.hidden) setSelectionData(span, 'clippedAway', '');
+      if (piece.hidden) {
+        setSelectionData(span, 'clippedAway', '');
+        // Text the page does not show is not read out either; the visible
+        // spans keep their order.
+        span.setAttribute?.('aria-hidden', 'true');
+      }
       if (run.paragraphId !== undefined) setSelectionData(span, 'paragraphId', run.paragraphId);
       if (run.source !== undefined) {
         setSelectionData(span, 'sourceStory', run.source.story);

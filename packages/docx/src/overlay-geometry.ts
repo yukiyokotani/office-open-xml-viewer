@@ -392,6 +392,39 @@ export function runOverlayRects(run: Run, start = 0, end = run.text.length): Run
   return mergeRunRects(runGlyphRects(run, start, end).flatMap((rect) => clipRunRect(run, rect)));
 }
 
+/** Rects of several runs, each in its run's frame and already cut to its
+ * clips, as boxes on the page: joined between runs of one orientation under
+ * the same clips where they touch, the area overlapping rects share covered
+ * once (invariant 5). A box stands where the first of its runs does in
+ * `parts`. One marking that spans runs (a find match) is drawn from these,
+ * so no part of it is tinted twice. */
+export function joinRunRects(parts: readonly Readonly<{ run: Run; rects: readonly RunRect[] }>[]): OverlayBox[] {
+  type Ordered = RunRect & { readonly order: number };
+  const groups = new Map<string, { frame: Run; rects: Ordered[] }>();
+  parts.forEach(({ run, rects }, order) => {
+    if (rects.length === 0) return;
+    const key = `${run.transform ?? ''}|${run.clips ? JSON.stringify(run.clips) : ''}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { frame: { ...run, x: 0, y: 0 }, rects: [] };
+      groups.set(key, group);
+    }
+    const [a, b, c, d] = orientation(run.transform);
+    const along = a * run.x + b * run.y;
+    const across = c * run.x + d * run.y;
+    for (const rect of rects) {
+      group.rects.push({ x: along + rect.x, y: across + rect.y, width: rect.width, height: rect.height, order });
+    }
+  });
+  const boxes: { box: OverlayBox; order: number; index: number }[] = [];
+  for (const group of groups.values()) {
+    for (const rect of joinRects(group.rects)) {
+      boxes.push({ box: placeRunRect(group.frame, rect), order: rect.order, index: boxes.length });
+    }
+  }
+  return boxes.sort((left, right) => left.order - right.order || left.index - right.index).map(({ box }) => box);
+}
+
 /** How many rects the tab lookup of overlayBoxes has examined so far: a
  * measure of its work for tests, which compare it across input sizes. */
 let rectsExamined = 0;

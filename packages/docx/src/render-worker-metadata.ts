@@ -1,5 +1,6 @@
 import { buildBookmarkPageMap } from './bookmark-nav.js';
 import { collectLayoutSourceCommentRangesIfPresent } from './comments.js';
+import { textRunsForPage } from './text-run-projection.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
 import {
@@ -27,8 +28,15 @@ export function projectRenderWorkerLayoutMeta(
   const reviewIndex = hasComments || hasRevisions
     ? reviewProjectionIndexForDocument(layout)
     : undefined;
-  const reviewProjection = options.provisional && reviewIndex
-    ? { completedSourceKeys: reviewIndex.completedSourceKeys }
+  const reviewProjection = reviewIndex
+    ? {
+        ...(options.provisional ? { completedSourceKeys: reviewIndex.completedSourceKeys } : {}),
+        // Each comment's card owner is decided once against this layout.
+        cardOwners: {
+          sourcePages: reviewIndex.sourcePages,
+          runsForPage: (pageIndex: number) => textRunsForPage(layout as DocumentLayout, pageIndex, { scale: 1 }),
+        },
+      }
     : undefined;
   return {
     diagnostics: layout.diagnostics,

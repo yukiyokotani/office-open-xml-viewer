@@ -1,6 +1,6 @@
 import { countSpacingCharacters } from './character-spacing.js';
 import { OverlayClipFrames } from './run-clip.js';
-import { clipRunRect, runFontBox, runOverlayRects, type RunRect } from './overlay-geometry.js';
+import { clipRunRect, joinRunRects, runFontBox, runOverlayRects, type RunRect } from './overlay-geometry.js';
 /**
  * IX2 docx find-highlight overlay.
  *
@@ -85,40 +85,43 @@ export function buildDocxHighlightLayer(
 
   for (const match of matches) {
     const fill = match.active ? activeColor : matchColor;
-    for (const slice of match.slices) {
+    // The glyphs of every slice of the match where they are painted inside
+    // their runs' clips (overlay-geometry.ts), joined across the slices: one
+    // match is one marking, so where its runs touch it is one box, and where
+    // their glyphs overlap the shared area is tinted once. A run without
+    // cluster boxes (not projected from a layout) is measured along the run
+    // and cut the same way.
+    const parts = match.slices.flatMap((slice) => {
       const run = runs[slice.runIndex];
-      if (!run) continue;
+      if (!run) return [];
       const start = Math.max(0, Math.min(slice.start, run.text.length));
       const end = Math.max(start, Math.min(slice.end, run.text.length));
-      // The slice's glyphs where they are painted inside the run's clips
-      // (overlay-geometry.ts). A run without cluster boxes (not projected
-      // from a layout) is measured along the run and cut the same way.
-      const rects = run.clusterBoxes
-        ? runOverlayRects(run, start, end)
-        : measuredSliceRects(run, start, end, measureForFont);
-      for (const rect of rects) {
-        // A clipped run's box also lies in containers sized to its clips,
-        // which cut it like the glyphs at any angle.
-        const frame = clipFrames.place(run);
-        const box = document.createElement('div');
-        // A vertical (tbRl) page reports the run at its physical top-left and
-        // carries a rotate transform; apply the same transform (about the box's
-        // top-left) so the highlight lies along the rotated glyph run, exactly as
-        // the selection span does.
-        const transform = frame.orientation
-          ? `transform:${frame.orientation};transform-origin:top left;`
-          : '';
-        // Positioned as a % of the page's intended CSS box so the box scales with
-        // the container under external CSS scaling. The rect's offsets run
-        // along the run's own axes, turned with the run.
-        box.style.cssText =
-          `position:absolute;` +
-          frame.position(rect.x, rect.y) +
-          `width:${frame.width(rect.width)};height:${frame.height(rect.height)};` +
-          transform +
-          `background:${fill};pointer-events:none;`;
-        frame.parent.appendChild(box);
-      }
+      return [{
+        run,
+        rects: run.clusterBoxes ? runOverlayRects(run, start, end) : measuredSliceRects(run, start, end, measureForFont),
+      }];
+    });
+    for (const placed of joinRunRects(parts)) {
+      // A clipped box also lies in containers sized to its clips, which cut
+      // it like the glyphs at any angle.
+      const frame = clipFrames.place(placed);
+      const box = document.createElement('div');
+      // A vertical (tbRl) page reports the run at its physical top-left and
+      // carries a rotate transform; apply the same transform (about the box's
+      // top-left) so the highlight lies along the rotated glyph run, exactly as
+      // the selection span does.
+      const transform = frame.orientation
+        ? `transform:${frame.orientation};transform-origin:top left;`
+        : '';
+      // Positioned as a % of the page's intended CSS box so the box scales with
+      // the container under external CSS scaling.
+      box.style.cssText =
+        `position:absolute;` +
+        frame.position(0, 0) +
+        `width:${frame.width(placed.width)};height:${frame.height(placed.height)};` +
+        transform +
+        `background:${fill};pointer-events:none;`;
+      frame.parent.appendChild(box);
     }
   }
 }

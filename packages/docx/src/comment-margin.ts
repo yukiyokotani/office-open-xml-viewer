@@ -183,6 +183,11 @@ export function buildDocxCommentMargin(
   }
   const cardAnchor = new Map<string, CommentAnchorRange>();
   const cardElsewhere = new Set<string>();
+  // A range decided for the whole document (CommentAnchorRange.cardOwner)
+  // carries its thread's card on every page; nothing is decided per page.
+  for (const anchor of model.anchors) {
+    if (anchor.cardOwner && visibleThreadIds.has(anchor.commentId)) cardAnchor.set(anchor.commentId, anchor);
+  }
   for (const anchor of model.anchors) {
     const id = anchor.commentId;
     if (!visibleThreadIds.has(id) || cardAnchor.has(id) || cardElsewhere.has(id)) continue;
@@ -240,10 +245,12 @@ export function buildDocxCommentMargin(
     }
   }
   // A thread's card and marker stand at its first occurrence a reader can
-  // see. On this page that is its first anchor with something to show,
-  // unless an earlier anchor belongs to another page, where the card stands:
-  // an earlier anchor that is on this page with nothing visible (clipped
-  // away) is passed over.
+  // see: the range decided for the whole document where there is one.
+  // Without that decision (one range, or ranges not collected from a layout)
+  // it is, on this page, the first anchor with something to show, unless an
+  // earlier anchor belongs to another page, where the card stands: an
+  // earlier anchor that is on this page with nothing visible (clipped away)
+  // is passed over.
   const cardThreads = threads.flatMap((thread): ReadOnlyCommentThread[] => {
     const anchor = cardAnchor.get(thread.root.id);
     if (!anchor || !resolvedAnchorSet.has(anchor)) return [];

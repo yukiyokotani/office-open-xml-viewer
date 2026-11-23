@@ -27,6 +27,12 @@ export interface CommentAnchorRange {
    * earlier page of the same paragraph, shows nothing of it and does not
    * resolve it from the reference boundary. */
   readonly coveredGeometry?: true;
+  /** Set on the one range of a comment with several ranges that carries the
+   * comment's margin card and marker: the first, in document order, of which
+   * a page shows something (assignCommentCardOwners). Absent for a comment
+   * with one range, and for ranges not decided against a laid-out document;
+   * the card then stands with the first range a page shows. */
+  readonly cardOwner?: true;
 }
 
 export interface CommentAnchorPoint {
@@ -220,6 +226,51 @@ function nearestProjectedText(
     : preceding ?? following;
 }
 
+/** Decide, once for a laid-out document, which range of each comment with
+ * several ranges carries its margin card: the first range, in document
+ * order, of which some page shows something (its runs have geometry inside
+ * their clips there). Every page then draws the card with that range and no
+ * other, so a comment whose first paragraph is clipped away, on this page or
+ * on another, still has one card. `sourcePages` names the pages that hold
+ * runs of each paragraph source and `runsForPage` projects a page; only the
+ * pages of undecided ranges are projected, each once. Ranges are returned in
+ * their order, the owners marked (`cardOwner`). */
+export function assignCommentCardOwners(
+  anchors: readonly CommentAnchorRange[],
+  sourcePages: ReadonlyMap<string, readonly number[]>,
+  runsForPage: (pageIndex: number) => readonly Readonly<DocxTextRunInfo>[],
+): readonly CommentAnchorRange[] {
+  const byComment = new Map<string, number[]>();
+  anchors.forEach((anchor, index) => {
+    const indices = byComment.get(anchor.commentId);
+    if (indices) indices.push(index);
+    else byComment.set(anchor.commentId, [index]);
+  });
+  const projected = new Map<number, readonly Readonly<DocxTextRunInfo>[]>();
+  const owners = new Set<number>();
+  for (const indices of byComment.values()) {
+    if (indices.length < 2) continue;
+    owner: for (const index of indices) {
+      const anchor = anchors[index]!;
+      const pages = new Set<number>();
+      for (const source of [anchor.source, anchor.reference.source, anchor.geometryFallback?.source]) {
+        for (const page of source ? sourcePages.get(sourceKey(source)) ?? [] : []) pages.add(page);
+      }
+      for (const page of [...pages].sort((left, right) => left - right)) {
+        let runs = projected.get(page);
+        if (!runs) projected.set(page, runs = runsForPage(page));
+        if (overlayBoxes(resolveCommentAnchorRuns(anchor, runs)).length > 0) {
+          owners.add(index);
+          break owner;
+        }
+      }
+    }
+  }
+  if (owners.size === 0) return anchors;
+  return Object.freeze(anchors.map((anchor, index) => (
+    owners.has(index) ? Object.freeze({ ...anchor, cardOwner: true as const }) : anchor)));
+}
+
 /** Resolve one document story's §17.13.4 marks. Kept module-public for focused
  * tests; the package API exposes `DocxDocument.commentAnchorRanges()` instead.
  * Per §17.13.4.3/.4, a lone rangeStart or rangeEnd is a single anchor point. */
@@ -294,6 +345,12 @@ function collectIndexedStoryCommentRanges(
       const fallbackOrigin = start.paragraphIndex === end.paragraphIndex
         && start.boundary === end.boundary ? start : reference;
       const geometryFallback = nearestProjectedText(fallbackOrigin, projectedTextIndex);
+      // One segment per paragraph of the range. A segment that covers no run
+      // (the range starts at the end of a paragraph, ends at the start of
+      // one, or crosses an empty one) marks nothing beside the segments that
+      // do: kept, it would resolve as a point to the run before it, outside
+      // the range. A range with no covered run at all stays one point.
+      const segments: CommentAnchorRange[] = [];
       for (let index = start.paragraphIndex; index <= end.paragraphIndex; index += 1) {
         const visit = paragraphs[index]!;
         const from = index === start.paragraphIndex ? start.boundary : 0;
@@ -309,13 +366,15 @@ function collectIndexedStoryCommentRanges(
             coveredGeometry = rendered.has(runIndex);
           }
         }
-        ranges.push(frozenRange(id, {
+        segments.push(frozenRange(id, {
           paragraphIndex: index,
           source: visit.source,
           boundary: from,
           runCount: normalizedBoundary(visit.paragraph, visit.paragraph.runs.length),
         }, reference, geometryFallback, Math.max(from, to), coveredGeometry));
       }
+      const covering = segments.filter((segment) => segment.endRunIndex > segment.startRunIndex);
+      ranges.push(...(covering.length > 0 ? covering : segments.slice(0, 1)));
       continue;
     }
 
@@ -360,10 +419,9 @@ export function collectLayoutSourceCommentRangesIfPresent(
   options: ReviewAnchorProjectionOptions = {},
 ): CommentAnchorRange[] {
   if ((comments?.length ?? 0) === 0) return [];
-  const ranges = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
+  const collected = collectLayoutSourceCommentRanges(comments ?? [], source, renderedRunIndex);
   const completed = options.completedSourceKeys;
-  if (completed === undefined) return ranges;
-  return ranges.filter((range) => {
+  const ranges = completed === undefined ? collected : collected.filter((range) => {
     const sourceIndices = renderedRunIndex.get(sourceKey(range.source)) ?? new Set<number>();
     const hasCoveredRun = range.startRunIndex < range.endRunIndex
       ? [...sourceIndices].some((index) =>
@@ -384,6 +442,8 @@ export function collectLayoutSourceCommentRangesIfPresent(
       || completed.has(sourceKey(range.source))
       || completed.has(sourceKey(range.reference.source));
   });
+  const owners = options.cardOwners;
+  return owners ? [...assignCommentCardOwners(ranges, owners.sourcePages, owners.runsForPage)] : ranges;
 }
 
 function sameStorySource(
