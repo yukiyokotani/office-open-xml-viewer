@@ -1242,7 +1242,8 @@ function buildContentSegments(
   const fitTextFragmentEntryByKey = new Map<string, number>();
   const fitTextRuns: FitTextRun[] = [];
   for (const [runIndex, run] of runs.entries()) {
-    // A removed anchoring run separates its neighbours as any non-text run does.
+    // A removed anchoring run separates its neighbours as any non-text run does
+    // (WORD_FIT_TEXT_REGION_DRAWING: every drawing run ends the region).
     if (fitTextSeams.has(runIndex)) fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });
     if (run.type !== 'text') {
       fitTextRuns.push({ charCount: 0, naturalWidthPx: 0 });

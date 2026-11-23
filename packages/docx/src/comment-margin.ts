@@ -175,14 +175,29 @@ export function buildDocxCommentMargin(
     readOnlyCommentAuthorAccent(thread.root.author),
   ]));
   const visibleThreadIds = new Set(threads.map((thread) => thread.root.id));
-  const firstAnchor = new Map<string, CommentAnchorRange>();
-  for (const anchor of model.anchors) {
-    if (visibleThreadIds.has(anchor.commentId) && !firstAnchor.has(anchor.commentId)) {
-      firstAnchor.set(anchor.commentId, anchor);
-    }
-  }
   const resolvedPageAnchors = resolvePageCommentAnchors(model.anchors, runs);
   const resolvedAnchorSet = new Set(resolvedPageAnchors.map(({ anchor }) => anchor));
+  const pageSources = new Set<string>();
+  for (const run of runs) {
+    if (run.source) pageSources.add(sourceKey(run.source));
+  }
+  const cardAnchor = new Map<string, CommentAnchorRange>();
+  const cardElsewhere = new Set<string>();
+  for (const anchor of model.anchors) {
+    const id = anchor.commentId;
+    if (!visibleThreadIds.has(id) || cardAnchor.has(id) || cardElsewhere.has(id)) continue;
+    if (resolvedAnchorSet.has(anchor)) {
+      cardAnchor.set(id, anchor);
+      continue;
+    }
+    // An anchor whose content is on this page with nothing visible is passed
+    // over; one whose content is on another page comes first, and the
+    // thread's card stands with it there.
+    const mayBeHere = pageSources.has(sourceKey(anchor.source))
+      || pageSources.has(sourceKey(anchor.reference.source))
+      || (anchor.geometryFallback !== undefined && pageSources.has(sourceKey(anchor.geometryFallback.source)));
+    if (!mayBeHere || resolveCommentAnchorRuns(anchor, runs).length === 0) cardElsewhere.add(id);
+  }
   const anchorRects = new Map<string, ReadOnlyCommentRect[]>();
   const markerAnchorById = new Map<string, Readonly<{
     rect: ReadOnlyCommentRect;
@@ -224,8 +239,13 @@ export function buildDocxCommentMargin(
       }
     }
   }
+  // A thread's card and marker stand at its first occurrence a reader can
+  // see. On this page that is its first anchor with something to show,
+  // unless an earlier anchor belongs to another page, where the card stands:
+  // an earlier anchor that is on this page with nothing visible (clipped
+  // away) is passed over.
   const cardThreads = threads.flatMap((thread): ReadOnlyCommentThread[] => {
-    const anchor = firstAnchor.get(thread.root.id);
+    const anchor = cardAnchor.get(thread.root.id);
     if (!anchor || !resolvedAnchorSet.has(anchor)) return [];
     return [{
       occurrenceKey: thread.root.id,

@@ -1295,6 +1295,18 @@ export const WORD_FIT_TEXT_INTER_CHARACTER_EXPANSION = defineCompatibilityRule({
   description: 'Expand a multi-character fitText region to its authored width by distributing the residual evenly across interior character gaps. Evidence (observed Office behaviour): Word PDF of a corpus document in PR #918; [MS-OI29500] §2.1.78(d) supports ignoring authored spacing, not the even-gap formula.',
 });
 
+export const WORD_FIT_TEXT_REGION_DRAWING = defineCompatibilityRule({
+  id: 'word-fit-text-region-drawing',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'fitfloat1',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.3.2.14 links consecutive fitText runs with one id into a region and does not say what a drawing among them does. Windows Word 16.0.20625 controls (compatibility mode 15; Times New Roman 10pt; fitText 24pt with id 1 on two two-letter runs, Latin left-to-right and Hebrew right-to-left; a 6pt DrawingML picture inline, floating wrapNone and floating square; glyph origins read from the exported PDF; controls: two adjacent runs with one id form one 24pt region, with two ids two 24pt regions): (1) a run without fitText between the two fitted runs ends the region whatever it holds: an inline picture stands between two 24pt regions, and a run that holds only a floating picture leaves two 24pt regions exactly as the two-id control, although the picture takes no width; (2) a floating picture first, in the middle or last inside the fitted run, or in its own run carrying the same fitText id, does not end the region and takes no width: one 24pt region as the one-id control (in left-to-right text with the picture in the middle, one letter is drawn 1.68pt left of its control position; region edges and the other letters agree); (3) an inline picture first, in the middle or last inside the fitted run, or in its own run carrying the same fitText id, keeps one region that is not fitted: letters and picture stand at their natural advances, both where they exceed the 24pt (24.8pt, left-to-right) and where they fall short of it (22.9pt, right-to-left). wrapNone and square agree in every row, and so do the two directions. Library scope: the parsed model does not keep the fitText of a run that holds a drawing, so (1) is applied to every drawing run: a floating drawing in the middle of a fitted run or in its own run with the same id divides the region where Word keeps one, and the text around an inline drawing inside a region is fitted where Word leaves it at natural advances; a floating drawing first or last in the fitted run agrees with Word.',
+});
+
 export const WORD_FIT_TEXT_OMITTED_ID_LINKING = defineCompatibilityRule({
   id: 'word-fit-text-omitted-id-linking',
   evidence: {
