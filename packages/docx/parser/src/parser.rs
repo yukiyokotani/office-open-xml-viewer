@@ -2617,9 +2617,9 @@ thread_local! {
 /// §17.3.1.33 spacing, line rule, borders and shading) so layout measures the
 /// band from them. Kept: text, fields, line breaks and inline pictures, with
 /// at most one surviving marker (a story without one draws no rule, mark
-/// None). Not represented (the story stays absent and the default rule
-/// applies): tables and other block content, numbered or framed paragraphs,
-/// an empty paragraph with a hidden mark, and other run content.
+/// None); an empty paragraph whose mark is hidden is skipped. Not represented
+/// (the story stays absent and the default rule applies): tables and other
+/// block content, numbered or framed paragraphs, and other run content.
 #[allow(clippy::too_many_arguments)]
 fn selected_note_separator_story(
     note: roxmltree::Node<'_, '_>,
@@ -2702,12 +2702,11 @@ fn selected_note_separator_story(
         });
         // A hidden mark (§17.3.2.41 on the paragraph mark) hides only the
         // mark: visible runs keep their line. An empty paragraph whose mark
-        // is hidden has no line to measure.
-        if !representable
-            || parsed.numbering.is_some()
-            || parsed.frame_pr.is_some()
-            || (parsed.mark_vanish && parsed.runs.is_empty())
-        {
+        // is hidden shows nothing and is skipped.
+        if parsed.mark_vanish && parsed.runs.is_empty() {
+            continue;
+        }
+        if !representable || parsed.numbering.is_some() || parsed.frame_pr.is_some() {
             return None;
         }
         paragraphs.push(parsed);
@@ -3269,6 +3268,73 @@ mod note_separator_tests {
     }
 
     #[test]
+    fn stories_select_mce_branches_skip_ignorable_blocks_and_unwrap_custom_xml() {
+        use crate::types::NoteSeparatorMark::Short;
+        const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+        let marker_paragraph = r#"<w:p><w:r><w:t>Sources</w:t></w:r><w:r><w:separator/></w:r></w:p>"#;
+        let texts = |content: &[BodyElement]| -> Vec<String> {
+            content
+                .iter()
+                .filter_map(|element| match element {
+                    BodyElement::Paragraph(paragraph) => Some(paragraph),
+                    _ => None,
+                })
+                .flat_map(|paragraph| paragraph.runs.iter())
+                .filter_map(|run| match run {
+                    DocRun::Text(text) if !text.text.is_empty() => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        for (label, body) in [
+            (
+                "unsupported choice",
+                format!(r#"<mc:AlternateContent><mc:Choice Requires="u"><w:p><w:r><w:t>Choice</w:t></w:r></w:p></mc:Choice><mc:Fallback>{marker_paragraph}</mc:Fallback></mc:AlternateContent>"#),
+            ),
+            (
+                "ignorable foreign block",
+                format!(r#"<vendor:p><w:r><w:t>Extension metadata</w:t><w:separator/></w:r></vendor:p>{marker_paragraph}"#),
+            ),
+            (
+                "block custom XML",
+                format!(r#"<w:customXml w:element="separator"><w:customXmlPr/>{marker_paragraph}</w:customXml>"#),
+            ),
+            (
+                "hidden empty paragraph",
+                format!(r#"<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr></w:p>{marker_paragraph}"#),
+            ),
+        ] {
+            let scope = format!(r#"xmlns:mc="{MC}" xmlns:vendor="urn:vendor" xmlns:u="urn:unsupported" mc:Ignorable="vendor""#);
+            let stories = format!(
+                r#"<w:footnote w:type="separator" w:id="42" {scope}>{body}</w:footnote><w:footnote w:id="7" {scope}>{body}</w:footnote>"#
+            );
+            let document = selected_note_package(
+                Some(r#"<w:footnotePr><w:footnote w:id="42"/></w:footnotePr>"#),
+                crate::xml_util::W_NS,
+                "42",
+                Some(&stories),
+            );
+            let settings = document.note_layout_settings.unwrap_or_default();
+            assert_eq!(settings.footnote_separator, Some(Short), "{label}");
+            let story = settings.footnote_separator_story.expect(label);
+            let story_blocks: Vec<BodyElement> = story
+                .into_iter()
+                .map(|paragraph| BodyElement::Paragraph(Box::new(paragraph)))
+                .collect();
+            assert_eq!(texts(&story_blocks), vec!["Sources".to_string()], "{label}");
+            // A note body takes the same branch, skips the same blocks and
+            // unwraps the same wrapper.
+            let note = document.footnotes.iter().find(|note| note.id == "7").expect(label);
+            let body_texts = texts(&note.content);
+            assert!(body_texts.contains(&"Sources".to_string()), "{label}: {body_texts:?}");
+            assert!(
+                !body_texts.iter().any(|text| text == "Choice" || text == "Extension metadata"),
+                "{label}: {body_texts:?}"
+            );
+        }
+    }
+
+    #[test]
     fn foreign_elements_cannot_define_selected_separator_stories() {
         for story in [
             r#"<x:footnote w:type="separator" w:id="42"><w:p><w:r><w:separator/></w:r></w:p></x:footnote>"#,
@@ -3288,17 +3354,17 @@ mod note_separator_tests {
             assert_eq!(document.footnotes[0].id, "1");
             // A foreign element is no listed story: Word's default applies.
             // Foreign content inside a listed story is read as the story
-            // parser reads it everywhere: what is left without a marker is an
-            // empty story paragraph (no rule).
-            // A foreign block wrapper is transparent to it (its w:p and
-            // marker stay); a foreign run or marker leaves no marker.
-            let expected = Some(if story.starts_with("<x:footnote")
-                || story.contains("<x:p><w:r><w:separator/>")
-            {
-                crate::types::NoteSeparatorMark::Short
+            // parser reads it everywhere.
+            // A foreign block is no paragraph (a story without one stays
+            // unrepresented); a foreign run or marker leaves an empty
+            // paragraph without a marker.
+            let expected = if story.starts_with("<x:footnote") {
+                Some(crate::types::NoteSeparatorMark::Short)
+            } else if story.contains("<x:p") {
+                None
             } else {
-                crate::types::NoteSeparatorMark::None
-            });
+                Some(crate::types::NoteSeparatorMark::None)
+            };
             assert_eq!(
                 document
                     .note_layout_settings
@@ -4621,17 +4687,8 @@ fn parse_embedded_fonts(
 fn body_children_with_cover_breaks<'a, 'input>(
     node: roxmltree::Node<'a, 'input>,
 ) -> Vec<(roxmltree::Node<'a, 'input>, bool)> {
-    // A row-less table is no block (see `table_has_rows`): skipping it here,
-    // as the streamed projector does, keeps it out of the Cover Pages tail,
-    // the §17.4.37 sequence and the REF passes, exactly as if absent.
-    let block = |n: &roxmltree::Node| {
-        n.is_element()
-            && !(is_w_ns(n.tag_name().namespace())
-                && n.tag_name().name() == "tbl"
-                && !table_has_rows(*n))
-    };
     let mut out: Vec<(roxmltree::Node, bool)> = Vec::new();
-    for child in node.children().filter(block) {
+    for child in story_block_children(node, false) {
         let tn = child.tag_name();
         if is_w_ns(tn.namespace()) && tn.name() == "sdt" {
             let is_cover = child_w(child, "sdtPr")
@@ -4641,10 +4698,7 @@ fn body_children_with_cover_breaks<'a, 'input>(
                 .as_deref()
                 == Some("Cover Pages");
             if let Some(content) = child_w(child, "sdtContent") {
-                let inner: Vec<_> = element_children_flat(content)
-                    .into_iter()
-                    .filter(block)
-                    .collect();
+                let inner = story_block_children(content, true);
                 let last = inner.len();
                 for (idx, c) in inner.into_iter().enumerate() {
                     out.push((c, is_cover && idx + 1 == last));
@@ -4655,6 +4709,94 @@ fn body_children_with_cover_breaks<'a, 'input>(
         }
     }
     out
+}
+
+/// A story's block-level children after markup compatibility and transparent
+/// wrappers, in document order (a top-level block content control is
+/// returned as is for its Cover Pages handling; inside one, nested controls
+/// are flattened). ECMA-376 Part 3
+/// §9.3 selects the branch of an `mc:AlternateContent`; an element of a
+/// namespace the parser does not understand is removed when it is ignorable
+/// (§10.1) unless `mc:ProcessContent` names it, whose children are processed
+/// in its place (§10.2), and is otherwise not a block; a block-level
+/// `w:customXml` (§17.5.1.6) holds blocks. A row-less table is no block (see
+/// `table_has_rows`): skipping it here, as the streamed projector does, keeps
+/// it out of the Cover Pages tail, the §17.4.37 sequence and the REF passes.
+fn story_block_children<'a, 'input>(
+    node: roxmltree::Node<'a, 'input>,
+    // Inside a content control: nested controls are flattened too.
+    nested: bool,
+) -> Vec<roxmltree::Node<'a, 'input>> {
+    fn walk<'a, 'input>(
+        node: roxmltree::Node<'a, 'input>,
+        nested: bool,
+        out: &mut Vec<roxmltree::Node<'a, 'input>>,
+    ) {
+        for child in node.children().filter(|n| n.is_element()) {
+            let namespace = child.tag_name().namespace();
+            let local = child.tag_name().name();
+            if namespace == Some(ooxml_common::bounded_xml::MCE_NS) {
+                if local == "AlternateContent" {
+                    if let Some(branch) = ooxml_common::mce::select_alternate_content(
+                        child,
+                        &crate::document_projector::docx_understands_namespace,
+                    ) {
+                        walk(branch, nested, out);
+                    }
+                }
+                continue;
+            }
+            if namespace.is_some_and(|namespace| {
+                !crate::document_projector::docx_understands_namespace(namespace)
+            }) {
+                if mce_processes_content(child) {
+                    walk(child, nested, out);
+                }
+                continue;
+            }
+            if is_w_ns(namespace) {
+                match local {
+                    "customXml" => {
+                        walk(child, nested, out);
+                        continue;
+                    }
+                    "customXmlPr" => continue,
+                    "sdt" if nested => {
+                        if let Some(content) = child_w(child, "sdtContent") {
+                            walk(content, nested, out);
+                        }
+                        continue;
+                    }
+                    "tbl" if !table_has_rows(child) => continue,
+                    _ => {}
+                }
+            }
+            out.push(child);
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, nested, &mut out);
+    out
+}
+
+/// Whether an `mc:ProcessContent` declaration in scope names this element
+/// (ECMA-376 Part 3 §10.2): its children are processed in its place.
+fn mce_processes_content(node: roxmltree::Node<'_, '_>) -> bool {
+    let (Some(namespace), local) = (node.tag_name().namespace(), node.tag_name().name()) else {
+        return false;
+    };
+    node.ancestors().filter(|ancestor| ancestor.is_element()).any(|ancestor| {
+        ancestor
+            .attribute((ooxml_common::bounded_xml::MCE_NS, "ProcessContent"))
+            .into_iter()
+            .flat_map(str::split_whitespace)
+            .any(|name| {
+                name.split_once(':').is_some_and(|(prefix, name_local)| {
+                    ancestor.lookup_namespace_uri(Some(prefix)) == Some(namespace)
+                        && (name_local == "*" || name_local == local)
+                })
+            })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4961,7 +5103,14 @@ impl BodyParseCursor {
     ) -> Vec<BodyElement> {
         let mut output = Vec::new();
         let mut child_diagnostics = Vec::new();
-        match child.tag_name().name() {
+        // Blocks are WordprocessingML elements by expanded name: a foreign
+        // element with the same local name is none.
+        let block_name = if is_w_ns(child.tag_name().namespace()) {
+            child.tag_name().name()
+        } else {
+            ""
+        };
+        match block_name {
             "p" => {
                 let mut result = parse_paragraph_with_diagnostics(
                     child,
