@@ -297,7 +297,8 @@ export interface FollowingBodyBlockMeasurementInput {
   /** As given to measureTable. */
   readonly lastColumnOfPage?: boolean;
   /** The wrapped drawings the keep set before this block anchors, which are
-   * not committed yet (BodyTableAcquisitionInput.precedingDrawings). */
+   * not committed yet (BodyTableAcquisitionInput.precedingDrawings). Given
+   * for a table only: a paragraph does not read them. */
   readonly precedingDrawings?: readonly LayoutRect[];
 }
 

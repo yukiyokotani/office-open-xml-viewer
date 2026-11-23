@@ -214,6 +214,7 @@ export type { BodyFrameGroup } from './frame.js';
 import type { ParagraphAcquisitionInput, ParagraphImageRun, ParagraphLayoutSource } from './text.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
 import { uprightDrawingMovePt, type UprightBlockPageIndex } from './upright-block-index.js';
+import { drawingMLCollisionEntriesVersion } from './drawingml-collision-registry.js';
 import type {
   DrawingLayout,
   DrawingPaintCommand,
@@ -5057,17 +5058,12 @@ export function anchorCollisionBlockers(input: Readonly<{
   sameParagraphCollisions: readonly DrawingMLCollisionEntryPt[];
 }>): FloatPlacementParticipant[] {
   if (input.allowOverlap) return [];
-  // §20.4.2.3 object collision is independent of text wrapping. An
-  // allowOverlap=true object keeps its resolved position: Word controls
-  // (issue #1623) never move such a picture away from pictures anchored in
-  // other paragraphs, in either compatibility mode, wrap kind, or reference.
-  // ECMA-376 §20.4.2.3 requires displacement for every existing object
-  // whose allowOverlap behavior makes it a collision participant.
-  // Word has one narrower composition exception: a source-later page-owned
-  // member below the already-authored layers in this SAME anchor paragraph
-  // retains its authored position. Cross-paragraph entries remain blockers.
+  // ECMA-376 §20.4.2.3: object collision is independent of text wrapping.
+  // A drawing that may overlap keeps its resolved position; one that may
+  // not is displaced for every object accepted before it. The objects of
+  // its own paragraph are blockers except under
+  // `word-lower-layer-same-paragraph-anchor-composition`.
   const sameParagraphBlockers = input.sameParagraphCollisions.filter((entry) =>
-    // `word-lower-layer-same-paragraph-anchor-composition`
     !wordPreservesLowerLayerSameParagraphComposition(
       input.verticalOwnership,
       input.relativeHeight,
@@ -6696,18 +6692,6 @@ function mergeAnchorCollisions(
   ]);
 }
 
-/**
- * The line key keeps the weak-map paragraph identity (runs, paragraph mark,
- * numbering) plus every input read by measureParagraph/buildSegments/layoutLines:
- * width/X, paragraph context, measurer, text/math services, vertical glyphs,
- * document compatibility settings, continuation, and field/note values only
- * for runs that consume them. Page/flow IDs, source, border/shading/trailing
- * extent, anchor frames/collisions, source-range rebasing, and page writing
- * frame are consumed by retained placement, so only the exact v1 key owns them.
- * startYPt, maximumYPt, and suppressed space-before are also exact-placement
- * inputs. Active line grids and wrap authorities are gated below before line
- * reuse; the exact key still includes all of their original facts.
- */
 /** The entries of `frames` for the anchor occurrences of `paragraph`, in
  * run order, as a key; null when it holds none of them. */
 function ownAnchorFramesKey(
@@ -6724,6 +6708,20 @@ function ownAnchorFramesKey(
   }
   return own ? JSON.stringify(own) : null;
 }
+
+/**
+ * The line key keeps the weak-map paragraph identity (runs, paragraph mark,
+ * numbering) plus every input read by measureParagraph/buildSegments/layoutLines:
+ * width/X, paragraph context, measurer, text/math services, vertical glyphs,
+ * document compatibility settings, continuation, and field/note values only
+ * for runs that consume them. Page/flow IDs, source, border/shading/trailing
+ * extent, anchor frames/collisions, source-range rebasing, and page writing
+ * frame are consumed by retained placement, so only the exact v1 key owns them.
+ * startYPt, maximumYPt, and suppressed space-before are also exact-placement
+ * inputs. Active line grids and wrap authorities are gated below before line
+ * reuse; the exact key still includes all of their original facts.
+ */
+const NO_ANCHOR_COLLISIONS: readonly DrawingMLCollisionEntryPt[] = Object.freeze([]);
 
 function paragraphAcquisitionKey(
   cache: ParagraphAcquisitionRuntimeCache,
@@ -6907,7 +6905,12 @@ function paragraphAcquisitionKey(
       ] : []),
     ],
     lineOnly ? null : JSON.stringify(options.exclusions),
-    lineOnly || !hasAnchoredPayload ? null : JSON.stringify(options.anchorCollisions ?? []),
+    // By a number that stands for the entries' exact content
+    // (drawingMLCollisionEntriesVersion): a page's registry grows by the
+    // drawings of each paragraph, and spelling it out for every anchoring
+    // paragraph made the keys of a page quadratic in its drawings.
+    lineOnly || !hasAnchoredPayload ? null
+      : drawingMLCollisionEntriesVersion(cache, options.anchorCollisions ?? NO_ANCHOR_COLLISIONS),
     // By the version of the page's table boxes, which stands for their
     // content: a later pass that places the same tables reuses the
     // acquisition.

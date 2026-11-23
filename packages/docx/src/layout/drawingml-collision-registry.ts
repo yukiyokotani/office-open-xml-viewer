@@ -93,9 +93,66 @@ export function applyDrawingMLCollisionRegistryDelta(
   delta: DrawingMLCollisionRegistryDeltaPt,
 ): DrawingMLCollisionRegistrySnapshotPt {
   validateDrawingMLCollisionRegistryDelta(snapshot, delta);
+  const entries = Object.freeze([...snapshot.entries, ...delta.entries]);
+  extendedFrom.set(entries, snapshot.entries);
   return Object.freeze({
     coordinateSpace: snapshot.coordinateSpace,
     flowDomainId: snapshot.flowDomainId,
-    entries: Object.freeze([...snapshot.entries, ...delta.entries]),
+    entries,
   });
+}
+
+/** The entries a registry's entries were extended from: a prefix of them. */
+const extendedFrom = new WeakMap<readonly DrawingMLCollisionEntryPt[], readonly DrawingMLCollisionEntryPt[]>();
+
+type EntriesVersions = {
+  /** Number of each (version, next entry) step: one per distinct content. */
+  readonly steps: Map<string, number>;
+  readonly known: WeakMap<readonly DrawingMLCollisionEntryPt[], number>;
+};
+const versionsByScope = new WeakMap<object, EntriesVersions>();
+
+/**
+ * A number that stands for the exact content of `entries` within `scope`
+ * (one acquisition cache): two lists get the same number exactly when they
+ * hold equal entries in the same order, however they were put together.
+ * Zero is the empty list.
+ *
+ * The number of a list is the number of the list before its last entry,
+ * extended by that entry. A registry that grew from another
+ * (applyDrawingMLCollisionRegistryDelta) is numbered from the one it grew
+ * from, so numbering each registry of a page as it grows reads every entry
+ * once.
+ */
+export function drawingMLCollisionEntriesVersion(
+  scope: object,
+  entries: readonly DrawingMLCollisionEntryPt[],
+): number {
+  if (entries.length === 0) return 0;
+  let versions = versionsByScope.get(scope);
+  if (!versions) versionsByScope.set(scope, versions = { steps: new Map(), known: new WeakMap() });
+  // The lists this one grew from, back to the first that is numbered.
+  const pending: Array<readonly DrawingMLCollisionEntryPt[]> = [];
+  let version = 0;
+  let numbered = 0;
+  for (let list: readonly DrawingMLCollisionEntryPt[] | undefined = entries; list; list = extendedFrom.get(list)) {
+    const known = versions.known.get(list);
+    if (known !== undefined) {
+      version = known;
+      numbered = list.length;
+      break;
+    }
+    pending.push(list);
+  }
+  for (let at = pending.length - 1; at >= 0; at -= 1) {
+    const list = pending[at]!;
+    for (; numbered < list.length; numbered += 1) {
+      const step = `${version}|${JSON.stringify(list[numbered])}`;
+      let next = versions.steps.get(step);
+      if (next === undefined) versions.steps.set(step, next = versions.steps.size + 1);
+      version = next;
+    }
+    versions.known.set(list, version);
+  }
+  return version;
 }

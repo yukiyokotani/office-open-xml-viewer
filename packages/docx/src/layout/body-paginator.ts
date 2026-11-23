@@ -3175,12 +3175,18 @@ function* paginateBodyPassSteps(
           ? physicalBodyBottomPt : undefined;
         if (cursor.boundary === null && block.keepNext && state.flow.pageHasContent) {
           let keepSetExtentPt = acquired.blockExtentPt;
-          // The wrapped drawings the keep set's paragraphs anchor, not
-          // committed yet: an upright block table the keep set ends with is
-          // placed against them (uprightPrecedingDrawings).
-          const keepSetDrawings = uprightPrecedingDrawings(
-            acquired.flowRegistryDelta?.floats?.entries, acquired.layout,
-          );
+          // `word-vertical-section-upright-block-table`: the wrapped
+          // drawings the keep set's paragraphs anchor, not committed yet: an
+          // upright block table the keep set ends with is placed against
+          // them (uprightPrecedingDrawings). Collected only where tables
+          // are upright, as the lists each paragraph gives, and put
+          // together once, for the table.
+          const collectsKeepSetDrawings = activeRegion(state).writingMode !== 'horizontal-tb';
+          const keepSetDrawings: Array<readonly LayoutRect[]> = [];
+          if (collectsKeepSetDrawings) {
+            const own = uprightPrecedingDrawings(acquired.flowRegistryDelta?.floats?.entries, acquired.layout);
+            if (own.length > 0) keepSetDrawings.push(own);
+          }
           const keepSetReferenceIds = new Set(footnoteIdsInRetainedSlice(acquired.layout));
           let terminalGridParagraph: ParagraphLayout | undefined;
           let terminalWholeParagraphHasPlacements = true;
@@ -3208,9 +3214,12 @@ function* paginateBodyPassSteps(
               precedingBlockExtentPt: keepSetExtentPt,
               freshPageBlockExtentPt: freshPageExtent(state),
               lastColumnOfPage: inLastColumn(state),
-              ...(keepSetDrawings.length > 0 ? { precedingDrawings: Object.freeze([...keepSetDrawings]) } : {}),
+              ...(nextBlock.kind !== 'paragraph' && keepSetDrawings.length > 0
+                ? { precedingDrawings: Object.freeze(keepSetDrawings.flat()) } : {}),
             });
-            if (following.precedingDrawings) keepSetDrawings.push(...following.precedingDrawings);
+            if (collectsKeepSetDrawings && following.precedingDrawings) {
+              keepSetDrawings.push(following.precedingDrawings);
+            }
             const continues = nextBlock.kind === 'paragraph'
               && (nextBlock.keepNext || bridgeSuccessor);
             bridgeSuccessor = false;

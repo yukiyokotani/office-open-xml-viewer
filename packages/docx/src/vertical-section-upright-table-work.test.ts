@@ -81,6 +81,12 @@ type Counts = {
   frameKeys: number;
   /** Table pin keys read by iterating a Set. */
   pinKeys: number;
+  /** Drawing collision entries serialized (JSON.stringify of an entry or of
+   * a list of them). */
+  collisionKeys: number;
+  /** Bare rectangles (exactly xPt, yPt, widthPt, heightPt) visited in an
+   * array: the drawing rectangles a keep set hands on. */
+  rects: number;
   /** Elements an insertion into or removal from an array of drawings moves. */
   drawingShifts: number;
 };
@@ -93,7 +99,7 @@ function counting<Result>(
 ): Readonly<{ result: Result; counts: Counts }> {
   const counts: Counts = {
     boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0, drawings: 0, floats: 0,
-    frameKeys: 0, pinKeys: 0,
+    frameKeys: 0, pinKeys: 0, collisionKeys: 0, rects: 0,
     drawingShifts: 0,
   };
   const visit = (value: unknown): void => {
@@ -106,6 +112,8 @@ function counting<Result>(
     else if ('anchorIndex' in value && 'frame' in value) counts.drawings += 1;
     else if ('kind' in value && value.kind === 'table-row') counts.rows += 1;
     else if ('kind' in value && value.kind === 'shape' && 'exclusionBounds' in value) counts.floats += 1;
+    else if ('xPt' in value && 'yPt' in value && 'widthPt' in value && 'heightPt' in value
+      && Object.keys(value).length === 4) counts.rects += 1;
     else if ('occurrenceId' in value && typeof value.occurrenceId === 'string'
       && value.occurrenceId.includes('upright-table')) counts.registryEntries += 1;
   };
@@ -162,6 +170,10 @@ function counting<Result>(
       && value[0][1] !== null && typeof value[0][1] === 'object' && 'xPt' in value[0][1]) {
       counts.frameKeys += value.length;
     }
+    const collision = (entry: unknown) =>
+      entry !== null && typeof entry === 'object' && 'occurrenceId' in entry && 'horizontalOwnership' in entry;
+    if (collision(value)) counts.collisionKeys += 1;
+    else if (Array.isArray(value) && collision(value[0])) counts.collisionKeys += value.length;
     return stringify(value, ...rest);
   }) as typeof JSON.stringify;
   restore.push(() => { JSON.stringify = stringify; });
@@ -372,6 +384,50 @@ describe('upright block table placement work', () => {
     const large = measure(8);
     expect(large.layouts).toBe(small.layouts);
     expect(large.drawings).toBeLessThanOrEqual(2 * small.drawings + 16);
+  }, 300_000);
+
+  it.each(['lrTb', 'tbLrV'] as const)(
+    'looks ahead from keepNext paragraphs without copying the drawings of the keep set (%s)',
+    (direction) => {
+      // A run of keepNext paragraphs, each anchoring a rectangle positioned
+      // down its paragraph, ended by
+      // a plain paragraph. Every one looks ahead over the rest of the run.
+      // The rectangles are needed only by an upright table that ends a
+      // keep set: none is collected in a horizontal section, and in a
+      // vertical one the lists are handed on as they are, so the
+      // rectangles visited do not grow faster than the run.
+      const measure = (count: number) => {
+        const kept = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+        const body = [...Array.from({ length: count }, (_, at) =>
+          kept.replace('</w:p>', `${anchoredRectangle(300, 100 + 30 * at, 12, 18, 'paragraph')}</w:p>`)), P];
+        const { result, counts } = counting(() => layOutPages(direction as 'tbLrV', body));
+        expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
+        return counts.rects;
+      };
+      const small = measure(8);
+      const large = measure(16);
+      expect(large).toBeLessThanOrEqual(2 * small + 16);
+    },
+    300_000,
+  );
+
+  it('keys anchoring paragraphs without spelling out the drawings placed before each', () => {
+    // Paragraphs each anchoring a rectangle positioned down its paragraph:
+    // every one is accepted into the page's collision registry in turn. A
+    // paragraph is keyed on a number standing for the registry's content,
+    // so each entry is spelled out once, not once per later paragraph.
+    const measure = (count: number) => {
+      const body = Array.from({ length: count }, (_, at) =>
+        P.replace('</w:p>', `${anchoredRectangle(45 + 30 * at, 500, 12, 18, 'paragraph')}</w:p>`));
+      const { result, counts } = counting(() => layOutPages('tbLrV', body));
+      expect(result).toHaveLength(1);
+      expect(result[0]!.drawings).toHaveLength(count);
+      return counts.collisionKeys;
+    };
+    const small = measure(8);
+    const large = measure(16);
+    expect(small).toBeGreaterThan(0);
+    expect(large).toBeLessThanOrEqual(2 * small + 2);
   }, 300_000);
 
   it('keys a paragraph on the pinned frames of its own drawings', () => {

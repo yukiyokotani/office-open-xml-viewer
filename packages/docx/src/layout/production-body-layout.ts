@@ -2263,11 +2263,13 @@ function keptParagraphDrawings(
   publicFloats: readonly FloatRegistryEntryPt[],
 ): LayoutRect[] {
   const { services, state, sessionState, publicAnchorBridge } = context;
-  const atStart = () => uprightPrecedingDrawings(
-    [...publicFloats, ...retainedBodyParagraphFloatEntries(sessionState, layout)], layout,
-  );
-  if (layout.drawings.length === 0 || !(request.precedingBlockExtentPt! > 0)
-    || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return atStart();
+  // Only an upright block table reads them (bodyUprightBlockLookAhead).
+  if (layout.drawings.length === 0 || !state.verticalPhys || !uprightBlockPaginates(state.verticalPhys)) return [];
+  if (!(request.precedingBlockExtentPt! > 0)) {
+    return uprightPrecedingDrawings(
+      [...publicFloats, ...retainedBodyParagraphFloatEntries(sessionState, layout)], layout,
+    );
+  }
   const reached = locationAfterKeepSet(request);
   const candidate: BodyAcquisitionState = {
     ...state,
