@@ -262,56 +262,67 @@ function joinRects<Rect extends RunRect & { readonly order?: number }>(rects: re
 
 /** `rects` with the area two of them share covered once: glyphs of
  * different extents across the run that are painted over each other
- * (condensed spacing between two sizes, a raised run, a tate-chu-yoko cell)
- * cannot join into one rect, and marking their overlap twice would darken
- * it. Each group of overlapping rects is replaced by rects of the same
- * region that do not overlap: one per stretch along the run of each band
- * across it, bands with the same stretches joined. Rects that overlap
- * nothing are returned as they are. */
+ * (condensed spacing between two sizes, a raised run, a tate-chu-yoko cell,
+ * lines set closer than their glyphs are tall) cannot join into one rect,
+ * and marking their overlap twice would darken it. Each group of overlapping
+ * rects is replaced by rects of the same region that do not overlap: one per
+ * stretch along the run of each band across it, bands with the same
+ * stretches joined. Rects that overlap nothing are returned as they are.
+ *
+ * The work follows the overlaps on both axes. Groups are found by a sweep
+ * along the run over the rects open there, kept in order across the run, so
+ * a rect is compared only with open rects near its own extent across; a
+ * group is then cut into bands by a sweep across the run over the rects
+ * open in each band. */
 function withoutOverlap<Rect extends RunRect & { readonly order?: number }>(rects: readonly Rect[]): Rect[] {
   const overlaps = (left: RunRect, right: RunRect): boolean => (
     Math.min(left.x + left.width, right.x + right.width) - Math.max(left.x, right.x) > TOUCH
     && Math.min(left.y + left.height, right.y + right.height) - Math.max(left.y, right.y) > TOUCH);
-  // Groups of rects connected by overlap. Rects are first parted into bands
-  // across the run that share no extent (lines); within a band a sweep along
-  // the run compares a rect only with the rects still open where it starts.
-  // The comparisons are bounded by the rects that share a place along the
-  // run in one band, not by the rects of the page or of the line.
   const group = rects.map((_, index) => index);
   const find = (index: number): number => {
     while (group[index] !== index) index = group[index] = group[group[index]!]!;
     return index;
   };
   let any = false;
-  const sweep = (band: number[]): void => {
-    band.sort((left, right) => rects[left]!.x - rects[right]!.x);
-    let open: number[] = [];
-    for (const index of band) {
-      const rect = rects[index]!;
-      if (open.length > 0) open = open.filter((other) => rects[other]!.x + rects[other]!.width - rect.x > TOUCH);
-      for (const other of open) {
-        if (overlaps(rects[other]!, rect)) {
-          group[find(index)] = find(other);
-          any = true;
-        }
-      }
-      open.push(index);
+  /** The first position in `list` (ordered by `key`) whose key is not below `value`. */
+  const lowerBound = (list: readonly number[], key: (index: number) => number, value: number): number => {
+    let low = 0;
+    let high = list.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (key(list[middle]!) < value) low = middle + 1;
+      else high = middle;
     }
+    return low;
   };
-  const byStart = rects.map((_, index) => index).sort((left, right) => rects[left]!.y - rects[right]!.y);
-  let band: number[] = [];
-  let bandEnd = Number.NEGATIVE_INFINITY;
-  for (const index of byStart) {
+  const top = (index: number): number => rects[index]!.y;
+  const end = (index: number): number => rects[index]!.x + rects[index]!.width;
+  // Open rects by their start across the run, and by their end along it.
+  const open: number[] = [];
+  const ending: number[] = [];
+  // No open rect is taller: one that reaches a rect starts within this of it.
+  let tallest = 0;
+  for (const index of rects.map((_, position) => position).sort((left, right) => rects[left]!.x - rects[right]!.x)) {
     const rect = rects[index]!;
-    if (band.length > 0 && rect.y - bandEnd >= -TOUCH) {
-      sweep(band);
-      band = [];
-      bandEnd = Number.NEGATIVE_INFINITY;
+    let closed = 0;
+    while (closed < ending.length && end(ending[closed]!) - rect.x <= TOUCH) {
+      const gone = ending[closed]!;
+      let at = lowerBound(open, top, top(gone));
+      while (open[at] !== gone) at += 1;
+      open.splice(at, 1);
+      closed += 1;
     }
-    band.push(index);
-    bandEnd = Math.max(bandEnd, rect.y + rect.height);
+    if (closed > 0) ending.splice(0, closed);
+    for (let at = lowerBound(open, top, rect.y - tallest); at < open.length && top(open[at]!) < rect.y + rect.height - TOUCH; at += 1) {
+      if (overlaps(rects[open[at]!]!, rect)) {
+        group[find(index)] = find(open[at]!);
+        any = true;
+      }
+    }
+    open.splice(lowerBound(open, top, rect.y), 0, index);
+    ending.splice(lowerBound(ending, end, end(index)), 0, index);
+    tallest = Math.max(tallest, rect.height);
   }
-  sweep(band);
   if (!any) return [...rects];
   const members = new Map<number, Rect[]>();
   rects.forEach((rect, index) => {
@@ -326,32 +337,43 @@ function withoutOverlap<Rect extends RunRect & { readonly order?: number }>(rect
       result.push(parts[0]!);
       continue;
     }
-    const order = parts.some((part) => part.order === undefined) ? undefined
-      : Math.min(...parts.map((part) => part.order!));
-    const edges = [...new Set(parts.flatMap((part) => [part.y, part.y + part.height]))].sort((a, b) => a - b);
-    let open: { x: number; y: number; width: number; height: number }[] = [];
+    let order: number | undefined;
+    for (const part of parts) {
+      if (part.order !== undefined && (order === undefined || part.order < order)) order = part.order;
+    }
+    // The group's bands across the run, each with the parts open in it.
+    const starting = [...parts].sort((left, right) => left.y - right.y);
+    const edges = [...new Set(parts.flatMap((part) => [part.y, part.y + part.height]))].sort((left, right) => left - right);
+    let covering: Rect[] = [];
+    let next = 0;
+    let previous: { x: number; y: number; width: number; height: number }[] = [];
     for (let band = 0; band < edges.length - 1; band += 1) {
-      const top = edges[band]!;
-      const bottom = edges[band + 1]!;
-      if (bottom - top <= TOUCH) continue;
+      const bandTop = edges[band]!;
+      const bandBottom = edges[band + 1]!;
+      covering = covering.filter((part) => part.y + part.height >= bandBottom - TOUCH);
+      while (next < starting.length && starting[next]!.y <= bandTop + TOUCH) {
+        if (starting[next]!.y + starting[next]!.height >= bandBottom - TOUCH) covering.push(starting[next]!);
+        next += 1;
+      }
+      if (bandBottom - bandTop <= TOUCH) continue;
       const stretches: { x: number; width: number }[] = [];
-      for (const part of parts.filter((candidate) => candidate.y <= top + TOUCH && candidate.y + candidate.height >= bottom - TOUCH)
-        .sort((left, right) => left.x - right.x)) {
+      for (const part of [...covering].sort((left, right) => left.x - right.x)) {
         const last = stretches.at(-1);
         if (last && part.x <= last.x + last.width + TOUCH) last.width = Math.max(last.width, part.x + part.width - last.x);
         else stretches.push({ x: part.x, width: part.width });
       }
       // A band with the stretches of the band above continues its rects.
-      const continues = open.length === stretches.length && open.every((rect, index) => (
-        Math.abs(rect.y + rect.height - top) <= TOUCH && Math.abs(rect.x - stretches[index]!.x) <= TOUCH
+      const continues = previous.length === stretches.length && previous.every((rect, index) => (
+        Math.abs(rect.y + rect.height - bandTop) <= TOUCH && Math.abs(rect.x - stretches[index]!.x) <= TOUCH
         && Math.abs(rect.width - stretches[index]!.width) <= TOUCH));
-      if (continues) for (const rect of open) rect.height = bottom - rect.y;
+      if (continues) for (const rect of previous) rect.height = bandBottom - rect.y;
       else {
-        open = stretches.map((stretch) => ({ ...stretch, y: top, height: bottom - top }));
-        for (const rect of open) result.push(rect as Rect);
+        previous = stretches.map((stretch) => ({
+          ...stretch, y: bandTop, height: bandBottom - bandTop, ...(order !== undefined ? { order } : {}),
+        }));
+        for (const rect of previous) result.push(rect as Rect);
       }
     }
-    if (order !== undefined) for (const rect of result) if (rect.order === undefined) (rect as { order?: number }).order = order;
   }
   return result;
 }

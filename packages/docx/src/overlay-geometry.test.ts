@@ -9,6 +9,7 @@ import { textRunSourceIndexForDocument } from './layout/text-index.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
 import { collectLayoutSourceCommentRanges } from './comments.js';
 import { buildDocxTextLayer } from './text-layer.js';
+import { textRunsForPage } from './text-run-projection.js';
 import {
   fakeElement, inlinePictureRun, intersect, layerBoxes, pageBoxOf, paintedDocument, PICTURE_PART, withFakeDocument,
   type FakeElement, type PageBox, type PaintedGlyph,
@@ -626,6 +627,29 @@ describe('the work of covering overlapping marks once', () => {
     expect(large).toBeLessThan(Math.max(small, 300) * 6);
   });
 
+  it('grows with the number of lines set closer than their glyphs are tall', () => {
+    // One 12px glyph per line, lines 8px apart: each overlaps the next, and
+    // the whole paragraph is one group.
+    const tight = (lines: number): DocxTextRunInfo[] => Array.from({ length: lines }, (_, line) => ({
+      text: 'x', x: 72, y: 72 + line * 8, w: 6, h: 12, fontSize: 12, font: '12px serif', sourceRunIndex: line,
+    }));
+    const count = (runs: DocxTextRunInfo[]): number => {
+      const counted = vi.spyOn(Math, 'min');
+      try {
+        expect(overlayBoxes(runs)).toHaveLength(1);
+        return counted.mock.calls.length;
+      } finally {
+        counted.mockRestore();
+      }
+    };
+    for (const [few, many] of [[20, 80], [200, 800]] as const) {
+      const small = count(tight(few));
+      const large = count(tight(many));
+      expect(small).toBeGreaterThan(0);
+      expect(large / small).toBeLessThan(6);
+    }
+  });
+
   it('grows with the length of one line of condensed runs that overlap their neighbours', () => {
     // 6px glyphs 4.5px apart, every other one raised by 1px: each overlaps
     // the next, and the whole line is one group.
@@ -655,5 +679,35 @@ describe('the work of covering overlapping marks once', () => {
     const small = comparisons(10);
     const large = comparisons(40);
     expect(large).toBeLessThan(Math.max(small, 600) * 6);
+  });
+});
+
+describe('a comment on the end of a paragraph that runs over two pages', () => {
+  it('is shown on the page that holds the commented run, and not on the page before', async () => {
+    const comments = '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + '<w:comment w:id="1" w:author="A"><w:p><w:r><w:t>c</w:t></w:r></w:p></w:comment></w:comments>';
+    const line = '<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Uncommented</w:t><w:br/></w:r>';
+    const { layout, model, runs } = await paintedDocument(
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>${line.repeat(55)}`
+      + '<w:commentRangeStart w:id="1"/><w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>Commented</w:t></w:r>'
+      + '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>', {
+        parts: { 'word/comments.xml': comments },
+        relationships: '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" '
+          + 'Target="comments.xml"/>',
+        contentTypes: '<Override PartName="/word/comments.xml" '
+          + 'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>',
+      });
+    expect(layout.pages).toHaveLength(2);
+    expect(runs.some((run) => run.text === 'Commented')).toBe(false);
+    const anchors = collectLayoutSourceCommentRanges(model.comments ?? [], layoutSourceStore(model),
+      textRunSourceIndexForDocument(layout));
+    expect(anchors).toHaveLength(1);
+    // Page one holds the paragraph but none of the commented run.
+    expect(resolveDocxCommentThreads(model.comments ?? [], anchors, runs)).toEqual([]);
+    const second = textRunsForPage(layout, 1, { scale: 1 });
+    const [thread] = resolveDocxCommentThreads(model.comments ?? [], anchors, second);
+    const commented = second.find((run) => run.text === 'Commented')!;
+    expect(thread!.anchors[0]!.rects).toHaveLength(1);
+    expect(thread!.anchors[0]!.rects[0]!.x).toBeCloseTo(commented.x, 6);
   });
 });

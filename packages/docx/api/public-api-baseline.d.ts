@@ -1182,6 +1182,7 @@ export interface CommentAnchorRange {
     readonly endRunIndex: number;
     readonly reference: CommentAnchorPoint;
     readonly geometryFallback?: CommentAnchorGeometryFallback;
+    readonly coveredGeometry?: true;
 }
 export type DecodedImageBudgetStrategy = 'adaptive' | 'strict';
 export interface DocComment {

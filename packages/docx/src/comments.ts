@@ -21,6 +21,12 @@ export interface CommentAnchorRange {
    * neither the covered interval nor the authored reference has text geometry.
    * Absent when that story contains no projected text run. */
   readonly geometryFallback?: CommentAnchorGeometryFallback;
+  /** Set when a covered run has geometry somewhere in the laid-out document
+   * (known only to anchors collected with its run index). The range is then
+   * shown where those runs are: a page that holds none of them, such as an
+   * earlier page of the same paragraph, shows nothing of it and does not
+   * resolve it from the reference boundary. */
+  readonly coveredGeometry?: true;
 }
 
 export interface CommentAnchorPoint {
@@ -124,6 +130,7 @@ function frozenRange(
   reference: MarkLocation,
   geometryFallback: MarkLocation | undefined,
   endRunIndex = location.boundary,
+  coveredGeometry = false,
 ): CommentAnchorRange {
   return Object.freeze({
     commentId,
@@ -137,6 +144,7 @@ function frozenRange(
         sourceRunIndex: geometryFallback.boundary,
       }),
     }),
+    ...(coveredGeometry ? { coveredGeometry: true as const } : {}),
   });
 }
 
@@ -292,12 +300,21 @@ function collectIndexedStoryCommentRanges(
         const to = index === end.paragraphIndex
           ? end.boundary
           : normalizedBoundary(visit.paragraph, visit.paragraph.runs.length);
+        // Whether a covered run is laid out anywhere in the document: the
+        // range then belongs to the pages that hold those runs.
+        const rendered = renderedRunIndex.get(sourceKey(visit.source));
+        let coveredGeometry = false;
+        if (rendered) {
+          for (let runIndex = from; runIndex < to && !coveredGeometry; runIndex += 1) {
+            coveredGeometry = rendered.has(runIndex);
+          }
+        }
         ranges.push(frozenRange(id, {
           paragraphIndex: index,
           source: visit.source,
           boundary: from,
           runCount: normalizedBoundary(visit.paragraph, visit.paragraph.runs.length),
-        }, reference, geometryFallback, Math.max(from, to)));
+        }, reference, geometryFallback, Math.max(from, to), coveredGeometry));
       }
       continue;
     }
@@ -394,6 +411,9 @@ export function resolveCommentAnchorRuns(
     (run.sourceRunIndex as number) >= anchor.startRunIndex
     && (run.sourceRunIndex as number) < anchor.endRunIndex);
   if (covered.length > 0) return covered;
+  // The covered runs are laid out on another page: nothing of the range is
+  // here, and its reference boundary does not stand in for it.
+  if (anchor.coveredGeometry && anchor.startRunIndex < anchor.endRunIndex) return [];
 
   // A lone rangeStart/rangeEnd or reference-only comment is a point anchor at
   // the range's own source/boundary (§17.13.4.3/.4). The separately-authored
