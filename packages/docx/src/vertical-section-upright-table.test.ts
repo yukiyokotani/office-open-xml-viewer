@@ -285,6 +285,48 @@ describe('upright block table of a vertical section', () => {
   });
 
   it.each(['tbRl', 'tbLrV'] as const)(
+    'holds text below a table only in at least 18 pt of room before the column end (%s)',
+    (direction) => {
+      // A table from the column top that ends 17 pt above the column's end
+      // leaves a 10.5 pt character room there, but the strips that meet it
+      // have no text below it and resume past it at the column top. In
+      // 19 pt of room each holds one character below the table.
+      const layOutWithRoom = (roomPt: number) => {
+        const pages = layOutPages(direction, [table(1, COLUMN_END - MARGIN.top - 2 * RULE - roomPt), P, P]);
+        expect(pages).toHaveLength(1);
+        expect(COLUMN_END - pages[0]!.tables[0]!.bottom).toBeCloseTo(roomPt, 6);
+        return pages[0]!;
+      };
+      const tight = layOutWithRoom(17);
+      expect(tight.strips.flat().map((strip) => strip.inlineStart)).toEqual([MARGIN.top, MARGIN.top]);
+      expect(tight.strips[0]![0]!.block).toBeCloseTo(TABLE_W + RULE + 7.14, 6);
+      const roomy = layOutWithRoom(19);
+      expect(roomy.strips[0]![0]!.block).toBe(0);
+      for (const strip of roomy.strips[0]!) expect(strip.inlineStart).toBeCloseTo(roomy.tables[0]!.bottom, 6);
+      expect(roomy.strips[0]).toHaveLength(5);
+    },
+  );
+
+  it.each(['tbRl', 'tbLrV'] as const)(
+    'starts the next page with a table whose box would reach the footnote it refers to (%s)',
+    (direction) => {
+      // Fifteen strips and a 180 pt table fit the page's block extent. The
+      // table's first cell refers to a four-paragraph footnote, whose band
+      // at the block end of the page the table's box would cross: the table
+      // adds no flow advance, so it is its box that has to end before the
+      // band. The table and its note start the next page.
+      const noted = table(2, 40).replace('</w:p>', `${FOOTNOTE_REFERENCE}</w:p>`);
+      const stories = { footnote: paragraph('note').repeat(4) };
+      const body = (tableXml: string) => [...Array.from({ length: 15 }, () => P), tableXml, P];
+      const plain = layOutPages(direction, body(table(2, 40)), 1, 360, undefined, undefined, stories);
+      expect(plain.map((page) => page.tables.length)).toEqual([1]);
+      const pages = layOutPages(direction, body(noted), 1, 360, undefined, undefined, stories);
+      expect(pages.map((page) => [page.strips.length, page.tables.length])).toEqual([[15, 0], [1, 1]]);
+      expect(pages[1]!.tables[0]!.top).toBeCloseTo(MARGIN.top, 6);
+    },
+  );
+
+  it.each(['tbRl', 'tbLrV'] as const)(
     'moves a keepNext paragraph with a table that its footnote leaves no room for (%s)',
     (direction) => {
       // Fourteen strips, a keepNext paragraph and a table fit the page. The

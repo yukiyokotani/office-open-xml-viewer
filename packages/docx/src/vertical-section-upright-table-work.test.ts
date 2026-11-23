@@ -81,6 +81,8 @@ type Counts = {
   frameKeys: number;
   /** Table pin keys read by iterating a Set. */
   pinKeys: number;
+  /** Lookups of a two-axis cell (`block:inline`) in a Map. */
+  cellLookups: number;
   /** Drawing collision entries serialized (JSON.stringify of an entry or of
    * a list of them). */
   collisionKeys: number;
@@ -96,10 +98,12 @@ function counting<Result>(
   run: () => Result,
   /** Count `pinKeys` too: every Set iteration of the layout is then wrapped. */
   setIteration = false,
+  /** Count `cellLookups` too: every Map lookup of the layout is then wrapped. */
+  mapLookups = false,
 ): Readonly<{ result: Result; counts: Counts }> {
   const counts: Counts = {
     boxes: 0, exclusions: 0, slots: 0, registryEntries: 0, rows: 0, history: 0, members: 0, drawings: 0, floats: 0,
-    frameKeys: 0, pinKeys: 0, collisionKeys: 0, rects: 0,
+    frameKeys: 0, pinKeys: 0, collisionKeys: 0, rects: 0, cellLookups: 0,
     drawingShifts: 0,
   };
   const visit = (value: unknown): void => {
@@ -177,6 +181,14 @@ function counting<Result>(
     return stringify(value, ...rest);
   }) as typeof JSON.stringify;
   restore.push(() => { JSON.stringify = stringify; });
+  if (mapLookups) {
+    const mapGet = Map.prototype.get;
+    Map.prototype.get = function (this: Map<unknown, unknown>, key: unknown) {
+      if (typeof key === 'string' && /^-?\d+:-?\d+$/.test(key)) counts.cellLookups += 1;
+      return mapGet.call(this, key);
+    };
+    restore.push(() => { Map.prototype.get = mapGet; });
+  }
   if (setIteration) {
     const setIterator = Set.prototype[Symbol.iterator];
     Set.prototype[Symbol.iterator] = function (this: Set<unknown>) {
@@ -432,6 +444,22 @@ describe('upright block table placement work', () => {
     const small = measure(8);
     const large = measure(16);
     expect(large).toBeLessThanOrEqual(3.5 * small);
+  }, 300_000);
+
+  it('continues a long table over pages without reading empty drawing cells', () => {
+    // One table of 20 pt rows over many pages, and no drawing anywhere:
+    // each page's rows ask for the drawings in their way over the rest of
+    // the table's height. With no drawing on the page nothing is read, so
+    // the cell lookups grow with the pages, not with pages times height.
+    const measure = (rows: number) => {
+      const { result, counts } = counting(() => layOutPages('tbRl', [table(rows, 20)]), false, true);
+      expect(result.flatMap((page) => page.tables)).toHaveLength(result.length);
+      expect(result.length).toBeGreaterThan(rows / 40);
+      return counts.cellLookups;
+    };
+    const small = measure(256);
+    const large = measure(512);
+    expect(large).toBeLessThanOrEqual(2 * small + 64);
   }, 300_000);
 
   it('keys anchoring paragraphs without spelling out the drawings placed before each', () => {

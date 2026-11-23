@@ -81,6 +81,12 @@ export interface UprightBlockPageIndex {
    * page's wrap rectangles have been looked at for them
    * (syncUprightDrawings). */
   readonly drawingCells: Map<string, UprightDrawingCell>;
+  /** The block and inline buckets that hold a drawing cell, as a range each
+   * (it only grows): a query reads no cell outside it. Null while there is
+   * none. */
+  drawingCellRange: Readonly<{
+    firstBlock: number; lastBlock: number; firstInline: number; lastInline: number;
+  }> | null;
   readonly wideDrawings: UprightPageDrawing[];
   drawingsSeen: number;
   /** Identifies the boxes of `tableBuckets` in registration order: equal for
@@ -193,6 +199,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     tableCount: 0,
     tableBoxesVersion: 0,
     drawingCells: new Map(),
+    drawingCellRange: null,
     wideDrawings: [],
     drawingsSeen: 0,
     exclusionCells: new Map(),
@@ -585,6 +592,13 @@ function insertDrawing(index: UprightBlockPageIndex, drawing: UprightPageDrawing
     index.wideDrawings.push(drawing);
     return;
   }
+  const range = index.drawingCellRange;
+  index.drawingCellRange = range ? {
+    firstBlock: Math.min(range.firstBlock, cells.firstBlock),
+    lastBlock: Math.max(range.lastBlock, cells.lastBlock),
+    firstInline: Math.min(range.firstInline, cells.firstInline),
+    lastInline: Math.max(range.lastInline, cells.lastInline),
+  } : cells;
   for (let block = cells.firstBlock; block <= cells.lastBlock; block += 1) {
     for (let inline = cells.firstInline; inline <= cells.lastInline; inline += 1) {
       const key = `${block}:${inline}`;
@@ -687,10 +701,15 @@ export function uprightPageDrawingsNear(
     if (extent.blockStartPt <= blockEndPt && blockStartPt <= extent.blockEndPt
       && extent.inlineEndPt > inlineFromPt && extent.inlineStartPt < inlineToPt) near.push(drawing);
   }
-  const firstBlock = bucketOf(blockStartPt);
-  const lastBlock = bucketOf(blockEndPt);
-  const firstInline = bucketOf(inlineFromPt);
-  const lastInline = bucketOf(inlineToPt);
+  // Only the buckets that hold a cell are read: a query over a range far
+  // larger than the page's drawings (the rows a table continues with) costs
+  // no more than one over the drawings' own range.
+  const range = index.drawingCellRange;
+  if (!range) return near;
+  const firstBlock = Math.max(bucketOf(blockStartPt), range.firstBlock);
+  const lastBlock = Math.min(bucketOf(blockEndPt), range.lastBlock);
+  const firstInline = Math.max(bucketOf(inlineFromPt), range.firstInline);
+  const lastInline = Math.min(bucketOf(inlineToPt), range.lastInline);
   const pending: number[] = [];
   for (let block = firstBlock; block <= lastBlock; block += 1) {
     for (let inline = firstInline; inline <= lastInline; inline += 1) {

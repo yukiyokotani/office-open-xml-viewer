@@ -3480,13 +3480,29 @@ function* paginateBodyPassSteps(
           const unwrappedReservePt = notePlans
             ? notePlans.reservePt(selected.fragment.lines.length)
             : footnoteAdmission(selected.fragment, location.availableBounds.widthPt).reservePt;
-          // Where the flow reaches the table after this fragment and its notes.
+          // Where the flow reaches the table after this fragment and its
+          // notes, and the notes the table itself refers to: its box has
+          // to end before their band as well.
           const reached = locationAfter(location, unwrappedChargePt);
+          const tableReferenceIds = session.measureFollowingBlock({
+            input: tableAfter,
+            location: reached,
+            availableInlineExtentPt: reached.availableBounds.widthPt,
+            freshPageBlockExtentPt: freshPageExtent(state),
+            lastColumnOfPage: inLastColumn(state),
+          }).fullFootnoteReferenceIds ?? [];
+          const plannedReservePt = tableReferenceIds.length === 0 ? unwrappedReservePt : Math.max(
+            unwrappedReservePt,
+            footnoteAdmissionForIds(
+              [...new Set([...footnoteIdsInRetainedSlice(selected.fragment), ...tableReferenceIds])],
+              location.availableBounds.widthPt,
+            ).reservePt,
+          );
           const tableLocation = Object.freeze({
             ...reached,
             availableBounds: Object.freeze({
               ...reached.availableBounds,
-              heightPt: Math.max(0, reached.availableBounds.heightPt - unwrappedReservePt),
+              heightPt: Math.max(0, reached.availableBounds.heightPt - plannedReservePt),
             }),
           });
           // The wrapped drawings this fragment anchors are committed with it,
@@ -3778,6 +3794,36 @@ function* paginateBodyPassSteps(
           reservePt: notes.reservePt,
           chargePt: flowChargePt(acquired) + notes.reservePt,
         });
+        // `word-vertical-section-upright-block-table`: an upright table
+        // charges no flow advance, but its box takes block extent from the
+        // flow position, and the notes it refers to take theirs from the
+        // block end of the page. Where the two would meet, the table is
+        // placed in the block extent the notes leave, once: a table too wide
+        // for it then starts the next region like any table too wide, and
+        // its notes go with it; a table that stays where it is (first on
+        // its page, or in a multi-column section) keeps its place and notes.
+        if (acquired.uprightBlockEndPt !== undefined && notes.reservePt > 0
+          && !atMostWithinFloatingPrecision(
+            acquired.uprightBlockEndPt,
+            activeBlockEndPt(state) - state.footnoteReservePt - notes.reservePt,
+          )) {
+          acquired = requestAt(Math.max(0, location.availableBounds.heightPt - notes.reservePt));
+          notes = acquired.requiresFreshFlowRegion
+            ? Object.freeze({
+                ids: Object.freeze([]) as readonly string[],
+                layouts: Object.freeze([]) as readonly NoteLayout[],
+                continuations: Object.freeze([]),
+                reservePt: 0,
+              })
+            : footnoteAdmission(acquired.layout, location.availableBounds.widthPt);
+          if (!acquired.requiresFreshFlowRegion) {
+            lastFootnoteAdmission = Object.freeze({
+              ids: notes.ids,
+              reservePt: notes.reservePt,
+              chargePt: flowChargePt(acquired) + notes.reservePt,
+            });
+          }
+        }
         const seenCandidates = new Set<string>();
         // Admission decides fit exactly as page containment will check it
         // (invariants.ts, through the shared floating-precision predicate):

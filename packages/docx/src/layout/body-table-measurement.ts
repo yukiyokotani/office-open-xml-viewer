@@ -525,6 +525,7 @@ function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): Upr
   if (index.drawingsSeen > floats.length) {
     // The rectangles were replaced, not extended: start over.
     index.drawingCells.clear();
+    index.drawingCellRange = null;
     index.wideDrawings.length = 0;
     index.drawingsSeen = 0;
   }
@@ -1364,6 +1365,7 @@ function measureUprightBlockTable(
       nextCursor,
       ...(registration ? { uprightBlocks: registration } : {}),
       ...(pin ? { uprightPagePin: pin } : {}),
+      uprightBlockEndPt: bounds.yPt + bounds.heightPt,
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
         xPt: origin.xPt,

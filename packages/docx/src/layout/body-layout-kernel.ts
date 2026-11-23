@@ -191,6 +191,10 @@ export interface AcquiredTableBlock {
    * fragment adds to the page's upright blocks
    * (BodyLayoutSession.commitUprightBlocks). */
   readonly uprightBlocks?: UprightBlockRegistration;
+  /** `word-vertical-section-upright-block-table`: where the placed
+   * fragment's box ends along the block axis. It charges no flow advance,
+   * so the footnotes it refers to are admitted against this. */
+  readonly uprightBlockEndPt?: number;
   /** `word-vertical-section-upright-block-table`: the fragment's block lies
    * over a column laid out before its own. Registered when the page's layout
    * starts (commitUprightBlocks), it makes the text of that column flow

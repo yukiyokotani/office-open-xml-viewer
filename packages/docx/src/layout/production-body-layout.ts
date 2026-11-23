@@ -153,7 +153,7 @@ import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, anchorAxisOwnership, anchorCollisionBlockers, anchorObstacleMove, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
-import { WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
+import { WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { UprightDrawingPin } from './body-layout-kernel.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -3224,20 +3224,34 @@ function addUprightBlockExclusionFloats(
   planned?: UprightBlockRegistration,
 ): void {
   const index = candidate.uprightBlockIndex;
-  if (index && index.exclusionCount > 0) {
-    const band = location.availableBounds;
-    const indents = resolveBodyParagraphLayoutContext(candidate, paragraph);
-    const startPt = indents.physicalIndentLeftPt;
+  const fromIndex = index !== undefined && index.exclusionCount > 0;
+  if (!fromIndex && !planned?.exclusions.length) return;
+  const band = location.availableBounds;
+  const bandEndPt = band.xPt + band.widthPt;
+  const context = resolveBodyParagraphLayoutContext(candidate, paragraph);
+  // `word-vertical-section-upright-block-table`: with a line grid, a strip
+  // that meets a table has no text in less than
+  // WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT between the table's bottom edge
+  // and the column's end: the exclusion then reaches that end.
+  const float = (exclusion: UprightBlockExclusion, ordinal: number): FloatRect => {
+    const rect = uprightBlockExclusionFloat(exclusion, ordinal);
+    const roomBelowPt = bandEndPt - rect.xRight;
+    return context.lineGrid.active && roomBelowPt > 0 && roomBelowPt < WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT
+      && rect.xLeft < bandEndPt
+      ? { ...rect, xRight: bandEndPt, imageW: bandEndPt - rect.imageX } : rect;
+  };
+  if (fromIndex) {
+    const startPt = context.physicalIndentLeftPt;
     const outdentPt = Math.max(
-      0, -startPt, -(startPt + indents.firstIndentPt), -indents.physicalIndentRightPt,
+      0, -startPt, -(startPt + context.firstIndentPt), -context.physicalIndentRightPt,
     );
     for (const entry of uprightBlockExclusionsAhead(
-      index, location.cursorPt.yPt, band.xPt - outdentPt, band.xPt + band.widthPt + outdentPt,
-    )) candidate.floats.push(uprightBlockExclusionFloat(entry.exclusion, entry.ordinal));
+      index, location.cursorPt.yPt, band.xPt - outdentPt, bandEndPt + outdentPt,
+    )) candidate.floats.push(float(entry.exclusion, entry.ordinal));
   }
   const ordinal = index?.exclusionCount ?? 0;
   planned?.exclusions.forEach((exclusion, at) => {
-    candidate.floats.push(uprightBlockExclusionFloat(exclusion, ordinal + at));
+    candidate.floats.push(float(exclusion, ordinal + at));
   });
 }
 
