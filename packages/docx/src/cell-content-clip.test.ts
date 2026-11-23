@@ -404,7 +404,9 @@ describe('overlay clip containers', () => {
         transform: 'rotate(90deg)', clips: [clip],
       };
       buildDocxHighlightLayer(layer as unknown as HTMLDivElement, [run, { ...run }],
-        [{ slices: [{ runIndex: 0, start: 0, end: 3 }, { runIndex: 1, start: 1, end: 2 }], active: false }],
+        // Two matches: the slices of one match would join into one box.
+        [{ slices: [{ runIndex: 0, start: 0, end: 3 }], active: false },
+          { slices: [{ runIndex: 1, start: 1, end: 2 }], active: false }],
         100, 100, () => (text: string) => text.length * 10);
       // One container for the consecutive runs' shared clip.
       expect(layer.children).toHaveLength(1);

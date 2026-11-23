@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
 import { resolveDocxCommentThreads } from './comments.js';
 import { buildDocxHighlightLayer } from './find-highlight-layer.js';
 import {
@@ -7,7 +8,10 @@ import {
 import { DocxFindController } from './find.js';
 import { textRunSourceIndexForDocument } from './layout/text-index.js';
 import { layoutSourceStore } from './layout-source-model-adapter.js';
-import { collectLayoutSourceCommentRanges } from './comments.js';
+import { collectLayoutSourceCommentRanges, collectLayoutSourceCommentRangesIfPresent } from './comments.js';
+import { buildDocxCommentMargin } from './comment-margin.js';
+import { installDom, makeEl } from './scroll-viewer-test-dom.js';
+import { reviewProjectionIndexForDocument } from './layout/text-index.js';
 import { buildDocxTextLayer } from './text-layer.js';
 import { textRunsForPage } from './text-run-projection.js';
 import {
@@ -15,6 +19,10 @@ import {
   type FakeElement, type PageBox, type PaintedGlyph,
 } from './test-support/painted-glyphs.test-support.js';
 import type { DocxTextRunInfo } from './types.js';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 /**
  * The overlay invariants (overlay-geometry.ts), checked against what is
@@ -709,5 +717,88 @@ describe('a comment on the end of a paragraph that runs over two pages', () => {
     const commented = second.find((run) => run.text === 'Commented')!;
     expect(thread!.anchors[0]!.rects).toHaveLength(1);
     expect(thread!.anchors[0]!.rects[0]!.x).toBeCloseTo(commented.x, 6);
+  });
+});
+
+const COMMENT_PART = {
+  parts: {
+    'word/comments.xml': '<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+      + '<w:comment w:id="1" w:author="A"><w:p><w:r><w:t>c</w:t></w:r></w:p></w:comment></w:comments>',
+  },
+  relationships: '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" '
+    + 'Target="comments.xml"/>',
+  contentTypes: '<Override PartName="/word/comments.xml" '
+    + 'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>',
+} as const;
+const sized = (value: string) => `<w:r><w:rPr><w:sz w:val="24"/></w:rPr><w:t>${value}</w:t></w:r>`;
+
+describe('the card of a comment that starts in clipped text and ends on a later page', () => {
+  it('stands on the page that shows the comment, decided once for the document', async () => {
+    // The comment starts on text an exact-height row hides (page one) and
+    // ends on visible text after a page break (page two).
+    const { layout, model, runs } = await paintedDocument(
+      exactRowCell(240, '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="800" w:lineRule="exact"/></w:pPr>'
+        + `<w:commentRangeStart w:id="1"/>${sized('Hidden')}</w:p>`).replace(/<w:p\/>$/u, '')
+      + `<w:p><w:pPr><w:pageBreakBefore/></w:pPr>${sized('Shown')}<w:commentRangeEnd w:id="1"/>`
+      + '<w:r><w:commentReference w:id="1"/></w:r></w:p>', COMMENT_PART);
+    expect(layout.pages).toHaveLength(2);
+    const index = reviewProjectionIndexForDocument(layout);
+    const anchors = collectLayoutSourceCommentRangesIfPresent(model.comments, layoutSourceStore(model), index.renderedRunIndex, {
+      cardOwners: { sourcePages: index.sourcePages, runsForPage: (page) => textRunsForPage(layout, page, { scale: 1 }) },
+    });
+    // The owner is the range of the paragraph a page shows, not the first one.
+    expect(anchors.filter((anchor) => anchor.cardOwner).map((anchor) => anchor.source.path)).toEqual(
+      [textRunsForPage(layout, 1, { scale: 1 }).find((run) => run.text === 'Shown')!.source!.path]);
+    installDom();
+    const cards = (pageRuns: DocxTextRunInfo[]): number => {
+      const tint = makeEl('div');
+      const margin = makeEl('div');
+      margin.clientHeight = 800;
+      buildDocxCommentMargin(tint as never, margin as never, pageRuns, { comments: model.comments ?? [], anchors },
+        612, 792, null, () => undefined, 1, 260, false);
+      return margin.children.length;
+    };
+    expect(cards(runs)).toBe(0);
+    expect(cards(textRunsForPage(layout, 1, { scale: 1 }))).toBe(1);
+  });
+});
+
+describe('a comment that starts at the end of a paragraph', () => {
+  it('marks the commented paragraph only, not the run before the range', async () => {
+    const { layout, model, runs } = await paintedDocument(
+      `<w:p>${sized('Uncommented')}<w:commentRangeStart w:id="1"/></w:p>`
+      + `<w:p>${sized('Commented')}<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>`, COMMENT_PART);
+    const anchors = collectLayoutSourceCommentRanges(model.comments ?? [], layoutSourceStore(model),
+      textRunSourceIndexForDocument(layout));
+    const [thread] = resolveDocxCommentThreads(model.comments ?? [], anchors, runs);
+    const rects = thread!.anchors.flatMap((anchor) => anchor.rects.map(pageBoxOf));
+    const commented = runs.find((run) => run.text === 'Commented')!;
+    expect(rects).toHaveLength(1);
+    expect(rects[0]!.top).toBeCloseTo(commented.y, 6);
+    expect(rects[0]!.left).toBeCloseTo(commented.x, 6);
+  });
+});
+
+describe('a find match over runs whose glyphs overlap', () => {
+  it('tints the shared area once', async () => {
+    // A condensed 12pt `A` under the start of an 18pt `B`.
+    const { runs, glyphs } = await paintedDocument(
+      '<w:p><w:r><w:rPr><w:spacing w:val="-80"/><w:sz w:val="24"/></w:rPr><w:t>A</w:t></w:r>'
+      + '<w:r><w:rPr><w:sz w:val="36"/></w:rPr><w:t>B</w:t></w:r></w:p>');
+    const [a] = paintedBoxes(glyphs, 'A');
+    const [b] = paintedBoxes(glyphs, 'B');
+    expect(intersect(a!, b!)).not.toBeNull();
+    const boxes = withFakeDocument(() => {
+      const layer = fakeElement();
+      buildDocxHighlightLayer(layer as never, runs, [{
+        active: false,
+        slices: runs.flatMap((run, runIndex) => (run.text === 'A' || run.text === 'B' ? [{ runIndex, start: 0, end: 1 }] : [])),
+      }], 612, 792, () => () => { throw new Error('a projected run is never measured'); });
+      return layerBoxes(layer, 612, 792);
+    });
+    expect(regionDifference(boxes, [a!, b!])).toBeNull();
+    for (const [index, box] of boxes.entries()) {
+      expect(boxes.slice(index + 1).some((other) => intersect(box, other) !== null)).toBe(false);
+    }
   });
 });

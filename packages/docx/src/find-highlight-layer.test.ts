@@ -127,10 +127,8 @@ describe('buildDocxHighlightLayer', () => {
     expect(layer.children[0].style.background).toBe(DEFAULT_FIND_ACTIVE_HIGHLIGHT);
   });
 
-  it('draws a box per run for a cross-run match', () => {
+  it('draws one box over the touching runs of a cross-run match, and a box per run across a gap', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
-    const layer = makeEl('div');
-    const runs = [run({ text: 'Hel', x: 0 }), run({ text: 'lo', x: 21 })];
     const matches: DocxHighlightMatch[] = [
       {
         slices: [
@@ -140,11 +138,17 @@ describe('buildDocxHighlightLayer', () => {
         active: false,
       },
     ];
-    // cssWidth = 100 so the percentage reads directly as the px value.
-    buildDocxHighlightLayer(layer as unknown as HTMLDivElement, runs, matches, 100, 100, measureForFont);
-    expect(layer.children).toHaveLength(2);
-    expect(layer.children[0].style.left).toBe('0%'); // run 0 origin (0/100)
-    expect(layer.children[1].style.left).toBe(`${(21 / 100) * 100}%`); // run 1 origin
+    const boxes = (secondX: number) => {
+      const layer = makeEl('div');
+      // cssWidth = 100 so the percentage reads directly as the px value.
+      buildDocxHighlightLayer(layer as unknown as HTMLDivElement,
+        [run({ text: 'Hel', x: 0 }), run({ text: 'lo', x: secondX })], matches, 100, 100, measureForFont);
+      return layer.children.map((box) => box.style.left);
+    };
+    // `Hel` ends where `lo` starts: one match, one box.
+    expect(boxes(21)).toEqual(['0%']);
+    // Something else stands between the runs: it is not highlighted.
+    expect(boxes(30)).toEqual(['0%', `${(30 / 100) * 100}%`]);
   });
 
   it('carries the run transform for a vertical (tbRl) page', () => {

@@ -4,4 +4,12 @@ export interface ReviewAnchorProjectionOptions {
    * paragraphs whose final fragment is already in the published prefix.
    * Omit for authoritative projection. */
   readonly completedSourceKeys?: ReadonlySet<string>;
+  /** The laid-out document to decide comment card owners against
+   * (comments.ts assignCommentCardOwners): the pages that hold runs of each
+   * paragraph source, and the projected runs of a page. Comment anchors
+   * only. */
+  readonly cardOwners?: Readonly<{
+    sourcePages: ReadonlyMap<string, readonly number[]>;
+    runsForPage: (pageIndex: number) => readonly Readonly<import('./types.js').DocxTextRunInfo>[];
+  }>;
 }

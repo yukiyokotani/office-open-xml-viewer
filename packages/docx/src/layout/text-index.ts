@@ -984,6 +984,8 @@ export function textRunSourceIndexForDocument(
 export interface ReviewProjectionIndex {
   readonly renderedRunIndex: ReadonlyMap<string, ReadonlySet<number>>;
   readonly completedSourceKeys: ReadonlySet<string>;
+  /** The pages, in order, that hold laid-out runs of each paragraph source. */
+  readonly sourcePages: ReadonlyMap<string, readonly number[]>;
 }
 
 /** Build every index needed by comment/revision projection in one canonical
@@ -994,6 +996,7 @@ export function reviewProjectionIndexForDocument(
 ): ReviewProjectionIndex {
   const renderedRunIndex = new Map<string, Set<number>>();
   const completedSourceKeys = new Set<string>();
+  const sourcePages = new Map<string, number[]>();
   for (let pageIndex = 0; pageIndex < layout.pages.length; pageIndex += 1) {
     const page = pageGeometryIndex(layout, pageIndex, {
       collectTextRuns: false,
@@ -1005,10 +1008,13 @@ export function reviewProjectionIndexForDocument(
       const indices = renderedRunIndex.get(key) ?? new Set<number>();
       if (!renderedRunIndex.has(key)) renderedRunIndex.set(key, indices);
       for (const index of pageIndices) indices.add(index);
+      const pages = sourcePages.get(key);
+      if (pages) pages.push(pageIndex);
+      else sourcePages.set(key, [pageIndex]);
     }
     for (const key of page.completedParagraphSources) completedSourceKeys.add(key);
   }
-  return Object.freeze({ renderedRunIndex, completedSourceKeys });
+  return Object.freeze({ renderedRunIndex, completedSourceKeys, sourcePages });
 }
 
 /** Index selectable drawings and inline image/chart placements in page paint order. */
