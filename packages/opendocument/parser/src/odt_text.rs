@@ -1699,13 +1699,16 @@ impl RunProperties {
                 // class selects which language applies to all of them
                 // (fo:language, style:language-asian, style:language-complex),
                 // as it selects the one face set on every font slot above. The
-                // renderer's ECMA-376 §17.3.2.26 slot table may place a
-                // character of this class in another slot (U+31C0 is Asian
-                // here, highAnsi there), so every axis carries the class's
-                // language.
-                lang: class_language.clone(),
-                lang_east_asia: class_language.clone(),
-                lang_bidi: class_language,
+                // renderer's ECMA-376 §17.3.2.26 slot table may place an Asian
+                // or complex character in an ascii/highAnsi slot (U+31C0 is
+                // Asian here, highAnsi there), which reads the western axis:
+                // it carries the class's language. The East Asian and complex
+                // axes keep their own values (regional font input; Latin
+                // seams then differ only in the western axis and keep a
+                // grapheme cluster whole across runs).
+                lang: class_language,
+                lang_east_asia: language(NS_STYLE, "language-asian", "country-asian"),
+                lang_bidi: language(NS_STYLE, "language-complex", "country-complex"),
                 complex: class == ScriptClass::Complex,
             },
             face,

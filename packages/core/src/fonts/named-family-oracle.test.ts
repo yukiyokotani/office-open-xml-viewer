@@ -24,6 +24,10 @@ function fakeOwner(options: { lang?: boolean; sentinels?: boolean } = {}) {
         calls.push(text);
         const font = context.font as string;
         const sentinel = SENTINELS.findIndex((candidate) => font.includes(candidate.family));
+        if ((globalThis as { __nanControls?: boolean }).__nanControls && !font.includes('Covering') && sentinel >= 0) {
+          return { width: NaN, actualBoundingBoxLeft: NaN, actualBoundingBoxRight: NaN, actualBoundingBoxAscent: NaN,
+            actualBoundingBoxDescent: NaN, fontBoundingBoxAscent: NaN, fontBoundingBoxDescent: NaN } as TextMetrics;
+        }
         if (sentinel < 0 || options.sentinels === false) {
           return { width: 0, actualBoundingBoxLeft: 0, actualBoundingBoxRight: 0, actualBoundingBoxAscent: 0,
             actualBoundingBoxDescent: 0, fontBoundingBoxAscent: 0, fontBoundingBoxDescent: 0 } as TextMetrics;
@@ -76,6 +80,21 @@ describe('named-family oracle (Canvas lang admission)', () => {
     }
     // Two route contexts and two control contexts, each set once.
     expect(fontAssignments() - before).toBeLessThanOrEqual(4);
+  });
+
+  it('takes no ownership evidence from non-finite control geometry', () => {
+    const { factory, owner } = fakeOwner();
+    const oracle = createNamedFamilyOracle(owner, factory);
+    expect(oracle.available).toBe(true);
+    // Every proof context now reports NaN advances for the sentinel-only
+    // controls while the route pair stays equal and finite.
+    const broken = (globalThis as { __nanControls?: boolean });
+    broken.__nanControls = true;
+    try {
+      expect(oracle.draws('"Covering"', 400, 'normal', 'й')).toBe(false);
+    } finally {
+      delete broken.__nanControls;
+    }
   });
 
   it('cannot judge without Canvas lang or working sentinels', () => {

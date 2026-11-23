@@ -113,6 +113,8 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, wes
  * emoji ZWJ sequence, a flag) are far shorter; a degenerate run of marks is
  * cut at the seam instead, which bounds the text judged again per seam. */
 const MAX_JOINED_CLUSTER_UNITS = 64;
+/** {@link SequenceTail.crossing} for a seam inside a cluster over the bound. */
+const OVER_LIMIT = -1;
 
 /** The §17.3.2.20 w:val languages of a sequence whose runs disagree on it:
  * contiguous ranges of the sequence's displayed text (UTF-16 `end` offsets,
@@ -199,7 +201,10 @@ class SequenceTail {
       end = part.index + part.segment.length;
     }
     this.cluster = known.slice(start);
-    return end > seam && end - start <= MAX_JOINED_CLUSTER_UNITS ? end - seam : 0;
+    if (end <= seam) return 0;
+    // The cluster continues past the seam but is longer than the bound: not
+    // a boundary, but no measured extent either.
+    return end - start <= MAX_JOINED_CLUSTER_UNITS ? end - seam : OVER_LIMIT;
   }
 }
 
@@ -321,6 +326,10 @@ export function acquireTextSequences(
       : scope === lastScope
         && formattingKey(visible, environment, false) === formattingKey(last, environment, false))) {
       crossing = tail.crossing(display);
+      // Over the bound, a run that joins anyway (same formatting) takes the
+      // cluster's language for all of its text rather than put a language
+      // boundary inside the cluster; one that differs in w:val alone is cut.
+      if (crossing === OVER_LIMIT) crossing = join ? display.length : 0;
       if (crossing > 0) join = true;
     }
     if (!join) finish();

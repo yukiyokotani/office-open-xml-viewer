@@ -392,7 +392,9 @@ export function nativeRouteClusterOwned(
   let routed = cacheable ? probe.controls.get(cluster) : undefined;
   if (routed === undefined) {
     const control = measurePair(SENTINEL_ONLY_FONTS, cluster, probe, 1);
-    if (!control) return undefined;
+    // Invalid readings are no evidence: negating an equality over them would
+    // pass the control, so non-finite geometry cannot judge (nor be cached).
+    if (!control || !control.every((geometry) => geometry.every(Number.isFinite))) return undefined;
     routed = !sameGeometry(control[0]!, control[1]!);
     if (cacheable) {
       if (probe.controls.size >= 4096) probe.controls.delete(probe.controls.keys().next().value!);

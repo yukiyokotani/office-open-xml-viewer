@@ -64,6 +64,16 @@ describe('text sequences across §17.3.2.20 language seams', () => {
     expect(sequences([run('a', 'sr-rs'), run(`${'\u0301'.repeat(63)}b`, 'en-us')]).size).toBe(1);
   });
 
+  it('puts no language boundary inside a cluster longer than the bound', () => {
+    // 63 units in Serbian, then two English runs of one mark each: the second
+    // joins by formatting; the cluster (65 units) keeps one language.
+    const joined = sequences([run(`a${'\u0301'.repeat(62)}`, 'sr-rs'), run('\u0301', 'en-us'), run('\u0301', 'en-us')]);
+    const sequence = joined.get(0)!;
+    expect(sequence.run.text.length).toBe(65);
+    expect(languages(sequence)).toBeUndefined();
+    expect(sequence.run.lang).toBe('sr-rs');
+  });
+
   it('keeps delimiting at a boundary and at w:eastAsia or w:bidi seams', () => {
     expect(sequences([run('a', 'sr-rs'), run('b', 'en-us')]).size).toBe(0);
     expect(sequences([

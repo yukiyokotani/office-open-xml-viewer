@@ -151,10 +151,9 @@ fn fields_and_paragraph_marks_carry_the_run_language() {
             _ => None,
         })
         .expect("page-number field");
-    // The page number is Latin-class text: its class's language on every axis.
     assert_eq!(
         (field.lang.as_deref(), field.lang_east_asia.as_deref()),
-        (Some("sr-RS"), Some("sr-RS"))
+        (Some("sr-RS"), Some("ja-JP"))
     );
     let mark = paragraphs[1]
         .paragraph_mark_font_facts
@@ -162,12 +161,12 @@ fn fields_and_paragraph_marks_carry_the_run_language() {
         .expect("paragraph mark facts");
     assert_eq!(
         (mark.lang.as_deref(), mark.lang_bidi.as_deref()),
-        (Some("sr-RS"), Some("sr-RS"))
+        (Some("sr-RS"), Some("ar-SA"))
     );
 }
 
 #[test]
-fn every_language_axis_carries_the_script_class_language() {
+fn the_western_axis_carries_the_script_class_language() {
     let automatic = r#"<style:style style:name="T" style:family="text"><style:text-properties fo:language="fr" fo:country="FR" style:language-asian="ja" style:country-asian="JP" style:language-complex="ar" style:country-complex="SA"/></style:style>"#;
     let document = read_fixture(Fixture {
         automatic,
@@ -184,13 +183,15 @@ fn every_language_axis_carries_the_script_class_language() {
         })
         .collect();
     // ODF Table 22: U+31C0 is Asian like U+5B57, whatever slot the renderer's
-    // §17.3.2.26 table gives it; every axis of a run has its class's language.
+    // §17.3.2.26 table gives it; the western axis (read by ascii/highAnsi
+    // slots) carries the run's class language, the others their own.
+    let all = [Some("fr-FR"), Some("ja-JP"), Some("ar-SA")];
     assert_eq!(
         axes,
         [
-            ("a".to_string(), [Some("fr-FR"); 3]),
-            ("\u{31C0}\u{5B57}".to_string(), [Some("ja-JP"); 3]),
-            ("\u{0627}".to_string(), [Some("ar-SA"); 3]),
+            ("a".to_string(), all),
+            ("\u{31C0}\u{5B57}".to_string(), [Some("ja-JP"), Some("ja-JP"), Some("ar-SA")]),
+            ("\u{0627}".to_string(), [Some("ar-SA"), Some("ja-JP"), Some("ar-SA")]),
         ]
     );
 }

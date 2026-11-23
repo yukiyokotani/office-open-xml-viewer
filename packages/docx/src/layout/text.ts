@@ -596,7 +596,10 @@ export type LanguageSlotGroup = 'latin' | 'eastAsia' | 'complexScript';
 export const languageSlotGroup = (slot: FontScriptSlot): LanguageSlotGroup =>
   slot === 'eastAsia' || slot === 'complexScript' ? slot : 'latin';
 
-export type CanvasLanguagePin = Readonly<{ group: LanguageSlotGroup; lang: string | null }>;
+/** A piece's Canvas language decision: for one slot group and the font route
+ * (fingerprint) it was proved on. A derived request that resolves another
+ * route proves its own language. */
+export type CanvasLanguagePin = Readonly<{ group: LanguageSlotGroup; route: string; lang: string | null }>;
 
 /** A well-formed BCP 47 language tag (RFC 5646 §2.1 shape: an alphabetic
  * primary subtag, then alphanumeric subtags of at most eight characters),
@@ -1848,7 +1851,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       shapeParts.push(['lang', canvasLanguageTag(request.language) ?? null,
         canvasLanguageTag(request.complexScriptLanguage) ?? null,
         request.canvasEastAsiaLanguage === undefined ? 'base' : canvasLanguageTag(request.canvasEastAsiaLanguage ?? undefined) ?? null,
-        request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.lang ?? null]);
+        request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.route ?? null,
+        request.canvasLanguagePin?.lang ?? null]);
     }
     // Vertical forms join the language proof only for text that has a language.
     if (request.verticalForms && (request.language !== undefined || request.eastAsiaLanguage !== undefined
@@ -2014,7 +2018,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       const slotLang = scriptSlotLanguage(request, group.script);
       const pin = request.canvasLanguagePin;
       const lang = slotLang === undefined ? undefined
-        : pin !== undefined && pin.group === languageSlotGroup(group.script) ? pin.lang ?? undefined
+        : pin !== undefined && pin.group === languageSlotGroup(group.script)
+          && pin.route === font.route.fingerprint ? pin.lang ?? undefined
           : input.measurer.namedFamiliesDraw?.({
             text: request.verticalForms ? withVerticalForms(group.text) : group.text,
             fontRoute: font.route, weight: font.weight, style: font.style,

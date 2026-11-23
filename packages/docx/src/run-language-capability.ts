@@ -1,3 +1,4 @@
+import { canvasLanguageTag } from './layout/text.js';
 import type { DocxDocumentModel } from './types.js';
 
 // Run languages. Ruby guides are shaped without a Canvas language
@@ -36,5 +37,6 @@ export function documentCarriesRunLanguage(document: DocxDocumentModel): boolean
 function isLanguageValue(field: unknown): boolean {
   const value = field !== null && typeof field === 'object' && 'value' in field
     ? (field as { value: unknown }).value : field;
-  return typeof value === 'string' && value !== '' && value.toLowerCase() !== 'x-none';
+  // The tag shaping would admit (x-none, ill-formed and extlang tags name none).
+  return typeof value === 'string' && canvasLanguageTag(value) !== undefined;
 }

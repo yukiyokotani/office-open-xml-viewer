@@ -8,6 +8,7 @@ import type { DocxTextRun, FieldRun } from '../types';
 import { acquireTextSequences, type SequenceLanguages } from './text-sequence.js';
 import type { HyperlinkTarget, ResolvedFontMetric } from '@silurus/ooxml-core';
 import {
+  canvasFontRouteFaces,
   DEFAULT_KINSOKU_RULES,
   isUax14NoBreakPair,
   lineBreakClass,
@@ -723,7 +724,8 @@ export function finalizeBuiltSegments(
         ...(canvasLanguageTag(request.language) !== undefined || request.eastAsiaLanguage !== undefined
           || request.canvasLanguagePin !== undefined
           ? [JSON.stringify([canvasLanguageTag(request.language) ?? null, request.eastAsiaLanguage ?? null,
-            request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.lang ?? null])]
+            request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.route ?? null,
+            request.canvasLanguagePin?.lang ?? null])]
           : []),
       ].join('|');
       const cached = metricCache.get(key);
@@ -1513,7 +1515,10 @@ function withAcquiredRouteLanguage(
     return request;
   }
   return Object.freeze({ ...request, canvasLanguagePin: Object.freeze({
-    group: languageSlotGroup(span.script), lang: span.fontRoute.lang ?? null,
+    group: languageSlotGroup(span.script),
+    // The route the decision was proved on, without its language.
+    route: canvasFontRouteFaces(span.fontRoute).fingerprint,
+    lang: span.fontRoute.lang ?? null,
   }) });
 }
 

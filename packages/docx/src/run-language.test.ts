@@ -54,6 +54,8 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     },
   });
   const fonts = { ascii: 'Face', highAnsi: 'Face', eastAsia: 'Face', complexScript: 'Face' };
+  // The fingerprint of the route 'Face' resolves to here (a pin's route).
+  const ROUTE = service.shape({ text: 'b', fontSizePt: 10, fonts, clusterGeometry: false }).spans[0]!.fontRoute.fingerprint;
 
   it('measures each slot with its own language and reports it on the span', () => {
     measured.length = 0;
@@ -114,23 +116,26 @@ describe('text service: §17.3.2.20 language per font slot', () => {
 
   it('reuses a piece\'s acquired route language in every derived request of that slot group', () => {
     const withheld = { text: 'бгд', fontSizePt: 10, fonts, language: 'sr-rs', clusterGeometry: false as const,
-      canvasLanguagePin: { group: 'latin' as const, lang: null } };
+      canvasLanguagePin: { group: 'latin' as const, route: ROUTE, lang: null } };
     expect(service.shape(withheld).spans[0]!.fontRoute.lang).toBeUndefined();
     expect(service.shape(sliceTextShapeRequest(withheld, 0, 1)).spans[0]!.fontRoute.lang).toBeUndefined();
     // A fragment of an accepted piece shapes through the piece's route: the
     // retained decision is not judged again for a slice of the same text.
-    const accepted = { ...withheld, canvasLanguagePin: { group: 'latin' as const, lang: 'sr-rs' } };
+    const accepted = { ...withheld, canvasLanguagePin: { group: 'latin' as const, route: ROUTE, lang: 'sr-rs' } };
     const whole = service.shape(accepted).spans[0]!.fontRoute;
     expect(whole.lang).toBe('sr-rs');
     expect(service.shape(sliceTextShapeRequest(accepted, 1, 3)).spans[0]!.fontRoute).toBe(whole);
     // Another slot group is decided on its own.
     expect(service.shape({ ...accepted, text: 'か', eastAsiaLanguage: 'ja-jp' }).spans.map(span => span.fontRoute.lang))
       .toEqual(['ja-jp']);
+    // A decision proved on another route does not carry over: proved afresh.
+    expect(service.shape({ ...withheld, canvasLanguagePin: { group: 'latin' as const, route: 'other', lang: null } })
+      .spans[0]!.fontRoute.lang).toBe('sr-rs');
   });
 
   it('shapes a ruby guide without a Canvas language, keeping the base regional font input', () => {
     const base = { text: '漢', fontSizePt: 10, fonts, language: 'en-us', eastAsiaLanguage: 'zh-cn',
-      complexScriptLanguage: 'ar-sa', canvasLanguagePin: { group: 'eastAsia' as const, lang: 'zh-cn' } };
+      complexScriptLanguage: 'ar-sa', canvasLanguagePin: { group: 'eastAsia' as const, route: ROUTE, lang: 'zh-cn' } };
     const guide = rubyGuideShapeRequest(base, 'かんab');
     expect([guide.language, guide.complexScriptLanguage, guide.eastAsiaLanguage, guide.canvasEastAsiaLanguage,
       guide.canvasLanguagePin]).toEqual([undefined, undefined, 'zh-cn', null, undefined]);

@@ -14,6 +14,9 @@ describe('documentCarriesRunLanguage', () => {
 
   it('ignores x-none and ruby guide tags (guides are shaped untagged)', () => {
     expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ lang: 'x-none' }] }] }))).toBe(false);
+    // A tag shaping would not admit (extlang, ill-formed) names no language here either.
+    expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ lang: 'zh-cmn-Hans-CN' }, { langEastAsia: 'en-a' }] }] })))
+      .toBe(false);
     expect(documentCarriesRunLanguage(model({ body: [{ runs: [{ type: 'text', text: '漢',
       typographyInput: { ruby: { language: { status: 'valid', value: 'ja-JP' }, guideRuns: [{ language: 'ja-jp' }] } },
     }] }] }))).toBe(false);

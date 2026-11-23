@@ -818,4 +818,3 @@ export interface LineLayoutEnvironment {
    * lowered beyond it. Folded into retained text segments during acquisition. */
   readonly positionExtendsLineBox?: boolean;
 }
-
