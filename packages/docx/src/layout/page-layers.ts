@@ -130,12 +130,12 @@ function visitAnchoredDrawings(
         owner: node,
         textBoxes: textBoxesForDrawing(node, drawing),
         // A page-positioned story shape (WORD_STORY_VML_PAGE_POSITION; a
-        // note shape carried by a table cell paragraph) keeps its owner's
-        // placement but none of its table, cell or paragraph clips.
-        frames: Object.freeze(isStoryPagePositionedDrawing(drawing)
-          ? paragraphFrames.filter((frame) => frame.kind !== 'clip')
-          : [...paragraphFrames]),
-        layoutTranslationPt: Object.freeze({ ...layoutTranslationPt }),
+        // note shape carried by a table cell paragraph) is resolved in the
+        // page frame: none of its table, cell or paragraph clips and
+        // transforms (a rotated cell included) apply to it.
+        frames: Object.freeze(isStoryPagePositionedDrawing(drawing) ? [] : [...paragraphFrames]),
+        layoutTranslationPt: Object.freeze(isStoryPagePositionedDrawing(drawing)
+          ? { xPt: 0, yPt: 0 } : { ...layoutTranslationPt }),
         encounterOrder: candidates.length,
         root,
       }));

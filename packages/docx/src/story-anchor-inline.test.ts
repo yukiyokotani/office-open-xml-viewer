@@ -706,6 +706,9 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
         + `<w:tr>${cell('<w:p/>', '<w:vMerge/>')}</w:tr>`),
       'a nested table': first + table(`<w:tr>${cell(table(`<w:tr>${cell('<w:p><w:r><w:t>INNER</w:t></w:r></w:p>')}</w:tr>`) + '<w:p/>')}</w:tr>`),
       'a text box in the last paragraph': first + textBox,
+      'a vertical-text (tbRl) cell': first + table(`<w:tr>${cell('<w:p><w:r><w:t>VERT</w:t></w:r></w:p>', '<w:textDirection w:val="tbRl"/>')}</w:tr>`),
+      'a table with a repeating header row': first + table(`<w:tr><w:trPr><w:tblHeader/></w:trPr>${cell('<w:p><w:r><w:t>HEAD</w:t></w:r></w:p>')}</w:tr>`
+        + Array.from({ length: 3 }, () => `<w:tr><w:trPr><w:trHeight w:val="14000" w:hRule="exact"/></w:trPr>${cell('<w:p/>', '<w:hideMark/>')}</w:tr>`).join('')),
     };
     const deleted = `<w:del w:id="8" w:author="a" w:date="2026-01-01T00:00:00Z">${vmlRect('vml-text-square')}</w:del>`;
     const probe = (body: string, storyRuns: string, markup: boolean) => {
@@ -722,8 +725,11 @@ describe('word-note-vml-host-paragraph formatting and story shape indexing', () 
         const plain = probe(body, '', true);
         const markup = probe(body, deleted, true);
         expect(markup.geometry).toEqual(plain.geometry);
+        // Published once, in the page frame: no owner clip or transform.
         expect(markup.carried).toHaveLength(1);
-        expect(markup.carried[0]!.kind === 'drawing' && markup.carried[0]!.frames.some((frame) => frame.kind === 'clip')).toBe(false);
+        const entry = markup.carried[0]!;
+        expect(entry.kind === 'drawing' ? entry.frames : null).toEqual([]);
+        expect(entry.kind === 'drawing' ? [entry.node.flowBounds.xPt, entry.node.flowBounds.yPt] : null).toEqual([300, 0]);
         const final = probe(body, deleted, false);
         expect(final.geometry).toEqual(probe(body, '', false).geometry);
         expect(final.carried).toHaveLength(0);

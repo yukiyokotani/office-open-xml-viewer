@@ -2315,6 +2315,9 @@ function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
         }
         if (element.type === 'table') {
           for (let row = element.rows.length - 1; row >= 0; row -= 1) {
+            // A §17.4.49 header row repeats on every page of the table: its
+            // paragraphs would publish the shape once per page.
+            if (element.rows[row]!.isHeader) continue;
             const cells = element.rows[row]!.cells;
             for (let cell = cells.length - 1; cell >= 0; cell -= 1) {
               // A §17.4.85 vertical-merge continuation lays out none of its

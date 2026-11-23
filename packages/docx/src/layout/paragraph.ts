@@ -6934,8 +6934,9 @@ const carrierParagraphs = new WeakMap<ParagraphAcquisitionInput, ParagraphAcquis
  * trailing runs that take no part in its layout. The paragraph is acquired
  * without them, then each visible carried occurrence is placed against the
  * last line (or, for a mark-only paragraph, the paragraph mark's box) and
- * recorded with its drawing; it adds no anchor frame, exclusion, collision
- * or line metric to the flow.
+ * recorded with its drawing and a zero-size line placement at that anchor
+ * point; it adds no line extent, anchor frame, exclusion, collision or line
+ * metric to the flow.
  */
 function withCarriedAnchors(
   acquired: AcquiredParagraphResult,
@@ -7000,9 +7001,11 @@ function withCarriedAnchors(
     if (!placed?.drawing) continue;
     drawings.push(placed.drawing);
     textBoxes.push(...placed.textBoxes);
+    // The drawing joins the line that publishes it with a zero-size
+    // placement at its anchor point, so no line extent grows by it.
     drawingPlacements.push({
       kind: 'drawing', range: placed.hostRange, drawingId: placed.drawing.id,
-      bounds: placed.drawing.inkBounds, advancePt: 0,
+      bounds: { ...host.bounds, widthPt: 0, heightPt: 0 }, advancePt: 0,
     });
   }
   const lines = lastLine && drawingPlacements.length > 0
