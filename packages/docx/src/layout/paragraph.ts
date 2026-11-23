@@ -2556,6 +2556,9 @@ export interface ParagraphAcquisitionOptions {
   readonly uprightTables?: Readonly<{
     index: UprightBlockPageIndex | undefined;
     planned?: readonly LayoutRect[];
+    /** How far past a table's far edge a drawing moved along the block
+     * axis lies (UprightDrawingLimits.tableClearancePt). */
+    clearancePt: number;
   }>;
   /** Set by acquireParagraphResult only, for one reflow pass. */
   readonly anchorReflowMoves?: AnchorReflowMoves;
@@ -5012,13 +5015,18 @@ export function anchorObstacleMove(input: Readonly<{
   /** The inline end of the drawing's page or cell, and the block end of its page. */
   inlineEndPt: number;
   blockEndPt: number;
-  uprightTables?: Readonly<{ index: UprightBlockPageIndex | undefined; planned?: readonly LayoutRect[] }>;
+  uprightTables?: Readonly<{
+    index: UprightBlockPageIndex | undefined; planned?: readonly LayoutRect[]; clearancePt: number;
+  }>;
 }>): Readonly<{ xPt: number; yPt: number; clearOfTables: boolean }> {
   const { occurrenceId, rect } = input;
   if (input.uprightTables) {
     const move = uprightDrawingMovePt(
       input.uprightTables.index, Number.POSITIVE_INFINITY, rect,
-      { inlineEndPt: input.inlineEndPt, blockEndPt: input.blockEndPt },
+      {
+        inlineEndPt: input.inlineEndPt, blockEndPt: input.blockEndPt,
+        tableClearancePt: input.uprightTables.clearancePt,
+      },
       input.uprightTables.planned, input.near ?? input.blockers().map((blocker) => blocker.bounds),
     );
     if (move) return { ...move, clearOfTables: move.xPt !== 0 || move.yPt !== 0 };

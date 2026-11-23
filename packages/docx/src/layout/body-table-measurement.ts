@@ -440,7 +440,9 @@ function uprightBlockEdgeOverhangsPt(
 /** The ends of the page a drawing moved for an upright table stays before
  * (uprightDrawingMovePt), in the section-logical page frame. */
 export function uprightDrawingLimits(state: Pick<BodyAcquisitionState, 'pageWidth' | 'pageH'>): UprightDrawingLimits {
-  return { inlineEndPt: state.pageWidth, blockEndPt: state.pageH };
+  return {
+    inlineEndPt: state.pageWidth, blockEndPt: state.pageH, tableClearancePt: WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
+  };
 }
 
 function uprightBlockIndexOf(state: BodyAcquisitionState): UprightBlockPageIndex {

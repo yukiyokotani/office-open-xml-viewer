@@ -263,8 +263,10 @@ export const PAGE_H = COLUMN_END + 80;
  * rectangles are the page's tables and, where drawings may not overlap
  * (`avoidsDrawings`), its other drawings. */
 export const hasNoPlace = (direction: Direction, page: Page, drawing: Drawing, avoidsDrawings: boolean) => {
+  // Past a table's far edge a drawing lies the 7.14 pt text clearance from it.
   const obstacles = [
-    ...page.tables.map((placed) => ({ left: placed.paintedLeft, right: placed.paintedRight, bottom: placed.bottom })),
+    ...page.tables.map((placed) =>
+      ({ left: placed.paintedLeft - 7.14, right: placed.paintedRight + 7.14, bottom: placed.bottom })),
     ...(avoidsDrawings ? page.drawings.filter((other) => other !== drawing).map((other) =>
       ({ left: other.left, right: other.left + other.width, bottom: other.top + other.height })) : []),
   ];

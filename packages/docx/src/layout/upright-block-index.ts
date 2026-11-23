@@ -374,16 +374,22 @@ export function addUprightTableBox(
 }
 
 /** The page's ends along the inline and the block axis, in section-logical
- * page points: a drawing moved for a table stays before them. */
-export type UprightDrawingLimits = Readonly<{ inlineEndPt: number; blockEndPt: number }>;
+ * page points: a drawing moved for a table stays before them. And how far
+ * past the far edge of a table's box a drawing moved along the block axis
+ * lies (the text clearance of an upright block table). */
+export type UprightDrawingLimits = Readonly<{
+  inlineEndPt: number;
+  blockEndPt: number;
+  tableClearancePt: number;
+}>;
 
 /**
  * `word-vertical-section-upright-block-table`: how far a wrapped drawing
  * with frame `rect` moves so that it covers no upright block table. Zero
  * when it covers none. Null when no place tried lies on the page: the
- * drawing then keeps its place, over the table, and stays visible. Library
- * policy where no control exists (the measured case is a drawing with room
- * below its table).
+ * drawing then keeps its place, over the table, and stays visible. The
+ * measurements are in the rule; the second route and the drawing that
+ * keeps its place are library policy.
  *
  * Two routes are tried from the drawing's own position, in this order, and
  * the first that ends clear is taken:
@@ -393,6 +399,8 @@ export type UprightDrawingLimits = Readonly<{ inlineEndPt: number; blockEndPt: n
  * 2. past: along the block axis past the far edge of what it covers, and,
  *    where that would pass the page's block end, along the inline axis
  *    instead.
+ * Past a table's far edge the drawing lies `limits.tableClearancePt` from
+ * its box; below a table, and beside a drawing, it lies directly against it.
  * A route ends without a place when neither move stays before the page's
  * ends.
  *
@@ -431,17 +439,17 @@ export function uprightDrawingMovePt(
       const endYPt = yPt + rect.heightPt;
       let nextXPt = Number.NEGATIVE_INFINITY;
       let nextYPt = Number.NEGATIVE_INFINITY;
-      const meet = (box: LayoutRect) => {
+      const meet = (box: LayoutRect, pastPt: number) => {
         if (box.xPt < endXPt && xPt < box.xPt + box.widthPt && box.yPt < endYPt && yPt < box.yPt + box.heightPt) {
           nextXPt = Math.max(nextXPt, box.xPt + box.widthPt);
-          nextYPt = Math.max(nextYPt, box.yPt + box.heightPt);
+          nextYPt = Math.max(nextYPt, box.yPt + box.heightPt + pastPt);
         }
       };
-      if (planned) for (const box of planned) meet(box);
+      if (planned) for (const box of planned) meet(box, limits.tableClearancePt);
       if (blockers) {
         const near = typeof blockers === 'function'
           ? blockers({ xPt, yPt, widthPt: rect.widthPt, heightPt: rect.heightPt }) : blockers;
-        for (let at = 0; at < near.length; at += 1) meet(near[at]!);
+        for (let at = 0; at < near.length; at += 1) meet(near[at]!, 0);
       }
       if (index && index.tableCount > 0) {
         const first = bucketOf(yPt);
@@ -449,7 +457,9 @@ export function uprightDrawingMovePt(
         for (let bucket = first; bucket <= last; bucket += 1) {
           const entries = index.tableBuckets.get(bucket);
           if (!entries) continue;
-          for (const entry of entries) if (entry.sourceIndex < beforeSourceIndex) meet(entry.box);
+          for (const entry of entries) {
+            if (entry.sourceIndex < beforeSourceIndex) meet(entry.box, limits.tableClearancePt);
+          }
         }
       }
       if (nextXPt === Number.NEGATIVE_INFINITY) return { xPt: xPt - rect.xPt, yPt: yPt - rect.yPt };

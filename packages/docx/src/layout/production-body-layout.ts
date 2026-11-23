@@ -153,7 +153,7 @@ import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, anchorAxisOwnership, anchorCollisionBlockers, anchorObstacleMove, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
-import { WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
+import { WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { UprightDrawingPin } from './body-layout-kernel.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -669,6 +669,7 @@ function acquireBodyParagraphAtLocation(
             uprightTables: {
               index: state.uprightBlockIndex,
               ...(plannedUprightTableBoxes ? { planned: plannedUprightTableBoxes } : {}),
+              clearancePt: WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
             },
           }
         : {}),
@@ -2640,8 +2641,11 @@ function prescanBodyPageAnchors(
         return blockersAmong(placed);
       },
       near: (current) => allowOverlap ? [] : blockersAmong(placedNear(current)).map((blocker) => blocker.bounds),
-      ...uprightDrawingLimits(state),
-      ...(drawing.wrapped ? { uprightTables: { index: state.uprightBlockIndex } } : {}),
+      inlineEndPt: state.pageWidth,
+      blockEndPt: state.pageH,
+      ...(drawing.wrapped ? {
+        uprightTables: { index: state.uprightBlockIndex, clearancePt: WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT },
+      } : {}),
     });
     const collision = Object.freeze({
       occurrenceId: anchor.occurrenceId,

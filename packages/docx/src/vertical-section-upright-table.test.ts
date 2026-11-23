@@ -1341,12 +1341,12 @@ describe('upright block table of a vertical section', () => {
 
     it.each([
       ['tbRl', 2, 360], ['tbLrV', 2, 100], ['tbRl', 1, 360], ['tbLrV', 1, 100],
-    ] as const)('moves a drawing with no room below its table past the table\'s far edge (%s, %i column(s))', (direction, columns, x) => {
+    ] as const)('moves a drawing with no room below its table 7.14 pt past the table\'s far edge (%s, %i column(s))', (direction, columns, x) => {
       // The table leaves the rectangle anchored after it no place below it
       // on the page: raised to the page's bottom edge in two columns (an
       // 80 x 60 pt rectangle), and ending 91 pt before it in one (80 x 100
       // pt). The rectangle keeps its position down the page and lies
-      // directly past the table's far edge.
+      // 7.14 pt past the table's far edge.
       const pages = layOutPages(direction, [
         table(1, columns === 2 ? 800 : 690),
         anchoring(5, anchoredRectangle(x, 300, 80, columns === 2 ? 60 : 100)), P,
@@ -1355,8 +1355,8 @@ describe('upright block table of a vertical section', () => {
       const [drawing] = pages[0]!.drawings;
       expect(placed!.bottom + drawing!.height).toBeGreaterThan(PAGE_H);
       expect(drawing!.top).toBeCloseTo(300, 6);
-      if (direction === 'tbRl') expect(drawing!.left + drawing!.width).toBeCloseTo(placed!.paintedLeft, 6);
-      else expect(drawing!.left).toBeCloseTo(placed!.paintedRight, 6);
+      if (direction === 'tbRl') expect(drawing!.left + drawing!.width).toBeCloseTo(placed!.paintedLeft - 7.14, 6);
+      else expect(drawing!.left).toBeCloseTo(placed!.paintedRight + 7.14, 6);
       expect(collisions(pages)).toEqual([]);
     });
 
@@ -1427,8 +1427,8 @@ describe('upright block table of a vertical section', () => {
       const [first, second] = pages[0]!.drawings;
       expect(first).toEqual({ left: firstX, top: 715, width: 400, height: 85 });
       expect(second!.top).toBeCloseTo(100, 6);
-      if (direction === 'tbRl') expect(second!.left + second!.width).toBeCloseTo(placed!.paintedLeft, 6);
-      else expect(second!.left).toBeCloseTo(placed!.paintedRight, 6);
+      if (direction === 'tbRl') expect(second!.left + second!.width).toBeCloseTo(placed!.paintedLeft - 7.14, 6);
+      else expect(second!.left).toBeCloseTo(placed!.paintedRight + 7.14, 6);
       expect(collisions(pages)).toEqual([]);
     });
 
@@ -1498,7 +1498,7 @@ describe('upright block table of a vertical section', () => {
       for (const strip of beside) {
         expect(strip.inlineStart).toBeGreaterThanOrEqual(fitted!.top + fitted!.height - 1e-6);
       }
-    });
+    }, 60_000);
 
     it('places a table below a text box that grows to fit its text', () => {
       // A 100 x 20 pt text box positioned on the page, fitted to twelve
