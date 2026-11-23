@@ -386,6 +386,11 @@ export interface TextShapeRequest {
    * probes) retain the decision: text of that group shapes through the same
    * route, language included, that the piece is painted through. */
   readonly canvasLanguagePin?: CanvasLanguagePin;
+  /** The source piece's whole text when this request shapes a fragment of
+   * it: faces are resolved for that text (regional fallback looks at its Han,
+   * for instance), so a fragment measures through the route paint draws the
+   * piece with. Independent probes resolve their own text. */
+  readonly faceText?: string;
   /** The text is set in a vertical CJK line (§17.6.20 tbRl), where layout
    * draws vertical presentation forms in place of some characters: a
    * language is admitted only when named families draw those forms too. */
@@ -534,7 +539,7 @@ export function independentTextShapeRequest(
   text: string,
 ): TextShapeRequest {
   return { ...request, text, baseDirection: undefined, joinRegisteredGrapheme: undefined, joinRegisteredLatinSlots: undefined,
-    registeredLatinPieceText: undefined, substituteContext: { text, offset: 0 } };
+    registeredLatinPieceText: undefined, faceText: undefined, substituteContext: { text, offset: 0 } };
 }
 
 /** The shape request of a ruby guide over `base`: independent text, shaped
@@ -1857,6 +1862,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     // Vertical forms join the language proof only for text that has a language.
     if (request.verticalForms && (request.language !== undefined || request.eastAsiaLanguage !== undefined
       || request.complexScriptLanguage !== undefined)) shapeParts.push('verticalForms');
+    if (request.faceText !== undefined && request.faceText !== request.text) shapeParts.push(['faceText', request.faceText]);
     const shapeKey = JSON.stringify(shapeParts);
     const retainedShape = cached(shapeCache, shapeKey);
     if (retainedShape) return retainedShape;
@@ -1900,7 +1906,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         themeFonts: request.themeFonts,
         themeFontPresence: request.themeFontPresence,
         slot: group.script,
-        text: group.text,
+        text: request.faceText ?? group.text,
         eastAsiaLanguage: request.eastAsiaLanguage,
         weight: request.weight,
         style: request.style,

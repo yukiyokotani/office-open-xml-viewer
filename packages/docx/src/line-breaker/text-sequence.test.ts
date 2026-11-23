@@ -55,23 +55,28 @@ describe('text sequences across §17.3.2.20 language seams', () => {
     }
   });
 
-  it('declines a seam inside a cluster longer than the bound', () => {
-    // 64 units already in the cluster: one more mark would exceed the bound.
-    expect(sequences([run(`a${'\u0301'.repeat(63)}`, 'sr-rs'), run('\u0301', 'en-us')]).size).toBe(0);
-    expect(sequences([run(`a${'\u0301'.repeat(62)}`, 'sr-rs'), run('\u0301', 'en-us')]).size).toBe(1);
-    // The bound is on the whole joined cluster, not on the second run.
-    expect(sequences([run('a', 'sr-rs'), run('\u0301'.repeat(64), 'en-us')]).size).toBe(0);
-    expect(sequences([run('a', 'sr-rs'), run(`${'\u0301'.repeat(63)}b`, 'en-us')]).size).toBe(1);
+  it('keeps a cluster of any length whole and transfers only its units', () => {
+    // 64 units already in the cluster, then one more mark: still one cluster.
+    expect(sequences([run(`a${'\u0301'.repeat(63)}`, 'sr-rs'), run('\u0301', 'en-us')]).size).toBe(1);
+    expect(sequences([run('a', 'sr-rs'), run('\u0301'.repeat(64), 'en-us')]).size).toBe(1);
+    // Only the crossing cluster takes the base language; 'b' keeps its own.
+    const joined = sequences([run(`a${'\u0301'.repeat(62)}`, 'sr-rs'), run('\u0301', 'en-us'), run('\u0301b', 'en-us')]);
+    expect(languages(joined.get(0))).toEqual([[65, 'sr-rs'], [66, 'en-us']]);
   });
 
-  it('puts no language boundary inside a cluster longer than the bound', () => {
-    // 63 units in Serbian, then two English runs of one mark each: the second
-    // joins by formatting; the cluster (65 units) keeps one language.
-    const joined = sequences([run(`a${'\u0301'.repeat(62)}`, 'sr-rs'), run('\u0301', 'en-us'), run('\u0301', 'en-us')]);
-    const sequence = joined.get(0)!;
-    expect(sequence.run.text.length).toBe(65);
-    expect(languages(sequence)).toBeUndefined();
-    expect(sequence.run.lang).toBe('sr-rs');
+  it('treats runs naming one language on every axis as one language fact', () => {
+    // OpenDocument runs: each names its script class's language on all axes.
+    const uniform = (text: string, lang: string) => run(text, lang, { langEastAsia: lang, langBidi: lang });
+    const joined = sequences([uniform('x\u0433', 'sr-rs'), uniform('\u0301b', 'en-us')]).get(0)!;
+    expect(joined.run.text).toBe('x\u0433\u0301b');
+    expect(languages(joined)).toEqual([[3, 'sr-rs'], [4, 'en-us']]);
+    expect((joined.run as SequenceLanguages).uniformLanguageRanges).toBe(true);
+    // A boundary still delimits.
+    expect(sequences([uniform('a', 'sr-rs'), uniform('b', 'en-us')]).size).toBe(0);
+    // Non-uniform runs differing beyond w:val still delimit, as before.
+    expect(sequences([
+      run('\u0433', 'sr-rs', { langEastAsia: 'ja-jp' }), run('\u0301', 'en-us', { langEastAsia: 'zh-cn' }),
+    ]).size).toBe(0);
   });
 
   it('keeps delimiting at a boundary and at w:eastAsia or w:bidi seams', () => {
@@ -105,11 +110,19 @@ describe('text sequences across §17.3.2.20 language seams', () => {
       units += input.length;
       return segment.call(this, input);
     });
-    // Every seam continues the cluster until it reaches the bound.
-    const runs = [run('a', 'sr-rs')];
-    for (let index = 0; index < 4000; index += 1) runs.push(run('\u0301', index % 2 ? 'sr-rs' : 'en-us'));
-    sequences(runs);
-    expect(units).toBeLessThanOrEqual(4000 * 66);
+    // Every seam continues one ever-growing cluster: a bounded context per
+    // seam (64 units of the cluster, the seam pre-check, the next run).
+    const marks = (count: number) => {
+      const runs = [run('a', 'sr-rs')];
+      for (let index = 0; index < count; index += 1) runs.push(run('\u0301', index % 2 ? 'sr-rs' : 'en-us'));
+      units = 0;
+      sequences(runs);
+      return units;
+    };
+    const thousand = marks(1000);
+    const fourThousand = marks(4000);
+    expect(fourThousand).toBeLessThanOrEqual(4000 * 70);
+    expect(fourThousand / thousand).toBeLessThan(4.2);
     // Long runs between seams are scanned once, not once per seam.
     units = 0;
     const long = [run('a', 'sr-rs')];
@@ -117,7 +130,7 @@ describe('text sequences across §17.3.2.20 language seams', () => {
       long.push(run(`\u0301${'x'.repeat(1000)}a`, index % 2 ? 'sr-rs' : 'en-us'));
     }
     expect(sequences(long).get(0)?.sources.length).toBe(201);
-    expect(units).toBeLessThanOrEqual(200 * (1002 + 2 * 66));
+    expect(units).toBeLessThanOrEqual(200 * (1002 + 3 * 70));
     // Untagged text is never segmented here.
     units = 0;
     sequences([run('a\u0301'), run('\u0301b'), run('c', undefined, { bold: true })]);

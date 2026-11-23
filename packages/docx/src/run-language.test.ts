@@ -146,6 +146,28 @@ describe('text service: §17.3.2.20 language per font slot', () => {
     expect('canvasEastAsiaLanguage' in untagged).toBe(false);
   });
 
+  it('shapes a fragment through the route its piece was resolved and painted with', () => {
+    // Regional fallback is chosen only for text containing Han: a fragment
+    // without Han would otherwise resolve another route than its piece.
+    const regional = createTextLayoutService({
+      fonts: createFontResolver([], {
+        regionalFamilyLists: { sc: { Absent: '"SC Face", serif' } },
+        nativeFamilyLists: { Absent: '"Plain Face", serif' },
+      }),
+      measurer: { fingerprint: 'regional', namedFamiliesDraw: () => true,
+        measure: request => ({ advancePt: [...request.text].length * 10, ascentPt: 8, descentPt: 2 }) },
+    });
+    const piece = { text: 'か漢', fontSizePt: 10, fonts: { eastAsia: 'Absent' }, eastAsiaLanguage: 'zh-cn',
+      clusterGeometry: false as const, faceText: 'か漢' };
+    const whole = regional.shape(piece).spans[0]!.fontRoute;
+    expect([whole.familyList, whole.lang]).toEqual(['"SC Face", serif', 'zh-cn']);
+    // The fragment keeps the piece's route and language.
+    expect(regional.shape(sliceTextShapeRequest(piece, 0, 1)).spans[0]!.fontRoute).toBe(whole);
+    // Without the piece (an independent probe), the fragment resolves its own.
+    expect(regional.shape({ ...piece, text: 'か', faceText: undefined }).spans[0]!.fontRoute.familyList)
+      .toBe('"Plain Face", serif');
+  });
+
   it('keeps independent languages when scoped Arabic shares a physical face across slots', () => {
     const scoped = createTextLayoutService({
       fonts: createFontResolver([
@@ -365,6 +387,15 @@ describe('Canvas lang at measure and paint', () => {
     expect(untagged).toEqual([['fi', 0, 'inherit']]);
     expect(await drawn('x-none')).toEqual(untagged);
     expect(await drawn('en-a')).toEqual(untagged);
+  });
+
+  it('draws a cluster of uniform-language runs whole in its base language on every axis', async () => {
+    const { canvas, draws } = recordingCanvas();
+    const uniform = (lang: string) => ({ lang, langEastAsia: lang, langBidi: lang });
+    await renderDocumentToCanvas(documentOf([
+      run('\u0433', uniform('sr-rs')), run('\u0301', uniform('en-us')),
+    ]), canvas, 0, { dpr: 1, width: 600 });
+    expect(draws.map(draw => [draw.text, draw.lang])).toEqual([['\u0433\u0301', 'sr-rs']]);
   });
 
   it('keeps Arabic joining across runs whose unused w:val differs', async () => {

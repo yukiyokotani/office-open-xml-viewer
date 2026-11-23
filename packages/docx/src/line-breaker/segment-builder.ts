@@ -1263,9 +1263,12 @@ function pushSegmentPiece(
   // only in w:val (text-sequence.ts) carries their languages as ranges of its
   // display text, cut at grapheme cluster boundaries: a piece crossing one is
   // emitted range by range, so every cluster shapes whole in one language.
-  const languageRanges = (r as ParagraphTextBearingRun & Pick<SequenceLanguages, 'westernLanguageRanges'>)
-    .westernLanguageRanges;
+  const sequenceLanguages = r as ParagraphTextBearingRun & SequenceLanguages;
+  const languageRanges = sequenceLanguages.westernLanguageRanges;
   let westernLanguage = r.lang;
+  // Ranges of uniform runs (one language on every axis) set every axis.
+  let eastAsiaLanguage = r.langEastAsia;
+  let bidiLanguage = r.langBidi;
   if (languageRanges) {
     const pieceStart = retainedContext.offset;
     const pieceEnd = pieceStart + text.length;
@@ -1303,6 +1306,10 @@ function pushSegmentPiece(
       return;
     }
     westernLanguage = languageRanges[index]!.lang;
+    if (sequenceLanguages.uniformLanguageRanges) {
+      eastAsiaLanguage = westernLanguage;
+      bidiLanguage = westernLanguage;
+    }
   }
 
   if (
@@ -1383,13 +1390,13 @@ function pushSegmentPiece(
     style,
     complexScript: cs,
     fontHint: r.fontHint,
-    eastAsiaLanguage: r.langEastAsia,
+    eastAsiaLanguage,
     // §17.3.2.20 languages of the other slots, present only when authored so
     // runs without a language keep their requests and cache keys.
     ...(westernLanguage ? { language: westernLanguage } : {}),
     // Vertical presentation forms join the language proof (TextShapeRequest).
     ...(environment.verticalCJK && r.eastAsianVert !== true ? { verticalForms: true as const } : {}),
-    ...(r.langBidi ? { complexScriptLanguage: r.langBidi } : {}),
+    ...(bidiLanguage ? { complexScriptLanguage: bidiLanguage } : {}),
     kerning:
       wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),
     measure: false,
@@ -1402,7 +1409,7 @@ function pushSegmentPiece(
   // through that acquired route. (A multi-span piece is emitted again span by
   // span, each with its own decision.)
   const textShapeRequest = shaped?.spans.length === 1
-    ? withAcquiredRouteLanguage(unpinnedTextShapeRequest, shaped.spans[0]!) : unpinnedTextShapeRequest;
+    ? withPieceFace(withAcquiredRouteLanguage(unpinnedTextShapeRequest, shaped.spans[0]!)) : unpinnedTextShapeRequest;
   const punctuationCompressions =
     compressCharacterWhitespace && documentCharacterCompressionApplies
       ? (() => {
@@ -1507,6 +1514,13 @@ function pushSegmentPiece(
  * the piece's one shaped span): TextShapeRequest.canvasLanguagePin. A request
  * without a §17.3.2.20 language for that slot, or one already retaining a
  * decision, is returned as is. */
+/** `request` resolving its faces for the whole piece (TextShapeRequest
+ * faceText): a fragment of the piece measures through the piece's route. */
+function withPieceFace(request: TextShapeRequest): TextShapeRequest {
+  return request.faceText !== undefined || request.text === '' ? request
+    : Object.freeze({ ...request, faceText: request.text });
+}
+
 function withAcquiredRouteLanguage(
   request: TextShapeRequest,
   span: Pick<TextShapeSpan, 'script' | 'fontRoute'>,
@@ -1843,7 +1857,7 @@ function emitResolvedTextSegment(
     // (withAcquiredRouteLanguage): every fragment, fit, kashida and pair probe
     // derived from it shapes through the route the piece is painted through.
     textShapeRequest: resolvedSpan
-      ? withAcquiredRouteLanguage(textShapeRequest, resolvedSpan) : textShapeRequest,
+      ? withPieceFace(withAcquiredRouteLanguage(textShapeRequest, resolvedSpan)) : textShapeRequest,
     ...(resolvedSpan?.substituteScope !== undefined
       ? { substituteScope: resolvedSpan.substituteScope } : {}),
     breakBefore: resolvedSpan?.breakBefore ?? authoritativeSpan?.breakBefore ?? true,

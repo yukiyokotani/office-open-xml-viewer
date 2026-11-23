@@ -49,7 +49,21 @@ const forcedComplexScript = (run: Pick<SequenceRun, 'cs' | 'rtl'>): boolean => r
 const westernLanguageOf = (run: SequenceRun): string | undefined =>
   forcedComplexScript(run) ? undefined : canvasLanguageTag(run.lang);
 
-function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, westernLanguage = true): string {
+/** Whether `run` names one language on every §17.3.2.20 axis (all equal,
+ * including all absent): its text is in that language whichever slot a
+ * scalar takes. An OpenDocument run is always uniform (its ODF script class
+ * selects one language). */
+const uniformLanguage = (run: SequenceRun): boolean =>
+  run.lang === run.langEastAsia && run.lang === run.langBidi;
+
+/** The language a language range records for `run`'s text. */
+const rangeLanguageOf = (run: SequenceRun): string | undefined =>
+  uniformLanguage(run) ? canvasLanguageTag(run.lang) : westernLanguageOf(run);
+
+/** Which §17.3.2.20 axes a formatting key includes. */
+type LanguageAxes = 'all' | 'nonWestern' | 'none';
+
+function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, axes: LanguageAxes = 'all'): string {
   const input = run.typographyInput;
   const effective = <T>(value: TypographyValueInput<T> | undefined, fallback: T | undefined) =>
     value?.status === 'valid' && value.value !== null ? value.value : fallback;
@@ -68,8 +82,8 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, wes
     // tags are one state and never delimit a sequence.
     // A run forced onto the complex-script slot (§17.3.2.7 w:cs, §17.3.2.30
     // w:rtl) never uses w:val, so it cannot delimit (e.g. Arabic joining).
-    langBidi: run.langBidi, langEastAsia: run.langEastAsia,
-    ...(westernLanguage ? { lang: westernLanguageOf(run) } : {}),
+    ...(axes !== 'none' ? { langBidi: run.langBidi, langEastAsia: run.langEastAsia } : {}),
+    ...(axes === 'all' ? { lang: westernLanguageOf(run) } : {}),
     vertAlign: effective(input?.verticalAlign, run.vertAlign ?? undefined),
     position: effective(input?.positionPt, run.position),
     charSpacing: input?.characterSpacingPt ?? run.charSpacing,
@@ -108,13 +122,9 @@ function formattingKey(run: SequenceRun, environment: LineLayoutEnvironment, wes
       : value);
 }
 
-/** UTF-16 units of the longest grapheme cluster a w:val-only run seam may
- * fall inside and still be joined. Real clusters (a base with its marks, an
- * emoji ZWJ sequence, a flag) are far shorter; a degenerate run of marks is
- * cut at the seam instead, which bounds the text judged again per seam. */
-const MAX_JOINED_CLUSTER_UNITS = 64;
-/** {@link SequenceTail.crossing} for a seam inside a cluster over the bound. */
-const OVER_LIMIT = -1;
+/** UTF-16 units of a sequence's last grapheme cluster kept as context for
+ * judging the next seam ({@link SequenceTail.crossing}). */
+const CLUSTER_CONTEXT_UNITS = 64;
 
 /** The §17.3.2.20 w:val languages of a sequence whose runs disagree on it:
  * contiguous ranges of the sequence's displayed text (UTF-16 `end` offsets,
@@ -123,6 +133,9 @@ const OVER_LIMIT = -1;
  * cluster carries them; `run.lang` is then the first range's language. */
 export interface SequenceLanguages {
   readonly westernLanguageRanges?: readonly Readonly<{ end: number; lang: string | undefined }>[];
+  /** Every joined run names one language on all axes: a range's language
+   * applies to every axis of its text, not to w:val alone. */
+  readonly uniformLanguageRanges?: true;
 }
 
 let graphemeSegmenter: Intl.Segmenter | null | undefined;
@@ -153,9 +166,9 @@ function seamMayJoin(segmenter: Intl.Segmenter, previous: string, next: string):
  * the cluster known then: a grapheme boundary depends only on the text
  * around it, so segmentation restarted at a true boundary finds the same
  * later boundaries. The work over a sequence is therefore linear: each
- * appended unit once, plus the last cluster and a probed prefix of the next
- * run (each at most about {@link MAX_JOINED_CLUSTER_UNITS} units when a join
- * is possible) per seam. */
+ * appended unit once, plus per seam a bounded context of the last cluster
+ * ({@link CLUSTER_CONTEXT_UNITS}) and the next run up to the end of the
+ * cluster crossing the seam. */
 class SequenceTail {
   private cluster = '';
   private readonly pending: string[] = [];
@@ -174,37 +187,48 @@ class SequenceTail {
   get clusterLength(): number { return this.cluster.length; }
 
   /** UTF-16 units at the start of `next` that belong to the sequence's last
-   * grapheme cluster: 0 when `next` starts a cluster, or when the joined
-   * cluster would exceed {@link MAX_JOINED_CLUSTER_UNITS}. */
+   * grapheme cluster (0 when `next` starts a cluster), however long the
+   * cluster. */
   crossing(next: string): number {
     graphemeSegmenter ??= typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
       ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
     if (!graphemeSegmenter || next.length === 0) return 0;
     const previous = this.pending.length > 0 ? this.pending[this.pending.length - 1]! : this.cluster;
     if (previous.length === 0 || !seamMayJoin(graphemeSegmenter, previous, next)) return 0;
-    // Nothing new to scan and the known cluster already exceeds the bound.
-    if (this.pending.length === 0 && this.cluster.length > MAX_JOINED_CLUSTER_UNITS) return 0;
-    const known = this.cluster + this.pending.join('');
+    // The scan restarts inside the known cluster, at most its last
+    // CLUSTER_CONTEXT_UNITS: a cluster that long is a run of extending
+    // characters (UAX #29 GB9), whose continuation a restart inside it judges
+    // alike. Each seam thus rescans a bounded context, however long the
+    // cluster grows across runs.
+    let cluster = this.cluster;
+    if (cluster.length > CLUSTER_CONTEXT_UNITS) {
+      cluster = cluster.slice(-CLUSTER_CONTEXT_UNITS);
+      const first = cluster.charCodeAt(0);
+      if (first >= 0xdc00 && first <= 0xdfff) cluster = cluster.slice(1);
+    }
+    const known = cluster + this.pending.join('');
     this.pending.length = 0;
     const seam = known.length;
-    // Only the cluster at the seam is needed from `next`: probe a bounded
-    // prefix of it, cut at a scalar boundary. A cluster reaching the end of a
-    // cut prefix is longer than the bound and is declined below.
-    let probed = Math.min(next.length, MAX_JOINED_CLUSTER_UNITS);
-    const lead = next.charCodeAt(probed - 1);
-    if (probed < next.length && lead >= 0xd800 && lead <= 0xdbff) probed += 1;
+    // `next` is read only up to the end of the cluster crossing the seam: a
+    // bounded prefix first, doubled while that cluster reaches its end.
+    let probed = 0;
     let start = 0;
     let end = 0;
-    for (const part of graphemeSegmenter.segment(known + next.slice(0, probed))) {
-      if (part.index >= seam) break;
-      start = part.index;
-      end = part.index + part.segment.length;
-    }
+    do {
+      probed = Math.min(next.length, Math.max(CLUSTER_CONTEXT_UNITS, probed * 2));
+      const lead = next.charCodeAt(probed - 1);
+      if (probed < next.length && lead >= 0xd800 && lead <= 0xdbff) probed += 1;
+      start = 0;
+      end = 0;
+      for (const part of graphemeSegmenter.segment(known + next.slice(0, probed))) {
+        if (part.index >= seam) break;
+        start = part.index;
+        end = part.index + part.segment.length;
+        if (end > seam) break;
+      }
+    } while (end === seam + probed && probed < next.length);
     this.cluster = known.slice(start);
-    if (end <= seam) return 0;
-    // The cluster continues past the seam but is longer than the bound: not
-    // a boundary, but no measured extent either.
-    return end - start <= MAX_JOINED_CLUSTER_UNITS ? end - seam : OVER_LIMIT;
+    return end > seam ? end - seam : 0;
   }
 }
 
@@ -236,6 +260,8 @@ export function acquireTextSequences(
   let lastScope: number | string | null = null;
   const tail = new SequenceTail();
   let languages: { end: number; lang: string | undefined }[] | undefined;
+  // Every joined run uniform: the ranges are each run's one language.
+  let allUniform = true;
   let texts: string[] = [];
   let sources: TextSequenceSource[] = [];
   let optionalHyphens: TextSequence['optionalHyphens'][number][] = [];
@@ -246,7 +272,8 @@ export function acquireTextSequences(
       sequences.set(start, {
         run: Object.freeze({ ...first, text,
           ...(languages && languages.length > 1
-            ? { westernLanguageRanges: Object.freeze(languages.map((range) => Object.freeze(range))) }
+            ? { westernLanguageRanges: Object.freeze(languages.map((range) => Object.freeze(range))),
+              ...(allUniform ? { uniformLanguageRanges: true as const } : {}) }
             : {}),
           ...(first.typographyInput ? { typographyInput: Object.freeze({
             ...first.typographyInput, sourceText: text,
@@ -260,6 +287,7 @@ export function acquireTextSequences(
     first = undefined;
     last = undefined;
     languages = undefined;
+    allUniform = true;
     texts = [];
     sources = [];
     optionalHyphens = [];
@@ -321,26 +349,28 @@ export function acquireTextSequences(
     // Judged against the previous run (whose seam this is), not the language
     // range in effect: a third run may carry the cluster's language again
     // while its seam with the second still differs in w:val.
+    // A seam may also differ in every axis when both runs are uniform (one
+    // language each): their whole language then transfers like w:val.
+    const uniformSeam = visible !== undefined && last !== undefined && !join && uniformLanguage(visible)
+      && uniformLanguage(last) && scope === lastScope
+      && formattingKey(visible, environment, 'none') === formattingKey(last, environment, 'none');
     if (visible && first && last && (join
-      ? westernLanguageOf(visible) !== (languages ? languages.at(-1)!.lang : westernLanguageOf(first))
-      : scope === lastScope
-        && formattingKey(visible, environment, false) === formattingKey(last, environment, false))) {
+      ? rangeLanguageOf(visible) !== (languages ? languages.at(-1)!.lang : rangeLanguageOf(first))
+      : uniformSeam || (scope === lastScope
+        && formattingKey(visible, environment, 'nonWestern') === formattingKey(last, environment, 'nonWestern')))) {
       crossing = tail.crossing(display);
-      // Over the bound, a run that joins anyway (same formatting) takes the
-      // cluster's language for all of its text rather than put a language
-      // boundary inside the cluster; one that differs in w:val alone is cut.
-      if (crossing === OVER_LIMIT) crossing = join ? display.length : 0;
       if (crossing > 0) join = true;
     }
     if (!join) finish();
     key = nextKey;
     if (!visible) continue;
     if (!first) { start = runIndex; first = visible; }
-    else if (!languages && crossing > 0) languages = [{ end: offset, lang: westernLanguageOf(first) }];
+    else if (!languages && crossing > 0) languages = [{ end: offset, lang: rangeLanguageOf(first) }];
     if (languages) {
       if (crossing > 0) extendLanguage(offset + crossing, languageAt(offset - tail.clusterLength));
-      if (display.length > crossing) extendLanguage(offset + display.length, westernLanguageOf(visible));
+      if (display.length > crossing) extendLanguage(offset + display.length, rangeLanguageOf(visible));
     }
+    if (!uniformLanguage(visible)) allUniform = false;
     last = visible;
     lastScope = scope;
     texts.push(visible.text);
