@@ -59,13 +59,22 @@ export function buildSectionedNoteNumbers(
   kind: 'footnote' | 'endnote',
   ruleFor: (sectionIndex: number) => SectionNoteNumberingRule,
   customReferenceIds: ReadonlySet<string> = new Set(noteReferenceIdsInDocumentOrder(elements, kind, true)),
+  /** §17.11.19 eachPage: the page of each reference; absent before the
+   * first pagination iteration, when eachPage numbers continue. */
+  referencePage?: (id: string) => number | undefined,
 ): Readonly<{ values: Map<string, number>; formats: Map<string, string> }> {
   const values = new Map<string, number>();
   const formats = new Map<string, string>();
   if (!notes) return { values, formats };
   const available = new Set(notes.map((note) => note.id));
-  let previous: number | undefined;
+  // WORD_EACH_PAGE_NOTE_NUMBERING: one running count advances for every
+  // automatic note and numbers notes of continuous sections; it restarts at
+  // numStart at the first note and where an eachSect section begins. A note
+  // of an eachPage section is numbered by its place among the eachPage notes
+  // on its page (1, 2, …), whatever their sections and numStart.
+  let counter: number | undefined;
   let previousSection = -1;
+  const pageCounts = new Map<number, number>();
   let sectionIndex = 0;
   const visitRuns = (runs: Extract<NoteReferenceSourceBlock, { runs: unknown }>['runs']) => {
     for (const run of runs) {
@@ -76,12 +85,16 @@ export function buildSectionedNoteNumbers(
         continue;
       }
       const rule = ruleFor(sectionIndex);
-      const restart = previous === undefined
-        || (rule.restart === 'eachSect' && sectionIndex !== previousSection);
-      const value = restart ? rule.start : previous! + 1;
+      counter = counter === undefined || (rule.restart === 'eachSect' && sectionIndex !== previousSection)
+        ? rule.start : counter + 1;
+      const page = rule.restart === 'eachPage' ? referencePage?.(ref.id) : undefined;
+      let value = counter;
+      if (page !== undefined) {
+        value = (pageCounts.get(page) ?? 0) + 1;
+        pageCounts.set(page, value);
+      }
       values.set(ref.id, value);
       formats.set(ref.id, rule.format);
-      previous = value;
       previousSection = sectionIndex;
     }
   };
@@ -95,6 +108,33 @@ export function buildSectionedNoteNumbers(
   };
   visit(elements, true);
   return { values, formats };
+}
+
+/** The physical page of each footnote reference of a laid-out document, in
+ * page order (the first page a reference appears on), for §17.11.19 eachPage
+ * numbering. Body, table-cell and note-story references all count. */
+export function footnoteReferencePages(
+  layout: Readonly<{ pages: readonly Readonly<{ pageIndex: number; layers: Readonly<{ body: readonly unknown[] }> }>[] }>,
+): ReadonlyMap<string, number> {
+  const pages = new Map<string, number>();
+  const visit = (node: unknown, pageIndex: number): void => {
+    if (node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, pageIndex);
+      return;
+    }
+    const record = node as Readonly<Record<string, unknown>>;
+    const reference = record.noteReference as Readonly<{ kind?: unknown; id?: unknown }> | undefined;
+    if ((record.kind === 'text' || record.kind === 'anchor-host') && reference?.kind === 'footnote'
+      && typeof reference.id === 'string' && reference.id.length > 0 && !pages.has(reference.id)) {
+      pages.set(reference.id, pageIndex);
+    }
+    for (const key of ['lines', 'placements', 'rows', 'cells', 'blocks', 'layout', 'story', 'textBoxes', 'drawings']) {
+      if (key in record) visit(record[key], pageIndex);
+    }
+  };
+  for (const page of layout.pages) visit(page.layers.body, page.pageIndex);
+  return pages;
 }
 
 /** Index note-part entries by their OOXML id for story acquisition. */

@@ -111,6 +111,7 @@ import {
   endnoteIdsInRetainedSlice,
   footnoteIdsInRetainedLines,
   footnoteIdsInRetainedSlice,
+  footnoteReferencePages,
 } from './note-reference-ownership.js';
 import { exactRetainedColumnBalanceTarget } from './column-balance-frontier.js';
 import { composeCanonicalSectionFlow } from './section-flow-composition.js';
@@ -5144,6 +5145,8 @@ type ReserveRepaginationCarry = Readonly<{
   anchorPlan: ReturnType<typeof pageAnchorDestinationPlan>;
   /** The pass needed the page-scoped table floor proof (#2012). */
   pageScopedFloorProof: boolean;
+  /** §17.11.19 eachPage: the pass's footnote reference pages. */
+  footnoteReferencePages?: ReadonlyMap<string, number>;
 }>;
 
 /** An unseeded run's second anchor pass, already advanced while the first
@@ -6155,6 +6158,9 @@ export function* paginateBodySteps(
           },
         }
       : undefined;
+    const numbering = input.noteLayoutSettings;
+    const footnoteEachPage = numbering?.footnoteNumbering?.restart === 'eachPage'
+      || (numbering?.sectionNoteNumbering ?? []).some((section) => section.footnote.restart === 'eachPage');
     let seed: BodyPaginationPassResult | null = yield* paginateBodyWithColumnBalancingSteps(
       input, services, options, [], publisher,
     );
@@ -6170,6 +6176,7 @@ export function* paginateBodySteps(
       // one is built.
       carry: (pass) => Object.freeze({
         fieldContexts: paginationFieldPageContexts(pass.layout),
+        ...(footnoteEachPage ? { footnoteReferencePages: footnoteReferencePages(pass.layout) } : {}),
         // Page-owned tables need one geometry-discovery pass and one exclusion
         // pass. Reuse the accepted geometry for this later reserve iteration
         // when stable; changed ownership still runs exact convergence anew.
@@ -6181,6 +6188,7 @@ export function* paginateBodySteps(
         const iterationServices = createFieldAcquisitionServicesView(services, {
           totalPages: contexts.length,
           resolveDestinationPage: (pageIndex) => contexts[pageIndex],
+          ...(carried.footnoteReferencePages ? { footnoteReferencePages: carried.footnoteReferencePages } : {}),
         });
         const refine = function* (pageScoped: boolean) {
           let observed = reserves;
@@ -6221,8 +6229,12 @@ export function* paginateBodySteps(
           return yield* refine(true);
         }
       },
-      identity: (pass) => paginationFieldPageContexts(pass.layout),
-      requiresConvergence: seed.session.hasPaginationFields,
+      // §17.11.19 eachPage footnote labels depend on the page of every
+      // reference: iterate until the reference pages are a fixed point.
+      identity: (pass) => footnoteEachPage
+        ? [paginationFieldPageContexts(pass.layout), [...footnoteReferencePages(pass.layout)]]
+        : paginationFieldPageContexts(pass.layout),
+      requiresConvergence: seed.session.hasPaginationFields || footnoteEachPage,
     });
     seed = null;
     const converged = (yield* convergence).result;

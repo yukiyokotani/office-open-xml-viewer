@@ -230,3 +230,122 @@ describe('section-aware note numbering', () => {
       .toBe(true);
   });
 });
+
+const PAGE_GEOMETRY = '<w:pgSz w:w="12240" w:h="15840"/>'
+  + '<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/>';
+const footnoteRef = (id: number) => `<w:r><w:footnoteReference w:id="${id}"/></w:r>`;
+const pageBreak = '<w:r><w:br w:type="page"/></w:r>';
+const referenceParagraph = (id: number, breakAfter = false) =>
+  `<w:p><w:r><w:t>P${id}</w:t></w:r>${footnoteRef(id)}${breakAfter ? pageBreak : ''}</w:p>`;
+const sectPr = (footnotePr: string, type = 'nextPage') =>
+  `<w:sectPr>${footnotePr ? `<w:footnotePr>${footnotePr}</w:footnotePr>` : ''}<w:type w:val="${type}"/>${PAGE_GEOMETRY}</w:sectPr>`;
+
+/** Six footnote references, two per page (hard page breaks), optional
+ * document-wide (settings.xml) and section footnotePr children. */
+function pagedControl(documentPr: string, sectionPr = ''): DocxDocumentModel {
+  const paragraphs = [1, 2, 3, 4, 5, 6].map((id) => referenceParagraph(id, id % 2 === 0 && id < 6)).join('');
+  return footnotePackage(paragraphs + sectPr(sectionPr), documentPr);
+}
+
+function footnotePackage(body: string, documentPr = ''): DocxDocumentModel {
+  const notes = [1, 2, 3, 4, 5, 6].map((id) => `<w:footnote w:id="${id}"><w:p><w:r><w:footnoteRef/></w:r>`
+    + `<w:r><w:t>N${id}</w:t></w:r></w:p></w:footnote>`).join('');
+  const parts = new Map<string, string>([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>'
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>'],
+    ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
+    ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="n" Type="${R}/footnotes" Target="footnotes.xml"/><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/></Relationships>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}"><w:footnotePr>${documentPr}</w:footnotePr>`
+      + '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>'],
+    ['word/document.xml', `<w:document xmlns:w="${W}"><w:body>${body}</w:body></w:document>`],
+    ['word/footnotes.xml', `<w:footnotes xmlns:w="${W}">${notes}</w:footnotes>`],
+  ]);
+  const archive = new DocxArchive(storeZip(new Map([...parts].map(([name, xml]) => [name, encode(xml)]))));
+  try {
+    return normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+}
+
+/** Body reference labels and in-note number labels, per page. */
+function pagedLabels(model: DocxDocumentModel): Array<{ body: string[]; notes: string[] }> {
+  const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+  return layout.pages.map((page) => {
+    const collect = (nodes: readonly PaintNode[], out: string[]) => {
+      for (const node of nodes) {
+        if (node.kind === 'paragraph') {
+          for (const line of node.lines) for (const placement of line.placements) {
+            if (placement.kind === 'text' && placement.noteReference && placement.text.length > 0) out.push(placement.text);
+          }
+        } else if (node.kind === 'note') {
+          collect(node.story.blocks, out);
+        }
+      }
+      return out;
+    };
+    return { body: collect(page.layers.body, []), notes: collect(page.layers.notes as readonly PaintNode[], []) };
+  });
+}
+
+describe('numRestart eachPage (pagination fixed point)', () => {
+  const eachPage = '<w:numRestart w:val="eachPage"/>';
+
+  it('restarts footnote numbering on every page, in references and notes', () => {
+    expect(pagedLabels(pagedControl('', eachPage))).toEqual([
+      { body: ['1', '2'], notes: ['1', '2'] },
+      { body: ['1', '2'], notes: ['1', '2'] },
+      { body: ['1', '2'], notes: ['1', '2'] },
+    ]);
+  });
+
+  it('numbers each page from 1 in the section format, whatever numStart (word-each-page-note-numbering)', () => {
+    expect(pagedLabels(pagedControl('', `<w:numFmt w:val="lowerRoman"/><w:numStart w:val="3"/>${eachPage}`))
+      .map((page) => page.body)).toEqual([['i', 'ii'], ['i', 'ii'], ['i', 'ii']]);
+    expect(pagedLabels(pagedControl('', `<w:numFmt w:val="upperLetter"/><w:numStart w:val="0"/>${eachPage}`))
+      .map((page) => page.body)).toEqual([['A', 'B'], ['A', 'B'], ['A', 'B']]);
+  });
+
+  it.each([
+    // Two eachPage sections share page 2: their page count goes on.
+    ['eachPage then eachPage', eachPage, eachPage, [['1', '2'], ['1', '2', '3'], ['1']]],
+    // numStart does not number eachPage notes.
+    ['eachPage (numStart 5) then eachPage', `<w:numStart w:val="5"/>${eachPage}`, eachPage, [['1', '2'], ['1', '2', '3'], ['1']]],
+    // A continuous section goes on with the count of all earlier notes.
+    ['eachPage then continuous', eachPage, '', [['1', '2'], ['1', '4', '5'], ['6']]],
+  ] as const)('numbers %s sections sharing a page', (_name, first, second, expected) => {
+    const body = referenceParagraph(1) + referenceParagraph(2, true) + referenceParagraph(3)
+      + `<w:p><w:pPr>${sectPr(first)}</w:pPr></w:p>`
+      + referenceParagraph(4) + referenceParagraph(5, true) + referenceParagraph(6)
+      + sectPr(second, 'continuous');
+    expect(pagedLabels(footnotePackage(body)).map((page) => page.body)).toEqual(expected);
+  });
+
+  it('ignores a document-wide eachPage in settings.xml (word-section-note-numbering)', () => {
+    expect(pagedLabels(pagedControl(eachPage)).map((page) => page.body)).toEqual([['1', '2'], ['3', '4'], ['5', '6']]);
+  });
+
+  it('restarts an eachPage section where it begins on a page it shares', () => {
+    // Section 1 numbers continuously over pages 1-2; section 2 (eachPage)
+    // begins on page 2 after a continuous break (kept on the page in
+    // compatibility mode 15, WORD_CONTINUOUS_SECTION_FOOTNOTE_PAGE).
+    const body = referenceParagraph(1) + referenceParagraph(2, true) + referenceParagraph(3)
+      + `<w:p><w:pPr>${sectPr('')}</w:pPr></w:p>`
+      + referenceParagraph(4) + referenceParagraph(5, true) + referenceParagraph(6)
+      + sectPr(eachPage, 'continuous');
+    expect(pagedLabels(footnotePackage(body))).toEqual([
+      { body: ['1', '2'], notes: ['1', '2'] },
+      { body: ['3', '1', '2'], notes: ['3', '1', '2'] },
+      { body: ['1'], notes: ['1'] },
+    ]);
+  });
+
+  it('keeps continuous numbering without eachPage', () => {
+    expect(pagedLabels(pagedControl('')).map((page) => page.body)).toEqual([['1', '2'], ['3', '4'], ['5', '6']]);
+  });
+});
