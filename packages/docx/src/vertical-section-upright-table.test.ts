@@ -326,6 +326,75 @@ describe('upright block table of a vertical section', () => {
     },
   );
 
+  describe('footnotes beside upright tables', () => {
+    // A four-paragraph footnote takes its band at the block end of the page.
+    // In one column no table box shares block extent with it unless nothing
+    // can move.
+    const stories = { footnote: paragraph('note').repeat(4) };
+    const noted = (xml: string) => xml.replace('</w:p>', `${FOOTNOTE_REFERENCE}</w:p>`);
+    const strips = (count: number) => Array.from({ length: count }, () => P);
+    /** A one-row table `widthPt` wide (two equal columns). */
+    const wide = (widthPt: number, rowPt: number) => table(1, rowPt)
+      .replace(/w:w="1440"/g, `w:w="${widthPt * 10}"`).replace(/w:w="2160"/g, `w:w="${widthPt * 10}"`);
+    /** How far the page's tables reach along the block axis, from the first strip. */
+    const tablesEnd = (direction: Direction, page: Page) => Math.max(...page.tables.map((placed) =>
+      direction === 'tbRl' ? PAGE_W - MARGIN.right - placed.paintedLeft : placed.paintedRight - MARGIN.left));
+    const layOutNoted = (direction: Direction, body: readonly string[], columns = 1, more: object = {}) =>
+      layOutPages(direction, body, columns, 360, undefined, undefined, { ...stories, ...more });
+
+    it.each(['tbRl', 'tbLrV'] as const)('starts the next page with a table moved past another into its own note (%s)', (direction) => {
+      // The 300 pt-wide table meets the 520 pt-tall one, does not fit below
+      // it and is placed past it along the block axis, where its box would
+      // reach the band of the note it refers to. It starts the next page.
+      const pages = layOutNoted(direction, [wide(90, 520), P, noted(wide(300, 300))]);
+      expect(pages.map((page) => page.tables.length)).toEqual([1, 1]);
+      expect(pages[0]!.noteStart).toBeNull();
+      expect(tablesEnd(direction, pages[1]!)).toBeLessThanOrEqual(pages[1]!.noteStart! + 1e-6);
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('moves a run of tables whose second table refers to a note (%s)', (direction) => {
+      // Two directly following tables are one block. The note the second
+      // refers to counts when the first is placed: both start the next page.
+      const second = noted(table(2, 40)).replace(/w:sz="4"/g, 'w:sz="8"');
+      const pages = layOutNoted(direction, [...strips(15), table(2, 40), second]);
+      expect(pages.map((page) => [page.strips.length, page.tables.length])).toEqual([[15, 0], [0, 2]]);
+      expect(tablesEnd(direction, pages[1]!)).toBeLessThanOrEqual(pages[1]!.noteStart! + 1e-6);
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('moves a paragraph whose note would reach a table placed before it (%s)', (direction) => {
+      // The table adds no flow advance, so the flow position after it does
+      // not say how far the page is occupied: its box does. The paragraph
+      // after it, whose note band would reach the box, starts the next page.
+      const pages = layOutNoted(direction, [...strips(15), table(2, 40), noted(P)]);
+      expect(pages.map((page) => [page.strips.length, page.tables.length])).toEqual([[15, 1], [1, 0]]);
+      expect(pages[0]!.noteStart).toBeNull();
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('moves a keepNext paragraph with a table whose own note it has no room for (%s)', (direction) => {
+      const kept = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+      const pages = layOutNoted(direction, [...strips(14), kept, noted(table(2, 40))]);
+      expect(pages.map((page) => [page.strips.length, page.tables.length])).toEqual([[14, 0], [1, 1]]);
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('continues the note of a table that is first on its page past the table (%s)', (direction) => {
+      // A 420 pt-wide table first on its page cannot move. Its note takes
+      // the room its box leaves and continues on the next page.
+      const first = noted(table(2, 40).replace(/w:w="1440"/g, 'w:w="4200"').replace(/w:w="2160"/g, 'w:w="4200"'));
+      const pages = layOutNoted(direction, [first, P], 1, { continueFootnotes: true });
+      expect(pages).toHaveLength(2);
+      expect(pages[0]!.tables).toHaveLength(1);
+      expect(tablesEnd(direction, pages[0]!)).toBeLessThanOrEqual(pages[0]!.noteStart! + 1e-6);
+      expect(pages[1]!.noteStart).not.toBeNull();
+    });
+
+    it.each(['tbRl', 'tbLrV'] as const)('leaves a table of two columns where the flow reaches it, also over its note (%s)', (direction) => {
+      const pages = layOutNoted(direction, [...strips(15), noted(table(2, 40)), P], 2);
+      expect(pages).toHaveLength(1);
+      expect(pages[0]!.tables).toHaveLength(1);
+      expect(tablesEnd(direction, pages[0]!)).toBeGreaterThan(pages[0]!.noteStart!);
+    });
+  });
+
   it.each(['tbRl', 'tbLrV'] as const)(
     'moves a keepNext paragraph with a table that its footnote leaves no room for (%s)',
     (direction) => {

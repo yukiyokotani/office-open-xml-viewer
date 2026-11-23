@@ -68,6 +68,11 @@ export interface UprightBlockPageIndex {
   /** The owner segments pinned when the page's layout started, by segment
    * key (uprightSegmentKey): a pinned segment takes these bounds. */
   readonly segmentPins: Map<string, LayoutRect>;
+  /** The far block edge of the boxes registered so far: how far the page's
+   * upright blocks reach along the block axis, whatever the flow has
+   * advanced (they add no flow advance). Negative infinity while there is
+   * none. */
+  occupiedBlockEndPt: number;
   /** The table placed last (UprightBlockTail). */
   tail: UprightBlockTail | null;
   /** The boxes of the placed top-level tables with the body index of the
@@ -175,6 +180,10 @@ export interface UprightBlockRegistration {
   readonly tableBox?: UprightTableBox;
   /** An owner segment placed for good at `bounds` (a page pin). */
   readonly segmentPin?: Readonly<{ key: string; bounds: LayoutRect }>;
+  /** The footnotes the tables of this registration refer to (every table
+   * placed with it, not only the first): their reserve has to leave the
+   * box clear (body-paginator.ts, committedFootnoteContentEndPt). */
+  readonly footnoteReferenceIds?: readonly string[];
 }
 
 /** Identity of one owner segment of the table at body index `sourceIndex`,
@@ -194,6 +203,7 @@ export function emptyUprightBlockPageIndex(): UprightBlockPageIndex {
     boxOrders: new Map(),
     slots: new Map(),
     segmentPins: new Map(),
+    occupiedBlockEndPt: Number.NEGATIVE_INFINITY,
     tail: null,
     tableBuckets: new Map(),
     tableCount: 0,
@@ -283,6 +293,7 @@ export function uprightBlockExclusionsAhead(
  * the block axis up to `reachPt` past its far edge. */
 export function addUprightBlockBox(index: UprightBlockPageIndex, box: LayoutRect, reachPt: number, order: number): void {
   index.boxOrders.set(box, order);
+  index.occupiedBlockEndPt = Math.max(index.occupiedBlockEndPt, box.yPt + box.heightPt);
   const first = Math.floor(box.yPt / BUCKET_PT);
   const last = Math.floor((box.yPt + box.heightPt + reachPt) / BUCKET_PT);
   if (!(last - first < MAX_BUCKET_SPAN)) {

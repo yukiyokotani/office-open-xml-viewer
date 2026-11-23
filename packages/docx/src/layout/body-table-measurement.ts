@@ -61,6 +61,7 @@ import {
   tableFragmentStartKey,
   uprightBlockTableKey,
 } from './source-key.js';
+import { footnoteIdsInRetainedSlice } from './note-reference-ownership.js';
 import {
   addUprightPageDrawing,
   type UprightDrawingLimits,
@@ -725,9 +726,13 @@ function searchUprightBlock(
     inlineStartPt,
     inlineRoomPt: bandEndPt - inlineStartPt,
     inlineBandPt: bandEndPt - cursorPt.xPt,
+    // Against the block extent the request gives the block, which can be
+    // less than the location's (the footnotes a table refers to).
     leavesBlockExtent: blockStartPt !== flowBlockPt
-      && blockStartPt + boxBlockExtentPt
-        > request.location.availableBounds.yPt + request.location.availableBounds.heightPt,
+      && blockStartPt + boxBlockExtentPt > Math.min(
+        request.location.availableBounds.yPt + request.location.availableBounds.heightPt,
+        request.location.cursorPt.yPt + (request.availableBlockExtentPt ?? Number.POSITIVE_INFINITY),
+      ),
   });
 }
 
@@ -779,6 +784,14 @@ function uprightBlockTooWide(request: BodyTableRequest, boxBlockExtentPt: number
 
 /** The outcome of placing the first fragment of an upright block table the
  * flow reaches, with the tables that run on from it. */
+/** The footnotes a table refers to, read from its acquisition once. */
+const uprightTableFootnoteIdsByAcquisition = new WeakMap<RetainedTableAcquisition, readonly string[]>();
+function uprightTableFootnoteIds(retained: RetainedTableAcquisition): readonly string[] {
+  let ids = uprightTableFootnoteIdsByAcquisition.get(retained);
+  if (!ids) uprightTableFootnoteIdsByAcquisition.set(retained, ids = footnoteIdsInRetainedSlice(retained.layout));
+  return ids;
+}
+
 type UprightRunPlan =
   /** The table starts a fresh column or page instead. */
   | Readonly<{ kind: 'fresh-region'; freshPage: boolean }>
@@ -787,7 +800,11 @@ type UprightRunPlan =
   /** `slots[0]` is the table's, the others those of the tables after it
    * that run on from it on this page; `box` bounds the tables placed whole
    * (the last slot can be one that splits by rows and is not in it). */
-  | Readonly<{ kind: 'placed'; slots: readonly UprightBlockSlot[]; box: LayoutRect; lastSourceIndex: number }>;
+  | Readonly<{
+    kind: 'placed'; slots: readonly UprightBlockSlot[]; box: LayoutRect; lastSourceIndex: number;
+    /** The footnotes the placed tables refer to. */
+    footnoteReferenceIds: readonly string[];
+  }>;
 
 /** The synthetic inputs of the logical tables a run was taken with, by layout
  * session and first body index: one object per logical table, so its
@@ -1120,8 +1137,14 @@ function planUprightRun(
       xPt: inlineStartPt, yPt: blockStartPt, widthPt: inlineEndPt - inlineStartPt, heightPt: boxBlockExtentPt,
     });
     if (at + wholeCount < members.length) slots.push(slotOf(members[at + wholeCount]!, true));
+    const footnoteReferenceIds: string[] = [];
+    for (let offset = 0; offset < slots.length; offset += 1) {
+      const ids = uprightTableFootnoteIds(members[at + offset]!.retained);
+      for (let id = 0; id < ids.length; id += 1) footnoteReferenceIds.push(ids[id]!);
+    }
     return Object.freeze({
       kind: 'placed' as const, slots, box, lastSourceIndex: members[at + wholeCount - 1]!.lastSourceIndex,
+      footnoteReferenceIds: Object.freeze(footnoteReferenceIds),
     });
   };
   // Rows that continue the upright table placed just before this one in the
@@ -1249,7 +1272,15 @@ export function bodyUprightBlockLookAhead(
   context: BodyTableMeasurementContext,
   request: BodyTableRequest,
   operations: BodyTableMeasurementOperations,
-): Readonly<{ startsHere: boolean; layout: TableLayout }> | null {
+): Readonly<{
+  startsHere: boolean;
+  layout: TableLayout;
+  /** Where the box of the tables placed with it ends along the block axis,
+   * when it is placed whole here. */
+  blockEndPt?: number;
+  /** The footnotes those tables refer to. */
+  footnoteReferenceIds: readonly string[];
+}> | null {
   const { services, state, sessionState } = context;
   const restore = sessionState.location;
   operations.setBodyAcquisitionLocation(services, state, sessionState, request.location);
@@ -1257,14 +1288,19 @@ export function bodyUprightBlockLookAhead(
     const found = uprightBlockLeader(context, request, operations);
     if (!found) return null;
     const layout = found.leader.retained.layout;
+    const own = uprightTableFootnoteIds(found.leader.retained);
     const slot = uprightBlockIndexOf(state).slots.get(found.leader.sourceIndex);
     if (slot && (slot.anyColumn || slot.flowDomainId === request.location.flowDomainId)) {
-      return { startsHere: true, layout };
+      return {
+        startsHere: true, layout, blockEndPt: slot.bounds.yPt + slot.bounds.heightPt, footnoteReferenceIds: own,
+      };
     }
+    const plan = planUprightRun(context, request, operations, found.physical, found.leader, false);
     return {
-      startsHere: planUprightRun(context, request, operations, found.physical, found.leader, false).kind
-        !== 'fresh-region',
+      startsHere: plan.kind !== 'fresh-region',
       layout,
+      ...(plan.kind === 'placed' ? { blockEndPt: plan.box.yPt + plan.box.heightPt } : {}),
+      footnoteReferenceIds: plan.kind === 'placed' ? plan.footnoteReferenceIds : own,
     };
   } finally {
     operations.setBodyAcquisitionLocation(services, state, sessionState, restore);
@@ -1302,6 +1338,7 @@ export function planBodyUprightBlocks(
       slots: Object.freeze([...plan.slots]),
       exclusions: Object.freeze(uprightRunExclusion(request, plan.box)),
       tail: Object.freeze({ sourceIndex: plan.lastSourceIndex, flowDomainId: request.location.flowDomainId, bounds: plan.box }),
+      ...(plan.footnoteReferenceIds.length > 0 ? { footnoteReferenceIds: plan.footnoteReferenceIds } : {}),
     });
   } finally {
     operations.setBodyAcquisitionLocation(services, state, sessionState, restore);
@@ -1365,7 +1402,9 @@ function measureUprightBlockTable(
       nextCursor,
       ...(registration ? { uprightBlocks: registration } : {}),
       ...(pin ? { uprightPagePin: pin } : {}),
-      uprightBlockEndPt: bounds.yPt + bounds.heightPt,
+      uprightBlockEndPt: Math.max(
+        bounds.yPt + bounds.heightPt, registration?.box ? registration.box.yPt + registration.box.heightPt : bounds.yPt,
+      ),
       placement: Object.freeze({
         coordinateSpace: 'upright-physical' as const,
         xPt: origin.xPt,
@@ -1501,6 +1540,7 @@ function measureUprightBlockTable(
           slots: Object.freeze(plan.slots.slice(1)),
           exclusions: Object.freeze(uprightRunExclusion(request, plan.box)),
           tail: Object.freeze({ sourceIndex: plan.lastSourceIndex, flowDomainId, bounds: plan.box }),
+          ...(plan.footnoteReferenceIds.length > 0 ? { footnoteReferenceIds: plan.footnoteReferenceIds } : {}),
         }),
         uprightBlockReachesEarlierColumn(request, plan.box)
           || uprightBlockCoversLaterDrawing(context.state, request.input.source, plan.box)

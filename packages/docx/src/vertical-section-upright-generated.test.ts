@@ -3,12 +3,15 @@ import {
   anchoredRectangle,
   anchoring,
   collisions,
+  footnoteReference,
   hasNoPlace,
   layOutPages,
   loadParser,
+  MARGIN,
   P,
   PAGE_H,
   PAGE_W,
+  PITCH,
   shared,
   T,
   table,
@@ -211,6 +214,68 @@ describe('generated sequences of upright block tables and square-wrapped drawing
       const pages = check(direction, columns, body, context, true);
       expect(drawingCollisions(pages, direction), context).toEqual([]);
       expect(offPage(pages).filter(({ drawing }) => drawing.width !== 70), context).toEqual([]);
+    });
+  }, TIMEOUT_MS);
+
+  it('footnote references in paragraphs and table cells beside upright tables', () => {
+    // Paragraphs and tables, some referring to a four-paragraph footnote
+    // (a table from its first cell), with runs of directly following tables,
+    // keepNext paragraphs and rectangles. In one column no upright box and
+    // no strip shares block extent with the footnote band of its page,
+    // unless nothing can move: the tables a page starts with keep their
+    // place whatever their notes need. A paragraph is not kept apart from
+    // the table it is kept with. Two columns only have to lay out: a table
+    // stays where the flow reaches it there, also over its note.
+    forEachSequence(0x1f9b, (random, direction, columns, context) => {
+      const pick = <Item>(items: readonly Item[]) => items[Math.floor(random() * items.length)]!;
+      let notes = 0;
+      const reference = () => footnoteReference(notes += 1);
+      const tables = [T, table(2, 40), table(6), table(1, 120), table(1, 300), table(30)];
+      const tableBlock = () => {
+        const xml = pick(tables);
+        return random() < 0.4 ? xml.replace('</w:p>', `${reference()}</w:p>`) : xml;
+      };
+      const text = () => {
+        const base = random() < 0.2 ? P.replace('<w:pPr>', '<w:pPr><w:keepNext/>') : P;
+        const runs = (random() < 0.25 ? reference() : '')
+          + (random() < 0.15 ? anchoredRectangle(
+            40 + Math.floor(random() * 400), 60 + Math.floor(random() * 500), pick([20, 80]), pick([10, 40]),
+          ) : '');
+        return runs ? base.replace('</w:p>', `${runs}</w:p>`) : base;
+      };
+      const body: string[] = [];
+      const length = 3 + Math.floor(random() * 8);
+      for (let at = 0; at < length; at += 1) {
+        const kind = random();
+        if (kind < 0.35) {
+          for (let run = random() < 0.3 ? 2 : 1; run > 0; run -= 1) body.push(tableBlock());
+        } else if (kind < 0.4 && columns > 1) {
+          body.push(columnBreak);
+        } else {
+          for (let run = 1 + Math.floor(random() * 6); run > 0; run -= 1) body.push(text());
+        }
+      }
+      let pages: Page[] = [];
+      expect(() => {
+        pages = layOutPages(direction, body, columns, 360, undefined, undefined, {
+          footnote: P.repeat(4), footnoteCount: Math.max(1, notes),
+        });
+      }, context).not.toThrow();
+      if (columns !== 1) return;
+      const reaching = pages.flatMap((page, pageIndex) => {
+        if (page.noteStart === null) return [];
+        // The tables the page starts with cannot move.
+        const fixed = page.order.findIndex((kind) => kind !== 'table');
+        const movable = page.tables.slice(fixed < 0 ? page.tables.length : fixed);
+        const blockEnd = (placed: Page['tables'][number]) => direction === 'tbRl'
+          ? PAGE_W - MARGIN.right - placed.paintedLeft : placed.paintedRight - MARGIN.left;
+        return [
+          ...movable.flatMap((placed) => blockEnd(placed) > page.noteStart! + 1e-6 ? [{ pageIndex, placed }] : []),
+          ...page.strips.flat().flatMap((strip) =>
+            strip.block + PITCH > page.noteStart! + 1e-6 ? [{ pageIndex, strip }] : []),
+        ];
+      });
+      expect(reaching, context).toEqual([]);
     });
   }, TIMEOUT_MS);
 });

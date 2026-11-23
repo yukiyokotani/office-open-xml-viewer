@@ -314,6 +314,10 @@ export interface FollowingBodyBlockMeasurementInput {
 export interface FollowingBodyBlockMeasurement {
   readonly fullExtentPt: number;
   readonly leadContentExtentPt: number;
+  /** `word-vertical-section-upright-block-table`: where the box of an
+   * upright block table (with the tables that run on from it) ends along
+   * the block axis when it starts here. */
+  readonly uprightBlockEndPt?: number;
   /** Retained first-line slice for reservation-aware grid admission. Only
    * acquired for grid lines; later paragraph decoration is excluded. */
   readonly leadGridParagraph?: ParagraphLayout;
@@ -432,6 +436,11 @@ export interface BodyLayoutSession {
   planUprightBlocks?(request: BodyTableAcquisitionInput): UprightBlockRegistration | null;
   /** Registers accepted upright blocks on the current page. */
   commitUprightBlocks?(registration: UprightBlockRegistration): void;
+  /** `word-vertical-section-upright-block-table`: the far block edge of the
+   * upright blocks registered on the current page (negative infinity when
+   * there is none). They add no flow advance, so the flow position alone
+   * does not say how far the page's content reaches. */
+  uprightOccupiedBlockEndPt?(): number;
 }
 
 /** Document-private acquisition adapter. Page construction and transition

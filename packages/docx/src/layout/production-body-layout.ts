@@ -153,7 +153,7 @@ import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, anchorAxisOwnership, anchorCollisionBlockers, anchorObstacleMove, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
 import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
-import { WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
+import { WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_NO_GRID_PT, WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT, WORD_UPRIGHT_TABLE_TABLE_CLEARANCE_PT, WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT, wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { UprightDrawingPin } from './body-layout-kernel.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -2354,7 +2354,8 @@ function measureFollowingBodyBlock(
         fullExtentPt: 0,
         leadContentExtentPt: 0,
         ...(upright.startsHere ? {} : { startsFreshRegion: true as const }),
-        fullFootnoteReferenceIds: footnoteIdsInRetainedSlice(upright.layout),
+        ...(upright.blockEndPt === undefined ? {} : { uprightBlockEndPt: upright.blockEndPt }),
+        fullFootnoteReferenceIds: upright.footnoteReferenceIds,
         leadFootnoteReferenceIds: footnoteIdsInRetainedSlice({
           ...upright.layout,
           rows: upright.layout.rows.slice(0, 1),
@@ -3229,14 +3230,16 @@ function addUprightBlockExclusionFloats(
   const band = location.availableBounds;
   const bandEndPt = band.xPt + band.widthPt;
   const context = resolveBodyParagraphLayoutContext(candidate, paragraph);
-  // `word-vertical-section-upright-block-table`: with a line grid, a strip
-  // that meets a table has no text in less than
-  // WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT between the table's bottom edge
-  // and the column's end: the exclusion then reaches that end.
+  // `word-vertical-section-upright-block-table`: a strip that meets a table
+  // has no text in less than the least room between the table's bottom
+  // edge and the column's end (with and without a line grid): the
+  // exclusion then reaches that end.
+  const leastRoomPt = context.lineGrid.active
+    ? WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT : WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_NO_GRID_PT;
   const float = (exclusion: UprightBlockExclusion, ordinal: number): FloatRect => {
     const rect = uprightBlockExclusionFloat(exclusion, ordinal);
     const roomBelowPt = bandEndPt - rect.xRight;
-    return context.lineGrid.active && roomBelowPt > 0 && roomBelowPt < WORD_UPRIGHT_TABLE_LEAST_ROOM_BELOW_PT
+    return roomBelowPt > 0 && roomBelowPt < leastRoomPt
       && rect.xLeft < bandEndPt
       ? { ...rect, xRight: bandEndPt, imageW: bandEndPt - rect.imageX } : rect;
   };
@@ -3726,6 +3729,7 @@ function openConcreteBodyLayoutSession(
     },
     planUprightBlocks: (request) => planBodyUprightBlocks(sessionDependencies, request, tableOperations),
     commitUprightBlocks: (registration) => commitBodyUprightBlocks(sessionDependencies, registration),
+    uprightOccupiedBlockEndPt: () => sessionDependencies.state.uprightBlockIndex?.occupiedBlockEndPt ?? Number.NEGATIVE_INFINITY,
     layoutStory: (request) => acquireBodyStoryLayout(storyAcquisitionContext, request),
     layoutNotes(
       request: Parameters<NonNullable<BodyLayoutSession['layoutNotes']>>[0],

@@ -2161,10 +2161,60 @@ function* paginateBodyPassSteps(
     footnoteReserveByPage.set(state.flow.pageIndex, pageReservePt);
     continuations.forEach(({ id, cursor }) => pendingFootnoteContinuations.set(id, cursor));
   };
+  // `word-vertical-section-upright-block-table`: how far the page's content
+  // reaches along the block axis for its footnotes.
+  //
+  // An upright block table adds no flow advance, so the flow position does
+  // not say how far the page is occupied: the far block edge of every
+  // upright box on the page does, with the box of the table (or tables) a
+  // decision is about to place (`candidateUprightEnd`). Every decision about
+  // a footnote band reads the occupied extent from here: the notes of a
+  // paragraph, of a table, of a run of tables, of the tables planned with a
+  // paragraph, and the keep-with-next look-ahead.
+  //
+  // Invariant, for a one-column section: no upright box and no line shares
+  // block extent with the footnote band of its page, unless nothing can
+  // move. What cannot fit moves to the next page: a paragraph whose notes
+  // would reach a placed table, a table (with the tables that run on from
+  // it) whose box would reach its own notes or the page's. A table that is
+  // first on its page cannot move; its notes then take the room its box
+  // leaves and continue on the next page. A multi-column section never
+  // moves a table and lets a table's box and its note share the page (both
+  // in the rule): there the boxes do not count.
+  let candidateUprightEnd: Readonly<{ pageIndex: number; endPt: number }> | null = null;
+  const uprightOccupiedEndPt = (): number => {
+    if (activeRegion(state).section.columns.length !== 1) return Number.NEGATIVE_INFINITY;
+    return Math.max(
+      session.uprightOccupiedBlockEndPt?.() ?? Number.NEGATIVE_INFINITY,
+      candidateUprightEnd?.pageIndex === state.flow.pageIndex ? candidateUprightEnd.endPt : Number.NEGATIVE_INFINITY,
+    );
+  };
+  /** Whether an upright box ending at `boxEndPt`, not registered yet, would
+   * reach the footnote band of the page once the notes `referenceIds` are
+   * admitted (their reserve is at least `knownReservePt`). The one test for
+   * a box that is about to be placed: the tables planned with a paragraph,
+   * and the table a keep set ends with. False in a multi-column section and
+   * when there is no note to admit. */
+  const uprightBoxReachesNotes = (
+    boxEndPt: number,
+    referenceIds: readonly string[],
+    knownReservePt: number,
+    inlineExtentPt: number,
+  ): boolean => {
+    if (activeRegion(state).section.columns.length !== 1) return false;
+    const reservePt = referenceIds.length === 0 ? knownReservePt : Math.max(
+      knownReservePt, footnoteAdmissionForIds([...new Set(referenceIds)], inlineExtentPt).reservePt,
+    );
+    return reservePt > 0 && !atMostWithinFloatingPrecision(
+      boxEndPt, activeBlockEndPt(state) - state.footnoteReservePt - reservePt,
+    );
+  };
   /** The deepest committed content a growing note band must not cover: the
-   * active column alone for a column band, every column for a page band. */
-  const committedFootnoteContentEndPt = (): number => (
-    perColumnFootnoteBands() ? state.flow.cursorBlockPt : state.flow.deepestColumnBlockPt
+   * active column alone for a column band, every column for a page band,
+   * and the upright boxes of the page (uprightOccupiedEndPt). */
+  const committedFootnoteContentEndPt = (): number => Math.max(
+    perColumnFootnoteBands() ? state.flow.cursorBlockPt : state.flow.deepestColumnBlockPt,
+    uprightOccupiedEndPt(),
   );
   placePendingFootnoteContinuations = () => {
     if (pendingFootnoteContinuations.size === 0) return;
@@ -3193,6 +3243,10 @@ function* paginateBodyPassSteps(
           let terminalLeadExtentPt = 0;
           let hasTerminalBlock = false;
           let terminalStartsFreshRegion = false;
+          // The box of an upright table the keep set ends with, and the
+          // notes the tables placed with it refer to.
+          let terminalUprightEndPt: number | undefined;
+          let terminalUprightReferenceIds: readonly string[] = [];
           let keepSetBlockedByDeferral = false;
           let bridgeSuccessor = wordEmptyKeepNextBridgesSuccessor({
             keepNext: block.keepNext,
@@ -3249,6 +3303,8 @@ function* paginateBodyPassSteps(
               : following.leadFootnoteReferenceIds;
             referenceIds?.forEach((id) => keepSetReferenceIds.add(id));
             if (!continues) {
+              terminalUprightEndPt = following.uprightBlockEndPt;
+              terminalUprightReferenceIds = following.fullFootnoteReferenceIds ?? [];
               terminalGridParagraph = following.leadGridParagraph;
               terminalWholeParagraphHasPlacements = following.wholeParagraphHasPlacements ?? true;
               terminalLeadExtentPt = following.leadContentExtentPt;
@@ -3279,6 +3335,14 @@ function* paginateBodyPassSteps(
             : terminalLeadExtentPt;
           const keepSetAdmissionPt = keepSetExtentPt
             - (terminalLeadExtentPt - terminalAdmissionPt) + keepSetReservePt;
+          // `word-vertical-section-upright-block-table`: the table the keep
+          // set ends with would reach the band of the notes the keep set
+          // and the table refer to, where its placement starts the next
+          // page: the same test, so the kept paragraph goes with it.
+          if (terminalUprightEndPt !== undefined && !terminalStartsFreshRegion && uprightBoxReachesNotes(
+            terminalUprightEndPt, [...keepSetReferenceIds, ...terminalUprightReferenceIds],
+            keepSetReservePt, location.availableBounds.widthPt,
+          )) terminalStartsFreshRegion = true;
           if (
             hasTerminalBlock
             && (keepSetAdmissionPt > location.availableBounds.heightPt || keepSetBlockedByDeferral
@@ -3480,29 +3544,13 @@ function* paginateBodyPassSteps(
           const unwrappedReservePt = notePlans
             ? notePlans.reservePt(selected.fragment.lines.length)
             : footnoteAdmission(selected.fragment, location.availableBounds.widthPt).reservePt;
-          // Where the flow reaches the table after this fragment and its
-          // notes, and the notes the table itself refers to: its box has
-          // to end before their band as well.
+          // Where the flow reaches the table after this fragment and its notes.
           const reached = locationAfter(location, unwrappedChargePt);
-          const tableReferenceIds = session.measureFollowingBlock({
-            input: tableAfter,
-            location: reached,
-            availableInlineExtentPt: reached.availableBounds.widthPt,
-            freshPageBlockExtentPt: freshPageExtent(state),
-            lastColumnOfPage: inLastColumn(state),
-          }).fullFootnoteReferenceIds ?? [];
-          const plannedReservePt = tableReferenceIds.length === 0 ? unwrappedReservePt : Math.max(
-            unwrappedReservePt,
-            footnoteAdmissionForIds(
-              [...new Set([...footnoteIdsInRetainedSlice(selected.fragment), ...tableReferenceIds])],
-              location.availableBounds.widthPt,
-            ).reservePt,
-          );
           const tableLocation = Object.freeze({
             ...reached,
             availableBounds: Object.freeze({
               ...reached.availableBounds,
-              heightPt: Math.max(0, reached.availableBounds.heightPt - plannedReservePt),
+              heightPt: Math.max(0, reached.availableBounds.heightPt - unwrappedReservePt),
             }),
           });
           // The wrapped drawings this fragment anchors are committed with it,
@@ -3511,7 +3559,7 @@ function* paginateBodyPassSteps(
           const precedingDrawings = uprightPrecedingDrawings(
             acquired.flowRegistryDelta?.floats?.entries, selected.fragment,
           );
-          const planned = session.planUprightBlocks({
+          const madePlan = session.planUprightBlocks({
             input: tableAfter,
             location: tableLocation,
             ...(precedingDrawings.length > 0 ? { precedingDrawings } : {}),
@@ -3521,6 +3569,17 @@ function* paginateBodyPassSteps(
             pageHasContent: true,
             lastColumnOfPage: inLastColumn(state),
           });
+          // A plan whose box would reach the band of the notes this fragment
+          // and the planned tables refer to is not made: a planned table
+          // cannot move afterwards. The tables are then placed when the flow
+          // reaches them, where they start the next page
+          // (committedFootnoteContentEndPt).
+          const planned = madePlan?.box && uprightBoxReachesNotes(
+            madePlan.box.yPt + madePlan.box.heightPt,
+            [...footnoteIdsInRetainedSlice(selected.fragment), ...(madePlan.footnoteReferenceIds ?? [])],
+            unwrappedReservePt,
+            location.availableBounds.widthPt,
+          ) ? null : madePlan;
           if (planned) {
             // Wrapping the fragment around the planned tables can move a
             // drawing positioned relative to its character or line. The
@@ -3784,6 +3843,27 @@ function* paginateBodyPassSteps(
               acquired.layout,
               location.availableBounds.widthPt,
             );
+        // `word-vertical-section-upright-block-table`: the box this fragment
+        // places counts as page content for the notes admitted below
+        // (committedFootnoteContentEndPt), and the tables placed with it
+        // count with their notes: a run moves as one.
+        candidateUprightEnd = acquired.uprightBlockEndPt === undefined || acquired.requiresFreshFlowRegion
+          ? null : Object.freeze({ pageIndex: state.flow.pageIndex, endPt: acquired.uprightBlockEndPt });
+        const placedWithReferenceIds = acquired.uprightBlocks?.footnoteReferenceIds;
+        const uprightReservePt = (): number => !placedWithReferenceIds
+          || placedWithReferenceIds.every((id) => notes.ids.includes(id)) ? notes.reservePt
+          : Math.max(notes.reservePt, footnoteAdmissionForIds(
+            [...new Set([...notes.ids, ...placedWithReferenceIds])], location.availableBounds.widthPt,
+          ).reservePt);
+        // A table that cannot move (first on its page) keeps its place; its
+        // notes take the room its box leaves and continue on the next page.
+        if (candidateUprightEnd && notes.reservePt > 0 && !state.flow.pageHasContent
+          && services.allowFootnoteContinuation === true
+          && footnoteReserveInvadesCommittedPageContent(notes.reservePt)) {
+          notes = footnoteAdmissionForIds(
+            notes.ids, location.availableBounds.widthPt, additionalFootnoteReserveCapacityPt(),
+          );
+        }
         // A zero-advance cell-owner host still occupies the host flow below the
         // cursor; its footnotes are admitted against that extent, as for a
         // placed paragraph frame. Other tables charge their block advance.
@@ -3794,36 +3874,6 @@ function* paginateBodyPassSteps(
           reservePt: notes.reservePt,
           chargePt: flowChargePt(acquired) + notes.reservePt,
         });
-        // `word-vertical-section-upright-block-table`: an upright table
-        // charges no flow advance, but its box takes block extent from the
-        // flow position, and the notes it refers to take theirs from the
-        // block end of the page. Where the two would meet, the table is
-        // placed in the block extent the notes leave, once: a table too wide
-        // for it then starts the next region like any table too wide, and
-        // its notes go with it; a table that stays where it is (first on
-        // its page, or in a multi-column section) keeps its place and notes.
-        if (acquired.uprightBlockEndPt !== undefined && notes.reservePt > 0
-          && !atMostWithinFloatingPrecision(
-            acquired.uprightBlockEndPt,
-            activeBlockEndPt(state) - state.footnoteReservePt - notes.reservePt,
-          )) {
-          acquired = requestAt(Math.max(0, location.availableBounds.heightPt - notes.reservePt));
-          notes = acquired.requiresFreshFlowRegion
-            ? Object.freeze({
-                ids: Object.freeze([]) as readonly string[],
-                layouts: Object.freeze([]) as readonly NoteLayout[],
-                continuations: Object.freeze([]),
-                reservePt: 0,
-              })
-            : footnoteAdmission(acquired.layout, location.availableBounds.widthPt);
-          if (!acquired.requiresFreshFlowRegion) {
-            lastFootnoteAdmission = Object.freeze({
-              ids: notes.ids,
-              reservePt: notes.reservePt,
-              chargePt: flowChargePt(acquired) + notes.reservePt,
-            });
-          }
-        }
         const seenCandidates = new Set<string>();
         // Admission decides fit exactly as page containment will check it
         // (invariants.ts, through the shared floating-precision predicate):
@@ -3859,6 +3909,10 @@ function* paginateBodyPassSteps(
             reservePt: notes.reservePt,
           });
           if (seenCandidates.has(fingerprint)) {
+            // `word-vertical-section-upright-block-table`: an upright table
+            // that stays where it is in less block extent (first on its
+            // page, or of a multi-column section) keeps its place and notes.
+            if (acquired.uprightBlockEndPt !== undefined) break;
             assertAdmission(lastFootnoteAdmission.ids, lastFootnoteAdmission.reservePt, lastFootnoteAdmission.chargePt);
             if (lastFootnoteAdmission.reservePt > 0
               && lastFootnoteAdmission.chargePt > freshPageExtent(state)) break;
@@ -3922,7 +3976,7 @@ function* paginateBodyPassSteps(
           continue;
         }
         if (
-          footnoteReserveInvadesCommittedPageContent(notes.reservePt)
+          footnoteReserveInvadesCommittedPageContent(candidateUprightEnd ? uprightReservePt() : notes.reservePt)
           && state.flow.pageHasContent
         ) {
           // The acquired table is already a coherent row fragment. A fresh
@@ -3955,6 +4009,7 @@ function* paginateBodyPassSteps(
         }
         // `word-vertical-section-upright-block-table`
         if (acquired.uprightBlocks) session.commitUprightBlocks?.(acquired.uprightBlocks);
+        candidateUprightEnd = null;
         if (uprightPinPage === state.flow.pageIndex) {
           const pin = uprightPins.get(uprightPinKey(sourceKey(block.source), fragmentStartKey));
           if (pin) pin.consumed = true;
@@ -4037,6 +4092,7 @@ function* paginateBodyPassSteps(
       uprightReplayPending = false;
       foundDrawingPins = new Map();
       drawingReplayPending = false;
+      candidateUprightEnd = null;
       for (const pin of uprightPinsOf(state.flow.pageIndex).values()) {
         pin.consumed = false;
         session.commitUprightBlocks?.(pin.registration);

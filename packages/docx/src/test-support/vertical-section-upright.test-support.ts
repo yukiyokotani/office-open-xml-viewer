@@ -81,9 +81,18 @@ export const romanPageTable = (paragraphs: number, rowPt: number, format: 'Roman
 export type Direction = 'tbRl' | 'tbLrV';
 /** The block content of the section's default header and footer, and of
  * the footnote that `FOOTNOTE_REFERENCE` refers to. */
-export type Stories = Readonly<{ header?: string; footer?: string; footnote?: string }>;
-/** A run referring to the footnote of `Stories.footnote`. */
-export const FOOTNOTE_REFERENCE = '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r>';
+export type Stories = Readonly<{
+  header?: string; footer?: string; footnote?: string;
+  /** Lets a footnote continue on the next page (the viewer's default). */
+  continueFootnotes?: boolean;
+  /** How many footnotes there are, each with the content `footnote`
+   * (ids 1 to this; one when absent). */
+  footnoteCount?: number;
+}>;
+/** A run referring to footnote `id` (1 to `Stories.footnoteCount`). */
+export const footnoteReference = (id: number) =>
+  `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="${id}"/></w:r>`;
+export const FOOTNOTE_REFERENCE = footnoteReference(1);
 
 function docx(
   direction: Direction,
@@ -133,7 +142,9 @@ function docx(
       ['word/footnotes.xml', xml(`<w:footnotes xmlns:w="${W}">`
         + '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
         + '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
-        + `<w:footnote w:id="1">${stories.footnote}</w:footnote></w:footnotes>`)],
+        + Array.from({ length: stories.footnoteCount ?? 1 }, (_, at) =>
+          `<w:footnote w:id="${at + 1}">${stories.footnote}</w:footnote>`).join('')
+        + '</w:footnotes>')],
     ] as Array<[string, Uint8Array]>),
     ...storyKinds.map((kind): [string, Uint8Array] => [
       `word/${kind}1.xml`,
@@ -188,6 +199,11 @@ export interface Page {
   readonly drawings: Array<Readonly<{ left: number; top: number; width: number; height: number }>>;
   /** For each of `drawings`, the body index of the paragraph that anchors it. */
   readonly drawingParagraphs: number[];
+  /** Where the page's footnote band starts along the block axis, as a
+   * distance from the first strip like `strips[].block`; null without notes. */
+  noteStart: number | null;
+  /** The page's body nodes in order. */
+  readonly order: Array<'table' | 'paragraph'>;
 }
 
 /** `linePitch`: the section's line grid pitch in twentieths of a point.
@@ -212,7 +228,10 @@ export function layOutPages(
   }
   const layout = layoutDocument(
     model,
-    createLayoutServices(model, { measureContext: measureContext() }),
+    createLayoutServices(model, {
+      measureContext: measureContext(),
+      ...(stories?.continueFootnotes ? { allowFootnoteContinuation: true } : {}),
+    }),
     { currentDateMs: 0 },
   );
   // The section-logical block origin: the right margin in tbRl (lines advance
@@ -220,8 +239,13 @@ export function layOutPages(
   const blockOrigin = direction === 'tbRl' ? MARGIN.right : MARGIN.left;
   // Each column's strips restart at the block origin.
   return layout.pages.map((laidOut) => {
-  const page: Page = { tables: [], strips: [], drawings: [], drawingParagraphs: [] };
+  const page: Page = { tables: [], strips: [], drawings: [], drawingParagraphs: [], noteStart: null, order: [] };
+  for (const note of laidOut.layers.notes) {
+    const start = note.flowBounds.yPt - blockOrigin;
+    page.noteStart = page.noteStart === null ? start : Math.min(page.noteStart, start);
+  }
   for (const node of laidOut.layers.body) {
+    if (node.kind === 'table' || node.kind === 'paragraph') page.order.push(node.kind);
     if (node.kind === 'table') {
       const rules = node.borders.filter((border) => border.from.xPt === border.to.xPt);
       page.tables.push({
