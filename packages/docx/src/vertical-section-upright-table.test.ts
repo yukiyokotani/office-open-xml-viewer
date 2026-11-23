@@ -1219,6 +1219,28 @@ describe('upright block table of a vertical section', () => {
     });
   });
   describe('tables and square-wrapped drawings', () => {
+    it.each([
+      ['tbLrV', anchoring(35, anchoredRectangle(45, 0, 38, 50, 'paragraph', 'character'))],
+      ['tbRl', anchoring(5, anchoredRectangle(440, 60, 38, 50))],
+    ] as const)('places a table of two columns below a drawing only where it ends within its column (%s)', (direction, before) => {
+      // Two columns, each 340 pt along the column. The rectangle of the
+      // paragraph before the table lies at the column top over the table's
+      // place. A 250 pt table ends within the column below the rectangle
+      // and stacks there; a 320 pt table would pass the column's end there,
+      // so it stays at the column top, 7.14 pt past the rectangle along the
+      // block axis.
+      const below = layOutPages(direction, [before, table(1, 250), P], 2)[0]!;
+      expect(below.tables[0]!.top).toBeCloseTo(below.drawings[0]!.top + below.drawings[0]!.height, 6);
+      const past = layOutPages(direction, [before, table(1, 320), P], 2)[0]!;
+      const [placed] = past.tables;
+      const [drawing] = past.drawings;
+      expect(placed!.top).toBeCloseTo(MARGIN.top, 6);
+      expect(drawing!.top).toBeCloseTo(MARGIN.top, 6);
+      if (direction === 'tbRl') expect(placed!.paintedRight).toBeCloseTo(drawing!.left - 7.14, 6);
+      else expect(placed!.paintedLeft).toBeCloseTo(drawing!.left + drawing!.width + 7.14, 6);
+      expect(collisions([below, past])).toEqual([]);
+    });
+
     it('lays out a table before a long one whose rows a later drawing lies below', () => {
       // The second table's first fragment covers the rectangle anchored
       // after it and is pinned; the first table, placed before it, is not

@@ -626,7 +626,9 @@ function pendingDrawingIndex(
  * it): a block that does not fit below the boxes it meets clears the nearest
  * of them along the block axis instead. In a one-column section that holds
  * for a block that fits the band from the column top (a taller one
- * paginates); a multi-column section lets it run to the bottom page edge.
+ * paginates); a multi-column section lets it run to the bottom page edge
+ * below a table, and to the end of its column below a drawing, past which
+ * it lies the text clearance from the drawing.
  * Later fragments and owner segments stay at the flow's block position
  * (library policy). `from` starts the search at a given position instead of
  * the flow's: rows that continue the table placed just before them.
@@ -687,6 +689,7 @@ function searchUprightBlock(
     // window is asked again. Each round passes at least one box or drawing.
     inlineStartPt = inlineOriginPt;
     let next = 0;
+    let metDrawing = false;
     for (;;) {
       while (next < met.length && met[next]!.xPt < inlineStartPt + inlineExtentPt) {
         const box = met[next]!;
@@ -698,12 +701,20 @@ function searchUprightBlock(
         blockStartPt, blockEndPt, inlineStartPt, inlineStartPt + inlineExtentPt,
       );
       if (obstacles.length === 0) break;
+      metDrawing = true;
       for (const box of obstacles) {
-        nearestEndPt = Math.min(nearestEndPt, box.yPt + box.heightPt);
+        // Past a drawing a table of a multi-column section lies the text
+        // clearance from it.
+        nearestEndPt = Math.min(
+          nearestEndPt, box.yPt + box.heightPt + (multiColumn ? WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT : 0),
+        );
         inlineStartPt = Math.max(inlineStartPt, box.xPt + box.widthPt);
       }
     }
-    const fitsBelow = inlineStartPt + inlineExtentPt <= (multiColumn ? physical.pageHeight : bandEndPt);
+    // A multi-column section lets a block below a table run to the bottom
+    // page edge, but one below a drawing only to the end of its column.
+    const fitsBelow = inlineStartPt + inlineExtentPt <= (!multiColumn ? bandEndPt
+      : metDrawing ? cursorPt.xPt + request.availableInlineExtentPt : physical.pageHeight);
     if (!first || inlineStartPt === inlineOriginPt || fitsBelow
       || (!multiColumn && inlineOriginPt + inlineExtentPt > bandEndPt)) break;
     blockStartPt = nearestEndPt;
