@@ -94,7 +94,7 @@ export function applyDrawingMLCollisionRegistryDelta(
 ): DrawingMLCollisionRegistrySnapshotPt {
   validateDrawingMLCollisionRegistryDelta(snapshot, delta);
   const entries = Object.freeze([...snapshot.entries, ...delta.entries]);
-  extendedFrom.set(entries, snapshot.entries);
+  growth.set(entries, Object.freeze({ from: growthOf(snapshot.entries), added: delta.entries }));
   return Object.freeze({
     coordinateSpace: snapshot.coordinateSpace,
     flowDomainId: snapshot.flowDomainId,
@@ -102,13 +102,26 @@ export function applyDrawingMLCollisionRegistryDelta(
   });
 }
 
-/** The entries a registry's entries were extended from: a prefix of them. */
-const extendedFrom = new WeakMap<readonly DrawingMLCollisionEntryPt[], readonly DrawingMLCollisionEntryPt[]>();
+/** How a registry's entries came about: the entries added to the ones it
+ * grew from. A record holds only what was added and the record before it,
+ * never a whole list, so the records of a page hold each entry once and an
+ * earlier list is not kept alive by a later one. */
+type EntriesGrowth = Readonly<{ from: EntriesGrowth | null; added: readonly DrawingMLCollisionEntryPt[] }>;
+const growth = new WeakMap<readonly DrawingMLCollisionEntryPt[], EntriesGrowth>();
+
+/** The record of `entries`; a list that did not grow from another is its
+ * own first record. Null for the empty list. */
+function growthOf(entries: readonly DrawingMLCollisionEntryPt[]): EntriesGrowth | null {
+  if (entries.length === 0) return null;
+  let record = growth.get(entries);
+  if (!record) growth.set(entries, record = Object.freeze({ from: null, added: entries }));
+  return record;
+}
 
 type EntriesVersions = {
   /** Number of each (version, next entry) step: one per distinct content. */
   readonly steps: Map<string, number>;
-  readonly known: WeakMap<readonly DrawingMLCollisionEntryPt[], number>;
+  readonly known: WeakMap<EntriesGrowth, number>;
 };
 const versionsByScope = new WeakMap<object, EntriesVersions>();
 
@@ -128,31 +141,28 @@ export function drawingMLCollisionEntriesVersion(
   scope: object,
   entries: readonly DrawingMLCollisionEntryPt[],
 ): number {
-  if (entries.length === 0) return 0;
   let versions = versionsByScope.get(scope);
   if (!versions) versionsByScope.set(scope, versions = { steps: new Map(), known: new WeakMap() });
-  // The lists this one grew from, back to the first that is numbered.
-  const pending: Array<readonly DrawingMLCollisionEntryPt[]> = [];
+  // The records this list grew through, back to the first that is numbered.
+  const pending: EntriesGrowth[] = [];
   let version = 0;
-  let numbered = 0;
-  for (let list: readonly DrawingMLCollisionEntryPt[] | undefined = entries; list; list = extendedFrom.get(list)) {
-    const known = versions.known.get(list);
+  for (let record = growthOf(entries); record; record = record.from) {
+    const known = versions.known.get(record);
     if (known !== undefined) {
       version = known;
-      numbered = list.length;
       break;
     }
-    pending.push(list);
+    pending.push(record);
   }
   for (let at = pending.length - 1; at >= 0; at -= 1) {
-    const list = pending[at]!;
-    for (; numbered < list.length; numbered += 1) {
-      const step = `${version}|${JSON.stringify(list[numbered])}`;
+    const record = pending[at]!;
+    for (let index = 0; index < record.added.length; index += 1) {
+      const step = `${version}|${JSON.stringify(record.added[index])}`;
       let next = versions.steps.get(step);
       if (next === undefined) versions.steps.set(step, next = versions.steps.size + 1);
       version = next;
     }
-    versions.known.set(list, version);
+    versions.known.set(record, version);
   }
   return version;
 }

@@ -411,6 +411,29 @@ describe('upright block table placement work', () => {
     300_000,
   );
 
+  it('places the table a keep set ends with against the drawings near each place it tries', () => {
+    // A run of keepNext paragraphs before a table, each anchoring a small
+    // rectangle in the table's block range, one below the other down the
+    // column: the table is tried at one place after another down the
+    // column. The rectangles handed to the placement are indexed once for
+    // it, and each place reads the ones near it. (Every paragraph of the
+    // run looks ahead to the table, so the whole is quadratic in the run,
+    // not cubic.)
+    const measure = (count: number) => {
+      const kept = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+      const body = [P, ...Array.from({ length: count }, (_, at) => kept.replace(
+        '</w:p>', `${anchoredRectangle(40 + 15 * (count + 1) + 75, 15 + 14 * at, 12, 10, 'paragraph')}</w:p>`,
+      )), table(1, 24)];
+      const { result, counts } = counting(() => layOutPages('tbLrV', body, 1, 300));
+      expect(result.flatMap((page) => page.drawings)).toHaveLength(count);
+      expect(result.flatMap((page) => page.tables)).toHaveLength(1);
+      return counts.rects + counts.drawings;
+    };
+    const small = measure(8);
+    const large = measure(16);
+    expect(large).toBeLessThanOrEqual(3.5 * small);
+  }, 300_000);
+
   it('keys anchoring paragraphs without spelling out the drawings placed before each', () => {
     // Paragraphs each anchoring a rectangle positioned down its paragraph:
     // every one is accepted into the page's collision registry in turn. A

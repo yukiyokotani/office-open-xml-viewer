@@ -4,6 +4,7 @@ import {
   anchoring,
   collisions,
   COLUMN_END,
+  FOOTNOTE_REFERENCE,
   MARGIN,
   PAGE_H,
   P,
@@ -282,6 +283,26 @@ describe('upright block table of a vertical section', () => {
     expect(pages[0]!.tables).toHaveLength(0);
     expect(pages[1]!.tables).toHaveLength(1);
   });
+
+  it.each(['tbRl', 'tbLrV'] as const)(
+    'moves a keepNext paragraph with a table that its footnote leaves no room for (%s)',
+    (direction) => {
+      // Fourteen strips, a keepNext paragraph and a table fit the page. The
+      // kept paragraph refers to a four-paragraph footnote, whose reserve
+      // at the block end of the page leaves the 180 pt table no room there.
+      // The look-ahead places the table in the block extent left after the
+      // note, as the placement does, so the paragraph moves with it.
+      const kept = P.replace('<w:pPr>', '<w:pPr><w:keepNext/>');
+      const body = (reference: string) => [
+        ...Array.from({ length: 14 }, () => P), kept.replace('</w:p>', `${reference}</w:p>`), T, P,
+      ];
+      const stories = { footnote: paragraph('note').repeat(4) };
+      const without = layOutPages(direction, body(''), 1, 360, undefined, undefined, stories);
+      expect(without.map((page) => [page.strips.length, page.tables.length])).toEqual([[16, 1]]);
+      const pages = layOutPages(direction, body(FOOTNOTE_REFERENCE), 1, 360, undefined, undefined, stories);
+      expect(pages.map((page) => [page.strips.length, page.tables.length])).toEqual([[14, 0], [2, 1]]);
+    },
+  );
 
   it('moves a keepNext paragraph with a table whose border rules pass the block extent left', () => {
     // After fifteen strips 195.3 pt are left: the 195 pt grid fits, the

@@ -3216,6 +3216,15 @@ function* paginateBodyPassSteps(
               lastColumnOfPage: inLastColumn(state),
               ...(nextBlock.kind !== 'paragraph' && keepSetDrawings.length > 0
                 ? { precedingDrawings: Object.freeze(keepSetDrawings.flat()) } : {}),
+              // The notes the keep set refers to take their reserve before
+              // the table is placed, as when the flow reaches it.
+              ...(nextBlock.kind !== 'paragraph' && collectsKeepSetDrawings && keepSetReferenceIds.size > 0
+                ? {
+                    precedingFootnoteReservePt: footnoteAdmissionForIds(
+                      [...keepSetReferenceIds], location.availableBounds.widthPt,
+                    ).reservePt,
+                  }
+                : {}),
             });
             if (collectsKeepSetDrawings && following.precedingDrawings) {
               keepSetDrawings.push(following.precedingDrawings);

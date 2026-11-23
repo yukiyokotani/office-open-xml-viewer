@@ -292,6 +292,11 @@ export interface FollowingBodyBlockMeasurementInput {
    * the flow reaches the block. Read for a block whose placement depends on
    * it (`word-vertical-section-upright-block-table`). */
   readonly precedingBlockExtentPt?: number;
+  /** Footnote reserve of the references in the keep set before this block,
+   * which are not admitted yet. A table is placed in the block extent left
+   * after them, as when the flow reaches it
+   * (`word-vertical-section-upright-block-table`). */
+  readonly precedingFootnoteReservePt?: number;
   /** Block extent of a fresh page, as given to measureTable. */
   readonly freshPageBlockExtentPt?: number;
   /** As given to measureTable. */

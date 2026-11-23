@@ -563,7 +563,7 @@ function syncUprightDrawings(state: BodyAcquisitionState, story: SourceRef): Upr
 function uprightBlockObstaclesMet(
   index: UprightBlockPageIndex,
   tableIndex: number,
-  pending: readonly LayoutRect[] | undefined,
+  pending: UprightBlockPageIndex | null,
   blockStartPt: number,
   blockEndPt: number,
   inlineFromPt: number,
@@ -575,8 +575,34 @@ function uprightBlockObstaclesMet(
   for (const drawing of uprightPageDrawingsNear(index, blockStartPt, blockEndPt, inlineFromPt, inlineToPt)) {
     if (drawing.anchorIndex < tableIndex && inTheWay(drawing.exclusion)) met.push(drawing.exclusion);
   }
-  if (pending) for (const box of pending) if (inTheWay(box)) met.push(box);
+  if (pending) {
+    for (const drawing of uprightPageDrawingsNear(pending, blockStartPt, blockEndPt, inlineFromPt, inlineToPt)) {
+      if (inTheWay(drawing.exclusion)) met.push(drawing.exclusion);
+    }
+  }
   return met;
+}
+
+/** The drawings handed to a placement that are not registered yet
+ * (BodyTableAcquisitionInput.precedingDrawings), in the two-axis cells the
+ * page's drawings are kept in: built once for a list, so every window a
+ * search asks for reads the drawings near it, not the whole list. */
+const pendingDrawingIndexes = new WeakMap<readonly LayoutRect[], UprightBlockPageIndex>();
+function pendingDrawingIndex(
+  pending: readonly LayoutRect[] | undefined,
+  limits: UprightDrawingLimits,
+): UprightBlockPageIndex | null {
+  if (!pending || pending.length === 0) return null;
+  let index = pendingDrawingIndexes.get(pending);
+  if (!index) {
+    index = emptyUprightBlockPageIndex();
+    for (let at = 0; at < pending.length; at += 1) {
+      const rect = pending[at]!;
+      addUprightPageDrawing(index, { anchorIndex: -1, exclusion: rect, frame: rect, registeredFrame: rect }, limits);
+    }
+    pendingDrawingIndexes.set(pending, index);
+  }
+  return index;
 }
 
 /**
@@ -636,6 +662,10 @@ function searchUprightBlock(
     ? Math.max(0, Math.min(cursorPt.xPt, physical.pageHeight - inlineExtentPt))
     : cursorPt.xPt;
   const flowBlockPt = from ? from.blockStartPt : cursorPt.yPt;
+  const pendingDrawings = pendingDrawingIndex(request.precedingDrawings, {
+    inlineEndPt: physical.pageHeight, blockEndPt: Number.POSITIVE_INFINITY,
+    tableClearancePt: WORD_UPRIGHT_TABLE_TEXT_CLEARANCE_PT,
+  });
   let blockStartPt = flowBlockPt;
   let inlineStartPt = inlineOriginPt;
   for (;;) {
@@ -664,7 +694,7 @@ function searchUprightBlock(
         next += 1;
       }
       const obstacles = uprightBlockObstaclesMet(
-        index, request.input.source.path[0]!, request.precedingDrawings,
+        index, request.input.source.path[0]!, pendingDrawings,
         blockStartPt, blockEndPt, inlineStartPt, inlineStartPt + inlineExtentPt,
       );
       if (obstacles.length === 0) break;

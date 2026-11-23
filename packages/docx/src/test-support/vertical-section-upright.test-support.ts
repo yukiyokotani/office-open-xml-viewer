@@ -79,8 +79,11 @@ export const romanPageTable = (paragraphs: number, rowPt: number, format: 'Roman
 };
 
 export type Direction = 'tbRl' | 'tbLrV';
-/** The block content of the section's default header and footer. */
-export type Stories = Readonly<{ header?: string; footer?: string }>;
+/** The block content of the section's default header and footer, and of
+ * the footnote that `FOOTNOTE_REFERENCE` refers to. */
+export type Stories = Readonly<{ header?: string; footer?: string; footnote?: string }>;
+/** A run referring to the footnote of `Stories.footnote`. */
+export const FOOTNOTE_REFERENCE = '<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r>';
 
 function docx(
   direction: Direction,
@@ -110,16 +113,27 @@ function docx(
       + (styles === undefined ? ''
         : '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>')
       + storyKinds.map((kind) => `<Override PartName="/word/${kind}1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`).join('')
+      + (stories.footnote === undefined ? ''
+        : '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>')
       + '</Types>')],
     ['_rels/.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
       + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)],
     ['word/document.xml', xml(document)],
-    ...(numberingLevel === undefined && styles === undefined && storyKinds.length === 0 ? [] : [
+    ...(numberingLevel === undefined && styles === undefined && storyKinds.length === 0
+      && stories.footnote === undefined ? [] : [
       ['word/_rels/document.xml.rels', xml('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         + (numberingLevel === undefined ? '' : `<Relationship Id="rIdNum" Type="${REL}/numbering" Target="numbering.xml"/>`)
         + (styles === undefined ? '' : `<Relationship Id="rIdStyles" Type="${REL}/styles" Target="styles.xml"/>`)
         + storyKinds.map((kind) => `<Relationship Id="rId${kind}" Type="${REL}/${kind}" Target="${kind}1.xml"/>`).join('')
+        + (stories.footnote === undefined ? ''
+          : `<Relationship Id="rIdFootnotes" Type="${REL}/footnotes" Target="footnotes.xml"/>`)
         + '</Relationships>')],
+    ] as Array<[string, Uint8Array]>),
+    ...(stories.footnote === undefined ? [] : [
+      ['word/footnotes.xml', xml(`<w:footnotes xmlns:w="${W}">`
+        + '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+        + '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>'
+        + `<w:footnote w:id="1">${stories.footnote}</w:footnote></w:footnotes>`)],
     ] as Array<[string, Uint8Array]>),
     ...storyKinds.map((kind): [string, Uint8Array] => [
       `word/${kind}1.xml`,

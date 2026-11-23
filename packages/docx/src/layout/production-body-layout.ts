@@ -2327,7 +2327,18 @@ function measureFollowingBodyBlock(
     // the page to clear an earlier table), and the keep set then has to
     // start there with it. The placement itself decides
     // (bodyUprightBlockLookAhead).
-    const reached = locationAfterKeepSet(request);
+    // The block extent left after the keep set and the notes it refers to,
+    // which the placement after them has (the paginator takes their reserve
+    // from the table's location).
+    const afterKeepSet = locationAfterKeepSet(request);
+    const reservePt = request.precedingFootnoteReservePt ?? 0;
+    const reached = reservePt > 0 ? Object.freeze({
+      ...afterKeepSet,
+      availableBounds: Object.freeze({
+        ...afterKeepSet.availableBounds,
+        heightPt: Math.max(0, afterKeepSet.availableBounds.heightPt - reservePt),
+      }),
+    }) : afterKeepSet;
     const upright = bodyUprightBlockLookAhead(context, {
       input: request.input,
       location: reached,
