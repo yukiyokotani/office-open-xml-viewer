@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderSlide, renderTable, type PptxTextRunInfo } from './renderer.js';
 import type { Slide, TableCell, TableElement, TableRow, TextBody } from './types.js';
+import { createPptxTextAnchor, resolvePptxTextAnchor } from './text-anchor.js';
 
 const EMU = 12_700;
 const SCALE = 1 / EMU;
@@ -96,6 +97,27 @@ function collectRuns(table: TableElement): PptxTextRunInfo[] {
 }
 
 describe('DrawingML table text selection runs', () => {
+  it('anchors slide-owned cells through native rendering and worker cloning', async () => {
+    const table = tableOf([[cell({ textBody: textBody('A\tB ') }), cell({ textBody: textBody('Other') })]], [COL, COL]);
+    table.id = '31';
+    const slide: Slide = { index: 2, slideNumber: 3, partName: 'ppt/slides/slide7.xml', background: null,
+      elements: [table], elementSources: [{ origin: 'slide' }] };
+    const canvas = { getContext: () => recordingContext() } as unknown as OffscreenCanvas;
+    const runs: PptxTextRunInfo[] = [];
+    await renderSlide(canvas, slide, table.width, table.height, { width: 120, dpr: 1 }, (run) => runs.push(run));
+    expect(runs.map((run) => run.source?.body.cell)).toEqual([
+      { row: 0, column: 0 }, { row: 0, column: 0 }, { row: 0, column: 1 },
+    ]);
+    expect(runs[0].source?.context).toEqual({ text: 'A\tB ', nonpainted: [{ start: 1, end: 2 }, { start: 3, end: 4 }] });
+    const created = createPptxTextAnchor(runs, [{ runIndex: 0, start: 0, end: 1 }, { runIndex: 1, start: 0, end: 1 }]);
+    expect(created.isSuccess).toBe(true);
+    if (!created.isSuccess) return;
+    expect(created.anchor).toMatchObject({ body: { slideIndex: 2, slidePart: 'ppt/slides/slide7.xml', shapeId: '31', cell: { row: 0, column: 0 } }, exact: 'A\tB' });
+    expect(resolvePptxTextAnchor(created.anchor, structuredClone(runs))).toEqual({ isSuccess: true,
+      slices: [{ runIndex: 0, start: 0, end: 1 }, { runIndex: 1, start: 0, end: 1 }] });
+    expect(createPptxTextAnchor(runs, [{ runIndex: 0, start: 0, end: 1 }, { runIndex: 2, start: 0, end: 1 }])).toEqual({ isSuccess: false, reason: 'cross-body' });
+  });
+
   it('emits table cell identity and geometry in row-major order', () => {
     const table = tableOf([[
       cell({ textBody: textBody('A') }),

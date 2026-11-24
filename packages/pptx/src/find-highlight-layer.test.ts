@@ -82,6 +82,7 @@ describe('buildPptxHighlightLayer', () => {
     // One shape div, containing one box.
     expect(layer.children).toHaveLength(1);
     const shapeDiv = layer.children[0];
+    expect(shapeDiv.style.overflow).toBe('visible');
     expect(shapeDiv.children).toHaveLength(1);
     const box = shapeDiv.children[0];
     // Box is placed as a PERCENTAGE of the shape frame (shapeW=100, shapeH=50)
