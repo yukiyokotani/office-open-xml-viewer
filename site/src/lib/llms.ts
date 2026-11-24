@@ -9,6 +9,7 @@ import {
   optionalRenderers,
   type ApiClass,
 } from './api-reference';
+import { docxSnippets, pptxSnippets, xlsxSheetSnippet, xlsxSheetWindowsSnippet } from './demo-snippets';
 import { canonicalPageUrl, siteMetadata } from './seo';
 
 export const llmsFormats = ['docx', 'xlsx', 'pptx'] as const;
@@ -19,7 +20,7 @@ const formatName: Record<LlmsFormat, string> = { docx: 'DOCX', xlsx: 'XLSX', ppt
 export const apiMarkdownPath = (format: LlmsFormat): string => `/api/${format}.md`;
 
 /** Guides linked from llms.txt; titles and summaries mirror each page's own metadata. */
-const guides: readonly { path: string; title: string; summary: string }[] = [
+export const llmsGuides: readonly { path: string; title: string; summary: string }[] = [
   { path: '/production/', title: 'Production decisions', summary: 'Rendering modes (main / worker), model ownership and optional renderers.' },
   { path: '/errors/', title: 'Error handling', summary: 'Typed errors such as OoxmlError, OoxmlResourceLimitError and their fields.' },
   { path: '/fonts/', title: 'Font sources', summary: 'The fonts option: Google Fonts, mirrors, hosted font services, own files or a resolver.' },
@@ -31,7 +32,29 @@ const guides: readonly { path: string; title: string; summary: string }[] = [
   { path: '/bundle-size/', title: 'Bundle size', summary: 'Current production bundle-size measurements.' },
 ];
 
-const absolute = (href: string): string => (href.startsWith('/') ? canonicalPageUrl(href) : href);
+// Site-relative links may carry a fragment (`/errors#delivery`); canonicalize
+// only the path so the trailing slash lands before the `#`.
+const absolute = (href: string): string => {
+  if (!href.startsWith('/')) return href;
+  const hash = href.indexOf('#');
+  return hash < 0 ? canonicalPageUrl(href) : canonicalPageUrl(href.slice(0, hash)) + href.slice(hash);
+};
+
+// The same snippets the per-format pages show beside their live demos.
+const examples: Record<LlmsFormat, readonly { title: string; code: string }[]> = {
+  docx: [
+    { title: 'Single-canvas viewer', code: docxSnippets.demo },
+    { title: 'Scrolling viewer', code: docxSnippets.scroll },
+  ],
+  pptx: [
+    { title: 'Single-canvas viewer', code: pptxSnippets.demo },
+    { title: 'Scrolling viewer', code: pptxSnippets.scroll },
+  ],
+  xlsx: [
+    { title: 'Workbook viewer', code: xlsxSheetSnippet },
+    { title: 'Sheet viewers over one workbook', code: xlsxSheetWindowsSnippet },
+  ],
+};
 
 // Table cells cannot hold raw pipes or newlines.
 const cell = (text: string): string => text.replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
@@ -69,6 +92,9 @@ export function apiMarkdown(format: LlmsFormat): string {
     '',
     `Rendering modes: ${formatRenderModeGuidance[format]}`,
     '',
+    '## Examples',
+    '',
+    ...examples[format].flatMap(({ title, code }) => [`### ${title}`, '', '```ts', code.trim(), '```', '']),
     '## Classes',
     '',
     ...apiReference[format].map(classMarkdown),
@@ -92,7 +118,7 @@ export function llmsTxt(): string {
     '',
     `> ${siteMetadata.description}`,
     '',
-    'Install `@silurus/ooxml` and import a format entry: `@silurus/ooxml/docx`, `@silurus/ooxml/xlsx` or `@silurus/ooxml/pptx`. Each entry exports Canvas viewer classes and a headless document, workbook or presentation model (listed below). Equations, ChartEx, 3-D charts, Region Maps and TIFF are opt-in renderers from their own entries.',
+    'Install `@silurus/ooxml` and import a format entry: `@silurus/ooxml/docx`, `@silurus/ooxml/xlsx` or `@silurus/ooxml/pptx`. Each entry exports Canvas viewer classes and a headless document, workbook or presentation model (listed below). Equations, ChartEx, 3-D charts, Region Maps and TIFF are opt-in renderers from their own entries. To read a file\'s text without rendering, load the headless model and call `toMarkdown()`.',
     '',
     '## API reference',
     '',
@@ -100,7 +126,7 @@ export function llmsTxt(): string {
     '',
     '## Guides',
     '',
-    ...guides.map((g) => `- [${g.title}](${canonicalPageUrl(g.path)}): ${g.summary}`),
+    ...llmsGuides.map((g) => `- [${g.title}](${canonicalPageUrl(g.path)}): ${g.summary}`),
     '',
     '## Optional',
     '',
@@ -110,6 +136,15 @@ export function llmsTxt(): string {
   ].join('\n');
 }
 
+/** Nest a page under llms-full.txt's H1, leaving fenced code untouched. */
+function demoteHeadings(markdown: string): string {
+  let fenced = false;
+  return markdown.split('\n').map((line) => {
+    if (line.startsWith('```')) fenced = !fenced;
+    return !fenced && line.startsWith('#') ? `#${line}` : line;
+  }).join('\n');
+}
+
 export function llmsFullTxt(): string {
   return [
     `# ${siteMetadata.name}`,
@@ -117,7 +152,7 @@ export function llmsFullTxt(): string {
     `> ${siteMetadata.description}`,
     '',
     optionalRenderersMarkdown(),
-    ...llmsFormats.map((format) => apiMarkdown(format).replace(/^#/gm, '##')),
+    ...llmsFormats.map((format) => demoteHeadings(apiMarkdown(format))),
   ].join('\n');
 }
 

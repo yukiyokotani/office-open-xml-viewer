@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { apiReference } from './lib/api-reference';
-import { apiMarkdown, llmsFormats, llmsFullTxt, llmsTxt } from './lib/llms';
+import { apiMarkdown, llmsFormats, llmsFullTxt, llmsGuides, llmsTxt } from './lib/llms';
+import { sitemapPaths } from './pages/sitemap.xml';
 import { GET as getLlms } from './pages/llms.txt';
 import { GET as getLlmsFull } from './pages/llms-full.txt';
 import { GET as getApiMarkdown } from './pages/api/[format].md';
@@ -35,6 +36,31 @@ describe('llms.txt', () => {
       const rows = apiMarkdown(format).split('\n').filter((line) => line.startsWith('| `'));
       const options = apiReference[format].flatMap((c) => c.options ?? []);
       expect(rows).toHaveLength(options.length);
+    }
+  });
+
+  it('links every public page from llms.txt, so a new page has to be listed', () => {
+    const linked = new Set([
+      '/',
+      ...llmsFormats.flatMap((format) => [`/${format}/`, `/api/${format}/`]),
+      ...llmsGuides.map(({ path }) => path),
+    ]);
+    // Format demo pages are covered by the Examples in /api/<format>.md; the
+    // rest are demos, announcements or per-framework variants of /frameworks/.
+    const notForAgents = (path: string): boolean =>
+      path === '/try/' || path.startsWith('/announcements/') || path.startsWith('/frameworks/')
+      || path === '/review-ui/source/';
+    expect(sitemapPaths.filter((path) => !linked.has(path) && !notForAgents(path))).toEqual([]);
+    for (const { path } of llmsGuides) expect(sitemapPaths, path).toContain(path);
+  });
+
+  it('keeps fragment links valid and code fences intact', () => {
+    const full = llmsFullTxt();
+    expect(full).toContain('https://ooxml.silurus.dev/errors/#ooxml-resource-limit-error');
+    expect(full).not.toMatch(/#[\w-]+\/\)/);
+    expect(full.split('\n').filter((line) => line.startsWith('```')).length % 2).toBe(0);
+    for (const format of llmsFormats) {
+      expect(apiMarkdown(format)).toContain(`from '@silurus/ooxml/${format}'`);
     }
   });
 
