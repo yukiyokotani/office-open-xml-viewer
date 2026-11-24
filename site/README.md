@@ -16,6 +16,12 @@ pnpm --filter @silurus/ooxml-site dev
 samples from `packages/*/public/demo` into `public/samples/` (office files are
 not committed under `site/`).
 
+`/llms.txt`, `/llms-full.txt` and `/api/{docx,xlsx,pptx}.md` give AI agents
+Markdown API docs ([llmstxt.org](https://llmstxt.org/)). They are rendered from
+`src/lib/api-reference.ts`, the same data as the `/api/*` pages.
+`src/lib/api-reference-coverage.test.ts` fails when that data misses or keeps
+an option or member of the checked-in public API baselines.
+
 Dev-only `/preview/*` routes render individual sections in isolation; they are
 not linked from the site.
 
