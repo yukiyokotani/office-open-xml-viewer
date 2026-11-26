@@ -293,6 +293,7 @@ function buildMeasureState(
       resolveColumns: resolveColumnWidths,
       createCellState: (state, contentWidthPt, cell) => ({
         ...withTableCellStory(tableCellOwnerState(state), tableCellFlowsHorizontally(cell)),
+        storyColumnFrame: state.storyColumnFrame ?? { xPt: state.contentX, widthPt: state.contentW },
         contentX: 0,
         contentW: contentWidthPt,
         y: 0,
@@ -370,7 +371,20 @@ function buildMeasureState(
                 : bottomBorderExtentPt(paragraph.borders),
             ),
             continuesFromPrevious: false,
-            anchorFrames: bodyAnchorReferenceFrames(cellState),
+            // WORD_STORY_VML_PAGE_POSITION: a cell's page-positioned story
+            // shape takes the real page and the enclosing story's column,
+            // not the cell band of a story laid out without a page bottom.
+            anchorFrames: bodyAnchorReferenceFrames(paragraph.runs.some((run) => (run as Readonly<{
+              anchorAcquisitionInput?: Readonly<{ storyPagePosition?: boolean }>;
+            }>).anchorAcquisitionInput?.storyPagePosition === true) && cellState.storyColumnFrame
+              ? {
+                  ...cellState,
+                  pageH: cellState.pageH === Number.MAX_SAFE_INTEGER
+                    ? cellState.sectionLayout.geometry.pageHeight : cellState.pageH,
+                  contentX: cellState.storyColumnFrame.xPt,
+                  contentW: cellState.storyColumnFrame.widthPt,
+                }
+              : cellState),
             // Bound to the cell's own owner (its section, page and, for an
             // upright physical table, that table's physical frame).
             acquireCompleteStory: completeTextBoxStoryAcquirerFor(cellState),
@@ -645,6 +659,11 @@ function acquireBodyParagraphAtLocation(
             sourceRangeStart: continuation.sourceRangeStart,
           }),
       anchorFrames: bodyAnchorReferenceFrames(state),
+      ...(paragraph.runs.some((run) => (run as Readonly<{
+        anchorAcquisitionInput?: Readonly<{ storyPagePosition?: boolean }>;
+      }>).anchorAcquisitionInput?.storyPagePosition === true)
+        ? { storyAnchorMarginBottomPt: location.availableBounds.yPt + location.availableBounds.heightPt }
+        : {}),
       acquireCompleteStory: completeTextBoxStoryAcquirerFor(state),
       // Body paragraphs are acquired at their page position.
       hostFlowPageTranslationPt: BODY_HOST_FLOW_PAGE_TRANSLATION,
@@ -1282,7 +1301,11 @@ function layoutBodyStory(
         ),
         continuesFromPrevious: continuing,
         ...(continuation?.sourceRangeStart === undefined ? {} : { sourceRangeStart: continuation.sourceRangeStart }),
-        anchorFrames: bodyAnchorReferenceFrames(candidate),
+        // A story laid out without a page bottom (a text box or note band)
+        // still places its page-positioned shapes against the real page
+        // (WORD_STORY_VML_PAGE_POSITION alignment and percentages).
+        anchorFrames: bodyAnchorReferenceFrames(candidate.pageH === Number.MAX_SAFE_INTEGER
+          ? { ...candidate, pageH: request.section.geometry.pageHeight } : candidate),
         // Nested text boxes in this story take the story's own section,
         // page and frame, not the body's current location.
         acquireCompleteStory: completeTextBoxStoryAcquirerFor(candidate),

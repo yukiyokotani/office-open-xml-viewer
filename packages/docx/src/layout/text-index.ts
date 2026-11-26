@@ -1,4 +1,5 @@
 import { sourceOwnedTextPlacements, type SourceOwnedTextGeometry } from './text-source-ownership.js';
+import { storyPagePositionedAnchors } from './story-page-anchors.js';
 import {
   composeAffine,
   quarterTurnAffine,
@@ -80,6 +81,8 @@ interface ProjectionContext {
   readonly drawingPaintOrder: ReadonlyMap<string, number>;
   readonly emittedTextBoxes: Set<string>;
   readonly emittedDrawings: Set<string>;
+  /** Drawings already indexed in their text box's host frame. */
+  readonly hostFrameDrawings: Set<string>;
   readonly runs: TextRunGeometry[];
   readonly sourceRuns: Map<string, Set<number>>;
   readonly completedParagraphSources: Set<string>;
@@ -329,9 +332,24 @@ function visitTextBox(
     textBoxVerticalMode: textBox.verticalMode ?? projection.textBoxVerticalMode,
   };
   const textBoxProjection = withClip(transformedProjection, textBox.clipBounds);
+  // WORD_STORY_VML_PAGE_POSITION: the story's page-positioned VML shapes are
+  // indexed in the box's host frame, as paint draws them (outside the box's
+  // transform and clip); the story's own visit skips them.
+  // Index order follows paint order: behind-text shapes, the story, then the
+  // other shapes, each in stacking order.
+  const anchors = storyPagePositionedAnchors(textBox.story.blocks);
+  for (const { drawing } of anchors) context.hostFrameDrawings.add(drawing.id);
+  const visitAnchors = (behindDoc: boolean) => {
+    for (const { owner, drawing } of anchors) {
+      if ((drawing.anchorLayer?.behindDoc === true) !== behindDoc) continue;
+      visitDrawing(new Map(owner.textBoxes.map((box) => [box.id, box])), drawing, projection, context);
+    }
+  };
+  visitAnchors(true);
   for (const block of textBox.story.blocks) {
     visitNode(block, textBoxProjection, context);
   }
+  visitAnchors(false);
 }
 
 function visitDrawing(
@@ -527,18 +545,35 @@ function visitParagraph(
           }];
         }))
     : [];
-  // Both anchored and inline drawings retain their paragraph run index as the
-  // terminal SourceRef path component. That is the one comparable source-order
-  // domain; anchor stacking ordinals and drawings-array indexes are not mixed.
   for (const { drawing } of drawingsInSourceOrder) {
     for (const id of drawing.textBoxIds ?? []) ownedTextBoxIds.add(id);
   }
-  const elementsInSourceOrder = [
-    ...drawingsInSourceOrder.map((entry) => ({ kind: 'drawing' as const, ...entry })),
+  // Element index order is paint order (paint/canvas-text.ts
+  // paintParagraphContents), so a reverse hit test meets the topmost element
+  // first: behind-text
+  // anchored drawings, the lines' inline resources, inline drawings (and
+  // the stories they own), then the other anchored drawings, each anchor
+  // layer in stacking order.
+  const stacking = (left: DrawingLayout, right: DrawingLayout) =>
+    left.anchorLayer!.relativeHeight - right.anchorLayer!.relativeHeight
+      || left.anchorLayer!.sourceOrder - right.anchorLayer!.sourceOrder;
+  const anchored = paragraph.drawings.filter((drawing) => drawing.anchorLayer);
+  // Text runs keep reading (source) order, whatever the stacking.
+  const elementsInPaintOrder = !context.collectDrawings ? [
+    ...drawingsInSourceOrder.map(({ drawing, runIndex, index }) => ({ kind: 'drawing' as const, drawing, runIndex, index })),
     ...inlineResourcesInSourceOrder.map((entry) => ({ kind: 'resource' as const, ...entry })),
-  ].sort((left, right) => left.runIndex - right.runIndex || left.index - right.index);
-  for (const entry of elementsInSourceOrder) {
+  ].sort((left, right) => left.runIndex - right.runIndex || left.index - right.index) : [
+    ...anchored.filter((drawing) => drawing.anchorLayer!.behindDoc).sort(stacking)
+      .map((drawing) => ({ kind: 'drawing' as const, drawing })),
+    ...inlineResourcesInSourceOrder.map((entry) => ({ kind: 'resource' as const, ...entry })),
+    ...paragraph.drawings.filter((drawing) => !drawing.anchorLayer)
+      .map((drawing) => ({ kind: 'drawing' as const, drawing })),
+    ...anchored.filter((drawing) => !drawing.anchorLayer!.behindDoc).sort(stacking)
+      .map((drawing) => ({ kind: 'drawing' as const, drawing })),
+  ];
+  for (const entry of elementsInPaintOrder) {
     if (entry.kind === 'drawing') {
+      if (context.hostFrameDrawings.has(entry.drawing.id)) continue;
       visitDrawing(textBoxesById, entry.drawing, inlineDrawingProjection(entry.drawing), context);
       continue;
     }
@@ -691,6 +726,7 @@ function pageGeometryIndex(
     drawingPaintOrder,
     emittedTextBoxes: new Set(),
     emittedDrawings: new Set(),
+    hostFrameDrawings: new Set(),
     runs: [],
     sourceRuns: new Map(),
     completedParagraphSources: new Set(),

@@ -1039,6 +1039,10 @@ function resolveAnchorPlacement(input: AnchorFrameInput): AnchorPlacementResult 
     const y = resolveAxis('vertical', height.resolved.valuePt, acquisition, frames);
     horizontal = { ...x, diagnostic: x.diagnostic as AnchorAxisDiagnostic };
     vertical = { ...y, diagnostic: y.diagnostic as AnchorAxisDiagnostic };
+    // WORD_STORY_VML_PAGE_POSITION: the text-box story's floor at the top margin.
+    if (acquisition.storyTopMarginFloor === true && vertical.valuePt !== undefined && frames.margin) {
+      vertical = { ...vertical, valuePt: Math.max(vertical.valuePt, frames.margin.yPt) };
+    }
     if (x.problem) issues.push(x.problem);
     if (y.problem) issues.push(y.problem);
   }

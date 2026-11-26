@@ -92,6 +92,9 @@ export interface CanvasPaintContext {
   readonly textBoxVerticalMode?: 'vert' | 'vert270' | 'eaVert' | 'mongolianVert';
   /** The page paint plan owns anchored drawings for this retained root. */
   readonly omitAnchoredDrawings?: boolean;
+  /** A text-box story paints its page-owned anchored drawings itself, in its
+   * host frame (WORD_STORY_VML_PAGE_POSITION); its blocks skip them. */
+  readonly omitPageOwnedAnchoredDrawings?: boolean;
   /** Layout measurement's reference-advance decisions (core
    * reference-advances.ts): a retained shorthand layout measured at the
    * reference em is drawn there under a linear scale, so the shaped glyph

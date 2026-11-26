@@ -238,7 +238,7 @@ describe('DOCX element context', () => {
     });
   });
 
-  it('preserves paragraph run paint order between inline drawings and resources', () => {
+  it('hit-tests inline drawings above the line resources they are painted over', () => {
     const retained = drawing('retained-inline', 0, 'image', 'image:retained', 0);
     const { anchorLayer: _anchorLayer, ...inlineDrawing } = retained;
     const layout = layoutFor([inlineDrawing]);
@@ -275,7 +275,7 @@ describe('DOCX element context', () => {
       layout, 0, { xPt: 20, yPt: 30 }, registry,
     )).toMatchObject({
       elementType: 'image',
-      source: { path: [0, 1] },
+      source: { path: [0, 0] },
     });
   });
 

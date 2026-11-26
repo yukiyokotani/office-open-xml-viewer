@@ -2021,7 +2021,7 @@ fn finish_document(
     let footnotes_path =
         find_internal_rel_target_by_types(&environment.rels_xml, FOOTNOTES_RELATIONSHIP_TYPES)
             .and_then(|target| resolve_part_name(DOCUMENT_PART, &target));
-    let (footnotes, footnote_stories) = footnotes_path
+    let (footnotes, mut footnote_stories) = footnotes_path
         .map(|path| {
             parse_notes(
                 zip,
@@ -2038,7 +2038,7 @@ fn finish_document(
     let endnotes_path =
         find_internal_rel_target_by_types(&environment.rels_xml, ENDNOTES_RELATIONSHIP_TYPES)
             .and_then(|target| resolve_part_name(DOCUMENT_PART, &target));
-    let (endnotes, endnote_stories) = endnotes_path
+    let (endnotes, mut endnote_stories) = endnotes_path
         .map(|path| {
             parse_notes(
                 zip,
@@ -2052,6 +2052,64 @@ fn finish_document(
             )
         })
         .unwrap_or_default();
+    let mut note_shapes = std::mem::take(&mut footnote_stories.note_shapes);
+    note_shapes.append(&mut endnote_stories.note_shapes);
+    if !note_shapes.is_empty() {
+        // word-note-vml-host-paragraph: one empty paragraph in the Normal
+        // style at the end of the main story hosts the shapes of the
+        // referenced notes, which normalization selects once the whole body
+        // is known. The style is explicit, so another default paragraph
+        // style does not apply.
+        let style = environment
+            .style_map
+            .normal_paragraph_style_id()
+            .map(|id| {
+                format!(
+                    r#"<w:pPr><w:pStyle w:val="{}"/></w:pPr>"#,
+                    id.replace('&', "&amp;")
+                        .replace('"', "&quot;")
+                        .replace('<', "&lt;")
+                )
+            })
+            .unwrap_or_default();
+        if let Ok(doc) = parse_guarded(&format!(
+            r#"<w:p xmlns:w="{}">{style}</w:p>"#,
+            ooxml_common::ns::wordprocessingml::TRANSITIONAL
+        )) {
+            let mut host = parse_paragraph_with_diagnostics(
+                doc.root_element(),
+                &environment.style_map,
+                &mut environment.num_map,
+                &environment.media_map,
+                &environment.chart_map,
+                &environment.rel_map,
+                &environment.theme,
+                None,
+                &mut FieldState::default(),
+                &mut Vec::new(),
+            );
+            host.runs = Vec::new();
+            // The moved anchor characters take the host paragraph's mark
+            // formatting, not their note run's.
+            let (_, mark) = environment.style_map.resolve_normal_paragraph_style();
+            for group in &mut note_shapes {
+                for run in &mut group.runs {
+                    if let DocRun::AnchorHost(anchor) = run {
+                        anchor.font_size = host.default_font_size.unwrap_or(DEFAULT_FONT_SIZE);
+                        anchor.font_family = host.default_font_family.clone();
+                        anchor.font_family_east_asia = None;
+                        anchor.bold = mark.bold.unwrap_or(false);
+                        anchor.italic = mark.italic.unwrap_or(false);
+                    }
+                }
+            }
+            let settings = environment
+                .note_layout_settings
+                .get_or_insert_with(Default::default);
+            settings.note_shape_host_paragraph = Some(Box::new(host));
+            settings.note_shapes = note_shapes;
+        }
+    }
     // A retained paragraph always has its mark, so marks decide presence.
     if footnote_stories.separator.is_some()
         || endnote_stories.separator.is_some()
@@ -2482,15 +2540,163 @@ fn parse_notes(
             StoryFlow::Fixed,
         );
         commit_story_diagnostics(local_diagnostics, diagnostics);
+        let mut content = content;
+        let mut taken = Vec::new();
+        take_note_vml_shapes(&mut content, element_name, &mut taken);
+        if !taken.is_empty() {
+            let (runs, revisions): (Vec<_>, Vec<_>) = taken.into_iter().unzip();
+            let run_revisions = if revisions.iter().any(Option::is_some) {
+                revisions
+            } else {
+                Vec::new()
+            };
+            selected_stories
+                .note_shapes
+                .push(crate::types::NoteShapeGroupWire {
+                    kind: element_name.to_string(),
+                    id: id.clone(),
+                    runs,
+                    run_revisions,
+                });
+        }
         out.push(crate::types::DocxNote { id, content });
     }
     (out, selected_stories)
+}
+
+/// Whether a run is an absolutely positioned VML drawing (shape, picture or
+/// group): its anchor acquisition comes from the VML style.
+fn is_absolute_vml_drawing(run: &DocRun) -> bool {
+    let acquisition = match run {
+        DocRun::Shape(shape) if !shape.inline => shape.anchor_acquisition.as_ref(),
+        DocRun::Image(image) if image.anchor => image.anchor_acquisition.as_ref(),
+        _ => None,
+    };
+    acquisition.is_some_and(|facts| facts.occurrence_id.starts_with("vml-anchor-"))
+}
+
+/// word-note-vml-host-paragraph: move every absolutely positioned VML
+/// drawing of a note (with the anchor host character emitted before it) out
+/// of the note's paragraphs, table cells included. The moved occurrence ids
+/// name the note part, so shapes at the same offset of the footnote and
+/// endnote parts stay distinct in their one host paragraph.
+fn take_note_vml_shapes(
+    content: &mut [BodyElement],
+    part: &str,
+    taken: &mut Vec<(DocRun, Option<RunRevision>)>,
+) {
+    fn part_id(id: &str, part: &str) -> String {
+        match id.strip_prefix("vml-anchor-") {
+            Some(rest) => format!("vml-anchor-{part}-{rest}"),
+            None => id.to_string(),
+        }
+    }
+    fn rename(run: &mut DocRun, part: &str) {
+        match run {
+            DocRun::Shape(shape) => {
+                if let Some(acquisition) = shape.anchor_acquisition.as_mut() {
+                    acquisition.occurrence_id = part_id(&acquisition.occurrence_id, part);
+                }
+            }
+            DocRun::Image(image) => {
+                if let Some(acquisition) = image.anchor_acquisition.as_mut() {
+                    acquisition.occurrence_id = part_id(&acquisition.occurrence_id, part);
+                }
+            }
+            DocRun::AnchorHost(host) => {
+                if let Some(id) = host.anchor_occurrence_id.as_mut() {
+                    *id = part_id(id, part);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// Moves the paragraph's absolute VML drawings (with the anchor host
+    /// character right before each) into `taken`, with their run revisions,
+    /// and re-indexes the run-indexed ranges left behind (comment marks,
+    /// complex-field boundaries, run revisions) onto the remaining runs.
+    fn take_runs(paragraph: &mut DocParagraph, part: &str, taken: &mut Vec<(DocRun, Option<RunRevision>)>) {
+        if !paragraph.runs.iter().any(is_absolute_vml_drawing) {
+            return;
+        }
+        let runs = std::mem::take(&mut paragraph.runs);
+        let mut moved = vec![false; runs.len()];
+        for (index, run) in runs.iter().enumerate() {
+            if is_absolute_vml_drawing(run) {
+                moved[index] = true;
+                if index > 0 && matches!(runs[index - 1], DocRun::AnchorHost(_)) {
+                    moved[index - 1] = true;
+                }
+            }
+        }
+        // kept_before[p]: the remaining runs before old run position p.
+        let mut kept_before = Vec::with_capacity(runs.len() + 1);
+        let mut count = 0usize;
+        for flag in &moved {
+            kept_before.push(count);
+            if !flag {
+                count += 1;
+            }
+        }
+        kept_before.push(count);
+        let revisions = std::mem::take(&mut paragraph.run_revisions);
+        let had_revisions = !revisions.is_empty();
+        let mut kept_revisions = Vec::new();
+        for (index, run) in runs.into_iter().enumerate() {
+            let revision = revisions.get(index).cloned().flatten();
+            if moved[index] {
+                let mut run = run;
+                if let DocRun::AnchorHost(host) = &mut run {
+                    // The host paragraph's line is its Normal mark's: the
+                    // moved anchor character keeps no East Asian face.
+                    host.font_family_east_asia = None;
+                }
+                rename(&mut run, part);
+                taken.push((run, revision));
+            } else {
+                paragraph.runs.push(run);
+                kept_revisions.push(revision);
+            }
+        }
+        if had_revisions {
+            paragraph.run_revisions = kept_revisions;
+        }
+        let remap = |index: usize| kept_before[index.min(kept_before.len() - 1)];
+        for mark in &mut paragraph.comment_marks {
+            mark.run_index = remap(mark.run_index as usize) as u32;
+        }
+        for boundary in &mut paragraph.complex_field_boundaries {
+            boundary.run_index = remap(boundary.run_index);
+        }
+    }
+    fn take_cells(table: &mut DocTable, part: &str, taken: &mut Vec<(DocRun, Option<RunRevision>)>) {
+        for row in &mut table.rows {
+            for cell in &mut row.cells {
+                for element in &mut cell.content {
+                    match element {
+                        CellElement::Paragraph(paragraph) => take_runs(paragraph, part, taken),
+                        CellElement::Table(table) => take_cells(table, part, taken),
+                    }
+                }
+            }
+        }
+    }
+    for element in content {
+        match element {
+            BodyElement::Paragraph(paragraph) => take_runs(paragraph, part, taken),
+            BodyElement::Table(table) => take_cells(table, part, taken),
+            _ => {}
+        }
+    }
 }
 
 /// Selected special story facts of one note part. A supported single
 /// paragraph is retained even when all its properties are inherited.
 #[derive(Default)]
 struct SelectedNoteSeparators {
+    /// word-note-vml-host-paragraph: absolutely positioned VML shapes taken
+    /// out of the part's notes, with their anchor host characters.
+    note_shapes: Vec<crate::types::NoteShapeGroupWire>,
     separator: Option<crate::types::NoteSeparatorMark>,
     continuation_separator: Option<crate::types::NoteSeparatorMark>,
     separator_paragraph: Option<Box<DocParagraph>>,
@@ -2718,6 +2924,32 @@ mod note_separator_tests {
             writer.finish().unwrap();
         }
         parse_from_bytes(&bytes).expect("note package parses")
+    }
+
+    #[test]
+    fn moved_note_shapes_keep_revisions_and_remap_ranges() {
+        let rect = r#"<w:r><w:pict><v:rect xmlns:v="urn:schemas-microsoft-com:vml" style="position:absolute;margin-left:300pt;margin-top:0;width:40pt;height:20pt;mso-position-horizontal-relative:text;mso-position-vertical-relative:text" fillcolor="black" stroked="f"/></w:pict></w:r>"#;
+        let story = format!(
+            r#"<w:footnote w:type="separator" w:id="42"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:id="2"><w:p><w:del w:id="9" w:author="a">{rect}</w:del><w:commentRangeStart w:id="5"/><w:r><w:t>After</w:t></w:r><w:commentRangeEnd w:id="5"/></w:p></w:footnote>"#
+        );
+        let document = selected_note_package(None, crate::xml_util::W_NS, "42", Some(&story));
+        let note = document.footnotes.iter().find(|note| note.id == "2").expect("note 2");
+        let BodyElement::Paragraph(paragraph) = &note.content[0] else {
+            panic!("note paragraph");
+        };
+        assert!(matches!(paragraph.runs.as_slice(), [DocRun::Text(text)] if text.text == "After"));
+        // The remaining run keeps no revision of the moved shape.
+        assert!(paragraph.run_revisions.iter().all(Option::is_none));
+        let marks: Vec<_> = paragraph
+            .comment_marks
+            .iter()
+            .map(|mark| (mark.kind.as_str(), mark.run_index))
+            .collect();
+        assert_eq!(marks, [("rangeStart", 0), ("rangeEnd", 1)]);
+        let shapes = document.note_layout_settings.unwrap().note_shapes;
+        let group = shapes.iter().find(|group| group.id == "2").expect("moved shapes");
+        assert_eq!(group.run_revisions.len(), group.runs.len());
+        assert!(group.run_revisions.iter().any(Option::is_some), "the deletion moves with the shape");
     }
 
     #[test]
@@ -3413,6 +3645,8 @@ fn parse_note_layout_settings(
         endnote_separator: None,
         endnote_continuation_separator: None,
         footnote_continuation_separator: None,
+        note_shape_host_paragraph: None,
+        note_shapes: Vec::new(),
         footnote_separator_paragraph: None,
         footnote_continuation_separator_paragraph: None,
         endnote_separator_paragraph: None,
@@ -4924,8 +5158,8 @@ fn drawing_extent(container: roxmltree::Node) -> DrawingExtent {
 
 /// Pre-order descendants of `root` (including `root`) that belong to the same
 /// DrawingML object rather than to a text box story inside it. A
-/// `w:txbxContent` (ECMA-376 §17.17.1.1, reached through `wps:txbx` or a
-/// group child's `wps:txbx`) is a separate WordprocessingML story whose runs
+/// `w:txbxContent` (ECMA-376 Part 4 §14.9.1.1; reached through `wps:txbx` or a
+/// group child's `wps:txbx`, [MS-ODRAWXML]) is a separate WordprocessingML story whose runs
 /// may hold their own `w:drawing`s; its subtree is skipped so lookups for the
 /// enclosing drawing's payload (`wpg:wgp`, `wps:wsp`, `c:chart`, `a:blip`, …)
 /// never resolve to a nested drawing's payload. The story element itself is
@@ -9672,7 +9906,7 @@ fn parse_inline_drawing_impl(
 /// pictures and shapes alike). Recorded on the container's inline picture and
 /// inline shape runs; anchors keep it in their wrap facts.
 fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
-    if container.tag_name().name() != "inline" {
+    if !drawing_container_flows_inline(container) {
         return;
     }
     let Some(node) = container
@@ -9706,6 +9940,27 @@ fn apply_inline_effect_extent(container: roxmltree::Node, runs: &mut [DocRun]) {
     }
 }
 
+/// Whether a `wp:inline` / `wp:anchor` drawing container lays out as an
+/// inline object (ECMA-376 §20.4.2.8). A `wp:anchor` (§20.4.2.3) inside a text
+/// box story (`w:txbxContent`, Part 4 §14.9.1.1, reached through `wps:txbx` or
+/// `v:textbox`) or a footnote/endnote story (`w:footnote` / `w:endnote`,
+/// §17.11.10 / §17.11.2) is laid out inline as well, as a `wp:inline` of the
+/// same `wp:extent` (word-story-anchor-inline).
+fn drawing_container_flows_inline(container: roxmltree::Node) -> bool {
+    match container.tag_name().name() {
+        "inline" => true,
+        "anchor" => container.ancestors().skip(1).any(|node| {
+            node.is_element()
+                && matches!(
+                    node.tag_name().name(),
+                    "txbxContent" | "footnote" | "endnote"
+                )
+                && is_w_ns(node.tag_name().namespace())
+        }),
+        _ => false,
+    }
+}
+
 /// One `wp:inline` / `wp:anchor` container of a `w:drawing`.
 #[allow(clippy::too_many_arguments)]
 fn parse_drawing_container(
@@ -9718,7 +9973,7 @@ fn parse_drawing_container(
     theme: &ThemeColors,
     depth: DepthGuard,
 ) -> Vec<DocRun> {
-    let is_anchor = drawing_container.tag_name().name() == "anchor";
+    let is_anchor = !drawing_container_flows_inline(drawing_container);
 
     if !is_anchor {
         let container = drawing_container;
@@ -10335,7 +10590,7 @@ fn collect_drawing_extent_diagnostic(
     });
     // An inline group/shape payload is sized from `wp:extent` exactly like a
     // picture (§20.4.2.7), so a missing/invalid extent omits it too.
-    let inline_extent_shape = container.tag_name().name() == "inline"
+    let inline_extent_shape = drawing_container_flows_inline(container)
         && (inline_group_payload(container).is_some() || inline_wps_payload(container).is_some());
     if !retained_extent_consumer && !inline_extent_shape {
         // The anchored group/shape branches size from `a:xfrm` and never
@@ -10957,6 +11212,8 @@ fn parse_anchor_acquisition_wire(container: &roxmltree::Node) -> AnchorAcquisiti
             layout_in_cell_status: anchor_value_status(layout_in_cell_raw, layout_in_cell),
         },
         group: None,
+        story_top_margin_floor: false,
+        story_page_position: false,
     }
 }
 
@@ -14271,6 +14528,11 @@ fn vml_word_anchor_reference(shape: roxmltree::Node, style: &str, axis: &str) ->
 /// shapes stay on the legacy compatibility path because manufacturing the
 /// defaults changes their anchor-line behavior and pagination.
 fn vml_word_has_complete_anchor_reference(shape: roxmltree::Node, style: &str) -> bool {
+    // A text box or note story places the shape from the page origin
+    // (word-story-vml-page-position); its authored frames are not consulted.
+    if vml_hosting_story(shape).is_some() {
+        return true;
+    }
     let wrap = shape
         .children()
         .find(|child| child.is_element() && child.tag_name().name() == "wrap");
@@ -14601,7 +14863,117 @@ fn vml_word_z_order(style: &str) -> (bool, Option<u32>, AnchorValueStatusWire) {
     )
 }
 
+/// The story kind hosting a VML drawing, when it is not the main, header or
+/// footer story: the nearest `w:txbxContent` (Part 4 §14.9.1.1) or `w:footnote` /
+/// `w:endnote` (§17.11.10 / §17.11.2) ancestor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VmlHostingStory {
+    TextBox,
+    Note,
+}
+
+fn vml_hosting_story(node: roxmltree::Node) -> Option<VmlHostingStory> {
+    node.ancestors().skip(1).find_map(|ancestor| {
+        if !ancestor.is_element() || !is_w_ns(ancestor.tag_name().namespace()) {
+            return None;
+        }
+        match ancestor.tag_name().name() {
+            "txbxContent" => Some(VmlHostingStory::TextBox),
+            "footnote" | "endnote" => Some(VmlHostingStory::Note),
+            _ => None,
+        }
+    })
+}
+
+/// word-story-vml-page-position: an absolutely positioned VML shape of a
+/// text box or note story is placed by its numeric offsets from the page
+/// origin, whatever its `mso-position-*-relative` frames. An alignment or a
+/// percentage position keeps its authored frame (page, margin, or the column
+/// for a text frame); a vertical alignment or percentage against a text or
+/// line frame places the shape at the page top. In a text box story a text-
+/// or line-relative shape placed by numeric offsets that wraps text is held
+/// at the top margin.
+fn apply_vml_story_page_position(
+    shape: roxmltree::Node,
+    style: &str,
+    acquisition: &mut AnchorAcquisitionWire,
+) {
+    let Some(story) = vml_hosting_story(shape) else {
+        return;
+    };
+    let page = || AnchorAxisWire {
+        relative_from: Some("page".to_string()),
+        relative_from_status: AnchorValueStatusWire::Valid,
+        choice: AnchorAxisChoiceWire::Missing,
+    };
+    let positioned = |axis: &AnchorAxisWire| {
+        matches!(
+            axis.choice,
+            AnchorAxisChoiceWire::Align { .. } | AnchorAxisChoiceWire::Percent { .. }
+        )
+    };
+    let vertical_numeric = !positioned(&acquisition.vertical);
+    let floor = story == VmlHostingStory::TextBox
+        && vertical_numeric
+        && matches!(
+            acquisition.vertical.relative_from.as_deref(),
+            Some("paragraph" | "line")
+        )
+        && !matches!(acquisition.wrap.kind, AnchorWrapKindWire::None);
+    if !positioned(&acquisition.horizontal) {
+        acquisition.horizontal = AnchorAxisWire {
+            choice: AnchorAxisChoiceWire::Offset {
+                value_pt: vml_numeric_offset_pt(style, "left", "margin-left"),
+            },
+            ..page()
+        };
+    }
+    if vertical_numeric {
+        acquisition.vertical = AnchorAxisWire {
+            choice: AnchorAxisChoiceWire::Offset {
+                value_pt: vml_numeric_offset_pt(style, "top", "margin-top"),
+            },
+            ..page()
+        };
+    } else if matches!(
+        acquisition.vertical.relative_from.as_deref(),
+        Some("paragraph" | "line")
+    ) {
+        acquisition.vertical = AnchorAxisWire {
+            choice: AnchorAxisChoiceWire::Offset { value_pt: 0.0 },
+            ..page()
+        };
+    }
+    acquisition.story_top_margin_floor = floor;
+    acquisition.story_page_position = true;
+    // The page origin is the frame, so a table cell of the story does not
+    // stand in for it.
+    acquisition.behavior.layout_in_cell = Some(false);
+    if story == VmlHostingStory::Note {
+        // Library policy: a note story is laid out before its page-final
+        // position is known, so a page-positioned shape does not exclude
+        // note lines (word-story-vml-page-position records the measured
+        // wrap types; overlapping placements are outside it).
+        acquisition.wrap.kind = AnchorWrapKindWire::None;
+        acquisition.wrap.side = None;
+        acquisition.wrap.polygon = None;
+    }
+}
+
 fn vml_word_anchor_acquisition(
+    shape: roxmltree::Node,
+    definition: Option<roxmltree::Node>,
+    style: &str,
+    width_pt: f64,
+    height_pt: f64,
+) -> AnchorAcquisitionWire {
+    let mut acquisition =
+        vml_word_anchor_acquisition_in_frames(shape, definition, style, width_pt, height_pt);
+    apply_vml_story_page_position(shape, style, &mut acquisition);
+    acquisition
+}
+
+fn vml_word_anchor_acquisition_in_frames(
     shape: roxmltree::Node,
     definition: Option<roxmltree::Node>,
     style: &str,
@@ -14925,12 +15297,17 @@ fn parse_vml_pict_image(
     };
     // The first shape carrying an <v:imagedata r:id>, that is NOT nested in a
     // <v:group> (grouped geometry is in group units, handled elsewhere).
-    let shape = pict.descendants().find(|n| {
+    // A picture inside the pict's own text box story belongs to that story's
+    // run, not to this pict (whose shape is then the text box).
+    // Only a group inside this pict counts: a text box story's own pict
+    // inside an outer group is a pict of its own.
+    let shape = story_bounded_descendants(pict).find(|n| {
         is_shape(n)
             && n.children()
                 .any(|c| c.is_element() && c.tag_name().name() == "imagedata")
             && !n
                 .ancestors()
+                .take_while(|a| *a != pict)
                 .any(|a| a.is_element() && a.tag_name().name() == "group")
     })?;
 
@@ -24924,19 +25301,18 @@ mod anchor_image_relative_from_tests {
         assert_eq!(after.text, "After image");
         assert_eq!(image.image_path, "word/media/image1.png");
         assert_eq!((image.width_pt, image.height_pt), (20.0, 10.0));
-        assert_eq!(image.anchor, inner_anchor);
-        if inner_anchor {
-            assert_eq!((image.anchor_x_pt, image.anchor_y_pt), (30.0, 40.0));
-            assert_eq!(image.wrap_mode.as_deref(), Some("none"));
-            assert_eq!(image.anchor_x_relative_from.as_deref(), Some("page"));
-            assert_eq!(image.anchor_y_relative_from.as_deref(), Some("page"));
-        } else {
-            assert!(image.anchor_acquisition.is_none());
-        }
+        // word-story-anchor-inline: an anchored picture in the text box
+        // story is the story's inline object, whatever its own container.
+        assert!(!image.anchor);
+        assert!(image.anchor_acquisition.is_none());
+        assert_eq!(
+            image.inline_object_origin,
+            Some(InlineObjectOrigin::DrawingMl)
+        );
     }
 
     #[test]
-    fn inline_textbox_retains_nested_floating_image() {
+    fn inline_textbox_lays_nested_anchor_inline() {
         assert_nested_drawing(false, true);
     }
 
@@ -25276,6 +25652,173 @@ mod anchor_image_relative_from_tests {
                 (container == "inline").then_some(InlineObjectOrigin::DrawingMl)
             );
         }
+    }
+
+    /// word-story-anchor-inline: a `wp:anchor` inside a text box story
+    /// (DrawingML or VML text box) is parsed as an inline object of its run;
+    /// the same anchor in the body keeps its floating acquisition.
+    #[test]
+    fn grouped_vml_text_box_keeps_its_story_picture() {
+        const NS: &str = r#"xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let picture = r#"<w:r><w:pict><v:shape id="vi" style="width:40pt;height:20pt"><v:imagedata r:id="rIdPng"/></v:shape></w:pict></w:r>"#;
+        let text_box = format!(
+            r#"<v:shape id="vtb" style="position:absolute;left:0;top:0;width:468;height:200"><v:textbox inset="0,0,0,0"><w:txbxContent><w:p>{picture}<w:r><w:t>G</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"#
+        );
+        let standalone = format!(r#"<w:p {NS}><w:r><w:pict>{}</w:pict></w:r></w:p>"#,
+            text_box.replace("left:0;top:0;width:468;height:200", "position:absolute;width:468pt;height:200pt"));
+        let grouped = format!(
+            r#"<w:p {NS}><w:r><w:pict><v:group id="g" style="position:absolute;width:468pt;height:200pt" coordsize="468,200">{text_box}</v:group></w:pict></w:r></w:p>"#
+        );
+        for body in [standalone, grouped] {
+            let doc = parse_from_bytes(&build_docx(&body)).expect("text box parses");
+            let json = serde_json::to_string(&doc.body).unwrap();
+            assert!(json.contains("word/media/"), "the story picture survives: {body}");
+            assert!(json.contains(r#""text":"G""#), "{body}");
+        }
+    }
+
+    #[test]
+    fn text_box_story_anchors_flow_inline() {
+        const NS: &str = r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:v="urn:schemas-microsoft-com:vml""#;
+        let anchored = |payload: &str, uri: &str| {
+            format!(
+                r#"<w:r><w:rPr><w:sz w:val="30"/></w:rPr><w:drawing><wp:anchor {NS} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1">
+                  <wp:simplePos x="0" y="0"/>
+                  <wp:positionH relativeFrom="page"><wp:posOffset>3810000</wp:posOffset></wp:positionH>
+                  <wp:positionV relativeFrom="page"><wp:posOffset>3810000</wp:posOffset></wp:positionV>
+                  <wp:extent cx="508000" cy="254000"/><wp:effectExtent l="0" t="12700" r="0" b="0"/>
+                  <wp:wrapSquare wrapText="bothSides"/><wp:docPr id="7" name="d"/>
+                  <a:graphic><a:graphicData uri="{uri}">{payload}</a:graphicData></a:graphic>
+                </wp:anchor></w:drawing></w:r>"#
+            )
+        };
+        let picture = anchored(
+            r#"<pic:pic><pic:nvPicPr><pic:cNvPr id="7" name="p"/><pic:cNvPicPr/></pic:nvPicPr>
+               <pic:blipFill><a:blip r:embed="rIdPng"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
+               <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic>"#,
+            "http://schemas.openxmlformats.org/drawingml/2006/picture",
+        );
+        let rectangle = anchored(
+            r#"<wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm>
+               <a:prstGeom prst="rect"/></wps:spPr><wps:bodyPr/></wps:wsp>"#,
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        );
+        let story = format!(r#"<w:p>{picture}{rectangle}<w:r><w:t>Ab</w:t></w:r></w:p>"#);
+        let vml_picture = r#"<w:r><w:pict><v:shape id="vi" style="position:absolute;margin-left:300pt;width:40pt;height:20pt"><v:imagedata r:id="rIdPng"/></v:shape></w:pict></w:r>"#;
+        let drawingml_box = anchored(
+            &format!(
+                r#"<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm>
+                   <a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{story}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>"#
+            ),
+            "http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+        );
+        let vml_box = format!(
+            r#"<w:r><w:pict><v:shape {NS} id="vtb" style="position:absolute;margin-top:30pt;width:468pt;height:200pt">
+               <v:textbox inset="0,0,0,0"><w:txbxContent>{story}<w:p>{vml_picture}<w:r><w:t>V</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"#
+        );
+        let body = format!(r#"{story}<w:p>{drawingml_box}</w:p><w:p {NS}>{vml_box}</w:p>"#)
+            .replace("<w:p>", &format!("<w:p {NS}>"));
+        let doc = parse_from_bytes(&build_docx(&body)).expect("text box anchors parse");
+        let paragraph_runs = |element: &BodyElement| match element {
+            BodyElement::Paragraph(paragraph) => paragraph.runs.clone(),
+            _ => panic!("expected a paragraph"),
+        };
+        // Body control: the same anchors float.
+        let body_runs = paragraph_runs(&doc.body[0]);
+        assert!(matches!(body_runs[0], DocRun::AnchorHost(_)));
+        assert!(body_runs
+            .iter()
+            .any(|run| matches!(run, DocRun::Image(image) if image.anchor)));
+        assert!(body_runs
+            .iter()
+            .any(|run| matches!(run, DocRun::Shape(shape) if !shape.inline)));
+        for (index, label) in [(1, "DrawingML text box"), (2, "VML text box")] {
+            let host = paragraph_runs(&doc.body[index]);
+            let text_box = host
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) if !shape.text_box_content.is_empty() => Some(shape),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: text box shape"));
+            let TextBoxBlockWire::Body(BodyElement::Paragraph(paragraph)) =
+                &text_box.text_box_content[0]
+            else {
+                panic!("{label}: story paragraph");
+            };
+            assert!(
+                !paragraph
+                    .runs
+                    .iter()
+                    .any(|run| matches!(run, DocRun::AnchorHost(_))),
+                "{label}: no floating host character"
+            );
+            let image = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Image(image) => Some(image),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: picture"));
+            assert!(!image.anchor, "{label}: picture flows inline");
+            assert!(image.anchor_acquisition.is_none(), "{label}");
+            assert_eq!(
+                image.inline_object_origin,
+                Some(InlineObjectOrigin::DrawingMl)
+            );
+            assert_eq!(
+                image.inline_effect_extent,
+                Some([0.0, 1.0, 0.0, 0.0]),
+                "{label}"
+            );
+            assert_eq!((image.width_pt, image.height_pt), (40.0, 20.0));
+            assert_eq!(
+                image
+                    .inline_object_font_facts
+                    .as_ref()
+                    .and_then(|facts| facts.font_size),
+                Some(15.0),
+                "{label}: the hosting run sizes the inline object's line"
+            );
+            let shape = paragraph
+                .runs
+                .iter()
+                .find_map(|run| match run {
+                    DocRun::Shape(shape) => Some(shape),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label}: rectangle"));
+            assert!(shape.inline, "{label}: rectangle flows inline");
+            assert!(shape.anchor_acquisition.is_none(), "{label}");
+            assert_eq!((shape.width_pt, shape.height_pt), (40.0, 20.0));
+        }
+        // A VML picture inside the VML text box belongs to the story: the
+        // text box keeps its text and the picture stays one of its runs.
+        let host = paragraph_runs(&doc.body[2]);
+        let text_box = host
+            .iter()
+            .find_map(|run| match run {
+                DocRun::Shape(shape) if !shape.text_box_content.is_empty() => Some(shape),
+                _ => None,
+            })
+            .expect("VML text box survives its nested picture");
+        assert!(!host.iter().any(|run| matches!(run, DocRun::Image(_))));
+        let TextBoxBlockWire::Body(BodyElement::Paragraph(last)) =
+            text_box.text_box_content.last().unwrap()
+        else {
+            panic!("VML picture paragraph");
+        };
+        assert!(last.runs.iter().any(|run| matches!(run, DocRun::Image(_))));
+        assert!(last
+            .runs
+            .iter()
+            .any(|run| matches!(run, DocRun::Text(text) if text.text == "V")));
     }
 
     #[test]
@@ -31130,6 +31673,187 @@ mod inline_wps_shape_tests {
         assert!(outer.text_blocks[0].text.starts_with("OUTER"));
     }
 
+    /// word-story-vml-page-position: an absolute VML shape in a text box or
+    /// note story is placed from the page origin; text box text/line frames
+    /// that wrap keep the top-margin floor; note shapes do not wrap.
+    #[test]
+    fn story_vml_shapes_take_page_positions() {
+        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w10="urn:schemas-microsoft-com:office:word""#;
+        let rect = |frames: &str, wrap: &str| {
+            format!(
+                r#"<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:0;width:40pt;height:20pt;{frames}" fillcolor="black" stroked="f"><w10:wrap type="{wrap}"/></v:rect></w:pict></w:r>"#
+            )
+        };
+        let text = "mso-position-horizontal-relative:text;mso-position-vertical-relative:text";
+        let margin =
+            "mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin";
+        for (host, frames, wrap, floor, note) in [
+            ("txbx", text, "square", true, false),
+            ("txbx", margin, "square", false, false),
+            ("txbx", text, "none", false, false),
+            ("footnote", text, "square", false, true),
+            ("endnote", text, "topAndBottom", false, true),
+            ("body", text, "square", false, false),
+        ] {
+            let run = rect(frames, wrap);
+            let xml = match host {
+                "txbx" => format!(
+                    r#"<w:root {NS}><w:txbxContent><w:p>{run}</w:p></w:txbxContent></w:root>"#
+                ),
+                "body" => format!(r#"<w:root {NS}><w:p>{run}</w:p></w:root>"#),
+                note => format!(
+                    r#"<w:root {NS}><w:{note} w:id="1"><w:p>{run}</w:p></w:{note}></w:root>"#
+                ),
+            };
+            let doc = roxmltree::Document::parse(&xml).expect("fixture");
+            let shape = doc
+                .descendants()
+                .find(|node| node.tag_name().name() == "rect")
+                .expect("rect");
+            let acquisition = vml_word_anchor_acquisition(
+                shape,
+                None,
+                shape.attribute("style").unwrap(),
+                40.0,
+                20.0,
+            );
+            let case = format!("{host} {frames} {wrap}");
+            let expected_frames = if host == "body" {
+                (Some("column"), Some("paragraph"))
+            } else {
+                (Some("page"), Some("page"))
+            };
+            assert_eq!(
+                (
+                    acquisition.horizontal.relative_from.as_deref(),
+                    acquisition.vertical.relative_from.as_deref()
+                ),
+                expected_frames,
+                "{case}"
+            );
+            assert!(
+                matches!(
+                    acquisition.horizontal.choice,
+                    AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 300.0
+                ),
+                "{case}"
+            );
+            if host != "body" {
+                assert!(
+                    matches!(
+                        acquisition.vertical.choice,
+                        AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 0.0
+                    ),
+                    "{case}"
+                );
+            }
+            assert_eq!(acquisition.story_top_margin_floor, floor, "{case}");
+            assert_eq!(
+                matches!(acquisition.wrap.kind, AnchorWrapKindWire::None),
+                note || wrap == "none",
+                "{case}"
+            );
+        }
+    }
+
+    /// word-story-vml-page-position: alignment and percentage positions keep
+    /// their authored frames; a vertical alignment against the text frame
+    /// takes the page top.
+    #[test]
+    fn story_vml_alignment_keeps_its_frames() {
+        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w10="urn:schemas-microsoft-com:office:word""#;
+        let acquire = |host: &str, position: &str| {
+            let run = format!(
+                r#"<w:r><w:pict><v:rect style="position:absolute;margin-left:300pt;margin-top:50pt;width:40pt;height:20pt;{position}" fillcolor="black" stroked="f"><w10:wrap type="none"/></v:rect></w:pict></w:r>"#
+            );
+            let xml = if host == "txbx" {
+                format!(r#"<w:root {NS}><w:txbxContent><w:p>{run}</w:p></w:txbxContent></w:root>"#)
+            } else {
+                format!(r#"<w:root {NS}><w:footnote w:id="1"><w:p>{run}</w:p></w:footnote></w:root>"#)
+            };
+            let doc = roxmltree::Document::parse(&xml).expect("fixture");
+            let shape = doc.descendants().find(|node| node.tag_name().name() == "rect").unwrap();
+            vml_word_anchor_acquisition(shape, None, shape.attribute("style").unwrap(), 40.0, 20.0)
+        };
+        for host in ["txbx", "footnote"] {
+            let aligned = acquire(host, "mso-position-horizontal:center;mso-position-vertical:bottom;mso-position-horizontal-relative:margin;mso-position-vertical-relative:page");
+            assert_eq!(aligned.horizontal.relative_from.as_deref(), Some("margin"));
+            assert!(matches!(&aligned.horizontal.choice, AnchorAxisChoiceWire::Align { value } if value == "center"));
+            assert_eq!(aligned.vertical.relative_from.as_deref(), Some("page"));
+            assert!(matches!(&aligned.vertical.choice, AnchorAxisChoiceWire::Align { value } if value == "bottom"));
+            let percent = acquire(host, "mso-left-percent:500;mso-top-percent:200;mso-position-horizontal-relative:page;mso-position-vertical-relative:margin");
+            assert!(matches!(percent.horizontal.choice, AnchorAxisChoiceWire::Percent { .. }));
+            assert_eq!(percent.vertical.relative_from.as_deref(), Some("margin"));
+            let text = acquire(host, "mso-position-horizontal:center;mso-position-vertical:bottom;mso-position-horizontal-relative:text;mso-position-vertical-relative:text");
+            assert_eq!(text.horizontal.relative_from.as_deref(), Some("column"));
+            assert_eq!(text.vertical.relative_from.as_deref(), Some("page"));
+            assert!(matches!(text.vertical.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 0.0));
+            // Numeric offsets keep the page origin.
+            let numeric = acquire(host, "mso-position-horizontal-relative:margin;mso-position-vertical-relative:margin");
+            assert_eq!(numeric.vertical.relative_from.as_deref(), Some("page"));
+            assert!(matches!(numeric.vertical.choice, AnchorAxisChoiceWire::Offset { value_pt } if value_pt == 50.0));
+        }
+    }
+
+    /// word-story-anchor-inline: an anchored picture in a footnote or endnote
+    /// story is the story's inline object; outside those stories (a header
+    /// here) the anchor keeps floating.
+    #[test]
+    fn note_story_anchors_flow_inline() {
+        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let drawing = r#"<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">
+            <wp:simplePos x="0" y="0"/>
+            <wp:positionH relativeFrom="column"><wp:posOffset>3810000</wp:posOffset></wp:positionH>
+            <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+            <wp:extent cx="508000" cy="254000"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="d"/>
+            <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="p"/><pic:cNvPicPr/></pic:nvPicPr>
+              <pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill>
+              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="508000" cy="254000"/></a:xfrm><a:prstGeom prst="rect"/></pic:spPr></pic:pic>
+            </a:graphicData></a:graphic></wp:anchor></w:drawing>"#;
+        let media = HashMap::from([("rIdImg".into(), "word/media/p.png".into())]);
+        for (root, story, inline) in [
+            ("footnotes", "footnote", true),
+            ("endnotes", "endnote", true),
+            ("hdr", "p", false),
+        ] {
+            let xml = if story == "p" {
+                format!(r#"<w:{root} {NS}><w:p><w:r>{drawing}</w:r></w:p></w:{root}>"#)
+            } else {
+                format!(
+                    r#"<w:{root} {NS}><w:{story} w:id="1"><w:p><w:r>{drawing}</w:r></w:p></w:{story}></w:{root}>"#
+                )
+            };
+            let doc = roxmltree::Document::parse(&xml).expect("story fixture");
+            let node = doc
+                .descendants()
+                .find(|node| node.has_tag_name((W_NS, "drawing")))
+                .expect("drawing");
+            let runs = parse_inline_drawing_impl(
+                &StyleMap::default(),
+                &mut NumberingMap::default(),
+                node,
+                &media,
+                &ChartMap::default(),
+                &HashMap::new(),
+                &ThemeColors::default(),
+                DepthGuard::root(),
+            );
+            let [DocRun::Image(image)] = runs.as_slice() else {
+                panic!("{root}: one picture, got {runs:?}")
+            };
+            assert_eq!(image.anchor, !inline, "{root}");
+            assert_eq!(image.anchor_acquisition.is_none(), inline, "{root}");
+            assert_eq!((image.width_pt, image.height_pt), (40.0, 20.0), "{root}");
+        }
+    }
+
     /// ECMA-376 §17.3.3.9 / §20.4.2.3 / §20.4.2.8 — `wp:inline` and `wp:anchor`
     /// are children of `w:drawing`. A drawing nested in a text box story owns
     /// its own container, so it must not decide whether the containing drawing
@@ -31234,15 +31958,10 @@ mod inline_wps_shape_tests {
                 let [inner] = images.as_slice() else {
                     panic!("{case}: nested picture missing")
                 };
-                assert_eq!(inner.anchor, inner_floating, "{case}: inner container");
+                // word-story-anchor-inline: a text box story lays either
+                // container out inline.
+                assert!(!inner.anchor, "{case}: inner container");
                 assert_eq!((inner.width_pt, inner.height_pt), (50.0, 25.0), "{case}");
-                if inner_floating {
-                    assert_eq!(
-                        (inner.anchor_x_pt, inner.anchor_y_pt),
-                        (10.0, 20.0),
-                        "{case}"
-                    );
-                }
             }
         }
 

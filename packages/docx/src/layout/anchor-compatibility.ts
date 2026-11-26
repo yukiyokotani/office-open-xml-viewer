@@ -217,6 +217,42 @@ export const WORD_TEXTBOX_VISIBLE_ANCHOR_EXTENT = defineCompatibilityRule({
   description: 'For DrawingML middle and bottom text anchoring, derive the positioned extent through the last visible retained block while preserving structural trailing empty paragraphs and terminal paragraph spacing in the complete story.',
 });
 
+export const WORD_STORY_ANCHOR_INLINE = defineCompatibilityRule({
+  id: 'word-story-anchor-inline',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'story-anchor-inline',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §20.4.2.3 positions a wp:anchor drawing on the page. Inside a text box story (w:txbxContent of a wps:txbx or a VML v:textbox) and inside a footnote or endnote story, Word instead lays the anchored drawing out inline at its run, like a wp:inline of the same wp:extent: its positionH/positionV offsets (column, paragraph or page relative), wrap mode (none, square, topAndBottom, tight) and behindDoc layer are ignored, the line grows to the object height, and the following text starts after the object. Evidence: Windows Word 16.0.20625 PDF exports of a 40x20pt picture (wrapNone, wrapSquare, wrapTopAndBottom, wrapTight, behindDoc, page-relative square) and a 60x30pt chart anchored 300pt from the column, each inside a DrawingML text box, a VML text box, a footnote and an endnote (28 controls). Word does not open documents with WordprocessingShape or WordprocessingGroup drawings in these stories (6 note and 4 text box controls), so no Office reference exists for them; they take the same inline route. VML shapes in these stories (w:pict) keep their own floating placement and are outside this rule.',
+});
+
+export const WORD_STORY_VML_PAGE_POSITION = defineCompatibilityRule({
+  id: 'word-story-vml-page-position',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'story-vml-page-position',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 Part 4 §19.1.2.19 positions an absolute VML shape against its mso-position-horizontal-relative / mso-position-vertical-relative frames. Inside a text box story (w:txbxContent of a wps:txbx or a VML v:textbox) and inside a footnote or endnote story, Word ignores those frames and places the shape at its margin-left / margin-top offsets from the page origin: the text box position, the host paragraph, the story position and the left margin do not move it. In a text box story a shape whose vertical frame is text or line and which wraps text (square, tight, through, topAndBottom) is held at or below the top page margin; margin- or page-relative and wrapNone shapes are not. Evidence: Windows Word 16.0.20625 PDF exports of a 40x20pt VML rect and VML pictures in DrawingML and VML text boxes (61 controls: margin-left 200/300, margin-top -20 to 100, every horizontal and vertical frame, every wrap type, text box offsets, host paragraph and story positions, top margins 36/72pt, left margins 72/144pt) and in footnotes and endnotes (24 controls with the same factors, none held at the margin). An alignment (mso-position-horizontal left/center/right/inside/outside, mso-position-vertical top/center/bottom) or a percentage position (mso-left-percent/mso-top-percent) instead keeps its authored frame: margin or page, the column for a horizontal text frame, while a vertical alignment against the text frame places the shape at the page top; inside and outside align as left and right on an odd page. For a note shape (word-note-vml-host-paragraph) the vertical margin frame ends at the top of the note area of its page (a bottom-aligned shape sits on the separator band). A shape in a table of the story is placed the same way (the cell is not its frame), and a rotated box does not rotate it. Alignment evidence: 44 further controls with margin-left 300pt and margin-top 50pt, in a DrawingML text box and in a footnote: each horizontal alignment against margin and page, each vertical alignment against margin and page, mso-left-percent 500 and mso-top-percent 200 against margin and page, and horizontal center and vertical bottom against the text frame.',
+});
+
+export const WORD_NOTE_VML_HOST_PARAGRAPH = defineCompatibilityRule({
+  id: 'word-note-vml-host-paragraph',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'note-vml-host-paragraph',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 Part 4 §19.1.2.19 anchors an absolutely positioned VML shape at the run that holds it. Word does not keep such a shape in a footnote or endnote: it takes every absolutely positioned VML shape, picture or group out of the notes and hosts them in one empty paragraph in the Normal style that it appends to the end of the main story, so the body ends one Normal paragraph later (endnotes start one Normal line plus its spacing lower) and the shapes are tagged after that paragraph. Body text after the reference does not move; the paragraph takes neither the note paragraph nor the reference paragraph formatting; two shapes in one note or in two notes share the one paragraph; an inline VML picture stays in its note. A note the main story does not reference is not laid out and gives up no shape (library policy). Evidence: Windows Word 16.0.20625 PDF exports and their tagged structure trees, 20 controls (footnotes and endnotes: text after the reference paragraph, two shapes in one note, two notes with one shape each, a 20pt note paragraph with 12pt after, Normal with 12pt after, a 20pt reference paragraph, an absolute and an inline VML picture, a VML group), with the 22 VML-rect note controls of the story position rule.',
+});
+
 export const WORD_OVERLAPPING_LAYOUT_IN_CELL_OVERLAY = defineCompatibilityRule({
   id: 'word-overlapping-layout-in-cell-overlay',
   evidence: {

@@ -2546,6 +2546,10 @@ export interface ParagraphAcquisitionOptions {
   readonly anchorCollisions?: readonly DrawingMLCollisionEntryPt[];
   /** Present only while acquiring a paragraph hosted by a table cell. */
   readonly anchorCellBounds?: LayoutRect;
+  /** WORD_STORY_VML_PAGE_POSITION: the bottom of the body text area above
+   * the page's notes, the bottom of the margin frame of a page-positioned
+   * note shape. Present only for a body paragraph hosting one. */
+  readonly storyAnchorMarginBottomPt?: number;
   /** Effective enclosing fill, retained only for automatic text-color resolution. */
   readonly containerShading?: string | null;
   /** Layout-owned §17.3.1.7 edge selection for adjacent/sliced border boxes. */
@@ -5030,7 +5034,20 @@ function acquireAnchorOccurrence(
         options.environment.pageWritingMode,
         physicalPage,
       );
-  const baseFrames = options.anchorFrames;
+  // WORD_STORY_VML_PAGE_POSITION: a page-positioned note shape aligns in the
+  // margin frame above the page's notes.
+  const storyMarginBottomPt = outer.run.anchorAcquisitionInput.storyPagePosition === true
+    ? options.storyAnchorMarginBottomPt : undefined;
+  const baseFrames = storyMarginBottomPt !== undefined && options.anchorFrames?.margin
+    ? {
+        ...options.anchorFrames,
+        margin: {
+          ...options.anchorFrames.margin,
+          heightPt: Math.max(0, Math.min(options.anchorFrames.margin.heightPt,
+            storyMarginBottomPt - options.anchorFrames.margin.yPt)),
+        },
+      }
+    : options.anchorFrames;
   const behavior = outer.run.anchorAcquisitionInput.behavior;
   const layoutInCellFrame = behavior.layoutInCellStatus === 'valid'
     && behavior.layoutInCell === true
@@ -5450,6 +5467,8 @@ function acquireAnchorOccurrence(
         && options.anchorCellBounds
         ? { cellContainment: true as const }
         : {}),
+      ...(outer.run.anchorAcquisitionInput.storyPagePosition === true
+        ? { storyPagePosition: true as const } : {}),
     },
     ...(textBoxIds.length ? { textBoxIds } : {}),
   };
@@ -6739,6 +6758,7 @@ function paragraphAcquisitionKey(
     lineOnly ? null : options.containerShading ?? null,
     options.continuesFromPrevious ?? null,
     lineOnly ? null : options.sourceRangeStart ?? null,
+    lineOnly ? null : options.storyAnchorMarginBottomPt ?? null,
     lineOnly ? null : anchorFrames ? [
       anchorFrames.page
         ? [
@@ -6905,11 +6925,112 @@ function immutableMeasuredLine(
 }
 
 /** @internal Acquires the measurement and retained layout as one final candidate. */
+/** The paragraph without its carried anchor runs, one object per source
+ * paragraph so the acquisition caches keep their identity. */
+const carrierParagraphs = new WeakMap<ParagraphAcquisitionInput, ParagraphAcquisitionInput>();
+
+/**
+ * Note shapes carried by this paragraph (parser-model withNoteShapeHostParagraph):
+ * trailing runs that take no part in its layout. The paragraph is acquired
+ * without them, then each visible carried occurrence is placed against the
+ * last line (or, for a mark-only paragraph, the paragraph mark's box) and
+ * recorded with its drawing and a zero-size line placement at that anchor
+ * point; it adds no line extent, anchor frame, exclusion, collision or line
+ * metric to the flow.
+ */
+function withCarriedAnchors(
+  acquired: AcquiredParagraphResult,
+  paragraph: ParagraphAcquisitionInput,
+  options: ParagraphAcquisitionOptions,
+): AcquiredParagraphResult {
+  const carriedFrom = paragraph.runs.length;
+  const payloadsByOccurrence = new Map<string, Array<Readonly<{ run: AnchoredPayloadRun; runIndex: number }>>>();
+  (paragraph.carriedAnchorRuns ?? []).forEach((run, carriedIndex) => {
+    const runIndex = carriedFrom + carriedIndex;
+    if (!anchoredPayloadRun(run)) return;
+    const kind = (run as Readonly<{ revision?: Readonly<{ kind?: string }> }>).revision?.kind;
+    if (revisionIsOmitted(kind, options.environment.showTrackedChanges)) return;
+    const payloads = payloadsByOccurrence.get(run.anchorAcquisitionInput!.occurrenceId) ?? [];
+    payloads.push({ run, runIndex });
+    payloadsByOccurrence.set(run.anchorAcquisitionInput!.occurrenceId, payloads);
+  });
+  if (payloadsByOccurrence.size === 0) return acquired;
+  const { layout, measured } = acquired;
+  const lastLine = layout.lines.at(-1);
+  const markBounds = layout.paragraphMark?.bounds;
+  const hostLine: LineLayout | undefined = lastLine ?? (markBounds ? {
+    range: { start: 0, end: 0 },
+    bounds: markBounds,
+    baselinePt: markBounds.yPt + markBounds.heightPt,
+    advancePt: markBounds.heightPt,
+    placements: [],
+  } as unknown as LineLayout : undefined);
+  if (!hostLine) return acquired;
+  const hostEnd = hostLine.range.end;
+  const drawings = [...layout.drawings];
+  const textBoxes = [...layout.textBoxes];
+  const drawingPlacements: ParagraphPlacement[] = [];
+  const occurrenceIds: ReadonlySet<string> = new Set(payloadsByOccurrence.keys());
+  // The carried runs read by index, after the paragraph's own.
+  const withCarried = { ...paragraph, runs: [...paragraph.runs, ...(paragraph.carriedAnchorRuns ?? [])] } as ParagraphAcquisitionInput;
+  for (const [occurrenceId, payloads] of payloadsByOccurrence) {
+    const host: Extract<ParagraphPlacement, { kind: 'anchor-host' }> = {
+      kind: 'anchor-host',
+      range: { start: hostEnd, end: hostEnd },
+      bounds: {
+        xPt: hostLine.bounds.xPt + hostLine.bounds.widthPt, yPt: hostLine.bounds.yPt,
+        widthPt: 0, heightPt: hostLine.bounds.heightPt,
+      },
+      baselinePt: hostLine.baselinePt,
+      anchorOccurrenceId: occurrenceId,
+    };
+    const placed = acquireAnchorOccurrence(
+      occurrenceId,
+      payloads,
+      [{ ...hostLine, placements: [...hostLine.placements, host] }],
+      withCarried,
+      options,
+      measured.contentEndYPt - options.placement.startYPt,
+      options.exclusions,
+      [],
+      options.anchorCollisions ?? [],
+      [],
+      occurrenceIds,
+      options.placement.startYPt + (options.placement.suppressSpaceBefore ? 0 : measured.requestedSpaceBeforePt),
+    );
+    if (!placed?.drawing) continue;
+    drawings.push(placed.drawing);
+    textBoxes.push(...placed.textBoxes);
+    // The drawing joins the line that publishes it with a zero-size
+    // placement at its anchor point, so no line extent grows by it.
+    drawingPlacements.push({
+      kind: 'drawing', range: placed.hostRange, drawingId: placed.drawing.id,
+      bounds: { ...host.bounds, widthPt: 0, heightPt: 0 }, advancePt: 0,
+    });
+  }
+  const lines = lastLine && drawingPlacements.length > 0
+    ? [...layout.lines.slice(0, -1), { ...lastLine, placements: [...lastLine.placements, ...drawingPlacements] }]
+    : layout.lines;
+  return Object.freeze({
+    measured,
+    layout: Object.freeze({ ...layout, lines, drawings, textBoxes }),
+  });
+}
+
 export function acquireParagraphResult(
   paragraph: ParagraphAcquisitionInput,
   options: ParagraphAcquisitionOptions,
   continuation?: Parameters<typeof measureParagraph>[5],
 ): AcquiredParagraphResult {
+  if (paragraph.carriedAnchorRuns?.length) {
+    let carrier = carrierParagraphs.get(paragraph);
+    if (!carrier) {
+      const { carriedAnchorRuns: _carried, ...rest } = paragraph;
+      carrier = Object.freeze(rest) as ParagraphAcquisitionInput;
+      carrierParagraphs.set(paragraph, carrier);
+    }
+    return withCarriedAnchors(acquireParagraphResult(carrier, options, continuation), paragraph, options);
+  }
   if (options.environment.closingPairRootSource && !closingPairRootSourceEligible(options)) {
     options = { ...options, environment: { ...options.environment, closingPairRootSource: undefined } };
   }

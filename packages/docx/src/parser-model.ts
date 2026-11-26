@@ -105,6 +105,7 @@ import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './lay
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
 import type { DocumentTypographySettingsInput } from './layout-context.js';
 import { isInklessParagraph, isSwallowedHiddenParagraph } from './layout/paragraph-visibility.js';
+import { cellParagraphOwnsNoFlow } from './layout/table-cell-blocks.js';
 import {
   wordHiddenParagraphRetainedBreaks,
   type WordHiddenParagraphRunFact,
@@ -333,6 +334,15 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     footnoteContinuationSeparator?: NoteSeparatorMark;
     /** Ordinary DOCX producer only: effective paragraphs of listed separator
      * stories; see SelectedNoteSeparatorParagraphsInput. */
+    /** word-note-vml-host-paragraph: the empty Normal paragraph appended to
+     * the main story with the VML shapes taken out of the notes. */
+    noteShapeHostParagraph?: DocParagraph;
+    /** The shapes each note gives up to that paragraph, by note. */
+    noteShapes?: readonly Readonly<{
+      kind: 'footnote' | 'endnote'; id: string; runs: readonly DocRun[];
+      /** Each moved run's revision, aligned with runs. */
+      __runRevisions?: readonly unknown[];
+    }>[];
     footnoteSeparatorParagraph?: DocParagraph;
     footnoteContinuationSeparatorParagraph?: DocParagraph;
     endnoteSeparatorParagraph?: DocParagraph;
@@ -1831,11 +1841,13 @@ export function paragraphAcquisitionInput(
     __paragraphTypographyAcquisition: _privateParagraphTypography,
     __complexFieldBoundaries: _privateComplexFieldBoundaries,
     __runRevisions: _privateRunRevisions,
+    __carriedAnchorRuns: carriedRuns,
     ...semanticParagraph
   } = paragraph as DocParagraph & Record<string, unknown> & {
     __paragraphTypographyAcquisition?: InternalParagraphTypographyWire;
     __complexFieldBoundaries?: readonly InternalComplexFieldBoundaryWire[];
     __runRevisions?: readonly (DocRun['revision'] | null)[];
+    __carriedAnchorRuns?: readonly DocRun[];
   };
   const typographyInput = paragraphTypographyAcquisitionInput(parserParagraph);
   const complexFieldBoundaries = (
@@ -1893,7 +1905,11 @@ export function paragraphAcquisitionInput(
       }
     }
   }
-  const runs = runPairs.map(({ run, originalRun }, runIndex): ParagraphAcquisitionRun => {
+  const projectRun = (
+    run: DocRun | UnavailableDrawingRunWire,
+    originalRun: DocRun | UnavailableDrawingRunWire,
+    runIndex: number,
+  ): ParagraphAcquisitionRun => {
     const internalRun = run as UnavailableDrawingRunWire;
     if (internalRun.type === 'unavailableDrawing') {
       const localAnchorInput = anchorAcquisitionInput(originalRun);
@@ -2057,10 +2073,16 @@ export function paragraphAcquisitionInput(
       }) as ParagraphAcquisitionRun;
     }
     return Object.freeze(structuredClone(run)) as ParagraphAcquisitionRun;
-  });
+  };
+  const runs = runPairs.map(({ run, originalRun }, runIndex) => projectRun(run, originalRun, runIndex));
+  // Note shapes carried by this paragraph (withNoteShapeHostParagraph):
+  // projected like its runs, numbered after them, but never part of them,
+  // so no rule that reads the paragraph's runs sees them.
+  const carriedAnchorRuns = (carriedRuns ?? []).map((run, index) => projectRun(run, run, runPairs.length + index));
   return deepFreezePlainData({
     ...snapshot,
     runs: runs as readonly ParagraphAcquisitionRun[],
+    ...(carriedAnchorRuns.length > 0 ? { carriedAnchorRuns } : {}),
     ...(complexFieldBoundaries?.length
       ? { complexFieldBoundaries }
       : {}),
@@ -2204,10 +2226,137 @@ function cellFlowAutoSpacingNeighbourhoods(
     : automaticSpacingNeighbourhood(participants, position, CELL_AUTO_SPACING_EDGES)));
 }
 
+/** word-note-vml-host-paragraph: append the parser's host paragraph of the
+ * notes' absolutely positioned VML shapes to the end of the main story, once
+ * (the settings no longer carry it afterwards). */
+/** word-note-vml-host-paragraph: the absolutely positioned VML shapes of the
+ * notes the main story references move to one empty Normal paragraph appended
+ * to the body. An unreferenced note is not laid out, so it gives none. */
+function withNoteShapeHostParagraph(doc: DocxDocumentModel): DocxDocumentModel {
+  const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
+  const host = settings?.noteShapeHostParagraph;
+  if (!settings || (!host && settings.noteShapes === undefined)) return doc;
+  const { noteShapeHostParagraph: _host, noteShapes, ...retained } = settings;
+  // Each referenced note's references, with the revision of each: a
+  // reference deleted or moved away is gone from the final view.
+  const references = new Map<string, unknown[]>();
+  const visitReferences = (blocks: readonly BodyElement[] | readonly unknown[]) => {
+    for (const element of blocks as readonly BodyElement[]) {
+      if (element.type === 'paragraph') {
+        const revisions = (element as InternalDocParagraph).__runRevisions ?? [];
+        element.runs.forEach((run, index) => {
+          if (run.type !== 'text' || !run.noteRef || run.noteRef.id.length === 0) return;
+          const key = `${run.noteRef.kind}:${run.noteRef.id}`;
+          references.set(key, [...(references.get(key) ?? []), revisions[index] ?? null]);
+        });
+      } else if (element.type === 'table') {
+        for (const row of element.rows) for (const cell of row.cells) visitReferences(cell.content);
+      }
+    }
+  };
+  visitReferences(doc.body);
+  const omitted = (revision: unknown) => {
+    const kind = (revision as Readonly<{ kind?: string }> | null)?.kind;
+    return kind === 'deletion' || kind === 'moveFrom';
+  };
+  const groups = (noteShapes ?? []).filter((group) => references.has(`${group.kind}:${group.id}`));
+  // Each shape's effective revision: a note whose every reference is deleted
+  // gives up its shapes with that deletion (whatever their own revision), so
+  // the final view omits them as it omits the note; otherwise the shape keeps
+  // its own revision.
+  const runs = groups.flatMap((group) => group.runs);
+  const revisions = groups.flatMap((group) => {
+    const own = references.get(`${group.kind}:${group.id}`)!;
+    const deletion = own.every(omitted) ? own[0] : undefined;
+    return group.runs.map((_, index) => deletion ?? group.__runRevisions?.[index] ?? null);
+  });
+  // The host paragraph is appended only when some shape survives in the
+  // final view; otherwise the shapes ride the last body paragraph, so no
+  // view gains an empty host line or page.
+  const visible = revisions.some((revision) => !omitted(revision));
+  const withRevisions = (paragraph: BodyElement, before: number, existing: readonly unknown[] = []) =>
+    revisions.some((revision) => revision !== null)
+      ? { __runRevisions: [...Array.from({ length: before }, (_, index) => existing[index] ?? null), ...revisions] }
+      : existing.length > 0 ? { __runRevisions: existing } : {};
+  if (!host || runs.length === 0) return { ...doc, __noteLayoutSettings: retained } as DocxDocumentModel;
+  if (!visible) {
+    // Every shape is deleted (or its note's references are): the markup view
+    // shows them marked deleted and the final view omits them. They are
+    // carried by the story's last paragraph in document order that takes part
+    // in the retained flow (inside a table cell when the body ends with a
+    // table) in a private list beside its runs (`__carriedAnchorRuns`), which
+    // layout places only after that paragraph is laid out
+    // (layout/paragraph.ts): no rule that reads the carrier's runs sees them,
+    // so its lines, mark and pagination are those of the paragraph alone.
+    // Each carried run keeps its own revision (the carrier's __runRevisions
+    // never see them).
+    const carriedRuns = runs.map((run, index) => {
+      const revision = revisions[index];
+      return (revision ? { ...run, revision } : run) as DocRun;
+    });
+    const carry = (paragraph: DocParagraph): BodyElement => {
+      const existing = (paragraph as Readonly<{ __carriedAnchorRuns?: readonly DocRun[] }>).__carriedAnchorRuns ?? [];
+      return { ...paragraph, __carriedAnchorRuns: [...existing, ...carriedRuns] } as unknown as BodyElement;
+    };
+    // The last paragraph that takes part in the retained flow: a swallowed
+    // hidden paragraph, a cell's structural trailing paragraph and a
+    // vertical-merge continuation lay out no content of their own.
+    const appendToLast = (blocks: readonly unknown[], inCell?: Readonly<{ hideMark: boolean }>): unknown[] | undefined => {
+      for (let index = blocks.length - 1; index >= 0; index -= 1) {
+        const element = blocks[index] as BodyElement;
+        if (element.type === 'paragraph') {
+          const ownsNoFlow = inCell
+            ? cellParagraphOwnsNoFlow(blocks as Parameters<typeof cellParagraphOwnsNoFlow>[0], index, inCell.hideMark)
+            : index < blocks.length - 1 && isSwallowedHiddenBodyParagraph(element);
+          if (ownsNoFlow) continue;
+          const next = [...blocks];
+          next[index] = carry(element);
+          return next;
+        }
+        if (element.type === 'table') {
+          for (let row = element.rows.length - 1; row >= 0; row -= 1) {
+            // A §17.4.49 header row repeats on every page of the table: its
+            // paragraphs would publish the shape once per page.
+            if (element.rows[row]!.isHeader) continue;
+            const cells = element.rows[row]!.cells;
+            for (let cell = cells.length - 1; cell >= 0; cell -= 1) {
+              // A §17.4.85 vertical-merge continuation lays out none of its
+              // content.
+              if (cells[cell]!.vMerge === false) continue;
+              const content = appendToLast(cells[cell]!.content, {
+                hideMark: (cells[cell] as Readonly<{ hideMark?: boolean }>).hideMark === true,
+              });
+              if (!content) continue;
+              const rows = [...element.rows];
+              const nextCells = [...cells];
+              nextCells[cell] = { ...cells[cell]!, content: content as typeof cells[number]['content'] };
+              rows[row] = { ...rows[row]!, cells: nextCells };
+              const next = [...blocks];
+              next[index] = { ...element, rows };
+              return next;
+            }
+          }
+        }
+      }
+      return undefined;
+    };
+    const body = appendToLast(doc.body) as BodyElement[] | undefined;
+    return { ...doc, ...(body ? { body } : {}), __noteLayoutSettings: retained } as DocxDocumentModel;
+  }
+  return {
+    ...doc,
+    body: [...doc.body, {
+      ...host, type: 'paragraph', runs, ...withRevisions(host as unknown as BodyElement, 0),
+    } as BodyElement],
+    __noteLayoutSettings: retained,
+  } as DocxDocumentModel;
+}
+
 function normalizeInternalDocumentModelWithOwnership(
   doc: DocxDocumentModel,
   consumeOwned: boolean,
 ): NormalizedDocumentInput {
+  doc = withNoteShapeHostParagraph(doc);
   const occurrences: MathOccurrence[] = [];
   const normalizeElement = (
     element: BodyElement,

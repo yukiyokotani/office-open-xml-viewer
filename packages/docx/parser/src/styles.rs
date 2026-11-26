@@ -1009,6 +1009,11 @@ impl StyleMap {
     /// Normal paragraph style, preserve the ordinary default-style fallback.
     /// A paragraph style whose ID is literally `Normal` is accepted only as a
     /// compatibility fallback for producers that omit its required name.
+    /// The style id of the Normal paragraph style (by name, else by id).
+    pub fn normal_paragraph_style_id(&self) -> Option<&str> {
+        self.normal_para_style_id.as_deref()
+    }
+
     pub fn resolve_normal_paragraph_style(&self) -> (ParaFmt, RunFmt) {
         if let Some(style_id) = self.normal_para_style_id.as_deref() {
             self.resolve_para(Some(style_id), None)

@@ -4,7 +4,7 @@ import {
   withVertFeature,
 } from '@silurus/ooxml-core';
 import { fillRetainedText } from './canvas-text-fill.js';
-import type { Matrix2DData, ParagraphLayout, TextBoxLayout } from '../layout/types.js';
+import type { DrawingLayout, Matrix2DData, PaintNode, ParagraphLayout, TextBoxLayout } from '../layout/types.js';
 import type { CanvasPaintContext } from './types.js';
 import { paintDrawingLayout } from './canvas-drawing.js';
 import { paintRetainedResource } from './canvas-resource.js';
@@ -392,8 +392,10 @@ function paintLineContents(
 function paintParagraphContents(node: ParagraphLayout, context: CanvasPaintContext): void {
   const { ctx } = context;
   const ownedTextBoxIds = new Set(node.drawings.flatMap((drawing) => drawing.textBoxIds ?? []));
-  const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void =>
+  const paintDrawingWithTextBoxes = (drawing: import('../layout/types.js').DrawingLayout): void => {
+    if (context.omitPageOwnedAnchoredDrawings && isStoryPagePositionedDrawing(drawing)) return;
     paintParagraphDrawingLayout(node, drawing, context);
+  };
   const behind = node.drawings
     .filter((drawing) => drawing.anchorLayer?.behindDoc === true)
     .sort((a, b) => a.anchorLayer!.relativeHeight - b.anchorLayer!.relativeHeight
@@ -561,12 +563,35 @@ export function paintTextBoxLayout(node: TextBoxLayout, context: CanvasPaintCont
     documentDefaultTextColor,
     defaultTextColor: node.defaultTextColor ?? documentDefaultTextColor,
     ...(node.verticalMode ? { textBoxVerticalMode: node.verticalMode } : {}),
+    omitPageOwnedAnchoredDrawings: false,
   };
+  // WORD_STORY_VML_PAGE_POSITION: the floats left in a text-box story (VML
+  // shapes; DrawingML anchors lay out inline there) are page-owned: they are
+  // acquired at page positions, so they paint in the box's host frame,
+  // neither rotated with the box nor cut by its text clip, including those of
+  // the story's tables. Behind-text ones paint first.
+  const anchors = storyPagePositionedAnchors(node.story.blocks);
+  const hostContext: CanvasPaintContext = {
+    ...context,
+    omitPageOwnedAnchoredDrawings: false,
+    documentDefaultTextColor,
+    defaultTextColor: node.defaultTextColor ?? documentDefaultTextColor,
+  };
+  const paintStoryAnchors = (behindDoc: boolean): void => {
+    if (context.omitAnchoredDrawings) return;
+    for (const { owner, drawing } of anchors.filter(({ drawing }) => (drawing.anchorLayer!.behindDoc === true) === behindDoc)) {
+      paintParagraphDrawingLayout(owner, drawing, hostContext);
+    }
+  };
+  paintStoryAnchors(true);
   transformFrame(() => {
-    if (clipFrame) clipFrame(() => paintStory(storyContext))();
-    else paintStory(storyContext);
+    const blocksContext = anchors.length > 0 ? { ...storyContext, omitPageOwnedAnchoredDrawings: true } : storyContext;
+    if (clipFrame) clipFrame(() => paintStory(blocksContext))();
+    else paintStory(blocksContext);
   })();
+  paintStoryAnchors(false);
 }
+
 
 /** Paints an absolute point-space text box into a CSS-pixel canvas viewport. */
 export function paintPlacedTextBoxLayout(
@@ -603,4 +628,32 @@ export function paintPlacedParagraphLayout(
     layoutTranslationPt: { xPt: dxPt, yPt: dyPt },
   };
   frame(() => paintParagraphLayout(node, placedContext))();
+}
+
+/** A DOCX text-box story's VML shape placed from the page origin
+ * (WORD_STORY_VML_PAGE_POSITION). Other producers' page-owned drawings keep
+ * their text box's transform and clip. The element index reads the same
+ * marker (layout/story-page-anchors.ts). */
+function isStoryPagePositionedDrawing(drawing: DrawingLayout): boolean {
+  return drawing.anchorLayer?.storyPagePosition === true;
+}
+
+/** A text-box story's page-positioned VML drawings with their owning
+ * paragraphs, table cells included, in stacking order. */
+function storyPagePositionedAnchors(
+  blocks: readonly PaintNode[],
+): Array<Readonly<{ owner: ParagraphLayout; drawing: DrawingLayout }>> {
+  const found: Array<Readonly<{ owner: ParagraphLayout; drawing: DrawingLayout }>> = [];
+  const visit = (block: PaintNode): void => {
+    if (block.kind === 'paragraph') {
+      for (const drawing of block.drawings) {
+        if (isStoryPagePositionedDrawing(drawing)) found.push({ owner: block, drawing });
+      }
+    } else if (block.kind === 'table') {
+      for (const row of block.rows) for (const cell of row.cells) for (const child of cell.blocks) visit(child.layout);
+    }
+  };
+  blocks.forEach(visit);
+  return found.sort((a, b) => a.drawing.anchorLayer!.relativeHeight - b.drawing.anchorLayer!.relativeHeight
+    || a.drawing.anchorLayer!.sourceOrder - b.drawing.anchorLayer!.sourceOrder);
 }
