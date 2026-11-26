@@ -119,7 +119,11 @@ function tableOf(table: string, direction: string | null = null, columns = 1) {
 }
 
 /** Cell boxes of the table nested in the first cell of `table`: their widths
- * and the first one's offset from the outer cell's content box. */
+ * and the first one's offset from the outer cell's left edge. */
+/** Where a cell's content box starts, from the cell's left edge. */
+const contentOffsetPt = (host: { flowBounds: { xPt: number }; contentBounds: { xPt: number } }): number =>
+  host.contentBounds.xPt - host.flowBounds.xPt;
+
 function nestedCells(table: string, mode: number | null = 15): { widths: number[]; firstCellXPt: number } {
   const archive = new DocxArchive(docx(table, null, 1, mode));
   let model: DocxDocumentModel;
@@ -140,7 +144,7 @@ function nestedCells(table: string, mode: number | null = 15): { widths: number[
   if (inner?.kind !== 'table') throw new Error('expected a nested table');
   return {
     widths: inner.rows[0]!.cells.map((box) => Math.round(box.flowBounds.widthPt * 1e6) / 1e6),
-    firstCellXPt: inner.rows[0]!.cells[0]!.flowBounds.xPt,
+    firstCellXPt: inner.rows[0]!.cells[0]!.flowBounds.xPt + contentOffsetPt(outer.rows[0]!.cells[0]!),
   };
 }
 
@@ -275,9 +279,9 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       + `${cell(2160, 'B1')}</w:tr></w:tbl>`;
     const { widths, firstCellXPt } = nestedCells(outer);
     expect(widths).toEqual([boxPt, boxPt].map((width) => Math.round(width * 1e6) / 1e6));
-    // From the cell's content box: the half rule its margin leaves
-    // uncovered, half the table's own rule (mode 15), then the gap.
-    expect(firstCellXPt).toBeCloseTo(Math.max(0, 0.25 - marginPt) + 0.25 + 4, 6);
+    // From the cell's edge: its margin or half its rule, half the table's
+    // own rule (mode 15), then the gap.
+    expect(firstCellXPt).toBeCloseTo(Math.max(marginPt, 0.25) + 0.25 + 4, 6);
   });
 
   it('draws the box of a vertically merged cell on every page it continues on', () => {
@@ -433,12 +437,13 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       + '<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>'
       + `<w:tr>${cell(1440, 'A', '<w:vMerge w:val="restart"/><w:tcBorders><w:right w:val="single" w:sz="48"/></w:tcBorders>')}${cell(2880, 'B1')}</w:tr>`
       + `<w:tr>${cell(1440, '', '<w:vMerge/>')}<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${nested}${paragraph('B2')}</w:tc></w:tr></w:tbl>`;
-    const inner = tablePages(outer, 15)[0]!.rows[1]!.cells.at(-1)!.blocks.map((block) => block.layout)
+    const hostCell = tablePages(outer, 15)[0]!.rows[1]!.cells.at(-1)!;
+    const inner = hostCell.blocks.map((block) => block.layout)
       .find((block) => block.kind === 'table');
     if (inner?.kind !== 'table') throw new Error('expected a nested table');
     const boxes = inner.rows[0]!.cells.map((box) => box.flowBounds);
     // Half the 6 pt rule on the left, half the 0.5 pt table rule on the right.
-    expect(boxes[0]!.xPt).toBeCloseTo(3 + 0.25 + 4, 6);
+    expect(boxes[0]!.xPt + contentOffsetPt(hostCell)).toBeCloseTo(3 + 0.25 + 4, 6);
     expect(boxes[0]!.widthPt).toBeCloseTo((144 - 3 - 0.25 - 0.5 - 12) / 2, 6);
   });
 
@@ -479,10 +484,11 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       + '</w:tr>').join('');
     const outer = `<w:tbl><w:tblPr>${AUTO}${BORDERS}${noMargins}</w:tblPr><w:tblGrid>`
       + `<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>${rows}</w:tbl>`;
-    const inner = tablePages(outer, 15)[0]!.rows[3]!.cells.at(-1)!.blocks.map((block) => block.layout)
+    const hostCell = tablePages(outer, 15)[0]!.rows[3]!.cells.at(-1)!;
+    const inner = hostCell.blocks.map((block) => block.layout)
       .find((block) => block.kind === 'table');
     if (inner?.kind !== 'table') throw new Error('expected a nested table');
-    expect(inner.rows[0]!.cells[0]!.flowBounds.xPt).toBeCloseTo(3 + 0.25 + 4, 6);
+    expect(inner.rows[0]!.cells[0]!.flowBounds.xPt + contentOffsetPt(hostCell)).toBeCloseTo(3 + 0.25 + 4, 6);
   });
 
   it('reads the row exception of the row that opens the merge', () => {
@@ -494,10 +500,11 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
       + '<w:gridCol w:w="1440"/><w:gridCol w:w="2880"/></w:tblGrid>'
       + `<w:tr>${exception}${cell(1440, 'A', '<w:vMerge w:val="restart"/>')}${cell(2880, 'B1')}</w:tr>`
       + `<w:tr>${cell(1440, '', '<w:vMerge/>')}<w:tc><w:tcPr><w:tcW w:w="2880" w:type="dxa"/></w:tcPr>${nested}${paragraph('B2')}</w:tc></w:tr></w:tbl>`;
-    const inner = tablePages(outer, 15)[0]!.rows[1]!.cells.at(-1)!.blocks.map((block) => block.layout)
+    const hostCell = tablePages(outer, 15)[0]!.rows[1]!.cells.at(-1)!;
+    const inner = hostCell.blocks.map((block) => block.layout)
       .find((block) => block.kind === 'table');
     if (inner?.kind !== 'table') throw new Error('expected a nested table');
-    expect(inner.rows[0]!.cells[0]!.flowBounds.xPt).toBeCloseTo(3 + 0.25 + 4, 6);
+    expect(inner.rows[0]!.cells[0]!.flowBounds.xPt + contentOffsetPt(hostCell)).toBeCloseTo(3 + 0.25 + 4, 6);
   });
 
   describe('a merge continuing below repeated header rows', () => {
@@ -592,7 +599,7 @@ describe('cell spacing in an AutoFit table with preferred cell widths', () => {
     const inner = host.blocks.map((block) => block.layout).find((block) => block.kind === 'table');
     if (inner?.kind !== 'table') throw new Error('expected a nested table');
     // The nested table's border box starts where the painted rule ends.
-    const firstBox = inner.rows[0]!.cells[0]!.flowBounds.xPt;
+    const firstBox = inner.rows[0]!.cells[0]!.flowBounds.xPt + contentOffsetPt(host);
     expect(firstBox - 4 - 0.25).toBeCloseTo(rulePt / 2, 6);
   });
 

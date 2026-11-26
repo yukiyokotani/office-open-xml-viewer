@@ -131,6 +131,8 @@ export interface TableSourceAcquisitionInput {
 export interface CellIntrinsicWidths {
   readonly minWidthPt: number;
   readonly maxWidthPt: number;
+  /** The side insets the widths include, when they differ from the margins. */
+  readonly horizontalInsetPt?: number;
 }
 
 type TableLexicalWidth = Readonly<{
@@ -199,6 +201,17 @@ export function projectEffectiveCellPreferredWidth(
 /** WORD_FIRST_ROW_TABLE_EXCEPTION_SCOPE: an authored first-row tblPrEx/tblW governs the
  * whole table, including auto/nil/zero clearing the body's preference. Both
  * occurrence ceiling selection and column projection use this resolver. */
+/** Whether the width projectEffectiveTablePreferredWidthPt resolves is a percentage. */
+function effectiveTablePreferredWidthIsRelative(input: TableSourceAcquisitionInput): boolean {
+  if (input.format.firstRowException?.preferredWidthAuthored) {
+    return input.format.firstRowException.preferredWidth?.kind === 'pct';
+  }
+  const lexical = tableWidthConstraintFromLexical(input.lexical.table?.preferredWidth);
+  if (lexical) return lexical.kind === 'pct';
+  return !(input.semantic.widthPt != null && input.semantic.widthPt > 0)
+    && input.semantic.widthPct != null && input.semantic.widthPct > 0;
+}
+
 export function projectEffectiveTablePreferredWidthPt(
   input: TableSourceAcquisitionInput,
   availableWidthPt: number,
@@ -361,6 +374,7 @@ export function projectTableColumnLayoutInput(
     gridWidthsPt,
     gridWidthKeys,
     tablePreferredWidthPt: projectEffectiveTablePreferredWidthPt(input, availableWidthPt),
+    ...(effectiveTablePreferredWidthIsRelative(input) ? { tablePreferredWidthRelative: true } : {}),
     rows: table.rows.map((row, rowIndex) => {
       const rowInput = input.lexical.rows[rowIndex];
       const beforeSpan = normalizedBeforeSpans[rowIndex] ?? 0;
@@ -399,8 +413,8 @@ export function projectTableColumnLayoutInput(
           const horizontalSpacingPt = spacingGeometry ? 2 * spacingGeometry.borderPt
             : spacingInsets.startPt + spacingInsets.endPt;
           const margins = input.format.rows[rowIndex]?.cells[cellIndex]?.marginsPt;
-          const horizontalMarginsPt = Math.max(0, margins?.left ?? 0)
-            + Math.max(0, margins?.right ?? 0);
+          const horizontalMarginsPt = intrinsic.horizontalInsetPt ?? (Math.max(0, margins?.left ?? 0)
+            + Math.max(0, margins?.right ?? 0));
           const result = {
             columnStart,
             columnSpan: span,

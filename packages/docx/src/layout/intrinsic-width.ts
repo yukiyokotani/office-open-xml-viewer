@@ -50,6 +50,8 @@ export interface TableCellIntrinsicWidths {
   readonly maxWidthPt: number;
   /** Intrinsic text width without first-line positioning, for w:noWrap. */
   readonly noWrapWidthPt?: number;
+  /** A cell's own result: the side insets its widths include. */
+  readonly horizontalInsetPt?: number;
 }
 
 export interface TableCellIntrinsicWidthDependencies {
@@ -107,6 +109,7 @@ export function measureTableCellIntrinsicWidths(
   return {
     minWidthPt: (unbrokenMinimum ? noWrapContentWidthPt : minContentWidthPt) + horizontalMarginsPt,
     maxWidthPt: Math.max(minContentWidthPt, maxContentWidthPt) + horizontalMarginsPt,
+    horizontalInsetPt: horizontalMarginsPt,
   };
 }
 

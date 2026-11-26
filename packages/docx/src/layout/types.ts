@@ -1493,6 +1493,15 @@ export interface TableColumnLayoutInput {
    * past the saved grid toward their maximum content width; 'nonbinding'
    * only when every maximum fits the ceiling together. */
   readonly growUnpreferredColumns?: boolean | 'nonbinding';
+  /** WORD_AUTOFIT_CONTENT_RESOLUTION: resolve the columns from content and
+   * preferred widths, without the saved grid. */
+  readonly contentResolution?: boolean;
+  /** Half the table's outer rules, which the ceiling holds beside the grid
+   * (compatibility mode 15). */
+  readonly contentResolutionCeilingInsetPt?: number;
+  /** Whether the ceiling of an automatic table is a measured one; a table
+   * that would bind another ceiling is outside the rule. */
+  readonly contentResolutionCeilingEstablished?: boolean;
   /** WORD_TABLE_CELL_SPACING_GEOMETRY: gaps are outside solver cell boxes. */
   readonly separatedCellSpacingPt?: number;
   /** Width of the uniform table border rule of the spaced geometry. */
@@ -1505,6 +1514,8 @@ export interface TableColumnLayoutInput {
   readonly gridWidthsPt: readonly number[];
   readonly gridWidthKeys?: readonly (string | null)[];
   readonly tablePreferredWidthPt: number | null;
+  /** The preferred table width is a share of its container. */
+  readonly tablePreferredWidthRelative?: boolean;
   readonly rows: readonly TableColumnRowConstraint[];
 }
 
@@ -1559,6 +1570,10 @@ export interface TableRowFormatInput {
     /** True only when parser provenance shows that every layer authors its
      * horizontal margins, if at all, as dxa legacy left/right elements. */
     readonly dxaHorizontalMarginsOnly?: boolean;
+    /** True only when parser provenance shows that every layer authors its
+     * horizontal margins, if at all, as dxa lengths: legacy left/right or
+     * logical start/end. */
+    readonly lengthHorizontalMarginsOnly?: boolean;
   }[];
 }
 

@@ -347,6 +347,7 @@ describe('table column acquisition boundary', () => {
       // exact point key (720/20), never re-derived from the IEEE-754 width.
       gridWidthKeys: ['36/1', '0/1', '0/1', '0/1', '0/1'],
       tablePreferredWidthPt: 150,
+      tablePreferredWidthRelative: true,
       rows: [{
         // wBefore/wAfter percentages use the page text extents (§17.4.85–86),
         // unlike tcW percentages, which remain relative to final table width.

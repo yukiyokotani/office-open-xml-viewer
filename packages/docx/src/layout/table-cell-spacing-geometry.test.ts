@@ -224,7 +224,11 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
   it('keeps all no-spacing retained geometry byte-identical to the previous renderer', () => {
     const cases = [null, 11, 12, 14, 15].flatMap((mode) => [false, true].flatMap((bidi) => ['left', 'center', 'end'].flatMap((jc) =>
       [false, true].map((auto) => ({ spacing: 0, mode, bidi, jc, auto, indent: 720, margin: 108 })))));
-    expect(fingerprint(cases)).toBe('27c5d15368ef440dec14dd99e2d1ba85a44e1290f3e49641b8110179f573290e');
+    // The fixed tables are byte-identical to the renderer before cell
+    // spacing geometry; the AutoFit ones have since followed
+    // WORD_AUTOFIT_CONTENT_RESOLUTION and are pinned as they are now.
+    expect(fingerprint(cases.filter((entry) => !entry.auto))).toBe('d7b86688ce359c2e56c760fb20dab1f8f420c81551b993e305efb64be7648220');
+    expect(fingerprint(cases)).toBe('6e71e8b692dd85f712e476e2f752734bde7dd10066a3a380104fd86656905601');
   });
   it('keeps unmeasured classes byte-identical to the previous renderer', () => {
     expect(fingerprint([{ asymmetric: true }, { cellBorder: true }, { rowSpacing: true }, { nested: true },

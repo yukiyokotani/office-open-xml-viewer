@@ -322,11 +322,12 @@ describe('unmeasured neighbours of the extended rules keep the previous behavior
 });
 
 describe('content-fit boundaries (#2065 review)', () => {
-  it('keeps three-track or spanning content-sized tables on their grid and indent', () => {
+  it('keeps three-track or spanning content-sized tables on their indent', () => {
     const three = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent })
       .replace('<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>', '<w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/>')
       .replace('</w:tr>', '<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr>'), 'Q', 15);
-    expect(three(null).widthPt).toBeCloseTo(300, 6);
+    // Three columns without widths hold their content (WORD_AUTOFIT_CONTENT_RESOLUTION).
+    expect(three(null).widthPt).toBeLessThan(100);
     expect(three(720).xPt - three(null).xPt).toBeCloseTo(36, 6);
     const spanned = (indent: number | null) => tableGeometry('body', tableXml({ ...CONTENT_SIZED, jc: 'right', label: 'Q', indent })
       .replace(/<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"\/><\/w:tcPr><w:p><w:r><w:t>b<\/w:t><\/w:r><\/w:p><\/w:tc>/, '')

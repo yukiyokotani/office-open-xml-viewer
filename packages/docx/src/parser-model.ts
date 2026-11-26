@@ -921,6 +921,12 @@ function effectiveTableCellMargins(
       && [cellMargins, exceptionMargins, tableMargins, styleMargins].every((margins) =>
         margins?.start == null && margins?.end == null
         && [margins?.left, margins?.right].every((width) => width == null || effectiveTableWidthKind(width) === 'dxa')),
+    // Lexical: the same with logical start/end elements allowed
+    // (WORD_AUTOFIT_CONTENT_RESOLUTION).
+    lengthHorizontalMarginsOnly: hasPrivateCellWire
+      && [cellMargins, exceptionMargins, tableMargins, styleMargins].every((margins) =>
+        [margins?.left, margins?.right, margins?.start, margins?.end].every((width) =>
+          width == null || effectiveTableWidthKind(width) === 'dxa')),
     marginsPt: {
       top: firstMargin('top',
         { width: cellMargins?.top, scope: 'cell' },
