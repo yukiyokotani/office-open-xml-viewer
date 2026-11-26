@@ -11,6 +11,7 @@ import {
   type LoadedFontSources,
 } from '@silurus/ooxml-core/internal/font-sources';
 import { wordOpenTypeAutoLineRatios } from './layout/line-compatibility.js';
+import { referenceFontFormatOf } from './reference-font-line-metrics.js';
 import { NO_SERVED_FACE_LINES, WML_TUPLES, tupleKey, type PreparedServedFaceLines, type ServedFaceLine } from './served-face-lines.js';
 
 /** Resource identity of the faces a font source serves under one family. The
@@ -64,9 +65,11 @@ export const displayFamily = (family: string) => family.trim().replace(/^(['"])(
 export function measuredMetric(
   served: string,
   line: LocalFontNormalLine | null | undefined, ownership: ServedFaceLine,
+  libreOfficeLineBoxes: boolean,
 ): Omit<ResolvedFontMetric, 'family' | 'weight' | 'style' | 'sourceIdentity'> | undefined {
   if (!line) return undefined;
-  if (findReferenceFontMetrics(served).some((profile) => profile.farEastCodePage !== false)) return undefined;
+  const format = referenceFontFormatOf({ libreOfficeLineBoxes });
+  if (findReferenceFontMetrics(served, { format: format ?? undefined }).some((profile) => profile.farEastCodePage !== false)) return undefined;
   const ascent = line.ascentRatio + line.lineGapRatio;
   const descent = line.descentRatio;
   if (!(Number.isFinite(ascent) && Number.isFinite(descent) && ascent >= 0 && descent >= 0 && ascent + descent > 0)) return undefined;
@@ -154,7 +157,7 @@ export function sourceFontLineMetrics(
       ? [...fontSet].find((candidate) => fontFamilyKey(displayFamily(candidate.family)) === key) : undefined;
     const declared = parseUnicodeRange(face?.unicodeRange) ?? [[0, 0x10ffff] as const];
     for (const { weight, style } of WML_TUPLES) {
-      const measured = measuredMetric(family, ownership.lines[tupleKey(weight, style)], ownership);
+      const measured = measuredMetric(family, ownership.lines[tupleKey(weight, style)], ownership, libreOfficeLineBoxes);
       if (!measured) continue;
       metrics[`${identity}\u0000${weight}\u0000${style}`] = Object.freeze({
         family, weight, style, sourceIdentity: identity, synthesized: false, ...measured, unicodeRanges: frozenRanges(declared),

@@ -4,8 +4,8 @@ import { measureResolvedCanvasFontBoxRatio, SYNTHETIC_ASCENT_EM, SYNTHETIC_DESCE
 import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
-import { referenceFontLineMetrics } from '../reference-font-line-metrics.js';
-import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, WORD_EMPTY_MARK_ASCII_FACE } from '../layout/line-compatibility.js';
+import { referenceFontFormatOf, referenceFontLineMetrics } from '../reference-font-line-metrics.js';
+import { wordDegenerateLineSpacingIsSingle, wordEastAsianGridLineCells, wordFarEastSingleLinePx, wordGridAtLeastLineHeightPx, wordUseFeLayoutInheritedGridHeightPx, wordUseFeLayoutParagraphMarkGridAdvancePx, wordInlinePictureAutoLineHeightPx, wordLatinDesignGridSingleHeight, gridCellsExtent, WORD_EMPTY_MARK_ASCII_FACE, WORD_EMPTY_MARK_DESIGN_GRID_CELLS } from '../layout/line-compatibility.js';
 import { type DocGridCtx, type LayoutLine } from './model.js';
 import { isGridLineRule } from './advance.js';
 import { buildFont, getDefaultFontFamily, getDefaultFontSize } from './font-routes.js';
@@ -145,7 +145,7 @@ export function lineBoxHeight(
     // dropping the admitted design minimum: ruby may add cells, never remove
     // cells that the same line without its annotation would occupy.
     const requiredHeight = hasRuby ? Math.max(glyphNatural, cellCountHeight) : cellCountHeight;
-    return docGridLineCells(requiredHeight, pitchPx) * pitchPx;
+    return gridCellsExtent(docGridLineCells(requiredHeight, pitchPx), pitchPx);
   };
   const inheritedOnly = ls !== null && ls.explicit !== true;
   if (!ls) {
@@ -422,7 +422,7 @@ export function paragraphMarkLineMetrics(
         textLayoutService.fontMetrics ?? textLayoutService.localMetrics ?? {},
       ), selectedFont)
       ? authoredReferenceVerticalMetric(selectedFont, { text: textLayoutService, probe: markProbe },
-        projection)
+        projection, referenceFontFormatOf(textLayoutService))
       : undefined;
     if (naturalMetricAllowed && !resolvedLocalFont && !referenceMarkMetric
       && selectedFont?.source === 'native' && ctx) {
@@ -501,6 +501,19 @@ export function paragraphMarkLineMetrics(
         minimumAscentPx > 0 ? asc + desc : 0,
       )
     : undefined;
+  // WORD_EMPTY_MARK_DESIGN_GRID_CELLS: off the East Asian grid path an empty
+  // mark counts whole cells from its face's admitted design single line, of
+  // either code-page class. A Canvas-only box keeps the one-cell floor.
+  void WORD_EMPTY_MARK_DESIGN_GRID_CELLS;
+  // The controls are automatic single lines (authored or omitted spacing);
+  // atLeast minima and other multiples keep their own grid allocation.
+  const singleSpacing = effectiveLineSpacing == null
+    || (effectiveLineSpacing.rule === 'auto' && effectiveLineSpacing.value === 1)
+    || wordDegenerateLineSpacingIsSingle(effectiveLineSpacing.rule, effectiveLineSpacing.value);
+  // Word line boxes only: another producer's grid lines keep their own boxes.
+  const wordLineBoxes = referenceFontFormatOf(textLayoutService) === 'docx';
+  const markGridCountSingle = emptyMark && wordLineBoxes && singleSpacing && !eastAsian
+    && minimumAscentPx <= 0 ? designIntendedSingle : 0;
   const ordinaryAdvancePx = lineBoxHeight(
     effectiveLineSpacing,
     asc,
@@ -511,6 +524,10 @@ export function paragraphMarkLineMetrics(
     intendedSingle,
     eastAsian,
     gridCountSingle,
+    undefined,
+    undefined,
+    0,
+    markGridCountSingle,
   );
   const gridAllocationActive = useFeLayout && eastAsian && isGridLineRule(grid);
   const allocatedGridAdvancePx = gridAllocationActive

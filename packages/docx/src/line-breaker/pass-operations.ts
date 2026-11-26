@@ -370,6 +370,7 @@ function resetPhysicalLineMetrics({ breakerState }: PassOperationState): void {
   breakerState.lineVisibleDescent = 0;
   breakerState.lineVisibleIntendedSingle = 0;
   breakerState.lineHasVisibleMetrics = false;
+  breakerState.lineWrapAffected = false;
   breakerState.lineMarkerHeight = 0;
   breakerState.lineMarkerAscent = 0;
   breakerState.lineHasRuby = false;
@@ -741,6 +742,10 @@ function placeLineWindow(
     && accepted.xOffset === rejected.xOffset && accepted.solverWidth === rejected.solverWidth) {
     accepted = { ...accepted, narrowed: false };
   }
+  // A window the floats left untouched (same top, whole band) does not make
+  // the line float-conditioned; a later fragment of the same line does.
+  if (transaction.cursor || accepted.topY !== transaction.requestTopY
+    || accepted.xOffset !== 0 || accepted.solverWidth !== lineBandWidth) breakerState.lineWrapAffected = true;
   breakerState.currentLineTopY = accepted.topY;
   breakerState.lineXOffset = accepted.xOffset;
   breakerState.lineMaxWidth = accepted.maxWidth;
@@ -1239,6 +1244,7 @@ export function performFlush(
     ...(breakerState.currentLine.some((segment) => 'isTab' in segment && segment.marginAllocation)
       ? { marginExtension: breakerState.lineMarginExtension } : {}),
     topY: wrapCtx ? breakerState.currentLineTopY : undefined,
+    ...(breakerState.lineWrapAffected ? { wrapAffected: true as const } : {}),
     hasRuby: breakerState.lineHasRuby,
     eastAsian: breakerState.lineEastAsian,
     endsWithBreak: brTerminated,

@@ -1606,11 +1606,32 @@ export const WORD_INLINE_OBJECT_EXACT_LINE = defineCompatibilityRule({
     kind: 'office-observation',
     syntheticFixtureId: 'inline-object-position-matrix',
     application: 'Microsoft Word',
-    version: '16.0.20527',
+    version: '16.0.20527 and 16.0.20625',
     platform: 'Windows',
   },
-  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text: the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). This holds for exact 8, 10, 24, 36 and 48pt lines, in compatibility modes omitted, 12, 14 and 15, on a 20pt lines grid (the exact line itself does not snap), and in body paragraphs, headers, footers, footnotes, table cells and text boxes. A DrawingML picture is clipped to the line box (a 30pt picture in a 24pt line shows only the 19.2pt above the baseline) in body paragraphs, headers, footers and footnotes, but not in table cells or text boxes; a VML picture is never clipped and overlaps the neighbouring lines. Vertical sections (tbRl and tbLrV, exact 24pt, compatibility mode 15; the same DrawingML and VML pictures with position -5, 0 and +5pt) keep the exact line too: the line pitch and the text do not move, but the upright object hangs from the line top moved by its run position instead of standing on the baseline (a 40pt-wide picture lowered 5pt shows the 19pt between its top and the far line edge; DrawingML clipped to the line, VML overlapping the next line). In tbLrV the VML picture does the same, but the clipped DrawingML picture hangs from the mirrored strip edge (lowered 5pt it leaves the 5pt gap on the other side of the strip). The upright extent itself is word-vertical-inline-picture-upright-extent. Library scope: lines without a wrap-conditioned origin (the text rule records a narrow side-gap counterexample there); charts and math keep their established placement, and WPS drawing shapes take the baseline but stay unclipped (their clipping was not measured).',
+  description: 'ECMA-376 §17.3.1.33 fixes an exact line at its authored height but does not place inline objects in it. Windows Word 16.0.20527 controls (Times New Roman 10pt; DrawingML wp:inline pictures and VML w:pict pictures of 16pt and 30pt; run position -15, -5, 0 and +5pt; box-only lines and lines with text on both sides) keep the baseline four fifths down the line whatever the objects, as for text: the text of a line with a 30pt picture stays where it is beside a 16pt one, and each object stands on that baseline moved by its run position (WORD_INLINE_OBJECT_POSITION). This holds for exact 8, 10, 24, 36 and 48pt lines, in compatibility modes omitted, 12, 14 and 15, on a 20pt lines grid (the exact line itself does not snap), and in body paragraphs, headers, footers, footnotes, table cells and text boxes. A DrawingML picture is clipped to the line box (a 30pt picture in a 24pt line shows only the 19.2pt above the baseline) in body paragraphs, headers, footers and footnotes, but not in table cells or text boxes; a VML picture is never clipped and overlaps the neighbouring lines. Vertical sections (tbRl and tbLrV, exact 24pt, compatibility mode 15; the same DrawingML and VML pictures with position -5, 0 and +5pt) keep the exact line too: the line pitch and the text do not move, but the upright object hangs from the line top moved by its run position instead of standing on the baseline (a 40pt-wide picture lowered 5pt shows the 19pt between its top and the far line edge; DrawingML clipped to the line, VML overlapping the next line). In tbLrV the VML picture does the same, but the clipped DrawingML picture hangs from the mirrored strip edge (lowered 5pt it leaves the 5pt gap on the other side of the strip). The upright extent itself is word-vertical-inline-picture-upright-extent. Inline charts (c:chart graphic frames in wp:inline) belong to the same class: Windows Word 16.0.20625 controls (chart1 set CH1, three documents: body paragraphs in compatibility modes 15 and 14 and table cells with zero cell margins in mode 15; Times New Roman 10pt; 40pt-wide charts of 16pt and 30pt; run position -5, 0 and +5pt; the chart alone, between text and beside a 30pt DrawingML picture lowered 5pt) measure exact 12, 24 and 48pt lines: every line advances by its authored height, the text baseline lies 0.8 x height below the line top, and the chart-space box ends exactly position above that baseline (within the 0.1pt PDF precision), the same in both modes, for charts far taller than the line and on lines carried to the next page. In body paragraphs the chart is clipped to the line box (a 30pt chart in a 12pt line shows only the 12pt line band); in table cells it is not (a chart lowered 5pt in a 24pt line paints 0.2pt below the line). Library scope: lines without a wrap-conditioned origin (the text rule records a narrow side-gap counterexample there); a chart\'s run position is applied in exact lines only (its automatic and atLeast lines were not measured and keep the unpositioned box); math keeps its established placement, and WPS drawing shapes take the baseline but stay unclipped (their clipping was not measured).',
 });
+
+/** ECMA-376 §17.3.1.33 fixes an exact line's height and describes clipping
+ * of too-large text and centering of too-small text; Word does not centre. */
+export const WORD_EXACT_LINE_BASELINE = defineCompatibilityRule({
+  id: 'word-exact-line-baseline',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'exact-line-baseline-matrix',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'Word puts the baseline of every line of a paragraph with exact spacing four fifths of the authored height below the line top, whatever the line holds. Windows Word 16.0.20625 controls (line1 set L1a, nine documents: Noto Sans/Noto Sans JP, Times New Roman/MS Mincho and Arial/Yu Gothic; no grid and a 20pt lines grid in compatibility mode 15, no grid in mode 14) measure exact 6, 8, 10, 12, 18, 24, 36, 48, 72 and 96pt lines holding 9pt plain text, 24pt text, bold, italic, underline, highlight, a run border, a superscript run, a run raised 3pt, 9pt and 18pt runs together, 9pt text over an 18pt paragraph mark, East Asian text alone and after Latin text, a numbered item, a tab with a PAGE field and every line of a wrapped paragraph: every baseline lies 0.8 x height below the line top (within the 0.1pt PDF precision), including text far taller than the line, which overhangs it unclipped. A paragraph border pushes the line down by its top border and spacing only (4/5 below the line top that follows the border). Corpus Windows exports agree for 12/8, 24/9, 24/24 bold, 63.5/9 and 96/9pt Noto Sans lines and for lines beside square-wrapped floats. Earlier controls: WORD_SPECIFIED_TEXT_LINE_BOX (#1674, six Latin faces, exact 12-30pt), #1884 numbered items, #1885 ruby lines (exact 18pt; the guide overhangs the line top) and WORD_INLINE_OBJECT_EXACT_LINE (objects of any height, every story, vertical sections). The exact advance itself is the authored height (§17.3.1.33); this rule places only the baseline. Library scope: Word line boxes (DOCX and binary DOC); lines holding inline math, which WORD_INLINE_OBJECT_EXACT_LINE does not measure, keep the rules they had (that rule when the line also holds a picture, chart or shape, the four-fifths partition of a measured exact ruby line, otherwise the centred box), and another producer\'s fixed lines (LibreOffice line boxes) keep their own.',
+});
+
+/** Baseline offset below the line top under WORD_EXACT_LINE_BASELINE, or
+ * undefined when the line is not an exact line. */
+export function wordExactLineBaselineOffsetPt(lineSpacing: LineSpacing | null | undefined): number | undefined {
+  void WORD_EXACT_LINE_BASELINE;
+  return lineSpacing?.rule === 'exact' && lineSpacing.value > 0 ? lineSpacing.value * 4 / 5 : undefined;
+}
 
 /** WORD_INLINE_OBJECT_EXACT_LINE gate: an exact line with inline objects keeps
  * the four-fifths baseline of an exact text line. */
@@ -1640,8 +1661,9 @@ export function wordInlineObjectExactLineReflectsClipped(clipped: boolean, block
   return clipped && blockReflectedLine;
 }
 
-/** WORD_INLINE_OBJECT_EXACT_LINE: a DrawingML inline picture is clipped to its
- * exact line box (outside table cells and text boxes); a VML picture is not. */
+/** WORD_INLINE_OBJECT_EXACT_LINE: a DrawingML inline picture or chart is
+ * clipped to its exact line box (outside table cells and text boxes); a VML
+ * picture is not. */
 export function wordInlineObjectExactLineClips(origin: 'drawingml' | 'vmlStaticTextbox' | undefined): boolean {
   return origin === 'drawingml';
 }
@@ -1656,6 +1678,20 @@ export const WORD_EMPTY_MARK_ASCII_FACE = defineCompatibilityRule({
     platform: 'Windows',
   },
   description: 'An empty paragraph has no character from which ECMA-376 §17.3.2.26 could select a font slot. Windows Word 16.0.20527 controls (368 rows: three empty paragraphs per case, mark ascii Century/Times New Roman/Arial x eastAsia MS Mincho/Yu Mincho x 10.5/12pt x eastAsia language ja-JP or en-US x hint eastAsia or none, documents with and without East Asian text, with and without a lines docGrid, compatibility modes omitted and 15) give every off-grid empty line the single-line height of the ascii face (1.15 em for Times New Roman/Arial, 1.2 em for Century), never the East Asian face, whatever the hint, language or document scripts; under a lines docGrid every case takes the grid pitch. A separate 24-case Windows page-edge matrix in modes 14 and 15 (11pt marks, 16.4pt pitch; ascii/eastAsia Times New Roman/MS Mincho, Arial/Yu Mincho and MS Mincho/Arial; 15, 15.5, 16.35 and 16.4pt remaining) shows that the ascii face also owns the content box used for grid page-edge admission: only the MS Mincho ascii mark with 15pt remaining moves to the next page; swapping MS Mincho into the eastAsia slot does not. A Windows Word export of a real off-grid mode-15 document agrees for SimSun/zh-CN marks with hint eastAsia, including empty table-cell paragraphs and the empty paragraph after a table. The real 20pt-grid document that once appeared to contradict the page-edge matrix does not: its Times New Roman mark box fits only because a preceding vertically merged table row ends about 0.5pt higher than in Word (an unrelated table-height difference); with Word\'s position the same box no longer fits. Inline object runs are outside this rule.',
+});
+
+/** ECMA-376 §17.6.5 and §17.3.1.32 define a line grid's pitch but not how
+ * many cells an empty paragraph mark taller than one pitch takes. */
+export const WORD_EMPTY_MARK_DESIGN_GRID_CELLS = defineCompatibilityRule({
+  id: 'word-empty-mark-design-grid-cells',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'empty-mark-grid-cells',
+    application: 'Microsoft Word',
+    version: '16.0.20527 and 16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'On a lines docGrid an empty paragraph mark with single automatic spacing takes the smallest whole number of cells that holds the single line of its ascii face (WORD_EMPTY_MARK_ASCII_FACE): ceil(single line / pitch) pitches, at least one. Windows Word controls, two empty marks per case, compatibility mode 15: Noto Sans marks (1.362 em, hhea 1069/-293) of 12pt (16.34pt) take one cell of an 18pt and of a 20pt pitch, and 18pt marks (24.5pt) take two cells of either pitch; Noto Sans JP marks, whose OS/2 Far East code-page class gives a 1.3 x usWin single line of 1.882 em, take two cells at 10, 11, 12 and 18pt on an 18pt pitch and at 12 and 13pt on a 20pt pitch; a hint eastAsia Noto Sans/Noto Sans JP 12pt mark keeps the ascii face and one 18pt cell. The same marks off the grid are exactly one single line high (11, 12 and 13pt Noto Sans JP: 20.7, 22.55 and 24.47pt). Word for Mac exports of the same files agree. Windows Word 16.0.20625 yugrid1 controls (empty marks of 8-24pt between Times New Roman 8pt markers, 18pt pitch, useFELayout off) agree at every size: Yu Mincho (1.673 em, 1.3 x usWin) takes one cell up to 10.5pt, two from 11pt and three from 22pt in mode 15 and in mode 14; MS Mincho (1.3 em) takes one cell up to 12pt and two from 14pt; Calibri (1.221 em) one up to 14pt and two from 16pt. Library scope: the face must supply an admitted design single line (a parsed resource or a reference profile); a Canvas-measured box cannot establish the design height and keeps the established one-cell floor, as for visible text (WORD_LATIN_DESIGN_GRID_CELLS). Marks on the East Asian grid path (word-east-asian-grid-line-allocation), picture-bullet marks and another producer\'s grid boxes (LibreOffice line boxes) keep their own counting. A mark whose paragraph holds only an anchored drawing is outside this rule: Word gave such a 12pt Noto Sans JP mark two 18pt cells like its empty neighbour, but the library lays that paragraph out as an anchor-host line sized by the drawing run (9pt there), and whether Word sizes it by the mark alone or by the larger of mark and run is not measured.',
 });
 
 /** Observed outer-run leading selection is bounded to mode-15 box-only body
@@ -1721,11 +1757,37 @@ export function wordOpenTypeAutoLineRatios(metrics: Readonly<{
   return officeOpenTypeAutoLineRatios(metrics);
 }
 
+const GRID_CELL_TOLERANCE = 1e-9;
+
+/** Whole line-grid cells (§17.6.5) that hold `heightPx`, at least one. A
+ * height equal to a whole number of pitches takes exactly that many: the
+ * product of a design ratio and a font size carries binary rounding (25pt x
+ * 1.362 = 34.050000000000004 against a 34.05pt pitch), so the quotient is
+ * compared with a tolerance far below one twip of any real pitch. */
+export function wholeGridCells(heightPx: number, pitchPx: number): number {
+  return pitchPx > 0 ? Math.max(1, Math.ceil(heightPx / pitchPx - GRID_CELL_TOLERANCE)) : 1;
+}
+
+/** The extent of {@link wholeGridCells} cells, rounded once to a millionth of
+ * a point (far below a twip) so that every pagination comparison sees the
+ * same exact multiple: 3 x 18.35 is 55.050000000000004 in binary arithmetic,
+ * against 55.05pt of available body. */
+export function wholeGridExtent(heightPx: number, pitchPx: number): number {
+  return gridCellsExtent(wholeGridCells(heightPx, pitchPx), pitchPx);
+}
+
+/** `cells` pitches, rounded as in {@link wholeGridExtent}. */
+export function gridCellsExtent(cells: number, pitchPx: number): number {
+  return Math.round(cells * pitchPx * GRID_EXTENT_RESOLUTION) / GRID_EXTENT_RESOLUTION;
+}
+
+const GRID_EXTENT_RESOLUTION = 1e6;
+
 export function wordEastAsianGridLineCells(
   naturalHeightPx: number,
   pitchPx: number,
 ): number {
-  return pitchPx > 0 ? Math.max(1, Math.ceil(naturalHeightPx / pitchPx)) : 1;
+  return wholeGridCells(naturalHeightPx, pitchPx);
 }
 
 export function wordFarEastSingleLinePx(
@@ -1766,15 +1828,17 @@ export const WORD_LATIN_DESIGN_GRID_CELLS = defineCompatibilityRule({
   id: 'word-latin-design-grid-cells',
   evidence: { kind: 'office-observation', syntheticFixtureId: 'float-grid-picture-origin',
     application: 'Microsoft Word', version: '16.113.2', platform: 'macOS 27.0' },
-  description: 'Issue #1674 modes 14/15 controls reserve 20/40/40pt for 10/20/30pt Arial single lines on a 20pt grid, including a preceding 20pt line. No-grid and snap-off controls retain natural advances. Apply whole-cell counting only to visible text with an admitted non-Far-East reference design profile. Far-East reference faces, native fallback boxes, empty marks, ruby, explicit multiples and exact/atLeast spacing retain their established paths. Later independent-font and anchor-free controls established WORD_SPECIFIED_TEXT_LINE_BOX for its separately gated ordinary Latin class; every other exact/atLeast class retains the established placement. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
+  description: 'Issue #1674 modes 14/15 controls reserve 20/40/40pt for 10/20/30pt Arial single lines on a 20pt grid, including a preceding 20pt line. No-grid and snap-off controls retain natural advances. Apply whole-cell counting only to visible text with an admitted non-Far-East reference design profile. Far-East reference faces, native fallback boxes, ruby, explicit multiples and atLeast spacing retain their established paths; empty marks count cells under WORD_EMPTY_MARK_DESIGN_GRID_CELLS, exact lines do not snap and take WORD_EXACT_LINE_BASELINE, and WORD_SPECIFIED_TEXT_LINE_BOX owns the atLeast and grid auto=1 boxes of its gated ordinary Latin class. Windows Word 16.0 build 16.0.20430 retest is consistent within the tested subset; see the officeObservations entry for this rule in scripts/docx-compatibility-microsoft-evidence.json for values and evidence limits.',
 });
 
 export function wordLatinDesignGridSingleHeight(natural: number, pitch: number, admittedDesign: number): number {
   // The admitted face controls only its own whole-cell reserve. Other fonts,
   // inline objects and baseline displacements still own their natural extent
   // (§17.3.1.33); admission of one run must not shrink any peer's line box.
-  return Math.max(natural, admittedDesign > 0
-    ? Math.max(1, Math.ceil(admittedDesign / pitch)) * pitch : pitch);
+  const cellsPt = admittedDesign > 0 ? wholeGridExtent(admittedDesign, pitch) : pitch;
+  // A natural extent within the cell tolerance of the whole cells is that
+  // allocation (the design height itself carries the same binary rounding).
+  return natural > cellsPt && wholeGridExtent(natural, pitch) > cellsPt ? natural : cellsPt;
 }
 
 export const WORD_SPECIFIED_TEXT_LINE_BOX = defineCompatibilityRule({
@@ -1786,29 +1850,24 @@ export const WORD_SPECIFIED_TEXT_LINE_BOX = defineCompatibilityRule({
     version: 'export build unrecorded (16.113.3 installed at measurement)',
     platform: 'macOS 27.0',
   },
-  description: 'Issue #1674: 636 printing-PDF pages, modes 14/15, no grid and 20pt lines/linesAndChars grids, Arial/Times New Roman/MS Mincho/Yu Mincho/Verdana/Calibri Latin glyphs. Exact 12/20/24/30pt lines put the baseline four fifths down the authored line, independent of the 10pt visible face or zero/one/two hosts; 30pt visible-text and 30pt-host diagnostics distinguish font ascent, centering and host-height hypotheses. Off-grid atLeast 24/40pt retains the normal design descent and places added leading before the normal line box. Grid-atLeast uses the same centered normal-cell box as explicit auto=1, with minimum leading before that box: 24pt minima remain 24pt for 10pt visible text, while oversized 30pt normal boxes reserve 40pt/60pt. A same-face floating host does not enlarge the admitted visible-text box, including the measured 30pt hosts. Independent readback of the complete source-bound matrix establishes these allocations and baselines. Fresh Word 16.113.3 mode-15 Arial-10pt controls with 13 lines, a 20pt grid, 40pt minima, three preceding-line phases, grid/snap-off/exact controls and line anchors distinguish device projection from layout: twelve text steps total exactly 480pt, with alternating 40.08/40.08/39.84pt or rotations, and anchors retain exact point advances. Do not accumulate the printing cadence or round the authored minimum to a grid-cell multiple. Explicit auto=1 diagnostics on an active grid use the same normal grid box; off-grid diagnostics already agree with the established path, which is preserved. PDF coordinates/font sizes are quantized to 0.24pt; this is export precision, not a layout correction. The exact-height evidence interval is 12 through 30pt; smaller captions do not isolate baseline placement from accumulated printing cadence, and heights outside this interval retain the established path. Scope is homogeneous regular unpositioned undecorated Latin text and matching paragraph-mark face/size with an admitted authored reference profile and a native or positively loaded installed Office local() face. Registered local aliases retain the authored family from the resolver; Application-provided SFNT, CSS, embedded, Google and substitute resources remain outside the evidence. Float-exclusion-conditioned origins are also excluded: a narrow side-gap Office counterexample has a different physical partition, so this round does not isolate its baseline from the wrap origin. Admission is paragraph-wide: a mixed-script or decorated continuation paragraph cannot switch contracts on its ASCII-only undecorated physical lines. Mixed scripts/font axes/faces/sizes, differing paragraph marks, decorated/hyperlink text, transformed text, ruby, inline objects, numbering and resource/fallback faces are unmeasured and retain the established path. Windows Word 16.0 build 16.0.20430 retest: Exact-height baseline offsets retain four fifths of the line. Yu Mincho no-grid atLeast 24pt with 10pt text has a 19.20pt baseline offset from paragraph shading top versus 20.16pt in the retained Mac PDF. Oversized 30pt text atLeast 24pt advances 50.16pt versus 42.96pt; 20pt auto1 diagnostics advance about 33.4pt versus 28.7pt. Adjudication (2026-10-16): read the selected host face tables and use the Windows result when identical vertical data yields different Office output. The tested Mac Office and Windows PDF Yu Mincho faces have hhea=(1802, -455, 1024), usWin=(2038, 598), UPM=2048. Windows matches 1.3 times usWin: 30pt atLeast 24pt advances 50.20pt with baseline offset 35.65pt; 10pt atLeast 24pt has offset 19.15pt, within 0.24pt PDF precision. The Mac hhea result remains historical evidence, not the selected policy. No viewer-OS or font-name selector is used. This establishes the tested regular static faces, not arbitrary Office versions, variable fonts or fallback resource identity. Windows Word 16.0 build 16.0.20430 #1884 controls (Arial 10pt and Times New Roman 12pt text; exact 12/18/30pt, atLeast 18/30/60pt; 6-20pt Symbol bullets and Arial numbers) extend the class to numbered lines and to paragraph marks of another face at the same size, including an East Asian mark slot: plain, numbered and empty items all keep four fifths of an exact line and the text descent above the bottom of an atLeast line. A taller first-line marker joins the atLeast normal box by its ascent over the text descent (paragraph-measure.ts).',
+  description: 'Exact-height baselines of every class are now WORD_EXACT_LINE_BASELINE; this rule keeps the atLeast and grid auto=1 boxes. Issue #1674: 636 printing-PDF pages, modes 14/15, no grid and 20pt lines/linesAndChars grids, Arial/Times New Roman/MS Mincho/Yu Mincho/Verdana/Calibri Latin glyphs. Exact 12/20/24/30pt lines put the baseline four fifths down the authored line, independent of the 10pt visible face or zero/one/two hosts; 30pt visible-text and 30pt-host diagnostics distinguish font ascent, centering and host-height hypotheses. Off-grid atLeast 24/40pt retains the normal design descent and places added leading before the normal line box. Grid-atLeast uses the same centered normal-cell box as explicit auto=1, with minimum leading before that box: 24pt minima remain 24pt for 10pt visible text, while oversized 30pt normal boxes reserve 40pt/60pt. A same-face floating host does not enlarge the admitted visible-text box, including the measured 30pt hosts. Independent readback of the complete source-bound matrix establishes these allocations and baselines. Fresh Word 16.113.3 mode-15 Arial-10pt controls with 13 lines, a 20pt grid, 40pt minima, three preceding-line phases, grid/snap-off/exact controls and line anchors distinguish device projection from layout: twelve text steps total exactly 480pt, with alternating 40.08/40.08/39.84pt or rotations, and anchors retain exact point advances. Do not accumulate the printing cadence or round the authored minimum to a grid-cell multiple. Explicit auto=1 diagnostics on an active grid use the same normal grid box; off-grid diagnostics already agree with the established path, which is preserved. PDF coordinates/font sizes are quantized to 0.24pt; this is export precision, not a layout correction. The exact-height evidence interval is 12 through 30pt; smaller captions do not isolate baseline placement from accumulated printing cadence, and heights outside this interval retain the established path. Scope is homogeneous regular unpositioned undecorated Latin text and matching paragraph-mark face/size with an admitted authored reference profile and a native or positively loaded installed Office local() face. Registered local aliases retain the authored family from the resolver; Application-provided SFNT, CSS, embedded, Google and substitute resources remain outside the evidence. Float-exclusion-conditioned origins are also excluded: a narrow side-gap Office counterexample has a different physical partition, so this round does not isolate its baseline from the wrap origin. Admission is paragraph-wide: a mixed-script or decorated continuation paragraph cannot switch contracts on its ASCII-only undecorated physical lines. Mixed scripts/font axes/faces/sizes, differing paragraph marks, decorated/hyperlink text, transformed text, ruby, inline objects, numbering and resource/fallback faces are unmeasured and retain the established path. Windows Word 16.0 build 16.0.20430 retest: Exact-height baseline offsets retain four fifths of the line. Yu Mincho no-grid atLeast 24pt with 10pt text has a 19.20pt baseline offset from paragraph shading top versus 20.16pt in the retained Mac PDF. Oversized 30pt text atLeast 24pt advances 50.16pt versus 42.96pt; 20pt auto1 diagnostics advance about 33.4pt versus 28.7pt. Adjudication (2026-10-16): read the selected host face tables and use the Windows result when identical vertical data yields different Office output. The tested Mac Office and Windows PDF Yu Mincho faces have hhea=(1802, -455, 1024), usWin=(2038, 598), UPM=2048. Windows matches 1.3 times usWin: 30pt atLeast 24pt advances 50.20pt with baseline offset 35.65pt; 10pt atLeast 24pt has offset 19.15pt, within 0.24pt PDF precision. The Mac hhea result remains historical evidence, not the selected policy. No viewer-OS or font-name selector is used. This establishes the tested regular static faces, not arbitrary Office versions, variable fonts or fallback resource identity. Windows Word 16.0 build 16.0.20430 #1884 controls (Arial 10pt and Times New Roman 12pt text; exact 12/18/30pt, atLeast 18/30/60pt; 6-20pt Symbol bullets and Arial numbers) extend the class to numbered lines and to paragraph marks of another face at the same size, including an East Asian mark slot: plain, numbered and empty items all keep four fifths of an exact line and the text descent above the bottom of an atLeast line. A taller first-line marker joins the atLeast normal box by its ascent over the text descent (paragraph-measure.ts).',
 });
 
 /** Word observation, not the normative centered-text rule: ECMA-376
  * §17.3.1.33 defines exact/atLeast units and describes bottom placement/clipping
  * for too-small lines and centering for too-large lines. [MS-OI29500]
  * §2.1.60 discusses style-hierarchy spacing but supplies no baseline formula.
- * The measured Word printing output instead preserves a fixed 4:1 exact baseline partition,
- * including oversized text that visibly overhangs without top clipping.
- * This partition is supported by the complete independent-font/host matrix,
- * not a fitted ascent or a sample-specific offset. §17.6.5 makes exact spacing
- * override the grid; non-exact normal boxes retain whole-cell grid leading.
+ * Exact lines take WORD_EXACT_LINE_BASELINE instead. For atLeast and grid
+ * auto=1 lines the measured Word output places the normal box as below;
+ * §17.6.5 non-exact normal boxes retain whole-cell grid leading.
  * Unsupported classes are declined by specifiedTextLineMetrics beside its gate. */
 export function wordSpecifiedTextLineMetrics(input: Readonly<{
   rule: string; value: number; descentPt: number;
   singlePt: number; pitchPt: number | null;
 }>): Readonly<{ advancePt: number; baselineOffsetPt: number }> {
   void WORD_SPECIFIED_TEXT_LINE_BOX;
-  if (input.rule === 'exact') {
-    return { advancePt: input.value, baselineOffsetPt: input.value * 4 / 5 };
-  }
   const normalPt = input.pitchPt !== null && input.pitchPt > 0
-    ? Math.ceil(input.singlePt / input.pitchPt) * input.pitchPt
+    ? wholeGridExtent(input.singlePt, input.pitchPt)
     : input.singlePt;
   const advancePt = input.rule === 'atLeast' ? Math.max(input.value, normalPt) : normalPt;
   return {

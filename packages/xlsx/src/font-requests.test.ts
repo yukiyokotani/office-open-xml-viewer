@@ -20,3 +20,11 @@ it('resolves the workbook CJK fallback from style fonts and strong script eviden
   const kana = { styles: { fonts: [{ name: 'Calibri' }] }, sharedStrings: [{ text: '漢字かな' }] } as ParsedWorkbook;
   expect(xlsxCjkFallback(kana, 'sc')).toBe('jp');
 });
+
+it('does not request a DOCX-only catalog face for the workbook default', () => {
+  const worksheet = {
+    defaultFontFamily: 'Noto Sans JP', defaultFontBold: false,
+    defaultFontItalic: false, rows: [], shapeGroups: [],
+  } as unknown as Worksheet;
+  expect(xlsxWorksheetOfficeFontRequests(worksheet)).toEqual([]);
+});

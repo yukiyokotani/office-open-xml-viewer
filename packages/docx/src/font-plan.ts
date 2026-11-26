@@ -9,6 +9,8 @@ import type {
   DocxDocumentModel,
 } from './types.js';
 import { docxRenderedTextUsages } from './document-content.js';
+import { documentReferenceFontFormat } from './reference-font-line-metrics.js';
+import { producerDocumentSettings } from './parser-model.js';
 
 /**
  * DOCX font requests every load makes: the exact local Office-face tuples and
@@ -32,12 +34,17 @@ export function docxOfficeFontFallbackRequests(
   options: Readonly<{ fontDemand?: boolean; cjkFallback?: CjkLang }> = {},
 ): OfficeFontFallbackRequest[] {
   const tuples = new Map<string, OfficeFontFallbackRequest>();
+  // The one place both the main-thread and worker loaders get their requests:
+  // a Word producer's requests may use the profiles admitted for DOCX
+  // (ReferenceFontMetricProfile.evidencedFormats); another producer's do not.
+  const format = documentReferenceFontFormat(producerDocumentSettings(doc));
   const add = (family: string | null | undefined, bold = false, italic = false) => {
     const name = family?.trim();
     if (!name) return;
     const weight = bold ? 700 : 400;
     const style = italic ? 'italic' : 'normal';
-    tuples.set(`${name.toLowerCase()}:${weight}:${style}`, { family: name, weight, style });
+    tuples.set(`${name.toLowerCase()}:${weight}:${style}`,
+      { family: name, weight, style, ...(format ? { format } : {}) });
   };
   // Theme faces can govern paragraph marks and inherited runs even when a
   // particular authored run does not repeat its font name.
@@ -59,8 +66,8 @@ export function docxOfficeFontFallbackRequests(
     const weight = request.weight ?? 400;
     const style = request.style ?? 'normal';
     if (weight === 400 && style === 'normal') continue;
-    if (findReferenceFontMetrics(request.family, { weight, style }).length > 0) continue;
-    if (findReferenceFontMetrics(request.family, { weight: 400, style: 'normal' }).length === 0) continue;
+    if (findReferenceFontMetrics(request.family, { weight, style, format: format ?? undefined }).length > 0) continue;
+    if (findReferenceFontMetrics(request.family, { weight: 400, style: 'normal', format: format ?? undefined }).length === 0) continue;
     add(request.family);
   }
   // Every authored family is checked for installation as a family, independent

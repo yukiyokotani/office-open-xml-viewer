@@ -2,7 +2,7 @@ import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js
 import { hasNativeUnitReceipt, hasNativeVisiblePrefix } from '../line-breaker/native-unit-contract.js';
 import { prepareSourceSpaceCells, type SourceSpaceCells } from './source-space-cells.js';
 import { hasRtlDecimalTabCapability } from '../line-breaker/tabs.js';
-import { LIBREOFFICE_FONT_LINE_BOX, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
+import { LIBREOFFICE_FONT_LINE_BOX, WORD_RUBY_LINE_ASCENT, wordExactLineBaselineOffsetPt, wordInlineObjectExactLineApplies, wordInlineObjectExactLineClips, wordInlineObjectExactLineHangsFromTop, wordInlineObjectExactLineReflectsClipped, wordLineEndJustification } from './line-compatibility.js';
 import { compatOf, DEFAULT_DOCX_COMPAT_PROFILE, docxCompatProfileKey, type DocxCompatProfile } from './compat-profile.js';
 import {
   countedSpacingAdvance,
@@ -28,7 +28,7 @@ import {
   authoredReferenceVerticalMetric,
   mayUseAuthoredReferenceVerticalMetric,
 } from '../line-breaker/font-metrics.js';
-import { referenceFontDecorationMetrics } from '../reference-font-line-metrics.js';
+import { referenceFontDecorationMetrics, referenceFontFormatOf } from '../reference-font-line-metrics.js';
 import { shadowInkBounds } from './vml-shadow.js';
 import { createParagraphAnchorReferenceWorkBudget } from './resource-budgets.js';
 import { addExactRational, exactRationalFromNumber, exactRationalToNumberUp } from './exact-geometry.js';
@@ -4034,6 +4034,12 @@ function planMeasuredLines(
     && !keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
   const specifiedParagraph = specifiedTextParagraphIsHomogeneous(paragraph,
     context.lineGrid.active || !compat.specifiedTextLineBoxMode15);
+  // WORD_EXACT_LINE_BASELINE covers Word line boxes; a LibreOffice producer's
+  // paragraph keeps them only where keepsWordLineBoxes says so. Decided once
+  // per paragraph, outside the line loop.
+  const exactWordLineBoxes = context.lineSpacing?.rule !== 'exact'
+    || textService?.libreOfficeLineBoxes !== true
+    || keepsWordLineBoxes(paragraph.runs as readonly import('./text.js').ParagraphLayoutRun[]);
   return retainPhysicalLines(measured.lines.map((measuredLine, lineIndex) => {
     const raw = measuredLine.layout;
     // The measured allocation's first-line marker union (paragraph-measure.ts):
@@ -4045,34 +4051,44 @@ function planMeasuredLines(
           paragraphMarkShapeInput,
           markerAscentPt === undefined ? undefined : Math.max(markerAscentPt, raw.ascent) + raw.descent)
       : null;
-    // Windows Word 16.0 #1885 controls (exact 18pt; Latin and MS Mincho base
-    // text; 3-10pt guides raised 0-19pt): a ruby line keeps the four-fifths
-    // exact partition of WORD_SPECIFIED_TEXT_LINE_BOX, within its 12-30pt
-    // evidence interval; the guide may overhang the line top.
-    const exactRubyLine = !specified && measuredRubyLine(raw)
-      && context.lineSpacing?.rule === 'exact' && context.lineSpacing.value >= 12
-      && context.lineSpacing.value <= 30
-      && compat.specifiedTextLineBoxMode15
-      && !context.lineGrid.active && raw.topY === undefined;
-    // WORD_INLINE_OBJECT_EXACT_LINE: an exact line holding an inline picture or
-    // drawing shape keeps the same four-fifths baseline; the object (moved by
-    // its run's position) stands on that baseline instead of lowering it, and
-    // a DrawingML picture is clipped to the line box. Clipping belongs to the
-    // line class, whichever rule (ruby, text or object) selected the baseline.
+    // WORD_INLINE_OBJECT_EXACT_LINE: an exact line holding an inline picture,
+    // chart or drawing shape keeps the same four-fifths baseline; the object
+    // (moved by its run's position) stands on that baseline instead of
+    // lowering it, and a DrawingML picture or chart is clipped to the line
+    // box. Clipping belongs to the line class, whichever rule (ruby, text or
+    // object) selected the baseline.
     const exactObjectClass = wordInlineObjectExactLineApplies({
       lineSpacing: context.lineSpacing,
-      wrapOrigin: raw.topY !== undefined,
+      wrapOrigin: raw.wrapAffected === true,
       hasInlineObject: raw.segments.some((segment) => 'imagePath' in segment && !segment.anchor
-        && segment.inlinePicture === true),
+        && (segment.inlinePicture === true || segment.chart === true)),
     });
     // Table cells and text boxes leave a DrawingML picture unclipped.
     const exactObjectClips = exactObjectClass && source.story !== 'textbox' && source.path.length === 1;
-    const exactObjectLine = !specified && !exactRubyLine && exactObjectClass;
+    // WORD_EXACT_LINE_BASELINE: an exact line's baseline sits four fifths down
+    // the line, whatever its text, ruby, pictures or position. Fixed lines of
+    // a LibreOffice producer (`libreOfficeLineBoxes`) take their own placement
+    // (`__lineExtraAbove` below, else the centred box); only their
+    // inline-object lines retain WORD_INLINE_OBJECT_EXACT_LINE.
+    // A line holding inline math (outside WORD_INLINE_OBJECT_EXACT_LINE's
+    // measured class) keeps the rules it had: the object rule when the line
+    // also holds a picture, chart or shape, the four-fifths ruby partition of
+    // the measured ruby class (WORD_RUBY_LINE_ASCENT, exact 12-30pt, mode 15,
+    // no grid, no float), and otherwise the centred box.
+    const mathLine = raw.segments.some((segment) => 'math' in segment);
+    const measuredExactRubyLine = measuredRubyLine(raw)
+      && context.lineSpacing?.rule === 'exact' && context.lineSpacing.value >= 12
+      && context.lineSpacing.value <= 30 && compat.specifiedTextLineBoxMode15
+      && !context.lineGrid.active && raw.wrapAffected !== true;
+    const exactBaselinePt = exactObjectClass
+      || (exactWordLineBoxes && (!mathLine || measuredExactRubyLine))
+      ? wordExactLineBaselineOffsetPt(context.lineSpacing) : undefined;
     // In a vertical section the upright object hangs from the exact line's
     // top instead of standing on its baseline.
     const exactObjectHangs = wordInlineObjectExactLineHangsFromTop(exactObjectClass, verticalPageFrame);
-    // Under atLeast the added leading falls before the line, which keeps its
-    // own descent above the bottom (atLeast 18pt, the same controls).
+    // WORD_RUBY_LINE_ASCENT: under atLeast a ruby line's added leading falls
+    // before the line, which keeps its own descent above the bottom.
+    void WORD_RUBY_LINE_ASCENT;
     const atLeastRubyLine = !specified && measuredRubyLine(raw)
       && context.lineSpacing?.rule === 'atLeast'
       && compat.specifiedTextLineBoxMode15
@@ -4094,11 +4110,11 @@ function planMeasuredLines(
         : context.lineSpacing!.rule === 'auto'
           ? measuredLine.topYPt + measuredLine.advancePt * 4 / 5
           : measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
+      : exactBaselinePt !== undefined
+      ? measuredLine.topYPt + exactBaselinePt
       : specified
       ? measuredLine.topYPt + specified.baselineOffsetPt
-      : exactRubyLine || exactObjectLine
-        ? measuredLine.topYPt + context.lineSpacing!.value * 4 / 5
-        : atLeastRubyLine
+      : atLeastRubyLine
           ? measuredLine.topYPt + measuredLine.advancePt - (raw.visibleDescent ?? raw.descent)
           : plannedBaselinePt(measuredLine, context, libreOfficeLines);
     const objectTopOffsetPt = (heightPt: number, positionPt: number | undefined, clipped = false): number => {
@@ -4180,8 +4196,10 @@ function planMeasuredLines(
           const ruleGeometry = ruleFont && ((ruleFont.source === 'local'
               && ruleFont.resourceIdentity?.startsWith('office-local:') === true)
             || (ruleFont.source === 'native' && ruleFont.installedFamily === true)
-            || (mayUseAuthoredReferenceVerticalMetric(ruleFont) && authoredReferenceVerticalMetric(ruleFont)))
-            ? referenceFontDecorationMetrics(ruleFont.requestedFamily, ruleFont.weight, ruleFont.style)
+            || (mayUseAuthoredReferenceVerticalMetric(ruleFont)
+              && authoredReferenceVerticalMetric(ruleFont, undefined, 'word', referenceFontFormatOf(textService))))
+            ? referenceFontDecorationMetrics(ruleFont.requestedFamily, ruleFont.weight, ruleFont.style,
+              referenceFontFormatOf(textService))
             : undefined;
           underline = {
             base: selectedMetric('M'),
@@ -4261,13 +4279,18 @@ function planMeasuredLines(
           ) / 2;
         // Exact-line clipping (and its tbLrV placement) is decided apart from a
         // rotated picture's own clip to the line.
-        const exactClipped = !image.chart && exactObjectClips
-          && wordInlineObjectExactLineClips(
-            (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
+        // A chart is a DrawingML graphic frame (§21.2.2.27 in wp:inline).
+        const exactClipped = exactObjectClips
+          && wordInlineObjectExactLineClips(image.chart ? 'drawingml'
+            : (sourceRun as { readonly inlineObjectOrigin?: 'drawingml' | 'vmlStaticTextbox' } | undefined)
               ?.inlineObjectOrigin);
-        const topOffsetPt = labelTopPt ?? (image.chart ? -image.heightPt - (image.positionPt ?? 0)
-          : objectTopOffsetPt(image.heightPt, image.positionPt, exactClipped)) + effectTopPt;
-        const clipToLine = !image.chart && (image.clipToLine || exactClipped);
+        // A chart's run position places it only in an exact line
+        // (LayoutImageSeg.chartPositionPt).
+        const positionPt = image.chart
+          ? exactBaselinePt === undefined ? undefined : image.chartPositionPt
+          : image.positionPt;
+        const topOffsetPt = labelTopPt ?? objectTopOffsetPt(image.heightPt, positionPt, exactClipped) + effectTopPt;
+        const clipToLine = exactClipped || (!image.chart && image.clipToLine === true);
         if (image.unavailableResourceKind) {
           segments.push({
             kind: 'unavailable-resource',

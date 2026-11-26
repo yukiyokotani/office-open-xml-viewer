@@ -528,6 +528,10 @@ export interface LayoutImageSeg extends LayoutSegSource {
    *  walk keys off `run.type === 'image'` and never sees a chart run). */
   chart?: true;
   chartResourceKey?: string;
+  /** ECMA-376 §17.3.2.24 position (pt) of an inline chart's hosting run. It
+   * places the chart only in an exact line (WORD_INLINE_OBJECT_EXACT_LINE);
+   * the chart's other line metrics stay unpositioned. */
+  chartPositionPt?: number;
   /** ECMA-376 §20.4.2.8 — this image-shaped line segment reserves the inline
    * WPS shape's extent; paint is owned by the paragraph's retained drawing. */
   inlineShape?: true;
@@ -628,6 +632,9 @@ export interface LayoutLine {
   marginExtension?: number;
   /** When wrap context is active, the absolute canvas Y where this line begins. */
   topY?: number;
+  /** A float narrowed, offset or moved this line (not merely an active wrap
+   * context): the float-conditioned class of the exact-line rules. */
+  wrapAffected?: true;
   /** Confirmed fixed-point allocation that owns topY, in the same units as
    * the wrap context. Never infer ownership from a numeric top alone. */
   wrapAllocation?: Readonly<{ physicalLineIndex: number; topYPt: number; advancePt: number }>;

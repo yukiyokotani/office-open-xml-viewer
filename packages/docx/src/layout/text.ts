@@ -259,6 +259,8 @@ export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>>
 
 export type ParagraphChartRun = DeepReadonly<Omit<Extract<DocRun, { type: 'chart' }>, 'chart'>> & Readonly<{
   resourceKey: string;
+  /** §17.3.2.24 raise (+) / lower (-) in pt of the hosting run. */
+  inlinePositionPt?: number;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
@@ -273,7 +275,8 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly heightPt: number;
   /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt). */
   readonly inlineEffectExtent?: readonly number[];
-  /** §17.3.2.24 position of the hosting run of an inline picture placeholder. */
+  /** §17.3.2.24 position of the hosting run of an inline picture or chart
+   * placeholder. */
   readonly inlinePositionPt?: number;
   /** A picture placeholder's §20.1.7.6 orientation (`ParagraphImageRun`). */
   readonly rotation?: number;

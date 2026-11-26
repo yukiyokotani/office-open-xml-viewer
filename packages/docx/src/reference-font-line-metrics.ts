@@ -22,6 +22,28 @@ export function libreOfficeProjectionOptions(projection: FontLineBoxProjection):
   };
 }
 
+/** The catalog format whose evidence a lookup may use: Word line boxes read
+ * the profiles admitted for DOCX (`evidencedFormats`); another producer's
+ * line boxes (`libreOfficeLineBoxes`, `plainLineBoxes`, null) see only
+ * unrestricted profiles. */
+export type DocxReferenceFormat = 'docx' | null;
+
+export function referenceFontFormatOf(
+  text: Readonly<{ libreOfficeLineBoxes?: boolean; plainLineBoxes?: boolean }> | undefined,
+): DocxReferenceFormat {
+  return text?.libreOfficeLineBoxes === true || text?.plainLineBoxes === true ? null : 'docx';
+}
+
+/** {@link referenceFontFormatOf} for a document model's producer settings. */
+export function documentReferenceFontFormat(
+  settings: Readonly<{ __libreOfficeLineBoxes?: boolean; __plainFontLineBoxes?: boolean }>,
+): DocxReferenceFormat {
+  return referenceFontFormatOf({
+    libreOfficeLineBoxes: settings.__libreOfficeLineBoxes,
+    plainLineBoxes: settings.__plainFontLineBoxes,
+  });
+}
+
 export interface ReferenceFontLineMetrics {
   readonly lineHeightRatio: number;
   readonly farEastCodePage: boolean;
@@ -49,9 +71,10 @@ function preferredProfiles(
   family: string | null | undefined,
   weight: number,
   style: 'normal' | 'italic',
+  format: DocxReferenceFormat,
 ): readonly ReferenceFontMetricProfile[] {
   if (!family?.trim()) return NO_PROFILES;
-  const key = `${weight}|${style}|${family}`;
+  const key = `${format ?? '*'}|${weight}|${style}|${family}`;
   const retained = preferredProfilesMemo.get(key);
   if (retained !== undefined) return retained;
   const sourceGroups = [
@@ -60,7 +83,7 @@ function preferredProfiles(
   let result = NO_PROFILES;
   for (const sources of sourceGroups) {
     const profiles = sources.flatMap((source) =>
-      findReferenceFontMetrics(family, { source, weight, style }));
+      findReferenceFontMetrics(family, { source, weight, style, format: format ?? undefined }));
     if (profiles.length > 0) {
       result = Object.freeze(profiles);
       break;
@@ -84,9 +107,10 @@ export function referenceFontDecorationMetrics(
   family: string | null | undefined,
   weight: number,
   style: 'normal' | 'italic',
+  format: DocxReferenceFormat,
 ): FontDecorationGeometry | undefined {
   let geometry: FontDecorationGeometry | undefined;
-  for (const profile of preferredProfiles(family, weight, style)) {
+  for (const profile of preferredProfiles(family, weight, style, format)) {
     const decoration = profile.decoration;
     if (!decoration || !(profile.unitsPerEm > 0)) return undefined;
     const [underlinePosition, underlineThickness, strikeoutPosition, strikeoutSize] = decoration;
@@ -202,8 +226,10 @@ export function referenceFontLineMetrics(
   weight = 400,
   style: 'normal' | 'italic' = 'normal',
   projection: FontLineBoxProjection = 'word',
+  // Production callers pass referenceFontFormatOf(their text service).
+  format: DocxReferenceFormat = 'docx',
 ): ReferenceFontLineMetrics | undefined {
-  return identicalProjection(preferredProfiles(family, weight, style), projection);
+  return identicalProjection(preferredProfiles(family, weight, style, format), projection);
 }
 
 /** Metadata-only OS/2 average width for a native face selected by Canvas.
@@ -213,8 +239,9 @@ export function referenceFontAverageWidthRatio(
   family: string | null | undefined,
   weight = 400,
   style: 'normal' | 'italic' = 'normal',
+  format: DocxReferenceFormat = 'docx',
 ): number | undefined {
-  const ratios = preferredProfiles(family, weight, style).map((profile) =>
+  const ratios = preferredProfiles(family, weight, style, format).map((profile) =>
     profile.xAvgCharWidth != null && profile.xAvgCharWidth > 0
       ? profile.xAvgCharWidth / profile.unitsPerEm
       : undefined);

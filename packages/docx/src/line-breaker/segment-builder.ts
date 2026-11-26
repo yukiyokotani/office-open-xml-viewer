@@ -22,7 +22,7 @@ import { groupFitTextRegions, type FitTextRun } from '../fit-text.js';
 import { mathFallbackText } from '../layout/math-fallback-text.js';
 import type { FontResolution } from '../layout/font-service.js';
 import type { FontDecorationGeometry } from '@silurus/ooxml-core/internal/font-decoration';
-import { referenceFontDecorationMetrics } from '../reference-font-line-metrics.js';
+import { referenceFontDecorationMetrics, referenceFontFormatOf, type DocxReferenceFormat } from '../reference-font-line-metrics.js';
 import type {
   ParagraphLayoutSource,
   ParagraphLayoutRun,
@@ -979,6 +979,7 @@ function chartSegment(
   chartRun: Readonly<{
     widthPt: number; heightPt: number; anchor?: boolean; anchorXPt?: number; anchorYPt?: number;
     anchorXFromMargin?: boolean; anchorYFromPara?: boolean; resourceKey?: string;
+    inlinePositionPt?: number;
   }>,
   environment: LineLayoutEnvironment,
 ): LayoutImageSeg {
@@ -1001,6 +1002,7 @@ function chartSegment(
     anchorYFromPara: chartRun.anchorYFromPara ?? false,
     chart: true,
     ...(chartRun.resourceKey === undefined ? {} : { chartResourceKey: chartRun.resourceKey }),
+    ...(!chartRun.anchor && chartRun.inlinePositionPt ? { chartPositionPt: chartRun.inlinePositionPt } : {}),
     measuredWidth: 0,
   };
 }
@@ -1048,6 +1050,7 @@ export function buildSegments(
         selected.requestedFamily,
         selected.weight,
         selected.style,
+        referenceFontFormatOf(environment.layoutServices?.text),
       );
       // Only catalog-backed tuples enter this per-build cache; arbitrary
       // authored family names cannot grow it across a long paragraph.
@@ -1623,14 +1626,16 @@ function emitResolvedTextSegment(
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
         ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
       fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true));
+        environment.verticalCJK === true || environment.wordLineBoxes === true),
+      referenceFontFormatOf(environment.layoutServices?.text));
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
       fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true));
+        environment.verticalCJK === true || environment.wordLineBoxes === true),
+      referenceFontFormatOf(environment.layoutServices?.text));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -1737,7 +1742,8 @@ function emitResolvedTextSegment(
           resolvedDesignDescentRatio: referenceLineMetric.designDescentRatio,
         }
       : {}),
-    ...admittedFaceDecoration(resolvedSpan?.font, referenceLineMetric != null),
+    ...admittedFaceDecoration(resolvedSpan?.font, referenceLineMetric != null,
+      referenceFontFormatOf(environment.layoutServices?.text)),
     resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
     ...(latinSpaceAverageWidthRatio != null && latinSpaceAverageWidthRatio > 0
       ? { latinSpaceAverageWidthRatio, latinSpaceCompressionEligible: true as const }
@@ -1923,7 +1929,7 @@ function tabFaceLineBox(
   if (!selected) return {};
   const { lineMetric } = selectedFontLineMetric(selected, selectedMetric(selected, 'x'), true,
     allowsReferenceFontMetric(indexedFontMetrics(service?.fontMetrics ?? service?.localMetrics ?? {}), selected),
-    undefined, fontLineBoxProjection(service, false));
+    undefined, fontLineBoxProjection(service, false), referenceFontFormatOf(service));
   return lineMetric?.designAscentRatio != null && lineMetric.designDescentRatio != null
     ? { textOwnedLineBox: true, lineBoxAscentRatio: lineMetric.designAscentRatio, lineBoxDescentRatio: lineMetric.designDescentRatio }
     : {};
@@ -2176,7 +2182,10 @@ function appendRunsToSegments(
       const anchored = 'anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined;
       segs.push({
         ...(run.resourceKind === 'chart'
-          ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
+          ? chartSegment({
+              widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
+              ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
+            }, environment)
           : imageSegment({
               imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
               ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
@@ -2286,7 +2295,8 @@ function appendRunsToSegments(
           // evidence, so only an exact catalogued tuple lends its geometry.
           ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
             fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true))
+        environment.verticalCJK === true || environment.wordLineBoxes === true),
+            referenceFontFormatOf(environment.layoutServices?.text))
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({
@@ -2319,7 +2329,8 @@ function appendRunsToSegments(
               resolvedDesignDescentRatio: referenceMetric.designDescentRatio,
             }
           : {}),
-        ...admittedFaceDecoration(selected, referenceMetric != null),
+        ...admittedFaceDecoration(selected, referenceMetric != null,
+          referenceFontFormatOf(environment.layoutServices?.text)),
         resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
         vertAlign: null,
         measuredWidth: 0,
@@ -2423,13 +2434,14 @@ function projectNoBreakRanges(runs: readonly ParagraphLayoutRun[], segs: LayoutS
 function admittedFaceDecoration(
   font: FontResolution | undefined,
   referenceAdmitted: boolean,
+  format: DocxReferenceFormat,
 ): { referenceFontDecoration?: FontDecorationGeometry } {
   if (!font) return {};
   const officeLocal = font.source === 'local' && font.resourceIdentity?.startsWith('office-local:') === true;
   const nativeInstalled = font.source === 'native' && font.installedFamily === true;
   if (!officeLocal && !nativeInstalled && !referenceAdmitted) return {};
-  const geometry = referenceFontDecorationMetrics(font.requestedFamily, font.weight, font.style)
-    ?? (referenceAdmitted ? referenceFontDecorationMetrics(font.requestedFamily, 400, 'normal') : undefined);
+  const geometry = referenceFontDecorationMetrics(font.requestedFamily, font.weight, font.style, format)
+    ?? (referenceAdmitted ? referenceFontDecorationMetrics(font.requestedFamily, 400, 'normal', format) : undefined);
   return geometry ? { referenceFontDecoration: geometry } : {};
 }
 
