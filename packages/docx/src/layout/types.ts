@@ -1121,6 +1121,8 @@ export interface NoteSeparatorLayout {
   readonly advancePt: number;
   /** The story's acquired paragraph; it paints its own decorations only. */
   readonly paragraph?: ParagraphLayout;
+  /** The story's later paragraphs, after {@link paragraph}, in order. */
+  readonly followingParagraphs?: readonly ParagraphLayout[];
   /** Ink of the U+0003/U+0004 control, emitted only here. */
   readonly rule?: Readonly<{
     mark: 'short' | 'full';

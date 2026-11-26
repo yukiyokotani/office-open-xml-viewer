@@ -1,0 +1,232 @@
+import { readFile } from 'node:fs/promises';
+import { beforeAll, describe, expect, it } from 'vitest';
+import init, { DocxArchive } from './wasm/docx_parser.js';
+import { storeZip } from './conformance/generate.js';
+import { normalizeInternalDocumentModel } from './parser-model.js';
+import { createLayoutServices } from './layout-runtime.js';
+import { layoutDocument } from './document-layout.js';
+import { formatCustomNoteNumber } from './line-breaker/text-runs.js';
+import type { DocxDocumentModel } from './types.js';
+import type { DocumentLayout, PaintNode } from './layout/types.js';
+
+// ECMA-376 §17.11.4/.5/.11/.12 note numbering through a parsed package:
+// section-wide overrides (§17.11.5/.11), numRestart (§17.11.19), custom
+// numFmt/@format patterns and Word's unsignedShort numStart
+// (WORD_NOTE_NUMBER_FORMAT_DEFAULTS).
+beforeAll(async () => {
+  await init({ module_or_path: await readFile(new URL('./wasm/docx_parser_bg.wasm', import.meta.url)) });
+});
+
+const context = {
+  font: '10px Arial', letterSpacing: '0px', fontKerning: 'none',
+  measureText: (text: string) => ({
+    width: [...text].length * 6,
+    fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
+    actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
+  }),
+} as unknown as CanvasRenderingContext2D;
+
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const MC = 'http://schemas.openxmlformats.org/markup-compatibility/2006';
+const W14 = 'http://schemas.microsoft.com/office/word/2010/wordml';
+const encode = (xml: string) => new TextEncoder().encode(xml);
+
+interface Control {
+  readonly kind: 'footnote' | 'endnote';
+  /** Document-wide footnotePr/endnotePr children. */
+  readonly documentPr?: string;
+  /** Section-wide overrides of the first and second section. */
+  readonly sectionPr?: readonly [string, string];
+  /** Omit the optional body-level sectPr of the final section. */
+  readonly omitFinalSectPr?: boolean;
+  /** The second section holds no note references. */
+  readonly secondWithoutReferences?: boolean;
+  /** Settings compatibility mode 15. */
+  readonly mode15?: boolean;
+}
+
+/** Two sections, each with two references; notes 1-4. */
+function control({ kind, documentPr = '', sectionPr = ['', ''], omitFinalSectPr = false, secondWithoutReferences = false, mode15 = false }: Control): DocxDocumentModel {
+  const ref = (id: number) => `<w:r><w:${kind}Reference w:id="${id}"/></w:r>`;
+  const pr = (children: string) => children ? `<w:${kind}Pr>${children}</w:${kind}Pr>` : '';
+  const sect = (children: string, type = '') => `<w:sectPr>${pr(children)}${type}<w:pgSz w:w="12240" w:h="15840"/>`
+    + '<w:pgMar w:top="720" w:right="1440" w:bottom="720" w:left="1440" w:header="360" w:footer="360" w:gutter="0"/></w:sectPr>';
+  const body = `<w:p><w:r><w:t>A</w:t></w:r>${ref(1)}${ref(2)}</w:p>`
+    + `<w:p><w:pPr>${sect(sectionPr[0], '<w:type w:val="continuous"/>')}</w:pPr></w:p>`
+    + `<w:p><w:r><w:t>B</w:t></w:r>${secondWithoutReferences ? '' : ref(3) + ref(4)}</w:p>`
+    + (omitFinalSectPr ? '' : sect(sectionPr[1], '<w:type w:val="continuous"/>'));
+  const notes = [1, 2, 3, 4].map((id) => `<w:${kind} w:id="${id}"><w:p><w:r><w:t>N${id}</w:t></w:r></w:p></w:${kind}>`).join('');
+  const parts = new Map<string, string>([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+      + `<Override PartName="/word/${kind}s.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}s+xml"/>`
+      + '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>'],
+    ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="d" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
+    ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+      + `<Relationship Id="n" Type="${R}/${kind}s" Target="${kind}s.xml"/><Relationship Id="s" Type="${R}/settings" Target="settings.xml"/></Relationships>`],
+    ['word/settings.xml', `<w:settings xmlns:w="${W}" xmlns:mc="${MC}" xmlns:w14="${W14}">${pr(documentPr)}`
+      + (mode15 ? '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>' : '')
+      + '</w:settings>'],
+    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:mc="${MC}" xmlns:w14="${W14}"><w:body>${body}</w:body></w:document>`],
+    [`word/${kind}s.xml`, `<w:${kind}s xmlns:w="${W}">${notes}</w:${kind}s>`],
+  ]);
+  const archive = new DocxArchive(storeZip(new Map([...parts].map(([name, xml]) => [name, encode(xml)]))));
+  try {
+    return normalizeInternalDocumentModel(JSON.parse(new TextDecoder().decode(archive.parse()))).document;
+  } finally {
+    archive.free();
+  }
+}
+
+/** Body reference labels in page order. */
+function referenceLabels(layout: DocumentLayout): string[] {
+  const labels: string[] = [];
+  const visit = (node: PaintNode) => {
+    if (node.kind !== 'paragraph') return;
+    for (const line of node.lines) {
+      for (const placement of line.placements) {
+        if (placement.kind === 'text' && placement.noteReference && placement.text.length > 0) labels.push(placement.text);
+      }
+    }
+  };
+  for (const page of layout.pages) page.layers.body.forEach(visit);
+  return labels;
+}
+
+function render(spec: Control): string[] {
+  const model = control(spec);
+  return referenceLabels(layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 }));
+}
+
+describe('section-aware note numbering', () => {
+  it('applies a section-wide format and start, continuing into the next section', () => {
+    expect(render({ kind: 'endnote', sectionPr: ['<w:numFmt w:val="upperLetter"/><w:numStart w:val="3"/>', ''] }))
+      .toEqual(['C', 'D', 'v', 'vi']);
+  });
+
+  it('restarts each section with that section numbering', () => {
+    expect(render({ kind: 'footnote',
+      sectionPr: ['<w:numRestart w:val="eachSect"/>', '<w:numFmt w:val="lowerLetter"/><w:numRestart w:val="eachSect"/>'] }))
+      .toEqual(['1', '2', 'a', 'b']);
+  });
+
+  it('ignores document-wide numbering in settings.xml (word-section-note-numbering)', () => {
+    expect(render({ kind: 'footnote', documentPr: '<w:numFmt w:val="upperLetter"/><w:numStart w:val="3"/>' }))
+      .toEqual(['1', '2', '3', '4']);
+    expect(render({ kind: 'endnote', documentPr: '<w:numFmt w:val="decimal"/>' })).toEqual(['i', 'ii', 'iii', 'iv']);
+  });
+
+  it('formats a custom numFmt pattern, also inside mc:AlternateContent', () => {
+    const custom = '<w:numFmt w:val="custom" w:format="001, 002, 003, ..."/>';
+    expect(render({ kind: 'footnote', sectionPr: [custom, custom] })).toEqual(['001', '002', '003', '004']);
+    const alternate = '<mc:AlternateContent><mc:Choice Requires="w14">'
+      + '<w:numFmt w:val="custom" w:format="001, 002, 003, ..."/></mc:Choice>'
+      + '<mc:Fallback><w:numFmt w:val="decimal"/></mc:Fallback></mc:AlternateContent>';
+    expect(render({ kind: 'footnote', sectionPr: [alternate, alternate] })).toEqual(['001', '002', '003', '004']);
+    expect(formatCustomNoteNumber(7, '０１, ０２, ...')).toBe('０７');
+    expect(formatCustomNoteNumber(4, 'A, B, C, ...')).toBe('D');
+    expect(formatCustomNoteNumber(12, 'x')).toBe('12');
+  });
+
+  it('starts the Katakana sequence of a custom format token (§17.11.18 example)', () => {
+    const katakana = (start: number) => `<w:numFmt w:val="custom" w:format="&#x30A2;"/><w:numStart w:val="${start}"/>`
+      + '<w:numRestart w:val="eachSect"/>';
+    expect(render({ kind: 'footnote', sectionPr: [katakana(3), katakana(1)] })).toEqual(['ウ', 'エ', 'ア', 'イ']);
+    expect(formatCustomNoteNumber(2, '①')).toBe('②');
+    expect(formatCustomNoteNumber(3, 'Ω')).toBe('3');
+  });
+
+  it('applies XSLT format tokens: digit families, prefix and suffix, bijective letters', () => {
+    expect(formatCustomNoteNumber(3, '٠٠١')).toBe('٠٠٣');
+    expect(formatCustomNoteNumber(3, '(01)')).toBe('(03)');
+    expect([26, 27, 28, 29].map((value) => formatCustomNoteNumber(value, 'A'))).toEqual(['Z', 'AA', 'AB', 'AC']);
+    expect(formatCustomNoteNumber(28, 'a')).toBe('ab');
+    expect(formatCustomNoteNumber(3, '(1), (2), ...')).toBe('(3)');
+    expect(formatCustomNoteNumber(9, '2')).toBe('9');
+    expect(formatCustomNoteNumber(3, '(1-1)')).toBe('(3)');
+    expect(formatCustomNoteNumber(3, '𝟏')).toBe('𝟑');
+    const arabic = '<w:numFmt w:val="custom" w:format="&#x660;&#x660;&#x661;"/><w:numStart w:val="3"/>';
+    expect(render({ kind: 'footnote', sectionPr: [arabic, arabic] })).toEqual(['٠٠٣', '٠٠٤', '٠٠٥', '٠٠٦']);
+  });
+
+  it('numbers an automatic note 0 from numStart 0, never as a custom mark', () => {
+    const zero = '<w:numStart w:val="0"/>';
+    expect(render({ kind: 'footnote', sectionPr: [zero, zero] })).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('places footnotes beneath the text from the section position only (word-footnote-beneath-text)', () => {
+    const noteTop = (documentPr: string, sectionPr: string) => {
+      const model = control({ kind: 'footnote', documentPr, sectionPr: [sectionPr, sectionPr] });
+      const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+      const page = layout.pages[0]!;
+      const bodyBottom = Math.max(...page.layers.body.map((node) => node.flowBounds.yPt + node.flowBounds.heightPt));
+      const top = Math.min(...page.layers.notes.map((note) => note.flowBounds.yPt));
+      return { beneath: Math.abs(top - bodyBottom) < 0.01,
+        unsupported: layout.diagnostics.some((diagnostic) => diagnostic.message.includes('footnote position')) };
+    };
+    const beneath = '<w:pos w:val="beneathText"/>';
+    expect(noteTop('', beneath)).toEqual({ beneath: true, unsupported: false });
+    expect(noteTop(beneath, '')).toEqual({ beneath: false, unsupported: false });
+    expect(noteTop('<w:pos w:val="pageBottom"/>', beneath)).toEqual({ beneath: true, unsupported: false });
+    expect(noteTop(beneath, '<w:pos w:val="pageBottom"/>')).toEqual({ beneath: false, unsupported: false });
+  });
+
+  it('diagnoses the footnote position of the section that places each page of footnotes', () => {
+    const unsupported = (sectionPr: readonly [string, string]) => {
+      const model = control({ kind: 'footnote', sectionPr });
+      return layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 })
+        .diagnostics.filter((diagnostic) => diagnostic.message.includes('footnote position')).map((diagnostic) => diagnostic.message);
+    };
+    // Each section's references put its footnotes on its own page.
+    const message = (position: string) => `Unsupported footnote position "${position}"; retained layout uses the pageBottom fallback`;
+    expect(unsupported(['<w:pos w:val="beneathText"/>', '<w:pos w:val="sectEnd"/>'])).toEqual([message('sectEnd')]);
+    expect(unsupported(['<w:pos w:val="sectEnd"/>', '<w:pos w:val="docEnd"/>'])).toEqual([message('sectEnd'), message('docEnd')]);
+    expect(unsupported(['<w:pos w:val="beneathText"/>', ''])).toEqual([]);
+    // A continuous section on the same page that holds no references does
+    // not hide the position of the section whose notes the page carries.
+    const model = control({ kind: 'footnote', sectionPr: ['<w:pos w:val="sectEnd"/>', ''], secondWithoutReferences: true, mode15: true });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+    expect(layout.pages).toHaveLength(1);
+    expect(layout.diagnostics.filter((diagnostic) => diagnostic.message.includes('footnote position'))
+      .map((diagnostic) => diagnostic.message)).toEqual([message('sectEnd')]);
+  });
+
+  it.each(['footnote', 'endnote'] as const)('keeps %s notes whose number format is none', (kind) => {
+    const none = '<w:numFmt w:val="none"/>';
+    const model = control({ kind, sectionPr: [none, none] });
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 });
+    const notes = layout.pages.flatMap((page) => page.layers.notes).filter((node) => node.kind === 'note');
+    expect(notes.map((note) => note.kind === 'note' ? note.source.storyInstance : '')).toEqual(['1', '2', '3', '4']);
+    expect(referenceLabels(layout)).toEqual([]);
+  });
+
+  it('numbers notes with Chicago symbols and cycles Korean jamo', () => {
+    const chicago = '<w:numFmt w:val="chicago"/>';
+    expect(render({ kind: 'footnote', sectionPr: [chicago, chicago] })).toEqual(['*', '\u2020', '\u2021', '\u00A7']);
+    // Past 116 chicago writes no label; the notes stay attached.
+    const late = '<w:numFmt w:val="chicago"/><w:numStart w:val="115"/>';
+    expect(render({ kind: 'footnote', sectionPr: [late, late] })).toEqual(['\u2021'.repeat(29), '\u00A7'.repeat(29)]);
+    const model = control({ kind: 'footnote', sectionPr: [late, late] });
+    expect(layoutDocument(model, createLayoutServices(model, { measureContext: context }), { currentDateMs: 0 })
+      .pages.flatMap((page) => page.layers.notes).filter((node) => node.kind === 'note')).toHaveLength(4);
+    const chosung = '<w:numFmt w:val="chosung"/><w:numStart w:val="14"/>';
+    expect(render({ kind: 'footnote', sectionPr: [chosung, chosung] })).toEqual(['\u314E', '\u3131', '\u3134', '\u3137']);
+  });
+
+  it('gives a final section without its own sectPr the default numbering', () => {
+    expect(render({ kind: 'footnote', sectionPr: ['<w:numFmt w:val="upperLetter"/>', ''], omitFinalSectPr: true }))
+      .toEqual(['A', 'B', '3', '4']);
+  });
+
+  it('ignores a numStart beyond the Word unsignedShort range instead of failing', () => {
+    const huge = '<w:numStart w:val="5000000"/>';
+    expect(render({ kind: 'endnote', sectionPr: [huge, huge] })).toEqual(['i', 'ii', 'iii', 'iv']);
+    // The largest Word start still formats within the number-format budget.
+    const largest = '<w:numStart w:val="65535"/>';
+    expect(render({ kind: 'endnote', sectionPr: [largest, largest] }).join('').startsWith('m'.repeat(65)))
+      .toBe(true);
+  });
+});

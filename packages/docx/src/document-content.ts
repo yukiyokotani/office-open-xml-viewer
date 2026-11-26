@@ -22,6 +22,7 @@ import {
 } from './parser-model.js';
 import { requestedFamily, shapeRunToDocRun, type TextFontSlots } from './layout/text.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
+import { isNoteSeparatorMarkerRun } from './layout/selected-note-separators.js';
 
 type InternalRenderedFontAxes = Readonly<InternalRunSlotMetadata>;
 
@@ -318,16 +319,18 @@ function* reservedSeparatorUsages(
 }
 
 /** Ordinary DOCX formatted listed separator paragraphs (§17.11.9). Layout
- * acquires their paragraph-mark line box, so its families join the same
- * preload/resolution ownership as body text. */
+ * acquires their paragraph-mark line box and their runs (text around the
+ * marker, and the marker run's own line metrics), so those families join the
+ * same preload/resolution ownership as body text. */
 function* selectedSeparatorUsages(
   doc: DocxDocumentModel,
   collection: FontCollection,
 ): Generator<DocxRenderedTextUsage> {
   const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
-  for (const paragraph of [settings?.footnoteSeparatorParagraph, settings?.footnoteContinuationSeparatorParagraph,
-    settings?.endnoteSeparatorParagraph, settings?.endnoteContinuationSeparatorParagraph]) {
-    if (paragraph) yield* paragraphUsages({ ...paragraph, runs: [] }, collection);
+  for (const paragraph of [settings?.footnoteSeparatorStory, settings?.footnoteContinuationSeparatorStory,
+    settings?.endnoteSeparatorStory, settings?.endnoteContinuationSeparatorStory].flatMap((story) => story ?? [])) {
+    const runs = (paragraph.runs ?? []).map((run) => isNoteSeparatorMarkerRun(run) ? { ...run, text: '\u200b' } : run);
+    yield* paragraphUsages({ ...paragraph, runs } as DocParagraph, collection);
   }
 }
 

@@ -285,11 +285,11 @@ mod serialization_tests {
         assert_eq!(settings, r#"{"footnoteSeparator":"short"}"#);
         let story = serde_json::to_value(NoteLayoutSettingsWire {
             footnote_separator: Some(NoteSeparatorMark::Short),
-            footnote_separator_paragraph: Some(Box::default()),
+            footnote_separator_story: Some(vec![DocParagraph::default()]),
             ..NoteLayoutSettingsWire::default()
         })
         .unwrap();
-        assert!(story["footnoteSeparatorParagraph"].is_object());
+        assert!(story["footnoteSeparatorStory"].is_array());
         assert!(story
             .get("footnoteContinuationSeparatorParagraph")
             .is_none());
@@ -396,6 +396,23 @@ pub struct NoteLayoutSettingsWire {
     /// §17.11.20 document-wide `w:endnotePr/w:numStart/@w:val`. Absent means 1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_number_start: Option<i64>,
+    /// §17.11.19 / §17.18.74 document-wide `w:footnotePr/w:numRestart/@w:val`.
+    /// Absent means continuous.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_number_restart: Option<String>,
+    /// §17.11.19 document-wide `w:endnotePr/w:numRestart/@w:val`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_number_restart: Option<String>,
+    /// `w:numFmt/@w:format` of a document-wide footnote `custom` format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_number_custom_format: Option<String>,
+    /// `w:numFmt/@w:format` of a document-wide endnote `custom` format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote_number_custom_format: Option<String>,
+    /// §17.11.5 / §17.11.11 section-wide note numbering overrides, one entry
+    /// per section (`w:sectPr`) in body order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub section_note_numbering: Vec<SectionNoteNumberingWire>,
     /// ECMA-376 §17.11.1/.23: mark kind is independent of reserved story role.
     /// Absence retains the historical ordinary default; explicit Short stays
     /// authored. None represents the supported bare-empty DOCX observation.
@@ -409,20 +426,21 @@ pub struct NoteLayoutSettingsWire {
     pub footnote_continuation_separator: Option<NoteSeparatorMark>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_continuation_separator: Option<NoteSeparatorMark>,
-    /// Ordinary DOCX producer only: the effective paragraph of a document-
-    /// listed (§17.11.3/.9) separator story whose one paragraph holds its
-    /// §17.11.23/§17.11.1 mark run, or is bare and empty. Present with a
-    /// matching Short/Full/None mark above. Layout measures inherited and
-    /// authored spacing and line facts (§17.3.1.33); no pPr does not mean zero
-    /// or a fixed gap. Missing and unsupported stories retain the fallback.
+    /// Ordinary DOCX producer only: the effective paragraphs of a document-
+    /// listed (§17.11.3/.9) separator story, in order. At most one text run
+    /// is its §17.11.23/§17.11.1 marker (`note_separator_marker`); a story
+    /// without one draws no rule. Present with a matching Short/Full/None mark
+    /// above. Layout measures inherited and authored spacing and line facts
+    /// (§17.3.1.33); no pPr does not mean zero or a fixed gap. Missing and
+    /// unsupported stories retain the fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub footnote_separator_paragraph: Option<Box<DocParagraph>>,
+    pub footnote_separator_story: Option<Vec<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub footnote_continuation_separator_paragraph: Option<Box<DocParagraph>>,
+    pub footnote_continuation_separator_story: Option<Vec<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub endnote_separator_paragraph: Option<Box<DocParagraph>>,
+    pub endnote_separator_story: Option<Vec<DocParagraph>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub endnote_continuation_separator_paragraph: Option<Box<DocParagraph>>,
+    pub endnote_continuation_separator_story: Option<Vec<DocParagraph>>,
     /// Reserved note separator stories (ECMA-376 §17.11.2/§17.11.10
     /// `w:footnote`/`w:endnote` of §17.18.33 type `separator`,
     /// `continuationSeparator` or `continuationNotice`) supplied as resolved
@@ -1055,6 +1073,39 @@ pub struct ColSpec {
     pub width_pt: f64,
     /// `@w:space` — space after this column in pt (converted from twips).
     pub space_pt: f64,
+}
+
+/// Numbering facts of one footnote or endnote properties element
+/// (§17.11.4/.5/.11/.12): numFmt (§17.11.17/.18), numStart (§17.11.20) and
+/// numRestart (§17.11.19).
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct NoteNumberingWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// `w:numFmt/@w:format` when `format` is `custom`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart: Option<String>,
+}
+
+/// Section-wide note numbering overrides of one section, in body order.
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SectionNoteNumberingWire {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote: Option<NoteNumberingWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endnote: Option<NoteNumberingWire>,
+    /// §17.11.21 `w:pos` of the section's own footnotePr, which overrides
+    /// the document-wide position ([MS-OI29500] §2.1.309).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footnote_position: Option<String>,
 }
 
 /** Parser-private section placement facts. This wire is deliberately emitted
@@ -3353,6 +3404,13 @@ pub struct TextRun {
     /// the note's 1-based position, not the raw id). `None` for ordinary runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_ref: Option<NoteRef>,
+    /// Parser-private: this empty run stands for the §17.11.23/§17.11.1
+    /// separator marker of a listed separator story, with its run properties.
+    #[serde(
+        rename = "__noteSeparatorMarker",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub note_separator_marker: bool,
     #[serde(
         rename = "__typographyAcquisition",
         skip_serializing_if = "Option::is_none"

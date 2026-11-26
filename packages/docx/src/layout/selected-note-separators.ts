@@ -11,7 +11,8 @@ import type { DocParagraph } from '../types.js';
 /**
  * Ordinary DOCX selected separator stories: document-listed (ECMA-376
  * §17.11.3/.9) footnote separator/continuation stories and endnote separators.
- * One paragraph holds a §17.11.23/§17.11.1 mark run or is bare and empty.
+ * Their paragraphs hold text around at most one §17.11.23/§17.11.1 marker
+ * run, or a bare empty paragraph.
  *
  * Identity: one canonical `selected:*` root per role and note kind. These are library identities, distinct from producer-supplied
  * `reserved:*` stories and never DOCX note ids. A root is shared by every
@@ -20,9 +21,9 @@ import type { DocParagraph } from '../types.js';
  * Geometry: the story paragraph's acquired advance replaces only the scalar
  * band height of its role, including inherited §17.3.1.33 line/spacing facts
  * when no pPr is authored. None suppresses rule ink while retaining its line
- * box. Missing stories keep the fallback. The parser admits only a mark run
- * whose rPr equals its paragraph
- * mark's, so the run-free paragraph line box is the mark's line box.
+ * box. Missing stories keep the fallback. A marker run is laid out in place,
+ * so the paragraph's indents and alignment position it; a run-free paragraph
+ * (no marker) keeps its mark's line box.
  */
 
 const SELECTED_INSTANCES: Readonly<Record<SelectedNoteSeparatorRole, string>> = Object.freeze({
@@ -37,6 +38,7 @@ const SELECTED_ROLE_BY_INSTANCE: ReadonlyMap<string, SelectedNoteSeparatorRole> 
 export type SelectedNoteSeparatorParagraphAcquirer = (
   paragraph: DeepReadonly<DocParagraph>,
   source: SourceRef,
+  mark: 'short' | 'full' | 'none',
 ) => ParagraphAcquisitionInput;
 
 export interface NormalizedSelectedNoteSeparators {
@@ -75,7 +77,7 @@ function reject(reason: string): never {
   throw new Error(`Unsupported selected note separator story: ${reason}`);
 }
 
-/** Validate and normalize the parser-boundary paragraphs once, before the
+/** Validate and normalize the parser-boundary stories once, before the
  * layout source is sealed. Returns at most two definitions. */
 export function normalizeSelectedNoteSeparators(
   raw: SelectedNoteSeparatorParagraphsInput | undefined,
@@ -90,21 +92,74 @@ export function normalizeSelectedNoteSeparators(
     if (!(ROLES as readonly string[]).includes(key)) reject(`unknown role ${key}`);
   }
   for (const role of ROLES) {
-    const paragraph = raw[role];
-    if (paragraph === undefined) continue;
+    const paragraphs = raw[role];
+    if (paragraphs === undefined) continue;
     const mark = marks[role];
     if (mark !== 'short' && mark !== 'full' && mark !== 'none') reject(`${role} paragraph has no selected mark`);
-    // The closed shape the parser admits: no runs besides the omitted mark,
-    // and no paragraph ink, numbering, frame or hidden mark.
-    if ((paragraph.runs ?? []).length !== 0) reject(`${role} paragraph carries runs`);
-    if (paragraph.numbering != null || paragraph.framePr != null || paragraph.borders != null
-      || paragraph.shading != null || paragraph.markVanish === true) {
-      reject(`${role} paragraph carries unrepresented properties`);
-    }
+    if (!Array.isArray(paragraphs) || paragraphs.length === 0) reject(`${role} story has no paragraph`);
+    // The closed shape the parser admits: text and field runs and line
+    // breaks with at most one marker run in the whole story, and no
+    // numbering or frame; a hidden mark only on a paragraph with runs
+    // (borders and shading paint).
+    let markerParagraph = -1;
+    paragraphs.forEach((paragraph, index) => {
+      if (!isNoteSeparatorStoryRuns(paragraph.runs ?? [])) reject(`${role} paragraph carries unrepresented runs`);
+      if ((paragraph.runs ?? []).some(isNoteSeparatorMarkerRun)) {
+        if (markerParagraph >= 0) reject(`${role} story holds two markers`);
+        markerParagraph = index;
+      }
+      if (paragraph.numbering != null || paragraph.framePr != null
+        || (paragraph.markVanish === true && (paragraph.runs ?? []).length === 0)) {
+        reject(`${role} paragraph carries unrepresented properties`);
+      }
+    });
     const root = selectedNoteSeparatorSource(role, [], kind);
-    const paragraphSource = selectedNoteSeparatorSource(role, [0], kind);
-    definitions[role] = Object.freeze({ role, root, paragraph: paragraphSource });
-    stories.push(Object.freeze({ source: root, body: Object.freeze([acquire(paragraph, paragraphSource)]) }));
+    const paragraphSource = selectedNoteSeparatorSource(role, [Math.max(0, markerParagraph)], kind);
+    definitions[role] = Object.freeze({ role, root, paragraph: paragraphSource, paragraphCount: paragraphs.length });
+    stories.push(Object.freeze({
+      source: root,
+      body: Object.freeze(paragraphs.map((paragraph, index) =>
+        acquire(paragraph, selectedNoteSeparatorSource(role, [index], kind), mark))),
+    }));
   }
   return Object.freeze({ definitions: Object.freeze(definitions), stories: Object.freeze(stories) });
+}
+
+/** The parser's marker run of a separator story: an empty text run flagged
+ * `__noteSeparatorMarker` that carries the marker's run properties. Authored
+ * text is never mistaken for it. */
+export function isNoteSeparatorMarkerRun(run: Readonly<{ type: string }>): boolean {
+  return run.type === 'text' && (run as Readonly<{ __noteSeparatorMarker?: boolean }>).__noteSeparatorMarker === true;
+}
+
+/** An inline (not anchored) picture of a separator story: a DrawingML
+ * picture or an inline VML picture shape. */
+function isInlineImageRun(run: Readonly<{ type: string }>): boolean {
+  if (run.type === 'image') return (run as Readonly<{ anchor?: boolean }>).anchor !== true;
+  const shape = run as Readonly<{ inline?: boolean; vmlPicture?: unknown; textBoxContent?: unknown }>;
+  return run.type === 'shape' && shape.inline === true && shape.vmlPicture != null && shape.textBoxContent == null;
+}
+
+/** Parser wire of one separator story paragraph: text and field runs, inline
+ * pictures and line breaks only, at most one of them the marker run. */
+export function isNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
+  return runs.every((run) => run.type === 'text' || run.type === 'field' || isInlineImageRun(run)
+      || (run.type === 'break' && (run as Readonly<{ breakType?: string }>).breakType === 'line'))
+    && runs.filter(isNoteSeparatorMarkerRun).length <= 1;
+}
+
+/** Acquired separator story paragraph: text runs, inline pictures and line
+ * breaks, around at most one inline object that lays the marker out. */
+export function isAcquiredNoteSeparatorStoryRuns(runs: readonly Readonly<{ type: string }>[]): boolean {
+  return runs.filter((run) => run.type === 'shape' && !isInlineImageRun(run)).length <= 1
+    && runs.every((run) => run.type === 'text' || run.type === 'field' || run.type === 'shape'
+      || run.type === 'break' || isInlineImageRun(run));
+}
+
+/** Inline advance of the separator marker object: the ordinary mark's 144pt
+ * (min(144pt, area width) is applied to the drawn rule). The continuation
+ * mark fills its own line instead: it advances nothing and line breaks
+ * separate it from text before and after it (WORD_NOTE_SEPARATOR_GEOMETRY). */
+export function noteSeparatorMarkerAdvancePt(mark: string | undefined): number {
+  return mark === 'full' ? 0 : 144;
 }

@@ -68,10 +68,12 @@ export type NumberFormat =
   | 'thaiLetters'
   | 'chosung'
   | 'ganada'
+  | 'chicago'
   | 'hindiVowels'
   | 'hindiConsonants'
   // Enclosed decimals + katakana a-i-u-e-o sequences (§17.18.59).
   | 'decimalEnclosedCircle'
+  | 'decimalEnclosedCircleChinese'
   | 'aiueoFullWidth'
   | 'aiueo'
   // Hebrew (positional gematria / alphabet-with-ת-suffix — NOT the repeat scheme).
@@ -136,7 +138,8 @@ function toUpperRoman(n: number): string {
 
 // ── Repeat-letter alphabets ─────────────────────────────────────────────────
 // §17.18.59 upperLetter/lowerLetter/arabicAlpha/arabicAbjad/russian*/
-// thaiLetters/chosung/ganada/hindiVowels/hindiConsonants all share ONE scheme:
+// thaiLetters/hindiVowels/hindiConsonants (and chicago) share ONE scheme
+// (chosung/ganada cycle instead, see cycleAlphabet):
 // a fixed ordered character set of size N; the value maps into 1..N, and for
 // values > N the SAME character is REPEATED once per full N subtracted (§17.18.59
 // "written once and then repeated for each time the size of the set was
@@ -214,6 +217,40 @@ const THAI_LETTERS: readonly string[] = [
   ...rangeChars(0x0E27, 0x0E2E),
 ];
 
+/** [MS-OI29500] §2.1.548 (o): no format displays a value above this. */
+const OFFICE_NUMBER_MAXIMUM = 2147483647;
+
+/** [MS-OI29500] §2.1.548 (j), (k), (l), (m), (n): the largest value each of
+ * these formats displays; a larger value has no label. */
+const OFFICE_NUMBER_FORMAT_MAXIMUM: Readonly<Partial<Record<string, number>>> = {
+  cardinalText: 999999,
+  chineseCountingThousand: 999999,
+  chineseLegalSimplified: 999999,
+  ideographLegalTraditional: 999999,
+  japaneseCounting: 999999,
+  koreanCounting: 999999,
+  koreanDigital2: 999999,
+  ordinalText: 999999,
+  taiwaneseCountingThousand: 999999,
+  chicago: 116,
+  hex: 65535,
+  japaneseDigitalTenThousand: 9999,
+  koreanLegal: 9999999,
+};
+
+/** Cycle a fixed ordered set: past its size the sequence starts over with
+ * the first glyph, one glyph per value ([MS-OI29500] §2.1.548 (c), (r), (u):
+ * aiueo, chosung and ganada start at 1 again; …, ㅍ, ㅎ, ㄱ, ㄴ, …).
+ * Caller guarantees n ≥ 1. */
+function cycleAlphabet(n: number, glyphs: readonly string[]): string {
+  return glyphs[(n - 1) % glyphs.length]!;
+}
+
+// §17.18.59 chicago "Chicago Manual of Style": the reference symbols *, †,
+// ‡, §, then each written once more per full set subtracted (**, ††, …), the
+// same repeat scheme as the letter alphabets.
+const CHICAGO: readonly string[] = ['*', '\u2020', '\u2021', '\u00A7'];
+
 // §17.18.59 chosung "Korean Chosung" — positions 1–14 (spec list of jamo).
 const KOREAN_CHOSUNG: readonly string[] = [
   'ㄱ', 'ㄴ', 'ㄷ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅅ', 'ㅇ',
@@ -273,8 +310,9 @@ const KATAKANA_FULLWIDTH: readonly string[] = [
 
 // §17.18.59 aiueo "AIUEO Order Half-Width Katakana" — positions 1–46 =
 // U+FF71–U+FF9C (ｱ..ﾜ), then U+FF66 (ｦ wo), then U+FF9D (ﾝ n). No archaic ヰ/ヱ
-// (they have no half-width forms). Same repeat scheme; spec example ｱ, ｲ, …, ｦ,
-// ﾝ, ｱｱ confirms wo/n at 45/46 and the wrap at 47. Katakana per [MS-OE376]
+// (they have no half-width forms). The spec example ｱ, ｲ, …, ｦ, ﾝ, ｱｱ confirms
+// wo/n at 45/46; past 46 Office starts at ｱ again ([MS-OI29500] §2.1.548 (c),
+// see cycleAlphabet). Katakana per [MS-OE376]
 // §2.1.580 note (b) — see KATAKANA_FULLWIDTH above.
 const KATAKANA_HALFWIDTH: readonly string[] = [
   ...rangeChars(0xff71, 0xff9c),
@@ -373,6 +411,9 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
   // decimal recovery convention without entering loops on Infinity or indexing
   // an alphabet with a fraction/unsafe integer.
   if (!Number.isSafeInteger(n)) return String(n);
+  // [MS-OI29500] §2.1.548 (j)-(o): above a format's largest displayed value
+  // Office writes no label at all.
+  if (n > (OFFICE_NUMBER_FORMAT_MAXIMUM[fmt ?? 'decimal'] ?? OFFICE_NUMBER_MAXIMUM)) return '';
   switch (fmt) {
     // Roman.
     case 'upperRoman':
@@ -396,9 +437,11 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
     case 'thaiLetters':
       return n >= 1 ? repeatAlphabet(n, THAI_LETTERS) : String(n);
     case 'chosung':
-      return n >= 1 ? repeatAlphabet(n, KOREAN_CHOSUNG) : String(n);
+      return n >= 1 ? cycleAlphabet(n, KOREAN_CHOSUNG) : String(n);
     case 'ganada':
-      return n >= 1 ? repeatAlphabet(n, KOREAN_GANADA) : String(n);
+      return n >= 1 ? cycleAlphabet(n, KOREAN_GANADA) : String(n);
+    case 'chicago':
+      return n >= 1 ? repeatAlphabet(n, CHICAGO) : String(n);
     case 'hindiVowels':
       return n >= 1 ? repeatAlphabet(n, HINDI_VOWELS) : String(n);
     case 'hindiConsonants':
@@ -407,10 +450,14 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
     case 'aiueoFullWidth':
       return n >= 1 ? repeatAlphabet(n, KATAKANA_FULLWIDTH) : String(n);
     case 'aiueo':
-      return n >= 1 ? repeatAlphabet(n, KATAKANA_HALFWIDTH) : String(n);
+      return n >= 1 ? cycleAlphabet(n, KATAKANA_HALFWIDTH) : String(n);
     // Enclosed decimals (bounded set → decimal fallback past the range).
     case 'decimalEnclosedCircle':
       return n >= 1 ? toEnclosedCircle(n) : String(n);
+    case 'decimalEnclosedCircleChinese':
+      // [MS-OI29500] §2.1.548 (s): only the first ten enclosed numbers, then
+      // decimal.
+      return n >= 1 && n <= 10 ? toEnclosedCircle(n) : String(n);
     // Hebrew.
     case 'hebrew1':
       return n >= 1 ? toHebrewGematria(n) : String(n);
@@ -456,7 +503,7 @@ export function formatOrdinalNumber(n: number, fmt: NumberFormat | undefined): s
       return n >= 1 ? toChineseCounting(n, DIGITS_TAIWANESE) : String(n);
     // Grouped counting / legal CJK.
     case 'chineseCountingThousand':
-      return n >= 1 ? toMyriadGrouped(n, MYRIAD_CHINESE) : String(n);
+      return n >= 1 ? toMyriadGrouped(n, MYRIAD_CHINESE, true) : String(n);
     case 'taiwaneseCountingThousand':
       return n >= 1 ? toMyriadGrouped(n, MYRIAD_TAIWANESE) : String(n);
     case 'chineseLegalSimplified':
@@ -679,7 +726,7 @@ function renderMyriadGroup(group: number, t: MyriadTable, elideOne: boolean): st
  *  additional symbol at one hundred million" but does not fully table it, so the
  *  高位 rendering is a faithful extension of the documented < 10^8 algorithm.
  *  Caller guarantees n ≥ 1. */
-function toMyriadGrouped(n: number, t: MyriadTable): string {
+function toMyriadGrouped(n: number, t: MyriadTable, omitSmallMyriadGapZero = false): string {
   if (n >= 100000000) {
     // 億 = 10^8. Recurse: <upper>億<remainder>, remainder rendered with no leading
     // elision quirk changes. (U+5104 億 for JP/CN, U+5104 shared.)
@@ -704,7 +751,11 @@ function toMyriadGrouped(n: number, t: MyriadTable): string {
     // but the 万 group is present (e.g. 10005 → 一万零五): a gap exists between 万
     // and the ones group (§17.18.59 "if no groups are formed … write 零"). Only
     // for formats that specify the 零 rule.
-    if (t.insertZero && upperGroup > 0 && lowerGroup < 1000) out += t.digits[0];
+    // [MS-OI29500] §2.1.548 (e): chineseCountingThousand writes no 零 here
+    // below 100,000 (10005 → 一万五).
+    if (t.insertZero && upperGroup > 0 && lowerGroup < 1000 && !(omitSmallMyriadGapZero && n < 100000)) {
+      out += t.digits[0];
+    }
     out += renderMyriadGroup(lowerGroup, t, t.elideOne);
   }
   return out;

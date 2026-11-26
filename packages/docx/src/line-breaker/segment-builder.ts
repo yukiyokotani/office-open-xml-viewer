@@ -1992,9 +1992,12 @@ function appendRunsToSegments(
         }
         continue;
       }
-      if ((run as ParagraphTextBearingRun).noteSeparatorCharacter !== undefined) {
+      if ((run as ParagraphTextBearingRun).noteSeparatorCharacter !== undefined
+        || (run as Readonly<{ __noteSeparatorMarker?: boolean }>).__noteSeparatorMarker === true) {
         // Reserved separator character: the U+0003/U+0004 rule
-        // control or its story's content paragraph mark. Neither has a glyph
+        // control or its story's content paragraph mark, or the marker run of
+        // a listed DOCX separator story (selected-note-separators.ts), whose
+        // inline object carries the rule. None has a glyph
         // here; the rule ink is retained separately. As for a suppressed note
         // mark, a bounded Latin probe resolves the run's own four font slots
         // and selected face through the ordinary text service, and only its
@@ -2039,9 +2042,19 @@ function appendRunsToSegments(
         // CT_FtnEdnRef/@customMarkFollows suppresses the automatic glyph, not
         // the note relationship. Keep an immutable zero-width host so a note
         // remains attached to the physical line/page of this reference.
-        // Number 0 is the acquisition map's custom-note sentinel; the note's
-        // own automatic *Ref placeholder is suppressed by the same contract.
-        if (t.noteRef.customMarkFollows === true || noteText === 0) {
+        // A negative number is the acquisition map's custom-note sentinel
+        // (CUSTOM_NOTE_MARK); the note's own automatic *Ref placeholder is
+        // suppressed by the same contract.
+        const customMark = t.noteRef.customMarkFollows === true || (noteText !== undefined && noteText < 0);
+        const label = customMark ? '' : noteText != null
+          ? formatNoteNumber(
+              noteText,
+              noteNumberingOf(environment.noteNumbering, t.noteRef.kind, t.noteRef.id),
+            )
+          : t.text || '';
+        // A suppressed label (§17.18.59 numFmt none) keeps the same
+        // zero-width host as a custom mark, so the note stays attached.
+        if (customMark || label.length === 0) {
           // As for an empty/anchor-only mark, a bounded Latin probe resolves
           // the four font slots and selected-face metrics through the ordinary
           // text service. Discard its ink/text, never its font authority.
@@ -2068,29 +2081,16 @@ function appendRunsToSegments(
           }
           continue;
         }
-        const label =
-          noteText != null
-            ? formatNoteNumber(
-                noteText,
-                t.noteRef.kind === 'footnote'
-                  ? environment.noteNumbering?.footnote
-                  : t.noteRef.kind === 'endnote'
-                    ? environment.noteNumbering?.endnote
-                    : undefined,
-              )
-            : t.text || '';
-        if (label.length > 0) {
-          appendTextPiece(
-            segmentBuildContext,
-            label,
-            t,
-            t.vertAlign ?? null,
-            runIndex,
-            ownRunContext(label, t, environment),
-            0,
-            joinFromPreviousNoBreakHyphen,
-          );
-        }
+        appendTextPiece(
+          segmentBuildContext,
+          label,
+          t,
+          t.vertAlign ?? null,
+          runIndex,
+          ownRunContext(label, t, environment),
+          0,
+          joinFromPreviousNoBreakHyphen,
+        );
         for (let index = emittedStart; index < segs.length; index += 1) {
           segs[index].sourceRunIndex = runIndex;
         }
@@ -2438,4 +2438,17 @@ function admittedFaceDecoration(
 function listLabelOf(run: object): { listLabel?: LayoutTextSeg['listLabel'] } {
   const listLabel = (run as { listLabel?: LayoutTextSeg['listLabel'] }).listLabel;
   return listLabel === undefined ? {} : { listLabel };
+}
+
+/** The numbering a note reference label uses: its own section format when
+ * the note's number is a display value (NoteNumbering.formats), else its
+ * kind's format and start. */
+function noteNumberingOf(
+  numbering: LineLayoutEnvironment['noteNumbering'],
+  kind: string,
+  id: string,
+): Readonly<{ format: string; start: number }> | undefined {
+  if (!numbering || (kind !== 'footnote' && kind !== 'endnote')) return undefined;
+  const format = id ? numbering.formats?.get(`${kind}:${id}`) : undefined;
+  return format === undefined ? numbering[kind] : { format, start: 1 };
 }

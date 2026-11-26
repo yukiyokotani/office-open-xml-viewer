@@ -14,7 +14,7 @@ import type { DocumentLayout, NoteLayout, PaintNode } from './layout/types.js';
 const context = {
   font: '10px Arial', letterSpacing: '0px', fontKerning: 'none',
   measureText: (text: string) => ({
-    width: [...text].length * 6,
+    width: [...text.replace(/\u200b/gu, '')].length * 6,
     fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2,
     actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2,
   }),
@@ -70,8 +70,8 @@ function model(
     __noteLayoutSettings: {
       footnoteSeparator: 'short',
       footnoteContinuationSeparator: 'full',
-      ...(stories.separator ? { footnoteSeparatorParagraph: stories.separator } : {}),
-      ...(stories.continuationSeparator ? { footnoteContinuationSeparatorParagraph: stories.continuationSeparator } : {}),
+      ...(stories.separator ? { footnoteSeparatorStory: [stories.separator] } : {}),
+      ...(stories.continuationSeparator ? { footnoteContinuationSeparatorStory: [stories.continuationSeparator] } : {}),
     },
   } as unknown as DocxDocumentModel;
 }
@@ -116,9 +116,10 @@ it('moves the reference line and its whole note past an authored 24pt separator 
     { body: [lines('P', 14).join('')], notes: [] },
     { body: ['1B01B02'], notes: [lines('N1L', 4).join('')] },
   ]);
-  // The band is the story paragraph's exact line; the Short rule (existing
-  // one-third policy of the 180pt main width) stays centred in the band.
-  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
+  // The band is the story paragraph's exact line; the Short rule is
+  // min(144pt, 180pt) long and sits 10pt/8 below the band middle
+  // (WORD_NOTE_SEPARATOR_GEOMETRY).
+  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
 });
 
 it.each([
@@ -134,27 +135,29 @@ it.each([
     { body: [lines('P', 14).join(''), '1B01'], notes: [lines('N1L', 4).slice(0, head).join('')] },
     { body: ['B02'], notes: [lines('N1L', 4).slice(head).join('')] },
   ]);
-  expect(band(layout, 0)).toEqual({ heightPt: 6, ruleOffsetPt: 3, ruleWidthPt: 60 });
-  expect(band(layout, 1)).toEqual({ heightPt: 6, ruleOffsetPt: 3, ruleWidthPt: 180 });
+  expect(band(layout, 0)).toEqual({ heightPt: 6, ruleOffsetPt: 4.25, ruleWidthPt: 144 });
+  // WORD_NOTE_SEPARATOR_GEOMETRY: a continued footnote takes the separator story.
+  expect(band(layout, 1)).toEqual({ heightPt: 6, ruleOffsetPt: 4.25, ruleWidthPt: 144 });
 });
 
-it('charges each role its own story band and keeps scalar bands for an absent role', () => {
-  // B01 + 24 + fourteen head lines = 174; the continuation story's 12pt band
-  // then carries the sixteen remaining lines (172).
-  const separate = render(model(324, [paragraph(['B01'], [['1']])], paragraph(lines('N', 30)), {
-    separator: story(24), continuationSeparator: story(12),
-  }));
-  expect(pages(separate)).toEqual([
-    { body: ['1B01'], notes: [lines('N', 14).join('')] },
-    { body: [], notes: [lines('N', 30).slice(14).join('')] },
-  ]);
-  expect(band(separate, 0)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
-  expect(band(separate, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 6, ruleWidthPt: 180 });
-  // An unformatted (absent) continuation role keeps the 6pt scalar band.
-  const scalar = render(model(324, [paragraph(['B01'], [['1']])], paragraph(lines('N', 30)), {
-    separator: story(24),
-  }));
-  expect(band(scalar, 1)).toEqual({ heightPt: 6, ruleOffsetPt: 3, ruleWidthPt: 180 });
+it('separates a continued footnote with its separator story, never the continuation story', () => {
+  // WORD_NOTE_SEPARATOR_GEOMETRY: Word separates every footnote band,
+  // continued ones included, with the separator story. B01 + 24 + fourteen
+  // head lines = 174; each later page: 24 + fifteen lines.
+  for (const stories of [
+    { separator: story(24), continuationSeparator: story(12) },
+    { separator: story(24) },
+  ]) {
+    const layout = render(model(324, [paragraph(['B01'], [['1']])], paragraph(lines('N', 30)), stories));
+    expect(pages(layout)).toEqual([
+      { body: ['1B01'], notes: [lines('N', 14).join('')] },
+      { body: [], notes: [lines('N', 29).slice(14).join('')] },
+      { body: [], notes: [lines('N', 30).slice(29).join('')] },
+    ]);
+    for (const page of [0, 1, 2]) {
+      expect(band(layout, page)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
+    }
+  }
 });
 
 it('charges the story band with continuation off and keeps notes whole', () => {
@@ -165,7 +168,7 @@ it('charges the story band with continuation off and keeps notes whole', () => {
     { body: [lines('P', 14).join('')], notes: [] },
     { body: ['1B01B02'], notes: [lines('N1L', 4).join('')] },
   ]);
-  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
+  expect(band(layout, 1)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
 });
 
 /** An exact-line story with authored spacing before/after its mark line. */
@@ -175,25 +178,25 @@ const spaced = (linePt: number, spaceBefore: number, spaceAfter: number): DocPar
 it.each([
   // §17.3.1.33: spacing is allocated before/after the paragraph's lines, so
   // the mark's exact 10pt line box spans 0..10 or 12..22 of the band. The
-  // rule stays at that line box's midpoint, never in the spacing.
-  { name: 'after', separator: spaced(10, 0, 40), expected: { heightPt: 50, ruleOffsetPt: 5, ruleWidthPt: 60 } },
-  { name: 'before', separator: spaced(10, 12, 0), expected: { heightPt: 22, ruleOffsetPt: 17, ruleWidthPt: 60 } },
+  // rule stays 10pt/8 below that line box's midpoint, never in the spacing.
+  { name: 'after', separator: spaced(10, 0, 40), expected: { heightPt: 50, ruleOffsetPt: 6.25, ruleWidthPt: 144 } },
+  { name: 'before', separator: spaced(10, 12, 0), expected: { heightPt: 22, ruleOffsetPt: 18.25, ruleWidthPt: 144 } },
 ])('reserves authored $name spacing but draws the rule within the mark line box', ({ separator, expected }) => {
   const layout = render(model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), { separator }), false);
   expect(band(layout, 0)).toEqual(expected);
 });
 
-it('places each role\'s rule within its own mark line box at each page\'s band', () => {
-  // B01 + 50 + twelve head lines = 180; then 22 + fifteen lines per page.
+it('places the separator rule within its mark line box at each page\'s band', () => {
+  // B01 + 50 + twelve head lines = 180; then 50 + thirteen lines per page.
   const layout = render(model(324, [paragraph(['B01'], [['1']])], paragraph(lines('N', 30)), {
     separator: spaced(10, 0, 40), continuationSeparator: spaced(10, 12, 0),
   }));
   expect(pages(layout).map(page => page.notes)).toEqual([
-    [lines('N', 12).join('')], [lines('N', 27).slice(12).join('')], [lines('N', 30).slice(27).join('')],
+    [lines('N', 12).join('')], [lines('N', 25).slice(12).join('')], [lines('N', 30).slice(25).join('')],
   ]);
-  expect(band(layout, 0)).toEqual({ heightPt: 50, ruleOffsetPt: 5, ruleWidthPt: 60 });
-  expect(band(layout, 1)).toEqual({ heightPt: 22, ruleOffsetPt: 17, ruleWidthPt: 180 });
-  expect(band(layout, 2)).toEqual({ heightPt: 22, ruleOffsetPt: 17, ruleWidthPt: 180 });
+  for (const page of [0, 1, 2]) {
+    expect(band(layout, page)).toEqual({ heightPt: 50, ruleOffsetPt: 6.25, ruleWidthPt: 144 });
+  }
 });
 
 it('loads the story paragraph mark family with the document fonts', () => {
@@ -202,14 +205,26 @@ it('loads the story paragraph mark family with the document fonts', () => {
     .toContain('Story Mark Face');
 });
 
+it('loads the fonts of separator text and of its marker run', () => {
+  const separator = {
+    ...story(10),
+    runs: [textRun('SEPA', { fontFamily: 'Separator Text Face' }), textRun('', { fontFamily: 'Marker Run Face', __noteSeparatorMarker: true })],
+  } as unknown as DocParagraph;
+  const families = docxRenderedFontFamilies(model(324, controlBody(), paragraph(lines('N1L', 4)), { separator }));
+  expect(families).toEqual(expect.arrayContaining(['Separator Text Face', 'Marker Run Face']));
+});
+
 it.each([
-  { name: 'a story paragraph without its Short/Full mark', settings: { footnoteSeparatorParagraph: story(24) } },
-  { name: 'a story paragraph with runs', settings: {
-    footnoteSeparator: 'short', footnoteSeparatorParagraph: paragraph(['x'], [], 24),
+  { name: 'a story paragraph without its Short/Full mark', settings: { footnoteSeparatorStory: [story(24)] } },
+  { name: 'a story with two markers', settings: {
+    footnoteSeparator: 'short', footnoteSeparatorStory: [
+      { ...story(24), runs: [textRun('', { __noteSeparatorMarker: true })] },
+      { ...story(24), runs: [textRun('', { __noteSeparatorMarker: true })] },
+    ],
   } },
-  { name: 'a story paragraph with borders', settings: {
+  { name: 'a numbered story paragraph', settings: {
     footnoteSeparator: 'short',
-    footnoteSeparatorParagraph: { ...story(24), borders: { top: { style: 'single', width: 0.5, color: '000000', space: 0 } } },
+    footnoteSeparatorStory: [{ ...story(24), numbering: { numId: '1', level: 0 } }],
   } },
 ])('rejects $name instead of approximating it', ({ settings }) => {
   const document = {
@@ -231,7 +246,7 @@ it.each(['footnote', 'endnote'] as const)('measures bare selected %s stories wit
       [kind === 'footnote' ? 'footnotes' : 'endnotes']: [{ id: '1', content: [paragraph(['N01'])] }],
       __noteLayoutSettings: {
         [kind === 'footnote' ? 'footnoteSeparator' : 'endnoteSeparator']: mark,
-        [kind === 'footnote' ? 'footnoteSeparatorParagraph' : 'endnoteSeparatorParagraph']: story(12),
+        [kind === 'footnote' ? 'footnoteSeparatorStory' : 'endnoteSeparatorStory']: [story(12)],
       },
     } as unknown as DocxDocumentModel;
     const [note] = notesOnPage(render(document).pages[0]!);
@@ -251,14 +266,14 @@ it.each([false, true])('uses the continued endnote area story even at a new-note
       ? [{ id: '1', content: [paragraph(lines('E', 14))] }, { id: '2', content: [paragraph(lines('E', 30).slice(14))] }]
       : [{ id: '1', content: [paragraph(lines('E', 30))] }],
     __noteLayoutSettings: { endnoteSeparator: 'short', endnoteContinuationSeparator: 'full',
-      endnoteSeparatorParagraph: story(24), endnoteContinuationSeparatorParagraph: story(12) },
+      endnoteSeparatorStory: [story(24)], endnoteContinuationSeparatorStory: [story(12)] },
   } as unknown as DocxDocumentModel;
   const layout = render(document);
   expect(pages(layout).map(page => page.notes.join(''))).toEqual([
     lines('E', 14).join(''), lines('E', 30).slice(14).join(''),
   ]);
-  expect(band(layout, 0)).toEqual({ heightPt: 24, ruleOffsetPt: 12, ruleWidthPt: 60 });
-  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 6, ruleWidthPt: 180 });
+  expect(band(layout, 0)).toEqual({ heightPt: 24, ruleOffsetPt: 13.25, ruleWidthPt: 144 });
+  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 7.25, ruleWidthPt: 180 });
 });
 
 it('admits a listed endnote continuation story when the ordinary separator is absent', () => {
@@ -267,11 +282,89 @@ it('admits a listed endnote continuation story when the ordinary separator is ab
   body.runs.push(textRun('e', { noteRef: { kind: 'endnote', id: '1' } }) as DocParagraph['runs'][number]);
   const document = { ...base, body: [body], footnotes: [],
     endnotes: [{ id: '1', content: [paragraph(lines('E', 30))] }],
-    __noteLayoutSettings: { endnoteContinuationSeparator: 'full', endnoteContinuationSeparatorParagraph: story(12) },
+    __noteLayoutSettings: { endnoteContinuationSeparator: 'full', endnoteContinuationSeparatorStory: [story(12)] },
   } as unknown as DocxDocumentModel;
   const layout = render(document);
   expect(pages(layout).map(page => page.notes.join(''))).toEqual([
     lines('E', 16).join(''), lines('E', 30).slice(16).join(''),
   ]);
-  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 6, ruleWidthPt: 180 });
+  expect(band(layout, 1)).toEqual({ heightPt: 12, ruleOffsetPt: 7.25, ruleWidthPt: 180 });
+});
+
+/** A listed story with text around its marker (the parser's U+FFFC run). */
+function markerStory(before: string, after: string, extra: Record<string, unknown> = {}): DocParagraph {
+  const base = paragraph([], [], 10);
+  return {
+    ...base,
+    ...extra,
+    runs: [
+      ...(before ? [textRun(before)] : []),
+      textRun('', { __noteSeparatorMarker: true }),
+      ...(after ? [textRun(after)] : []),
+    ] as DocParagraph['runs'],
+  } as DocParagraph;
+}
+
+const leadingOf = (layout: DocumentLayout, pageIndex: number) => notesOnPage(layout.pages[pageIndex]!)[0]!;
+
+it('paints separator text inline before the marker and draws the rule at the marker', () => {
+  // 180pt area: SEPA advances 24pt, then the 144pt marker; WORD_NOTE_SEPARATOR_GEOMETRY.
+  const layout = render(model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), {
+    separator: markerStory('SEPA', ''),
+  }), false);
+  const note = leadingOf(layout, 0);
+  expect(note.separator).toEqual([]);
+  expect(note.leading?.paragraph && text(note.leading.paragraph)).toBe('SEPA');
+  expect(note.leading?.rule?.segment.from.xPt).toBeCloseTo(96, 6);
+  expect(note.leading?.rule?.segment.to.xPt).toBeCloseTo(240, 6);
+  expect(note.leading?.advancePt).toBe(10);
+});
+
+it('starts the rule of a bidi separator paragraph at its right edge', () => {
+  const layout = render(model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), {
+    separator: { ...story(10), bidi: true } as DocParagraph,
+  }), false);
+  const rule = leadingOf(layout, 0).separator[0]!;
+  expect([rule.from.xPt, rule.to.xPt]).toEqual([108, 252]);
+});
+
+it('gives a continuation marker its own line, with text after it on the next line', () => {
+  const document = model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), {
+    separator: markerStory('', 'CONT'),
+  });
+  (document as unknown as { __noteLayoutSettings: Record<string, unknown> })
+    .__noteLayoutSettings.footnoteSeparator = 'full';
+  const note = leadingOf(render(document, false), 0);
+  const leading = note.leading!;
+  expect(leading.paragraph!.kind === 'paragraph' && leading.paragraph!.lines.length).toBe(2);
+  expect(leading.advancePt).toBe(20);
+  expect([leading.rule!.segment.from.xPt, leading.rule!.segment.to.xPt]).toEqual([72, 252]);
+  expect(leading.rule!.segment.from.yPt - note.flowBounds.yPt).toBeCloseTo(6.25, 6);
+});
+
+it('keeps the mark line for a marker run raised like the rest of the document', () => {
+  // A w:position raise on the marker run does not lift its line: the band is
+  // the run-free paragraph's mark line.
+  const single = { lineSpacing: { value: 1, rule: 'auto', explicit: true } };
+  const raised = { ...markerStory('', ''), ...single,
+    runs: [textRun('', { __noteSeparatorMarker: true, position: 3 })] } as unknown as DocParagraph;
+  const bandOf = (separator: DocParagraph) =>
+    band(render(model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), { separator }), false), 0);
+  expect(bandOf(raised)).toEqual(bandOf({ ...story(10), ...single } as unknown as DocParagraph));
+});
+
+it('keeps a mark-only marker run on one line in an area narrower than 144pt', () => {
+  // A 20pt marker run in a 10pt paragraph: one 20pt line at any area width.
+  const narrow = (pageWidth: number) => {
+    const document = model(324, [paragraph(['B01'], [['1']])], paragraph(['N01']), {
+      separator: { ...markerStory('', ''), runs: [textRun('', { fontSize: 20, __noteSeparatorMarker: true })] } as DocParagraph,
+    });
+    document.section.pageWidth = pageWidth;
+    const note = leadingOf(render(document, false), 0);
+    return { heightPt: note.flowBounds.heightPt - note.story.advancePt, rule: note.separator[0] ?? note.leading?.rule?.segment };
+  };
+  const wide = narrow(324);
+  const tight = narrow(244);
+  expect(wide.heightPt).toBe(tight.heightPt);
+  expect(tight.rule!.to.xPt - tight.rule!.from.xPt).toBe(100);
 });

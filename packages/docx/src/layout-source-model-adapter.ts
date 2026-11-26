@@ -26,7 +26,7 @@ import type {
   SelectedNoteSeparatorDefinitionsInput,
 } from './layout/body-layout-input.js';
 import { normalizeReservedNoteSeparators } from './layout/reserved-note-separators.js';
-import { normalizeSelectedNoteSeparators } from './layout/selected-note-separators.js';
+import { normalizeSelectedNoteSeparators, selectedNoteSeparatorSource } from './layout/selected-note-separators.js';
 import {
   sealLayoutSourceStore,
   type LayoutSourceStore,
@@ -500,6 +500,27 @@ function buildLayoutSourceModelAdapter(
     privateDocument,
     documentTypographySettingsInput(privateDocument),
   );
+  // Inline pictures of the selected separator stories are painted from the
+  // same source-keyed registry as every other story's.
+  const separatorSettings = bodyLayoutInput.noteLayoutSettings;
+  const separatorResourceParagraphs = (['footnote', 'endnote'] as const).flatMap((kind) => {
+    const paragraphs = kind === 'footnote'
+      ? separatorSettings?.footnoteSeparatorParagraphs : separatorSettings?.endnoteSeparatorParagraphs;
+    return (['separator', 'continuationSeparator'] as const).flatMap((role) => {
+      const story = paragraphs?.[role];
+      const mark = kind === 'footnote'
+        ? role === 'separator' ? separatorSettings?.footnoteSeparator : separatorSettings?.footnoteContinuationSeparator
+        : role === 'separator' ? separatorSettings?.endnoteSeparator : separatorSettings?.endnoteContinuationSeparator;
+      if (!story || (mark !== 'short' && mark !== 'full' && mark !== 'none')) return [];
+      return story.map((paragraph, index) => {
+        const source = selectedNoteSeparatorSource(role, [index], kind);
+        return {
+          source,
+          runs: selectedNoteSeparatorParagraphAcquisitionInput(paragraph, source, mark).runs as unknown as readonly DocRun[],
+        };
+      });
+    });
+  });
   const resources = projectDocumentSnapshotResources(
     privateDocument,
     privateProjections,
@@ -515,13 +536,22 @@ function buildLayoutSourceModelAdapter(
       widthPt: numbering.picBulletWidthPt ?? marker.fontSizePt,
       heightPt: numbering.picBulletHeightPt ?? marker.fontSizePt,
     };
-  }, bodyLayoutInput.pageBackground);
+  }, bodyLayoutInput.pageBackground, separatorResourceParagraphs);
   const footnotes = frozenNotes(privateDocument.footnotes);
   const endnotes = frozenNotes(privateDocument.endnotes);
+  // Selected separator stories paint on every page with notes: a PAGE or
+  // NUMPAGES field in them depends on pagination like any other story's.
+  const separatorStories = [
+    bodyLayoutInput.noteLayoutSettings?.footnoteSeparatorParagraphs,
+    bodyLayoutInput.noteLayoutSettings?.endnoteSeparatorParagraphs,
+  ].flatMap((paragraphs) => paragraphs === undefined ? []
+    : [paragraphs.separator, paragraphs.continuationSeparator].flatMap((story) =>
+      // Story paragraphs are bare paragraph records (no block tag).
+      story === undefined ? [] : [story.map((paragraph) => ({ ...paragraph, type: 'paragraph' }) as unknown as BodyElement)]));
   const hasPaginationFields = paginatedFlowHasPaginationDependentFields(
     privateDocument.body,
     footnotes,
-    [...storyBodies(privateDocument), ...endnotes.map((note) => note.content)],
+    [...storyBodies(privateDocument), ...endnotes.map((note) => note.content), ...separatorStories],
   );
   const requiresDomVerticalGlyphLayout = documentRequiresDomVerticalGlyphLayout(privateDocument);
   const fatalParse = privateDocument.parseError === undefined ? null : {

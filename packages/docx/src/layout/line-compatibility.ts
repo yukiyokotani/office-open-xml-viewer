@@ -6,6 +6,46 @@ import type { OpenTypeLineMetrics, ResolvedFontMetric } from '@silurus/ooxml-cor
 import type { LineSpacing, TabStop } from '../types.js';
 import type { ParagraphLayoutSource } from './text.js';
 
+export const WORD_SECTION_NOTE_NUMBERING = defineCompatibilityRule({
+  id: 'word-section-note-numbering',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'section-note-numbering',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.11.4/§17.11.12 make settings.xml footnotePr/endnotePr the document-wide note properties that a section without its own §17.11.5/§17.11.11 properties uses. Word numbers notes from the section properties alone: a document-wide numFmt, numStart or numRestart in settings.xml changes no note number, and a section without its own properties takes the defaults (decimal footnotes, lowerRoman endnotes, start 1, continuous). Evidence: Windows Word 16.0.20625 PDF exports with settings.xml footnotePr upperLetter + numStart 0 + numRestart eachPage (footnotes numbered 1-6 continuously), settings.xml numRestart eachPage alone (1-6), settings.xml endnotePr numFmt bullet (i, ii, iii), while the same numRestart eachPage on the sectPr restarts footnotes on every page.',
+});
+
+export const WORD_NOTE_NUMBER_FORMAT_DEFAULTS = defineCompatibilityRule({
+  id: 'word-note-number-format-defaults',
+  evidence: {
+    kind: 'microsoft-note',
+    reference: '[MS-OI29500] §§2.1.306, 2.1.307, 2.1.308',
+  },
+  description: 'ECMA-376 §17.11.17 makes decimal the default endnote numbering format when endnotePr/numFmt is omitted; Word uses lowerRoman instead ([MS-OI29500] §2.1.306(a)). ECMA-376 §§17.11.17/17.11.18 allow numFmt="bullet" for endnotes and footnotes; Word numbers such notes with decimal instead ([MS-OI29500] §§2.1.306(b), 2.1.307(b)). ECMA-376 §17.11.20 types numStart as an integer; Word defines it as an unsignedShort ([MS-OI29500] §2.1.308), so a value outside 0-65535 is not a Word start and the default 1 applies. The footnote default stays decimal. Windows Word 16.0.20625 exports of endnote controls without endnotePr print the first endnote reference as "i".',
+});
+
+/** Whether a §17.11.20 numStart is a Word start value (an unsignedShort,
+ * WORD_NOTE_NUMBER_FORMAT_DEFAULTS). */
+export function wordNoteNumberStartIsValid(start: number): boolean {
+  return Number.isInteger(start) && start >= 0 && start <= 0xffff;
+}
+
+/** Effective §17.11.17/.18 note numbering format under
+ * WORD_NOTE_NUMBER_FORMAT_DEFAULTS: an absent endnote format is lowerRoman,
+ * an absent footnote format decimal, and bullet numbers as decimal. */
+export function wordNoteNumberFormat(
+  kind: 'footnote' | 'endnote',
+  format: string | undefined,
+): string {
+  if (typeof format !== 'string' || format.length === 0) {
+    return kind === 'endnote' ? 'lowerRoman' : 'decimal';
+  }
+  return format === 'bullet' ? 'decimal' : format;
+}
+
 export const WORD_TAB_DISPLACED_READING_FRAME = defineCompatibilityRule({
   id: 'word-float-tab-reading-frame',
   evidence: {

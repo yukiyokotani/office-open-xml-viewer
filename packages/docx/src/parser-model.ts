@@ -10,9 +10,11 @@ import type {
   ReservedNoteSeparatorStoryInput,
   NoteSeparatorMark,
   NoteSeparatorInput,
+  NoteNumberingInput,
+  SectionNoteNumberingInput,
   SelectedNoteSeparatorParagraphsInput,
 } from './layout/body-layout-input.js';
-import { wordKerningApplies } from './layout/line-compatibility.js';
+import { wordKerningApplies, wordNoteNumberFormat, wordNoteNumberStartIsValid } from './layout/line-compatibility.js';
 import type {
   BodyElement,
   DocParagraph,
@@ -100,6 +102,7 @@ import type {
   BodyLayoutSequenceEntryFor,
 } from './layout/body-layout-input.js';
 import { pageObjectStorySource, projectBodyLayoutInput } from './layout/body-layout-input.js';
+import { isNoteSeparatorMarkerRun, noteSeparatorMarkerAdvancePt } from './layout/selected-note-separators.js';
 import { buildDocxCompatProfile, type DocxCompatSettingsInput } from './layout/compat-profile.js';
 import { pageBackgroundAcquisitionInput, pageBackgroundStorySource } from './layout/page-background.js';
 import type { BodyAcquisitionInputProjections } from './layout/acquisition-input-projections.js';
@@ -327,16 +330,27 @@ export interface InternalDocxDocumentModel extends DocxDocumentModel {
     footnoteNumberStart?: number;
     endnoteNumberFormat?: string;
     endnoteNumberStart?: number;
+    footnoteNumberRestart?: string;
+    endnoteNumberRestart?: string;
+    footnoteNumberCustomFormat?: string;
+    endnoteNumberCustomFormat?: string;
+    /** §17.11.5/.11 section-wide overrides, one entry per body section. */
+    sectionNoteNumbering?: readonly Readonly<{
+      footnote?: InternalNoteNumberingWire;
+      endnote?: InternalNoteNumberingWire;
+      /** §17.11.21 w:pos of the section's own footnotePr (§17.11.11). */
+      footnotePosition?: string;
+    }>[];
     footnoteSeparator?: NoteSeparatorMark;
     endnoteSeparator?: NoteSeparatorMark;
     endnoteContinuationSeparator?: NoteSeparatorMark;
     footnoteContinuationSeparator?: NoteSeparatorMark;
     /** Ordinary DOCX producer only: effective paragraphs of listed separator
      * stories; see SelectedNoteSeparatorParagraphsInput. */
-    footnoteSeparatorParagraph?: DocParagraph;
-    footnoteContinuationSeparatorParagraph?: DocParagraph;
-    endnoteSeparatorParagraph?: DocParagraph;
-    endnoteContinuationSeparatorParagraph?: DocParagraph;
+    footnoteSeparatorStory?: DocParagraph[];
+    footnoteContinuationSeparatorStory?: DocParagraph[];
+    endnoteSeparatorStory?: DocParagraph[];
+    endnoteContinuationSeparatorStory?: DocParagraph[];
     /** Producer extension only (not WordprocessingML); see
      * ReservedNoteSeparatorsInput. */
     reservedSeparators?: ReservedNoteSeparatorsInput;
@@ -383,11 +397,21 @@ function documentPageLayoutSettingsInput(
   }, 'DOCX page layout settings input');
 }
 
+/** Parser wire of one note properties element's numbering facts. */
+interface InternalNoteNumberingWire {
+  readonly format?: string;
+  readonly customFormat?: string;
+  readonly start?: number;
+  readonly restart?: string;
+}
+
 export interface DocumentNoteLayoutSettingsInput {
   readonly footnotePosition: string;
+  readonly sectionFootnotePositions?: readonly string[];
   readonly endnotePosition: string;
-  readonly footnoteNumbering: Readonly<{ format: string; start: number }>;
-  readonly endnoteNumbering: Readonly<{ format: string; start: number }>;
+  readonly footnoteNumbering: NoteNumberingInput;
+  readonly endnoteNumbering: NoteNumberingInput;
+  readonly sectionNoteNumbering?: readonly SectionNoteNumberingInput[];
   readonly footnoteSeparator: NoteSeparatorInput;
   readonly endnoteSeparator: NoteSeparatorInput;
   readonly endnoteContinuationSeparator: NoteSeparatorInput;
@@ -471,21 +495,19 @@ function selectedNoteSeparatorParagraphsInput(
   fixedParagraphAutoSpacing: boolean,
 ): Readonly<{ footnoteSeparatorParagraphs?: SelectedNoteSeparatorParagraphsInput;
   endnoteSeparatorParagraphs?: SelectedNoteSeparatorParagraphsInput }> {
-  const resolve = (paragraph: DocParagraph | undefined, mark: unknown): DocParagraph | undefined => {
-    if (paragraph === undefined) return undefined;
+  const resolve = (story: readonly DocParagraph[] | undefined, mark: unknown): readonly DocParagraph[] | undefined => {
+    if (story === undefined) return undefined;
     if (mark !== 'short' && mark !== 'full' && mark !== 'none') throw new Error('Unsupported note separator story paragraph');
-    if (paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true) return paragraph;
-    return {
-      ...paragraph,
-      ...resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing),
-    };
+    return story.map((paragraph) => paragraph.beforeAutospacing !== true && paragraph.afterAutospacing !== true
+      ? paragraph
+      : { ...paragraph, ...resolveAutomaticParagraphMarginsPt(paragraph, fixedParagraphAutoSpacing) });
   };
-  const separator = resolve(settings?.footnoteSeparatorParagraph, settings?.footnoteSeparator);
+  const separator = resolve(settings?.footnoteSeparatorStory, settings?.footnoteSeparator);
   const continuationSeparator = resolve(
-    settings?.footnoteContinuationSeparatorParagraph, settings?.footnoteContinuationSeparator,
+    settings?.footnoteContinuationSeparatorStory, settings?.footnoteContinuationSeparator,
   );
-  const endnoteSeparator = resolve(settings?.endnoteSeparatorParagraph, settings?.endnoteSeparator);
-  const endnoteContinuationSeparator = resolve(settings?.endnoteContinuationSeparatorParagraph, settings?.endnoteContinuationSeparator);
+  const endnoteSeparator = resolve(settings?.endnoteSeparatorStory, settings?.endnoteSeparator);
+  const endnoteContinuationSeparator = resolve(settings?.endnoteContinuationSeparatorStory, settings?.endnoteContinuationSeparator);
   return {
     ...(endnoteSeparator || endnoteContinuationSeparator ? { endnoteSeparatorParagraphs: {
       ...(endnoteSeparator ? { separator: endnoteSeparator } : {}),
@@ -498,15 +520,44 @@ function selectedNoteSeparatorParagraphsInput(
   };
 }
 
-/** §17.11.17/.18 numFmt defaults to decimal and §17.11.20 numStart to 1 for
- * both note kinds when the document-wide element is absent. */
+/** Effective note numbering of one note kind: the §17.11.17/.18 numFmt
+ * (`custom:<pattern>` for a custom numFmt/@format) under Word's defaults,
+ * the §17.11.20 numStart and the §17.11.19 numRestart
+ * (WORD_NOTE_NUMBER_FORMAT_DEFAULTS). Word reads numStart as an
+ * unsignedShort; another producer keeps any safe integer. */
 function noteNumberingInput(
-  format: string | undefined,
-  start: number | undefined,
-): Readonly<{ format: string; start: number }> {
+  kind: 'footnote' | 'endnote',
+  wire: InternalNoteNumberingWire,
+  word: boolean,
+): NoteNumberingInput {
+  const start = wire.start;
+  const restart = wire.restart === 'eachSect' || (wire.restart === 'eachPage' && kind === 'footnote')
+    ? wire.restart
+    : 'continuous';
   return {
-    format: typeof format === 'string' && format.length > 0 ? format : 'decimal',
-    start: typeof start === 'number' && Number.isSafeInteger(start) ? start : 1,
+    format: wire.format === 'custom' && typeof wire.customFormat === 'string' && wire.customFormat.length > 0
+      ? `custom:${wire.customFormat}`
+      : wordNoteNumberFormat(kind, wire.format),
+    start: typeof start === 'number' && Number.isSafeInteger(start)
+      && (!word || wordNoteNumberStartIsValid(start)) ? start : 1,
+    restart,
+  };
+}
+
+/** Field-wise §17.11.5/.11 override of document-wide numbering facts. */
+function mergedNoteNumberingWire(
+  document: InternalNoteNumberingWire,
+  section: InternalNoteNumberingWire | undefined,
+): InternalNoteNumberingWire {
+  if (!section) return document;
+  const format = section.format ?? document.format;
+  return {
+    ...(format === undefined ? {} : { format }),
+    ...(section.format !== undefined
+      ? (section.customFormat === undefined ? {} : { customFormat: section.customFormat })
+      : (document.customFormat === undefined ? {} : { customFormat: document.customFormat })),
+    ...((section.start ?? document.start) === undefined ? {} : { start: section.start ?? document.start }),
+    ...((section.restart ?? document.restart) === undefined ? {} : { restart: section.restart ?? document.restart }),
   };
 }
 
@@ -514,18 +565,46 @@ function documentNoteLayoutSettingsInput(
   doc: DocxDocumentModel,
 ): DocumentNoteLayoutSettingsInput {
   const settings = (doc as InternalDocxDocumentModel).__noteLayoutSettings;
+  const word = (doc.settings as Readonly<{ __libreOfficeLineBoxes?: boolean }> | undefined)
+    ?.__libreOfficeLineBoxes !== true;
+  const documentWire = (kind: 'footnote' | 'endnote'): InternalNoteNumberingWire => {
+    const format = kind === 'footnote' ? settings?.footnoteNumberFormat : settings?.endnoteNumberFormat;
+    const customFormat = kind === 'footnote'
+      ? settings?.footnoteNumberCustomFormat : settings?.endnoteNumberCustomFormat;
+    const start = kind === 'footnote' ? settings?.footnoteNumberStart : settings?.endnoteNumberStart;
+    const restart = kind === 'footnote' ? settings?.footnoteNumberRestart : settings?.endnoteNumberRestart;
+    return {
+      ...(format === undefined ? {} : { format }),
+      ...(customFormat === undefined ? {} : { customFormat }),
+      ...(start === undefined ? {} : { start }),
+      ...(restart === undefined ? {} : { restart }),
+    };
+  };
+  const footnoteWire = documentWire('footnote');
+  const endnoteWire = documentWire('endnote');
+  const sectionNoteNumbering = settings?.sectionNoteNumbering?.length
+    ? settings.sectionNoteNumbering.map((section) => ({
+      footnote: noteNumberingInput('footnote', mergedNoteNumberingWire(footnoteWire, section.footnote), word),
+      endnote: noteNumberingInput('endnote', mergedNoteNumberingWire(endnoteWire, section.endnote), word),
+    }))
+    : undefined;
   return snapshotPlainData({
-    // §17.11.21/.22 defaults when document-wide w:pos is absent.
-    footnotePosition: settings?.footnotePosition ?? 'pageBottom',
+    // §17.11.21/.22 defaults when w:pos is absent. A section's own footnotePr
+    // position (§17.11.11) places its footnotes; the DOCX parser keeps no
+    // settings.xml position (WORD_FOOTNOTE_BENEATH_TEXT). The document
+    // reports the first section position other than pageBottom.
+    // The DOCX parser states section positions only; another producer
+    // (legacy DOC, ODT) states one document position.
+    footnotePosition: settings?.footnotePosition ?? (settings?.sectionNoteNumbering ?? [])
+      .map((section) => section.footnotePosition ?? 'pageBottom')
+      .find((position) => position !== 'pageBottom') ?? 'pageBottom',
+    ...(settings?.sectionNoteNumbering?.some((section) => section.footnotePosition !== undefined) ? {
+      sectionFootnotePositions: settings.sectionNoteNumbering.map((section) => section.footnotePosition ?? 'pageBottom'),
+    } : {}),
     endnotePosition: settings?.endnotePosition ?? 'docEnd',
-    footnoteNumbering: noteNumberingInput(
-      settings?.footnoteNumberFormat,
-      settings?.footnoteNumberStart,
-    ),
-    endnoteNumbering: noteNumberingInput(
-      settings?.endnoteNumberFormat,
-      settings?.endnoteNumberStart,
-    ),
+    footnoteNumbering: noteNumberingInput('footnote', footnoteWire, word),
+    endnoteNumbering: noteNumberingInput('endnote', endnoteWire, word),
+    ...(sectionNoteNumbering ? { sectionNoteNumbering } : {}),
     footnoteSeparator: noteSeparatorInput(settings?.footnoteSeparator),
     endnoteSeparator: noteSeparatorInput(settings?.endnoteSeparator),
     endnoteContinuationSeparator: noteSeparatorInput(settings?.endnoteContinuationSeparator),
@@ -2106,18 +2185,56 @@ export function reservedNoteSeparatorParagraphAcquisitionInput(
   }) as unknown as ParagraphAcquisitionInput;
 }
 
+/** The zero-width metrics run of a separator marker: the marker's font and
+ * size, unraised (§17.3.2.24 w:position does not lift the rule's line). */
+function separatorMarkerMetricsRun(run: DocRun): DocRun {
+  const typography = (run as Readonly<{ __typographyAcquisition?: Record<string, unknown> }>).__typographyAcquisition;
+  return {
+    ...run,
+    text: '\u200b',
+    noBreakBefore: true,
+    position: undefined,
+    ...(typography ? { __typographyAcquisition: { ...typography, positionPt: { status: 'valid', raw: '0', value: 0 } } } : {}),
+  } as unknown as DocRun;
+}
+
 /** Immutable acquisition input of an ordinary DOCX formatted separator
- * paragraph. Its single mark run carries the paragraph mark's own rPr (the
- * parser admits nothing else), so the run-free paragraph reserves exactly the
- * shared paragraph-mark line box with the paragraph's spacing and line rule. */
+ * paragraph. A run-free paragraph (no marker) reserves the paragraph-mark line
+ * box with the paragraph's spacing and line rule; a marker run is laid out in
+ * place, so the paragraph's indents and alignment position its rule. */
 export function selectedNoteSeparatorParagraphAcquisitionInput(
   paragraph: DeepReadonly<DocParagraph>,
   source: SourceRef,
+  mark: 'short' | 'full' | 'none' = 'short',
 ): ParagraphAcquisitionInput {
+  // The run-free shape, or text runs around the marker: the marker run keeps
+  // its properties as a zero-width text run (its line metrics) followed by
+  // one empty inline object of the marker's advance, where layout draws the
+  // rule; a continuation marker owns its whole line
+  // (WORD_NOTE_SEPARATOR_GEOMETRY).
+  const authored = (paragraph.runs ?? []) as readonly DocRun[];
+  const markerIndex = authored.findIndex(isNoteSeparatorMarkerRun);
+  const lineBreak = { type: 'break', breakType: 'line' } as DocRun;
+  const runs = markerIndex < 0 ? authored : authored.flatMap((run, index) => {
+    if (index !== markerIndex) return [run];
+    const fillsLine = mark === 'full';
+    return [
+      ...(fillsLine && index > 0 && authored[index - 1]?.type !== 'break' ? [lineBreak] : []),
+      {
+        type: 'shape', inline: true, widthPt: noteSeparatorMarkerAdvancePt(mark), heightPt: 0,
+        subpaths: [], fill: null, stroke: null, wrapMode: null,
+      } as unknown as DocRun,
+      // Glued to the marker object so it shares the object's line. It lends
+      // the line its font metrics, not a w:position raise: a marker formatted
+      // like its paragraph mark keeps the mark's line.
+      separatorMarkerMetricsRun(run),
+      ...(fillsLine && index < authored.length - 1 && authored[index + 1]?.type !== 'break' ? [lineBreak] : []),
+    ];
+  });
   return paragraphAcquisitionInput({
     ...(paragraph as unknown as DocParagraph),
     type: 'paragraph',
-    runs: [],
+    runs,
   } as unknown as ParagraphLayoutSource, source);
 }
 

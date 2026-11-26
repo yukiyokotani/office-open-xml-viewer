@@ -119,17 +119,19 @@ export type SelectedNoteSeparatorRole = 'separator' | 'continuationSeparator';
  * separator stories. The source-model adapter replaces them
  * with {@link SelectedNoteSeparatorDefinitionsInput} before sealing. */
 export type SelectedNoteSeparatorParagraphsInput = Readonly<
-  Partial<Record<SelectedNoteSeparatorRole, DeepReadonly<DocParagraph>>>
+  Partial<Record<SelectedNoteSeparatorRole, readonly DeepReadonly<DocParagraph>[]>>
 >;
 
 /** Canonical definition of one ordinary DOCX selected story: a `selected:*`
  * root (never native `reserved:*` provenance or a DOCX note id) shared by
- * every page occurrence, and its single paragraph `[0]`. Its mark stays the
- * role's existing Short/Full separator mode. */
+ * every page occurrence, its `paragraphCount` paragraphs `[0..n)`, and the
+ * paragraph holding its marker (or `[0]` without one). Its mark stays the
+ * role's existing Short/Full/None separator mode. */
 export interface SelectedNoteSeparatorDefinitionInput {
   readonly role: SelectedNoteSeparatorRole;
   readonly root: SourceRef;
   readonly paragraph: SourceRef;
+  readonly paragraphCount: number;
 }
 
 export type SelectedNoteSeparatorDefinitionsInput = Readonly<
@@ -272,9 +274,13 @@ export interface BodyLayoutInput {
   readonly repeatedFootnoteLastEntries?: readonly Readonly<{ id: string; entryIndex: number }>[];
   readonly noteLayoutSettings?: Readonly<{
     footnotePosition: string;
+    /** §17.11.21 footnote position of each body section, in section order
+     * (WORD_FOOTNOTE_BENEATH_TEXT). */
+    sectionFootnotePositions?: readonly string[];
     endnotePosition: string;
     footnoteNumbering?: NoteNumberingInput;
     endnoteNumbering?: NoteNumberingInput;
+    sectionNoteNumbering?: readonly SectionNoteNumberingInput[];
     footnoteSeparator?: NoteSeparatorInput;
     endnoteSeparator?: NoteSeparatorInput;
     endnoteContinuationSeparator?: NoteSeparatorInput;
@@ -294,12 +300,23 @@ export interface BodyLayoutInput {
   }>;
 }
 
-/** ECMA-376 §17.11.17/.18 numFmt and §17.11.20 numStart for one note kind. */
+/** ECMA-376 §17.11.17/.18 numFmt, §17.11.20 numStart and §17.11.19
+ * numRestart for one note kind. */
 export interface NoteNumberingInput {
-  /** ST_NumberFormat (§17.18.59); `decimal` when not authored. */
+  /** ST_NumberFormat (§17.18.59), or `custom:<pattern>` for a custom
+   * numFmt/@format; WORD_NOTE_NUMBER_FORMAT_DEFAULTS when not authored. */
   readonly format: string;
   /** First automatic note number; 1 when not authored. */
   readonly start: number;
+  /** ST_RestartNumber (§17.18.74); continuous when not authored. */
+  readonly restart?: 'continuous' | 'eachSect' | 'eachPage';
+}
+
+/** Effective note numbering of one section (§17.11.5/.11 over the
+ * document-wide §17.11.4/.12 facts), in body section order. */
+export interface SectionNoteNumberingInput {
+  readonly footnote: NoteNumberingInput;
+  readonly endnote: NoteNumberingInput;
 }
 
 export interface BodyLayoutAcquisitionInput {
@@ -312,9 +329,11 @@ export interface BodyLayoutAcquisitionInput {
   readonly repeatedFootnoteLastEntries?: readonly Readonly<{ id: string; entryIndex: number }>[];
   readonly noteLayoutSettings: Readonly<{
     footnotePosition: string;
+    sectionFootnotePositions?: readonly string[];
     endnotePosition: string;
     footnoteNumbering?: NoteNumberingInput;
     endnoteNumbering?: NoteNumberingInput;
+    sectionNoteNumbering?: readonly SectionNoteNumberingInput[];
     footnoteSeparator?: NoteSeparatorInput;
     endnoteSeparator?: NoteSeparatorInput;
     endnoteContinuationSeparator?: NoteSeparatorInput;

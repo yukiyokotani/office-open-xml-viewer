@@ -13,6 +13,86 @@ import type {
   WritingMode,
 } from './types.js';
 
+export const WORD_NOTE_SEPARATOR_GEOMETRY = defineCompatibilityRule({
+  id: 'word-note-separator-geometry',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'note-separator-geometry',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §§17.11.1/17.11.23 give the continuation mark the main-story width and the ordinary mark a shorter, unspecified width; §17.11.3/.9 select the special notes listed in settings. Word draws the ordinary (short) rule min(144pt, note-area width) long from the area start (a column in per-column note bands, the page-wide area in compatibility mode 15), the rule is font size / 20 thick, and its centre lies an eighth of the separator mark font size below the middle of the separator line box. Special separator stories that settings.xml does not list are ignored: Word lays out its default separator, one Normal-style mark-only line, single-spaced with no space after whatever the Normal spacing, with a short rule, whatever the unlisted story holds (larger or smaller mark, spacing, exact line, another font, an empty paragraph, or no story). Its default footnote continuation separator is short as well, while its default endnote continuation separator spans the area width. A footnote continued onto a page is separated by the separator story, never the continuation story; an endnote continuation takes its continuation story. The rule starts at the separator paragraph\'s start edge (the right edge of a bidi separator paragraph, the left edge otherwise, whatever the section direction; a mode-15 page-wide area in a right-to-left two-column section still starts at its left edge). A listed story may hold text runs around the mark run: the short mark lays out inline as a 144pt object between them and the rule is drawn at its position, the continuation mark owns its own line (text before and after it takes the lines around it), and the mark run\'s own font size sets the line and rule (a 20pt mark run in a 10pt paragraph gives a 23pt line with a 1pt rule) while an East Asian hint on the mark changes nothing. Evidence: Windows Word 16.0.20625 PDF exports. 21 controls vary listed and unlisted stories, the mark size (6/10/20pt), the separator paragraph spacing and line rule, the Normal font (Times New Roman/Arial) and size (10/14pt), an empty story, a missing story and the note number format. 14 controls vary the text width (100, 144, 200 and 468pt), two 120pt columns in modes 14 and 15, and multi-page footnotes and endnotes at 468 and 200pt. 22 further controls place text before and after the mark, a continuation mark followed by text, a 20pt mark run, an East Asian hinted mark, bidi and non-bidi separator paragraphs in right-to-left and left-to-right sections, two right-to-left 120pt columns in modes 14 and 15 and a 200pt right-to-left continuation, for footnotes and endnotes; 20 more vary the Normal spacing after (0 and 12pt) under unlisted stories. A public specimen exports a 144pt rule at a 467.7pt column with a 9pt exact-12pt separator line (Windows and Mac). Measured rule centres lie 7.0pt (10pt mark, 11.5pt line), 14.0pt (20pt mark, 23pt line), 9.8pt (14pt mark, 16.1pt line) and 7.0pt (9pt mark, exact 12pt line) below the band top.',
+});
+
+/** Length of Word's ordinary (short) note separator rule. */
+export function wordShortNoteSeparatorLengthPt(areaWidthPt: number): number {
+  return Math.max(0, Math.min(144, areaWidthPt));
+}
+
+/** Horizontal extent of a note separator rule.
+ *
+ * Word (WORD_NOTE_SEPARATOR_GEOMETRY): the rule lies in the note area, every
+ * column of the section for a page-wide area, and starts at the separator
+ * paragraph's start edge (the right edge of a right-to-left paragraph,
+ * whatever the section direction). The continuation mark spans the area and
+ * the ordinary mark is min(144pt, area width); a story-less continuation
+ * role is full (a Word footnote continuation uses the separator role). Another producer keeps the library policy: the rule starts
+ * at the column's left edge, the ordinary mark is a third of the column and
+ * a story-less continuation spans it. */
+/** The note area a separator lays out in: the note container, or under Word
+ * geometry the page-wide area across every column of the section. */
+export function noteSeparatorArea(input: Readonly<{
+  word: boolean;
+  pageWide: boolean;
+  container: Readonly<{ xPt: number; widthPt: number }>;
+  columns: readonly Readonly<{ xPt: number; wPt: number }>[];
+}>): Readonly<{ xPt: number; widthPt: number }> {
+  if (!input.word || !input.pageWide || input.columns.length <= 1) {
+    return { xPt: input.container.xPt, widthPt: input.container.widthPt };
+  }
+  const left = Math.min(...input.columns.map((column) => column.xPt));
+  const right = Math.max(...input.columns.map((column) => column.xPt + column.wPt));
+  return { xPt: left, widthPt: Math.max(0, right - left) };
+}
+
+export function noteSeparatorRuleSpan(input: Readonly<{
+  word: boolean;
+  kind: 'footnote' | 'endnote';
+  mode: 'short' | 'full' | 'none' | 'default' | undefined;
+  continuing: boolean;
+  pageWide: boolean;
+  rtl: boolean;
+  container: Readonly<{ xPt: number; widthPt: number }>;
+  columns: readonly Readonly<{ xPt: number; wPt: number }>[];
+}>): Readonly<{ fromXPt: number; toXPt: number }> {
+  const storyless = input.mode === undefined || input.mode === 'default';
+  if (!input.word) {
+    const full = input.mode === 'full' || (storyless && input.continuing);
+    const length = full ? input.container.widthPt : input.container.widthPt / 3;
+    return { fromXPt: input.container.xPt, toXPt: input.container.xPt + length };
+  }
+  const area = noteSeparatorArea(input);
+  const left = area.xPt;
+  const right = area.xPt + area.widthPt;
+  const width = area.widthPt;
+  const full = input.mode === 'full' || (storyless && input.continuing);
+  const length = full ? width : wordShortNoteSeparatorLengthPt(width);
+  return input.rtl
+    ? { fromXPt: right - length, toXPt: right }
+    : { fromXPt: left, toXPt: left + length };
+}
+
+/** Word note separator rule thickness: one twentieth of the mark font size. */
+export function wordNoteSeparatorRuleWidthPt(markFontSizePt: number): number {
+  return markFontSizePt / 20;
+}
+
+/** Distance of Word's separator rule centre below its line box middle. */
+export function wordNoteSeparatorRuleDropPt(markFontSizePt: number): number {
+  return markFontSizePt / 8;
+}
+
 export const WORD_PRE_BREAK_ANCHOR_PARAGRAPH = defineCompatibilityRule({
   id: 'word-pre-break-anchor-paragraph',
   evidence: {
@@ -729,6 +809,18 @@ export function wordFootnoteLookaheadBoundary(entry: BodyLayoutInput['sequence']
     || (entry.kind === 'begin-section' && entry.section.startType !== 'continuous')
     || (entry.kind === 'body-block' && entry.block.kind === 'paragraph' && entry.block.pageBreakBefore);
 }
+
+export const WORD_FOOTNOTE_BENEATH_TEXT = defineCompatibilityRule({
+  id: 'word-footnote-beneath-text',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'footnote-beneath-text',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'ECMA-376 §17.11.21 places beneathText footnotes "immediately below the last line of text on the page". Word reads the position from the section\'s own footnotePr only: beneathText in settings.xml alone leaves the footnotes at the page bottom, a section beneathText wins over settings pageBottom, and a section pageBottom wins over settings beneathText. The footnote area (separator band, then the notes) starts at the bottom of the last body line of the page, including a paragraph that holds a page break, and a page whose text reaches the bottom keeps the pagination of pageBottom with the notes right below its last line. A section that follows on the next page keeps its own position. In two compatibility-mode-15 columns the page-wide note area starts below the deeper column and flows through the columns. Evidence: Windows Word 16.0.20625 PDF exports, 9 controls (settings only, section only, section over settings both ways, a full page, a page ending in a page break, one note per page, beneathText then pageBottom sections, two columns).',
+});
 
 export const WORD_PER_COLUMN_FOOTNOTE_BANDS = defineCompatibilityRule({
   id: 'word-per-column-footnote-bands',

@@ -366,6 +366,17 @@ export function placeNoteSeparatorOccurrence(
         },
       }),
     } : {}),
+    ...(occurrence.followingParagraphs ? {
+      followingParagraphs: Object.freeze(occurrence.followingParagraphs.map((block, index) =>
+        projectBodyOccurrence(block, {
+          occurrenceId: `${destination.occurrenceId}:${index + 1}`,
+          destination: {
+            coordinateSpace: 'logical-page-points',
+            flowDomainId: destination.flowDomainId,
+            translation: delta,
+          },
+        }))),
+    } : {}),
     ...(occurrence.rule ? {
       rule: Object.freeze({ ...occurrence.rule, segment: translateBorder(occurrence.rule.segment, delta) }),
     } : {}),
@@ -376,6 +387,7 @@ export function placeNoteSeparatorOccurrence(
 export function noteOwnedBlocks(note: NoteLayout): readonly PaintNode[] {
   return [
     ...(note.leading?.paragraph ? [note.leading.paragraph] : []),
+    ...(note.leading?.followingParagraphs ?? []),
     ...note.story.blocks,
     ...(note.trailing?.paragraph ? [note.trailing.paragraph] : []),
   ];

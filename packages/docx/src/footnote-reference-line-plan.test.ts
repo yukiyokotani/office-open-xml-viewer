@@ -239,12 +239,12 @@ it.each([
   (document as unknown as Record<string, unknown>).__noteLayoutSettings = {
     footnoteSeparator: 'short',
     footnoteContinuationSeparator: 'full',
-    footnoteSeparatorParagraph: paragraph([], [], {}),
-    footnoteContinuationSeparatorParagraph: paragraph([], [], {}),
+    footnoteSeparatorStory: [paragraph([], [], {})],
+    footnoteContinuationSeparatorStory: [paragraph([], [], {})],
   };
-  for (const story of ['footnoteSeparatorParagraph', 'footnoteContinuationSeparatorParagraph']) {
-    const settings = (document as unknown as { __noteLayoutSettings: Record<string, DocParagraph> }).__noteLayoutSettings;
-    settings[story] = { ...settings[story]!, lineSpacing: { value: separatorPt, rule: 'exact', explicit: true } } as DocParagraph;
+  for (const story of ['footnoteSeparatorStory', 'footnoteContinuationSeparatorStory']) {
+    const settings = (document as unknown as { __noteLayoutSettings: Record<string, DocParagraph[]> }).__noteLayoutSettings;
+    settings[story] = [{ ...settings[story]![0]!, lineSpacing: { value: separatorPt, rule: 'exact', explicit: true } } as DocParagraph];
   }
   const body = lines('B', bodyLines).join('') + '1';
   expect(pages(render(document))).toEqual(head === noteLines
@@ -260,7 +260,7 @@ function withExactSeparator(document: DocxDocumentModel, pt: number): DocxDocume
   const story = { ...paragraph([]), lineSpacing: { value: pt, rule: 'exact', explicit: true } };
   (document as unknown as Record<string, unknown>).__noteLayoutSettings = {
     footnoteSeparator: 'short', footnoteContinuationSeparator: 'full',
-    footnoteSeparatorParagraph: story, footnoteContinuationSeparatorParagraph: story,
+    footnoteSeparatorStory: [story], footnoteContinuationSeparatorStory: [story],
   };
   return document;
 }

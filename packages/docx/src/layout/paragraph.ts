@@ -151,6 +151,7 @@ import {
   translateTextBox,
   translateTextBoxStoryTable,
 } from './retained-geometry-translation.js';
+
 export { translateParagraphLayout } from './retained-geometry-translation.js';
 import { paginationFieldDependency } from './pagination-fields.js';
 import {
@@ -238,6 +239,8 @@ import type {
   TextPlacement,
   WrapExclusion,
 } from './types.js';
+
+const EMPTY_NOTE_NUMBERS: ReadonlyMap<string, number> = new Map();
 
 function finiteNonNegative(value: number, name: string): number {
   if (!Number.isFinite(value) || value < 0) {
@@ -6679,10 +6682,10 @@ function paragraphAcquisitionKey(
       keysPageFields ? environment.displayPageNumber ?? null : null,
       keysPageFields ? environment.pageNumberFormat ?? null : null,
       keysPageFields ? environment.currentDateMs ?? null : null,
-      !keysNotes || !environment.noteNumbers
-        ? null
-        : [...environment.noteNumbers.entries()]
-          .sort(([left], [right]) => left.localeCompare(right)),
+      // One ordinal per session's exact note numbers and per-note formats.
+      !keysNotes ? null : cache.noteNumberingKey(
+        environment.noteNumbers ?? EMPTY_NOTE_NUMBERS, environment.noteNumbering?.formats,
+      ),
       keysNotes ? environment.noteReferenceNumber ?? null : null,
       !keysNotes ? null : environment.noteNumbering
         ? [

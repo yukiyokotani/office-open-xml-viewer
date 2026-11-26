@@ -765,7 +765,8 @@ describe('canonical producer with a real document model', () => {
     if (storyParagraph?.kind !== 'paragraph') throw new Error('Expected retained endnote paragraph');
     expect(storyParagraph.lines.flatMap((line) => line.placements)
       .find((placement) => placement.kind === 'text' && placement.noteReference))
-      .toMatchObject({ kind: 'text', text: '1' });
+      // Word's default endnote format (WORD_NOTE_NUMBER_FORMAT_DEFAULTS).
+      .toMatchObject({ kind: 'text', text: 'i' });
   });
 
   it('retains the entire document-end note when it needs additional pages', () => {
@@ -798,6 +799,43 @@ describe('canonical producer with a real document model', () => {
     expect(painted.replace(/\s/g, '')).toBe('endnote'.repeat(80));
   });
 
+  it.each([
+    ['beneathText', true, false],
+    ['sectEnd', false, true],
+  ] as const)('lays a producer document position %s out or reports it', (position, beneath, unsupported) => {
+    const section = {
+      pageWidth: 200, pageHeight: 300,
+      marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
+      headerDistance: 5, footerDistance: 5, titlePage: false,
+      evenAndOddHeaders: false, sectionStart: 'nextPage', columns: null,
+    } as SectionProps;
+    const model = {
+      section,
+      body: [paragraph() as unknown as BodyElement],
+      headers: { default: null, first: null, even: null },
+      footers: { default: null, first: null, even: null },
+      footnotes: [{ id: '7', content: [ordinaryParagraph('footnote')] }],
+      endnotes: [],
+      fontFamilyClasses: {},
+      __noteLayoutSettings: { footnotePosition: position },
+    } as unknown as DocxDocumentModel;
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), { currentDateMs: 0 });
+    const page = layout.pages[0]!;
+    const bodyBottom = Math.max(...page.layers.body.map((node) => node.flowBounds.yPt + node.flowBounds.heightPt));
+    const noteTop = Math.min(...page.layers.notes.map((note) => note.flowBounds.yPt));
+    expect(Math.abs(noteTop - bodyBottom) < 0.01).toBe(beneath);
+    expect(layout.diagnostics.some((diagnostic) => diagnostic.message.includes('footnote position'))).toBe(unsupported);
+  });
+
+  it('reports beneathText footnotes it keeps in per-column bands at the page bottom', () => {
+    const model = columnStoryDocument([paragraph()], [{ id: '7', content: [ordinaryParagraph('footnote')] }]);
+    (model as unknown as Record<string, unknown>).settings = { compatibilityMode: 14 };
+    (model as unknown as Record<string, unknown>).__noteLayoutSettings = { footnotePosition: 'beneathText' };
+    const layout = layoutDocument(model, createLayoutServices(model, { measureContext: measureContext() }), { currentDateMs: 0 });
+    expect(layout.diagnostics.map((diagnostic) => diagnostic.message))
+      .toContainEqual(expect.stringContaining('Unsupported footnote position "beneathText"'));
+  });
+
   it('surfaces unsupported authored note positions instead of silently treating them as defaults', () => {
     const section = {
       pageWidth: 200, pageHeight: 140,
@@ -824,8 +862,8 @@ describe('canonical producer with a real document model', () => {
 
     expect(layout.pages.flatMap((page) => page.layers.notes).map((note) => note.source.story))
       .toEqual(['endnote', 'footnote']);
+    // beneathText is laid out (WORD_FOOTNOTE_BENEATH_TEXT); sectEnd is not.
     expect(layout.diagnostics.map((diagnostic) => diagnostic.message)).toEqual([
-      expect.stringContaining('Unsupported footnote position "beneathText"'),
       expect.stringContaining('Unsupported endnote position "sectEnd"'),
     ]);
   });
@@ -1122,7 +1160,7 @@ describe('canonical producer with a real document model', () => {
     expect(empty?.flowBounds).toEqual(standard?.flowBounds);
   });
 
-  it('uses the authored continuation rule width on a retained note fragment', () => {
+  it('uses the ordinary separator rule on a retained footnote fragment', () => {
     const section = {
       pageWidth: 200, pageHeight: 100,
       marginTop: 10, marginRight: 10, marginBottom: 10, marginLeft: 10,
@@ -1160,18 +1198,19 @@ describe('canonical producer with a real document model', () => {
       return edge ? edge.to.xPt - edge.from.xPt : 0;
     };
     expect(width(short[0]!)).toBeCloseTo(width(full[0]!), 5);
-    expect(width(short[1]!)).toBeCloseTo(60, 5);
-    expect(width(full[1]!)).toBeCloseTo(180, 5);
-    // A missing story retains the full-width continuation fallback; it must
-    // not inherit the ordinary Short rule or become an explicit empty rule.
+    // WORD_NOTE_SEPARATOR_GEOMETRY: the short rule is min(144pt, width).
+    expect(width(short[1]!)).toBeCloseTo(144, 5);
+    // WORD_NOTE_SEPARATOR_GEOMETRY: a continued footnote takes the ordinary
+    // separator, whatever its continuation story authors.
+    expect(width(full[1]!)).toBeCloseTo(144, 5);
     const absent = render();
-    expect(absent.map(width)).toEqual(full.map(width));
+    expect(absent.map(width)).toEqual(short.map(width));
     const emptyFirst = render('full', 'none');
     expect(width(emptyFirst[0]!)).toBe(0);
-    expect(width(emptyFirst[1]!)).toBeCloseTo(180, 5);
+    expect(width(emptyFirst[1]!)).toBe(0);
     const emptyContinuation = render('none');
-    expect(width(emptyContinuation[0]!)).toBeCloseTo(60, 5);
-    expect(width(emptyContinuation[1]!)).toBe(0);
+    expect(width(emptyContinuation[0]!)).toBeCloseTo(144, 5);
+    expect(width(emptyContinuation[1]!)).toBeCloseTo(144, 5);
     expect(emptyContinuation.map(note => note.advancePt)).toEqual(full.map(note => note.advancePt));
     // A note taller than a physical page must be acquired before partitioning.
     const long = render('full', undefined, 30);

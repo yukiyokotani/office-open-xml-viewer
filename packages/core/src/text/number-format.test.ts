@@ -133,7 +133,8 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       ['chineseCountingThousand', [
         [1, '一'], [10, '一十'], [11, '一十一'], [20, '二十'], [100, '一百'],
         [111, '一百一十一'], [1000, '一千'], [1001, '一千零一'],
-        [2024, '二千零二十四'], [10000, '一万'], [10005, '一万零五'],
+        // No 零 between 万 and a small ones group below 100,000 ([MS-OI29500] §2.1.548 (e)).
+        [2024, '二千零二十四'], [10000, '一万'], [10005, '一万五'],
         [12345, '一万二千三百四十五'],
       ]],
       // taiwaneseCountingThousand mirrors chineseCountingThousand's rules.
@@ -201,12 +202,16 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       ['thaiLetters', [
         [1, 'ก'], [41, 'ฮ'], [42, 'กก'],
       ]],
-      // chosung / ganada (14-jamo/syllable sets, repeat).
+      // chosung / ganada (14-jamo/syllable sets): Word cycles, one glyph per value.
       ['chosung', [
-        [1, 'ㄱ'], [14, 'ㅎ'], [15, 'ㄱㄱ'],
+        [1, 'ㄱ'], [14, 'ㅎ'], [15, 'ㄱ'], [16, 'ㄴ'], [29, 'ㄱ'],
       ]],
       ['ganada', [
-        [1, '가'], [14, '하'], [15, '가가'],
+        [1, '가'], [14, '하'], [15, '가'], [16, '나'],
+      ]],
+      // chicago (4 reference symbols, repeat).
+      ['chicago', [
+        [1, '*'], [2, '\u2020'], [3, '\u2021'], [4, '\u00A7'], [5, '**'], [8, '\u00A7\u00A7'], [9, '***'],
       ]],
       // hindiVowels (37) / hindiConsonants (18) sets, repeat.
       ['hindiVowels', [
@@ -264,7 +269,8 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
       // U+FF66 ｦ, U+FF9D ﾝ — no archaic forms). Spec example: ｱ, ｲ, …, ｦ, ﾝ, ｱｱ.
       ['aiueo', [
         [1, 'ｱ'], [5, 'ｵ'], [44, 'ﾜ'], [45, 'ｦ'],
-        [46, 'ﾝ'], [47, 'ｱｱ'], [92, 'ﾝﾝ'],
+        // Past 46 the sequence starts again ([MS-OI29500] §2.1.548 (c)).
+        [46, 'ﾝ'], [47, 'ｱ'], [92, 'ﾝ'],
       ]],
     ];
 
@@ -305,7 +311,7 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
   });
 
   it.each(['upperRoman', 'lowerRoman', 'upperLetter', 'lowerLetter', 'hebrew2',
-    'arabicAlpha', 'russianUpper', 'thaiLetters', 'aiueo'])('bounds output expansion for %s', fmt => {
+    'arabicAlpha', 'russianUpper', 'thaiLetters', 'aiueoFullWidth'])('bounds output expansion for %s', fmt => {
     // A valid 32-bit DOC section start must not expand to millions of glyphs.
     expect(() => formatOrdinalNumber(2147483646, fmt)).toThrow(/number-format output budget/i);
     for (const value of [Infinity, NaN, 1.5, Number.MAX_VALUE]) {
@@ -321,5 +327,39 @@ describe('formatOrdinalNumber — ECMA-376 §17.18.59 ST_NumberFormat', () => {
     expect(formatOrdinalNumber(4096 * 22, 'hebrew2')).toHaveLength(4096);
     expect(() => formatOrdinalNumber(4096 * 22 + 1, 'hebrew2')).toThrow(RangeError);
     expect(formatOrdinalNumber(2147483646, 'decimal')).toBe('2147483646');
+  });
+});
+
+describe('formatOrdinalNumber — [MS-OI29500] §2.1.548 wrap rules and limits', () => {
+  // One row per implementation note that fixes what happens past a format's
+  // set or above its largest displayed value: restart at 1, repeat the glyph,
+  // fall back to decimal, or no label at all.
+  it.each([
+    // (c) aiueo starts at 1 again past 46; (f) aiueoFullWidth repeats.
+    ['aiueo', 46, 'ﾝ'], ['aiueo', 47, 'ｱ'], ['aiueo', 48, 'ｲ'],
+    ['aiueoFullWidth', 48, 'ン'], ['aiueoFullWidth', 49, 'アア'],
+    // (g), (h) arabicAbjad and arabicAlpha repeat past 28.
+    ['arabicAbjad', 29, 'أأ'], ['arabicAlpha', 29, 'أأ'],
+    // (i), (k) chicago repeats and writes nothing after 116.
+    ['chicago', 5, '**'], ['chicago', 116, '§'.repeat(29)], ['chicago', 117, ''],
+    // (j) no label after 999,999.
+    ...(['cardinalText', 'chineseCountingThousand', 'chineseLegalSimplified', 'ideographLegalTraditional',
+      'japaneseCounting', 'koreanCounting', 'koreanDigital2', 'ordinalText', 'taiwaneseCountingThousand'] as const)
+      .map((format) => [format, 1000000, ''] as const),
+    ['cardinalText', 999999, '999999'],
+    // (l) hex, (m) japaneseDigitalTenThousand, (n) koreanLegal limits.
+    ['hex', 65535, 'FFFF'], ['hex', 65536, ''],
+    ['japaneseDigitalTenThousand', 10000, ''], ['koreanLegal', 10000000, ''],
+    // (o) no format displays a value above 2147483647.
+    ['decimal', 2147483647, '2147483647'], ['decimal', 2147483648, ''],
+    // (r), (u) chosung and ganada start at 1 again past 14.
+    ['chosung', 15, 'ㄱ'], ['ganada', 15, '가'],
+    // (e) chineseCountingThousand writes no 零 between 万 and a small ones
+    // group below 100,000; the legal format keeps it.
+    ['chineseCountingThousand', 10005, '\u4E00\u4E07\u4E94'],
+    // (s) decimalEnclosedCircleChinese: ten enclosed numbers, then decimal.
+    ['decimalEnclosedCircleChinese', 10, '⑩'], ['decimalEnclosedCircleChinese', 11, '11'],
+  ] as const)('%s(%d) is %j', (format, value, expected) => {
+    expect(formatOrdinalNumber(value, format as NumberFormat)).toBe(expected);
   });
 });

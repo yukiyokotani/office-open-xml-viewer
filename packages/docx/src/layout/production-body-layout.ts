@@ -1,6 +1,7 @@
 import { noteOverflowAllowed, noteOverflowPolicyOf, NoteOverflowRecoveryRequired,
   attachNoteRecoveryOwner, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import { MAX_BODY_LAYOUT_PAGES } from './resource-budgets.js';
+import { wordNoteNumberFormat } from './line-compatibility.js';
 import { registerFootnoteTable, registerFootnoteTableDestination } from './footnote-table-fragmentation.js';
 import { registerNoteBlockAcquisition, registerNoteBlockDestination } from './note-block-acquisition.js';
 import { acquireNoteParagraphWindow, projectNoteParagraphWindow, type NoteParagraphWindow } from './note-paragraph-window.js';
@@ -70,7 +71,7 @@ import {
   verticalGlyphMeasurementServiceOf,
 } from './runtime-state.js';
 import { attachStoryBlockLayoutAlgorithms, layoutStory as layoutSharedStory } from './stories.js';
-import { buildNoteNumberMap, footnoteIdsInRetainedLines, footnoteIdsInRetainedSlice, indexNotes, noteReferenceIdsInDocumentOrder } from './note-reference-ownership.js';
+import { buildSectionedNoteNumbers, footnoteIdsInRetainedLines, footnoteIdsInRetainedSlice, indexNotes } from './note-reference-ownership.js';
 import type {
   BodyAcquisitionLocation,
   BodyLayoutKernel,
@@ -147,7 +148,7 @@ import {
 import { paragraphGapAdjustment, paragraphGapFoldOf } from './paragraph-spacing.js';
 import { bottomBorderExtentPt, resolveParagraphBorderEdges, topBorderExtentPt, type ParagraphBorderEdges } from './paragraph-border-adjacency.js';
 import { acquireParagraphResult, acquireRetainedFrameGroup, bodyFrameGroupFor, bodyParagraphBorderEdgesFor, projectPhysicalAnchorResult, retainedFrameMaximumBaselineLoweringPt, sliceParagraphLayout, type BodyFrameGroup } from './paragraph.js';
-import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt } from './body-pagination-compatibility.js';
+import { libreOfficeProportionalLineAdmissionExtentPt, wordFinalParagraphAdmissionExtentPt, wordGridLeadingWrapExclusionOverlaps, wordLoweredDropCapAnchorLeadingPt, noteSeparatorArea, noteSeparatorRuleSpan, wordNoteSeparatorRuleDropPt, wordNoteSeparatorRuleWidthPt } from './body-pagination-compatibility.js';
 import { wordGridFrameCarrierSourceOwnsNoFlow } from './table-compatibility.js';
 import type { CompleteTextBoxStoryAcquirer } from './paragraph.js';
 import type { AnchorFloatRegistrationState, BodyAcquisitionState, BodyMeasurementContext, CompleteTextBoxStoryOwner, PhysicalAnchorFrame, RetainedTableRecord } from './acquisition-context.js';
@@ -165,6 +166,7 @@ import type {
   LayoutStoryBlock,
   LayoutTableBlock,
 } from './layout-source-store.js';
+import { isNoteSeparatorMarkerRun } from './selected-note-separators.js';
 import type { ParagraphLayoutSource } from './text.js';
 import type { TableLayoutSource } from './table-source-acquisition.js';
 import { retainedTableFromPassMemo, retainedTablePassKey, retainTableInPassMemo } from './retained-table-pass-cache.js';
@@ -739,7 +741,7 @@ function acquireBodyStoryLayout(
   }
   // A reserved or DOCX selected separator root is a shared source
   // definition, not a numbered (continued) note: it has no number and no note
-  // cursor. Its closed run-free shape has no page-dependent content, so one
+  // cursor. Without fields it has no page-dependent content, so one
   // acquisition per width/section/font context serves every page occurrence.
   const reservedRole = reservedNoteSeparatorRole(request.source)
     ?? selectedNoteSeparatorRole(request.source);
@@ -821,7 +823,15 @@ function acquireBodyStoryLayout(
   // cannot change their acquisition. Recovery field blocks are destination-
   // acquired before fit, not painted from this shared template. All other
   // stories keep their page and placement facts in the cache key.
-  const sharedAcquisition = reusableNote || reservedRole !== undefined;
+  // A separator story holding a field (PAGE, §17.16.5.44; NUMPAGES) reads
+  // its destination page and the page count, so each page acquires its own
+  // occurrence, keyed by that field context.
+  const separatorFields = reservedRole !== undefined && root.some((block) =>
+    block.type === 'paragraph' && block.runs.some((run) => run.type === 'field'));
+  const sharedAcquisition = reusableNote || (reservedRole !== undefined && !separatorFields);
+  const runtime = paragraphAcquisitionCacheOf(services);
+  const field = fieldAcquisitionContextOf(services);
+  const pageField = field.resolveDestinationPage?.(request.pageIndex);
   const occurrence = JSON.stringify(overflowingNote
     ? [request.source, sharedAcquisition ? null : request.pageIndex, 'overflow']
     : [request.source, sharedAcquisition ? null : request.pageIndex]);
@@ -831,12 +841,10 @@ function acquireBodyStoryLayout(
     band: sharedAcquisition ? null : request.bandTranslationPt ?? null,
     pageFrames: sharedAcquisition ? null : request.pageFrames ?? null,
     sourceStart: request.sourceStart ?? null,
+    fields: separatorFields ? [field.totalPages, pageField ?? null, dependencies.state.pageNumberFormat ?? null] : null,
   });
   const pageStoryCache = (request.source.story === 'header' || request.source.story === 'footer')
     ? headerFooterLayoutCacheOf(services) : undefined;
-  const runtime = paragraphAcquisitionCacheOf(services);
-  const field = fieldAcquisitionContextOf(services);
-  const pageField = field.resolveDestinationPage?.(request.pageIndex);
   if (request.source.story === 'header' || request.source.story === 'footer'
     || request.source.story === 'footnote' || request.source.story === 'endnote') {
     // Admit at the acquisition boundary, before either trial or descendant
@@ -968,6 +976,10 @@ function layoutBodyStory(
       && (request.source.story === 'footnote' || request.source.story === 'endnote')
       ? state.noteNumbers?.get(`${request.source.story}:${request.source.storyInstance}`)
       : undefined;
+  // The note's own *Ref mark takes the note's section format.
+  const noteStoryFormat = noteReferenceNumber !== undefined
+    ? state.noteNumbering?.formats?.get(`${request.source.story}:${request.source.storyInstance}`)
+    : undefined;
   const fieldContext = fieldAcquisitionContextOf(services);
   const pageFieldContext = fieldContext.resolveDestinationPage?.(request.pageIndex);
   const storyVertical = isVerticalTextDirection(request.section.textDirection);
@@ -999,6 +1011,12 @@ function layoutBodyStory(
     retainedTablesBySourceIndex: new Map(),
     pageAnchorPrescanned: new Set<ParagraphLayoutSource>(),
     noteReferenceNumber,
+    ...(noteStoryFormat !== undefined && state.noteNumbering ? {
+      noteNumbering: {
+        ...state.noteNumbering,
+        [request.source.story as 'footnote' | 'endnote']: { format: noteStoryFormat, start: 1 },
+      },
+    } : {}),
     verticalCJK: storyVertical,
     verticalAllRotated:
       storyVertical && isAllRotatedVerticalTextDirection(request.section.textDirection),
@@ -1920,14 +1938,29 @@ function layoutBodyNotes(
     // scalar policy below; the rule sits at the midpoint of the story's mark
     // line box, not in its spacing. Bare selected stories keep that line box;
     // only absent stories use the scalar fallback.
+    // WORD_NOTE_SEPARATOR_GEOMETRY: a Word footnote continued onto a page is
+    // separated by the ordinary separator story; an endnote continuation by
+    // its continuation story.
+    const wordGeometry = services.text?.libreOfficeLineBoxes !== true;
+    const separatorRole = request.continuing === true && !(wordGeometry && request.kind === 'footnote')
+      ? 'continuationSeparator' as const : 'separator' as const;
     const selectedDefinition = first && !reservedDefinitions
       && request.blankLeadingAdvancePt === undefined
       ? (request.kind === 'footnote' ? noteSettings?.footnoteSeparatorStories : noteSettings?.endnoteSeparatorStories)?.[
-        request.continuing === true ? 'continuationSeparator' : 'separator'
+        separatorRole
       ]
       : undefined;
+    // A page-wide note area (WORD_PAGE_WIDE_FOOTNOTE_AREA /
+    // WORD_PAGE_WIDE_ENDNOTE_AREA) spans every column of the section; the
+    // separator paragraph and its rule lie in that area.
+    const pageWideArea = request.kind === 'footnote'
+      ? context.state.layoutSettings.compat.pageWideFootnoteArea
+      : context.state.layoutSettings.compat.pageWideEndnoteArea;
+    const separatorArea = noteSeparatorArea({
+      word: wordGeometry, pageWide: pageWideArea, container: request.container.bounds, columns: request.section.columns,
+    });
     const selectedBand = selectedDefinition
-      ? acquireSelectedNoteSeparatorBand(context, request, selectedDefinition, noteTopPt)
+      ? acquireSelectedNoteSeparatorBand(context, request, selectedDefinition, noteTopPt, separatorArea)
       : undefined;
     const separatorHeightPt = (first ? request.blankLeadingAdvancePt : undefined) ?? (reservedDefinitions
       ? leading?.advancePt ?? 0
@@ -1985,44 +2018,83 @@ function layoutBodyNotes(
     // ECMA-376 §17.11 reserved stories: the observed bare empty story
     // suppresses rule ink while retaining the existing note band gap.
     const separatorMode = request.kind === 'footnote'
-      ? request.continuing ? noteSettings?.footnoteContinuationSeparator : noteSettings?.footnoteSeparator
-      : request.continuing ? noteSettings?.endnoteContinuationSeparator : noteSettings?.endnoteSeparator;
-    const separator = first && !reservedDefinitions && separatorMode !== 'none'
+      ? separatorRole === 'continuationSeparator' ? noteSettings?.footnoteContinuationSeparator : noteSettings?.footnoteSeparator
+      : separatorRole === 'continuationSeparator' ? noteSettings?.endnoteContinuationSeparator : noteSettings?.endnoteSeparator;
+    // ECMA-376 §17.11.1/.23: the marker kind wins over the story role; an
+    // absent kind takes the default marks of the producer's geometry.
+    const span = noteSeparatorRuleSpan({
+      word: wordGeometry,
+      kind: request.kind,
+      mode: separatorMode,
+      continuing: separatorRole === 'continuationSeparator',
+      pageWide: pageWideArea,
+      // The rule starts at the separator paragraph's own start edge.
+      rtl: selectedBand?.bidi === true,
+      container: request.container.bounds,
+      columns: request.section.columns,
+    });
+    // A marker laid out in place starts the ordinary rule at its own inline
+    // position (after any text before it, from its right edge in a
+    // right-to-left paragraph); the continuation rule spans the area.
+    // The rule never leaves the area.
+    const marker = selectedBand?.marker;
+    const areaRightPt = separatorArea.xPt + separatorArea.widthPt;
+    // The marker can sit beyond the area (a large indent): its rule edge is
+    // clamped into the area and the rule never runs backwards.
+    const clampToArea = (xPt: number) => Math.min(areaRightPt, Math.max(separatorArea.xPt, xPt));
+    const ruleLengthPt = span.toXPt - span.fromXPt;
+    const ruleSpan = marker && separatorMode === 'short'
+      ? selectedBand?.bidi === true
+        ? (() => {
+            const toXPt = clampToArea(marker.xPt + marker.widthPt);
+            return { fromXPt: Math.max(separatorArea.xPt, toXPt - ruleLengthPt), toXPt };
+          })()
+        : (() => {
+            const fromXPt = clampToArea(marker.xPt);
+            return { fromXPt, toXPt: Math.min(areaRightPt, fromXPt + ruleLengthPt) };
+          })()
+      : span;
+    const ruleSegments = first && !reservedDefinitions && separatorMode !== 'none'
       && request.blankLeadingAdvancePt === undefined
       ? Object.freeze([
           Object.freeze({
             edge: 'top' as const,
-            from: Object.freeze({
-              xPt: request.container.bounds.xPt,
-              yPt: ruleYPt,
-            }),
-            to: Object.freeze({
-              // ECMA-376 §17.11.1/.23: marker kind wins over story role.
-              // Word 16.113.3 compatibility controls (300pt main width,
-              // 80 plain single-spaced paragraphs, printed Times New Roman
-              // 12pt) retain a selected Short mark in a continuation story.
-              // A missing continuation story prints a full-width rule and
-              // gains a listed Full story on save. Preserve source absence;
-              // this fallback does not synthesize a parser fact or change
-              // the public continuation option's default. These controls
-              // establish neither universal Short dimensions nor gap/leading.
-              // §17.11.1 defines the continuation mark as full main-story width.
-              // §17.11.23 defines a partial ordinary mark; one third is the
-              // existing library policy, not a normative numeric fraction.
-              // It differs from the 144pt Short rule in those Office controls.
-              xPt: request.container.bounds.xPt + request.container.bounds.widthPt
-                * (separatorMode === 'full'
-                  || ((separatorMode === undefined || separatorMode === 'default') && request.continuing)
-                  ? 1 : 1 / 3),
-              yPt: ruleYPt,
-            }),
-            color: '#000000',
-            widthPt: 0.5,
+            from: Object.freeze({ xPt: ruleSpan.fromXPt, yPt: ruleYPt }),
+            to: Object.freeze({ xPt: ruleSpan.toXPt, yPt: ruleYPt }),
+            // The marker run's resolved colour (§17.3.2.6); automatic is black.
+            color: selectedBand?.ruleColor ?? '#000000',
+            widthPt: selectedBand ? wordNoteSeparatorRuleWidthPt(selectedBand.markFontSizePt) : 0.5,
             authoredStyle: 'single',
             style: 'solid' as const,
           }),
         ])
       : Object.freeze([]);
+    // A separator story with text paints as the note's leading occurrence:
+    // its paragraph, then the rule of its in-place marker.
+    const separatorParagraphs = selectedBand?.paragraphs;
+    const separatorLeading: NoteSeparatorLayout | undefined = separatorParagraphs?.length && selectedDefinition
+      ? placeNoteSeparatorOccurrence(Object.freeze({
+          role: separatorRole,
+          source: selectedDefinition.root,
+          flowBounds: Object.freeze({
+            xPt: request.container.bounds.xPt, yPt: noteTopPt,
+            widthPt: request.container.bounds.widthPt, heightPt: separatorHeightPt,
+          }),
+          advancePt: separatorHeightPt,
+          paragraph: separatorParagraphs[0]!,
+          ...(separatorParagraphs.length > 1 ? { followingParagraphs: Object.freeze(separatorParagraphs.slice(1)) } : {}),
+          ...(ruleSegments[0] && (separatorMode === 'short' || separatorMode === 'full') ? {
+            rule: Object.freeze({ mark: separatorMode, source: selectedDefinition.paragraph, segment: ruleSegments[0] }),
+          } : {}),
+        }), {
+          occurrenceId: request.container.id.includes(':band:')
+            ? `${request.kind}:${id}:${request.container.id}:separator`
+            : `${request.kind}:${id}:page:${request.pageIndex}:separator`,
+          flowDomainId: request.container.id,
+          yPt: noteTopPt,
+        })
+      : undefined;
+    const separator = separatorLeading ? Object.freeze([]) : ruleSegments;
     const advancePt = separatorHeightPt + story.advancePt;
     const flowBounds = Object.freeze({
       xPt: request.container.bounds.xPt,
@@ -2059,7 +2131,7 @@ function layoutBodyNotes(
       clipBounds: request.container.bounds,
       advancePt,
       separator,
-      ...(leading ? { leading } : {}),
+      ...(leading ?? separatorLeading ? { leading: leading ?? separatorLeading } : {}),
       story,
     });
     registerFootnoteTableDestination(note, {
@@ -2125,9 +2197,8 @@ function acquireReservedNoteSeparator(
  *   and after (§17.3.1.33 places that spacing outside the paragraph's lines).
  * - `ruleOffsetPt`: the midpoint of the acquired mark line box, measured from
  *   the story's own top in its acquisition frame, so it applies at whatever
- *   band y it is placed. §17.11.23 places the separator mark in its run; the
- *   parser admits only a mark run formatted exactly like the paragraph mark,
- *   so that run's line is this mark-only line box. The midpoint is the
+ *   band y it is placed. §17.11.23 places the separator mark in its run; a
+ *   run-free paragraph (no marker) uses its mark-only line box. The midpoint is the
  *   library's existing rule placement, not an Office glyph-baseline
  *   observation.
  * No paragraph layout is retained: the closed run-free shape has neither text
@@ -2137,12 +2208,26 @@ function acquireSelectedNoteSeparatorBand(
   request: Parameters<NonNullable<BodyLayoutSession['layoutNotes']>>[0],
   definition: SelectedNoteSeparatorDefinitionInput,
   yPt: number,
-): Readonly<{ advancePt: number; ruleOffsetPt: number }> {
+  area: Readonly<{ xPt: number; widthPt: number }>,
+): Readonly<{
+  advancePt: number;
+  ruleOffsetPt: number;
+  markFontSizePt: number;
+  bidi: boolean;
+  /** The marker laid out in place (text around it). */
+  marker?: Readonly<{ xPt: number; widthPt: number }>;
+  /** The marker run's authored colour as `#RRGGBB`; absent when automatic. */
+  ruleColor?: string;
+  /** The story's paragraphs, when it paints text. */
+  paragraphs?: readonly ParagraphLayout[];
+}> {
   const container = {
     ...request.container,
     id: `${request.container.id}:${sourceKey(definition.root)}`,
     bounds: {
       ...request.container.bounds,
+      xPt: area.xPt,
+      widthPt: area.widthPt,
       yPt,
       heightPt: Math.max(0, request.container.bounds.yPt + request.container.bounds.heightPt - yPt),
     },
@@ -2161,17 +2246,84 @@ function acquireSelectedNoteSeparatorBand(
     }
     throw error;
   }
-  const [paragraph, ...rest] = story.blocks;
-  // The run-free paragraph acquires no text line; its mark-only line box is
-  // the paragraph mark bounds (spacing before excluded, line rule applied).
-  const mark = paragraph?.kind === 'paragraph' && rest.length === 0 && paragraph.lines.length === 0
-    ? paragraph.paragraphMark : undefined;
-  if (!mark || mark.hidden) {
-    throw new Error('A note separator story must acquire exactly one visible mark-only paragraph');
+  const paragraphs = story.blocks.filter((block): block is ParagraphLayout => block.kind === 'paragraph');
+  if (paragraphs.length !== story.blocks.length || paragraphs.length !== definition.paragraphCount) {
+    throw new Error('A note separator story must acquire its paragraphs');
   }
+  const markerIndex = definition.paragraph.path[0] ?? 0;
+  const paragraph = paragraphs[markerIndex]!;
+  const source = context.source.blocks.resolve(definition.paragraph);
+  if (source.type !== 'paragraph') throw new Error('A note separator story paragraph must be a paragraph');
+  const bidi = (source as Readonly<{ bidi?: boolean }>).bidi === true;
+  if (paragraphs.length === 1 && source.runs.length === 0) {
+    // The run-free paragraph acquires no text line: its mark-only line box is
+    // the paragraph mark bounds (spacing before excluded, line rule applied).
+    const box = paragraph.lines.length === 0 && !paragraph.paragraphMark?.hidden
+      ? paragraph.paragraphMark?.bounds : undefined;
+    if (!box) throw new Error('A note separator story must acquire exactly one visible mark line');
+    // WORD_NOTE_SEPARATOR_GEOMETRY: the rule sits an eighth of the mark's
+    // font size below the middle of its line box.
+    const markFontSizePt = context.state.acquisitionInputs.paragraphMarkShapeInput(source)?.fontSizePt
+      ?? source.defaultFontSize ?? 10;
+    return Object.freeze({
+      advancePt: story.advancePt,
+      ruleOffsetPt: box.yPt + box.heightPt / 2 - story.flowBounds.yPt
+        + wordNoteSeparatorRuleDropPt(markFontSizePt),
+      markFontSizePt,
+      bidi,
+      // Its borders and shading still paint.
+      ...(paragraph.borders.length > 0 || paragraph.shading !== undefined ? { paragraphs } : {}),
+    });
+  }
+  // The marker laid out in place: its inline object's line and position
+  // carry the rule; the story's text paints around it. A story without a
+  // marker draws no rule (its mark is None) and paints its text.
+  // The marker's inline object is the run glued before its metrics run;
+  // inline pictures of the story are drawings too.
+  const markerRunIndex = source.runs.findIndex(isNoteSeparatorMarkerRun);
+  const markerDrawingIds = new Set(paragraph.drawings
+    .filter((drawing) => markerRunIndex > 0 && drawing.source.path.at(-1) === markerRunIndex - 1)
+    .map((drawing) => drawing.id));
+  let marker: Readonly<{ line: typeof paragraph.lines[number]; xPt: number; widthPt: number }> | undefined;
+  for (const line of paragraph.lines) {
+    for (const placement of line.placements) {
+      if (placement.kind === 'drawing' && markerDrawingIds.has(placement.drawingId)) {
+        marker = { line, xPt: placement.bounds.xPt, widthPt: placement.bounds.widthPt };
+      }
+    }
+  }
+  const markerRun = markerRunIndex < 0 ? undefined : source.runs[markerRunIndex];
+  if (!marker || !markerRun) {
+    if (markerRun) throw new Error('A note separator story must lay its marker out');
+    return Object.freeze({ advancePt: story.advancePt, ruleOffsetPt: 0, markFontSizePt: 10, bidi, paragraphs });
+  }
+  // The size its line is laid out with: the complex-script size (§17.3.2.39
+  // szCs) for an rtl or cs marker run, as for any such run's text.
+  const markerSizes = markerRun as Readonly<{ fontSize?: number; fontSizeCs?: number; rtl?: boolean; cs?: boolean; color?: string | null }>;
+  const authoredColor = typeof markerSizes.color === 'string' ? markerSizes.color.replace(/^#/u, '') : '';
+  const ruleColor = /^[0-9A-Fa-f]{6}$/u.test(authoredColor) ? `#${authoredColor.toUpperCase()}` : undefined;
+  const markFontSizePt = (markerSizes.rtl === true || markerSizes.cs === true
+    ? markerSizes.fontSizeCs ?? markerSizes.fontSize : markerSizes.fontSize) ?? 10;
+  const box = marker.line.bounds;
+  // Content beside the marker paints with the story: text (symbols
+  // included), a field (its result or computed value), an inline picture, or
+  // paragraph borders and shading. Line breaks, empty text and the marker's own inline object
+  // only shape the lines.
+  const hasText = paragraphs.length > 1
+    || paragraphs.some((laid) => laid.borders.length > 0 || laid.shading !== undefined)
+    || source.runs.some((run, index) => run.type === 'field' || run.type === 'image'
+      || (run.type === 'shape' && index !== markerRunIndex - 1)
+    || (run.type === 'text' && !isNoteSeparatorMarkerRun(run)
+      && ((run as Readonly<{ text?: string }>).text ?? '').length > 0));
   return Object.freeze({
     advancePt: story.advancePt,
-    ruleOffsetPt: mark.bounds.yPt + mark.bounds.heightPt / 2 - story.flowBounds.yPt,
+    ruleOffsetPt: box.yPt + box.heightPt / 2 - story.flowBounds.yPt
+      + wordNoteSeparatorRuleDropPt(markFontSizePt),
+    markFontSizePt,
+    bidi,
+    marker: Object.freeze({ xPt: marker.xPt, widthPt: marker.widthPt }),
+    ...(ruleColor ? { ruleColor } : {}),
+    ...(hasText ? { paragraphs } : {}),
   });
 }
 
@@ -3113,26 +3265,36 @@ function openConcreteBodyLayoutSession(
   const sourceFootnotes = source.blocks.footnotes;
   const sourceEndnotes = source.blocks.endnotes;
   const noteSettings = source.bodyLayoutInput.noteLayoutSettings;
+  // §17.11.4/.5/.11/.12 numbering: each reference takes its section's rule
+  // (format, numStart, numRestart); the map holds display values, and every
+  // automatic note's format is kept beside it.
+  const documentNumbering = {
+    footnote: noteSettings?.footnoteNumbering ?? { format: wordNoteNumberFormat('footnote', undefined), start: 1 },
+    endnote: noteSettings?.endnoteNumbering ?? { format: wordNoteNumberFormat('endnote', undefined), start: 1 },
+  };
+  const sectionNumbering = noteSettings?.sectionNoteNumbering;
+  const numbered = (kind: 'footnote' | 'endnote', notes: typeof sourceFootnotes) => buildSectionedNoteNumbers(
+    notes,
+    source.blocks.body,
+    kind,
+    // A section without its own sectPr entry (an omitted final body sectPr)
+    // takes the defaults, never the previous section's numbering.
+    (sectionIndex) => sectionNumbering?.[sectionIndex]?.[kind] ?? documentNumbering[kind],
+  );
+  const footnoteNumbers = numbered('footnote', sourceFootnotes);
+  const endnoteNumbers = numbered('endnote', sourceEndnotes);
   state.noteNumbering = {
-    footnote: noteSettings?.footnoteNumbering ?? { format: 'decimal', start: 1 },
-    endnote: noteSettings?.endnoteNumbering ?? { format: 'decimal', start: 1 },
+    footnote: { format: documentNumbering.footnote.format, start: 1 },
+    endnote: { format: documentNumbering.endnote.format, start: 1 },
+    formats: new Map([
+      ...[...footnoteNumbers.formats].map(([id, format]) => [`footnote:${id}`, format] as const),
+      ...[...endnoteNumbers.formats].map(([id, format]) => [`endnote:${id}`, format] as const),
+    ]),
   };
   const footnotesById = indexNotes(sourceFootnotes);
   state.noteNumbers = new Map([
-    ...[
-      ...buildNoteNumberMap(
-        sourceFootnotes,
-        noteReferenceIdsInDocumentOrder(source.blocks.body, 'footnote'),
-        new Set(noteReferenceIdsInDocumentOrder(source.blocks.body, 'footnote', true)),
-      ),
-    ].map(([id, number]) => [`footnote:${id}`, number] as const),
-    ...[
-      ...buildNoteNumberMap(
-        sourceEndnotes,
-        noteReferenceIdsInDocumentOrder(source.blocks.body, 'endnote'),
-        new Set(noteReferenceIdsInDocumentOrder(source.blocks.body, 'endnote', true)),
-      ),
-    ].map(([id, number]) => [`endnote:${id}`, number] as const),
+    ...[...footnoteNumbers.values].map(([id, number]) => [`footnote:${id}`, number] as const),
+    ...[...endnoteNumbers.values].map(([id, number]) => [`endnote:${id}`, number] as const),
   ]);
   let location = input.initialLocation;
   const pageRegistryFlowDomainId = (pageIndex: number) => `body:page:${pageIndex}:registry`;
@@ -3180,7 +3342,7 @@ function openConcreteBodyLayoutSession(
       // session's small context/generation key, whose retained bytes are charged
       // to the bounded story cache (including markup resolver generations).
       paragraphAcquisitionCacheOf(services)?.fingerprintOrdinal(
-        JSON.stringify([state.noteNumbering, [...state.noteNumbers]]),
+        JSON.stringify([state.noteNumbering, [...(state.noteNumbering?.formats ?? [])], [...state.noteNumbers]]),
       ),
       // This resolver lazily assigns colours to story-only authors. A new
       // session owns a new generation, so markup stories must not bypass its

@@ -99,10 +99,31 @@ function docxSynthesizedPaint(doc: DocxDocumentModel): 'all' | { texts: string[]
   const literal: string[] = [];
   let verticalForms = false;
   let kashida = false;
-  const settings = (doc as { __noteLayoutSettings?: { footnoteNumberFormat?: string; endnoteNumberFormat?: string } })
+  const settings = (doc as { __noteLayoutSettings?: {
+    footnoteNumberFormat?: string; endnoteNumberFormat?: string;
+    sectionNoteNumbering?: readonly { footnote?: { format?: string }; endnote?: { format?: string } }[];
+    footnoteSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
+    footnoteContinuationSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
+    endnoteSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
+    endnoteContinuationSeparatorStory?: readonly { runs?: readonly { text?: unknown }[] }[];
+  } })
     .__noteLayoutSettings;
-  for (const format of [settings?.footnoteNumberFormat, settings?.endnoteNumberFormat]) {
+  // Document- and section-wide note formats (a custom pattern is never ASCII
+  // by this check, so it demands every glyph).
+  for (const format of [
+    settings?.footnoteNumberFormat, settings?.endnoteNumberFormat,
+    ...(settings?.sectionNoteNumbering ?? []).flatMap((section) => [section.footnote?.format, section.endnote?.format]),
+  ]) {
     if (format !== undefined && !ASCII_NUMBER_FORMATS.has(format)) return 'all';
+  }
+  // Separator story text, and the marker measured as a zero-width text run.
+  for (const paragraph of [settings?.footnoteSeparatorStory, settings?.footnoteContinuationSeparatorStory,
+    settings?.endnoteSeparatorStory, settings?.endnoteContinuationSeparatorStory].flatMap((story) => story ?? [])) {
+    for (const run of paragraph.runs ?? []) {
+      if (typeof run.text === 'string') {
+        literal.push((run as { __noteSeparatorMarker?: boolean }).__noteSeparatorMarker === true ? '\u200b' : run.text);
+      }
+    }
   }
   const pending: unknown[] = [doc];
   const seen = new Set<object>();

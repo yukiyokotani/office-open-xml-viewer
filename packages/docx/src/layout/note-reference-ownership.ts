@@ -35,6 +35,68 @@ export function buildNoteNumberMap(
   return numbers;
 }
 
+/** One section's numbering rule for a note kind (§17.11.17-.20). */
+export interface SectionNoteNumberingRule {
+  readonly format: string;
+  readonly start: number;
+  readonly restart?: 'continuous' | 'eachSect' | 'eachPage';
+}
+
+/** Number-map value of a note whose reference has a custom mark
+ * (customMarkFollows): no automatic value is ever negative. */
+export const CUSTOM_NOTE_MARK = -1;
+
+/** Display values and formats of automatic notes in first-reference order.
+ * Each reference takes the rule of the section that holds it (§17.11.5/.11
+ * over §17.11.4/.12): the first automatic note starts at numStart, and a
+ * section whose rule restarts each section (§17.11.19 eachSect) restarts
+ * its first note there. A custom mark (customMarkFollows) keeps the
+ * CUSTOM_NOTE_MARK sentinel and consumes no value; numStart 0 is an ordinary
+ * automatic value. Top-level sectionBreak elements end sections. */
+export function buildSectionedNoteNumbers(
+  notes: readonly Readonly<{ id: string }>[] | undefined,
+  elements: readonly NoteReferenceSourceBlock[],
+  kind: 'footnote' | 'endnote',
+  ruleFor: (sectionIndex: number) => SectionNoteNumberingRule,
+  customReferenceIds: ReadonlySet<string> = new Set(noteReferenceIdsInDocumentOrder(elements, kind, true)),
+): Readonly<{ values: Map<string, number>; formats: Map<string, string> }> {
+  const values = new Map<string, number>();
+  const formats = new Map<string, string>();
+  if (!notes) return { values, formats };
+  const available = new Set(notes.map((note) => note.id));
+  let previous: number | undefined;
+  let previousSection = -1;
+  let sectionIndex = 0;
+  const visitRuns = (runs: Extract<NoteReferenceSourceBlock, { runs: unknown }>['runs']) => {
+    for (const run of runs) {
+      const ref = run.type === 'text' ? run.noteRef : undefined;
+      if (ref?.kind !== kind || ref.id.length === 0 || !available.has(ref.id) || values.has(ref.id)) continue;
+      if (customReferenceIds.has(ref.id)) {
+        values.set(ref.id, CUSTOM_NOTE_MARK);
+        continue;
+      }
+      const rule = ruleFor(sectionIndex);
+      const restart = previous === undefined
+        || (rule.restart === 'eachSect' && sectionIndex !== previousSection);
+      const value = restart ? rule.start : previous! + 1;
+      values.set(ref.id, value);
+      formats.set(ref.id, rule.format);
+      previous = value;
+      previousSection = sectionIndex;
+    }
+  };
+  const visit = (blocks: readonly NoteReferenceSourceBlock[], topLevel: boolean) => {
+    for (const element of blocks) {
+      if (element.type === 'paragraph' && 'runs' in element) visitRuns(element.runs);
+      else if (element.type === 'table' && 'rows' in element) {
+        for (const row of element.rows) for (const cell of row.cells) visit(cell.content, false);
+      } else if (topLevel && element.type === 'sectionBreak') sectionIndex += 1;
+    }
+  };
+  visit(elements, true);
+  return { values, formats };
+}
+
 /** Index note-part entries by their OOXML id for story acquisition. */
 export function indexNotes<T extends Readonly<{ id: string }>>(
   notes: readonly T[] | undefined,
