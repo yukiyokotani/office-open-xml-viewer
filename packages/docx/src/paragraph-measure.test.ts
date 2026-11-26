@@ -788,7 +788,12 @@ describe('measureParagraph', () => {
     const result = measureParagraph(
       paragraph({
         spaceBefore: 0,
-        runs: [{ type: 'text', ...textRun('aa aa', { ruby: { text: 'ruby', fontSizePt: 8 } }) }],
+        // A ruby cell is indivisible (WORD_RUBY_ALIGN_PLACEMENT): the
+        // second line holds the following run.
+        runs: [
+          { type: 'text', ...textRun('aa ', { ruby: { text: 'ruby', fontSizePt: 8 } }) },
+          { type: 'text', ...textRun('aa') },
+        ],
       }),
       layoutContext({
         lineGrid: { active: true, pitchPt: 10 },

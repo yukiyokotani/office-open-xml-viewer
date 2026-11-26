@@ -66,6 +66,8 @@ import {
   performExplicitTextSplit,
   performQueueEmergencyTail,
   performRetractCurrentLineForLeadingKinsoku,
+  performRetractLineEndForbidden,
+  performProspectiveCellAdvance,
   performKeepLeadingKinsokuWithCurrentLine,
 } from './pass-operations.js';
 import type { PassOperationState } from './pass-operations.js';
@@ -221,6 +223,9 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
 
   const prospectiveSnapAdvance = (s: LayoutTextSeg, naturalWidth: number): number =>
     performProspectiveSnapAdvance(operationState, s, naturalWidth);
+  const prospectiveCellAdvance = (
+    pieces: readonly Readonly<{ segment: LayoutTextSeg; naturalPx: number }>[],
+  ): number => performProspectiveCellAdvance(operationState, pieces);
 
   const addToLine = (
     s: LayoutTextSeg | LayoutImageSeg | LayoutMathSeg | LayoutTabSeg,
@@ -387,7 +392,8 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
   /**
    * Move a legal suffix of the current line ahead of a segment whose first
    * glyph is forbidden at line start. This is the single cross-run 追い出し
-   * authority for both the CJK and SEA overflow paths.
+   * authority for the CJK and SEA overflow paths and for ruby cells; the
+   * suffix may span segments and whole ruby cells (kinsoku.ts).
    *
    * A source seam marked by `hardJoinPrev` is indivisible: moving the complete
    * following segment would strand its owner on the previous line. Likewise,
@@ -397,6 +403,10 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
    */
   const retractCurrentLineForLeadingKinsoku = (next: LayoutTextSeg): CrossRunKinsokuRetraction =>
     performRetractCurrentLineForLeadingKinsoku(operationState, next);
+  const retractLineEndForbidden = (
+    next: LayoutTextSeg,
+    admits: (retractedAdvancePx: number) => boolean,
+  ): CrossRunKinsokuRetraction => performRetractLineEndForbidden(operationState, next, admits);
 
   /** Keep one otherwise-forbidden line-start grapheme with the current line.
    * This is the only legal fallback when cross-run retraction would split an
@@ -431,6 +441,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     bidiIntervalPx,
     flush,
     prospectiveSnapAdvance,
+    prospectiveCellAdvance,
     addToLine,
     admitLineMetric,
     measurement,
@@ -458,6 +469,7 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
     explicitTextSplit,
     queueEmergencyTail,
     retractCurrentLineForLeadingKinsoku,
+    retractLineEndForbidden,
     keepLeadingKinsokuWithCurrentLine,
   };
   // The first numbered line's body indent may be resolved against its float
@@ -507,8 +519,12 @@ export function runLineBreakerPass(input: LineBreakerPassInput): LayoutLine[] {
       Object.assign(line, metrics);
       line.endsWithBreak = last.endsWithBreak;
       for (const segment of line.segments) {
-        if ('text' in segment) segment.lineRelativePosition =
-          wordUniformRunPositionPaintPt(segment.position ?? 0, positionReference ?? 0);
+        // A vertical line positioned uniformly stays on its axis
+        // (WORD_VERTICAL_LINE_CENTRED_BOX); its runs paint relative to it.
+        if ('text' in segment) segment.lineRelativePosition = segment.verticalRun || segment.tateChuYoko
+          || segment.verticalFrameRun === 'upright'
+          ? (segment.position ?? 0) - (positionReference ?? 0)
+          : wordUniformRunPositionPaintPt(segment.position ?? 0, positionReference ?? 0);
       }
     }
     start = end;

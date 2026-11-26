@@ -1,6 +1,8 @@
 import { candidateUnitIsSingleton } from './line-gaps.js';
 import { advanceLineBoundary } from './source-cursor.js';
 import { isInklessLineItem } from './break-queue.js';
+import { placedUnitOf } from './ruby-cell.js';
+import { lineClusterContinuation, queueRetraction } from './kinsoku.js';
 import { lineEndSpaceCharged, lineTrailingSpaceSuffixWidth, measureFitTextUnit, measureJoinedTextUnit } from './atomic-units.js';
 import { placeOptionalHyphenPrefix, rtlLineEndSpaceInside } from './optional-hyphens.js';
 import {
@@ -87,6 +89,9 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'measurement'
   | 'textSegmentBox'
   | 'prospectiveSnapAdvance'
+  | 'prospectiveCellAdvance'
+  | 'segNaturalAdvance'
+  | 'materializeLatinSpaceCompression'
   | 'segAdvance'
   | 'strAdvance'
   | 'justifiedCompression'
@@ -111,6 +116,7 @@ export type BreakOpportunityIteratorContext = Pick<
   | 'lineEdgeRules'
   | 'strNaturalAdvance'
   | 'retractCurrentLineForLeadingKinsoku'
+  | 'retractLineEndForbidden'
   | 'keepLeadingKinsokuWithCurrentLine'
   | 'explicitTextSplit'
   | 'queueEmergencyTail'
@@ -285,13 +291,61 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   const h = segmentBox.height;
   const asc = segmentBox.ascent;
   const desc = segmentBox.descent;
+  // UAX #29: text that opens a segment inside the cluster of the line's
+  // last character (marks, a variation selector, the rest of an emoji
+  // sequence, in a run of other formatting) is placed with that character
+  // before anything after it is judged, and never starts a line.
+  if (placedUnitOf(s) === undefined && s.fitTextRegionIndex === undefined && !s.tateChuYoko) {
+    const continuation = lineClusterContinuation(breakerState.currentLine, s);
+    const whole = continuation >= s.text.length;
+    // A segment that goes on past the cluster and fits is placed whole as
+    // it is by the paths below.
+    if (continuation > 0 && (whole || !fitsLineWidth(breakerState.currentWidth + prospectiveWidth, availW()))) {
+      const head = s.text.slice(0, continuation);
+      const headWidth = whole ? w : context.strNaturalAdvance(s, head);
+      const headSegment: LayoutTextSeg = whole ? s : {
+        ...s,
+        ...RESET_SLICED_TEXT_MEASUREMENT,
+        text: head,
+        measuredWidth: headWidth,
+        ...slicedTextMetadata(s, 0, continuation),
+      };
+      // The rest of the cluster does not fit beside its first character: the
+      // line ends at the legal break before the cluster, which moves down
+      // whole. Only when nothing before it can stay does it overflow here.
+      // It is judged by the advance placement commits, character-grid cells
+      // included (prospectiveSnapAdvance).
+      if (!fitsLineWidth(breakerState.currentWidth + prospectiveSnapAdvance(headSegment, headWidth), availW())) {
+        const retraction = context.retractLineEndForbidden(s, () => true);
+        if (retraction.kind === 'retracted') {
+          flush(undefined, false, retraction.tail.src);
+          breakerState.queue.unshift(s);
+          queueRetraction(breakerState.queue, retraction);
+          return;
+        }
+      }
+      if (whole) {
+        s.measuredWidth = w;
+        addToLine(s, w, h, asc, desc);
+        return;
+      }
+      addToLine(headSegment, headWidth, h, asc, desc);
+      context.queueEmergencyTail(s, continuation);
+      return;
+    }
+  }
   const paragraphFinalIdeographicSpaceTail = s.paragraphFinalIdeographicSpaceTail === true;
   const paragraphFinalIdeographicSpaceCount = s.paragraphFinalIdeographicSpaceCount ?? 0;
   const paragraphFinalIdeographicSpaceLocalCount = s.paragraphFinalIdeographicSpaceLocalCount ?? 0;
   const visibleBeforeParagraphFinalTail = paragraphFinalIdeographicSpaceTail
     ? s.text.slice(0, Math.max(0, s.text.length - paragraphFinalIdeographicSpaceLocalCount))
     : s.text;
+  // A ruby cell's unit (WORD_RUBY_ALIGN_PLACEMENT, placedUnitOf) is never
+  // cut: every path below that splits, hangs or admits a segment by itself
+  // defers to placeRubyCell.
+  const rubyCell = placedUnitOf(s) !== undefined;
   if (
+    !rubyCell &&
     paragraphFinalIdeographicSpaceTail &&
     paragraphFinalIdeographicSpaceCount > 1 &&
     visibleBeforeParagraphFinalTail.length > 0
@@ -326,6 +380,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     return;
   }
   if (
+    !rubyCell &&
     paragraphFinalIdeographicSpaceTail &&
     /^\u3000+$/u.test(s.text) &&
     s.paragraphFinalIdeographicSpaceTailStart === true
@@ -340,8 +395,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
         trailingTailWidth += segAdvance(candidate);
       }
       if (!fitsLineWidth(breakerState.currentWidth + trailingTailWidth, availW())) {
-        flush(undefined, false, s.src);
-        breakerState.queue.unshift(s);
+        if (!endLineBefore(context, s, trailingTailWidth)) breakerState.queue.unshift(s);
         return;
       }
     }
@@ -352,14 +406,14 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // every member is added without entering the CJK/overlong-word split paths.
   // This also handles a target wider than the line: it overflows as one unit
   // instead of violating the required internal non-wrap boundary.
-  if (s.fitTextRegionIndex !== undefined) {
+  if (s.fitTextRegionIndex !== undefined && !rubyCell) {
     if (s.fitTextRegionStart) {
       const regionWidth = measureFitTextUnit(s, breakerState.queue, context);
       if (
         breakerState.currentLine.length > 0 &&
         !fitsLineWidth(breakerState.currentWidth + regionWidth, availW())
       ) {
-        flush(undefined, false, s.src);
+        if (endLineBefore(context, s, regionWidth)) return;
       }
       // The region is one fixed cell: it cannot be forced into a narrower gap.
       if (breakerState.currentLine.length === 0 && !context.fitsMeasuredWidth(regionWidth, availW())) {
@@ -475,7 +529,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
     && !s.optionalHyphenWord && s.explicitBreaks === undefined
     && context.fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW())
     && candidateUnitIsSingleton(s, breakerState.queue.peek());
-  if (completeUnitFitApplies && !ordinaryAdmissionCertified
+  if (!rubyCell && completeUnitFitApplies && !ordinaryAdmissionCertified
     && fitJustifiedCompression(context, s,
       context.justifiedCompressionAdmissionOnly === true ? segmentBox : undefined)) return;
   // A declined justified candidate re-measured its box; restore the fitted pair.
@@ -483,7 +537,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   s.measuredWidth = w;
   // The authored opportunity follows the existing whole-unit justified fit;
   // it must not introduce a wrap before a word admitted by that policy.
-  if (placeOptionalHyphenPrefix(context, s)) return;
+  if (!rubyCell && placeOptionalHyphenPrefix(context, s)) return;
   const fittedPredecessor = breakerState.currentLine.at(-1);
   if (prepareAtomicTextFit(context, { s, w, trailingSpaceW, sDictSea, fitWidthFor })) return;
   // A pre-flush (an atomic group or a SEA chunk moved to a fresh line) leaves
@@ -540,7 +594,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
   // WORD_COMPRESSED_SPACE_LINE_FIT: once a mixed line's spaces are shrunk, a
   // following unit (such as a closing mark split into its own source run) is
   // judged by the same reduction rule; joined and split runs must agree.
-  if (breakerState.mixedSpace.compressed && mixedCandidateMayShrink(breakerState, s.text, s)) {
+  if (!rubyCell && breakerState.mixedSpace.compressed && mixedCandidateMayShrink(breakerState, s.text, s)) {
     const required = context.mixedSpaceRequirement(mixedSeamCandidate(context, s, s.text, wForFit));
     if (required !== undefined) {
       s.measuredWidth = w;
@@ -559,8 +613,7 @@ function processTextSegment(context: BreakOpportunityIteratorContext, seg: Layou
       !breakerState.latinLineFace ||
       !sameLatinSpaceFace(s, breakerState.latinLineFace))
   ) {
-    flush(undefined, false, s.src);
-    breakerState.queue.unshift(s);
+    if (!endLineBefore(context, s, wForFit)) breakerState.queue.unshift(s);
     return;
   }
 
@@ -1386,6 +1439,10 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     wForFit,
     admitsTrailingOverflowPunctuation,
   } = frame;
+  if (placedUnitOf(s)) {
+    placeRubyCell(context, frame);
+    return;
+  }
   if (
     (fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW()) &&
       breakerState.latinAppliedPerGap === 0) ||
@@ -1580,9 +1637,95 @@ function placeOrSplitText(context: BreakOpportunityIteratorContext, inputFrame: 
     // whole column — the empty-line branch above breaks it at the character level
     // (overflow-wrap). Re-queueing rather than force-adding is what lets that
     // over-long-word path run instead of letting the word spill the column.
-    flush(undefined, false, s.src);
-    breakerState.queue.unshift(s);
+    if (!endLineBefore(context, s, wForFit)) breakerState.queue.unshift(s);
   }
+}
+
+/** End the current line before the text segment `s`, which moves to the
+ * next line leading a unit `unitWidth` wide. §17.3.1.16: the line's
+ * line-end-forbidden end (its trailing openers, whichever runs they are of)
+ * moves with it when both fit a whole line. Returns true when content was
+ * retracted: `s` is then queued again behind it, and the caller is done. */
+function endLineBefore(context: BreakOpportunityIteratorContext, s: LayoutTextSeg, unitWidth: number): boolean {
+  const { breakerState } = context;
+  const retraction = context.retractLineEndForbidden(s, (retractedPx) => context.fitsMeasuredWidth(
+    retractedPx + unitWidth, lineFitWidth(context, breakerState.lineMaxWidth)));
+  context.flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
+  if (retraction.kind !== 'retracted') return false;
+  breakerState.queue.unshift(s);
+  queueRetraction(breakerState.queue, retraction);
+  return true;
+}
+
+/** WORD_RUBY_ALIGN_PLACEMENT: a ruby cell (every piece of one ruby run, its
+ * widening included, with any fitText region it shares a segment with:
+ * placedUnitOf) is one indivisible unit, admitted by its whole advance,
+ * so none of the CJK, SEA, hanging-punctuation or emergency split paths may
+ * cut its base or charge less than its advance. A cell that does not fit
+ * after content moves whole to a fresh line; on a line it would start, or
+ * cannot leave, it overflows whole. */
+function placeRubyCell(context: BreakOpportunityIteratorContext, frame: TextFitFrame): void {
+  const { breakerState, flush, addToLine, availW, fitsMeasuredWidth } = context;
+  const { s, w, h, asc, desc, wForFit } = frame;
+  const unit = placedUnitOf(s)!;
+  const admit = () => {
+    s.measuredWidth = w;
+    addToLine(s, w, h, asc, desc);
+  };
+  if ((s.placedUnitIndex ?? 0) > 0) {
+    // A later member never starts a line: its unit's first member is placed.
+    if (!fitsMeasuredWidth(breakerState.currentWidth + wForFit, availW())) {
+      const unitStart = joinedUnitStart(breakerState.currentLine);
+      context.forcedPlacement(lineAdvanceFrom(breakerState.currentLine, unitStart) + wForFit, unitStart);
+    }
+    admit();
+    return;
+  }
+  // The first member is admitted by the whole unit, its later members with
+  // it, each allocated as placement will allocate it (prospectiveCellAdvance).
+  const followers: LayoutTextSeg[] = [];
+  for (const follower of breakerState.queue) {
+    if (!('text' in follower) || placedUnitOf(follower) !== unit) break;
+    followers.push(follower);
+  }
+  const unitWidth = context.prospectiveCellAdvance([
+    { segment: s, naturalPx: w },
+    ...followers.map((follower) => ({ segment: follower, naturalPx: context.segNaturalAdvance(follower) })),
+  ]) - (context.prospectiveSnapAdvance(s, w) - wForFit);
+  if (fitsMeasuredWidth(breakerState.currentWidth + unitWidth, availW())) {
+    admit();
+    return;
+  }
+  const startsLine = breakerState.currentLine.length === 0
+    || (s.listLabel === undefined && breakerState.currentWidth < availW()
+      && breakerState.currentLine.every(isListLabelItem))
+    || (breakerState.currentLine.every(isInklessLineItem) && overlongAnchorLineInScope(context, unitWidth));
+  if (startsLine) {
+    context.forcedPlacement(unitWidth);
+    admit();
+    return;
+  }
+  // §17.3.1.16. A cell led by a line-start-forbidden character pulls the
+  // end of the line down with it (cross-run 追い出し) and, when nothing can
+  // move, keeps its place past the line end, as the CJK overflow path keeps
+  // a forbidden leader. Otherwise the line's line-end-forbidden end moves
+  // with the cell when both fit a whole line. The cell itself is never split.
+  const leaderForbidden = context.lineEdgeRules.enabled
+    && context.lineEdgeRules.lineStartForbidden.has(s.text.codePointAt(0) ?? -1);
+  if (leaderForbidden) {
+    const retraction = context.retractCurrentLineForLeadingKinsoku(s);
+    if (retraction.kind !== 'retracted') {
+      const unitStart = joinedUnitStart(breakerState.currentLine);
+      context.forcedPlacement(lineAdvanceFrom(breakerState.currentLine, unitStart) + unitWidth, unitStart);
+      admit();
+      return;
+    }
+    flush(undefined, false, retraction.tail.src);
+    breakerState.queue.unshift(s);
+    queueRetraction(breakerState.queue, retraction);
+    return;
+  }
+  if (!endLineBefore(context, s, unitWidth)) breakerState.queue.unshift(s);
 }
 
 function prepareAtomicTextFit(
@@ -1625,6 +1768,8 @@ function prepareAtomicTextFit(
     && breakerState.currentLine.every(isListLabelItem);
   if (
     !s.joinPrev &&
+    // A ruby cell is admitted whole by placeRubyCell.
+    placedUnitOf(s) === undefined &&
     !listLabelOnlyLine &&
     breakerState.currentLine.length > 0 &&
     (follower?.joinPrev || preferWholeWord && follower?.explicitBreakBefore) &&
@@ -1652,7 +1797,7 @@ function prepareAtomicTextFit(
       !(mixedCandidateMayShrink(breakerState, group.pieces.map((piece) => piece.text).join(''), group.pieces[0]?.segment)
         && context.mixedSpaceRequirement({ pieces: group.pieces, fitWidth: groupFitWidth }) !== undefined)
     ) {
-      flush(undefined, false, s.src);
+      if (endLineBefore(context, s, groupFitWidth)) return true;
     }
   }
 
@@ -1706,7 +1851,7 @@ function prepareAtomicTextFit(
       !fitsLineWidth(breakerState.currentWidth + chunkWForFit, availW()) &&
       fitsLineWidth(chunkWForFit, lineFitWidth(context, breakerState.lineMaxWidth))
     ) {
-      flush(undefined, false, s.src);
+      if (endLineBefore(context, s, chunkWForFit)) return true;
     }
   }
   return false;
@@ -1800,6 +1945,25 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
   // at the O(1) gate before any candidate text is built.
   const allChars = [...s.text];
   const minSplit = breakerState.currentLine.length > 0 ? 0 : 1;
+  // §17.3.1.16 over grapheme clusters (UAX #29): a character with its
+  // combining marks or variation selector is one character of the retraction.
+  // Counting code points would let it stop between a base and its mark, where
+  // the source-protection step then moves the break to the cluster start
+  // without the line edge being checked again. Text whose every code point
+  // is a cluster of its own takes the code-point path unchanged.
+  const clusterStarts = [0, ...graphemeClusterOffsets(s.text)];
+  const clusters = clusterStarts.length === allChars.length ? undefined
+    : clusterStarts.map((start, index) => s.text.slice(start, clusterStarts[index + 1]));
+  // Code points before each cluster, and after the last.
+  const codePointsBefore = clusters ? [0] : undefined;
+  for (const cluster of clusters ?? []) codePointsBefore!.push(codePointsBefore!.at(-1)! + [...cluster].length);
+  const kinsokuSplit = (split: number, minimum: number): number => {
+    if (!clusters || !codePointsBefore) return kinsokuAdjustedSplit(allChars, split, kinsoku, minimum);
+    // The clusters that end at or before the split.
+    let whole = 0;
+    while (whole < clusters.length && codePointsBefore[whole + 1]! <= split) whole += 1;
+    return codePointsBefore[kinsokuAdjustedSplit(clusters, whole, kinsoku, minimum)]!;
+  };
   const proposedPrefixFor = (split: number, extensions: boolean): string => {
     const hangingSplit =
       extensions &&
@@ -1831,7 +1995,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       )
         ? split + 1
         : null;
-    const adjusted = hangingSplit ?? kinsokuAdjustedSplit(allChars, split, kinsoku, minSplit);
+    const adjusted = hangingSplit ?? kinsokuSplit(split, minSplit);
     const proposedSplit = extensions
       ? extendThroughTrailingIdeographicSpaces(
           allChars,
@@ -1989,7 +2153,7 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
   if (breakerState.currentLine.length === 0) {
     // minSplit keeps progress on an empty line even when no legal prefix
     // fits; that retained prefix is forced unless a legal one exists.
-    const legalSplit = kinsokuAdjustedSplit(allChars, rawSplit, kinsoku, 0);
+    const legalSplit = kinsokuSplit(rawSplit, 0);
     const legalUtf16 = allChars.slice(0, legalSplit).join('').length;
     if (legalTextSplitAtOrBefore(s, legalUtf16, 1) === 0 || placedAdvanceExceeds(context, s, prefix)) {
       context.forcedPlacement(context.minimalLegalTextWidth(s));
@@ -2029,8 +2193,8 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
     // char, kinsokuAdjustedSplit can't fix it from within `s` (the offending
     // char is its first); pull trailing graphemes of the current line's last
     // text segment down so they lead the next line ahead of `s` — cross-run
-    // 追い出し (§17.3.1.16). See crossRunKinsokuRetract for the bounded,
-    // re-validating, whitespace-guarded retraction count.
+    // 追い出し (§17.3.1.16). See retractLeadingKinsoku for the re-validating,
+    // whitespace-guarded retraction point.
     const retraction = retractCurrentLineForLeadingKinsoku(s);
     if (retraction.kind === 'blocked') {
       // Keeping the forbidden leader overflows the line: force its unit.
@@ -2043,9 +2207,13 @@ function splitCjkOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       keepLeadingKinsokuWithCurrentLine(s, h, asc, desc);
       return;
     }
-    flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
-    breakerState.queue.unshift(s);
-    if (retraction.kind === 'retracted') breakerState.queue.unshift(retraction.tail);
+    if (retraction.kind === 'retracted') {
+      flush(undefined, false, retraction.tail.src);
+      breakerState.queue.unshift(s);
+      queueRetraction(breakerState.queue, retraction);
+    } else if (!endLineBefore(context, s, context.minimalLegalTextWidth(s))) {
+      breakerState.queue.unshift(s);
+    }
   } else {
     // Empty line and not even one char fits — force-fit one char to guarantee progress
     const forcedChars = [...s.text];
@@ -2191,9 +2359,13 @@ function splitSeaOverflow(context: BreakOpportunityIteratorContext, frame: TextF
       keepLeadingKinsokuWithCurrentLine(s, h, asc, desc);
       return;
     }
-    flush(undefined, false, retraction.kind === 'retracted' ? retraction.tail.src : s.src);
-    breakerState.queue.unshift(s);
-    if (retraction.kind === 'retracted') breakerState.queue.unshift(retraction.tail);
+    if (retraction.kind === 'retracted') {
+      flush(undefined, false, retraction.tail.src);
+      breakerState.queue.unshift(s);
+      queueRetraction(breakerState.queue, retraction);
+    } else if (!endLineBefore(context, s, context.minimalLegalTextWidth(s))) {
+      breakerState.queue.unshift(s);
+    }
   } else {
     // Empty line and the first dictionary word is wider than the whole
     // column: emergency GRAPHEME-safe split (a code-point split would tear a

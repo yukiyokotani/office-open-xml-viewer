@@ -47,6 +47,103 @@ export interface LayoutSegSource {
 }
 
 
+/** One w:rt run of a ruby guide: its text and the faces it selects. */
+export interface RubyGuideRunFace {
+  readonly text: string;
+  readonly fonts: Readonly<{
+    ascii?: string | null;
+    highAnsi?: string | null;
+    eastAsia?: string | null;
+    complexScript?: string | null;
+  }>;
+  readonly bold: boolean;
+  readonly italic: boolean;
+  /** §17.3.2.2 bCs / §17.3.2.17 iCs: the weight and slant of the run's
+   * complex-script text. */
+  readonly boldCs: boolean;
+  readonly italicCs: boolean;
+  /** §17.3.2.30 rtl: the run's text runs right to left. */
+  readonly rtl: boolean;
+  /** The run's own script controls, which select among its slots: complex
+   * script (§17.3.2.30 rtl or §17.3.2.7 cs) and §17.3.2.26 rFonts@hint. */
+  readonly complexScript: boolean;
+  readonly fontHint?: 'default' | 'eastAsia' | 'cs';
+}
+
+/** One placed unit of a ruby guide (WORD_RUBY_ALIGN_PLACEMENT): a grapheme,
+ * a contextual span that paints whole (a joining or pair-kerned script), or a
+ * planned vertical cell (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). */
+export interface RubyGuideUnit {
+  readonly text: string;
+  /** UTF-16 range in the guide text. */
+  readonly start: number;
+  readonly end: number;
+  /** Paint origin along the run from the cell start, with the alignment
+   * spacing applied (an upright vertical cell's origin is its centre). */
+  readonly originPx: number;
+  /** The unit's pen along the guide before any alignment spacing. */
+  readonly penPx: number;
+  /** The unit's own advance along the run. */
+  readonly advancePx: number;
+  readonly fontRoute: CanvasFontRoute;
+  readonly fontWeight: number;
+  readonly fontStyle: 'normal' | 'italic';
+  readonly kerning?: 'normal' | 'none';
+  readonly orientation?: 'upright' | 'rotate' | 'sideways';
+  readonly verticalFeature?: true;
+  readonly drawOffsetPx?: Readonly<{ xPt: number; yPt: number }>;
+  /** The selected face's box at the guide size (a horizontally shaped unit):
+   * an upright frame turns the unit about it. */
+  readonly faceBoxPx?: Readonly<{ ascentPx: number; descentPx: number }>;
+}
+
+/** The single geometry of a ruby run's cell, at the layout scale it was
+ * computed for (WORD_RUBY_ALIGN_PLACEMENT, WORD_RUBY_LINE_ASCENT,
+ * WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). */
+export interface RubyCellGeometry {
+  readonly scale: number;
+  /** The whole base's laid-out advance (all pieces). */
+  readonly basePx: number;
+  /** The guide's advance in its own orientation. */
+  readonly guidePx: number;
+  /** The cell: the base widened to a longer guide under an authored
+   * alignment. */
+  readonly advancePx: number;
+  /** The base's offset inside the cell. */
+  readonly baseOffsetPx: number;
+  /** Guide units in paint order; empty without a shaping service. */
+  readonly units: readonly RubyGuideUnit[];
+  /** The guide baseline (vertical: its axis) above the base baseline. */
+  readonly raisePx: number;
+  /** The guide's extent past its baseline toward the line head. */
+  readonly headPx: number;
+  /** The guide units are planned as a vertical run. */
+  readonly vertical: boolean;
+}
+
+/** Consecutive segments placed on one line as one unit. */
+export interface PlacedUnit {
+  readonly members: readonly LayoutTextSeg[];
+}
+
+/** A ruby-annotated source run: every emitted piece shares this object. */
+export interface RubyGroup {
+  readonly ruby: NonNullable<LayoutTextSeg['ruby']>;
+  readonly pieces: readonly LayoutTextSeg[];
+  /** The paragraph's base direction is right to left (§17.3.1.6): the
+   * embedding the cell's runs, and its guide's, are reordered in. */
+  readonly baseRtl?: boolean;
+  /** The Far East single-line class of a face the guide selects for `text`,
+   * from the same admitted face data as a base run's
+   * (`resolvedFarEastLineClass` / `resolvedLineHeightRatio`); undefined
+   * when no data is admitted for the face. */
+  readonly guideFarEastClass?: (
+    font: import('../layout/font-service.js').FontResolution,
+    text: string,
+  ) => boolean | undefined;
+  cell?: RubyCellGeometry;
+}
+
 export interface LayoutTextSeg extends LayoutSegSource {
   text: string;
   /** An authored zero-advance discretionary boundary. The retained glyph
@@ -141,6 +238,11 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** Admitted reference profile has no Far East code-page bits; its Latin
    * single-line design height owns whole line-grid cells (#1674). */
   resolvedLatinGridCellAllocation?: boolean;
+  /** The admitted resource or reference profile sets an OS/2 Far East
+   * code-page bit (Word's 1.3 x usWin single-line class). */
+  resolvedFarEastLineClass?: true;
+  /** The run is set in a quarter-turned frame (LineLayoutEnvironment.verticalFrameLines). */
+  verticalFrameRun?: 'rotated' | 'upright';
   resolvedLineHeightRatio?: number;
   /** A selected route supplied this ratio from measured or parsed geometry. */
   resolvedResourceVerticalMetric?: true;
@@ -244,10 +346,28 @@ export interface LayoutTextSeg extends LayoutSegSource {
   /** ECMA-376 §17.3.2.4 `<w:bdr>` — a run-level border (box) around the text. */
   border?: DocxRunBorder | null;
   /** Ruby annotation rendered in a small font directly above this segment. */
-  ruby?: { text: string; fontSizePt: number; hpsRaisePt?: number };
-  /** Every piece of a ruby-annotated run (only the first carries `ruby`):
-   * none takes a WORD_KERNED_SPACE_PAIRS seam pair. */
-  rubyPiece?: true;
+  ruby?: {
+    text: string;
+    fontSizePt: number;
+    hpsRaisePt?: number;
+    /** Valid authored §17.3.3.1 w:rubyAlign (ST_RubyAlign). */
+    align?: string;
+    /** The w:rt runs (§17.3.3.24) in order, whose texts make up `text`,
+     * each with its own faces. */
+    guideRuns?: readonly RubyGuideRunFace[];
+  };
+  /** The ruby run this segment is a piece of, shared by every piece (the
+   * first also carries `ruby`). Its cell geometry is computed once and read
+   * by measurement, wrapping, grids, fitText and paint. */
+  rubyGroup?: RubyGroup;
+  /** This piece's index in {@link rubyGroup}'s pieces. */
+  rubyPieceIndex?: number;
+  /** The unit this segment is placed with whole (ruby-cell.ts placedUnitOf):
+   * its ruby cell together with every fitText region (§17.3.2.14) that
+   * shares a segment with it. Formed per pass by prepareBreakQueue. */
+  placedUnit?: PlacedUnit;
+  /** This segment's index in {@link placedUnit}'s members. */
+  placedUnitIndex?: number;
   /** Track-changes revision attached to this run (insertion / deletion /
    *  moveFrom / moveTo). */
   revision?: { kind: 'insertion' | 'deletion' | string; author?: string };
@@ -528,6 +648,10 @@ export interface LayoutImageSeg extends LayoutSegSource {
    *  walk keys off `run.type === 'image'` and never sees a chart run). */
   chart?: true;
   chartResourceKey?: string;
+  /** ECMA-376 §17.3.2.24 position (pt) of an inline chart's hosting run. It
+   * places the chart only in an exact line (WORD_INLINE_OBJECT_EXACT_LINE);
+   * the chart's other line metrics stay unpositioned. */
+  chartPositionPt?: number;
   /** ECMA-376 §20.4.2.8 — this image-shaped line segment reserves the inline
    * WPS shape's extent; paint is owned by the paragraph's retained drawing. */
   inlineShape?: true;
@@ -628,6 +752,9 @@ export interface LayoutLine {
   marginExtension?: number;
   /** When wrap context is active, the absolute canvas Y where this line begins. */
   topY?: number;
+  /** A float narrowed, offset or moved this line (not merely an active wrap
+   * context): the float-conditioned class of the exact-line rules. */
+  wrapAffected?: true;
   /** Confirmed fixed-point allocation that owns topY, in the same units as
    * the wrap context. Never infer ownership from a numeric top alone. */
   wrapAllocation?: Readonly<{ physicalLineIndex: number; topYPt: number; advancePt: number }>;
@@ -784,6 +911,10 @@ export interface LineLayoutEnvironment {
   readonly noteNumbering?: NoteNumbering;
   readonly noteReferenceNumber?: number;
   readonly verticalCJK?: boolean;
+  /** The paragraph is laid out in a quarter-turned frame (a vertical text box
+   * story or a vertical table cell): its lines take the vertical single line
+   * of WORD_VERTICAL_LINE_CENTRED_BOX in their own horizontal partition. */
+  readonly verticalFrameLines?: 'rotated' | 'upright';
   /** The paragraph keeps Word's line boxes under a LibreOffice producer
    * (keepsWordLineBoxes). */
   readonly wordLineBoxes?: boolean;

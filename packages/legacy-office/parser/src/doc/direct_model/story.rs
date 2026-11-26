@@ -1005,6 +1005,10 @@ fn push_ruby(
                 italic: run.italic,
                 color: run.color,
                 language: language.map(str::to_ascii_lowercase),
+                // The guide's per-slot faces and script controls are not
+                // read from the binary run properties here: the guide is
+                // shaped in the base run's faces.
+                ..Default::default()
             });
             Ok(())
         },

@@ -72,9 +72,9 @@ it('collects the distinct authored font tuples used by rendered text', () => {
     { type: 'text', text: 'light', fontFamily: 'Calibri Light', bold: false, italic: false },
   ];
   const requests = docxOfficeFontFallbackRequests(doc);
-  expect(requests).toContainEqual({ family: 'Calibri', weight: 400, style: 'normal' });
-  expect(requests).toContainEqual({ family: 'calibri', weight: 700, style: 'italic' });
-  expect(requests).toContainEqual({ family: 'Calibri Light', weight: 400, style: 'normal' });
+  expect(requests).toContainEqual({ family: 'Calibri', weight: 400, style: 'normal', format: 'docx' });
+  expect(requests).toContainEqual({ family: 'calibri', weight: 700, style: 'italic', format: 'docx' });
+  expect(requests).toContainEqual({ family: 'Calibri Light', weight: 400, style: 'normal', format: 'docx' });
   expect(requests.filter((request) => request.family.toLowerCase() === 'calibri' && !request.presenceOnly))
     .toHaveLength(2);
   // One family presence probe per authored family, independent of its tuples.
@@ -90,8 +90,8 @@ it('also requests the catalogued regular face of a styled tuple the catalog lack
     { type: 'text', text: '見出し', fontFamily: 'MS Mincho', bold: true, italic: false },
   ];
   const requests = docxOfficeFontFallbackRequests(doc);
-  expect(requests).toContainEqual({ family: 'MS Mincho', weight: 700, style: 'normal' });
-  expect(requests).toContainEqual({ family: 'MS Mincho', weight: 400, style: 'normal' });
+  expect(requests).toContainEqual({ family: 'MS Mincho', weight: 700, style: 'normal', format: 'docx' });
+  expect(requests).toContainEqual({ family: 'MS Mincho', weight: 400, style: 'normal', format: 'docx' });
 });
 
 it('demands every rendered authored family, whatever a source serves', () => {
@@ -118,8 +118,8 @@ it('checks substitute family presence independent of the styles used', () => {
   // requests; presence is asked for the family.
   const requests = docxOfficeFontFallbackRequests(doc, { fontDemand: true });
   expect(requests.filter((request) => request.family === 'Franklin Gothic Book')).toEqual([
-    { family: 'Franklin Gothic Book', weight: 700, style: 'normal' },
-    { family: 'Franklin Gothic Book', weight: 400, style: 'normal' },
+    { family: 'Franklin Gothic Book', weight: 700, style: 'normal', format: 'docx' },
+    { family: 'Franklin Gothic Book', weight: 400, style: 'normal', format: 'docx' },
     { family: 'Franklin Gothic Book', presenceOnly: true },
   ]);
   // Without web fonts the family is still probed once (layout's installed
@@ -148,7 +148,7 @@ it('loads the themed bold face when a run inherits its family', () => {
     { type: 'text', text: 'heading', bold: true },
   ];
   expect(docxOfficeFontFallbackRequests(doc)).toContainEqual({
-    family: 'Calibri', weight: 700, style: 'normal',
+    family: 'Calibri', weight: 700, style: 'normal', format: 'docx',
   });
 });
 
@@ -158,9 +158,9 @@ it('loads the inherited Latin face when only an East Asian face is authored', ()
     { type: 'text', text: 'Latin text', fontFamilyEastAsia: 'Meiryo', bold: true },
   ];
   const requests = docxOfficeFontFallbackRequests(doc);
-  expect(requests).toContainEqual({ family: 'Calibri', weight: 400, style: 'normal' });
-  expect(requests).toContainEqual({ family: 'Calibri', weight: 700, style: 'normal' });
-  expect(requests).toContainEqual({ family: 'Meiryo', weight: 700, style: 'normal' });
+  expect(requests).toContainEqual({ family: 'Calibri', weight: 400, style: 'normal', format: 'docx' });
+  expect(requests).toContainEqual({ family: 'Calibri', weight: 700, style: 'normal', format: 'docx' });
+  expect(requests).toContainEqual({ family: 'Meiryo', weight: 700, style: 'normal', format: 'docx' });
 });
 
 it('does not load the theme face for an explicitly authored Latin face', () => {
@@ -169,9 +169,9 @@ it('does not load the theme face for an explicitly authored Latin face', () => {
     { type: 'text', text: 'Latin text', fontFamily: 'Arial', fontFamilyEastAsia: 'Meiryo', bold: true },
   ];
   const requests = docxOfficeFontFallbackRequests(doc);
-  expect(requests).not.toContainEqual({ family: 'Calibri', weight: 700, style: 'normal' });
-  expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'normal' });
-  expect(requests).toContainEqual({ family: 'Meiryo', weight: 700, style: 'normal' });
+  expect(requests).not.toContainEqual({ family: 'Calibri', weight: 700, style: 'normal', format: 'docx' });
+  expect(requests).toContainEqual({ family: 'Arial', weight: 700, style: 'normal', format: 'docx' });
+  expect(requests).toContainEqual({ family: 'Meiryo', weight: 700, style: 'normal', format: 'docx' });
 });
 
 it('demands a theme minorFont such as Ubuntu', () => {
@@ -223,7 +223,7 @@ it('keeps default native preflight at its existing slot projection', () => {
       eastAsia: 'Arial', complexScript: 'Arial' }, themePresent: {} } }];
   expect(docxOfficeFontFallbackRequests(doc).some((request) => request.family === 'Cambria')).toBe(false);
   expect(docxOfficeFontFallbackRequests(doc, { fontDemand: true }))
-    .toContainEqual({ family: 'Cambria', weight: 400, style: 'normal' });
+    .toContainEqual({ family: 'Cambria', weight: 400, style: 'normal', format: 'docx' });
   expect(docxFontPreloadNames(doc)).toContain('Cambria');
 });
 
@@ -247,4 +247,15 @@ it('demands only families whose presence was probed, probing past the office-fal
   const plan = docxFontFamilyPlan(doc, GOOGLE, undefined, completed);
   expect(plan.families).toEqual(names.slice(0, 32));
   expect(completed.installed).toEqual(['face 33']);
+});
+
+describe('docxOfficeFontFallbackRequests format', () => {
+  it('tags a Word document\'s requests for DOCX-evidenced profiles and leaves another producer\'s untagged', () => {
+    const word = docxOfficeFontFallbackRequests(docWith('Hello', 'Noto Sans JP', 'Noto Sans JP'));
+    expect(word.filter((request) => !request.presenceOnly)
+      .every((request) => request.format === 'docx')).toBe(true);
+    const odt = { ...docWith('Hello', 'Noto Sans JP', 'Noto Sans JP'),
+      settings: { __libreOfficeLineBoxes: true } } as unknown as DocxDocumentModel;
+    expect(docxOfficeFontFallbackRequests(odt).every((request) => request.format === undefined)).toBe(true);
+  });
 });

@@ -22,6 +22,7 @@ import {
 } from './parser-model.js';
 import { requestedFamily, shapeRunToDocRun, type TextFontSlots } from './layout/text.js';
 import type { NumberingMarkerShapeInput } from './layout/types.js';
+import type { InternalRunTypographyWire } from './layout/typography-input.js';
 
 type InternalRenderedFontAxes = Readonly<InternalRunSlotMetadata>;
 
@@ -96,6 +97,8 @@ export interface DocxRenderedTextUsage {
   latinFontFamily?: string | null;
   bold?: boolean;
   italic?: boolean;
+  /** The usage of a ruby guide run (§17.3.3.24). */
+  rubyGuide?: true;
 }
 
 function* shapeTextUsages(shape: ShapeRun, collection: FontCollection): Generator<DocxRenderedTextUsage> {
@@ -115,6 +118,13 @@ function* shapeTextUsages(shape: ShapeRun, collection: FontCollection): Generato
   }
   for (const block of shape.textBlocks ?? []) {
     yield* shapeBlockUsages(block, collection, content === undefined);
+  }
+  // The flattened blocks carry no ruby guide runs. A guide's faces can be
+  // authored on its w:rt runs alone, so they are taken from the story.
+  if (content !== undefined) {
+    for (const usage of bodyUsages(content as BodyElement[], collection)) {
+      if (usage.rubyGuide) yield usage;
+    }
   }
 }
 
@@ -210,6 +220,37 @@ function* runUsages(run: DocRun, collection: FontCollection): Generator<DocxRend
   if (run.type === 'text') {
     const text = run as DocxTextRun & InternalRenderedFontAxes;
     yield* textResultUsages(run.text, run.fontFamily, text, run.bold, run.italic, collection);
+    // §17.3.3.24: each w:rt run of a ruby guide is shaped in its own faces
+    // (ruby-cell.ts guideShapes), so they are demanded with the guide text.
+    const guideRuns = (run as { __typographyAcquisition?: InternalRunTypographyWire })
+      .__typographyAcquisition?.ruby?.guideRuns;
+    for (const guide of run.ruby ? guideRuns ?? [] : []) {
+      const fonts = guide.fonts;
+      if (!fonts) continue;
+      yield {
+        text: guide.text,
+        eastAsiaLanguage: text.langEastAsia,
+        fontFamilies: [fonts.ascii ?? run.fontFamily, fonts.highAnsi ?? text.fontFamilyHighAnsi,
+          fonts.eastAsia ?? text.fontFamilyEastAsia],
+        latinFontFamily: fonts.ascii ?? fonts.highAnsi ?? run.fontFamily ?? null,
+        bold: guide.bold,
+        italic: guide.italic,
+        rubyGuide: true,
+      };
+      // A slot the guide run leaves unnamed is the base run's (ruby-cell.ts
+      // guideShapes): a complex-script guide run without rFonts is shaped in
+      // the base's complex-script face.
+      const complexScript = fonts.complexScript
+        ?? (guide.rtl === true || guide.cs === true ? text.fontFamilyCs : undefined);
+      if (complexScript) {
+        // §17.3.2.2 / §17.3.2.17: the guide's complex-script text is shaped
+        // with bCs and iCs (ruby-cell.ts shapedGuideRuns), independent of
+        // b and i, so its face is demanded in that variant.
+        yield { text: guide.text, eastAsiaLanguage: text.langEastAsia,
+          fontFamilies: [complexScript], bold: guide.boldCs === true, italic: guide.italicCs === true,
+          rubyGuide: true };
+      }
+    }
   } else if (run.type === 'field') {
     const field = run as FieldRun & InternalRenderedFontAxes;
     yield* textResultUsages(field.fallbackText, field.fontFamily, field, field.bold, field.italic, collection);

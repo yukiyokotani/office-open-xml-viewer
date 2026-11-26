@@ -295,10 +295,10 @@ describe('complete DOCX parser inputs preserve formatting-only split invariance'
       return geometry(paragraphs(layoutDocument(doc, createLayoutServices(doc, { measureContext: context() })))
         .filter(p => p.source.story === 'body' && p.source.path.length === 1))[0]?.lines.map(l => l.text.trim());
     };
-    // Ruby paints its annotation on the owning piece; existing script/case
-    // breaks remain unchanged. The ordinary policy must not add an internal
-    // hyphen break to an unannotated tail of that same authored base.
-    expect(lines('a\u0301-b')).toEqual(['AAAA a\u0301', '-b']);
+    // Ruby paints its annotation on the owning piece. The pieces a script or
+    // case split emits are one ruby cell (WORD_RUBY_ALIGN_PLACEMENT): they
+    // wrap together, and the ordinary policy adds no internal hyphen break.
+    expect(lines('a\u0301-b')).toEqual(['AAAA', 'a\u0301-b']);
     expect(lines('aB-c', '<w:smallCaps/>')).toEqual(['AAAA', 'AB-C']);
   });
   it('admits the same legal hyphen prefix when its tail changes font', () => {

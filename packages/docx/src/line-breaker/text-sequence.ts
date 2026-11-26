@@ -27,7 +27,7 @@ function visibleTextRun(run: ParagraphLayoutRun, environment: LineLayoutEnvironm
   // These are authored units, rather than formatting-only seams: a ruby base,
   // note marker, fitText unit, noBreakHyphen owner, upright tate-chu-yoko cell
   // or explicitly advanced space.
-  if (r.optionalHyphen || r.ruby || r.noteRef || r.fitTextVal != null || r.noBreakRanges?.length
+  if (r.optionalHyphen || r.ruby || r.rubyBaseContinuation || r.noteRef || r.fitTextVal != null || r.noBreakRanges?.length
     || r.noBreakBefore || r.noBreakAfter || r.eastAsianVert || r.spaceAdvancePt !== undefined
     || r.listLabel !== undefined) return undefined;
   const text = run.type === 'text' ? run.text : resolveFieldText(run as FieldRun, environment);

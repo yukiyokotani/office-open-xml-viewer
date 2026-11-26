@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as lineLayout from './line-layout.js';
+
+// Counts keepsWordLineBoxes calls (pass-through) for the per-paragraph test.
+vi.mock('./line-layout.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./line-layout.js')>();
+  return { ...original, keepsWordLineBoxes: vi.fn(original.keepsWordLineBoxes) };
+});
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
 import { layoutBodyModel } from './test-support/document-layout.test-support.js';
 import { createLayoutServices } from './layout-runtime.js';
@@ -180,6 +187,31 @@ describe('LIBREOFFICE_FONT_LINE_BOX', () => {
   it('keeps the text at the top of a proportional line', () => {
     const [lines] = pages([para([run('One'), BR, run('Two')], auto(2))], LIBREOFFICE);
     expect(lines!.map((line) => line.baselinePt)).toEqual([20 + 9.6, 20 + 31.2 + 9.6].map((v) => expect.closeTo(v, 6)));
+  });
+
+  it('keeps another producer\'s fixed line off the Word exact baseline (WORD_EXACT_LINE_BASELINE)', () => {
+    const exact30 = { rule: 'exact', value: 30, explicit: true } as LineSpacing;
+    // A Word document: four fifths of the 30pt line.
+    const [word] = pages([para([run('Fixed')], exact30)]);
+    expect(word![0]!.baselinePt).toBeCloseTo(20 + 24, 6);
+    // A LibreOffice-producer line without its own fixed-line placement
+    // (`__lineExtraAbove`, as for vertical ODT pages) keeps the centred box.
+    const [other] = pages([para([run('Fixed')], exact30)], LIBREOFFICE);
+    expect(other![0]!.advancePt).toBe(30);
+    expect(other![0]!.baselinePt).toBeCloseTo(20 + (30 - 12) / 2 + 9.6, 6);
+  });
+
+  it('decides a fixed paragraph\'s line-box kind once, not once per line', () => {
+    const keeps = vi.mocked(lineLayout.keepsWordLineBoxes);
+    const calls = (count: number) => {
+      const runs: DocParagraph['runs'] = [];
+      for (let i = 0; i < count; i++) runs.push(run(`r${i}`), BR);
+      keeps.mockClear();
+      pages([para(runs, { rule: 'exact', value: 12, explicit: true } as LineSpacing)], LIBREOFFICE, 20000);
+      return keeps.mock.calls.length;
+    };
+    // The count follows the paragraph's acquisitions, not its 50 or 100 lines.
+    expect(calls(100)).toBe(calls(50));
   });
 
   it('places a proportional line below 100% as a fixed line of its height', () => {

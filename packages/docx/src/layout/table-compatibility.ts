@@ -561,6 +561,35 @@ export const WORD_CELL_VERTICAL_ALIGNMENT_INK_BLOCK = defineCompatibilityRule({
   description: 'Center or bottom-align the visible cell ink block without charging the first paragraph spaceBefore or final paragraph spaceAfter at the cell edges. Evidence (observed Office behaviour): Word PDF of a corpus document in PR #552 (midpoint placement); ECMA-376 §17.4.83 vAlign does not define the ink block.',
 });
 
+/** ECMA-376 §17.4.42/§17.4.72 define cell margins and text direction but
+ * not where a margin is measured from when the cell edge carries a rule. */
+export const WORD_ROTATED_CELL_RULE_INSET = defineCompatibilityRule({
+  id: 'word-rotated-cell-rule-inset',
+  evidence: {
+    kind: 'office-observation',
+    syntheticFixtureId: 'rotated-cell-rule-inset',
+    application: 'Microsoft Word',
+    version: '16.0.20625',
+    platform: 'Windows',
+  },
+  description: 'In a btLr or tbRl cell of a collapsed-border table, the physical left and right content edges (across the turned lines) lie max(margin, w/2) inside the centre of the winning vertical rule of width w, the rule centre being half its width to the right of the cell edge this layout uses (the left rule lies inside the cell box, the right one outside it). So with zero margins a btLr cell\'s first column starts the full left rule width in from the cell edge and a tbRl cell\'s first column stays at it, and with a 5.4pt margin and a 0.5pt rule both move a quarter point to the right. Evidence: Windows Word 16.0.20625 PDF exports (vert3 set) of one 250 x 300pt cell with btLr or tbRl, MS Mincho and Times New Roman/MS Mincho 10.5pt East Asian, Latin and mixed paragraphs, under rules of 0, 0.5 and 1.5pt with zero margins and a 0.5pt rule with 5.4pt margins: every first glyph lay within 0.12pt (the export\'s position grid) of this edge; the vert2 btLr cells (0.5pt rules, zero left and right margins) had shown the same 0.5pt offset. Library scope: the rule applies to rotated cells only; horizontal cells, spaced (separated-border) tables and rules wider than 1.5pt are outside this evidence.',
+});
+
+/** WORD_ROTATED_CELL_RULE_INSET: a rotated cell's physical left and right
+ * margins measured from this layout's cell edges, given the widths of its
+ * winning left and right rules. */
+export function wordRotatedCellRuleInsets<M extends Readonly<{ leftPt: number; rightPt: number }>>(
+  margins: M,
+  leftRulePt: number,
+  rightRulePt: number,
+): M {
+  return {
+    ...margins,
+    leftPt: leftRulePt / 2 + Math.max(margins.leftPt, leftRulePt / 2),
+    rightPt: Math.max(margins.rightPt, rightRulePt / 2) - rightRulePt / 2,
+  };
+}
+
 export const WORD_VERTICAL_MERGE_TERMINAL_BORDER = defineCompatibilityRule({
   id: 'word-vertical-merge-terminal-border',
   evidence: {

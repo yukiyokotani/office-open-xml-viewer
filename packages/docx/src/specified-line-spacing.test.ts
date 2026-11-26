@@ -95,10 +95,11 @@ describe('numbered specified lines outside compatibility mode 15 (#1884)', () =>
     { empty: false, rule: 'exact' as const }, { empty: true, rule: 'exact' as const },
     { empty: false, rule: 'atLeast' as const }, { empty: true, rule: 'atLeast' as const },
   ])('keeps the established $rule line, empty=$empty', ({ empty, rule }) => {
-    // The values main produced before the mode-15 numbered class was measured.
+    // The values main produced before the mode-15 numbered class was measured;
+    // an exact line keeps four fifths in every mode (WORD_EXACT_LINE_BASELINE).
     const paragraph = render('Arial', 10, { rule, value: 18, explicit: true },
       false, undefined, 14, false, 10, false, false, false, undefined, { markerSize: 30, empty });
-    expect(paragraph.lines[0].baselinePt - paragraph.lines[0].bounds.yPt).toBe(11);
+    expect(paragraph.lines[0].baselinePt - paragraph.lines[0].bounds.yPt).toBeCloseTo(rule === 'exact' ? 14.4 : 11, 9);
     expect(paragraph.lines[0].advancePt).toBe(18);
   });
 });
@@ -125,23 +126,31 @@ describe('Word specified spacing for ordinary Latin text', () => {
     expect(hosted.flowBounds.heightPt).toBe(3 * height);
   });
 
-  it('keeps the unmeasured compatibility-mode class on the established centered path', () => {
+  it('keeps four fifths of an exact line in compatibility modes 12 and 14 (WORD_EXACT_LINE_BASELINE)', () => {
     const old = render('Arial', 10, { rule: 'exact', value: 30, explicit: true }, false, undefined, 12);
-    expect(old.lines[0].baselinePt - 72).toBe(17);
+    expect(old.lines[0].baselinePt - 72).toBe(24);
     const fourteen = render('Arial', 10, { rule: 'exact', value: 30, explicit: true }, false, undefined, 14);
     expect(fourteen.lines[0].baselinePt - 72).toBe(24);
   });
 
-  it('preserves exact heights outside the measured evidence interval', () => {
+  it('keeps four fifths of exact heights outside 12-30pt (WORD_EXACT_LINE_BASELINE)', () => {
     const paragraph = render('Arial', 10, { rule: 'exact', value: 40, explicit: true });
-    expect(paragraph.lines[0].baselinePt - 72).toBe(22);
+    expect(paragraph.lines[0].baselinePt - 72).toBe(32);
+    // Windows Word line1 L1a: text far taller than the line and a tall line
+    // over small text keep the same partition.
+    for (const [size, height] of [[24, 6], [9, 96], [24, 24]] as const) {
+      const lines = render('Arial', size, { rule: 'exact', value: height, explicit: true }).lines;
+      expect(lines.map(line => line.baselinePt - line.bounds.yPt))
+        .toEqual(lines.map(() => expect.closeTo(height * 4 / 5, 9)));
+      expect(lines[0]!.advancePt).toBe(height);
+    }
     expect(paragraph.flowBounds.heightPt).toBe(120);
   });
 
-  it('preserves the placement contract for float-exclusion-conditioned lines', () => {
+  it('keeps four fifths of an exact line beside a wrapping float (WORD_EXACT_LINE_BASELINE)', () => {
     const paragraph = render('Arial', 10, { rule: 'exact', value: 30, explicit: true },
       false, undefined, 15, false, 10, true);
-    expect(paragraph.lines[0].baselinePt - paragraph.lines[0].bounds.yPt).toBe(17);
+    expect(paragraph.lines[0].baselinePt - paragraph.lines[0].bounds.yPt).toBe(24);
   });
 
   it('keeps installed local aliases in the authored-face baseline class', () => {
@@ -185,18 +194,18 @@ describe('Word specified spacing for ordinary Latin text', () => {
     expect(Math.abs(paragraph.lines[0].baselinePt - 72 - baseline)).toBeLessThan(.24);
   });
 
-  it('preserves unmeasured decorated text and a differently-sized paragraph mark', () => {
+  it('keeps four fifths for decorated text and a differently-sized paragraph mark (WORD_EXACT_LINE_BASELINE)', () => {
     const spacing = { rule: 'exact', value: 30, explicit: true } as const;
     const underlined = render('Arial', 10, spacing, false, undefined, 15, true);
     const differentMark = render('Arial', 10, spacing, false, undefined, 15, false, 12);
-    expect(underlined.lines[0].baselinePt - 72).toBe(17);
-    expect(differentMark.lines[0].baselinePt - 72).toBe(17);
+    expect(underlined.lines[0].baselinePt - 72).toBe(24);
+    expect(differentMark.lines[0].baselinePt - 72).toBe(24);
   });
 
-  it('preserves the whole paragraph when decoration starts on a later physical line', () => {
+  it('keeps every line of a paragraph decorated on a later line at four fifths', () => {
     const paragraph = render('Arial', 10, { rule: 'exact', value: 30, explicit: true },
       false, undefined, 15, false, 10, false, false, true);
-    expect(paragraph.lines.map(line => line.baselinePt - line.bounds.yPt)).toEqual([17, 17, 17]);
+    expect(paragraph.lines.map(line => line.baselinePt - line.bounds.yPt)).toEqual([24, 24, 24]);
   });
 
   it('keeps four fifths beside a same-size paragraph mark of another face', () => {

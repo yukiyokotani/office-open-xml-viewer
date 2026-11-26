@@ -181,6 +181,9 @@ type ParagraphTextFacts = Readonly<{
   /** Authored discretionary opportunity with its own conditional glyph style.
    * Its source run is otherwise empty, independent of dictionary hyphenation. */
   optionalHyphen?: boolean;
+  /** A §17.3.3.25 w:rubyBase run after the first: part of the ruby cell the
+   * preceding annotated run opens. */
+  rubyBaseContinuation?: true;
   /** Explicit advance (pt) of every U+0020 in the run, replacing the space
    * glyph's advance as a width horizontal scaling does not change; character
    * spacing still applies. Producers other than DOCX set it where their format fixes it. */
@@ -259,6 +262,8 @@ export type ParagraphImageRun = DeepReadonly<Extract<DocRun, { type: 'image' }>>
 
 export type ParagraphChartRun = DeepReadonly<Omit<Extract<DocRun, { type: 'chart' }>, 'chart'>> & Readonly<{
   resourceKey: string;
+  /** §17.3.2.24 raise (+) / lower (-) in pt of the hosting run. */
+  inlinePositionPt?: number;
   anchorAcquisitionInput?: AnchorAcquisitionInput;
 }>;
 
@@ -273,7 +278,8 @@ export interface UnavailableDrawingAcquisitionRun {
   readonly heightPt: number;
   /** ECMA-376 §20.4.2.6 inline effect extent [left, top, right, bottom] (pt). */
   readonly inlineEffectExtent?: readonly number[];
-  /** §17.3.2.24 position of the hosting run of an inline picture placeholder. */
+  /** §17.3.2.24 position of the hosting run of an inline picture or chart
+   * placeholder. */
   readonly inlinePositionPt?: number;
   /** A picture placeholder's §20.1.7.6 orientation (`ParagraphImageRun`). */
   readonly rotation?: number;

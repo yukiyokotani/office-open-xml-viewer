@@ -1,4 +1,5 @@
 import type { LineOrderResolver } from '../bidi-line.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { paragraphLineOrderModel, type LineOrderModel } from '../bidi-line.js';
 import { wordLineEndJustification } from '../layout/line-compatibility.js';
 import { physicalDecimalAlignmentPoint } from './decimal-anchor.js';
@@ -58,7 +59,7 @@ export function wordTabGlueUnit(
   const text = head.text;
   if (text.length === 0 || /^\s/u.test(text)) return false;
   if (follower && 'text' in follower && follower.joinPrev === true) return false;
-  if (head.fitTextRegionIndex !== undefined || head.ruby || head.tateChuYoko || head.hardJoinPrev
+  if (head.fitTextRegionIndex !== undefined || rubyCellOf(head) || head.tateChuYoko || head.hardJoinPrev
     || head.noBreakRanges?.length || head.seaBreaks !== undefined || head.optionalHyphen
     || head.optionalHyphenBreaks?.length || hasCJKBreakOpportunity(text)) return false;
   const visibleEnd = text.replace(/\s+$/u, '').length;

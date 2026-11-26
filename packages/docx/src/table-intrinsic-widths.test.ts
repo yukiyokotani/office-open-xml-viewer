@@ -441,6 +441,36 @@ describe('table intrinsic content widths', () => {
     )).toEqual({ minWidthPt: 7, maxWidthPt: 14 });
   });
 
+  it('takes a whole ruby cell, its widening included, as one minimum-width atom', () => {
+    // WORD_RUBY_ALIGN_PLACEMENT: the base 漢字 (two runs, 5pt per character)
+    // is one indivisible cell, which a centred seven-letter guide widens.
+    const align = { status: 'valid', raw: 'center', value: 'center' };
+    const missing = { status: 'missing', raw: null, value: null };
+    const ruby = { text: 'かきくけこさし', fontSizePt: 5, hpsRaisePt: 9 };
+    const source = paragraph([
+      textRun('前'),
+      { ...textRun('漢'), ruby, typographyInput: { ruby: { align, baseFontSizePt: missing, raisePt: missing, language: missing, guideRuns: [] } } },
+      { ...textRun('字'), rubyBaseContinuation: true },
+      textRun('後'),
+    ] as unknown as DocParagraph['runs']);
+    const context = measuringContext();
+    const widths = (runs: DocParagraph['runs']) => measureParagraphIntrinsicWidths(
+      { ...source, runs },
+      intrinsicContext({}),
+      200,
+      { context, fontFamilyClasses: {} },
+      {
+        pageIndex: 0, totalPages: 1, pageWritingMode: 'horizontal-tb', documentHasEastAsianText: true,
+        layoutServices: createLayoutServices(model([]), { measureContext: context }),
+      },
+    );
+    // The stub measures 5pt per letter at any size: the 35pt guide widens
+    // the 10pt base, and 後 stays outside the cell.
+    expect(widths(source.runs)).toEqual({ minWidthPt: 35, maxWidthPt: 45 });
+    // Without the ruby the same characters break one by one.
+    expect(widths([textRun('前'), textRun('漢'), textRun('字'), textRun('後')])).toEqual({ minWidthPt: 5, maxWidthPt: 20 });
+  });
+
   it('does not merge runs with different character-grid participation', () => {
     const source = paragraph([
       { ...textRun('漢'), snapToGrid: true },

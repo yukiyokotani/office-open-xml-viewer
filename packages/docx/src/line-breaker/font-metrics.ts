@@ -2,7 +2,7 @@ import type { CanvasFontRoute, ResolvedFontMetric } from '@silurus/ooxml-core';
 import { localFontMetricCoversText, normalizeFontMetricFamily } from '@silurus/ooxml-core';
 import type { FontResolution } from '../layout/font-service.js';
 import type { TextLayoutService } from '../layout/text.js';
-import { libreOfficeProjectionOptions, referenceFontLineMetrics, type FontLineBoxProjection, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
+import { libreOfficeProjectionOptions, referenceFontLineMetrics, type DocxReferenceFormat, type FontLineBoxProjection, type ReferenceFontLineMetrics } from '../reference-font-line-metrics.js';
 import { LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY, libreOfficeLineBox } from '../layout/line-compatibility.js';
 
 /** The projection of a producer's line boxes: grid-snapped lines of a
@@ -131,9 +131,10 @@ export function authoredReferenceVerticalMetric(
   selected: FontResolution,
   synthesis?: SynthesizedFaceProbe,
   projection: FontLineBoxProjection = 'word',
+  format: DocxReferenceFormat = 'docx',
 ): ReferenceFontLineMetrics | undefined {
   void LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY;
-  const exact = referenceFontLineMetrics(selected.requestedFamily, selected.weight, selected.style, projection);
+  const exact = referenceFontLineMetrics(selected.requestedFamily, selected.weight, selected.style, projection, format);
   if (exact || !synthesis?.text.sameGlyphRaster
     || selected.source !== 'native' || selected.installedFamily !== true) return exact;
   const faces = synthesis.text.exactLocalFaces?.(selected.requestedFamily) ?? [];
@@ -141,7 +142,7 @@ export function authoredReferenceVerticalMetric(
   // Glyph ownership: the span's own graphemes (and the raster probe's) must
   // come from the matched exact source, not from a fallback face.
   if (!matched?.coverageProbeFamily || !synthesis.text.ownsGlyphs) return undefined;
-  const reference = referenceFontLineMetrics(selected.requestedFamily, matched.weight, matched.style, projection);
+  const reference = referenceFontLineMetrics(selected.requestedFamily, matched.weight, matched.style, projection, format);
   // Face identity is a property of the route and tuple, as for the regular
   // catalog tuple this extends (which admits a native installed route without
   // per-glyph proof). One fixed probe per script class bounds the work to a
@@ -171,13 +172,14 @@ export function selectedFontLineMetric(
   referenceMetricAllowed = true,
   synthesis?: SynthesizedFaceProbe,
   projection: FontLineBoxProjection = 'word',
+  format: DocxReferenceFormat = 'docx',
 ) {
   const resourceMetric = (naturalMetricAllowed || localFont?.designAscentRatio == null)
     && (localFont?.lineHeightRatio != null || localFont?.designAscentRatio != null
       || localFont?.eastAsianLineHeightRatio != null) ? projectedResourceMetric(localFont, projection) : undefined;
   const referenceMetric = naturalMetricAllowed && referenceMetricAllowed && !resourceMetric
     && mayUseAuthoredReferenceVerticalMetric(selected)
-    ? authoredReferenceVerticalMetric(selected, synthesis, projection)
+    ? authoredReferenceVerticalMetric(selected, synthesis, projection, format)
     : undefined;
   return { resourceMetric, referenceMetric, lineMetric: resourceMetric ?? referenceMetric };
 }

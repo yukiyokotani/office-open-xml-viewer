@@ -1,4 +1,5 @@
 import { compatOf } from '../layout/compat-profile.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { retainClosingPairAdvances } from './closing-pair-advance.js';
 import { ownSourceCursor } from './source-cursor.js';
 import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-source-units.js';
@@ -22,7 +23,7 @@ import { groupFitTextRegions, type FitTextRun } from '../fit-text.js';
 import { mathFallbackText } from '../layout/math-fallback-text.js';
 import type { FontResolution } from '../layout/font-service.js';
 import type { FontDecorationGeometry } from '@silurus/ooxml-core/internal/font-decoration';
-import { referenceFontDecorationMetrics } from '../reference-font-line-metrics.js';
+import { referenceFontDecorationMetrics, referenceFontFormatOf, type DocxReferenceFormat } from '../reference-font-line-metrics.js';
 import type {
   ParagraphLayoutSource,
   ParagraphLayoutRun,
@@ -48,7 +49,7 @@ import {
   wordInlineDrawingTurnsFootprint,
   wordInlinePictureClipsToLine,
 } from '../layout/line-compatibility.js';
-import { type LayoutImageSeg, type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment } from './model.js';
+import { type LayoutImageSeg, type LayoutSeg, type LayoutTextSeg, type LineLayoutEnvironment, type RubyGroup } from './model.js';
 import { charScaleFactor, retainHorizontalPunctuationInkClearance } from './advance.js';
 import { assignEastAsianAutoSpace } from './east-asian-autospace.js';
 import {
@@ -287,13 +288,50 @@ export function appendTextPiece(
   // Splitting on word boundaries would lose the association, so attach
   // the annotation only to the first emitted segment.
   const baseRuby = r.ruby;
+  const rubyAlign = acquiredValue(acquiredTypography?.ruby?.align, undefined);
+  // §17.3.3.24: each w:rt run keeps its own properties; the guide is shaped
+  // run by run when the runs spell the guide text.
+  const authoredGuideRuns = acquiredTypography?.ruby?.guideRuns;
+  const guideRuns = baseRuby && authoredGuideRuns && authoredGuideRuns.length > 0
+    && authoredGuideRuns.map((guideRun) => guideRun.text).join('') === baseRuby.text
+    ? authoredGuideRuns.map((guideRun) => ({
+        text: guideRun.text,
+        fonts: guideRun.fonts ?? {},
+        bold: guideRun.bold,
+        italic: guideRun.italic,
+        boldCs: guideRun.boldCs === true,
+        italicCs: guideRun.italicCs === true,
+        rtl: guideRun.rtl === true,
+        // §17.3.2.30 / §17.3.2.7: either makes the run complex script, as
+        // for a base run.
+        complexScript: guideRun.rtl === true || guideRun.cs === true,
+        ...(guideRun.fontHint === 'eastAsia' || guideRun.fontHint === 'cs' || guideRun.fontHint === 'default'
+          ? { fontHint: guideRun.fontHint as 'eastAsia' | 'cs' | 'default' } : {}),
+      }))
+    : undefined;
   const ruby = baseRuby
     ? {
         text: baseRuby.text,
         fontSizePt: baseRuby.fontSizePt,
         ...(baseRuby.hpsRaisePt != null ? { hpsRaisePt: baseRuby.hpsRaisePt } : {}),
+        ...(rubyAlign ? { align: rubyAlign } : {}),
+        ...(guideRuns ? { guideRuns } : {}),
       }
     : undefined;
+  // WORD_RUBY_ALIGN_PLACEMENT: every piece emitted from a ruby base shares
+  // one cell, created with the base's first run. §17.3.3.25: a later
+  // w:rubyBase run (rubyBaseContinuation) joins the cell the run before it
+  // belongs to.
+  const previousSegment = segs.at(-1);
+  const rubyGroup: RubyGroup | undefined = ruby
+    ? {
+      ruby,
+      pieces: [],
+      ...(environment.paragraphRtl === true ? { baseRtl: true } : {}),
+      guideFarEastClass: (font, guideText) => faceFarEastClass(environment, selectedMetric, font, guideText),
+    }
+    : 'rubyBaseContinuation' in r && r.rubyBaseContinuation && previousSegment && 'text' in previousSegment
+      ? rubyCellOf(previousSegment) : undefined;
   const revision = r.revision;
   const rtl = r.rtl === true ? true : undefined;
   const fitTextFragmentEntryIndex =
@@ -365,6 +403,7 @@ export function appendTextPiece(
     effectiveKerningThreshold,
     effectiveSnapToGrid,
     ruby,
+    rubyGroup,
     revision,
     fitTextFragmentEntryIndex,
     fitTextRegionIndex,
@@ -541,12 +580,12 @@ export function finalizeBuiltSegments(
   // boundaries use the complete displayed text, irrespective of font/run seams.
   // This acquires opportunities, without splitting or merging shaped segments.
   // Atomic cells and external-link syntax have their own owners below.
-  const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && segment.ruby)
+  const rubyOwnedRuns = new Set(segs.filter(segment => 'text' in segment && rubyCellOf(segment))
     .map(segment => segment.sourceRunIndex));
   for (let start = 0; start < segs.length;) {
     const ordinary = (s: LayoutSeg): s is LayoutTextSeg => 'text' in s
       && s.hyperlink?.kind !== 'external' && s.fitTextRegionIndex === undefined
-      && !s.ruby && !s.tateChuYoko && !rubyOwnedRuns.has(s.sourceRunIndex);
+      && !rubyCellOf(s) && !s.tateChuYoko && !rubyOwnedRuns.has(s.sourceRunIndex);
     if (!ordinary(segs[start]!)) { start++; continue; }
     let end = start;
     const group: LayoutTextSeg[] = [];
@@ -789,7 +828,7 @@ export function finalizeBuiltSegments(
   // REPLACES the default East-Asian table for a language and so must NOT be able
   // to drop the ASCII non-starters and re-orphan a Latin comma). The document's
   // kinsoku settings still govern the separate per-character CJK retract paths
-  // (kinsokuAdjustedSplit / crossRunKinsokuRetract), which read the layout kinsoku argument.
+  // (kinsokuAdjustedSplit / retractLeadingKinsoku), which read the layout kinsoku argument.
   // The ASCII non-starters (!),.:;?]}) live in that default table (core
   // rules.ts), so one membership test covers Latin and (incidentally) CJK forms.
   for (let i = 1; i < segs.length; i++) {
@@ -979,6 +1018,7 @@ function chartSegment(
   chartRun: Readonly<{
     widthPt: number; heightPt: number; anchor?: boolean; anchorXPt?: number; anchorYPt?: number;
     anchorXFromMargin?: boolean; anchorYFromPara?: boolean; resourceKey?: string;
+    inlinePositionPt?: number;
   }>,
   environment: LineLayoutEnvironment,
 ): LayoutImageSeg {
@@ -1001,6 +1041,7 @@ function chartSegment(
     anchorYFromPara: chartRun.anchorYFromPara ?? false,
     chart: true,
     ...(chartRun.resourceKey === undefined ? {} : { chartResourceKey: chartRun.resourceKey }),
+    ...(!chartRun.anchor && chartRun.inlinePositionPt ? { chartPositionPt: chartRun.inlinePositionPt } : {}),
     measuredWidth: 0,
   };
 }
@@ -1048,6 +1089,7 @@ export function buildSegments(
         selected.requestedFamily,
         selected.weight,
         selected.style,
+        referenceFontFormatOf(environment.layoutServices?.text),
       );
       // Only catalog-backed tuples enter this per-build cache; arbitrary
       // authored family names cannot grow it across a long paragraph.
@@ -1178,7 +1220,9 @@ interface SegmentEmissionState {
   readonly effectiveCharacterScale: number | undefined;
   readonly effectiveKerningThreshold: number | undefined;
   readonly effectiveSnapToGrid: boolean | undefined;
-  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number } | undefined;
+  readonly ruby: { hpsRaisePt?: number | undefined; text: string; fontSizePt: number; align?: string;
+    guideRuns?: readonly import('./model.js').RubyGuideRunFace[] } | undefined;
+  readonly rubyGroup: RubyGroup | undefined;
   readonly revision:
     | {
         readonly kind: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' | string;
@@ -1466,6 +1510,7 @@ function emitResolvedTextSegment(
     effectiveKerningThreshold,
     effectiveSnapToGrid,
     ruby,
+    rubyGroup,
     revision,
     fitTextFragmentEntryIndex,
     fitTextRegionIndex,
@@ -1506,7 +1551,7 @@ function emitResolvedTextSegment(
     && textShapeRequest.kerning === true && registeredLatinSlotRunCandidate(text);
   const uniformAllocation = environment.characterGridActive === false && environment.verticalCJK !== true
     && environment.paragraphRtl === false
-    && !rtl && !ruby && fitTextRegionIndex === undefined
+    && !rtl && !rubyGroup && fitTextRegionIndex === undefined
     && !base.smallCaps && !base.allCaps && !effectiveVertAlign
     && (effectiveCharacterSpacing == null || effectiveCharacterSpacing === 0)
     && (effectiveCharacterScale == null || effectiveCharacterScale === 1)
@@ -1623,14 +1668,16 @@ function emitResolvedTextSegment(
       environment.layoutServices ? { text: environment.layoutServices.text, probe: text,
         ...(textShapeRequest.baseDirection !== undefined ? { baseDirection: textShapeRequest.baseDirection } : {}) } : undefined,
       fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true));
+        environment.verticalCJK === true || environment.wordLineBoxes === true),
+      referenceFontFormatOf(environment.layoutServices?.text));
   // LIBRARY_SYNTHESIZED_FACE_LINE_GEOMETRY does not extend to the East Asian
   // floor of a run painted in another slot (see that rule's scope).
   const { lineMetric: eaLineMetric } = selectedFontLineMetric(eaResolution, localEaFloor, naturalMetricAllowed,
       allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
         ?? environment.layoutServices?.text.localMetrics ?? {}), eaResolution), undefined,
       fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true));
+        environment.verticalCJK === true || environment.wordLineBoxes === true),
+      referenceFontFormatOf(environment.layoutServices?.text));
   const resolvedEaFloorFamily =
     eaResolution?.resolvedFamily ?? localEaFloor?.family ?? eaFontFamily;
   // WORD_USE_FE_LAYOUT_INHERITED_GRID_MINIMUM was observed for an active
@@ -1723,6 +1770,10 @@ function emitResolvedTextSegment(
     resolvedLineHeightRatio: familyLineMetric?.lineHeightRatio,
     resolvedLatinGridCellAllocation: (resourceFamilyLineMetric?.farEastCodePage
       ?? referenceLineMetric?.farEastCodePage) === false,
+    ...((resourceFamilyLineMetric?.farEastCodePage
+      ?? referenceLineMetric?.farEastCodePage) === true
+      ? { resolvedFarEastLineClass: true as const } : {}),
+    ...(environment.verticalFrameLines ? { verticalFrameRun: environment.verticalFrameLines } : {}),
     ...(resourceFamilyLineMetric?.lineHeightRatio != null
       ? {
           resolvedResourceVerticalMetric: true as const,
@@ -1737,7 +1788,8 @@ function emitResolvedTextSegment(
           resolvedDesignDescentRatio: referenceLineMetric.designDescentRatio,
         }
       : {}),
-    ...admittedFaceDecoration(resolvedSpan?.font, referenceLineMetric != null),
+    ...admittedFaceDecoration(resolvedSpan?.font, referenceLineMetric != null,
+      referenceFontFormatOf(environment.layoutServices?.text)),
     resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
     ...(latinSpaceAverageWidthRatio != null && latinSpaceAverageWidthRatio > 0
       ? { latinSpaceAverageWidthRatio, latinSpaceCompressionEligible: true as const }
@@ -1769,8 +1821,13 @@ function emitResolvedTextSegment(
     background: base.background ?? null,
     colorAuto: r.colorAuto ?? false,
     border: r.border ?? null,
-    ruby: emissionState.firstSeg ? ruby : undefined,
-    ...(ruby ? { rubyPiece: true as const } : {}),
+    ruby: emissionState.firstSeg && ruby ? ruby : undefined,
+    ...(rubyGroup ? {
+      rubyGroup,
+      rubyPieceIndex: rubyGroup.pieces.length,
+      // A cell's later pieces never leave its first.
+      ...(rubyGroup.pieces.length > 0 ? { joinPrev: true as const, hardJoinPrev: true as const } : {}),
+    } : {}),
     revision,
     ...(revision && environment.showTrackedChanges === true
       ? {
@@ -1827,8 +1884,31 @@ function emitResolvedTextSegment(
     // rotate-fallback ink-extent advance correction in the measure passes.
     verticalRun: environment.verticalCJK && r.eastAsianVert !== true ? true : undefined,
   });
+  if (rubyGroup) (rubyGroup.pieces as LayoutTextSeg[]).push(segs.at(-1) as LayoutTextSeg);
   emissionState.firstSeg = false;
   emissionState.gluePending = false;
+}
+
+/** The Far East single-line class of the face `font` selected for `text`, as
+ * a run in that face resolves it (`resolvedFarEastLineClass`, and
+ * `resolvedLineHeightRatio` for a face of the other class); undefined when
+ * no line data is admitted for the face. */
+function faceFarEastClass(
+  environment: LineLayoutEnvironment,
+  selectedMetric: SegmentBuildContext['selectedMetric'],
+  font: FontResolution,
+  text: string,
+): boolean | undefined {
+  const { resourceMetric, referenceMetric, lineMetric } = selectedFontLineMetric(font, selectedMetric(font, text),
+    environment.lineSpacing?.rule !== 'exact',
+    allowsReferenceFontMetric(indexedFontMetrics(environment.layoutServices?.text.fontMetrics
+      ?? environment.layoutServices?.text.localMetrics ?? {}), font),
+    environment.layoutServices ? { text: environment.layoutServices.text, probe: text } : undefined,
+    fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
+      environment.verticalCJK === true || environment.wordLineBoxes === true),
+    referenceFontFormatOf(environment.layoutServices?.text));
+  if ((resourceMetric?.farEastCodePage ?? referenceMetric?.farEastCodePage) === true) return true;
+  return lineMetric?.lineHeightRatio != null ? false : undefined;
 }
 
 /** ECMA-376 §20.4.2.6: an inline object's line box is its extent widened by
@@ -1923,7 +2003,7 @@ function tabFaceLineBox(
   if (!selected) return {};
   const { lineMetric } = selectedFontLineMetric(selected, selectedMetric(selected, 'x'), true,
     allowsReferenceFontMetric(indexedFontMetrics(service?.fontMetrics ?? service?.localMetrics ?? {}), selected),
-    undefined, fontLineBoxProjection(service, false));
+    undefined, fontLineBoxProjection(service, false), referenceFontFormatOf(service));
   return lineMetric?.designAscentRatio != null && lineMetric.designDescentRatio != null
     ? { textOwnedLineBox: true, lineBoxAscentRatio: lineMetric.designAscentRatio, lineBoxDescentRatio: lineMetric.designDescentRatio }
     : {};
@@ -2176,7 +2256,10 @@ function appendRunsToSegments(
       const anchored = 'anchorAcquisitionInput' in run && run.anchorAcquisitionInput !== undefined;
       segs.push({
         ...(run.resourceKind === 'chart'
-          ? chartSegment({ widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored }, environment)
+          ? chartSegment({
+              widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
+              ...(run.inlinePositionPt ? { inlinePositionPt: run.inlinePositionPt } : {}),
+            }, environment)
           : imageSegment({
               imagePath: '', mimeType: '', widthPt: run.widthPt, heightPt: run.heightPt, anchor: anchored,
               ...(run.inlineEffectExtent ? { inlineEffectExtent: run.inlineEffectExtent } : {}),
@@ -2286,7 +2369,8 @@ function appendRunsToSegments(
           // evidence, so only an exact catalogued tuple lends its geometry.
           ? referenceFontLineMetrics(selected.requestedFamily, weight, style,
             fontLineBoxProjection(environment.layoutServices?.text, environment.lineGridActive === true,
-        environment.verticalCJK === true || environment.wordLineBoxes === true))
+        environment.verticalCJK === true || environment.wordLineBoxes === true),
+            referenceFontFormatOf(environment.layoutServices?.text))
           : undefined;
       const familyLineMetric = resourceMetric ?? referenceMetric;
       segs.push({
@@ -2319,7 +2403,8 @@ function appendRunsToSegments(
               resolvedDesignDescentRatio: referenceMetric.designDescentRatio,
             }
           : {}),
-        ...admittedFaceDecoration(selected, referenceMetric != null),
+        ...admittedFaceDecoration(selected, referenceMetric != null,
+          referenceFontFormatOf(environment.layoutServices?.text)),
         resolvedEastAsianLineHeightRatio: familyLineMetric?.eastAsianLineHeightRatio,
         vertAlign: null,
         measuredWidth: 0,
@@ -2423,13 +2508,14 @@ function projectNoBreakRanges(runs: readonly ParagraphLayoutRun[], segs: LayoutS
 function admittedFaceDecoration(
   font: FontResolution | undefined,
   referenceAdmitted: boolean,
+  format: DocxReferenceFormat,
 ): { referenceFontDecoration?: FontDecorationGeometry } {
   if (!font) return {};
   const officeLocal = font.source === 'local' && font.resourceIdentity?.startsWith('office-local:') === true;
   const nativeInstalled = font.source === 'native' && font.installedFamily === true;
   if (!officeLocal && !nativeInstalled && !referenceAdmitted) return {};
-  const geometry = referenceFontDecorationMetrics(font.requestedFamily, font.weight, font.style)
-    ?? (referenceAdmitted ? referenceFontDecorationMetrics(font.requestedFamily, 400, 'normal') : undefined);
+  const geometry = referenceFontDecorationMetrics(font.requestedFamily, font.weight, font.style, format)
+    ?? (referenceAdmitted ? referenceFontDecorationMetrics(font.requestedFamily, 400, 'normal', format) : undefined);
   return geometry ? { referenceFontDecoration: geometry } : {};
 }
 

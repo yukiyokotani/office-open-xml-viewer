@@ -1,4 +1,5 @@
 import { bidiClass } from '@silurus/ooxml-core/internal/bidi-line';
+import { rubyCellOf } from './ruby-cell.js';
 import { lineOrderEngineIdentity, sameEngineState, resolveNativeSourceLevelUnits } from '../bidi-line.js';
 import { nativeVisiblePrefixMatches, sliceTextShapeRequest } from '../layout/text.js';
 import type { ParagraphLayoutRun } from '../layout/text.js';
@@ -65,7 +66,7 @@ export function acquireNativeSourceUnits(
   let hasVisibleCut = false;
   let unitIndex = 0;
   for (const segment of original) {
-    if (!('text' in segment) || !segment.textShapeRequest || segment.metricOnly || segment.ruby
+    if (!('text' in segment) || !segment.textShapeRequest || segment.metricOnly || rubyCellOf(segment)
       || segment.tateChuYoko || segment.vertAlign != null || segment.script === 'eastAsia'
       || segment.latinSpaceCompressionEligible || segment.mixedSpaceAverageWidthRatio !== undefined
       || segment.widthBalanceSpaceSequence || segment.fitTextRegionIndex !== undefined || segment.verticalRun

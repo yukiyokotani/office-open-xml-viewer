@@ -1,14 +1,16 @@
 import { remapSourceBoundary } from './source-cursor.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { createMixedSpaceState } from './mixed-space-fit.js';
 import { LineMeasurementAdapter } from './measurement-adapter.js';
 import type { KinsokuRules } from '@silurus/ooxml-core';
 import { containsSeaScript, seaMixedBreakOffsets } from '@silurus/ooxml-core';
-import { type LayoutImageSeg, type LayoutLine, type LayoutMathSeg, type LayoutSeg, type LayoutTabSeg, type LayoutTextSeg, type LineBoundary, type WrapLayoutCtx } from './model.js';
+import { type LayoutImageSeg, type LayoutLine, type LayoutMathSeg, type LayoutSeg, type LayoutTabSeg, type LayoutTextSeg, type LineBoundary, type RubyGroup, type WrapLayoutCtx } from './model.js';
 import { protectedNoBreakOffsets, slicedTextMetadata } from './advance.js';
 import { rebaseSeaBreaks } from './text-runs.js';
 import { resolveFitTextSegments } from './segment-builder.js';
 import type { LineGapModel } from './line-gaps.js';
 import { SegmentQueue, type SegmentQueueCursor } from './segment-queue.js';
+import type { LineAdmission } from './line-admission.js';
 
 /** Prepare source-anchored break opportunities and the resumable queue.
  * SEA dictionary boundaries, protected ranges, paragraph-final hanging spaces,
@@ -79,6 +81,16 @@ export function prepareBreakQueue(
     }
   }
 
+  // WORD_RUBY_ALIGN_PLACEMENT: every ruby piece has its cell. buildSegments
+  // forms the cells; a ruby segment given to the breaker without one is a
+  // cell of its own.
+  for (const segment of queue) {
+    if ('text' in segment && segment.ruby && !segment.rubyGroup) {
+      segment.rubyGroup = { ruby: segment.ruby, pieces: [segment] };
+      segment.rubyPieceIndex = 0;
+    }
+  }
+
   // Mark the paragraph-final U+3000 suffix once. A backwards pass avoids the
   // O(N²) suffix rescans that would result from queue.every/reduce per segment.
   let paragraphFinalIdeographicSpaceCount = 0;
@@ -98,7 +110,7 @@ export function prepareBreakQueue(
     if (
       candidate.fitTextRegionIndex !== undefined ||
       candidate.tateChuYoko === true ||
-      candidate.ruby !== undefined
+      rubyCellOf(candidate) !== undefined
     ) {
       // buildSegments can split an atomic source run before its U+3000 tail
       // (ruby is retained only on the first emitted segment). Undo any markers
@@ -153,6 +165,68 @@ export function prepareBreakQueue(
       measurement.measureSegment(segment).width +
       measurement.verticalInkExtra(segment, segment.text),
   );
+
+  // WORD_RUBY_ALIGN_PLACEMENT: each pass owns its ruby groups, over the
+  // segments it measures (fitText allocation above included), so a ruby
+  // cell is computed once per pass at this scale.
+  const rubyPieces = new Map<RubyGroup, LayoutTextSeg[]>();
+  for (const segment of queue) {
+    const cell = 'text' in segment ? rubyCellOf(segment) : undefined;
+    if (!cell) continue;
+    const pieces = rubyPieces.get(cell) ?? [];
+    pieces.push(segment as LayoutTextSeg);
+    rubyPieces.set(cell, pieces);
+  }
+  for (const [source, pieces] of rubyPieces) {
+    const group: RubyGroup = { ...source, pieces, cell: undefined };
+    pieces.forEach((piece, index) => {
+      piece.rubyGroup = group;
+      piece.rubyPieceIndex = index;
+    });
+  }
+
+  // The units placed whole (placedUnitOf): consecutive text segments chained
+  // by a shared ruby cell or a shared fitText region, when the chain holds a
+  // ruby cell.
+  let chain: LayoutTextSeg[] = [];
+  let cells = new Set<RubyGroup>();
+  let regions = new Set<number>();
+  const close = () => {
+    const members = chain;
+    if (cells.size > 0) {
+      const unit = { members };
+      members.forEach((member, index) => {
+        member.placedUnit = unit;
+        member.placedUnitIndex = index;
+      });
+    } else {
+      for (const member of members) {
+        member.placedUnit = undefined;
+        member.placedUnitIndex = undefined;
+      }
+    }
+    chain = [];
+    cells = new Set();
+    regions = new Set();
+  };
+  for (const segment of queue) {
+    if (!('text' in segment)) {
+      close();
+      continue;
+    }
+    const cell = rubyCellOf(segment);
+    const region = segment.fitTextRegionIndex;
+    if (chain.length > 0 && !((cell && cells.has(cell)) || (region !== undefined && regions.has(region)))) close();
+    if (!cell && region === undefined) {
+      segment.placedUnit = undefined;
+      segment.placedUnitIndex = undefined;
+      continue;
+    }
+    chain.push(segment);
+    if (cell) cells.add(cell);
+    if (region !== undefined) regions.add(region);
+  }
+  close();
 
   return queue;
 }
@@ -256,6 +330,10 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineHeight: 0,
     lineAscent: 0,
     lineDescent: 0,
+    /** Largest descent of the line's items before the zero floor (a vertical
+     * run moved by w:position may reach past the axis). */
+    lineSignedDescent: Number.NEGATIVE_INFINITY,
+    lineSignedAscent: Number.NEGATIVE_INFINITY,
     lineIntendedSingle: 0,
     lineHasInlinePicture: false,
     linePictureMarkSingle: 0,
@@ -267,6 +345,8 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineVisibleDescent: 0,
     lineVisibleIntendedSingle: 0,
     lineHasVisibleMetrics: false,
+    /** A float narrowed, offset or moved down the current physical line. */
+    lineWrapAffected: false,
     /** Picture-bullet marker metric admitted to the current line (pt, px). */
     lineMarkerHeight: 0,
     lineMarkerAscent: 0,
@@ -284,5 +364,12 @@ export function createLineBreakerState(maxWidth: number, wrapCtx?: WrapLayoutCtx
     lineEastAsian: false,
     queue: new SegmentQueue(),
     trailingBreakFontSize: null as number | null,
+    /** One record per item of `currentLine` (line-admission.ts): what each
+     * admission changed, so that any suffix of the line can be taken back
+     * with the line's extents recomputed. */
+    admissions: [] as LineAdmission[],
+    /** §17.3.1.16: the length of `currentLine` when a retraction search last
+     * found no legal boundary in it; later searches stop there. */
+    kinsokuBlockedLength: 0,
   };
 }

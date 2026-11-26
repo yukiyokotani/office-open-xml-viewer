@@ -20,7 +20,7 @@ import {
   CELL_OWNED_TABLE,
   type TableOwnerContext,
 } from './table-owner-runs.js';
-import { eastAsianUprightPaintOps } from './vertical-glyph-orientation.js';
+import { eastAsianUprightPaintOps, uprightFrameRuby, uprightFrameSidewaysOffsetPt } from './vertical-glyph-orientation.js';
 import type {
   FloatingTablePositionInput,
   DrawingMLCollisionEntryPt,
@@ -585,7 +585,11 @@ function orientRotatedCellBlocks(
     lines: layout.lines.map((line) => ({
       ...line,
       placements: line.placements.map((placement) => placement.kind === 'text'
-        ? { ...placement, paintOps: eastAsianUprightPaintOps(placement) }
+        ? {
+            ...placement,
+            paintOps: eastAsianUprightPaintOps(placement, false, uprightFrameSidewaysOffsetPt(placement)),
+            ...(placement.ruby ? { ruby: uprightFrameRuby(placement) } : {}),
+          }
         : placement),
     })),
   });

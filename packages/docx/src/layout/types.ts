@@ -309,9 +309,14 @@ export interface RetainedGlyphPaintOperation {
   readonly fontStyle: 'normal' | 'italic';
   readonly color: TextColorPolicy;
   /** Present when the operation paints a contextual span whose acquisition
-   * was pair-kerned (WORD_ARABIC_PAIR_KERNING); absent operations paint one
-   * grapheme, which has no pair to kern. */
-  readonly kerning?: 'normal';
+   * set the kerning: 'normal' when it was pair-kerned
+   * (WORD_ARABIC_PAIR_KERNING), 'none' for a planned vertical ruby guide
+   * (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE). Absent operations paint one grapheme
+   * or keep the context's kerning. */
+  readonly kerning?: 'normal' | 'none';
+  /** The selected face's box (a horizontally shaped ruby guide unit): an
+   * upright frame centres a turned unit's box on its axis. */
+  readonly faceBoxPt?: Readonly<{ ascentPt: number; descentPt: number }>;
   /** Tight selected-face ink relative to this operation's baseline origin. */
   readonly inkBounds?: Readonly<{
     xMinPt: number;
@@ -319,6 +324,13 @@ export interface RetainedGlyphPaintOperation {
     ascentPt: number;
     descentPt: number;
   }>;
+  /** A vertical ruby guide cell (WORD_VERTICAL_RUBY_UPRIGHT_GUIDE): painted
+   * like a vertical base text cell of the same orientation. */
+  readonly glyphOrientation?: 'sideways' | 'upright' | 'rotate';
+  readonly verticalFeature?: true;
+  readonly glyphOffsetPt?: PointPt;
+  /** A ruby guide unit's own advance along the run (WORD_RUBY_ALIGN_PLACEMENT). */
+  readonly advancePt?: number;
 }
 
 export type RetainedMarkPath = Readonly<{
@@ -462,6 +474,10 @@ export interface TextPlacement {
   readonly verticalAlign?: 'super' | 'sub';
   readonly tateChuYoko?: boolean;
   readonly tateChuYokoCompress?: boolean;
+  /** A piece of a ruby base (§17.3.3.25): every piece of the cell carries
+   * it, whether or not a guide could be shaped; the first piece also carries
+   * the guide in `ruby`. */
+  readonly rubyBasePiece?: true;
   readonly ruby?: Readonly<{
     text: string;
     advancePt: number;
@@ -1728,6 +1744,10 @@ export interface FlowContainer {
   readonly quarterTurnMath?: boolean;
   /** The story is laid out in a quarter-turned (vertical bodyPr) text box. */
   readonly quarterTurned?: boolean;
+  /** The quarter-turned story keeps East Asian glyphs upright (eaVert,
+   * mongolianVert): its lines take the centred box of
+   * WORD_VERTICAL_LINE_CENTRED_BOX. */
+  readonly uprightEastAsian?: boolean;
 }
 
 export interface FlowCursor extends PointPt {}

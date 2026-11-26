@@ -1,6 +1,6 @@
 import { hadLocalFontProbeTimeout, loadLocalFontMetrics, normalizeLocalFontMetricFamily, unloadLocalFontMetrics } from './local-metrics.js';
 import { activeFontSet } from './font-registry.js';
-import { findReferenceFontMetrics } from './reference-font-metrics.js';
+import { findReferenceFontMetrics, type ReferenceFontFormat } from './reference-font-metrics.js';
 import type { ResolvedFontMetric } from './resource-metrics.js';
 
 /** A document requests an authored face and style. This API retains its name
@@ -16,6 +16,9 @@ export interface OfficeFontFallbackRequest {
    * {@link LoadedOfficeFontFallbacks.installed}.
    */
   presenceOnly?: boolean;
+  /** The requesting format; catalog profiles restricted to other formats
+   * (`ReferenceFontMetricProfile.evidencedFormats`) are not candidates. */
+  format?: ReferenceFontFormat;
 }
 
 export interface OfficeFontFallbackRoute {
@@ -73,7 +76,8 @@ function tupleFor(request: OfficeFontFallbackRequest): Tuple | undefined {
   // tuples with a catalogued face (named cuts such as a 300 Light face too).
   if (!Number.isInteger(weight) || weight < 1 || weight > 1000
     || (style !== 'normal' && style !== 'italic')) return undefined;
-  const profiles = findReferenceFontMetrics(family, { weight, style });
+  const format = request.format;
+  const profiles = findReferenceFontMetrics(family, { weight, style, format });
   if (profiles.length === 0) return undefined;
   // An alias shared by regular and bold is a family name, not proof of a
   // styled face. Prefer full/PostScript aliases unique to this tuple. For the
@@ -83,7 +87,7 @@ function tupleFor(request: OfficeFontFallbackRequest): Tuple | undefined {
   // the other tuples of every matched catalog family too, so local("Arial") can
   // never stand in for the 900 cut and load the regular face.
   const catalogFamilies = new Set([family, ...profiles.map((profile) => profile.family)]);
-  const otherAliases = new Set([...catalogFamilies].flatMap((name) => findReferenceFontMetrics(name))
+  const otherAliases = new Set([...catalogFamilies].flatMap((name) => findReferenceFontMetrics(name, { format }))
     .filter((profile) => profile.weight !== weight || profile.style !== style)
     .flatMap((profile) => profile.aliases.map(normalizeLocalFontMetricFamily)));
   const distinct = [...new Set(profiles.flatMap((profile) => profile.aliases))];

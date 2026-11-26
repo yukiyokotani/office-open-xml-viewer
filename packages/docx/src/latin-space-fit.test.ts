@@ -54,6 +54,15 @@ describe('selected-face Latin inter-word space fit', () => {
     expect(lay([word('A '), other], 6)).toHaveLength(2);
   });
 
+  it('moves an opener with the mixed-face unit that ends a space-fitted line', () => {
+    // "A (" is admitted by narrowing its space; a unit of another face then
+    // ends the line, and the opener (§17.3.1.16) moves down with it.
+    const other = { ...word('B'), fontRoute: createCanvasFontRoute('Other', 'registered') };
+    const lines = lay([word('A '), word('('), other], 7);
+    expect(lines.map((line) => line.segments.map((segment) => (segment as LayoutTextSeg).text).join('')))
+      .toEqual(['A ', '(B']);
+  });
+
   it('does not apply horizontal U+0020 fitting to upright vertical runs', () => {
     const vertical = [
       { ...word('A '), verticalRun: true },

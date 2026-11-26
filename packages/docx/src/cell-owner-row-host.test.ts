@@ -1608,10 +1608,13 @@ describe('cell-owner row host at the production layout boundary', () => {
       paragraph('after') as BodyElement,
     ], { section: vertical });
     const control = document(null);
-    const hosted = document(frame({ x: 150, y: 200 }));
+    // The host spans physical x∈[140,340], logical block [60,260]: the first
+    // vertical line of AFTER (10pt plus the vertical single-line addition,
+    // WORD_VERTICAL_LINE_CENTRED_BOX) fits before it.
+    const hosted = document(frame({ x: 140, y: 200 }));
     // The upright control table starts at the physical top margin, right of
     // the logical flow start: physical x = pageWidth − margin − grid.
-    const dx = 150 - (PAGE - MARGIN - 200);
+    const dx = 140 - (PAGE - MARGIN - 200);
     const dy = 200 - MARGIN;
     const controlRuns = runs(control);
     const hostRuns = runs(hosted);

@@ -89,6 +89,8 @@ function geometry(o: Options = {}, fragments?: TableLayout[]): TableLayout {
 beforeAll(async () => { await init({ module_or_path: await readFile(new URL('../wasm/docx_parser_bg.wasm', import.meta.url)) }); });
 const right = (rect: { xPt: number; widthPt: number }) => rect.xPt + rect.widthPt;
 const bottom = (rect: { yPt: number; heightPt: number }) => rect.yPt + rect.heightPt;
+// Fingerprints re-captured when WORD_EXACT_LINE_BASELINE moved the fixtures'
+// exact-line baselines to four fifths; every other retained field is unchanged.
 const fingerprint = (values: Options[]) => createHash('sha256').update(JSON.stringify(values.map((value) => geometry(value)))).digest('hex');
 
 describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
@@ -165,9 +167,9 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
     // entire retained layout must use the base path, including vertical flow.
     expect(geometry(binding).flowBounds.widthPt).toBe(300);
     // Captured at 5b6d291540f122570b801086a52b43e6718b6fbe with this helper.
-    expect(fingerprint([binding])).toBe('e1bf5a08d76e3b3a8f07a79d22938e09add612f9ace1af555ed17d6da04c90ce');
+    expect(fingerprint([binding])).toBe('7259fe2fb6343df19311f0a5575fababb313d41b23cba7912247174042e13033');
     expect(fingerprint([{ auto: true, widths: [5000, 5000, 5000], long: true }]))
-      .toBe('d62e5a2c96040b2b97c9950b751a0d3317dfa4adeace656b0b24e56391c3ed94');
+      .toBe('6a08bbfcedcfa3ab470bbfb9999140cf4cb60939ca6572570117edb4e203b1d8');
   });
   // Captured from the unmodified stacked parent cb1746fad^ using these same
   // synthetic inputs. These guard the explicit byte-identical retained-layout
@@ -224,16 +226,16 @@ describe('WORD_TABLE_CELL_SPACING_GEOMETRY (#2066)', () => {
   it('keeps all no-spacing retained geometry byte-identical to the previous renderer', () => {
     const cases = [null, 11, 12, 14, 15].flatMap((mode) => [false, true].flatMap((bidi) => ['left', 'center', 'end'].flatMap((jc) =>
       [false, true].map((auto) => ({ spacing: 0, mode, bidi, jc, auto, indent: 720, margin: 108 })))));
-    expect(fingerprint(cases)).toBe('27c5d15368ef440dec14dd99e2d1ba85a44e1290f3e49641b8110179f573290e');
+    expect(fingerprint(cases)).toBe('77df9d546218320bd7174167ff4cf04f3bb765a15735f6dd02f10f13246c9569');
   });
   it('keeps unmeasured classes byte-identical to the previous renderer', () => {
     expect(fingerprint([{ asymmetric: true }, { cellBorder: true }, { rowSpacing: true }, { nested: true },
-      { header: true }, { floating: true }, { vertical: true }, { verticalMerge: true }])).toBe('28a6cf890f22e943b52dc511ea76b9e98f25e5bae672811f81863286987f92d2');
+      { header: true }, { floating: true }, { vertical: true }, { verticalMerge: true }])).toBe('9f55da9471b33bdc6e9c6385a7729fb378ff391787cfd7742f589ffde9d385a1');
   });
   it.each(['row', 'exception'] as const)('keeps uniform %s spacing byte-identical to the base renderer', (spacingScope) => {
     expect(geometry({ spacingScope }).flowBounds.heightPt).toBeCloseTo(66.8, 8);
     // Captured independently for both sources at 5b6d291540f122570b801086a52b43e6718b6fbe.
-    expect(fingerprint([{ spacingScope }])).toBe('1e2aaa8dc6f1d43b1ea27dbc6d7cc73ebc207c5a57dade938ac26e89d2cafbb6');
+    expect(fingerprint([{ spacingScope }])).toBe('30d293578bc294cd6c901d86b5182dd75d14fa3a7fd551cc874b33f4b347c6cc');
   });
   it('keeps style-inherited table-level spacing in the measured class', () => {
     expect(geometry({ spacingScope: 'style' })).toEqual(geometry());

@@ -10,6 +10,7 @@ import {
   wordCollapsedBorderRowTrackFootprintPt,
   wordExactRowFloorPt,
   wordExactRowVerticalClipBounds,
+  wordRotatedCellRuleInsets,
   wordSpacedCellInsideBorderOverridesTable,
   wordVerticalMergeInteriorBorderPt,
 } from './table-compatibility.js';
@@ -1462,6 +1463,30 @@ function placedChildInkBounds(
   };
 }
 
+const verticalBoundaryCache = new WeakMap<TableLayoutInput, ReturnType<typeof resolvedBoundaries>['vertical']>();
+
+/** WORD_ROTATED_CELL_RULE_INSET: the physical left and right content insets
+ * of a rotated cell in a collapsed-border table, from the widths of the
+ * cell's winning vertical rules. */
+function rotatedCellAcrossLineMargins(
+  input: TableLayoutInput,
+  rowIndex: number,
+  cell: TableCellLayoutInput,
+  margins: TableCellLayoutInput['margins'],
+): TableCellLayoutInput['margins'] {
+  let vertical = verticalBoundaryCache.get(input);
+  if (!vertical) {
+    vertical = resolvedBoundaries(input).vertical;
+    verticalBoundaryCache.set(input, vertical);
+  }
+  const start = cell.columnStart;
+  const end = cell.columnStart + cell.columnSpan;
+  const leftBoundary = input.bidiVisual ? end : start;
+  const rightBoundary = input.bidiVisual ? start : end;
+  const widthAt = (boundary: number) => vertical![boundary]?.[rowIndex]?.border.widthPt ?? 0;
+  return wordRotatedCellRuleInsets(margins, widthAt(leftBoundary), widthAt(rightBoundary));
+}
+
 /**
  * Place a rotated cell (ECMA-376 §17.4.72). The blocks keep the horizontal
  * geometry they were acquired with in a local frame whose width is the
@@ -1720,7 +1745,7 @@ function materializeTableRow(
       .every((ownedRow) => ownedRow.heightRule === 'exact');
     if (cell.verticalText && cell.verticalMerge !== 'continue') {
       return rotatedCellLayout(
-        { ...cell, margins },
+        { ...cell, margins: horizontalSpacingPt > 0 ? margins : rotatedCellAcrossLineMargins(input, rowIndex, cell, margins) },
         flow,
         { xPt: cellXPt, yPt: cellTopPt, widthPt: cellWidthPt, heightPt: cellHeightPt },
         physicalContentHeightPt,

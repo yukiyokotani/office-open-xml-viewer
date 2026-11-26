@@ -35,6 +35,8 @@ import {
   wordUnmarkedArabicKashidaChargesSourceSpace,
   wordInlineDrawingRunLeadingApplies,
   isInlineDrawingRun,
+  wordExactLineBaselineOffsetPt,
+  wholeGridExtent,
 } from './layout/line-compatibility.js';
 import { LayoutInvariantError } from './layout/diagnostics.js';
 import type { MeasurementTextContext } from './layout/measurement-capabilities.js';
@@ -161,8 +163,7 @@ function snapParagraphLineToGrid(heightPt: number, grid: DocGridCtx): number {
   if (!isGridLineRule(grid)) return heightPt;
   const pitchPt = grid.linePitchPt!;
   if (pitchPt <= 0) return heightPt;
-  if (heightPt <= pitchPt) return pitchPt;
-  return Math.ceil(heightPt / pitchPt) * pitchPt;
+  return wholeGridExtent(heightPt, pitchPt);
 }
 
 export function measureParagraph(
@@ -247,13 +248,12 @@ export function measureParagraph(
   // then the line rule). The baseline sits four fifths down an exact line,
   // the mark's descent above the bottom of an atLeast line, and at the union
   // ascent of an automatic line, whose added leading falls below it.
-  // The controls are compatibility mode 15, exact lines within the 12-30pt
-  // interval of WORD_SPECIFIED_TEXT_LINE_BOX; other classes keep their path.
-  const markSpacing = context.lineSpacing;
+  // The controls are compatibility mode 15 without a grid; other classes keep
+  // their path. An exact line's advance and baseline do not depend on the
+  // marker (WORD_EXACT_LINE_BASELINE).
   const textMarkerAscentPt = !continuation && firstLinePictureMarkerHeightPt === undefined
     && compat.specifiedTextLineBoxMode15
     && !context.lineGrid.active && !context.hasRuby
-    && !(markSpacing?.rule === 'exact' && (markSpacing.value < 12 || markSpacing.value > 30))
     ? environment.markOnlyTextMarkerAscentPt : undefined;
   const textMarkerMarkBelowBaselinePt = (advancePt: number, ascentPt: number, descentPt: number) => {
     const spacing = context.lineSpacing;
@@ -280,6 +280,7 @@ export function measureParagraph(
       compat.useFeLayout,
       firstLinePictureMarkerHeightPt ?? textMarkerAscentPt ?? 0,
       emptyMark,
+      environment.verticalCJK === true || environment.verticalFrameLines !== undefined,
     );
     const markAdvancePt = markMetrics.advancePx;
     let markWrapBounds: MeasuredParagraph['markWrapBounds'];
@@ -334,6 +335,10 @@ export function measureParagraph(
     // (WORD_AUTO_MULTIPLE_BASELINE_PIN). This is draw-only; pagination keeps
     // the centred trailing-mark metric below.
     const lineSpacing = context.lineSpacing;
+    // WORD_EXACT_LINE_BASELINE covers Word documents' mark lines; another
+    // producer's line boxes (`libreOfficeLineBoxes`) keep their own split.
+    const exactMarkBaselinePt = environment.layoutServices?.text.libreOfficeLineBoxes === true
+      && !keepsWordLineBoxes(paragraph.runs) ? undefined : wordExactLineBaselineOffsetPt(lineSpacing);
     const markPictureBaselineOffsetPt = firstLinePictureMarkerHeightPt !== undefined
       && lineSpacing?.rule === 'auto' && lineSpacing.value > 1
       && !context.hasRuby && !context.lineGrid.active
@@ -351,7 +356,10 @@ export function measureParagraph(
       uniformRubyAdvancePt: 0,
       contentStartYPt: markTopPt,
       contentEndYPt: markTopPt + markAdvancePt,
-      lastLineBelowBaselinePt: textMarkerAscentPt === undefined
+      // WORD_EXACT_LINE_BASELINE: an exact mark line keeps four fifths too.
+      lastLineBelowBaselinePt: exactMarkBaselinePt !== undefined
+        ? markAdvancePt - exactMarkBaselinePt
+        : textMarkerAscentPt === undefined
         ? lineBelowBaselinePx(markAdvancePt, markMetrics.ascentPx, markMetrics.descentPx)
         : textMarkerMarkBelowBaselinePt(markAdvancePt, markMetrics.ascentPx, markMetrics.descentPx),
       markGridAfterLeadingPt: markMetrics.gridAfterLeadingPx,
@@ -735,8 +743,34 @@ export function measureParagraph(
     context.lineEdgeRules,
   );
   if (lines.length === 0) return measureMarkOnly(!segments.some(segment => 'imagePath' in segment && segment.anchor));
+  // WORD_VERTICAL_LINE_CENTRED_BOX: the empty line a terminal manual break
+  // opens (§17.3.3.1) holds only the paragraph mark, so a vertical line is
+  // measured as an empty paragraph's mark line (WORD_EMPTY_MARK_ASCII_FACE),
+  // one vertical single line of the mark.
+  // Library scope: a float-wrapped paragraph keeps the line its wrap search
+  // allocated (the allocation is fixed by then).
+  const verticalMarkLine = environment.verticalCJK === true || environment.verticalFrameLines !== undefined;
+  const finalLine = lines.at(-1)!;
+  const trailingMark = verticalMarkLine && !placement.wrap && lines.length > 1
+    && finalLine.segments.length === 0 && finalLine.endsWithBreak !== true
+    ? paragraphMarkLineMetrics(
+        paragraph, 1, grid, context.hasRuby, markUsesEastAsianGrid, measurer.context, fontFamilyClasses,
+        context.lineSpacing, environment.resolvedLocalFonts, environment.layoutServices?.text,
+        environment.paragraphMarkShapeInput, compat.useFeLayout, 0, true, true,
+      )
+    : undefined;
+  if (trailingMark) {
+    finalLine.ascent = trailingMark.ascentPx;
+    finalLine.descent = trailingMark.descentPx;
+    finalLine.intendedSingle = trailingMark.intendedSinglePx;
+  }
 
   const { allocations, uniformRubyAdvancePt } = allocateLines(lines);
+  // The mark line holds no ruby: it keeps its own extent in a ruby paragraph
+  // too (word-ruby-paragraph-uniform-line-advance spans the text lines).
+  if (trailingMark) {
+    allocations[allocations.length - 1] = { layout: finalLine, advancePt: trailingMark.advancePx };
+  }
   const measuredLines: MeasuredLine[] = [];
   let physicalLineIndex: number | undefined;
   let physicalTopPt = cursorPt;

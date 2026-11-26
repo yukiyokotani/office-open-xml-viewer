@@ -277,7 +277,7 @@ export const WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION = defineCompatibilit
     version: '16.111.1',
     platform: 'macOS 26.5.2',
   },
-  description: 'In a vertical-rl section, Word admits the final visible text column when its transformed baseline and retained visible ink remain inside the block-end edge even if the complete logical line box crosses that edge. The complete retained advance remains authoritative after admission.',
+  description: 'In a vertical-rl section, Word admits the final visible text column when its transformed baseline and retained visible ink remain inside the block-end edge even if the complete logical line box crosses that edge. The complete retained advance remains authoritative after admission. Windows Word 16.0.20625 does not admit such columns of upright vertical text (vert2 position controls: final 10.5pt Meiryo and 14pt MS Mincho exact-24pt columns whose line boxes crossed the edge by 1.7 and 2.2pt while their axes and glyph ink stayed inside moved to the next page), and the library follows Windows: lines of vertical runs, whose boxes are centred (WORD_VERTICAL_LINE_CENTRED_BOX), keep the whole line box as their extent.',
 });
 
 export const WORD_LOWERED_DROP_CAP_ANCHOR_LEADING = defineCompatibilityRule({
@@ -462,6 +462,12 @@ export function wordVerticalRlFinalLineAdmissionExtentPt(input: Readonly<{
   }
   const finalLine = input.paragraph.lines.at(-1);
   if (!finalLine) return input.logicalLineBoxExtentPt;
+  // A line of vertical runs keeps its whole centred box
+  // (WORD_VERTICAL_RL_FINAL_LINE_BASELINE_ADMISSION scope).
+  if (finalLine.placements.some((placement) =>
+    placement.kind === 'text' && placement.writingMode === 'vertical-rl')) {
+    return input.logicalLineBoxExtentPt;
+  }
   const hasUnprovedTransformedInk = finalLine.placements.some((placement) =>
     placement.kind === 'text'
     && (placement.paintOps ?? []).some((operation) =>

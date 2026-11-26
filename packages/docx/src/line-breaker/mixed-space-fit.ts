@@ -80,7 +80,7 @@ function clusterCore(text: string): string {
 
 /**
  * Running summary of the committed line, O(1) per commit. It is maintained
- * only through commitMixedLineItem / popMixedLineItem / replaceLastMixedLineItem,
+ * only through commitMixedLineItem / popMixedLineItem,
  * which also perform the matching `currentLine` mutation, and is reset with
  * the line. `contributions` mirrors `currentLine` item for item when the
  * paragraph can use the rule (and stays empty otherwise); the totals equal a
@@ -223,16 +223,6 @@ export function commitMixedLineItem(
 export function popMixedLineItem(breakerState: BreakerState): void {
   breakerState.currentLine.pop();
   if (breakerState.mixedSpaceEnabled) removeContribution(breakerState.mixedSpace);
-}
-
-/** Replace the last committed item (a kinsoku-retracted head) in both. */
-export function replaceLastMixedLineItem(
-  breakerState: BreakerState,
-  item: LineItem,
-  scale: number,
-): void {
-  popMixedLineItem(breakerState);
-  commitMixedLineItem(breakerState, item, scale);
 }
 
 /** Terminal-cluster facts of the committed line; amortized O(1): each

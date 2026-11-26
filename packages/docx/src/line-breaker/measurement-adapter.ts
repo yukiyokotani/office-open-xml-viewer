@@ -1,4 +1,5 @@
 import { shapeNativeSourceRequest } from './native-unit-contract.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { sameNativeLevelUnit } from './native-unit-contract.js';
 import { wordArabicTextKerned, wordKerningApplies } from '../layout/line-compatibility.js';
 import { graphemeClusterOffsets } from '@silurus/ooxml-core';
@@ -52,7 +53,7 @@ export function kernedSpaceSeamIdentity(left: LayoutTextSeg, right: LayoutTextSe
   return !!l && !!r && l.kerning === true && r.kerning === true
     && !!right.textLayoutService && right.textLayoutService === left.textLayoutService
     && !left.tateChuYoko && !right.tateChuYoko
-    && !left.ruby && !right.ruby && !left.rubyPiece && !right.rubyPiece
+    && !rubyCellOf(left) && !rubyCellOf(right)
     && !left.metricOnly && !right.metricOnly
     && left.fitTextRegionIndex === undefined && right.fitTextRegionIndex === undefined
     && !left.verticalRun && !right.verticalRun && !left.rtl && !right.rtl
@@ -224,7 +225,7 @@ export class LineMeasurementAdapter {
     const service = right.textLayoutService;
     if (!left || !l || !r || l.kerning !== true || !service || service !== left.textLayoutService
       || !left.text.endsWith(' ') || right.text.startsWith(' ') || !right.text
-      || left.metricOnly || right.metricOnly || left.ruby || right.ruby
+      || left.metricOnly || right.metricOnly || rubyCellOf(left) || rubyCellOf(right)
       || left.fitTextRegionIndex !== undefined || right.fitTextRegionIndex !== undefined
       || left.verticalRun || right.verticalRun || left.rtl || right.rtl
       || l.complexScript || r.complexScript
@@ -269,7 +270,7 @@ export class LineMeasurementAdapter {
     // Pieces of a ruby run are one annotated base (only the first piece
     // carries `ruby`); they take no pair either.
     if (!left || !left.text || !right.text || left.tateChuYoko || right.tateChuYoko
-      || left.ruby || right.ruby || left.rubyPiece || right.rubyPiece) return 0;
+      || rubyCellOf(left) || rubyCellOf(right)) return 0;
     const leftSpace = left.text.endsWith(' ');
     if (leftSpace === right.text.startsWith(' ')) return 0;
     if (leftSpace && (left.script === right.script || hasLiveSlotSeam(left) || hasLiveSlotSeam(right))) {

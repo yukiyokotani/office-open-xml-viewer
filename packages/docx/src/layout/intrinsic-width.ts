@@ -1,4 +1,5 @@
 import { closingPairScopeApplies } from '../line-breaker/closing-pair-advance.js';
+import { rubyCellOf } from '../line-breaker/ruby-cell.js';
 import { sameNativeLevelUnit } from '../line-breaker/native-unit-contract.js';
 import { textBreakWindow, textBreakOffsets } from '../line-breaker/text-break-window.js';
 import { uprightResourceOrientation } from './coordinate-space.js';
@@ -176,14 +177,6 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
     // adjacent runs with identical fonts remain two cells, so their source-run
     // boundary is semantic rather than a shaping-only seam.
     segment.tateChuYoko ? (segment.sourceRunIndex ?? null) : null,
-    // Ruby belongs to its authored base run. Extending that base across a run
-    // seam would change the annotation's ownership during the intrinsic probe.
-    segment.ruby ? [
-      segment.sourceRunIndex ?? null,
-      segment.ruby.text,
-      segment.ruby.fontSizePt,
-      segment.ruby.hpsRaisePt ?? null,
-    ] : null,
     segment.verticalRun ?? false,
   ]);
 }
@@ -218,6 +211,9 @@ function mergeCompatibleTextSegments(
       && 'text' in previous
       && 'text' in segment
       && sameNativeLevelUnit(previous, segment)
+      // WORD_RUBY_ALIGN_PLACEMENT: a ruby cell's pieces are its own; joining
+      // one with its neighbour would move text into or out of the cell.
+      && !rubyCellOf(previous) && !rubyCellOf(segment)
       && !previous.optionalHyphen && !segment.optionalHyphen
       // Keep a conditional endpoint's following protected seam addressable
       // for the same eligibility predicate consumed by actual line breaking.
@@ -579,6 +575,9 @@ function visitTextAtomWidths(
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
     const segment = segments[segmentIndex];
     if (!('text' in segment) || segment.text.length === 0) continue;
+    // A ruby cell is one atom, measured where it is laid out
+    // (measureParagraphIntrinsicWidths).
+    if (rubyCellOf(segment)) continue;
     const pieces: Array<{ segment: LayoutTextSeg; start: number; end: number }> = [];
     let joinedText = '';
     const append = (piece: LayoutTextSeg): void => {
@@ -589,7 +588,7 @@ function visitTextAtomWidths(
     append(segment);
     while (segmentIndex + 1 < segments.length) {
       const following = segments[segmentIndex + 1];
-      if (!('text' in following) || following.joinPrev !== true) break;
+      if (!('text' in following) || following.joinPrev !== true || rubyCellOf(following)) break;
       append(following);
       segmentIndex += 1;
     }
@@ -781,8 +780,17 @@ export function measureParagraphIntrinsicWidths(
   for (const line of lines) {
     let penPt = 0;
     const lineWidthPt = line.segments.reduce((sum, segment) => sum + segment.measuredWidth, 0);
+    // WORD_RUBY_ALIGN_PLACEMENT: a ruby cell is indivisible, so its whole
+    // advance as laid out (every piece, its widening and its grid cells) is
+    // one atom. The unbounded layout above places every cell whole.
+    let rubyCell: ReturnType<typeof rubyCellOf>;
+    let rubyCellPt = 0;
     for (const segment of line.segments) {
       penPt += segment.measuredWidth;
+      const cell = 'text' in segment ? rubyCellOf(segment) : undefined;
+      rubyCellPt = cell && cell === rubyCell ? rubyCellPt + segment.measuredWidth : cell ? segment.measuredWidth : 0;
+      rubyCell = cell;
+      minimumAtomPt = Math.max(minimumAtomPt, rubyCellPt);
       if ('imagePath' in segment && !segment.anchor) {
         minimumAtomPt = Math.max(minimumAtomPt, segment.measuredWidth);
       } else if ('math' in segment) {

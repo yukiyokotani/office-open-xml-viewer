@@ -566,12 +566,14 @@ describe('Word for Mac uniform positioned text in an automatic line', () => {
     const raised = arial('A', 3) as Any;
     raised.lineSpacing = exact(15);
     const next = arial('B', 3) as Any;
-    next.lineSpacing = atLeast(15);
-    const last = arial('C', 3) as Any;
+    next.lineSpacing = exact(15);
+    const minimum = arial('C', 3) as Any;
+    minimum.lineSpacing = atLeast(15);
+    const last = arial('D', 3) as Any;
     last.lineSpacing = atLeast(15);
-    const y = await baselines(raised, next, last);
+    const y = await baselines(raised, next, minimum, last);
     expect(y[1]! - y[0]!).toBeCloseTo(15, 1);
-    expect(y[2]! - y[1]!).toBeGreaterThanOrEqual(15);
+    expect(y[3]! - y[2]!).toBeGreaterThanOrEqual(15);
   });
 });
 
@@ -614,13 +616,13 @@ describe('lineRule=auto (multiple spacing) pins the baseline at natural ascent �
   });
 });
 
-describe('lineRule=exact / atLeast keep the centred placement (regression guard, unchanged by #990)', () => {
-  it('exact 20pt centres the glyph box (half-leading above and below)', async () => {
+describe('lineRule=exact puts the baseline four fifths down; atLeast keeps the centred placement', () => {
+  it('exact 20pt puts the baseline 16pt below the line top (WORD_EXACT_LINE_BASELINE)', async () => {
     const calls = await renderAndRead(paragraph('T', exact(20)));
     const t = calls.find((c) => c.text === 'T');
     expect(t).toBeDefined();
-    // Centred: top + (20 − 10)/2 + 8 = 13.
-    expect(t!.y).toBeCloseTo(13, TOL);
+    // Four fifths of 20pt, not the centred top + (20 − 10)/2 + 8 = 13.
+    expect(t!.y).toBeCloseTo(16, TOL);
   });
 
   it('atLeast 20pt centres the glyph box (half-leading above and below)', async () => {
@@ -786,11 +788,11 @@ describe('text-box (shape) lineRule=auto pins the baseline — extra leading bel
     expect(yAuto1).toBeCloseTo(yNone, TOL); // 1.0× auto ≡ single spacing
   });
 
-  it('exact spacing still centres the glyph box (regression guard, unchanged by #990)', async () => {
-    // exact 20pt expands the box; the glyph stays centred, so its baseline sits
-    // BELOW the pinned auto baseline by the half-leading (extra/2 = 5).
+  it('exact spacing puts the baseline four fifths down the line (WORD_EXACT_LINE_BASELINE)', async () => {
+    // exact 20pt: the baseline sits 16pt below the line top, 8pt below the
+    // pinned auto baseline at the 8pt ascent.
     const yAuto1 = await renderTextbox('auto', 1.0);
     const yExact = await renderTextbox('exact', 20);
-    expect(yExact - yAuto1).toBeCloseTo((20 - NATURAL) / 2, TOL); // +5
+    expect(yExact - yAuto1).toBeCloseTo(20 * 4 / 5 - ASCENT, TOL); // +8
   });
 });

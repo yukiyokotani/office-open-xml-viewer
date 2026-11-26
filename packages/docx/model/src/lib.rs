@@ -2946,14 +2946,36 @@ pub struct EastAsianLayoutTypographyWire {
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+pub struct RubyGuideRunFontsWire {
+    pub ascii: Option<String>,
+    pub high_ansi: Option<String>,
+    pub east_asia: Option<String>,
+    pub complex_script: Option<String>,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct RubyGuideRunTypographyWire {
     pub text: String,
     pub font_family: Option<String>,
+    /// The guide run's resolved §17.3.2.26 rFonts slots (theme references
+    /// resolved), so each guide letter selects its own face by script.
+    pub fonts: RubyGuideRunFontsWire,
     pub font_size_pt: Option<f64>,
     pub bold: bool,
     pub italic: bool,
     pub color: Option<String>,
     pub language: Option<String>,
+    /// The guide run's own script controls, which select among its rFonts
+    /// slots: §17.3.2.26 rFonts@hint, §17.3.2.30 rtl and §17.3.2.7 cs.
+    pub font_hint: Option<String>,
+    pub rtl: bool,
+    pub cs: bool,
+    /// §17.3.2.2 bCs and §17.3.2.17 iCs: the weight and slant of the run's
+    /// complex-script text, independent of `bold` and `italic`.
+    pub bold_cs: bool,
+    pub italic_cs: bool,
 }
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq)]
@@ -3122,6 +3144,14 @@ pub struct TextRun {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub optional_hyphen: bool,
+    /// A §17.3.3.25 w:rubyBase run after the first: it belongs to the ruby
+    /// annotation the first base run carries, so every base run forms one
+    /// ruby cell.
+    #[serde(
+        rename = "__rubyBaseContinuation",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub ruby_base_continuation: bool,
     /// An explicit advance in points for every U+0020 in this run, replacing
     /// the space glyph's own advance as a width that horizontal scaling does
     /// not change (character spacing still applies). DOCX never sets it; other producers set it
@@ -3800,7 +3830,8 @@ pub struct UnavailableDrawingRun {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub flip_v: bool,
     /// Parser-private §17.3.2.24 position of the hosting run of an inline
-    /// picture placeholder, as on the available picture (`ImageRun`).
+    /// picture or chart placeholder, as on the available resource
+    /// (`ImageRun`, `ChartRun`).
     #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
     pub inline_position: Option<f64>,
     /// Parser-private font facts of the hosting run of an inline picture
@@ -3930,6 +3961,11 @@ pub struct ChartRun {
         skip_serializing_if = "Option::is_none"
     )]
     pub anchor_acquisition: Option<AnchorAcquisitionWire>,
+    /// ECMA-376 §17.3.2.24 `w:position` (pt, positive raises) of the run that
+    /// hosts this inline chart, as on `ImageRun`. Parser-private; absent for
+    /// anchors and an unpositioned run.
+    #[serde(rename = "__inlinePosition", skip_serializing_if = "Option::is_none")]
+    pub inline_position: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]

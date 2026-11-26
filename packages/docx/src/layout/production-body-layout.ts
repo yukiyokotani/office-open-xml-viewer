@@ -292,7 +292,7 @@ function buildMeasureState(
       tableDecision: singleTableDecision,
       resolveColumns: resolveColumnWidths,
       createCellState: (state, contentWidthPt, cell) => ({
-        ...withTableCellStory(tableCellOwnerState(state), tableCellFlowsHorizontally(cell)),
+        ...verticalCellStory(withTableCellStory(tableCellOwnerState(state), tableCellFlowsHorizontally(cell)), cell),
         contentX: 0,
         contentW: contentWidthPt,
         y: 0,
@@ -1009,6 +1009,7 @@ function layoutBodyStory(
       containers: [],
       lineNumberingEligible: false,
       ...(request.container.quarterTurned ? { quarterTurned: true } : {}),
+      ...(request.container.uprightEastAsian ? { uprightFrame: true as const } : {}),
       ...(textBoxStoryHostedByHeaderFooter(request.source) ? { headerFooterHosted: true as const } : {}),
       // WORD_JUSTIFICATION_PUNCTUATION_HANG: Word matches the main body in a
       // header and a footnote (blk-0898-cjk-kincell); footers, endnotes, note
@@ -4417,4 +4418,17 @@ function markLineWrapped(
   return layout.exclusions.length > 0 && wordGridLeadingWrapExclusionOverlaps(
     layout, measured.contentStartYPt, measured.contentEndYPt,
   );
+}
+
+/** WORD_VERTICAL_LINE_CENTRED_BOX: a cell whose §17.4.72 textDirection turns
+ * its content (the cells table acquisition rotates: no nested table) sets its
+ * lines in a vertical frame. */
+function verticalCellStory<State extends { readonly storyContext?: StoryContext }>(
+  state: State,
+  cell: Readonly<{ textDirection?: string | null; content: readonly { readonly type: string }[] }>,
+): State {
+  const turned = cell.textDirection === 'tbRl' || cell.textDirection === 'btLr' || cell.textDirection === 'tbRlV';
+  if (!turned || !state.storyContext || cell.content.some((element) => element.type === 'table')) return state;
+  return { ...state, storyContext: { ...state.storyContext,
+    verticalCell: cell.textDirection === 'tbRlV' ? 'upright' : 'rotated' } };
 }

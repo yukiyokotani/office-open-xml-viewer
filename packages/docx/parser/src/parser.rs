@@ -587,6 +587,26 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn ruby_base_runs_after_the_first_continue_its_cell() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:ruby><w:rubyPr><w:rubyAlign w:val="center"/><w:hps w:val="10"/>
+              <w:hpsRaise w:val="18"/><w:hpsBaseText w:val="21"/><w:lid w:val="ja-JP"/></w:rubyPr>
+              <w:rt><w:r><w:t>とうきょう</w:t></w:r></w:rt>
+              <w:rubyBase><w:r><w:t>東</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>京</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r><w:r><w:t>後</w:t></w:r>"#,
+            &styles,
+        );
+        let runs: Vec<serde_json::Value> = paragraph.runs.iter()
+            .map(|run| serde_json::to_value(run).expect("run serializes")).collect();
+        assert_eq!(runs.len(), 3);
+        assert!(runs[0]["ruby"].is_object());
+        assert!(runs[0].get("__rubyBaseContinuation").is_none());
+        assert_eq!(runs[1]["__rubyBaseContinuation"], true);
+        assert!(runs[2].get("__rubyBaseContinuation").is_none());
+    }
+
+    #[test]
     fn ruby_private_wire_retains_alignment_metrics_language_and_rich_guide_runs() {
         let styles = StyleMap::parse("");
         let paragraph = parse_p(
@@ -612,10 +632,64 @@ mod private_typography_wire_tests {
         assert_eq!(ruby["language"]["value"], "ja-jp");
         assert_eq!(ruby["guideRuns"][0]["text"], "かん");
         assert_eq!(ruby["guideRuns"][0]["fontFamily"], "Yu Gothic");
+        assert_eq!(ruby["guideRuns"][0]["fonts"]["ascii"], "Yu Gothic");
         assert_eq!(ruby["guideRuns"][0]["fontSizePt"], 6.0);
         assert_eq!(ruby["guideRuns"][0]["bold"], true);
         assert_eq!(ruby["guideRuns"][0]["italic"], true);
         assert_eq!(ruby["guideRuns"][0]["color"], "112233");
+        assert_eq!(ruby["guideRuns"][0]["rtl"], false);
+        assert_eq!(ruby["guideRuns"][0]["cs"], false);
+        assert!(ruby["guideRuns"][0]["fontHint"].is_null());
+    }
+
+    #[test]
+    fn ruby_guide_runs_keep_their_own_script_controls() {
+        // The run holding the ruby is right-to-left; each w:rt run has its own
+        // rtl, cs and rFonts hint.
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:rPr><w:rtl/></w:rPr><w:ruby>
+              <w:rubyPr><w:hps w:val="12"/></w:rubyPr>
+              <w:rt>
+                <w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t>か</w:t></w:r>
+                <w:r><w:rPr><w:rtl/></w:rPr><w:t>س</w:t></w:r>
+                <w:r><w:rPr><w:cs/></w:rPr><w:t>ل</w:t></w:r>
+              </w:rt>
+              <w:rubyBase><w:r><w:rPr><w:rtl/></w:rPr><w:t>אב</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r>"#,
+            &styles,
+        );
+        let runs = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["ruby"]["guideRuns"];
+        assert_eq!(runs[0]["rtl"], false);
+        assert_eq!(runs[0]["cs"], false);
+        assert_eq!(runs[0]["fontHint"], "eastAsia");
+        assert_eq!(runs[1]["rtl"], true);
+        assert_eq!(runs[1]["cs"], false);
+        assert_eq!(runs[2]["rtl"], false);
+        assert_eq!(runs[2]["cs"], true);
+    }
+
+    #[test]
+    fn ruby_guide_runs_carry_complex_script_bold_and_italic() {
+        let styles = StyleMap::parse("");
+        let paragraph = parse_p(
+            r#"<w:r><w:ruby>
+              <w:rubyPr><w:hps w:val="12"/></w:rubyPr>
+              <w:rt>
+                <w:r><w:rPr><w:bCs/><w:iCs/><w:rtl/></w:rPr><w:t>س</w:t></w:r>
+                <w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>a</w:t></w:r>
+              </w:rt>
+              <w:rubyBase><w:r><w:t>漢</w:t></w:r></w:rubyBase>
+            </w:ruby></w:r>"#,
+            &styles,
+        );
+        let runs = &first_run_json(&paragraph, "text")["__typographyAcquisition"]["ruby"]["guideRuns"];
+        assert_eq!(runs[0]["boldCs"], true);
+        assert_eq!(runs[0]["italicCs"], true);
+        assert_eq!(runs[0]["bold"], false);
+        assert_eq!(runs[1]["boldCs"], false);
+        assert_eq!(runs[1]["italicCs"], false);
+        assert_eq!(runs[1]["bold"], true);
     }
 
     #[test]
@@ -7771,12 +7845,10 @@ fn set_inline_object_position(run: &mut DocRun, position: Option<f64>) {
     match run {
         DocRun::Shape(shape) if shape.inline => shape.inline_position = position,
         DocRun::Image(image) if !image.anchor => image.inline_position = position,
-        // An unavailable inline picture keeps the position its picture would
-        // have (charts keep their established placement either way).
-        DocRun::UnavailableDrawing(drawing)
-            if drawing.anchor_acquisition.is_none()
-                && matches!(drawing.resource_kind, UnavailableDrawingResourceKind::Image) =>
-        {
+        DocRun::Chart(chart) if !chart.anchor => chart.inline_position = position,
+        // An unavailable inline picture or chart keeps the position its
+        // resource would have.
+        DocRun::UnavailableDrawing(drawing) if drawing.anchor_acquisition.is_none() => {
             drawing.inline_position = position
         }
         _ => {}
@@ -7884,31 +7956,51 @@ fn ruby_typography_wire(
                 return None;
             }
             let mut fmt = base_fmt.clone();
+            // The script controls that select among the guide run's rFonts
+            // slots (§17.3.2.26 hint, §17.3.2.30 rtl, §17.3.2.7 cs) are the
+            // guide run's own: a w:rt run is not text of the run that holds
+            // the ruby, whose direction and script belong to the base.
+            let mut own = RunFmt::default();
             let rpr = child_w(run, "rPr");
             if let Some(style_id) = rpr
                 .and_then(|properties| child_w(properties, "rStyle"))
                 .and_then(|style| attr_w(style, "val"))
             {
-                apply_direct_run(&mut fmt, &style_map.resolve_run_style(&style_id));
+                let style = style_map.resolve_run_style(&style_id);
+                apply_direct_run(&mut fmt, &style);
+                apply_direct_run(&mut own, &style);
             }
             if let Some(properties) = rpr {
-                apply_direct_run(&mut fmt, &parse_run_fmt(properties));
+                let direct = parse_run_fmt(properties);
+                apply_direct_run(&mut fmt, &direct);
+                apply_direct_run(&mut own, &direct);
             }
             let language = rpr
                 .and_then(|properties| child_w(properties, "lang"))
                 .and_then(|lang| attr_w(lang, "val"))
                 .map(|value| value.to_lowercase());
             let east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
+            let ascii = theme.resolve_font_ref(fmt.font_family_ascii.clone());
+            let fonts = RubyGuideRunFontsWire {
+                ascii: ascii.clone(),
+                high_ansi: theme.resolve_font_ref(fmt.font_family_high_ansi.clone()),
+                east_asia: east_asia.clone(),
+                complex_script: theme.resolve_font_ref(fmt.font_family_cs.clone()),
+            };
             Some(RubyGuideRunTypographyWire {
                 text,
-                font_family: theme
-                    .resolve_font_ref(fmt.font_family_ascii.clone())
-                    .or(east_asia),
+                font_family: ascii.or(east_asia),
+                fonts,
                 font_size_pt: fmt.font_size,
                 bold: fmt.bold.unwrap_or(false),
                 italic: fmt.italic.unwrap_or(false),
                 color: fmt.color.clone(),
                 language,
+                font_hint: own.font_hint.clone(),
+                rtl: own.rtl.unwrap_or(false),
+                cs: own.cs_toggle.unwrap_or(false),
+                bold_cs: fmt.bold_cs.unwrap_or(false),
+                italic_cs: fmt.italic_cs.unwrap_or(false),
             })
         })
         .collect();
@@ -8462,6 +8554,7 @@ fn parse_run_inner(
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
                         optional_hyphen: false,
+                        ruby_base_continuation: false,
                         space_advance_pt: None,
                         list_label: None,
                         bold,
@@ -8567,6 +8660,7 @@ fn parse_run_inner(
                         no_break_after: false,
                         no_break_hyphen_offsets: Vec::new(),
                         optional_hyphen: false,
+                        ruby_base_continuation: false,
                         space_advance_pt: None,
                         list_label: None,
                         bold,
@@ -8633,6 +8727,7 @@ fn parse_run_inner(
                     no_break_after: false,
                     no_break_hyphen_offsets: Vec::new(),
                     optional_hyphen: false,
+                    ruby_base_continuation: false,
                     space_advance_pt: None,
                     list_label: None,
                     bold,
@@ -8741,6 +8836,7 @@ fn parse_run_inner(
                         "-".to_string()
                     },
                     optional_hyphen: optional,
+                    ruby_base_continuation: false,
                     space_advance_pt: None,
                     list_label: None,
                     // If the hyphen cannot merge with the previous text run,
@@ -8922,18 +9018,23 @@ fn parse_run_inner(
                             None,
                         );
                     }
-                    // Attach ruby to the FIRST text run produced from rubyBase
-                    // (typical case is a single base run carrying one or two
-                    // glyphs). Splitting the annotation across multiple runs
-                    // is uncommon — sample data has 1 base run per ruby.
+                    // §17.3.3.25: the annotation rides on the FIRST text run
+                    // produced from rubyBase; the later base runs are marked
+                    // as its continuation so layout forms one ruby cell.
                     if let Some(rb_anno) = ruby {
+                        let mut first = true;
                         for r in &mut runs[before..] {
                             if let DocRun::Text(t) = r {
-                                t.ruby = Some(rb_anno.clone());
-                                if let Some(typography) = &mut t.typography_acquisition {
-                                    typography.ruby = rb_anno.typography.clone();
+                                if first {
+                                    t.ruby = Some(rb_anno.clone());
+                                    if let Some(typography) = &mut t.typography_acquisition {
+                                        typography.ruby = rb_anno.typography.clone();
+                                    }
+                                    first = false;
+                                } else {
+                                    // Every later base run joins the same ruby cell.
+                                    t.ruby_base_continuation = true;
                                 }
-                                break;
                             }
                         }
                     }
@@ -8982,6 +9083,7 @@ fn parse_run_inner(
                     no_break_after: false,
                     no_break_hyphen_offsets: Vec::new(),
                     optional_hyphen: false,
+                    ruby_base_continuation: false,
                     space_advance_pt: None,
                     list_label: None,
                     bold,
@@ -9788,6 +9890,7 @@ fn parse_drawing_container(
                                 anchor_x_relative_from: None,
                                 anchor_y_relative_from: None,
                                 anchor_acquisition: None,
+                                inline_position: None,
                             }))];
                         }
                     }
@@ -10143,6 +10246,7 @@ fn parse_drawing_container(
                             anchor_x_relative_from: rel_h.clone(),
                             anchor_y_relative_from: rel_v.clone(),
                             anchor_acquisition: Some(anchor_acquisition.clone()),
+                            inline_position: None,
                         }))];
                     }
                 }
@@ -25193,6 +25297,29 @@ mod anchor_image_relative_from_tests {
             (drawing.rotation, drawing.flip_h, drawing.flip_v),
             (90.0, true, false)
         );
+    }
+
+    #[test]
+    fn unavailable_inline_chart_keeps_its_run_position() {
+        // WORD_INLINE_OBJECT_EXACT_LINE: an inline chart moves with its
+        // hosting run's §17.3.2.24 position like a picture, and so does its
+        // placeholder.
+        let body = r#"<w:p><w:r><w:rPr><w:position w:val="10"/></w:rPr><w:drawing>
+  <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <wp:extent cx="508000" cy="203200"/>
+    <wp:docPr id="1" name="chart"/>
+    <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+      <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdMissing"/>
+    </a:graphicData></a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>"#;
+        let doc = parse_from_bytes(&build_docx_without_media(body))
+            .expect("a dangling chart relationship must not abort parsing");
+        let drawing = first_unavailable_drawing(&doc);
+        assert_eq!(drawing.resource_kind, UnavailableDrawingResourceKind::Chart);
+        assert_eq!(drawing.inline_position, Some(5.0));
     }
 
     #[test]

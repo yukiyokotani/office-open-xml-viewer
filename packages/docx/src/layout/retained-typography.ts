@@ -43,47 +43,6 @@ export function centeredLeaderGlyphOrigins(
   }));
 }
 
-export interface RubyGuideSpanInput extends Omit<RetainedGlyphPaintOperation, 'origin'> {
-  readonly offsetPt: number;
-}
-
-export function rubyPaintOperations(input: Readonly<{
-  baseOrigin: PointPt;
-  baseAdvancePt: number;
-  guideAdvancePt: number;
-  raisePt?: number;
-  /** Used only for the specification-independent touching-ink fallback. */
-  baseInkTopPt?: number;
-  guideInkBottomFromBaselinePt?: number;
-  spans: readonly RubyGuideSpanInput[];
-}>): readonly RetainedGlyphPaintOperation[] {
-  let baselinePt: number;
-  if (input.raisePt !== undefined) {
-    baselinePt = input.baseOrigin.yPt - input.raisePt;
-  } else if (
-    input.baseInkTopPt !== undefined
-    && input.guideInkBottomFromBaselinePt !== undefined
-  ) {
-    baselinePt = input.baseInkTopPt - input.guideInkBottomFromBaselinePt;
-  } else {
-    throw new Error(
-      'Ruby geometry requires authored w:hpsRaise or retained base/guide ink bounds',
-    );
-  }
-  const startXPt = input.baseOrigin.xPt
-    + (input.baseAdvancePt - input.guideAdvancePt) / 2;
-  return input.spans.map((span) => ({
-    text: span.text,
-    origin: { xPt: startXPt + span.offsetPt, yPt: baselinePt },
-    fontRoute: span.fontRoute,
-    fontSizePt: span.fontSizePt,
-    fontWeight: span.fontWeight,
-    fontStyle: span.fontStyle,
-    color: span.color,
-    ...(span.kerning ? { kerning: span.kerning } : {}),
-  }));
-}
-
 type RetainedInkMetric = Pick<GlyphMeasurement, 'ascentPt' | 'descentPt' | 'inkBounds'>;
 
 function inkTop(metric: RetainedInkMetric): number {

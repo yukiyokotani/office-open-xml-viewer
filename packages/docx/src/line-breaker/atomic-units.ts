@@ -1,4 +1,5 @@
 import { textBreakOffsetAt } from './text-break-window.js';
+import { rubyCellOf } from './ruby-cell.js';
 import { DEFAULT_KINSOKU_RULES } from '@silurus/ooxml-core';
 import type { LayoutSeg, LayoutTextSeg } from './model.js';
 import { hardJoinPrefixEnd } from './advance.js';
@@ -139,7 +140,7 @@ export function measureJoinedTextUnit(
     if (!('text' in f)) break;
     const wholeWordSeam = preferWholeWord && f.explicitBreakBefore && f.hyperlink?.kind !== 'external';
     if ((!f.joinPrev && !wholeWordSeam) || atLineStart && f.fitTextRegionStart) break;
-    const fixedCell = f.ruby !== undefined || f.tateChuYoko === true;
+    const fixedCell = rubyCellOf(f) !== undefined || f.tateChuYoko === true;
     // Hard-seam acquisition scans the entire follower to find its first legal
     // grapheme. Charge that scan before allocation, not just its short result.
     if (f.hardJoinPrev) measurement.reservePrefixWork(f.text.length);

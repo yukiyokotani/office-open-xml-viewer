@@ -1,4 +1,5 @@
 import type { DocxCompatProfile } from './compat-profile.js';
+import { rubyCellOf } from '../line-breaker/ruby-cell.js';
 import type { LayoutLine, LayoutTextSeg } from '../line-layout.js';
 import type { NumberingMarkerShapeInput } from './types.js';
 import type { ParagraphLayoutSource, ParagraphTextBearingRun } from './text.js';
@@ -56,10 +57,8 @@ export function specifiedTextParagraphIsHomogeneous(paragraph: ParagraphLayoutSo
  * source and authored name come from the resolver, never CSS-name inference.
  * The existing authored-reference predicate admits installed Office local()
  * tuples, not application-provided SFNT resources registered as local faces.
- * Separate Office-PDF comparisons of decorated exact paragraphs did not
- * support extending the fixed partition to their mark/style mixtures. Those
- * counterexamples do not isolate decoration from mark formatting: preserve
- * both unmeasured classes instead of assigning a guessed correction. */
+ * This gate covers atLeast and grid auto=1 lines; exact lines of every class
+ * are WORD_EXACT_LINE_BASELINE. */
 export function specifiedTextLineMetrics(
   line: LayoutLine,
   context: ParagraphLayoutContext,
@@ -73,14 +72,9 @@ export function specifiedTextLineMetrics(
   const spacing = context.lineSpacing;
   if (!compat.specifiedTextLineBoxMode || vertical || context.hasRuby
     || spacing?.explicit !== true || spacing.value <= 0
-    || (spacing.rule !== 'exact' && spacing.rule !== 'atLeast'
+    // Exact lines of every class take WORD_EXACT_LINE_BASELINE.
+    || (spacing.rule !== 'atLeast'
       && !(spacing.rule === 'auto' && spacing.value === 1))) return null;
-  // The independent matrix establishes exact heights from 12 through 30pt.
-  // Separate smaller-line PDF captions accumulate a device cadence that does
-  // not isolate their baseline partition from preceding advances. Preserve
-  // heights outside the measured interval; these are evidence bounds, not a
-  // fitted minimum line height or a correction to the authored spacing.
-  if (spacing.rule === 'exact' && (spacing.value < 12 || spacing.value > 30)) return null;
   // No-grid auto=1 diagnostics already agree with the established normal-box
   // path. Only the measured whole-cell grid diagnostic needs this override.
   if (spacing.rule === 'auto' && !context.lineGrid.active) return null;
@@ -107,7 +101,7 @@ export function specifiedTextLineMetrics(
     if (!segment.text) continue;
     if (!/^[\x20-\x7e]+$/u.test(segment.text) || segment.bold || segment.italic
       || segment.underline || segment.strikethrough || segment.hyperlink
-      || segment.ruby || segment.vertAlign || segment.position || segment.smallCaps
+      || rubyCellOf(segment) || segment.vertAlign || segment.position || segment.smallCaps
       || segment.verticalRun || segment.textBoxLineFloor
       || !referenceSourceAdmitted(segment)) return null;
     first ??= segment;
@@ -149,7 +143,9 @@ export function specifiedTextLineMetrics(
   // homogeneous native/local gate above excludes unrelated caller resources.
   const profile = first.resolvedLineHeightRatio != null && first.resolvedDesignDescentRatio != null
     ? { lineHeightRatio: first.resolvedLineHeightRatio, designDescentRatio: first.resolvedDesignDescentRatio }
-    : referenceFontLineMetrics(authoredFamily, 400, 'normal');
+    // Word line boxes only: compatibility modes 14/15 gate this class above,
+    // and another producer's documents carry neither.
+    : referenceFontLineMetrics(authoredFamily, 400, 'normal', 'word', 'docx');
   if (!profile) return null;
   return wordSpecifiedTextLineMetrics({
     rule: spacing.rule,
