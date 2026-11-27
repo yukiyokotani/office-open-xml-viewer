@@ -16,7 +16,14 @@ export default defineConfig({
   testMatch: formats.map((format) => `${format}.spec.ts`),
   fullyParallel: false,
   reporter: [['list']],
-  use: { actionTimeout: 30_000 },
+  use: {
+    actionTimeout: 30_000,
+    // Number separators and built-in Excel date formats follow
+    // navigator.language (charts included). Pin the previous-renderer and
+    // candidate contexts to the same locale so a host-language change cannot
+    // masquerade as a regression.
+    locale: process.env.VRT_LOCALE || 'en-US',
+  },
   projects: [
     {
       name: 'chrome',

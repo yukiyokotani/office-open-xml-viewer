@@ -22,6 +22,11 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${vrtPort}`,
     actionTimeout: 30_000,
+    // Number separators and built-in Excel date formats follow
+    // navigator.language (charts included). Pin the previous-renderer and
+    // candidate contexts to the same locale so a host-language change cannot
+    // masquerade as a regression.
+    locale: process.env.VRT_LOCALE || 'en-US',
   },
   projects: [
     {

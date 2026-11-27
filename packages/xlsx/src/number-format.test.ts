@@ -333,6 +333,7 @@ describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
       // A quoted literal keeps its own characters.
       expect(fmt(2.5, '0.0" km."')).toBe('2,5 km.');
       expect(formatGeneralNumber(123456789012.5)).toBe('1,23457E+11');
+      expect(formatCellValue(numCell(2.5), builtinStyles(49))).toBe('2,5');
     } finally {
       vi.unstubAllGlobals();
     }

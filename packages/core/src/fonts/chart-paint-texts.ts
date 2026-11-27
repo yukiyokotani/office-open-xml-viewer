@@ -16,7 +16,8 @@ import { excelDateTimeSectionNameTexts, isDateFormatSection, splitFormatSections
  *   format codes whose literals a formatted label copies). Face names are not
  *   painted and are left out;
  * - generated numbers and dates: §18.8.30 formatting writes ASCII digits,
- *   signs, separators and exponents (printable ASCII below), the code's own
+ *   signs and exponents (printable ASCII below), the host locale's decimal
+ *   and group separators (core `numberSymbolTexts`), the code's own
  *   literals (above) and, for a date / time section, the formatter's name
  *   tables (core `excelDateTimeSectionNameTexts`: month, weekday, AM/PM,
  *   Japanese weekday, era and quarter names). Every string under a key naming

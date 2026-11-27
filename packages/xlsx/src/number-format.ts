@@ -507,7 +507,8 @@ function applyFormat(
   // sign-section semantics match exactly.
   const builtinNumeric = BUILTIN_NUMERIC_FMT[numFmtId];
   if (builtinNumeric) return applyFormatCode(num, builtinNumeric);
-  if (numFmtId === 49) return { text: String(num) };
+  // `@` shows the stored number as text, with the host decimal separator.
+  if (numFmtId === 49) return { text: String(num).replace('.', hostNumberSymbols().decimal) };
   // 0 (General) and every unknown id.
   return { text: formatGeneralText(num), general: true };
 }

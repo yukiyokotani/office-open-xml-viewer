@@ -57,8 +57,10 @@ export function declaredFontSubstitutions(sources: readonly FontSourceDescriptor
  * Text the renderer paints that no model text spells, measured or painted
  * with the faces of every cell and shape: printable ASCII (row and column
  * headers, General and built-in number output, booleans and error values,
- * `#` fill, `E`/`%`/sign/separator characters, the space that `?` and `_`
- * pad with) and the horizontal ellipsis of clipped slicer text.
+ * `#` fill, `E`/`%`/sign characters, the space that `?` and `_` pad with)
+ * and the horizontal ellipsis of clipped slicer text. The host locale's
+ * decimal and group separators come with the number-format texts
+ * (`numberFormatPaintTexts`).
  */
 const RENDERER_SENTINEL_TEXT = `${String.fromCharCode(...Array.from({ length: 0x7f - 0x20 }, (_, i) => 0x20 + i))}…`;
 
