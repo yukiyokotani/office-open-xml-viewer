@@ -7721,6 +7721,14 @@ export function applyFrameTransform(
   ctx.translate(-(x + w / 2), -(y + h / 2));
 }
 
+/** The exact `vert` tokens whose measureOnly result is the box width in
+ * {@link renderTextBody}: its stacked and rotated dispatch. Any other token
+ * (mongolianVert, padded or invalid values) is laid out horizontally there,
+ * so it is measured like horizontal text. */
+const MEASURED_BY_BOX_WIDTH_VERT: ReadonlySet<string> = new Set([
+  'wordArtVert', 'wordArtVertRtl', 'vert', 'eaVert', 'vert270',
+]);
+
 export function renderTable(
   ctx: CanvasRenderingContext2D,
   el: TableElement,
@@ -7780,7 +7788,7 @@ export function renderTable(
   // positive row keeps its minimum for those bodies instead of growing to the
   // cell width. A zero-height row still takes that box measure as before.
   const measuresByBoxWidth = (body: TextBody): boolean =>
-    body.vert != null && body.vert !== 'horz';
+    MEASURED_BY_BOX_WIDTH_VERT.has(body.vert);
 
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {

@@ -409,6 +409,50 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 20)).toHaveLength(1);
   });
 
+  const threeLines = (vert = 'horz') => ({
+    verticalAnchor: 't',
+    paragraphs: [{
+      alignment: 'l', marL: 0, marR: 0, indent: 0,
+      spaceBefore: null, spaceAfter: null,
+      spaceLine: { type: 'pct', val: 100000 },
+      runs: [
+        { type: 'text', text: 'one', fontSize: 18, fontFamily: 'Arial' },
+        { type: 'break' },
+        { type: 'text', text: 'two', fontSize: 18, fontFamily: 'Arial' },
+        { type: 'break' },
+        { type: 'text', text: 'three', fontSize: 18, fontFamily: 'Arial' },
+      ],
+      bullet: { type: 'none' }, eaLnBrk: true,
+    }],
+    defaultFontSize: null, defaultBold: null, defaultItalic: null,
+    lIns: 0, rIns: 0, tIns: 3.6 * EMU, bIns: 3.6 * EMU,
+    wrap: 'square', vert, autoFit: 'none',
+  } as unknown as TextBody);
+
+  it('grows a positive row for a vert token the renderer lays out horizontally', () => {
+    // renderTextBody rotates only vert/eaVert/vert270 and stacks only
+    // wordArtVert*; mongolianVert is painted horizontally, so it measures so.
+    const t = tableOf([
+      [cell({ textBody: threeLines('mongolianVert'), borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    expect(horizontalAt(render(t), 72)).toHaveLength(1);
+  });
+
+  it('grows positive rows under a rowSpan cell when the minima fill the frame', () => {
+    // Two 20pt minima (the frame is their 40pt sum) under a 72pt merged cell:
+    // the 32pt deficit is shared, so the rows meet at 36pt.
+    const t = tableOf([
+      [cell({ textBody: threeLines(), rowSpan: 2, borderB: ln() })],
+      [cell({ vMerge: true })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.rows[2].height = 0;
+    t.height = 40 * EMU;
+    const strokes = render(t);
+    expect(horizontalAt(strokes, 72)).toHaveLength(1);
+  });
+
   it('shared VERTICAL gridline is drawn exactly ONCE (not once per cell)', () => {
     // Left cell right = 1pt; right cell left = 1pt (same). Previously TWO strokes
     // at x=60 (one per cell); now exactly one.
