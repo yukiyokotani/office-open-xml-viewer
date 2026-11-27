@@ -671,6 +671,14 @@
     "source": "71daaa72c6e26f549281fafc69055b01459751fd9444715934578005f6c7b077",
     "pdf": "b2add518e0ef47217f962299800faecbc052fe036e2db784696c56b624fba0c6"
   },
+  "pptx-020-table-row-growth.mac.pdf": {
+    "source": "e51f6e4a99b2ece7f68af717d18e0361a99aa7918a6330a2a433705a8dd89825",
+    "pdf": "38d4ccf1a798447dc7a2116f4dfbc0cf44e215ae15850068b5a99ff5c5d0adfe"
+  },
+  "pptx-020-table-row-growth.win.pdf": {
+    "source": "e51f6e4a99b2ece7f68af717d18e0361a99aa7918a6330a2a433705a8dd89825",
+    "pdf": "89cdd6f76221b92b60bb48b7ca114e4ff9196d10cbe0626375d90175d9cb7f28"
+  },
   "xlsx-009-chart.mac.pdf": {
     "source": "f549094c713f82e7a8dc1140f46c69e468291051e6f5239e800a9ecbb8af3aa3",
     "pdf": "327a2e865ce85ccf2d0fa3b4e5ddf09f7b6505dcf74035fd4abdf13b3c2b599f"
