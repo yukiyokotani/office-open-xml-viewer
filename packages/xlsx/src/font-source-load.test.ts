@@ -53,6 +53,16 @@ describe('XLSX font-source demand', () => {
     expect(scalars.has('曜'.codePointAt(0) as number)).toBe(false);
   });
 
+  it('demands the host locale separators that numbers paint (#2346)', () => {
+    vi.stubGlobal('navigator', { language: 'fr-FR' });
+    try {
+      const demand = new XlsxFontDemand(workbook(), 'jp', []).take();
+      expect(new Set(demand?.scalars as number[]).has(0x202f)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('adds script fallbacks for the text the workbook paints', () => {
     const demand = new XlsxFontDemand(workbook({ sharedStrings: [{ text: '漢字' }] as never }), 'sc', []).take();
     expect(demand?.fallbackFamilies).toEqual(['Noto Sans SC', 'Noto Serif SC']);

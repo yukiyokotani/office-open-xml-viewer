@@ -1,4 +1,5 @@
 import { localizedExcelShortDateTexts } from '../chart/chart-number-format.js';
+import { numberSymbolTexts } from '../number-symbols.js';
 import { excelDateTimeSectionNameTexts, isDateFormatSection, splitFormatSections } from '../excel-number-format.js';
 
 /**
@@ -68,6 +69,9 @@ export function chartPaintTexts(chart: unknown): readonly string[] | 'all' {
       }
     }
   }
+  // Value labels and number-format codes paint the host locale's decimal
+  // and group separators (number-symbols.ts).
+  texts.push(...numberSymbolTexts());
   if (localizedShortDate) {
     const shortDate = localizedExcelShortDateTexts();
     if (!shortDate.complete) return 'all';

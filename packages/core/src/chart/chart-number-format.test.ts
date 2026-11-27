@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   formatChartVal,
   formatChartValWithCode,
@@ -234,5 +234,31 @@ describe('scientific and fraction sections', () => {
     // The search does not grow with the denominator's digits.
     expect(formatChartValWithCode(1, '# ?/???????')).toBe('1');
     expect(formatChartValWithCode(1 / 3, '# ?/???????')).toBe('1/3');
+  });
+});
+
+describe('chart labels paint the host locale separators (#2346)', () => {
+  it('uses the fr-FR decimal and group separators like worksheet cells', () => {
+    vi.stubGlobal('navigator', { language: 'fr-FR' });
+    try {
+      expect(formatChartValWithCode(1234.5, '#,##0.00')).toBe('1 234,50');
+      expect(formatChartVal(0.5)).toBe('0,5');
+      expect(formatChartValWithCode(0.125, '0.00%')).toBe('12,50%');
+      // The mantissa that rounds up to the next power is read back through
+      // the localized separators.
+      expect(formatChartValWithCode(9.96, '0.0E+0')).toBe('1,0E+1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps the invariant separators for en-US', () => {
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    try {
+      expect(formatChartValWithCode(1234.5, '#,##0.00')).toBe('1,234.50');
+      expect(formatChartVal(0.5)).toBe('0.5');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

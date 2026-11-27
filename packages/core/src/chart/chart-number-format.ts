@@ -15,6 +15,7 @@ import {
   textSectionIndex,
 } from '../excel-number-format';
 import { roundDecimalHalfUp } from '../text/round-decimal';
+import { groupDigits, hostNumberSymbols } from '../number-symbols';
 
 const localizedShortDateFormatters = new Map<string, Intl.DateTimeFormat>();
 
@@ -96,8 +97,9 @@ export function formatChartVal(v: number): string {
   // Cap at 6 decimals and trim trailing zeros (0.50 → "0.5"). Round half-UP on
   // the decimal value like Excel (matters only at a `.xxxxxx5` boundary; equal
   // to `toFixed(6)` otherwise), so this path never disagrees with the explicit
-  // number-format sections below.
-  return roundDecimalHalfUp(v, 6).replace(/\.?0+$/, '');
+  // number-format sections below. The decimal point is the host locale's,
+  // as for worksheet cells (number-symbols.ts).
+  return roundDecimalHalfUp(v, 6).replace(/\.?0+$/, '').replace('.', hostNumberSymbols().decimal);
 }
 
 /**
@@ -300,7 +302,7 @@ function applyChartNumberSection(abs: number, section: string): string {
     const [digits, power] = value === 0 ? ['0', '0'] : value.toExponential().split('e');
     let exp = Math.floor(Number(power) / places) * places;
     let mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
-    if (Number(mantissa.replace(/,/g, '')) >= 10 ** places) {
+    if (mantissaValue(mantissa) >= 10 ** places) {
       exp += places;
       mantissa = formatNumericPattern(Number(`${digits}e${Number(power) - exp}`), pattern);
     }
@@ -407,7 +409,16 @@ function formatNumericPattern(value: number, pattern: string): string {
   const rounded = roundDecimalHalfUp(value, fracDigits);
   const [ints, fracs = ''] = rounded.split('.');
   const paddedInts = ints.padStart(minIntDigits, '0');
-  const withSeparators = thousands ? paddedInts.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : paddedInts;
+  // `,` and `.` in the code stand for the host locale's group and decimal
+  // separators (ECMA-376 §18.8.30; number-symbols.ts), as for worksheet cells.
+  const symbols = hostNumberSymbols();
+  const withSeparators = thousands ? groupDigits(paddedInts, symbols.group) : paddedInts;
   if (fracDigits === 0) return withSeparators;
-  return `${withSeparators}.${fracs.padEnd(fracDigits, '0')}`;
+  return `${withSeparators}${symbols.decimal}${fracs.padEnd(fracDigits, '0')}`;
+}
+
+/** The value of a mantissa {@link formatNumericPattern} painted. */
+function mantissaValue(text: string): number {
+  const symbols = hostNumberSymbols();
+  return Number(text.split(symbols.group).join('').replace(symbols.decimal, '.'));
 }

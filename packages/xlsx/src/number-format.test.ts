@@ -320,6 +320,40 @@ describe('date formats (Excel serial; 45292 = 2024-01-01)', () => {
     }
   });
 
+  it('paints the host locale decimal and group separators (#2346)', () => {
+    // §18.8.30 stores `.` and `,` whatever the locale; Excel paints the OS
+    // regional separators. fr-FR groups with U+202F (Intl/CLDR).
+    vi.stubGlobal('navigator', { language: 'fr-FR' });
+    try {
+      expect(fmt(1234.5, '#,##0.00')).toBe('1\u202f234,50');
+      expect(formatCellValue(numCell(0.5), styles('General'))).toBe('0,5');
+      expect(formatCellValue(numCell(0.5), builtinStyles(0))).toBe('0,5');
+      expect(fmt(0.125, '0.00%')).toBe('12,50%');
+      expect(fmt(12345, '0.00E+00')).toBe('1,23E+04');
+      // A quoted literal keeps its own characters.
+      expect(fmt(2.5, '0.0" km."')).toBe('2,5 km.');
+      expect(formatGeneralNumber(123456789012.5)).toBe('1,23457E+11');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    vi.stubGlobal('navigator', { language: 'de-DE' });
+    try {
+      expect(fmt(1234567.5, '#,##0.00')).toBe('1.234.567,50');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps the invariant separators for an en-US host', () => {
+    vi.stubGlobal('navigator', { language: 'en-US' });
+    try {
+      expect(fmt(1234.5, '#,##0.00')).toBe('1,234.50');
+      expect(formatCellValue(numCell(0.5), builtinStyles(0))).toBe('0.5');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('reuses the localized short-date formatter for cells in the same UI locale', () => {
     vi.stubGlobal('navigator', { language: 'ko-KR' });
     const NativeDateTimeFormat = Intl.DateTimeFormat;
