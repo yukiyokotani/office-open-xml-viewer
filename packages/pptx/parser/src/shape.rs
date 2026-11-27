@@ -2408,7 +2408,11 @@ fn parse_table_row_with(
             )
         })
         .collect();
-    TableRow { height, fixed_height: false, cells }
+    TableRow {
+        height,
+        fixed_height: false,
+        cells,
+    }
 }
 
 /// A table cell outside any table-style context (tests).
