@@ -1,13 +1,14 @@
 // Decimal and digit-group separators painted by spreadsheet number formats.
 //
-// ECMA-376 §18.8.30 stores `.` and `,` in a format code whatever the
-// author's locale: they stand for "the decimal separator" and "the
-// thousands separator", which Excel takes from the OS regional settings,
-// not from the file (`#,##0.00` paints `1 234,50` on a fr-FR system and
-// `1.234,50` on de-DE). The host locale is the viewer's equivalent of those
-// settings, as it already is for built-in format 14
-// (`formatLocalizedExcelShortDate`), so both resolve the same locale:
+// ECMA-376 §18.8.30 defines `.` and `,` in a format code as the decimal
+// point and the thousands separator tokens. [MS-OI29500] §2.1.712 states that
+// grammar for en-US and has Office adjust it for international settings, with
+// INTL-CHAR-DECIMAL-SEP as the fractional-seconds marker. Viewer policy
+// (#2346): paint those tokens with the host locale's separators, the locale
+// built-in format 14 already follows (`formatLocalizedExcelShortDate`):
 // `navigator.language`, which a worker sees as well as the main thread.
+// Neither specification names that locale; it stands in for the reader's
+// regional settings, which a browser library cannot read.
 //
 // Library policy and its limits:
 // - Only the two symbols are localized. Digits stay ASCII and groups stay

@@ -93,7 +93,9 @@ export function localizedExcelShortDateTexts(
 export function formatChartVal(v: number): string {
   // Matches Excel's default `<c:valAx><c:numFmt formatCode="General">` which
   // shows raw numbers — no "k"/"M" abbreviation.
-  if (Number.isInteger(v)) return String(v);
+  // A large integer's String() is exponential (1.25e+21) and carries a
+  // decimal point in its mantissa, which is localized like any other.
+  if (Number.isInteger(v)) return String(v).replace('.', hostNumberSymbols().decimal);
   // Cap at 6 decimals and trim trailing zeros (0.50 → "0.5"). Round half-UP on
   // the decimal value like Excel (matters only at a `.xxxxxx5` boundary; equal
   // to `toFixed(6)` otherwise), so this path never disagrees with the explicit

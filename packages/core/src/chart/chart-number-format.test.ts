@@ -247,6 +247,8 @@ describe('chart labels paint the host locale separators (#2346)', () => {
       // The mantissa that rounds up to the next power is read back through
       // the localized separators.
       expect(formatChartValWithCode(9.96, '0.0E+0')).toBe('1,0E+1');
+      // General's integer path: String() of a large integer is exponential.
+      expect(formatChartVal(1.25e21)).toBe('1,25e+21');
     } finally {
       vi.unstubAllGlobals();
     }
