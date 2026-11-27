@@ -347,7 +347,12 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 72)).toHaveLength(1);
   });
 
-  it('does not invent positive-row growth when row minima already fill the frame', () => {
+  it('grows a positive row even when the row minima already fill the frame', () => {
+    // #2345: generators such as python-pptx write equal a:tr@h minima whose
+    // sum equals the graphic-frame extent. PowerPoint still treats each
+    // a:tr@h as a minimum ([MS-OE376] §2.1.1347) and grows the row to its
+    // wrapped text, pushing the next row down; the frame extent is not a
+    // reason to let the text overflow into the following row.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{
@@ -375,7 +380,33 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     t.rows[1].height = 40 * EMU;
     t.height = 100 * EMU;
 
-    expect(horizontalAt(render(t), 60)).toHaveLength(1);
+    const strokes = render(t);
+    expect(horizontalAt(strokes, 60)).toHaveLength(0);
+    expect(horizontalAt(strokes, 72)).toHaveLength(1);
+  });
+
+  it('keeps a positive row for rotated cell text, whose measure is the box width', () => {
+    // measureOnly reports a rotated or stacked body by its cell width, not by
+    // its laid-out extent. Growing a positive row to that width would invent
+    // height, so a positive row keeps its minimum for these bodies.
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'v', fontSize: 10, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'vert', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+
+    expect(horizontalAt(render(t), 20)).toHaveLength(1);
   });
 
   it('shared VERTICAL gridline is drawn exactly ONCE (not once per cell)', () => {

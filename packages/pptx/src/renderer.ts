@@ -7767,13 +7767,20 @@ export function renderTable(
   // first row.
   const authoredRowHeights = el.rows.map(r => emuToPx(r.height, scale));
   const rowHeights = [...authoredRowHeights];
-  const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
-  // The graphic-frame extent is the table's authored outer height. PowerPoint
-  // can leave slack between that extent and the sum of positive a:tr@h minima;
-  // that discrepancy signals that text-driven row growth was present when the
-  // table was authored. When the positive minima already fill the frame, do not
-  // invent growth merely because browser font metrics wrap differently.
-  const hasAuthoredRowGrowthSignal = el.height > authoredRowsTotalEmu;
+  // Every row grows to its content, whatever the graphic-frame extent says.
+  // Tagged PowerPoint PDF controls grow positive and zero minima alike when
+  // the frame extent is below, equal to or above the row sum (#2345: decks
+  // from generators such as python-pptx write equal minima that sum to the
+  // frame and rely on that growth). Browser fonts that wrap differently from
+  // Office can change the grown height; overflowing into the next row is the
+  // worse failure, because it breaks the layout.
+  //
+  // measureOnly reports a rotated (vert, vert270, eaVert) or stacked
+  // (wordArtVert*) body by its box width, not by its laid-out extent, so a
+  // positive row keeps its minimum for those bodies instead of growing to the
+  // cell width. A zero-height row still takes that box measure as before.
+  const measuresByBoxWidth = (body: TextBody): boolean =>
+    body.vert != null && body.vert !== 'horz';
 
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
@@ -7786,7 +7793,7 @@ export function renderTable(
       // Shrink-to-fit text (model sources, ODF §20.360) fits the cell as
       // authored: it shrinks instead of growing the row.
       if (cell.textBody.shrinkOnOverflow) continue;
-      if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
+      if (row.height > 0 && measuresByBoxWidth(cell.textBody)) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
@@ -7811,7 +7818,7 @@ export function renderTable(
       const hasAutoHeightRow = el.rows
         .slice(ri, Math.min(el.rows.length, ri + span))
         .some((spannedRow) => spannedRow.height === 0);
-      if (!hasAutoHeightRow && !hasAuthoredRowGrowthSignal) continue;
+      if (!hasAutoHeightRow && measuresByBoxWidth(cell.textBody)) continue;
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
