@@ -439,18 +439,46 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 72)).toHaveLength(1);
   });
 
-  it('grows positive rows under a rowSpan cell when the minima fill the frame', () => {
-    // Two 20pt minima (the frame is their 40pt sum) under a 72pt merged cell:
-    // the 32pt deficit is shared, so the rows meet at 36pt.
+  it('adds a rowSpan deficit to the last spanned row', () => {
+    // PowerPoint PDF controls: a merged cell taller than its rows keeps every
+    // earlier row at its own height and grows only the last. Two 20pt minima
+    // (frame = their sum) under a 72pt merged cell: the neighbour's shared
+    // edge stays at 20pt and the merged area ends at 72pt.
     const t = tableOf([
-      [cell({ textBody: threeLines(), rowSpan: 2, borderB: ln() })],
-      [cell({ vMerge: true })],
-      [cell({ borderT: ln() })],
-    ], [COL]);
+      [cell({ textBody: threeLines(), rowSpan: 2, borderB: ln() }), cell({ borderB: ln() })],
+      [cell({ vMerge: true }), cell({ borderT: ln() })],
+      [cell({ borderT: ln() }), cell({ borderT: ln() })],
+    ], [COL, COL]);
     t.rows[2].height = 0;
     t.height = 40 * EMU;
     const strokes = render(t);
-    expect(horizontalAt(strokes, 72)).toHaveLength(1);
+    expect(horizontalAt(strokes, 20)).toHaveLength(1);
+    expect(horizontalAt(strokes, 36)).toHaveLength(0);
+    // One segment per column.
+    expect(horizontalAt(strokes, 72)).toHaveLength(2);
+  });
+
+  it('grows rotated cell text only under frame slack, as before', () => {
+    // The box-width measure keeps the earlier rule: with the frame extent
+    // above the row sum the row grows to that measure (the cell width here).
+    const textBody = { ...threeLines('vert') } as TextBody;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.height = 50 * EMU;
+    expect(horizontalAt(render(t), 20)).toHaveLength(0);
+  });
+
+  it('keeps an ODF fixed row at its height when the minima fill the frame', () => {
+    // ODF 1.3 Part 3 §20.348: style:row-height is fixed; the earlier rule
+    // stays for it, so three lines do not grow the 20pt row here.
+    const t = tableOf([
+      [cell({ textBody: threeLines(), borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.rows[0].fixedHeight = true;
+    expect(horizontalAt(render(t), 20)).toHaveLength(1);
   });
 
   it('shared VERTICAL gridline is drawn exactly ONCE (not once per cell)', () => {

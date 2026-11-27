@@ -36,6 +36,7 @@ import type {
   TableElement,
   ChartElement,
   TableCell,
+  TableRow,
   Fill,
   TileInfo,
   Stroke,
@@ -7764,31 +7765,37 @@ export function renderTable(
   };
 
   // ── Row heights: Office minimum-row semantics ─────────────────────────────
-  // ECMA-376 §21.1.3.18 defines a:tr@h as the row height; [MS-OE376]
-  // §2.1.1347 additionally constrains it to zero or at least the minimum row
-  // height. PowerPoint grows a row to fit its tallest cell's laid-out text. A
-  // literal h=0 therefore becomes
-  // content-driven. We measure each cell's text body at its spanned width
-  // (reusing the same renderTextBody machinery via measureOnly) and take
-  // max(tr@h, tallest single-row cell content). A rowSpan cell distributes
-  // its content height across the rows it covers so it doesn't inflate the
-  // first row.
+  // ECMA-376 §21.1.3.18 gives a:tr@h as the row height; [MS-OE376]
+  // §2.1.1347 constrains it to zero or at least a minimum derived from the
+  // cell margins. PowerPoint treats a positive a:tr@h as a minimum too: it
+  // grows a row to fit its tallest cell's laid-out text, and a literal h=0
+  // is content-driven. Each cell's text body is measured at its spanned width
+  // with the renderTextBody machinery (measureOnly).
   const authoredRowHeights = el.rows.map(r => emuToPx(r.height, scale));
   const rowHeights = [...authoredRowHeights];
-  // Every row grows to its content, whatever the graphic-frame extent says.
-  // Tagged PowerPoint PDF controls grow positive and zero minima alike when
-  // the frame extent is below, equal to or above the row sum (#2345: decks
-  // from generators such as python-pptx write equal minima that sum to the
-  // frame and rely on that growth). Browser fonts that wrap differently from
+  // Rows grow whatever the graphic-frame extent says. PowerPoint PDF
+  // controls (Windows and Mac) grow positive and zero minima alike when the
+  // frame extent is below, equal to or above the row sum: decks from
+  // generators such as python-pptx write equal minima that sum to the frame
+  // and rely on that growth (#2345). Browser fonts that wrap differently from
   // Office can change the grown height; overflowing into the next row is the
   // worse failure, because it breaks the layout.
   //
-  // measureOnly reports a rotated (vert, vert270, eaVert) or stacked
-  // (wordArtVert*) body by its box width, not by its laid-out extent, so a
-  // positive row keeps its minimum for those bodies instead of growing to the
-  // cell width. A zero-height row still takes that box measure as before.
+  // Two kinds of row keep the earlier rule, which grew a positive row only
+  // when the frame extent exceeded the row sum:
+  // - a positive row whose cell measureOnly reports by its box width
+  //   (MEASURED_BY_BOX_WIDTH_VERT): that measure is not the laid-out extent of
+  //   rotated or stacked text, so the frame-independent rule has no evidence
+  //   for it;
+  // - an ODF fixed row (`fixedHeight`, ODF 1.3 Part 3 §20.348). ODF calls that
+  //   height fixed; LibreOffice's own growth of such rows is not measured here.
+  const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
+  const frameHasSlack = el.height > authoredRowsTotalEmu;
   const measuresByBoxWidth = (body: TextBody): boolean =>
     MEASURED_BY_BOX_WIDTH_VERT.has(body.vert);
+  const keepsEarlierRule = (rows: readonly TableRow[], body: TextBody): boolean =>
+    rows.some((r) => r.fixedHeight)
+    || (rows.every((r) => r.height > 0) && measuresByBoxWidth(body));
 
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
@@ -7801,7 +7808,7 @@ export function renderTable(
       // Shrink-to-fit text (model sources, ODF §20.360) fits the cell as
       // authored: it shrinks instead of growing the row.
       if (cell.textBody.shrinkOnOverflow) continue;
-      if (row.height > 0 && measuresByBoxWidth(cell.textBody)) continue;
+      if (row.height > 0 && !frameHasSlack && keepsEarlierRule([row], cell.textBody)) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
@@ -7811,9 +7818,11 @@ export function renderTable(
     }
   }
 
-  // Second pass: rowSpan cells. If the content needs more than the sum of the
-  // rows it spans, distribute the deficit across those rows so the merged area
-  // grows without inflating any single row beyond what its own content needs.
+  // Second pass: rowSpan cells. When the merged content needs more than the
+  // rows it spans, PowerPoint adds the whole deficit to the last spanned row:
+  // PDF controls (Windows and Mac) with a 144 pt merged cell over minima of
+  // 24+48, 24+24 and 48+24 pt (frame equal to the row sum) keep every earlier
+  // row at its own height and grow only the last.
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
     for (let ci = 0; ci < row.cells.length; ci++) {
@@ -7823,19 +7832,24 @@ export function renderTable(
       if (span <= 1 || !cell.textBody) continue;
       if (cell.textBody.shrinkOnOverflow) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
-      const hasAutoHeightRow = el.rows
-        .slice(ri, Math.min(el.rows.length, ri + span))
-        .some((spannedRow) => spannedRow.height === 0);
-      if (!hasAutoHeightRow && measuresByBoxWidth(cell.textBody)) continue;
+      const spannedRows = el.rows.slice(ri, Math.min(el.rows.length, ri + span));
+      const hasAutoHeightRow = spannedRows.some((spannedRow) => spannedRow.height === 0);
+      const earlierRule = keepsEarlierRule(spannedRows, cell.textBody);
+      if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
         '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
       ) as number) || 0;
+      const last = ri + spannedRows.length - 1;
       let have = 0;
-      for (let s = 0; s < span && ri + s < rowHeights.length; s++) have += rowHeights[ri + s];
-      if (needed > have) {
-        const extra = (needed - have) / span;
-        for (let s = 0; s < span && ri + s < rowHeights.length; s++) rowHeights[ri + s] += extra;
+      for (let r = ri; r <= last; r++) have += rowHeights[r];
+      if (needed <= have) continue;
+      if (earlierRule) {
+        // The earlier rule spread the deficit evenly over the spanned rows.
+        const extra = (needed - have) / spannedRows.length;
+        for (let r = ri; r <= last; r++) rowHeights[r] += extra;
+      } else {
+        rowHeights[last] += needed - have;
       }
     }
   }

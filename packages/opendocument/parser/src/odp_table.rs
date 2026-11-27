@@ -76,12 +76,12 @@ pub fn table<'a>(
     let mut rows = Vec::with_capacity(row_count);
     let mut cells_total = 0usize;
     // Row heights per source row (a repeated row is one node).
-    let mut row_heights: HashMap<roxmltree::NodeId, f64> = HashMap::new();
+    let mut row_heights: HashMap<roxmltree::NodeId, (f64, bool)> = HashMap::new();
     for (r, row) in rows_nodes.iter().enumerate() {
         // Each expanded row is traversed (cells, then spans): charged by its
         // markup, comments and text included.
         payload.step(1 + row.range().len() / 32)?;
-        let height = match row_heights.get(&row.id()) {
+        let (height, fixed_height) = match row_heights.get(&row.id()) {
             Some(height) => *height,
             None => {
                 let row_props = row
@@ -96,13 +96,21 @@ pub fn table<'a>(
                         .len()
                         .saturating_add(crate::odp_style::props_cost(&rp)),
                 )?;
-                let height = rp
-                    .get(NS_STYLE, "row-height")
-                    .or_else(|| rp.get(NS_STYLE, "min-row-height"))
-                    .and_then(length_emu)
-                    .unwrap_or(0.0);
-                row_heights.insert(row.id(), height);
-                height
+                // §20.348 style:row-height is a fixed height;
+                // style:min-row-height is a minimum. Both feed `height`; the
+                // flag keeps the distinction for the renderer.
+                let fixed = rp.get(NS_STYLE, "row-height").and_then(length_emu);
+                let entry = match fixed {
+                    Some(h) => (h, true),
+                    None => (
+                        rp.get(NS_STYLE, "min-row-height")
+                            .and_then(length_emu)
+                            .unwrap_or(0.0),
+                        false,
+                    ),
+                };
+                row_heights.insert(row.id(), entry);
+                entry
             }
         };
         let default_cell = row.attribute((NS_TABLE, "default-cell-style-name"));
@@ -172,6 +180,7 @@ pub fn table<'a>(
         }
         rows.push(TableRow {
             height: height.round() as i64,
+            fixed_height,
             cells,
         });
     }

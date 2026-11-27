@@ -567,6 +567,9 @@ export interface TableElement {
 export interface TableRow {
   /** Row height in EMU */
   height: number;
+  /** ODF `style:row-height` (ODF 1.3 Part 3 §20.348): a fixed height rather
+   *  than a minimum. Never set for DrawingML `a:tr@h`. */
+  fixedHeight?: boolean;
   cells: TableCell[];
 }
 

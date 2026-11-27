@@ -293,6 +293,11 @@ pub struct TableElement {
 pub struct TableRow {
     /// Row height in EMU
     pub height: i64,
+    /// ODF `style:row-height` (OpenDocument 1.3 Part 3 §20.348), which ODF
+    /// calls a fixed height, as opposed to `style:min-row-height`. DrawingML
+    /// `a:tr@h` never sets it. Skipped when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fixed_height: bool,
     pub cells: Vec<TableCell>,
 }
 
