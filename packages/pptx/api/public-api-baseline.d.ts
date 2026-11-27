@@ -2368,6 +2368,7 @@ export interface TableElement {
 }
 export interface TableRow {
     height: number;
+    fixedHeight?: boolean;
     cells: TableCell[];
 }
 export interface TabStop {
