@@ -2,8 +2,9 @@ import { LANG, PPTX } from '../lib/grid.mjs';
 import { field, header, pptxPackage, table, textBox } from '../lib/pptx.mjs';
 import { esc } from '../lib/xml.mjs';
 
-// a:tr@h is a minimum ([MS-OE376] §2.1.1347): PowerPoint grows a row to the
-// text of its tallest cell and moves the rows below it down. Every row here
+// ECMA-376 §21.1.3.18 gives a:tr@h as the row height. PowerPoint treats it as
+// a minimum: its Windows and Mac PDF exports of this slide grow each row to
+// the text of its tallest cell and move the rows below it down. Every row here
 // has the same 24 pt minimum and the frame extent equals their sum, as
 // generators that write a:tr@h without laying out the text do; the extent is
 // not where the grown table ends.
@@ -81,8 +82,8 @@ export default {
       table(3, 'Rows', box, COLUMNS, rows),
       textBox(4, 'Caption', field(1, 6, 4, 4), [
         { style: 'caption', text: 'Every a:tr@h is 24 pt and the frame extent is their sum, 96 pt.' },
-        { style: 'caption', text: 'a:tr@h is a minimum: PowerPoint grows a row to its tallest cell' },
-        { style: 'caption', text: 'and moves the rows below it down ([MS-OE376] 2.1.1347).' },
+        { style: 'caption', text: 'PowerPoint treats a:tr@h as a minimum: it grows a row to its' },
+        { style: 'caption', text: 'tallest cell and moves the rows below it down.' },
       ]),
     ]);
   },

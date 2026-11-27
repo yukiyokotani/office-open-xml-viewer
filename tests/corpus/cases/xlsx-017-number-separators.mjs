@@ -3,10 +3,13 @@ import { sheet } from '../lib/xlsx.mjs';
 
 const { MARGIN_COL, MODULE, FIRST_ROW } = XLSX;
 
-// ECMA-376 §18.8.30 stores `.` and `,` in a format code whatever the
-// author's locale: they stand for the decimal and group separators of the
-// reader's regional settings. Every row paints at least one of them; the last
-// one also has a dot inside a quoted literal, which stays a dot.
+// ECMA-376 §18.8.30 defines `.` and `,` in a format code as the decimal
+// point and the thousands separator tokens; [MS-OI29500] §2.1.712 states the
+// grammar for en-US and has Office adjust it for international settings. The
+// viewer's policy (#2346) paints those tokens with the host locale's
+// separators, so this specimen pins the en-US output under the en-US VRT
+// host. Every row paints at least one of them; the last one also has a dot
+// inside a quoted literal, which is literal text and stays a dot.
 // [quantity, value, format code; null for General]
 const ROWS = [
   ['Inches per metre', 39.37007874, null],
