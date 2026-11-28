@@ -436,6 +436,13 @@ describe('comment threads asked for a view other than the active one', () => {
     posted.length = 0;
     expect(await doc.getCommentThreads(0)).toEqual([]);
     expect(posted).toEqual([expect.not.objectContaining({ commentAnchors: true })]);
+    // While its layout is still being published the worker may hold a newer
+    // layout than the prefix the document knows: the anchors come with the
+    // runs then too.
+    Object.assign(doc, { _layoutLifecycle: { complete: false } });
+    posted.length = 0;
+    expect(await doc.getCommentThreads(0)).toHaveLength(1);
+    expect(posted).toEqual([expect.objectContaining({ type: 'collectRuns', commentAnchors: true })]);
   });
 
   it('runs keep the layout that produced them when the document changes its view', async () => {
@@ -699,6 +706,30 @@ describe('comment anchors read from a prefix the render worker has published', (
     // The complete layout places the comment.
     expect(renderWorkerCommentAnchors(retained, review, 0, false).commentAnchorRanges).toHaveLength(1);
     expect(renderWorkerLayoutMeta(retained, review, 0, false).commentAnchorRanges).toHaveLength(1);
+  });
+});
+
+describe('a reference-only comment after a run that goes on beyond a published prefix', () => {
+  it('is not placed until the fragment next to it is laid out', async () => {
+    const filler = Array.from({ length: 400 }, (_, index) => `<w:p>${sized(`filler ${index}`)}</w:p>`).join('');
+    const { model } = await paintedDocument(
+      `<w:p>${EXACT_12PT}${sized(`${'word '.repeat(910)}end`)}${REFERENCE}</w:p>${filler}`, COMMENT_PART);
+    const source = layoutSourceStore(model);
+    const retained = retainRenderWorkerDocumentLayout(
+      source, createLayoutServices(source, { measureContext: oracleMeasureContext() }), 0);
+    const review = { comments: model.comments ?? [], revisions: [] };
+    const published: [number, number][] = [];
+    await paginateRenderWorkerDocumentProgressively(retained, source, {
+      publish: (publication) => {
+        published.push([publication.pageCount, publication.commentAnchorRanges?.length ?? 0]);
+      },
+      progress: () => undefined,
+    }, { currentDateMs: 0 }, undefined, review);
+    // The one-page prefix holds the first fragment of the run only.
+    expect(published[0]).toEqual([1, 0]);
+    const complete = renderWorkerLayoutMeta(retained, review, 0, false);
+    expect(complete.commentAnchorRanges).toHaveLength(1);
+    expect(complete.commentAnchorPlacements?.[0]?.cardPageIndex).toBe(1);
   });
 });
 

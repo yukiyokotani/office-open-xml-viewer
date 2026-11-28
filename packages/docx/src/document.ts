@@ -2275,18 +2275,20 @@ export class DocxDocument {
     let anchors: readonly CommentAnchorRange[];
     if (this._mode === 'worker') {
       // Keep collection validation on the same selected worker layout as paint.
-      // The anchors of the active view are the document's own (its metadata
-      // follows the worker's publications in message order). Another view's
-      // come with the runs, read from the same retained layout; so do the
-      // active view's if the document left that view while the runs were
-      // pending.
+      // The anchors of the active view, once its layout is complete, are the
+      // document's own. Another view's come with the runs, read from the
+      // same retained layout; so do the active view's while the layout is
+      // still being published (the worker may have rebuilt it since the
+      // prefix the document's metadata describes), or if the document left
+      // that view while the runs were pending.
       const collect = async (commentAnchors: boolean) => (await this._bridge.request(
         (id) => ({
           type: 'collectRuns', id, pageIndex, opts: wireOpts, ...(commentAnchors ? { commentAnchors: true as const } : {}),
         }) satisfies RenderWorkerRequest,
       )) as Extract<RenderWorkerResponse, { type: 'runsCollected' }>;
       const commented = this.comments.length > 0;
-      let collected = await collect(commented && !this._isActiveView(produced));
+      let collected = await collect(commented
+        && (!this._isActiveView(produced) || !(this._layoutLifecycle?.complete ?? true)));
       if (commented && !collected.commentAnchorRanges && !this._isActiveView(produced)) collected = await collect(true);
       runs = collected.runs;
       if (collected.commentAnchorRanges) {

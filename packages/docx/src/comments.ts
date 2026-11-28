@@ -637,22 +637,32 @@ export function collectLayoutSourceCommentRangesIfPresent(
   const collected = collectLayoutSourceCommentRanges(
     comments ?? [], source, renderedRunIndex, options.splitRuns, options.textRunIndex);
   const completed = options.completedSourceKeys;
+  // In a prefix, the run next to a boundary is there when the fragment that
+  // adjoins the boundary is: the first fragment of the run after it, laid
+  // out as soon as the run appears, or the last fragment of the run before
+  // it, laid out only when something after it is (a later run, or the end
+  // of its paragraph). An earlier fragment of a run that goes on beyond the
+  // prefix does not place the boundary.
+  const adjoiningRun = (
+    source: Readonly<DocxStorySource>,
+    boundary: number,
+    affinity: 'following' | 'preceding',
+  ): boolean => {
+    const indices = renderedRunIndex.get(sourceKey(source));
+    if (!indices) return false;
+    if (affinity === 'following') return indices.has(boundary);
+    if (!indices.has(boundary - 1)) return false;
+    if (completed!.has(sourceKey(source))) return true;
+    for (const index of indices) if (index >= boundary) return true;
+    return false;
+  };
   const ranges = completed === undefined ? collected : collected.filter((range) => {
     const sourceIndices = renderedRunIndex.get(sourceKey(range.source)) ?? new Set<number>();
     const hasCoveredRun = range.startRunIndex < range.endRunIndex
       ? [...sourceIndices].some((index) =>
           index >= range.startRunIndex && index < range.endRunIndex)
-      : sourceIndices.has(
-          range.reference.affinity === 'following'
-            ? range.startRunIndex
-            : range.startRunIndex - 1,
-        );
-    const referenceIndices = renderedRunIndex.get(sourceKey(range.reference.source));
-    const hasReferenceRun = referenceIndices?.has(
-      range.reference.affinity === 'following'
-        ? range.reference.runIndex
-        : range.reference.runIndex - 1,
-    ) === true;
+      : adjoiningRun(range.source, range.startRunIndex, range.reference.affinity);
+    const hasReferenceRun = adjoiningRun(range.reference.source, range.reference.runIndex, range.reference.affinity);
     return hasCoveredRun
       || hasReferenceRun
       || completed.has(sourceKey(range.source))
