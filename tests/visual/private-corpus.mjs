@@ -226,10 +226,11 @@ function snapshotCorpusInputs(root) {
 // deleted or edited after the snapshot cannot pass.
 const recordedCopies = new Map();
 
-function assertRecordedCopies({ root, candidate, label }) {
+/** `present` is the admitted-copy list from the status call that verified the
+ * checkout, so no further git process runs here. */
+function assertRecordedCopies({ root, candidate, label, present }) {
   const recorded = recordedCopies.get(root);
-  if (!recorded) return;
-  const present = allowedCorpusInputs(checkoutState(root));
+  if (!recorded || (recorded.length === 0 && present.length === 0)) return;
   if (JSON.stringify(present) !== JSON.stringify(recorded.map((copy) => copy.path))) {
     throw new Error(
       `${label} corpus input copies differ from the snapshot's record: `
@@ -257,7 +258,7 @@ function assertRendererCheckout({ root, revision, label, candidate = root }) {
   const corpusInputs = allowedCorpusInputs({ tracked, untracked });
   assertCandidateCorpusInputs({ root, candidate, paths: corpusInputs, label });
   const changed = [...new Set([...tracked, ...untracked])].filter((path) => !corpusInputs.includes(path));
-  if (changed.length === 0) return;
+  if (changed.length === 0) return corpusInputs;
   const harnessBootstrap = process.env.VRT_ALLOW_HARNESS_CHANGES === '1'
     && changed.every((path) => VRT_HARNESS_PATHS.has(path));
   if (!harnessBootstrap) {
@@ -288,6 +289,7 @@ function assertRendererCheckout({ root, revision, label, candidate = root }) {
       );
     }
   }
+  return corpusInputs;
 }
 
 function checkoutRoot(path) {
@@ -298,7 +300,11 @@ function checkoutRoot(path) {
  * `revision` with an unmodified renderer, so its images were produced by that
  * revision's renderer and not copied into an arbitrary directory. Returns the
  * checkout's real path. */
-export function verifyBaselineCheckout({ checkout, revision, candidate = ownCheckout() }) {
+export function verifyBaselineCheckout(options) {
+  return verifyBaselineCheckoutState(options).real;
+}
+
+function verifyBaselineCheckoutState({ checkout, revision, candidate = ownCheckout() }) {
   if (!/^[0-9a-f]{40}$/.test(revision)) {
     throw new Error(`baseline revision must be a full commit SHA, got ${revision}`);
   }
@@ -318,8 +324,8 @@ export function verifyBaselineCheckout({ checkout, revision, candidate = ownChec
       `VRT_BASELINE_CHECKOUT must be the root of a Git checkout: ${directory} is inside ${root}`,
     );
   }
-  assertRendererCheckout({ root: real, revision, label: 'self-VRT baseline', candidate });
-  return real;
+  const corpusInputs = assertRendererCheckout({ root: real, revision, label: 'self-VRT baseline', candidate });
+  return { real, corpusInputs };
 }
 
 /** Real path of the checkout that runs this process. */
@@ -445,8 +451,10 @@ function baselineLocation({ snapshot = false } = {}) {
   if (existsSync(checkout) && realpathSync(checkout) === candidate) {
     throw new Error('VRT_BASELINE_CHECKOUT must name the previous-renderer checkout, not this one');
   }
-  const real = verifyBaselineCheckout({ checkout, revision: requiredBaselineRevision() });
-  assertRecordedCopies({ root: real, candidate, label: 'self-VRT baseline' });
+  const { real, corpusInputs } = verifyBaselineCheckoutState({
+    checkout, revision: requiredBaselineRevision(), candidate,
+  });
+  assertRecordedCopies({ root: real, candidate, label: 'self-VRT baseline', present: corpusInputs });
   return { checkout: real, directory: join(real, packagePath, 'tests/visual/baseline'), candidate };
 }
 
@@ -590,7 +598,8 @@ export function prepareSelfVrtCorpus({ corpus, format, files, snapshot, selectio
       );
     }
     recordedCopies.set(location.checkout, corpusInputCopies);
-    assertRecordedCopies({ root: location.checkout, candidate: location.candidate, label: 'self-VRT baseline' });
+    // Verify the baseline against the record just loaded.
+    baselineLocation();
   }
 }
 

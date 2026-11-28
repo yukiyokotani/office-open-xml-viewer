@@ -693,6 +693,21 @@ test('allowance copies recorded at snapshot time must stay present and identical
     writeFileSync(join(candidate, rel, specimen), 'edited');
     assert.throws(() => compare('1'), /changed since its snapshot recorded it|SHA-256|manifest mismatch/);
 
+    // Edited mid-run, in both checkouts to identical new bytes: only the
+    // snapshot's digest still rejects it.
+    writeFileSync(join(candidate, rel, specimen), 'new');
+    writeFileSync(join(base, rel, specimen), 'new');
+    inXlsx(candidate, {
+      VRT_ALLOW_CORPUS_INPUT_CHANGES: '1',
+      VRT_BASELINE_CHECKOUT: base,
+      VRT_BASELINE_REVISION: revision,
+    }, () => {
+      prepareSelfVrtCorpus({ ...spec, snapshot: false });
+      writeFileSync(join(base, rel, specimen), 'rewritten');
+      writeFileSync(join(candidate, rel, specimen), 'rewritten');
+      assert.throws(() => selfVrtBaselineRoot(), /corpus input .*xlsx-999-new\.xlsx changed since its snapshot recorded it/);
+    });
+
     // Deleted mid-run, after the corpus manifest was verified.
     writeFileSync(join(candidate, rel, specimen), 'new');
     writeFileSync(join(base, rel, specimen), 'new');
