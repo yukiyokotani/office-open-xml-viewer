@@ -30,7 +30,7 @@ const workerMocks = vi.hoisted(() => ({
   verticalFallback: vi.fn(() => false),
   carriesLanguage: vi.fn(() => false),
   // One model walk: both facts come from the same call.
-  capabilities: vi.fn((): { requiresDomVerticalGlyphLayout: boolean; carriesRunLanguage: boolean } => ({
+  capabilities: vi.fn((_document?: unknown, _options?: unknown): { requiresDomVerticalGlyphLayout: boolean; carriesRunLanguage: boolean } => ({
     requiresDomVerticalGlyphLayout: workerMocks.verticalFallback(),
     carriesRunLanguage: workerMocks.carriesLanguage(),
   })),
@@ -246,6 +246,8 @@ describe('DOCX render worker with a model source', () => {
       expect(posted(posts, published, 30)).toHaveLength(1);
       // One model walk serves admission and the layout source adapter.
       expect(workerMocks.capabilities).toHaveBeenCalledTimes(1);
+      // Admission stops the walk at a vertical section, as before languages.
+      expect(workerMocks.capabilities.mock.calls[0]?.[1]).toEqual({ stopOnVerticalLayout: true });
       if (published === 'parsedMeta') {
         expect(workerMocks.adaptedCapabilities).toEqual([
           { requiresDomVerticalGlyphLayout: false, carriesRunLanguage: tagged },

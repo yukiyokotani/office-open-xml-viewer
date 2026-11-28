@@ -346,10 +346,14 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         throw new Error('render-worker parse was superseded');
       }
       // One model walk yields both capability facts; the layout source
-      // adapter below reuses them rather than walking the model again. A
-      // realm without sentinels falls back whatever the model says, so it
-      // walks nothing, as before languages.
-      const capabilities = nativeSentinels ? documentRenderCapabilities(pulledModels.document) : undefined;
+      // adapter below reuses them rather than walking the model again. The
+      // walk stops at the first DOM-only vertical section, which rules worker
+      // layout out whatever the languages are. A realm without sentinels
+      // falls back whatever the model says, so it walks nothing, as before
+      // languages.
+      const capabilities = nativeSentinels
+        ? documentRenderCapabilities(pulledModels.document, { stopOnVerticalLayout: true })
+        : undefined;
       // A document naming a run language (run-language-capability.ts) is
       // laid out here only where this realm judges its languages as the main
       // realm would. The measuring context and oracle made here are the ones

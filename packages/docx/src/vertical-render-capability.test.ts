@@ -58,4 +58,42 @@ describe('vertical render capability', () => {
       keys.mockRestore();
     }
   });
+
+  it('stops worker admission at a vertical section without collecting languages', () => {
+    const document = model() as unknown as Record<string, unknown>;
+    // The depth-first walk pops the last body block first.
+    document.body = [
+      ...Array.from({ length: 50_000 }, () => ({ type: 'paragraph', runs: [{ type: 'text', text: 'a' }] })),
+      { type: 'sectionBreak', kind: 'nextPage', textDirection: 'tbRl' },
+    ];
+    const keys = vi.spyOn(Object, 'keys');
+    try {
+      expect(documentRenderCapabilities(
+        document as unknown as DocxDocumentModel,
+        { stopOnVerticalLayout: true },
+      )).toEqual({ requiresDomVerticalGlyphLayout: true });
+      expect(keys.mock.calls.length).toBeLessThan(10);
+    } finally {
+      keys.mockRestore();
+    }
+    // Without the option the walk still collects the language fact.
+    expect(documentRenderCapabilities(document as unknown as DocxDocumentModel))
+      .toEqual({ requiresDomVerticalGlyphLayout: true, carriesRunLanguage: false });
+  });
+
+  it('visits a subtree shared by several parents once', () => {
+    let shared: Record<string, unknown> = { type: 'text', text: 'a' };
+    for (let level = 0; level < 19; level += 1) shared = { left: shared, right: shared };
+    const document = model() as unknown as Record<string, unknown>;
+    document.body = [{ type: 'paragraph', runs: [shared] }];
+    const keys = vi.spyOn(Object, 'keys');
+    try {
+      expect(documentRenderCapabilities(document as unknown as DocxDocumentModel))
+        .toEqual({ requiresDomVerticalGlyphLayout: false, carriesRunLanguage: false });
+      // 20 shared levels + the paragraph and the model's own records, not 2^19.
+      expect(keys.mock.calls.length).toBeLessThan(40);
+    } finally {
+      keys.mockRestore();
+    }
+  });
 });

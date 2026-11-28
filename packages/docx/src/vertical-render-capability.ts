@@ -21,42 +21,51 @@ export interface DocumentRenderCapabilities {
   readonly carriesRunLanguage: boolean;
 }
 
+/** The early answer of a walk asked to stop at vertical layout: the
+ * document leaves the worker, so its language fact is not collected. */
+export interface DomVerticalGlyphLayoutRequired {
+  readonly requiresDomVerticalGlyphLayout: true;
+  readonly carriesRunLanguage?: undefined;
+}
+
 /**
  * Both capability facts from one walk of the immutable parser model, so a
  * load pays a single traversal whatever it needs to know; the walk stops once
  * both facts hold. Walking the model keeps the decisions independent of where
  * a section property or a run language was authored.
  *
- * The parser model is a tree, so the walk retains no visited set: only the
- * objects on the current path are held (cycle protection for caller-owned
- * compatibility models), and a subtree shared by several parents is simply
- * visited once per parent.
+ * With `stopOnVerticalLayout` (render-worker admission) the walk returns as
+ * soon as it finds a DOM-only vertical section, as the vertical-only walk did
+ * before languages: such a document is laid out on the main thread, where the
+ * layout source adapter walks the model for both facts itself.
+ *
+ * Each object is visited once (identity set): a subtree shared by several
+ * parents in a caller-owned compatibility model costs one visit, and a cyclic
+ * one terminates.
  */
-export function documentRenderCapabilities(document: DocxDocumentModel): DocumentRenderCapabilities {
+export function documentRenderCapabilities(document: DocxDocumentModel): DocumentRenderCapabilities;
+export function documentRenderCapabilities(
+  document: DocxDocumentModel,
+  options: { readonly stopOnVerticalLayout: true },
+): DocumentRenderCapabilities | DomVerticalGlyphLayoutRequired;
+export function documentRenderCapabilities(
+  document: DocxDocumentModel,
+  options?: { readonly stopOnVerticalLayout: true },
+): DocumentRenderCapabilities | DomVerticalGlyphLayoutRequired {
+  const stopOnVerticalLayout = options?.stopOnVerticalLayout === true;
   let requiresDomVerticalGlyphLayout = false;
   let carriesRunLanguage = false;
-  // Parallel stacks: a value to visit, or (exit) an object whose subtree is done.
   const pending: object[] = [document];
-  const exits: boolean[] = [false];
-  const path = new Set<object>();
+  const seen = new Set<object>();
   while (pending.length > 0) {
     const value = pending.pop()!;
-    if (exits.pop()) {
-      path.delete(value);
-      continue;
-    }
-    if (path.has(value)) continue;
-    path.add(value);
-    pending.push(value);
-    exits.push(true);
+    if (seen.has(value)) continue;
+    seen.add(value);
     if (Array.isArray(value)) {
       // One push per child: spreading a wide array as call arguments would
       // exceed the engine's argument limit on large documents.
       for (const child of value) {
-        if (child !== null && typeof child === 'object') {
-          pending.push(child);
-          exits.push(false);
-        }
+        if (child !== null && typeof child === 'object' && !seen.has(child)) pending.push(child);
       }
       continue;
     }
@@ -65,16 +74,14 @@ export function documentRenderCapabilities(document: DocxDocumentModel): Documen
       const field = record[key];
       if (!requiresDomVerticalGlyphLayout && key === 'textDirection'
         && typeof field === 'string' && DOM_VERTICAL_PAGE_DIRECTIONS.has(field)) {
+        if (stopOnVerticalLayout) return { requiresDomVerticalGlyphLayout: true };
         requiresDomVerticalGlyphLayout = true;
       }
       if (!carriesRunLanguage && isRunLanguageField(key, field)) carriesRunLanguage = true;
       if (requiresDomVerticalGlyphLayout && carriesRunLanguage) {
         return { requiresDomVerticalGlyphLayout, carriesRunLanguage };
       }
-      if (field !== null && typeof field === 'object') {
-        pending.push(field);
-        exits.push(false);
-      }
+      if (field !== null && typeof field === 'object' && !seen.has(field)) pending.push(field);
     }
   }
   return { requiresDomVerticalGlyphLayout, carriesRunLanguage };
