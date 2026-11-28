@@ -223,6 +223,20 @@ export function findMatches(
   query: string,
   opts: FindMatchesOptions = {},
 ): TextMatch[] {
+  return findAcceptedMatches(index, query, opts, () => true);
+}
+
+/** {@link findMatches} among the occurrences that `accept` takes (for
+ * example those a reader can see). An occurrence that is not accepted takes
+ * no place: scanning resumes one character after its start, so an accepted
+ * occurrence that overlaps it is still found. Not part of the package
+ * entrypoint. */
+export function findAcceptedMatches(
+  index: TextIndex,
+  query: string,
+  opts: FindMatchesOptions,
+  accept: (slices: MatchRunSlice[]) => boolean,
+): TextMatch[] {
   if (query.length === 0) return [];
   const caseSensitive = opts.caseSensitive ?? false;
   const haystack = caseSensitive ? index.text : index.folded;
@@ -237,7 +251,12 @@ export function findMatches(
   for (;;) {
     const at = haystack.indexOf(needle, from);
     if (at === -1) break;
-    matches.push({ matchIndex, slices: sliceRange(index, at, at + needle.length) });
+    const slices = sliceRange(index, at, at + needle.length);
+    if (!accept(slices)) {
+      from = at + 1;
+      continue;
+    }
+    matches.push({ matchIndex, slices });
     matchIndex++;
     // Advance past this match so occurrences never overlap.
     from = at + needle.length;

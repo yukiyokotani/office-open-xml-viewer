@@ -10,8 +10,10 @@ import {
 } from './comments.js';
 import { buildDocxCommentMargin } from './comment-margin.js';
 import { DocxDocument } from './document.js';
+import { DocxFindController } from './find.js';
 import { layoutDocumentInput } from './layout/document.js';
 import { attachDocumentLayoutVariants } from './layout/document-layout-variants.js';
+import type { LayoutOptions } from './layout/options.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { attachDocumentLayoutRuntime, documentLayoutRuntimeOf } from './layout/runtime-state.js';
 import { reviewProjectionIndexForDocument } from './layout/text-index.js';
@@ -163,13 +165,17 @@ describe('a comment in a paragraph that every page repeats', () => {
 function documentOf(model: DocxDocumentModel, layout: DocumentLayout) {
   const source = layoutSourceStore(model);
   const services = createLayoutServices(source, { measureContext: oracleMeasureContext() });
+  const builds: LayoutOptions[] = [];
   const variants = attachDocumentLayoutVariants({
     source,
     services,
     defaultCurrentDateMs: 0,
-    buildLayout: (options) => (options.showTrackedChanges === true
-      ? layoutDocumentInput(source.bodyLayoutInput, services, options)
-      : layout),
+    buildLayout: (options) => {
+      builds.push(options);
+      return options.showTrackedChanges === true || options.currentDateMs !== 0
+        ? layoutDocumentInput(source.bodyLayoutInput, services, options)
+        : layout;
+    },
   });
   const doc = Object.create(DocxDocument.prototype) as DocxDocument;
   Object.assign(doc, {
@@ -178,7 +184,7 @@ function documentOf(model: DocxDocumentModel, layout: DocumentLayout) {
   });
   attachDocumentLayoutRuntime(doc, 0);
   documentLayoutRuntimeOf(doc).services = services;
-  return { doc, services, variants };
+  return { doc, services, variants, builds };
 }
 
 describe('comment threads asked for a view other than the active one', () => {
@@ -212,6 +218,43 @@ describe('comment threads asked for a view other than the active one', () => {
     // The active view's anchors are untouched.
     const [again] = await doc.getCommentThreads(0);
     expect(again!.anchors[0]!.rects[0]!.x).toBeCloseTo(shown!.anchors[0]!.rects[0]!.x, 6);
+  });
+
+  it('a range segment that view leaves out is absent from its runs', async () => {
+    // The range starts before a tracked deletion and ends after a line
+    // break in the next paragraph. The final view lays out no covered run
+    // and keeps both segments for the fallback; the markup view lays the
+    // deletion out and leaves the break-only segment out.
+    const { layout, model } = await paintedDocument(
+      '<w:p><w:commentRangeStart w:id="1"/><w:del w:id="9" w:author="A" w:date="2024-01-01T00:00:00Z"><w:r>'
+      + '<w:rPr><w:sz w:val="24"/></w:rPr><w:delText>Deleted</w:delText></w:r></w:del></w:p>'
+      + `<w:p><w:r><w:br/></w:r><w:commentRangeEnd w:id="1"/>${REFERENCE}${sized('Outside')}</w:p>`, COMMENT_PART);
+    const { doc } = documentOf(model, layout);
+    const anchors = doc.commentAnchorRanges();
+    expect(anchors).toHaveLength(2);
+    const markup = await doc.collectPageRuns(0, { showTrackedChanges: true });
+    const expected = (await doc.getCommentThreads(0, { showTrackedChanges: true }))
+      .flatMap((thread) => thread.anchors.flatMap((anchor) => anchor.rects));
+    expect(expected).toHaveLength(1);
+    expect(expected[0]!.x).toBeCloseTo(markup.find((run) => run.text === 'Deleted')!.x, 6);
+    expect(resolveDocxCommentThreads(doc.comments, anchors, markup)
+      .flatMap((thread) => thread.anchors.flatMap((anchor) => anchor.rects))).toEqual(expected);
+    expect(anchors.flatMap((anchor) => resolveCommentAnchorRuns(anchor, markup)).map((run) => run.text))
+      .toEqual(['Deleted']);
+  });
+
+  it('runs keep the layout that produced them when the Date they were asked with changes', async () => {
+    const { layout, model } = await paintedDocument(body, COMMENT_PART);
+    const { doc, builds } = documentOf(model, layout);
+    const date = new Date(86_400_000);
+    const runs = await doc.collectPageRuns(0, { currentDate: date, showTrackedChanges: true });
+    const anchors = doc.commentAnchorRanges();
+    expect(resolveCommentAnchorRuns(anchors[0]!, runs)[0]!.text.startsWith('Deleted')).toBe(true);
+    const built = builds.length;
+    date.setTime(2 * 86_400_000);
+    expect(resolveCommentAnchorRuns(anchors[0]!, runs)[0]!.text.startsWith('Deleted')).toBe(true);
+    // No other layout is selected, or built, for the runs already collected.
+    expect(builds).toHaveLength(built);
   });
 
   it('runs keep the layout that produced them when the document changes its view', async () => {
@@ -403,5 +446,25 @@ describe('navigation to a comment that starts in clipped text and ends on a late
     const { reached, select } = await navigate(placedAnchors, 0);
     expect(reached).toBe(false);
     expect(select).not.toHaveBeenCalled();
+  });
+});
+
+describe('find beside text that a clip hides', () => {
+  it('matches the letters that are seen, not a hidden letter and one of them', async () => {
+    // "A" below a 12pt exact-height row is hidden; "AA" follows the table.
+    const { runs } = await paintedDocument(
+      '<w:tbl><w:tblPr><w:tblW w:w="2000" w:type="dxa"/><w:tblLayout w:type="fixed"/>'
+      + '<w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="240" w:hRule="exact"/></w:trPr>'
+      + '<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:spacing w:before="0" w:after="0" '
+      + `w:line="800" w:lineRule="exact"/></w:pPr>${sized('A')}</w:p></w:tc></w:tr></w:tbl><w:p>${sized('AA')}</w:p>`);
+    expect(runs.map((run) => run.text).join('')).toBe('AAA');
+    const visible = runs.findIndex((run) => run.text === 'AA');
+    const find = new DocxFindController(() => 1, async () => runs);
+    expect(await find.find('AA')).toHaveLength(1);
+    expect(find.pageHighlights(0).map((highlight) => highlight.slices)).toEqual(
+      [[{ runIndex: visible, start: 0, end: 2 }]]);
+    // The hidden letter alone is no match; each visible one is.
+    expect(await find.find('A')).toHaveLength(2);
   });
 });

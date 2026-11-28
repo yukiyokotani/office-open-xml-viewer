@@ -1873,9 +1873,9 @@ export class DocxDocument {
   private async _workerCommentAnchorRangesFor(
     view: Readonly<{ currentDate?: Date | number; showTrackedChanges?: boolean }>,
   ): Promise<readonly CommentAnchorRange[]> {
-    if (this._isActiveView(view)) return this.commentAnchorRanges();
-    if (this.comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
     const requested = this._layoutOptionsOfView(view);
+    if (this._isActiveView(requested)) return this.commentAnchorRanges();
+    if (this.comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
     const res = await this._bridge.request(
       (id) => ({
         type: 'collectCommentAnchors',
@@ -1899,24 +1899,19 @@ export class DocxDocument {
     );
   }
 
-  /** Whether `view` (per-call options already filled from the active view)
+  /** Whether `requested` (the normalized options of a view)
    * selects the layout the document's own anchors were collected against. */
-  private _isActiveView(
-    view: Readonly<{ currentDate?: Date | number; showTrackedChanges?: boolean }>,
-  ): boolean {
+  private _isActiveView(requested: LayoutOptions): boolean {
     const runtime = documentLayoutRuntimeOf(this);
     return sameLayoutView(
       runtime.activeLayoutOptions ?? normalizeLayoutOptions(undefined, runtime.defaultCurrentDateMs),
-      this._layoutOptionsOfView(view),
+      requested,
     );
   }
 
   /** Main mode: the anchors of the layout `view` selects, kept with it. */
-  private _mainCommentAnchorRangesFor(
-    view: Readonly<{ currentDate?: Date | number; showTrackedChanges?: boolean }>,
-  ): readonly CommentAnchorRange[] {
+  private _mainCommentAnchorRangesFor(requested: LayoutOptions): readonly CommentAnchorRange[] {
     const runtime = documentLayoutRuntimeOf(this);
-    const requested = this._layoutOptionsOfView(view);
     if (!this._document || !this._source) return [];
     const comments = this._reviewSnapshot().comments;
     if (comments.length === 0) return NO_COMMENT_ANCHOR_RANGES;
@@ -2317,11 +2312,14 @@ export class DocxDocument {
     // collected for, as the layout that produced them places it, whichever
     // view is active when the join is made. The anchors of a layout other
     // than the active one are collected only when such a join asks for them.
+    // The layout is fixed now, by its normalized options: a Date the caller
+    // changes later selects nothing else.
+    const produced = this._layoutOptionsOfView(wireOpts);
     noteCollectedRuns(runs, {
       pageIndex,
-      anchors: () => (this._isActiveView(wireOpts)
+      anchors: () => (this._isActiveView(produced)
         ? this.commentAnchorRanges()
-        : this._mainCommentAnchorRangesFor(wireOpts)),
+        : this._mainCommentAnchorRangesFor(produced)),
     });
     return runs;
   }

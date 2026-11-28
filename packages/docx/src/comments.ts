@@ -90,11 +90,13 @@ const anchorKey = (anchor: Readonly<CommentAnchorRange>): string =>
  * layout of the runs collected and placed it. Geometry that belongs to a
  * layout (which covered runs are laid out, the run that stands in, the
  * fallback) is read from the layout the runs come from, whichever layout the
- * given anchor was collected against. */
+ * given anchor was collected against. Undefined for a range that layout
+ * does not show (a segment it left out for the range's laid-out ones): it
+ * is absent from the runs, and nothing of another layout stands in for it. */
 function anchorOfRunsLayout(
   anchor: Readonly<CommentAnchorRange>,
   origin: CollectedRunsOrigin | undefined,
-): Readonly<CommentAnchorRange> {
+): Readonly<CommentAnchorRange> | undefined {
   const anchors = origin?.anchors();
   if (!anchors) return anchor;
   let counterparts = COUNTERPARTS.get(anchors);
@@ -102,7 +104,7 @@ function anchorOfRunsLayout(
     counterparts = new Map(anchors.map((own) => [anchorKey(own), own]));
     COUNTERPARTS.set(anchors, counterparts);
   }
-  return counterparts.get(anchorKey(anchor)) ?? anchor;
+  return counterparts.get(anchorKey(anchor));
 }
 
 /** The placement of an anchor in the layout it was collected against;
@@ -659,7 +661,8 @@ export function resolveCommentAnchorRuns(
   runs: readonly Readonly<DocxTextRunInfo>[],
 ): readonly Readonly<DocxTextRunInfo>[] {
   const origin = RUNS_ORIGIN.get(runs);
-  return resolveCommentAnchorRunsOnPage(anchorOfRunsLayout(anchor, origin), runs, origin?.pageIndex);
+  const own = anchorOfRunsLayout(anchor, origin);
+  return own ? resolveCommentAnchorRunsOnPage(own, runs, origin?.pageIndex) : [];
 }
 
 /** resolveCommentAnchorRuns for the runs of page `pageIndex`. An anchor
@@ -787,7 +790,7 @@ export function resolveDocxCommentThreadsOnPage(
   runs: readonly Readonly<DocxTextRunInfo>[],
   pageIndex: number | undefined,
   options: ResolveDocxCommentThreadsOptions = {},
-  placed: (anchor: Readonly<CommentAnchorRange>) => Readonly<CommentAnchorRange> = (anchor) => anchor,
+  placed: (anchor: Readonly<CommentAnchorRange>) => Readonly<CommentAnchorRange> | undefined = (anchor) => anchor,
 ): readonly Readonly<ResolvedDocxCommentThread>[] {
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
   const roots = comments.filter((comment) => comment.parentId === undefined);
@@ -823,6 +826,7 @@ export function resolveDocxCommentThreadsOnPage(
     const rootId = rootIdByCommentId.get(anchor.commentId);
     if (rootId === undefined) continue;
     const own = placed(anchor);
+    if (!own) continue;
     const mayResolve = pageSources.has(sourceKey(own.source)) ||
       pageSources.has(sourceKey(own.reference.source)) ||
       (own.geometryFallback !== undefined &&
