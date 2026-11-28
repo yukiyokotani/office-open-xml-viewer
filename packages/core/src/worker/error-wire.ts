@@ -447,6 +447,7 @@ const DECODED_IMAGE_LIMIT_METRICS = {
   'image-effect-count': true,
   'image-effect-work': true,
   'tiff-lzw-work': true,
+  'tiff-packbits-work': true,
   'metafile-path-commands': true,
   'metafile-record-points': true,
   'metafile-record-polygons': true,

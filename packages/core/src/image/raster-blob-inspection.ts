@@ -6,6 +6,16 @@ import {
   type RasterDimensions,
 } from './raster-dimensions.js';
 import { isTiff } from './tiff-contract.js';
+import {
+  bmpResolution,
+  exifResolution,
+  jfifResolution,
+  orientRasterResolution,
+  pngResolution,
+  tiffResolution,
+  type RasterByteReader,
+  type RasterResolution,
+} from './raster-resolution.js';
 import { isEmf, isWmf } from './wmf.js';
 
 export type RasterFormat = 'png' | 'jpeg' | 'gif' | 'bmp' | 'webp' | 'tiff' | 'wmf' | 'emf';
@@ -13,6 +23,8 @@ export type RasterFormat = 'png' | 'jpeg' | 'gif' | 'bmp' | 'webp' | 'tiff' | 'w
 export interface RasterBlobInspection {
   readonly format: RasterFormat | null;
   readonly dimensions: RasterDimensions | null;
+  /** Physical resolution declared in the header prefix, when present. */
+  readonly resolution?: RasterResolution | null;
 }
 
 /** MIME types whose browser decoder accepts a bounded two-axis resize request.
@@ -72,14 +84,23 @@ function isJpegSof(marker: number): boolean {
     && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
 }
 
+interface JpegMetadata {
+  readonly dimensions: RasterDimensions | null;
+  /** JFIF density, else EXIF IFD0 resolution, on the oriented axes. */
+  readonly resolution: RasterResolution | null;
+}
+
 /**
- * Find JPEG SOF dimensions without retaining the compressed image in a JS
- * ArrayBuffer. JPEG permits arbitrarily many APP/ICC segments before SOF, so a
- * fixed prefix is not a security boundary. The state machine consumes the Blob
- * stream once, skips segment payloads, and retains SOF dimensions while it
- * continues through metadata to SOS/EOI for a later EXIF orientation.
+ * Find JPEG SOF dimensions and declared resolution without retaining the
+ * compressed image in a JS ArrayBuffer. JPEG permits arbitrarily many APP/ICC
+ * segments before SOF, so a fixed prefix is not a security boundary. The state
+ * machine consumes the Blob stream once, skips fill bytes, standalone markers
+ * and segment payloads, retains only SOF, JFIF APP0 and EXIF APP1 payloads
+ * (each bounded by its 16-bit declared length), and continues through metadata
+ * to SOS/EOI for a later EXIF orientation. Orientation applies to the
+ * dimensions and the resolution axes together.
  */
-async function streamJpegDimensions(blob: Blob): Promise<RasterDimensions | null> {
+async function streamJpegMetadata(blob: Blob): Promise<JpegMetadata> {
   const reader = blob.slice(2).stream().getReader();
   let sawMarkerPrefix = false;
   let marker = -1;
@@ -93,10 +114,18 @@ async function streamJpegDimensions(blob: Blob): Promise<RasterDimensions | null
   let app1Offset = 0;
   let orientation: number | null = null;
   let sawExif = false;
+  let app0Payload: Uint8Array | null = null;
+  let app0Offset = 0;
+  let jfif: RasterResolution | null = null;
+  let exif: RasterResolution | null = null;
+  const result = (): JpegMetadata => ({
+    dimensions: dimensions ? orientJpegDimensions(dimensions, orientation) : null,
+    resolution: orientRasterResolution(jfif ?? exif, orientation),
+  });
   try {
     while (true) {
       const { value, done } = await reader.read();
-      if (done) return dimensions ? orientJpegDimensions(dimensions, orientation) : null;
+      if (done) return result();
       for (const byte of value) {
         if (sofPayload) {
           sofPayload[sofOffset++] = byte;
@@ -108,10 +137,19 @@ async function streamJpegDimensions(blob: Blob): Promise<RasterDimensions | null
             sofOffset = 0;
             if (sawExif) {
               await reader.cancel();
-              return orientJpegDimensions(dimensions, orientation);
+              return result();
             }
             skip = sofTrailingBytes;
             sofTrailingBytes = 0;
+          }
+          continue;
+        }
+        if (app0Payload) {
+          app0Payload[app0Offset++] = byte;
+          if (app0Offset === app0Payload.length) {
+            jfif ??= jfifResolution(app0Payload);
+            app0Payload = null;
+            app0Offset = 0;
           }
           continue;
         }
@@ -121,12 +159,13 @@ async function streamJpegDimensions(blob: Blob): Promise<RasterDimensions | null
             if (isJpegExifPayload(app1Payload)) {
               sawExif = true;
               orientation = sniffJpegExifOrientation(app1Payload);
+              exif = await exifResolution(app1Payload);
             }
             app1Payload = null;
             app1Offset = 0;
             if (sawExif && dimensions) {
               await reader.cancel();
-              return orientJpegDimensions(dimensions, orientation);
+              return result();
             }
           }
           continue;
@@ -141,9 +180,9 @@ async function streamJpegDimensions(blob: Blob): Promise<RasterDimensions | null
             continue;
           }
           const segmentLength = (lengthHi << 8) | byte;
-          if (segmentLength < 2) return null;
+          if (segmentLength < 2) return result();
           if (isJpegSof(marker)) {
-            if (segmentLength < 7) return null;
+            if (segmentLength < 7) return result();
             if (dimensions) {
               skip = segmentLength - 2;
             } else {
@@ -154,6 +193,9 @@ async function streamJpegDimensions(blob: Blob): Promise<RasterDimensions | null
           } else if (marker === 0xe1 && !sawExif && segmentLength > 2) {
             app1Payload = new Uint8Array(segmentLength - 2);
             app1Offset = 0;
+          } else if (marker === 0xe0 && jfif === null && segmentLength > 2) {
+            app0Payload = new Uint8Array(segmentLength - 2);
+            app0Offset = 0;
           } else {
             skip = segmentLength - 2;
           }
@@ -170,7 +212,7 @@ async function streamJpegDimensions(blob: Blob): Promise<RasterDimensions | null
         if (byte === 0x00) continue;
         if (byte === 0xd9 || byte === 0xda) {
           await reader.cancel();
-          return dimensions ? orientJpegDimensions(dimensions, orientation) : null;
+          return result();
         }
         if (byte === 0xd8 || byte === 0x01 || (byte >= 0xd0 && byte <= 0xd7)) continue;
         marker = byte;
@@ -216,6 +258,25 @@ async function deepTiffDimensions(blob: Blob, head: Uint8Array): Promise<RasterD
   return width === undefined || height === undefined ? null : { width, height };
 }
 
+/** Declared resolution of a non-JPEG raster. Metadata past the header prefix
+ * (a PNG pHYs after large ancillary chunks, TIFF values at far offsets) is
+ * sought with small bounded reads; nothing else is read. */
+async function rasterResolution(
+  format: RasterFormat,
+  blob: Blob,
+  head: Uint8Array,
+): Promise<RasterResolution | null> {
+  const read: RasterByteReader = async (offset, length) => {
+    if (!(offset >= 0) || !(length >= 0) || offset >= blob.size) return new Uint8Array(0);
+    if (offset + length <= head.length) return head.subarray(offset, offset + length);
+    return new Uint8Array(await blob.slice(offset, offset + length).arrayBuffer());
+  };
+  if (format === 'png') return pngResolution(read);
+  if (format === 'tiff') return tiffResolution(read);
+  if (format === 'bmp') return bmpResolution(head);
+  return null;
+}
+
 /** Inspect the decoder-natural raster grid before handing bytes to a decoder. */
 export async function inspectRasterBlob(
   blob: Blob,
@@ -231,9 +292,11 @@ export async function inspectRasterBlob(
   // follows SOF. Scan every JPEG to the first scan boundary so retained-surface
   // planning uses the decoder-natural orientation.
   if (format === 'jpeg') {
-    return { format, dimensions: await streamJpegDimensions(blob) ?? dimensions };
+    const metadata = await streamJpegMetadata(blob);
+    return { format, dimensions: metadata.dimensions ?? dimensions, resolution: metadata.resolution };
   }
-  if (dimensions) return { format, dimensions };
-  if (format === 'tiff') return { format, dimensions: await deepTiffDimensions(blob, head) };
-  return { format, dimensions: null };
+  const resolution = await rasterResolution(format, blob, head);
+  if (dimensions) return { format, dimensions, resolution };
+  if (format === 'tiff') return { format, dimensions: await deepTiffDimensions(blob, head), resolution };
+  return { format, dimensions: null, resolution };
 }

@@ -167,7 +167,12 @@ describe('inline objects on a line grid', () => {
     const first = layoutDocument(model, layoutServices).pages[0].layers.body[0];
     if (first.kind !== 'paragraph') throw new Error('expected picture paragraph');
     const image = first.lines[0].placements.find((item) => item.kind === 'resource');
-    expect(image?.bounds.yPt).toBeCloseTo(72 + (expectedAdvance - 221.2) / 2, 6);
+    // WORD_INLINE_OBJECT_EXACT_LINE: an exact line keeps its four-fifths
+    // baseline (the 20pt-grid exact control), so the picture stands on it;
+    // other rules centre the object in the allocated cells.
+    expect(image?.bounds.yPt).toBeCloseTo(spacing?.rule === 'exact'
+      ? 72 + spacing.value * 4 / 5 - 221.2
+      : 72 + (expectedAdvance - 221.2) / 2, 6);
     const tops: number[] = [];
     await renderDocumentToCanvas(model, canvas, 0, {
       dpr: 1, width: 400, layoutServices,

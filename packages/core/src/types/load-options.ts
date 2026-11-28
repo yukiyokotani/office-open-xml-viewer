@@ -211,6 +211,21 @@ export interface LoadOptions {
    * use the library defaults. A positive safe integer overrides a default;
    * `null` disables that configurable limit only. Limits are admission policy,
    * not guarantees of exact browser-process memory use.
+   *
+   * Limits apply per package session. When a self-loading Viewer reloads, the
+   * previous engine stays alive while the replacement engine is acquired, so
+   * the two sessions overlap and their combined peak is not bounded by these
+   * limits. The previous engine is released when the replacement is installed,
+   * which happens before the initial page, slide or sheet render; a failed
+   * acquisition keeps the previous engine, but a failed initial render does not.
+   *
+   * To choose values, open representative documents and exercise their
+   * content first (later interactions can inflate further archive entries, so
+   * the report emitted at load can be too early), then read
+   * `largestInflatedEntryBytes` (for `maxArchiveEntryBytes`) and
+   * `distinctInflatedBytes` (for `maxTotalInflatedBytes`) from the `usage` of
+   * the report that `await getResourceMetrics()` resolves to, add headroom, and
+   * confirm on the lowest-memory device supported.
    */
   resourceLimits?: OoxmlResourceLimits;
   /**
@@ -291,8 +306,9 @@ export interface LoadOptions {
   /**
    * Opt in to bounded TIFF 6.0 image decoding. Import `tiff` from the separate
    * `@silurus/ooxml/tiff` entry and inject it once. The built-in codec accepts
-   * stripped bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK images, plus
-   * CCITT Group 4 bilevel images. Without this option, recognized TIFF images
+   * stripped bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK images,
+   * uncompressed, PackBits- or LZW-compressed, plus CCITT Group 4 bilevel
+   * images. Without this option, recognized TIFF images
    * use a visible unavailable-image placeholder and the document keeps
    * rendering. Unsupported or malformed input makes standalone codec calls and
    * DOCX/PPTX rendering report `TiffDecodeError`; XLSX rendering, including

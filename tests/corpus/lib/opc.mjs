@@ -16,12 +16,13 @@ export function contentTypes(overrides) {
 }
 
 /** @param {Array<[id: string, type: string, target: string, mode?: 'External']>} rels type is the
- * last segment of the officeDocument/2006/relationships URI. */
+ * last segment of the officeDocument/2006/relationships URI, or a whole URI
+ * for a relationship type defined elsewhere. */
 export function relationships(rels) {
   const body = rels
     .map(([id, type, target, mode]) => `<Relationship${attrs({
       Id: id,
-      Type: `http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}`,
+      Type: type.startsWith('http') ? type : `http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}`,
       Target: target,
       TargetMode: mode,
     })}/>`)

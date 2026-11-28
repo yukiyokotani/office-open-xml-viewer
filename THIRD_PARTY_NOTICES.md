@@ -173,6 +173,37 @@ UTC L2/12-368 (2012), section 7, <https://www.unicode.org/wg2/docs/n4384.pdf>.
 Only code-to-code-point correspondences are reproduced; no text, glyph image
 or font data from the document or the fonts is included.
 
+## DrawingML preset geometry data
+
+### Preset shape definitions (LibreOffice / ECMA-376)
+
+Preset shapes (`a:prstGeom`) are drawn from guide formulas and paths compiled
+into `packages/core/src/shape/preset-geometry/presets.json` (shipped in
+`dist/`) by `packages/pptx/scripts/extract-presets.mjs`. The generator input,
+`packages/pptx/scripts/preset-shape-definitions.xml`, is an unmodified copy of
+LibreOffice's `oox/source/drawingml/customshapes/presetShapeDefinitions.xml`
+at commit `500a70ba19d9c1207fd9121531950e55a70fd940` (not part of the npm
+tarball). That file is the ECMA-376 Part 1 `presetShapeDefinitions.xml`
+electronic insert with LibreOffice corrections (noSmoking, star24/star32,
+upArrow). The file carries no licence header; the LibreOffice project
+distributes its source under the Mozilla Public License 2.0. The source form
+is available in this repository and at the upstream URL below.
+
+- Source: <https://github.com/LibreOffice/core/blob/500a70ba19d9c1207fd9121531950e55a70fd940/oox/source/drawingml/customshapes/presetShapeDefinitions.xml>
+- Terms: Mozilla Public License 2.0, <https://www.mozilla.org/en-US/MPL/2.0/>
+
+### Preset text-warp definitions (ECMA-376)
+
+WordArt text warps (`a:prstTxWarp`) use envelope paths compiled into
+`packages/core/src/shape/preset-geometry/text-warp-presets.json` (shipped in
+`dist/`) by `packages/pptx/scripts/extract-text-warps.mjs`. The generator
+input, `packages/pptx/scripts/preset-text-warp-definitions.xml`, is an
+unmodified copy of the `presetTextWarpDefinitions.xml` electronic insert of
+ECMA-376 Part 1 (OfficeOpenXML-DrawingMLGeometries) (not part of the npm
+tarball).
+
+- Source: <https://ecma-international.org/publications-and-standards/standards/ecma-376/>
+
 ## License texts
 
 - **MIT** — see [LICENSE](./LICENSE) (this repository's own license; the

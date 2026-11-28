@@ -4,7 +4,7 @@ import type { LayoutServices, MathRenderer } from './layout/types.js';
 import type { ChartThreeDRenderer, ChartRegionMapRenderer, ChartExRenderer, ImageResourceOptions, TiffRenderer, SvgBlobDecoder } from '@silurus/ooxml-core';
 export type { DocxTextRunInfo } from './types';
 import { bodyMathOccurrences } from './layout/resources.js';
-import { paintResourceRegistryOf, privateResourceLookupOf } from './layout/runtime-state.js';
+import { paintResourceRegistryOf, privateResourceLookupOf, textAdvanceLookupOf } from './layout/runtime-state.js';
 import { selectDocumentLayoutPage, withErrorPlaceholderPage } from './layout/document-layout-variants.js';
 import type { WireErrorPlaceholder } from './layout/error-page.js';
 import { rasterPaintOccurrencesForPage } from './layout/text-index.js';
@@ -142,10 +142,11 @@ function normalizeRenderOptions(
       svgDecoder: options.svgDecoder,
       parseError: source.fatalParse !== null,
       registry: paintResourceRegistryOf(services),
+      textAdvances: textAdvanceLookupOf(services),
       rasterPaintOccurrences: rasterPaintOccurrencesForPage(selection.layout, pageIndex),
       privateResources: privateResourceLookupOf<CanvasImageSource>(services),
       textRuns: options.onTextRun
-        ? textRunsForPage(selection.layout, pageIndex, { scale })
+        ? textRunsForPage(selection.layout, pageIndex, { scale, textAdvances: textAdvanceLookupOf(services) })
         : [],
       onTextRun: options.onTextRun,
       callerOwnedCanvasTarget: options.callerOwnedCanvasTarget,

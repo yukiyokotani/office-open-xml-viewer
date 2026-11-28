@@ -39,6 +39,7 @@ export const NS = {
   wpg: 'http://schemas.microsoft.com/office/word/2010/wordprocessingGroup',
   w14: 'http://schemas.microsoft.com/office/word/2010/wordml',
   wp14: 'http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing',
+  cx: 'http://schemas.microsoft.com/office/drawing/2014/chartex',
 };
 
 export const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';

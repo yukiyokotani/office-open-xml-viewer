@@ -9,7 +9,7 @@ import type {
   PaintResourceKind,
 } from '../layout/types.js';
 import { rasterizeColumnSeparator } from './column-separator-raster.js';
-import { paintDrawingLayout } from './canvas-drawing.js';
+import { paintDrawingCommands, paintDrawingLayout } from './canvas-drawing.js';
 import {
   paintDrawingWithOwnedTextBoxes,
   paintParagraphLayout,
@@ -277,10 +277,22 @@ function paintPageContents(
       });
     }
   };
+  // ECMA-376 §17.2.1: the document background (its VML fills, then the
+  // `background` layer holding its drawing story) fills the physical page
+  // behind all other content, a back page border included. Its colour is
+  // the page surface, painted by the surface owner (paintLayoutPage here,
+  // or the document renderer's page fill).
+  const firstNonBackground = entries.findIndex((entry) => entry.sourceLayer !== 'background');
+  const backgroundEnd = Math.min(
+    firstNonBackground === -1 ? entries.length : firstNonBackground,
+    decorationIndex,
+  );
+  if (page.pageBackground) paintDrawingCommands(page.pageBackground.commands, context);
+  paintEntries(entries.slice(0, backgroundEnd));
   if (page.pageBorder?.zOrder === 'back') {
     paintPageBorderLayout(page.pageBorder, context);
   }
-  paintEntries(entries.slice(0, decorationIndex));
+  paintEntries(entries.slice(backgroundEnd, decorationIndex));
   paintColumnSeparators(page, context);
   paintEntries(entries.slice(decorationIndex));
   // ECMA-376 §17.13.5 markup view (`word-track-change-bar`): margin bars are
@@ -338,6 +350,10 @@ export async function paintLayoutPage(
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, target.width, target.height);
     ctx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+    if (page.pageBackground?.color) {
+      ctx.fillStyle = page.pageBackground.color;
+      ctx.fillRect(0, 0, page.geometry.widthPt, page.geometry.heightPt);
+    }
     paintLayoutPageContent(page, {
       ctx, scale: options.scale, dpr: options.dpr, resources,
     });

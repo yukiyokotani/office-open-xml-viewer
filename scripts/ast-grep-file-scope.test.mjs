@@ -1,4 +1,4 @@
-// The ast-grep rule tests (rule-tests/*.yml) check snippets without a path.
+// The ast-grep rule tests (ast-grep/tests/*.yml) check snippets without a path.
 // These tests run the real rules over a fixture tree, for what depends on
 // where a file lives: which modules a rule inspects and which it skips.
 import assert from 'node:assert/strict';
@@ -18,7 +18,7 @@ const lintArguments = lintScript.replace(/^ast-grep /, '').replaceAll("'", '').s
 function scan(t, files) {
   const root = mkdtempSync(join(tmpdir(), 'ooxml-ast-grep-scope-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const name of ['sgconfig.yml', 'rules', 'rule-utils']) {
+  for (const name of ['sgconfig.yml', 'ast-grep']) {
     cpSync(join(repo, name), join(root, name), { recursive: true });
   }
   for (const [path, contents] of Object.entries(files)) {

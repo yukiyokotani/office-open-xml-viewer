@@ -22,6 +22,7 @@ tests/corpus/
   lib/opc.mjs, xml.mjs, zip.mjs      packaging
   lib/png.mjs          deterministic PNG pictures drawn by the builder
   lib/chart.mjs, drawing.mjs, iso216.mjs   shared chart, picture and data helpers
+  lib/chartex.mjs      chart extension (cx) parts and their drawing anchor
   lib/features.mjs     `covers` vocabulary (extraction shared with tests/visual/corpus-features.mjs)
   lib/package-check.mjs  content types, relationships, XML well-formedness
   render.mjs           render specimens to PNG and contact sheets for review
@@ -112,8 +113,9 @@ Noto Sans JP.
 
 The rules every specimen follows (grid, type, font, colour, text, minimal
 XML), the procedure for adding one and the review loop live in the
-`corpus-specimen` skill, `.agents/skills/corpus-specimen/SKILL.md` (shared by Codex; `.claude/skills/corpus-specimen` links to it). Read it
-before adding or changing a case.
+[`docs/workflow/corpus-specimen.md`](../../docs/workflow/corpus-specimen.md)
+(loaded by the `corpus-specimen` skill). Read it before adding or changing a
+case.
 
 ## Visual regression
 

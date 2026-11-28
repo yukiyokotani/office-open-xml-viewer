@@ -739,6 +739,32 @@ describe('paintParagraphLayout', () => {
     ]);
   });
 
+  it('clips a turned inline picture to its line band only while painting it (word-inline-rotated-picture-line-clip)', () => {
+    const layout = node();
+    const picture = {
+      kind: 'resource' as const, resourceKey: 'image:body:0', resourceKind: 'image' as const,
+      range: { start: 0, end: 1 }, bounds: { xPt: 12, yPt: 20, widthPt: 30, heightPt: 40 }, advancePt: 30,
+      lineClip: { topPt: -2, bottomPt: 43 },
+    };
+    const operations: unknown[][] = [];
+    const ctx = {
+      fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: 'left', textBaseline: 'alphabetic',
+      save() { operations.push(['save']); }, restore() { operations.push(['restore']); },
+      rect(...args: number[]) { operations.push(['rect', ...args]); }, clip() { operations.push(['clip']); },
+      setLineDash() {}, fillRect() {}, strokeRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fillText() {},
+    } as unknown as CanvasRenderingContext2D;
+
+    paintParagraphLayout({ ...layout, lines: [{ ...layout.lines[0]!, placements: [picture] }] }, {
+      ctx, scale: 1, dpr: 1, resources: { paint: (key) => { operations.push(['paint', key]); } },
+    });
+
+    // The band spans the resource's turn about its centre (reach 50pt) and
+    // the line box from 18pt to 63pt.
+    expect(operations).toEqual([
+      ['save'], ['rect', 27 - 50, 18, 100, 45], ['clip'], ['paint', 'image:body:0'], ['restore'],
+    ]);
+  });
+
   it('paints retained per-code-point origins without reconstructing justification', () => {
     const layout = node();
     const placement = layout.lines[0]!.placements[0]!;

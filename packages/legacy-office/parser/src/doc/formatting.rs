@@ -1016,7 +1016,7 @@ impl<'a> Formatting<'a> {
     }
 }
 
-/// MS-DOC 2.9.86 FFN chs of the symbol character set (SYMBOL_CHARSET).
+/// MS-DOC 2.9.82 FFN chs of the symbol character set (SYMBOL_CHARSET).
 const SYMBOL_CHARSET: u8 = 2;
 
 fn read_fonts(bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), String> {
@@ -1041,25 +1041,51 @@ fn read_fonts(bytes: &[u8]) -> Result<(Vec<String>, Vec<String>), String> {
         let name = font
             .get(39..)
             .ok_or_else(|| unsupported("short Word font data"))?;
-        let units: Vec<_> = name
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| u16::from_le_bytes(*b))
-            .take_while(|u| *u != 0)
-            .collect();
-        if units.is_empty() || units.len() * 2 + 2 > name.len() {
-            return Err(unsupported("unterminated or empty Word font name"));
+        let mut units = ffn_string(name, 0)
+            .ok_or_else(|| crate::rejection::corrupt("unterminated Word font name"))?;
+        // MS-DOC 2.9.82 FFN: xszFfn MUST hold a name. An empty one takes the
+        // xszAlt substitution name when ixchSzAlt declares one; otherwise the
+        // slot stays empty. The slot is kept either way so later indices
+        // still address their fonts. An empty slot names no font: the run
+        // axes that select it stay unset (`direct_font_axes`), and a symbol
+        // run in it keeps the run's own fonts (`direct_symbol`).
+        if units.is_empty() {
+            units = match font[4] {
+                0 => {
+                    crate::rejection::ignored_value("empty Word font name");
+                    units
+                }
+                alt => crate::rejection::spec_default(
+                    "empty Word font name",
+                    ffn_string(name, alt.into()).ok_or_else(|| {
+                        crate::rejection::corrupt("unterminated Word alternate font name")
+                    })?,
+                ),
+            };
         }
         let name = String::from_utf16(&units)
             .map_err(|_| unsupported("invalid Unicode Word font name"))?;
-        if font[3] == SYMBOL_CHARSET {
+        if font[3] == SYMBOL_CHARSET && !name.is_empty() {
             symbol_fonts.push(name.clone());
         }
         fonts.push(name);
         offset += size;
     }
     Ok((fonts, symbol_fonts))
+}
+
+/// The NUL-terminated UTF-16LE string that starts at code unit `start` of an
+/// FFN name area (MS-DOC 2.9.82 xszFfn, xszAlt), or `None` when no NUL unit
+/// ends it inside the area.
+fn ffn_string(name: &[u8], start: usize) -> Option<Vec<u16>> {
+    let mut units = Vec::new();
+    for unit in name.get(start * 2..)?.as_chunks::<2>().0 {
+        match u16::from_le_bytes(*unit) {
+            0 => return Some(units),
+            unit => units.push(unit),
+        }
+    }
+    None
 }
 
 fn read_styles(bytes: &[u8]) -> Result<(Properties, Vec<Option<Style<'_>>>), String> {
@@ -1183,6 +1209,68 @@ mod tests {
         assert_eq!(read_fonts(&bytes).unwrap().0, ["日本語 Font"]);
         bytes.pop();
         assert!(read_fonts(&bytes).is_err());
+    }
+
+    #[test]
+    fn keeps_the_slot_of_an_empty_font_name_and_reads_the_fonts_after_it() {
+        let mut bytes = vec![2, 0, 0, 0];
+        for name in ["", "Calibri"] {
+            let mut font = vec![0; 39];
+            for unit in format!("{name}\0").encode_utf16() {
+                font.extend(unit.to_le_bytes());
+            }
+            bytes.push(font.len() as u8);
+            bytes.extend(font);
+        }
+        crate::rejection::take_best_effort();
+        assert_eq!(read_fonts(&bytes).unwrap().0, ["", "Calibri"]);
+        assert_eq!(
+            crate::rejection::take_best_effort(),
+            [(
+                crate::rejection::BestEffort::IgnoredValue,
+                "empty Word font name"
+            )]
+        );
+    }
+
+    /// A one-font SttbfFfn whose FFN has `ixch_sz_alt` and the name area
+    /// `names` (UTF-16LE; NULs are written where `names` has them).
+    fn one_font(ixch_sz_alt: u8, names: &str) -> Vec<u8> {
+        let mut font = vec![0; 39];
+        font[4] = ixch_sz_alt;
+        for unit in names.encode_utf16() {
+            font.extend(unit.to_le_bytes());
+        }
+        let mut bytes = vec![1, 0, 0, 0, font.len() as u8];
+        bytes.extend(font);
+        bytes
+    }
+
+    #[test]
+    fn rejects_a_font_name_without_a_nul_inside_its_record() {
+        for names in ["AB", ""] {
+            assert_eq!(
+                read_fonts(&one_font(0, names)).unwrap_err(),
+                "UNSUPPORTED:unterminated Word font name",
+                "{names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_font_name_takes_its_declared_alternate_name() {
+        crate::rejection::take_best_effort();
+        assert_eq!(read_fonts(&one_font(1, "\0Arial\0")).unwrap().0, ["Arial"]);
+        // Without ixchSzAlt there is no alternate name to read.
+        assert_eq!(read_fonts(&one_font(0, "\0Arial\0")).unwrap().0, [""]);
+        assert_eq!(crate::rejection::take_best_effort().len(), 2);
+        for (ixch_sz_alt, names) in [(1, "\0Ar"), (9, "\0Arial\0")] {
+            assert_eq!(
+                read_fonts(&one_font(ixch_sz_alt, names)).unwrap_err(),
+                "UNSUPPORTED:unterminated Word alternate font name",
+                "{ixch_sz_alt} {names:?}"
+            );
+        }
     }
 
     fn empty() -> Formatting<'static> {

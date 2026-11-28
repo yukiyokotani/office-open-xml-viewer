@@ -1,7 +1,7 @@
 import { attachNoteOverflowPolicy, noteOverflowPolicyOf, attachNoteRecoveryOwner, noteRecoveryOwnerOf } from './note-overflow-policy.js';
 import type { LayoutServices } from './types.js';
 import type { PaintResourceRegistry } from './types.js';
-import type { KinsokuRules, NumberFormat } from '@silurus/ooxml-core';
+import type { KinsokuRules, NumberFormat, TextAdvanceLookup } from '@silurus/ooxml-core';
 import type { BodyLayoutKernel } from './body-layout-kernel.js';
 import type { LayoutVariantStore } from './variant-store.js';
 import type { VerticalGlyphMeasurementService } from './measurement-capabilities.js';
@@ -84,6 +84,7 @@ const verticalGlyphMeasurementServices = new WeakMap<
   VerticalGlyphMeasurementService
 >();
 const layoutVariantStores = new WeakMap<LayoutServices, LayoutVariantStore>();
+const textAdvancePlanners = new WeakMap<LayoutServicesRuntimeOwner, TextAdvanceLookup>();
 
 /** One paginateBodySteps execution owns this memo, whether a synchronous or
  * progressive driver consumes it. It never enters LayoutServices or
@@ -312,6 +313,26 @@ export function verticalGlyphMeasurementServiceOf(
   const service = owner ? verticalGlyphMeasurementServices.get(owner) : undefined;
   if (!service) throw new Error('Vertical glyph measurement service is not attached');
   return service;
+}
+
+/** The measuring context's reference-advance planner (core
+ * reference-advances.ts), exposed read-only: retained paint and acquisition
+ * consumers look up the decision layout measurement made for a shorthand. */
+export function attachTextAdvancePlanner(
+  services: LayoutServices,
+  planner: TextAdvanceLookup,
+): void {
+  const owner = layoutServicesRuntimeOwner(services, true)!;
+  if (textAdvancePlanners.has(owner)) {
+    throw new Error('Text advance planner is already attached');
+  }
+  textAdvancePlanners.set(owner, Object.freeze({ planned: (font: string) => planner.planned(font) }));
+}
+
+/** Absent for services without a concrete measuring context. */
+export function textAdvanceLookupOf(services: LayoutServices): TextAdvanceLookup | undefined {
+  const owner = layoutServicesRuntimeOwner(services, false);
+  return owner ? textAdvancePlanners.get(owner) : undefined;
 }
 
 export function attachLayoutVariantStore(

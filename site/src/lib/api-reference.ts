@@ -75,7 +75,7 @@ export const optionalRenderers: readonly OptionalRendererReference[] = [
     entry: '@silurus/ooxml/tiff',
     exportName: 'tiff',
     contract: 'TiffRenderer',
-    desc: 'Decodes bounded stripped TIFF 6.0 images in DOCX, XLSX and PPTX. Supported classes are bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK, uncompressed or LZW-compressed (8-bit classes optionally with horizontal differencing), plus 1-bit CCITT Group 4. Unsupported or malformed classes make standalone calls and DOCX/PPTX rendering report TiffDecodeError. XLSX rendering, including XlsxViewer, contains the failure at that picture and shows an unavailable-image placeholder.',
+    desc: 'Decodes bounded stripped TIFF 6.0 images in DOCX, XLSX and PPTX. Supported classes are bilevel, 8-bit grayscale, RGB, RGBA and process-CMYK, uncompressed, PackBits-compressed or LZW-compressed (8-bit LZW classes optionally with horizontal differencing), plus 1-bit CCITT Group 4. Unsupported or malformed classes make standalone calls and DOCX/PPTX rendering report TiffDecodeError. XLSX rendering, including XlsxViewer, contains the failure at that picture and shows an unavailable-image placeholder.',
   },
 ];
 
@@ -97,7 +97,7 @@ const MATH = { name: 'math', type: 'MathRenderer', def: 'undefined', desc: 'Opt-
 const THREE_D = { name: 'threeD', type: 'ChartThreeDRenderer', def: 'undefined', desc: 'Opt-in model-space 3-D chart renderer. Import `threeD` from the separate `@silurus/ooxml/three-d` entry and inject it once. Omit it to use the canonical 2-D fallback and avoid loading or evaluating the mesh/camera implementation in main mode. The self-contained worker asset retains the worker-side implementation. It renders the view angle authored in OOXML in main and worker modes.', emphasis: 'Opt-in model-space 3-D chart renderer.' };
 const REGION_MAP = { name: 'regionMap', type: 'ChartRegionMapRenderer', def: 'undefined', desc: 'Opt-in offline ChartEx Region Map renderer using a pinned, public-domain Natural Earth country asset. Import `regionMap` from `@silurus/ooxml/region-map` and inject it once. Unsupported cached or sub-country views fail closed. The built-in renderer works in main and worker modes.', emphasis: 'Opt-in offline ChartEx Region Map renderer' };
 const CHART_EX = { name: 'chartEx', type: 'ChartExRenderer', def: 'undefined', desc: 'Opt-in renderer for Microsoft ChartEx (`cx:*`) chart families. Import `chartEx` from `@silurus/ooxml/chart-ex` and inject it once. Classic 2-D charts stay in the default format entries; ChartEx is opt-in. The built-in renderer works in main and worker modes.', emphasis: 'Classic 2-D charts stay in the default format entries; ChartEx is opt-in.' };
-const TIFF = { name: 'tiff', type: 'TiffRenderer', def: 'undefined', desc: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX. Import `tiff` from `@silurus/ooxml/tiff` and inject it once. The bounded codec accepts stripped TIFF 6.0 bilevel, grayscale, RGB, RGBA and process-CMYK images, uncompressed or LZW-compressed, plus CCITT Group 4 bilevel images. Omit it to keep the implementation out of ordinary format bundles; recognized TIFF images then use an unavailable-image placeholder while the rest of the document keeps rendering. Unsupported or malformed input makes standalone codec calls and DOCX/PPTX rendering report TiffDecodeError; XLSX rendering, including XlsxViewer, contains it at that picture and shows the placeholder. The built-in codec works in main and worker modes.', emphasis: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX.' };
+const TIFF = { name: 'tiff', type: 'TiffRenderer', def: 'undefined', desc: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX. Import `tiff` from `@silurus/ooxml/tiff` and inject it once. The bounded codec accepts stripped TIFF 6.0 bilevel, grayscale, RGB, RGBA and process-CMYK images, uncompressed, PackBits-compressed or LZW-compressed, plus CCITT Group 4 bilevel images. Omit it to keep the implementation out of ordinary format bundles; recognized TIFF images then use an unavailable-image placeholder while the rest of the document keeps rendering. Unsupported or malformed input makes standalone codec calls and DOCX/PPTX rendering report TiffDecodeError; XLSX rendering, including XlsxViewer, contains it at that picture and shows the placeholder. The built-in codec works in main and worker modes.', emphasis: 'Opt-in TIFF image codec shared by DOCX, XLSX and PPTX.' };
 const LEGACY_SOURCE = (exportName: 'legacyDoc' | 'legacyXls' | 'legacyPpt', entry: 'doc' | 'xls' | 'ppt', format: 'docx' | 'xlsx' | 'pptx', factory: string): ApiOption => ({
   name: exportName,
   type: `ModelSource<'${format}'>`,
@@ -200,8 +200,8 @@ const DOCX_CURRENT_DATE: ApiOption = {
 };
 const DOCX_FOOTNOTE_CONTINUATION: ApiOption = {
   name: 'allowFootnoteContinuation', type: 'boolean', def: 'true',
-  desc: 'Paragraph footnotes continue across physical pages by default, including for ordinary DOCX input. This can change page placement. Column placement and separators follow the document settings. Pass false to retain the previous whole-note pagination. With continuation, fitting tables remain whole. Notes requiring table splitting or field reflow that changes the source cut can reject layout. Full-note acquisition has library source and page budgets.',
-  emphasis: 'Pass false to retain the previous whole-note pagination.',
+  desc: 'Footnotes continue across physical pages by default, including for ordinary DOCX input. This can change page placement. Column placement and separators follow the document settings. Pass false to select whole-note pagination for ordinary note admission; a note too large to place whole can still be fragmented by oversized-note recovery. With continuation, tables in notes can continue across pages, but a table whose layout depends on its page (for example through a PAGE field) is not split by continuation. Field reflow that changes a note\'s source cut can reject layout. Full-note acquisition has library source and page budgets.',
+  emphasis: 'Pass false to select whole-note pagination for ordinary note admission',
 };
 const DOCX_LAYOUT_VIEW_OPTIONS: readonly ApiOption[] = [
   DOCX_SHOW_TRACKED_CHANGES,
@@ -279,8 +279,20 @@ const PPTX_PROGRESSIVE_OPTIONS = [
 const zoomMethods = (asyncSet: boolean): ApiMethod[] => [
   { sig: 'getScale(): number', desc: 'The current zoom factor (1 = 100%).' },
   { sig: `setScale(scale: number): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: 'Set the absolute zoom factor (1 = 100%), clamped to [zoomMin, zoomMax]; re-renders at the new size and fires onScaleChange when it changes. View-only.' },
+  { sig: `zoomIn(): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: 'Step up to the next rung of the shared zoom ladder, clamped to zoomMax (routes through setScale).' },
+  { sig: `zoomOut(): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: 'Step down to the next lower rung of the shared zoom ladder, clamped to zoomMin.' },
   { sig: `fitWidth(): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: "Fit the content WIDTH to the host container and re-render (routes through setScale). Defers when nothing is loaded or the container is unlaid-out." },
   { sig: `fitPage(): ${asyncSet ? 'Promise<void>' : 'void'}`, desc: 'Fit the WHOLE content (width and height) inside the container so it is visible without scrolling — takes the tighter of the two fits. Defers when unloaded / unlaid-out.' },
+];
+
+// Scroll viewers document their own setScale (its effective range includes a
+// width fit below zoomMin); the rest of the zoom facade is shared.
+const scrollZoomMethods = (unit: 'page' | 'slide'): ApiMethod[] => [
+  { sig: 'getScale(): number', desc: 'The current zoom factor (1 = 100%).' },
+  { sig: 'zoomIn(): void', desc: 'Step up to the next rung of the shared zoom ladder, clamped to zoomMax.' },
+  { sig: 'zoomOut(): void', desc: 'Step down to the next lower rung of the shared zoom ladder.' },
+  { sig: 'fitWidth(): void', desc: `Zoom so the ${unit} width fills the container.` },
+  { sig: 'fitPage(): void', desc: `Zoom so a whole ${unit} fits inside the container.` },
 ];
 
 // Shared find methods (IX2) — identical shape across all three viewers; only the
@@ -312,6 +324,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FONTS, GFONTS_DEPRECATED,
         CJK_FALLBACK,
         PASSWORD,
+        WASM_URL,
+        WORKER_TIMEOUT,
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer so users can select & copy slide text.' },
         { name: 'enableElementSelection', type: 'boolean', def: 'false', desc: 'Enable read-only slide-element selection with a non-editable outline and element context; no editor model is exposed.' },
         { name: 'elementHitTolerance', type: 'number', def: '6', desc: 'Straight-line hit tolerance in CSS pixels for element context clicks.' },
@@ -391,6 +405,12 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'getElementContextAt(slideIndex, point, options?): Promise<PptxElementContext | null>', desc: 'Return compact context for the topmost transformed element frame at a slide-EMU point in either mode (line segments use tolerance). Includes master/layout/slide provenance, never editor tree indexes or mutable elements.' },
         { sig: 'getElementBoundsByIds(slideIndex, elementIds): Promise<readonly PptxElementBounds[]>', desc: 'Resolve authored DrawingML element ids to immutable slide geometry in one lazy slide read. Use this with modern-comment drawing or text anchors; it works in main and worker modes.' },
         partFailuresGetter('pptx'),
+        { sig: 'toMarkdown(): Promise<string>', desc: 'Best-effort, text-focused GitHub-flavoured Markdown for AI ingestion and full-text search: each slide becomes a heading section, body text nested bullets, tables pipe tables, charts summarised bullets, speaker notes stay with their slide and comments follow in a quoted appendix. Positioning, animation, images and drawing detail are discarded. Works in both modes.' },
+        { sig: 'getImage(imagePath: string, mimeType: string): Promise<Blob>', desc: 'Extract an embedded image by package path (e.g. `ppt/media/image1.png`) as a Blob of the given MIME type. Cached with getMedia under one count and byte budget.' },
+        { sig: 'getMedia(mediaPath: string): Promise<Blob>', desc: 'Extract the audio or video bytes a MediaElement references, by package path.' },
+        { sig: 'collectSlideRuns(slideIndex: number, width?: number): Promise<PptxTextRunInfo[]>', desc: 'Collect a slide’s text runs with CSS-pixel geometry at `width` (default 960) without painting a visible canvas. Works in both modes.' },
+        { sig: 'getSlideIndexByPartName(partName: string): number | undefined', desc: 'Resolve a slide part name such as `ppt/slides/slide3.xml` to its 0-based index, or undefined.' },
+        { sig: 'resolveInternalTarget(ref: string, currentIndex?: number): number | undefined', desc: 'Resolve the ref of an internal HyperlinkTarget (a relative `ppaction://hlinkshowjump` or a slide-part jump) to a slide index, relative to currentIndex (default 0).' },
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
@@ -426,6 +446,9 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FONTS, GFONTS_DEPRECATED,
         CJK_FALLBACK,
         PASSWORD,
+        ON_SCALE_CHANGE,
+        WASM_URL,
+        WORKER_TIMEOUT,
         ZIP,
         RESOURCE_LIMITS,
         IMAGE_RESOURCES,
@@ -453,6 +476,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'goToComment(slideIndex: number, commentIndex: number, opts?: { behavior?: "auto" | "smooth" }): Promise<boolean>', desc: 'Reveal and highlight one entry from presentation.getComments(slideIndex). Resolves after modern element bounds or the authored slide point has been selected; returns false for an invalid locator or unresolved target.' },
         ...findMethods('PptxMatchLocation'),
         { sig: 'setScale(scale: number): void', desc: 'Set the absolute zoom scale at runtime (clamped to the effective zoom range, which includes a width fit below zoomMin). Flicker-free. View-only.' },
+        ...scrollZoomMethods('slide'),
         { sig: 'relayout(): void', desc: 'Force a re-fit + re-mount of the visible window. Called automatically after load / resize / zoom; use it when the container resizes in a way a ResizeObserver cannot observe (e.g. a late web-font load). Idempotent.' },
         { sig: 'get slideCount(): number', desc: 'Total slides (0 until loaded).' },
         { sig: 'get availableSlideCount(): number', desc: 'Paintable opening-slide prefix; the full scroll extent already uses slideCount.' },
@@ -481,6 +505,10 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FONTS, GFONTS_DEPRECATED,
         CJK_FALLBACK,
         PASSWORD,
+        WASM_URL,
+        WORKER_TIMEOUT,
+        { name: 'container', type: 'HTMLElement', def: 'canvas parent', desc: 'Element that fitWidth / fitPage measure against. Defaults to the element that holds the canvas.' },
+        { name: 'defaultTextColor', type: 'string', def: "'#000000'", desc: 'Document default text color (any CSS color) used where a run resolves no explicit or theme color.' },
         { name: 'enableTextSelection', type: 'boolean', def: 'false', desc: 'Overlay a transparent text layer for native selection & copy.' },
         ...DOCX_LAYOUT_VIEW_OPTIONS, DOCX_FOOTNOTE_CONTINUATION,
         { name: 'enableElementSelection', type: 'boolean', def: 'false', desc: 'Enable read-only picture, chart, and shape selection with a non-editable outline and element context. No editor model is added.' },
@@ -559,6 +587,12 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'renderPageToBitmap(index, opts?: { width?, dpr?, onTextRun? }): Promise<ImageBitmap>', desc: 'Render one page and return it as an ImageBitmap (both modes; in worker mode page paint, equations, ChartEx, 3-D charts and Region Maps run off the main thread and return the same text-run stream beside the bitmap). The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: 'The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.' },
         { sig: 'getElementContextAt(pageIndex, point, options?): Promise<DocxElementContext | null>', desc: 'Return compact context for the topmost rendered picture, chart, or shape—including inline content—at a physical-page-point coordinate in either mode.' },
         partFailuresGetter('docx'),
+        { sig: 'toMarkdown(): Promise<string>', desc: 'Best-effort, text-focused GitHub-flavoured Markdown for AI ingestion and full-text search: headings from outline levels, lists, tables, bold / italic / strikethrough / links, footnotes and endnotes collated at the end and comments in a quoted appendix. Positioning, sections, fonts and drawings are discarded. Works in both modes.' },
+        { sig: 'get document(): DocxDocumentModel', desc: 'The raw parsed document model. Available only in `main` mode; throws in `worker` mode, where the model stays in the worker.' },
+        { sig: 'get footnotes(): DocNote[]', desc: 'Footnotes (`word/footnotes.xml`) as data, without the separator entries; [] when absent. They are also drawn on their pages.' },
+        { sig: 'get endnotes(): DocNote[]', desc: 'Endnotes (`word/endnotes.xml`) as data, without the separator entries; [] when absent.' },
+        { sig: 'getImage(imagePath: string, mimeType: string): Promise<Blob>', desc: 'Extract an embedded image by package path (e.g. `word/media/image1.png`) as a Blob of the given MIME type, cached per path.' },
+        { sig: 'getFontBytes(partPath: string): Promise<Uint8Array>', desc: 'Raw bytes of an embedded font part (e.g. `word/fonts/font1.odttf`), still obfuscated as stored.' },
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],
@@ -590,6 +624,10 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FONTS, GFONTS_DEPRECATED,
         CJK_FALLBACK,
         PASSWORD,
+        ON_SCALE_CHANGE,
+        WASM_URL,
+        WORKER_TIMEOUT,
+        { name: 'defaultTextColor', type: 'string', def: "'#000000'", desc: 'Document default text color (any CSS color) used where a run resolves no explicit or theme color.' },
         ZIP,
         RESOURCE_LIMITS,
         IMAGE_RESOURCES,
@@ -622,6 +660,7 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'setShowTrackedChanges(value: boolean): Promise<void>', desc: 'Switch between the final view (false, default) and the tracked-change markup view (true) at runtime. Resolves after matching layout geometry is ready and mounted pages have been refreshed.' },
         ...findMethods('DocxMatchLocation'),
         { sig: 'setScale(scale: number): void', desc: 'Set the absolute zoom scale at runtime (clamped to the effective zoom range, which includes a width fit below zoomMin). Flicker-free. View-only.' },
+        ...scrollZoomMethods('page'),
         { sig: 'relayout(): void', desc: 'Force a re-fit + re-mount of the visible window. Called automatically after load / resize / zoom; use it when the container resizes in a way a ResizeObserver cannot observe (e.g. a late web-font load). Idempotent.' },
         { sig: 'get pageCount(): number', desc: 'Pages available so far (0 until loaded); authoritative only when layoutComplete is true.' },
         { sig: 'get topVisiblePage(): number', desc: 'Index of the top-most visible page.' },
@@ -656,6 +695,8 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         FONTS, GFONTS_DEPRECATED,
         CJK_FALLBACK,
         PASSWORD,
+        WASM_URL,
+        WORKER_TIMEOUT,
         ZIP,
         RESOURCE_LIMITS,
         XLSX_WORKSHEET_LIMITS,
@@ -705,12 +746,15 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'relayout(): Promise<void>', desc: 'Re-read the viewport box, clamp the current offset, and render again after an external layout change.' },
         { sig: 'getScale(): number', desc: 'The current zoom factor (1 = 100%).' },
         { sig: 'setScale(scale: number): void', desc: 'Set the zoom factor (1 = 100%), clamped to [zoomMin, zoomMax] and snapped to whole percent; re-renders and fires onScaleChange when it changes. View-only.' },
+        { sig: 'zoomIn(): void', desc: 'Step up to the next rung of the shared zoom ladder, clamped to zoomMax (routes through setScale).' },
+        { sig: 'zoomOut(): void', desc: 'Step down to the next lower rung of the shared zoom ladder, clamped to zoomMin.' },
         { sig: 'fitWidth(): void', desc: 'Fit the used data range WIDTH (row header + used columns) to the canvas area (routes through setScale). Defers when unloaded / unlaid-out.' },
         { sig: 'fitPage(): void', desc: 'Fit the used data range WIDTH and HEIGHT inside the canvas area so the whole used range is visible without scrolling — takes the tighter of the two fits. Defers when unloaded / unlaid-out.' },
         ...findMethods('XlsxMatchLocation'),
         { sig: 'setSelectionColor(color: string): void', desc: 'Change the selection accent color at runtime (any CSS color).' },
         { sig: 'get hiddenSheetMode(): "show" | "skip" | "dim"', desc: 'The current hidden-sheet mode.' },
         { sig: 'setHiddenSheetMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-sheet mode at runtime: restyle the tabs and re-render. Entering `skip` while on a hidden sheet advances to the nearest visible sheet.' },
+        { sig: 'get visibleSheetCount(): number', desc: 'Number of sheets that are not hidden; sheetCount stays the absolute count.' },
         { sig: 'getCellAt(clientX: number, clientY: number): CellAddress | null', desc: 'Hit-test a viewport coordinate to a cell address.' },
         { sig: 'get canvasElement(): HTMLCanvasElement', desc: 'The underlying canvas the grid is drawn on.' },
         partFailuresGetter('xlsx'),
@@ -784,6 +828,10 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'relayout(): Promise<void>', desc: 'Re-read the canvas CSS box and repaint the current viewport.' },
         ...zoomMethods(false),
         ...findMethods('XlsxMatchLocation'),
+        { sig: 'setSelectionColor(color: string): void', desc: 'Change the selection accent color at runtime (any CSS color); the current selection repaints immediately.' },
+        { sig: 'get hiddenSheetMode(): "show" | "skip" | "dim"', desc: 'The current hidden-sheet mode.' },
+        { sig: 'setHiddenSheetMode(mode: "show" | "skip" | "dim"): Promise<void>', desc: 'Switch the hidden-sheet mode at runtime and re-render. Entering `skip` while on a hidden sheet advances to the nearest visible sheet.' },
+        { sig: 'get visibleSheetCount(): number', desc: 'Number of sheets that are not hidden; sheetCount stays the absolute count.' },
         { sig: 'get selectionState(): XlsxSelectionState | null', desc: 'Detached canonical state for the current selection.' },
         { sig: 'setSelection(input: string | XlsxSelectionState | null): void', desc: 'Set an A1 area, a complete canonical state, or clear the selection.' },
         { sig: 'getSelectionContext(options?: { maxCells?: number; maxTextCharacters?: number }): XlsxSelectionContext | null', desc: 'Return bounded selected-cell content, including attached comments, or clicked chart, picture, or shape context for AI/MCP use.' },
@@ -811,6 +859,12 @@ export const apiReference: Record<'docx' | 'xlsx' | 'pptx', ApiClass[]> = {
         { sig: 'renderViewportToBitmap(sheetIndex, viewport, opts: RenderViewportToBitmapOptions): Promise<ImageBitmap>', desc: 'Render a sheet viewport and return it as an ImageBitmap (both modes; in worker mode viewport paint, equations, ChartEx, 3-D charts and Region Maps run off the main thread). `width` and `height` are required — a worker has no DOM element to measure. The bitmap is caller-owned: pass it to `transferFromImageBitmap` (which consumes it) or call `bitmap.close()`.', emphasis: '`width` and `height` are required — a worker has no DOM element to measure.' },
         { sig: 'resolveValidationList(sheetIndex, formula1): Promise<ResolvedList>', desc: 'Resolve a list-type data-validation `formula1` (ECMA-376 §18.3.1.32) into the allowed values to display — inline quoted list, a range reference (each cell’s display string), or `{ kind: \'formula\' }` for named ranges. Read-only.' },
         partFailuresGetter('xlsx'),
+        { sig: 'toMarkdown(): Promise<string>', desc: 'Best-effort, text-focused GitHub-flavoured Markdown for AI ingestion and full-text search: each sheet becomes a `## SheetName` section with a pipe table of its populated range; comments follow in a quoted appendix. Styling, charts and drawings are discarded. Works in both modes.' },
+        { sig: 'cellText(ws: Worksheet, cell: Cell): string', desc: 'The display string the grid draws for a cell (number formats, dates, booleans, flattened rich text); empty before load.' },
+        { sig: 'get tabColors(): (string | null)[]', desc: 'Per-sheet tab colors (`#RRGGBB`) parallel to sheetNames; null where a sheet declares none.' },
+        { sig: 'sheetVisibility(sheetIndex: number): SheetVisibility', desc: "`'visible'`, `'hidden'` or `'veryHidden'` for a 0-based sheet index; out-of-range indexes report `'visible'`." },
+        { sig: 'isHidden(sheetIndex: number): boolean', desc: 'Whether a sheet is hidden or veryHidden; out-of-range indexes report false.' },
+        { sig: 'getImage(imagePath: string, mimeType: string): Promise<Blob>', desc: 'Extract an embedded image by package path (e.g. `xl/media/image1.png`) as a Blob of the given MIME type.' },
         RESOURCE_METRICS_METHOD,
         { sig: 'destroy(): void', desc: 'Release the worker.' },
       ],

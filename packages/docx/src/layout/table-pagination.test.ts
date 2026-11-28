@@ -97,6 +97,8 @@ function row(
 function acquisition(
   rows: readonly TableRowLayoutInput[],
   id = 'table-0',
+  /** A nested table is acquired at its cell's content origin, (0, 0). */
+  origin: Readonly<{ xPt: number; yPt: number }> = { xPt: 10, yPt: 20 },
 ): RetainedTableAcquisition {
   const columnCount = Math.max(1, ...rows.flatMap((item) => item.cells.map(
     (cell) => cell.columnStart + cell.columnSpan,
@@ -111,10 +113,10 @@ function acquisition(
   const placement = {
     container: {
       id: 'body', kind: 'body' as const,
-      bounds: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 500 },
+      bounds: { ...origin, widthPt: 100, heightPt: 500 },
     },
-    cursor: { xPt: 10, yPt: 20 },
-    availableBounds: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 500 },
+    cursor: origin,
+    availableBounds: { ...origin, widthPt: 100, heightPt: 500 },
   };
   return Object.freeze({
     input,
@@ -231,6 +233,57 @@ function take(
     ...overrides,
   });
 }
+
+/** A row of cells, each holding the given paragraphs as its blocks. */
+const cellsRow = (
+  logicalRowIndex: number,
+  cells: readonly (readonly ParagraphLayout[])[],
+  options: { repeatedHeader?: boolean } = {},
+): TableRowLayoutInput => {
+  const template = row(logicalRowIndex, 10, options);
+  return {
+    ...template,
+    cells: cells.map((paragraphs, columnStart) => ({
+      ...template.cells[0]!,
+      id: `cell-${logicalRowIndex}.${columnStart}`,
+      columnStart,
+      blocks: paragraphs.map((layout, sourceBlockIndex) => ({ layout, sourceBlockIndex })),
+    })),
+  };
+};
+
+/** The paragraph with a layoutInCell drawing whose containment interval
+ * (ECMA-376 §20.4.2.3) is `drawingBounds`, in the paragraph's coordinates. */
+const withContainedDrawing = (
+  plain: ParagraphLayout,
+  drawingBounds: Readonly<{ xPt: number; yPt: number; widthPt: number; heightPt: number }>,
+): ParagraphLayout => layoutParagraph({
+  ...plain,
+  lines: plain.lines.map((line, index) => index > 0 ? line : {
+    ...line,
+    placements: [{
+      kind: 'drawing' as const, range: line.range, drawingId: `${plain.id}:drawing`,
+      bounds: drawingBounds, advancePt: 0,
+    }],
+  }),
+  drawings: [{
+    kind: 'drawing', id: `${plain.id}:drawing`, source: plain.source,
+    flowDomainId: plain.flowDomainId, ordinaryFlow: false,
+    flowBounds: drawingBounds, inkBounds: drawingBounds,
+    advancePt: 0, commands: [],
+    anchorLayer: {
+      occurrenceId: `${plain.id}:drawing`, behindDoc: false, relativeHeight: 1, sourceOrder: 0,
+      horizontalOwnership: 'host', verticalOwnership: 'host',
+      layoutInCell: true, cellContainment: true,
+    },
+  }],
+  cellContainmentBounds: drawingBounds,
+});
+
+const bottomAlignedSecondCell = (input: TableRowLayoutInput): TableRowLayoutInput => ({
+  ...input,
+  cells: input.cells.map((cell, index) => index === 1 ? { ...cell, vAlign: 'bottom' as const } : cell),
+});
 
 describe('retained table pagination', () => {
   afterEach(() => {
@@ -385,8 +438,15 @@ describe('retained table pagination', () => {
         mergedRow(4, [mergedCell(4, 0, 'none'), mergedCell(4, 1, 'none')]),
       ];
       expect(completedPartialRowWindowEnd(rows[0]!, rows, 0, 1)).toBe(2);
-      // Without the projection fact the same continuations open nothing.
+      // Without the segment fact the window is not extended: a fragment's
+      // continuation holds no content, and following it from every row of a
+      // long merge would lay out the merge's rest again for each of them.
       expect(completedPartialRowWindowEnd(rows[0]!, rows, 0)).toBe(0);
+      const long = Array.from({ length: 200 }, (_unused, index) =>
+        mergedRow(index, [mergedCell(index, 0, 'none'), mergedCell(index, 1, index === 0 ? 'restart' : 'continue')]));
+      const followed = long.slice(1).reduce((sum, row, index) =>
+        sum + completedPartialRowWindowEnd(row, long, index + 1) - (index + 1), 0);
+      expect(followed).toBe(0);
     });
   });
 
@@ -1037,7 +1097,9 @@ describe('retained table pagination', () => {
     expect(second.requiresFreshPage).toBe(false);
   });
 
-  it('fails fast when no block boundary can advance on a fresh page', () => {
+  it('retains an over-page indivisible unit, clipped, on a fresh page', () => {
+    // Moving on cannot gain space, so the first unit is kept and clipped to
+    // the band (ECMA-376 §17.4.6 lets the row continue) instead of failing.
     const retained = paragraph('unplaceable-zero-line', []);
     const unplaceable = {
       ...retained,
@@ -1047,9 +1109,225 @@ describe('retained table pagination', () => {
     };
     const source = acquisition([row(0, 120, { paragraph: unplaceable })]);
 
-    expect(() => take(source, 100, startTableFragmentCursor(), {
-      freshPageHeightPt: 100,
-    })).toThrow('Table pagination cannot advance from a fresh page');
+    const result = take(source, 100, startTableFragmentCursor(), { freshPageHeightPt: 100 });
+    expect(result.requiresFreshPage).toBe(false);
+    expect(result.nextCursor).toBeNull();
+    expect(result.fragment?.advancePt).toBe(100);
+    expect(result.fragment?.clipBounds?.heightPt).toBe(100);
+    expect(result.fragment?.unpaintedOverflowPt).toBe(20);
+  });
+
+  // LIBRARY_OVER_PAGE_TABLE_CELL_UNIT_CLIP: fresh-band recovery of cell units
+  // that no page can hold.
+  const rangesOf = (result: ReturnType<typeof take>, rowIndex = 0) =>
+    result.fragment?.rows[rowIndex]?.cells.map((cell) => cell.contentRanges);
+
+  it('clips an over-page first cell line on a fresh page and continues the cell on the next page', () => {
+    const source = acquisition([cellsRow(0, [[
+      paragraph('over-page-line', [120]),
+      paragraph('following', [10, 10]),
+    ]])]);
+
+    const first = take(source, 100);
+    expect(first.requiresFreshPage).toBe(false);
+    expect(rangesOf(first)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }]]);
+    expect(first.fragment?.advancePt).toBe(100);
+    expect(first.fragment?.clipBounds?.heightPt).toBe(100);
+    expect(first.fragment?.unpaintedOverflowPt).toBe(20);
+    expect(first.nextCursor).toMatchObject({ rowIndex: 0, rowFragmentIndex: 1, cells: [{ blockIndex: 1 }] });
+
+    const second = take(source, 100, first.nextCursor!);
+    expect(rangesOf(second)).toEqual([[{ kind: 'paragraph', blockIndex: 1, lineStart: 0, lineEnd: 2 }]]);
+    expect(second.fragment?.advancePt).toBe(20);
+    expect(second.fragment?.clipBounds).toBeUndefined();
+    expect(second.nextCursor).toBeNull();
+  });
+
+  type PaintedTable = Readonly<{
+    flowBounds: { yPt: number; heightPt: number };
+    clipBounds?: { yPt: number; heightPt: number };
+    rows: readonly Readonly<{ cells: readonly Readonly<{
+      contentBounds: { yPt: number };
+      blocks: readonly Readonly<{ offsetPt: number; layout: ParagraphLayout | PaintedTable & { kind: 'table' } }>[];
+    }>[] }>[];
+  }>;
+  /** Every cell line painted inside its table's clip, nested fragments
+   * included, as `paragraph:line`. A nested fragment counts only when its own
+   * clipped box lies inside the enclosing band. */
+  const paintedLines = (table: PaintedTable): string[] => {
+    const clip = table.clipBounds ?? table.flowBounds;
+    const bottomPt = clip.yPt + clip.heightPt + 1e-6;
+    return table.rows.flatMap((item) => item.cells.flatMap((cell) => cell.blocks.flatMap((block) => {
+      const layout = block.layout;
+      const originPt = cell.contentBounds.yPt + block.offsetPt;
+      if (layout.kind === 'table') {
+        const nestedClip = layout.clipBounds ?? layout.flowBounds;
+        return originPt >= clip.yPt - 1e-6 && originPt + nestedClip.heightPt <= bottomPt
+          ? paintedLines(layout) : [];
+      }
+      return layout.lines.flatMap((line) => {
+        const topPt = originPt + line.bounds.yPt - layout.flowBounds.yPt;
+        // Slices extend the source paragraph id.
+        return topPt >= clip.yPt - 1e-6 && topPt + line.advancePt <= bottomPt
+          ? [`${layout.id.split(':')[0]}:${line.range.start}`] : [];
+      });
+    })));
+  };
+  const visibleLines = (result: ReturnType<typeof take>): string[] =>
+    result.fragment ? paintedLines(result.fragment as unknown as PaintedTable) : [];
+  /** Take fragments on fresh 100pt pages until the table ends. */
+  const takeAll = (
+    source: RetainedTableAcquisition,
+    overrides: Partial<TableFragmentContext> = {},
+  ): ReturnType<typeof take>[] => {
+    const results: ReturnType<typeof take>[] = [];
+    let cursor: ReturnType<typeof take>['nextCursor'] = startTableFragmentCursor();
+    while (cursor && results.length < 4) {
+      const result = take(source, 100, cursor, overrides);
+      expect(result.requiresFreshPage).toBe(false);
+      results.push(result);
+      cursor = result.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    return results;
+  };
+
+  it('admits cell text past a layoutInCell containment no fresh band can hold', () => {
+    // The drawing's containment ends 120pt below its paragraph top, past any
+    // 100pt band. It stops charging admission only on a fresh band; the text
+    // keeps flowing instead of one line per page.
+    const anchored = withContainedDrawing(
+      paragraph('contained-anchor', [10, 10, 10]),
+      { xPt: 0, yPt: 90, widthPt: 20, heightPt: 30 },
+    );
+    const source = acquisition([cellsRow(0, [[anchored, paragraph('after-anchor', [10])]])]);
+
+    // Relocating can still gain space: the containment keeps charging.
+    expect(take(source, 60).requiresFreshPage).toBe(true);
+
+    const fresh = take(source, 100);
+    expect(rangesOf(fresh)).toEqual([[
+      { kind: 'whole', blockIndex: 0 },
+      { kind: 'whole', blockIndex: 1 },
+    ]]);
+    expect(fresh.nextCursor).toBeNull();
+    // The left-out interval no longer grows the row; its drawing is clipped
+    // with the fragment.
+    expect(fresh.fragment?.advancePt).toBe(40);
+    expect(fresh.fragment?.clipBounds?.heightPt).toBe(40);
+    expect(visibleLines(fresh)).toHaveLength(4);
+  });
+
+  it('paints every recovered line once beside a drawing that starts above its text', () => {
+    // Containment from -20pt to +120pt of its paragraph: no 100pt band holds
+    // it. Materialization must not move the admitted text down by the 20pt
+    // above it, and a bottom-aligned sibling must not align against the
+    // over-band row; otherwise admitted lines are clipped with the cursor
+    // already past them.
+    const anchored = withContainedDrawing(
+      paragraph('raised-anchor', Array.from({ length: 12 }, () => 10)),
+      { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+    );
+    const source = acquisition([bottomAlignedSecondCell(
+      cellsRow(0, [[anchored], [paragraph('bottom-aligned', [10])]]),
+    )]);
+    const seen = takeAll(source).flatMap(visibleLines);
+    expect(seen.sort()).toEqual([
+      ...Array.from({ length: 12 }, (_, line) => `raised-anchor:${line}`),
+      'bottom-aligned:0',
+    ].sort());
+  });
+
+  it('anchors a floating table to the recovered placement of its paragraph', () => {
+    // Materialization puts the recovered text at the cell top, not 20pt below
+    // the drawing that starts above it; a text-relative float follows it.
+    const anchored = withContainedDrawing(
+      paragraph('float-anchor', [10, 10, 10, 10]),
+      { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+    );
+    const floating = acquisition([row(0, 10)], 'floating-table');
+    const source = withNestedFloatingTable(acquisition([cellsRow(0, [[anchored]])]), floating);
+
+    const results = takeAll(source, {
+      floatingTableFrames: {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 120 },
+        margin: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 100 },
+        column: { xPt: 10, yPt: 20, widthPt: 100, heightPt: 100 },
+      },
+      floatingTableRegistry: {
+        coordinateSpace: 'logical-page-points', flowDomainId: 'logical-page:1',
+        entries: Object.freeze([]), nextParagraphId: 0,
+      },
+      reacquirePageDependentBlock: (request: { acquired: ParagraphLayout }) => request.acquired,
+    } as unknown as Partial<TableFragmentContext>);
+    expect(results).toHaveLength(1);
+    const fragment = results[0]!.fragment!;
+    const cell = fragment.rows[0]!.cells[0]!;
+    const paintedTopPt = cell.contentBounds.yPt + cell.blocks[0]!.offsetPt;
+    const [placement] = results[0]!.floatingTablePlacements ?? [];
+    expect(placement?.source.anchorBounds.yPt).toBe(paintedTopPt);
+    // The text-relative float (6pt below its anchor) stays inside the band.
+    expect(placement?.yPt).toBe(paintedTopPt + 6);
+    // take() places the fragment at y=20 in a 100pt band.
+    expect(placement!.bounds.yPt + placement!.bounds.heightPt).toBeLessThanOrEqual(120);
+    expect(results.flatMap(visibleLines).sort()).toEqual([
+      'float-anchor:0', 'float-anchor:1', 'float-anchor:2', 'float-anchor:3',
+    ]);
+  });
+
+  it.each([
+    // word-parallel-paragraph-row-cut rejects the short cell's progress alone;
+    // the recovery is decided after it, so both cells share one clipped page.
+    ['word', 1],
+    // No such rule: the short cell goes first, the tall one is recovered next.
+    ['standard', 2],
+  ] as const)(
+    'recovers a blocked cell beside a progressing cell on a fresh page (%s)',
+    (compatibility, expectedPages) => {
+      const source = acquisition([cellsRow(0, [
+        [paragraph('tall', [120])],
+        [paragraph('short', [10])],
+      ])]);
+      let cursor: ReturnType<typeof take>['nextCursor'] = startTableFragmentCursor();
+      const tallPages: number[] = [];
+      let pages = 0;
+      while (cursor && pages < 3) {
+        const result = take(source, 100, cursor, { compatibility });
+        expect(result.requiresFreshPage).toBe(false);
+        if (rangesOf(result)?.[0]?.length) tallPages.push(pages);
+        pages += 1;
+        cursor = result.nextCursor;
+        if (!cursor) {
+          expect(result.fragment?.clipBounds?.heightPt).toBe(100);
+          expect(result.fragment?.unpaintedOverflowPt).toBe(20);
+        }
+      }
+      expect(cursor).toBeNull();
+      expect(pages).toBe(expectedPages);
+      expect(tallPages).toEqual([expectedPages - 1]);
+    },
+  );
+
+  it('recovers a body row continued below a repeated header on a fresh page', () => {
+    const header = cellsRow(0, [[paragraph('header', [20])]], { repeatedHeader: true });
+    const body = cellsRow(1, [[paragraph('body', [10, 120, 10])]]);
+    const source = acquisition([header, body]);
+
+    const first = take(source, 100);
+    expect(rangesOf(first, 1)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 0, lineEnd: 1 }]]);
+    expect(first.fragment?.clipBounds).toBeUndefined();
+
+    const second = take(source, 100, first.nextCursor!);
+    expect(second.fragment?.rows.map((item) => item.ownership)).toEqual(['repeated-header', 'source']);
+    expect(rangesOf(second, 1)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 1, lineEnd: 2 }]]);
+    expect(second.fragment?.advancePt).toBe(100);
+    expect(second.fragment?.clipBounds?.heightPt).toBe(100);
+
+    const third = take(source, 100, second.nextCursor!);
+    expect(third.fragment?.rows.map((item) => item.ownership)).toEqual(['repeated-header', 'source']);
+    expect(rangesOf(third, 1)).toEqual([[{ kind: 'paragraph', blockIndex: 0, lineStart: 2, lineEnd: 3 }]]);
+    expect(third.fragment?.advancePt).toBe(30);
+    expect(third.nextCursor).toBeNull();
   });
 
   it('requests a fresh page for an unbreakable row that fits the fresh band', () => {
@@ -1850,4 +2128,303 @@ describe('oversized note table source work', () => {
     // source-sized budget at all three sizes; no wall-clock assertion.
     expect(visits).toBeLessThanOrEqual(20 * count);
   });
+});
+
+// The materialized fragment at every nesting depth is the selection admission
+// accepted: nothing selected, cut, clipped or recovered is replaced by its
+// source layout on the way out.
+describe('table fragment selection conservation', () => {
+  const BAND_TOP_PT = 20;
+  const BAND_PT = 100;
+  const NESTED_ORIGIN = { xPt: 0, yPt: 0 };
+  /** Line length a rotated sibling cell requires of its row. */
+  const ROTATED_PT = 30;
+  type Leaf = 'flow' | 'recovery' | 'recoveryCut' | 'cantSplit';
+  type Wrap = 'bare' | 'mixed' | 'blocked' | 'rotated';
+  type Case = Readonly<{
+    depth: number; leaf: Leaf; wrap: Wrap; floating: boolean; compatibility: 'word' | 'standard';
+  }>;
+  const lines = (count: number) => Array.from({ length: count }, () => 10);
+
+  /** `depth` tables nested in one another, the leaf innermost. Returns every
+   * source line as `paragraph:line` and the lines Word's over-page cantSplit
+   * clip hides by rule. */
+  const build = (item: Case) => {
+    const expected: string[] = [];
+    const text = (id: string, count: number): ParagraphLayout => {
+      for (let line = 0; line < count; line += 1) expected.push(`${id}:${line}`);
+      return paragraph(id, lines(count));
+    };
+    const origin = (level: number) => level === 1 ? undefined : NESTED_ORIGIN;
+    const leafRow = (): TableRowLayoutInput => {
+      switch (item.leaf) {
+        // Ordinary continuation across pages, no recovery.
+        case 'flow': return bottomAlignedSecondCell(
+          cellsRow(0, [[text('flow', 25)], [text('leaf-side', 1)]]),
+        );
+        // A containment from -20pt to +120pt of its paragraph: no band holds
+        // it. The recovered text fits one band (40pt), or is cut (120pt).
+        case 'recovery':
+        case 'recoveryCut': return bottomAlignedSecondCell(cellsRow(0, [
+          [withContainedDrawing(
+            text('raised', item.leaf === 'recovery' ? 4 : 12),
+            { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+          )],
+          [text('leaf-side', 1)],
+        ]));
+        // 120pt that may not split: Word clips it, the standard continues it.
+        case 'cantSplit': return {
+          ...cellsRow(0, [[text('cant', 12)], [text('leaf-side', 1)]]),
+          cantSplit: true,
+        };
+      }
+    };
+    const floating = item.floating
+      ? acquisition([row(0, 10, { paragraph: paragraph('floating', [10]) })], 'floating-table', NESTED_ORIGIN)
+      : null;
+    let table = acquisition([leafRow()], `table-${item.depth}`, origin(item.depth));
+    if (floating) table = withNestedFloatingTable(table, floating);
+    // `bare`: each enclosing cell holds only the nested table, beside a
+    // bottom-aligned sibling, so every level can complete in one fragment.
+    // `mixed`: paragraphs around the nested table, cell margins, a following
+    // row and a repeated header on the outermost table, so levels are cut,
+    // continued, and narrower than the page band.
+    // `blocked`: the sibling is itself a unit no band holds, so every
+    // enclosing row recovers around the nested table.
+    // `rotated`: the sibling is a rotated cell (ECMA-376 §17.4.72), whose
+    // content is never sliced: its row's first fragment owns it.
+    const mixed = item.wrap === 'mixed';
+    const INSET_PT = 7;
+    const HEADER_PT = 20;
+    for (let level = item.depth - 1; level >= 1; level -= 1) {
+      const nested = table;
+      const sibling = item.wrap === 'blocked'
+        ? withContainedDrawing(text(`blocked-${level}`, 4), { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 })
+        : text(`side-${level}`, 1);
+      const body = bottomAlignedSecondCell(cellsRow(mixed && level === 1 ? 1 : 0, [
+        [
+          ...(mixed && level % 2 === 0 ? [text(`lead-${level}`, 1)] : []),
+          nested.layout as unknown as ParagraphLayout,
+          ...(mixed && level % 2 === 1 ? [text(`trail-${level}`, 2)] : []),
+        ],
+        [sibling],
+      ]));
+      const inset: TableRowLayoutInput = mixed ? {
+        ...body,
+        cells: body.cells.map((cell) => ({
+          ...cell, margins: { topPt: 3, rightPt: 0, bottomPt: INSET_PT - 3, leftPt: 0 },
+        })),
+      } : item.wrap === 'rotated' ? {
+        ...body,
+        cells: body.cells.map((cell, index) => index === 1 ? {
+          ...cell,
+          vAlign: 'top' as const,
+          verticalText: { mode: 'vert' as const, lineLengthPt: ROTATED_PT, requiredLineLengthPt: ROTATED_PT },
+        } : cell),
+      } : body;
+      if (mixed && level === 1) expected.push('header:0');
+      const rows = mixed && level === 1 ? [
+        // A source row on the table's first page; its repetitions on later
+        // pages are not source lines.
+        cellsRow(0, [[paragraph('header', [HEADER_PT])]], { repeatedHeader: true }),
+        inset,
+        cellsRow(2, [[text('below', 1)]]),
+      ] : [inset];
+      table = Object.freeze({
+        ...acquisition(rows, `table-${level}`, origin(level)),
+        nestedById: Object.freeze({ [nested.layout.id]: nested }),
+      });
+    }
+    // Word clips an over-page cantSplit row at its own fresh band and paints
+    // nothing below it (word-over-page-cant-split-clip): the page band less
+    // every enclosing inset.
+    const cantSplitBandPt = BAND_PT
+      - (mixed && item.depth > 1 ? HEADER_PT + INSET_PT * (item.depth - 1) : 0);
+    const hidden = item.leaf === 'cantSplit' && item.compatibility === 'word'
+      ? expected.filter((line) => {
+        const [id, index] = line.split(':');
+        return id === 'cant' && (Number(index) + 1) * 10 > cantSplitBandPt;
+      }) : [];
+    return { source: table, expected, hidden };
+  };
+
+  type Painted = Readonly<{
+    kind: 'table';
+    id: string;
+    flowBounds: { yPt: number; heightPt: number };
+    clipBounds?: { yPt: number; heightPt: number };
+    resolvedFloatingTables?: readonly Readonly<{
+      source: { tableId: string; anchorBounds: { yPt: number } };
+    }>[];
+    rows: readonly Readonly<{ ownership?: 'source' | 'repeated-header'; cells: readonly Readonly<{
+      flowBounds: { yPt: number };
+      verticalText?: object;
+      blocks: readonly Readonly<{ offsetPt: number; layout: ParagraphLayout | Painted }>[];
+    }>[] }>[];
+  }>;
+  type Seen = {
+    materialized: string[];
+    visible: string[];
+    tables: { id: string; topPt: number; bottomPt: number }[];
+    paragraphTops: Map<string, number>;
+    floats: { tableId: string; anchorTopPt: number }[];
+  };
+  /** Walk a painted fragment in page coordinates. `originPt` is the page
+   * position of the table's local y = 0; `clip` the intersection of every
+   * enclosing clip and the page band. */
+  const walk = (
+    table: Painted,
+    originPt: number,
+    clip: Readonly<{ topPt: number; bottomPt: number }>,
+    seen: Seen,
+  ): void => {
+    const topPt = originPt + table.flowBounds.yPt;
+    seen.tables.push({ id: table.id, topPt, bottomPt: topPt + table.flowBounds.heightPt });
+    const own = table.clipBounds ? {
+      topPt: Math.max(clip.topPt, originPt + table.clipBounds.yPt),
+      bottomPt: Math.min(clip.bottomPt, originPt + table.clipBounds.yPt + table.clipBounds.heightPt),
+    } : clip;
+    for (const placement of table.resolvedFloatingTables ?? []) {
+      seen.floats.push({ tableId: placement.source.tableId, anchorTopPt: placement.source.anchorBounds.yPt });
+    }
+    for (const item of table.rows) for (const cell of item.cells) for (const block of cell.blocks) {
+      if (item.ownership === 'repeated-header') continue;
+      const blockTopPt = originPt + cell.flowBounds.yPt + block.offsetPt;
+      const layout = block.layout;
+      if (layout.kind === 'table') {
+        walk(layout, blockTopPt, own, seen);
+        continue;
+      }
+      // Slices extend the source paragraph id.
+      const id = layout.id.split(':')[0]!;
+      if (layout.lines[0]?.range.start === 0) seen.paragraphTops.set(id, blockTopPt);
+      for (const line of layout.lines) {
+        // A rotated cell's lines run along its row from the cell top; the
+        // others stack down from their block.
+        const lineTopPt = cell.verticalText
+          ? originPt + cell.flowBounds.yPt
+          : blockTopPt + line.bounds.yPt - layout.flowBounds.yPt;
+        const lineExtentPt = cell.verticalText ? ROTATED_PT : line.advancePt;
+        seen.materialized.push(`${id}:${line.range.start}`);
+        if (lineTopPt >= own.topPt - 1e-6 && lineTopPt + lineExtentPt <= own.bottomPt + 1e-6) {
+          seen.visible.push(`${id}:${line.range.start}`);
+        }
+      }
+    }
+  };
+
+  it('fragments a chain of recovering nested tables in work linear in its depth', () => {
+    // Single-row tables nested in one another, each holding its child beside
+    // a paragraph no band holds, so every level re-selects (recovers) its
+    // row. A level that fragments its child once per selection of its row,
+    // and selects its row once, costs the same at every depth; one that
+    // repeats either doubles the work per level. Source scans are counted,
+    // not time.
+    const scansAt = (depth: number): number => {
+      const blocked = (id: string) => withContainedDrawing(
+        paragraph(id, lines(4)), { xPt: 0, yPt: -20, widthPt: 20, heightPt: 140 },
+      );
+      let table = acquisition([cellsRow(0, [[blocked('leaf')]])], `chain-${depth}`, NESTED_ORIGIN);
+      for (let level = depth - 1; level >= 1; level -= 1) {
+        const nested = table;
+        table = Object.freeze({
+          ...acquisition([cellsRow(0, [
+            [nested.layout as unknown as ParagraphLayout], [blocked(`blocked-${level}`)],
+          ])], `chain-${level}`, level === 1 ? undefined : NESTED_ORIGIN),
+          nestedById: Object.freeze({ [nested.layout.id]: nested }),
+        });
+      }
+      let scans = 0;
+      const result = take(table, BAND_PT, startTableFragmentCursor(), {
+        chargeSourceScan: (units) => { scans += units; },
+      });
+      expect(result.nextCursor).toBeNull();
+      expect(result.fragment?.advancePt).toBe(40);
+      return scans;
+    };
+    const [at4, at8, at16] = [4, 8, 16].map(scansAt) as [number, number, number];
+    // Equal steps cost equal work: the per-level cost from 8 to 16 is that
+    // from 4 to 8, not its sixteenfold.
+    expect(at16 - at8).toBe(2 * (at8 - at4));
+  });
+
+  const cases: Case[] = [];
+  for (const depth of [1, 2, 3, 4]) for (const leaf of ['flow', 'recovery', 'recoveryCut', 'cantSplit'] as const) {
+    for (const wrap of (depth === 1 ? ['bare'] : ['bare', 'mixed', 'blocked', 'rotated']) as Wrap[]) {
+      for (const floating of [false, true]) for (const compatibility of ['word', 'standard'] as const) {
+        cases.push({ depth, leaf, wrap, floating, compatibility });
+      }
+    }
+  }
+
+  it.each(cases)(
+    'paints every line once inside its band: depth $depth, $leaf, $wrap, floating $floating, $compatibility',
+    (item) => {
+      const { source, expected, hidden } = build(item);
+      const anchorParagraph = item.leaf === 'flow' ? 'flow' : item.leaf === 'cantSplit' ? 'cant' : 'raised';
+      const frames = {
+        page: { xPt: 0, yPt: 0, widthPt: 200, heightPt: 140 },
+        margin: { xPt: 10, yPt: BAND_TOP_PT, widthPt: 100, heightPt: BAND_PT },
+      };
+      const acquired = (request: { acquired: ParagraphLayout }) => request.acquired;
+      const materialized: string[] = [];
+      const visible: string[] = [];
+      const floats: string[] = [];
+      const advances: number[] = [];
+      let cursor: ReturnType<typeof take>['nextCursor'] = startTableFragmentCursor();
+      let pages = 0;
+      while (cursor) {
+        expect(pages += 1).toBeLessThanOrEqual(12);
+        const result = take(source, BAND_PT, cursor, {
+          compatibility: item.compatibility,
+          page: { physicalPageIndex: pages, displayPageNumber: pages + 1, occurrenceId: `page-${pages}` },
+          ...(item.floating ? {
+            floatingTableFrames: { ...frames, column: frames.margin },
+            floatingTableRegistry: {
+              coordinateSpace: 'logical-page-points', flowDomainId: 'logical-page:1',
+              entries: Object.freeze([]), nextParagraphId: 0,
+            },
+            finalPlacementTranslationPt: { xPt: 0, yPt: 0 },
+            reacquirePageDependentBlock: acquired,
+            pagePlacement: { frames, translationPt: { xPt: 0, yPt: 0 }, reacquireParagraph: acquired },
+          } : {}),
+        } as unknown as Partial<TableFragmentContext>);
+        // A fresh band always makes progress.
+        expect(result.requiresFreshPage).toBe(false);
+        const fragment = result.fragment as unknown as Painted;
+        const seen: Seen = { materialized: [], visible: [], tables: [], paragraphTops: new Map(), floats: [] };
+        const band = { topPt: BAND_TOP_PT, bottomPt: BAND_TOP_PT + BAND_PT };
+        walk(fragment, 0, band, seen);
+        // No fragment at any depth exceeds its band: an over-band selection
+        // is clipped, never left at (or restored to) its source extent.
+        for (const table of seen.tables) {
+          expect(table.topPt, `${table.id} top on page ${pages}`).toBeGreaterThanOrEqual(band.topPt - 1e-6);
+          expect(table.bottomPt, `${table.id} bottom on page ${pages}`).toBeLessThanOrEqual(band.bottomPt + 1e-6);
+        }
+        // A positioned table is anchored where its paragraph is painted.
+        for (const float of seen.floats) {
+          expect(float.anchorTopPt).toBe(seen.paragraphTops.get(anchorParagraph));
+          floats.push(float.tableId);
+        }
+        materialized.push(...seen.materialized);
+        visible.push(...seen.visible);
+        advances.push(result.fragment!.advancePt);
+        cursor = result.nextCursor;
+      }
+      // Every source line is selected exactly once across the pages...
+      expect([...materialized].sort()).toEqual([...expected].sort());
+      // ...and painted inside every enclosing clip, except what Word's
+      // over-page cantSplit clip hides by rule.
+      expect([...visible].sort()).toEqual(expected.filter((line) => !hidden.includes(line)).sort());
+      expect(floats).toEqual(item.floating ? ['floating-table'] : []);
+      if (item.wrap === 'bare' && item.compatibility === 'word') {
+        // Every level completes in its first fragment, so each enclosing
+        // table keeps what the leaf selected: the recovered 40pt of text, or
+        // the cantSplit row's 100pt clip. Neither returns to its source
+        // extent (140pt, 120pt) under any number of enclosing tables.
+        if (item.leaf === 'recovery') expect(advances).toEqual([40]);
+        if (item.leaf === 'cantSplit') expect(advances).toEqual([BAND_PT]);
+      }
+    },
+  );
 });
