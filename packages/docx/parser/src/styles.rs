@@ -135,6 +135,12 @@ pub struct RunFmt {
     /// ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased — the language of text
     /// that is neither East Asian nor complex script.
     pub lang: Option<String>,
+    /// True when a `<w:lang>` element is present at THIS level (or anywhere in
+    /// a style chain already folded into this value). §17.3.2.20 separates an
+    /// absent element (the level inherits) from a present element whose
+    /// `w:val` is omitted (the Western language is "automatically determined"
+    /// for that level), so `apply_run` needs presence, not only the value.
+    pub lang_element_set_here: bool,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
     /// the pitch added AFTER each character before the next is rendered
     /// ("equivalent to the additional character pitch added by a document
@@ -1544,13 +1550,15 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.lang_east_asia.is_some() {
         dst.lang_east_asia = src.lang_east_asia.clone();
     }
-    // Renderer policy for §17.3.2.20 (not established by an Office control):
-    // each w:lang attribute cascades on its own, as w:eastAsia and w:bidi
-    // already do here and as Word's three run language properties are
-    // stored (MS-DOC 2.6.1); a lower level naming one axis keeps the others
-    // instead of the standard's automatic determination.
-    if src.lang.is_some() {
+    // ECMA-376 §17.3.2.20: an absent <w:lang> leaves the previous level's
+    // value; a present <w:lang> without w:val leaves the Western language to
+    // automatic determination, so the inherited w:val is cleared at that level
+    // (`lang` carries only an authored tag; none means no Canvas language).
+    // w:eastAsia and w:bidi above keep their established per-attribute merge,
+    // which feeds regional font selection and bidi digit classification.
+    if src.lang_element_set_here {
         dst.lang = src.lang.clone();
+        dst.lang_element_set_here = true;
     }
     // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
     // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
@@ -2321,6 +2329,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // Complex-script language tag (ECMA-376 §17.3.2.20 w:lang/@w:bidi). Lower-
     // cased; its primary subtag later decides European-digit AN classification.
     if let Some(lang) = child_w(rpr, "lang") {
+        fmt.lang_element_set_here = true;
         if let Some(bidi) = attr_w(lang, "bidi") {
             if !bidi.is_empty() {
                 fmt.lang_bidi = Some(bidi.to_lowercase());

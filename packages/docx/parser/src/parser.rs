@@ -280,34 +280,63 @@ mod private_typography_wire_tests {
     }
 
     #[test]
-    fn western_language_resolves_cascade_independently_of_other_slots() {
-        // Renderer policy, not an ECMA-376 rule: §17.3.2.20 leaves an omitted
-        // attribute to automatic determination. Each w:lang attribute is
-        // inherited through §17.7 docDefaults → paragraph style → character
-        // style → direct formatting on its own, the model this parser already
-        // uses for w:eastAsia and w:bidi and the shape of Word's own three
-        // run language properties (MS-DOC 2.6.1). How Word imports an omitted
-        // DOCX attribute is not established by an Office control.
+    fn western_language_follows_element_presence_through_the_cascade() {
+        // ECMA-376 §17.3.2.20: an absent <w:lang> inherits the previous level
+        // of the §17.7 cascade (docDefaults → paragraph style → character
+        // style → direct formatting); a present <w:lang> whose w:val is
+        // omitted leaves the Western language to automatic determination, so
+        // that level carries no w:val language. w:eastAsia and w:bidi keep
+        // their per-attribute merge (regional font selection and bidi input).
         let styles = StyleMap::parse(&format!(
             r#"<w:styles xmlns:w="{W_NS}">
           <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="en-US" w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults>
           <w:style w:type="paragraph" w:styleId="Base"><w:rPr><w:lang w:val="sr-Latn-RS"/></w:rPr></w:style>
           <w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style>
+          <w:style w:type="paragraph" w:styleId="Auto"><w:rPr><w:lang w:bidi="ar-SA"/></w:rPr></w:style>
+          <w:style w:type="paragraph" w:styleId="AutoChild"><w:basedOn w:val="Auto"/></w:style>
           <w:style w:type="character" w:styleId="Char"><w:rPr><w:lang w:bidi="ar-SA"/></w:rPr></w:style>
         </w:styles>"#
         ));
-        for (ppr, rpr, expected) in [
-            ("", "", "en-us"),
-            (r#"<w:pStyle w:val="Child"/>"#, "", "sr-latn-rs"),
+        for (ppr, rpr, expected, mark) in [
+            ("", "", Some("en-us"), Some("en-us")),
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                "",
+                Some("sr-latn-rs"),
+                Some("sr-latn-rs"),
+            ),
+            // A paragraph style (and its basedOn children) naming only
+            // w:bidi clears the docDefaults w:val.
+            (r#"<w:pStyle w:val="AutoChild"/>"#, "", None, None),
+            // A character style naming only w:bidi clears the paragraph
+            // style's w:val for the run; the paragraph mark keeps the
+            // paragraph style chain.
             (
                 r#"<w:pStyle w:val="Child"/>"#,
                 r#"<w:rStyle w:val="Char"/>"#,
-                "sr-latn-rs",
+                None,
+                Some("sr-latn-rs"),
             ),
             (
                 r#"<w:pStyle w:val="Child"/>"#,
                 r#"<w:lang w:val="RO-ro"/>"#,
-                "ro-ro",
+                Some("ro-ro"),
+                Some("sr-latn-rs"),
+            ),
+            // Direct formatting naming only w:eastAsia clears the inherited
+            // w:val too (the reviewed `sr-RS` + eastAsia-only case).
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                r#"<w:lang w:eastAsia="ja-JP"/>"#,
+                None,
+                Some("sr-latn-rs"),
+            ),
+            // A later level that names w:val again wins over the cleared one.
+            (
+                r#"<w:pStyle w:val="AutoChild"/>"#,
+                r#"<w:lang w:val="de-DE"/>"#,
+                Some("de-de"),
+                None,
             ),
         ] {
             let p = parse_p(
@@ -315,26 +344,30 @@ mod private_typography_wire_tests {
                 &styles,
             );
             let wire = first_run_json(&p, "text");
-            assert_eq!(wire["lang"], expected, "{ppr} {rpr}");
+            match expected {
+                Some(tag) => {
+                    assert_eq!(wire["lang"], tag, "{ppr} {rpr}");
+                    assert_eq!(wire["__typographyAcquisition"]["languages"]["val"], tag);
+                }
+                None => {
+                    assert!(wire.get("lang").is_none(), "{ppr} {rpr}");
+                    assert!(wire["__typographyAcquisition"]["languages"]
+                        .get("val")
+                        .is_none());
+                }
+            }
+            // w:eastAsia is merged per attribute exactly as before.
             assert_eq!(wire["langEastAsia"], "ja-jp", "{ppr} {rpr}");
-            assert_eq!(
-                wire["__typographyAcquisition"]["languages"]["val"],
-                expected
-            );
             // The paragraph mark inherits the style chain, not the run's
-            // direct formatting.
-            let mark = if rpr.contains("w:lang") {
-                "sr-latn-rs"
-            } else {
-                expected
-            };
+            // direct formatting or character style.
             assert_eq!(
                 p.paragraph_mark_font_facts
                     .as_ref()
                     .unwrap()
                     .lang
                     .as_deref(),
-                Some(mark)
+                mark,
+                "{ppr} {rpr}"
             );
         }
         // A run whose cascade never names w:val carries no language key, so
