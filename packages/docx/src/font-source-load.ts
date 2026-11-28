@@ -66,8 +66,8 @@ const DOCX_RUN_WEIGHTS: readonly number[] = Object.freeze([400, 700]);
 
 /**
  * Paint facts the rendered-text traversal does not spell, from one walk over
- * the parsed model (the same generic walk `vertical-render-capability.ts`
- * uses). Returns the extra texts layout synthesises for this document, or
+ * the parsed model (a generic walk, as `vertical-render-capability.ts`
+ * makes). Returns the extra texts layout synthesises for this document, or
  * `'all'` for a paint path whose scalars cannot be proven from the text:
  *
  * - text-box direction other than `horz` and §17.3.2.10 `eastAsianLayout`

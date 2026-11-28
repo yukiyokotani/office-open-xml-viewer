@@ -12,6 +12,8 @@ export interface MeasurementTextContext {
   font: string;
   letterSpacing: string;
   fontKerning: CanvasFontKerning;
+  /** Canvas `lang`, present only where the engine supports it. */
+  lang?: string;
   measureText(text: string): TextMetrics;
 }
 
@@ -21,7 +23,9 @@ export interface MeasurementTextContext {
  * OpenType feature probe mutates and restores font state in one stack frame. */
 export interface VerticalGlyphMeasurementService {
   readonly fingerprint: string;
-  measureRunInkExtra(text: string): number;
+  /** `lang`: the route language the text is measured in
+   * (CanvasFontRoute.lang), passed to the `vert` probe; none for untagged. */
+  measureRunInkExtra(text: string, lang?: string): number;
   planRun(input: Readonly<{
     text: string;
     font: string;
@@ -33,6 +37,9 @@ export interface VerticalGlyphMeasurementService {
     charScale: number;
     growTrRotateInk: boolean;
     writingMode: WritingMode;
+    /** Language of the route `font` was built from (CanvasFontRoute.lang):
+     * a shorthand cannot carry it, so it travels beside the shorthand. */
+    lang?: string;
     /** Punctuation compression and width balance of a source range, floored
      * with the cell (WORD_CONDENSED_SPACING_ADVANCE_FLOOR); when supplied,
      * reported advances include it. */

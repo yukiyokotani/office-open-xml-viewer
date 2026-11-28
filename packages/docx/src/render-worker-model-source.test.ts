@@ -28,12 +28,30 @@ const workerMocks = vi.hoisted(() => ({
   unloadLocal: vi.fn(),
   paginate: vi.fn(async () => undefined),
   verticalFallback: vi.fn(() => false),
+  carriesLanguage: vi.fn(() => false),
+  // One model walk: both facts come from the same call.
+  capabilities: vi.fn((_document?: unknown, _options?: unknown): { requiresDomVerticalGlyphLayout: boolean; carriesRunLanguage: boolean } => ({
+    requiresDomVerticalGlyphLayout: workerMocks.verticalFallback(),
+    carriesRunLanguage: workerMocks.carriesLanguage(),
+  })),
+  adaptedCapabilities: [] as unknown[],
+  adapt: <F extends (...args: never[]) => unknown>(original: F) => ((...args: Parameters<F>) => {
+    workerMocks.adaptedCapabilities.push(args[2]);
+    return original(...args);
+  }) as F,
+  oracleAvailable: vi.fn(() => true),
+  createServices: vi.fn((..._args: unknown[]) => ({})),
 }));
 vi.mock('@silurus/ooxml-core', async importOriginal => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core')>(),
   loadOfficeFontFallbacks: workerMocks.metrics,
   unloadOfficeFontFallbacks: workerMocks.unloadLocal,
   loadNativeRouteSentinels: async () => [],
+  createNamedFamilyOracle: () => ({
+    get available() { return workerMocks.oracleAvailable(); },
+    sentinelsApply: true,
+    draws: () => false,
+  }),
 }));
 vi.mock('@silurus/ooxml-core/internal/model-source', async importOriginal => ({
   ...await importOriginal<typeof import('@silurus/ooxml-core/internal/model-source')>(),
@@ -51,9 +69,15 @@ vi.mock('./embedded-fonts.js', () => ({
 }));
 vi.mock('./renderer.js', () => ({ prepareMathRuns: vi.fn(), renderLayoutSourceToCanvas: vi.fn() }));
 vi.mock('./vertical-render-capability.js', () => ({
-  documentRequiresDomVerticalGlyphLayout: workerMocks.verticalFallback,
+  documentRenderCapabilities: workerMocks.capabilities,
 }));
-vi.mock('./layout-runtime.js', () => ({ createLayoutServices: () => ({}), nativeRouteLineRequests: () => [] }));
+vi.mock('./layout-source-model-adapter.js', async importOriginal => {
+  const original = await importOriginal<typeof import('./layout-source-model-adapter.js')>();
+  return { ...original, layoutSourceModelAdapterFromOwnedModel: workerMocks.adapt(original.layoutSourceModelAdapterFromOwnedModel) };
+});
+vi.mock('./layout-runtime.js', () => ({
+  createLayoutServices: (...args: unknown[]) => workerMocks.createServices(...args), nativeRouteLineRequests: () => [],
+}));
 vi.mock('./render-worker-layout.js', () => ({
   retainRenderWorkerDocumentLayout: () => ({
     defaultCurrentDateMs: 0, layoutServices: {},
@@ -102,6 +126,13 @@ beforeEach(() => {
   workerMocks.paginate.mockResolvedValue(undefined);
   workerMocks.verticalFallback.mockReset();
   workerMocks.verticalFallback.mockReturnValue(false);
+  workerMocks.carriesLanguage.mockReset();
+  workerMocks.carriesLanguage.mockReturnValue(false);
+  workerMocks.capabilities.mockClear();
+  workerMocks.adaptedCapabilities.length = 0;
+  workerMocks.oracleAvailable.mockReset();
+  workerMocks.oracleAvailable.mockReturnValue(true);
+  workerMocks.createServices.mockClear();
 });
 
 describe('DOCX render worker with a model source', () => {
@@ -189,6 +220,73 @@ describe('DOCX render worker with a model source', () => {
     expect(posted(posts, 'mainThreadVerticalFallback', 16)).toEqual([
       expect.objectContaining({ viewDefaults: { showTrackedChanges: true } }),
     ]);
+  });
+
+  it.each([
+    ['tagged, judging realm', true, true, 'lang', 'parsedMeta'],
+    ['tagged, Canvas lang but sentinels not applied', true, false, 'lang', 'mainThreadVerticalFallback'],
+    ['tagged, engine without Canvas lang (no realm applies tags)', true, false, 'no-lang', 'parsedMeta'],
+    ['tagged, no measuring context', true, true, 'none', 'mainThreadVerticalFallback'],
+    ['untagged, realm that cannot judge', false, false, 'lang', 'parsedMeta'],
+  ] as const)('admits a run-language document to the worker only where it can judge it: %s', async (
+    _label, tagged, available, offscreen, published,
+  ) => {
+    workerMocks.carriesLanguage.mockReturnValue(tagged);
+    workerMocks.oracleAvailable.mockReturnValue(available);
+    if (offscreen !== 'none') {
+      const context = offscreen === 'lang' ? { lang: 'inherit' } : {};
+      vi.stubGlobal('OffscreenCanvas', class { getContext() { return context; } });
+    } else {
+      vi.stubGlobal('OffscreenCanvas', undefined);
+    }
+    try {
+      const { dispatch, posts } = await loadWorker();
+      workerMocks.opens.push(async () => modelSource({}).opened);
+      await dispatch({ data: parseRequest(30) } as MessageEvent);
+      expect(posted(posts, published, 30)).toHaveLength(1);
+      // One model walk serves admission and the layout source adapter.
+      expect(workerMocks.capabilities).toHaveBeenCalledTimes(1);
+      // Admission stops the walk at a vertical section, as before languages.
+      expect(workerMocks.capabilities.mock.calls[0]?.[1]).toEqual({ stopOnVerticalLayout: true });
+      if (published === 'parsedMeta') {
+        expect(workerMocks.adaptedCapabilities).toEqual([
+          { requiresDomVerticalGlyphLayout: false, carriesRunLanguage: tagged },
+        ]);
+      }
+      // A tagged document laid out here uses the admission's context and
+      // oracle in its text service (one capability, one fingerprint).
+      if (tagged && published === 'parsedMeta') {
+        const options = workerMocks.createServices.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+        expect(options.namedFamilyOracle).toBeDefined();
+        expect(options.measureContext).toBeDefined();
+      }
+      // Untagged documents never consult the capability.
+      if (!tagged) expect(workerMocks.oracleAvailable).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    ['ODT script class naming none', { type: 'text', text: 'a', langScriptClass: '', langEastAsia: 'ja-jp' }],
+    ['automatic East Asian axis', { type: 'text', text: 'a', langEastAsia: 'ja-jp', langEastAsiaAutomatic: true }],
+  ])('keeps a document whose only language facts shaping suppresses in the worker: %s', async (_label, run) => {
+    const actual = await vi.importActual<typeof import('./vertical-render-capability.js')>('./vertical-render-capability.js');
+    workerMocks.capabilities.mockImplementationOnce(
+      actual.documentRenderCapabilities as unknown as (...args: unknown[]) => never,
+    );
+    workerMocks.oracleAvailable.mockReturnValue(false);
+    vi.stubGlobal('OffscreenCanvas', class { getContext() { return { lang: 'inherit' }; } });
+    try {
+      const { dispatch, posts } = await loadWorker();
+      workerMocks.opens.push(async () => modelSource({ body: [{ type: 'paragraph', runs: [run] }] }).opened);
+      await dispatch({ data: parseRequest(31) } as MessageEvent);
+      expect(posted(posts, 'parsedMeta', 31)).toHaveLength(1);
+      expect(posted(posts, 'mainThreadVerticalFallback', 31)).toHaveLength(0);
+      expect(workerMocks.oracleAvailable).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('does not let a deferred old parse publish or close the newer source', async () => {

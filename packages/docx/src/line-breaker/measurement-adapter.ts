@@ -18,6 +18,7 @@ import {
 } from './advance.js';
 import type { DocGridCtx } from './model.js';
 import { verticalRunInkExtra } from './vertical-text.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 
 /** Measured UTF-16 units per text unit charged for one vertical cell plan:
  * routing probes (natural, vertical-form and ink probes) plus one
@@ -128,6 +129,15 @@ export class LineMeasurementAdapter {
     }
   }
 
+  /** Direct Canvas measurement of a segment's text applies its route's
+   * language with the route's shorthand (CanvasFontRoute.lang): the state
+   * its shaped span was measured in and is painted in. Returns what
+   * {@link restoreCanvasLanguage} takes; a route without a language leaves
+   * the context untouched. */
+  private selectSegmentLanguage(segment: LayoutTextSeg): string | undefined {
+    return selectCanvasLanguage(this.context, segment.fontRoute?.lang);
+  }
+
   withSegmentKerning<T>(segment: LayoutTextSeg, measure: () => T): T {
     const previous = this.selectSegmentKerning(segment);
     try {
@@ -194,9 +204,11 @@ export class LineMeasurementAdapter {
     }
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
+    const previousLang = this.selectSegmentLanguage(segment);
     try {
       return this.context.measureText(segment.text);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.restoreKerning(previous);
     }
   }
@@ -284,19 +296,26 @@ export class LineMeasurementAdapter {
     const font = this.fontForSegment(left);
     // One pass keeps one Canvas state apart from the font and kerning set
     // here, so the pair of a face and two clusters is measured once per pass.
-    const key = `${font}\u0000${before}\u0000${after}`;
+    // The route's language can change the pair (a shorthand cannot carry
+    // it); keys of routes without one are unchanged.
+    const lang = left.fontRoute?.lang;
+    const key = lang === undefined
+      ? `${font}\u0000${before}\u0000${after}`
+      : `${font}\u0000${before}\u0000${after}\u0000${lang}`;
     const cached = this.kernedSeamPairs.get(key);
     if (cached !== undefined) return cached * charScaleFactor(right);
     const previousFont = this.selectedFont ?? this.initialFont;
     const previousKerning = this.context.fontKerning;
     this.setFont(font);
     this.context.fontKerning = 'normal';
+    const previousLang = this.selectSegmentLanguage(left);
     try {
       const width = (text: string) => this.context.measureText(text).width;
       const pair = width(before + after) - width(before) - width(after);
       this.kernedSeamPairs.set(key, pair);
       return pair * charScaleFactor(right);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.context.font = previousFont;
       this.selectedFont = previousFont;
       this.context.fontKerning = previousKerning;
@@ -336,6 +355,7 @@ export class LineMeasurementAdapter {
       const gridPx = segmentCharacterGridDeltaPx(segment, grid, this.scale);
       const cells = this.verticalGlyphMeasurement.planRun({
         text,
+        ...(segment.fontRoute?.lang !== undefined ? { lang: segment.fontRoute.lang } : {}),
         font: this.fontForSegment(segment),
         fontKerning: this.segmentKerning(segment),
         fontSizePt: calcEffectiveFontPx(segment, this.scale),
@@ -400,9 +420,11 @@ export class LineMeasurementAdapter {
   measureRunText(segment: LayoutTextSeg, text: string): TextMetrics {
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
+    const previousLang = this.selectSegmentLanguage(segment);
     try {
       return this.context.measureText(text);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.restoreKerning(previous);
     }
   }
@@ -429,9 +451,11 @@ export class LineMeasurementAdapter {
     }
     this.selectSegmentFont(segment);
     const previous = this.selectSegmentKerning(segment);
+    const previousLang = this.selectSegmentLanguage(segment);
     try {
-      return verticalRunInkExtra(text, true, this.verticalGlyphMeasurement);
+      return verticalRunInkExtra(text, true, this.verticalGlyphMeasurement, segment.fontRoute?.lang);
     } finally {
+      restoreCanvasLanguage(this.context, previousLang);
       this.restoreKerning(previous);
     }
   }

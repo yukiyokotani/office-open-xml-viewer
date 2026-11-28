@@ -2873,6 +2873,33 @@ pub struct RunFontFacts {
     pub lang_bidi: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 `w:lang/@w:val` — the language of non-East-Asian,
+    /// non-complex-script text, lower-cased (e.g. "sr-latn-rs"). Drives
+    /// language-sensitive OpenType forms (`locl`) of ascii/highAnsi text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// The one language of all this run's text, where the source format
+    /// resolves a language per run from its own script classification (ODF 1.3
+    /// Part 3 §20.358 Table 22 selects fo:language, style:language-asian or
+    /// style:language-complex). When present it names the language of every
+    /// character for language-sensitive glyph forms, instead of the
+    /// §17.3.2.26 slot choice among the axes above; an empty string records a
+    /// class that names no language while an axis above names one. The axes
+    /// keep their own values (regional font selection reads `lang_east_asia`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_script_class: Option<String>,
+    /// ECMA-376 §17.3.2.20 by element presence: true where the deepest
+    /// level with a `<w:lang>` element omits w:eastAsia, which leaves that
+    /// axis to automatic determination there, while an outer level names one
+    /// (`lang_east_asia`). Such text takes no Canvas (language-sensitive
+    /// glyph form) language; `lang_east_asia` keeps its per-attribute merge
+    /// for regional font selection. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lang_east_asia_automatic: bool,
+    /// As `lang_east_asia_automatic`, for w:bidi (complex-script text);
+    /// `lang_bidi` keeps its per-attribute merge for bidi digit classes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lang_bidi_automatic: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kerning: Option<f64>,
 }
@@ -2929,6 +2956,9 @@ pub struct UnderlineTypographyWire {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TypographyLanguagesWire {
+    /// ECMA-376 §17.3.2.20 w:lang/@w:val (non-East-Asian, non-cs text).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub val: Option<String>,
     pub east_asia: Option<String>,
     pub bidi: Option<String>,
 }
@@ -3082,6 +3112,33 @@ pub struct FieldRun {
     pub lang_bidi: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 `w:lang/@w:val` — the language of non-East-Asian,
+    /// non-complex-script text, lower-cased (e.g. "sr-latn-rs"). Drives
+    /// language-sensitive OpenType forms (`locl`) of ascii/highAnsi text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// The one language of all this run's text, where the source format
+    /// resolves a language per run from its own script classification (ODF 1.3
+    /// Part 3 §20.358 Table 22 selects fo:language, style:language-asian or
+    /// style:language-complex). When present it names the language of every
+    /// character for language-sensitive glyph forms, instead of the
+    /// §17.3.2.26 slot choice among the axes above; an empty string records a
+    /// class that names no language while an axis above names one. The axes
+    /// keep their own values (regional font selection reads `lang_east_asia`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_script_class: Option<String>,
+    /// ECMA-376 §17.3.2.20 by element presence: true where the deepest
+    /// level with a `<w:lang>` element omits w:eastAsia, which leaves that
+    /// axis to automatic determination there, while an outer level names one
+    /// (`lang_east_asia`). Such text takes no Canvas (language-sensitive
+    /// glyph form) language; `lang_east_asia` keeps its per-attribute merge
+    /// for regional font selection. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lang_east_asia_automatic: bool,
+    /// As `lang_east_asia_automatic`, for w:bidi (complex-script text);
+    /// `lang_bidi` keeps its per-attribute merge for bidi digit classes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lang_bidi_automatic: bool,
     pub background: Option<String>,
     /// "super" | "sub" | None
     pub vert_align: Option<String>,
@@ -3287,6 +3344,33 @@ pub struct TextRun {
     /// Resolved ECMA-376 §17.3.2.20 w:lang/@w:eastAsia.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 `w:lang/@w:val` — the language of non-East-Asian,
+    /// non-complex-script text, lower-cased (e.g. "sr-latn-rs"). Drives
+    /// language-sensitive OpenType forms (`locl`) of ascii/highAnsi text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// The one language of all this run's text, where the source format
+    /// resolves a language per run from its own script classification (ODF 1.3
+    /// Part 3 §20.358 Table 22 selects fo:language, style:language-asian or
+    /// style:language-complex). When present it names the language of every
+    /// character for language-sensitive glyph forms, instead of the
+    /// §17.3.2.26 slot choice among the axes above; an empty string records a
+    /// class that names no language while an axis above names one. The axes
+    /// keep their own values (regional font selection reads `lang_east_asia`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang_script_class: Option<String>,
+    /// ECMA-376 §17.3.2.20 by element presence: true where the deepest
+    /// level with a `<w:lang>` element omits w:eastAsia, which leaves that
+    /// axis to automatic determination there, while an outer level names one
+    /// (`lang_east_asia`). Such text takes no Canvas (language-sensitive
+    /// glyph form) language; `lang_east_asia` keeps its per-attribute merge
+    /// for regional font selection. Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lang_east_asia_automatic: bool,
+    /// As `lang_east_asia_automatic`, for w:bidi (complex-script text);
+    /// `lang_bidi` keeps its per-attribute merge for bidi digit classes.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub lang_bidi_automatic: bool,
     /// ECMA-376 §17.3.2.34 `<w:snapToGrid>` — run participation in the section
     /// character grid. `Some(false)` opts this run out; `None` inherits.
     #[serde(skip_serializing_if = "Option::is_none")]

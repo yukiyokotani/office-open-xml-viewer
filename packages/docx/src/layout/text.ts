@@ -20,7 +20,9 @@ import type {
   FontResolver,
   FontStyle,
 } from './font-service.js';
-import type { CanvasFontRoute } from '@silurus/ooxml-core';
+import {
+  canvasFontRouteWithLanguage, verticalBracketFormSubstitute, verticalFormSubstitute, type CanvasFontRoute,
+} from '@silurus/ooxml-core';
 export type { ResolvedFontMetric, ResolvedLocalFontMetric } from '@silurus/ooxml-core';
 import { stableFingerprint } from './fingerprint.js';
 import type {
@@ -204,6 +206,19 @@ type ParagraphTextFacts = Readonly<{
   italicCs?: boolean;
   langBidi?: string;
   langEastAsia?: string;
+  /** ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased. */
+  lang?: string;
+  /** The one language of all the run's text where the source format resolved
+   * it per run by its own script classification (ODF 1.3 Part 3 §20.358);
+   * empty: that class names none. See {@link TextShapeRequest.scriptClassLanguage}. */
+  langScriptClass?: string;
+  /** §17.3.2.20 by element presence: the deepest present w:lang omits
+   * w:eastAsia (w:bidi), leaving that axis to automatic determination, while
+   * the per-attribute {@link langEastAsia} ({@link langBidi}) inherits a tag.
+   * Such text takes no Canvas language on that axis. Absent when false. See
+   * {@link canvasLanguageAxes}. */
+  langEastAsiaAutomatic?: boolean;
+  langBidiAutomatic?: boolean;
   fontSlots?: Readonly<{
     direct: TextFontSlots;
     theme: TextFontSlots;
@@ -370,6 +385,43 @@ export interface TextShapeRequest {
   readonly fontHint?: 'default' | 'eastAsia' | 'cs';
   /** Resolved w:lang@eastAsia, normalized to lower case. */
   readonly eastAsiaLanguage?: string;
+  /** Resolved w:lang@val (§17.3.2.20): language of ascii/highAnsi text. */
+  readonly language?: string;
+  /** Resolved w:lang@bidi (§17.3.2.20): language of complex-script text. */
+  readonly complexScriptLanguage?: string;
+  /** The language of all this text, whatever §17.3.2.26 slot a character
+   * takes, where the source format resolved one language for the run from
+   * its own script classification (ODF 1.3 Part 3 §20.358 Table 22, whose
+   * classes differ from the slot table); empty: that class names none. When
+   * present it alone selects the Canvas language; {@link eastAsiaLanguage}
+   * stays the regional font-selection input. */
+  readonly scriptClassLanguage?: string;
+  /** The route language acquired for the source piece this request derives
+   * from (one slot language group; null: withheld). A request re-resolves its
+   * route from run facts on every shape, and the language is the one part of
+   * that route which depends on the acquired piece's text (named-family
+   * coverage), so derived requests (fragments, fits, pair or generated
+   * probes) retain the decision: text of that group shapes through the same
+   * route, language included, that the piece is painted through. */
+  readonly canvasLanguagePin?: CanvasLanguagePin;
+  /** The source piece's whole text when this request shapes a fragment of
+   * it: faces are resolved for that text (regional fallback looks at its Han,
+   * for instance), so a fragment measures through the route paint draws the
+   * piece with. Independent probes resolve their own text. Only a piece
+   * that retains a route language ({@link canvasLanguagePin}) sets it, so
+   * that its fragments resolve the route the language was decided on; text
+   * without a language resolves each fragment's own text, as it always has.
+   * Shape caches key it by what a resolution reads from it, never by its
+   * content. */
+  readonly faceText?: string;
+  /** The text is set in a vertical CJK line (§17.6.20 tbRl), where layout
+   * draws vertical presentation forms in place of some characters: a
+   * language is admitted only when named families draw those forms too. */
+  readonly verticalForms?: true;
+  /** Canvas language of East Asian text when it differs from the regional
+   * font-selection input {@link eastAsiaLanguage}; null names none (a ruby
+   * guide, which never takes its base run's language). */
+  readonly canvasEastAsiaLanguage?: string | null;
   /** fontTable w:charset for the selected eastAsia face (hex byte). */
   readonly eastAsiaFontCharset?: string;
   readonly genericFamily?: 'serif' | 'sans-serif' | 'monospace';
@@ -499,13 +551,41 @@ export function sliceTextShapeRequest(
 /** A generated probe or ruby guide is independent text, even when its glyphs
  * happen to occur in the base run. It inherits neither that run's Arabic proof
  * nor its explicit native base. A caller establishing a new directed probe
- * must request that authority independently. */
+ * must request that authority independently.
+ *
+ * It keeps the piece's retained route language (canvasLanguagePin): a metric
+ * probe stands in for the piece and is measured in the piece's state.
+ * Generated text that is painted on its own (a ruby guide, an emphasis mark)
+ * clears it, so its language is proved for its own text. */
 export function independentTextShapeRequest(
   request: Readonly<TextShapeRequest>,
   text: string,
 ): TextShapeRequest {
   return { ...request, text, baseDirection: undefined, joinRegisteredGrapheme: undefined, joinRegisteredLatinSlots: undefined,
-    registeredLatinPieceText: undefined, substituteContext: { text, offset: 0 } };
+    registeredLatinPieceText: undefined, faceText: undefined, substituteContext: { text, offset: 0 } };
+}
+
+/** The shape request of a ruby guide over `base`: independent text, shaped
+ * without a Canvas language. The guide's own languages (its runs' w:lang,
+ * w:rubyPr/w:lid) are not carried to shaping yet, and the base run's are not
+ * the guide's, so no language reaches Canvas for it; regional font selection
+ * keeps the base's w:eastAsia input, as before languages. Line metrics and
+ * paint both use this request. */
+export function rubyGuideShapeRequest(
+  base: Readonly<TextShapeRequest>,
+  text: string,
+): TextShapeRequest {
+  return {
+    ...independentTextShapeRequest(base, text),
+    canvasLanguagePin: undefined,
+    language: undefined,
+    complexScriptLanguage: undefined,
+    // Only a base w:eastAsia needs withholding; an untagged guide's request
+    // (and its keys) stay as before languages.
+    ...(base.eastAsiaLanguage !== undefined ? { canvasEastAsiaLanguage: null } : {}),
+    // A base's script-class language is not the guide's either.
+    ...(base.scriptClassLanguage !== undefined ? { scriptClassLanguage: '' } : {}),
+  };
 }
 
 /** Transform this range in its run (e.g. inserting justification kashidas),
@@ -523,6 +603,113 @@ export function replaceTextShapeRequest(
       + context.text.slice(context.offset + request.text.length),
     offset: context.offset,
   } };
+}
+
+/** `text` followed by the vertical presentation forms a vertical line may
+ * draw for its characters (core vertical-orientation.ts), each once. */
+function withVerticalForms(text: string): string {
+  let forms = '';
+  for (const scalar of text) {
+    const cp = scalar.codePointAt(0)!;
+    for (const form of [verticalBracketFormSubstitute(cp), verticalFormSubstitute(cp)]) {
+      if (form === null) continue;
+      const glyph = String.fromCodePoint(form);
+      if (!forms.includes(glyph)) forms += glyph;
+    }
+  }
+  return forms ? text + forms : text;
+}
+
+/** The shape-request Canvas axes of run language facts. ECMA-376 §17.3.2.20
+ * resolves each axis by element presence for Canvas (a level whose w:lang
+ * omits w:eastAsia or w:bidi leaves that axis to automatic determination), so
+ * an axis the parser marks automatic (`langEastAsiaAutomatic` /
+ * `langBidiAutomatic`) names no Canvas language, while regional font
+ * selection and bidi digit classes keep reading the per-attribute values. Keys are present only when a value is, so
+ * untagged requests (and their cache keys) are unchanged. */
+export function canvasLanguageAxes(facts: Readonly<{
+  langEastAsiaAutomatic?: boolean; langBidi?: string; langBidiAutomatic?: boolean;
+}>): Pick<TextShapeRequest, 'complexScriptLanguage' | 'canvasEastAsiaLanguage'> {
+  const bidi = facts.langBidiAutomatic ? undefined : facts.langBidi;
+  return {
+    ...(bidi ? { complexScriptLanguage: bidi } : {}),
+    ...(facts.langEastAsiaAutomatic ? { canvasEastAsiaLanguage: null } : {}),
+  };
+}
+
+/** §17.3.2.20 language axes: w:val (ascii/highAnsi), w:eastAsia, w:bidi. */
+export type LanguageSlotGroup = 'latin' | 'eastAsia' | 'complexScript';
+
+export const languageSlotGroup = (slot: FontScriptSlot): LanguageSlotGroup =>
+  slot === 'eastAsia' || slot === 'complexScript' ? slot : 'latin';
+
+/** A piece's Canvas language decision: for one slot group and the font route
+ * (fingerprint) it was proved on. A derived request that resolves another
+ * route proves its own language. */
+export type CanvasLanguagePin = Readonly<{ group: LanguageSlotGroup; route: string; lang: string | null }>;
+
+/** A well-formed BCP 47 language tag (RFC 5646 §2.1 shape: an alphabetic
+ * primary subtag, then alphanumeric subtags of at most eight characters),
+ * bounded in length. Canvas `lang` takes such a tag; anything else names no
+ * language and never enters a route identity or cache key. */
+/** Longest tag admitted: bounds what enters route fingerprints and keys. */
+const MAX_LANGUAGE_TAG_UNITS = 64;
+const canonicalTags = new Map<string, string | null>();
+/** RFC 5646 §2.2.8 grandfathered tags (irregular and regular): well-formed
+ * BCP 47 outside the ECMA-402 locale grammar, kept as written. */
+const GRANDFATHERED_TAGS = new Set([
+  'en-gb-oed', 'i-ami', 'i-bnn', 'i-default', 'i-enochian', 'i-hak', 'i-klingon', 'i-lux', 'i-mingo',
+  'i-navajo', 'i-pwn', 'i-tao', 'i-tay', 'i-tsu', 'sgn-be-fr', 'sgn-be-nl', 'sgn-ch-de',
+  'art-lojban', 'cel-gaulish', 'no-bok', 'no-nyn', 'zh-guoyu', 'zh-hakka', 'zh-min', 'zh-min-nan', 'zh-xiang',
+]);
+/** RFC 5646 §2.1 privateuse: "x" 1*("-" (1*8alphanum)). */
+const PRIVATE_USE_TAG = /^x(?:-[a-z0-9]{1,8})+$/u;
+
+
+/** `tag` as a lower-case BCP 47 tag, or undefined when it names no language:
+ * Word's `x-none`, the Canvas keyword `inherit`, or an ill-formed (RFC 5646
+ * §2.1) or oversized value. Language tags are canonicalized by ECMA-402
+ * Intl.getCanonicalLocales; grandfathered (§2.2.8) and private-use tags,
+ * which its locale grammar does not cover, are kept as written. */
+export function canvasLanguageTag(tag: string | undefined): string | undefined {
+  if (!tag || tag.length > MAX_LANGUAGE_TAG_UNITS) return undefined;
+  const lower = tag.toLowerCase();
+  if (lower === 'x-none' || lower === 'inherit') return undefined;
+  if (GRANDFATHERED_TAGS.has(lower) || PRIVATE_USE_TAG.test(lower)) return lower;
+  let canonical = canonicalTags.get(lower);
+  if (canonical === undefined) {
+    const canonicalize = (candidate: string): string | null => {
+      try {
+        return typeof Intl !== 'undefined' && typeof Intl.getCanonicalLocales === 'function'
+          ? Intl.getCanonicalLocales(candidate)[0]?.toLowerCase() ?? null : null;
+      } catch {
+        return null;
+      }
+    };
+    canonical = canonicalize(lower);
+    // ECMA-402's grammar has no extlang (RFC 5646 §2.2.2): confirming one
+    // needs the IANA registry's prefix pairs, so such a tag names no language
+    // here and shapes as untagged text.
+    if (canonicalTags.size >= 256) canonicalTags.clear();
+    canonicalTags.set(lower, canonical);
+  }
+  return canonical ?? undefined;
+}
+
+/** The §17.3.2.20 w:lang attribute that governs text of one §17.3.2.26 font
+ * slot: the same classification that selects the slot's face selects its
+ * language ({@link canvasLanguageTag}). A request whose source resolved one
+ * language for all its text ({@link TextShapeRequest.scriptClassLanguage})
+ * names that language for every slot, independently of the slot table. */
+export function scriptSlotLanguage(
+  request: Readonly<Pick<TextShapeRequest, 'language' | 'eastAsiaLanguage' | 'complexScriptLanguage'
+    | 'canvasEastAsiaLanguage' | 'scriptClassLanguage'>>,
+  slot: FontScriptSlot,
+): string | undefined {
+  if (request.scriptClassLanguage !== undefined) return canvasLanguageTag(request.scriptClassLanguage);
+  return canvasLanguageTag(slot === 'eastAsia'
+    ? request.canvasEastAsiaLanguage !== undefined ? request.canvasEastAsiaLanguage ?? undefined : request.eastAsiaLanguage
+    : slot === 'complexScript' ? request.complexScriptLanguage : request.language);
 }
 
 export interface TextFontResolveRequest {
@@ -602,6 +789,18 @@ export interface GlyphMeasurer {
   /** True only when every grapheme of `text` shapes with zero advance
    * through the size-adjust:0% family, i.e. that exact source owns it. */
   ownsGlyphs?(request: Readonly<GlyphOwnershipRequest>): boolean;
+  /** True only when NAMED families of the route (before any generic) draw
+   * every grapheme of `text` (core createNamedFamilyOracle). Absent or unable
+   * to judge → false. */
+  namedFamiliesDraw?(request: Readonly<NamedFamilyDrawRequest>): boolean;
+}
+
+/** Text drawn by one Canvas route in one weight/style tuple. */
+export interface NamedFamilyDrawRequest {
+  readonly text: string;
+  readonly fontRoute: CanvasFontRoute;
+  readonly weight: number;
+  readonly style: FontStyle;
 }
 
 /** Glyph ownership through one source's size-adjust:0% registration. */
@@ -611,6 +810,9 @@ export interface GlyphOwnershipRequest {
   readonly weight: number;
   readonly style: FontStyle;
   readonly coverageProbeFamily: string;
+  /** Language of the route the certified text is measured and painted
+   * through ({@link CanvasFontRoute.lang}); the probe family is no route. */
+  readonly lang?: string;
 }
 
 export interface TextShapeSpan extends GlyphMeasurement {
@@ -629,6 +831,10 @@ export interface TextShapeSpan extends GlyphMeasurement {
   /** False when this scalar span continues the preceding grapheme cluster. */
   readonly breakBefore: boolean;
   readonly font: FontResolution;
+  /** The route the span was measured through and is painted through. It
+   * carries the span's language ({@link CanvasFontRoute.lang}) when a
+   * §17.3.2.20 language was admitted; `font.route` is the same route without
+   * one (the identity of the resolved faces and their line metrics). */
   readonly fontRoute: CanvasFontRoute;
 }
 
@@ -748,6 +954,10 @@ export interface TextLayoutService {
   exactLocalFaces?(requestedFamily: string): readonly Readonly<{ resolvedFamily: string; weight: number; style: FontStyle; coverageProbeFamily?: string }>[];
   /** {@link GlyphMeasurer.ownsGlyphs} of this service's measurer. */
   ownsGlyphs?(request: Readonly<GlyphOwnershipRequest>): boolean;
+  /** {@link GlyphMeasurer.namedFamiliesDraw} of this service's measurer:
+   * generated text that joins an acquired piece (a justification kashida)
+   * must pass it before it may shape through that piece's route language. */
+  namedFamiliesDraw?(request: Readonly<NamedFamilyDrawRequest>): boolean;
   /** Symbol-encoded text (core symbol-font.ts) as the faces this service
    * selects draw it: each scalar takes its §17.3.2.26 slot, exactly as
    * {@link shape} does, and only a symbol-font slot family is judged (see
@@ -986,6 +1196,9 @@ const SCOPE_NEUTRAL_SCALAR = /^[\s\p{Cf}\p{M}]$/u;
 const SCOPE_CACHE_LIMIT = 64;
 const SCOPE_CONFIGURATIONS_PER_RUN = 8;
 const SCOPE_SLOTS = ['ascii', 'highAnsi', 'eastAsia', 'complexScript'] as const;
+/** Tagged piece texts whose Han presence a text service retains (see
+ * pieceHasHan). */
+const PIECE_HAN_FACTS_LIMIT = 64;
 
 /** Two resolutions select the same registered face: the same resource,
  * weight, style and source. Native and generic routes name no resource, so
@@ -1219,7 +1432,31 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     ...(input.libreOfficeMsWordGridMetrics ? { libreOfficeMsWordGridMetrics: true } : {}),
     ...(input.libreOfficeNoExternalLeading ? { libreOfficeNoExternalLeading: true } : {}),
   });
-  const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution => {
+  /**
+   * Han presence of a tagged piece's whole text (TextShapeRequest.faceText),
+   * the only fact of that text a fragment's face resolution reads: Han
+   * admits the CJK fallback and the language-selected regional list. A
+   * scoped visual substitute's coverage is never read from it, because the
+   * shaper carries the shared per-cluster scope (`substituteScope`) for every
+   * slot that has one. All fragments of a piece share the fact, so the piece
+   * is scanned once, never once per fragment (quadratic in its length). The
+   * table is bounded ({@link PIECE_HAN_FACTS_LIMIT} texts, oldest evicted)
+   * and keyed by the text: a lookup hashes a string object once. Requests
+   * without faceText (untagged text, independent probes) never consult it.
+   */
+  const pieceHanFacts = new Map<string, boolean>();
+  const pieceHasHan = (text: string): boolean => {
+    let hasHan = pieceHanFacts.get(text);
+    if (hasHan !== undefined) {
+      pieceHanFacts.delete(text);
+    } else {
+      hasHan = containsHanScript(text);
+      if (pieceHanFacts.size >= PIECE_HAN_FACTS_LIMIT) pieceHanFacts.delete(pieceHanFacts.keys().next().value!);
+    }
+    pieceHanFacts.set(text, hasHan);
+    return hasHan;
+  };
+  const resolveFace = (request: Readonly<TextFontResolveRequest>, hasHan: boolean): FontResolution => {
     const authoredFamily = requestedFamily(request, request.slot);
     const genericFamily = authoredFamily
       ? ownValue(genericFamilies, authoredFamily.trim().toLowerCase())
@@ -1230,7 +1467,6 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       // consumer policy changes only the script classes covered by Word output
       // evidence; every authored direct/theme face remains authoritative above.
       : request.genericFamily ?? defaultGenericForSlot(request.slot);
-    const hasHan = containsHanScript(request.text ?? '');
     // A scoped visual substitute (core substitute-script.ts) answers only text
     // of its script. The shaper carries the shared per-cluster scope
     // (`substituteScope`); otherwise the same shared rule judges `text` as a
@@ -1255,6 +1491,8 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       style: request.style,
     });
   };
+  const resolve = (request: Readonly<TextFontResolveRequest>): FontResolution =>
+    resolveFace(request, containsHanScript(request.text ?? ''));
   // Pagination convergence and later view variants revisit text under the same
   // service fingerprint. Keep recent pure results for those passes, but cap
   // document lifetime retention after long documents finish paginating.
@@ -1455,6 +1693,9 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         if (request.baseDirection !== undefined && !directedCapable) throw new TypeError('Directed glyph ownership is unsupported');
         return input.measurer.ownsGlyphs!(request);
       } } : {}),
+    ...(input.measurer.namedFamiliesDraw
+      ? { namedFamiliesDraw: (request: Readonly<NamedFamilyDrawRequest>) => input.measurer.namedFamiliesDraw!(request) }
+      : {}),
     ...(input.fonts.exactLocalFaces
       ? { exactLocalFaces: (family: string) => input.fonts.exactLocalFaces!(family) } : {}),
     scalarFamily(request: Readonly<Omit<SymbolTextRequest, 'text'>>, character: string) {
@@ -1683,6 +1924,29 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       ...(scopeDescriptor !== undefined ? [scopeDescriptor] : []),
     ];
     if (request.baseDirection !== undefined) shapeParts.push(['baseDirection', request.baseDirection]);
+    if (request.language !== undefined || request.complexScriptLanguage !== undefined
+      || request.canvasLanguagePin !== undefined || request.canvasEastAsiaLanguage !== undefined
+      || request.scriptClassLanguage !== undefined) {
+      shapeParts.push(['lang', canvasLanguageTag(request.language) ?? null,
+        canvasLanguageTag(request.complexScriptLanguage) ?? null,
+        request.canvasEastAsiaLanguage === undefined ? 'base' : canvasLanguageTag(request.canvasEastAsiaLanguage ?? undefined) ?? null,
+        request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.route ?? null,
+        request.canvasLanguagePin?.lang ?? null,
+        ...(request.scriptClassLanguage !== undefined
+          ? [canvasLanguageTag(request.scriptClassLanguage) ?? ''] : [])]);
+    }
+    // Vertical forms join the language proof only for text that has a language.
+    if (request.verticalForms && (request.language !== undefined || request.eastAsiaLanguage !== undefined
+      || request.complexScriptLanguage !== undefined || request.scriptClassLanguage !== undefined)) {
+      shapeParts.push('verticalForms');
+    }
+    // A fragment resolves its faces for the piece's whole text. The key
+    // names what a resolution reads from that text (its Han presence; see
+    // pieceHasHan), never the text: its content would repeat in the key of
+    // every fragment, quadratic in the piece's length.
+    if (request.faceText !== undefined && request.faceText !== request.text) {
+      shapeParts.push(['faceText', pieceHasHan(request.faceText) ? 'H' : 'h']);
+    }
     const shapeKey = JSON.stringify(shapeParts);
     const retainedShape = cached(shapeCache, shapeKey);
     if (retainedShape) return retainedShape;
@@ -1719,32 +1983,42 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
       }
     }
 
-    const resolvedGroups = grouped.map((group) => ({
-      ...group,
-      font: resolve({
+    const resolvedGroups = grouped.map((group) => {
+      const resolveRequest: TextFontResolveRequest = {
         fonts: request.fonts,
         themeFonts: request.themeFonts,
         themeFontPresence: request.themeFontPresence,
         slot: group.script,
-        text: group.text,
+        text: request.faceText ?? group.text,
         eastAsiaLanguage: request.eastAsiaLanguage,
         weight: request.weight,
         style: request.style,
         genericFamily: request.genericFamily,
         // Carry the shared per-cluster scope; a fragment is never re-judged.
         ...(scopedBySlot.has(group.script) ? { substituteScope: group.substituteScript } : {}),
-      }),
-    }));
+      };
+      return {
+        ...group,
+        // A tagged piece's fragments share its whole-text Han fact; any other
+        // request resolves its own text directly.
+        font: request.faceText !== undefined
+          ? resolveFace(resolveRequest, pieceHasHan(request.faceText))
+          : resolve(resolveRequest),
+      };
+    });
     // Scoped text that resolves to the same effective face (same registered
     // resource, weight, style and source) is one string for Canvas, whichever
     // family name or slot requested it and whatever CSS fallback list follows.
     // Shaping it apart would break Arabic joining. Only in-scope spans
-    // merge; ordinary spans start with per-slot runs, independently of the
+    // merge when their slot languages also agree: a shared face does not
+    // erase independent §17.3.2.20 language axes or their OpenType forms.
+    // Ordinary spans start with per-slot runs, independently of the
     // registered physical-unit admission below.
     const merged: Array<(typeof resolvedGroups)[number] & Pick<TextShapeSpan, 'semanticSlotSpans'>> = [];
     for (const group of resolvedGroups) {
       const previous = merged.at(-1);
       if (previous && previous.substituteScript && group.substituteScript
+        && scriptSlotLanguage(request, previous.script) === scriptSlotLanguage(request, group.script)
         && sameEffectiveFace(previous.font, group.font)) {
         merged[merged.length - 1] = { ...previous, text: previous.text + group.text, end: group.end };
       } else {
@@ -1830,13 +2104,31 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
     }
 
     const spans = merged.map(({ substituteScript, font, ...group }): TextShapeSpan => {
+      // §17.3.2.20 gives the language of the slot's text; it reaches Canvas
+      // only where a named face of the route draws all of it. A generic or
+      // last-resort fallback face is chosen per content language (CSS Fonts 4
+      // §5.1/§5.4), so a language there would change the face, its advances
+      // and weights rather than select forms (locl) within the face.
+      // An admitted language becomes part of the span's route: the route
+      // measures the span here, and every later consumer compares, caches and
+      // paints by that route.
+      const slotLang = scriptSlotLanguage(request, group.script);
+      const pin = request.canvasLanguagePin;
+      const lang = slotLang === undefined ? undefined
+        : pin !== undefined && pin.group === languageSlotGroup(group.script)
+          && pin.route === font.route.fingerprint ? pin.lang ?? undefined
+          : input.measurer.namedFamiliesDraw?.({
+            text: request.verticalForms ? withVerticalForms(group.text) : group.text,
+            fontRoute: font.route, weight: font.weight, style: font.style,
+          }) === true ? slotLang : undefined;
+      const fontRoute = canvasFontRouteWithLanguage(font.route, lang);
       const measurement = request.measure === false ? {
         advancePt: 0,
         ascentPt: 0,
         descentPt: 0,
       } : measureGlyph({
         text: group.text,
-        fontRoute: font.route,
+        fontRoute,
         fontSizePt: request.fontSizePt,
         weight: font.weight,
         style: font.style,
@@ -1845,7 +2137,7 @@ export function createTextLayoutService(input: TextLayoutServiceInput): TextLayo
         ...(request.baseDirection !== undefined ? { baseDirection: request.baseDirection } : {}),
       });
       return Object.freeze({
-        ...group, ...measurement, font, fontRoute: font.route,
+        ...group, ...measurement, font, fontRoute,
         // Excluded spans also depend on the full run: a mark attached to a
         // Latin base must not become Arabic proof when measured in isolation.
         ...(scopeDescriptor !== undefined ? { substituteScope: substituteScript } : {}),

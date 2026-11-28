@@ -7,7 +7,7 @@
 
 use crate::budget;
 use crate::error::invalid;
-use crate::xml::{self, Stepped, NS_STYLE, NS_TEXT};
+use crate::xml::{self, Stepped, NS_FO, NS_STYLE, NS_TEXT};
 use std::collections::{HashMap, HashSet};
 
 /// Implementation bound on a parent chain; ODF requires none, a cycle is a
@@ -106,6 +106,10 @@ pub type Key = (String, String);
 #[derive(Debug, Default, Clone)]
 pub struct Properties {
     pub attributes: HashMap<Key, String>,
+    /// The keys of `attributes` that name a language
+    /// (`is_language_attribute`), classified once when the style is read
+    /// (text-properties only), so cascade builds never scan names.
+    pub language: Vec<Key>,
     /// Child elements of the group (e.g. `style:tab-stops`), by local name,
     /// kept as their serialized children for the readers that admit them.
     pub elements: HashMap<String, Vec<Element>>,
@@ -344,6 +348,77 @@ pub struct Cascade<'a> {
     values: HashMap<(&'a str, &'a str), usize>,
     /// The keys and values in first-seen order (nearest style first).
     order: Vec<(&'a Key, &'a str)>,
+    /// The position in `styles` of the style that sets each resolved
+    /// language attribute (text group only): the only attributes whose
+    /// meaning depends on which alternative is set nearer (§§20.343–20.345).
+    language_depths: Vec<(&'a Key, usize)>,
+    /// Whether any style of a text-properties search order sets a language
+    /// attribute (`is_language_attribute`), found while the order is
+    /// flattened. A cascade without one resolves no language, so language
+    /// resolution does no lookups for untagged text.
+    names_language: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lookups of language attributes on this thread (tests assert that
+    /// untagged text resolves none).
+    pub(crate) static LANGUAGE_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Cascades built on this thread (tests assert that untagged items build
+    /// no extra cascade for language).
+    pub(crate) static CASCADE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_language_lookup(namespace: &str, name: &str) {
+    if is_language_attribute(namespace, name) {
+        LANGUAGE_LOOKUPS.with(|count| count.set(count.get() + 1));
+    }
+}
+
+/// A text-properties group whose language attributes are classified once.
+fn text_properties(attributes: HashMap<Key, String>) -> Properties {
+    let language = attributes
+        .keys()
+        .filter(|key| is_language_attribute(&key.0, &key.1))
+        .cloned()
+        .collect();
+    Properties {
+        attributes,
+        language,
+        ..Properties::default()
+    }
+}
+
+/// The ODF 1.3 Part 3 text-properties attributes that name a language for
+/// a script class: §20.202/§20.302/§20.303 language, §20.222/§20.356/§20.357
+/// script, §20.188/§20.256/§20.257 country and §§20.343–20.345
+/// style:rfc-language-tag (with their -asian and -complex forms).
+fn is_language_attribute(namespace: &str, name: &str) -> bool {
+    // Every language attribute name holds one of these words; testing the
+    // short local name first skips the namespace URI comparison for the
+    // other text properties.
+    if !(name.contains("language") || name.contains("script") || name.contains("country")) {
+        return false;
+    }
+    (namespace == NS_FO && matches!(name, "language" | "script" | "country"))
+        || (namespace == NS_STYLE
+            && matches!(
+                name,
+                "language-asian"
+                    | "language-complex"
+                    | "script-asian"
+                    | "script-complex"
+                    | "country-asian"
+                    | "country-complex"
+                    | "rfc-language-tag"
+                    | "rfc-language-tag-asian"
+                    | "rfc-language-tag-complex"
+            ))
 }
 
 impl<'a> Cascade<'a> {
@@ -351,6 +426,8 @@ impl<'a> Cascade<'a> {
     /// to resolve properties, and it counts its own steps: one per style
     /// of the search order, per attribute and per captured element node.
     pub fn build(styles: Vec<StyleRef<'a>>, group: Group) -> Result<Self, String> {
+        #[cfg(test)]
+        CASCADE_BUILDS.with(|count| count.set(count.get() + 1));
         budget::tick(styles.iter().fold(0usize, |steps, style| {
             steps.saturating_add(1).saturating_add(
                 style
@@ -360,7 +437,10 @@ impl<'a> Cascade<'a> {
         }))?;
         let mut values: HashMap<(&'a str, &'a str), usize> = HashMap::new();
         let mut order = Vec::new();
-        for style in &styles {
+        let text_group = group == TEXT;
+        let mut names_language = false;
+        let mut language_depths = Vec::new();
+        for (position, style) in styles.iter().enumerate() {
             if let Some(properties) = style.group(group) {
                 for (key, value) in &properties.attributes {
                     if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -370,6 +450,18 @@ impl<'a> Cascade<'a> {
                         order.push((key, value.as_str()));
                     }
                 }
+                if text_group {
+                    // Only the preclassified language keys are looked up:
+                    // untagged cascades have none and do no extra work.
+                    for key in &properties.language {
+                        if language_depths.iter().all(|(seen, _)| *seen != key) {
+                            if let Some((stored, _)) = properties.attributes.get_key_value(key) {
+                                names_language = true;
+                                language_depths.push((stored, position));
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(Self {
@@ -377,16 +469,39 @@ impl<'a> Cascade<'a> {
             group,
             values,
             order,
+            language_depths,
+            names_language,
         })
     }
 
+    /// Whether this text-properties cascade sets any language attribute
+    /// (`is_language_attribute`); always false for other groups.
+    pub fn names_language(&self) -> bool {
+        self.names_language
+    }
+
     pub fn get(&self, namespace: &str, name: &str) -> Option<&'a str> {
+        #[cfg(test)]
+        count_language_lookup(namespace, name);
         // The map's key lifetime shortens to the arguments' (it is
         // covariant); the value comes from `order`, at its full lifetime.
         let values: &HashMap<(&str, &str), usize> = &self.values;
         values
             .get(&(namespace, name))
             .map(|index| self.order[*index].1)
+    }
+
+    /// The position in the search order (0 = nearest) of the style that sets
+    /// the attribute's resolved value, for attributes whose meaning depends
+    /// on which of two alternatives is set nearer: language attributes
+    /// (`is_language_attribute`) of a text-properties cascade, else `None`.
+    pub fn depth(&self, namespace: &str, name: &str) -> Option<usize> {
+        #[cfg(test)]
+        count_language_lookup(namespace, name);
+        self.language_depths
+            .iter()
+            .find(|(key, _)| key.0 == namespace && key.1 == name)
+            .map(|(_, position)| *position)
     }
 
     pub fn element(&self, name: &str) -> Option<&'a [Element]> {
@@ -452,13 +567,7 @@ fn read_list_style_named(node: roxmltree::Node<'_, '_>, name: String) -> Result<
             parent: None,
             automatic: true,
             attributes: HashMap::new(),
-            groups: HashMap::from([(
-                TEXT.to_string(),
-                Properties {
-                    attributes: attributes(text),
-                    ..Properties::default()
-                },
-            )]),
+            groups: HashMap::from([(TEXT.to_string(), text_properties(attributes(text)))]),
         };
         level_text.insert(key, style);
     }
@@ -518,9 +627,13 @@ fn read_style_body(node: roxmltree::Node<'_, '_>, name: String) -> Result<Option
             // Other producers' extension groups carry nothing ODF defines.
             _ => continue,
         };
-        let mut properties = Properties {
-            attributes: attributes(child),
-            ..Properties::default()
+        let mut properties = if group == TEXT {
+            text_properties(attributes(child))
+        } else {
+            Properties {
+                attributes: attributes(child),
+                ..Properties::default()
+            }
         };
         for element in child.kids().filter(|n| n.is_element()) {
             // Each element-valued property occurs at most once per group.

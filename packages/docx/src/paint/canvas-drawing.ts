@@ -11,7 +11,7 @@ import {
   withPatternCoordinateSpace,
 } from '@silurus/ooxml-core';
 import { paintRetainedResource } from './canvas-resource.js';
-import { fillRetainedText } from './canvas-text-fill.js';
+import { fillRetainedRouteText } from './canvas-text-fill.js';
 
 function paintPageAlignedDrawingMLShape(
   plan: Parameters<typeof paintDrawingMLShape>[1],
@@ -219,7 +219,7 @@ export function paintDrawingCommands(
                 span.fontStyle,
               );
               context.ctx.font = font;
-              fillRetainedText(context, font, span.text, xPt, 0);
+              fillRetainedRouteText(context, span.fontRoute, font, span.text, xPt, 0);
               xPt += span.advancePt;
             }
             context.ctx.restore();
@@ -257,7 +257,7 @@ export function paintDrawingCommands(
             span.fontStyle,
           );
           context.ctx.font = font;
-          fillRetainedText(context, font, span.text, xPt, 0);
+          fillRetainedRouteText(context, span.fontRoute, font, span.text, xPt, 0);
           xPt += span.advancePt;
         }
         context.ctx.restore();
@@ -312,6 +312,6 @@ export function paintDrawingCommands(
         : command.baseline === 'bottom'
           ? command.rect.yPt + command.rect.heightPt
           : command.rect.yPt + command.rect.heightPt / 2;
-    fillRetainedText(context, font, command.text, xPt, yPt);
+    fillRetainedRouteText(context, command.fontRoute, font, command.text, xPt, yPt);
   }
 }

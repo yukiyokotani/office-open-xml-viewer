@@ -1,3 +1,5 @@
+import { restoreCanvasLanguage, selectCanvasLanguage } from '../internal/canvas-language.js';
+
 type Ctx2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 interface ProbeState {
@@ -274,20 +276,28 @@ function rasterChanged(
     || changed(offFirst.metrics, offSecond.metrics, onFirst.metrics, onSecond.metrics);
 }
 
+const VERT_PROBE_CACHE_LIMIT = 4096;
+
 /**
  * Whether this main-thread canvas/font demonstrably paints a different glyph or
  * placement for `cp` after composing the OpenType `vert` feature. Results are
  * cached by code point, feature settings, and family/weight/style shorthand, and
  * invalidated whenever the document FontFaceSet completes or fails a load.
  */
-export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
+export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number, lang?: string): boolean {
   const target = canvasElementFor(ctx);
   if (target === null || typeof document === 'undefined') return false;
 
   const doc = target.ownerDocument ?? document;
   const state = probeState(doc);
   const sourceFeature = sourceFeatureSettings(target);
-  const key = `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}`;
+  // `lang` is the Canvas language the caller draws this text in (HTML canvas
+  // text styles): it selects forms (locl) the probe must judge too. It is
+  // passed, never read from `ctx`, so callers without languages (XLSX, PPTX,
+  // untagged DOCX) probe and key exactly as before.
+  const key = lang === undefined
+    ? `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}`
+    : `${state.epoch}:${replaceFontSize(ctx.font, '<size>')}:${sourceFeature}:${cp}:lang:${lang}`;
   const cached = state.cache.get(key);
   if (cached !== undefined) return cached;
 
@@ -299,6 +309,7 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
   const probe = state.canvas.getContext('2d', { willReadFrequently: true });
   if (probe !== null) {
     const previousFeature = state.canvas.style.fontFeatureSettings;
+    const previousLang = selectCanvasLanguage(probe, lang);
     try {
       probe.font = replaceFontSize(ctx.font, `${PROBE_FONT_PX}px`);
       probe.fillStyle = '#000';
@@ -320,11 +331,15 @@ export function verticalVertGlyphReachable(ctx: Ctx2D, cp: number): boolean {
       supported = false;
     } finally {
       state.canvas.style.fontFeatureSettings = previousFeature;
+      restoreCanvasLanguage(probe, previousLang);
       probe.font = probe.font;
       probe.clearRect(0, 0, state.canvas.width, state.canvas.height);
       if (!wasAttached) state.canvas.remove();
     }
   }
+  // Bounded: keys include the font shorthand and the language in effect,
+  // both authored per document, and the cache outlives a viewer session.
+  if (state.cache.size >= VERT_PROBE_CACHE_LIMIT) state.cache.delete(state.cache.keys().next().value!);
   state.cache.set(key, supported);
   return supported;
 }

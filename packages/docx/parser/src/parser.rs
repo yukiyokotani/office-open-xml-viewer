@@ -280,6 +280,227 @@ mod private_typography_wire_tests {
     }
 
     #[test]
+    fn western_language_follows_element_presence_through_the_cascade() {
+        // ECMA-376 §17.3.2.20: an absent <w:lang> inherits the previous level
+        // of the §17.7 cascade (docDefaults → paragraph style → character
+        // style → direct formatting); a present <w:lang> whose w:val is
+        // omitted leaves the Western language to automatic determination, so
+        // that level carries no w:val language. w:eastAsia and w:bidi keep
+        // their per-attribute merge (regional font selection and bidi input).
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="en-US" w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="paragraph" w:styleId="Base"><w:rPr><w:lang w:val="sr-Latn-RS"/></w:rPr></w:style>
+          <w:style w:type="paragraph" w:styleId="Child"><w:basedOn w:val="Base"/></w:style>
+          <w:style w:type="paragraph" w:styleId="Auto"><w:rPr><w:lang w:bidi="ar-SA"/></w:rPr></w:style>
+          <w:style w:type="paragraph" w:styleId="AutoChild"><w:basedOn w:val="Auto"/></w:style>
+          <w:style w:type="character" w:styleId="Char"><w:rPr><w:lang w:bidi="ar-SA"/></w:rPr></w:style>
+        </w:styles>"#
+        ));
+        for (ppr, rpr, expected, mark) in [
+            ("", "", Some("en-us"), Some("en-us")),
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                "",
+                Some("sr-latn-rs"),
+                Some("sr-latn-rs"),
+            ),
+            // A paragraph style (and its basedOn children) naming only
+            // w:bidi clears the docDefaults w:val.
+            (r#"<w:pStyle w:val="AutoChild"/>"#, "", None, None),
+            // A character style naming only w:bidi clears the paragraph
+            // style's w:val for the run; the paragraph mark keeps the
+            // paragraph style chain.
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                r#"<w:rStyle w:val="Char"/>"#,
+                None,
+                Some("sr-latn-rs"),
+            ),
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                r#"<w:lang w:val="RO-ro"/>"#,
+                Some("ro-ro"),
+                Some("sr-latn-rs"),
+            ),
+            // Direct formatting naming only w:eastAsia clears the inherited
+            // w:val too (the reviewed `sr-RS` + eastAsia-only case).
+            (
+                r#"<w:pStyle w:val="Child"/>"#,
+                r#"<w:lang w:eastAsia="ja-JP"/>"#,
+                None,
+                Some("sr-latn-rs"),
+            ),
+            // A later level that names w:val again wins over the cleared one.
+            (
+                r#"<w:pStyle w:val="AutoChild"/>"#,
+                r#"<w:lang w:val="de-DE"/>"#,
+                Some("de-de"),
+                None,
+            ),
+        ] {
+            let p = parse_p(
+                &format!(r#"<w:pPr>{ppr}</w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>a</w:t></w:r>"#),
+                &styles,
+            );
+            let wire = first_run_json(&p, "text");
+            match expected {
+                Some(tag) => {
+                    assert_eq!(wire["lang"], tag, "{ppr} {rpr}");
+                    assert_eq!(wire["__typographyAcquisition"]["languages"]["val"], tag);
+                }
+                None => {
+                    assert!(wire.get("lang").is_none(), "{ppr} {rpr}");
+                    assert!(wire["__typographyAcquisition"]["languages"]
+                        .get("val")
+                        .is_none());
+                }
+            }
+            // w:eastAsia is merged per attribute exactly as before.
+            assert_eq!(wire["langEastAsia"], "ja-jp", "{ppr} {rpr}");
+            // The paragraph mark inherits the style chain, not the run's
+            // direct formatting or character style.
+            assert_eq!(
+                p.paragraph_mark_font_facts
+                    .as_ref()
+                    .unwrap()
+                    .lang
+                    .as_deref(),
+                mark,
+                "{ppr} {rpr}"
+            );
+        }
+        // A run whose cascade never names w:val carries no language key, so
+        // its wire (and every downstream cache key) is unchanged.
+        let p = parse_p(r#"<w:r><w:t>a</w:t></w:r>"#, &StyleMap::default());
+        let wire = first_run_json(&p, "text");
+        assert!(wire.get("lang").is_none());
+        assert!(wire["__typographyAcquisition"]["languages"]
+            .get("val")
+            .is_none());
+    }
+
+    #[test]
+    fn oversized_lang_val_is_not_cloned_into_inheriting_runs() {
+        // The renderer admits at most 64 UTF-16 units as a Canvas language;
+        // a longer style w:val names none and is not retained per run, while
+        // its element still clears the inherited value (§17.3.2.20) and the
+        // regional w:eastAsia/w:bidi inputs stay as authored.
+        let oversized = format!("en-{}", "a".repeat(200));
+        let bounded = format!("en-{}", "a".repeat(61));
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:val="de-DE"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="paragraph" w:styleId="Big"><w:rPr><w:lang w:val="{oversized}" w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:rPr></w:style>
+          <w:style w:type="paragraph" w:styleId="Edge"><w:rPr><w:lang w:val="{bounded}"/></w:rPr></w:style>
+        </w:styles>"#
+        ));
+        let runs = "<w:r><w:t>a</w:t></w:r>".repeat(50);
+        let p = parse_p(
+            &format!(r#"<w:pPr><w:pStyle w:val="Big"/></w:pPr>{runs}"#),
+            &styles,
+        );
+        let mut count = 0;
+        for run in &p.runs {
+            let DocRun::Text(_) = run else { continue };
+            count += 1;
+            let wire = serde_json::to_value(run).expect("run serializes");
+            assert!(wire.get("lang").is_none());
+            assert!(wire["__typographyAcquisition"]["languages"]
+                .get("val")
+                .is_none());
+            assert_eq!(wire["langEastAsia"], "ja-jp");
+            assert_eq!(wire["langBidi"], "ar-sa");
+        }
+        assert_eq!(count, 50);
+        assert!(p.paragraph_mark_font_facts.as_ref().unwrap().lang.is_none());
+        // Exactly 64 units is retained.
+        let p = parse_p(
+            r#"<w:pPr><w:pStyle w:val="Edge"/></w:pPr><w:r><w:t>a</w:t></w:r>"#,
+            &styles,
+        );
+        assert_eq!(first_run_json(&p, "text")["lang"], bounded);
+    }
+
+    #[test]
+    fn canvas_east_asian_and_bidi_axes_follow_element_presence() {
+        // ECMA-376 §17.3.2.20: a present <w:lang> that omits w:eastAsia or
+        // w:bidi leaves that axis to automatic determination at its level, so
+        // no inherited tag reaches Canvas there. The per-attribute values stay
+        // as before: regional font selection and bidi digit classes read them.
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:style w:type="paragraph" w:styleId="Ja"><w:rPr><w:lang w:eastAsia="ja-JP" w:bidi="ar-SA"/></w:rPr></w:style>
+        </w:styles>"#
+        ));
+        for (rpr, ea_automatic, bidi_automatic) in [
+            // No w:lang on the run: the style's element applies whole.
+            ("", false, false),
+            // Only w:val on the run: both other axes are automatic.
+            (r#"<w:lang w:val="en-US"/>"#, true, true),
+            // The run names w:eastAsia again: only w:bidi is automatic.
+            (r#"<w:lang w:val="en-US" w:eastAsia="ja-JP"/>"#, false, true),
+            (
+                r#"<w:lang w:bidi="ar-SA" w:eastAsia="ja-JP"/>"#,
+                false,
+                false,
+            ),
+        ] {
+            let p = parse_p(
+                &format!(
+                    r#"<w:pPr><w:pStyle w:val="Ja"/></w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>漢</w:t></w:r>"#
+                ),
+                &styles,
+            );
+            let wire = first_run_json(&p, "text");
+            // Regional inputs keep the per-attribute merge.
+            assert_eq!(wire["langEastAsia"], "ja-jp", "{rpr}");
+            assert_eq!(wire["langBidi"], "ar-sa", "{rpr}");
+            // The automatic axes appear on the wire only when true.
+            assert_eq!(
+                wire.get("langEastAsiaAutomatic").is_some(),
+                ea_automatic,
+                "{rpr}"
+            );
+            assert_eq!(
+                wire.get("langBidiAutomatic").is_some(),
+                bidi_automatic,
+                "{rpr}"
+            );
+            if ea_automatic {
+                assert_eq!(wire["langEastAsiaAutomatic"], true);
+            }
+            // The paragraph mark follows the style chain only.
+            let mark = p.paragraph_mark_font_facts.as_ref().unwrap();
+            assert!(!mark.lang_east_asia_automatic, "{rpr}");
+            assert!(!mark.lang_bidi_automatic, "{rpr}");
+        }
+        // A character style chain folded into one level keeps presence: a
+        // run style with only w:val clears the paragraph style's w:eastAsia
+        // for Canvas, and its own w:eastAsia would restore it.
+        let styles = StyleMap::parse(&format!(
+            r#"<w:styles xmlns:w="{W_NS}">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:lang w:eastAsia="zh-CN"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="character" w:styleId="Val"><w:rPr><w:lang w:val="fr-FR"/></w:rPr></w:style>
+          <w:style w:type="character" w:styleId="ValChild"><w:basedOn w:val="Val"/></w:style>
+        </w:styles>"#
+        ));
+        let p = parse_p(
+            r#"<w:r><w:rPr><w:rStyle w:val="ValChild"/></w:rPr><w:t>漢</w:t></w:r>"#,
+            &styles,
+        );
+        let wire = first_run_json(&p, "text");
+        assert_eq!(wire["langEastAsia"], "zh-cn");
+        assert_eq!(wire["langEastAsiaAutomatic"], true);
+        assert!(wire.get("langBidiAutomatic").is_none());
+        // An untagged run carries neither key.
+        let p = parse_p(r#"<w:r><w:t>漢</w:t></w:r>"#, &StyleMap::default());
+        let wire = first_run_json(&p, "text");
+        assert!(wire.get("langEastAsiaAutomatic").is_none());
+        assert!(wire.get("langBidiAutomatic").is_none());
+    }
+
+    #[test]
     fn private_run_typography_is_identical_for_text_and_field_results() {
         let rpr = r#"<w:rPr>
           <w:u w:val="words" w:color="FF0000" w:themeColor="accent2" w:themeTint="20"/>
@@ -7783,6 +8004,14 @@ fn set_inline_object_position(run: &mut DocRun, position: Option<f64>) {
     }
 }
 
+/// Whether a §17.3.2.20 axis is automatic by element presence
+/// (`TextRun::lang_east_asia_automatic`): the per-attribute merge inherits a
+/// `regional` tag that the deepest present element omits (`by_element`, the
+/// element-presence value, is then none; otherwise the two agree).
+fn language_axis_automatic(regional: &Option<String>, by_element: &Option<String>) -> bool {
+    regional.is_some() && by_element.is_none()
+}
+
 fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
     let font_family_east_asia = theme.resolve_font_ref(fmt.font_family_east_asia.clone());
     RunFontFacts {
@@ -7804,6 +8033,13 @@ fn resolved_run_font_facts(fmt: &RunFmt, theme: &ThemeColors) -> RunFontFacts {
         italic_cs: fmt.italic_cs,
         lang_bidi: fmt.lang_bidi.clone(),
         lang_east_asia: fmt.lang_east_asia.clone(),
+        lang: fmt.lang.clone(),
+        lang_script_class: None,
+        lang_east_asia_automatic: language_axis_automatic(
+            &fmt.lang_east_asia,
+            &fmt.lang_east_asia_by_element,
+        ),
+        lang_bidi_automatic: language_axis_automatic(&fmt.lang_bidi, &fmt.lang_bidi_by_element),
         kerning: fmt.kerning,
     }
 }
@@ -7954,6 +8190,7 @@ fn run_typography_wire(
             .clone()
             .unwrap_or_else(missing_typography_value),
         languages: TypographyLanguagesWire {
+            val: fmt.lang.clone(),
             east_asia: fmt.lang_east_asia.clone(),
             bidi: fmt.lang_bidi.clone(),
         },
@@ -8010,6 +8247,13 @@ fn make_field_run(
         italic_cs: fmt.italic_cs,
         lang_bidi: fmt.lang_bidi.clone(),
         lang_east_asia: fmt.lang_east_asia.clone(),
+        lang: fmt.lang.clone(),
+        lang_script_class: None,
+        lang_east_asia_automatic: language_axis_automatic(
+            &fmt.lang_east_asia,
+            &fmt.lang_east_asia_by_element,
+        ),
+        lang_bidi_automatic: language_axis_automatic(&fmt.lang_bidi, &fmt.lang_bidi_by_element),
         background: fmt.background.clone(),
         vert_align: fmt.vert_align.clone(),
         all_caps: fmt.all_caps.unwrap_or(false),
@@ -8113,6 +8357,9 @@ fn text_runs_mergeable(a: &TextRun, b: &TextRun) -> bool {
         && a.italic_cs == b.italic_cs
         && a.lang_bidi == b.lang_bidi
         && a.lang_east_asia == b.lang_east_asia
+        && a.lang == b.lang
+        && a.lang_east_asia_automatic == b.lang_east_asia_automatic
+        && a.lang_bidi_automatic == b.lang_bidi_automatic
         && a.snap_to_grid == b.snap_to_grid
         // Character metrics change measured or painted geometry, so every one
         // must match before a noBreakHyphen run can be folded into its neighbour.
@@ -8402,6 +8649,10 @@ fn parse_run_inner(
     let italic_cs = fmt.italic_cs;
     let lang_bidi = fmt.lang_bidi.clone();
     let lang_east_asia = fmt.lang_east_asia.clone();
+    let lang = fmt.lang.clone();
+    let lang_east_asia_automatic =
+        language_axis_automatic(&fmt.lang_east_asia, &fmt.lang_east_asia_by_element);
+    let lang_bidi_automatic = language_axis_automatic(&fmt.lang_bidi, &fmt.lang_bidi_by_element);
     let font_hint = fmt.font_hint.clone();
     let snap_to_grid = fmt.snap_to_grid;
     // Run character metrics (ECMA-376 §17.3.2.35 spacing / §17.3.2.43 w /
@@ -8499,6 +8750,10 @@ fn parse_run_inner(
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
                         lang_east_asia: lang_east_asia.clone(),
+                        lang: lang.clone(),
+                        lang_script_class: None,
+                        lang_east_asia_automatic,
+                        lang_bidi_automatic,
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -8609,6 +8864,10 @@ fn parse_run_inner(
                         italic_cs,
                         lang_bidi: lang_bidi.clone(),
                         lang_east_asia: lang_east_asia.clone(),
+                        lang: lang.clone(),
+                        lang_script_class: None,
+                        lang_east_asia_automatic,
+                        lang_bidi_automatic,
                         snap_to_grid,
                         char_spacing,
                         fit_text_val,
@@ -8670,6 +8929,10 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
+                    lang: lang.clone(),
+                    lang_script_class: None,
+                    lang_east_asia_automatic,
+                    lang_bidi_automatic,
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -8784,6 +9047,10 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
+                    lang: lang.clone(),
+                    lang_script_class: None,
+                    lang_east_asia_automatic,
+                    lang_bidi_automatic,
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -9023,6 +9290,10 @@ fn parse_run_inner(
                     italic_cs,
                     lang_bidi: lang_bidi.clone(),
                     lang_east_asia: lang_east_asia.clone(),
+                    lang: lang.clone(),
+                    lang_script_class: None,
+                    lang_east_asia_automatic,
+                    lang_bidi_automatic,
                     snap_to_grid,
                     char_spacing,
                     fit_text_val,
@@ -22305,6 +22576,11 @@ mod rtl_tests {
         );
         assert_eq!(run.font_hint.as_deref(), Some("eastAsia"));
         assert_eq!(run.lang_east_asia.as_deref(), Some("zh-cn"));
+        assert_eq!(
+            run.lang.as_deref(),
+            Some("en-ae"),
+            "w:lang@w:val lower-cased → run.lang"
+        );
     }
 
     /// Legacy VML text box (ECMA-376 Part 4 §14.1): `<w:pict>` with a

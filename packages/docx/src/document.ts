@@ -2102,6 +2102,12 @@ export class DocxDocument {
       );
     }
     if (!this._source) throw new Error('Document not loaded');
+    // The retained services measured in this document's realm, with the
+    // faces registered there (embedded, local, route sentinels) and the run
+    // languages admitted for them. A caller canvas owned by another document
+    // (an iframe) paints with that document's font set, which this contract
+    // has never covered for registered faces either; a canvas of this
+    // realm (or an OffscreenCanvas) paints exactly what was measured.
     return renderLayoutSourceToCanvas(this._source, target, pageIndex, {
       ...this._withActiveView(opts),
       onDiagnostic: diagnostic => recordResourceDiagnostics(this, [diagnostic]),

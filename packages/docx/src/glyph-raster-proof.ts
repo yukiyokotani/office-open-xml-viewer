@@ -1,4 +1,5 @@
 import { canvasFontString } from '@silurus/ooxml-core';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { quoteCssFontFamily } from '@silurus/ooxml-core/internal/css-font-family';
 import type { GlyphOwnershipRequest, GlyphRasterComparisonRequest } from './layout/text.js';
 
@@ -41,6 +42,17 @@ function sharedContext(width: number, height: number): RasterContext | null {
   return shared.context;
 }
 
+/** Run `action` in the language of the certified text's route, restoring the
+ * surface's own (a resize resets Canvas state, so set it per operation). */
+function withLanguage<T>(context: RasterContext, lang: string | undefined, action: () => T): T {
+  const previous = selectCanvasLanguage(context, lang);
+  try {
+    return action();
+  } finally {
+    restoreCanvasLanguage(context, previous);
+  }
+}
+
 /** Owned scratch surfaces may be resized between calls (which resets Canvas
  * state). Set/read/restore the requested base for each actual native operation. */
 function withDirection<T>(context: RasterContext, base: 'ltr' | 'rtl' | undefined, action: () => T): T {
@@ -57,12 +69,18 @@ function withDirection<T>(context: RasterContext, base: 'ltr' | 'rtl' | undefine
   } finally { context.direction = previous; context.textAlign = previousAlign; }
 }
 
-function rasterize(context: RasterContext, font: string, text: string, width: number, height: number, base?: 'ltr' | 'rtl'): Uint8ClampedArray {
+function rasterize(context: RasterContext, font: string, text: string, width: number, height: number, base?: 'ltr' | 'rtl', lang?: string): Uint8ClampedArray {
   context.clearRect(0, 0, width, height);
   context.font = font;
   context.textBaseline = 'alphabetic';
   context.fillStyle = '#000';
-  withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7)));
+  // Untagged probes keep the direct path: no language wrapper, no closure.
+  if (lang === undefined) {
+    withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7)));
+  } else {
+    withLanguage(context, lang, () =>
+      withDirection(context, base, () => context.fillText(text, PROBE_EM_PX / 2, Math.round(height * 0.7))));
+  }
   return context.getImageData(0, 0, width, height).data;
 }
 
@@ -85,18 +103,16 @@ export function sameGlyphRaster(request: Readonly<GlyphRasterComparisonRequest>)
   const faceFont = `${request.style} ${request.weight} ${PROBE_EM_PX}px ${quoteCssFontFamily(request.faceFamily)}`;
   const measure = sharedContext(1, PROBE_EM_PX * 2);
   if (!measure) return false;
-  measure.font = nativeFont;
-  const nativeWidth = withDirection(measure, request.baseDirection, () => measure.measureText(probe).width);
-  measure.font = faceFont;
-  const faceWidth = withDirection(measure, request.baseDirection, () => measure.measureText(probe).width);
+  const nativeWidth = probeWidth(measure, nativeFont, probe, request.baseDirection, request.route.lang);
+  const faceWidth = probeWidth(measure, faceFont, probe, request.baseDirection, request.route.lang);
   if (!(Number.isFinite(nativeWidth) && nativeWidth > 0) || nativeWidth !== faceWidth) return false;
-  const width = Math.ceil(nativeWidth + PROBE_EM_PX);
+  const rasterWidth = Math.ceil(nativeWidth + PROBE_EM_PX);
   const height = PROBE_EM_PX * 2;
-  const context = sharedContext(width, height);
+  const context = sharedContext(rasterWidth, height);
   if (!context) return false;
   try {
-    const native = rasterize(context, nativeFont, probe, width, height, request.baseDirection);
-    const face = rasterize(context, faceFont, probe, width, height, request.baseDirection);
+    const native = rasterize(context, nativeFont, probe, rasterWidth, height, request.baseDirection, request.route.lang);
+    const face = rasterize(context, faceFont, probe, rasterWidth, height, request.baseDirection, request.route.lang);
     let ink = false;
     for (let index = 0; index < native.length; index++) {
       if (native[index] !== face[index]) return false;
@@ -116,6 +132,15 @@ const OWNERSHIP_LIMIT = 16384;
  * the realm-wide cache stays bounded in bytes as well as entries. */
 const OWNERSHIP_KEY_UNITS = 16;
 let graphemes: Intl.Segmenter | null | undefined;
+
+function probeWidth(
+  context: RasterContext, font: string, probe: string, base: 'ltr' | 'rtl' | undefined, lang: string | undefined,
+): number {
+  context.font = font;
+  if (lang === undefined) return withDirection(context, base, () => context.measureText(probe).width);
+  return withLanguage(context, lang, () =>
+    withDirection(context, base, () => context.measureText(probe).width));
+}
 
 /**
  * Glyph ownership through a size-adjust:0% registration of the exact source
@@ -137,8 +162,11 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
   const font = `${request.style} ${request.weight} 100px ${quoteCssFontFamily(request.coverageProbeFamily)}`;
   let context: RasterContext | null | undefined;
   for (const part of parts) {
-    const key = request.baseDirection === undefined ? `${font}\u0000${part}`
-      : `directed\u0000${JSON.stringify([font, part, request.baseDirection])}`;
+    // Keys of requests without a language are those used before languages.
+    const key = request.lang !== undefined
+      ? `lang\u0000${JSON.stringify([font, part, request.baseDirection ?? null, request.lang])}`
+      : request.baseDirection === undefined ? `${font}\u0000${part}`
+        : `directed\u0000${JSON.stringify([font, part, request.baseDirection])}`;
     let owned = ownership.get(key);
     if (owned === undefined) {
       context ??= sharedContext(1, PROBE_EM_PX * 2);
@@ -146,9 +174,14 @@ export function ownsGlyphs(request: Readonly<GlyphOwnershipRequest>): boolean {
       context.font = font;
       // Owned glyphs keep zero advance AND zero ink (the outlines scale too);
       // a fallback, even a zero-advance combining mark, keeps positive ink.
-      const metrics = request.baseDirection === undefined
-        ? context.measureText(part)
-        : withDirection(context, request.baseDirection, () => context!.measureText(part));
+      const measureContext = context;
+      const metrics = request.lang === undefined
+        ? request.baseDirection === undefined
+          ? measureContext.measureText(part)
+          : withDirection(measureContext, request.baseDirection, () => measureContext.measureText(part))
+        : withLanguage(measureContext, request.lang, () => request.baseDirection === undefined
+          ? measureContext.measureText(part)
+          : withDirection(measureContext, request.baseDirection, () => measureContext.measureText(part)));
       const inkWidth = (metrics.actualBoundingBoxLeft ?? 0) + (metrics.actualBoundingBoxRight ?? 0);
       const inkHeight = (metrics.actualBoundingBoxAscent ?? 0) + (metrics.actualBoundingBoxDescent ?? 0);
       owned = metrics.width === 0 && Number.isFinite(inkWidth) && Number.isFinite(inkHeight)

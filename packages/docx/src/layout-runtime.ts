@@ -1,3 +1,4 @@
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { classifyCjkFont, type CjkLang, type NativeRouteLineRequest, type OfficeFontFallbackRoute } from '@silurus/ooxml-core';
 import {
   activeFontSet,
@@ -119,6 +120,10 @@ export function createLayoutServices(
     readonly mathResources?: readonly MathLayoutResource[];
     readonly mathDrawables?: ReadonlyMap<string, CanvasImageSource>;
     readonly measureContext?: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+    /** The run-language oracle already built on {@link measureContext} (a
+     * render worker decides admission with it); otherwise the text service
+     * builds its own. */
+    readonly namedFamilyOracle?: import('@silurus/ooxml-core').NamedFamilyOracle;
     /** The factory that made {@link measureContext}'s canvas, when the caller
      * owns one (a Node session): symbol colour probes allocate their scratch
      * canvas through it, on the backend that measures and paints. */
@@ -164,9 +169,11 @@ export function createLayoutServices(
   const verticalContext = canvasContext === null || measured === null
     ? null
     : withReferenceAdvances(canvasContext, measured);
+  let hasLang: boolean | undefined;
+  const engineHasLang = () => hasLang ??= canvasContext !== null && 'lang' in canvasContext;
   const context: MeasurementTextContext | null = canvasContext === null || measured === null
     ? null
-    : Object.freeze({
+    : Object.freeze(Object.defineProperties({
         get textAlign() { return canvasContext.textAlign; },
         set textAlign(value: CanvasTextAlign | undefined) { if (value !== undefined) canvasContext.textAlign = value; },
         get direction() { return canvasContext.direction; },
@@ -178,7 +185,18 @@ export function createLayoutServices(
         get fontKerning() { return canvasContext.fontKerning; },
         set fontKerning(value: CanvasFontKerning) { canvasContext.fontKerning = value; },
         measureText(text: string) { return measured.measureText(text); },
-      });
+      }, {
+        // Canvas `lang` (language-specific glyphs), forwarded only where the
+        // engine has it. The engine is asked on first use, never at creation:
+        // untagged text selects no language, so its measurement reads and
+        // writes none of the caller context's language state. An engine
+        // without the attribute reads as no language and ignores writes.
+        lang: {
+          get: () => engineHasLang() ? (canvasContext as unknown as { lang: string }).lang : undefined,
+          set: (value: string) => { if (engineHasLang()) (canvasContext as unknown as { lang: string }).lang = value; },
+          enumerable: true,
+        },
+      }));
   const canvasElement = canvasContext?.canvas as HTMLCanvasElement | undefined;
   const ownerCanvasConstructor =
     canvasElement?.ownerDocument?.defaultView?.HTMLCanvasElement;
@@ -199,13 +217,13 @@ export function createLayoutServices(
       : hasDomVerticalProbe
         ? 'vertical-glyph-measurement:dom-vert-probe-v3'
         : 'vertical-glyph-measurement:no-dom-vert-probe-v2',
-    measureRunInkExtra(text: string): number {
+    measureRunInkExtra(text: string, lang?: string): number {
       if (canvasContext === null || verticalContext === null) {
         throw new Error('Vertical glyph measurement requires a concrete text context');
       }
       return withVertFeatureCanvasScope(
         canvasContext,
-        () => verticalRunInkExtraPx(verticalContext, text),
+        () => verticalRunInkExtraPx(verticalContext, text, lang),
       );
     },
     planRun(input: Parameters<VerticalGlyphMeasurementService['planRun']>[0]) {
@@ -221,6 +239,7 @@ export function createLayoutServices(
         const previousKerning = canvasContext.fontKerning;
         view.font = input.font;
         canvasContext.fontKerning = input.fontKerning;
+        const previousLang = selectCanvasLanguage(canvasContext, input.lang);
         try {
           return planVerticalRunWithCapability(
             view,
@@ -229,12 +248,13 @@ export function createLayoutServices(
             input.letterSpacingPt,
             input.charScale,
             input.growTrRotateInk,
-            (cp) => verticalVertGlyphReachable(view, cp),
+            (cp) => verticalVertGlyphReachable(view, cp, input.lang),
             input.writingMode,
             input.characterGridDeltaPt,
             input.characterAdjustmentPt,
           );
         } finally {
+          restoreCanvasLanguage(canvasContext, previousLang);
           view.font = previousFont;
           canvasContext.fontKerning = previousKerning;
         }
@@ -255,6 +275,7 @@ export function createLayoutServices(
     measureContext: context,
     ...(advancePlanner ? { textAdvancePlanner: advancePlanner } : {}),
     symbolProbeOwner: canvasContext,
+    ...(options.namedFamilyOracle ? { namedFamilyOracle: options.namedFamilyOracle } : {}),
     ...(options.createCanvas ? { symbolProbeCanvas: options.createCanvas } : {}),
     // A caller canvas may belong to a popup/iframe. CSS face admission must
     // inspect the FontFaceSet that also shapes this context's glyphs.

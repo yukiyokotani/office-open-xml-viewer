@@ -448,6 +448,8 @@ export interface TextPlacement {
   /** Immutable contextual paint operations. Normally one whole-run operation. */
   readonly paintOps: readonly TextPaintOp[];
   readonly color: TextColorPolicy;
+  /** The route the text was measured through; paint applies its shorthand
+   * and its language ({@link CanvasFontRoute.lang}, §17.3.2.20 w:lang). */
   readonly fontRoute: CanvasFontRoute;
   readonly fontSizePt: number;
   readonly fontWeight: number;
@@ -1374,6 +1376,13 @@ export interface NumberingMarkerShapeInput {
   readonly complexScript: boolean;
   readonly fontHint?: 'default' | 'eastAsia' | 'cs';
   readonly eastAsiaLanguage?: string;
+  /** The independent w:lang axes of numbering/paragraph-mark run properties. */
+  readonly language?: string;
+  readonly complexScriptLanguage?: string;
+  /** TextShapeRequest.canvasEastAsiaLanguage of those run properties. */
+  readonly canvasEastAsiaLanguage?: string | null;
+  /** TextShapeRequest.scriptClassLanguage of those run properties. */
+  readonly scriptClassLanguage?: string;
   readonly kerning?: boolean;
 }
 

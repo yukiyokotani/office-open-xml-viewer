@@ -1,6 +1,6 @@
 import type { LineSpacing } from '../types';
 import type { CanvasFontRoute, ResolvedFontMetric } from '@silurus/ooxml-core';
-import { measureResolvedCanvasFontBoxRatio, SYNTHETIC_ASCENT_EM, SYNTHETIC_DESCENT_EM } from '@silurus/ooxml-core';
+import { canvasFontRouteFaces, measureResolvedCanvasFontBoxRatio, SYNTHETIC_ASCENT_EM, SYNTHETIC_DESCENT_EM } from '@silurus/ooxml-core';
 import type { NumberingMarkerShapeInput } from '../layout/types.js';
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
 import type { ParagraphLayoutSource, TextLayoutService } from '../layout/text.js';
@@ -274,7 +274,8 @@ export function nativeCanvasLineRatio(
     cache = new Map();
     ownerCaches.set(cacheOwner, cache);
   }
-  const key = JSON.stringify([route.fingerprint, family, weight, style, probe]);
+  // A font box belongs to the faces, whatever language the route shapes in.
+  const key = JSON.stringify([canvasFontRouteFaces(route).fingerprint, family, weight, style, probe]);
   if (cache.has(key)) return cache.get(key) ?? null;
   const small = measureResolvedCanvasFontBoxRatio(context, family, {
     text: probe, emPx: NATIVE_BOX_PROBE_SMALL_EM, weight, style,
@@ -397,6 +398,10 @@ export function paragraphMarkLineMetrics(
       complexScript: forceCs,
       fontHint: effectiveMarkShapeInput?.fontHint,
       eastAsiaLanguage: effectiveMarkShapeInput?.eastAsiaLanguage,
+      language: effectiveMarkShapeInput?.language,
+      complexScriptLanguage: effectiveMarkShapeInput?.complexScriptLanguage,
+      canvasEastAsiaLanguage: effectiveMarkShapeInput?.canvasEastAsiaLanguage,
+      scriptClassLanguage: effectiveMarkShapeInput?.scriptClassLanguage,
       kerning: effectiveMarkShapeInput?.kerning,
       measure: true,
     });

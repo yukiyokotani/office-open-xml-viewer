@@ -133,6 +133,23 @@ pub struct RunFmt {
     pub lang_bidi: Option<String>,
     /// ECMA-376 §17.3.2.20 w:lang/@w:eastAsia, lower-cased.
     pub lang_east_asia: Option<String>,
+    /// ECMA-376 §17.3.2.20 w:lang/@w:val, lower-cased — the language of text
+    /// that is neither East Asian nor complex script.
+    pub lang: Option<String>,
+    /// True when a `<w:lang>` element is present at THIS level (or anywhere in
+    /// a style chain already folded into this value). §17.3.2.20 separates an
+    /// absent element (the level inherits) from a present element whose
+    /// `w:val` is omitted (the Western language is "automatically determined"
+    /// for that level), so `apply_run` needs presence, not only the value.
+    pub lang_element_set_here: bool,
+    /// w:eastAsia and w:bidi resolved by element presence, like `lang`: the
+    /// value of the deepest level whose `<w:lang>` is present, none where that
+    /// element omits the attribute (§17.3.2.20 leaves it to automatic
+    /// determination). Canvas language input only; `lang_east_asia` and
+    /// `lang_bidi` keep their per-attribute merge for regional font selection
+    /// and bidi digit classification.
+    pub lang_east_asia_by_element: Option<String>,
+    pub lang_bidi_by_element: Option<String>,
     /// ECMA-376 §17.3.2.35 `<w:spacing w:val>` — character-spacing adjustment,
     /// the pitch added AFTER each character before the next is rendered
     /// ("equivalent to the additional character pitch added by a document
@@ -615,6 +632,9 @@ pub struct StyleMap {
 /// at five or fewer levels; 64 leaves ample headroom while bounding each
 /// resolution. A longer chain fails closed with a typed resource error.
 pub(crate) const MAX_STYLE_INHERITANCE_DEPTH: usize = 64;
+/// Longest w:lang@w:val retained as a Canvas language, in UTF-16 units: the
+/// renderer bound (packages/docx/src/layout/text.ts MAX_LANGUAGE_TAG_UNITS).
+pub(crate) const MAX_CANVAS_LANGUAGE_TAG_UNITS: usize = 64;
 
 /// The largest number of distinct styles any one `basedOn` chain applies,
 /// counted exactly as [`StyleMap::apply_style_chain`] and
@@ -1587,6 +1607,18 @@ pub(crate) fn apply_run(dst: &mut RunFmt, src: &RunFmt) {
     if src.lang_east_asia.is_some() {
         dst.lang_east_asia = src.lang_east_asia.clone();
     }
+    // ECMA-376 §17.3.2.20: an absent <w:lang> leaves the previous level's
+    // value; a present <w:lang> without w:val leaves the Western language to
+    // automatic determination, so the inherited w:val is cleared at that level
+    // (`lang` carries only an authored tag; none means no Canvas language).
+    // w:eastAsia and w:bidi above keep their established per-attribute merge,
+    // which feeds regional font selection and bidi digit classification.
+    if src.lang_element_set_here {
+        dst.lang = src.lang.clone();
+        dst.lang_east_asia_by_element = src.lang_east_asia_by_element.clone();
+        dst.lang_bidi_by_element = src.lang_bidi_by_element.clone();
+        dst.lang_element_set_here = true;
+    }
     // Run character-metric axes (§17.3.2.14 fitText / §17.3.2.35 spacing /
     // §17.3.2.43 w / §17.3.2.24 position / §17.3.2.19 kern). Each carries the
     // same "if omitted, inherit; if set, override" rule as the other run
@@ -2356,6 +2388,7 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
     // Complex-script language tag (ECMA-376 §17.3.2.20 w:lang/@w:bidi). Lower-
     // cased; its primary subtag later decides European-digit AN classification.
     if let Some(lang) = child_w(rpr, "lang") {
+        fmt.lang_element_set_here = true;
         if let Some(bidi) = attr_w(lang, "bidi") {
             if !bidi.is_empty() {
                 fmt.lang_bidi = Some(bidi.to_lowercase());
@@ -2366,6 +2399,19 @@ pub fn parse_run_fmt(rpr: roxmltree::Node) -> RunFmt {
                 fmt.lang_east_asia = Some(east_asia.to_lowercase());
             }
         }
+        // `lang` is the Canvas-only w:val fact. ECMA-376 §17.3.2.20 types
+        // w:val as ST_Lang (a language identifier); the renderer admits at
+        // most MAX_LANGUAGE_TAG_UNITS (64) UTF-16 units and treats a longer
+        // value as naming no language, so it is not retained here and is not
+        // cloned into every inheriting run. Element presence
+        // (`lang_element_set_here`) still clears the inherited value.
+        if let Some(val) = attr_w(lang, "val") {
+            if !val.is_empty() && val.encode_utf16().count() <= MAX_CANVAS_LANGUAGE_TAG_UNITS {
+                fmt.lang = Some(val.to_lowercase());
+            }
+        }
+        fmt.lang_east_asia_by_element = fmt.lang_east_asia.clone();
+        fmt.lang_bidi_by_element = fmt.lang_bidi.clone();
     }
 
     // Color. An explicit `<w:color w:val="auto"/>` (ECMA-376 §17.3.2.6) does NOT

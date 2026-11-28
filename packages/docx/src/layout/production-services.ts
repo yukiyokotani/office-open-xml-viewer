@@ -1,4 +1,5 @@
 import { acquireCanvasGlyphContours } from '../native-glyph-contours.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { type CjkLang } from '@silurus/ooxml-core';
 import {
   fontFamilyKey,
@@ -8,6 +9,7 @@ import {
   activeFontSet,
   canvasFontString,
   createSymbolFaceOracle,
+  createNamedFamilyOracle,
   fontFaceWeightCovers,
 } from '@silurus/ooxml-core';
 import type { ResolvedFontMetric } from '@silurus/ooxml-core';
@@ -68,6 +70,8 @@ export interface ProductionLayoutServiceOptions {
   /** The 2D context behind {@link measureContext}: symbol-face colour probes
    * draw on a scratch canvas of its realm (core symbol-face.ts). */
   readonly symbolProbeOwner?: unknown;
+  /** Run-language oracle built on the measuring context by the caller. */
+  readonly namedFamilyOracle?: import('@silurus/ooxml-core').NamedFamilyOracle;
   /** The canvas factory of the measuring/painting backend, for those
    * probes (a Node session's canvas factory). */
   readonly symbolProbeCanvas?: import('@silurus/ooxml-core').SymbolProbeCanvasFactory;
@@ -331,6 +335,12 @@ export function createProductionTextLayoutService(
   const supportsDirectedContext = context !== null
     && ['ltr', 'rtl', 'inherit'].includes(context.direction ?? '')
     && ['start', 'end', 'left', 'right', 'center'].includes(context.textAlign ?? '');
+  // Only a document that names a run language ever judges one; any other
+  // keeps the untagged measurer identity and does no capability work.
+  const namedFamilyOracle = context && source.carriesRunLanguage !== false
+    ? options.namedFamilyOracle
+      ?? createNamedFamilyOracle(options.symbolProbeOwner ?? context, options.symbolProbeCanvas)
+    : undefined;
   const measure = (request: Readonly<GlyphMeasureRequest>) => {
     if (!context) return {
       advancePt: [...request.text].length * request.fontSizePt * 0.5,
@@ -342,6 +352,7 @@ export function createProductionTextLayoutService(
     const previousKerning = context.fontKerning;
     const previousDirection = request.baseDirection !== undefined ? context.direction : undefined;
     const previousTextAlign = request.baseDirection !== undefined ? context.textAlign : undefined;
+    let previousLang: string | undefined;
     try {
       if (request.baseDirection !== undefined) {
         context.direction = request.baseDirection;
@@ -358,6 +369,13 @@ export function createProductionTextLayoutService(
         request.weight,
         request.style,
       );
+      // The route's language is part of what it measures (CanvasFontRoute.lang).
+      // It is selected after the font: assigning the font settles the
+      // reference-em plan (core reference-advances.ts) in the context's
+      // ambient state, a per-font decision no run language changes.
+      if (request.fontRoute.lang !== undefined) {
+        previousLang = selectCanvasLanguage(context, request.fontRoute.lang);
+      }
       context.letterSpacing = `${request.letterSpacingPt}px`;
       if (request.kerning != null) context.fontKerning = request.kerning ? 'normal' : 'none';
       const metrics = context.measureText(request.text);
@@ -391,6 +409,8 @@ export function createProductionTextLayoutService(
         context.direction = previousDirection;
         context.textAlign = previousTextAlign;
       }
+      // The ambient language first, so restoring the font plans in it too.
+      if (previousLang !== undefined) restoreCanvasLanguage(context, previousLang);
       context.font = previousFont;
       context.letterSpacing = previousLetterSpacing;
       if (request.kerning != null) context.fontKerning = previousKerning;
@@ -502,9 +522,21 @@ export function createProductionTextLayoutService(
       // fingerprint, independently of source occurrence or cache history.
       // v6/v3: a shorthand the context grid-fits at its own size is measured
       // at the reference em (core reference-advances.ts).
-      fingerprint: supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v6'
-        : context ? 'canvas-text-metrics-v3' : 'deterministic-text-metrics-v1',
-      ...(context ? { sameGlyphRaster, ownsGlyphs } : {}),
+      // +named-family-lang: run languages reach Canvas (named-family text, in
+      // a font set that can prove it); untagged documents keep the identity.
+      fingerprint: (supportsDirectedContext ? 'canvas-projectable-directed-prefix-text-metrics-v6'
+        : context ? 'canvas-text-metrics-v3' : 'deterministic-text-metrics-v1')
+        + (namedFamilyOracle?.available ? '+named-family-lang' : ''),
+      ...(context ? {
+        sameGlyphRaster,
+        ownsGlyphs,
+      } : {}),
+      ...(namedFamilyOracle ? {
+        // Judged in the font set of the canvas that measures and paints (the
+        // symbol oracle's owner); results live with this service's snapshot.
+        namedFamiliesDraw: (request: Readonly<import('./text.js').NamedFamilyDrawRequest>) =>
+          namedFamilyOracle!.draws(request.fontRoute.familyList, request.weight, request.style, request.text),
+      } : {}),
       measure,
       ...(supportsDirectedContext ? { measureDirected: measure, supportsDirectedAuxiliaries: true as const } : {}),
     },

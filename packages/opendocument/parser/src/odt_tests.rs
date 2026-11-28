@@ -118,6 +118,461 @@ fn text_runs(paragraph: &DocParagraph) -> Vec<&TextRun> {
 }
 
 #[test]
+fn untagged_styles_resolve_no_language_attribute() {
+    // A cascade build notes whether any style sets a language attribute, so
+    // text whose styles name none does no language lookups at all.
+    let automatic = r#"<style:style style:name="B" style:family="text"><style:text-properties fo:font-weight="bold"/></style:style>"#;
+    let before = crate::style::LANGUAGE_LOOKUPS.with(|count| count.get());
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r#"<text:p><text:span text:style-name="B">a漢</text:span>b<text:page-number>1</text:page-number></text:p>"#,
+        ..Fixture::default()
+    });
+    let after = crate::style::LANGUAGE_LOOKUPS.with(|count| count.get());
+    assert_eq!(after, before);
+    assert!(text_runs(paragraphs(&document.body)[0])
+        .iter()
+        .all(|run| run.lang.is_none()
+            && run.lang_east_asia.is_none()
+            && run.lang_bidi.is_none()
+            && run.lang_script_class.is_none()));
+    // A language attribute anywhere in the search order enables resolution.
+    let tagged = r#"<style:style style:name="B" style:family="text"><style:text-properties style:country-asian="JP"/></style:style>"#;
+    read_fixture(Fixture {
+        automatic: tagged,
+        body: r#"<text:p><text:span text:style-name="B">a</text:span></text:p>"#,
+        ..Fixture::default()
+    });
+    assert!(crate::style::LANGUAGE_LOOKUPS.with(|count| count.get()) > after);
+}
+
+#[test]
+fn untagged_items_build_no_cascade_for_their_own_class() {
+    // Styles naming no language give every §20.358 class none, so a field,
+    // ruby base or custom citation label after Han text is not classified:
+    // it builds (and charges the work budget for) no cascade beyond those of
+    // the same item after Latin text, whose class needs no lookup.
+    let builds = |body: &str| {
+        let before = crate::style::CASCADE_BUILDS.with(|count| count.get());
+        let document = read_fixture(Fixture {
+            body,
+            ..Fixture::default()
+        });
+        let after = crate::style::CASCADE_BUILDS.with(|count| count.get());
+        assert!(text_runs(paragraphs(&document.body)[0])
+            .iter()
+            .all(|run| run.lang_script_class.is_none()));
+        after - before
+    };
+    let field =
+        |lead: &str| format!("<text:p>{lead}<text:page-number>1</text:page-number></text:p>");
+    assert_eq!(builds(&field("\u{6F22}")), builds(&field("a")));
+    let ruby = |lead: &str, base: &str| {
+        format!("<text:p>{lead}<text:ruby><text:ruby-base>{base}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:p>")
+    };
+    assert_eq!(
+        builds(&ruby("\u{6F22}", "\u{0434}")),
+        builds(&ruby("\u{6F22}", "\u{6F22}"))
+    );
+    let note = |lead: &str, label: &str| {
+        format!("<text:p>{lead}<text:note text:note-class=\"footnote\"><text:note-citation text:label=\"{label}\">{label}</text:note-citation><text:note-body><text:p>n</text:p></text:note-body></text:note></text:p>")
+    };
+    assert_eq!(
+        builds(&note("\u{6F22}", "a")),
+        builds(&note("\u{6F22}", "\u{6F22}"))
+    );
+}
+
+#[test]
+fn western_language_and_country_become_the_run_language() {
+    let automatic = r#"<style:style style:name="Sr" style:family="text"><style:text-properties fo:language="sr" fo:country="rs"/></style:style><style:style style:name="Ro" style:family="text"><style:text-properties fo:language="ro"/></style:style><style:style style:name="None" style:family="text"><style:text-properties fo:language="none" fo:country="RS"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r#"<text:p><text:span text:style-name="Sr">а</text:span><text:span text:style-name="Ro">ș</text:span><text:span text:style-name="None">x</text:span>y</text:p>"#,
+        ..Fixture::default()
+    });
+    let languages: Vec<Option<&str>> = text_runs(paragraphs(&document.body)[0])
+        .iter()
+        .map(|run| run.lang.as_deref())
+        .collect();
+    // BCP 47 language-region, the same tag the Asian/complex slots carry.
+    // fo:language="none" names no language, like the unstyled "y".
+    assert_eq!(languages, [Some("sr-RS"), Some("ro"), None, None]);
+}
+
+#[test]
+fn fields_and_paragraph_marks_carry_the_run_language() {
+    let automatic = r#"<style:style style:name="Sr" style:family="text"><style:text-properties fo:language="sr" fo:country="rs" style:language-asian="ja" style:country-asian="jp"/></style:style><style:style style:name="SrP" style:family="paragraph"><style:text-properties fo:language="sr" fo:country="rs" style:language-complex="ar" style:country-complex="sa"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: r#"<text:p><text:span text:style-name="Sr"><text:page-number>1</text:page-number></text:span></text:p><text:p text:style-name="SrP"/>"#,
+        ..Fixture::default()
+    });
+    let paragraphs = paragraphs(&document.body);
+    let field = paragraphs[0]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Field(field) => Some(field),
+            _ => None,
+        })
+        .expect("page-number field");
+    // The page number is Latin-class text: its class's language is the
+    // script-class fact; the axes keep the style's own values.
+    assert_eq!(
+        (
+            field.lang_script_class.as_deref(),
+            field.lang.as_deref(),
+            field.lang_east_asia.as_deref()
+        ),
+        (Some("sr-RS"), Some("sr-RS"), Some("ja-JP"))
+    );
+    let mark = paragraphs[1]
+        .paragraph_mark_font_facts
+        .as_ref()
+        .expect("paragraph mark facts");
+    assert_eq!(
+        (
+            mark.lang_script_class.as_deref(),
+            mark.lang.as_deref(),
+            mark.lang_bidi.as_deref()
+        ),
+        (Some("sr-RS"), Some("sr-RS"), Some("ar-SA"))
+    );
+}
+
+const THREE_LANGUAGES: &str = r#"<style:style style:name="T" style:family="text"><style:text-properties fo:language="fr" fo:country="FR" style:language-asian="zh" style:country-asian="CN" style:language-complex="ar" style:country-complex="SA"/></style:style>"#;
+
+/// Each run's text, script-class language and three style axes.
+type Languages<'a> = (String, Option<&'a str>, [Option<&'a str>; 3]);
+
+fn languages(run: &TextRun) -> Languages<'_> {
+    (
+        run.text.clone(),
+        run.lang_script_class.as_deref(),
+        [
+            run.lang.as_deref(),
+            run.lang_east_asia.as_deref(),
+            run.lang_bidi.as_deref(),
+        ],
+    )
+}
+
+#[test]
+fn the_script_class_language_is_a_fact_beside_the_style_axes() {
+    let document = read_fixture(Fixture {
+        automatic: THREE_LANGUAGES,
+        body: "<text:p><text:span text:style-name=\"T\">a\u{1D11E}\u{31C0}\u{5B57}\u{0627}</text:span>x</text:p>",
+        ..Fixture::default()
+    });
+    let runs: Vec<_> = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .map(languages)
+        .collect();
+    // ODF Table 22: U+31C0 is Asian like U+5B57 and U+1D11E Latin, whatever
+    // slot the renderer's §17.3.2.26 table gives them. The class language is
+    // its own fact; every run keeps the style's three axes, so regional font
+    // selection still reads the Asian setting. The unstyled "x" names no
+    // language on any axis and carries no fact.
+    let axes = [Some("fr-FR"), Some("zh-CN"), Some("ar-SA")];
+    assert_eq!(
+        runs,
+        [
+            ("a\u{1D11E}".to_string(), Some("fr-FR"), axes),
+            ("\u{31C0}\u{5B57}".to_string(), Some("zh-CN"), axes),
+            ("\u{0627}".to_string(), Some("ar-SA"), axes),
+            ("x".to_string(), None, [None; 3]),
+        ]
+    );
+}
+
+#[test]
+fn a_class_without_a_language_is_recorded_only_beside_another_class_language() {
+    let automatic = r#"<style:style style:name="A" style:family="text"><style:text-properties style:language-asian="zh" style:country-asian="CN"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p><text:span text:style-name=\"A\">a\u{5B57}<text:page-number>1</text:page-number></text:span>b<text:page-number>2</text:page-number></text:p>",
+        ..Fixture::default()
+    });
+    let items: Vec<(String, Option<&str>)> = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            DocRun::Field(field) => {
+                Some(("<page>".to_string(), field.lang_script_class.as_deref()))
+            }
+            DocRun::Text(text) => Some((text.text.clone(), text.lang_script_class.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            // Latin text of a style that names only an Asian language: the
+            // empty fact keeps the renderer from using the Asian axis.
+            ("a".to_string(), Some("")),
+            ("\u{5B57}".to_string(), Some("zh-CN")),
+            ("<page>".to_string(), Some("")),
+            // No language on any axis: no fact, as in a document without
+            // languages.
+            ("b".to_string(), None),
+            ("<page>".to_string(), None),
+        ]
+    );
+}
+
+#[test]
+fn a_latin_class_character_keeps_the_asian_axis_for_regional_fonts() {
+    // U+16FE2 is outside Table 22 and weak: it takes the Latin class of "a",
+    // while the renderer's Unicode Han test may still select a regional face
+    // for it from the Asian axis.
+    let document = read_fixture(Fixture {
+        automatic: THREE_LANGUAGES,
+        body: "<text:p><text:span text:style-name=\"T\">a\u{16FE2}</text:span></text:p>",
+        ..Fixture::default()
+    });
+    let runs: Vec<_> = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .map(languages)
+        .collect();
+    assert_eq!(
+        runs,
+        [(
+            "a\u{16FE2}".to_string(),
+            Some("fr-FR"),
+            [Some("fr-FR"), Some("zh-CN"), Some("ar-SA")]
+        )]
+    );
+}
+
+#[test]
+fn fields_and_ruby_bases_take_the_language_of_their_own_text() {
+    let document = read_fixture(Fixture {
+        automatic: THREE_LANGUAGES,
+        body: "<text:p><text:span text:style-name=\"T\"><text:page-number>1</text:page-number>\u{5B57}<text:page-number>2</text:page-number><text:page-count>3</text:page-count><text:ruby><text:ruby-base>\u{0434}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:ruby><text:ruby-base>\u{3001}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:ruby><text:ruby-base>\u{2014}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby><text:ruby><text:ruby-base>a\u{5B57}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:span></text:p>",
+        ..Fixture::default()
+    });
+    let items: Vec<(String, Option<&str>)> = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            DocRun::Field(field) => Some((
+                format!("<{}>", field.field_type),
+                field.lang_script_class.as_deref(),
+            )),
+            DocRun::Text(text) => Some((text.text.clone(), text.lang_script_class.as_deref())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            // A page number or count is Latin text wherever it stands: at
+            // the paragraph start and after Asian text alike.
+            ("<page>".to_string(), Some("fr-FR")),
+            ("\u{5B57}".to_string(), Some("zh-CN")),
+            ("<page>".to_string(), Some("fr-FR")),
+            ("<numPages>".to_string(), Some("fr-FR")),
+            // A ruby base is classed by its own text: Cyrillic is Latin
+            // class after U+5B57, U+3001 Asian.
+            ("\u{0434}".to_string(), Some("fr-FR")),
+            ("\u{3001}".to_string(), Some("zh-CN")),
+            // A base of weak characters alone takes the preceding class.
+            ("\u{2014}".to_string(), Some("zh-CN")),
+            // A base of two classes is one run and names no one language.
+            ("a\u{5B57}".to_string(), Some("")),
+        ]
+    );
+}
+
+#[test]
+fn a_mixed_class_ruby_base_takes_a_language_its_classes_share() {
+    // Latin and Asian classes naming one tag (ja-JP): the base `a字` keeps it.
+    let same = r#"<style:style style:name="T" style:family="text"><style:text-properties fo:language="ja" fo:country="JP" style:language-asian="ja" style:country-asian="JP" style:language-complex="ar" style:country-complex="SA"/></style:style>"#;
+    let base = |automatic: &'static str| {
+        let document = read_fixture(Fixture {
+            automatic,
+            body: "<text:p><text:span text:style-name=\"T\"><text:ruby><text:ruby-base>a\u{5B57}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:span></text:p>",
+            ..Fixture::default()
+        });
+        let runs: Vec<(String, Option<String>, bool)> = text_runs(paragraphs(&document.body)[0])
+            .iter()
+            .map(|run| {
+                (
+                    run.text.clone(),
+                    run.lang_script_class.clone(),
+                    run.ruby.is_some(),
+                )
+            })
+            .collect();
+        runs
+    };
+    // One run, one annotation, the shared tag (the complex class, absent
+    // from the base, does not take part).
+    assert_eq!(
+        base(same),
+        [("a\u{5B57}".to_string(), Some("ja-JP".to_string()), true)]
+    );
+    // Classes naming different languages: no one language.
+    assert_eq!(
+        base(THREE_LANGUAGES),
+        [("a\u{5B57}".to_string(), Some(String::new()), true)]
+    );
+}
+
+#[test]
+fn a_mixed_class_ruby_base_compares_tags_case_insensitively() {
+    // BCP 47 tags are case-insensitive (RFC 5646 §2.1.1): `sl-rozaj` and
+    // `SL-ROZAJ` name one language, which the base keeps (first spelling).
+    let automatic = r#"<style:style style:name="T" style:family="text"><style:text-properties style:rfc-language-tag="sl-rozaj" style:rfc-language-tag-asian="SL-ROZAJ"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        body: "<text:p><text:span text:style-name=\"T\"><text:ruby><text:ruby-base>a\u{5B57}</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby></text:span></text:p>",
+        ..Fixture::default()
+    });
+    let runs: Vec<(String, Option<String>, bool)> = text_runs(paragraphs(&document.body)[0])
+        .iter()
+        .map(|run| {
+            (
+                run.text.clone(),
+                run.lang_script_class.clone(),
+                run.ruby.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        [("a\u{5B57}".to_string(), Some("sl-rozaj".to_string()), true)]
+    );
+}
+
+#[test]
+fn custom_note_labels_take_the_language_of_their_own_text() {
+    // Serbian Latin for the Latin class, Japanese for the Asian class, in
+    // the body span and in the note paragraphs alike.
+    let properties = r#"<style:text-properties fo:language="sr" fo:script="Latn" fo:country="RS" style:language-asian="ja" style:country-asian="JP"/>"#;
+    let automatic = format!(
+        r#"<style:style style:name="T" style:family="text">{properties}</style:style><style:style style:name="P" style:family="paragraph">{properties}</style:style>"#
+    );
+    let note = |label: &str| {
+        format!("<text:note text:note-class=\"footnote\"><text:note-citation text:label=\"{label}\">{label}</text:note-citation><text:note-body><text:p text:style-name=\"P\">n</text:p></text:note-body></text:note>")
+    };
+    let body = format!(
+        "<text:p><text:span text:style-name=\"T\">\u{5B57}{}{}</text:span></text:p>",
+        note("\u{0434}"),
+        note("\u{6CE8}")
+    );
+    let document = read_fixture(Fixture {
+        automatic: &automatic,
+        body: &body,
+        ..Fixture::default()
+    });
+    let labelled = |runs: Vec<&TextRun>| -> Vec<(String, Option<String>)> {
+        runs.iter()
+            .filter(|run| run.note_ref.is_none() && !run.text.is_empty())
+            .map(|run| (run.text.clone(), run.lang_script_class.clone()))
+            .collect()
+    };
+    assert_eq!(
+        labelled(text_runs(paragraphs(&document.body)[0])),
+        [
+            ("\u{5B57}".to_string(), Some("ja-JP".to_string())),
+            // A Cyrillic label after U+5B57 is Latin-class text.
+            ("\u{0434}".to_string(), Some("sr-Latn-RS".to_string())),
+            ("\u{6CE8}".to_string(), Some("ja-JP".to_string())),
+        ]
+    );
+    // The note story's copy of each label: an Asian label is Asian-class
+    // text there too, whatever the Latin-class base properties.
+    let story =
+        |index: usize| labelled(text_runs(paragraphs(&document.footnotes[index].content)[0]));
+    assert_eq!(
+        story(0),
+        [
+            ("\u{0434}".to_string(), Some("sr-Latn-RS".to_string())),
+            ("n".to_string(), Some("sr-Latn-RS".to_string())),
+        ]
+    );
+    assert_eq!(
+        story(1),
+        [
+            ("\u{6CE8}".to_string(), Some("ja-JP".to_string())),
+            ("n".to_string(), Some("sr-Latn-RS".to_string())),
+        ]
+    );
+    // The label keeps its run's font and size (only its language follows).
+    let body_runs = text_runs(paragraphs(&document.body)[0]);
+    let cyrillic = body_runs.iter().find(|run| run.text == "\u{0434}").unwrap();
+    let han = body_runs.iter().find(|run| run.text == "\u{5B57}").unwrap();
+    assert_eq!(
+        (&cyrillic.font_family, cyrillic.font_size),
+        (&han.font_family, han.font_size)
+    );
+}
+
+#[test]
+fn class_language_tags_carry_script_and_rfc_language_tags() {
+    let automatic = r#"<style:style style:name="S" style:family="text"><style:text-properties fo:language="sr" fo:script="latn" fo:country="rs" style:language-asian="zh" style:script-asian="Hant" style:country-asian="TW"/></style:style><style:style style:name="F" style:family="text"><style:text-properties fo:language="sl" fo:country="SI" style:rfc-language-tag="sl-rozaj"/></style:style><style:style style:name="N" style:family="text" style:parent-style-name="R"><style:text-properties fo:language="de" fo:country="DE"/></style:style>"#;
+    // R is a common style: N, an automatic style, inherits from it.
+    let styles = r#"<style:style style:name="R" style:family="text"><style:text-properties style:rfc-language-tag="sl-rozaj" style:rfc-language-tag-asian="ja-JP-u-ca-japanese" style:rfc-language-tag-complex="ar-SA-u-nu-arab"/></style:style>"#;
+    let document = read_fixture(Fixture {
+        automatic,
+        styles,
+        body: "<text:p><text:span text:style-name=\"S\">a\u{5B57}</text:span><text:span text:style-name=\"R\">b\u{5B57}\u{0627}</text:span><text:span text:style-name=\"F\">c</text:span><text:span text:style-name=\"N\">d\u{5B57}</text:span></text:p>",
+        ..Fixture::default()
+    });
+    let runs: Vec<Languages<'_>> = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .map(languages)
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            // §20.222 / §20.356: the script subtag joins each class tag;
+            // the regional axes keep language and country only.
+            (
+                "a".to_string(),
+                Some("sr-Latn-RS"),
+                [Some("sr-RS"), Some("zh-TW"), None]
+            ),
+            (
+                "\u{5B57}".to_string(),
+                Some("zh-Hant-TW"),
+                [Some("sr-RS"), Some("zh-TW"), None]
+            ),
+            // §§20.343–20.345: an RFC 5646 tag alone names the class
+            // language; it supplies no regional axis.
+            ("b".to_string(), Some("sl-rozaj"), [None, None, None]),
+            (
+                "\u{5B57}".to_string(),
+                Some("ja-JP-u-ca-japanese"),
+                [None, None, None]
+            ),
+            (
+                "\u{0627}".to_string(),
+                Some("ar-SA-u-nu-arab"),
+                [None, None, None]
+            ),
+            // A fallback language and country beside the RFC tag in one
+            // style: the RFC tag is the language.
+            (
+                "c".to_string(),
+                Some("sl-rozaj"),
+                [Some("sl-SI"), None, None]
+            ),
+            // A language set nearer overrides an inherited RFC tag; the
+            // Asian class keeps its inherited one.
+            ("d".to_string(), Some("de-DE"), [Some("de-DE"), None, None]),
+            (
+                "\u{5B57}".to_string(),
+                Some("ja-JP-u-ca-japanese"),
+                [Some("de-DE"), None, None]
+            ),
+        ]
+    );
+}
+
+#[test]
 fn collapses_white_space_and_keeps_spaces_tabs_and_breaks() {
     let document = read_fixture(Fixture {
         body:
@@ -1779,4 +2234,189 @@ fn reads_the_libreoffice_line_settings() {
     });
     let s = document.settings.as_ref().unwrap();
     assert!(s.libre_office_ms_word_grid_metrics && s.libre_office_no_external_leading);
+}
+
+#[test]
+fn an_oversized_class_language_is_not_copied_into_inheriting_runs() {
+    // The renderer admits at most 64 UTF-16 units as a Canvas language; a
+    // longer RFC tag names none there and becomes the empty "names none"
+    // fact instead of a copy per run. The regional axes are unchanged.
+    let read = |tag: &str| {
+        let style = format!(
+            r#"<style:style style:name="T" style:family="text"><style:text-properties style:rfc-language-tag="{tag}" fo:language="fr" fo:country="FR"/></style:style>"#
+        );
+        let body = "<text:p><text:span text:style-name=\"T\">a</text:span></text:p>".repeat(40);
+        read_fixture(Fixture {
+            automatic: &style,
+            body: &body,
+            ..Fixture::default()
+        })
+    };
+    let oversized = read(&format!("en-{}", "a".repeat(200)));
+    let bounded_tag = format!("en-{}", "a".repeat(61));
+    let bounded = read(&bounded_tag);
+    let facts = |document: &_| -> Vec<(Option<String>, [Option<String>; 3])> {
+        paragraphs(document)
+            .into_iter()
+            .flat_map(text_runs)
+            .map(|run| {
+                (
+                    run.lang_script_class.clone(),
+                    [
+                        run.lang.clone(),
+                        run.lang_east_asia.clone(),
+                        run.lang_bidi.clone(),
+                    ],
+                )
+            })
+            .collect()
+    };
+    let oversized = facts(&oversized.body);
+    let bounded = facts(&bounded.body);
+    assert_eq!(oversized.len(), 40);
+    for ((fact, axes), (kept, kept_axes)) in oversized.iter().zip(&bounded) {
+        assert_eq!(fact.as_deref(), Some(""));
+        assert_eq!(kept.as_deref(), Some(bounded_tag.as_str()));
+        assert_eq!(axes, kept_axes);
+    }
+}
+
+#[test]
+fn an_oversized_class_language_is_bounded_before_items_copy_it() {
+    // Page fields after non-Latin text and ruby bases each take a class
+    // language other than their position's (§20.358). An oversized tag is
+    // bounded where it is resolved, so those items copy only the empty
+    // "names none" tag, never the inherited value per item.
+    let tag = format!("en-{}", "a".repeat(200));
+    let style = format!(
+        r#"<style:style style:name="T" style:family="text"><style:text-properties style:rfc-language-tag="{tag}" fo:language="fr" fo:country="FR" style:rfc-language-tag-asian="{tag}" style:language-asian="zh" style:country-asian="CN"/></style:style>"#
+    );
+    let item = "\u{5B57}<text:page-number>1</text:page-number><text:ruby><text:ruby-base>a</text:ruby-base><text:ruby-text>r</text:ruby-text></text:ruby>";
+    let body = format!(
+        "<text:p><text:span text:style-name=\"T\">{}</text:span></text:p>",
+        item.repeat(200)
+    );
+    let before = text::CLASS_LANGUAGE_BYTES.with(|bytes| bytes.get());
+    let document = read_fixture(Fixture {
+        automatic: &style,
+        body: &body,
+        ..Fixture::default()
+    });
+    let copied = text::CLASS_LANGUAGE_BYTES.with(|bytes| bytes.get()) - before;
+    assert_eq!(copied, 0);
+    let facts: Vec<Option<&str>> = paragraphs(&document.body)[0]
+        .runs
+        .iter()
+        .filter_map(|run| match run {
+            DocRun::Field(field) => Some(field.lang_script_class.as_deref()),
+            DocRun::Text(text) => Some(text.lang_script_class.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert!(facts.len() >= 400);
+    assert!(facts.iter().all(|fact| *fact == Some("")));
+    // The regional inputs are unchanged.
+    let run = text_runs(paragraphs(&document.body)[0])
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(run.lang_east_asia.as_deref(), Some("zh-CN"));
+}
+
+#[test]
+fn an_oversized_language_component_bounds_the_class_language_tag() {
+    // The language/script/country components are measured before the Canvas
+    // tag is built: an inherited 1,024-byte fo:script names no Canvas
+    // language, while regional inputs within the limit are unchanged.
+    let class_language = |attributes: &str| {
+        let style = format!(
+            r#"<style:style style:name="T" style:family="text"><style:text-properties {attributes}/></style:style>"#
+        );
+        let document = read_fixture(Fixture {
+            automatic: &style,
+            body: "<text:p><text:span text:style-name=\"T\">a</text:span></text:p>",
+            ..Fixture::default()
+        });
+        text_runs(paragraphs(&document.body)[0])
+            .into_iter()
+            .next()
+            .unwrap()
+            .lang_script_class
+            .clone()
+    };
+    let script = "a".repeat(1024);
+    assert_eq!(
+        class_language(&format!(r#"fo:language="en" fo:script="{script}""#)).as_deref(),
+        Some("")
+    );
+    assert_eq!(
+        class_language(r#"fo:language="en" fo:script="latn" fo:country="us""#).as_deref(),
+        Some("en-Latn-US")
+    );
+    // The western regional value is bounded too: an inherited oversized
+    // fo:country is not copied into the runs' `lang`.
+    let western = |attributes: &str| {
+        let style = format!(
+            r#"<style:style style:name="T" style:family="text"><style:text-properties {attributes}/></style:style>"#
+        );
+        let document = read_fixture(Fixture {
+            automatic: &style,
+            body: "<text:p><text:span text:style-name=\"T\">a</text:span><text:span text:style-name=\"T\">b</text:span></text:p>",
+            ..Fixture::default()
+        });
+        text_runs(paragraphs(&document.body)[0])
+            .into_iter()
+            .map(|run| run.lang.clone())
+            .collect::<Vec<_>>()
+    };
+    let country = "x".repeat(1024);
+    let oversized = western(&format!(r#"fo:language="en" fo:country="{country}""#));
+    assert!(!oversized.is_empty());
+    assert!(oversized.iter().all(Option::is_none));
+    assert!(western(r#"fo:language="en" fo:country="us""#)
+        .iter()
+        .all(|lang| lang.as_deref() == Some("en-US")));
+}
+
+#[test]
+fn oversized_regional_languages_are_not_copied_to_paragraph_marks_and_fields() {
+    // An Asian language with a 1,024-byte country cannot match a regional
+    // font list: the paragraph marks and the field must not each retain it.
+    let country = "x".repeat(1024);
+    let style = format!(
+        r#"<style:style style:name="P" style:family="paragraph"><style:text-properties style:language-asian="ja" style:country-asian="{country}" style:language-complex="ar" style:country-complex="{country}"/></style:style><style:style style:name="Ok" style:family="paragraph"><style:text-properties style:language-asian="ja" style:country-asian="JP"/></style:style>"#
+    );
+    let body = format!(
+        "{}<text:p text:style-name=\"P\"><text:page-number>1</text:page-number></text:p><text:p text:style-name=\"Ok\"><text:page-number>1</text:page-number></text:p>",
+        "<text:p text:style-name=\"P\"/>".repeat(32)
+    );
+    let document = read_fixture(Fixture {
+        automatic: &style,
+        body: &body,
+        ..Fixture::default()
+    });
+    let paragraphs = paragraphs(&document.body);
+    for paragraph in &paragraphs[..33] {
+        let facts = paragraph.paragraph_mark_font_facts.as_ref().unwrap();
+        assert_eq!(facts.lang_east_asia, None);
+        assert_eq!(facts.lang_bidi, None);
+    }
+    for run in &paragraphs[32].runs {
+        if let DocRun::Field(field) = run {
+            assert_eq!(field.lang_east_asia, None);
+            assert_eq!(field.lang_bidi, None);
+        }
+    }
+    // Valid regional inputs are unchanged.
+    let ok = paragraphs[33].paragraph_mark_font_facts.as_ref().unwrap();
+    assert_eq!(ok.lang_east_asia.as_deref(), Some("ja-JP"));
+    let field = paragraphs[33]
+        .runs
+        .iter()
+        .find_map(|run| match run {
+            DocRun::Field(field) => Some(field),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(field.lang_east_asia.as_deref(), Some("ja-JP"));
 }

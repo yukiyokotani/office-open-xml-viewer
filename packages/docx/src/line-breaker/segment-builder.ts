@@ -5,9 +5,10 @@ import { acquireNativeSourceUnits, eligibleNativeSourceText } from './native-sou
 import { revisionIsOmitted } from '../layout/revision-visibility.js';
 import { type TextBreakWindow } from './text-break-window.js';
 import type { DocxTextRun, FieldRun } from '../types';
-import { acquireTextSequences } from './text-sequence.js';
+import { acquireTextSequences, type SequenceLanguageRange, type SequenceLanguages } from './text-sequence.js';
 import type { HyperlinkTarget, ResolvedFontMetric } from '@silurus/ooxml-core';
 import {
+  canvasFontRouteFaces,
   DEFAULT_KINSOKU_RULES,
   isUax14NoBreakPair,
   lineBreakClass,
@@ -30,7 +31,7 @@ import type {
   TextShapeRequest,
   TextShapeSpan,
 } from '../layout/text.js';
-import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate } from '../layout/text.js';
+import { calcEffectiveFontPx, EAST_ASIAN_RE, assertTextShapeRunContext, independentTextShapeRequest, sliceTextShapeRequest, registeredLatinMarkGraphemeCandidate, registeredLatinSlotRunCandidate, registeredLatinSingleSeamCandidate, scriptSlotLanguage, languageSlotGroup, canvasLanguageTag, canvasLanguageAxes } from '../layout/text.js';
 import {
   referenceFontAverageWidthRatio,
   referenceFontLineMetrics,
@@ -357,6 +358,10 @@ export function appendTextPiece(
     selectedMetric,
     selectedAverageWidth,
     r,
+    sequenceRun: r,
+    languageRanges: (r as ParagraphTextBearingRun & SequenceLanguages).languageRanges,
+    languageRangeRuns: undefined,
+    bidiDigitRun: forceCs || Boolean(r.rtl),
     effectiveVertAlign,
     effectivePosition,
     effectiveCharacterSpacing,
@@ -483,10 +488,23 @@ export function appendTextPiece(
         // order — e.g. "28-02-2026" → segments [28][-][02][-][2026] reordered to
         // 2026-02-28. Canvas only reorders WITHIN a fillText using EN semantics,
         // so a single-segment date would otherwise stay 28-02-2026.
-        if (digitsAsAN) {
-          for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
-        } else {
-          emit(word, 'cs');
+        // (w:bidi is per language range of a sequence: each stretch of the
+        // word follows the digit class of its own range.)
+        if (!emissionState.languageRanges) {
+          // No language ranges: the run's own digit class, no part list.
+          if (emissionState.digitsAsAN) {
+            for (const slice of splitDigitGroups(word)) emit(slice, 'cs');
+          } else {
+            emit(word, 'cs');
+          }
+          continue;
+        }
+        for (const part of bidiDigitParts(emissionState, word)) {
+          if (part.digitsAsAN) {
+            for (const slice of splitDigitGroups(part.text)) emit(slice, 'cs');
+          } else {
+            emit(part.text, 'cs');
+          }
         }
       } else {
         // Mixed Arabic+Latin word (no w:rtl / w:cs): split at script boundaries
@@ -500,6 +518,29 @@ export function appendTextPiece(
       }
     }
   }
+}
+
+/** Whether the seam between two adjacent text pieces is a UAX #14 no-break
+ * pair. `beforeCp` classifies the left side: its last scalar, or (LB9) the
+ * base of its last cluster where the caller knows that cluster. One-way:
+ * false means unsupported/deferred, never "break allowed". The caller checks
+ * whitespace on both sides of the seam first (source runs may start with
+ * whitespace even though ASCII spaces normally remain attached to the
+ * preceding splitTextForLayout token). */
+function uax14SeamJoins(previous: string, current: string, beforeCp: number | undefined): boolean {
+  // Callers have already rejected whitespace on either side of the seam (an
+  // actual wrap boundary), so it is checked once, before scalar extraction.
+  const afterCp = current.codePointAt(0);
+  if (beforeCp === undefined || afterCp === undefined) return false;
+  // U+200B is the explicit zero-width-space opportunity from LB8 and is not
+  // included in JavaScript's \s character class.
+  if (beforeCp === 0x200b || afterCp === 0x200b) return false;
+  // SEA uses the application's dictionary tailoring, so the LB1 SA→AL default
+  // must not suppress a real word boundary. CJK keeps its established
+  // per-character split / kinsoku path and sparse-line safeguards.
+  if (containsSeaScript(previous) || containsSeaScript(current)) return false;
+  if (hasCJKBreakOpportunity(previous) || hasCJKBreakOpportunity(current)) return false;
+  return isUax14NoBreakPair(beforeCp, afterCp);
 }
 
 /** Resolve source-level no-break ownership and adjacent UAX14/fitText seams
@@ -691,6 +732,27 @@ export function finalizeBuiltSegments(
         segment.bold ? 700 : 400,
         segment.italic ? 'italic' : 'normal',
         segment.kerning ?? 'none',
+        // Both probes shape in the request's language state: each through
+        // the acquired route decision of its slot group when the request
+        // retains one, else by that slot's §17.3.2.20 axis. Keys of requests
+        // without a language are unchanged.
+        // w:val enters as its effective tag (x-none and ill-formed tags shape
+        // as untagged); w:eastAsia stays raw, as regional font resolution
+        // reads it.
+        // The ideographic-cell probe shapes in the effective Canvas East
+        // Asian axis: an automatic w:eastAsia (canvasEastAsiaLanguage null)
+        // keeps the regional tag for fonts but shapes untagged, so it is
+        // keyed apart from an explicit tag of the same value.
+        ...(canvasLanguageTag(request.language) !== undefined || request.eastAsiaLanguage !== undefined
+          || request.canvasLanguagePin !== undefined || request.scriptClassLanguage !== undefined
+          || request.canvasEastAsiaLanguage !== undefined
+          ? [JSON.stringify([canvasLanguageTag(request.language) ?? null, request.eastAsiaLanguage ?? null,
+            request.canvasLanguagePin?.group ?? null, request.canvasLanguagePin?.route ?? null,
+            request.canvasLanguagePin?.lang ?? null,
+            ...(request.scriptClassLanguage !== undefined ? [request.scriptClassLanguage] : []),
+            ...(request.canvasEastAsiaLanguage !== undefined
+              ? ['ea', canvasLanguageTag(request.canvasEastAsiaLanguage ?? undefined) ?? null] : [])])]
+          : []),
       ].join('|');
       const cached = metricCache.get(key);
       if (cached !== undefined) return cached;
@@ -835,29 +897,10 @@ export function finalizeBuiltSegments(
       continue;
     const prev = segs[i - 1];
     if (!('text' in prev) || prev.text.length === 0) continue;
-
-    // Whitespace is an actual wrap boundary. Check both sides because source
-    // runs may start with whitespace even though ASCII spaces normally remain
-    // attached to the preceding splitTextForLayout token.
+    // Whitespace on either side of the seam is a wrap boundary; decide it
+    // before expanding the previous segment into code points.
     if (/\s$/u.test(prev.text) || /^\s/u.test(cur.text)) continue;
-
-    const prevChar = [...prev.text].at(-1);
-    const nextChar = [...cur.text][0];
-    const prevCp = prevChar?.codePointAt(0);
-    const nextCp = nextChar?.codePointAt(0);
-    if (prevCp === undefined || nextCp === undefined) continue;
-
-    // U+200B is the explicit zero-width-space opportunity from LB8 and is not
-    // included in JavaScript's \s character class.
-    if (prevCp === 0x200b || nextCp === 0x200b) continue;
-
-    // SEA uses the application's dictionary tailoring, so the LB1 SA→AL default
-    // must not suppress a real word boundary. CJK keeps its established
-    // per-character split / kinsoku path and sparse-line safeguards.
-    if (containsSeaScript(prev.text) || containsSeaScript(cur.text)) continue;
-    if (hasCJKBreakOpportunity(prev.text) || hasCJKBreakOpportunity(cur.text)) continue;
-
-    if (isUax14NoBreakPair(prevCp, nextCp)) cur.joinPrev = true;
+    if (uax14SeamJoins(prev.text, cur.text, [...prev.text].at(-1)?.codePointAt(0))) cur.joinPrev = true;
   }
 
   // §17.3.2.14 fitText is a fixed-width, non-wrapping unit. Glue every segment
@@ -1170,7 +1213,20 @@ interface SegmentEmissionState {
   readonly segs: LayoutSeg[];
   readonly selectedMetric: SegmentBuildContext['selectedMetric'];
   readonly selectedAverageWidth: SegmentBuildContext['selectedAverageWidth'];
-  readonly r: ParagraphTextBearingRun;
+  /** The run whose facts the piece being emitted takes: {@link sequenceRun},
+   * or its copy in the languages of the piece's language range. */
+  r: ParagraphTextBearingRun;
+  /** The emitted run as acquired (a text sequence's run, or a source run). */
+  readonly sequenceRun: ParagraphTextBearingRun;
+  /** The §17.3.2.20 language ranges of a sequence whose runs name different
+   * languages (text-sequence.ts SequenceLanguages), over its display text. */
+  readonly languageRanges: readonly SequenceLanguageRange[] | undefined;
+  /** {@link sequenceRun} in each range's languages, made on first use. */
+  /** Allocated on the first language range emitted (none for untagged text). */
+  languageRangeRuns: (ParagraphTextBearingRun | undefined)[] | undefined;
+  /** Whether the run's digits may take the AN class (forced complex-script
+   * or rtl): its w:bidi language then decides {@link digitsAsAN}. */
+  readonly bidiDigitRun: boolean;
   readonly effectiveVertAlign: 'super' | 'sub' | null;
   readonly effectivePosition: number | undefined;
   readonly effectiveCharacterSpacing: number | undefined;
@@ -1195,7 +1251,8 @@ interface SegmentEmissionState {
   readonly csBold: boolean;
   readonly csItalic: boolean;
   readonly eaFontFamily: string | null;
-  readonly digitsAsAN: boolean;
+  /** Of the piece being emitted (per language range, like {@link r}). */
+  digitsAsAN: boolean;
   readonly sourceRunIndex: number;
   readonly sourceFragmentIndex: number | undefined;
   readonly hyperlink: HyperlinkTarget | undefined;
@@ -1210,7 +1267,133 @@ interface SegmentEmissionState {
   readonly scopeContext: { readonly text: string; cursor: number };
 }
 
+/** Index of the language range holding the display unit at `offset` (the
+ * last range at the text's end). Binary search over the ascending ends keeps
+ * a sequence of many pieces and ranges linearithmic. */
+function languageRangeIndex(ranges: readonly SequenceLanguageRange[], offset: number): number {
+  let index = 0;
+  let high = ranges.length - 1;
+  while (index < high) {
+    const middle = (index + high) >>> 1;
+    if (ranges[middle]!.end <= offset) index = middle + 1;
+    else high = middle;
+  }
+  return index;
+}
+
+/** Whether digits of a run that may class them AN do so under `langBidi`. */
+const bidiDigitsAsAN = (emissionState: SegmentEmissionState, langBidi: string | undefined): boolean =>
+  emissionState.bidiDigitRun && isRtlBidiLang(langBidi, Boolean(emissionState.sequenceRun.rtl));
+
+/** `word`, the next text the run emits, cut where the digit class set by
+ * w:bidi changes between its language ranges (cluster boundaries). One part
+ * for a run without ranges. */
+function bidiDigitParts(
+  emissionState: SegmentEmissionState,
+  word: string,
+): readonly Readonly<{ text: string; digitsAsAN: boolean }>[] {
+  const ranges = emissionState.languageRanges;
+  const start = emissionState.scopeContext.cursor;
+  // The word is located by the run's cursor; text that is not the display
+  // text at the cursor keeps the sequence run's class.
+  if (!ranges || !emissionState.scopeContext.text.startsWith(word, start)) {
+    return [{ text: word, digitsAsAN: emissionState.digitsAsAN }];
+  }
+  const parts: { text: string; digitsAsAN: boolean }[] = [];
+  const end = start + word.length;
+  let index = languageRangeIndex(ranges, start);
+  for (let partStart = start; partStart < end || parts.length === 0; index += 1) {
+    const partEnd = Math.min(end, ranges[index]?.end ?? end);
+    const digitsAsAN = bidiDigitsAsAN(emissionState, ranges[index]?.langBidi);
+    const part = word.slice(partStart - start, partEnd - start);
+    const previous = parts.at(-1);
+    if (previous && previous.digitsAsAN === digitsAsAN) previous.text += part;
+    else parts.push({ text: part, digitsAsAN });
+    partStart = partEnd;
+    if (partStart >= end) break;
+  }
+  return parts;
+}
+
+/**
+ * Emit one piece of the run's display text.
+ *
+ * In a sequence whose runs name different §17.3.2.20 languages
+ * (text-sequence.ts SequenceLanguages) a piece is emitted language range by
+ * language range, each through the run facts of its own range: the range's
+ * whole language tuple reaches the shape request (w:val, w:eastAsia, w:bidi
+ * and the script-class language), the segment and the bidi digit class. The
+ * ranges are cut at grapheme cluster boundaries, so every cluster shapes
+ * whole in one language.
+ */
 function pushSegmentPiece(
+  emissionState: SegmentEmissionState,
+  text: string,
+  cs: boolean,
+  fontFamily: string | null,
+  authoritativeSpan?: TextShapeSpan,
+  compressCharacterWhitespace = false,
+  mappedSymbolUnicode = false,
+  substituteContext?: TextShapeRequest['substituteContext'],
+): void {
+  const ranges = emissionState.languageRanges;
+  if (!ranges) {
+    pushLanguagePiece(emissionState, text, cs, fontFamily, authoritativeSpan,
+      compressCharacterWhitespace, mappedSymbolUnicode, substituteContext);
+    return;
+  }
+  // Consume this piece's exact range of the display run (pushLanguagePiece).
+  const scopeContext = emissionState.scopeContext;
+  const context = substituteContext
+    ?? Object.freeze({ text: scopeContext.text, offset: scopeContext.cursor });
+  assertTextShapeRunContext({ text, substituteContext: context }, scopeContext.text);
+  if (!substituteContext) scopeContext.cursor += text.length;
+  const pieceStart = context.offset;
+  const pieceEnd = pieceStart + text.length;
+  let index = languageRangeIndex(ranges, pieceStart);
+  if (ranges[index]!.end < pieceEnd) {
+    let previousPart = '';
+    for (let partStart = pieceStart; partStart < pieceEnd; index += 1) {
+      const partEnd = Math.min(pieceEnd, ranges[index]?.end ?? pieceEnd);
+      const part = text.slice(partStart - pieceStart, partEnd - pieceStart);
+      // The language seam is a rendering seam inside one piece, not a line
+      // break opportunity of its own. The UAX #14 seam pass sees only the
+      // last scalar before a seam; a range ends with a whole cluster, so
+      // its base classifies the left side here (LB9).
+      if (previousPart && !/\s$/u.test(previousPart) && !/^\s/u.test(part) &&
+        uax14SeamJoins(previousPart, part,
+          previousPart.codePointAt(graphemeClusterOffsets(previousPart).at(-1) ?? 0))) {
+        emissionState.gluePending = true;
+      }
+      pushSegmentPiece(
+        emissionState, part, cs, fontFamily,
+        undefined, compressCharacterWhitespace, mappedSymbolUnicode,
+        { text: context.text, offset: partStart },
+      );
+      previousPart = part;
+      partStart = partEnd;
+    }
+    return;
+  }
+  const range = ranges[index]!;
+  const outerRun = emissionState.r;
+  const outerDigitsAsAN = emissionState.digitsAsAN;
+  emissionState.r = (emissionState.languageRangeRuns ??= [])[index] ??= Object.freeze({
+    ...emissionState.sequenceRun,
+    lang: range.lang, langEastAsia: range.langEastAsia, langBidi: range.langBidi,
+    langScriptClass: range.langScriptClass,
+    langEastAsiaAutomatic: range.langEastAsiaAutomatic, langBidiAutomatic: range.langBidiAutomatic,
+  }) as ParagraphTextBearingRun;
+  emissionState.digitsAsAN = bidiDigitsAsAN(emissionState, range.langBidi);
+  pushLanguagePiece(emissionState, text, cs, fontFamily, authoritativeSpan,
+    compressCharacterWhitespace, mappedSymbolUnicode, context);
+  emissionState.r = outerRun;
+  emissionState.digitsAsAN = outerDigitsAsAN;
+}
+
+/** {@link pushSegmentPiece} for a piece in one language state
+ * (`emissionState.r`). */
+function pushLanguagePiece(
   emissionState: SegmentEmissionState,
   text: string,
   cs: boolean,
@@ -1300,7 +1483,7 @@ function pushSegmentPiece(
   const italic = cs ? csItalic : base.italic;
   const weight = bold ? 700 : 400;
   const style = italic ? ('italic' as const) : ('normal' as const);
-  const textShapeRequest: TextShapeRequest = Object.freeze({
+  const unpinnedTextShapeRequest: TextShapeRequest = Object.freeze({
     text,
     ...(retainedContext ? { substituteContext: retainedContext } : {}),
     fontSizePt: cs ? csFontSize : base.fontSize,
@@ -1324,13 +1507,28 @@ function pushSegmentPiece(
     complexScript: cs,
     fontHint: r.fontHint,
     eastAsiaLanguage: r.langEastAsia,
+    // §17.3.2.20 languages of the other slots, present only when authored so
+    // runs without a language keep their requests and cache keys.
+    ...(r.lang ? { language: r.lang } : {}),
+    // Vertical presentation forms join the language proof (TextShapeRequest).
+    ...(environment.verticalCJK && r.eastAsianVert !== true ? { verticalForms: true as const } : {}),
+    // Untagged pieces (no w:bidi and no automatic w:eastAsia, §17.3.2.20)
+    // construct no Canvas-axes object.
+    ...(r.langBidi || r.langEastAsiaAutomatic ? canvasLanguageAxes(r) : {}),
+    ...(r.langScriptClass !== undefined ? { scriptClassLanguage: r.langScriptClass } : {}),
     kerning:
       wordKerningApplies(cs ? csFontSize : base.fontSize, effectiveKerningThreshold),
     measure: false,
   });
   const shaped = authoritativeSpan
     ? { spans: [authoritativeSpan] }
-    : environment.layoutServices?.text.shape(textShapeRequest);
+    : environment.layoutServices?.text.shape(unpinnedTextShapeRequest);
+  // A piece that is one span has its route language decided here: every
+  // probe below, and everything derived from the segment later, shapes
+  // through that acquired route. (A multi-span piece is emitted again span by
+  // span, each with its own decision.)
+  const textShapeRequest = shaped?.spans.length === 1
+    ? withPieceFace(withAcquiredRouteLanguage(unpinnedTextShapeRequest, shaped.spans[0]!)) : unpinnedTextShapeRequest;
   const punctuationCompressions =
     compressCharacterWhitespace && documentCharacterCompressionApplies
       ? (() => {
@@ -1429,6 +1627,36 @@ function pushSegmentPiece(
     shaped,
     punctuationCompressions,
   }); // glue applies only to a piece's FIRST segment
+}
+
+/** `request` resolving its faces for the whole piece (TextShapeRequest
+ * faceText) where it retains the piece's route language: the decision holds
+ * for one route, so a fragment of the piece must resolve that route rather
+ * than one for its own text. A request without a retained language (all text
+ * of a document without languages) is returned as is: its fragments resolve
+ * and key exactly as they did before languages. */
+function withPieceFace(request: TextShapeRequest): TextShapeRequest {
+  return request.canvasLanguagePin === undefined || request.faceText !== undefined || request.text === ''
+    ? request : Object.freeze({ ...request, faceText: request.text });
+}
+
+/** `request` retaining the route language acquired for its piece (`span`,
+ * the piece's one shaped span): TextShapeRequest.canvasLanguagePin. A request
+ * without a §17.3.2.20 language for that slot, or one already retaining a
+ * decision, is returned as is. */
+function withAcquiredRouteLanguage(
+  request: TextShapeRequest,
+  span: Pick<TextShapeSpan, 'script' | 'fontRoute'>,
+): TextShapeRequest {
+  if (request.canvasLanguagePin !== undefined || scriptSlotLanguage(request, span.script) === undefined) {
+    return request;
+  }
+  return Object.freeze({ ...request, canvasLanguagePin: Object.freeze({
+    group: languageSlotGroup(span.script),
+    // The route the decision was proved on, without its language.
+    route: canvasFontRouteFaces(span.fontRoute).fingerprint,
+    lang: span.fontRoute.lang ?? null,
+  }) });
 }
 
 interface ResolvedSegmentFrame {
@@ -1748,7 +1976,11 @@ function emitResolvedTextSegment(
     vertAlign: effectiveVertAlign,
     measuredWidth: 0,
     textLayoutService: environment.layoutServices?.text,
-    textShapeRequest,
+    // The piece's route language is decided once and retained on its request
+    // (withAcquiredRouteLanguage): every fragment, fit, kashida and pair probe
+    // derived from it shapes through the route the piece is painted through.
+    textShapeRequest: resolvedSpan
+      ? withPieceFace(withAcquiredRouteLanguage(textShapeRequest, resolvedSpan)) : textShapeRequest,
     ...(resolvedSpan?.substituteScope !== undefined
       ? { substituteScope: resolvedSpan.substituteScope } : {}),
     breakBefore: resolvedSpan?.breakBefore ?? authoritativeSpan?.breakBefore ?? true,

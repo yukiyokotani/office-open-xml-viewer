@@ -26,6 +26,7 @@ import { COMPRESSIBLE_TRAILING_FULL_WIDTH_PUNCTUATION } from './text-runs.js';
 import type { LayoutSeg, LayoutTextSeg } from './model.js';
 import type { PassOperationState } from './pass-operations.js';
 import { leadingAutoSpacePx } from './advance.js';
+import { sameRouteFaces } from './font-routes.js';
 
 /** One committed line item's contribution to the running summary. */
 interface Contribution {
@@ -325,7 +326,7 @@ export interface MixedSpaceCandidate {
 function sameSpaceFace(candidate: LayoutTextSeg, reference: LayoutTextSeg): boolean {
   return (
     candidate.mixedSpaceAverageWidthRatio === reference.mixedSpaceAverageWidthRatio &&
-    candidate.fontRoute?.fingerprint === reference.fontRoute?.fingerprint &&
+    sameRouteFaces(candidate.fontRoute, reference.fontRoute) &&
     candidate.fontFamily === reference.fontFamily &&
     candidate.fontSize === reference.fontSize &&
     candidate.bold === reference.bold &&

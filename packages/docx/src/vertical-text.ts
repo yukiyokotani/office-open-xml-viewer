@@ -615,11 +615,13 @@ export function verticalRunInkExtraPxWithCapability(
   return routedWidth - ctx.measureText(text).width;
 }
 
-export function verticalRunInkExtraPx(ctx: Ctx2D, text: string): number {
+/** `lang`: the Canvas language the run's route measures it in
+ * (CanvasFontRoute.lang), for the `vert` probe; none for untagged text. */
+export function verticalRunInkExtraPx(ctx: Ctx2D, text: string, lang?: string): number {
   return verticalRunInkExtraPxWithCapability(
     ctx,
     text,
-    (cp) => verticalVertGlyphReachable(ctx, cp),
+    (cp) => verticalVertGlyphReachable(ctx, cp, lang),
   );
 }
 

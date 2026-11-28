@@ -29,7 +29,7 @@ import type {
   TextMeasurer,
 } from '../paragraph-measure.js';
 import { paragraphCharacterGrid } from '../paragraph-measure.js';
-import { calcEffectiveFontPx, sliceTextShapeRequest } from './text.js';
+import { calcEffectiveFontPx, canvasLanguageTag, sliceTextShapeRequest } from './text.js';
 import { wordSnapToCharsEastAsianCellCount } from './line-compatibility.js';
 import type { ParagraphLayoutSource, TextFontSlots } from './text.js';
 import { projectEffectiveCellPreferredWidth, type TableLayoutSource } from './table-source-acquisition.js';
@@ -150,12 +150,33 @@ function compatibleTextKey(segment: LayoutTextSeg): string {
       request.genericFamily ?? null,
       request.letterSpacingPt ?? null,
       request.kerning ?? null,
+      // Authored §17.3.2.20 languages delimit the pieces of a text sequence
+      // (text-sequence.ts language ranges), so production shapes pieces of
+      // different languages apart even when neither is admitted to Canvas.
+      // This key partitions exactly as those ranges do (languageKey): w:val
+      // by its effective tag and not at all on a forced complex-script
+      // request, the other axes as written (w:eastAsia above). An untagged
+      // key is unchanged.
+      ...((request.complexScript ? undefined : canvasLanguageTag(request.language)) !== undefined
+        || request.complexScriptLanguage !== undefined || request.scriptClassLanguage !== undefined
+        || request.canvasEastAsiaLanguage !== undefined
+        ? [['lang', (request.complexScript ? undefined : canvasLanguageTag(request.language)) ?? null,
+          request.complexScriptLanguage ?? null,
+          ...(request.scriptClassLanguage !== undefined ? [canvasLanguageTag(request.scriptClassLanguage) ?? ''] : []),
+          // The element-presence East Asian Canvas axis (canvasLanguageAxes).
+          ...(request.canvasEastAsiaLanguage !== undefined ? [['ea', request.canvasEastAsiaLanguage]] : [])]] : []),
     ] : null,
     segment.bold,
     segment.italic,
     calcEffectiveFontPx(segment, 1),
     segment.fontFamily,
-    segment.fontRoute ? [segment.fontRoute.familyList, segment.fontRoute.scope] : null,
+    // The route identity includes its language (CanvasFontRoute.lang): pieces
+    // painted in different language states never merge, and a merged probe
+    // shapes through the route both were acquired with. The key of a route
+    // without a language is unchanged.
+    segment.fontRoute ? segment.fontRoute.lang === undefined
+      ? [segment.fontRoute.familyList, segment.fontRoute.scope]
+      : [segment.fontRoute.familyList, segment.fontRoute.scope, segment.fontRoute.lang] : null,
     segment.charScale ?? 1,
     segment.charSpacing ?? 0,
     segment.fitTextPerGapPx ?? null,

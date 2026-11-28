@@ -1,3 +1,4 @@
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 import { DocxDocument, docxModelSourcesConfigured, docxViewerLoadSignal } from './document';
 import type { DocxViewerLoadControl, LoadOptions } from './document';
 import {
@@ -1111,7 +1112,7 @@ export class DocxViewer implements ZoomableViewer {
       highlights,
       width,
       height,
-      (font) => this._measureForFont(font),
+      (font, lang) => this._measureForFont(font, lang),
       this._opts.findHighlightColors,
     );
   }
@@ -1126,9 +1127,10 @@ export class DocxViewer implements ZoomableViewer {
     return { width: w, height: h };
   }
 
-  /** A width-measurer primed with `font`, backed by a private 1×1 canvas so it
-   *  never disturbs the visible canvas's context state. */
-  private _measureForFont(font: string): (s: string) => number {
+  /** A width-measurer primed with `font` and the run's Canvas `lang`, backed
+   *  by a private 1×1 canvas so it never disturbs the visible canvas's
+   *  context state. */
+  private _measureForFont(font: string, lang?: string): (s: string) => number {
     if (!this._measureCtx) {
       const c = document.createElement('canvas');
       this._measureCtx = c.getContext('2d');
@@ -1136,7 +1138,16 @@ export class DocxViewer implements ZoomableViewer {
     const ctx = this._measureCtx;
     if (!ctx) return (s) => s.length; // measurement unavailable (headless w/o canvas)
     ctx.font = font;
-    return (s) => ctx.measureText(s).width;
+    if (lang === undefined) return (s) => ctx.measureText(s).width;
+    return (s) => {
+      ctx.font = font;
+      const previous = selectCanvasLanguage(ctx, lang);
+      try {
+        return ctx.measureText(s).width;
+      } finally {
+        restoreCanvasLanguage(ctx, previous);
+      }
+    };
   }
 
   /** Render a page to a throwaway offscreen canvas purely to collect its runs
@@ -1169,7 +1180,7 @@ export class DocxViewer implements ZoomableViewer {
       this._hyperlinkHandler(),
       // §17.3.2.10 縦中横 (#836) — the same measurer the highlight overlay uses,
       // so a tate-chu-yoko selection span is clamped to its drawn one-em cell.
-      (font) => this._measureForFont(font),
+      (font, lang) => this._measureForFont(font, lang),
       this._currentPage,
     );
   }

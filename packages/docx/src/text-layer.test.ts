@@ -77,6 +77,15 @@ describe('buildDocxTextLayer (extracted from DocxViewer._buildTextLayer)', () =>
     expect(layer.children.length).toBe(0);
   });
 
+  it('tags a run span with the Canvas language the run was drawn in', () => {
+    vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
+    const layer = makeEl('div');
+    buildDocxTextLayer(layer as unknown as HTMLDivElement, [run({ text: 'где', lang: 'sr-rs' }), run({ text: 'x' })], 700, 900);
+    const [tagged, plain] = layer.children as unknown as Array<FakeEl & { lang?: string }>;
+    expect(tagged!.lang).toBe('sr-rs');
+    expect(plain!.lang).toBeUndefined();
+  });
+
   it('lays one absolutely-positioned span per run with the shipped inline styles', () => {
     vi.stubGlobal('document', { createElement: (t: string) => makeEl(t) });
     const layer = makeEl('div');

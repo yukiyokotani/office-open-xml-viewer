@@ -6,6 +6,7 @@ import {
   type TextAdvancePlanner,
 } from '@silurus/ooxml-core';
 import type { GlyphContourRequest } from './layout/text.js';
+import { restoreCanvasLanguage, selectCanvasLanguage } from '@silurus/ooxml-core/internal/canvas-language';
 
 type Point = Readonly<{x: number; y: number}>;
 
@@ -51,10 +52,13 @@ export function acquireCanvasGlyphContours(
         const font = canvasFontString(span.fontRoute, request.fontSizePt, span.font.weight, span.font.style);
         ctx.font = font;
         // Shape with the em layout measured the span at (core
-        // reference-advances.ts) so contour glyphs sit on retained advances.
+        // reference-advances.ts) so contour glyphs sit on retained advances;
+        // planned before the route language, as measurement plans it.
         const reference = advances?.plan(font);
-        if (reference) fillTextAtReference(ctx, reference, span.text, x, 0);
+        const previousLang = selectCanvasLanguage(ctx, span.fontRoute.lang);
+        if (reference) fillTextAtReference(ctx, reference, span.text, x, 0, span.fontRoute.lang);
         else ctx.fillText(span.text, x, 0);
+        restoreCanvasLanguage(ctx, previousLang);
         x += span.advancePt;
       }
       const w = canvas.width, h = canvas.height, stride = w + 1;

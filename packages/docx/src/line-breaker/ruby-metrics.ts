@@ -1,5 +1,5 @@
 import type { MeasurementTextContext } from '../layout/measurement-capabilities.js';
-import { calcEffectiveFontPx, independentTextShapeRequest } from '../layout/text.js';
+import { calcEffectiveFontPx, rubyGuideShapeRequest } from '../layout/text.js';
 import { type LayoutTextSeg } from './model.js';
 import { buildFont } from './font-routes.js';
 
@@ -26,7 +26,7 @@ export function rubyAscentReservePx(
       clusterGeometry: false,
     });
     const guide = segment.textLayoutService.shape({
-      ...independentTextShapeRequest(segment.textShapeRequest, segment.ruby.text),
+      ...rubyGuideShapeRequest(segment.textShapeRequest, segment.ruby.text),
       fontSizePt: segment.ruby.fontSizePt * scale,
       measure: true,
       clusterGeometry: false,

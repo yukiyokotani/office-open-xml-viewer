@@ -3,6 +3,8 @@ import {
   bindMetafileFontDemand,
   bindMetafileFontFamilies,
   activeFontSet,
+  createNamedFamilyOracle,
+  type NamedFamilyOracle,
   loadNativeRouteSentinels,
   loadOfficeFontFallbacks,
   type NativeRouteNormalLine,
@@ -75,7 +77,7 @@ import { PaginationAbortError } from './layout/pagination-scheduler.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { textRunsForSelectedPage } from './text-run-projection.js';
 import { hitTestSelectedDocxElementContext } from './element-context.js';
-import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
+import { documentRenderCapabilities } from './vertical-render-capability.js';
 import {
   renderWorkerLayoutMeta,
   projectRenderWorkerLayoutMeta,
@@ -338,12 +340,42 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
       // at all, embedded or local, and declines every measured line as main
       // mode in that host does; it keeps laying out here.
       const workerFontSet = activeFontSet();
-      const nativeSentinels = workerFontSet ? await loadNativeRouteSentinels(workerFontSet) : [];
+      let nativeSentinels = workerFontSet ? await loadNativeRouteSentinels(workerFontSet) : [];
       if (requestedGeneration !== parseGeneration) {
         if (nativeSentinels) unloadOfficeFontFallbacks(nativeSentinels);
         throw new Error('render-worker parse was superseded');
       }
-      if (!nativeSentinels || documentRequiresDomVerticalGlyphLayout(pulledModels.document)) {
+      // One model walk yields both capability facts; the layout source
+      // adapter below reuses them rather than walking the model again. The
+      // walk stops at the first DOM-only vertical section, which rules worker
+      // layout out whatever the languages are. A realm without sentinels
+      // falls back whatever the model says, so it walks nothing, as before
+      // languages.
+      const capabilities = nativeSentinels
+        ? documentRenderCapabilities(pulledModels.document, { stopOnVerticalLayout: true })
+        : undefined;
+      // A document naming a run language (run-language-capability.ts) is
+      // laid out here only where this realm judges its languages as the main
+      // realm would. The measuring context and oracle made here are the ones
+      // the text service uses below (one capability; its fingerprint records
+      // it). Canvas `lang` is an engine feature: where it is missing, no realm
+      // applies a tag and the document stays here. Where it exists, the
+      // sentinels must apply and graphemes segment (`available`), else the
+      // main realm may apply tags this one would withhold.
+      // Untagged documents keep the admission they had before languages.
+      let languageMeasuring: { context: OffscreenCanvasRenderingContext2D; oracle: NamedFamilyOracle } | undefined;
+      if (nativeSentinels && capabilities?.carriesRunLanguage) {
+        const context = typeof OffscreenCanvas !== 'undefined'
+          ? new OffscreenCanvas(1, 1).getContext('2d') : null;
+        const oracle = context ? createNamedFamilyOracle(context) : undefined;
+        if (!context || !oracle || ('lang' in context && !oracle.available)) {
+          unloadOfficeFontFallbacks(nativeSentinels);
+          nativeSentinels = null;
+        } else {
+          languageMeasuring = { context, oracle };
+        }
+      }
+      if (!nativeSentinels || !capabilities || capabilities.requiresDomVerticalGlyphLayout) {
         if (nativeSentinels) unloadOfficeFontFallbacks(nativeSentinels);
         // The normalized public model deliberately omits parser-only sidecars
         // such as unavailable-drawing geometry. Stream the untouched parser
@@ -378,6 +410,7 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
         adapted = layoutSourceModelAdapterFromOwnedModel(
           pulledModels.document,
           pulledModels.ownedLayoutDocument,
+          capabilities,
         );
         nativeRouteRequests = nativeRouteLineRequests(adapted.source, adapted.document, {
           fontSubstitutes: declaredFontSubstitutions(fontSources), cjkFallback: req.cjkFallback,
@@ -452,6 +485,8 @@ self.onmessage = async (e: MessageEvent<RenderWorkerWireRequest | WorkerSvgDecod
           : undefined;
         if (requestedGeneration !== parseGeneration) throw new Error('render-worker parse was superseded');
         const serviceOptions = {
+          ...(languageMeasuring
+            ? { measureContext: languageMeasuring.context, namedFamilyOracle: languageMeasuring.oracle } : {}),
           allowFootnoteContinuation: req.allowFootnoteContinuation === true,
           fontMetrics: embeddedFonts.metrics,
           fontSubstitutes: declaredFontSubstitutions(fontSources),

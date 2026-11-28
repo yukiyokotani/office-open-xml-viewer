@@ -72,7 +72,7 @@ export function buildDocxHighlightLayer(
   matches: DocxHighlightMatch[],
   cssWidth: number,
   cssHeight: number,
-  measureForFont: (font: string) => (s: string) => number,
+  measureForFont: (font: string, lang?: string) => (s: string) => number,
   colors: DocxHighlightColors = {},
 ): void {
   layer.innerHTML = '';

@@ -38,6 +38,8 @@
  * in the decision; it is a probe of the measuring context itself.
  */
 
+import { saveCanvasState } from '../internal/canvas-language.js';
+
 /**
  * Reference em in CSS px. Embedded bitmap strikes are indexed by a uint8 ppem
  * (OpenType `EBLC`/`CBLC` BitmapSize.ppemX/ppemY) and `hdmx` device records by
@@ -181,6 +183,12 @@ export function createTextAdvancePlanner(
     const previousFont = context.font;
     const previousSpacing = context.letterSpacing;
     const previousKerning = context.fontKerning;
+    // The probe runs in the context's ambient text state, `lang` included
+    // (HTML canvas text drawing styles): a caller's own context measures as
+    // it always has, with no language read or write. The decision is per
+    // font, shared by text of every language, so callers that measure a route
+    // in a run language assign its font (which probes) before selecting that
+    // language (DOCX production-services.ts measure).
     try {
       if (typeof previousSpacing === 'string') context.letterSpacing = '0px';
       if (previousKerning !== undefined) context.fontKerning = 'none';
@@ -385,16 +393,19 @@ export interface ReferenceTextPaintTarget {
  * reference-em advances a planned layout measured. The caller's current
  * `letterSpacing` (requested px) is converted to reference px; alignment,
  * baseline, direction, kerning and fill state are scale invariant. The font
- * and spacing are restored with the drawing state. */
+ * and spacing are restored with the drawing state. `lang` is the Canvas
+ * language the caller selected for this text, kept across the internal
+ * `save()`; untagged text passes none and gets a plain `save()`. */
 export function fillTextAtReference(
   ctx: ReferenceTextPaintTarget,
   reference: ReferenceTextFont,
   text: string,
   x: number,
   y: number,
+  lang?: string,
 ): void {
   const spacing = ctx.letterSpacing;
-  ctx.save();
+  saveCanvasState(ctx, lang);
   try {
     ctx.translate(x, y);
     ctx.scale(reference.scale, reference.scale);

@@ -43,7 +43,7 @@ import { projectDocumentSnapshotResources } from './layout/production-paint-reso
 import { sourceKey } from './layout/source-key.js';
 import type { BodyElement, DocNote } from './types.js';
 import type { SourceRef } from './layout/types.js';
-import { documentRequiresDomVerticalGlyphLayout } from './vertical-render-capability.js';
+import { documentRenderCapabilities, type DocumentRenderCapabilities } from './vertical-render-capability.js';
 import { defaultSectionGeometry } from './layout/context.js';
 
 /** The public compatibility model and the sealed layout source are separate
@@ -458,12 +458,16 @@ export function layoutSourceModelAdapter(input: DocxDocumentModel): LayoutSource
 export function layoutSourceModelAdapterFromOwnedModel(
   publicInput: DocxDocumentModel,
   ownedLayoutInput: DocxDocumentModel,
+  /** The two graphs' {@link documentRenderCapabilities}, where the caller
+   * already walked one of them for its own admission (the render worker):
+   * the graphs carry the same parser facts, so they are not walked again. */
+  capabilities?: DocumentRenderCapabilities,
 ): LayoutSourceModelAdapter {
   const cached = adapters.get(publicInput);
   if (cached) return cached;
   const normalizedPublic = normalizeOwnedInternalDocumentModel(compatibleDocumentModel(publicInput));
   const normalizedPrivate = normalizeOwnedInternalDocumentModel(compatibleDocumentModel(ownedLayoutInput));
-  return buildLayoutSourceModelAdapter(normalizedPublic, normalizedPrivate, true, publicInput);
+  return buildLayoutSourceModelAdapter(normalizedPublic, normalizedPrivate, true, publicInput, capabilities);
 }
 
 /** Consume one exclusively-owned parser graph directly into the immutable
@@ -488,6 +492,7 @@ function buildLayoutSourceModelAdapter(
   privateInput: NormalizedDocumentInput,
   ownsPrivateGraph: boolean,
   cacheKey: DocxDocumentModel,
+  capabilities?: DocumentRenderCapabilities,
 ): LayoutSourceModelAdapter {
   const privateDocument = privateInput.document;
   const privateProjections = privateInput.bodyModelGateway.acquisitionInputs;
@@ -523,7 +528,9 @@ function buildLayoutSourceModelAdapter(
     footnotes,
     [...storyBodies(privateDocument), ...endnotes.map((note) => note.content)],
   );
-  const requiresDomVerticalGlyphLayout = documentRequiresDomVerticalGlyphLayout(privateDocument);
+  // One model walk yields both facts (vertical-render-capability.ts).
+  const { requiresDomVerticalGlyphLayout, carriesRunLanguage } = capabilities
+    ?? documentRenderCapabilities(privateDocument);
   const fatalParse = privateDocument.parseError === undefined ? null : {
     message: privateDocument.parseError,
     pageSize: {
@@ -715,6 +722,7 @@ function buildLayoutSourceModelAdapter(
     paintDescriptors: resources.paintResources.descriptors,
     hasPaginationFields,
     requiresDomVerticalGlyphLayout,
+    carriesRunLanguage,
     fatalParse: fatalParse === null ? null : deepFreezePlainData(fatalParse),
   });
   const adapter = Object.freeze({ document: publicInput.document, source });

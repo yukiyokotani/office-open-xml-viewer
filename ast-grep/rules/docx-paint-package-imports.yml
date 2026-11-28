@@ -157,10 +157,20 @@ utils:
   chart-font-sources-value:
     any:
       - regex: "^withChartFontSubstitutions$"
+  # Canvas `lang` selection/restoration around a draw (#2001): pure Canvas
+  # text state, the same value layout measured with; no measurement entry.
+  canvas-language-value:
+    any:
+      - regex: "^selectCanvasLanguage$"
+      - regex: "^restoreCanvasLanguage$"
+      # save() that keeps that language on the active state (Chrome resets it).
+      - regex: "^saveCanvasState$"
   from-core:
     has: { field: source, regex: "^['\"]@silurus/ooxml-core['\"]$" }
   from-chart-font-sources:
     has: { field: source, regex: "^['\"]@silurus/ooxml-core/internal/chart-font-sources['\"]$" }
+  from-canvas-language:
+    has: { field: source, regex: "^['\"]@silurus/ooxml-core/internal/canvas-language['\"]$" }
   type-only-statement:
     regex: "^import\\s+type\\s*\\{"
   typed-specifier:
@@ -177,6 +187,7 @@ rule:
         any:
           - matches: from-core
           - matches: from-chart-font-sources
+          - matches: from-canvas-language
     # A comment inside the statement can hide `type` from the rules below.
     - kind: import_statement
       all:
@@ -220,6 +231,15 @@ rule:
       not:
         all:
           - matches: chart-font-sources-value
+          - not: { inside: { stopBy: end, kind: import_statement, matches: type-only-statement } }
+    - kind: import_specifier
+      inside:
+        stopBy: end
+        kind: import_statement
+        matches: from-canvas-language
+      not:
+        all:
+          - matches: canvas-language-value
           - not: { inside: { stopBy: end, kind: import_statement, matches: type-only-statement } }
 files:
   - "packages/docx/src/paint/**/*.ts"

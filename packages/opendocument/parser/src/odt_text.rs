@@ -904,9 +904,25 @@ impl<'a> Reader<'a> {
                 link: None,
             });
         }
-        let base = self
-            .run_properties(&contexts, (contexts.len() - 1) as u32, ScriptClass::Latin)?
-            .text_run();
+        let context = (contexts.len() - 1) as u32;
+        let properties = self.run_properties(&contexts, context, ScriptClass::Latin)?;
+        // A custom label is classified on its own text (it starts the note,
+        // so its weak characters are Latin), keeping the base properties'
+        // font and geometry: only its class language follows its text.
+        // Styles naming no language give the label none without classifying
+        // it (`RunProperties::names_language`).
+        let label_language = match label {
+            Some(_) if !properties.names_language => None,
+            Some(label) => self.own_text_language(
+                &contexts,
+                context,
+                label,
+                ScriptClass::Latin,
+                &mut HashMap::new(),
+            )?,
+            None => None,
+        };
+        let base = properties.text_run();
         // The mark run, and the custom label run when there is one, each own
         // a copy of the base properties.
         let mut runs = Vec::new();
@@ -921,9 +937,88 @@ impl<'a> Reader<'a> {
         if let Some(label) = label {
             let mut custom = base;
             custom.text = label.to_string();
+            if let Some(tag) = label_language {
+                custom.lang_script_class = properties
+                    .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty()));
+            }
             runs.push(DocRun::Text(Box::new(custom)));
         }
         Ok(runs)
+    }
+
+    /// The language a context's styles set for text of `class` (§20.358).
+    fn class_language(
+        &self,
+        contexts: &[TextContext<'a>],
+        context: u32,
+        class: ScriptClass,
+    ) -> Result<Option<String>, String> {
+        let cascade = Cascade::build(self.search_order(contexts, context)?, TEXT)?;
+        let tag = class_language_tag(&cascade, class, self.fonts).map(|tag| tag.to_string());
+        #[cfg(test)]
+        CLASS_LANGUAGE_BYTES
+            .with(|bytes| bytes.set(bytes.get() + tag.as_ref().map_or(0, String::len)));
+        Ok(tag)
+    }
+
+    /// The class language of an item's own visible text (a ruby base, a
+    /// custom note label) where it is not that of `position`, the class of
+    /// the character before it, whose language `properties` carry: `None`
+    /// where the text's class is `position`'s, else the tag (empty: none).
+    /// §20.358 classes characters, and an item's visible text is its own:
+    /// its language is that of the class of the text it shows. (Its other
+    /// properties stay those of its position.)
+    ///
+    /// Text of several classes is one run (a ruby base carries one
+    /// annotation, ODF 1.3 Part 3 §6.4 text:ruby; a label is one citation).
+    /// Where every class it holds names the same language, that is its
+    /// language; BCP 47 tags are compared case-insensitively (RFC 5646
+    /// §2.1.1), the first spelling kept. Classes naming different languages
+    /// (or one naming none) leave it no one language. Bounded policy:
+    /// per-range languages inside one such run are not represented.
+    fn own_text_language(
+        &self,
+        contexts: &[TextContext<'a>],
+        context: u32,
+        text: &str,
+        position: ScriptClass,
+        languages: &mut HashMap<(u32, ScriptClass), Option<String>>,
+    ) -> Result<Option<String>, String> {
+        let classes: Vec<ScriptClass> = match text_class(text, position) {
+            Some(class) if class == position => return Ok(None),
+            Some(class) => vec![class],
+            None => {
+                let mut classes: Vec<ScriptClass> = Vec::new();
+                for class in text.chars().filter_map(table_22) {
+                    if !classes.contains(&class) {
+                        classes.push(class);
+                    }
+                }
+                classes
+            }
+        };
+        let mut shared: Option<Option<String>> = None;
+        for class in classes {
+            let key = (context, class);
+            if let std::collections::hash_map::Entry::Vacant(entry) = languages.entry(key) {
+                entry.insert(self.class_language(contexts, context, class)?);
+            }
+            let language = &languages[&key];
+            match &shared {
+                None => shared = Some(language.clone()),
+                Some(first) => {
+                    let same = match (first, language) {
+                        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !same {
+                        return Ok(Some(String::new()));
+                    }
+                }
+            }
+        }
+        Ok(Some(shared.flatten().unwrap_or_default()))
     }
 
     pub(super) fn run_properties(
@@ -991,6 +1086,8 @@ impl<'a> Reader<'a> {
         };
         let weak = weak_classes(&tokens);
         let mut cache: HashMap<(u32, ScriptClass), RunProperties> = HashMap::new();
+        // Class languages of items whose text is not of their position's class.
+        let mut languages: HashMap<(u32, ScriptClass), Option<String>> = HashMap::new();
         // The last emitted text run's key and direction, for merging.
         let mut current: Option<(u32, ScriptClass, bool)> = None;
         let mut previous_class = ScriptClass::Latin;
@@ -1013,10 +1110,61 @@ impl<'a> Reader<'a> {
                     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(key) {
                         entry.insert(self.run_properties(contexts, context, key.1)?);
                     }
+                    // §20.358 classes characters, and an item's visible text
+                    // is its own: the language is that of the class of the
+                    // text the item shows, not of the character before it.
+                    // (Its other properties stay those of its position.)
+                    // Styles that name no language for any class give every
+                    // class none (`RunProperties::names_language`): the item
+                    // is not classified and builds no cascade.
+                    let names_language = cache[&key].names_language;
+                    let language = match &inline.items[item as usize] {
+                        _ if !names_language => None,
+                        // A page number or count is set in ASCII digits or
+                        // letters (`page_number_format`): Latin in Table 22.
+                        Item::Field { .. } => {
+                            if previous_class == ScriptClass::Latin {
+                                None
+                            } else {
+                                let key = (context, ScriptClass::Latin);
+                                if let std::collections::hash_map::Entry::Vacant(entry) =
+                                    languages.entry(key)
+                                {
+                                    entry.insert(self.class_language(
+                                        contexts,
+                                        context,
+                                        ScriptClass::Latin,
+                                    )?);
+                                }
+                                Some(languages[&key].clone().unwrap_or_default())
+                            }
+                        }
+                        Item::Ruby { base, .. } => self.own_text_language(
+                            contexts,
+                            context,
+                            base,
+                            previous_class,
+                            &mut languages,
+                        )?,
+                        // A custom citation shows its label (§19.762
+                        // text:label), classified in the citation's own
+                        // style context.
+                        Item::NoteReference {
+                            label: Some(label), ..
+                        } => self.own_text_language(
+                            contexts,
+                            context,
+                            label,
+                            previous_class,
+                            &mut languages,
+                        )?,
+                        Item::Run(_) | Item::NoteReference { .. } => None,
+                    };
                     let properties = &cache[&key];
                     let run = self.item_run(
                         &mut inline.items[item as usize],
                         properties,
+                        language,
                         contexts,
                         context,
                     )?;
@@ -1118,6 +1266,10 @@ impl<'a> Reader<'a> {
         &mut self,
         item: &mut Item,
         properties: &RunProperties,
+        // The class language of the item's own text where it differs from
+        // `properties`' (empty: none), for a field, ruby base or custom
+        // note label (`own_text_language`).
+        language: Option<String>,
         contexts: &[TextContext<'a>],
         context: u32,
     ) -> Result<Vec<DocRun>, String> {
@@ -1148,7 +1300,7 @@ impl<'a> Reader<'a> {
                 instruction,
                 fallback,
             } => {
-                let text = properties.text_run();
+                let text = properties.field_text_run();
                 vec![DocRun::Field(Box::new(FieldRun {
                     field_type: (*kind).into(),
                     instruction: (*instruction).into(),
@@ -1171,6 +1323,16 @@ impl<'a> Reader<'a> {
                     all_caps: text.all_caps,
                     small_caps: text.small_caps,
                     double_strikethrough: text.double_strikethrough,
+                    // The field result is text of the same style: its
+                    // §17.3.2.20-equivalent language axes too.
+                    lang: text.lang.clone(),
+                    lang_east_asia: text.lang_east_asia.clone(),
+                    lang_bidi: text.lang_bidi.clone(),
+                    lang_script_class: match language {
+                        Some(tag) => properties
+                            .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty())),
+                        None => text.lang_script_class.clone(),
+                    },
                     ..FieldRun::default()
                 }))]
             }
@@ -1185,6 +1347,10 @@ impl<'a> Reader<'a> {
                 if label.is_some() {
                     let mut custom = properties.text_run();
                     custom.text = label.clone().unwrap_or_default();
+                    if let Some(tag) = language {
+                        custom.lang_script_class = properties
+                            .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty()));
+                    }
                     run.text = String::new();
                     vec![DocRun::Text(Box::new(run)), DocRun::Text(Box::new(custom))]
                 } else {
@@ -1198,6 +1364,10 @@ impl<'a> Reader<'a> {
             } => {
                 let mut run = properties.text_run();
                 run.text = base.clone();
+                if let Some(tag) = language {
+                    run.lang_script_class = properties
+                        .class_language_fact(Some(tag.as_str()).filter(|tag| !tag.is_empty()));
+                }
                 run.ruby = Some(RubyAnnotation {
                     text: text.clone(),
                     font_size_pt: match *ruby_size {
@@ -1480,8 +1650,16 @@ pub(super) struct RunProperties {
     pub combine: bool,
     pub vertical: bool,
     pub border: Option<(String, Option<String>, u64)>,
+    /// fo:language + fo:country (western text), as a BCP 47 tag.
+    pub lang: Option<Atom>,
     pub lang_east_asia: Option<Atom>,
     pub lang_bidi: Option<Atom>,
+    /// The complete language tag of the run's script class
+    /// (`class_language_tag`); `None` where the styles name none for that
+    /// class.
+    pub script_language: Option<Atom>,
+    /// Whether the styles name a language for any script class.
+    pub names_language: bool,
     pub complex: bool,
 }
 
@@ -1642,22 +1820,11 @@ impl RunProperties {
                     (spec.width * 1000.0).round() as u64,
                 )
             });
-        let language = |language: &str, country: &str| -> Option<Atom> {
-            let language = cascade.get(NS_STYLE, language).filter(|v| *v != "none")?;
-            Some(fonts.atom(
-                &match cascade.get(NS_STYLE, country).filter(|v| *v != "none") {
-                    Some(country) => format!(
-                        "{}-{}",
-                        language.to_ascii_lowercase(),
-                        country.to_ascii_uppercase()
-                    ),
-                    None => language.to_ascii_lowercase(),
-                },
-            ))
-        };
         if size < 0.5 {
             size = 0.5;
         }
+        let class_tags = [ScriptClass::Latin, ScriptClass::Asian, ScriptClass::Complex]
+            .map(|any| class_language_tag(cascade, any, fonts));
         (
             Self {
                 family,
@@ -1683,8 +1850,27 @@ impl RunProperties {
                 combine,
                 vertical,
                 border,
-                lang_east_asia: language("language-asian", "country-asian"),
-                lang_bidi: language("language-complex", "country-complex"),
+                // ODF 1.3 Part 3 §20.358 Table 22 classes the run's characters,
+                // and the class selects which of the three languages applies
+                // to all of them, as it selects the one face set on every
+                // font slot above. That resolved language, a complete tag
+                // (`class_language_tag`), is a fact of its own: the renderer's ECMA-376 §17.3.2.26
+                // slot table may place a character of this class in any slot
+                // (U+31C0 is Asian here, highAnsi there; U+1D11E Latin here,
+                // East Asian there), so no axis can stand for it. The axes
+                // keep the style's own three language-country values
+                // (`regional_language`); the renderer's regional font
+                // selection reads the Asian one.
+                lang: regional_language(cascade, ScriptClass::Latin, fonts),
+                lang_east_asia: regional_language(cascade, ScriptClass::Asian, fonts),
+                lang_bidi: regional_language(cascade, ScriptClass::Complex, fonts),
+                names_language: class_tags.iter().any(Option::is_some),
+                script_language: class_tags[match class {
+                    ScriptClass::Latin => 0,
+                    ScriptClass::Asian => 1,
+                    ScriptClass::Complex => 2,
+                }]
+                .clone(),
                 complex: class == ScriptClass::Complex,
             },
             face,
@@ -1694,6 +1880,23 @@ impl RunProperties {
     /// Native size of one emitted run, excluding its text and link: the run
     /// shells and every string `text_run` copies out of the properties.
     pub fn text_run(&self) -> TextRun {
+        self.text_run_regional(false)
+    }
+
+    /// The text run of a field result: like `text_run`, but an East Asian or
+    /// complex regional value over the Canvas language limit is rejected on
+    /// the borrowed value, before any copy (`regional_language_admitted`).
+    fn field_text_run(&self) -> TextRun {
+        self.text_run_regional(true)
+    }
+
+    fn text_run_regional(&self, bounded: bool) -> TextRun {
+        let regional = |value: &Option<Atom>| {
+            value
+                .as_deref()
+                .filter(|value| !bounded || regional_language_admitted(value))
+                .map(str::to_string)
+        };
         let family = Some(self.family.to_string());
         TextRun {
             bold: self.bold,
@@ -1733,9 +1936,33 @@ impl RunProperties {
                 width: *width as f64 / 1000.0,
                 space: 0.0,
             }),
-            lang_east_asia: self.lang_east_asia.as_deref().map(str::to_string),
-            lang_bidi: self.lang_bidi.as_deref().map(str::to_string),
+            lang: self.lang.as_deref().map(str::to_string),
+            lang_east_asia: regional(&self.lang_east_asia),
+            lang_bidi: regional(&self.lang_bidi),
+            lang_script_class: self.class_language_fact(self.script_language.as_deref()),
             ..TextRun::default()
+        }
+    }
+
+    /// The model's script-class language for text of these properties whose
+    /// class language is `language`: the tag, or an empty string where the
+    /// class names none while another class does (the renderer would
+    /// otherwise pick one of the axes by its own slot table). Absent when the
+    /// styles name no language at all: such text is the same with or without
+    /// the fact, and a document without languages stays free of it.
+    ///
+    /// A tag longer than the renderer admits (64 UTF-16 units, packages/docx
+    /// src/layout/text.ts MAX_LANGUAGE_TAG_UNITS) names no language there, so
+    /// it becomes the empty "names none" fact instead of being copied into
+    /// every run (RFC 5646 §4.4.1 lets an implementation bound tag length).
+    fn class_language_fact(&self, language: Option<&str>) -> Option<String> {
+        match language {
+            Some(tag) if !utf16_units_within(tag, MAX_CANVAS_LANGUAGE_TAG_UNITS) => {
+                Some(String::new())
+            }
+            Some(tag) => Some(tag.to_string()),
+            None if self.names_language => Some(String::new()),
+            None => None,
         }
     }
 
@@ -1753,9 +1980,225 @@ impl RunProperties {
             bold_cs: Some(self.bold),
             italic_cs: Some(self.italic),
             kerning: self.kerning,
+            // The paragraph mark's text style carries its languages as well.
+            lang: self.lang.as_deref().map(str::to_string),
+            lang_east_asia: self
+                .lang_east_asia
+                .as_deref()
+                .filter(|value| regional_language_admitted(value))
+                .map(str::to_string),
+            lang_bidi: self
+                .lang_bidi
+                .as_deref()
+                .filter(|value| regional_language_admitted(value))
+                .map(str::to_string),
+            lang_script_class: self.class_language_fact(self.script_language.as_deref()),
             ..RunFontFacts::default()
         }
     }
+}
+
+/// The language a cascade sets for text of a script class as the regional
+/// font-selection input of the model's three language axes: language and
+/// country (ODF 1.3 Part 3 §20.358: fo:language and fo:country for Latin
+/// text, style:language-asian / -complex with their countries for the
+/// others; "none" names no language). The renderer matches these against its
+/// regional font lists (zh-CN, ja-JP, ...), so they keep this shape; the
+/// Canvas language of the class is `class_language_tag`.
+/// Longest class language retained as a Canvas language, in UTF-16 units.
+const MAX_CANVAS_LANGUAGE_TAG_UNITS: usize = 64;
+
+/// Whether an East Asian or complex regional value (language-COUNTRY, matched
+/// against the renderer's regional font lists) is short enough to be kept on
+/// the facts this module adds for non-text glyphs (paragraph marks, fields): a
+/// value over the Canvas language limit matches no regional list, and copying
+/// it into every paragraph would multiply an oversized string. Text runs keep
+/// their long-standing values. UTF-16 units never exceed UTF-8 bytes, so short
+/// values skip the count.
+fn regional_language_admitted(value: &str) -> bool {
+    utf16_units_within(value, MAX_CANVAS_LANGUAGE_TAG_UNITS)
+}
+
+/// Whether `value` is at most `limit` UTF-16 units, counting no further than
+/// one unit past the limit so an oversized value costs a bounded scan.
+fn utf16_units_within(value: &str, limit: usize) -> bool {
+    value.len() <= limit || {
+        let mut units = 0usize;
+        value.chars().all(|c| {
+            units += c.len_utf16();
+            units <= limit
+        })
+    }
+}
+
+fn regional_language(cascade: &Cascade<'_>, class: ScriptClass, fonts: &FontFaces) -> Option<Atom> {
+    // Untagged styles: no language attribute anywhere, so no lookups.
+    if !cascade.names_language() {
+        return None;
+    }
+    let (ns, language, country) = match class {
+        ScriptClass::Latin => (NS_FO, "language", "country"),
+        ScriptClass::Asian => (NS_STYLE, "language-asian", "country-asian"),
+        ScriptClass::Complex => (NS_STYLE, "language-complex", "country-complex"),
+    };
+    let language = cascade.get(ns, language).filter(|v| *v != "none")?;
+    let country = cascade.get(ns, country).filter(|v| *v != "none");
+    // The western value is new model data copied into every inheriting run:
+    // a combined length the renderer would not admit as a language is
+    // dropped before any case conversion or copy (the East Asian and complex
+    // values keep their behaviour).
+    if class == ScriptClass::Latin {
+        let mut units = 0usize;
+        for part in [Some(language), country].iter().flatten() {
+            units += usize::from(units > 0);
+            for c in part.chars() {
+                units += c.len_utf16();
+                if units > MAX_CANVAS_LANGUAGE_TAG_UNITS {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(fonts.atom(&match country {
+        Some(country) => format!(
+            "{}-{}",
+            language.to_ascii_lowercase(),
+            country.to_ascii_uppercase()
+        ),
+        None => language.to_ascii_lowercase(),
+    }))
+}
+
+/// The complete language tag a cascade sets for text of a script class: the
+/// language the class's text is in, for Canvas `lang`.
+///
+/// - ODF 1.3 Part 3 §§20.343–20.345: style:rfc-language-tag (-asian,
+///   -complex) is an RFC 5646 tag, used only where the language, script and
+///   country attributes cannot express it; producers may write those as a
+///   fallback beside it. The RFC tag therefore wins over them when it is set
+///   in the same style or a nearer one of the §16.2 search order; a
+///   component set in a nearer style overrides an inherited RFC tag
+///   (library policy for the cascade of two alternative spellings, which the
+///   standard does not order).
+/// - Otherwise the tag is assembled from the language (§20.202 fo:language,
+///   §20.302/§20.303), the script (§20.222 fo:script, §20.356/§20.357) and
+///   the country (§20.188 fo:country, §20.256/§20.257), in RFC 5646 order
+///   with its conventional case. Script and country are ignored without a
+///   language (they "may be ignored if not specified together with" it).
+///
+/// The renderer canonicalizes the tag (an ill-formed one names no language).
+fn class_language_tag(
+    cascade: &Cascade<'_>,
+    class: ScriptClass,
+    fonts: &FontFaces,
+) -> Option<Atom> {
+    // Untagged styles: no language attribute anywhere, so no lookups.
+    if !cascade.names_language() {
+        return None;
+    }
+    let (ns, rfc, language, script, country) = match class {
+        ScriptClass::Latin => (NS_FO, "rfc-language-tag", "language", "script", "country"),
+        ScriptClass::Asian => (
+            NS_STYLE,
+            "rfc-language-tag-asian",
+            "language-asian",
+            "script-asian",
+            "country-asian",
+        ),
+        ScriptClass::Complex => (
+            NS_STYLE,
+            "rfc-language-tag-complex",
+            "language-complex",
+            "script-complex",
+            "country-complex",
+        ),
+    };
+    // The RFC tag is a style: attribute for every class.
+    let tag = cascade
+        .get(NS_STYLE, rfc)
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if let Some(tag) = tag {
+        let depth = cascade.depth(NS_STYLE, rfc);
+        let nearer_component = [language, script, country]
+            .into_iter()
+            .filter_map(|name| cascade.depth(ns, name))
+            .min()
+            .is_some_and(|component| Some(component) < depth);
+        if !nearer_component {
+            return Some(canvas_language_atom(fonts, tag));
+        }
+    }
+    let language = cascade.get(ns, language).filter(|v| *v != "none")?;
+    let script = cascade
+        .get(ns, script)
+        .filter(|v| *v != "none" && !v.is_empty());
+    let country = cascade
+        .get(ns, country)
+        .filter(|v| *v != "none" && !v.is_empty());
+    // Bound the combined UTF-16 length (with the '-' separators) before any
+    // case conversion or copy; counting stops once the limit is exceeded.
+    let mut units = 0usize;
+    for (index, part) in [Some(language), script, country]
+        .iter()
+        .flatten()
+        .enumerate()
+    {
+        units += usize::from(index > 0);
+        for c in part.chars() {
+            units += c.len_utf16();
+            if units > MAX_CANVAS_LANGUAGE_TAG_UNITS {
+                return Some(fonts.atom(""));
+            }
+        }
+    }
+    let mut tag = language.to_ascii_lowercase();
+    if let Some(script) = script {
+        let mut chars = script.chars();
+        tag.push('-');
+        tag.extend(chars.next().map(|c| c.to_ascii_uppercase()));
+        tag.push_str(&chars.as_str().to_ascii_lowercase());
+    }
+    if let Some(country) = country {
+        tag.push('-');
+        tag.push_str(&country.to_ascii_uppercase());
+    }
+    Some(canvas_language_atom(fonts, &tag))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Bytes of class-language tags copied out for items on this thread
+    /// (tests assert an oversized tag is bounded before it is copied).
+    pub(crate) static CLASS_LANGUAGE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A class language as interned for Canvas: a tag longer than the renderer
+/// admits (`MAX_CANVAS_LANGUAGE_TAG_UNITS`) names no language there, so it
+/// is bounded here, before it is interned, cached or copied into any run,
+/// and becomes the empty "names none" tag (RFC 5646 §4.4.1 lets an
+/// implementation bound tag length). It still counts as naming a language
+/// (`RunProperties::names_language`), so every class keeps an explicit fact.
+fn canvas_language_atom(fonts: &FontFaces, tag: &str) -> Atom {
+    // UTF-16 units never exceed UTF-8 bytes, so short tags skip the count.
+    if !utf16_units_within(tag, MAX_CANVAS_LANGUAGE_TAG_UNITS)
+    {
+        fonts.atom("")
+    } else {
+        fonts.atom(tag)
+    }
+}
+
+/// The Table 22 class of an item's own text: the one class its classified
+/// characters share, `previous` (the preceding character's class, the weak
+/// character rule of `weak_classes`) where it has none, and `None` where
+/// they are of several classes.
+fn text_class(text: &str, previous: ScriptClass) -> Option<ScriptClass> {
+    let mut classes = text.chars().filter_map(table_22);
+    let Some(first) = classes.next() else {
+        return Some(previous);
+    };
+    classes.all(|class| class == first).then_some(first)
 }
 
 /// The font size a cascade sets for a script class (§20.190 fo:font-size,
@@ -1970,5 +2413,24 @@ pub(super) fn libreoffice_automatic_color(background: &str) -> &'static str {
         "ffffff"
     } else {
         "000000"
+    }
+}
+
+#[cfg(test)]
+mod language_bound_tests {
+    use super::*;
+
+    #[test]
+    fn utf16_bound_counts_units_not_bytes_and_stops_early() {
+        assert!(utf16_units_within(&"a".repeat(64), 64));
+        assert!(!utf16_units_within(&"a".repeat(65), 64));
+        // BMP scalars are one unit though three bytes: units, not bytes, count.
+        assert!(utf16_units_within(&"\u{3042}".repeat(64), 64));
+        assert!(!utf16_units_within(&"\u{3042}".repeat(65), 64));
+        // Astral scalars are two units each.
+        assert!(utf16_units_within(&"\u{1d11e}".repeat(32), 64));
+        assert!(!utf16_units_within(&"\u{1d11e}".repeat(33), 64));
+        assert!(regional_language_admitted("ja-JP"));
+        assert!(!regional_language_admitted(&"x".repeat(10_000)));
     }
 }
