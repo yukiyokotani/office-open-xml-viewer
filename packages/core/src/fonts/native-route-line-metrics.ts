@@ -365,12 +365,25 @@ const sameGeometry = (a: readonly number[], b: readonly number[]) =>
 /** Scalars for which CSS Fonts 4 §5.4 lets an engine choose a face outside
  * the family-list order: emoji presentation (Extended_Pictographic, emoji
  * modifiers, regional indicators, keycap and tag sequences, ZWJ sequences)
- * and variation selectors (every Variation_Selector, Mongolian free variation
- * selectors included). Any part of such a cluster may bypass both
- * sentinels through presentation-based system fallback, which no sentinel
- * can observe, so these clusters are outside the evidence boundary. */
+ * and the standardized/ideographic variation selectors (U+FE00..FE0F,
+ * U+E0100..E01EF). Any part of such a cluster may bypass both sentinels
+ * through presentation-based system fallback, which no sentinel can observe,
+ * so these clusters are outside the evidence boundary. This set decides the
+ * native route line metric for every document (tagged or not), so it stays
+ * as it was; the language-admission oracle rejects more (see
+ * {@link LANGUAGE_PROOF_EXCLUDED}). */
 const PRESENTATION_SELECTED =
-  /[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\p{Variation_Selector}\u200d\u20e3\u{e0020}-\u{e007f}]/u;
+  /[\p{Extended_Pictographic}\p{Emoji_Modifier}\p{Regional_Indicator}\u200d\u20e3\ufe00-\ufe0f\u{e0020}-\u{e007f}\u{e0100}-\u{e01ef}]/u;
+
+/** Additional exclusion of the language-admission proof only: every
+ * Unicode Variation_Selector (the Mongolian free variation selectors
+ * U+180B..180D and U+180F included). A variation sequence selects a glyph
+ * variant that a face may or may not provide (Unicode 15 §23.4), so whether a
+ * named family "draws" it is not settled by the sentinel comparison; such a
+ * cluster never earns a Canvas language. Kept out of
+ * {@link PRESENTATION_SELECTED} so that untagged runs keep their existing
+ * native line-metric eligibility (library policy). */
+const LANGUAGE_PROOF_EXCLUDED = /\p{Variation_Selector}/u;
 
 /** Whether the route's first available family (or an absent family before
  * it) draws every part of `cluster`; undefined when the realm cannot judge.
@@ -529,6 +542,7 @@ export function createNamedFamilyOracle(
       for (const cluster of clusters) {
         const key = listId !== undefined && cluster.length <= OWNERSHIP_CACHED_CLUSTER_UNITS
           ? `${listId}\u0000${cluster}` : undefined;
+        if (LANGUAGE_PROOF_EXCLUDED.test(cluster)) return false;
         let owned = key !== undefined ? results.get(key) : undefined;
         if (owned === undefined) {
           const judged = nativeRouteClusterOwned(fonts, cluster, probe);

@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createNamedFamilyOracle } from './native-route-line-metrics.js';
+import { localFontMetricCoversText } from './local-line-metrics.js';
+import type { ResolvedFontMetric } from './resource-metrics.js';
+import type { CanvasFontRoute } from './canvas-route.js';
 import { PROBE_EM, SENTINELS, SENTINEL_UPM } from './route-sentinels.js';
 
 // A structural Canvas double for the route sentinels: the named family
@@ -202,5 +205,27 @@ describe('named-family oracle (Canvas lang admission)', () => {
     for (let index = 1; index < 24; index += 1) probes(list(index), 'г');
     expect(probes(list(23), 'г')).toBe(0);
     expect(probes(list(0), 'г')).toBe(2);
+  });
+  it('rejects every variation selector for a language, not for the native line metric', () => {
+    // Identical Canvas metrics serve both paths: "Covering" draws U+1820
+    // U+180B. The native route line metric (every document, tagged or not)
+    // keeps its presentation-selected predicate and accepts the cluster; only
+    // the language-admission proof excludes the Mongolian free variation
+    // selector.
+    const { factory, owner } = fakeOwner();
+    vi.stubGlobal('OffscreenCanvas', class { getContext() { return factory().getContext('2d'); } });
+    try {
+      const metric = {
+        family: 'Covering', requiresGlyphCoverage: true, nativeRoutePrimaryFamily: '"Covering"',
+      } as ResolvedFontMetric;
+      const route = { familyList: '"Covering", serif' } as CanvasFontRoute;
+      expect(localFontMetricCoversText(metric, '\u1820\u180b', route)).toBe(true);
+      expect(localFontMetricCoversText(metric, '\u1820\ufe0f', route)).toBe(false);
+      const oracle = createNamedFamilyOracle(owner, factory);
+      expect(oracle.draws('"Covering"', 400, 'normal', '\u1820')).toBe(true);
+      expect(oracle.draws('"Covering"', 400, 'normal', '\u1820\u180b')).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
