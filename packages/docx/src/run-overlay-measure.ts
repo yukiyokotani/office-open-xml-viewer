@@ -10,11 +10,11 @@ export function runOverlayMeasure(
   measureForFont: (font: string, lang?: string) => (s: string) => number,
 ): (s: string) => number {
   const reference = run.referenceFont;
+  const font = reference ? reference.font : run.font;
   // Untagged runs call the factory with the font alone, as callbacks that
   // inspect their argument count expect.
-  const measurerFor = (font: string) =>
-    run.lang === undefined ? measureForFont(font) : measureForFont(font, run.lang);
-  if (!reference) return measurerFor(run.font);
-  const measure = measurerFor(reference.font);
-  return (s) => measure(s) * reference.scale;
+  const measure = run.lang === undefined ? measureForFont(font) : measureForFont(font, run.lang);
+  if (!reference) return measure;
+  const scale = reference.scale;
+  return (s) => measure(s) * scale;
 }
