@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels, SecondaryValueAxis } from '../types/chart';
+import type { ChartModel, ChartRect, ChartSeries, ChartSeriesDataLabels } from '../types/chart';
 import { renderChart } from './renderer.js';
 import { renderChartExChart } from './chart-ex-renderer.js';
 import { renderSimpleThreeDChart } from './three-d-renderer.js';
-import { drawSecondaryCategoryAxis } from './shared/secondary-axis.js';
-import { chartCategoriesNumeric, seriesCategoriesNumeric } from './category-spacing.js';
+import { categorySourceAt } from './category-caption.js';
+import { wrapMeasuredText } from './shared/axis.js';
 import { formatLocalizedExcelShortDate } from './chart-number-format.js';
 import { adoptHostLocale } from '../number-symbols.js';
 
@@ -169,26 +169,69 @@ describe('single-series line chart, category 1.2', () => {
   });
 });
 
-describe('categories follow the series that supplies them', () => {
-  const axis = { hidden: false, tickLabelPos: 'nextTo', lineHidden: true, majorTickMark: 'none', fontSizeHpt: 1000, formatCode: '0.0' } as unknown as SecondaryValueAxis;
-  const secondary = (numeric: boolean | null | undefined) => inLocale('fr-FR', () => {
-    const rec = recordingContext();
-    drawSecondaryCategoryAxis(rec.ctx, model({}), axis, ['1.2'], RECT, 0, 100, 200, 1, numeric);
-    return texts(rec);
+describe('categories follow the source that supplies them', () => {
+  const secondaryAxis = { min: 0, max: 20, title: null, hidden: false, lineHidden: true, majorTickMark: 'none', fontSizeHpt: 1000 } as never;
+  // Primary categories 5.5; the secondary series' own cache says 1.2.
+  const combo = (primaryNumeric: boolean, secondaryNumeric: boolean) => model({
+    categories: ['5.5'], categoriesNumeric: primaryNumeric,
+    secondaryValAxis: secondaryAxis, secondaryCatAxis: secondaryAxis,
+    series: [series({ values: [1] }), series({ values: [2], useSecondaryAxis: true, categories: ['1.2'], categoriesNumeric: secondaryNumeric })],
   });
 
-  it('secondary axis: numeric secondary under text primary, and the reverse', () => {
-    // primary text + secondary numeric
-    const textPrimary = model({ categories: ['1.2'], categoriesNumeric: false, series: [series(), series({ categories: ['1.2'], categoriesNumeric: true, useSecondaryAxis: true })] });
-    expect(seriesCategoriesNumeric(textPrimary, textPrimary.series[1])).toBe(true);
-    expect(secondary(true)).toContain('1,2');
-    // primary numeric + secondary text
-    const numericPrimary = model({ categories: ['1.2'], categoriesNumeric: true, series: [series(), series({ categories: ['1.2'], categoriesNumeric: false, useSecondaryAxis: true })] });
-    expect(seriesCategoriesNumeric(numericPrimary, numericPrimary.series[1])).toBe(false);
-    expect(secondary(false)).toEqual(['1.2']);
-    // a secondary series sharing the chart's categories inherits the chart's flag
-    expect(seriesCategoriesNumeric(numericPrimary, numericPrimary.series[0])).toBe(true);
-    expect(chartCategoriesNumeric(textPrimary)).toBe(false);
+  it('secondary axis through the bar renderer: text primary + numeric secondary', () => {
+    const painted = texts(inLocale('fr-FR', () => render(combo(false, true))));
+    expect(painted).toContain('1,2');
+    expect(painted).toContain('5.5');
+  });
+
+  it('secondary axis through the bar renderer: numeric primary + text secondary', () => {
+    const painted = texts(inLocale('fr-FR', () => render(combo(true, false))));
+    expect(painted).toContain('1.2');
+    expect(painted).not.toContain('1,2');
+    expect(painted).toContain('5,5');
+  });
+
+  it('resolves per point: a short own numeric cache falls back to the shared text list', () => {
+    const chart = model({
+      categories: ['a', '7.5'], categoriesNumeric: false,
+      series: [series({ categories: ['1.2'], categoriesNumeric: true })],
+    });
+    expect(categorySourceAt(chart, chart.series[0], 0)).toEqual({ raw: '1.2', numeric: true });
+    expect(categorySourceAt(chart, chart.series[0], 1)).toEqual({ raw: '7.5', numeric: false });
+    expect(categorySourceAt(chart, null, 1)).toEqual({ raw: '7.5', numeric: false });
+  });
+
+  it('column chart: axis tick and point caption agree on one source', () => {
+    const column = (numeric: boolean) => model({
+      categories: ['1.2', '2.5'], categoriesNumeric: numeric, catAxisFormatCode: numeric ? '0.00' : undefined,
+      series: [series({ seriesDataLabels: { ...labelled, showVal: false }, dataLabelOverrides: [{ idx: 0, showCatName: true } as never, { idx: 1, showCatName: true } as never] })],
+    });
+    const fr = texts(inLocale('fr-FR', () => render(column(true))));
+    expect(fr.filter(text => text === '1,20').length).toBeGreaterThanOrEqual(1);
+    expect(fr).not.toContain('1.2');
+  });
+
+  it('scatter: a text-backed X caption stays verbatim although the coordinate parses as a number', () => {
+    const scatter = (numeric: boolean) => model({
+      chartType: 'scatter', categories: ['1.2', '2.5'], categoriesNumeric: numeric,
+      series: [series({ seriesType: 'scatter', categories: ['1.2', '2.5'], categoriesNumeric: numeric, seriesDataLabels: labelled })],
+    });
+    const text = texts(inLocale('fr-FR', () => render(scatter(false))));
+    expect(text).toContain('1.2');
+    expect(text).not.toContain('1,2');
+    const numeric = texts(inLocale('fr-FR', () => render(scatter(true))));
+    expect(numeric).toContain('1,2');
+  });
+
+  it('surface: the authored 0.00 axis code formats a numeric category', () => {
+    const surface = model({
+      chartType: 'surface', categories: ['1.2', '2.5', '3'], categoriesNumeric: true, catAxisFormatCode: '0.00',
+      valMin: 0, valMax: 10, valAxisMajorUnit: 5,
+      series: [series({ values: [1, 9, 2] }), series({ values: [9, 1, 8] })],
+    });
+    const painted = texts(inLocale('fr-FR', () => render(surface)));
+    expect(painted).toContain('1,20');
+    expect(painted).not.toContain('1.2');
   });
 
   const threeD = (over: Partial<ChartModel>) => model({
@@ -248,5 +291,24 @@ describe('built-in short dates follow the adopted host locale', () => {
     expect(formatLocalizedExcelShortDate(45_659, false)).toBe('1/2/2025');
     adoptHostLocale('fr-FR');
     expect(formatLocalizedExcelShortDate(45_659, false)).toBe('02/01/2025');
+  });
+});
+
+describe('label wrapping keeps no-break group separators', () => {
+  const ctx = { measureText: (text: string) => ({ width: Array.from(text).length * 7 }) } as unknown as CanvasRenderingContext2D;
+
+  it('does not break at, or rewrite, U+202F / U+00A0 / U+2007', () => {
+    for (const space of ['\u202f', '\u00a0', '\u2007']) {
+      expect(wrapMeasuredText(ctx, `1${space}234,5`, 100)).toEqual([`1${space}234,5`]);
+    }
+    // An ordinary space still wraps.
+    expect(wrapMeasuredText(ctx, 'ab cd', 20)).toEqual(['ab', 'cd']);
+  });
+
+  it('a fr-FR numeric category paints its U+202F group separator through the axis', () => {
+    const painted = texts(inLocale('fr-FR', () => render(model({
+      categories: ['1234.5', '2'], categoriesNumeric: true, catAxisFormatCode: '#,##0.0',
+    }))));
+    expect(painted).toContain('1\u202f234,5');
   });
 });

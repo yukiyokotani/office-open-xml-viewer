@@ -43,7 +43,8 @@ import { drawSeriesTrendlines } from '../shared/trendline.js';
 import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, secondaryAxisTitleBandW } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { dataLabelWithinAxisMaximum, drawSeriesDataLabels } from '../shared/data-labels.js';
-import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
+import { chartCategories } from '../category-spacing.js';
+import { axisCategoryCaption, pointCategoryCaptionAt } from '../category-caption.js';
 import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleBarPaint, drawDropLineEnvelopes, chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { drawUpDownBars } from '../shared/line-decorations.js';
 import { drawChartMarker } from '../shared/markers.js';
@@ -290,7 +291,7 @@ export function renderStockChart(
       ? dateAxisPlan.majorTicks.map(tick =>
         formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true))
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) =>
-        formatCategoryLabel((cats[index * labelInterval] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)));
+        axisCategoryCaption(chart, index * labelInterval));
     const manualInner = chart.plotAreaManualLayout?.layoutTarget === 'inner' &&
       chart.plotAreaManualLayout.w != null && chart.plotAreaManualLayout.h != null;
     const categoryLabelExtraH = authoredExtraLinesHeight(
@@ -704,7 +705,7 @@ export function renderStockChart(
       ),
       shapeRotationDeg,
       undefined,
-      chartCategoriesNumeric(chart),
+      pointCategoryCaptionAt(chart, stockSeries, true),
     );
   }
 
@@ -733,7 +734,7 @@ export function renderStockChart(
       : Array.from({ length: Math.ceil(n / labelInterval) }, (_, index) => {
         const ci = index * labelInterval;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)),
+          label: axisCategoryCaption(chart, ci),
           x: toX(ci),
           categoryIndex: ci,
         };

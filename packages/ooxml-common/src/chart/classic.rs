@@ -1383,8 +1383,14 @@ pub(super) fn parse_classic_impl(
     let resolved_category_levels = first_series
         .and_then(|series| collect_multi_level_str_cache(series, category_tag))
         .or_else(|| {
+            // Hierarchy levels are text; a numeric source resolves through
+            // `collect_string_source`'s typed numeric path instead.
+            let numeric = first_series
+                .and_then(|series| category_source_is_numeric(series, category_tag))
+                == Some(true);
             shared_category_formula
                 .as_deref()
+                .filter(|_| !numeric)
                 .and_then(|formula| references.resolve_string_levels(formula))
         });
     let categories: Vec<String> = resolved_category_levels
@@ -1544,10 +1550,15 @@ pub(super) fn parse_classic_impl(
             // caches/literals and genuinely distinct formulas remain per-series.
             let series_categories: Option<Vec<String>> = {
                 let own_formula = external_reference_formula(*ser, own_category_tag);
+                // A later series shares the chart's labels only when formula
+                // AND source kind match: cacheless `numRef` and `strRef` over
+                // one range are different category sources.
                 let shares_chart_categories = own_category_tag == category_tag
                     && (series_position == 0
                         || (own_formula.is_some()
-                            && own_formula.as_deref() == shared_category_formula.as_deref()));
+                            && own_formula.as_deref() == shared_category_formula.as_deref()
+                            && category_source_is_numeric(*ser, own_category_tag)
+                                == categories_numeric));
                 if shares_chart_categories {
                     None
                 } else {

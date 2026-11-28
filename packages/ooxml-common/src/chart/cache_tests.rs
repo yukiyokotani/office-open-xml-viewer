@@ -678,6 +678,51 @@ mod tests {
         assert_eq!(number_then_text.series[1].categories_numeric, Some(false));
     }
 
+    struct TypedCellResolver;
+
+    impl ChartReferenceResolver for TypedCellResolver {
+        // Worksheet A1:A3 = 3, the text "1.2", 1.5.
+        fn resolve_strings(&mut self, _formula: &str) -> Option<Vec<String>> {
+            Some(vec!["3".into(), "1.2".into(), "1.5".into()])
+        }
+        fn resolve_numbers(&mut self, _formula: &str) -> Option<Vec<Option<f64>>> {
+            Some(vec![Some(3.0), None, Some(1.5)])
+        }
+    }
+
+    #[test]
+    fn cacheless_numeric_and_text_references_to_one_range_are_different_sources() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:barChart>
+              <c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:numRef><c:f>S!$A$1:$A$3</c:f></c:numRef></c:cat>
+                <c:val><c:numLit><c:ptCount val="3"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+              <c:ser><c:idx val="1"/><c:order val="1"/><c:cat><c:strRef><c:f>S!$A$1:$A$3</c:f></c:strRef></c:cat>
+                <c:val><c:numLit><c:ptCount val="3"/><c:pt idx="0"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser>
+            </c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        let mut references = TypedCellResolver;
+        let chart = parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                references: std::cell::Cell::new(Some(&mut references)),
+                ..Default::default()
+            },
+        )
+        .expect("bar chart parses");
+        // The numeric reference reads typed numbers: the text cell is a gap,
+        // kept positionally, not the number-looking string "1.2".
+        assert_eq!(chart.categories, vec!["3", "", "1.5"]);
+        assert_eq!(chart.categories_numeric, Some(true));
+        // The later text reference over the same formula keeps its own kind.
+        assert_eq!(
+            chart.series[1].categories,
+            Some(vec!["3".to_string(), "1.2".to_string(), "1.5".to_string()])
+        );
+        assert_eq!(chart.series[1].categories_numeric, Some(false));
+    }
+
     #[test]
     fn plot_visible_only_preserves_source_masks_and_precedes_statistical_error_bars() {
         let xml = format!(

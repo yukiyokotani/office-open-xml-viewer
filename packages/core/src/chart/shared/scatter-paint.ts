@@ -20,7 +20,7 @@ import { dataLabelWithinAxisMaximum, drawSeriesDataLabels } from './data-labels.
 import { chartFontFamily } from './fonts.js';
 import { drawSeriesTrendlines } from './trendline.js';
 import { seriesPaintsSmoothedLine, smoothCurveExtent } from '../smooth-extent.js';
-import { seriesCategoriesNumeric } from '../category-spacing.js';
+import { pointCategoryCaptionAt } from '../category-caption.js';
 
 
 /** Whether {@link drawScatterSeriesLayer} draws a series' connecting line as
@@ -356,7 +356,7 @@ export function drawScatterSeriesLayer(
       value => dataLabelWithinAxisMaximum(chart, value, valueAxisMaximum),
       shapeRotationDeg,
       markerGapAt,
-      seriesCategoriesNumeric(chart, s),
+      pointCategoryCaptionAt(chart, s),
     );
   }
 

@@ -2277,14 +2277,7 @@ pub(super) fn category_source_is_numeric(ser_node: Node<'_, '_>, child_tag: &str
     let container = ser_node
         .children()
         .find(|node| node.is_element() && node.tag_name().name() == child_tag)?;
-    container
-        .children()
-        .filter(|node| node.is_element())
-        .find_map(|node| match node.tag_name().name() {
-            "numRef" | "numLit" => Some(true),
-            "strRef" | "strLit" | "multiLvlStrRef" => Some(false),
-            _ => None,
-        })
+    source_container_kind(container)
 }
 
 pub(super) fn reference_formula(container: Node<'_, '_>) -> Option<String> {
@@ -2315,10 +2308,47 @@ pub(super) fn collect_string_source(
         // use that live source just as Office does. Keep an unresolved empty
         // cache explicit so non-XLSX hosts never inherit unrelated data.
         return reference_formula(container)
-            .and_then(|formula| references.resolve_strings(&formula))
+            .and_then(|formula| resolve_source_strings(container, &formula, references))
             .or(Some(authored));
     }
-    reference_formula(container).and_then(|formula| references.resolve_strings(&formula))
+    reference_formula(container)
+        .and_then(|formula| resolve_source_strings(container, &formula, references))
+}
+
+/// Resolve a category/X source formula the way its declared kind reads it. A
+/// `numRef` is resolved through typed numeric resolution (a worksheet text
+/// cell is a gap, not a number-looking string; gaps stay positional as empty
+/// labels), a text reference through the string resolver.
+fn resolve_source_strings(
+    container: Node<'_, '_>,
+    formula: &str,
+    references: &mut dyn ChartReferenceResolver,
+) -> Option<Vec<String>> {
+    if source_container_kind(container) == Some(true) {
+        // A host without typed numeric resolution still answers as text.
+        if let Some(values) = references.resolve_numbers(formula) {
+            return Some(
+                values
+                    .into_iter()
+                    .map(|value| value.map(|number| number.to_string()).unwrap_or_default())
+                    .collect(),
+            );
+        }
+    }
+    references.resolve_strings(formula)
+}
+
+/// `Some(true)` for a `numRef` / `numLit` source, `Some(false)` for a text
+/// one, `None` when the container declares neither.
+pub(super) fn source_container_kind(container: Node<'_, '_>) -> Option<bool> {
+    container
+        .children()
+        .filter(|node| node.is_element())
+        .find_map(|node| match node.tag_name().name() {
+            "numRef" | "numLit" => Some(true),
+            "strRef" | "strLit" | "multiLvlStrRef" => Some(false),
+            _ => None,
+        })
 }
 
 pub(super) fn collect_number_source(

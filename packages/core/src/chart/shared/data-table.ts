@@ -2,12 +2,13 @@
 import type { ChartModel, ChartSeries } from '../../types/chart';
 import { chartDataTableFamilyIsPainted } from '../marker-style.js';
 import { catAxisLabelBandH, chartTextFontSizePx } from '../layout.js';
-import { formatCategoryLabel, formatChartValWithCode, formatLocalizedExcelShortDate } from '../chart-number-format.js';
+import { formatChartValWithCode, formatLocalizedExcelShortDate } from '../chart-number-format.js';
 import { legendEntryGlobalIndex, legendEntryRanges } from '../legend-entry-plan.js';
 import { authoredLineCount, authoredTextLines, fillAuthoredText, measureAuthoredTextWidth } from '../chart-text-lines.js';
 import { axisLineWidthPx } from '../axis-style.js';
 import { chartFontCss, chartFontFamily } from './fonts.js';
-import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
+import { chartCategories } from '../category-spacing.js';
+import { categorySourceAt, formatCategorySource } from '../category-caption.js';
 import { wrapMeasuredText } from './axis.js';
 import { buildLegendEntries, drawLegendSwatch } from './legend.js';
 import { dashPatternForPreset } from './geometry.js';
@@ -145,16 +146,16 @@ export function measureChartDataTable(
   // Their format, built-in id and numeric-vs-text provenance come from that
   // series, not from whichever later series carries one.
   const headerSeries = chart.series[0];
-  const headerNumeric = chartCategoriesNumeric(chart);
   const seriesCategoryFormat = headerSeries?.catFormatCode;
   const categoryFormat = seriesCategoryFormat ?? chart.catAxisFormatCode;
   const categoryDivisors = seriesCategoryFormat == null ? chart.catAxisFormatDivisors : null;
   const categoryBuiltinId = headerSeries?.catFormatBuiltinId;
-  const headerLines = chartCategories(chart).map(category => {
-    const numeric = category.trim() === '' ? Number.NaN : Number(category);
-    const label = headerNumeric !== false && categoryBuiltinId === 14 && Number.isFinite(numeric)
+  const headerLines = chartCategories(chart).map((_, index) => {
+    const source = categorySourceAt(chart, null, index);
+    const numeric = source.raw.trim() === '' ? Number.NaN : Number(source.raw);
+    const label = source.numeric !== false && categoryBuiltinId === 14 && Number.isFinite(numeric)
       ? formatLocalizedExcelShortDate(numeric, chart.date1904)
-      : formatCategoryLabel(category, categoryFormat, chart.date1904, categoryDivisors, headerNumeric);
+      : formatCategorySource(chart, source, { code: categoryFormat, divisors: categoryDivisors });
     return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
   });
   ctx.restore();

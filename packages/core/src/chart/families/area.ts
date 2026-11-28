@@ -57,7 +57,8 @@ import { drawSeriesTrendlines } from '../shared/trendline.js';
 import { chartDateAxisPlan, forEachErrorBarEndpoint, computeSecondaryAxis, drawSecondaryValueGridlines, drawSecondaryValueAxis, secondaryAxisTitleBandW } from '../shared/secondary-axis.js';
 import { measuredCartesianTitleBand, drawChartTitleForLayout } from '../shared/title.js';
 import { dataLabelWithinAxisMaximum, drawCategoryDataLabels } from '../shared/data-labels.js';
-import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
+import { chartCategories } from '../category-spacing.js';
+import { axisCategoryCaption, pointCategoryCaptionAt } from '../category-caption.js';
 import { applyDecorationLineStyle, chartStyleRoleLine, chartStyleRoleErrorBar } from '../shared/style-roles.js';
 import { axisCrossingValue, categoryAxisCrossingValue } from '../shared/line-decorations.js';
 import { drawChartMarker, seriesHasResolvedMarkerDetail } from '../shared/markers.js';
@@ -462,7 +463,7 @@ export function renderAreaChart(
     ? dateAxisPlan.majorTicks.map(tick =>
       formatCategoryLabel(String(tick.serial), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, true))
     : Array.from({ length: Math.ceil(n / categoryLabelSkip) }, (_, index) =>
-      formatCategoryLabel((cats[index * categoryLabelSkip] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)));
+      axisCategoryCaption(chart, index * categoryLabelSkip));
   // Authored breaks in a category label stack extra lines below the first;
   // an automatic/outer layout lifts the plot bottom by them (an authored inner
   // rectangle already leaves its own label band). Exactly 0 without breaks.
@@ -791,7 +792,7 @@ export function renderAreaChart(
           isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
         ),
         shapeRotationDeg,
-        chartCategoriesNumeric(chart),
+        pointCategoryCaptionAt(chart, s),
       );
     }
   }
@@ -881,7 +882,7 @@ export function renderAreaChart(
         isSecondarySeries(s) && secScale ? secScale.max : areaPlan.max,
       ),
       shapeRotationDeg,
-      chartCategoriesNumeric(chart),
+      pointCategoryCaptionAt(chart, s),
     );
     drawSeriesTrendlines(
       ctx, s, stroke, toX, yOf, ptToPx, undefined,
@@ -1009,7 +1010,7 @@ export function renderAreaChart(
       : Array.from({ length: Math.ceil(n / authoredSkip) }, (_, index) => {
         const ci = index * authoredSkip;
         return {
-          label: formatCategoryLabel((cats[ci] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart)),
+          label: axisCategoryCaption(chart, ci),
           x: toX(ci),
           categoryIndex: ci,
         };

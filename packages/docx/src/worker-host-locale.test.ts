@@ -1,4 +1,5 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, expect, it, vi } from 'vitest';
+import { DocxDocument } from './document.js';
 
 /**
  * The main thread sends its host locale with every worker parse request
@@ -20,7 +21,6 @@ afterEach(() => {
 // Main mode parses in a worker that paints nothing, so only worker mode (the
 // render worker) needs the locale.
 it('sends the main thread host locale with the worker-mode parse request', async () => {
-  const { DocxDocument } = await import('./document.js');
   const posted: Record<string, unknown>[] = [];
   vi.stubGlobal('navigator', { language: 'fr-FR' });
   vi.stubGlobal('location', { href: 'http://localhost/' });
@@ -37,17 +37,31 @@ it('sends the main thread host locale with the worker-mode parse request', async
   void loading;
 });
 
-it('render worker adopts the request locale before handling it, and keeps its own without one', async () => {
-  const posted: unknown[] = [];
-  const fake = { onmessage: null as ((event: MessageEvent) => unknown) | null, postMessage: (message: unknown) => { posted.push(message); } };
-  vi.stubGlobal('self', fake);
-  vi.stubGlobal('navigator', { language: 'en-US' });
+// The render worker is imported once in beforeAll (its module graph is the
+// expensive part, so it stays out of each test's timeout) with a fake `self`.
+const worker: { onmessage: ((event: MessageEvent) => unknown) | null } = { onmessage: null };
+// The worker's own module graph: adoption happens in it, so the painted-text
+// and font-demand functions are imported from the same graph.
+let core: typeof import('@silurus/ooxml-core');
+let demandModule: typeof import('@silurus/ooxml-core/internal/font-scalar-demand');
+beforeAll(async () => {
+  vi.stubGlobal('self', { postMessage: () => undefined, set onmessage(handler: never) { worker.onmessage = handler; } });
   vi.resetModules();
   await import('./render-worker.js');
-  const core = await import('@silurus/ooxml-core');
-  expect(core.hostLocale()).toBe('en-US');
-  await Promise.resolve(fake.onmessage?.({ data: { type: 'unknown-request', id: 1 } } as MessageEvent)).catch(() => undefined);
-  expect(core.hostLocale()).toBe('en-US');
-  await Promise.resolve(fake.onmessage?.({ data: { type: 'unknown-request', id: 2, hostLocale: 'fr-FR' } } as MessageEvent)).catch(() => undefined);
-  expect(core.hostLocale()).toBe('fr-FR');
+  core = await import('@silurus/ooxml-core');
+  demandModule = await import('@silurus/ooxml-core/internal/font-scalar-demand');
+}, 60_000);
+
+it('render worker paints and demands the request locale\'s separators, and keeps its own without one', async () => {
+  const paint = () => core.formatLocalizedExcelShortDate(45_659, false);
+  const demand = () => (demandModule.chartPaintTexts({ chartType: 'bar', series: [] }) as string[]).join('');
+  expect(paint()).toBe('1/2/2025');
+  expect(demand()).not.toContain('\u202f');
+  // A request without the field leaves the worker's own locale in place.
+  await Promise.resolve(worker.onmessage?.({ data: { type: 'unsupported', id: 1 } } as MessageEvent)).catch(() => undefined);
+  expect(paint()).toBe('1/2/2025');
+  // The request's hostLocale is adopted before the request is handled.
+  await Promise.resolve(worker.onmessage?.({ data: { type: 'unsupported', id: 2, hostLocale: 'fr-FR' } } as MessageEvent)).catch(() => undefined);
+  expect(paint()).toBe('02/01/2025');
+  expect(demand()).toContain('\u202f');
 });

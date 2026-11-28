@@ -27,7 +27,8 @@ import { dataLabelIsDeleted } from './data-label-style.js';
 import { EMU_PER_PT, PT_TO_PX } from '../units.js';
 import { pptxPresetDashArray } from '../draw/dash.js';
 import { finiteDataExtent, planNumericValueAxis, type NumericValueAxisPlan } from './axis-scale.js';
-import { categoryCaption, formatCategoryLabel, formatChartValWithCode } from './chart-number-format.js';
+import { formatChartValWithCode } from './chart-number-format.js';
+import { categorySourceAt, formatCategorySource, pointCategoryCaption } from './category-caption.js';
 import {
   axisTitleFontPx,
   axisTitleMargin,
@@ -79,7 +80,6 @@ import {
   categoryMinorGridlineFractions,
   categoryLabelOffsetPx,
   categoryPositionFraction,
-  seriesCategoriesNumeric,
 } from './category-spacing.js';
 import {
   buildThreeDAreaStripMeshes,
@@ -1500,10 +1500,7 @@ function drawThreeDDataLabel(
     showSeries,
     showValue: showVal,
     showPercent,
-    category: categoryCaption(
-      series.categories?.[categoryIndex] ?? chart.categories[categoryIndex] ?? `${categoryIndex + 1}`,
-      seriesCategoriesNumeric(chart, series),
-    ),
+    category: pointCategoryCaption(chart, series, categoryIndex, true),
     seriesName: series.name || `Series ${seriesIndex + 1}`,
     sourceValue: value,
     valueDivisor: valueDisplayUnits?.divisor,
@@ -1686,7 +1683,7 @@ function titleAndPlot(
   ctx.save();
   const rawLegendLabels = chart.chartType === 'pie'
     ? (chart.series[0]?.categories?.length ? chart.series[0].categories : chart.categories)
-      .map(label => categoryCaption(label, seriesCategoriesNumeric(chart, chart.series[0])))
+      .map((label, index) => chart.series[0] ? pointCategoryCaption(chart, chart.series[0], index) : label)
     : chart.series.map((series, index) => series.name || `Series ${index + 1}`);
   const legendLabels = rawLegendLabels.flatMap((label, index) =>
     legendOverrides.get(index)?.deleted === true ? [] : [{ label, index }]
@@ -2319,7 +2316,7 @@ function simpleLegend(
       .map((label, index) => {
         const authored = chart.series[0]?.dataPointColors?.[index];
         return {
-          label: categoryCaption(label, seriesCategoriesNumeric(chart, chart.series[0])),
+          label: chart.series[0] ? pointCategoryCaption(chart, chart.series[0], index) : label,
           color: authored === '00000000'
             ? 'transparent'
             : authored ? `#${authored}` : colorFor(index),
@@ -3316,7 +3313,6 @@ function renderCartesian(
   const percent = chart.chartType.endsWith('Pct');
   const categorySeries = chart.series.find(series => (series.categories?.length ?? 0) > 0);
   const categories = categorySeries?.categories ?? chart.categories;
-  const categoriesNumeric = seriesCategoriesNumeric(chart, categorySeries);
   const categoryCount = Math.max(1, categories.length, ...chart.series.map(series => series.values.length));
   const percentScales = percent
     ? planThreeDPercentCategoryScales(chart, categoryCount)
@@ -4491,13 +4487,9 @@ function renderCartesian(
       chart.catAxisLabelOffsetPercent,
     );
     const formattedCategories = Array.from({ length: categoryCount }, (_, index) =>
-      formatCategoryLabel(
-        String(categories[index] ?? index + 1),
-        chart.catAxisFormatCode,
-        chart.date1904,
-        chart.catAxisFormatDivisors,
-        categoriesNumeric,
-      )
+      formatCategorySource(chart, categorySourceAt(chart, categorySeries ?? null, index, true), {
+        code: chart.catAxisFormatCode, divisors: chart.catAxisFormatDivisors,
+      })
     );
     let rotation = authoredCategoryRotation(chart);
     if (rotation == null) {
@@ -4851,10 +4843,7 @@ function renderPie(
         showSeries: labelOverride?.showSerName ?? defaults?.showSerName ?? false,
         showValue: labelOverride?.showVal ?? defaults?.showVal ?? chart.showDataLabels,
         showPercent: labelOverride?.showPercent ?? defaults?.showPercent ?? false,
-        category: categoryCaption(
-          series.categories?.[slice.index] ?? chart.categories[slice.index] ?? `${slice.index + 1}`,
-          seriesCategoriesNumeric(chart, series),
-        ),
+        category: pointCategoryCaption(chart, series, slice.index, true),
         seriesName: series.name || 'Series 1',
         sourceValue: slice.value,
         percentRatio: slice.percentValue,
@@ -4941,7 +4930,7 @@ function renderPie(
   simpleLegend(ctx, {
     ...chart,
     categories,
-    series: [{ ...series, categories, categoriesNumeric: seriesCategoriesNumeric(chart, series), dataPointColors: legendPointColors }],
+    series: [{ ...series, categories, categoriesNumeric: categorySourceAt(chart, series, 0).numeric, dataPointColors: legendPointColors }],
   }, legend, ptToPx, true, legendMeasure, shapeRotationDeg);
   return true;
 }

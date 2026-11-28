@@ -607,13 +607,21 @@ export function wrapMeasuredText(
   return paragraphs.flatMap(paragraph => wrapMeasuredLine(ctx, paragraph, maxWidth, singleTokenOverhangPx));
 }
 
+// NBSP, NARROW NBSP and FIGURE SPACE, built from code points (not literals) so
+// the painter-literal font-demand guard does not read them as painted text.
+const NO_BREAK_SPACES = String.fromCharCode(0xa0, 0x202f, 0x2007);
+const BREAKABLE_SPACE = new RegExp(`[^\\S${NO_BREAK_SPACES}]+`);
+
 function wrapMeasuredLine(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number,
   singleTokenOverhangPx: number,
 ): string[] {
-  const words = text.trim().split(/\s+/).filter(Boolean);
+  // Break only at breakable whitespace: a no-break space (U+00A0), a narrow
+  // no-break space (U+202F, fr-FR's group separator) and a figure space
+  // (U+2007) stay inside their token, so a grouped number never splits there.
+  const words = text.trim().split(BREAKABLE_SPACE).filter(Boolean);
   if (words.length === 0) return [''];
   const lines: string[] = [];
   let line = '';

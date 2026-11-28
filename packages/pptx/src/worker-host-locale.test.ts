@@ -3,7 +3,8 @@ import {
   PULL_SESSION_PROTOCOL,
   type PullSessionCommand,
 } from '@silurus/ooxml-core/worker';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { PptxPresentation } from './presentation.js';
 
 /**
  * The main thread sends its host locale with every worker parse request
@@ -158,7 +159,6 @@ describe('PPTX worker host locale', () => {
 
 describe('PPTX loader parse request', () => {
   it.each(['worker', 'main'] as const)('sends the main thread host locale with the %s-mode parse request', async (mode) => {
-    const { PptxPresentation } = await import('./presentation.js');
     const posted: Record<string, unknown>[] = [];
     vi.stubGlobal('navigator', { language: 'fr-FR' });
     vi.stubGlobal('location', { href: 'http://localhost/' });
@@ -173,5 +173,32 @@ describe('PPTX loader parse request', () => {
     await vi.waitFor(() => expect(posted.some(message => message.kind === 'parse')).toBe(true));
     expect(posted.find(message => message.kind === 'parse')).toMatchObject({ hostLocale: 'fr-FR' });
     void loading;
+  });
+});
+
+describe('PPTX render worker host locale', () => {
+  const worker: { onmessage: ((event: MessageEvent) => unknown) | null } = { onmessage: null };
+  // The render worker's own module graph: adoption happens in it, so the
+  // painted-text and font-demand functions come from the same graph.
+  let core: typeof import('@silurus/ooxml-core');
+  let demandModule: typeof import('@silurus/ooxml-core/internal/font-scalar-demand');
+  beforeAll(async () => {
+    vi.stubGlobal('self', { postMessage: () => undefined, set onmessage(handler: never) { worker.onmessage = handler; } });
+    vi.resetModules();
+    await import('./render-worker.js');
+    core = await import('@silurus/ooxml-core');
+    demandModule = await import('@silurus/ooxml-core/internal/font-scalar-demand');
+  }, 60_000);
+
+  it('paints and demands the request locale, and keeps its own without one', async () => {
+    const paint = () => core.formatLocalizedExcelShortDate(45_659, false);
+    const demand = () => (demandModule.chartPaintTexts({ chartType: 'bar', series: [] }) as string[]).join('');
+    expect(paint()).toBe('1/2/2025');
+    expect(demand()).not.toContain('\u202f');
+    await Promise.resolve(worker.onmessage?.({ data: { kind: 'unsupported', id: 1 } } as MessageEvent)).catch(() => undefined);
+    expect(paint()).toBe('1/2/2025');
+    await Promise.resolve(worker.onmessage?.({ data: { kind: 'unsupported', id: 2, hostLocale: 'fr-FR' } } as MessageEvent)).catch(() => undefined);
+    expect(paint()).toBe('02/01/2025');
+    expect(demand()).toContain('\u202f');
   });
 });

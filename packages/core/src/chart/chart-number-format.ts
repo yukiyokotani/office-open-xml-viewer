@@ -168,7 +168,7 @@ export function formatChartValWithCode(
  * legend entries, generated ticks): a number from a numeric source
  * (`c:numRef` / `c:numLit`) paints as General, with the host decimal
  * separator; any other category is shown verbatim. */
-export function categoryCaption(raw: string, numeric: boolean | null | undefined): string {
+function generalCategoryCaption(raw: string, numeric: boolean | null | undefined): string {
   return numeric === true && raw.trim() !== '' && Number.isFinite(Number(raw))
     ? raw.replace('.', hostNumberSymbols().decimal)
     : raw;
@@ -201,7 +201,7 @@ export function formatCategoryLabel(
   numeric?: boolean | null,
 ): string {
   if (numeric === false) return raw;
-  if (!code && numeric === true) return categoryCaption(raw, true);
+  if (!code && numeric === true) return generalCategoryCaption(raw, true);
   if (!code) return raw;
   // Only numeric-looking categories are formatted. `Number('')` and
   // `Number('  ')` are 0 (falsely finite), so reject blank / whitespace text

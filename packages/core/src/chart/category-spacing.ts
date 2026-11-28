@@ -1,4 +1,4 @@
-import type { ChartModel, ChartSeries } from '../types/chart.js';
+import type { ChartModel } from '../types/chart.js';
 
 /** Which format owns the omitted category-axis gap policy. */
 export type CategoryGapPolicy = 'legacy' | 'chartex';
@@ -134,21 +134,6 @@ export function resolveCategoryGapWidthPercent(
 }
 
 // ─── Category helper ────────────────────────────────────────────────────────
-
-/** Whether the labels {@link chartCategories} returns came from a numeric
- * source (`categoriesNumeric` of the model, or of the first series when its
- * own categories supply them); `undefined` for generated 1..n labels. */
-export function chartCategoriesNumeric(chart: ChartModel): boolean | null | undefined {
-  if (chart.categories.length > 0) return chart.categoriesNumeric;
-  const first = chart.series[0];
-  return first?.categories && first.categories.length > 0 ? first.categoriesNumeric : undefined;
-}
-
-/** Provenance of the labels `series.categories?.length ? series.categories :
- * chart.categories` yields (a series' own categories, else the chart's). */
-export function seriesCategoriesNumeric(chart: ChartModel, series: ChartSeries | undefined): boolean | null | undefined {
-  return series?.categories?.length ? series.categoriesNumeric : chart.categoriesNumeric;
-}
 
 export function chartCategories(chart: ChartModel): string[] {
   if (chart.categories.length > 0) return chart.categories;

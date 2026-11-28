@@ -16,7 +16,6 @@ import {
 import { computeChartFrame } from '../layout.js';
 import { automaticRadarMajorUnit, planNumericValueAxis } from '../axis-scale.js';
 import { axisLineWidthPx, resolveAxisLine } from '../axis-style.js';
-import { formatCategoryLabel } from '../chart-number-format.js';
 import { axisLabelLineHeightPx, fillAuthoredText } from '../chart-text-lines.js';
 import { categoryLabelOffsetPx } from '../category-spacing.js';
 
@@ -32,7 +31,8 @@ import { chartFontFamily, chartFontCss } from '../shared/fonts.js';
 import { measuredLegendReserve, drawLegendForLayout } from '../shared/legend.js';
 import { drawAxisTick, valGridStroke, valMinorGridStroke, valAxisReversed, drawValMajorGridlines, formatPrimaryValueAxisTick, axisLabelPx, catLabelsVisible } from '../shared/axis.js';
 import { drawChartTitleForLayout } from '../shared/title.js';
-import { chartCategories, chartCategoriesNumeric } from '../category-spacing.js';
+import { chartCategories } from '../category-spacing.js';
+import { axisCategoryCaption } from '../category-caption.js';
 import { drawChartMarker } from '../shared/markers.js';
 import { clamp } from '../shared/geometry.js';
 import { paintClassicDataPointPath } from '../shared/chartex-style.js';
@@ -261,7 +261,7 @@ export function renderRadarChart(
           : 2 * Math.min(plotRightX - lx, lx - plotLeftX);
     // §21.2.2.71: format numeric-serial categories via the category-axis
     // numFmt; string spoke labels pass through unchanged.
-    const label = formatCategoryLabel((cats[i] ?? '').toString(), chart.catAxisFormatCode, chart.date1904, chart.catAxisFormatDivisors, chartCategoriesNumeric(chart));
+    const label = axisCategoryCaption(chart, i);
     fillAuthoredText(ctx, label, lx, ly, axisLabelLineHeightPx(radarCatFontPx), maxPx);
   }
 

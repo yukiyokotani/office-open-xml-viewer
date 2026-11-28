@@ -34,8 +34,7 @@ import {
   type RichDataLabelBlock,
 } from '../rich-data-label.js';
 import { effectiveDataLabelText } from '../data-label-content.js';
-import { categoryCaption } from '../chart-number-format.js';
-import { seriesCategoriesNumeric } from '../category-spacing.js';
+import { categorySourceAt, pointCategoryCaption } from '../category-caption.js';
 
 import { chartDataPointStyleRole, chartSeriesSourceIndex } from '../effective-style.js';
 import { chartStyleLineDecision } from '../style-paint.js';
@@ -307,7 +306,7 @@ export function renderPieChart(
     && chart.series.length > 1;
   const legendChart: ChartModel = seriesLegend
     ? chart
-    : { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: seriesCategoriesNumeric(chart, s) }] };
+    : { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: categorySourceAt(chart, s, 0).numeric }] };
 
   // Shared frame (radial form). Pie uses title pads 0.035 / 0.035; its legend
   // labels categories (one row per slice) so it reserves a wider 0.28 side band
@@ -530,7 +529,7 @@ function drawPieRichLabels(
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(
-    { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: seriesCategoriesNumeric(chart, s) }] },
+    { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: categorySourceAt(chart, s, 0).numeric }] },
     ptToPx,
   );
   const calloutIndices = new Set<number>();
@@ -554,7 +553,7 @@ function drawPieRichLabels(
   // callout or change the sibling's authored radial position.
   if (calloutIndices.size > 0) {
     drawPieCalloutLabels(
-      ctx, chart, def, s, cats, vals, total, cx2, cy2, outerR, innerR, startAngle,
+      ctx, chart, def, s, vals, total, cx2, cy2, outerR, innerR, startAngle,
       font, ptToPx, plotX, plotW, plotY, plotH, chartX, chartY, chartW, chartH,
       calloutIndices, overridesByIndex, sliceOffsets, shapeRotationDeg,
     );
@@ -597,7 +596,7 @@ function drawPieRichLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: categoryCaption((cats[i] ?? '').toString(), seriesCategoriesNumeric(chart, s)),
+      category: pointCategoryCaption(chart, s, i),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,
@@ -1005,7 +1004,6 @@ function drawPieCalloutLabels(
   chart: ChartModel,
   def: ChartSeriesDataLabels,
   s: ChartSeries,
-  cats: string[],
   vals: number[],
   total: number,
   cx2: number, cy2: number,
@@ -1071,7 +1069,7 @@ function drawPieCalloutLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: categoryCaption((cats[i] ?? '').toString(), seriesCategoriesNumeric(chart, s)),
+      category: pointCategoryCaption(chart, s, i),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,
