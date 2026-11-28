@@ -38,6 +38,7 @@
  * reads would be worse than not previewing at all: the whole progressive pass
  * would be discarded AND a second full layout built.
  */
+import { markProvisionalLayout } from './review-projection.js';
 import { layoutDocumentProgressively } from './layout/progressive.js';
 import { unchangedLeadingPageCount } from './layout/unchanged-pages.js';
 import type { DeepReadonly, DocumentLayout } from './layout/types.js';
@@ -46,7 +47,6 @@ import type { LayoutSourceStore } from './layout/layout-source-store.js';
 import type { RetainedRenderWorkerDocumentLayout } from './render-worker-layout.js';
 import type { DocumentLayoutPartial } from './worker-protocol.js';
 import {
-  markProvisionalRenderWorkerLayout,
   projectRenderWorkerLayoutMeta,
   type RenderWorkerReviewIndexInput,
 } from './render-worker-metadata.js';
@@ -135,7 +135,7 @@ export async function paginateRenderWorkerDocumentProgressively(
           return;
         }
         publishedLayout = retainedPreview;
-        markProvisionalRenderWorkerLayout(retainedPreview);
+        markProvisionalLayout(retainedPreview);
         publisher.publish(publicationOf(preview.layout, preview.exact, source, review, unchangedPages));
       },
     },

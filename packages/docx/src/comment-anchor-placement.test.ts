@@ -32,6 +32,7 @@ import {
   fakeElement, inlinePictureRun, oracleMeasureContext, paintedDocument, PICTURE_PART, withFakeDocument,
   type FakeElement,
 } from './test-support/painted-glyphs.test-support.js';
+import { markProvisionalLayout } from './review-projection.js';
 import { resolveRevisionAnchorRuns } from './revisions.js';
 import { textRunsForPage } from './text-run-projection.js';
 import type { DocxClipRegion, DocxDocumentModel, DocxTextRunInfo } from './types.js';
@@ -320,6 +321,23 @@ describe('comment threads asked for a view other than the active one', () => {
     // The active view's anchors are untouched.
     const [again] = await doc.getCommentThreads(0);
     expect(again!.anchors[0]!.rects[0]!.x).toBeCloseTo(shown!.anchors[0]!.rects[0]!.x, 6);
+  });
+
+  it('are projected whole from that view\'s complete layout while the active view is still published', async () => {
+    // A reference-only comment before deleted text, the last paragraph: a
+    // prefix defers it (the text after it, which it prefers, is not laid
+    // out yet); a complete layout stands it at the text before.
+    const { layout, model } = await paintedDocument(
+      `<w:p>${sized('Before')}</w:p><w:p>${REFERENCE}${DELETION}</w:p>`, COMMENT_PART);
+    const { doc, variants } = documentOf(model, layout);
+    // The active view's layout is a published prefix; the document is loading.
+    markProvisionalLayout(variants.store.defaultLayout);
+    Object.assign(doc, { _layoutLifecycle: { complete: false } });
+    expect(await doc.getCommentThreads(0)).toEqual([]);
+    const threads = await doc.getCommentThreads(0, { currentDate: 86_400_000 });
+    expect(threads).toHaveLength(1);
+    const before = (await doc.collectPageRuns(0, { currentDate: 86_400_000 })).find((run) => run.text === 'Before')!;
+    expect(threads[0]!.anchors[0]!.rects[0]!.x).toBeCloseTo(before.x, 6);
   });
 
   it('a range segment that view leaves out is absent from its runs', async () => {
@@ -743,14 +761,38 @@ describe('a comment whose authored extent goes on beyond a published prefix', ()
       source, createLayoutServices(source, { measureContext: oracleMeasureContext() }), 0);
     const review = { comments: model.comments ?? [], revisions: [] };
     const published: [number, number][] = [];
+    const cardPages: (number | undefined)[] = [];
     await paginateRenderWorkerDocumentProgressively(retained, source, {
       publish: (publication) => {
         published.push([publication.pageCount, publication.commentAnchorRanges?.length ?? 0]);
+        if (publication.commentAnchorRanges?.length) {
+          cardPages.push(publication.commentAnchorPlacements?.[0]?.cardPageIndex);
+        }
       },
       progress: () => undefined,
     }, { currentDateMs: 0 }, undefined, review);
-    return { published, complete: renderWorkerLayoutMeta(retained, review, 0, false) };
+    return { published, cardPages, complete: renderWorkerLayoutMeta(retained, review, 0, false) };
   };
+
+  it('waits for the whole table of a cell whose paragraph has ended while its row goes on', async () => {
+    // A row that splits over pages: the left cell's one run fills them; the
+    // right cell holds deleted text and a reference-only comment, which
+    // stands at the end of the text before it, where the left cell ends.
+    const cell = (content: string) => `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${content}</w:tc>`;
+    const { published, cardPages, complete } = await publish(
+      '<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>'
+      + '<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr>'
+      + cell(`<w:p>${EXACT_12PT}${sized('word '.repeat(700))}</w:p>`)
+      + cell(`<w:p>${DELETION}${REFERENCE}</w:p>`) + '</w:tr></w:tbl>');
+    const finalPage = complete.commentAnchorPlacements?.[0]?.cardPageIndex;
+    expect(complete.commentAnchorRanges).toHaveLength(1);
+    expect(finalPage).toBeGreaterThan(0);
+    // The first prefix ends inside the row.
+    expect(published[0]![0]).toBeLessThanOrEqual(finalPage!);
+    expect(published[0]![1]).toBe(0);
+    // Whenever a prefix shows the comment, it is where it stays.
+    expect(cardPages.every((page) => page === finalPage)).toBe(true);
+  });
 
   it('is not shown at unrelated text of the prefix: a range from deleted text to the next page', async () => {
     const { published, complete } = await publish(`<w:p>${sized('Unrelated')}</w:p>`

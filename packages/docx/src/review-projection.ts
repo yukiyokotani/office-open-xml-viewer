@@ -34,3 +34,18 @@ export interface ReviewAnchorProjectionOptions {
    * only. */
   readonly commentAnchorPlacements?: (import('./comments.js').CommentAnchorPlacement | null)[];
 }
+
+const PROVISIONAL_LAYOUTS = new WeakSet<object>();
+
+/** Record that `layout` is a prefix published while its document is still
+ * being paginated. The mark belongs to the layout: whichever route reads it
+ * later (its publication, a view selection, a runs request, in the worker or
+ * on the main thread) projects its review anchors as from a prefix, and a
+ * complete layout of another view is projected whole while this one loads. */
+export function markProvisionalLayout(layout: object): void {
+  PROVISIONAL_LAYOUTS.add(layout);
+}
+
+export function isProvisionalLayout(layout: object): boolean {
+  return PROVISIONAL_LAYOUTS.has(layout);
+}

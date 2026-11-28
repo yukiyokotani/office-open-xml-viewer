@@ -1,5 +1,6 @@
 import { buildBookmarkPageMap } from './bookmark-nav.js';
 import { collectLayoutSourceCommentRangesIfPresent, type CommentAnchorPlacement } from './comments.js';
+import { isProvisionalLayout } from './review-projection.js';
 import { textRunsForPage } from './text-run-projection.js';
 import { normalizeLayoutOptions } from './layout/options.js';
 import { layoutSourceStoreOf } from './layout/runtime-state.js';
@@ -13,15 +14,6 @@ import type { DeepReadonly, DocumentLayout } from './layout/types.js';
 import type { DocumentLayoutMeta, DocumentMeta } from './worker-protocol.js';
 
 export type RenderWorkerReviewIndexInput = Pick<DocumentMeta, 'comments' | 'revisions'>;
-
-const PROVISIONAL_LAYOUTS = new WeakSet<object>();
-
-/** Record that `layout` is a prefix published while the document is still
- * being paginated: whichever request reads it later, its review anchors are
- * projected as from a prefix, as its publication was. */
-export function markProvisionalRenderWorkerLayout(layout: object): void {
-  PROVISIONAL_LAYOUTS.add(layout);
-}
 
 /** The single worker-side projection from an immutable selected layout to the
  * synchronous geometry and indexes exposed by the host. Initial parse and
@@ -40,7 +32,7 @@ export function projectRenderWorkerLayoutMeta(
   // A published prefix is projected as one by every route that reads it
   // (its publication, a view selection, a runs request), not only by the
   // route that says so: the mark belongs to the layout.
-  const provisional = options.provisional === true || PROVISIONAL_LAYOUTS.has(layout);
+  const provisional = options.provisional === true || isProvisionalLayout(layout);
   const reviewProjection = reviewIndex
     ? {
         ...(provisional ? { completedSourceKeys: reviewIndex.completedSourceKeys } : {}),

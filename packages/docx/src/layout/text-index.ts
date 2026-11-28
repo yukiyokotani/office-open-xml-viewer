@@ -1067,6 +1067,25 @@ export function reviewProjectionIndexForDocument(
       continuing.delete(key);
     }
   }
+  // The unit of completion in the body is the top-level block. A paragraph
+  // inside a table has ended in a prefix only when its whole table has: the
+  // paragraph of one cell ends while the row goes on in another, and the
+  // pages of the row are not settled until then. A table has ended when the
+  // body has moved on to a later top-level block.
+  let lastBodyBlock = -1;
+  const bodyBlock = (key: string): { nested: boolean; index: number } | undefined => {
+    if (!key.startsWith('body:')) return undefined;
+    const path = key.slice(key.lastIndexOf(':') + 1).split('.');
+    return { nested: path.length > 1, index: Number(path[0]) };
+  };
+  for (const key of [...sourcePages.keys(), ...completedSourceKeys]) {
+    const block = bodyBlock(key);
+    if (block && block.index > lastBodyBlock) lastBodyBlock = block.index;
+  }
+  for (const key of [...completedSourceKeys]) {
+    const block = bodyBlock(key);
+    if (block?.nested && block.index >= lastBodyBlock) completedSourceKeys.delete(key);
+  }
   return Object.freeze({ renderedRunIndex, textRunIndex, completedSourceKeys, sourcePages, splitRuns });
 }
 

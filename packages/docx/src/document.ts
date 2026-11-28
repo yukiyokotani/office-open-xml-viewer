@@ -106,6 +106,7 @@ import {
   materializeDocumentPullAdapterSession,
 } from './document-pull-client.js';
 import { layoutDocumentInputAsync } from './layout/document.js';
+import { isProvisionalLayout, markProvisionalLayout } from './review-projection.js';
 import { layoutDocumentProgressively } from './layout/progressive.js';
 import { PaginationAbortError } from './layout/pagination-scheduler.js';
 import { normalizeLayoutOptions, type LayoutOptions } from './layout/options.js';
@@ -885,6 +886,7 @@ export class DocxDocument {
                   layoutOptions,
                   publishedLayout,
                   preview.layout,
+                  true,
                 );
                 if (retainedPreview === null) {
                   // A view change may evict this variant and a later geometry
@@ -933,6 +935,7 @@ export class DocxDocument {
                 layoutOptions,
                 publishedLayout,
                 layout,
+                false,
               );
               if (authoritative === null) ownsPublication = false;
             }
@@ -1400,8 +1403,13 @@ export class DocxDocument {
     options: LayoutOptions,
     expected: DeepReadonly<DocumentLayout> | null,
     next: DeepReadonly<DocumentLayout>,
+    /** `next` is a prefix of a layout still being paginated. */
+    provisional: boolean,
   ): DeepReadonly<DocumentLayout> | null {
     const retained = store.replaceIfCurrent(options, expected, next);
+    // The projections read the layout's own mark, so it is set before any
+    // of them can be asked for.
+    if (retained !== null && provisional) markProvisionalLayout(retained);
     if (retained !== null && this._isLayoutViewActive(options)) {
       this._invalidateLayoutDerivedCaches();
     }
@@ -1842,11 +1850,11 @@ export class DocxDocument {
     const active = runtime.activeLayoutOptions;
     const layout = active ? store.layoutFor(active) : store.defaultLayout;
     this._reviewProjectionIndex ??= reviewProjectionIndexForDocument(layout);
-    const projectionOptions = (this._layoutLifecycle?.complete ?? true)
-      ? undefined
-      : {
-          completedSourceKeys: this._reviewProjectionIndex.completedSourceKeys,
-        };
+    // Provisional by the layout's own mark, not by the document's loading
+    // state: this layout may be complete while another view still loads.
+    const projectionOptions = isProvisionalLayout(layout)
+      ? { completedSourceKeys: this._reviewProjectionIndex.completedSourceKeys }
+      : undefined;
     this._commentAnchorRanges ??= collectLayoutSourceCommentRangesIfPresent(
       comments,
       this._source,
@@ -1900,7 +1908,7 @@ export class DocxDocument {
     if (!ranges) {
       const index = reviewProjectionIndexForDocument(layout);
       ranges = collectLayoutSourceCommentRangesIfPresent(comments, this._source, index.renderedRunIndex, {
-        ...((this._layoutLifecycle?.complete ?? true) ? {} : { completedSourceKeys: index.completedSourceKeys }),
+        ...(isProvisionalLayout(layout) ? { completedSourceKeys: index.completedSourceKeys } : {}),
         cardOwners: {
           sourcePages: index.sourcePages,
           runsForPage: (pageIndex) => textRunsForPage(layout, pageIndex, { scale: 1 }),
@@ -1908,8 +1916,8 @@ export class DocxDocument {
         splitRuns: index.splitRuns,
         textRunIndex: index.textRunIndex,
       });
-      // A layout still being published is collected again when it has grown.
-      if (this._layoutLifecycle?.complete ?? true) COMMENT_ANCHOR_RANGES_BY_LAYOUT.set(layout, ranges);
+      // Each publication of a layout still being paginated is its own layout.
+      COMMENT_ANCHOR_RANGES_BY_LAYOUT.set(layout, ranges);
     }
     return ranges;
   }
@@ -1935,11 +1943,11 @@ export class DocxDocument {
     const active = runtime.activeLayoutOptions;
     const layout = active ? store.layoutFor(active) : store.defaultLayout;
     this._reviewProjectionIndex ??= reviewProjectionIndexForDocument(layout);
-    const projectionOptions = (this._layoutLifecycle?.complete ?? true)
-      ? undefined
-      : {
-          completedSourceKeys: this._reviewProjectionIndex.completedSourceKeys,
-        };
+    // Provisional by the layout's own mark, not by the document's loading
+    // state: this layout may be complete while another view still loads.
+    const projectionOptions = isProvisionalLayout(layout)
+      ? { completedSourceKeys: this._reviewProjectionIndex.completedSourceKeys }
+      : undefined;
     this._revisionAnchorRanges ??= collectLayoutSourceRevisionRangesIfPresent(
       revisions,
       this._source,

@@ -157,6 +157,7 @@ describe('progressive layout handover', () => {
         options: typeof layoutOptions,
         expected: DeepReadonly<DocumentLayout> | null,
         next: DeepReadonly<DocumentLayout>,
+        provisional: boolean,
       ): DeepReadonly<DocumentLayout> | null;
     };
     const publications = document as unknown as MainPublicationHarness;
@@ -165,6 +166,7 @@ describe('progressive layout handover', () => {
       layoutOptions,
       null,
       prefix,
+      true,
     );
     expect(retainedPrefix).not.toBeNull();
 
@@ -178,6 +180,7 @@ describe('progressive layout handover', () => {
       layoutOptions,
       retainedPrefix,
       full,
+      false,
     )).not.toBeNull();
     lifecycle.complete = true;
     expect(document.getBookmarkPage('later-bookmark')).toBeGreaterThan(0);
