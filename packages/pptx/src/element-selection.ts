@@ -101,10 +101,16 @@ function distanceToSegment(point: PptxSlidePoint, start: PptxSlidePoint, end: Pp
   );
 }
 
+/**
+ * `paintedHeight` (EMU) is the height a table paints after its rows grow to
+ * their content (renderTable). The hit region extends the authored frame to
+ * it downwards; the frame transform keeps its authored pivot, as in paint.
+ */
 export function hitTestPptxElement(
   element: SlideElement,
   point: PptxSlidePoint,
   tolerance = 0,
+  paintedHeight?: number,
 ): boolean {
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
   const local = inverseFramePoint(element, point);
@@ -119,8 +125,11 @@ export function hitTestPptxElement(
   }
   const minX = Math.min(element.x, element.x + element.width);
   const maxX = Math.max(element.x, element.x + element.width);
-  const minY = Math.min(element.y, element.y + element.height);
-  const maxY = Math.max(element.y, element.y + element.height);
+  const height = element.type === 'table' && paintedHeight !== undefined
+    && Number.isFinite(paintedHeight) && paintedHeight > element.height
+    ? paintedHeight : element.height;
+  const minY = Math.min(element.y, element.y + height);
+  const maxY = Math.max(element.y, element.y + height);
   return local.x >= minX && local.x <= maxX && local.y >= minY && local.y <= maxY;
 }
 
@@ -208,11 +217,14 @@ function boundedJoinedText(parts: Iterable<ElementTextPiece>, maxCharacters: num
     : { truncated: false, textCharacters: 0 };
 }
 
+/** `tableExtents`: painted table heights (EMU) by element index, as the
+ * renderer reported them (SlideRenderOptions.onTableExtent). */
 export function hitTestPptxSlideContext(
   slideIndex: number,
   slide: Slide,
   point: PptxSlidePoint,
   options: PptxElementContextOptions = {},
+  tableExtents?: ReadonlyMap<number, number>,
 ): PptxElementContext | null {
   if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) {
     throw new RangeError('PPTX hit-test point must contain finite coordinates.');
@@ -228,7 +240,7 @@ export function hitTestPptxSlideContext(
   }
   for (let elementIndex = slide.elements.length - 1; elementIndex >= 0; elementIndex--) {
     const element = slide.elements[elementIndex];
-    if (!hitTestPptxElement(element, point, tolerance)) continue;
+    if (!hitTestPptxElement(element, point, tolerance, tableExtents?.get(elementIndex))) continue;
     const boundedText = element.type === 'chart'
       ? boundedChartContextText(element.chart, maxTextCharacters)
       : boundedJoinedText(elementTextParts(element), maxTextCharacters);

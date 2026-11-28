@@ -300,6 +300,7 @@ pub fn table<'a>(
         cols,
         rows,
         rtl: false,
+        odf_row_heights: true,
     };
     out.push(SlideElement::Table(table));
     Ok(())

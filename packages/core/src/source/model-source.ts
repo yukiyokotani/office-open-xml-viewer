@@ -187,6 +187,38 @@ export function selectModelSource<T extends ModelSourceTarget>(
 }
 
 /**
+ * {@link selectModelSource} over a format's named source options in their
+ * fixed claim order (`undefined` slots skipped), also returning the index of
+ * the option that claimed. The slot, not the source's identity, says which
+ * option won: one provider may fill several options, and the first in claim
+ * order is the one selected.
+ */
+export function selectNamedModelSource<T extends ModelSourceTarget>(
+  named: readonly (ModelSource<T> | undefined)[],
+  target: T,
+  bytes: Uint8Array,
+): { source: ModelSource<T>; slot: number } | undefined {
+  const slots: number[] = [];
+  const sources: ModelSource<T>[] = [];
+  named.forEach((source, slot) => {
+    if (source === undefined) return;
+    slots.push(slot);
+    sources.push(source);
+  });
+  if (sources.length === 0) return undefined;
+  // One source at a time, in order, so each claim() runs exactly as in
+  // selectModelSource and the claiming position is known.
+  if (sources.length > MAX_MODEL_SOURCES) {
+    throw new RangeError(`model source selection accepts at most ${MAX_MODEL_SOURCES} sources`);
+  }
+  for (let k = 0; k < sources.length; k++) {
+    const source = selectModelSource([sources[k]], target, bytes);
+    if (source) return { source, slot: slots[k] };
+  }
+  return undefined;
+}
+
+/**
  * The configured sources of one load, in a format's fixed claim order (its
  * named source options, each holding at most one source). `undefined` when
  * none is set. Each entry is validated by {@link selectModelSource}.

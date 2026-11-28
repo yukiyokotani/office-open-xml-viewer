@@ -9,6 +9,7 @@ import {
   MODEL_SOURCE_MODULE_PROTOCOL,
   openModelSourceModule,
   selectModelSource,
+  selectNamedModelSource,
   validateModelSourceModuleDescriptor,
   type ModelSource,
   type ModelSourceModuleDescriptor,
@@ -202,5 +203,25 @@ describe('openModelSourceModule', () => {
     controller.abort();
     await expect(openModelSourceModule(descriptor(url), new Uint8Array(), archiveOf, controller.signal))
       .rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('selectNamedModelSource', () => {
+  const claiming = (claims: boolean) => ({
+    target: 'pptx' as const, claim: vi.fn(() => claims), beginLoad: vi.fn(),
+  }) as unknown as ModelSource<'pptx'>;
+
+  it('reports the slot of the claiming option, skipping empty ones', () => {
+    const declining = claiming(false);
+    const accepting = claiming(true);
+    expect(selectNamedModelSource([undefined, declining, accepting], 'pptx', new Uint8Array()))
+      .toEqual({ source: accepting, slot: 2 });
+    expect(selectNamedModelSource([undefined, undefined], 'pptx', new Uint8Array())).toBeUndefined();
+  });
+
+  it('selects the first slot when one provider fills several', () => {
+    const shared = claiming(true);
+    expect(selectNamedModelSource([shared, shared], 'pptx', new Uint8Array())).toEqual({ source: shared, slot: 0 });
+    expect(shared.claim).toHaveBeenCalledTimes(1);
   });
 });

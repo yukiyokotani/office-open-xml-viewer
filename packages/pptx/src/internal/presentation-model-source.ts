@@ -13,7 +13,7 @@ import {
   type NormalizedOoxmlResourcePolicy,
   type WorkerRendererDescriptors,
 } from '@silurus/ooxml-core/worker';
-import { selectModelSource, beginModelSourceLoad, effectiveModelSources, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
+import { selectNamedModelSource, beginModelSourceLoad, modelSourceWorker } from '@silurus/ooxml-core/internal/model-source';
 import { optionFontSources, type FontSourceDescriptor } from '@silurus/ooxml-core/internal/font-sources';
 import type { PptxFontDemandFacts } from '../font-requests.js';
 import { PptxPresentation, type LoadOptions } from '../presentation.js';
@@ -29,6 +29,7 @@ type MutablePresentation = {
   _tiff: LoadOptions['tiff'];
   _fonts: readonly FontSourceDescriptor[] | undefined;
   _parsedTextChain: boolean;
+  _odfTables: boolean;
   _preflight: {
     fontPreloadNames: readonly (string | null)[];
     fontPreloadFacts?: PptxFontDemandFacts;
@@ -79,16 +80,20 @@ export async function loadPptxModelSource(
     }
     // Selection happens once: an unclaimed input continues on the OOXML path
     // with every source option cleared, so it is never offered again.
-    const selected = selectModelSource(effectiveModelSources(opts.legacyPpt, opts.odp), 'pptx', new Uint8Array(buffer));
-    if (!selected) return PptxPresentation.load(buffer, { ...opts, legacyPpt: undefined, odp: undefined });
-    const load = beginModelSourceLoad(selected, 'pptx');
+    const choice = selectNamedModelSource([opts.legacyPpt, opts.odp], 'pptx', new Uint8Array(buffer));
+    if (!choice) return PptxPresentation.load(buffer, { ...opts, legacyPpt: undefined, odp: undefined });
+    const load = beginModelSourceLoad(choice.source, 'pptx');
+    // The ODP sizing policy follows the option that claimed the input (slot
+    // 1, `odp`), so a provider whose tables omit `odfRowHeights` still gets
+    // it; a provider filling both options is selected as `legacyPpt`.
+    const odfTables = choice.slot === 1;
     try {
       metrics.setSourceBytes(buffer.byteLength);
       metrics.checkpoint('container ready');
       const worker = mode === 'worker'
         ? (await import('../render-worker-host.js')).createRenderWorker()
         : new (await import('../worker-source.ts?worker&inline')).default();
-      const wiredWorker = sourceWorker(worker, load);
+      const wiredWorker = sourceWorker(worker, load, odfTables);
       const renderers = mode === 'worker' ? workerRendererDescriptors(opts) : undefined;
       let presentation: PptxPresentation | undefined;
       try {
@@ -109,6 +114,7 @@ export async function loadPptxModelSource(
         state._fonts = optionFontSources(opts.fonts);
         // A model source's slides have no proven parsed colour chain.
         state._parsedTextChain = false;
+        state._odfTables = odfTables;
         warnUnserializableRenderers(opts, mode, renderers);
         const progressive = opts.progressiveLayout ? {
           onProgress: opts.onLayoutProgress,
@@ -147,7 +153,7 @@ export async function loadPptxModelSource(
   }
 }
 
-function sourceWorker(worker: Worker, load: AdmittedModelSourceLoad): Worker {
+function sourceWorker(worker: Worker, load: AdmittedModelSourceLoad, odfTables: boolean): Worker {
   const sourceOwnerUrl = resolveBundledAssetUrl(new URL(
     import.meta.env.DEV ? './worker-presentation-source.ts' : './pptx-source-worker.mjs',
     import.meta.url,
@@ -156,6 +162,7 @@ function sourceWorker(worker: Worker, load: AdmittedModelSourceLoad): Worker {
     discriminator: 'kind',
     load,
     parseMessage: (wire) => ({ ...wire, source: load.module, sourceOwnerUrl,
+      ...(odfTables ? { odfTables: true } : {}),
       ...(load.transfer.length ? { sourceTransfer: load.transfer } : {}) }),
   });
 }

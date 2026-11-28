@@ -1,9 +1,8 @@
 import { normalizeLoadResourceOptions, parseTypedParserError } from '@silurus/ooxml-core/worker';
 import {
   beginModelSourceLoad,
-  effectiveModelSources,
   openModelSourceModule,
-  selectModelSource,
+  selectNamedModelSource,
   type ModelSource,
   type ModelSourceOpenContext,
   type ModelSourceTarget,
@@ -13,7 +12,13 @@ import { resolveOoxmlContainer, type OoxmlResourceLimits } from '@silurus/ooxml-
 
 /** One Node input: an opened model-source archive, or resolved OOXML bytes. */
 export type NodeSessionInput<TArchive> =
-  | Readonly<{ kind: 'model-source'; opened: OpenedModelSourceModule<TArchive>; sourceByteLength: number }>
+  | Readonly<{
+    kind: 'model-source';
+    opened: OpenedModelSourceModule<TArchive>;
+    sourceByteLength: number;
+    /** Index in `options.sources` of the named option that claimed. */
+    slot: number;
+  }>
   | Readonly<{ kind: 'ooxml'; bytes: Uint8Array }>;
 
 /**
@@ -38,11 +43,11 @@ export async function resolveNodeSessionInput<TArchive>(
   normalizeError: (error: unknown) => unknown = error => parseTypedParserError(error) ?? error,
 ): Promise<NodeSessionInput<TArchive>> {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const selected = selectModelSource(effectiveModelSources(...(options.sources ?? [])), target, bytes);
-  if (!selected) {
+  const choice = selectNamedModelSource(options.sources ?? [], target, bytes);
+  if (!choice) {
     return { kind: 'ooxml', bytes: await resolveOoxmlContainer(bytes, options.password) };
   }
-  const load = beginModelSourceLoad(selected, target);
+  const load = beginModelSourceLoad(choice.source, target);
   try {
     const opened = await openModelSourceModule(
       load.module,
@@ -71,6 +76,7 @@ export async function resolveNodeSessionInput<TArchive>(
         },
       },
       sourceByteLength: bytes.byteLength,
+      slot: choice.slot,
     };
   } catch (error) {
     throw normalizeError(error);

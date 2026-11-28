@@ -51,6 +51,7 @@ import type {
   RenderWorkerResponse,
 } from './worker-protocol';
 import { findPptxElementBoundsByIds, hitTestPptxSlideContext } from './element-selection';
+import { TableHitExtents } from './table-hit-extents';
 import { loadEmbeddedFonts, uncoveredOfficeFontRequests } from './embedded-fonts';
 import { ProgressivePreflightGate } from './progressive-preflight-gate';
 import type { WorkerPresentationSourceOwner, WorkerCursorArchive } from './internal/worker-presentation-source';
@@ -60,6 +61,11 @@ const host = new WasmParserHost<PptxArchive>(init, {
   reinit,
 });
 let source: WorkerPresentationSourceOwner<PptxArchive> | undefined;
+/** The open source is LoadOptions.odp (RenderContext.odfTables). */
+let sourceOdfTables = false;
+/** Painted table extensions of recently displayed slides (hit testing);
+ * cleared when a presentation is opened. */
+const tableHitExtents = new TableHitExtents(HARD_MAX_PPTX_CACHED_SLIDES);
 
 function executeArchive<T>(operation: (archive: WorkerCursorArchive) => T): T {
   if (source) return source.execute(operation);
@@ -206,6 +212,7 @@ function getFontBytes(path: string): Promise<Uint8Array> {
 }
 
 async function openPresentation(request: Extract<RenderWorkerRequest, { kind: 'parse' }>) {
+  tableHitExtents.clear();
   releaseOfficeFonts();
   unregisterEmbeddedFonts(embeddedFontFaces);
   embeddedFontFaces = [];
@@ -351,6 +358,7 @@ function executeArchiveFromNew(
       if (!request.sourceOwnerUrl) throw new TypeError('PPTX source owner URL is missing');
       const { WorkerPresentationSourceOwner } = await import(/* @vite-ignore */ request.sourceOwnerUrl) as typeof import('./internal/worker-presentation-source.js');
       source = new WorkerPresentationSourceOwner(host);
+      sourceOdfTables = request.odfTables === true;
       await source.openModelSource(new Uint8Array(request.buffer), descriptor, request.sourceTransfer, {
         resourcePolicy: request.resourcePolicy,
       });
@@ -415,6 +423,9 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         pptxSlideOfficeFontRequests(slide, compact.majorFont, compact.minorFont));
       await fontsLoaded;
       const { routes: officeFontRoutes, installed: officeInstalledFamilies } = await officeRoutesForRequests(officeRequests);
+      // A display render publishes its painted table extensions for hit
+      // testing once it completes (TableHitExtents); runs collection does not.
+      const extents = tableHitExtents.begin(request.slideIndex);
       const { bitmap, runs } = await requireSlides().withSlide(request.slideIndex, async (slide) => {
         await slidePull.run(() => executeArchive((archive) => archive.assert_healthy()));
         const { renderSlideWithEmbeddedFonts } = await rendererModule;
@@ -429,10 +440,12 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         await renderSlideWithEmbeddedFonts(canvas, slide, compact.slideWidth, compact.slideHeight, {
           width: request.width,
           dpr: request.dpr,
+          onTableExtent: extents.record,
           imageResources: request.imageResources,
           defaultTextColor: compact.defaultTextColor,
           // A model source's slides have no proven parsed colour chain.
           parsedTextChain: source === undefined,
+          odfTables: source !== undefined && sourceOdfTables,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
@@ -458,6 +471,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
         }, (run) => runs.push(run));
         return { bitmap: canvas.transferToImageBitmap(), runs };
       });
+      extents.publish();
       postOwnedImageBitmap(post, { kind: 'slideRendered', id: request.id, bitmap, runs });
       return;
     }
@@ -481,6 +495,7 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
           defaultTextColor: compact.defaultTextColor,
           // A model source's slides have no proven parsed colour chain.
           parsedTextChain: source === undefined,
+          odfTables: source !== undefined && sourceOdfTables,
           cjkFallback,
           majorFont: compact.majorFont,
           minorFont: compact.minorFont,
@@ -508,8 +523,11 @@ self.onmessage = async (event: MessageEvent<RenderWorkerRequest | WorkerSvgDecod
     }
 
     if (request.kind === 'hitTestElement') {
+      // Grown tables are hit by what the latest display render painted; a
+      // slide not rendered (not on screen) is hit by its authored frames.
       const context = await requireSlides().withSlide(request.slideIndex, (slide) =>
-        hitTestPptxSlideContext(request.slideIndex, slide, request.point, request.options));
+        hitTestPptxSlideContext(request.slideIndex, slide, request.point, request.options,
+          tableHitExtents.get(request.slideIndex)));
       post({ kind: 'elementHit', id: request.id, context });
       return;
     }

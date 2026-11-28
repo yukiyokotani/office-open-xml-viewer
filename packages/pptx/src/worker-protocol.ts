@@ -55,6 +55,9 @@ export type PptxWorkerRequest =
       /** Application-selected model source (LoadOptions.legacyPpt or odp). */
       source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
       sourceTransfer?: readonly Transferable[];
+      /** The source is LoadOptions.odp: render its tables by the ODF
+       *  row-height rule (RenderContext.odfTables). */
+      odfTables?: boolean;
       sourceOwnerUrl?: string;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       /** Resolved regional Han fallback. PPTX derives its font-preload set from
@@ -116,6 +119,9 @@ export type RenderWorkerRequest =
       /** Application-selected model source (LoadOptions.legacyPpt or odp). */
       source?: import('@silurus/ooxml-core').ModelSourceModuleDescriptor;
       sourceTransfer?: readonly Transferable[];
+      /** The source is LoadOptions.odp: render its tables by the ODF
+       *  row-height rule (RenderContext.odfTables). */
+      odfTables?: boolean;
       sourceOwnerUrl?: string;
       resourcePolicy: NormalizedOoxmlResourcePolicy;
       /** Validated `LoadOptions.fonts` descriptors (plain, structured-clone

@@ -2411,6 +2411,24 @@ mod tests {
         assert!(table.rows[1].cells[1].v_merge);
     }
 
+    /// ODF row heights (OpenDocument 1.3 Part 3 §20.348) mark the table so
+    /// the renderer keeps its earlier row-growth rule for it.
+    #[test]
+    fn tables_mark_their_odf_row_heights() {
+        let automatic = r#"<style:style style:name="ro1" style:family="table-row"><style:table-row-properties style:row-height="1cm"/></style:style><style:style style:name="ro2" style:family="table-row"><style:table-row-properties style:min-row-height="2cm"/></style:style>"#;
+        let body = r#"<draw:frame svg:width="10cm" svg:height="5cm"><table:table><table:table-column/><table:table-row table:style-name="ro1"><table:table-cell><text:p>x</text:p></table:table-cell></table:table-row><table:table-row table:style-name="ro2"><table:table-cell><text:p>y</text:p></table:table-cell></table:table-row></table:table></draw:frame>"#;
+        let deck = deck("", "", automatic, &page(body)).unwrap();
+        let slide0 = model(&deck, 0);
+        let SlideElement::Table(table) = &slide0.elements[0] else {
+            panic!();
+        };
+        assert!(table.odf_row_heights);
+        assert_eq!(
+            (table.rows[0].height, table.rows[1].height),
+            (360_000, 720_000)
+        );
+    }
+
     #[test]
     fn table_cell_padding_sets_the_cell_insets() {
         let automatic = r#"<style:style style:name="ce1" style:family="table-cell"><style:table-cell-properties fo:padding="0.1cm" fo:padding-left="0.3cm"/></style:style>"#;

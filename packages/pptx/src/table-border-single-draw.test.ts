@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { Stroke } from '@silurus/ooxml-core';
-import { renderTable } from './renderer.js';
+import { orderTableMerges, renderTable, renderTableWithLayoutMemo, renderTextBody, type TableLayoutMemo } from './renderer.js';
+import { presentFacesContext } from './test-support/present-faces.js';
 import type { TableCell, TableElement, TableRow, TextBody } from './types';
 
 // DrawingML `<a:tbl>` — end-to-end render: an interior gridline SHARED by two
@@ -16,10 +17,10 @@ import type { TableCell, TableElement, TableRow, TextBody } from './types';
 interface StrokeSeg { x1: number; y1: number; x2: number; y2: number; width: number; color: string; }
 interface FillRect { x: number; y: number; width: number; height: number; color: string; }
 
-function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number }> } {
+function makeRecordingCtx(onMeasure?: () => void, fontBox: { ascent: number; descent: number; inkAscent?: number; inkDescent?: number } = { ascent: 8, descent: 2 }): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg[]; fills: FillRect[]; texts: Array<{ text: string; y: number; font: string }> } {
   const strokes: StrokeSeg[] = [];
   const fills: FillRect[] = [];
-  const texts: Array<{ text: string; y: number }> = [];
+  const texts: Array<{ text: string; y: number; font: string }> = [];
   let cur = { x: 0, y: 0 };
   let pending: { x1: number; y1: number; x2: number; y2: number } | null = null;
   let lineWidth = 1;
@@ -52,8 +53,16 @@ function makeRecordingCtx(): { ctx: CanvasRenderingContext2D; strokes: StrokeSeg
     quadraticCurveTo() {}, bezierCurveTo() {},
     createLinearGradient() { return { addColorStop() {} }; },
     createPattern() { return null; },
-    measureText: () => ({ width: 0, fontBoundingBoxAscent: 8, fontBoundingBoxDescent: 2, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 } as TextMetrics),
-    fillText(text: string, _x: number, y: number) { texts.push({ text, y }); }, strokeText() {},
+    // Deterministic advances: every character is half the font's px size
+    // wide, so wrapping happens the same way on every host.
+    measureText(text: string) {
+      onMeasure?.();
+      const sizePx = Number(/(\d+(?:\.\d+)?)px/.exec(String(this.font))?.[1] ?? 10);
+      // A kerned "AV" pair is a quarter of the size narrower.
+      const kerned = text.split('AV').length - 1;
+      return { width: (text.length * 0.5 - kerned * 0.25) * sizePx, fontBoundingBoxAscent: fontBox.ascent, fontBoundingBoxDescent: fontBox.descent, actualBoundingBoxAscent: fontBox.inkAscent ?? 8, actualBoundingBoxDescent: fontBox.inkDescent ?? 2 } as TextMetrics;
+    },
+    fillText(text: string, _x: number, y: number) { texts.push({ text, y, font: String(this.font) }); }, strokeText() {},
     font: '10px sans-serif',
     textAlign: 'left' as CanvasTextAlign,
     textBaseline: 'alphabetic' as CanvasTextBaseline,
@@ -293,11 +302,11 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 21.2)).toHaveLength(1);
   });
 
-  it('keeps a positive authored row height when the glyph box and insets fit', () => {
-    // ECMA-376 §21.1.3.18 makes a:tr@h a minimum, not an auto-height request.
-    // PowerPoint keeps this 18pt minimum because the 16pt glyph box plus 1pt
-    // top/bottom insets fits. Applying the auto-row 120% leading here would
-    // incorrectly enlarge the row to 21.2pt.
+  it('grows a positive row to the 120% line box when line spacing is omitted', () => {
+    // PowerPoint PDF controls (Windows and Mac) grow a 20pt minimum holding
+    // one 20pt line to 24pt: an omitted lnSpc line takes 1.2 x size in a
+    // positive row too. Here 16pt * 1.2 + 1pt top + 1pt bottom = 21.2pt
+    // exceeds the 18pt minimum.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{
@@ -313,13 +322,14 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
     t.rows[0].height = 18 * EMU;
 
-    expect(horizontalAt(render(t), 18)).toHaveLength(1);
+    const lines = render(t);
+    expect(horizontalAt(lines, 18)).toHaveLength(0);
+    expect(horizontalAt(lines, 21.2)).toHaveLength(1);
   });
 
-  it('grows a positive row for every painted baseline before the final glyph box', () => {
-    // [MS-OE376] §2.1.1347 gives Office's minimum-row rule. A lone terminal line
-    // may fit by its glyph box, but multi-line content consumes every line box
-    // used by paint. Three 18pt lines at explicit 100% use 3 * 21.6pt plus
+  it('grows a positive row for every painted line box', () => {
+    // PowerPoint grows a positive row to its content (observed). Every line,
+    // the last included, consumes the line box used by paint. Three 18pt lines at explicit 100% use 3 * 21.6pt plus
     // 3.6pt top/bottom insets = 72pt.
     const textBody = {
       verticalAnchor: 'ctr',
@@ -347,20 +357,22 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 72)).toHaveLength(1);
   });
 
-  it('does not invent positive-row growth when row minima already fill the frame', () => {
+  it('grows a positive row even when the row minima already fill the frame', () => {
+    // #2345: generators such as python-pptx write equal a:tr@h minima whose
+    // sum equals the graphic-frame extent. PowerPoint still grows the row
+    // (observed; ECMA-376 §21.1.3.18 only defines the height) to its
+    // wrapped text, pushing the next row down; the frame extent is not a
+    // reason to let the text overflow into the following row.
+    // One unbroken run that must wrap: at 9px per 18px character,
+    // "aaaa bbbb cccc" breaks into three lines in the 60px column, so
+    // 3 * 21.6pt + 3.6pt top and bottom = 72pt.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{
         alignment: 'l', marL: 0, marR: 0, indent: 0,
         spaceBefore: null, spaceAfter: null,
         spaceLine: { type: 'pct', val: 100000 },
-        runs: [
-          { type: 'text', text: 'one', fontSize: 18, fontFamily: 'Arial' },
-          { type: 'break' },
-          { type: 'text', text: 'two', fontSize: 18, fontFamily: 'Arial' },
-          { type: 'break' },
-          { type: 'text', text: 'three', fontSize: 18, fontFamily: 'Arial' },
-        ],
+        runs: [{ type: 'text', text: 'aaaa bbbb cccc', fontSize: 18, fontFamily: 'Arial' }],
         bullet: { type: 'none' }, eaLnBrk: true,
       }],
       defaultFontSize: null, defaultBold: null, defaultItalic: null,
@@ -369,13 +381,728 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     } as unknown as TextBody;
     const t = tableOf([
       [cell({ textBody, borderB: ln() })],
-      [cell({ borderT: ln() })],
+      [cell({ borderT: ln(), borderB: ln() })],
     ], [COL]);
     t.rows[0].height = 60 * EMU;
     t.rows[1].height = 40 * EMU;
     t.height = 100 * EMU;
 
-    expect(horizontalAt(render(t), 60)).toHaveLength(1);
+    const { ctx, strokes, texts } = makeRecordingCtx();
+    renderTable(ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1 });
+    expect(texts.map((entry) => entry.text.trim())).toEqual(['aaaa', 'bbbb', 'cccc']);
+    expect(horizontalAt(strokes, 60)).toHaveLength(0);
+    expect(horizontalAt(strokes, 72)).toHaveLength(1);
+    // The next row keeps its 40pt minimum below the grown row.
+    expect(horizontalAt(strokes, 100)).toHaveLength(0);
+    expect(horizontalAt(strokes, 112)).toHaveLength(1);
+  });
+
+  it('keeps a positive row for a warped body, whose paint does not wrap', () => {
+    // a:prstTxWarp textInflate (ECMA-376 §20.1.9.19): paint fits the text
+    // into the warp envelope without wrapping, so the flat wrapped measure
+    // is not its extent. With the minima filling the frame the 24pt row
+    // stays, as before this growth rule.
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'aaaa bbbb cccc dddd eeee', fontSize: 24, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+      textWarp: { preset: 'textInflate' },
+    } as unknown as TextBody;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.rows[0].height = 24 * EMU;
+    t.height = 44 * EMU;
+    const strokes = render(t);
+    expect(horizontalAt(strokes, 24)).toHaveLength(1);
+    expect(horizontalAt(strokes, 144)).toHaveLength(0);
+    // textNoShape is no warp: it grows like ordinary text.
+    textBody.textWarp = { preset: 'textNoShape' };
+    expect(horizontalAt(render(t), 24)).toHaveLength(0);
+  });
+
+  it('paints a fontAlgn paragraph by the model its body falls back to', () => {
+    // A 20pt Arial paragraph with fontAlgn="t" resolves in the metric pass,
+    // but the next paragraph's face has no reference metrics, so the whole
+    // body is laid out again with the ordinary model (baseline 0.8 x 24pt
+    // per 24pt line). The discarded pass's alignment offset must not move
+    // the first baseline (it would be 37.2pt).
+    const para = (text: string, fontFamily: string, fontAlgn?: string) => ({
+      alignment: 'l', marL: 0, marR: 0, indent: 0,
+      spaceBefore: null, spaceAfter: null, spaceLine: null,
+      ...(fontAlgn ? { fontAlgn } : {}),
+      runs: [{ type: 'text', text, fontSize: 20, fontFamily }],
+      bullet: { type: 'none' }, eaLnBrk: true,
+    });
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [para('top', 'Arial', 't'), para('next', 'No Reference Metrics Face')],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody })]], [COL]);
+    t.rows[0].height = 100 * EMU;
+    t.height = 100 * EMU;
+    const { ctx, texts } = makeRecordingCtx();
+    // Arial present (its reference metrics apply); the other face is not.
+    renderTable(ctx, t, SCALE, undefined, presentFacesContext({
+      ...textBody, paragraphs: textBody.paragraphs.slice(0, 1),
+    } as TextBody));
+    expect(texts.map((entry) => entry.text)).toEqual(['top', 'next']);
+    expect(texts[0].y).toBeCloseTo(19.2, 5);
+    expect(texts[1].y).toBeCloseTo(43.2, 5);
+  });
+
+  it('keeps only row-sizing layouts, and only until their cell is painted', () => {
+    // Row sizing records each measured paragraph layout for the paint of
+    // that cell (one per cell here); paint drops it. A shrink-to-fit cell
+    // (ODF style:shrink-to-fit) is skipped by row sizing, and the font
+    // scales its paint tries are never retained; a warped cell, whose paint
+    // does not reuse its flat layout, is not recorded either.
+    const shrinking = {
+      verticalAnchor: 't', shrinkOnOverflow: true,
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'aaaa bbbb cccc dddd eeee ffff gggg', fontSize: 24, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'norm',
+    } as unknown as TextBody;
+    const warped = { ...lines(2), textWarp: { preset: 'textInflate' } } as TextBody;
+    const t = tableOf([
+      [cell({ textBody: lines(1) }), cell({ textBody: lines(1) }), cell({ textBody: shrinking })],
+      [cell({ textBody: lines(1) }), cell({ textBody: warped }), cell()],
+    ], [COL, COL, COL]);
+    t.height = 60 * EMU; // frame slack: the warped cell is measured too
+    const memo: TableLayoutMemo = { layouts: new Map(), payload: 0 };
+    const sizes: number[] = [];
+    const { ctx, texts } = makeRecordingCtx(() => sizes.push(memo.layouts.size));
+    renderTableWithLayoutMemo(memo, ctx, t, SCALE, undefined);
+    expect(texts.some((entry) => entry.text.startsWith('aaaa'))).toBe(true);
+    // Three measured one-line cells, never more; each painted cell gives its
+    // layout up, so nothing is held once the table is painted.
+    expect(Math.max(...sizes)).toBe(3);
+    expect(memo.payload).toBe(0);
+    expect(memo.layouts.size).toBe(0);
+  });
+
+  it('bounds the layouts a table retains by their payload, font strings included', () => {
+    // Retention charges what a layout holds: lines, segments, metric marks,
+    // the characters of their text, and each distinct CSS font string once
+    // (interned, shared by every retained segment using it).
+    const glyph = (text: string, fontFamily: string) => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text, fontSize: 10, fontFamily }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const peakOf = (t: TableElement) => {
+      const memo: TableLayoutMemo = { layouts: new Map(), payload: 0 };
+      let held = 0;
+      let payload = 0;
+      const recording = makeRecordingCtx(() => {
+        held = Math.max(held, memo.layouts.size);
+        payload = Math.max(payload, memo.payload);
+      });
+      renderTableWithLayoutMemo(memo, recording.ctx, t, SCALE, undefined);
+      expect(memo.payload).toBe(0);
+      return { held, payload, texts: recording.texts };
+    };
+    // Admission: one glyph under a 70,000-character family name exceeds the
+    // bound alone and is not retained; under a short name it is.
+    const long = 'F'.repeat(70_000);
+    expect(peakOf(tableOf([[cell({ textBody: glyph('x', long) })]], [COL])).held).toBe(0);
+    expect(peakOf(tableOf([[cell({ textBody: glyph('x', 'Arial') })]], [COL])).held).toBe(1);
+    // Aggregate: four one-glyph rows under distinct 20,000-character names,
+    // a little over 20,000 units each. Recording stops at three, below the
+    // bound, and every row still paints its glyph on its own 12pt line (20pt
+    // rows, baseline 0.8 x 12pt).
+    const rows = ['a', 'b', 'c', 'd'].map((text) =>
+      [cell({ textBody: glyph(text, `${text}${'G'.repeat(20_000)}`) })]);
+    const { held, payload, texts } = peakOf(tableOf(rows, [COL]));
+    expect(held).toBe(3);
+    expect(payload).toBeGreaterThan(60_000);
+    expect(payload).toBeLessThanOrEqual(65_536);
+    expect(texts.map(({ text, y }) => [text, Math.round(y * 10) / 10]))
+      .toEqual([['a', 9.6], ['b', 29.6], ['c', 49.6], ['d', 69.6]]);
+    // One shared name is charged once: all four rows are retained.
+    const shared = 'H'.repeat(20_000);
+    const sharedRows = ['a', 'b', 'c', 'd'].map((text) => [cell({ textBody: glyph(text, shared) })]);
+    expect(peakOf(tableOf(sharedRows, [COL])).held).toBe(4);
+  });
+
+  it('lets no other text body see the measured layouts of a table cell', () => {
+    // An onTextRun consumer renders the same paragraph on a second canvas
+    // with another theme font while the cell paints. It must get its own
+    // layout (Courier New), not the table's measured one (Arial).
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'theme', fontSize: 18, fontFamily: '+mn-lt' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody })]], [COL]);
+    const outer = makeRecordingCtx();
+    const nested = makeRecordingCtx();
+    let rendered = false;
+    renderTable(outer.ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: 'Arial', dpr: 1 }, () => {
+      if (rendered) return;
+      rendered = true;
+      renderTextBody(nested.ctx, textBody, 0, 0, COL * SCALE, 20, SCALE, null, 0, false, false,
+        '#000000', undefined, { themeMajorFont: null, themeMinorFont: 'Courier New', dpr: 1 });
+    });
+    expect(rendered).toBe(true);
+    expect(outer.texts[0].font).toContain('Arial');
+    expect(nested.texts.map((entry) => entry.text)).toEqual(['theme']);
+    expect(nested.texts[0].font).toContain('Courier New');
+    expect(nested.texts[0].font).not.toContain('Arial');
+  });
+
+  it('keeps a positive row for rotated cell text, whose measure is the box width', () => {
+    // measureOnly reports a rotated or stacked body by its cell width, not by
+    // its laid-out extent. Growing a positive row to that width would invent
+    // height, so a positive row keeps its minimum for these bodies.
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'v', fontSize: 10, fontFamily: 'Arial' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'vert', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+
+    expect(horizontalAt(render(t), 20)).toHaveLength(1);
+  });
+
+  // n 18pt lines at explicit 100%: n * 21.6pt plus 3.6pt top and bottom.
+  const lines = (n: number, vert = 'horz') => ({
+    verticalAnchor: 't',
+    paragraphs: [{
+      alignment: 'l', marL: 0, marR: 0, indent: 0,
+      spaceBefore: null, spaceAfter: null,
+      spaceLine: { type: 'pct', val: 100000 },
+      runs: Array.from({ length: n }, (_, i) => [
+        ...(i > 0 ? [{ type: 'break' }] : []),
+        { type: 'text', text: `l${i}`, fontSize: 18, fontFamily: 'Arial' },
+      ]).flat(),
+      bullet: { type: 'none' }, eaLnBrk: true,
+    }],
+    defaultFontSize: null, defaultBold: null, defaultItalic: null,
+    lIns: 0, rIns: 0, tIns: 3.6 * EMU, bIns: 3.6 * EMU,
+    wrap: 'square', vert, autoFit: 'none',
+  } as unknown as TextBody);
+  const threeLines = (vert = 'horz') => lines(3, vert);
+
+  it('keeps every non-horizontal vert token on the earlier rule', () => {
+    // ST_TextVerticalType (ECMA-376 §20.1.10.83): mongolianVert is vertical
+    // text too, and an xsd:token value padded with collapsible whitespace is
+    // the same token. Only an effectively horizontal body (omitted or `horz`,
+    // padded or not) takes the growth rule; with the minima filling the
+    // frame every other value keeps the 20pt row.
+    for (const vert of ['mongolianVert', ' vert ', '\teaVert\n', ' wordArtVert', 'vert270 ', 'unknown']) {
+      const t = tableOf([
+        [cell({ textBody: threeLines(vert), borderB: ln() })],
+        [cell({ borderT: ln() })],
+      ], [COL]);
+      expect(horizontalAt(render(t), 20), vert).toHaveLength(1);
+    }
+    for (const vert of [' horz', 'horz\t']) {
+      const t = tableOf([
+        [cell({ textBody: threeLines(vert), borderB: ln() })],
+        [cell({ borderT: ln() })],
+      ], [COL]);
+      expect(horizontalAt(render(t), 72), vert).toHaveLength(1);
+    }
+  });
+
+  it('adds a rowSpan deficit to the last spanned row', () => {
+    // PowerPoint PDF controls: a merged cell taller than its rows keeps every
+    // earlier row at its own height and grows only the last. Two 20pt minima
+    // (frame = their sum) under a 72pt merged cell: the neighbour's shared
+    // edge stays at 20pt and the merged area ends at 72pt.
+    const t = tableOf([
+      [cell({ textBody: threeLines(), rowSpan: 2, borderB: ln() }), cell({ borderB: ln() })],
+      [cell({ vMerge: true }), cell({ borderT: ln() })],
+      [cell({ borderT: ln() }), cell({ borderT: ln() })],
+    ], [COL, COL]);
+    t.rows[2].height = 0;
+    t.height = 40 * EMU;
+    const strokes = render(t);
+    expect(horizontalAt(strokes, 20)).toHaveLength(1);
+    expect(horizontalAt(strokes, 36)).toHaveLength(0);
+    // One segment per column.
+    expect(horizontalAt(strokes, 72)).toHaveLength(2);
+  });
+
+  it('grows rotated cell text only under frame slack, as before', () => {
+    // The box-width measure keeps the earlier rule: with the frame extent
+    // above the row sum the row grows to that measure (the cell width here).
+    const textBody = { ...threeLines('vert') } as TextBody;
+    const t = tableOf([
+      [cell({ textBody, borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.height = 50 * EMU;
+    expect(horizontalAt(render(t), 20)).toHaveLength(0);
+  });
+
+  it('keeps the earlier rule for an ODF table', () => {
+    // ODF row heights (OpenDocument 1.3 Part 3 §20.348) are not covered by
+    // the PowerPoint controls: with the minima filling the frame the row
+    // keeps its height, and with frame slack it grows as before.
+    const t = tableOf([
+      [cell({ textBody: threeLines(), borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    t.odfRowHeights = true;
+    expect(horizontalAt(render(t), 20)).toHaveLength(1);
+    // A table from an ODP source keeps the rule whether or not the source
+    // marked it (RenderContext.odfTables, set by the ODP source admission).
+    const unmarked = tableOf([
+      [cell({ textBody: threeLines(), borderB: ln() })],
+      [cell({ borderT: ln() })],
+    ], [COL]);
+    const { ctx: odpCtx, strokes: odpStrokes } = makeRecordingCtx();
+    renderTable(odpCtx, unmarked, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1, odfTables: true });
+    expect(horizontalAt(odpStrokes, 20)).toHaveLength(1);
+    t.height = 100 * EMU;
+    const grown = render(t);
+    expect(horizontalAt(grown, 20)).toHaveLength(0);
+    expect(horizontalAt(grown, 72)).toHaveLength(1);
+  });
+
+  it('resolves nested merged cells by the row they end on, whatever the column order', () => {
+    // A five-line cell over rows 1-3 (115.2pt) and a four-line cell over
+    // rows 1-2 (93.6pt), three 20pt minima. The inner merge grows row 2 to
+    // 73.6pt; the outer one then needs only 1.6pt more in row 3, so the table
+    // ends at 115.2pt in either column order.
+    const outer = () => cell({ textBody: lines(5), rowSpan: 3 });
+    const inner = () => cell({ textBody: lines(4), rowSpan: 2 });
+    const edge = () => cell({ borderB: ln() });
+    for (const order of [[outer, inner, edge], [inner, outer, edge]]) {
+      const merged = (make: () => TableCell, row: number) =>
+        make === edge ? edge() : make === inner && row === 2 ? cell() : cell({ vMerge: true });
+      const t = tableOf([
+        order.map((make) => make()),
+        order.map((make) => merged(make, 1)),
+        order.map((make) => merged(make, 2)),
+      ], [COL, COL, COL]);
+      const strokes = render(t);
+      expect(horizontalAt(strokes, 115.2)).toHaveLength(1);
+      expect(horizontalAt(strokes, 168.8)).toHaveLength(0);
+    }
+  });
+
+  it('resolves staggered merges by end row, not by span length (control4 J/K)', () => {
+    // PowerPoint for Mac control4 (2026-11-29), four rows of 24pt minima,
+    // 24pt leading (20pt text), zero margins, frame equal to the row sum:
+    // eight lines over rows 1-3 beside five lines over rows 3-4 exports as
+    // 24/24/144/24 in both column orders (J, and K with the columns
+    // swapped). Shortest span first would give 24/24/144/96.
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    // Column a: eight lines over rows 1-3. Column b: five lines over rows 3-4.
+    const a = [cell({ textBody: body(8), rowSpan: 3 }), cell({ vMerge: true }), cell({ vMerge: true }), cell()];
+    const b = [cell(), cell(), cell({ textBody: body(5), rowSpan: 2 }), cell({ vMerge: true })];
+    for (const swapped of [false, true]) {
+      const t = tableOf([0, 1, 2, 3].map((r) => swapped
+        ? [b[r], a[r], cell({ borderB: ln() })]
+        : [a[r], b[r], cell({ borderB: ln() })]), [COL, COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = 96 * EMU;
+      const edges = render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 120)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+      expect(edges, swapped ? 'K' : 'J').toEqual([24, 48, 192, 216]);
+    }
+  });
+
+  it('resolves earlier-rule merges after every growth-rule merge, whatever the column order', () => {
+    // A one-line merge over rows 1-4 (fits, adds nothing), a rotated merge
+    // over rows 1-2 and a four-line merge over rows 2-3. The growth-rule
+    // merge goes first: its 45.6pt deficit (93.6pt over 24 + 24pt) grows
+    // row 3. The rotated cell then spreads its 12pt deficit (60pt box width
+    // over 48pt) evenly over rows 1-2. Swapping the fitting and the rotated
+    // merge changes nothing.
+    const fitting = [cell({ textBody: lines(1), rowSpan: 4 }), cell({ vMerge: true }), cell({ vMerge: true }), cell({ vMerge: true })];
+    const rotated = [cell({ textBody: threeLines('vert'), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
+    const tall = [cell(), cell({ textBody: lines(4), rowSpan: 2 }), cell({ vMerge: true }), cell()];
+    const result = (swapped: boolean) => {
+      const t = tableOf([0, 1, 2, 3].map((r) => [
+        ...(swapped ? [rotated[r], fitting[r]] : [fitting[r], rotated[r]]),
+        tall[r], cell({ borderB: ln() }),
+      ]), [COL, COL, COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = 100 * EMU; // frame slack: the rotated cell is measured
+      return render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 180)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+    };
+    // 30 / 30 / 69.6 / 24pt rows: edges 30, 60, 129.6, 153.6.
+    expect(result(false)).toEqual([30, 60, 129, 153]);
+    expect(result(true)).toEqual(result(false));
+  });
+
+  it('lets an earlier-rule merge change nothing the growth-rule merges resolve', () => {
+    // An eight-line merge over rows 1-3 beside a five-line merge over rows
+    // 1-2 give 24/96/72/24 (edges 24/120/192/216). A rotated merge over rows
+    // 3-4 needs its 60pt box width, more than the 48pt those rows start
+    // with, but resolved after the growth-rule merges it finds 96pt and adds
+    // nothing, before or after the other merges in column order (frame
+    // slack, so the earlier rule measures it).
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const eight = [cell({ textBody: body(8), rowSpan: 3 }), cell({ vMerge: true }), cell({ vMerge: true }), cell()];
+    const five = [cell({ textBody: body(5), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
+    const rotated = [cell(), cell(), cell({ textBody: { ...body(1), vert: 'vert' } as TextBody, rowSpan: 2 }), cell({ vMerge: true })];
+    for (const rotatedFirst of [false, true]) {
+      const t = tableOf([0, 1, 2, 3].map((r) => [
+        ...(rotatedFirst ? [rotated[r], eight[r], five[r]] : [eight[r], five[r], rotated[r]]),
+        cell({ borderB: ln() }),
+      ]), [COL, COL, COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = 100 * EMU;
+      const edges = render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 180)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+      expect(edges, rotatedFirst ? 'rotated first' : 'rotated last').toEqual([24, 120, 192, 216]);
+    }
+  });
+
+  it('sizes a growth-rule spAutoFit cell by the painted line box, not the font bbox', () => {
+    // spAutoFit's allowance for the resolved font's design box is shape
+    // autofit. A table row measures the line advance paint uses: changing
+    // only the font bounding box the canvas reports (same advances and ink)
+    // moves no row edge. One 20pt line: 24pt rows.
+    const textBody = {
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: [{ type: 'text', text: 'fit', fontSize: 20, fontFamily: 'No Reference Metrics Face' }],
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'sp',
+    } as unknown as TextBody;
+    const edges = (bboxAscent: number, bboxDescent: number) => {
+      const t = tableOf([
+        [cell({ textBody, borderB: ln() })],
+        [cell({ textBody, borderB: ln() })],
+      ], [COL]);
+      t.rows[0].height = 10 * EMU;
+      t.rows[1].height = 10 * EMU;
+      const recording = makeRecordingCtx(undefined, { ascent: bboxAscent, descent: bboxDescent });
+      renderTable(recording.ctx, t, SCALE);
+      return recording.strokes
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5)
+        .map((s) => Math.floor(s.y1));
+    };
+    expect(edges(8, 2)).toEqual([24, 48]);
+    expect(edges(40, 10)).toEqual([24, 48]);
+  });
+
+  it('places a growth-rule spAutoFit cell\'s glyphs by the same line box it was sized by', () => {
+    // One 20pt line in a 10pt row grows the row to 24pt. Paint must seat the
+    // glyph in that box (baseline 0.8 x 24pt = 19.2pt) for every anchor,
+    // whatever font bounding box the canvas reports: the design-box
+    // allowance of spAutoFit stays out of table cells in paint too.
+    for (const anchor of ['t', 'ctr', 'b']) {
+      for (const box of [{ ascent: 8, descent: 2 }, { ascent: 40, descent: 10 }]) {
+        const textBody = {
+          verticalAnchor: anchor,
+          paragraphs: [{
+            alignment: 'l', marL: 0, marR: 0, indent: 0,
+            spaceBefore: null, spaceAfter: null, spaceLine: null,
+            runs: [{ type: 'text', text: 'fit', fontSize: 20, fontFamily: 'No Reference Metrics Face' }],
+            bullet: { type: 'none' }, eaLnBrk: true,
+          }],
+          defaultFontSize: null, defaultBold: null, defaultItalic: null,
+          lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+          wrap: 'square', vert: 'horz', autoFit: 'sp',
+        } as unknown as TextBody;
+        const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
+        t.rows[0].height = 10 * EMU;
+        t.height = 10 * EMU;
+        const recording = makeRecordingCtx(undefined, box);
+        renderTable(recording.ctx, t, SCALE);
+        const label = `${anchor} ${box.ascent}/${box.descent}`;
+        expect(recording.strokes.filter((st) => Math.abs(st.y1 - st.y2) < 0.5).map((st) => Math.floor(st.y1)), label)
+          .toEqual([24]);
+        expect(recording.texts.map(({ text }) => text), label).toEqual(['fit']);
+        expect(recording.texts[0]!.y, label).toBeCloseTo(19.2, 5);
+      }
+    }
+  });
+
+  it('sizes a growth-rule cell to the ink its paint places, for tall fallback glyphs', () => {
+    // A fallback face whose glyphs carry stacked marks (Chrome: 29.22 ink
+    // ascent, 4.21 descent for one 20pt line) pushes the ordinary-model
+    // baseline down to the ink top. Sizing contains that ink the same way:
+    // the row grows to 29.22 + 4.21 = 33.43pt, and every anchor seats the
+    // baseline at 29.22pt, its ink inside the row. Ordinary ink (8/2) keeps
+    // the 24pt line box. spAutoFit and plain bodies alike.
+    for (const autoFit of ['sp', 'none']) {
+      for (const anchor of ['t', 'ctr', 'b']) {
+        for (const [ink, row, baseline] of [[{ inkAscent: 8, inkDescent: 2 }, 24, 19.2], [{ inkAscent: 29.22, inkDescent: 4.21 }, 33, 29.22]] as const) {
+          const textBody = {
+            verticalAnchor: anchor,
+            paragraphs: [{
+              alignment: 'l', marL: 0, marR: 0, indent: 0,
+              spaceBefore: null, spaceAfter: null, spaceLine: null,
+              runs: [{ type: 'text', text: 'Âg', fontSize: 20, fontFamily: 'No Reference Metrics Face' }],
+              bullet: { type: 'none' }, eaLnBrk: true,
+            }],
+            defaultFontSize: null, defaultBold: null, defaultItalic: null,
+            lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+            wrap: 'square', vert: 'horz', autoFit,
+          } as unknown as TextBody;
+          const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
+          t.rows[0].height = 10 * EMU;
+          t.height = 10 * EMU;
+          const recording = makeRecordingCtx(undefined, { ascent: 8, descent: 2, ...ink });
+          renderTable(recording.ctx, t, SCALE);
+          const label = `${autoFit} ${anchor} ${ink.inkAscent}`;
+          expect(recording.strokes.filter((st) => Math.abs(st.y1 - st.y2) < 0.5).map((st) => Math.floor(st.y1)), label)
+            .toEqual([row]);
+          expect(recording.texts[0]!.y, label).toBeCloseTo(baseline, 5);
+          expect(recording.texts[0]!.y + ink.inkDescent, label).toBeLessThanOrEqual(row + 1);
+        }
+      }
+    }
+  });
+
+  it('sizes rows from a:tr@h and content alone, whatever the frame extent (control5 M-Q)', () => {
+    // PowerPoint for Mac control (2 columns x 3 rows, a:tr@h 24pt, zero
+    // margins, exact 24pt leading, 20pt text): a middle row holding three
+    // lines exports 24/72/24 with frames of 72 (M), 120 (N) and 48pt (O);
+    // single lines export 24/24/24 with frames of 120 (P) and 48pt (Q).
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: { type: 'pts', val: 24 },
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const cases: [string, number, number, number[]][] = [
+      ['M', 72, 3, [24, 96, 120]],
+      ['N', 120, 3, [24, 96, 120]],
+      ['O', 48, 3, [24, 96, 120]],
+      ['P', 120, 1, [24, 48, 72]],
+      ['Q', 48, 1, [24, 48, 72]],
+    ];
+    for (const [label, frame, middleLines, edges] of cases) {
+      const t = tableOf([
+        [cell({ textBody: body(1) }), cell({ borderB: ln() })],
+        [cell({ textBody: body(middleLines) }), cell({ borderB: ln() })],
+        [cell({ textBody: body(1) }), cell({ borderB: ln() })],
+      ], [COL, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = frame * EMU;
+      const found = render(t)
+        .filter((st) => Math.abs(st.y1 - st.y2) < 0.5 && st.x1 >= 60)
+        .map((st) => Math.floor(st.y1));
+      expect(found, label).toEqual(edges);
+    }
+  });
+
+  it('measures an earlier-rule cell with the earlier sizing input', () => {
+    // A two-column body (numCol=2) keeps the earlier rule. Its runs
+    // alternate an explicit red "A" with a "V " that inherits the cell's
+    // red tcTxStyle colour. The earlier rule measured with the black
+    // default, so the pairs stay separate segments and do not kern (the
+    // mock narrows a kerned "AV"): the row grows to 80pt, as before, not
+    // to the 40pt a red, coalesced measure would give.
+    const runs = Array.from({ length: 4 }, () => [
+      { type: 'text', text: 'A', fontSize: 20, fontFamily: 'Arial', color: 'FF0000' },
+      { type: 'text', text: 'V ', fontSize: 20, fontFamily: 'Arial' },
+    ]).flat();
+    const textBody = {
+      verticalAnchor: 't', numCol: 2, spcCol: 0,
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs, bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody;
+    const t = tableOf([[cell({ textBody, textColor: 'FF0000', borderB: ln() })]], [80 * EMU]);
+    t.height = 200 * EMU; // frame slack: the earlier rule measures the cell
+    const strokes = render(t);
+    expect(horizontalAt(strokes, 80)).toHaveLength(1);
+    expect(horizontalAt(strokes, 40)).toHaveLength(0);
+  });
+
+  it('leaves merges that add no height out of the merge groups', () => {
+    // An eight-line merge over rows 1-3 beside a five-line merge over rows
+    // 1-2 resolve by end row: 24/96/72/24 (edges 24/120/192/216). A rotated
+    // merge over rows 3-4 adds nothing, so it must not join them into a
+    // reading-order group (24/96/144/24, edges 24/120/264/288): without
+    // frame slack the earlier rule skips it; with slack (100pt frame) it is
+    // measured by its 40pt box width, which the two 24pt rows already hold.
+    const body = (n: number): TextBody => ({
+      verticalAnchor: 't',
+      paragraphs: [{
+        alignment: 'l', marL: 0, marR: 0, indent: 0,
+        spaceBefore: null, spaceAfter: null, spaceLine: null,
+        runs: Array.from({ length: n }, (_, i) => [
+          ...(i > 0 ? [{ type: 'break' }] : []),
+          { type: 'text', text: `l${i}`, fontSize: 20, fontFamily: 'Arial' },
+        ]).flat(),
+        bullet: { type: 'none' }, eaLnBrk: true,
+      }],
+      defaultFontSize: null, defaultBold: null, defaultItalic: null,
+      lIns: 0, rIns: 0, tIns: 0, bIns: 0,
+      wrap: 'square', vert: 'horz', autoFit: 'none',
+    } as unknown as TextBody);
+    const eight = [cell({ textBody: body(8), rowSpan: 3 }), cell({ vMerge: true }), cell({ vMerge: true }), cell()];
+    const five = [cell({ textBody: body(5), rowSpan: 2 }), cell({ vMerge: true }), cell(), cell()];
+    const rotated = [cell(), cell(), cell({ textBody: { ...body(1), vert: 'vert' } as TextBody, rowSpan: 2 }), cell({ vMerge: true })];
+    for (const [frame, rotatedWidth] of [[96, 60], [100, 40]]) {
+      const t = tableOf([0, 1, 2, 3].map((r) => [eight[r], five[r], rotated[r], cell({ borderB: ln() })]),
+        [COL, COL, rotatedWidth * EMU, COL]);
+      for (const row of t.rows) row.height = 24 * EMU;
+      t.height = frame * EMU;
+      const edges = render(t)
+        .filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 120 + rotatedWidth)
+        .map((s) => Math.floor(s.y1)); // strokes sit on half-pixel centres
+      expect(edges, `frame ${frame}`).toEqual([24, 120, 192, 216]);
+    }
+  });
+
+  it('orders many merges without overflowing the stack', () => {
+    // 1000 columns of non-overlapping two-row merges over 260 rows plus a
+    // staggered column: 130,000+ interacting merges.
+    const merges: { ri: number; last: number; earlierRule: boolean }[] = [];
+    for (let ri = 0; ri < 260; ri += 2) {
+      for (let ci = 0; ci < 1000; ci++) merges.push({ ri, last: ri + 1, earlierRule: false });
+    }
+    for (let ri = 1; ri < 259; ri += 2) merges.push({ ri, last: ri + 1, earlierRule: false });
+    const order = orderTableMerges(merges);
+    expect(order).toHaveLength(merges.length);
+    expect(order.every((merge, k) => k === 0 || order[k - 1].last <= merge.last)).toBe(true);
+    // Earlier-rule merges follow every growth-rule merge, in reading order.
+    merges[0].earlierRule = true;
+    merges[5].earlierRule = true;
+    const mixed = orderTableMerges(merges);
+    expect(mixed).toHaveLength(merges.length);
+    expect(mixed.slice(-2)).toEqual([merges[0], merges[5]]);
+    expect(mixed.slice(0, -2).every((merge) => !merge.earlierRule)).toBe(true);
+  });
+
+  it('keeps a multi-column cell on the earlier rule, painting into its columns', () => {
+    // numCol=2 flows four 21.6pt lines into two columns of a 54pt row
+    // (two lines and the 7.2pt insets fit one column); a stacked measure
+    // would ask for 93.6pt.
+    const textBody = { ...lines(4), numCol: 2 } as TextBody;
+    const t = tableOf([[cell({ textBody, borderB: ln() })], [cell()]], [2 * COL]);
+    t.rows[0].height = 54 * EMU;
+    t.height = 74 * EMU;
+    const { ctx, strokes, texts } = makeRecordingCtx();
+    renderTable(ctx, t, SCALE, undefined, { themeMajorFont: null, themeMinorFont: null, dpr: 1 });
+    expect(horizontalAt(strokes, 54)).toHaveLength(1);
+    const y = (text: string) => texts.find((entry) => entry.text === text)?.y;
+    expect(y('l2')).toBe(y('l0'));
+    expect(y('l3')).toBe(y('l1'));
+  });
+
+  it('keeps row-major order for interacting merges on the earlier rule', () => {
+    // An ODF table with frame slack: a six-line merge over rows 1-3, then a
+    // five-line merge over rows 1-2 beside it. The earlier rule resolves
+    // them in reading order, as before.
+    const t = tableOf([
+      [cell({ textBody: lines(6), rowSpan: 3 }), cell({ textBody: lines(5), rowSpan: 2 }), cell({ borderB: ln() })],
+      [cell({ vMerge: true }), cell({ vMerge: true }), cell({ borderB: ln() })],
+      [cell({ vMerge: true }), cell(), cell({ borderB: ln() })],
+    ], [COL, COL, COL]);
+    t.height = 70 * EMU;
+    t.odfRowHeights = true;
+    const strokes = render(t);
+    // Row edges in the right-hand column (main and this renderer agree).
+    expect(strokes.filter((s) => Math.abs(s.y1 - s.y2) < 0.5 && s.x1 >= 120).map((s) => s.y1))
+      .toEqual([57.5, 115.5, 160.5]);
+  });
+
+  it('spreads a rotated merged cell evenly, as before, over a zero-height row', () => {
+    // The box-width measure (60pt, the cell width) keeps the earlier even
+    // split when a spanned row has h=0: rows of 20pt and 0pt each take half
+    // of the 40pt deficit, so the boundary moves to 40pt.
+    const t = tableOf([
+      [cell({ textBody: threeLines('vert'), rowSpan: 2 }), cell({ borderB: ln() })],
+      [cell({ vMerge: true }), cell()],
+    ], [COL, COL]);
+    t.rows[1].height = 0;
+    t.height = 20 * EMU;
+    expect(horizontalAt(render(t), 40)).toHaveLength(1);
   });
 
   it('shared VERTICAL gridline is drawn exactly ONCE (not once per cell)', () => {

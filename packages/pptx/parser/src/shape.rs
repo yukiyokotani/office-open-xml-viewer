@@ -2379,6 +2379,7 @@ pub(crate) fn parse_table(
         cols,
         rows,
         rtl,
+        odf_row_heights: false,
     })
 }
 

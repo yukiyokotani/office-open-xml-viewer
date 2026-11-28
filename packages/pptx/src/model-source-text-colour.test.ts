@@ -6,12 +6,19 @@ import type { ModelSource } from '@silurus/ooxml-core';
 // parser have that proven chain; a caller-supplied model source keeps the
 // 0.89.7 theme or `defaultTextColor` fallback, so white default text on a dark
 // slide does not turn invisible.
-const rendered = vi.hoisted(() => ({ opts: [] as Array<{ parsedTextChain?: boolean }> }));
+const rendered = vi.hoisted(() => ({ opts: [] as Array<{ parsedTextChain?: boolean; odfTables?: boolean }> }));
 vi.mock('./renderer', async (importOriginal) => ({
   ...await importOriginal<typeof import('./renderer')>(),
   renderSlideWithEmbeddedFonts: async (...args: unknown[]) => {
-    rendered.opts.push(args[4] as { parsedTextChain?: boolean });
+    rendered.opts.push(args[4] as { parsedTextChain?: boolean; odfTables?: boolean });
   },
+}));
+const posted = vi.hoisted(() => ({ messages: [] as Array<Record<string, unknown>> }));
+vi.mock('./render-worker-host', () => ({
+  createRenderWorker: () => ({
+    postMessage: (message: Record<string, unknown>) => { posted.messages.push(message); },
+    addEventListener() {}, removeEventListener() {}, terminate() {},
+  }),
 }));
 vi.mock('./font-requests', async (importOriginal) => ({
   ...await importOriginal<typeof import('./font-requests')>(),
@@ -28,10 +35,11 @@ class SilentWorker {
 }
 
 const G = globalThis as Record<string, unknown>;
-const ORIGINAL = { Worker: G.Worker, location: G.location };
+const ORIGINAL = { Worker: G.Worker, location: G.location, OffscreenCanvas: G.OffscreenCanvas };
 afterEach(() => {
   G.Worker = ORIGINAL.Worker;
   G.location = ORIGINAL.location;
+  G.OffscreenCanvas = ORIGINAL.OffscreenCanvas;
   rendered.opts = [];
   vi.restoreAllMocks();
 });
@@ -43,7 +51,19 @@ type Internals = {
   _officeRoutesForRequests(): Promise<{ routes: Map<string, string>; installed: Set<string> }>;
 };
 
-async function parsedTextChainFor(variant: 'parser' | 'model-source'): Promise<boolean | undefined> {
+type Variant = 'parser' | 'model-source' | 'odp' | 'both';
+
+const testSource = (): ModelSource<'pptx'> => ({ target: 'pptx', claim: () => true, beginLoad: () => ({
+  module: { protocol: 'ooxml-model-source-module/v2', target: 'pptx', moduleUrl: 'https://example.test/source.mjs', config: {} },
+  release: () => undefined,
+}) });
+
+const sourceOptions = (variant: Variant, source: ModelSource<'pptx'>) =>
+  variant === 'model-source' ? { legacyPpt: source }
+    : variant === 'odp' ? { odp: source }
+      : variant === 'both' ? { legacyPpt: source, odp: source } : {};
+
+async function renderOptionsFor(variant: Variant): Promise<{ parsedTextChain?: boolean; odfTables?: boolean } | undefined> {
   G.Worker = SilentWorker;
   G.location = { href: 'http://localhost/' };
   const proto = PptxPresentation.prototype as unknown as Internals;
@@ -61,17 +81,58 @@ async function parsedTextChainFor(variant: 'parser' | 'model-source'): Promise<b
   vi.spyOn(proto, '_waitForSlide').mockResolvedValue(undefined);
   vi.spyOn(proto, '_assertSlideIndex').mockReturnValue(undefined);
   vi.spyOn(proto, '_officeRoutesForRequests').mockResolvedValue({ routes: new Map(), installed: new Set() });
-  const source: ModelSource<'pptx'> = { target: 'pptx', claim: () => true, beginLoad: () => ({
-    module: { protocol: 'ooxml-model-source-module/v2', target: 'pptx', moduleUrl: 'https://example.test/source.mjs', config: {} },
-    release: () => undefined,
-  }) };
-  const presentation = await PptxPresentation.load(new ArrayBuffer(0),
-    variant === 'model-source' ? { legacyPpt: source } : {});
+  const presentation = await PptxPresentation.load(new ArrayBuffer(0), sourceOptions(variant, testSource()));
   const canvas = { width: 0, height: 0 } as unknown as OffscreenCanvas;
   await presentation.renderSlide(canvas, 0, { width: 100, dpr: 1 });
   presentation.destroy();
-  return rendered.opts.at(-1)?.parsedTextChain;
+  return rendered.opts.at(-1);
 }
+
+async function parsedTextChainFor(variant: 'parser' | 'model-source'): Promise<boolean | undefined> {
+  return (await renderOptionsFor(variant))?.parsedTextChain;
+}
+
+describe('ODP table sizing provenance', () => {
+  // Tables of an LoadOptions.odp source keep the ODF row-height rule even
+  // when the provider's model omits TableElement.odfRowHeights; the policy
+  // follows the source the application selected.
+  it('marks slides from an ODP source, whatever their tables carry', async () => {
+    expect((await renderOptionsFor('odp'))?.odfTables).toBe(true);
+  });
+
+  it('leaves slides from the parser and from other sources unmarked', async () => {
+    expect((await renderOptionsFor('parser'))?.odfTables).not.toBe(true);
+    expect((await renderOptionsFor('model-source'))?.odfTables).not.toBe(true);
+  });
+
+  it('follows the claiming option when one provider fills both', async () => {
+    // legacyPpt claims first, so the load is a legacy one.
+    expect((await renderOptionsFor('both'))?.odfTables).not.toBe(true);
+  });
+
+  it.each([['odp', true], ['both', false], ['model-source', false]] as const)(
+    'marks the render worker parse message for %s', async (variant, expected) => {
+      G.Worker = SilentWorker;
+      G.OffscreenCanvas = class {};
+      G.location = { href: 'http://localhost/' };
+      posted.messages = [];
+      const proto = PptxPresentation.prototype as unknown as Internals;
+      // The real parse posts through the presentation's (source-wired) worker.
+      vi.spyOn(proto, '_parse').mockImplementationOnce(async function (this: { _worker: Worker }) {
+        this._worker.postMessage({ kind: 'parse', id: 1, buffer: new ArrayBuffer(0) });
+        Object.assign(this, {
+          _preflight: { slideCount: 0, slideWidth: 914400, slideHeight: 914400, fontPreloadNames: [] },
+        });
+      });
+      const presentation = await PptxPresentation.load(new ArrayBuffer(0),
+        { mode: 'worker', ...sourceOptions(variant, testSource()) });
+      presentation.destroy();
+      const parse = posted.messages.find((message) => message.kind === 'parse');
+      expect(parse?.source).toBeDefined();
+      expect(parse?.odfTables === true).toBe(expected);
+    },
+  );
+});
 
 describe('parsed text-colour chain provenance', () => {
   it('marks slides from the built-in parser as a parsed chain', async () => {

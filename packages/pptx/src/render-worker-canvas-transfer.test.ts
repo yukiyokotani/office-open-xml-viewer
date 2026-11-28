@@ -13,6 +13,7 @@ import type { RenderWorkerResponse } from './worker-protocol.js';
 
 const mocks = vi.hoisted(() => ({
   render: vi.fn(async (..._args: unknown[]) => undefined),
+  elements: [] as unknown[],
 }));
 
 class FakePptxArchive {
@@ -28,7 +29,7 @@ class FakePptxArchive {
   pull_slide(): Uint8Array {
     return new TextEncoder().encode(JSON.stringify({
       index: 0, slideNumber: 1, partName: 'ppt/slides/slide1.xml',
-      background: null, elements: [], notes: null, hidden: false,
+      background: null, elements: mocks.elements, notes: null, hidden: false,
     }));
   }
   slide_cursor_resource_usage(): Uint8Array {
@@ -92,7 +93,7 @@ class LoopbackWorker implements WorkerLike {
   terminate(): void {}
 }
 
-async function loadWorker(variant: 'parser' | 'model-source' = 'parser') {
+async function loadWorker(variant: 'parser' | 'model-source' | 'odp-source' = 'parser') {
   vi.resetModules();
   const scope = {
     onmessage: null as ((event: MessageEvent) => Promise<void>) | null,
@@ -107,10 +108,11 @@ async function loadWorker(variant: 'parser' | 'model-source' = 'parser') {
   await dispatch({
     kind: 'parse', id: 100, buffer: new ArrayBuffer(1),
     resourcePolicy: { maxArchiveEntryBytes: null, maxTotalInflatedBytes: null, maxArchiveEntries: null },
-    ...(variant === 'model-source' ? {
+    ...(variant !== 'parser' ? {
       source: { protocol: 'ooxml-model-source-module/v2', target: 'pptx', moduleUrl: 'x', config: {} },
       sourceOwnerUrl: new URL('./test-support/worker-source-owner.ts', import.meta.url).href,
     } : {}),
+    ...(variant === 'odp-source' ? { odfTables: true } : {}),
   });
   expect(worker.received).toContainEqual(expect.objectContaining({ kind: 'presentationReady', id: 100 }));
   const bridge = new WorkerBridge<RenderWorkerResponse>(worker, {
@@ -139,7 +141,9 @@ function expectCallerSurface(worker: LoopbackWorker, kind: string): FakeOffscree
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  mocks.render.mockClear();
+  mocks.render.mockReset();
+  mocks.render.mockImplementation(async () => undefined);
+  mocks.elements = [];
   FakeOffscreenCanvas.created = [];
 });
 
@@ -179,6 +183,25 @@ describe('PPTX render worker bitmap surface', () => {
   });
 });
 
+describe('PPTX render worker ODP table sizing', () => {
+  // The model-source loader marks an LoadOptions.odp parse; the render
+  // worker carries that to every render so the source's tables keep the ODF
+  // row-height rule without a parser-emitted field.
+  it.each([['parser', false], ['model-source', false], ['odp-source', true]] as const)(
+    'passes odfTables for %s slides when painting and collecting runs', async (variant, expected) => {
+      const { presentation } = await loadWorker(variant);
+
+      await presentation.renderSlideToBitmap(0, { width: 320, dpr: 1 });
+      await presentation.collectSlideRuns(0, 320);
+
+      expect(mocks.render).toHaveBeenCalledTimes(2);
+      for (const call of mocks.render.mock.calls) {
+        expect((call[4] as { odfTables?: boolean }).odfTables === true).toBe(expected);
+      }
+    },
+  );
+});
+
 describe('PPTX render worker parsed text-colour chain', () => {
   // Issue #1989's hard black default needs the built-in parser's resolved
   // colour chain; a model source keeps the 0.89.7 fallback.
@@ -195,4 +218,51 @@ describe('PPTX render worker parsed text-colour chain', () => {
       }
     },
   );
+});
+
+describe('PPTX render worker table hit testing', () => {
+  // A table whose rows grow paints beyond its authored frame; the worker hit
+  // tests against the extent its latest successful display render published
+  // (TableHitExtents). Runs collection and failed renders publish nothing,
+  // and an unrendered slide is hit by its authored frame. The worker handles
+  // one request at a time, so a hit never sees a render in flight; the main
+  // mode test covers that case.
+  const EMU = 12700;
+  const table = {
+    type: 'table', x: 0, y: 0, width: 100 * EMU, height: 20 * EMU, rotation: 0, flipH: false, flipV: false,
+    cols: [100 * EMU], rows: [{ height: 20 * EMU, cells: [] }],
+  };
+  const reporting = (heightPt: number, after?: () => Promise<void>) =>
+    async (...args: unknown[]): Promise<undefined> => {
+      (args[4] as { onTableExtent?: (index: number, height: number) => void }).onTableExtent?.(0, heightPt * EMU);
+      await after?.();
+      return undefined;
+    };
+  let nextId = 100;
+  const hits = async (dispatch: (data: unknown) => Promise<void>, worker: LoopbackWorker, yPt: number) => {
+    const id = nextId++;
+    await dispatch({ kind: 'hitTestElement', id, slideIndex: 0, point: { x: 10 * EMU, y: yPt * EMU }, options: {} });
+    const reply = worker.received.find((message) => (message as { id?: number }).id === id) as
+      { context: { elementType: string } | null };
+    return reply.context?.elementType === 'table';
+  };
+
+  it('publishes a display render, not runs collection or a failed render', async () => {
+    mocks.elements = [table];
+    const { worker, dispatch } = await loadWorker();
+    expect(await hits(dispatch, worker, 22)).toBe(false);
+    mocks.render.mockImplementation(reporting(24));
+    await dispatch({ kind: 'renderSlide', id: 7, slideIndex: 0, width: 320, dpr: 1 });
+    expect(await hits(dispatch, worker, 22)).toBe(true);
+    expect(await hits(dispatch, worker, 25)).toBe(false);
+
+    mocks.render.mockImplementation(reporting(50));
+    await dispatch({ kind: 'collectRuns', id: 8, slideIndex: 0, width: 320 });
+    expect(await hits(dispatch, worker, 45)).toBe(false);
+
+    mocks.render.mockImplementation(reporting(40, async () => { throw new Error('paint failed'); }));
+    await dispatch({ kind: 'renderSlide', id: 9, slideIndex: 0, width: 320, dpr: 1 });
+    expect(await hits(dispatch, worker, 35)).toBe(false);
+    expect(await hits(dispatch, worker, 22)).toBe(true);
+  });
 });

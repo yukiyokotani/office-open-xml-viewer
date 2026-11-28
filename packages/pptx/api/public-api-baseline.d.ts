@@ -2365,6 +2365,7 @@ export interface TableElement {
     cols: number[];
     rows: TableRow[];
     rtl?: boolean;
+    odfRowHeights?: boolean;
 }
 export interface TableRow {
     height: number;

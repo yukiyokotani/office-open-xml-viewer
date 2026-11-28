@@ -107,6 +107,7 @@ import {
   type PptxElementBounds,
   type PptxSlidePoint,
 } from './element-selection';
+import { TableHitExtents } from './table-hit-extents';
 import { publishPptxLayout } from './presentation-layout-events';
 import { yieldToHostTaskQueue } from './worker-task-scheduler';
 import { deferred, type Deferred } from '@silurus/ooxml-core/internal/deferred';
@@ -276,6 +277,14 @@ export class PptxPresentation {
    * are fully resolved (issue #1989). A caller-supplied model source sets this
    * false and keeps the 0.89.7 theme or `defaultTextColor` fallback. */
   private _parsedTextChain = true;
+  /** Slides come from LoadOptions.odp (set by the model-source loader). */
+  private _odfTables = false;
+  /** Painted table extensions of recently displayed slides (hit testing). */
+  private _tableHitExtentsStore?: TableHitExtents;
+
+  private get _tableHitExtents(): TableHitExtents {
+    return this._tableHitExtentsStore ??= new TableHitExtents(HARD_MAX_PPTX_CACHED_SLIDES);
+  }
   private _metrics: OoxmlResourceMetricsSession | null = null;
   private readonly _worker: Worker;
   private readonly _bridge: WorkerBridge<
@@ -1262,7 +1271,24 @@ export class PptxPresentation {
       }
       this._assertSlideIndex(slideIndex);
       await this._waitForSlide(slideIndex);
+      await this._paintSlide(canvas, slideIndex, opts, true);
+    } catch (error) {
+      this._rethrowWithResourceFailure(error);
+    }
+  }
+
+  /** Main-mode paint. A display paint (`display`) publishes its painted
+   * table extensions for hit testing once it completes; text collection
+   * does not (TableHitExtents). */
+  private async _paintSlide(
+    canvas: HTMLCanvasElement | OffscreenCanvas,
+    slideIndex: number,
+    opts: RenderSlideOptions,
+    display: boolean,
+  ): Promise<void> {
+    {
       if (this._destroyed) throw new Error('Presentation destroyed');
+      const extents = display ? this._tableHitExtents.begin(slideIndex) : undefined;
       const compact = this._preflight;
       const repository = this._slides;
       if (!compact || !repository) throw new Error('Presentation not loaded');
@@ -1293,8 +1319,10 @@ export class PptxPresentation {
           {
             width,
             dpr,
+            ...(extents ? { onTableExtent: extents.record } : {}),
             defaultTextColor: compact.defaultTextColor,
             parsedTextChain: this._parsedTextChain,
+            odfTables: this._odfTables,
             cjkFallback: this._cjkFallback,
             majorFont: compact.majorFont,
             minorFont: compact.minorFont,
@@ -1321,8 +1349,7 @@ export class PptxPresentation {
           opts.onTextRun,
         );
       });
-    } catch (error) {
-      this._rethrowWithResourceFailure(error);
+      extents?.publish();
     }
   }
 
@@ -1420,7 +1447,9 @@ export class PptxPresentation {
       }
       const runs: PptxTextRunInfo[] = [];
       const off = new OffscreenCanvas(1, 1);
-      await this.renderSlide(off, slideIndex, { width, onTextRun: (r) => runs.push(r) });
+      // Text collection is not a display render: it publishes no table
+      // extents for hit testing.
+      await this._paintSlide(off, slideIndex, { width, onTextRun: (r) => runs.push(r) }, false);
       return runs;
     } catch (error) {
       this._rethrowWithResourceFailure(error);
@@ -1449,8 +1478,10 @@ export class PptxPresentation {
         return (response as Extract<RenderWorkerResponse, { kind: 'elementHit' }>).context;
       }
       if (!this._slides) throw new Error('Presentation not loaded');
+      // Grown tables are hit by what the latest display render painted; a
+      // slide not rendered (not on screen) is hit by its authored frames.
       return await this._slides.withSlide(slideIndex, (slide) =>
-        hitTestPptxSlideContext(slideIndex, slide, point, options));
+        hitTestPptxSlideContext(slideIndex, slide, point, options, this._tableHitExtents.get(slideIndex)));
     } catch (error) {
       this._rethrowWithResourceFailure(error);
     }
@@ -1686,6 +1717,7 @@ export class PptxPresentation {
     this._bridge.terminate();
     this._slides?.clear();
     this._slides = null;
+    this._tableHitExtentsStore?.clear();
     this._slidePullClient = null;
     this._bootstrap = null;
     this._preflight = null;

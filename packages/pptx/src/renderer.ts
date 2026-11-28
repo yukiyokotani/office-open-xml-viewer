@@ -237,6 +237,9 @@ import {
 /** Theme font context threaded through the render call chain. */
 export interface RenderContext {
   cjkFallback?: CjkLang;
+  /** Tables come from an OpenDocument source (see renderTable's earlier
+   *  rule). Set by this package's ODP source admission, not by the model. */
+  odfTables?: boolean;
   officeFontRoutes?: Readonly<Record<string, import('@silurus/ooxml-core').OfficeFontFallbackRoute>>;
   /** Normalized authored families with any installed face (presence probes). */
   officeInstalledFamilies?: readonly string[];
@@ -5058,6 +5061,54 @@ function renderStackedTextBody(
   }
 }
 
+/** The ink of one segment in the font Canvas resolved: an equation's box,
+ * or the glyphs' actual bounding box (0 where the canvas reports none). */
+function segmentInk(seg: LayoutSegment, metrics: TextMetrics | null): { ascent: number; descent: number } {
+  if (seg.math) return { ascent: seg.math.ascent, descent: seg.math.descent };
+  return {
+    ascent: metrics && metrics.actualBoundingBoxAscent > 0 ? metrics.actualBoundingBoxAscent : 0,
+    descent: metrics && metrics.actualBoundingBoxDescent > 0 ? metrics.actualBoundingBoxDescent : 0,
+  };
+}
+
+/** The ordinary line model's baseline in a line box: 0.8 of the box, moved
+ * down far enough that the tallest ink clears the box top. Paint seats
+ * every ordinary-model line by it. */
+function ordinaryBaselineOffset(lineHeight: number, inkAscent: number): number {
+  return Math.max(lineHeight * 0.8, inkAscent);
+}
+
+/** The height an ordinary-model line occupies with its ink contained: the
+ * line box, or the baseline paint chooses (ordinaryBaselineOffset) plus the
+ * deepest ink below it when that reaches further. */
+const lineInkCache = new WeakMap<LayoutLine, { ascent: number; descent: number }>();
+
+function ordinaryLineInkExtent(ctx: CanvasRenderingContext2D, line: LayoutLine, lineHeight: number): number {
+  // A line's ink depends only on its segments' fonts and text, so a line
+  // laid out once (a reused table layout, a body laid out again with the
+  // ordinary model) is measured once.
+  let ink = lineInkCache.get(line);
+  if (!ink) lineInkCache.set(line, ink = measureLineInk(ctx, line));
+  return Math.max(lineHeight, ordinaryBaselineOffset(lineHeight, ink.ascent) + ink.descent);
+}
+
+function measureLineInk(ctx: CanvasRenderingContext2D, line: LayoutLine): { ascent: number; descent: number } {
+  let ascent = 0;
+  let descent = 0;
+  for (const seg of line.segments) {
+    if (seg.isTab) continue;
+    let metrics: TextMetrics | null = null;
+    if (!seg.math) {
+      ctx.font = seg.font;
+      metrics = ctx.measureText(seg.text || FONT_BASELINE_SENTINEL);
+    }
+    const ink = segmentInk(seg, metrics);
+    ascent = Math.max(ascent, ink.ascent);
+    descent = Math.max(descent, ink.descent);
+  }
+  return { ascent, descent };
+}
+
 // Exported (like `layoutParagraph` / `paintHighlight`) so the picture-bullet
 // draw path can be unit-tested against a mock 2D context without standing up a
 // full canvas. Not re-exported from index.ts — module-internal otherwise.
@@ -5086,13 +5137,29 @@ export function renderTextBody(
   // `vert`/`vert270` (whose spec meaning IS to rotate every glyph), keeping those
   // paths byte-identical.
   eaVertUpright = false,
-  // A zero-height table row asks PowerPoint to derive its height from the
-  // natural line box. Office treats a positive a:tr@h as an authored minimum
-  // ([MS-OE376] §2.1.1347): use the glyph-size box when checking whether content
-  // actually exceeds that minimum, so implicit leading alone does not enlarge
-  // an already-sufficient row.
+  // Table rows measure with the painted line box (1.2 × size per line when
+  // lnSpc is omitted). Only cells that keep renderTable's earlier rule
+  // (rotated text measured by its box, ODF tables) pass false for a positive
+  // row and measure an omitted-lnSpc line by its glyph size.
   measureNaturalLineSpacing = measureOnly,
+  // renderTable's per-cell inputs (TableCellText). Only the cell's own flat
+  // layout uses them: rotated, stacked and warped re-entries, and any other
+  // renderTextBody call, lay out afresh.
+  tableCell?: TableCellText,
 ): number | void {
+  const tableLayouts = tableCell?.layouts;
+  // Layouts of this call: a body laid out again (the ordinary model after
+  // the metric one, a stored normAutofit scale) breaks each paragraph once
+  // per distinct input. Lines are never modified after layout (see
+  // tableParagraphLayout), so reuse paints what a fresh layout would.
+  const callLayouts = new Map<Paragraph, Map<string, LayoutLine[]>>();
+  // A growth-rule table cell is sized and painted by the painted line box.
+  // spAutoFit's allowance for the resolved font's design box (#1473) is
+  // shape autofit: it resizes a shape, and the host font's bounding box is
+  // not the line advance, so it stays out of table cells on the growth rule,
+  // in measurement and in paint alike (baseline and vertical anchor), so the
+  // row sizing and the glyph placement use one geometry.
+  const paintedLineBox = tableCell?.paintedLineBox === true;
   // Stacked vertical text (wordArtVert / wordArtVertRtl): upright glyphs one
   // above another in columns; see stacked-text.ts and core layoutStackedText.
   if (body.vert === 'wordArtVert' || body.vert === 'wordArtVertRtl') {
@@ -5332,7 +5399,7 @@ export function renderTextBody(
     // in lockstep with the draw-side `textXOffset` (§below) and the
     // naturalWidthExceedsBbox measurement; a bullet's gutter contributes 0.
     const firstLineIndentPx = firstLineIndentPxFor(hasBullet, indentPx);
-    const lines = layoutParagraph(ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
+    const lines = tableParagraphLayout(tableLayouts, callLayouts, ctx, para, maxW, paraDefaultFontSizePx, paraDefaultColor, scale, marLPx, bodyDefaultBold, bodyDefaultItalic, fontScale, slideNumber, rc, firstLineIndentPx);
 
     // spaceBefore/After are in hundredths of a point → convert to canvas px.
     // Percentage forms (ECMA-376 §21.1.2.3.11 spcPct) are resolved per line
@@ -5342,7 +5409,8 @@ export function renderTextBody(
     const spaceAfterPx  = para.spaceAfter  != null ? (para.spaceAfter  / 100) * PT_TO_EMU * scale * paraSpacingScale : 0;
 
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      // Not const: fontAlgn below gives this pass its own copy of the line.
+      let line = lines[i];
       const isFirst = i === 0;
       const isLast  = i === lines.length - 1;
 
@@ -5423,25 +5491,28 @@ export function renderTextBody(
       // shapes all keep the same omitted-lnSpc pitch at a given point size.
       // Percentage spacing scales this renderer's PowerPoint-compatible natural
       // line box (ECMA-376 §21.1.2.2.5/.11 defines the authored percentage;
-      // Office output supplies the line-box compatibility behaviour). A positive
-      // a:tr@h remains a minimum. A PowerPoint table control with 16pt text,
+      // Office output supplies the line-box compatibility behaviour).
+      // PowerPoint grows a positive a:tr@h to its content (observed). A
+      // PowerPoint table control with 16pt text,
       // 120% lnSpc and 8.5pt vertical cell margins grows a 36.85pt row;
       // changing only lnSpc to 100% or the margins to zero does not. Explicit
       // percentage spacing therefore consumes the painted natural line box
-      // even for one final line. Omitted lnSpc keeps its glyph-box exception
-      // in a positive row. Neither path uses a substituted font's design box.
+      // even for one final line. Omitted lnSpc does too: PowerPoint PDF
+      // controls (Windows and Mac) with zero cell margins grow 12, 20 and
+      // 22pt minima holding one 20pt line to 24pt, 44 and 30pt minima holding
+      // two to 48pt, a 6pt minimum holding one 10pt line to 12pt, and add
+      // 3.6pt marT/marB on top (31.2pt). Neither path uses a substituted
+      // font's design box.
       const naturalSingle = maxSizePx * 1.2;
-      const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
+      const useResolvedFontMetrics = isSpAutoFit && !paintedLineBox
+        && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
       // Keeping the two values separate prevents a tall Meiryo design box from
       // being repeated between every pair of lines under spAutoFit (#1473).
       const implicitSingle = naturalSingle;
-      // Paint and table measurement must agree for explicitly authored
-      // percentage spacing. Positive rows with omitted lnSpc retain the
-      // existing glyph-box containment rule: the implicit leading is not by
-      // itself evidence that PowerPoint grows the authored minimum. An explicit
-      // percentage, however, is part of the authored content extent, and every
-      // line in a multi-line body consumes the painted line box.
+      // Paint and table measurement agree on the line box. The glyph-box
+      // measure below is kept only for rows that keep renderTable's earlier
+      // rule (measureNaturalLineSpacing false).
       const paintedLineHeight = drawingMlLineHeight(
         implicitSingle, para.spaceLine, PT_TO_EMU * scale,
       );
@@ -5502,16 +5573,32 @@ export function renderTextBody(
         const unitPx = POWERPOINT_FONT_ALGN_UNIT_PT * PT_TO_EMU * scale;
         alignedLine = powerPointFontAlgnReference(fontAlgn, metricRuns, compatOff, unitPx);
         if (!alignedLine) metricOk = false;
+        // The offsets belong to this metric pass only. They go on a copy of
+        // the line, never on the laid-out segments: a pass the body discards
+        // (metricOk false later) must not leave them on lines that the
+        // ordinary-model pass, or a table's measured-layout reuse
+        // (tableParagraphLayout), paints again.
+        const offsets: number[] = [];
         for (const seg of line.segments) {
           if (!alignedLine) break;
-          if (seg.isTab || !seg.text) continue;
+          if (seg.isTab || !seg.text) {
+            offsets.push(NaN);
+            continue;
+          }
           const offset = seg.lineMetric
             && powerPointFontAlgnOffset(fontAlgn, { sizePx: seg.sizePx, face: seg.lineMetric }, compatOff, unitPx);
           if (offset === undefined) {
             metricOk = false;
             break;
           }
-          seg.fontAlgnOffsetPx = offset;
+          offsets.push(offset);
+        }
+        if (metricOk) {
+          line = {
+            ...line,
+            segments: line.segments.map((seg, k) =>
+              Number.isNaN(offsets[k]) ? seg : { ...seg, fontAlgnOffsetPx: offsets[k] }),
+          };
         }
       }
       if (metric && metricOk && !(measureOnly && !isSpAutoFit && !measureNaturalLineSpacing && !para.spaceLine)) {
@@ -5588,9 +5675,15 @@ export function renderTextBody(
       });
       const lineTop = totalHeight + topGap;
       totalHeight += linePx + topGap;
+      // A growth-rule table cell on the ordinary model contains its ink the
+      // way paint seats it (ordinaryBaselineOffset): a fallback face whose
+      // glyph ink rises above 0.8 of the box pushes the baseline down, and
+      // the row holds the ink below it too.
       const requiredLineHeight = useResolvedFontMetrics && metricAscent === undefined
         ? Math.max(lineHeight, resolvedFontLine)
-        : lineHeight;
+        : paintedLineBox && metricAscent === undefined
+          ? ordinaryLineInkExtent(ctx, line, lineHeight)
+          : lineHeight;
       requiredHeight = Math.max(
         requiredHeight,
         totalHeight,
@@ -5666,8 +5759,9 @@ export function renderTextBody(
   }
 
   // ── measure-only: return the content height the text body needs ─────────
-  // Used by renderTable to grow rows to fit their tallest cell (ECMA-376
-  // §21.1.3.18: a:tr@h is a minimum). Returns padding + laid-out text height.
+  // Used by renderTable to grow rows to fit their tallest cell (observed
+  // PowerPoint behaviour; ECMA-376 §21.1.3.18 only defines the row height).
+  // Returns padding + laid-out text height.
   if (measureOnly) {
     return tPad + requiredHeight + bPad;
   }
@@ -5791,7 +5885,10 @@ export function renderTextBody(
   let entriesInCol = 0;
 
   for (const entry of allLines) {
-    const { line, linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
+    const { linePx, lineHeight, topGapPx, textXOffset, bulletLabel, bulletFont, bulletColor, bulletFollowsText, bulletImage, alignment, isLastLine, useResolvedFontMetrics, metricAscent } = entry;
+    // Not const: resolved tab widths go on a copy (the laid-out line may be a
+    // table's measured layout, tableParagraphLayout, and stays unmodified).
+    let line = entry.line;
     // Balanced column advance: when the current column has reached its share
     // of paragraphs, jump to the next one. PowerPoint never breaks a single
     // line across columns and never spills past the last column — anything
@@ -5856,9 +5953,10 @@ export function renderTextBody(
       // the wrap pass) rather than collapsing to a space (issue #1006).
       const defTabSzPx = emuToPx(entry.para.defTabSz ?? 914400, scale);
       const widths = resolveTabWidths(items, stops, leadingIndentPx, limitPx, spaceW, defTabSzPx);
-      for (let i = 0; i < line.segments.length; i++) {
-        if (line.segments[i].isTab) line.segments[i].tabWidthPx = widths[i];
-      }
+      line = {
+        ...line,
+        segments: line.segments.map((seg, i) => seg.isTab ? { ...seg, tabWidthPx: widths[i] } : seg),
+      };
     }
 
     // Measure line width and the metrics of the fonts Canvas actually resolved.
@@ -5876,7 +5974,7 @@ export function renderTextBody(
       }
       if (seg.math) {
         lineWidth += seg.math.width;
-        maxAscent = Math.max(maxAscent, seg.math.ascent);
+        maxAscent = Math.max(maxAscent, segmentInk(seg, null).ascent);
         continue;
       }
       ctx.font = seg.font;
@@ -5884,9 +5982,7 @@ export function renderTextBody(
       const ls = seg.letterSpacingPx ?? 0;
       lineWidth += seg.leadingLetterSpacingPx ?? 0;
       lineWidth += seg.text ? measureTextAdvance(ctx, seg.text, ls) : 0;
-      if (m.actualBoundingBoxAscent > 0) {
-        maxAscent = Math.max(maxAscent, m.actualBoundingBoxAscent);
-      }
+      maxAscent = Math.max(maxAscent, segmentInk(seg, m).ascent);
       if (useResolvedFontMetrics) {
         const fontAscent = m.fontBoundingBoxAscent ?? 0;
         const fontHeight = fontAscent + (m.fontBoundingBoxDescent ?? 0);
@@ -5915,7 +6011,7 @@ export function renderTextBody(
             maxAscent,
             resolvedFontAscent + Math.max(0, lineHeight - resolvedFontHeight) / 2,
           )
-      : Math.max(lineHeight * 0.8, maxAscent);
+      : ordinaryBaselineOffset(lineHeight, maxAscent);
     // Under pPr@fontAlgn t / ctr / b, metricAscent is the line's alignment
     // reference and each run sits at its own offset from it. A list marker
     // follows the line's first run.
@@ -7721,6 +7817,221 @@ export function applyFrameTransform(
   ctx.translate(-(x + w / 2), -(y + h / 2));
 }
 
+/**
+ * True for a table cell body that is effectively horizontal: `vert` omitted or
+ * the ST_TextVerticalType token `horz`. DrawingML restricts the token as
+ * xsd:token in both strict and transitional schemas, so whitespace collapse
+ * admits only U+0020/TAB/LF/CR at its ends; NBSP or internal whitespace
+ * cannot mean `horz`. Every other value (the vertical tokens vert, vert270,
+ * eaVert, wordArtVert, wordArtVertRtl and mongolianVert, padded or not, and
+ * unknown values) is not admitted.
+ */
+function isHorizontalCellVert(vert: unknown): boolean {
+  return vert === undefined || typeof vert === 'string'
+    && /^[ \t\r\n]*horz[ \t\r\n]*$/.test(vert);
+}
+
+/**
+ * Paragraph layouts that renderTable's row sizing measured, kept for the paint
+ * of the same cells. Row sizing measures a cell at the width and colour it is
+ * painted with, so paint reuses those lines instead of breaking every
+ * paragraph twice.
+ *
+ * - It is passed explicitly to the cell's own renderTextBody calls
+ *   (TableLayoutAccess), never held in module state, so no other text body
+ *   (a nested render on another canvas or with another render context, an
+ *   onTextRun consumer) can see it.
+ * - Only row sizing records, and only for cells on the growth rule, whose
+ *   paint lays the same paragraphs out the same way. Paint, cells that row
+ *   sizing skips (shrink-to-fit) and cells on the earlier rule (rotated,
+ *   stacked, warped, multi-column, ODF) store nothing, so trial layouts (a
+ *   shrink search at many scales) are never kept.
+ * - Retention is bounded by payload, not by line count: recording stops
+ *   once TABLE_LAYOUT_RETAINED_PAYLOAD units (segments, metric marks, the
+ *   characters of their text, layoutPayload, and each distinct CSS font
+ *   string once, interned in `fonts`) are held, and a painted cell drops its
+ *   paragraphs. A large table reuses the layouts of its first cells and lays
+ *   the rest out again, as it would without the memo: past the bound it
+ *   costs a measure and a paint per cell. Matching paint-only cost there
+ *   would mean holding every layout until the table background, which needs
+ *   every row height, is painted. Nothing outlives renderTable, so a font that
+ *   loads later is picked up by the next render.
+ * - Recorded lines are frozen. Everything a layout pass or paint derives from
+ *   them (fontAlgn offsets, resolved tab widths) goes on that pass's own copy,
+ *   so a discarded pass cannot change what a later pass paints.
+ */
+export interface TableLayoutMemo {
+  layouts: Map<Paragraph, Map<string, readonly LayoutLine[]>>;
+  /** Payload currently held: layoutPayload of every retained layout plus
+   * the length of every string in `fonts`. */
+  payload: number;
+  /** The CSS font strings of retained segments and marks, each held once and
+   * shared (interned) by every retained segment that uses it, with the
+   * number of retained segments and marks using it. */
+  fonts?: Map<string, { font: string; refs: number }>;
+}
+
+/** What renderTable hands one cell's renderTextBody call. */
+interface TableCellText {
+  /** Measured layouts for reuse (TableLayoutAccess). */
+  layouts?: TableLayoutAccess;
+  /** A growth-rule cell: size and paint by the painted line box. */
+  paintedLineBox?: boolean;
+}
+
+/** A cell's view of the memo: `record` is true for row sizing of a cell
+ * whose paint reuses the result. */
+interface TableLayoutAccess {
+  memo: TableLayoutMemo;
+  record: boolean;
+}
+
+/** Retention bound of TableLayoutMemo, in layoutPayload units (about one
+ * small object or one UTF-16 unit each). Memory policy only: past it,
+ * layouts are computed again and paint is unchanged. */
+const TABLE_LAYOUT_RETAINED_PAYLOAD = 65_536;
+
+/** What a layout retains apart from its font strings: one unit per line,
+ * segment and metric mark, and one per text character. */
+function layoutPayload(lines: readonly LayoutLine[]): number {
+  let payload = 0;
+  for (const line of lines) {
+    payload += 1;
+    for (const seg of line.segments) payload += 1 + seg.text.length;
+    for (const mark of line.metricMarks ?? []) payload += 1 + mark.text.length;
+  }
+  return payload;
+}
+
+/** Every segment and metric mark of a layout. */
+function* layoutPieces(lines: readonly LayoutLine[]): Generator<LayoutSegment> {
+  for (const line of lines) {
+    yield* line.segments;
+    if (line.metricMarks) yield* line.metricMarks;
+  }
+}
+
+function freezeLayout(lines: LayoutLine[]): LayoutLine[] {
+  for (const line of lines) {
+    for (const seg of line.segments) Object.freeze(seg);
+    Object.freeze(line.segments);
+    if (line.metricMarks) {
+      for (const mark of line.metricMarks) Object.freeze(mark);
+      Object.freeze(line.metricMarks);
+    }
+    Object.freeze(line);
+  }
+  return Object.freeze(lines) as LayoutLine[];
+}
+
+function tableParagraphLayout(
+  access: TableLayoutAccess | undefined,
+  callLayouts: Map<Paragraph, Map<string, LayoutLine[]>>,
+  ...args: Parameters<typeof layoutParagraph>
+): LayoutLine[] {
+  const [ctx, para, ...rest] = args;
+  // Object inputs (render context) are the same throughout one call and one
+  // table, so the key holds the scalar inputs.
+  const key = rest.map((value) => typeof value === 'object' ? '' : String(value)).join('|');
+  let inCall = callLayouts.get(para);
+  if (!inCall) callLayouts.set(para, inCall = new Map());
+  const fromCall = inCall.get(key);
+  if (fromCall) return fromCall;
+  const cached = access?.memo.layouts.get(para)?.get(key) as LayoutLine[] | undefined;
+  if (cached) {
+    inCall.set(key, cached);
+    return cached;
+  }
+  const lines = layoutParagraph(ctx, para, ...rest);
+  inCall.set(key, lines);
+  if (!access) return lines;
+  const { memo, record } = access;
+  if (!record) return lines;
+  // A CSS font string carries the authored family names, so it is not
+  // bounded by the text: each distinct one is charged once, when the memo
+  // first holds it, and shared by the segments that use it.
+  const fonts = memo.fonts ??= new Map();
+  let payload = layoutPayload(lines);
+  const added = new Set<string>();
+  for (const piece of layoutPieces(lines)) {
+    if (!fonts.has(piece.font) && !added.has(piece.font)) {
+      added.add(piece.font);
+      payload += piece.font.length;
+    }
+  }
+  if (memo.payload + payload > TABLE_LAYOUT_RETAINED_PAYLOAD) return lines;
+  for (const piece of layoutPieces(lines)) {
+    let entry = fonts.get(piece.font);
+    if (!entry) fonts.set(piece.font, entry = { font: piece.font, refs: 0 });
+    entry.refs++;
+    piece.font = entry.font;
+  }
+  let byKey = memo.layouts.get(para);
+  if (!byKey) memo.layouts.set(para, byKey = new Map());
+  byKey.set(key, freezeLayout(lines));
+  memo.payload += payload;
+  return lines;
+}
+
+function dropTableLayouts(memo: TableLayoutMemo, paragraphs: readonly Paragraph[]): void {
+  for (const para of paragraphs) {
+    const byKey = memo.layouts.get(para);
+    if (!byKey) continue;
+    for (const lines of byKey.values()) {
+      memo.payload -= layoutPayload(lines);
+      for (const piece of layoutPieces(lines)) {
+        const entry = memo.fonts?.get(piece.font);
+        if (entry && --entry.refs === 0) {
+          memo.fonts!.delete(piece.font);
+          memo.payload -= piece.font.length;
+        }
+      }
+    }
+    memo.layouts.delete(para);
+  }
+}
+
+/** A merged (rowSpan > 1) cell that row sizing resolves. */
+interface TableMerge {
+  ri: number;
+  ci: number;
+  /** Last row it spans. */
+  last: number;
+  earlierRule: boolean;
+  /** Measured content height (px). */
+  needed: number;
+}
+
+/**
+ * The order in which row sizing resolves merged cells (given in reading
+ * order). Every growth-rule merge comes first, by the row it ends on; the
+ * earlier-rule merges follow in reading order, the order that rule always
+ * used, each resolved against the rows as they then stand. The two rules
+ * therefore cannot reorder each other: an earlier-rule merge (rotated,
+ * stacked, warped, multi-column) changes neither the order nor the input of
+ * any growth-rule merge, wherever it sits.
+ *
+ * Growth-rule merges resolve by the row they end on, not in reading order or
+ * by span length. Synthetic PowerPoint controls (four rows, 24pt minima and
+ * leading, zero margins) exported from PowerPoint for Mac, 2026-11-28/29:
+ * - an eight-line merge over rows 1-3 beside a five-line merge over rows
+ *   1-2, in either column order: 24/96/72/24 (reading order: 24/96/144/24);
+ * - eight lines over rows 1-3 beside five over rows 3-4, in either column
+ *   order: 24/24/144/24 (shortest span first: 24/24/144/96);
+ * - five lines over rows 1-2 beside eight over rows 2-4: 24/96/24/72
+ *   (longest first: 24/96/24/144).
+ * Array.prototype.sort is stable: cells ending on the same row keep their
+ * reading order. Exported for tests; built by appending one merge at a
+ * time, so no argument list grows with the table.
+ */
+export function orderTableMerges<T extends Pick<TableMerge, 'last' | 'earlierRule'>>(
+  merges: readonly T[],
+): T[] {
+  const order = merges.filter((merge) => !merge.earlierRule).sort((a, b) => a.last - b.last);
+  for (const merge of merges) if (merge.earlierRule) order.push(merge);
+  return order;
+}
+
 export function renderTable(
   ctx: CanvasRenderingContext2D,
   el: TableElement,
@@ -7728,7 +8039,22 @@ export function renderTable(
   slideNumber?: number,
   rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
   onTextRun?: TextRunCallback,
-) {
+): number {
+  return renderTableWithLayoutMemo({ layouts: new Map(), payload: 0 }, ctx, el, scale, slideNumber, rc, onTextRun);
+}
+
+/** renderTable with a caller-owned layout memo; exported for tests, which
+ * observe its retention. Not re-exported from index.ts. Returns the painted
+ * height in EMU (the grown row sum). */
+export function renderTableWithLayoutMemo(
+  memo: TableLayoutMemo,
+  ctx: CanvasRenderingContext2D,
+  el: TableElement,
+  scale: number,
+  slideNumber: number | undefined,
+  rc: RenderContext = { themeMajorFont: null, themeMinorFont: null, dpr: 1 },
+  onTextRun?: TextRunCallback,
+): number {
   ctx.save();
   applyFrameTransform(ctx, el, scale);
   const x0 = emuToPx(el.x, scale);
@@ -7755,26 +8081,70 @@ export function renderTable(
     return w;
   };
 
-  // ── Row heights: Office minimum-row semantics ─────────────────────────────
-  // ECMA-376 §21.1.3.18 defines a:tr@h as the row height; [MS-OE376]
-  // §2.1.1347 additionally constrains it to zero or at least the minimum row
-  // height. PowerPoint grows a row to fit its tallest cell's laid-out text. A
-  // literal h=0 therefore becomes
-  // content-driven. We measure each cell's text body at its spanned width
-  // (reusing the same renderTextBody machinery via measureOnly) and take
-  // max(tr@h, tallest single-row cell content). A rowSpan cell distributes
-  // its content height across the rows it covers so it doesn't inflate the
-  // first row.
+  // ── Row heights: content-driven growth ────────────────────────────────────
+  // ECMA-376 §21.1.3.18 defines a:tr@h as the row height, and [MS-OE376]
+  // §2.1.1347 constrains the authored value to zero or at least a minimum
+  // derived from the cell margins. Neither makes the value a minimum: that
+  // rows grow to fit their tallest cell's laid-out text, positive and zero
+  // heights alike, is observed PowerPoint behaviour. Each cell's text body
+  // is measured at its spanned width with the renderTextBody machinery
+  // (measureOnly).
   const authoredRowHeights = el.rows.map(r => emuToPx(r.height, scale));
   const rowHeights = [...authoredRowHeights];
+  // PowerPoint PDF controls (Windows and Mac) grow positive and zero rows in
+  // tables whose graphic-frame extent equals the row sum, the case decks
+  // from generators such as python-pptx write and rely on (#2345). The
+  // frame extent takes no part: a PowerPoint for Mac control (2 columns x 3
+  // rows, a:tr@h 24pt, zero margins, exact 24pt leading, 20pt text) exports
+  // rows 24/72/24 for a middle row needing 72pt with frames of 72, 120 and
+  // 48pt, and 24/24/24 without growth with frames of 120 and 48pt: each row
+  // is max(a:tr@h, its content), slack is not spread over the rows and a
+  // short frame shrinks none (2026-11-29). Each line of text, the last included,
+  // takes its painted line box (measureNaturalLineSpacing). Browser fonts
+  // that wrap differently from Office can change the grown height;
+  // overflowing into the next row is the worse failure, because it breaks
+  // the layout.
+  //
+  // These cells keep the earlier rule, which grew a positive row only
+  // when the frame extent exceeded the row sum, measured an omitted-lnSpc
+  // line of a positive row by its glyph size, and spread a merged cell's
+  // deficit evenly over its rows:
+  // - a cell that is not effectively horizontal (isHorizontalCellVert, the
+  //   same admission as the horizontal clip below): rotated and stacked
+  //   bodies measure by their box width, which is not their laid-out extent,
+  //   and the PowerPoint controls cover horizontal text only, so
+  //   mongolianVert, padded vertical tokens and unknown values stay too;
+  // - every cell of an ODF table (`odfRowHeights` from the parser, or any
+  //   table of a slide from an ODP source, `rc.odfTables`, so an
+  //   application-supplied source need not mark it): ODF row heights are
+  //   style:row-height (fixed, OpenDocument 1.3 Part 3 §20.348) or
+  //   style:min-row-height, and LibreOffice's growth of either is not
+  //   measured here;
+  // - a multi-column body (numCol > 1, ECMA-376 §21.1.2.1.1): measureOnly
+  //   stacks every line in one column, while paint flows the lines into the
+  //   columns, so the stacked sum is not the height the cell needs;
+  // - a warped body (a:prstTxWarp other than textNoShape, ECMA-376
+  //   §20.1.9.19, `hasTextWarp`): measureOnly lays it out as wrapped flat
+  //   text, while paint (renderWarpedText) fits the unwrapped lines into the
+  //   warp envelope, so the flat measure is not its extent either. How
+  //   PowerPoint sizes a row for warped cell text is not measured.
   const authoredRowsTotalEmu = el.rows.reduce((sum, row) => sum + row.height, 0);
-  // The graphic-frame extent is the table's authored outer height. PowerPoint
-  // can leave slack between that extent and the sum of positive a:tr@h minima;
-  // that discrepancy signals that text-driven row growth was present when the
-  // table was authored. When the positive minima already fill the frame, do not
-  // invent growth merely because browser font metrics wrap differently.
-  const hasAuthoredRowGrowthSignal = el.height > authoredRowsTotalEmu;
+  const frameHasSlack = el.height > authoredRowsTotalEmu;
+  const keepsEarlierRule = (body: TextBody): boolean =>
+    el.odfRowHeights === true || rc.odfTables === true || !isHorizontalCellVert(body.vert)
+    || (body.numCol ?? 1) > 1
+    || (body.textWarp != null && hasTextWarp(body.textWarp.preset));
 
+  // Row sizing records the layouts of growth-rule cells for the paint below
+  // (tableParagraphLayout).
+  const sizingInput = (earlierRule: boolean): TableCellText | undefined =>
+    earlierRule ? undefined : { layouts: { memo, record: true }, paintedLineBox: true };
+  const paintInput = (body: TextBody): TableCellText => ({
+    layouts: { memo, record: false },
+    ...(keepsEarlierRule(body) ? {} : { paintedLineBox: true }),
+  });
+  const sizingTextColor = (cell: TableCell, earlierRule: boolean): string | null =>
+    !earlierRule && cell.textColor ? hexToRgba(cell.textColor) : null;
   // First pass: single-row (rowSpan ≤ 1) cells set their own row's minimum.
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
@@ -7786,19 +8156,32 @@ export function renderTable(
       // Shrink-to-fit text (model sources, ODF §20.360) fits the cell as
       // authored: it shrinks instead of growing the row.
       if (cell.textBody.shrinkOnOverflow) continue;
-      if (row.height > 0 && !hasAuthoredRowGrowthSignal) continue;
+      const earlierRule = keepsEarlierRule(cell.textBody);
+      if (earlierRule && row.height > 0 && !frameHasSlack) continue;
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
+      // A growth-rule cell is measured with its own text colour, as painted,
+      // so paint reuses these lines (tableParagraphLayout). An earlier-rule
+      // cell keeps the earlier input, the black default: the colour takes
+      // part in run coalescing and so in kerning and wrapping.
       const needed = (renderTextBody(
-        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
-        '#000000', slideNumber, rc, undefined, true, undefined, false, row.height === 0,
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
+        sizingTextColor(cell, earlierRule), 0, false, false,
+        '#000000', slideNumber, rc, undefined, true, undefined, false,
+        !earlierRule || row.height === 0, sizingInput(earlierRule),
       ) as number) || 0;
       if (needed > rowHeights[ri]) rowHeights[ri] = needed;
     }
   }
 
-  // Second pass: rowSpan cells. If the content needs more than the sum of the
-  // rows it spans, distribute the deficit across those rows so the merged area
-  // grows without inflating any single row beyond what its own content needs.
+  // Second pass: rowSpan cells. When the merged content needs more than the
+  // rows it spans, PowerPoint adds the whole deficit to the last spanned row:
+  // PDF controls (Windows and Mac) with a 144 pt merged cell over minima of
+  // 24+48, 24+24 and 48+24 pt (frame equal to the row sum) keep every earlier
+  // row at its own height and grow only the last. Growth-rule merges are
+  // resolved in the order of the row they end on, so a cell ending lower
+  // sees the growth of every merge nested inside it whatever the column
+  // order; earlier-rule merges follow (orderTableMerges).
+  const spanCells: TableMerge[] = [];
   for (let ri = 0; ri < el.rows.length; ri++) {
     const row = el.rows[ri];
     for (let ci = 0; ci < row.cells.length; ci++) {
@@ -7807,23 +8190,45 @@ export function renderTable(
       const span = cell.rowSpan || 1;
       if (span <= 1 || !cell.textBody) continue;
       if (cell.textBody.shrinkOnOverflow) continue;
+      const last = Math.min(el.rows.length, ri + span) - 1;
+      const earlierRule = keepsEarlierRule(cell.textBody);
+      let hasAutoHeightRow = false;
+      for (let r = ri; r <= last; r++) if (el.rows[r].height === 0) hasAutoHeightRow = true;
+      // The earlier rule sizes a merge only over a zero-height row or under
+      // frame slack.
+      if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
+      // The measured height does not depend on the row heights, so it is
+      // taken once, here. A merge whose content already fits the rows after
+      // the first pass never adds height (rows only grow) and is left out.
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
-      const hasAutoHeightRow = el.rows
-        .slice(ri, Math.min(el.rows.length, ri + span))
-        .some((spannedRow) => spannedRow.height === 0);
-      if (!hasAutoHeightRow && !hasAuthoredRowGrowthSignal) continue;
       const needed = (renderTextBody(
-        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
-        '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
+        ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale,
+        sizingTextColor(cell, earlierRule), 0, false, false,
+        '#000000', slideNumber, rc, undefined, true, undefined, false,
+        !earlierRule || hasAutoHeightRow, sizingInput(earlierRule),
       ) as number) || 0;
-      let have = 0;
-      for (let s = 0; s < span && ri + s < rowHeights.length; s++) have += rowHeights[ri + s];
-      if (needed > have) {
-        const extra = (needed - have) / span;
-        for (let s = 0; s < span && ri + s < rowHeights.length; s++) rowHeights[ri + s] += extra;
-      }
+      let firstPass = 0;
+      for (let r = ri; r <= last; r++) firstPass += rowHeights[r];
+      if (needed <= firstPass) continue;
+      spanCells.push({ ri, ci, last, earlierRule, needed });
     }
   }
+  for (const { ri, ci, last, earlierRule, needed } of orderTableMerges(spanCells)) {
+    const cell = el.rows[ri].cells[ci];
+    let have = 0;
+    for (let r = ri; r <= last; r++) have += rowHeights[r];
+    if (needed <= have) continue;
+    if (earlierRule) {
+      const extra = (needed - have) / (cell.rowSpan || 1);
+      for (let r = ri; r <= last; r++) rowHeights[r] += extra;
+    } else {
+      rowHeights[last] += needed - have;
+    }
+  }
+
+  // The extent paint covers, in EMU: hit testing extends the authored frame
+  // to it (TableHitExtents).
+  const paintedHeightEmu = rowHeights.reduce((sum, h) => sum + h, 0) / scale;
 
   // ── Column x-positions ────────────────────────────────────────────────────
   // ECMA-376 §21.1.3.13 (a:tblPr@rtl): a right-to-left table places column 0
@@ -8000,15 +8405,10 @@ export function renderTable(
       // already folded into body.vert, omitted or `horz`). How the physical x
       // interval maps onto rotated, stacked or unknown directions is not settled
       // here, so those bodies keep their previous unclipped paint and overlays.
-      // DrawingML ST_TextVerticalType restricts xsd:token in both strict and
-      // transitional schemas. For this single-word enum, collapse accepts only
-      // U+0020/TAB/LF/CR at the ends; NBSP and internal whitespace cannot mean
-      // `horz`. Apply this only to admission, leaving the body/paint policy intact.
-      // Keep this tolerant for caller-supplied and previously parsed models too;
+      // isHorizontalCellVert gives the xsd:token admission. Apply it only to
+      // admission, leaving the body/paint policy intact. Keep this tolerant for caller-supplied and previously parsed models too;
       // normalizing the shared direction would also change orientation dispatch.
-      const rawVert = cell.textBody.vert;
-      const isHorizontal = rawVert === undefined || typeof rawVert === 'string'
-        && /^[ \t\r\n]*horz[ \t\r\n]*$/.test(rawVert);
+      const isHorizontal = isHorizontalCellVert(cell.textBody.vert);
       cellHorzOverflow = !isHorizontal ? undefined
         : cell.horzOverflow === 'overflow' ? 'overflow' : 'clip';
       ctx.save();
@@ -8030,8 +8430,15 @@ export function renderTable(
           slideNumber,
           rc,
           tableTextRun,
+          false,
+          undefined,
+          false,
+          false,
+          paintInput(cell.textBody),
         );
       } finally {
+        // The cell is painted: its measured layouts are not needed again.
+        dropTableLayouts(memo, cell.textBody.paragraphs);
         ctx.restore();
       }
     }
@@ -8231,6 +8638,7 @@ export function renderTable(
     ctx.restore();
   }
   ctx.restore();
+  return paintedHeightEmu;
 }
 
 // ===== Public API =====
@@ -8307,6 +8715,14 @@ type InternalSlideRenderOptions = SlideRenderOptions & {
    *  paths), whose colour chain is resolved even when it carries no slide
    *  theme (an unreadable theme part). */
   parsedTextChain?: boolean;
+  /** The slide comes from an OpenDocument presentation source
+   *  (LoadOptions.odp): every table keeps the ODF row-height rule
+   *  (RenderContext.odfTables), whether or not the source marks it. */
+  odfTables?: boolean;
+  /** Receives the painted height (EMU) of each source table element painted
+   *  taller than its authored frame, by its index in the slide model, for
+   *  hit testing (TableHitExtents). */
+  onTableExtent?: (elementIndex: number, heightEmu: number) => void;
 };
 
 /**
@@ -8586,6 +9002,7 @@ async function renderSlideLeased(
     themeMajorFont: slide.theme ? slide.theme.majorFont : opts.majorFont ?? null,
     themeMinorFont: slide.theme ? slide.theme.minorFont : opts.minorFont ?? null,
     themeHlinkColor: slide.theme ? slide.theme.hlinkColor : opts.hlinkColor ?? null,
+    ...(opts.odfTables ? { odfTables: true } : {}),
     embeddedFontAliases: opts.embeddedFontAliases,
     embeddedFontAuthoredFamilies: opts.embeddedFontAuthoredFamilies,
     embeddedFontTuples: opts.embeddedFontTuples,
@@ -9140,8 +9557,11 @@ async function renderSlideLeased(
         if (step.failure) throw step.failure.error;
       }
     } else if (el.type === 'table') {
-      withPatternCoordinateSpace(ctx, slidePatternFrame, () =>
-        renderTable(ctx, el, scale, slideNumber, rc, elementTextRun));
+      withPatternCoordinateSpace(ctx, slidePatternFrame, () => {
+        const heightEmu = renderTable(ctx, el, scale, slideNumber, rc, elementTextRun);
+        const sourceIndex = sourceIndices ? sourceIndices[elementIndex] : elementIndex;
+        if (sourceIndex !== undefined && heightEmu > el.height) opts.onTableExtent?.(sourceIndex, heightEmu);
+      });
     } else if (el.type === 'chart') {
       // OOXML: 1pt = 12700 EMU. The slide renderer's `scale` is px-per-EMU,
       // so PT_TO_EMU * scale gives pixels-per-point at the current display size.
