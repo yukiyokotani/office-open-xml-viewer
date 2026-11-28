@@ -8,7 +8,7 @@ import { authoredLineCount, authoredTextLines, fillAuthoredText, measureAuthored
 import { axisLineWidthPx } from '../axis-style.js';
 import { chartFontCss, chartFontFamily } from './fonts.js';
 import { chartCategories } from '../category-spacing.js';
-import { categorySourceAt, formatCategorySource } from '../category-caption.js';
+import { categorySourceAt, formatCategoryRecord } from '../category-caption.js';
 import { wrapMeasuredText } from './axis.js';
 import { buildLegendEntries, drawLegendSwatch } from './legend.js';
 import { dashPatternForPreset } from './geometry.js';
@@ -142,20 +142,17 @@ export function measureChartDataTable(
   const face = chartFontFamily(chart, table.fontFace, 'minor');
   ctx.save();
   ctx.font = chartFontCss(fontPx, face, table.fontBold ?? false, table.fontItalic ?? false);
-  // The headers are `chartCategories(chart)`: the first series' categories.
-  // Their format, built-in id and numeric-vs-text provenance come from that
-  // series, not from whichever later series carries one.
-  const headerSeries = chart.series[0];
-  const seriesCategoryFormat = headerSeries?.catFormatCode;
-  const categoryFormat = seriesCategoryFormat ?? chart.catAxisFormatCode;
-  const categoryDivisors = seriesCategoryFormat == null ? chart.catAxisFormatDivisors : null;
-  const categoryBuiltinId = headerSeries?.catFormatBuiltinId;
+  // Each header is the resolved record of the shared source: its text,
+  // provenance, format code and built-in id come from that one source, not
+  // from whichever series happens to be first after visibility filtering.
   const headerLines = chartCategories(chart).map((_, index) => {
     const source = categorySourceAt(chart, null, index);
-    const numeric = source.raw.trim() === '' ? Number.NaN : Number(source.raw);
-    const label = source.numeric !== false && categoryBuiltinId === 14 && Number.isFinite(numeric)
+    const numeric = source.text.trim() === '' ? Number.NaN : Number(source.text);
+    const label = source.numeric !== false && source.builtinFormatId === 14 && Number.isFinite(numeric)
       ? formatLocalizedExcelShortDate(numeric, chart.date1904)
-      : formatCategorySource(chart, source, { code: categoryFormat, divisors: categoryDivisors });
+      : formatCategoryRecord(chart, source, source.formatCode
+        ? { code: source.formatCode }
+        : { code: chart.catAxisFormatCode, divisors: chart.catAxisFormatDivisors });
     return wrapMeasuredText(ctx, label, Math.max(1, categoryWidth - 4 * ptToPx));
   });
   ctx.restore();

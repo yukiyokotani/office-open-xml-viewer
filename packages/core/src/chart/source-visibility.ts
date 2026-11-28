@@ -4,6 +4,7 @@ import type {
   ChartModel,
   ChartSeries,
 } from '../types/chart';
+import { seriesWithSharedCategories } from './category-caption.js';
 
 interface VisibilityPlan {
   keep: number[];
@@ -200,7 +201,7 @@ export function applyPlotVisibleOnly(chart: ChartModel): ChartModel {
       ...chart,
       series: chart.series.flatMap((series, seriesIndex) => {
         const effective = series.categories == null
-          ? { ...series, categories: chart.categories }
+          ? seriesWithSharedCategories(chart, series)
           : series;
         const hidden = effective.sourceHidden;
         const plan = hidden && makeVisibilityPlan(hidden, pointCount(effective));
@@ -249,6 +250,7 @@ export function applyPlotVisibleOnly(chart: ChartModel): ChartModel {
   return {
     ...chart,
     categories: select(chart.categories, categoryPlan) ?? [],
+    categoryFormatCodes: select(chart.categoryFormatCodes, categoryPlan) ?? undefined,
     categoryLevels: chart.categoryLevels?.map(level => select(level, categoryPlan) ?? []),
     categorySourceHidden: select(chart.categorySourceHidden, categoryPlan),
     subtotalIndices,

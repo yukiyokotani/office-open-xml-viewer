@@ -3,7 +3,8 @@ import {
   PULL_SESSION_PROTOCOL,
   type PullSessionCommand,
 } from '@silurus/ooxml-core/worker';
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { googleFonts } from '@silurus/ooxml-core/internal/font-sources';
 import { PptxPresentation } from './presentation.js';
 
 /**
@@ -75,6 +76,29 @@ vi.mock('./wasm/pptx_parser.js', () => ({
   reinit: () => Promise.resolve(),
   PptxArchive: FakePptxArchive,
 }));
+
+// The render worker's font-source session: the demand it is asked to load is
+// the worker-produced result observed below. Every other font-sources export
+// stays real.
+const { ensured } = vi.hoisted(() => ({ ensured: [] as unknown[] }));
+vi.mock('@silurus/ooxml-core/internal/font-sources', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@silurus/ooxml-core/internal/font-sources')>();
+  const probe = async (families: readonly string[]) => ({
+    installed: new Set<string>(),
+    checked: new Set(families.map((family) => family.trim().toLowerCase())),
+  });
+  return {
+    ...original,
+    probeFontFamilyPresence: probe,
+    InstalledFamilyExclusion: class extends original.InstalledFamilyExclusion {
+      constructor() { super(probe); }
+    },
+    FontSourceSession: class {
+      loaded = undefined;
+      async ensure(demand: unknown): Promise<void> { ensured.push(demand); }
+    },
+  };
+});
 
 interface FakeSelf {
   onmessage: ((event: MessageEvent) => void) | null;
@@ -177,28 +201,24 @@ describe('PPTX loader parse request', () => {
 });
 
 describe('PPTX render worker host locale', () => {
-  const worker: { onmessage: ((event: MessageEvent) => unknown) | null } = { onmessage: null };
-  // The render worker's own module graph: adoption happens in it, so the
-  // painted-text and font-demand functions come from the same graph.
-  let core: typeof import('@silurus/ooxml-core');
-  let demandModule: typeof import('@silurus/ooxml-core/internal/font-scalar-demand');
-  beforeAll(async () => {
-    vi.stubGlobal('self', { postMessage: () => undefined, set onmessage(handler: never) { worker.onmessage = handler; } });
+  const parseThroughRenderWorker = async (request: Record<string, unknown>): Promise<unknown[]> => {
+    ensured.length = 0;
+    const posted: { kind: string }[] = [];
+    const scope = { fonts: {} as FontFaceSet, onmessage: null as ((event: MessageEvent) => unknown) | null, postMessage: (message: unknown) => { posted.push(message as { kind: string }); } };
+    vi.stubGlobal('self', scope);
     vi.resetModules();
     await import('./render-worker.js');
-    core = await import('@silurus/ooxml-core');
-    demandModule = await import('@silurus/ooxml-core/internal/font-scalar-demand');
-  }, 60_000);
+    await scope.onmessage?.({ data: { kind: 'init', wasmUrl: 'x' } } as MessageEvent);
+    await scope.onmessage?.({ data: {
+      kind: 'parse', id: 1, buffer: new ArrayBuffer(4), resourcePolicy, cjkFallback: 'jp',
+      fonts: [googleFonts()], ...request,
+    } } as MessageEvent);
+    expect(posted.find(message => message.kind === 'presentationReady'), JSON.stringify(posted)).toBeDefined();
+    return [...ensured];
+  };
 
-  it('paints and demands the request locale, and keeps its own without one', async () => {
-    const paint = () => core.formatLocalizedExcelShortDate(45_659, false);
-    const demand = () => (demandModule.chartPaintTexts({ chartType: 'bar', series: [] }) as string[]).join('');
-    expect(paint()).toBe('1/2/2025');
-    expect(demand()).not.toContain('\u202f');
-    await Promise.resolve(worker.onmessage?.({ data: { kind: 'unsupported', id: 1 } } as MessageEvent)).catch(() => undefined);
-    expect(paint()).toBe('1/2/2025');
-    await Promise.resolve(worker.onmessage?.({ data: { kind: 'unsupported', id: 2, hostLocale: 'fr-FR' } } as MessageEvent)).catch(() => undefined);
-    expect(paint()).toBe('02/01/2025');
-    expect(demand()).toContain('\u202f');
-  });
+  it('demands the request locale\'s separators for a chart slide, and its own locale without one', async () => {
+    expect(JSON.stringify(await parseThroughRenderWorker({ hostLocale: 'fr-FR' }))).toContain(String(NARROW_NO_BREAK_SPACE));
+    expect(JSON.stringify(await parseThroughRenderWorker({}))).not.toContain(String(NARROW_NO_BREAK_SPACE));
+  }, 60_000);
 });

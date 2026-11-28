@@ -356,7 +356,7 @@ export function drawScatterSeriesLayer(
       value => dataLabelWithinAxisMaximum(chart, value, valueAxisMaximum),
       shapeRotationDeg,
       markerGapAt,
-      pointCategoryCaptionAt(chart, s),
+      pointCategoryCaptionAt(chart, s, 'index'),
     );
   }
 

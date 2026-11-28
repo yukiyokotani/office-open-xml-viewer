@@ -34,7 +34,7 @@ import {
   type RichDataLabelBlock,
 } from '../rich-data-label.js';
 import { effectiveDataLabelText } from '../data-label-content.js';
-import { categorySourceAt, pointCategoryCaption } from '../category-caption.js';
+import { pointCategoryCaption, seriesWithDisplayedCategories } from '../category-caption.js';
 
 import { chartDataPointStyleRole, chartSeriesSourceIndex } from '../effective-style.js';
 import { chartStyleLineDecision } from '../style-paint.js';
@@ -297,7 +297,6 @@ export function renderPieChart(
 ): void {
   const { x, y, w, h } = r;
   const s = chart.series[0]; if (!s) return;
-  const cats = (s.categories && s.categories.length > 0) ? s.categories : chart.categories;
   const vals = s.values.map(v => Math.abs(v ?? 0));
   const total = vals.reduce((a, b) => a + b, 0);
   if (total === 0) return;
@@ -306,7 +305,7 @@ export function renderPieChart(
     && chart.series.length > 1;
   const legendChart: ChartModel = seriesLegend
     ? chart
-    : { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: categorySourceAt(chart, s, 0).numeric }] };
+    : { ...chart, series: [seriesWithDisplayedCategories(chart, s)] };
 
   // Shared frame (radial form). Pie uses title pads 0.035 / 0.035; its legend
   // labels categories (one row per slice) so it reserves a wider 0.28 side band
@@ -474,7 +473,7 @@ export function renderPieChart(
   if (hasRichLabels) {
     const outerRingInnerR = isDoughnut ? outerR - ringBand : 0;
     drawPieRichLabels(
-      ctx, chart, richDef, s, cats, vals, total,
+      ctx, chart, richDef, s, vals, total,
       cx2, cy2, outerR, outerRingInnerR, startAngle, dLblFont, ptToPx,
       plotLeft, plotTop, pw, ph,
       x, y, w, h,
@@ -513,7 +512,6 @@ function drawPieRichLabels(
   chart: ChartModel,
   def: ChartSeriesDataLabels,
   s: ChartSeries,
-  cats: string[],
   vals: number[],
   total: number,
   cx2: number, cy2: number,
@@ -529,7 +527,7 @@ function drawPieRichLabels(
   const overrides = s.dataLabelOverrides ?? [];
   const overridesByIndex = indexPointOverrides(overrides);
   const dataLabelLegendKey = createDataLabelLegendKeyResolver(
-    { ...chart, series: [{ ...s, categories: cats, categoriesNumeric: categorySourceAt(chart, s, 0).numeric }] },
+    { ...chart, series: [seriesWithDisplayedCategories(chart, s)] },
     ptToPx,
   );
   const calloutIndices = new Set<number>();
@@ -596,7 +594,7 @@ function drawPieRichLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: pointCategoryCaption(chart, s, i),
+      category: pointCategoryCaption(chart, s, i, 'none'),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,
@@ -1069,7 +1067,7 @@ function drawPieCalloutLabels(
       showSeries: showSerName,
       showValue: showVal,
       showPercent,
-      category: pointCategoryCaption(chart, s, i),
+      category: pointCategoryCaption(chart, s, i, 'none'),
       seriesName: s.name,
       sourceValue: vals[i],
       percentRatio: vals[i] / total,

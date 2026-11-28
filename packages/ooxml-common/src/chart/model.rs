@@ -469,6 +469,15 @@ pub struct ChartModel {
     /// and a text category is never reformatted. Absent: no category source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub categories_numeric: Option<bool>,
+    /// Number format of the shared category source (the first series' `cat` /
+    /// `xVal` cache), as `ChartSeries.cat_format_*` carries it for a series'
+    /// own source: the code, the worksheet built-in id, per-point codes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_format_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_builtin_format_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_format_codes: Option<Vec<Option<String>>>,
     pub series: Vec<ChartSeries>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_groups: Option<Vec<ChartPlotGroup>>,

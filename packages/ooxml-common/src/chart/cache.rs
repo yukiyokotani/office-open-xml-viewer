@@ -2280,6 +2280,82 @@ pub(super) fn category_source_is_numeric(ser_node: Node<'_, '_>, child_tag: &str
     source_container_kind(container)
 }
 
+/// Number-format facts of a category/X source: the cache's own code (a bare
+/// `General` is the default and not recorded), the worksheet built-in id of
+/// its first cell, and per-point `formatCode`s.
+#[derive(Default)]
+pub(super) struct CategorySourceFormats {
+    pub code: Option<String>,
+    pub builtin_id: Option<u32>,
+    pub codes: Option<Vec<Option<String>>>,
+}
+
+pub(super) fn category_source_formats(
+    ser: Node<'_, '_>,
+    own_category_tag: &str,
+    references: &mut dyn ChartReferenceResolver,
+) -> CategorySourceFormats {
+    let code = ser
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
+            .and_then(|source| {
+                source.descendants().find(|node| {
+                    node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
+                })
+            })
+            .and_then(|cache| child(cache, "formatCode"))
+            .and_then(|format| format.text().map(str::to_string))
+            .filter(|format| !format.is_empty() && format != "General");
+        let builtin_id = ser
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
+            .and_then(|source| child(source, "numRef").or_else(|| child(source, "strRef")))
+            .and_then(|reference| child(reference, "f"))
+            .and_then(|formula| formula.text())
+            .and_then(|formula| references.resolve_number_format_id(formula));
+        let codes = ser
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == own_category_tag)
+            .and_then(|source| {
+                source.descendants().find(|node| {
+                    node.is_element() && matches!(node.tag_name().name(), "numCache" | "numLit")
+                })
+            })
+            .and_then(|cache| {
+                let point_count = child(cache, "ptCount")
+                    .and_then(|count| attr(&count, "val"))
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .unwrap_or_else(|| {
+                        cache
+                            .children()
+                            .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+                            .filter_map(|point| attr(&point, "idx"))
+                            .filter_map(|idx| idx.parse::<usize>().ok())
+                            .max()
+                            .map(|idx| idx + 1)
+                            .unwrap_or(0)
+                    });
+                let mut formats = vec![None; point_count];
+                for point in cache
+                    .children()
+                    .filter(|node| node.is_element() && node.tag_name().name() == "pt")
+                {
+                    let Some(idx) =
+                        attr(&point, "idx").and_then(|idx| idx.parse::<usize>().ok())
+                    else {
+                        continue;
+                    };
+                    if idx >= formats.len() {
+                        formats.resize(idx + 1, None);
+                    }
+                    formats[idx] = attr(&point, "formatCode")
+                        .filter(|format| !format.is_empty() && format != "General");
+                }
+                formats.iter().any(Option::is_some).then_some(formats)
+            });
+    CategorySourceFormats { code, builtin_id, codes }
+}
+
 pub(super) fn reference_formula(container: Node<'_, '_>) -> Option<String> {
     container
         .descendants()

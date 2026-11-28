@@ -646,6 +646,31 @@ mod tests {
     }
 
     #[test]
+    fn shared_category_source_format_is_recorded_beside_the_categories() {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{C_NS}"><c:chart><c:plotArea><c:barChart>
+              <c:ser><c:idx val="0"/><c:order val="0"/><c:cat><c:numRef><c:f>S!A1:A2</c:f><c:numCache><c:formatCode>0.0</c:formatCode><c:ptCount val="2"/><c:pt idx="0"><c:v>1.25</c:v></c:pt><c:pt idx="1" formatCode="0.000"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:cat>
+                <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+            </c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let doc = root_of(&xml);
+        let chart = parse_chart_part(
+            doc.root_element(),
+            &ChartParseContext {
+                color_resolver: Some(&FixtureResolver),
+                ..Default::default()
+            },
+        )
+        .expect("bar chart parses");
+        assert_eq!(chart.category_format_code.as_deref(), Some("0.0"));
+        assert_eq!(
+            chart.category_format_codes,
+            Some(vec![None, Some("0.000".to_string())])
+        );
+        assert_eq!(chart.series[0].cat_format_code.as_deref(), Some("0.0"));
+    }
+
+    #[test]
     fn series_own_categories_carry_their_own_source_kind() {
         let parse = |first: &str, second: &str| {
             let xml = format!(

@@ -196,19 +196,63 @@ describe('categories follow the source that supplies them', () => {
       categories: ['a', '7.5'], categoriesNumeric: false,
       series: [series({ categories: ['1.2'], categoriesNumeric: true })],
     });
-    expect(categorySourceAt(chart, chart.series[0], 0)).toEqual({ raw: '1.2', numeric: true });
-    expect(categorySourceAt(chart, chart.series[0], 1)).toEqual({ raw: '7.5', numeric: false });
-    expect(categorySourceAt(chart, null, 1)).toEqual({ raw: '7.5', numeric: false });
+    expect(categorySourceAt(chart, chart.series[0], 0)).toMatchObject({ text: '1.2', numeric: true, owner: 'series' });
+    expect(categorySourceAt(chart, chart.series[0], 1)).toMatchObject({ text: '7.5', numeric: false, owner: 'shared' });
+    expect(categorySourceAt(chart, null, 1)).toMatchObject({ text: '7.5', numeric: false, owner: 'shared' });
   });
 
-  it('column chart: axis tick and point caption agree on one source', () => {
-    const column = (numeric: boolean) => model({
-      categories: ['1.2', '2.5'], categoriesNumeric: numeric, catAxisFormatCode: numeric ? '0.00' : undefined,
-      series: [series({ seriesDataLabels: { ...labelled, showVal: false }, dataLabelOverrides: [{ idx: 0, showCatName: true } as never, { idx: 1, showCatName: true } as never] })],
+  it('column chart: the axis follows the axis code, the point label its own source', () => {
+    const column = (over: Partial<ChartSeries>) => model({
+      categories: ['1.2', '2.5'], categoriesNumeric: true, catAxisFormatCode: '0.00',
+      series: [series({
+        seriesDataLabels: { ...labelled, showVal: false },
+        dataLabelOverrides: [{ idx: 0, showCatName: true } as never, { idx: 1, showCatName: true } as never],
+        ...over,
+      })],
     });
-    const fr = texts(inLocale('fr-FR', () => render(column(true))));
-    expect(fr.filter(text => text === '1,20').length).toBeGreaterThanOrEqual(1);
-    expect(fr).not.toContain('1.2');
+    // Axis ticks '1,20'; the point label is General ('1,2'): only the label can
+    // paint that text, the axis cannot satisfy it. No axis-code inheritance.
+    const general = texts(inLocale('fr-FR', () => render(column({}))));
+    expect(general).toContain('1,20');
+    expect(general).toContain('1,2');
+    // A source code of its own formats the label and not the axis.
+    const own = texts(inLocale('fr-FR', () => render(model({
+      categories: ['1.2', '2.5'], categoriesNumeric: true, catAxisFormatCode: '0.00', categoryFormatCode: '0.000',
+      series: [series({
+        seriesDataLabels: { ...labelled, showVal: false },
+        dataLabelOverrides: [{ idx: 0, showCatName: true } as never],
+      })],
+    }))));
+    expect(own).toContain('1,20');
+    expect(own).toContain('1,200');
+  });
+
+  it('a short own cache falls back to the shared source with the shared source\'s own format', () => {
+    const chart = model({
+      categories: ['a', '5.6'], categoriesNumeric: false, categoryFormatCode: '0.0',
+      series: [series({ categories: ['1.2'], categoriesNumeric: true, catFormatCode: '0.000' })],
+    });
+    expect(categorySourceAt(chart, chart.series[0], 0)).toMatchObject({ text: '1.2', formatCode: '0.000', owner: 'series' });
+    expect(categorySourceAt(chart, chart.series[0], 1)).toMatchObject({ text: '5.6', numeric: false, formatCode: '0.0', owner: 'shared' });
+  });
+
+  it('generated captions are resolved by index, not by rebuilding the 1..n list per label', () => {
+    let valueReads = 0;
+    const base = series({ values: Array.from({ length: 4000 }, (_, i) => i) });
+    const counted = { ...base };
+    Object.defineProperty(counted, 'values', { get() { valueReads++; return base.values; } });
+    const chart = model({ categories: [], series: [counted] });
+    for (let i = 0; i < 4000; i++) categorySourceAt(chart, null, i);
+    expect(categorySourceAt(chart, null, 3999).text).toBe('4000');
+    expect(categorySourceAt(chart, null, 4000).text).toBe('');
+    expect(valueReads).toBeLessThanOrEqual(2);
+  });
+
+  it('with no categories at all point labels keep the generated 1..n names; pie and legend do not', () => {
+    const chart = model({ categories: [], series: [series({ values: [5, 6] })] });
+    expect(categorySourceAt(chart, chart.series[0], 1, 'chart').text).toBe('2');
+    expect(categorySourceAt(chart, chart.series[0], 1, 'none')).toMatchObject({ text: '', owner: 'generated' });
+    expect(categorySourceAt(chart, chart.series[0], 1, 'index').text).toBe('2');
   });
 
   it('scatter: a text-backed X caption stays verbatim although the coordinate parses as a number', () => {
@@ -221,6 +265,28 @@ describe('categories follow the source that supplies them', () => {
     expect(text).not.toContain('1,2');
     const numeric = texts(inLocale('fr-FR', () => render(scatter(true))));
     expect(numeric).toContain('1,2');
+  });
+
+  it('plotVisibleOnly keeps the shared source provenance on scatter series it filters', () => {
+    const scatter = (plotVisibleOnly: boolean) => model({
+      chartType: 'scatter', categories: ['1.2', '2.5', '3.5'], categoriesNumeric: false, plotVisibleOnly,
+      series: [series({ seriesType: 'scatter', values: [1, 2, 3], sourceHidden: [false, true, false], seriesDataLabels: labelled })],
+    });
+    for (const visibleOnly of [false, true]) {
+      const painted = texts(inLocale('fr-FR', () => render(scatter(visibleOnly))));
+      expect(painted, `visibleOnly=${visibleOnly}`).toContain('1.2');
+      expect(painted, `visibleOnly=${visibleOnly}`).not.toContain('1,2');
+    }
+  });
+
+  it('a pie legend resolves entries beyond a short own cache from the shared source', () => {
+    const pie = model({
+      chartType: 'pie', categories: ['a', '5.6'], categoriesNumeric: true, showLegend: true, legendPos: 'r',
+      series: [series({ values: [1, 2], categories: ['1.2'], categoriesNumeric: true, seriesDataLabels: { ...labelled, showCatName: true } })],
+    });
+    const painted = texts(inLocale('fr-FR', () => render(pie)));
+    expect(painted).toContain('5,6');
+    expect(painted).not.toContain('Item 2');
   });
 
   it('surface: the authored 0.00 axis code formats a numeric category', () => {
@@ -303,6 +369,17 @@ describe('label wrapping keeps no-break group separators', () => {
     }
     // An ordinary space still wraps.
     expect(wrapMeasuredText(ctx, 'ab cd', 20)).toEqual(['ab', 'cd']);
+  });
+
+  it('the emergency code-point split never breaks beside a no-break space', () => {
+    // 7 px per glyph, 14 px wide: the whole token cannot fit, so it is split by code point.
+    for (const space of ['\u202f', '\u00a0', '\u2007']) {
+      const lines = wrapMeasuredText(ctx, `1${space}234,5`, 14);
+      expect(lines.join(''), space).toBe(`1${space}234,5`);
+      for (const line of lines) {
+        expect(line.startsWith(space) || line.endsWith(space), `${JSON.stringify(lines)}`).toBe(false);
+      }
+    }
   });
 
   it('a fr-FR numeric category paints its U+202F group separator through the axis', () => {

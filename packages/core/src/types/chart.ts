@@ -140,7 +140,7 @@ export interface ChartSeries {
   categories?: string[] | null;
   /** Provenance of this series' own `categories`: numeric source (`c:numRef` /
    *  `c:numLit`) or text; see `ChartModel.categoriesNumeric`. */
-  categoriesNumeric?: boolean | null;
+  categoriesNumeric?: boolean;
   /** Bubble-only provenance for a string-backed `<c:xVal>` source. Excel
    * exposes such a lone bubble series as one legend entry per point while a
    * numeric X source keeps the ordinary one-entry-per-series legend. */
@@ -858,11 +858,20 @@ export interface ChartModel {
   /**
    * Whether the shared category source is numeric (`c:numRef` / `c:numLit`)
    * rather than text (`c:strRef` / `c:strLit` / `c:multiLvlStrRef`).
-   * `categories` holds either as strings; a numeric category follows the axis
-   * number format (General included, with the host decimal separator) and a
+   * `categories` holds either as strings; a numeric category follows its
+   * number format code (General included, with the host decimal separator) and a
    * text category is never reformatted. Absent: unknown, legacy handling.
    */
-  categoriesNumeric?: boolean | null;
+  categoriesNumeric?: boolean;
+  /**
+   * Number format of the shared category source (the first series' `cat` /
+   * `xVal` cache), as `ChartSeries.catFormat*` carries it for a series' own
+   * source. Kept at chart level so the format stays tied to the source that
+   * supplied `categories` when series are filtered or reordered.
+   */
+  categoryFormatCode?: string;
+  categoryBuiltinFormatId?: number;
+  categoryFormatCodes?: (string | null)[];
   series: ChartSeries[];
   /** Ordered classic chart groups. Absent keeps legacy public models on the
    * existing single-family compatibility path. */

@@ -705,7 +705,7 @@ export function renderStockChart(
       ),
       shapeRotationDeg,
       undefined,
-      pointCategoryCaptionAt(chart, stockSeries, true),
+      pointCategoryCaptionAt(chart, stockSeries, 'index'),
     );
   }
 

@@ -656,6 +656,12 @@ function wrapMeasuredLine(
           high = mid - 1;
         }
       }
+      // Never break beside a no-break space: keep it with both neighbours
+      // (back off first; where that would make no progress, extend forward).
+      const forbidden = (at: number): boolean => at < chars.length
+        && (NO_BREAK_SPACES.includes(chars[at - 1]) || NO_BREAK_SPACES.includes(chars[at]));
+      while (end > start + 1 && forbidden(end)) end--;
+      while (end < chars.length && forbidden(end)) end++;
       const chunk = chars.slice(start, end).join('');
       start = end;
       if (start < chars.length) lines.push(chunk);
