@@ -293,11 +293,11 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     expect(horizontalAt(render(t), 21.2)).toHaveLength(1);
   });
 
-  it('keeps a positive authored row height when the glyph box and insets fit', () => {
-    // ECMA-376 §21.1.3.18 makes a:tr@h a minimum, not an auto-height request.
-    // PowerPoint keeps this 18pt minimum because the 16pt glyph box plus 1pt
-    // top/bottom insets fits. Applying the auto-row 120% leading here would
-    // incorrectly enlarge the row to 21.2pt.
+  it('grows a positive row to the 120% line box when line spacing is omitted', () => {
+    // PowerPoint PDF controls (Windows and Mac) grow a 20pt minimum holding
+    // one 20pt line to 24pt: an omitted lnSpc line takes 1.2 x size in a
+    // positive row too. Here 16pt * 1.2 + 1pt top + 1pt bottom = 21.2pt
+    // exceeds the 18pt minimum.
     const textBody = {
       verticalAnchor: 'ctr',
       paragraphs: [{
@@ -313,13 +313,14 @@ describe('DrawingML <a:tbl> — shared interior gridline drawn once (spec-silent
     const t = tableOf([[cell({ textBody, borderB: ln() })]], [COL]);
     t.rows[0].height = 18 * EMU;
 
-    expect(horizontalAt(render(t), 18)).toHaveLength(1);
+    const lines = render(t);
+    expect(horizontalAt(lines, 18)).toHaveLength(0);
+    expect(horizontalAt(lines, 21.2)).toHaveLength(1);
   });
 
-  it('grows a positive row for every painted baseline before the final glyph box', () => {
-    // [MS-OE376] §2.1.1347 gives Office's minimum-row rule. A lone terminal line
-    // may fit by its glyph box, but multi-line content consumes every line box
-    // used by paint. Three 18pt lines at explicit 100% use 3 * 21.6pt plus
+  it('grows a positive row for every painted line box', () => {
+    // [MS-OE376] §2.1.1347 gives Office's minimum-row rule. Every line,
+    // the last included, consumes the line box used by paint. Three 18pt lines at explicit 100% use 3 * 21.6pt plus
     // 3.6pt top/bottom insets = 72pt.
     const textBody = {
       verticalAnchor: 'ctr',

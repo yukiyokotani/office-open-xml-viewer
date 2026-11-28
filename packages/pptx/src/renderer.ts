@@ -5087,11 +5087,10 @@ export function renderTextBody(
   // `vert`/`vert270` (whose spec meaning IS to rotate every glyph), keeping those
   // paths byte-identical.
   eaVertUpright = false,
-  // A zero-height table row asks PowerPoint to derive its height from the
-  // natural line box. Office treats a positive a:tr@h as an authored minimum
-  // ([MS-OE376] §2.1.1347): use the glyph-size box when checking whether content
-  // actually exceeds that minimum, so implicit leading alone does not enlarge
-  // an already-sufficient row.
+  // Table rows measure with the painted line box (1.2 × size per line when
+  // lnSpc is omitted). Only rows that keep renderTable's earlier rule (rotated
+  // text measured by its box, ODF fixed rows) pass false and measure an
+  // omitted-lnSpc line by its glyph size.
   measureNaturalLineSpacing = measureOnly,
 ): number | void {
   // Stacked vertical text (wordArtVert / wordArtVertRtl): upright glyphs one
@@ -5429,20 +5428,21 @@ export function renderTextBody(
       // 120% lnSpc and 8.5pt vertical cell margins grows a 36.85pt row;
       // changing only lnSpc to 100% or the margins to zero does not. Explicit
       // percentage spacing therefore consumes the painted natural line box
-      // even for one final line. Omitted lnSpc keeps its glyph-box exception
-      // in a positive row. Neither path uses a substituted font's design box.
+      // even for one final line. Omitted lnSpc does too: PowerPoint PDF
+      // controls (Windows and Mac) with zero cell margins grow 12, 20 and
+      // 22pt minima holding one 20pt line to 24pt, 44 and 30pt minima holding
+      // two to 48pt, a 6pt minimum holding one 10pt line to 12pt, and add
+      // 3.6pt marT/marB on top (31.2pt). Neither path uses a substituted
+      // font's design box.
       const naturalSingle = maxSizePx * 1.2;
       const useResolvedFontMetrics = isSpAutoFit && resolvedFontLine > naturalSingle;
       // A live resolved font box describes containment, not baseline advance.
       // Keeping the two values separate prevents a tall Meiryo design box from
       // being repeated between every pair of lines under spAutoFit (#1473).
       const implicitSingle = naturalSingle;
-      // Paint and table measurement must agree for explicitly authored
-      // percentage spacing. Positive rows with omitted lnSpc retain the
-      // existing glyph-box containment rule: the implicit leading is not by
-      // itself evidence that PowerPoint grows the authored minimum. An explicit
-      // percentage, however, is part of the authored content extent, and every
-      // line in a multi-line body consumes the painted line box.
+      // Paint and table measurement agree on the line box. The glyph-box
+      // measure below is kept only for rows that keep renderTable's earlier
+      // rule (measureNaturalLineSpacing false).
       const paintedLineHeight = drawingMlLineHeight(
         implicitSingle, para.spaceLine, PT_TO_EMU * scale,
       );
@@ -7812,7 +7812,8 @@ export function renderTable(
       const cellW = spannedWidth(ci, cell.gridSpan || 1);
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
-        '#000000', slideNumber, rc, undefined, true, undefined, false, row.height === 0,
+        '#000000', slideNumber, rc, undefined, true, undefined, false,
+        row.height === 0 || !keepsEarlierRule([row], cell.textBody),
       ) as number) || 0;
       if (needed > rowHeights[ri]) rowHeights[ri] = needed;
     }
@@ -7838,7 +7839,8 @@ export function renderTable(
       if (earlierRule && !hasAutoHeightRow && !frameHasSlack) continue;
       const needed = (renderTextBody(
         ctx, tableTextBody(cell.textBody), 0, 0, cellW, 0, scale, null, 0, false, false,
-        '#000000', slideNumber, rc, undefined, true, undefined, false, hasAutoHeightRow,
+        '#000000', slideNumber, rc, undefined, true, undefined, false,
+        hasAutoHeightRow || !earlierRule,
       ) as number) || 0;
       const last = ri + spannedRows.length - 1;
       let have = 0;
